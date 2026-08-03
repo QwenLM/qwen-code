@@ -236,6 +236,78 @@ describe('ParallelAgentsGroup timeline rendering', () => {
     }
   });
 
+  it('re-anchors the header clock when a second wave of agents starts', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(20_000);
+    try {
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      const first = agent({
+        callId: 'first',
+        status: 'pending',
+        startTime: 10_000,
+      });
+      const second = agent({
+        callId: 'second',
+        status: 'pending',
+        startTime: 15_000,
+      });
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <ParallelAgentsGroup agents={[first, second]} />
+          </I18nProvider>,
+        );
+      });
+      mounted.push({ root, container });
+      act(() => {
+        vi.advanceTimersByTime(1_000);
+      });
+      expect(container.textContent).toContain('Parallel agents 11s·0/2 done');
+
+      // The first wave finishes entirely and the live clock disappears.
+      const finished = [
+        { ...first, status: 'completed' as const, endTime: 21_000 },
+        { ...second, status: 'completed' as const, endTime: 21_500 },
+      ];
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <ParallelAgentsGroup agents={finished} />
+          </I18nProvider>,
+        );
+      });
+      expect(container.textContent).toContain('Parallel agents·2/2 done');
+
+      // A second wave starts much later: the clock must re-anchor to the new
+      // agent's start, not keep accumulating from the first wave's anchor.
+      vi.setSystemTime(60_000);
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <ParallelAgentsGroup
+              agents={[
+                ...finished,
+                agent({
+                  callId: 'third',
+                  status: 'pending',
+                  startTime: 55_000,
+                }),
+              ]}
+            />
+          </I18nProvider>,
+        );
+      });
+      act(() => {
+        vi.advanceTimersByTime(1_000);
+      });
+      expect(container.textContent).toContain('Parallel agents 6s·2/3 done');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps nested agents inspectable without a details provider', () => {
     const container = renderExpandedGroup([
       agent({ callId: 'nested', subContent: 'nested agent output' }),

@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { ACPToolCall } from '../../adapters/types';
+import { hasActiveAgents } from '../../adapters/toolClassification';
 import { I18nProvider } from '../../i18n';
 import { WebShellCustomizationProvider } from '../../customization';
 import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
@@ -27,7 +28,6 @@ const {
   getActiveTool,
   getRawFileDiff,
   getToolHeaderKind,
-  hasActiveTool,
   hasExpandableContent,
   isWebFetchToolName,
   languageForPath,
@@ -148,7 +148,7 @@ describe('tool group summary logic', () => {
       }),
     ];
 
-    expect(hasActiveTool(tools)).toBe(true);
+    expect(hasActiveAgents(tools)).toBe(true);
     expect(getActiveTool(tools).callId).toBe('active');
     expect(formatToolGroupSummary(tools, t)).toBe('Running ReadFile · 2 tools');
   });
@@ -229,7 +229,7 @@ describe('tool group summary logic', () => {
       }),
     ];
 
-    expect(hasActiveTool(tools)).toBe(false);
+    expect(hasActiveAgents(tools)).toBe(false);
     expect(getActiveTool(tools).callId).toBe('ask');
     expect(formatToolGroupSummary(tools, t)).toBe(
       'Edited 1 files Ran 1 commands Read 1 files Searched 1 times Updated todos 1 times Asked 2 questions',

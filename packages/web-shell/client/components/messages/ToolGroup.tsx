@@ -13,6 +13,7 @@ import type {
   TodoItem,
 } from '../../adapters/types';
 import {
+  hasActiveAgents,
   isBackgroundSubAgentToolCall,
   isSubAgentToolCall,
 } from '../../adapters/toolClassification';
@@ -591,7 +592,7 @@ export function formatToolGroupSummary(
   t: ReturnType<typeof useI18n>['t'],
   duration?: string,
 ): string {
-  if (hasActiveTool(tools)) {
+  if (hasActiveAgents(tools)) {
     const foregroundActiveTool = tools.find(
       (tool) =>
         isActiveToolStatus(tool.status) && !isBackgroundSubAgentToolCall(tool),
@@ -771,10 +772,6 @@ function getAskUserQuestionCount(tool: ACPToolCall): number {
   return Array.isArray(questions) && questions.length > 0
     ? questions.length
     : 1;
-}
-
-export function hasActiveTool(tools: ACPToolCall[]): boolean {
-  return tools.some((tool) => isActiveToolStatus(tool.status));
 }
 
 function PencilIcon() {
@@ -1528,7 +1525,7 @@ export const ToolGroup = memo(function ToolGroup({
     useState(false);
   const [chatExpanded, setChatExpanded] = useState(false);
   const monitorDetailsRequestRef = useRef<object | null>(null);
-  const hasRunningTool = hasActiveTool(tools);
+  const hasRunningTool = hasActiveAgents(tools);
   const hasFailedTool = tools.some((tool) => tool.status === 'failed');
   const activeTool = tools.length > 0 ? getActiveTool(tools) : undefined;
   const singleTool = tools.length === 1 ? tools[0] : undefined;

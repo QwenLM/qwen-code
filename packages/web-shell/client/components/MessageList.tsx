@@ -22,7 +22,6 @@ import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import type { Message, ACPToolCall, TurnCollapseHead } from '../adapters/types';
 import type { PermissionRequest } from '../adapters/types';
 import {
-  hasActiveAgents,
   isBackgroundSubAgentToolCall,
   isSubAgentToolCall,
 } from '../adapters/toolClassification';
@@ -1284,6 +1283,24 @@ export function getSessionTimelineRangeForIndexes(
  * remains. Returns the original array untouched when disabled or when there is
  * nothing to collapse.
  */
+/** Does any tool-carrying row in [start, end] hold a tool matching `pred`? */
+function someTurnToolCall(
+  items: DisplayItem[],
+  start: number,
+  end: number,
+  pred: (tool: ACPToolCall) => boolean,
+): boolean {
+  for (let i = start; i <= end; i++) {
+    const item = items[i];
+    if (item.type === 'parallel_agents') {
+      if (item.agents.some(pred)) return true;
+    } else if (item.type === 'message' && item.message.role === 'tool_group') {
+      if (item.message.tools.some(pred)) return true;
+    }
+  }
+  return false;
+}
+
 /** Does any tool group / parallel-agents row in [start, end] own `callId`? */
 function turnOwnsCallId(
   items: DisplayItem[],
@@ -1292,19 +1309,9 @@ function turnOwnsCallId(
   callId: string | null | undefined,
 ): boolean {
   if (!callId) return false;
-  for (let i = start; i <= end; i++) {
-    const item = items[i];
-    if (item.type === 'parallel_agents') {
-      if (item.agents.some((agent) => toolContainsCallId(agent, callId))) {
-        return true;
-      }
-    } else if (item.type === 'message' && item.message.role === 'tool_group') {
-      if (item.message.tools.some((tool) => toolContainsCallId(tool, callId))) {
-        return true;
-      }
-    }
-  }
-  return false;
+  return someTurnToolCall(items, start, end, (tool) =>
+    toolContainsCallId(tool, callId),
+  );
 }
 
 function turnHasActiveAgent(
@@ -1312,23 +1319,12 @@ function turnHasActiveAgent(
   start: number,
   end: number,
 ): boolean {
-  for (let i = start; i <= end; i++) {
-    const item = items[i];
-    if (item.type === 'parallel_agents') {
-      if (hasActiveAgents(item.agents)) {
-        return true;
-      }
-    } else if (item.type === 'message' && item.message.role === 'tool_group') {
-      if (
-        item.message.tools.some(
-          (tool) => isSubAgentToolCall(tool) && isActiveToolStatus(tool.status),
-        )
-      ) {
-        return true;
-      }
-    }
-  }
-  return false;
+  return someTurnToolCall(
+    items,
+    start,
+    end,
+    (tool) => isSubAgentToolCall(tool) && isActiveToolStatus(tool.status),
+  );
 }
 
 export function applyTurnCollapse(
