@@ -1827,6 +1827,11 @@ export class GeminiChat {
     return this.lastPromptTokenCount;
   }
 
+  /** Previous model-response tokens used by the next prompt estimate. */
+  getLastOutputTokenCount(): number {
+    return this.lastOutputTokenCount;
+  }
+
   /**
    * Builds request contents for the content generator without deep-cloning the
    * whole chat history. This is an internal hot path: long sessions can make a

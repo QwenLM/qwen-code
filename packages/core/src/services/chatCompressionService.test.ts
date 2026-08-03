@@ -2197,7 +2197,9 @@ describe('ChatCompressionService.compress cache sharing', () => {
     baseUrl?: string;
     compactionModel?: string;
     enableCacheControl?: boolean;
-    contextWindowSize?: number;
+    contextWindowSize?: number | null;
+    lastPromptTokenCount?: number;
+    lastOutputTokenCount?: number;
   }): {
     chat: GeminiChat;
     config: Config;
@@ -2224,6 +2226,12 @@ describe('ChatCompressionService.compress cache sharing', () => {
         tools,
         thinkingConfig: { includeThoughts: true },
       }),
+      getLastPromptTokenCount: vi
+        .fn()
+        .mockReturnValue(options?.lastPromptTokenCount ?? 180_000),
+      getLastOutputTokenCount: vi
+        .fn()
+        .mockReturnValue(options?.lastOutputTokenCount ?? 0),
     } as unknown as GeminiChat;
     const config = {
       getChatCompression: vi.fn(),
@@ -2233,7 +2241,9 @@ describe('ChatCompressionService.compress cache sharing', () => {
         model: 'test-model',
         authType: options?.authType ?? AuthType.USE_ANTHROPIC,
         baseUrl: options?.baseUrl,
-        contextWindowSize: options?.contextWindowSize ?? 200_000,
+        ...(options?.contextWindowSize === null
+          ? {}
+          : { contextWindowSize: options?.contextWindowSize ?? 220_000 }),
         enableCacheControl: options?.enableCacheControl ?? true,
       }),
       getHookSystem: vi.fn().mockReturnValue({
@@ -2632,7 +2642,7 @@ describe('ChatCompressionService.compress cache sharing', () => {
   it.each([
     {
       name: 'provider prompt count',
-      originalTokenCount: 180_001,
+      originalTokenCount: 179_999,
       precomputedEffectiveTokens: undefined,
     },
     {
@@ -2683,6 +2693,79 @@ describe('ChatCompressionService.compress cache sharing', () => {
       );
     },
   );
+
+  it('uses the default context window when the provider omits its size', async () => {
+    const { chat, config, generateText } = makeFixture({
+      contextWindowSize: null,
+    });
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    expect(generateText).toHaveBeenCalledTimes(1);
+  });
+
+  it('includes the previous model output in the shared-request window check', async () => {
+    const { chat, config, generateText } = makeFixture({
+      contextWindowSize: 200_000,
+      lastPromptTokenCount: 170_000,
+      lastOutputTokenCount: 20_000,
+    });
+    const coldSpy = vi
+      .spyOn(sideQueryModule, 'runSideQuery')
+      .mockResolvedValue({
+        text: '<state_snapshot>cold summary</state_snapshot>',
+        usage: {
+          promptTokenCount: 170_000,
+          candidatesTokenCount: 500,
+          totalTokenCount: 170_500,
+        },
+      } as never);
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 170_000,
+    });
+
+    expect(generateText).not.toHaveBeenCalled();
+    expect(coldSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips cache sharing when the chat has no provider token-count anchor', async () => {
+    const { chat, config, generateText } = makeFixture({
+      lastPromptTokenCount: 0,
+    });
+    const coldSpy = vi
+      .spyOn(sideQueryModule, 'runSideQuery')
+      .mockResolvedValue({
+        text: '<state_snapshot>cold summary</state_snapshot>',
+        usage: {
+          promptTokenCount: 170_000,
+          candidatesTokenCount: 500,
+          totalTokenCount: 170_500,
+        },
+      } as never);
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 0,
+      precomputedEffectiveTokens: 170_000,
+    });
+
+    expect(generateText).not.toHaveBeenCalled();
+    expect(coldSpy).toHaveBeenCalledTimes(1);
+  });
 
   it.each([
     {

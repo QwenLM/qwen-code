@@ -363,6 +363,9 @@ export class ChatCompressionService {
     const chatCompressionSettings = config.getChatCompression();
     const slimmingConfig = resolveSlimmingConfig(chatCompressionSettings);
     const tuning = resolveCompactionTuning(chatCompressionSettings);
+    const contentGeneratorConfig = config.getContentGeneratorConfig();
+    const contextLimit =
+      contentGeneratorConfig.contextWindowSize ?? DEFAULT_TOKEN_LIMIT;
 
     // Cheap gates first — these don't need the curated history. Forward
     // originalTokenCount on NOOP (matching the threshold-gate branch below)
@@ -384,9 +387,6 @@ export class ChatCompressionService {
       // guarantees `prompt + max_tokens ≤ window`, so no output budget needs
       // to be reserved out of the window here (this replaced the
       // #5957/#6266 reservedOutputTokens machinery).
-      const contextLimit =
-        config.getContentGeneratorConfig()?.contextWindowSize ??
-        DEFAULT_TOKEN_LIMIT;
       const { auto } = computeThresholds(
         contextLimit,
         config.getAutoCompactThreshold(),
@@ -646,15 +646,42 @@ export class ChatCompressionService {
 
     let summaryResult: GenerateTextResult | undefined;
     let usedCacheSharing = false;
-    const contextWindowSize =
-      config.getContentGeneratorConfig().contextWindowSize ??
-      DEFAULT_TOKEN_LIMIT;
+    const sharedRequestText =
+      `${systemInstruction}\n\n` +
+      'Do not call tools; tool execution is disabled for this request. ' +
+      'First, reason in your <analysis> block. Then, produce the <state_snapshot> XML.';
     const sharedPromptTokenCount =
-      opts.precomputedEffectiveTokens ?? originalTokenCount;
+      opts.precomputedEffectiveTokens ??
+      originalTokenCount + (chat.getLastOutputTokenCount?.() ?? 0);
+    const sharedDirectiveTokenCount = Math.ceil(
+      sharedRequestText.length / CHARS_PER_TOKEN,
+    );
+    const usesMainModel = effectiveCompactionModel === config.getModel();
+    const providerSupportsCacheSharing =
+      supportsCompressionCacheSharing(config);
+    const hasProviderTokenCount = (chat.getLastPromptTokenCount?.() ?? 0) > 0;
+    const sharedRequestFits =
+      sharedPromptTokenCount +
+        sharedDirectiveTokenCount +
+        COMPACT_MAX_OUTPUT_TOKENS <=
+      contextLimit;
     const canShareCache =
-      effectiveCompactionModel === config.getModel() &&
-      supportsCompressionCacheSharing(config) &&
-      sharedPromptTokenCount + COMPACT_MAX_OUTPUT_TOKENS <= contextWindowSize;
+      usesMainModel &&
+      providerSupportsCacheSharing &&
+      hasProviderTokenCount &&
+      sharedRequestFits;
+    if (!canShareCache) {
+      const reason = !usesMainModel
+        ? 'distinct compaction model'
+        : !providerSupportsCacheSharing
+          ? 'provider does not support cache sharing'
+          : !hasProviderTokenCount
+            ? 'no provider token-count anchor'
+            : `shared request exceeds context window: prompt=${sharedPromptTokenCount}, ` +
+              `directive=${sharedDirectiveTokenCount}, reserve=${COMPACT_MAX_OUTPUT_TOKENS}, ` +
+              `window=${contextLimit}`;
+      debugLogger.debug(`[compaction] skipping cache sharing: ${reason}`);
+    }
     if (canShareCache) {
       try {
         const generationConfig = {
@@ -671,10 +698,7 @@ export class ChatCompressionService {
               role: 'user',
               parts: [
                 {
-                  text:
-                    `${systemInstruction}\n\n` +
-                    'Do not call tools; tool execution is disabled for this request. ' +
-                    'First, reason in your <analysis> block. Then, produce the <state_snapshot> XML.',
+                  text: sharedRequestText,
                 },
               ],
             },
@@ -683,8 +707,7 @@ export class ChatCompressionService {
           systemInstruction: mainSystemInstruction,
           config: {
             ...generationConfig,
-            ...(config.getContentGeneratorConfig().authType ===
-            AuthType.USE_ANTHROPIC
+            ...(contentGeneratorConfig.authType === AuthType.USE_ANTHROPIC
               ? {
                   thinkingConfig: {
                     ...generationConfig.thinkingConfig,
