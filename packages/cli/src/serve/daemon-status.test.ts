@@ -181,7 +181,10 @@ describe('buildDaemonStatusResponse', () => {
     expect(response.runtime.memory).toEqual({
       registeredWorkspaces: 1,
       activeAcpChildren: 1,
-      childRssCoverage: 'primary_only',
+      childRssCoverage: 'active_children',
+      // No registry in this case, so there are no bridges to enumerate — the
+      // honest reading is "nothing measured", not "no children".
+      children: { rssBytes: 0, sampled: 0, oldestReadingAgeMs: null },
       modeled: {
         recommendedShareAtRegisteredMb: 15_360,
         recommendedShareAtActiveMb: 15_360,
@@ -224,7 +227,10 @@ describe('buildDaemonStatusResponse', () => {
     expect(response.runtime.memory).toEqual({
       registeredWorkspaces: 0,
       activeAcpChildren: 0,
-      childRssCoverage: 'primary_only',
+      childRssCoverage: 'active_children',
+      // No registry in this case, so there are no bridges to enumerate — the
+      // honest reading is "nothing measured", not "no children".
+      children: { rssBytes: 0, sampled: 0, oldestReadingAgeMs: null },
       modeled: {
         recommendedShareAtRegisteredMb: null,
         recommendedShareAtActiveMb: null,
@@ -284,6 +290,127 @@ describe('buildDaemonStatusResponse', () => {
     expect(response.runtime.memory?.modeled).toEqual({
       recommendedShareAtRegisteredMb: 7_680,
       recommendedShareAtActiveMb: 15_360,
+    });
+  });
+
+  it('sums only the children that actually reported, and says how many did', async () => {
+    // Every state a live child can be in, in one response. `sampled` is what
+    // separates "measured and small" from "never measured": without it, the
+    // three unreported children below are indistinguishable from children
+    // using no memory.
+    const liveWith = (rssBytes: number, ageMs: number) =>
+      ({
+        getDaemonStatusSnapshot: () => BASE_BRIDGE_SNAPSHOT,
+        isChannelLive: () => true,
+        getChildResourceSnapshot: () => ({ rssBytes, cpuPercent: 1, ageMs }),
+        lastActivityAt: null,
+      }) as unknown as AcpSessionBridge;
+    const liveUnpolled = {
+      getDaemonStatusSnapshot: () => BASE_BRIDGE_SNAPSHOT,
+      isChannelLive: () => true,
+      // Live, but stale or never polled — the hook exists and returns nothing.
+      getChildResourceSnapshot: () => undefined,
+      lastActivityAt: null,
+    } as unknown as AcpSessionBridge;
+    const liveOlderContract = {
+      getDaemonStatusSnapshot: () => BASE_BRIDGE_SNAPSHOT,
+      isChannelLive: () => true,
+      // An injected bridge predating the hook entirely.
+      lastActivityAt: null,
+    } as unknown as AcpSessionBridge;
+    const dormant = {
+      getDaemonStatusSnapshot: () => ({
+        ...BASE_BRIDGE_SNAPSHOT,
+        channelLive: false,
+      }),
+      isChannelLive: () => false,
+      // Deliberately unfaithful: the real hook self-gates on a live channel
+      // and would return undefined here. This stub does not, so the test
+      // fails unless the sum gates on `isChannelLive` itself.
+      getChildResourceSnapshot: () => ({
+        rssBytes: 999,
+        cpuPercent: 1,
+        ageMs: 1,
+      }),
+      lastActivityAt: null,
+    } as unknown as AcpSessionBridge;
+
+    const runtimes = [
+      {
+        workspaceId: 'a',
+        workspaceCwd: BASE_WORKSPACE,
+        bridge: liveWith(100, 1_000),
+      },
+      {
+        workspaceId: 'b',
+        workspaceCwd: '/work/b',
+        bridge: liveWith(200, 9_000),
+      },
+      { workspaceId: 'c', workspaceCwd: '/work/c', bridge: liveUnpolled },
+      { workspaceId: 'd', workspaceCwd: '/work/d', bridge: liveOlderContract },
+      { workspaceId: 'e', workspaceCwd: '/work/e', bridge: dormant },
+    ];
+    const options = makeOptions();
+    options.bridge = runtimes[0].bridge;
+    options.workspaceRegistry = {
+      primary: { workspaceCwd: BASE_WORKSPACE, bridge: runtimes[0].bridge },
+      list: () => runtimes,
+      listManaged: () => runtimes,
+      listEntries: () => runtimes.map(() => ({})),
+    } as unknown as BuildDaemonStatusOptions['workspaceRegistry'];
+    options.opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
+      availableMemoryMb: 32_768,
+    });
+
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    expect(response.runtime.memory?.childRssCoverage).toBe('active_children');
+    // Four children are live; only two reported. The dormant one is excluded
+    // from both figures even though its stub would have returned a value.
+    expect(response.runtime.memory?.activeAcpChildren).toBe(4);
+    expect(response.runtime.memory?.children).toEqual({
+      rssBytes: 300,
+      sampled: 2,
+      // The oldest contributor, not the newest: the sum spans this much time.
+      oldestReadingAgeMs: 9_000,
+    });
+    // The gap is visible without the client having to know it exists.
+    expect(response.runtime.memory!.children.sampled).toBeLessThan(
+      response.runtime.memory!.activeAcpChildren,
+    );
+  });
+
+  it('counts a child whose bridge predates ageMs, but cannot age the sum', async () => {
+    // Distinct from a missing hook: the hook is present and returns a reading,
+    // it just carries no age. That child must still contribute memory, and
+    // `null` must not be mistaken for "sampled nothing".
+    const preAgeMs = {
+      getDaemonStatusSnapshot: () => BASE_BRIDGE_SNAPSHOT,
+      isChannelLive: () => true,
+      getChildResourceSnapshot: () => ({ rssBytes: 512, cpuPercent: 3 }),
+      lastActivityAt: null,
+    } as unknown as AcpSessionBridge;
+    const runtimes = [
+      { workspaceId: 'a', workspaceCwd: BASE_WORKSPACE, bridge: preAgeMs },
+    ];
+    const options = makeOptions();
+    options.bridge = preAgeMs;
+    options.workspaceRegistry = {
+      primary: { workspaceCwd: BASE_WORKSPACE, bridge: preAgeMs },
+      list: () => runtimes,
+      listManaged: () => runtimes,
+      listEntries: () => [{}],
+    } as unknown as BuildDaemonStatusOptions['workspaceRegistry'];
+    options.opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
+      availableMemoryMb: 32_768,
+    });
+
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    expect(response.runtime.memory?.children).toEqual({
+      rssBytes: 512,
+      sampled: 1,
+      oldestReadingAgeMs: null,
     });
   });
 

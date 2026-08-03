@@ -322,14 +322,46 @@ interface DaemonStatusRuntimeMemory {
    */
   activeAcpChildren: number;
   /**
-   * Which children the daemon's RSS sampling actually covers. Only the primary
-   * ACP child is sampled today, so this section must not be read as
-   * process-tree observation. Sampling is gated on an active SSE/WS watcher;
-   * when no client is observing, childRssBytes reads 0 even for the primary.
-   * The drop is not instant: after the last watcher detaches, the last sampled
-   * value persists until it ages out of the staleness window (~30s).
+   * Which children the daemon's RSS sampling covers: every ACP child with a
+   * live channel, i.e. the same set `activeAcpChildren` counts. Still not
+   * process-tree observation — channel workers and the children's own MCP
+   * descendants report nothing (see `children`).
+   *
+   * Sampling is gated on an active SSE/WS watcher; with no client observing,
+   * `children.sampled` falls to 0 even though children are live. The drop is
+   * not instant: after the last watcher detaches, each reading persists until
+   * it ages out of the staleness window (~30s).
    */
-  childRssCoverage: 'primary_only';
+  childRssCoverage: 'active_children';
+  /**
+   * Aggregate RSS across the children `childRssCoverage` names.
+   *
+   * Read it as a floor and an over-count at the same time. Over, because
+   * summing per-process RSS double-counts pages the children share (the node
+   * binary, libc). Under, because each child reports only its own process —
+   * MCP servers it spawned are invisible here, and channel workers have no
+   * reporting path at all. It is not "the daemon tree's memory".
+   */
+  children: {
+    /**
+     * Sum over children that produced a reading. When `sampled` is below the
+     * sibling `activeAcpChildren`, this is a floor rather than a total.
+     */
+    rssBytes: number;
+    /**
+     * How many children contributed. The denominator is `activeAcpChildren`,
+     * deliberately not repeated here. 0 with live children means nothing was
+     * measured — either no watcher is gating the sampler open, or the daemon
+     * was built without a workspace registry to enumerate.
+     */
+    sampled: number;
+    /**
+     * Age of the oldest reading in the sum, so a caller can tell how far apart
+     * its parts were taken. `null` when nothing was sampled — and also when
+     * every contributor predates the field, so `null` never means "fresh".
+     */
+    oldestReadingAgeMs: number | null;
+  };
   /**
    * Modeled per-child shares. Advisory; nothing applies them. Each is capped
    * at the legacy child ceiling, and floored at the minimum child heap only
@@ -346,7 +378,9 @@ interface DaemonStatusRuntimeMemory {
   /**
    * The daemon root's own memory pressure. Reported in both modes; only
    * `observe` also raises a status issue from it. Covers the root process
-   * alone — see `childRssCoverage` for why this is not tree pressure.
+   * alone: these figures are `process.memoryUsage()` of this process, so a
+   * daemon whose children are the ones growing still reports `normal`.
+   * Compare against `children.rssBytes` to see that gap.
    *
    * The computed shape is referenced rather than restated so the two cannot
    * drift: a field added or renamed in `daemon-memory-pressure.ts` would not
@@ -501,6 +535,38 @@ export async function buildDaemonStatusResponse(
     const registeredWorkspaceCount = input.workspaceRegistry
       ? input.workspaceRegistry.listEntries().length
       : workspaceSnapshots.length;
+    // Summed in the SAME synchronous pass that produced `activeAcpChildCount`
+    // above, over the same array. Keep it that way: an `await` slipped between
+    // them would not break `sampled <= activeAcpChildren` — a child that dies
+    // drops out of the sum, and one that starts has no cached reading yet — it
+    // would instead make the two figures describe different instants, so the
+    // gap between them would quietly absorb children that came or went while
+    // the response was being built. That gap is the entire reason `sampled` is
+    // reported, and no assertion would catch it going wrong.
+    let childRssBytesTotal = 0;
+    let childRssSampled = 0;
+    let oldestChildReadingAgeMs: number | null = null;
+    for (const runtime of managedRuntimes ?? []) {
+      // Gate on the same predicate `activeAcpChildCount` used, rather than
+      // trusting `getChildResourceSnapshot` to return nothing for a dead
+      // channel. It does today, but that is another package's internal, and
+      // leaning on it would make `sampled <= activeAcpChildren` — the one
+      // thing this block promises — hold by coincidence instead of by
+      // construction.
+      if (!runtime.bridge.isChannelLive()) continue;
+      const snapshot = runtime.bridge.getChildResourceSnapshot?.();
+      if (!snapshot) continue;
+      childRssBytesTotal += snapshot.rssBytes;
+      childRssSampled += 1;
+      // Absent on bridges predating the field; such a child still counts
+      // toward the sum, it just cannot say how old its reading is.
+      if (snapshot.ageMs !== undefined) {
+        oldestChildReadingAgeMs = Math.max(
+          oldestChildReadingAgeMs ?? 0,
+          snapshot.ageMs,
+        );
+      }
+    }
     const pressureMode = input.opts.memoryPressureMode ?? 'observe';
     // One reading for the two figures of a single ratio. Reading twice would
     // divide an rss and a heapUsed sampled at different instants.
@@ -514,7 +580,12 @@ export async function buildDaemonStatusResponse(
     runtimeMemory = {
       registeredWorkspaces: registeredWorkspaceCount,
       activeAcpChildren: activeAcpChildCount,
-      childRssCoverage: 'primary_only',
+      childRssCoverage: 'active_children',
+      children: {
+        rssBytes: childRssBytesTotal,
+        sampled: childRssSampled,
+        oldestReadingAgeMs: oldestChildReadingAgeMs,
+      },
       modeled: {
         recommendedShareAtRegisteredMb:
           registeredWorkspaceCount > 0

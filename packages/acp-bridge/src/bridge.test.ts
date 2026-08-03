@@ -19924,4 +19924,40 @@ describe('createAcpSessionBridge — child-resource refresh', () => {
       await bridge.shutdown();
     }
   });
+
+  it('ages the snapshot, and drops it entirely once past the staleness window', async () => {
+    const handle = makeChannel({
+      extMethodImpl: async (method) =>
+        method === SERVE_STATUS_EXT_METHODS.workspaceResource
+          ? { rssBytes: 4096, cpuPercent: 7 }
+          : {},
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    try {
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await bridge.refreshChildResource!();
+
+      const fresh = bridge.getChildResourceSnapshot!();
+      expect(fresh).toMatchObject({ rssBytes: 4096, cpuPercent: 7 });
+      // A reading just taken is not in the future and not already expired.
+      expect(fresh!.ageMs).toBeGreaterThanOrEqual(0);
+      expect(fresh!.ageMs).toBeLessThan(30_000);
+
+      // Walk the clock past the cliff. `STALE_CHILD_RESOURCE_MS` is a const
+      // inside the bridge factory closure, not an export, so drive the
+      // boundary with the clock rather than exporting it for a test.
+      const realNow = Date.now;
+      try {
+        const staleAt = realNow() + 30_001;
+        Date.now = () => staleAt;
+        // Dropped, not returned-and-stale: a zombie child must not read as
+        // healthy just because its last good value is still in the cache.
+        expect(bridge.getChildResourceSnapshot!()).toBeUndefined();
+      } finally {
+        Date.now = realNow;
+      }
+    } finally {
+      await bridge.shutdown();
+    }
+  });
 });

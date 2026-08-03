@@ -2012,6 +2012,11 @@ describe('runQwenServe memory budget', () => {
             registeredWorkspaces: number;
             activeAcpChildren: number;
             childRssCoverage: string;
+            children: {
+              rssBytes: number;
+              sampled: number;
+              oldestReadingAgeMs: number | null;
+            };
             modeled: {
               recommendedShareAtRegisteredMb: number;
               recommendedShareAtActiveMb: number | null;
@@ -2058,9 +2063,9 @@ describe('runQwenServe memory budget', () => {
 
       const runtimeMemory = body.runtime.memory;
       expect(runtimeMemory?.registeredWorkspaces).toBe(1);
-      // Sampling still covers only the primary child; say so rather than let
-      // the section imply process-tree observation.
-      expect(runtimeMemory?.childRssCoverage).toBe('primary_only');
+      // Sampling now covers every live child; it still is not process-tree
+      // observation, which `children`'s own docs spell out.
+      expect(runtimeMemory?.childRssCoverage).toBe('active_children');
       expect(
         runtimeMemory?.modeled.recommendedShareAtRegisteredMb,
       ).toBeGreaterThan(0);
@@ -2081,6 +2086,23 @@ describe('runQwenServe memory budget', () => {
         Math.max(pressure?.rssRatio ?? 0, pressure?.heapRatio ?? 0),
       );
       expect(pressure?.source).not.toBe('unknown');
+
+      // Aggregate child RSS. This test opens no SSE/WS stream, so the
+      // sampler's watch gate never fires and nothing is polled — assert the
+      // invariants that hold regardless rather than a non-zero sum, which
+      // only a streaming client would produce.
+      const children = runtimeMemory?.children;
+      expect(children?.sampled).toBeLessThanOrEqual(
+        runtimeMemory?.activeAcpChildren ?? 0,
+      );
+      // Nothing sampled must read as nothing summed and no age — never as a
+      // measured zero.
+      if (children?.sampled === 0) {
+        expect(children.rssBytes).toBe(0);
+        expect(children.oldestReadingAgeMs).toBeNull();
+      } else {
+        expect(children?.rssBytes).toBeGreaterThan(0);
+      }
     } finally {
       await handle.close();
     }
