@@ -4145,6 +4145,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       | 'restoreReplayPartial'
       | 'restoreReplayError'
       | 'restoreHistoryHasMore'
+      | 'activePromptId'
     >,
     action: 'load' | 'resume',
   ): Pick<
@@ -4180,9 +4181,21 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       };
     }
     if (action === 'load') {
+      const liveJournal = snapshot.liveJournal.map((event) => {
+        if (
+          !entry.activePromptId ||
+          event.type !== 'history_truncated' ||
+          !event.data ||
+          typeof event.data !== 'object' ||
+          (event.data as { scope?: unknown }).scope !== 'live_journal'
+        ) {
+          return event;
+        }
+        return { ...event, promptId: entry.activePromptId };
+      });
       return {
         compactedReplay: snapshot.compactedTurns,
-        liveJournal: snapshot.liveJournal,
+        liveJournal,
         lastEventId: snapshot.lastEventId,
         eventEpoch,
         ...replayStatus,
