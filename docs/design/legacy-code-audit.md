@@ -76,11 +76,12 @@ audit outputs. The numbers in this section are author-reported from those
 records, and the Dogfood item in Verification is the external check they
 rest on. Committing a redacted copy of both records under
 `docs/design/assets/` — the exploitable details are already withheld
-from this document, so a summary would cost nothing — is a precondition of
-this design's argument, not a follow-up: the records must land in this
-PR, and
-doing so awaits the author's machine, the only place the untracked originals
-exist.
+from this document, so a summary would cost nothing — is an unpaid debt
+of this design's argument, and this PR ships without paying it: the
+untracked originals exist only on the author's machine, so the records
+land as a follow-up from that machine, named in Verification as a ship
+criterion for implementation — the spec must not be built before its
+evidence is checkable.
 
 ## Scope and non-goals
 
@@ -113,12 +114,18 @@ and a companion DESIGN.md of over 500 lines, so the bill is bigger than one
 section; the benefit is that neither document lies about its flow.
 
 What is reused is the **TypeScript layer**, in two grades. **Lifts
-as-is:** `agent-prompt` roster/brief printing, the findings schema, and the
-budget machinery's shape (a plan-derived size→work mapping; `plan-files`
-supplies the line counts). **Needs a target-kind parameter, not a lift:**
-the roster machinery (`lib/roster.ts`) keys on diff metrics — the
-`srcDiffLines`/`diffLines` topology gate, `hasDeletions()` (true on an empty
-file list by design), a resolved PR number — so a diff-free plan misfires
+as-is:** the findings schema and the budget machinery's shape (a
+plan-derived size→work mapping; `plan-files` supplies the line counts).
+**Needs a target-kind parameter, not a lift:** `agent-prompt`'s
+roster/brief printing keys on the diff file itself — `requireDiffPath()`
+throws on the whole-diff, invariant, and `--roster` paths alike, and every
+role block embeds `read_file(file_path="<diff>", offset=…, limit=…)`
+windows computed from the plan's chunk ranges — the reads are the block —
+so a diff-free roster re-expresses those windows against the plan-files
+set rather than lifting them; the roster machinery (`lib/roster.ts`)
+keys on diff metrics — the `srcDiffLines`/`diffLines` topology gate,
+`hasDeletions()` (true on an empty file list by design), a resolved PR
+number — so a diff-free plan misfires
 through it on every input the gate reads: once `plan-files` populates
 per-file entries, `hasDeletions()` returns false — its true-on-empty
 fail-safe only fires on an empty list — so 1b is not required; with no
@@ -147,7 +154,9 @@ files at write time, refusing or downgrading any finding whose snippet does
 not resolve; an audit posts nothing, so a bad anchor that `/review` would
 surface at posting would otherwise ship silently. The trade still holds —
 parameterizing target kind is cheaper than forking the document — but the
-shared layer is the printing, schema, and budget shape, not the gates. The
+shared layer is the schema and the budget shape, not the printing or the
+gates: the brief blocks read the diff file through windows the chunk plan
+computes, so they key on it as hard as the gates key on diff metrics. The
 cross-round findings ledger does not lift into v1 — see Open questions.
 
 ### Target resolution and planning
@@ -159,7 +168,7 @@ cross-round findings ledger does not lift into v1 — see Open questions.
   out of the subject set (to Agent 5) — `generated` and `docs` files stay
   subjects and count toward the gate.
 - The topology gate is a hard bound in v1: subject lines ≤ 9,000 AND
-  subject-plus-test ≤ 18,000 lines; over either arm refuses at plan time.
+  test lines ≤ 2× subject lines; over either arm refuses at plan time.
 - Larger subsystems are audited as coherent sub-paths, one bounded run each.
 - Event/lifecycle modules are detected by call patterns and get 1c's
   event-coverage brief; the detection outcome rides into the report header.
@@ -182,33 +191,33 @@ subcommand, `qwen audit plan-files <path>`, which plays the role
 - counts lines and applies the topology gate as a hard bound — two arms, in
   `/review`'s shape (its gate is `src ≤ 500 AND total ≤ 3200`): subject
   lines — every classified kind except `test` — ≤ a `plan-files` constant
-  pinned at 9,000, and subject-plus-test lines ≤ 18,000; a module over
-  either arm refuses at plan time and asks for a narrower path, because v1
-  has no above-gate branch (deferred — see Open questions). The subject arm
-  sits above the largest module the experiments validated whole-file
-  (8,516) — a fail-safe choice, not a calibrated value: every module larger
-  than the two measured ones is untested territory, and the margin's job is
-  to keep every size class with whole-file evidence below that arm. The
-  test arm does not hold the same property, and the design says so: the
-  Round-2 module is 8,516 subject lines but 24,851 with tests, over the
-  18,000 arm — so `/audit packages/core/src/hooks` refuses at plan time, a
-  maintainer re-running the cited replication is refused, and the only
-  measured large test corpus sits above the arm built to bound it. The test
-  arm exists because Agent 5's subject is the test corpus, which the
-  subject count excludes — an 8k-subject module with a 20k-line test tree
-  would otherwise pass the gate while Agent 5 reads 28k lines whole, and
-  Agent 5 reads its corpus whole, so no bound short of refusal limits that
-  read. The 18,000 constant is an unmeasured first cut — twice the
-  validated subject bound — and rides into the report header with the other
-  unexercised constants. Enumeration is path-bounded, so a module whose
-  tests live outside the audited directory (a sibling `test/` tree, a Rust
-  crate-root `tests/`) enumerates zero test files: the test arm then
-  measures nothing, and v1 does not widen enumeration beyond the path —
-  instead Agent 5 is skipped with that reason in the header's walks record,
-  so "walks completed" cannot read as "tests audited" when the corpus was
-  empty. A module under both arms stays below the gate: dimension agents
-  each read the whole file set — the only topology either experiment
-  exercised, validated at 7,638 and 8,516 lines;
+  pinned at 9,000, and test lines ≤ 2× subject lines; a module over either
+  arm refuses at plan time and asks for a narrower path, because v1 has no
+  above-gate branch (deferred — see Open questions). Both arms apply the
+  same fail-safe rule — sit just above what the experiments validated, so
+  every class with whole-file evidence stays below the gate: the subject
+  arm above the largest module validated whole-file (8,516), the test arm
+  above the largest measured test:source ratio (1.92×, on the Round-2
+  module; permissions measured 1.13×). The margins are fail-safe choices,
+  not calibrated values: every module above the two measured sizes and
+  every corpus above the two measured ratios is untested territory, and a
+  gate that refused the Round-2 module would refuse the replication its
+  own argument cites. The test arm exists because Agent 5's subject is the
+  test corpus, which the subject count excludes — an 8k-subject module
+  with a 20k-line test tree would otherwise pass the subject arm while
+  Agent 5 reads 28k lines whole, and Agent 5 reads its corpus whole, so no
+  bound short of refusal limits that read; the ratio form bounds the
+  corpus relative to what it tests, and caps Agent 5's read at 18,000
+  test lines (2× the subject arm). Enumeration is path-bounded, so a
+  module whose tests live outside the audited directory (a sibling
+  `test/` tree, a Rust crate-root `tests/`) enumerates zero test files:
+  the test arm then measures nothing, and v1 does not widen enumeration
+  beyond the path — instead Agent 5 is skipped with that reason in the
+  header's walks record, so "walks completed" cannot read as "tests
+  audited" when the corpus was empty. A module under both arms stays
+  below the gate: dimension agents each read the whole file set — the
+  only topology either experiment exercised, validated at 7,638 and 8,516
+  subject lines, 16,278 and 24,851 subject-plus-test;
 - detects event/lifecycle modules by emit/dispatch/subscribe call
   patterns and flags them for the 1c event-coverage brief; the detection
   outcome (detected / not detected, heuristic) rides into the report
@@ -219,9 +228,12 @@ subcommand, `qwen audit plan-files <path>`, which plays the role
 No worktree, no base resolution, no merge base — the tree under audit is the
 user's own checkout, read-only for the walks. The exceptions execute and
 mutate: a runnable probe flips under the implied fix on a scratch copy of
-the probed file (never the checkout's copy), and the surviving baseline test
-run (Open questions) executes the module's own tests. Audited-module code
-may be vendored or third-party, and execution is consent-gated, not
+the probed file — a sibling under a scratch name in the probed file's own
+directory, created for the probe and deleted when it lands, so its relative
+imports resolve exactly as the original's do while the checkout's copy is
+never mutated — and the surviving baseline test run (Open questions)
+executes the module's own tests. Audited-module code may be vendored
+or third-party, and execution is consent-gated, not
 disclose-after: the pre-launch confirmation (Budget ceiling) names the two
 execution classes, and nothing executes unless the user confirms it. Both
 classes are separate opt-ins at that confirmation, because both are
@@ -296,9 +308,10 @@ measured one: the worst-case below-gate subject arm — 9,000 subject lines
 at the range's 6M-per-1,000 top — lands at ~54M under the 60M cap, with
 the 40-agent cap similarly above the 9-agent roster. The test arm is where
 the cap binds: priced at the same top, the full below-gate worst case —
-18,000 subject-plus-test lines — lands at ~108M, over the 60M cap, so a
-test-heavy module can pass both gate arms and still refuse at the cap
-check. That refusal is the honest answer to a topology neither experiment
+9,000 subject lines at the ratio cap's 18,000 tests, 27,000
+subject-plus-test — lands at ~162M, over the 60M cap, so a test-heavy
+module can pass both gate arms and still refuse at the cap check.
+That refusal is the honest answer to a topology neither experiment
 priced — the conservatism is itself measured (Round 2's test-heavy arm
 landed at roughly a third of its priced top), and the calibration loop
 reads the actual-vs-estimate delta the header records; the alternative is
@@ -543,12 +556,16 @@ brief must name both cases.
   be distinguishable from a full one, because "0 security findings" on a
   run whose security agent never completed is not "safe" (`/review` solves
   this with `unreviewedDimensions`). The header also carries every flag
-  this design attaches to unexercised machinery — 6a's untested status, the
-  event-module detection outcome, the unmeasured ceiling constants (60M
-  tokens / 40 agents), the low-tier size gate, and the unmeasured 18,000
-  subject-plus-test gate arm, the high-tier loop, twice-whiffed
-  reverse-audit scopes, budget-bound walks, declined execution opt-outs,
-  unmeasured tiers — since `/audit` has no verdict for them to cap.
+  this design attaches to unexercised machinery — in one "Unmeasured /
+  unexercised in this run" subsection, not a flat list, ordered by what
+  each flag does to the findings it ships with: first the flags that
+  change how a reader weighs this run's findings — walks skipped with
+  reason, budget-bound walks, declined execution opt-outs, twice-whiffed
+  reverse-audit scopes — then the standing machinery disclosures — 6a's
+  untested status, the event-module detection outcome, the unmeasured
+  ceiling constants (60M tokens / 40 agents), the low-tier size gate, the
+  high-tier loop, unmeasured tiers — since `/audit` has no verdict for
+  them to cap.
 - **Local-only, verified not assumed:** the report must never land in version
   control — a real security property, since an audit of a security module will
   quote exploitable code. The property holds only when the project ignores
@@ -746,7 +763,15 @@ capped, sold as triage — as above.)
   criterion, zero self-adjudicated false positives both arms).
 - Docs: a user-facing page for `/audit` under `docs/users/features/`
   (`legacy-audit.md`, the analog of `/review`'s `code-review.md`) — named
-  here so the ship criteria include it.
+  here so the ship criteria include it; it must call out the tier
+  vocabulary collision explicitly — `medium` moves in opposite directions
+  in the two skills, `/review`'s medium drops the adversarial personas
+  while `/audit`'s medium adds 6a — so a `/review` user does not carry
+  the wrong expectation across.
+- Records: the redacted Round 1 and Round 2 experiment records under
+  `docs/design/assets/` (Provenance section) — landed from the author's
+  machine, the only place the untracked originals exist. A ship criterion
+  for implementing this spec, not for this design document.
 - Dogfood: audit a module whose maintainers can confirm or reject the
   Criticals — the external check the self-adjudicated precision record
   rests on — as PR #6457's confirmed-defect set calibrated `/review`.
