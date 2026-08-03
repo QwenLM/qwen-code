@@ -243,6 +243,9 @@ export class ManagedMediaStorage {
       const filePath = path.join(stagingPath, file);
       const stat = await fs.promises.lstat(filePath);
       if (stat.isDirectory()) {
+        debugLogger.warn(
+          `Refusing subdirectory in staging ${invocationId}: ${filePath}`,
+        );
         throw new Error(
           `Unexpected subdirectory in staging ${invocationId}: "${file}". ` +
             'Policy tools must write flat files only.',
