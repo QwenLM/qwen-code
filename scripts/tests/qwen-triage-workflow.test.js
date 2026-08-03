@@ -487,6 +487,7 @@ describe('qwen-triage tmux workflow', () => {
     expect(finalizeStep).toContain('steps.triage.outcome');
     expect(finalizeStep).toContain("JOB_STATUS: '${{ job.status }}'");
     expect(finalizeStep).toContain('Qwen Triage was cancelled');
+    expect(finalizeStep).toContain('已取消');
     expect(finalizeStep).toContain(
       'elif [ "${JOB_STATUS:-}" = \'cancelled\' ]',
     );
@@ -496,10 +497,162 @@ describe('qwen-triage tmux workflow', () => {
     expect(finalizeStep).toContain('select(.user.login == $bot)');
     expect(finalizeStep).toContain('startswith($m)');
     expect(finalizeStep).not.toContain('contains($m)');
+    // PATCH only a comment this run owns: its claim embeds this run's URL,
+    // while a previous run's terminal wording shares the same marker.
+    expect(finalizeStep).toContain('contains($runurl)');
     expect(finalizeStep).toContain('--method PATCH');
     expect(finalizeStep).toContain('Qwen Triage finished');
     expect(finalizeStep).toContain('ended early');
   });
+
+  // Unordered substring pinning cannot tell which branch posts which message
+  // (swapping the success and cancelled bodies survives it), nor whether the
+  // ZH half is really Chinese. Execute the real composer against a stubbed
+  // `gh` and assert the body it sends for each terminal state.
+  it.skipIf(spawnSync('jq', ['--version']).status !== 0)(
+    'finalizes with the wording matching the terminal state',
+    () => {
+      const finalizeStep = step('Finalize triage status comment');
+      const script = finalizeStep
+        .match(/run: \|-\n([\s\S]*)$/)?.[1]
+        .replace(/^ {10}/gm, '');
+      expect(script).toBeTruthy();
+
+      const dir = mkdtempSync(join(tmpdir(), 'triage-finalize-'));
+      const commentsFile = join(dir, 'comments.json');
+      const bodyOut = join(dir, 'body.md');
+      const callOut = join(dir, 'call.txt');
+      try {
+        writeFileSync(
+          join(dir, 'gh'),
+          [
+            '#!/usr/bin/env bash',
+            'body=""',
+            'for a in "$@"; do case "$a" in body=*) body="${a#body=}";; esac; done',
+            'if [ -n "$body" ]; then',
+            '  printf "%s" "$body" > "$GH_STUB_OUT"',
+            '  printf "%s\n" "$*" > "$GH_STUB_CALL"',
+            'fi',
+            'case "$*" in',
+            "  'api user --jq .login') echo qwen-code-ci-bot ;;",
+            '  *--paginate*) cat "$GH_STUB_COMMENTS" ;;',
+            'esac',
+            'exit 0',
+          ].join('\n'),
+          { mode: 0o755 },
+        );
+
+        const RUN_URL = 'https://github.com/QwenLM/qwen-code/actions/runs/77';
+        const run = (env) => {
+          rmSync(bodyOut, { force: true });
+          rmSync(callOut, { force: true });
+          const proc = spawnSync('bash', ['-c', script], {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              GH_TOKEN: 'x',
+              GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+              NUMBER: '7999',
+              RUN_URL,
+              TRIAGE_OUTCOME: 'success',
+              JOB_STATUS: 'success',
+              GH_STUB_OUT: bodyOut,
+              GH_STUB_CALL: callOut,
+              GH_STUB_COMMENTS: commentsFile,
+              ...env,
+            },
+            encoding: 'utf8',
+          });
+          expect(proc.status, proc.stderr).toBe(0);
+          return {
+            body: existsSync(bodyOut) ? readFileSync(bodyOut, 'utf8') : null,
+            call: existsSync(callOut) ? readFileSync(callOut, 'utf8') : null,
+          };
+        };
+
+        // Which branch posts which body. No lifecycle comment exists yet, so
+        // each run POSTs its own and the composer is what is under test.
+        writeFileSync(commentsFile, '[]');
+        const wordings = {
+          finished: ['Qwen Triage finished', 'Qwen Triage 已完成'],
+          cancelled: ['Qwen Triage was cancelled', 'Qwen Triage 已取消'],
+          early: ['Qwen Triage ended early', 'Qwen Triage 提前结束'],
+        };
+        const combos = [
+          [{ TRIAGE_OUTCOME: 'success', JOB_STATUS: 'success' }, 'finished'],
+          // A timeout/manual cancel landing AFTER the triage step already
+          // succeeded still reports the success.
+          [{ TRIAGE_OUTCOME: 'success', JOB_STATUS: 'cancelled' }, 'finished'],
+          [
+            { TRIAGE_OUTCOME: 'cancelled', JOB_STATUS: 'cancelled' },
+            'cancelled',
+          ],
+          [{ TRIAGE_OUTCOME: 'failure', JOB_STATUS: 'cancelled' }, 'cancelled'],
+          [{ TRIAGE_OUTCOME: 'failure', JOB_STATUS: 'failure' }, 'early'],
+          [{ TRIAGE_OUTCOME: 'skipped', JOB_STATUS: 'failure' }, 'early'],
+        ];
+        for (const [env, expected] of combos) {
+          const { body, call } = run(env);
+          expect(call, 'POSTed, not PATCHed').not.toContain('--method PATCH');
+          expect(call).toContain('issues/7999/comments');
+          expect(body.startsWith('<!-- qwen-triage lifecycle -->'), body).toBe(
+            true,
+          );
+          for (const [kind, [en, zh]] of Object.entries(wordings)) {
+            if (kind === expected) {
+              expect(body, JSON.stringify(env)).toContain(en);
+              expect(body, JSON.stringify(env)).toContain(zh);
+            } else {
+              expect(body, JSON.stringify(env)).not.toContain(en);
+            }
+          }
+        }
+
+        // A cancel landing before THIS run's claim posted must not clobber a
+        // previous run's terminal wording — ownership is the run link the
+        // claim embeds, which a prior run's comment does not carry.
+        writeFileSync(
+          commentsFile,
+          JSON.stringify([
+            {
+              id: 42,
+              user: { login: 'qwen-code-ci-bot' },
+              body: '<!-- qwen-triage lifecycle -->\n\n✅ earlier verdict [finalize run](https://github.com/QwenLM/qwen-code/actions/runs/55)',
+            },
+          ]),
+        );
+        const foreign = run({
+          TRIAGE_OUTCOME: 'skipped',
+          JOB_STATUS: 'cancelled',
+        });
+        expect(foreign.body).toBe(null);
+        expect(foreign.call).toBe(null);
+
+        // The intended case: the claim carries this run's link, so the
+        // timeout-cancel after the claim still flips it to terminal.
+        writeFileSync(
+          commentsFile,
+          JSON.stringify([
+            {
+              id: 43,
+              user: { login: 'qwen-code-ci-bot' },
+              body: `<!-- qwen-triage lifecycle -->\n\n🔄 running — [watch live progress](${RUN_URL})`,
+            },
+          ]),
+        );
+        const own = run({
+          TRIAGE_OUTCOME: 'failure',
+          JOB_STATUS: 'cancelled',
+        });
+        expect(own.call).toContain('--method PATCH');
+        expect(own.call).toContain('issues/comments/43');
+        expect(own.body).toContain('Qwen Triage was cancelled');
+        expect(own.body).toContain('Qwen Triage 已取消');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('reports timeout and infra-error without claiming the flow was exercised', () => {
     const postStep = step('Post tmux result comment');

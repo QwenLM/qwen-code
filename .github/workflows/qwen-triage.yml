@@ -958,19 +958,31 @@ jobs:
             EXISTING_ID="$(
               gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
                 --method GET --paginate -F per_page=100 |
-                jq -rs --arg m "$MARKER" --arg legacy "$LEGACY_MARKER" --arg bot "$BOT_LOGIN" \
-                  '[.[][] | select(.user.login == $bot) | select((.body | startswith($m)) or (.body | startswith($legacy)))] | last | .id // empty'
+                jq -rs --arg m "$MARKER" --arg legacy "$LEGACY_MARKER" --arg bot "$BOT_LOGIN" --arg runurl "$RUN_URL" \
+                  '[.[][] | select(.user.login == $bot) | select((.body | startswith($m)) or (.body | startswith($legacy)))] | last
+                   | if . == null then empty
+                     elif (.body | contains($runurl)) then .id
+                     else "foreign" end'
             )" || EXISTING_ID=''
-            if [ -n "$EXISTING_ID" ]; then
-              gh api --method PATCH \
-                "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING_ID" \
-                -f body="$BODY" >/dev/null ||
-                echo "::warning::Failed to finalize triage status comment; continuing." >&2
-            else
-              gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
-                -f body="$BODY" >/dev/null ||
-                echo "::warning::Failed to post final triage status comment; continuing." >&2
-            fi
+            # PATCH only a comment this run owns — its claim embeds $RUN_URL.
+            # A cancel landing before the claim posts would otherwise clobber
+            # a previous run's terminal wording, which shares this marker.
+            case "$EXISTING_ID" in
+              '')
+                gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
+                  -f body="$BODY" >/dev/null ||
+                  echo "::warning::Failed to post final triage status comment; continuing." >&2
+                ;;
+              foreign)
+                echo "::warning::Marker comment belongs to another run; skipping final status comment upsert."
+                ;;
+              *)
+                gh api --method PATCH \
+                  "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING_ID" \
+                  -f body="$BODY" >/dev/null ||
+                  echo "::warning::Failed to finalize triage status comment; continuing." >&2
+                ;;
+            esac
           fi
 
   # On-demand real-user testing: a write-permission user comments
