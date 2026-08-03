@@ -1002,6 +1002,7 @@ jobs:
                 git worktree remove --force "$worktree" ||
                   echo "::warning::could not remove review worktree: $worktree"
               done
+          rm -rf .qwen/tmp/review-pr-* 2>/dev/null || true
           git worktree prune -v || true
           git for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
             | while read -r review_ref; do
@@ -1009,7 +1010,6 @@ jobs:
                 git branch -D "$review_ref" ||
                   echo "::warning::could not remove review branch: $review_ref"
               done
-          git worktree prune -v || true
           rm -f .qwen/tmp/qwen-review-lease-pr-*.json 2>/dev/null || true
           echo "review worktrees cleaned"
 

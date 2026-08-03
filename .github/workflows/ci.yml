@@ -187,7 +187,6 @@ jobs:
                     git -C "$GITHUB_WORKSPACE" branch -D "$stale_ref" || true
                   fi
                 done
-            git -C "$GITHUB_WORKSPACE" worktree prune -v || true
           fi
 
       # On PRs, check out refs/pull/N/head (the immutable PR head, published the
