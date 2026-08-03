@@ -40,6 +40,19 @@ test('loads replayed transcript and connects to fake daemon @smoke', async ({
   await expect(page.locator('[data-web-shell-message-list]')).toContainText(
     'Hello from fake daemon',
   );
+
+  // #8214: pin the explicit ::selection rule on message content. This
+  // asserts the rule is present and matches the [data-user-selectable]
+  // wrapper; it does not verify the Firefox paint effect itself (this
+  // repo's Playwright projects are chromium-only).
+  const selectionBackground = await page.evaluate(() => {
+    const content = document.querySelector(
+      '[data-user-selectable] *',
+    ) as Element | null;
+    if (!content) return null;
+    return getComputedStyle(content, '::selection').backgroundColor;
+  });
+  expect(selectionBackground).toBe('rgba(0, 128, 255, 0.3)');
 });
 
 test('submits a prompt and renders a streamed assistant response @smoke', async ({
