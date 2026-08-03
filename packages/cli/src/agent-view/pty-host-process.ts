@@ -361,7 +361,20 @@ async function callAgentViewPtyHost(
     ...(params ? { params } : {}),
   });
   if (response.ok) return response.result;
-  throw new Error(response.error.message);
+  throw new AgentViewPtyHostRequestError(
+    response.error.code,
+    response.error.message,
+  );
+}
+
+class AgentViewPtyHostRequestError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'AgentViewPtyHostRequestError';
+  }
 }
 
 async function requestAgentViewPtyHost(
@@ -672,7 +685,13 @@ async function waitForPtyHost(
           workerPid: Number(result['workerPid']),
         };
       }
-    } catch {
+    } catch (error) {
+      if (
+        error instanceof AgentViewPtyHostRequestError &&
+        error.code === 'unauthorized'
+      ) {
+        throw error;
+      }
       // Retry until the host socket is ready.
     }
     await delay(HOST_READY_DELAY_MS);
