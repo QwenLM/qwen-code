@@ -27,10 +27,6 @@ export default defineConfig({
         __dirname,
         '../core/src/memory/scopes.ts',
       ),
-      '@qwen-code/qwen-code-core/sanitizeChildEnv': path.resolve(
-        __dirname,
-        '../core/src/utils/sanitize-child-env.ts',
-      ),
       '@qwen-code/qwen-code-core/envVarResolver': path.resolve(
         __dirname,
         '../core/src/utils/envVarResolver.ts',

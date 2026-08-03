@@ -55,8 +55,12 @@ export function sanitizeChildEnv(
   env: NodeJS.ProcessEnv = process.env,
 ): NodeJS.ProcessEnv {
   const sanitized: NodeJS.ProcessEnv = { ...env };
-  for (const key of INTERNAL_SECRET_ENV_VARS) {
-    delete sanitized[key];
+  // Case variants must go too: on Windows env keys are case-insensitive,
+  // so an externally set `qwen_server_token` is just the canonical secret.
+  for (const key of Object.keys(sanitized)) {
+    if (isInternalSecretEnvVar(key)) {
+      delete sanitized[key];
+    }
   }
   return sanitized;
 }

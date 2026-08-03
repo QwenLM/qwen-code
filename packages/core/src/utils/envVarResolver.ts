@@ -32,11 +32,13 @@ export function resolveEnvVarsInString(
   const envVarRegex = /\$(?:(\w+)|{([^}]+)})/g; // Find $VAR_NAME or ${VAR_NAME}
   return value.replace(envVarRegex, (match, varName1, varName2) => {
     const varName = varName1 || varName2;
-    if (customEnv && typeof customEnv[varName] === 'string') {
-      return customEnv[varName];
-    }
+    // Check the denylist before customEnv so no caller-supplied map can
+    // ever resolve an internal secret.
     if (isInternalSecretEnvVar(varName)) {
       return match;
+    }
+    if (customEnv && typeof customEnv[varName] === 'string') {
+      return customEnv[varName];
     }
     if (process && process.env && typeof process.env[varName] === 'string') {
       return process.env[varName]!;

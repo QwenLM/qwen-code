@@ -3270,6 +3270,7 @@ describe('Settings Loading and Merging', () => {
         security: {
           allowPrivateNetworkHooks: true,
           allowedHttpHookUrls: ['https://hooks.example.com/*'],
+          folderTrust: { enabled: true },
         },
       };
 
@@ -3289,6 +3290,11 @@ describe('Settings Loading and Merging', () => {
         settings.merged.security?.allowPrivateNetworkHooks,
       ).toBeUndefined();
       expect(settings.merged.security?.allowedHttpHookUrls).toBeUndefined();
+      // ...but the strip is surgical: other workspace security settings
+      // still merge.
+      expect(settings.merged.security?.folderTrust).toEqual({
+        enabled: true,
+      });
     });
 
     it('should honor security.allowedHttpHookUrls from user scope', () => {
@@ -3353,6 +3359,42 @@ describe('Settings Loading and Merging', () => {
       expect(
         warnings.some((w) => w.includes('security.allowedHttpHookUrls')),
       ).toBe(true);
+    });
+
+    it('should not warn about stripped security fields when workspace settings do not define them', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              security: { folderTrust: { enabled: true } },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      const warnings = getSettingsWarnings(settings);
+      expect(
+        warnings.some((w) => w.includes('security.allowPrivateNetworkHooks')),
+      ).toBe(false);
+      expect(
+        warnings.some((w) => w.includes('security.allowedHttpHookUrls')),
+      ).toBe(false);
+    });
+
+    it('should not warn about stripped security fields when no workspace settings file is loaded', () => {
+      // beforeEach defaults (existsSync -> false): no settings file loads,
+      // so there is no workspace scope to strip or warn about.
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.workspace.rawJson).toBeUndefined();
+      const warnings = getSettingsWarnings(settings);
+      expect(
+        warnings.some((w) => w.includes('security.allowPrivateNetworkHooks')),
+      ).toBe(false);
+      expect(
+        warnings.some((w) => w.includes('security.allowedHttpHookUrls')),
+      ).toBe(false);
     });
 
     it('should let user scope win over a stripped workspace value', () => {

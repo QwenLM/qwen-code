@@ -257,9 +257,21 @@ export class HttpHookRunner {
         // Per Qwen Code spec: Non-2xx status is a non-blocking error
         // Execution continues, but we log a warning
         if (!response.ok) {
-          debugLogger.warn(
-            `HTTP hook ${hookId} returned non-2xx status ${response.status} (non-blocking)`,
-          );
+          if (response.status >= 300 && response.status < 400) {
+            // With redirect: 'manual' a 3xx lands here; the endpoint is
+            // behind a redirecting LB and silently no-ops unless the user
+            // knows to repoint it, so name the target and the remedy.
+            debugLogger.warn(
+              `HTTP hook ${hookId} returned a redirect (${response.status}) to ` +
+                `"${response.headers.get('location') ?? 'unknown'}"; redirects ` +
+                `are never followed (SSRF protection). Point the hook at the ` +
+                `final URL (non-blocking).`,
+            );
+          } else {
+            debugLogger.warn(
+              `HTTP hook ${hookId} returned non-2xx status ${response.status} (non-blocking)`,
+            );
+          }
           // Return success: true with continue: true for non-blocking error
           return {
             hookConfig,

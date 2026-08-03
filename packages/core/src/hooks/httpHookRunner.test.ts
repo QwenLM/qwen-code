@@ -9,6 +9,17 @@ import { HookEventName, HookType } from './types.js';
 import type { HttpHookConfig, HookInput } from './types.js';
 import { HttpHookRunner } from './httpHookRunner.js';
 
+const mockDebugLogger = vi.hoisted(() => ({
+  isEnabled: vi.fn(() => false),
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+vi.mock('../utils/debugLogger.js', () => ({
+  createDebugLogger: vi.fn(() => mockDebugLogger),
+}));
+
 // Mock fetch
 const mockFetch = vi.fn();
 vi.stubGlobal('fetch', mockFetch);
@@ -255,6 +266,13 @@ describe('HttpHookRunner', () => {
       expect(result.output?.continue).toBe(true);
       // Exactly one request: the redirect target is never fetched
       expect(mockFetch).toHaveBeenCalledTimes(1);
+      // The 3xx gets a dedicated, self-service warning naming the target
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('returned a redirect (302)'),
+      );
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('http://169.254.169.254/latest/meta-data'),
+      );
       expect(mockFetch).toHaveBeenCalledWith(
         'https://api.example.com/hook',
         expect.objectContaining({ redirect: 'manual' }),

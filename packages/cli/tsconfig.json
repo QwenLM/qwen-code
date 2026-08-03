@@ -11,9 +11,6 @@
       "@qwen-code/qwen-code-core/transcriptRecords": [
         "../core/src/utils/transcript-records.ts"
       ],
-      "@qwen-code/qwen-code-core/sanitizeChildEnv": [
-        "../core/src/utils/sanitize-child-env.ts"
-      ],
       "@qwen-code/qwen-code-core/envVarResolver": [
         "../core/src/utils/envVarResolver.ts"
       ],

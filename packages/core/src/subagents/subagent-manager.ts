@@ -939,10 +939,6 @@ export class SubagentManager {
             agentScope,
           );
         } else {
-          // Single outer guard; nested branch on hookRegistry. The pre-fix
-          // structure repeated the `config.hooks && Object.keys(...).length`
-          // predicate across two `if`/`else if` arms, which made it easy to
-          // drift one side during future edits.
           debugLogger.warn(
             `Subagent "${config.name}" declares hooks but the host has no HookSystem; ignoring per-agent hooks.`,
           );
