@@ -13,7 +13,15 @@ import {
   afterEach,
   type MockInstance,
 } from 'vitest';
-import { readFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   createNonInteractivePromptId,
   main,
@@ -2239,6 +2247,7 @@ describe('startInteractiveUI', () => {
     getProjectRoot: () => '/root',
     getScreenReader: () => false,
     isTelemetryInitializationDeferred: () => true,
+    getChatRecordingService: () => undefined,
   } as unknown as Config;
   const mockSettings = {
     merged: {
@@ -2730,6 +2739,125 @@ describe('startInteractiveUI', () => {
     expect(mockWriteStderrLine).not.toHaveBeenCalledWith(
       expect.stringContaining('Rendering error'),
     );
+  });
+
+  // The quit screen's resume hint is drawn on the alternate screen in VP
+  // mode and discarded on teardown, so cleanup echoes the command to the
+  // main screen. Pin the echo's gate, message shape, and sanitization.
+  describe('exit-time resume echo', () => {
+    async function runCleanup(config: Config): Promise<void> {
+      const unmount = vi.fn();
+      const { render } = await import('ink');
+      vi.mocked(render).mockReturnValue({ unmount } as never);
+      mockConsumeLastRenderError.mockReturnValue(undefined);
+
+      await startInteractiveUI(
+        config,
+        mockSettings,
+        mockStartupWarnings,
+        mockWorkspaceRoot,
+        {
+          authError: null,
+          themeError: null,
+          shouldOpenAuthDialog: false,
+          geminiMdFileCount: 0,
+        },
+      );
+
+      const { registerCleanup } = await import('./utils/cleanup.js');
+      const cleanupFn = vi.mocked(registerCleanup).mock.calls.at(-1)?.[0] as
+        | (() => Promise<void> | void)
+        | undefined;
+      expect(cleanupFn).toBeTypeOf('function');
+      await cleanupFn?.();
+    }
+
+    function makeRecordingConfig(sessionId: string, projectDir: string) {
+      return {
+        ...mockConfig,
+        getChatRecordingService: () => ({}),
+        getSessionId: () => sessionId,
+        storage: { getProjectDir: () => projectDir },
+      } as unknown as Config;
+    }
+
+    it('echoes the resume command when the session file exists', async () => {
+      const sessionId = 'echo-session-id';
+      const projectDir = mkdtempSync(join(tmpdir(), 'resume-echo-'));
+      mkdirSync(join(projectDir, 'chats'), { recursive: true });
+      writeFileSync(join(projectDir, 'chats', `${sessionId}.jsonl`), '');
+
+      const writeSpy = vi
+        .spyOn(process.stdout, 'write')
+        .mockImplementation(() => true);
+      try {
+        await runCleanup(makeRecordingConfig(sessionId, projectDir));
+
+        expect(writeSpy).toHaveBeenCalledWith(
+          `\nTo continue this session, run\nqwen --resume ${sessionId}\n`,
+        );
+      } finally {
+        writeSpy.mockRestore();
+        rmSync(projectDir, { recursive: true, force: true });
+      }
+    });
+
+    it('does not echo when the session file is missing', async () => {
+      const projectDir = mkdtempSync(join(tmpdir(), 'resume-echo-'));
+
+      const writeSpy = vi
+        .spyOn(process.stdout, 'write')
+        .mockImplementation(() => true);
+      try {
+        await runCleanup(makeRecordingConfig('missing-session-id', projectDir));
+
+        for (const [chunk] of writeSpy.mock.calls) {
+          expect(String(chunk)).not.toContain('qwen --resume');
+        }
+      } finally {
+        writeSpy.mockRestore();
+        rmSync(projectDir, { recursive: true, force: true });
+      }
+    });
+
+    it('sanitizes the echoed session ID', async () => {
+      const sessionId = 'evil\u001B]52;c;pwned\u0007session';
+      const projectDir = mkdtempSync(join(tmpdir(), 'resume-echo-'));
+      mkdirSync(join(projectDir, 'chats'), { recursive: true });
+      writeFileSync(join(projectDir, 'chats', `${sessionId}.jsonl`), '');
+
+      const writeSpy = vi
+        .spyOn(process.stdout, 'write')
+        .mockImplementation(() => true);
+      try {
+        await runCleanup(makeRecordingConfig(sessionId, projectDir));
+
+        const echoed = writeSpy.mock.calls
+          .map(([chunk]) => String(chunk))
+          .find((chunk) => chunk.includes('qwen --resume'));
+        expect(echoed).toBeDefined();
+        expect(echoed).not.toContain('\u001B');
+        expect(echoed).toContain('qwen --resume evil');
+      } finally {
+        writeSpy.mockRestore();
+        rmSync(projectDir, { recursive: true, force: true });
+      }
+    });
+
+    it('does not echo when chat recording is disabled', async () => {
+      const writeSpy = vi
+        .spyOn(process.stdout, 'write')
+        .mockImplementation(() => true);
+      try {
+        await runCleanup(mockConfig);
+
+        for (const [chunk] of writeSpy.mock.calls) {
+          expect(String(chunk)).not.toContain('qwen --resume');
+        }
+      } finally {
+        writeSpy.mockRestore();
+      }
+    });
   });
 
   describe('periodic memory-pressure check', () => {

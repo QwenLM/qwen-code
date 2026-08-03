@@ -330,8 +330,13 @@ export async function startInteractiveUI(
     // its resume hint) is drawn on the alternate screen in VP mode and is
     // discarded on teardown, so echo the resume command here where it
     // survives exit and can be copied from the terminal scrollback.
-    if (process.stdout.isTTY && config.getChatRecordingService()) {
-      try {
+    // --resume lookup is cwd-scoped, so the hint assumes it is pasted in
+    // the session's working directory. Sessions keyed elsewhere share this
+    // limitation with the in-TUI hint — notably --worktree startup, which
+    // chdirs into the worktree while the user's shell stays at the launch
+    // directory.
+    try {
+      if (process.stdout.isTTY && config.getChatRecordingService()) {
         const sessionId = config.getSessionId();
         const sessionFile = join(
           config.storage.getProjectDir(),
@@ -340,12 +345,12 @@ export async function startInteractiveUI(
         );
         if (existsSync(sessionFile)) {
           process.stdout.write(
-            `\n${t('To continue this session, run')}\nqwen --resume ${sessionId}\n`,
+            `\n${t('To continue this session, run')}\nqwen --resume ${sanitizeTerminalText(sessionId)}\n`,
           );
         }
-      } catch {
-        // Best-effort: a hint must never block or break exit.
       }
+    } catch {
+      // Best-effort: a hint must never block or break exit.
     }
   });
 }
