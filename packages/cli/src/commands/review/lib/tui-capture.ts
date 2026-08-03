@@ -61,8 +61,10 @@ export function tmuxSupportsCaptureN(versionLine: string): boolean | undefined {
   const major = Number(m[1]);
   const minor = Number(m[2]);
   if (major !== 3) return major > 3;
-  if (minor !== 0) return minor > 0;
-  return (m[3] ?? '') >= 'a'; // 3.0 shipped before -N; 3.0a added it
+  // capture-pane -N landed in 3.1 (upstream CHANGES lists it under "CHANGES
+  // FROM 3.0a TO 3.1"; the 3.0a man page's synopsis has no -N) — the whole
+  // 3.0 line, letters included, is too old. Ubuntu 20.04 ships 3.0a.
+  return minor >= 1;
 }
 
 /**
@@ -129,13 +131,20 @@ export function tmuxPlan(opts: {
   sendKeys: (key: string) => string[];
 } {
   const scope = ['-L', opts.server];
+  const esc = (s: string): string => s.replaceAll("'", "'\\''");
   // The pane must outlive the command: tmux's default `remain-on-exit off`
   // destroys pane → window → session the moment the command exits, so a
   // one-shot command (render and exit — exactly what a verify fixture looks
-  // like) would be uncapturable (measured: 0/10 without the holder). The
-  // `sh -c` wrapper also survives exotic default-shells, and `kill-server`
-  // reaps the holder along with everything else. Two hours outlasts the
-  // longest legal capture (1h --until + settle + freeze) with slack.
+  // like) would be uncapturable (measured: 0/10 without the holder).
+  // `kill-server` reaps the holder along with everything else. Two hours
+  // outlasts the longest legal capture (1h --until + settle + freeze).
+  //
+  // TWO nested shells, not one: in a single shell, a command ending in
+  // `exit N` (or opening with `exec`, or running under its own `set -e`)
+  // takes the keep-alive down with it — pane, session, and server gone
+  // before the capture (measured: deterministic "no server running" refusal
+  // on `printf ...; exit 0`). The inner sh absorbs the exit; the outer one
+  // holds the pane.
   //
   // The hold sits on its OWN LINE: appended with `;` it is voided by the
   // command's own tail — a trailing `;` makes `;;` (syntax error, pane dies
@@ -143,10 +152,30 @@ export function tmuxPlan(opts: {
   // recurs), and both blame tmux for a valid command. A trailing `\` would
   // still fold the next line into the command — the command layer refuses
   // that shape up front.
-  const held = `sh -c '${opts.command.replaceAll("'", "'\\''")}\nsleep 7200'`;
+  const inner = `sh -c '${esc(opts.command)}'`;
+  const held = `sh -c '${esc(`${inner}\nsleep 7200`)}'`;
   return {
+    // ONE client invocation, three properties:
+    // - `-f /dev/null` starts the server CONFIG-FREE: without it the
+    //   private server loads ~/.tmux.conf, and user options reach into the
+    //   capture — measured: `set -g destroy-unattached on` killed the
+    //   detached session with a misattributed "no server running" refusal.
+    // - `set-option -g default-shell /bin/sh` runs BEFORE new-session (the
+    //   `;` chains commands inside the same client): the holder string is
+    //   parsed by tmux's default-shell, and an exotic login shell
+    //   (measured: tcsh via $SHELL or passwd) chokes on it.
+    // - Both ride the same invocation as new-session because a session-less
+    //   server exits the moment its first client leaves (exit-empty) — a
+    //   separate bootstrap call left "no server running" for the next one.
     start: [
+      '-f',
+      '/dev/null',
       ...scope,
+      'set-option',
+      '-g',
+      'default-shell',
+      '/bin/sh',
+      ';',
       'new-session',
       '-d',
       '-s',

@@ -151,7 +151,11 @@ describe('capture-tui without tmux (probe seam)', () => {
     }
   });
 
-  it('leaves NO stale artifacts when a re-run refuses', async () => {
+  it.skipIf(process.platform === 'win32')(
+    // The fake-tmux PATH shim is a POSIX `#!/bin/sh` script on a `:`-joined
+    // PATH — unreachable on the windows-2022 merge-queue lane, where the
+    // probe would return undefined and refuse BEFORE the artifact clear.
+    'leaves NO stale artifacts when a re-run refuses', async () => {
     // The previous run's artifacts cannot survive a refused re-run: a stale
     // manifest claiming a png rung whose .ans no longer exists is exactly
     // the wrong-evidence failure this command exists to prevent. The fake
@@ -227,6 +231,8 @@ describe('capture-tui without tmux (probe seam)', () => {
       { command: 'x', keys: [false] }, // --no-keys
       { command: 'x', out: ['x', 'y'] },
       { command: 'x', out: undefined },
+      { command: 'x', ready: ['A', 'B'] }, // --ready A --ready B
+      { command: 'x', cwd: ['a', 'b'] },
     ]) {
       process.exitCode = undefined;
       const { stderr } = await withStdio(() =>
@@ -382,7 +388,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
       for (let i = 0; i < 100 && !serverPid; i++) {
         const r = spawnSync(
           'pgrep',
-          ['-f', `tmux -L qwen-review-capture-${process.pid}-`],
+          ['-f', `qwen-review-capture-${process.pid}-`],
           { encoding: 'utf8' },
         );
         const pid = Number((r.stdout ?? '').trim().split('\n')[0]);
@@ -567,8 +573,37 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(manifest.keysSent).toBe(false);
     expect(manifest.degradedBecause).toContain('--ready never matched');
     expect(manifest.degradedBecause).toContain('NOT sent');
+    // The manifest tells the truth about HOW the run ended: it waited out
+    // --timeout-ms (a timeout settle, not a fixed delay), and the active
+    // duration recorded is the one that governed it.
+    expect(manifest.settledBy).toBe('timeout');
+    expect(manifest.timeoutMs).toBe(1500);
+    expect(manifest.settleMs).toBeUndefined();
     // The pty would echo even unread keystrokes — absence proves withheld.
     expect(readFileSync(join(dir, 'cap.ans'), 'utf8')).not.toContain('DANGER');
+  });
+
+  it('gates --ready on the LOGICAL view — an SGR-split marker still opens it', async () => {
+    // Both prior ready tests used plain markers; on the physical (-e) view
+    // an escape lands inside the marker and the gate never opens — keys
+    // withheld on a healthy UI.
+    await runCaptureTui({
+      command: `bash -c 'sleep 0.5; printf "GA\\033[31mTE\\033[0m\\n"; cat'`,
+      cwd: dir,
+      cols: 80,
+      rows: 24,
+      settleMs: 0,
+      ready: 'GATE',
+      until: 'sgr-gated',
+      keys: ['sgr-gated', 'Enter'],
+      out: join(dir, 'sgr-ready'),
+      timeoutMs: 10_000,
+    } as never);
+    const manifest = JSON.parse(
+      readFileSync(join(dir, 'sgr-ready.json'), 'utf8'),
+    );
+    expect(manifest.settledBy).toBe('until-match');
+    expect(manifest.keysSent).toBe(true);
   });
 
   it('refuses an empty or invalid --ready like it refuses --until', async () => {
@@ -770,9 +805,85 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
   });
 
   it('refuses a command ending in a backslash — line continuation eats the holder', async () => {
-    await run({ command: 'printf "X\\n" \\' });
+    const { stderr } = await withStdio(() =>
+      run({ command: 'printf "X\\n" \\' }),
+    );
     expect(process.exitCode).toBe(3);
     expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
+    // The reason pins the gate itself: without it, the holder folds, the
+    // pane dies, and the mid-capture refusal shows the same exit/artifacts.
+    expect(stderr).toContain('trailing backslash');
+    expect(stderr).not.toContain('mid-capture');
+  });
+
+  it('accepts an EVEN run of trailing backslashes — escaped literals, not a continuation', async () => {
+    // Only an ODD trailing run is a line continuation; `\\` is an escaped
+    // literal backslash and the old always-refuse gate over-refused it.
+    await run({
+      command: 'printf "EVEN-OK %s\\n" \\\\; sleep 30',
+      until: 'EVEN-OK',
+    });
+    expect(process.exitCode).toBeUndefined();
+    expect(readFileSync(join(dir, 'cap.ans'), 'utf8')).toContain('EVEN-OK');
+  });
+
+  it('captures a command that ENDS ITSELF with exit 0 — the inner shell absorbs it', async () => {
+    // Single-shell holder measured: `printf ...; exit 0` took pane, session
+    // and server down before capture — "no server running" on a valid
+    // command. The nested holder absorbs the exit.
+    await run({ command: 'printf "EXITY\\n"; exit 0', until: 'EXITY' });
+    expect(process.exitCode).toBeUndefined();
+    expect(readFileSync(join(dir, 'cap.ans'), 'utf8')).toContain('EXITY');
+  });
+
+  it('refuses --until/--ready patterns that would MATCH a blank pane', async () => {
+    // The blank pane's logical capture is rows of newlines, not the empty
+    // string — `.?`, `x*`, `\s` and `\n` all pass an empty-string-only
+    // oracle yet settle (or fire keys) before the UI rendered anything.
+    for (const until of ['.?', '(MARKER)?', 'x*', '\\s', '\\n']) {
+      process.exitCode = undefined;
+      const { stderr } = await withStdio(() => run({ until }));
+      expect(process.exitCode, until).toBe(3);
+      expect(stderr).toContain('matches a blank pane');
+    }
+    process.exitCode = undefined;
+    const { stderr } = await withStdio(() =>
+      run({ until: 'REAL', ready: '\\s', keys: ['x'] }),
+    );
+    expect(process.exitCode).toBe(3);
+    expect(stderr).toContain('--ready');
+    expect(stderr).toContain('matches a blank pane');
+  });
+
+  it('reports the success JSON on stdout — captured, evidence, manifest path', async () => {
+    // The consumer is an agent: the success line is machine-read, and only
+    // the refusal side was pinned before.
+    const { stdout } = await withStdio(() => run());
+    const line = stdout.trim().split('\n').at(-1) ?? '';
+    expect(JSON.parse(line)).toEqual({
+      captured: true,
+      evidence: hasFreeze ? 'png' : 'ans-only',
+      manifest: join(dir, 'cap.json'),
+    });
+  });
+
+  it('shares ONE deadline between the ready gate and the until poll', async () => {
+    // Two separate clocks would let a ready+until capture run to
+    // 2× --timeout-ms: ready matches late (~1.5s), until never matches, and
+    // the whole run must still end near the single 2s deadline, not 3.5s.
+    const started = Date.now();
+    await run({
+      command: 'sleep 1.5; printf "GATE-OPEN\\n"; sleep 30',
+      ready: 'GATE-OPEN',
+      until: 'NEVER-MATCHES',
+      timeoutMs: 2500,
+    });
+    expect(process.exitCode).toBeUndefined();
+    const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
+    expect(manifest.settledBy).toBe('timeout');
+    // Pristine ends near the single 2.5s deadline; the two-clock mutant
+    // needs ready(~1.6s) + until(2.5s) ≈ 4.1s and lands past the bound.
+    expect(Date.now() - started).toBeLessThan(3600);
   });
 
   it('refuses an empty --until instead of settling on a blank frame', async () => {
@@ -796,9 +907,28 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
       // lose the pane text at the very last write.
       const ro = join(dir, 'ro');
       mkdirSync(ro, { mode: 0o555 });
-      await run({ out: join(ro, 'cap') });
+      const { stderr } = await withStdio(() => run({ out: join(ro, 'cap') }));
       expect(process.exitCode).toBe(3);
       expect(existsSync(join(ro, 'cap.ans'))).toBe(false);
+      // The reason pins WHERE the refusal landed: without the up-front
+      // probe, the capture runs to completion (a 1h --timeout-ms burns the
+      // whole window first) and refuses at the final write instead.
+      expect(stderr).toContain('not writable');
+      expect(stderr).not.toContain('cannot write capture output');
+    },
+  );
+
+  it.skipIf(process.getuid?.() === 0)(
+    'refuses a --cwd the process cannot ENTER, not just a missing one',
+    async () => {
+      // statSync alone passes a mode-644 directory; entering it needs +x —
+      // tmux would exit 0 and silently run the pane in the launcher's cwd
+      // while the manifest records the requested one.
+      const blocked = join(dir, 'blocked');
+      mkdirSync(blocked, { mode: 0o644 });
+      await run({ cwd: blocked });
+      expect(process.exitCode).toBe(3);
+      expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
     },
   );
 
@@ -840,27 +970,68 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     // undefined, the duration guard refuses, and this test turns red — the
     // option-contract bug class test-plan.test.ts documents.
     await (captureTuiCommand.handler as (argv: unknown) => Promise<void>)({
-      command: 'printf "MAPPED\\n"; sleep 30',
+      command: `bash -c 'sleep 0.3; printf "MAPPED\\n"; cat'`,
       cwd: dir,
       cols: 80,
       rows: 24,
       'settle-ms': 0,
-      until: 'MAPPED',
-      keys: undefined,
+      ready: 'MAPPED',
+      until: 'typed-by-map',
+      keys: ['typed-by-map', 'Enter'],
       out: join(dir, 'mapped'),
       'timeout-ms': 10_000,
     });
     expect(process.exitCode).toBeUndefined();
     const manifest = JSON.parse(readFileSync(join(dir, 'mapped.json'), 'utf8'));
     expect(manifest.settledBy).toBe('until-match');
+    // Every mapped field observable in the manifest is pinned BY VALUE — a
+    // settle-ms/timeout-ms swap or a wrong ready/keys argv key ships green
+    // otherwise (keys/ready only shape-check when !== undefined).
+    expect(manifest.keysSent).toBe(true);
+    expect(manifest.keys).toEqual(['typed-by-map', 'Enter']);
+    expect(manifest.ready).toBe('MAPPED');
+    expect(manifest.until).toBe('typed-by-map');
+    expect(manifest.timeoutMs).toBe(10_000);
+    expect(manifest.cwd).toBe(dir);
+  });
+
+  it('declares the yargs surface — array keys, required command/out, defaults', () => {
+    // The mapping test drives the handler; this pins the BUILDER: dropping
+    // array:true from keys refuses the documented `--keys "/review" Enter`
+    // usage while every handler-level test stays green.
+    const options: Record<string, Record<string, unknown>> = {};
+    const fake = {
+      option(name: string, cfg: Record<string, unknown>) {
+        options[name] = cfg;
+        return this;
+      },
+    };
+    (captureTuiCommand.builder as (y: unknown) => unknown)(fake);
+    expect(options['keys']?.['array']).toBe(true);
+    expect(options['command']?.['demandOption']).toBe(true);
+    expect(options['out']?.['demandOption']).toBe(true);
+    expect(options['cols']?.['default']).toBe(80);
+    expect(options['rows']?.['default']).toBe(24);
+    expect(options['settle-ms']?.['default']).toBe(3000);
+    expect(options['timeout-ms']?.['default']).toBe(60_000);
+    expect(options['ready']?.['type']).toBe('string');
+  });
+
+  it('pins the production freeze render defaults — the belt is 30s, the bin is freeze', () => {
+    // The belt test overrides-and-restores; without this pin a mutant
+    // shipping timeoutMs: 5_000 (or a renamed bin) is invisible.
+    expect(freezeRender.timeoutMs).toBe(30_000);
+    expect(freezeRender.bin).toBe('freeze');
   });
 
   it.skipIf(!hasPgrep)(
-    'reaps the private server when the capture is SIGTERMed mid-poll',
+    'reaps the private server when the capture is signalled mid-poll — SIGTERM and SIGINT',
     async () => {
       // The no-orphan guarantee cannot rest on finally alone — a signal
       // skips it. Spawn the capture as a child, kill it mid --until poll,
-      // and assert nothing named for the CHILD's pid survives.
+      // and assert nothing named for the CHILD's pid survives. BOTH
+      // signals: deleting only the SIGINT registration shipped green while
+      // an operator's Ctrl+C left server, socket and holder alive.
       // vitest's transform does not guarantee a usable file: import.meta.url;
       // resolve from the working directory (package root or repo root).
       let captureTuiTs = join(
@@ -874,46 +1045,68 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
         );
       }
       expect(existsSync(captureTuiTs)).toBe(true);
-      const driver = join(dir, 'driver.mts');
-      writeFileSync(
-        driver,
-        [
-          `const { runCaptureTui } = await import(${JSON.stringify(captureTuiTs)});`,
-          `await runCaptureTui({ command: 'sleep 300', cwd: ${JSON.stringify(dir)}, cols: 80, rows: 24, settleMs: 0, until: 'NEVER-MATCHES', keys: undefined, out: ${JSON.stringify(join(dir, 'sig'))}, timeoutMs: 60_000 } as never);`,
-        ].join('\n'),
-      );
       const { spawn } = await import('node:child_process');
-      const child = spawn(process.execPath, ['--import', 'tsx', driver], {
-        cwd: process.cwd(),
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-      const childPid = child.pid as number;
-      // Wait for the child's private server to exist, then SIGTERM the child.
-      let seen = false;
-      for (let i = 0; i < 200 && !seen; i++) {
-        const r = spawnSync(
-          'pgrep',
-          ['-f', `tmux -L qwen-review-capture-${childPid}-`],
-          { encoding: 'utf8' },
+      for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+        const outBase = join(dir, `sig-${signal}`);
+        const driver = join(dir, `driver-${signal}.mts`);
+        writeFileSync(
+          driver,
+          [
+            `const { runCaptureTui } = await import(${JSON.stringify(captureTuiTs)});`,
+            `await runCaptureTui({ command: 'sleep 300', cwd: ${JSON.stringify(dir)}, cols: 80, rows: 24, settleMs: 0, until: 'NEVER-MATCHES', keys: undefined, out: ${JSON.stringify(outBase)}, timeoutMs: 60_000 } as never);`,
+          ].join('\n'),
         );
-        if ((r.stdout ?? '').trim() !== '') seen = true;
-        else await sleep(50);
+        const child = spawn(process.execPath, ['--import', 'tsx', driver], {
+          cwd: process.cwd(),
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        const childPid = child.pid as number;
+        let seen = false;
+        for (let i = 0; i < 200 && !seen; i++) {
+          const r = spawnSync(
+            'pgrep',
+            ['-f', `qwen-review-capture-${childPid}-`],
+            { encoding: 'utf8' },
+          );
+          if ((r.stdout ?? '').trim() !== '') seen = true;
+          else await sleep(50);
+        }
+        expect(seen, `${signal}: server appeared`).toBe(true);
+        child.kill(signal);
+        await new Promise((resolve) => child.once('exit', resolve));
+        // The reap ran before the re-raise: no server named for the child.
+        let gone = false;
+        for (let i = 0; i < 40 && !gone; i++) {
+          const r = spawnSync(
+            'pgrep',
+            ['-f', `qwen-review-capture-${childPid}-`],
+            { encoding: 'utf8' },
+          );
+          if ((r.stdout ?? '').trim() === '') gone = true;
+          else await sleep(50);
+        }
+        expect(gone, `${signal}: server reaped`).toBe(true);
       }
-      expect(seen).toBe(true);
-      child.kill('SIGTERM');
-      await new Promise((resolve) => child.once('exit', resolve));
-      // The reap ran before the re-raise: no server named for the child.
-      let gone = false;
-      for (let i = 0; i < 40 && !gone; i++) {
-        const r = spawnSync(
-          'pgrep',
-          ['-f', `tmux -L qwen-review-capture-${childPid}-`],
-          { encoding: 'utf8' },
-        );
-        if ((r.stdout ?? '').trim() === '') gone = true;
-        else await sleep(50);
-      }
-      expect(gone).toBe(true);
     },
   );
+
+  it('renders through a stdin-IGNORING spawn — a pipe stdin hangs freeze', async () => {
+    // The production spawn sets stdio ignore because freeze treats a pipe
+    // stdin as "the input is stdin" (measured: prompt EOF → "No input",
+    // open pipe → indefinite hang). This fake blocks on stdin unless it is
+    // /dev/null: with the guard in place it renders instantly; the
+    // stdio-dropped mutant blocks, the belt kills it, and evidence
+    // degrades — turning this red.
+    const realBelt = freezeRender.timeoutMs;
+    freezeRender.timeoutMs = 3000;
+    try {
+      await withFakeFreeze('#!/bin/sh\ncat > /dev/null\n: > "$5"\nexit 0\n', () =>
+        run(),
+      );
+    } finally {
+      freezeRender.timeoutMs = realBelt;
+    }
+    const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
+    expect(manifest.evidence).toBe('png');
+  });
 });

@@ -31,7 +31,9 @@ import type { CommandModule } from 'yargs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import {
+  accessSync,
   closeSync,
+  constants as fsConstants,
   existsSync,
   mkdirSync,
   openSync,
@@ -197,6 +199,46 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       return;
     }
   }
+  if (args.out.trim() === '') {
+    // resolve('') is the cwd: artifacts would land as <cwd>.ans/.png/.json
+    // NEXT TO the working directory, silently clobbering whatever holds
+    // those names (the brief's template with an empty variable hits this).
+    refuse('--out must not be empty.');
+    return;
+  }
+  const outBase = resolve(args.out);
+  const ansPath = `${outBase}.ans`;
+  const pngPath = `${outBase}.png`;
+  const manifestPath = `${outBase}.json`;
+  try {
+    mkdirSync(dirname(outBase), { recursive: true });
+    // Probe the actual write target BEFORE any process starts: mkdirSync
+    // with `recursive` does no permission check on a directory that already
+    // exists, so an unwritable --out would otherwise run the full capture —
+    // up to the 1h ceiling — and lose the pane text at the very last write.
+    // The probe uses a UNIQUE sibling, never the .ans itself: truncating the
+    // real one would delete the previous run's text while its manifest/png
+    // survive to misdescribe it.
+    const probePath = `${outBase}.write-probe-${randomBytes(4).toString('hex')}`;
+    const fd = openSync(probePath, 'w');
+    closeSync(fd);
+    rmSync(probePath, { force: true });
+    // Clear the previous run's artifacts BEFORE any other gate can refuse:
+    // every exit path — including a refusal for a typo'd flag later in this
+    // validation chain — must leave THIS run's artifacts or nothing. A
+    // refusal that left a stale manifest behind would hand a verifier
+    // evidence from a different capture, the exact failure this command
+    // exists to prevent (measured: a typo'd --until used to leave all three
+    // prior artifacts in place).
+    rmSync(ansPath, { force: true });
+    rmSync(pngPath, { force: true });
+    rmSync(manifestPath, { force: true });
+  } catch (e) {
+    refuse(
+      `--out is not writable: ${e instanceof Error ? e.message : String(e)}`,
+    );
+    return;
+  }
   const tmuxVersion = probes.tmux();
   if (tmuxVersion === undefined) {
     refuse(
@@ -208,7 +250,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   }
   if (tmuxSupportsCaptureN(tmuxVersion) === false) {
     refuse(
-      `${tmuxVersion} is too old: capture-pane -N needs tmux 3.0a or newer.`,
+      `${tmuxVersion} is too old: capture-pane -N needs tmux 3.1 or newer.`,
     );
     return;
   }
@@ -221,32 +263,33 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     refuse('--command must not be empty.');
     return;
   }
-  if (args.command.trimEnd().endsWith('\\')) {
+  {
     // A trailing backslash is a line continuation: it would fold the pane
-    // holder's own line into the command, silently changing what runs.
-    refuse('--command must not end with a trailing backslash.');
-    return;
-  }
-  if (args.out.trim() === '') {
-    // resolve('') is the cwd: artifacts would land as <cwd>.ans/.png/.json
-    // NEXT TO the working directory, silently clobbering whatever holds
-    // those names (the brief's template with an empty variable hits this).
-    refuse('--out must not be empty.');
-    return;
+    // holder's own line into the command, silently changing what runs. Only
+    // an ODD run of trailing backslashes is a continuation — an even run is
+    // escaped literals (measured: `echo \\` runs fine in the holder).
+    const tail = /\\+$/.exec(args.command.trimEnd());
+    if (tail && tail[0].length % 2 === 1) {
+      refuse('--command must not end with a trailing backslash.');
+      return;
+    }
   }
   if (args.cwd !== undefined) {
-    // tmux new-session -c with a nonexistent directory exits 0 and silently
+    // tmux new-session -c with an unusable directory exits 0 and silently
     // runs the pane in the launching process's cwd — evidence from the
-    // wrong directory with nothing recording the swap. Every other caller
-    // mistake refuses; so does this one.
-    let isDir = false;
+    // wrong directory with nothing recording the swap. stat alone is not
+    // enough: a directory without +x stats fine but cannot be entered
+    // (measured: mode-644 --cwd passed the gate and the manifest lied).
+    let usable = false;
     try {
-      isDir = statSync(resolve(args.cwd)).isDirectory();
+      const abs = resolve(args.cwd);
+      usable = statSync(abs).isDirectory();
+      if (usable) accessSync(abs, fsConstants.X_OK);
     } catch {
-      // fall through to the refusal below
+      usable = false;
     }
-    if (!isDir) {
-      refuse(`--cwd is not a directory: ${args.cwd}`);
+    if (!usable) {
+      refuse(`--cwd is not an enterable directory: ${args.cwd}`);
       return;
     }
   }
@@ -270,80 +313,57 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   // straddle the UI's mount — a Down was consumed and the Enter behind it
   // lost — so key-driven captures of anything that takes a moment to render
   // are unreliable without a gate. The gate is a marker, like --until.
-  let readyRe: RegExp | undefined;
-  if (args.ready !== undefined && args.ready.trim() === '') {
-    refuse('--ready must not be empty.');
-    return;
-  }
-  if (args.ready !== undefined) {
+  // A marker that matches a BLANK pane settles before the TUI rendered
+  // anything — a false settle claim (or keys fired into a still-mounting UI,
+  // the exact failure --ready exists to prevent). Empty/whitespace patterns
+  // are the obvious case; `.?`, `x*`, `^`, `\s` and `\n` are the sneaky
+  // ones: the blank pane's logical capture is rows of newlines, not the
+  // empty string, so both oracles are probed (through the match budget — a
+  // backtracking pattern must not hang the gate itself).
+  const compileMarker = (
+    name: '--ready' | '--until',
+    pattern: string,
+  ): RegExp | { error: string } => {
+    if (pattern.trim() === '') return { error: `${name} must not be empty.` };
+    let re: RegExp;
     try {
-      readyRe = new RegExp(args.ready);
+      re = new RegExp(pattern);
     } catch (e) {
-      refuse(
-        `--ready is not a valid regex: ${e instanceof Error ? e.message : String(e)}`,
-      );
+      return {
+        error: `${name} is not a valid regex: ${e instanceof Error ? e.message : String(e)}`,
+      };
+    }
+    const blankPane = '\n'.repeat(args.rows);
+    if (
+      testWithBudget(re, '') === 'match' ||
+      testWithBudget(re, blankPane) === 'match'
+    ) {
+      return {
+        error:
+          `${name} ${JSON.stringify(pattern)} matches a blank pane — it ` +
+          `would settle before the UI rendered anything; pick a marker the ` +
+          `claim actually draws`,
+      };
+    }
+    return re;
+  };
+  let readyRe: RegExp | undefined;
+  if (args.ready !== undefined) {
+    const r = compileMarker('--ready', args.ready);
+    if ('error' in r) {
+      refuse(r.error);
       return;
     }
+    readyRe = r;
   }
   let untilRe: RegExp | undefined;
-  if (args.until !== undefined && args.until.trim() === '') {
-    // An empty pattern matches ANY pane text, including a blank one: the
-    // first poll would settle "until-match" before the TUI rendered
-    // anything — a false settle claim from a tool whose contract is an
-    // honest evidence ladder.
-    refuse('--until must not be empty.');
-    return;
-  }
   if (args.until !== undefined) {
-    try {
-      untilRe = new RegExp(args.until);
-    } catch (e) {
-      refuse(
-        `--until is not a valid regex: ${e instanceof Error ? e.message : String(e)}`,
-      );
+    const r = compileMarker('--until', args.until);
+    if ('error' in r) {
+      refuse(r.error);
       return;
     }
-  }
-
-  const outBase = resolve(args.out);
-  try {
-    mkdirSync(dirname(outBase), { recursive: true });
-  } catch (e) {
-    // The same principle as the regex above: an unwritable --out (EACCES,
-    // EROFS, ENOSPC) is a caller/environment mistake and gets the refusal
-    // contract, not a stack trace.
-    refuse(
-      `cannot create output directory: ${e instanceof Error ? e.message : String(e)}`,
-    );
-    return;
-  }
-  const ansPath = `${outBase}.ans`;
-  const pngPath = `${outBase}.png`;
-  const manifestPath = `${outBase}.json`;
-  try {
-    // Probe the actual write target BEFORE any process starts: mkdirSync
-    // with `recursive` does no permission check on a directory that already
-    // exists, so an unwritable --out would otherwise run the full capture —
-    // up to the 1h ceiling — and lose the pane text at the very last write.
-    // The probe uses a UNIQUE sibling, never the .ans itself: truncating the
-    // real one would delete the previous run's text while its manifest/png
-    // survive to misdescribe it.
-    const probePath = `${outBase}.write-probe-${randomBytes(4).toString('hex')}`;
-    const fd = openSync(probePath, 'w');
-    closeSync(fd);
-    rmSync(probePath, { force: true });
-    // Clear the previous run's artifacts before anything starts: every path
-    // from here must leave THIS run's artifacts or nothing — a refusal that
-    // left a stale manifest behind would hand a verifier evidence from a
-    // different capture, the exact failure this command exists to prevent.
-    rmSync(ansPath, { force: true });
-    rmSync(pngPath, { force: true });
-    rmSync(manifestPath, { force: true });
-  } catch (e) {
-    refuse(
-      `--out is not writable: ${e instanceof Error ? e.message : String(e)}`,
-    );
-    return;
+    untilRe = r;
   }
 
   const server = captureServerName(process.pid, randomBytes(4).toString('hex'));
@@ -408,6 +428,10 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   };
   process.on('SIGINT', onSignal);
   process.on('SIGTERM', onSignal);
+  const releaseSignals = (): void => {
+    process.removeListener('SIGINT', onSignal);
+    process.removeListener('SIGTERM', onSignal);
+  };
 
   let ansText = '';
   let settledBy: CaptureManifest['settledBy'] = 'fixed-delay';
@@ -446,8 +470,10 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       }
     }
     if (readyFailed) {
-      // The deadline is spent; a late frame is all there is.
-      if (untilRe) settledBy = 'timeout';
+      // The deadline is spent; a late frame is all there is. This is a
+      // timeout settle even without --until — the run waited out
+      // --timeout-ms, and calling it 'fixed-delay' would misdescribe it.
+      settledBy = 'timeout';
       ansText = tmux(plan.capture);
     } else if (untilRe) {
       // Poll for the settle marker on the LOGICAL view (wraps joined,
@@ -487,15 +513,19 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     const detail =
       (err.stderr ?? '').trim().split('\n').slice(-1)[0] ||
       (err.message ?? String(e)).split('\n')[0];
+    releaseSignals();
     refuse(`tmux failed mid-capture: ${detail}`);
     return;
   } finally {
     // Always, even when start/capture threw: the private server holds every
     // process this capture launched, and an orphaned TUI outliving the
-    // review is the mess this command exists to make impossible.
+    // review is the mess this command exists to make impossible. The signal
+    // listeners stay INSTALLED past this point: the freeze render below can
+    // block up to its belt, and a signal in that window must still reap
+    // (idempotent — the server is already gone) and re-raise, not die with
+    // an orphaned render child (measured: a SIGTERM 2ms into the
+    // listener-less window left the spawned child alive).
     reap();
-    process.removeListener('SIGINT', onSignal);
-    process.removeListener('SIGTERM', onSignal);
   }
 
   try {
@@ -504,6 +534,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // The disk can fill (or the target turn hostile) during a long capture
     // window; the same principle as the mkdir guard — refusal contract, not
     // a stack trace.
+    releaseSignals();
     refuse(
       `cannot write capture output: ${e instanceof Error ? e.message : String(e)}`,
     );
@@ -580,7 +611,11 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
         r.status === 0
           ? 'exited 0 but wrote no image'
           : r.signal
-            ? `signal ${r.signal}`
+            ? // A belt kill carries BOTH signal and error (ETIMEDOUT); name
+              // the belt, or it reads as an unexplained external kill.
+              `signal ${r.signal}${
+                r.error ? ` after the ${freezeRender.timeoutMs}ms render belt` : ''
+              }`
             : r.status !== null
               ? `exit ${String(r.status)}`
               : `spawn failed: ${r.error ? r.error.message : 'unknown error'}`;
@@ -602,8 +637,16 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     ...(keysSent !== undefined ? { keysSent } : {}),
     ...(args.ready !== undefined ? { ready: args.ready } : {}),
     ...(args.until !== undefined ? { until: args.until } : {}),
-    ...(args.until === undefined ? { settleMs: args.settleMs } : {}),
-    ...(args.until !== undefined ? { timeoutMs: args.timeoutMs } : {}),
+    // The ACTIVE durations: settleMs governed the run only when a fixed
+    // delay actually happened; timeoutMs governed it when either marker
+    // (--until OR --ready) was in play — a --ready-only run spends the
+    // timeout budget too, and recording settleMs alone would misdescribe it.
+    ...(args.until === undefined && !readyFailed
+      ? { settleMs: args.settleMs }
+      : {}),
+    ...(args.until !== undefined || args.ready !== undefined
+      ? { timeoutMs: args.timeoutMs }
+      : {}),
     ansPath,
     pngPath: png,
     evidence: png ? 'png' : 'ans-only',
@@ -617,11 +660,22 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       'utf8',
     );
   } catch (e) {
+    // "THIS run's artifacts or nothing": a refusal must not leave an .ans
+    // (and possibly a png) with no manifest to describe them — best-effort
+    // remove what this run already wrote before refusing.
+    try {
+      rmSync(ansPath, { force: true });
+      rmSync(pngPath, { force: true });
+    } catch {
+      // The refusal reason below is the primary signal either way.
+    }
+    releaseSignals();
     refuse(
       `cannot write capture manifest: ${e instanceof Error ? e.message : String(e)}`,
     );
     return;
   }
+  releaseSignals();
 
   writeStderrLine(
     `capture-tui: ${manifest.evidence} at ${args.cols}x${args.rows} ` +
@@ -691,7 +745,8 @@ export const captureTuiCommand: CommandModule = {
       .option('timeout-ms', {
         type: 'number',
         default: 60_000,
-        describe: 'Deadline for --until polling',
+        describe:
+          'One shared deadline for the --ready gate and --until polling — a ready+keys capture without --until is still bounded by this',
       }),
   handler: (argv) =>
     runCaptureTui({

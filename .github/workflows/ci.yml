@@ -401,7 +401,10 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.os == 'Linux' }}"
         run: |-
           if command -v tmux > /dev/null 2>&1; then
-            tmux -V
+            # Advisory here too: a broken-but-installed tmux (dangling
+            # symlink, missing lib) must not fail the required Test check
+            # before a single test has run.
+            tmux -V || echo 'tmux present but not answering; real-tmux capture tests will be skipped.'
           elif command -v sudo > /dev/null 2>&1 && command -v apt-get > /dev/null 2>&1; then
             # Advisory, not a gate: an apt hiccup must not fail the job for a
             # suite that is describe.skipIf-gated and simply skips without tmux.

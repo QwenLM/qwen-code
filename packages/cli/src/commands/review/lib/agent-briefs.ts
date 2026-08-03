@@ -610,8 +610,10 @@ For anything that is not one of those two wires — the project's own HTTP servi
 "\${QWEN_CODE_CLI:-qwen}" review capture-tui \\
   --command "<the worktree's built entry, or the fixture that drives it>" \\
   --cols <the width the claim names> --until "<a pane marker that means 'settled'>" \\
-  --out <the plan report's directory>/qwen-review-capture-<finding-id>-<cols>
+  --out <the plan report's directory>/qwen-review-<target>-capture-<finding-id>-<cols>
 \`\`\`
+
+(\`<target>\` is this review's artifact prefix — the same one the plan and findings files carry — so Step 9's sweep reclaims the captures and identical finding ids across different reviews cannot collide.)
 
 It drives the command in a **private tmux server** (it cannot see, resize or kill the user's own sessions — the isolation is structural, and it reaps everything it started), writes \`<out>.ans\` (the pane bytes, always), renders \`<out>.png\` when \`freeze\` is available, and records which it managed in \`<out>.json\`. To drive the UI first, gate the keystrokes on a rendered marker — \`--ready '<marker>' --keys <tokens>\` — keys fired into a still-mounting UI get partially eaten (measured on this repo's own onboarding dialog). And pick markers unique to the claim: a substring that exists in BOTH arms of a pair (measured: a provider name that also appears in another entry's description) settles the control arm falsely. Three rules make the capture evidence:
 
