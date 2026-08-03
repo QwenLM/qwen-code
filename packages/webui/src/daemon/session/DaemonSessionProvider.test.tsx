@@ -9638,6 +9638,76 @@ describe('DaemonSessionProvider', () => {
     expect(sdkMocks.getSessionTranscriptPage).toHaveBeenCalledTimes(1);
   });
 
+  it('retries a latched pagination failure when loadMore is forced', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_transcript_pagination'],
+    });
+    const replayEvent = (id: number, text: string): DaemonEvent => ({
+      id,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text },
+          _meta: { 'qwen.session.recordId': `record-${id}` },
+        },
+      },
+    });
+    const session = createMockSession({
+      sessionId: 'session-retried-history-page',
+      historyHasMore: true,
+      replaySnapshot: {
+        compactedReplay: [replayEvent(2, 'recent prompt')],
+        liveJournal: [],
+      },
+    });
+    sdkMocks.sessions.push(session);
+    sdkMocks.getSessionTranscriptPage
+      .mockRejectedValueOnce(new DaemonHttpError(403, undefined, 'Forbidden'))
+      .mockResolvedValueOnce({
+        v: 1,
+        sessionId: session.sessionId,
+        events: [replayEvent(1, 'older prompt')],
+        hasMore: false,
+      });
+    let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
+    function Harness() {
+      history = useDaemonTranscriptHistory();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      historyPageSize: 25,
+    });
+    await act(async () => {
+      await expect(history?.loadMore()).rejects.toThrow('Forbidden');
+      await flushPromises();
+    });
+    expect(history?.paginationError).toBe(true);
+    expect(history?.hasMore).toBe(false);
+
+    await act(async () => {
+      await history?.loadMore({ force: true });
+      await flushPromises();
+    });
+
+    expect(sdkMocks.getSessionTranscriptPage).toHaveBeenCalledTimes(2);
+    expect(sdkMocks.getSessionTranscriptPage).toHaveBeenNthCalledWith(
+      2,
+      session.sessionId,
+      {
+        beforeRecordId: 'record-2',
+        limit: 25,
+        clientId: session.clientId,
+      },
+    );
+    expect(history?.paginationError).toBe(false);
+    expect(history?.hasMore).toBe(false);
+  });
+
   it('skips malformed older-page events and advances by record boundary', async () => {
     sdkMocks.capabilities.mockResolvedValue({
       workspaceCwd: '/mock-workspace',

@@ -310,10 +310,46 @@ const SETTINGS_SCHEMA = {
     label: 'Serve',
     category: 'Advanced',
     requiresRestart: true,
-    default: {} as { channels?: string[] },
+    default: {},
     description: 'Persistent qwen serve settings.',
     showInDialog: false,
     mergeStrategy: MergeStrategy.SHALLOW_MERGE,
+    properties: {
+      channels: {
+        type: 'array',
+        label: 'Startup Channels',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: [] as string[],
+        description:
+          'Messaging channels to start automatically when the daemon boots.',
+        showInDialog: false,
+        items: { type: 'string' },
+      },
+      maxConcurrentSubSessionsPerCaller: {
+        type: 'integer',
+        label: 'Max Concurrent Sub-Sessions Per Caller',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: 16,
+        minimum: 1,
+        description:
+          'Per-session ceiling on concurrent in-flight sub-sessions spawned via the create_sub_session tool.',
+        showInDialog: false,
+      },
+      maxConcurrentSubSessionsTotal: {
+        type: 'integer',
+        label: 'Max Concurrent Sub-Sessions Total',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: 24,
+        minimum: 1,
+        maximum: 1024,
+        description:
+          'Workspace-wide ceiling on concurrent in-flight sub-sessions across all callers.',
+        showInDialog: false,
+      },
+    },
   },
 
   // Model providers configuration grouped by authType
@@ -1985,6 +2021,17 @@ const SETTINGS_SCHEMA = {
           "Max runtime in minutes for background memory agents (extraction, dream, remember, skill review). Unset uses each agent's built-in default (2–5 minutes); 0 disables the time limit. Useful for slow local models that need longer than the defaults.",
         showInDialog: false,
       },
+      agentMaxTurns: {
+        type: 'number',
+        label: 'Memory Agent Max Turns',
+        category: 'Memory',
+        requiresRestart: true,
+        default: undefined as number | undefined,
+        minimum: 0,
+        description:
+          "Max turns for background memory agents (extraction, dream, remember, skill review). Unset uses each agent's built-in default (5–8); 0 disables the turn limit.",
+        showInDialog: false,
+      },
       enableTeamMemory: {
         type: 'boolean',
         label: 'Enable Team Memory',
@@ -3455,6 +3502,16 @@ const SETTINGS_SCHEMA = {
     description: 'Settings to enable experimental features.',
     showInDialog: false,
     properties: {
+      sessionWorkflow: {
+        type: 'boolean',
+        label: 'Session Workflow Plan & Review',
+        category: 'Experimental',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Enable the daemon Web Shell Session Workflow DAG and present Plan mode as Plan & Review. Disabled by default and does not change ordinary Todo or execution behavior.',
+        showInDialog: true,
+      },
       cron: {
         type: 'boolean',
         label: 'Enable Cron/Loop Tools',
