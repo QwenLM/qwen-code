@@ -211,6 +211,23 @@ describe('Agent View PTY host process server', () => {
     await expect(connected.exited).resolves.toEqual({ exitCode: 0 });
   });
 
+  it('fails fast when connecting with the wrong host token', async () => {
+    const socketPath = shortSocketPath();
+    const server = createAgentViewPtyHostServer(fakeHost(), socketPath, {
+      authToken: 'expected-token',
+    });
+    servers.push(server);
+    await server.listen();
+
+    await expect(
+      connectAgentViewPtyHostProcess(
+        createLaunch('session-1'),
+        socketPath,
+        'wrong-token',
+      ),
+    ).rejects.toThrow('Unauthorized PTY host request.');
+  });
+
   it('disposes a connected host by asking the remote host to shut down', async () => {
     const host = fakeHost();
     const socketPath = shortSocketPath();
