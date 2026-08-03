@@ -2424,6 +2424,10 @@ describe('qwen-autofix workflow', () => {
     // (jq -rs add, --slurpfile + add) are unaffected: add is idempotent
     // over a single flat array.
     expect(workflow).not.toContain('--paginate > "');
+    // Pin the total --paginate occurrence count (13 code sites + 3 comment
+    // lines today) so ANY new paginated site forces a deliberate test
+    // update, however it is spaced or line-wrapped.
+    expect(workflow.split('--paginate').length - 1).toBe(16);
     // scan ic + pr-events + ic re-fetch + scan rv/rc + prepare rv/rc/ic +
     // report COMMENTS_JSON fallback = nine normalized fetch sites.
     expect(workflow.split("jq -s 'add // []'").length - 1).toBe(9);
