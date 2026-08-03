@@ -165,6 +165,7 @@ describe('sniffImageFormat / validateAssetContent', () => {
   const PNG = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
   const JPEG = Uint8Array.from([0xff, 0xd8, 0xff, 0xe0]);
   const GIF = Uint8Array.from([...'GIF89a'].map((c) => c.charCodeAt(0)));
+  const GIF87 = Uint8Array.from([...'GIF87a'].map((c) => c.charCodeAt(0)));
   const WEBP = Uint8Array.from(
     [...'RIFF\u0000\u0000\u0000\u0000WEBP'].map((c) => c.charCodeAt(0)),
   );
@@ -173,10 +174,11 @@ describe('sniffImageFormat / validateAssetContent', () => {
     expect(sniffImageFormat(PNG)).toBe('png');
     expect(sniffImageFormat(JPEG)).toBe('jpeg');
     expect(sniffImageFormat(GIF)).toBe('gif');
+    expect(sniffImageFormat(GIF87)).toBe('gif');
     expect(sniffImageFormat(WEBP)).toBe('webp');
   });
 
-  it('returns null for non-images, truncated headers, and empty input', () => {
+  it('returns null for non-images, truncated or near-miss headers, and empty input', () => {
     expect(
       sniffImageFormat(
         Uint8Array.from([...'#!/bin/sh\n'].map((c) => c.charCodeAt(0))),
@@ -190,6 +192,22 @@ describe('sniffImageFormat / validateAssetContent', () => {
         Uint8Array.from([...'RIFF0000AVI '].map((c) => c.charCodeAt(0))),
       ),
     ).toBeNull();
+    // Depth pins: each signature is checked to its full length, so bytes
+    // that stop one compare short of a real signature are not admitted.
+    expect(sniffImageFormat(Uint8Array.from([0xff, 0xd8, 0x00]))).toBeNull();
+    expect(
+      sniffImageFormat(
+        Uint8Array.from([...'RIFF0000WEB '].map((c) => c.charCodeAt(0))),
+      ),
+    ).toBeNull();
+    const pngByte7Off = Uint8Array.from(PNG);
+    pngByte7Off[7] = 0x0b;
+    expect(sniffImageFormat(pngByte7Off)).toBeNull();
+    expect(
+      sniffImageFormat(
+        Uint8Array.from([...'GIF89b'].map((c) => c.charCodeAt(0))),
+      ),
+    ).toBeNull();
   });
 
   it('admits content that matches the extension claim', () => {
@@ -197,7 +215,10 @@ describe('sniffImageFormat / validateAssetContent', () => {
     expect(validateAssetContent('b.jpg', JPEG).ok).toBe(true);
     expect(validateAssetContent('b.jpeg', JPEG).ok).toBe(true);
     expect(validateAssetContent('c.gif', GIF).ok).toBe(true);
+    expect(validateAssetContent('c87.gif', GIF87).ok).toBe(true);
     expect(validateAssetContent('d.webp', WEBP).ok).toBe(true);
+    // The batch gate lowercases extensions; the content gate must agree.
+    expect(validateAssetContent('E.JPG', JPEG).ok).toBe(true);
   });
 
   it('refuses a name whose content is a different format — or no image at all', () => {
@@ -208,10 +229,17 @@ describe('sniffImageFormat / validateAssetContent', () => {
     );
     const r1 = validateAssetContent('evil.png', shell);
     expect(r1.ok).toBe(false);
-    if (!r1.ok) expect(r1.reason).toContain('not a recognized image');
+    if (!r1.ok)
+      expect(r1.reason).toContain(
+        'content is not a recognized image but the extension claims png',
+      );
     const r2 = validateAssetContent('mislabeled.png', JPEG);
     expect(r2.ok).toBe(false);
-    if (!r2.ok) expect(r2.reason).toContain('jpeg');
+    // Direction matters to the operator: what the content IS comes first.
+    if (!r2.ok)
+      expect(r2.reason).toContain(
+        'content is jpeg but the extension claims png',
+      );
   });
 
   it('fails closed on an extension outside the allowlist', () => {

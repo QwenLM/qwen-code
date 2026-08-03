@@ -19,13 +19,12 @@
 // Everything here is pure so the naming and validation rules are unit-testable
 // without a GitHub, a filesystem, or a mock. The command layer owns I/O.
 
-/** The extensions an evidence image may carry. An allowlist, not a denylist:
- * SVG is deliberately absent (it is a script container), and anything
- * non-image is refused rather than hosted — this command publishes review
- * evidence, not arbitrary files. */
-export const ASSET_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp']);
-
-/** The container format each allowed extension claims to carry. */
+/** The container format each allowed extension claims to carry — and the
+ * allowlist's single source of truth: `ASSET_EXTENSIONS` derives from these
+ * keys, so admitting a format is a one-place change both gates agree on.
+ * An allowlist, not a denylist: SVG is deliberately absent (it is a script
+ * container), and anything non-image is refused rather than hosted — this
+ * command publishes review evidence, not arbitrary files. */
 const EXTENSION_FORMAT: Record<string, 'png' | 'jpeg' | 'gif' | 'webp'> = {
   png: 'png',
   jpg: 'jpeg',
@@ -33,6 +32,16 @@ const EXTENSION_FORMAT: Record<string, 'png' | 'jpeg' | 'gif' | 'webp'> = {
   gif: 'gif',
   webp: 'webp',
 };
+
+/** The extensions an evidence image may carry. */
+export const ASSET_EXTENSIONS = new Set(Object.keys(EXTENSION_FORMAT));
+
+/** The lowercased extension a basename claims, or '' when it claims none. */
+function claimedExtension(basename: string): string {
+  return basename.includes('.')
+    ? basename.slice(basename.lastIndexOf('.') + 1).toLowerCase()
+    : '';
+}
 
 /**
  * Detect the image format from a file's first bytes.
@@ -80,9 +89,7 @@ export function validateAssetContent(
   basename: string,
   header: Uint8Array,
 ): { ok: true } | { ok: false; reason: string } {
-  const ext = basename.includes('.')
-    ? basename.slice(basename.lastIndexOf('.') + 1).toLowerCase()
-    : '';
+  const ext = claimedExtension(basename);
   const claimed = EXTENSION_FORMAT[ext];
   if (claimed === undefined) {
     return {
@@ -196,9 +203,7 @@ export function validateAssetFile(
   basename: string,
   bytes: number,
 ): { ok: true } | { ok: false; reason: string } {
-  const ext = basename.includes('.')
-    ? basename.slice(basename.lastIndexOf('.') + 1).toLowerCase()
-    : '';
+  const ext = claimedExtension(basename);
   if (!ASSET_EXTENSIONS.has(ext)) {
     return {
       ok: false,

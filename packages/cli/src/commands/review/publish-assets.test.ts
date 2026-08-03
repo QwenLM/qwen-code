@@ -307,6 +307,23 @@ describe('publish-assets', () => {
     );
   });
 
+  it('publishes a webp whose bytes match — the slice covers the WEBP marker', () => {
+    // The content ruling sniffs a 16-byte slice, and WEBP's marker sits at
+    // bytes 8-11: a slice shorter than 12 would false-refuse every real WEBP
+    // at publish time while the unit tests (full headers) stayed green.
+    happyGh();
+    const shot = join(dir, 'shot.webp');
+    writeFileSync(
+      shot,
+      Uint8Array.from(
+        [...'RIFF\u0000\u0000\u0000\u0000WEBP'].map((c) => c.charCodeAt(0)),
+      ),
+    );
+    run({ files: [shot] });
+    expect(process.exitCode).toBeUndefined();
+    expect(ghWithInputMock).toHaveBeenCalled();
+  });
+
   it('refuses an unreadable file the same way', () => {
     run({ files: [join(dir, 'absent.png')] });
     expect(process.exitCode).toBe(3);
