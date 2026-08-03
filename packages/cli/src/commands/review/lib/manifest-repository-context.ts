@@ -15,6 +15,7 @@ import type {
 import {
   compareText,
   isControlFree,
+  isSafeRepositoryRelativePath,
   MAX_ARRAY_ITEMS,
   MAX_LABEL_LENGTH,
   MAX_NOTE_LENGTH,
@@ -393,11 +394,15 @@ function expandRelatedPaths(
         visit(path);
         continue;
       }
+      // Disk names can carry POSIX-legal bytes the wire format rejects (a
+      // backslash, control characters); skip them like changedPaths does
+      // instead of failing the whole review over one odd filename.
       if (
         !entry.isFile() ||
         changedPaths.has(path) ||
         !patterns.some((pattern) => globMatches(pattern, path)) ||
-        !isContainedFile(worktree, path)
+        !isContainedFile(worktree, path) ||
+        !isSafeRepositoryRelativePath(path)
       ) {
         continue;
       }

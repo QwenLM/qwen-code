@@ -143,6 +143,27 @@ describe('manifest repository context provider', () => {
     expect(context?.relatedPaths).toEqual(['src/safe.ts']);
   });
 
+  // A backslash is a path separator on Windows, so the POSIX-only filename
+  // shape this guards against cannot exist there.
+  it.skipIf(process.platform === 'win32')(
+    'skips related files with POSIX-legal unsafe name bytes',
+    () => {
+      // A backslash is a legal filename byte on POSIX; such a file must be
+      // skipped rather than failing validation for the whole review.
+      const worktree = temp();
+      write(join(worktree, 'src', 'safe.ts'));
+      write(join(worktree, 'src', 'foo\\bar.ts'));
+      const context = provide(
+        worktree,
+        ['src/change.ts'],
+        manifest({
+          rules: [{ paths: ['src/**'], relatedPaths: ['src/**'] }],
+        }),
+      );
+      expect(context?.relatedPaths).toEqual(['src/safe.ts']);
+    },
+  );
+
   it('fails closed as soon as related matches exceed the bound', () => {
     const worktree = temp();
     const source = join(worktree, 'src');
