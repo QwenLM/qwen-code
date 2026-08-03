@@ -1116,6 +1116,7 @@
 
 .workspaceChipText {
   min-width: 0;
+  line-height: 1.2;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1322,7 +1323,7 @@
   min-width: 0;
   flex: 1 1 auto;
   align-self: center;
-  line-height: 1;
+  line-height: 1.2;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
