@@ -4540,6 +4540,10 @@ class QwenAgent implements Agent {
             for (const update of replay.updates) {
               await liveSession.sendUpdate(update);
             }
+            // Replayed plan updates re-stamp the revision via sendUpdate;
+            // drop it so a replayed snapshot cannot bind a later approval
+            // (same rule Session.replayHistory applies to cold loads).
+            liveSession.clearActiveTodoPlanRevision();
             if (replay.replayError !== undefined) {
               throw RequestError.internalError(undefined, replay.replayError);
             }
@@ -4635,10 +4639,6 @@ class QwenAgent implements Agent {
                   replayError: replay.replayError,
                   ...(replayPage.hasMore ? { hasMore: true } : {}),
                 };
-              } else if (
-                createdSession.getConfig().getApprovalMode() !== 'plan'
-              ) {
-                createdSession.restoreTodoPlanRevisionFromReplay(replayUpdates);
               }
               replayEnvelope ??= {
                 v: LOAD_REPLAY_VERSION,

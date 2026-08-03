@@ -723,10 +723,18 @@ vi.mock('./components/dialogs/GitDiffDialog', async () => {
 vi.mock('./components/dialogs/DialogShell', async () => {
   const React = await import('react');
   return {
-    DialogShell: (props: { children?: React.ReactNode }) =>
+    DialogShell: (props: {
+      children?: React.ReactNode;
+      title?: React.ReactNode;
+    }) =>
       React.createElement(
         'div',
-        { 'data-testid': 'dialog-shell' },
+        {
+          'data-testid': 'dialog-shell',
+          ...(typeof props.title === 'string'
+            ? { 'data-dialog-title': props.title }
+            : {}),
+        },
         props.children,
       ),
   };
@@ -2524,6 +2532,43 @@ describe('App plan todos', () => {
     expect(
       testState.latestTasksStatusProps?.agentTools?.map((tool) => tool.callId),
     ).toEqual(['agent-call']);
+  });
+
+  it('keeps the tasks dialog plain when Session Workflow is off', async () => {
+    testState.messages = [
+      {
+        id: 'plan',
+        role: 'plan',
+        todos: [{ id: 'work', content: 'Work', status: 'in_progress' }],
+      },
+      {
+        id: 'agents',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'agent-call',
+            toolName: 'Agent',
+            status: 'in_progress',
+            args: { todo_id: 'work' },
+          },
+        ],
+      },
+    ];
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestTodoPanelOnOpen?.();
+      await Promise.resolve();
+    });
+
+    expect(testState.latestTasksStatusProps?.planTodos).toEqual([]);
+    expect(testState.latestTasksStatusProps?.agentTools).toEqual([]);
+    expect(
+      container
+        .querySelector('[data-testid="dialog-shell"]')
+        ?.getAttribute('data-dialog-title'),
+    ).toBe('Background tasks');
   });
 });
 

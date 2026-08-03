@@ -1027,6 +1027,37 @@ describe('ChatPane', () => {
     );
   });
 
+  it('keeps the exit-plan approval text-only when Session Workflow is off', () => {
+    messagesState = [
+      {
+        id: 'plan-update',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'todo-call-1',
+            toolName: 'todo_write',
+            status: 'completed',
+            rawOutput: {
+              entries: [{ content: 'Ship', status: 'pending' }],
+              plan: { id: 'plan-1' },
+            },
+          },
+        ],
+      },
+    ];
+    pendingPermission = {
+      id: 'perm-plan',
+      toolKind: 'switch_mode',
+      toolName: 'exit_plan_mode',
+      todoPlan: { planId: 'plan-1', sourceCallId: 'todo-call-1' },
+      rawInput: {},
+    };
+
+    render();
+
+    expect(testid('tool-approval')?.getAttribute('data-plan-todos')).toBe('[]');
+  });
+
   it('reflects streaming state on the composer', () => {
     streamingStateValue = 'responding';
     render();

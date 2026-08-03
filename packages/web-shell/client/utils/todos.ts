@@ -11,6 +11,14 @@ export function isTodoWriteToolName(name: string): boolean {
   return normalized === 'todo_write' || normalized === 'todowrite';
 }
 
+/**
+ * Shared by App, ChatPane, and ToolApproval so the exit-plan wire name never
+ * drifts between the surfaces that gate the revision-bound approval UI.
+ */
+export function isExitPlanModeToolName(name: string | undefined): boolean {
+  return name?.toLowerCase() === 'exit_plan_mode';
+}
+
 export function parseTodoItemsFromEntries(
   entries: readonly unknown[],
 ): TodoItem[] {

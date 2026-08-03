@@ -3798,6 +3798,19 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         lastSessionMock?.clearActiveTodoPlanRevision,
       ).toHaveBeenCalledOnce();
       expect(lastSessionMock?.clearTodoStopGuardTrust).toHaveBeenCalledOnce();
+
+      // Re-selecting plan (the Web Shell /plan path) must keep the revision
+      // captured during the current plan cycle.
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionApprovalMode, {
+          sessionId,
+          mode: 'plan',
+        }),
+      ).resolves.toEqual({ previous: 'plan', current: 'plan' });
+      expect(
+        lastSessionMock?.clearActiveTodoPlanRevision,
+      ).toHaveBeenCalledOnce();
+      expect(lastSessionMock?.clearTodoStopGuardTrust).toHaveBeenCalledOnce();
     } finally {
       approvalModes.splice(0, approvalModes.length, ...originalApprovalModes);
     }
@@ -13478,7 +13491,6 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         sendAvailableCommandsUpdate: ReturnType<typeof vi.fn>;
         replayHistory: ReturnType<typeof vi.fn>;
         primeTurnFromHistory: ReturnType<typeof vi.fn>;
-        restoreTodoPlanRevisionFromReplay: ReturnType<typeof vi.fn>;
         cumulativeUsage: {
           promptTokens: number;
           cachedTokens: number;
@@ -13671,7 +13683,6 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
             opts.replayHistoryImpl ?? (async () => undefined),
           ),
         primeTurnFromHistory: vi.fn(opts.primeTurnFromHistoryImpl),
-        restoreTodoPlanRevisionFromReplay: vi.fn(),
         cumulativeUsage: {
           promptTokens: 7,
           cachedTokens: 3,
@@ -13688,6 +13699,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
         assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
         sendUpdate: vi.fn().mockResolvedValue(undefined),
+        clearActiveTodoPlanRevision: vi.fn(),
         dispose: vi.fn(),
       };
       lastSessionMock = sessionMock;
@@ -14294,9 +14306,6 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     expect(lastSessionMock?.primeTurnFromHistory).toHaveBeenCalledWith(
       messages,
     );
-    expect(
-      lastSessionMock?.restoreTodoPlanRevisionFromReplay,
-    ).toHaveBeenCalledWith([{ ...replayUpdate, timestamp: 4242 }]);
     expect(mockHistoryReplay).toHaveBeenCalledTimes(1);
 
     expect(
@@ -14320,13 +14329,18 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     await agentPromise;
   });
 
-  it('does not restore replayed Todo plan revision while loading plan mode', async () => {
+  it('clears the replayed Todo plan revision on a live-session load', async () => {
     const messages = [{ role: 'user', parts: [{ text: 'hi' }] }];
-    const innerConfig = bindRestoreMocks({
-      sessionExists: true,
+    const innerConfig = makeRestoreInnerConfig({
       resumedConversation: { messages },
     });
     innerConfig.getApprovalMode.mockReturnValue('plan');
+    innerConfig.getSessionService.mockReturnValue({
+      loadSession: vi
+        .fn()
+        .mockImplementation(() => innerConfig.getResumedSessionData()),
+    });
+    vi.mocked(loadSettings).mockReturnValue(makeRestoreSettings());
     const replayUpdate = {
       sessionUpdate: 'plan',
       entries: [{ content: 'Old plan', priority: 'medium', status: 'done' }],
@@ -14341,18 +14355,32 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         context as { sendUpdate: (update: unknown) => Promise<void> }
       ).sendUpdate(replayUpdate);
     });
+    const liveSession = {
+      getId: vi.fn().mockReturnValue('persisted-1'),
+      getConfig: vi.fn().mockReturnValue(innerConfig),
+      assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
+      beginClose: vi.fn().mockReturnValue(vi.fn()),
+      waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
+      sendUpdate: vi.fn().mockResolvedValue(undefined),
+      clearActiveTodoPlanRevision: vi.fn(),
+    };
     const { agent, agentPromise } = await spawnAgent();
+    (agent as unknown as { sessions: Map<string, unknown> }).sessions.set(
+      'persisted-1',
+      liveSession,
+    );
 
     await agent.loadSession({
       cwd: '/tmp',
       sessionId: 'persisted-1',
       mcpServers: [],
-      _meta: { 'qwen.session.loadReplayMode': 'bulk' },
     });
 
-    expect(
-      lastSessionMock?.restoreTodoPlanRevisionFromReplay,
-    ).not.toHaveBeenCalled();
+    expect(liveSession.sendUpdate).toHaveBeenCalledWith({
+      ...replayUpdate,
+      timestamp: 4242,
+    });
+    expect(liveSession.clearActiveTodoPlanRevision).toHaveBeenCalledOnce();
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -14518,9 +14546,6 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     });
     expect(lastSessionMock?.installRewriter).toHaveBeenCalledTimes(1);
     expect(lastSessionMock?.startCronScheduler).toHaveBeenCalledTimes(1);
-    expect(
-      lastSessionMock?.restoreTodoPlanRevisionFromReplay,
-    ).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;

@@ -2199,6 +2199,10 @@ export class Session implements SessionContext {
   ): Promise<void> {
     this.primeTurnFromHistory(records);
     await this.historyReplayer.replay(records, gaps);
+    // Replayed plan updates re-stamp the revision via sendUpdate, but they
+    // belong to finished cycles; only live updates may bind the next
+    // exit_plan_mode approval, so a replayed session starts text-only.
+    this.activeTodoPlanRevision = undefined;
   }
 
   rewindToTurn(
@@ -4443,10 +4447,6 @@ export class Session implements SessionContext {
     await this.client.sessionUpdate(params);
 
     this.#captureTodoPlanRevision(update);
-  }
-
-  restoreTodoPlanRevisionFromReplay(updates: readonly SessionUpdate[]): void {
-    for (const update of updates) this.#captureTodoPlanRevision(update);
   }
 
   #captureTodoPlanRevision(update: SessionUpdate): void {

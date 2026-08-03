@@ -259,6 +259,12 @@ describe('getActiveTodosForPlanRevision', () => {
     expect(
       getActiveTodosForPlanRevision(
         [todoWriteMessage('m1', [todo('1', 'pending')], undefined, 'plan-1')],
+        undefined,
+      ),
+    ).toEqual([]);
+    expect(
+      getActiveTodosForPlanRevision(
+        [todoWriteMessage('m1', [todo('1', 'pending')], undefined, 'plan-1')],
         { planId: 'plan-other', sourceCallId: 'call-m1' },
       ),
     ).toEqual([]);

@@ -1960,6 +1960,52 @@ describe('Session', () => {
         expect.anything(),
       );
     });
+
+    it('clears the active Todo plan revision when transitioning into plan mode', async () => {
+      mockConfig.getApprovalMode = vi
+        .fn()
+        .mockReturnValue(ApprovalMode.DEFAULT);
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [{ content: 'Ship', priority: 'medium', status: 'pending' }],
+        _meta: {
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      });
+
+      await session.setMode({
+        sessionId: 'test-session-id',
+        modeId: 'plan',
+      });
+
+      expect(
+        (session as unknown as { activeTodoPlanRevision?: unknown })
+          .activeTodoPlanRevision,
+      ).toBeUndefined();
+    });
+
+    it('preserves the active Todo plan revision when re-selecting plan mode', async () => {
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [{ content: 'Ship', priority: 'medium', status: 'pending' }],
+        _meta: {
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      });
+
+      await session.setMode({
+        sessionId: 'test-session-id',
+        modeId: 'plan',
+      });
+
+      expect(
+        (session as unknown as { activeTodoPlanRevision?: unknown })
+          .activeTodoPlanRevision,
+      ).toEqual({ planId: 'plan-1', sourceCallId: 'todo-call-1' });
+    });
   });
 
   describe('sendCurrentModeUpdateNotification', () => {
@@ -2012,7 +2058,7 @@ describe('Session', () => {
   });
 
   describe('rewindToTurn', () => {
-    it('truncates model history before the requested user turn and records rewind', () => {
+    it('truncates model history before the requested user turn and records rewind', async () => {
       const history: Content[] = [
         { role: 'user', parts: [{ text: 'first' }] },
         { role: 'model', parts: [{ text: 'first reply' }] },
@@ -2021,16 +2067,14 @@ describe('Session', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-      session.restoreTodoPlanRevisionFromReplay([
-        {
-          sessionUpdate: 'plan',
-          entries: [{ content: 'old', priority: 'medium', status: 'pending' }],
-          _meta: {
-            qwenTodoPlan: { id: 'old-plan' },
-            qwenTranscript: { planToolCallId: 'old-call' },
-          },
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [{ content: 'old', priority: 'medium', status: 'pending' }],
+        _meta: {
+          qwenTodoPlan: { id: 'old-plan' },
+          qwenTranscript: { planToolCallId: 'old-call' },
         },
-      ]);
+      });
 
       const result = session.rewindToTurn(1);
 
@@ -13548,7 +13592,7 @@ describe('Session', () => {
 
     it.each([
       ['live update', 'live', true],
-      ['bulk replay restore', 'replay', true],
+      ['history replay', 'replay', false],
       ['failed replacement', 'failed', false],
       ['mode transition', 'cleared', false],
     ] as const)(
@@ -13633,15 +13677,34 @@ describe('Session', () => {
           },
         };
         if (revisionSource === 'replay') {
-          session.restoreTodoPlanRevisionFromReplay([
-            {
-              ...planUpdate,
-              _meta: {
-                qwenTodoPlan: { id: 'stale-plan' },
-                qwenTranscript: { planToolCallId: 'stale-call' },
+          // A reloaded session replays the previous cycle's todo_write result;
+          // the replayed plan update must not bind the next approval.
+          await session.replayHistory([
+            chatRecord({
+              uuid: 'todo-exec-1',
+              type: 'tool_result',
+              message: {
+                parts: [
+                  {
+                    functionResponse: {
+                      name: core.ToolNames.TODO_WRITE,
+                      id: 'stale-call',
+                      response: {},
+                    },
+                  },
+                ],
               },
-            },
-            planUpdate,
+              toolCallResult: {
+                callId: 'stale-call',
+                resultDisplay: {
+                  type: 'todo_list',
+                  planId: 'stale-plan',
+                  todos: [
+                    { id: '1', content: 'Done task', status: 'completed' },
+                  ],
+                },
+              },
+            }),
           ]);
         } else {
           await session.sendUpdate(planUpdate);
@@ -13725,6 +13788,70 @@ describe('Session', () => {
         });
       },
     );
+
+    it('clears the captured revision when enter_plan_mode execution enters plan mode', async () => {
+      let mode = ApprovalMode.DEFAULT;
+      const executeSpy = vi.fn().mockImplementation(async () => {
+        mode = ApprovalMode.PLAN;
+        return { llmContent: 'entered', returnDisplay: 'entered' };
+      });
+      const invocation = {
+        params: {},
+        getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+        getConfirmationDetails: vi.fn(),
+        getDescription: vi.fn().mockReturnValue('Enter plan mode'),
+        toolLocations: vi.fn().mockReturnValue([]),
+        execute: executeSpy,
+      };
+      const tool = {
+        name: core.ToolNames.ENTER_PLAN_MODE,
+        kind: core.Kind.Think,
+        build: vi.fn().mockReturnValue(invocation),
+      };
+
+      mockToolRegistry.getTool.mockReturnValue(tool);
+      mockConfig.getApprovalMode = vi.fn(() => mode);
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockConfig.getMessageBus = vi.fn().mockReturnValue({});
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'call-enter-plan',
+                  name: core.ToolNames.ENTER_PLAN_MODE,
+                  args: {},
+                },
+              ],
+            },
+          },
+        ]),
+      );
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          { content: 'Old cycle', priority: 'medium', status: 'pending' },
+        ],
+        _meta: {
+          qwenTodoPlan: { id: 'old-plan' },
+          qwenTranscript: { planToolCallId: 'old-call' },
+        },
+      });
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'plan this' }],
+      });
+
+      expect(executeSpy).toHaveBeenCalled();
+      expect(
+        (session as unknown as { activeTodoPlanRevision?: unknown })
+          .activeTodoPlanRevision,
+      ).toBeUndefined();
+    });
 
     it('routes ACP protected L4 allow writes through AUTO review', async () => {
       const cwd = '/repo';
