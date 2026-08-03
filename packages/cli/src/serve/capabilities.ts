@@ -34,6 +34,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   daemon_status: { since: 'v1' },
   capabilities: { since: 'v1' },
   session_create: { since: 'v1' },
+  session_id_override: { since: 'v1' },
   session_scope_override: { since: 'v1' },
   session_load: { since: 'v1' },
   session_resume: { since: 'v1' },

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { AcpWsTransport } from '../../src/daemon/AcpWsTransport.js';
 import { DaemonTransportClosedError } from '../../src/daemon/DaemonTransport.js';
 import {
@@ -55,6 +55,79 @@ describe('AcpWsTransport', () => {
       const t2 = new AcpWsTransport('ws://host/acp');
       expect(t2.type).toBe('acp-ws');
       t2.dispose();
+    });
+
+    it('uses REST capabilities instead of the ACP initialize envelope', async () => {
+      const originalWebSocket = globalThis.WebSocket;
+      const originalFetch = Object.getOwnPropertyDescriptor(
+        globalThis,
+        'fetch',
+      );
+      class FakeWebSocket {
+        onopen: (() => void) | null = null;
+        onmessage: ((event: { data: string }) => void) | null = null;
+        onclose: (() => void) | null = null;
+        onerror: (() => void) | null = null;
+
+        constructor() {
+          queueMicrotask(() => this.onopen?.());
+        }
+
+        send(payload: string) {
+          const request = JSON.parse(payload) as { id: number };
+          queueMicrotask(() =>
+            this.onmessage?.({
+              data: JSON.stringify({
+                jsonrpc: '2.0',
+                id: request.id,
+                result: { protocolVersion: 1, agentCapabilities: {} },
+              }),
+            }),
+          );
+        }
+
+        close() {
+          this.onclose?.();
+        }
+      }
+      Object.defineProperty(globalThis, 'WebSocket', {
+        configurable: true,
+        value: FakeWebSocket,
+      });
+      const restFetch = vi.fn(async () =>
+        synthesizeResponse(200, {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_id_override'],
+          transports: ['acp-ws'],
+        }),
+      );
+      Object.defineProperty(globalThis, 'fetch', {
+        configurable: true,
+        value: restFetch,
+      });
+      const transport = new AcpWsTransport('ws://daemon/acp');
+
+      try {
+        const response = await transport.fetch('http://daemon/capabilities', {
+          method: 'GET',
+        });
+        await expect(response.json()).resolves.toMatchObject({
+          features: ['session_id_override'],
+        });
+        expect(restFetch).toHaveBeenCalledOnce();
+      } finally {
+        transport.dispose();
+        Object.defineProperty(globalThis, 'WebSocket', {
+          configurable: true,
+          value: originalWebSocket,
+        });
+        if (originalFetch) {
+          Object.defineProperty(globalThis, 'fetch', originalFetch);
+        } else {
+          Reflect.deleteProperty(globalThis, 'fetch');
+        }
+      }
     });
   });
 

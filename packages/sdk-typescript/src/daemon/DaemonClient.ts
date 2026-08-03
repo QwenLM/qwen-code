@@ -462,6 +462,18 @@ export class DaemonPendingPromptLimitError extends Error {
   }
 }
 
+export class DaemonSessionIdProtocolError extends Error {
+  constructor(
+    readonly requestedSessionId: string,
+    readonly actualSessionId: string,
+  ) {
+    super(
+      `Daemon returned session "${actualSessionId}" instead of requested session "${requestedSessionId}".`,
+    );
+    this.name = 'DaemonSessionIdProtocolError';
+  }
+}
+
 export interface DaemonTurnError extends DaemonHttpError {
   _daemonTurnError: true;
 }
@@ -488,6 +500,11 @@ export interface CreateSessionRequest {
    * `400 workspace_mismatch` `DaemonHttpError`.
    */
   workspaceCwd?: string;
+  /**
+   * UUID v1-v5 to assign to a new thread session. This is creation, not an
+   * idempotent attach; use load/resume after an ambiguous response.
+   */
+  sessionId?: string;
   modelServiceId?: string;
   /**
    * Per-request session-scope override. The production daemon defaults
@@ -2269,6 +2286,9 @@ export class DaemonClient {
     req: CreateSessionRequest,
     clientId?: string,
   ): Promise<DaemonSession> {
+    if (req.sessionId !== undefined && req.sessionId !== null) {
+      await this.requireCapability('session_id_override');
+    }
     if (req.sourceType !== undefined || req.sourceId !== undefined) {
       await this.requireCapability('session_source_metadata');
     }
@@ -2291,6 +2311,7 @@ export class DaemonClient {
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
         body: JSON.stringify({
           cwd: req.workspaceCwd,
+          ...(req.sessionId !== undefined ? { sessionId: req.sessionId } : {}),
           ...(req.modelServiceId ? { modelServiceId: req.modelServiceId } : {}),
           // `!== undefined` (not truthy) so a buggy caller passing
           // `sessionScope: '' | null` doesn't get the field silently
@@ -2314,7 +2335,17 @@ export class DaemonClient {
       },
       async (res) => {
         if (!res.ok) throw await this.failOnError(res, 'POST /session');
-        return (await res.json()) as DaemonSession;
+        const session = (await res.json()) as DaemonSession;
+        if (
+          typeof req.sessionId === 'string' &&
+          session.sessionId !== req.sessionId.toLowerCase()
+        ) {
+          throw new DaemonSessionIdProtocolError(
+            req.sessionId.toLowerCase(),
+            session.sessionId,
+          );
+        }
+        return session;
       },
     );
   }

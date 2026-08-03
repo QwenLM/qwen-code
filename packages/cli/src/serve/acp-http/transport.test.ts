@@ -32,6 +32,7 @@ import {
   PermissionPolicyNotImplementedError,
   PromptQueueFullError,
   SessionLimitExceededError,
+  SessionNotFoundError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
   TotalSessionLimitExceededError,
@@ -166,6 +167,7 @@ class FakeBridge {
     | undefined;
   lastSetModel: unknown;
   lastSpawnScope: string | undefined;
+  lastRequestedSessionId: string | undefined;
   closeShouldThrow = false;
   closeError: Error | undefined;
   killed: string[] = [];
@@ -177,6 +179,8 @@ class FakeBridge {
   /** `attached` value loadSession returns (false = spawned-from-disk). */
   loadAttached = true;
   spawnSessionId = 'sess-1';
+  honorRequestedSessionId = true;
+  spawnAttached = false;
   spawnClientId: string | undefined = 'client-1';
   loadRequests: Array<{
     sessionId: string;
@@ -190,13 +194,17 @@ class FakeBridge {
 
   closedSessions: string[] = [];
 
-  async spawnOrAttach(req: { sessionScope?: string }) {
+  async spawnOrAttach(req: { sessionScope?: string; sessionId?: string }) {
     this.lastSpawnScope = req?.sessionScope;
+    this.lastRequestedSessionId = req?.sessionId;
     if (this.gate) await this.gate;
     return {
-      sessionId: this.spawnSessionId,
+      sessionId:
+        this.honorRequestedSessionId && req.sessionId
+          ? req.sessionId
+          : this.spawnSessionId,
       workspaceCwd: TEST_WORKSPACE,
-      attached: false,
+      attached: this.spawnAttached,
       clientId: this.spawnClientId,
     };
   }
@@ -358,7 +366,7 @@ class FakeBridge {
     if (sessionId === 'sess-1') {
       return { sessionId, workspaceCwd: TEST_WORKSPACE };
     }
-    throw new Error(`Session not found: ${sessionId}`);
+    throw new SessionNotFoundError(sessionId);
   }
 
   detached: Array<{ sessionId: string; clientId?: string }> = [];
@@ -4728,6 +4736,149 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
     await new Promise((r) => setTimeout(r, 30));
     expect(bridge.lastSpawnScope).toBe('thread');
+  });
+
+  it('session/new validates, normalizes, and forwards caller-supplied sessionId meta', async () => {
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 440,
+      method: 'session/new',
+      params: {
+        _meta: {
+          'qwen-code/sessionId': '550E8400-E29B-41D4-A716-446655440000',
+        },
+      },
+    });
+
+    const [frame] = (await got) as Array<{
+      result: { sessionId: string };
+    }>;
+    expect(bridge.lastRequestedSessionId).toBe(
+      '550e8400-e29b-41d4-a716-446655440000',
+    );
+    expect(frame.result.sessionId).toBe('550e8400-e29b-41d4-a716-446655440000');
+  });
+
+  it('pins fallback sessionId persistence admission to the mount runtime base', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440004';
+    await writeStoredSession(sessionId);
+    const laterRuntimeDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-acp-later-runtime-'),
+    );
+    process.env['QWEN_RUNTIME_DIR'] = laterRuntimeDir;
+
+    try {
+      const connId = await initialize();
+      const connStream = await openStream(connId);
+      const got = takeFrames(connStream, 1);
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 443,
+        method: 'session/new',
+        params: {
+          _meta: { 'qwen-code/sessionId': sessionId },
+        },
+      });
+
+      const [frame] = (await got) as Array<{
+        error: { code: number; data: Record<string, unknown> };
+      }>;
+      expect(frame.error).toMatchObject({
+        code: -32602,
+        data: {
+          httpStatus: 409,
+          errorKind: 'session_id_conflict',
+          conflict: 'persisted',
+        },
+      });
+      expect(bridge.lastRequestedSessionId).toBeUndefined();
+    } finally {
+      process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
+      await fs.rm(laterRuntimeDir, { recursive: true, force: true });
+    }
+  });
+
+  it('session/new rejects invalid sessionId meta without spawning', async () => {
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 441,
+      method: 'session/new',
+      params: { _meta: { 'qwen-code/sessionId': '../../escape' } },
+    });
+
+    const [frame] = (await got) as Array<{
+      error: { code: number; data: Record<string, unknown> };
+    }>;
+    expect(frame.error).toMatchObject({
+      code: -32602,
+      data: { httpStatus: 400, errorKind: 'invalid_session_id' },
+    });
+    expect(bridge.lastRequestedSessionId).toBeUndefined();
+  });
+
+  it('session/new removes a mismatched orphan and reports a protocol error', async () => {
+    bridge.honorRequestedSessionId = false;
+    bridge.spawnSessionId = '550e8400-e29b-41d4-a716-446655440999';
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 442,
+      method: 'session/new',
+      params: {
+        _meta: {
+          'qwen-code/sessionId': '550e8400-e29b-41d4-a716-446655440000',
+        },
+      },
+    });
+
+    const [frame] = (await got) as Array<{
+      error: { code: number; data: Record<string, unknown> };
+    }>;
+    expect(frame.error).toMatchObject({
+      code: -32603,
+      data: { httpStatus: 500, errorKind: 'session_id_not_honored' },
+    });
+    expect(bridge.killed).toContain('550e8400-e29b-41d4-a716-446655440999');
+  });
+
+  it('session/new rolls back a mismatched attach without killing it', async () => {
+    bridge.honorRequestedSessionId = false;
+    bridge.spawnSessionId = 'existing-session';
+    bridge.spawnAttached = true;
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 444,
+      method: 'session/new',
+      params: {
+        _meta: {
+          'qwen-code/sessionId': '550e8400-e29b-41d4-a716-446655440000',
+        },
+      },
+    });
+
+    const [frame] = (await got) as Array<{
+      error: { code: number; data: Record<string, unknown> };
+    }>;
+    expect(frame.error).toMatchObject({
+      code: -32603,
+      data: { httpStatus: 500, errorKind: 'session_id_not_honored' },
+    });
+    expect(bridge.detached).toContainEqual({
+      sessionId: 'existing-session',
+      clientId: 'client-1',
+    });
+    expect(bridge.killed).not.toContain('existing-session');
   });
 
   it('session/prompt with empty prompt → INVALID_PARAMS', async () => {

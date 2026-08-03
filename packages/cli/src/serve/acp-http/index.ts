@@ -42,6 +42,10 @@ import { WsStream } from './ws-stream.js';
 import type { RateLimitTier } from '../rate-limit.js';
 import { SessionArchiveCoordinator } from '../server/session-archive.js';
 import {
+  createRequestedSessionIdAdmission,
+  type RequestedSessionIdAdmission,
+} from '../session-id-admission.js';
+import {
   RPC,
   error as rpcError,
   isNotification,
@@ -391,6 +395,7 @@ export interface MountAcpHttpOptions {
   /** Effective direct session shell policy for ACP initialize/dispatch. */
   sessionShellCommandEnabled?: boolean;
   archiveCoordinator?: SessionArchiveCoordinator;
+  requestedSessionIdAdmission?: RequestedSessionIdAdmission;
   /** Shared lane for sessionless workspace remember tasks. */
   workspaceRememberLane: WorkspaceRememberTaskLane;
   /** Rate limit checker for WS messages (WS bypasses Express middleware). */
@@ -603,6 +608,34 @@ export function mountAcpHttp(
   if (!enabled) return undefined;
 
   const daemonEnv = opts.daemonEnv ?? process.env;
+  const primarySessionRuntimeBaseDir =
+    opts.workspaceRegistry?.primary.sessionRuntimeBaseDir ??
+    Storage.getRuntimeBaseDir();
+  const archiveCoordinator =
+    opts.archiveCoordinator ?? new SessionArchiveCoordinator();
+  const requestedSessionIdAdmission =
+    opts.requestedSessionIdAdmission ??
+    createRequestedSessionIdAdmission({
+      archiveCoordinator,
+      getBridges: () =>
+        opts.workspaceRegistry
+          ? opts.workspaceRegistry
+              .listManaged()
+              .map((runtime) => runtime.bridge)
+          : [bridge],
+      getPersistenceTargets: () =>
+        opts.workspaceRegistry
+          ? opts.workspaceRegistry.listManaged().map((runtime) => ({
+              workspaceCwd: runtime.workspaceCwd,
+              runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+            }))
+          : [
+              {
+                workspaceCwd: opts.boundWorkspace,
+                runtimeBaseDir: primarySessionRuntimeBaseDir,
+              },
+            ],
+    });
   const getPrimaryEnv = () =>
     opts.workspaceRegistry
       ? runtimeEffectiveEnv(opts.workspaceRegistry.primary, daemonEnv)
@@ -796,7 +829,8 @@ export function mountAcpHttp(
     opts.deviceFlowRegistry,
     opts.sessionShellCommandEnabled === true,
     registry,
-    opts.archiveCoordinator ?? new SessionArchiveCoordinator(),
+    archiveCoordinator,
+    requestedSessionIdAdmission,
     opts.isPrimaryWorkspaceTrusted ??
       (() => {
         const entry = opts.workspaceRegistry?.primaryEntry;
@@ -809,8 +843,20 @@ export function mountAcpHttp(
       return guard ? () => guard.assertOpen() : undefined;
     },
     undefined,
-    opts.workspaceRegistry?.primary.sessionRuntimeBaseDir ??
-      Storage.getRuntimeBaseDir(),
+    primarySessionRuntimeBaseDir,
+    () => {
+      const runtime = opts.workspaceRegistry?.primary;
+      return runtime
+        ? {
+            bridge: runtime.bridge,
+            sessionRuntimeBaseDir: runtime.sessionRuntimeBaseDir,
+            workspaceId: runtime.workspaceId,
+          }
+        : {
+            bridge,
+            sessionRuntimeBaseDir: primarySessionRuntimeBaseDir,
+          };
+    },
   );
   dispatcherRef.current = dispatcher;
 
@@ -1269,6 +1315,13 @@ export function mountAcpHttp(
       rt.bridge,
       rt.workspaceCwd,
     );
+    const registeredGeneration = opts.workspaceRegistry?.getEntryByWorkspaceId(
+      rt.workspaceId,
+    )?.current;
+    const generationGuard =
+      registeredGeneration?.runtime === rt
+        ? registeredGeneration.guard
+        : rt.generationGuard;
     const secondaryDispatcher = new AcpDispatcher(
       rt.bridge,
       rt.workspaceCwd,
@@ -1284,16 +1337,19 @@ export function mountAcpHttp(
       opts.deviceFlowRegistry,
       opts.sessionShellCommandEnabled === true,
       secondaryRegistry,
-      opts.archiveCoordinator ?? new SessionArchiveCoordinator(),
+      archiveCoordinator,
+      requestedSessionIdAdmission,
       () => rt.trusted,
-      () => {
-        const guard = rt.generationGuard;
-        return guard ? () => guard.assertOpen() : undefined;
-      },
+      () => (generationGuard ? () => generationGuard.assertOpen() : undefined),
       rt.provenance === 'live-conversation'
         ? opts.liveSessionIsolation
         : undefined,
       rt.sessionRuntimeBaseDir,
+      () => ({
+        bridge: rt.bridge,
+        sessionRuntimeBaseDir: rt.sessionRuntimeBaseDir,
+        workspaceId: rt.workspaceId,
+      }),
     );
     secondaryDispatcherRef.current = secondaryDispatcher;
     return {
