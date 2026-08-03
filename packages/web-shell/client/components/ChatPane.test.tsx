@@ -1006,6 +1006,27 @@ describe('ChatPane', () => {
           },
         ],
       },
+      {
+        id: 'plan-update-newer',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'todo-call-2',
+            toolName: 'todo_write',
+            status: 'completed',
+            rawOutput: {
+              entries: [
+                {
+                  content: 'Ship v2',
+                  status: 'pending',
+                  _meta: { qwenTodo: { id: 'ship-v2' } },
+                },
+              ],
+              plan: { id: 'plan-1' },
+            },
+          },
+        ],
+      },
     ];
     messagesState.push({
       id: 'revision',
