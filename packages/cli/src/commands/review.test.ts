@@ -63,6 +63,7 @@ describe('reviewCommand', () => {
       'findings',
       'publish-assets',
       'compose-review',
+      'save-artifact',
       'submit',
       'cleanup',
     ]);
