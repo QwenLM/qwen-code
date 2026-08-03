@@ -3677,6 +3677,67 @@ const SETTINGS_SCHEMA = {
           },
         },
       },
+      transport: {
+        type: 'object',
+        label: 'Omni Transport Guard',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: {},
+        description:
+          'Transport guard dimensions beyond the byte ceiling for omni ' +
+          'media delivery.',
+        showInDialog: false,
+        properties: {
+          maxEstimatedTokens: {
+            type: 'number',
+            label: 'Max Estimated Tokens',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: 0,
+            description:
+              'Estimated-token ceiling for a single omni media input, ' +
+              'checked before upload using the versioned raw-resource ' +
+              'estimator. 0 disables the token guard (estimates are still ' +
+              'attached for observability) — the estimation formula is ' +
+              'pending confirmation with the model provider; set a ' +
+              'positive threshold to enforce fail-closed rejection.',
+            showInDialog: false,
+            jsonSchemaOverride: {
+              type: 'number',
+              minimum: 0,
+              default: 0,
+            },
+          },
+        },
+      },
+      download: {
+        type: 'object',
+        label: 'Omni Download',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: {},
+        description: 'URL media localization limits for omni delivery.',
+        showInDialog: false,
+        properties: {
+          maxFileBytes: {
+            type: 'number',
+            label: 'Max Download File Bytes',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: 0,
+            description:
+              'Byte ceiling for downloading URL media inputs. 0 or unset ' +
+              'follows omni.upload.maxFileBytes (downloading more than the ' +
+              'upload channel can deliver is pointless).',
+            showInDialog: false,
+            jsonSchemaOverride: {
+              type: 'number',
+              minimum: 0,
+              default: 0,
+            },
+          },
+        },
+      },
     },
   },
 } as const satisfies SettingsSchema;

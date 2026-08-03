@@ -2386,6 +2386,88 @@ describe('OpenAIContentConverter', () => {
       );
     });
 
+    it('should convert oss:// audio fileData to input_audio with the bare URL (omni upload delivery)', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              { text: 'What is this sound?' },
+              {
+                fileData: {
+                  mimeType: 'audio/mpeg',
+                  fileUri:
+                    'oss://dashscope-instant/uploads/model/abc/12345678-tone.mp3',
+                  displayName: 'tone.mp3',
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
+
+      const userMessage = messages.find((message) => message.role === 'user');
+      const contentArray = userMessage?.content as Array<{
+        type: string;
+        input_audio?: { data: string; format: string };
+      }>;
+      const audioPart = contentArray.find((p) => p.type === 'input_audio');
+      // Bare oss URL — no data: prefix (unlike the inline branch).
+      expect(audioPart?.input_audio?.data).toBe(
+        'oss://dashscope-instant/uploads/model/abc/12345678-tone.mp3',
+      );
+      expect(audioPart?.input_audio?.format).toBe('mp3');
+    });
+
+    it('should convert flac/ogg/m4a audio fileData instead of textifying', () => {
+      for (const [mime, format] of [
+        ['audio/flac', 'flac'],
+        ['audio/ogg', 'ogg'],
+        ['audio/mp4', 'm4a'],
+      ] as const) {
+        const request: GenerateContentParameters = {
+          model: 'models/test',
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                {
+                  fileData: {
+                    mimeType: mime,
+                    fileUri: 'oss://bucket/key',
+                    displayName: 'clip',
+                  },
+                },
+              ],
+            },
+          ],
+        };
+        const messages = converter.convertGeminiRequestToOpenAI(
+          request,
+          requestContext,
+        );
+        const userMessage = messages.find((m) => m.role === 'user');
+        const contentArray = userMessage?.content as Array<{
+          type: string;
+          input_audio?: { data: string; format: string };
+          text?: string;
+        }>;
+        const audioPart = contentArray.find((p) => p.type === 'input_audio');
+        expect(audioPart?.input_audio?.format).toBe(format);
+        expect(
+          contentArray.some((p) =>
+            p.text?.includes('Unsupported file media type'),
+          ),
+        ).toBe(false);
+      }
+    });
+
     it('should render unsupported inlineData file types as a text block', () => {
       const request: GenerateContentParameters = {
         model: 'models/test',
@@ -2447,7 +2529,7 @@ describe('OpenAIContentConverter', () => {
       expect(contentArray[1].text).toContain('archive.zip');
     });
 
-    it('should render unsupported fileData types (including audio) as a text block', () => {
+    it('should render unsupported fileData types as a text block', () => {
       const request: GenerateContentParameters = {
         model: 'models/test',
         contents: [
@@ -2474,9 +2556,9 @@ describe('OpenAIContentConverter', () => {
                   parts: [
                     {
                       fileData: {
-                        mimeType: 'audio/mpeg',
-                        fileUri: 'https://example.com/audio.mp3',
-                        displayName: 'audio.mp3',
+                        mimeType: 'application/zip',
+                        fileUri: 'https://example.com/archive.zip',
+                        displayName: 'archive.zip',
                       },
                     },
                   ],
@@ -2504,8 +2586,8 @@ describe('OpenAIContentConverter', () => {
       expect(contentArray[0].text).toBe('File content');
       expect(contentArray[1].type).toBe('text');
       expect(contentArray[1].text).toContain('Unsupported file media type');
-      expect(contentArray[1].text).toContain('audio/mpeg');
-      expect(contentArray[1].text).toContain('audio.mp3');
+      expect(contentArray[1].text).toContain('application/zip');
+      expect(contentArray[1].text).toContain('archive.zip');
     });
 
     it('should create tool message with text-only content when no media parts', () => {

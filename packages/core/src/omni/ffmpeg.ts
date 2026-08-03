@@ -121,21 +121,28 @@ export async function assertOmniRuntimeDependencies(): Promise<void> {
   );
 }
 
-/** Basic video metadata extracted via ffprobe. */
-export interface VideoProbeResult {
+/** Media metadata extracted via ffprobe (fields populated per modality). */
+export interface MediaProbeResult {
   /** Container/format name reported by ffprobe (e.g. "mov,mp4,m4a,..."). */
   formatName?: string;
-  /** Duration in milliseconds, when reported. */
+  /** Duration in milliseconds (video/audio), when reported. */
   durationMs?: number;
-  /** Width in pixels of the first video stream. */
+  /** Width in pixels (video: first video stream; image: the image). */
   width?: number;
-  /** Height in pixels of the first video stream. */
+  /** Height in pixels. */
   height?: number;
-  /** Average frame rate (frames per second) of the first video stream. */
+  /** Average frame rate (fps) of the first video stream (video only). */
   frameRate?: number;
-  /** Codec name of the first video stream (e.g. "h264"). */
+  /** Codec name of the primary stream for the modality. */
   codec?: string;
+  /** Sample rate in Hz of the first audio stream (audio only). */
+  sampleRateHz?: number;
+  /** Channel count of the first audio stream (audio only). */
+  channels?: number;
 }
+
+/** @deprecated S1 name kept for existing imports. */
+export type VideoProbeResult = MediaProbeResult;
 
 /** Parse an ffprobe rational like "30000/1001" (or plain "25") into fps. */
 function parseFrameRate(raw: string | undefined): number | undefined {
@@ -151,16 +158,18 @@ function parseFrameRate(raw: string | undefined): number | undefined {
 }
 
 /**
- * Probe a local video file with ffprobe. Throws on non-zero exit or
+ * Probe a local media file with ffprobe. Throws on non-zero exit or
  * unparseable output — the omni pipeline treats a failed probe as a
  * recognition failure (fail closed), not as "probably fine". Error
  * messages carry the file's basename only (they can reach model-visible
- * content).
+ * content). ffprobe handles images too (single video stream, no duration),
+ * so the omni path needs no sharp dependency.
  */
-export async function probeVideoMetadata(
+export async function probeMediaMetadata(
   filePath: string,
+  modality: 'image' | 'audio' | 'video',
   signal?: AbortSignal,
-): Promise<VideoProbeResult> {
+): Promise<MediaProbeResult> {
   const { stdout, code, stderr } = await execCommand(
     'ffprobe',
     [
@@ -191,6 +200,8 @@ export async function probeVideoMetadata(
       height?: number;
       avg_frame_rate?: string;
       r_frame_rate?: string;
+      sample_rate?: string;
+      channels?: number;
     }>;
   };
   try {
@@ -201,18 +212,51 @@ export async function probeVideoMetadata(
     );
   }
   const videoStream = parsed.streams?.find((s) => s.codec_type === 'video');
+  const audioStream = parsed.streams?.find((s) => s.codec_type === 'audio');
   const durationSeconds = Number(parsed.format?.duration);
-  return {
-    formatName: parsed.format?.format_name,
-    durationMs:
-      Number.isFinite(durationSeconds) && durationSeconds >= 0
-        ? Math.round(durationSeconds * 1000)
-        : undefined,
-    width: videoStream?.width,
-    height: videoStream?.height,
-    frameRate:
-      parseFrameRate(videoStream?.avg_frame_rate) ??
-      parseFrameRate(videoStream?.r_frame_rate),
-    codec: videoStream?.codec_name,
-  };
+  const durationMs =
+    Number.isFinite(durationSeconds) && durationSeconds >= 0
+      ? Math.round(durationSeconds * 1000)
+      : undefined;
+
+  const base: MediaProbeResult = { formatName: parsed.format?.format_name };
+  switch (modality) {
+    case 'image':
+      return {
+        ...base,
+        width: videoStream?.width,
+        height: videoStream?.height,
+        codec: videoStream?.codec_name,
+      };
+    case 'audio':
+      return {
+        ...base,
+        durationMs,
+        codec: audioStream?.codec_name,
+        sampleRateHz: audioStream?.sample_rate
+          ? Number(audioStream.sample_rate)
+          : undefined,
+        channels: audioStream?.channels,
+      };
+    case 'video':
+    default:
+      return {
+        ...base,
+        durationMs,
+        width: videoStream?.width,
+        height: videoStream?.height,
+        frameRate:
+          parseFrameRate(videoStream?.avg_frame_rate) ??
+          parseFrameRate(videoStream?.r_frame_rate),
+        codec: videoStream?.codec_name,
+      };
+  }
+}
+
+/** @deprecated S1 wrapper: video probe. */
+export async function probeVideoMetadata(
+  filePath: string,
+  signal?: AbortSignal,
+): Promise<MediaProbeResult> {
+  return probeMediaMetadata(filePath, 'video', signal);
 }

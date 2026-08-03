@@ -251,6 +251,12 @@ export async function resolveAtCommandQuery({
     ref: { id?: string; title?: string };
   }> = [];
 
+  // URL media references (`@https://…`) collected during the loop and
+  // localized (downloaded → recognized → promoted into the omni object
+  // store) after it. Only active when omni delivery is on; otherwise URL
+  // tokens keep today's fall-through behavior (left as text).
+  const urlMediaRefs: Array<{ originalAtPath: string; url: string }> = [];
+
   for (const atPathPart of atPathCommandParts) {
     const originalAtPath = atPathPart.content; // e.g., "@file.txt" or "@"
 
@@ -262,6 +268,23 @@ export async function resolveAtCommandQuery({
     }
 
     const pathName = originalAtPath.substring(1);
+
+    // URL media reference (`@https://…`): detected BEFORE every other
+    // parser — a URL can't be an extension/session/MCP ref, and without
+    // this branch it would fall through to filesystem resolution where the
+    // ENOENT skip silently drops it. Only intercepted when omni delivery
+    // is active; otherwise preserve the legacy text fall-through.
+    if (/^https?:\/\//i.test(pathName)) {
+      const omni = await import('@qwen-code/qwen-code-core');
+      if (omni.isOmniDeliveryActive(config) && omni.parseHttpUrlRef(pathName)) {
+        if (!urlMediaRefs.some((r) => r.url === pathName)) {
+          urlMediaRefs.push({ originalAtPath, url: pathName });
+        }
+        // Keep the URL verbatim in the text sent to the model.
+        atPathToResolvedSpecMap.set(originalAtPath, pathName);
+        continue;
+      }
+    }
 
     // Extension reference (`@ext:<name>`): detected BEFORE MCP/filesystem
     // resolution. Only matches when the path starts with `ext:` and the name
@@ -504,6 +527,86 @@ export async function resolveAtCommandQuery({
         .readMcpResource(ref.serverName, ref.uri, { signal }),
     ),
   );
+
+  // URL media localization: download → recognize → promote into the omni
+  // object store → upload → fileData part. Sequential (media downloads can
+  // be large; parallel GiB transfers would contend), failure-isolated per
+  // URL (an error card is shown and the turn continues — mirroring the MCP
+  // resource block's Promise.allSettled semantics).
+  const urlMediaParts: Part[] = [];
+  const urlMediaDisplays: IndividualToolCallDisplay[] = [];
+  const urlMediaLabels: string[] = [];
+  if (urlMediaRefs.length > 0) {
+    const core = await import('@qwen-code/qwen-code-core');
+    const os = await import('node:os');
+    for (let i = 0; i < urlMediaRefs.length; i++) {
+      const ref = urlMediaRefs[i];
+      const callId = `client-url-media-${userMessageTimestamp}-${i}`;
+      const hostLabel = (() => {
+        try {
+          return new URL(ref.url).hostname;
+        } catch {
+          return 'invalid-url';
+        }
+      })();
+      let tempDir: string | undefined;
+      try {
+        const store = new core.OmniObjectStore(config.storage.getQwenDir());
+        const downloadsDir = path.join(store.getOmniRootDir(), 'downloads');
+        const downloaded = await core.downloadMediaUrl({
+          url: ref.url,
+          downloadsDir,
+          maxBytes: core.effectiveMaxDownloadFileBytes(config),
+          signal,
+        });
+        tempDir = downloaded.partPath;
+        // Full local-file pipeline on the downloaded bytes: sniff/probe/
+        // hash again (the design requires re-recognition from the local
+        // file — never trust transfer-time observations), guard, store,
+        // upload. readMediaViaOmniDelivery needs a stable name for
+        // display; use the URL basename.
+        const urlBase = path.basename(new URL(ref.url).pathname) || hostLabel;
+        const delivery = await core.processMediaForOmniDelivery(
+          downloaded.partPath,
+          config,
+          { signal },
+        );
+        urlMediaParts.push({
+          fileData: {
+            fileUri: delivery.fileUri,
+            mimeType: delivery.mimeType,
+            displayName: urlBase,
+          },
+        });
+        urlMediaLabels.push(ref.url);
+        urlMediaDisplays.push({
+          callId,
+          name: 'Fetch Media URL',
+          description: `Downloaded ${ref.url}`,
+          status: ToolCallStatus.Success,
+          resultDisplay: `Localized ${urlBase} (${delivery.recognized.modality}, ${(delivery.recognized.sizeBytes / 1024 / 1024).toFixed(1)}MB) and delivered via omni upload.`,
+          confirmationDetails: undefined,
+        });
+      } catch (error) {
+        if (signal.aborted) throw error;
+        const reason = getErrorMessage(error);
+        onDebugMessage(`Failed to localize media URL ${ref.url}: ${reason}`);
+        urlMediaDisplays.push({
+          callId,
+          name: 'Fetch Media URL',
+          description: `Download ${ref.url}`,
+          status: ToolCallStatus.Error,
+          resultDisplay: `Failed to fetch media from ${hostLabel}: ${reason}`,
+          confirmationDetails: undefined,
+        });
+      } finally {
+        if (tempDir) {
+          await fs.rm(tempDir, { force: true }).catch(() => {});
+        }
+      }
+    }
+    void os; // reserved for future temp-dir strategies
+  }
 
   const resourceParts: Part[] = [];
   const resourceDisplays: IndividualToolCallDisplay[] = [];
@@ -852,6 +955,7 @@ export async function resolveAtCommandQuery({
         ...scopedMentionLabels,
         ...contentLabelsForDisplay,
         ...resourceLabels,
+        ...urlMediaLabels,
       ];
       return {
         processedQuery: null,
@@ -859,6 +963,7 @@ export async function resolveAtCommandQuery({
         toolDisplays: [
           ...scopedMentionDisplays,
           ...resourceDisplays,
+          ...urlMediaDisplays,
           errorToolCallDisplay,
         ],
         filesRead: labelsOnError,
@@ -881,11 +986,13 @@ export async function resolveAtCommandQuery({
     ...scopedMentionParts,
     ...fileParts,
     ...resourceParts,
+    ...urlMediaParts,
   ];
   const allLabels = [
     ...scopedMentionLabels,
     ...contentLabelsForDisplay,
     ...resourceLabels,
+    ...urlMediaLabels,
   ];
 
   return {
@@ -895,6 +1002,7 @@ export async function resolveAtCommandQuery({
       ...scopedMentionDisplays,
       ...fileDisplays,
       ...resourceDisplays,
+      ...urlMediaDisplays,
     ],
     filesRead: allLabels,
     recording: {

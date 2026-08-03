@@ -173,6 +173,7 @@ import {
   normalizeParts,
 } from '../services/visionBridge/image-part-utils.js';
 import { bridgeToolResultImages } from '../services/visionBridge/tool-result-vision-bridge.js';
+import { processToolResultOmniMedia } from '../omni/tool-result-media.js';
 import {
   getInvocationContext,
   runWithInvocationContext,
@@ -1387,9 +1388,19 @@ export class CoreToolScheduler {
   }> {
     let modelOverride: string | undefined;
     const notices: string[] = [];
+    // Omni second normalization trigger point: convert inline tool-result
+    // media into oss:// fileData BEFORE the vision bridge runs — converted
+    // parts are invisible to isImagePart, so the bridge skips them. Sibling
+    // step by design (§8.2): never mixed into bridge logic. Preserves the
+    // identity-equality contract: unchanged input returns the same array.
+    const omniProcessed = await processToolResultOmniMedia(
+      responseParts,
+      this.config,
+      signal,
+    );
     const processedParts = await bridgeToolResultImages({
       config: this.config,
-      responseParts,
+      responseParts: omniProcessed,
       signal,
       onFullTurnModel: (model) => {
         if (!this.onToolResultFullTurnModel?.(model)) return false;

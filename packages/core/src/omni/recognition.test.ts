@@ -91,3 +91,74 @@ describe('hashFileSha256', () => {
     }
   });
 });
+
+describe('sniffMediaType (S2 modalities)', async () => {
+  const { sniffMediaType } = await import('./recognition.js');
+
+  it('detects images: png/jpeg/webp/gif', () => {
+    expect(
+      sniffMediaType(
+        Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47]), Buffer.alloc(8)]),
+      ),
+    ).toMatchObject({ mimeType: 'image/png', modality: 'image' });
+    expect(sniffMediaType(Buffer.from([0xff, 0xd8, 0xff, 0xe0]))).toMatchObject(
+      { mimeType: 'image/jpeg', modality: 'image' },
+    );
+    expect(
+      sniffMediaType(
+        Buffer.concat([
+          Buffer.from('RIFF', 'latin1'),
+          Buffer.alloc(4),
+          Buffer.from('WEBP', 'latin1'),
+        ]),
+      ),
+    ).toMatchObject({ mimeType: 'image/webp', modality: 'image' });
+    expect(sniffMediaType(Buffer.from('GIF89a....'))).toMatchObject({
+      mimeType: 'image/gif',
+      modality: 'image',
+    });
+  });
+
+  it('detects audio: mp3(id3/framesync)/wav/flac/ogg/m4a', () => {
+    expect(sniffMediaType(Buffer.from('ID3\x04\x00'))).toMatchObject({
+      mimeType: 'audio/mpeg',
+      modality: 'audio',
+    });
+    expect(sniffMediaType(Buffer.from([0xff, 0xfb, 0x90, 0x00]))).toMatchObject(
+      { mimeType: 'audio/mpeg', modality: 'audio' },
+    );
+    expect(
+      sniffMediaType(
+        Buffer.concat([
+          Buffer.from('RIFF', 'latin1'),
+          Buffer.alloc(4),
+          Buffer.from('WAVE', 'latin1'),
+        ]),
+      ),
+    ).toMatchObject({ mimeType: 'audio/wav', modality: 'audio' });
+    expect(sniffMediaType(Buffer.from('fLaC....'))).toMatchObject({
+      mimeType: 'audio/flac',
+      modality: 'audio',
+    });
+    expect(sniffMediaType(Buffer.from('OggS....'))).toMatchObject({
+      mimeType: 'audio/ogg',
+      modality: 'audio',
+    });
+    const m4a = Buffer.concat([
+      Buffer.from([0, 0, 0, 0x18]),
+      Buffer.from('ftypM4A ', 'latin1'),
+      Buffer.alloc(4),
+    ]);
+    expect(sniffMediaType(m4a)).toMatchObject({
+      mimeType: 'audio/mp4',
+      modality: 'audio',
+    });
+  });
+
+  it('rejects non-media content', () => {
+    expect(sniffMediaType(Buffer.from('#!/bin/sh\necho hi'))).toBeNull();
+    expect(sniffMediaType(Buffer.from('<html><body>'))).toBeNull();
+    expect(sniffMediaType(Buffer.from('%PDF-1.7'))).toBeNull();
+    expect(sniffMediaType(Buffer.alloc(0))).toBeNull();
+  });
+});

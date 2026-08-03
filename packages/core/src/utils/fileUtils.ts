@@ -925,6 +925,13 @@ export interface ProcessedFileReadResult {
   pdfVisionBridgeCandidate?: PDFVisionBridgeCandidate;
   /** User-only disclosure attached after a prepared PDF candidate runs. */
   pdfVisionBridgeNotice?: string;
+  /**
+   * Raw-resource token estimate for omni-delivered media (the single
+   * storage location for the estimate — design doc §6.4). Absent for
+   * non-omni reads; `status: 'unavailable'` when required metadata was
+   * missing.
+   */
+  tokenEstimate?: import('../omni/estimation.js').OmniTokenEstimate;
 }
 
 export interface PDFVisionBridgeFallback {
@@ -1253,15 +1260,24 @@ export async function processSingleFileContent(
         errorType: ToolErrorType.FILE_TOO_LARGE,
       };
     }
-    // Omni experiment: when active, local video files are delivered via the
-    // DashScope upload channel instead of inline base64, with a 1 GiB
-    // per-file ceiling replacing the 10MB inline cap below. Dynamic import
+    // Omni experiment: when active, local media files (image/audio/video)
+    // are delivered via the DashScope upload channel instead of inline
+    // base64, with a 1 GiB per-file ceiling replacing the 10MB inline cap
+    // below. Content is uploaded AS-IS (no resize/transcode — degradation
+    // is the job of omni policies, which must disclose). Dynamic import
     // keeps the omni module (which reaches into the provider layer) out of
-    // fileUtils' static dependency graph.
+    // fileUtils' static dependency graph. Gated per-modality on the same
+    // `modalities` config the converter uses, so the omni path never
+    // swallows a file the vision bridge would otherwise transcribe
+    // (bridge only activates when modalities.image is false).
     let omniModule: typeof import('../omni/index.js') | undefined;
-    if (fileType === 'video') {
+    if (
+      (fileType === 'video' && modalities.video) ||
+      (fileType === 'audio' && modalities.audio) ||
+      (fileType === 'image' && modalities.image)
+    ) {
       const omni = await import('../omni/index.js');
-      if (omni.isOmniVideoDeliveryActive(config)) {
+      if (omni.isOmniDeliveryActive(config)) {
         omniModule = omni;
       }
     }
@@ -1460,6 +1476,19 @@ export async function processSingleFileContent(
         };
       }
       case 'image': {
+        if (omniModule) {
+          // Omni: upload the ORIGINAL bytes — no local resize (that is a
+          // lossy transform reserved for omni policies with disclosure).
+          // renderImageOverview is skipped entirely on this path.
+          return await omniModule.readMediaViaOmniDelivery({
+            filePath,
+            config,
+            displayName,
+            relativePathForDisplay,
+            expectedModality: 'image',
+            signal,
+          });
+        }
         if (shouldRenderImageOverview) {
           try {
             const view = await renderImageOverview(
@@ -1534,15 +1563,16 @@ export async function processSingleFileContent(
       }
       case 'audio':
       case 'video': {
-        if (fileType === 'video' && omniModule) {
+        if (omniModule) {
           // Delegated to the omni module: fail-closed delivery via the
           // DashScope upload channel; user aborts are rethrown and land in
           // this function's outer abort handling.
-          return await omniModule.readVideoViaOmniDelivery({
+          return await omniModule.readMediaViaOmniDelivery({
             filePath,
             config,
             displayName,
             relativePathForDisplay,
+            expectedModality: fileType,
             signal,
           });
         }
