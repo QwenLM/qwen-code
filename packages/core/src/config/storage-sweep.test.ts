@@ -19,6 +19,20 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   return {
     ...actual,
+    readdir: async (dir: fs.PathLike, options?: never) => {
+      const entries = await actual.readdir(dir, options);
+      // deterministic iteration order: the stuck entry first, so a
+      // continue-vs-break regression cannot hide behind filesystem order
+      if (Array.isArray(entries)) {
+        return [...entries].sort((a, b) => {
+          const sa = String(a);
+          const sb = String(b);
+          if (sa.includes('aaa-stuck') === sb.includes('aaa-stuck')) return 0;
+          return sa.includes('aaa-stuck') ? -1 : 1;
+        });
+      }
+      return entries;
+    },
     rm: async (target: fs.PathLike, options?: fs.RmOptions) => {
       if (String(target).includes('aaa-stuck')) {
         const err = new Error('Permission denied') as NodeJS.ErrnoException;
@@ -209,6 +223,73 @@ describe('sweepStaleWorktreeProjects', () => {
     expect(removed).toEqual([sanitizeCwd(goneWorktree)]);
     expect(fs.existsSync(stuck)).toBe(true);
     expect(fs.existsSync(gone)).toBe(false);
+  });
+
+  it('keeps the bucket when a runtime.json reports a live session', async () => {
+    const goneWorktree = path.join(base, 'gone-wt');
+    const entry = sanitizeCwd(goneWorktree);
+    const projectDir = makeProjectSnapshot(base, entry, {
+      worktreePath: goneWorktree,
+      originalCwd: '/repo',
+    });
+    fs.writeFileSync(
+      path.join(projectDir, 'chats', 'session-live.runtime.json'),
+      JSON.stringify({
+        schema_version: 1,
+        pid: process.pid,
+        session_id: 'session-live',
+        work_dir: '/repo',
+        hostname: os.hostname(),
+        started_at: Date.now(),
+        qwen_version: 'test',
+      }),
+    );
+
+    const removed = await sweepStaleWorktreeProjects(base);
+
+    expect(removed).toEqual([]);
+    expect(fs.existsSync(projectDir)).toBe(true);
+  });
+
+  it('a dead runtime.json does not veto the sweep', async () => {
+    const goneWorktree = path.join(base, 'gone-wt');
+    const entry = sanitizeCwd(goneWorktree);
+    const projectDir = makeProjectSnapshot(base, entry, {
+      worktreePath: goneWorktree,
+      originalCwd: '/repo',
+    });
+    fs.writeFileSync(
+      path.join(projectDir, 'chats', 'session-dead.runtime.json'),
+      JSON.stringify({
+        schema_version: 1,
+        pid: 4194303,
+        session_id: 'session-dead',
+        work_dir: '/repo',
+        hostname: os.hostname(),
+        started_at: Date.now(),
+        qwen_version: 'test',
+      }),
+    );
+
+    const removed = await sweepStaleWorktreeProjects(base);
+
+    expect(removed).toEqual([entry]);
+    expect(fs.existsSync(projectDir)).toBe(false);
+  });
+
+  it('a plain file at the worktree path is not a live worktree', async () => {
+    const filePath = path.join(base, 'wt-is-a-file');
+    fs.writeFileSync(filePath, 'not a directory');
+    const entry = sanitizeCwd(filePath);
+    const projectDir = makeProjectSnapshot(base, entry, {
+      worktreePath: filePath,
+      originalCwd: '/repo',
+    });
+
+    const removed = await sweepStaleWorktreeProjects(base);
+
+    expect(removed).toEqual([entry]);
+    expect(fs.existsSync(projectDir)).toBe(false);
   });
 
   it('the Storage constructor schedules the sweep once per base dir', async () => {
