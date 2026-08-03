@@ -270,6 +270,15 @@ const packageJsonPath =
   packageJsonPathCandidates.find((candidate) => existsSync(candidate)) ??
   packageJsonPathCandidates[0];
 
+if (!process.env['CLI_VERSION']?.trim()) {
+  try {
+    const pkg = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
+    process.env['CLI_VERSION'] = pkg.version || 'unknown';
+  } catch {
+    // The CLI has its own version fallback when package metadata is unavailable.
+  }
+}
+
 if (isTopLevelVersion) {
   try {
     const { readFileSync } = await import('node:fs');

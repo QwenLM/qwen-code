@@ -47,7 +47,6 @@ import type { CommandModule } from 'yargs';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
-import { getCliVersion } from '../../utils/version.js';
 import { ghWithInput, setGhHost } from './lib/gh.js';
 import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
 import { parseReceiptIds } from './lib/receipt.js';
@@ -121,6 +120,26 @@ interface ReviewPayload {
   /** Refused if present. The caller was trying to author the verdict. */
   event?: unknown;
   body?: unknown;
+}
+
+const REVIEW_FOOTER_RE =
+  /(?:\s*_— [^\n]* via Qwen Code \/review(?: \(v[^\n)]*\))?_\s*)+$/;
+
+function normalizeInlineComments(
+  comments: ReviewComment[],
+  modelId: unknown,
+  cliVersion: string,
+): ReviewComment[] {
+  if (typeof modelId !== 'string' || modelId.trim() === '') return comments;
+  const footer = `_— ${modelId} via Qwen Code /review (v${cliVersion})_`;
+  return comments.map((comment) =>
+    typeof comment.body === 'string'
+      ? {
+          ...comment,
+          body: `${comment.body.replace(REVIEW_FOOTER_RE, '')}\n\n${footer}`,
+        }
+      : comment,
+  );
 }
 
 // The severity prefixes and the counting live in `lib/inline-counts.ts`,
@@ -341,7 +360,10 @@ function isRepo(repo: string): boolean {
   );
 }
 
-export function runSubmit(args: SubmitArgs, cliVersion = 'unknown'): void {
+export function runSubmit(
+  args: SubmitArgs,
+  cliVersion = process.env['CLI_VERSION'] || 'unknown',
+): void {
   setGhHost(args.host);
 
   // The repo goes straight into the API path. A malformed value does not fail
@@ -399,6 +421,15 @@ export function runSubmit(args: SubmitArgs, cliVersion = 'unknown'): void {
         structural.map((p) => `  - ${p}`).join('\n'),
     );
   }
+
+  payload = {
+    ...payload,
+    comments: normalizeInlineComments(
+      payload.comments ?? [],
+      payload.state?.modelId,
+      cliVersion,
+    ),
+  };
 
   // The verdict, computed here. It was never in the payload.
   let event: string;
@@ -548,7 +579,7 @@ export const submitCommand: CommandModule = {
         default: false,
         describe: 'Check authorisation and payload consistency, then stop.',
       }),
-  handler: async (argv) => {
-    runSubmit(argv as unknown as SubmitArgs, await getCliVersion());
+  handler: (argv) => {
+    runSubmit(argv as unknown as SubmitArgs);
   },
 };

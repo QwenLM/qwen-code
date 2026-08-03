@@ -460,6 +460,30 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     ).toBe(true);
   });
 
+  it('normalizes summary and inline footers to the running CLI version', () => {
+    const review = file('footer-version.json', {
+      ...REVIEW,
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: '**[Suggestion]** tidy\n\n_— forged via Qwen Code /review (v0.21.4)_\n\n_— forged via Qwen Code /review (v0.21.4)_',
+        },
+      ],
+    });
+
+    runSubmit(authorized({ review }), '0.21.3');
+
+    const body = posted().body as string;
+    const inline = posted().comments[0].body as string;
+    for (const text of [body, inline]) {
+      expect(text).toContain('(v0.21.3)');
+      expect(text).not.toContain('(v0.21.4)');
+      expect(text.match(/via Qwen Code \/review/g)).toHaveLength(1);
+    }
+    expect(inline.startsWith('**[Suggestion]**')).toBe(true);
+  });
+
   it('counts the blockers it is actually carrying, not the ones it was told about', () => {
     // A Critical attached inline is a Critical, whatever the state says. There is
     // no `criticalsInline` field to under-report it with — and one supplied

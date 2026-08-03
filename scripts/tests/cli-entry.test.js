@@ -73,6 +73,30 @@ describe('scripts/cli-entry.js production entry', () => {
     }
   });
 
+  it('preserves the startup version in child review commands', async () => {
+    const inherited = process.env.CLI_VERSION;
+    process.env.CLI_VERSION = '0.21.3';
+    try {
+      await import('../cli-entry.js?stamps-version');
+      expect(process.env.CLI_VERSION).toBe('0.21.3');
+    } finally {
+      if (inherited === undefined) delete process.env.CLI_VERSION;
+      else process.env.CLI_VERSION = inherited;
+    }
+  });
+
+  it('initializes the version for a fresh CLI process', async () => {
+    const inherited = process.env.CLI_VERSION;
+    delete process.env.CLI_VERSION;
+    try {
+      await import('../cli-entry.js?initializes-version');
+      expect(process.env.CLI_VERSION).toBe('0.0.0-test');
+    } finally {
+      if (inherited === undefined) delete process.env.CLI_VERSION;
+      else process.env.CLI_VERSION = inherited;
+    }
+  });
+
   it('prefers the standalone launcher shim, which carries the bundled Node', async () => {
     // The standalone package launches this file through `bin/qwen`, a shim that
     // selects the BUNDLED Node — the host may have none — and announces itself
