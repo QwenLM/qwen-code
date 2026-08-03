@@ -29,7 +29,6 @@ const {
   getToolHeaderKind,
   hasActiveTool,
   hasExpandableContent,
-  isActiveToolStatus,
   isWebFetchToolName,
   languageForPath,
   shouldAutoExpand,
@@ -139,14 +138,6 @@ const zhT = (key: string, values?: Record<string, string | number>): string => {
 };
 
 describe('tool group summary logic', () => {
-  it('detects active tool statuses', () => {
-    expect(isActiveToolStatus('pending')).toBe(true);
-    expect(isActiveToolStatus('in_progress')).toBe(true);
-    expect(isActiveToolStatus('running')).toBe(true);
-    expect(isActiveToolStatus('completed')).toBe(false);
-    expect(isActiveToolStatus('failed')).toBe(false);
-  });
-
   it('uses the active tool in running summaries', () => {
     const tools = [
       makeTool({ callId: 'done', status: 'completed' }),

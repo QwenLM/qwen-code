@@ -69,8 +69,6 @@ import {
 import flashStyles from '../MessageLocateFlash.module.css';
 import styles from './tools/ToolChrome.module.css';
 
-export { isActiveToolStatus } from './toolFormatting';
-
 interface ToolGroupProps {
   tools: ACPToolCall[];
   pendingApproval?: PermissionRequest | null;

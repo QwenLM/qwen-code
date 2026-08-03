@@ -145,27 +145,92 @@ describe('computeAgentsTimeline', () => {
 });
 
 describe('ParallelAgentsGroup timeline rendering', () => {
-  it('shows live progress while a background agent is pending', () => {
+  it('shows live progress while background agents are pending', () => {
     vi.useFakeTimers();
     vi.setSystemTime(10_000);
     try {
-      const container = renderExpandedGroup([
+      const agents = [
         agent({ callId: 'done', startTime: 1_000, endTime: 5_000 }),
-        agent({ callId: 'pending', status: 'pending', startTime: 2_000 }),
-      ]);
+        agent({
+          callId: 'pending-early',
+          status: 'pending',
+          startTime: 2_000,
+        }),
+        agent({
+          callId: 'pending-late',
+          status: 'pending',
+          startTime: 4_000,
+        }),
+      ];
+      const container = renderExpandedGroup(agents);
 
-      expect(container.textContent).toContain('Parallel agents 8s·1/2 done');
-      const pendingRow = computeAgentsTimeline(
-        [
-          agent({ callId: 'done', startTime: 1_000, endTime: 5_000 }),
-          agent({ callId: 'pending', status: 'pending', startTime: 2_000 }),
-        ],
-        10_000,
-      )?.rows.get('pending');
-      expect(pendingRow?.running).toBe(true);
-      expect(
-        (pendingRow?.leftPct ?? 0) + (pendingRow?.widthPct ?? 0),
-      ).toBeCloseTo(100);
+      // The header clock anchors at the earliest ACTIVE agent's start (2s),
+      // not the latest (4s) nor mount time, and both pending bars reach now.
+      expect(container.textContent).toContain('Parallel agents 8s·1/3 done');
+      const timeline = computeAgentsTimeline(agents, 10_000);
+      for (const callId of ['pending-early', 'pending-late']) {
+        const row = timeline?.rows.get(callId);
+        expect(row?.running).toBe(true);
+        expect((row?.leftPct ?? 0) + (row?.widthPct ?? 0)).toBeCloseTo(100);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the header clock monotonic when the earliest agent finishes', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(150_000);
+    try {
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      const early = agent({
+        callId: 'early',
+        status: 'pending',
+        startTime: 0,
+      });
+      const late = agent({
+        callId: 'late',
+        status: 'pending',
+        startTime: 100_000,
+      });
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <ParallelAgentsGroup agents={[early, late]} />
+          </I18nProvider>,
+        );
+      });
+      mounted.push({ root, container });
+      // A live tick surfaces the anchored elapsed time.
+      act(() => {
+        vi.advanceTimersByTime(1_000);
+      });
+      expect(container.textContent).toContain(
+        'Parallel agents 2m 31s·0/2 done',
+      );
+
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <ParallelAgentsGroup
+              agents={[
+                { ...early, status: 'completed', endTime: 151_000 },
+                late,
+              ]}
+            />
+          </I18nProvider>,
+        );
+      });
+      act(() => {
+        vi.advanceTimersByTime(1_000);
+      });
+      // The earliest agent finishing must not rewind the header clock to the
+      // later sibling's start time.
+      expect(container.textContent).toContain(
+        'Parallel agents 2m 32s·1/2 done',
+      );
     } finally {
       vi.useRealTimers();
     }

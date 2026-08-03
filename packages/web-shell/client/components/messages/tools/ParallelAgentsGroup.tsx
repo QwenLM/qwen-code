@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ACPToolCall, PermissionRequest } from '../../../adapters/types';
+import { hasActiveAgents } from '../../../adapters/toolClassification';
 import { useI18n } from '../../../i18n';
 import { useSubagentDetails } from '../../../subagentDetailsContext';
 import {
@@ -169,7 +170,7 @@ export function ParallelAgentsGroup({
   const [now, setNow] = useState(() => Date.now());
   const liveStartedAtRef = useRef(Date.now());
 
-  const hasActive = agents.some((agent) => isActiveToolStatus(agent.status));
+  const hasActive = hasActiveAgents(agents);
   const activeStartedAt = agents.reduce<number | undefined>(
     (earliest, agent) => {
       if (
@@ -185,10 +186,15 @@ export function ParallelAgentsGroup({
     undefined,
   );
 
+  const wasActiveRef = useRef(false);
   useEffect(() => {
-    if (!hasActive) return;
-    liveStartedAtRef.current = activeStartedAt ?? Date.now();
-    setNow(Date.now());
+    // Latch the anchor on the false->true edge: re-anchoring while agents
+    // finish would rewind the header clock to a later start time.
+    if (hasActive && !wasActiveRef.current) {
+      liveStartedAtRef.current = activeStartedAt ?? Date.now();
+      setNow(Date.now());
+    }
+    wasActiveRef.current = hasActive;
   }, [activeStartedAt, hasActive]);
 
   useEffect(() => {

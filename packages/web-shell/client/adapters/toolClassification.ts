@@ -15,6 +15,10 @@ export function isActiveToolStatus(
   );
 }
 
+export function hasActiveAgents(agents: readonly ACPToolCall[]): boolean {
+  return agents.some((agent) => isActiveToolStatus(agent.status));
+}
+
 export function isTaskExecutionRaw(raw: unknown): boolean {
   return getRecord(raw)?.['type'] === 'task_execution';
 }

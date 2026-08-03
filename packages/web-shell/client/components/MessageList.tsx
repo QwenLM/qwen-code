@@ -22,6 +22,7 @@ import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import type { Message, ACPToolCall, TurnCollapseHead } from '../adapters/types';
 import type { PermissionRequest } from '../adapters/types';
 import {
+  hasActiveAgents,
   isBackgroundSubAgentToolCall,
   isSubAgentToolCall,
 } from '../adapters/toolClassification';
@@ -1314,7 +1315,7 @@ function turnHasActiveAgent(
   for (let i = start; i <= end; i++) {
     const item = items[i];
     if (item.type === 'parallel_agents') {
-      if (item.agents.some((agent) => isActiveToolStatus(agent.status))) {
+      if (hasActiveAgents(item.agents)) {
         return true;
       }
     } else if (item.type === 'message' && item.message.role === 'tool_group') {
