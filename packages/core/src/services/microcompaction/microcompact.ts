@@ -387,6 +387,7 @@ interface SizeClearPlan {
   toolResultCharsAfter: number;
   pendingToolResultChars: number;
   toolResultsTotalCharsThreshold: number;
+  toolResultsLowWatermark: number;
 }
 
 function planSizeBasedClearing(
@@ -400,6 +401,12 @@ function planSizeBasedClearing(
   if (!Number.isFinite(threshold) || threshold < 0) {
     return null;
   }
+  // Clear down to half the threshold, not just below it: stopping at the
+  // threshold leaves the total riding the limit, so every subsequent turn
+  // re-triggers and rewrites one more old result, breaking the provider
+  // prompt-cache prefix on every request. The watermark is a best-effort
+  // target — protected results may keep the total above it.
+  const lowWatermark = Math.floor(threshold / 2);
 
   const pending = normalizePendingContent(pendingContent);
   const virtualHistory =
@@ -427,11 +434,23 @@ function planSizeBasedClearing(
   const compactableToolRefs = tool.filter(
     (ref) => !preservedToolRefs.has(refKey(ref)),
   );
-  const keepToolRefs = buildKeepRefs(compactableToolRefs, keepRecent);
+  // keepRecent protects the most-recent *committed* results only — pending
+  // refs must not consume protection slots (a batch of keepRecent+ pending
+  // results would leave zero history protected). Pending refs still join
+  // the set so kept-path resolution treats their file reads as live.
+  const keepToolRefs = new Set([
+    ...buildKeepRefs(
+      compactableToolRefs.filter((ref) => ref.contentIndex < history.length),
+      keepRecent,
+    ),
+    ...compactableToolRefs
+      .filter((ref) => ref.contentIndex >= history.length)
+      .map(refKey),
+  ]);
   const clearRefs: PartRef[] = [];
   let remainingChars = totalChars;
   for (const ref of compactableToolRefs) {
-    if (remainingChars <= threshold) break;
+    if (remainingChars <= lowWatermark) break;
 
     const key = refKey(ref);
     const chars = charsByRef.get(key) ?? 0;
@@ -455,6 +474,7 @@ function planSizeBasedClearing(
     toolResultCharsAfter: remainingChars - pendingChars,
     pendingToolResultChars: pendingChars,
     toolResultsTotalCharsThreshold: threshold,
+    toolResultsLowWatermark: lowWatermark,
   };
 }
 
@@ -477,6 +497,7 @@ export interface MicrocompactMeta {
   toolResultCharsAfter?: number;
   pendingToolResultChars?: number;
   toolResultsTotalCharsThreshold?: number;
+  toolResultsLowWatermark?: number;
   /** Count of `tool`-kind results cleared (compactable tool outputs). */
   toolsCleared: number;
   /** Count of media parts cleared (`media` top-level + `nested-media` under non-compactable tools). */
@@ -532,6 +553,7 @@ export function microcompactHistory(
   let toolResultCharsAfter: number | undefined;
   let pendingToolResultChars: number | undefined;
   let toolResultsTotalCharsThreshold: number | undefined;
+  let toolResultsLowWatermark: number | undefined;
   let keptPathHistory = history;
   let keptPathRefs: PartRef[] = [];
 
@@ -588,6 +610,7 @@ export function microcompactHistory(
     toolResultCharsAfter = sizePlan.toolResultCharsAfter;
     pendingToolResultChars = sizePlan.pendingToolResultChars;
     toolResultsTotalCharsThreshold = sizePlan.toolResultsTotalCharsThreshold;
+    toolResultsLowWatermark = sizePlan.toolResultsLowWatermark;
   }
 
   if (clearRefs.length === 0 && triggerReason !== 'size') {
@@ -714,6 +737,7 @@ export function microcompactHistory(
       toolResultCharsAfter,
       pendingToolResultChars,
       toolResultsTotalCharsThreshold,
+      toolResultsLowWatermark,
       toolsCleared,
       mediaCleared,
       toolsKept,

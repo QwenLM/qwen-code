@@ -3254,14 +3254,17 @@ describe('Gemini Client (client.ts)', () => {
         compacted[1]!.parts![0]!.functionResponse!.response!['output'],
       ).toBe('[Old tool result content cleared]');
       expect(clear).not.toHaveBeenCalled();
-      expect(markReadEvictedFromHistory).toHaveBeenCalledTimes(1);
+      // Three reads are blanked while clearing down to the 250K watermark.
+      expect(markReadEvictedFromHistory).toHaveBeenCalledTimes(3);
       expect(mockClientDebugLogger.info).toHaveBeenCalledWith(
         expect.stringContaining(
           '[TOOL-RESULT MC] tool result chars 530000 > 500000',
         ),
       );
       expect(mockClientDebugLogger.info).toHaveBeenCalledWith(
-        expect.stringContaining('history now 360000 (+50000 pending)'),
+        expect.stringContaining(
+          'history now 120000 (+50000 pending), target 250000',
+        ),
       );
     });
 
