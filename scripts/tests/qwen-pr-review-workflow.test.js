@@ -9,10 +9,13 @@ import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -408,11 +411,31 @@ function runCaptureToolsStep({ stubs = {} } = {}) {
       write(name, body);
     }
     const { run, env } = captureToolsSource();
-    // Drop host directories that ship a tmux: whether the step's apt branch
-    // runs must depend on the scenario, not on the machine hosting the suite.
+    // Hide the host's tmux so whether the step's apt branch runs depends on
+    // the scenario, not on the machine hosting the suite. Blank ONLY the tmux
+    // entry, never its directory: on GitHub-hosted ubuntu runners tmux lives
+    // in /usr/bin, and dropping the whole directory takes bash, grep, and tar
+    // down with it — every test below then died on ENOENT in CI while passing
+    // on tmux-less dev machines.
+    let shadowSeq = 0;
     const hostPath = (process.env.PATH ?? '')
       .split(':')
-      .filter((d) => d && !existsSync(join(d, 'tmux')))
+      .map((d) => {
+        if (!d || !existsSync(join(d, 'tmux'))) return d;
+        const shadow = join(dir, `shadow-${shadowSeq++}`);
+        mkdirSync(shadow);
+        for (const name of readdirSync(d)) {
+          if (name === 'tmux') continue;
+          try {
+            symlinkSync(join(d, name), join(shadow, name));
+          } catch {
+            // An unreadable or racing entry stays unresolved, same as a host
+            // PATH entry the harness could never see.
+          }
+        }
+        return shadow;
+      })
+      .filter(Boolean)
       .join(':');
     const harness = [
       `export HOME="${homeDir}"`,
