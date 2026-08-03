@@ -170,12 +170,26 @@ export function ParallelAgentsGroup({
   const liveStartedAtRef = useRef(Date.now());
 
   const hasActive = agents.some((agent) => isActiveToolStatus(agent.status));
+  const activeStartedAt = agents.reduce<number | undefined>(
+    (earliest, agent) => {
+      if (
+        !isActiveToolStatus(agent.status) ||
+        typeof agent.startTime !== 'number'
+      ) {
+        return earliest;
+      }
+      return earliest === undefined
+        ? agent.startTime
+        : Math.min(earliest, agent.startTime);
+    },
+    undefined,
+  );
 
   useEffect(() => {
     if (!hasActive) return;
-    liveStartedAtRef.current = Date.now();
+    liveStartedAtRef.current = activeStartedAt ?? Date.now();
     setNow(Date.now());
-  }, [hasActive]);
+  }, [activeStartedAt, hasActive]);
 
   useEffect(() => {
     if (!hasActive) return;

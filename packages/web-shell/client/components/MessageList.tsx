@@ -1451,10 +1451,11 @@ export function applyTurnCollapse(
     }
 
     // A turn with foldable steps gets a chevron and defaults to expanded while
-    // streaming, when the turn errored, or when there is no final answer;
-    // otherwise it collapses once complete. A step-less turn (e.g. a plain "hi"
-    // reply) has nothing to fold, so it stays expanded and shows a chevron-less
-    // metrics line. An explicit user toggle always wins.
+    // streaming, while a subagent is still active, when the turn errored, or
+    // when there is no final answer; otherwise it collapses once complete. A
+    // step-less turn (e.g. a plain "hi" reply) has nothing to fold, so it stays
+    // expanded and shows a chevron-less metrics line. An explicit user toggle
+    // always wins.
     const shouldStayOpen =
       isActiveTurn || hasActiveAgent || hasTurnError || answerIdx < 0;
     const expanded =
