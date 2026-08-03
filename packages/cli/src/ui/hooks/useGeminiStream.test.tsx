@@ -4481,6 +4481,7 @@ describe('useGeminiStream', () => {
         resultDisplay: 'first',
         error: undefined,
         errorType: undefined,
+        executionStatus: 'success',
         persistedOutputFiles: [],
       },
       tool: {
@@ -4525,6 +4526,9 @@ describe('useGeminiStream', () => {
     expect(recordToolResult.mock.calls.flatMap((call) => call[0])).toEqual(
       toolResultParts,
     );
+    expect(
+      recordToolResult.mock.calls.map((call) => call[1].executionStatus),
+    ).toEqual(expect.arrayContaining(['success', 'not_started']));
     expect(client.recordCompletedToolCall).toHaveBeenCalledTimes(1);
   });
 

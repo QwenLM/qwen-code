@@ -7,6 +7,8 @@
 export const GOAL_STATE_VERSION = 2 as const;
 export const GOAL_PROPOSAL_REASON_MAX_CHARACTERS = 8_000;
 export const GOAL_PROPOSAL_REASON_MAX_BYTES = 16_000;
+export const GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON =
+  'The current Goal revision exceeded the bounded evidence catalog. Automatic retries cannot recover. Edit or replace the Goal before resuming it.';
 
 export const PAUSED_GOAL_SYSTEM_REMINDER =
   '<system-reminder>\nThe Goal is paused. Do not continue its objective unless the user resumes it. Treat this message as ordinary conversation.\n</system-reminder>';
