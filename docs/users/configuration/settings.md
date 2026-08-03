@@ -553,6 +553,15 @@ LSP server configuration is done through `.lsp.json` files in your project root 
 | `security.auth.apiKey`         | string  | **Deprecated.** API key for OpenAI-compatible authentication. Migrate to `modelProviders` with `envKey` instead — see [Model Providers](./model-providers). | `undefined` |
 | `security.auth.baseUrl`        | string  | **Deprecated.** Base URL for the OpenAI-compatible API. Migrate to `modelProviders` instead — see [Model Providers](./model-providers).                     | `undefined` |
 
+#### serve
+
+Persistent settings for [`qwen serve`](../qwen-serve). Changes require restarting the daemon. Non-positive or non-integer concurrency limits produce a warning and fall back to their built-in defaults.
+
+| Setting                                   | Type    | Description                                                                                                                     | Default |
+| ----------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `serve.maxConcurrentSubSessionsPerCaller` | integer | Maximum number of in-flight sub-sessions that one caller session can create through `create_sub_session`. Must be at least `1`. | `16`    |
+| `serve.maxConcurrentSubSessionsTotal`     | integer | Maximum number of in-flight sub-sessions across all callers in one workspace. Must be an integer from `1` through `1024`.       | `24`    |
+
 #### advanced
 
 | Setting                        | Type             | Description                                                                                                                                                                                                                                                                                                                              | Default                  |
