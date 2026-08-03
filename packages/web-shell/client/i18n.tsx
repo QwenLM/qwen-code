@@ -1901,16 +1901,20 @@ const EN: Messages = {
   'mode.name.auto': 'auto',
   'mode.name.yolo': 'yolo',
   'mode.label.plan': 'Plan',
+  'mode.label.planReview': 'Plan & Review',
   'mode.label.default': 'Ask Approval',
   'mode.label.auto-edit': 'Auto Edit',
   'mode.label.auto': 'Classifier Approval',
   'mode.label.yolo': 'Full Access',
   'mode.listLabel.plan': 'Plan (plan)',
+  'mode.listLabel.planReview': 'Plan & Review (plan)',
   'mode.listLabel.default': 'Ask Approval (default)',
   'mode.listLabel.auto-edit': 'Auto Edit (auto-edit)',
   'mode.listLabel.auto': 'Classifier Approval (auto)',
   'mode.listLabel.yolo': 'Full Access (yolo)',
   'mode.desc.plan': 'Analyze only, do not modify files or execute commands',
+  'mode.desc.planReview':
+    'Use Plan mode and review its workflow when one is available',
   'mode.desc.default':
     'Ask before running commands, editing files, or accessing external resources',
   'mode.desc.auto-edit':
@@ -2407,7 +2411,7 @@ const EN: Messages = {
   'channels.loadError.title': 'Channels could not be loaded',
   'channels.empty.title': 'No supported channels configured',
   'channels.empty.description':
-    'Configure DingTalk, WeCom, or Feishu to receive messages in this workspace.',
+    'Configure DingTalk, WeCom, Feishu, GitHub, or GitLab to receive messages in this workspace.',
   'channels.runtimeError': 'Channel runtime error',
   'channels.action.back': 'Back',
   'channels.action.start': 'Start',
@@ -2443,6 +2447,62 @@ const EN: Messages = {
   'channels.editor.field.wecom.wsUrl': 'WebSocket URL',
   'channels.editor.field.feishu.clientId': 'App ID',
   'channels.editor.field.feishu.clientSecret': 'App Secret',
+  'channels.editor.field.github.token': 'Personal Access Token',
+  'channels.editor.field.github.token.description':
+    'Classic PAT with "notifications" scope',
+  'channels.editor.field.github.baseUrl': 'API Base URL',
+  'channels.editor.field.github.baseUrl.description':
+    'GitHub Enterprise API root (e.g. https://ghe.example.com/api/v3). Leave empty for github.com',
+  'channels.editor.field.github.groupPolicy': 'Group Policy',
+  'channels.editor.field.github.groupPolicy.description':
+    'Must be "Open" for notifications to flow',
+  'channels.editor.field.github.senderPolicy': 'Sender Policy',
+  'channels.editor.field.github.senderPolicy.description':
+    'Use "Allowlist" with allowed users on public repos',
+  'channels.editor.field.github.allowedUsers':
+    'Allowed Users (comma-separated)',
+  'channels.editor.field.github.allowedUsers.description':
+    'GitHub usernames, used by Allowlist and Pairing policies',
+  'channels.editor.field.github.reasonFilter': 'Reason Filter',
+  'channels.editor.field.github.reasonFilter.description':
+    'Optional. Comma-separated notification reasons to process. Valid values: mention, review_requested, assign, author, comment, ci_activity, manual, state_change, subscribed, team_mention, security_alert, approval_requested, invitation, member_feature_requested, security_advisory_credit. Leave empty to process all.',
+  'channels.editor.field.gitlab.token': 'Personal Access Token',
+  'channels.editor.field.gitlab.token.description':
+    'PAT with "read_api" + "api" scopes',
+  'channels.editor.field.gitlab.baseUrl': 'Instance URL',
+  'channels.editor.field.gitlab.baseUrl.description':
+    'Self-hosted instance URL (e.g. https://gitlab.example.com). Leave empty for gitlab.com',
+  'channels.editor.field.gitlab.groupPolicy': 'Group Policy',
+  'channels.editor.field.gitlab.groupPolicy.description':
+    'Must be "Open" or "Allowlist" for todos to be processed',
+  'channels.editor.field.gitlab.senderPolicy': 'Sender Policy',
+  'channels.editor.field.gitlab.senderPolicy.description':
+    'Use "Allowlist" with allowed users on public projects',
+  'channels.editor.field.gitlab.allowedUsers':
+    'Allowed Users (comma-separated)',
+  'channels.editor.field.gitlab.allowedUsers.description':
+    'GitLab usernames, used by Allowlist and Pairing policies',
+  'channels.editor.field.gitlab.action_prompt_template': 'Action Templates',
+  'channels.editor.field.gitlab.action_prompt_template.description':
+    'Only actions with a template are processed; others are skipped. Template variables: %project%, %project_url%, %author%, %target_type%, %iid%, %title%, %description%, %todo_id%. Use %% for a literal %. Example for "mentioned": Project: %project% | Author: %author% | Title: %title%',
+  'channels.editor.field.gitlab.action_prompt_template.option.mentioned':
+    'Mentioned — @bot in a comment or description',
+  'channels.editor.field.gitlab.action_prompt_template.option.directly_addressed':
+    'Directly Addressed — comment starts with @bot',
+  'channels.editor.field.gitlab.action_prompt_template.option.assigned':
+    'Assigned — bot assigned to an issue or MR',
+  'channels.editor.field.gitlab.action_prompt_template.option.review_requested':
+    'Review Requested — bot requested as MR reviewer',
+  'channels.editor.field.gitlab.action_prompt_template.option.approval_required':
+    'Approval Required — MR needs bot approval',
+  'channels.editor.field.gitlab.action_prompt_template.option.marked':
+    "Marked — someone stars bot's comment/issue/MR",
+  'channels.editor.field.gitlab.action_prompt_template.option.build_failed':
+    'Build Failed — CI/CD pipeline fails on bot branch/MR',
+  'channels.editor.field.gitlab.action_prompt_template.option.unmergeable':
+    'Unmergeable — MR becomes unmergeable (conflicts)',
+  'channels.editor.field.gitlab.action_prompt_template.option.merge_train_removed':
+    'Merge Train Removed — MR removed from merge train',
   'channels.editor.secret.environment': 'Stored in environment',
   'channels.editor.secret.stored': 'Stored securely',
   'channels.editor.secret.preserve': 'Keep',
@@ -2505,6 +2565,8 @@ const EN: Messages = {
   'channels.editor.validation.duplicate':
     'A Channel with this name already exists.',
   'channels.editor.validation.invalidName': 'Choose a different instance name.',
+  'channels.editor.validation.invalidOption':
+    "Remove values that aren't in the allowed list.",
   'channels.editor.validation.number': 'Enter a valid number.',
   'channels.editor.validation.policy': 'Choose an access policy.',
   'channels.editor.saveError': 'Changes were not saved',
@@ -4396,16 +4458,19 @@ const ZH: Messages = {
   'mode.name.auto': 'auto',
   'mode.name.yolo': 'yolo',
   'mode.label.plan': '计划',
+  'mode.label.planReview': '计划并审阅',
   'mode.label.default': '请求批准',
   'mode.label.auto-edit': '自动编辑',
   'mode.label.auto': '智能审批',
   'mode.label.yolo': '完全访问权限',
   'mode.listLabel.plan': '计划（plan）',
+  'mode.listLabel.planReview': '计划并审阅（plan）',
   'mode.listLabel.default': '请求批准（default）',
   'mode.listLabel.auto-edit': '自动编辑（auto-edit）',
   'mode.listLabel.auto': '智能审批（auto）',
   'mode.listLabel.yolo': '完全访问权限（yolo）',
   'mode.desc.plan': '仅分析，不修改文件或执行命令',
+  'mode.desc.planReview': '使用 Plan 模式，并在 Workflow 可用时进行审阅',
   'mode.desc.default': '执行命令、编辑文件或访问外部资源前请求确认',
   'mode.desc.auto-edit': '自动批准文件编辑，命令执行等敏感操作仍会询问',
   'mode.desc.auto': '自动评估工具风险，安全操作直接执行，风险操作再确认',
@@ -4869,7 +4934,7 @@ const ZH: Messages = {
   'channels.loadError.title': '无法加载频道',
   'channels.empty.title': '尚未配置支持的频道',
   'channels.empty.description':
-    '配置钉钉、企业微信或飞书，让当前工作区接收消息。',
+    '配置钉钉、企业微信、飞书、GitHub 或 GitLab，让当前工作区接收消息。',
   'channels.runtimeError': '频道运行时错误',
   'channels.action.back': '返回',
   'channels.action.start': '启动',
@@ -4904,6 +4969,60 @@ const ZH: Messages = {
   'channels.editor.field.wecom.wsUrl': 'WebSocket URL',
   'channels.editor.field.feishu.clientId': 'App ID',
   'channels.editor.field.feishu.clientSecret': 'App Secret',
+  'channels.editor.field.github.token': '个人访问令牌',
+  'channels.editor.field.github.token.description':
+    '需要 "notifications" 权限的经典 PAT',
+  'channels.editor.field.github.baseUrl': 'API 基础 URL',
+  'channels.editor.field.github.baseUrl.description':
+    'GitHub Enterprise API 根地址（如 https://ghe.example.com/api/v3），github.com 留空',
+  'channels.editor.field.github.groupPolicy': '群组策略',
+  'channels.editor.field.github.groupPolicy.description':
+    '必须设为 "Open" 才能接收通知',
+  'channels.editor.field.github.senderPolicy': '发送者策略',
+  'channels.editor.field.github.senderPolicy.description':
+    '公开仓库建议使用 "Allowlist" 并指定允许的用户',
+  'channels.editor.field.github.allowedUsers': '允许的用户（逗号分隔）',
+  'channels.editor.field.github.allowedUsers.description':
+    'GitHub 用户名，用于 Allowlist 和 Pairing 策略',
+  'channels.editor.field.github.reasonFilter': '通知原因过滤',
+  'channels.editor.field.github.reasonFilter.description':
+    '可选。逗号分隔的通知原因。有效值：mention、review_requested、assign、author、comment、ci_activity、manual、state_change、subscribed、team_mention、security_alert、approval_requested、invitation、member_feature_requested、security_advisory_credit。留空则处理全部。',
+  'channels.editor.field.gitlab.token': '个人访问令牌',
+  'channels.editor.field.gitlab.token.description':
+    '需要 "read_api" + "api" 权限的 PAT',
+  'channels.editor.field.gitlab.baseUrl': '实例 URL',
+  'channels.editor.field.gitlab.baseUrl.description':
+    '自托管实例地址（如 https://gitlab.example.com），gitlab.com 留空',
+  'channels.editor.field.gitlab.groupPolicy': '群组策略',
+  'channels.editor.field.gitlab.groupPolicy.description':
+    '必须设为 "Open" 或 "Allowlist" 才能处理 Todo',
+  'channels.editor.field.gitlab.senderPolicy': '发送者策略',
+  'channels.editor.field.gitlab.senderPolicy.description':
+    '公开项目建议使用 "Allowlist" 并指定允许的用户',
+  'channels.editor.field.gitlab.allowedUsers': '允许的用户（逗号分隔）',
+  'channels.editor.field.gitlab.allowedUsers.description':
+    'GitLab 用户名，用于 Allowlist 和 Pairing 策略',
+  'channels.editor.field.gitlab.action_prompt_template': '动作模板',
+  'channels.editor.field.gitlab.action_prompt_template.description':
+    '仅配置了模板的动作会被处理，其余跳过。模板变量：%project%、%project_url%、%author%、%target_type%、%iid%、%title%、%description%、%todo_id%。用 %% 表示字面 %。示例（mentioned）：Project: %project% | Author: %author% | Title: %title%',
+  'channels.editor.field.gitlab.action_prompt_template.option.mentioned':
+    '被提及 — 评论或描述中 @bot',
+  'channels.editor.field.gitlab.action_prompt_template.option.directly_addressed':
+    '直接对话 — 评论以 @bot 开头',
+  'channels.editor.field.gitlab.action_prompt_template.option.assigned':
+    '被指派 — bot 被指派到 issue 或 MR',
+  'channels.editor.field.gitlab.action_prompt_template.option.review_requested':
+    '请求审查 — bot 被请求为 MR 审查者',
+  'channels.editor.field.gitlab.action_prompt_template.option.approval_required':
+    '需要批准 — MR 需要 bot 批准',
+  'channels.editor.field.gitlab.action_prompt_template.option.marked':
+    '被标记 — 有人星标 bot 的评论/issue/MR',
+  'channels.editor.field.gitlab.action_prompt_template.option.build_failed':
+    '构建失败 — CI/CD 流水线在 bot 分支/MR 上失败',
+  'channels.editor.field.gitlab.action_prompt_template.option.unmergeable':
+    '不可合并 — MR 变为不可合并（冲突）',
+  'channels.editor.field.gitlab.action_prompt_template.option.merge_train_removed':
+    '合并队列移除 — MR 从合并队列中移除',
   'channels.editor.secret.environment': '已保存在环境变量中',
   'channels.editor.secret.stored': '已安全保存',
   'channels.editor.secret.preserve': '保留',
@@ -4962,6 +5081,7 @@ const ZH: Messages = {
     `${v?.label ?? '此字段'}为必填项。`,
   'channels.editor.validation.duplicate': '已存在同名频道。',
   'channels.editor.validation.invalidName': '请使用其他实例名称。',
+  'channels.editor.validation.invalidOption': '请移除不在允许列表中的值。',
   'channels.editor.validation.number': '请输入有效数字。',
   'channels.editor.validation.policy': '请选择准入策略。',
   'channels.editor.saveError': '未能保存更改',
@@ -5104,6 +5224,9 @@ const ZH: Messages = {
   'settings.label.experimental.enableCronTools': '启用 Cron/Loop 工具',
   'settings.description.experimental.enableCronTools':
     '启用会话内 cron/loop 工具（实验性）。启用后，模型可以用 cron_create、cron_list 和 cron_delete 创建周期性提示。也可通过 QWEN_CODE_ENABLE_CRON=1 环境变量启用。',
+  'settings.label.experimental.sessionWorkflow': 'Session Workflow 计划并审阅',
+  'settings.description.experimental.sessionWorkflow':
+    '显示 Session Workflow DAG，并将 Plan 模式展示为计划并审阅。',
   'settings.label.experimental.emitToolUseSummaries': '工具使用摘要',
   'settings.description.experimental.emitToolUseSummaries':
     '每个工具批次完成后生成一个简短的 LLM 标签。紧凑模式下会替代通用的 Tool × N 标题；完整模式下显示为工具组下方的弱化 ● <label> 行。需要配置快速模型。',

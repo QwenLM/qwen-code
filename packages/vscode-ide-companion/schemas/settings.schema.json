@@ -3318,6 +3318,11 @@
       "description": "Settings to enable experimental features.",
       "type": "object",
       "properties": {
+        "sessionWorkflow": {
+          "description": "Enable the daemon Web Shell Session Workflow DAG and present Plan mode as Plan & Review. Disabled by default and does not change ordinary Todo or execution behavior.",
+          "type": "boolean",
+          "default": false
+        },
         "cron": {
           "description": "Enable in-session cron/loop tools. When enabled, the model can create recurring prompts using cron_create, cron_list, and cron_delete tools. Can be disabled via QWEN_CODE_DISABLE_CRON=1 environment variable.",
           "type": "boolean",
