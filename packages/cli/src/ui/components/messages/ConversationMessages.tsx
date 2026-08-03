@@ -327,14 +327,16 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
         ? t('Thought briefly')
         : `${t('Thought for')} ${formatDuration(durationMs)}`;
 
-  if (!isPending && !expanded) {
-    const label = completedLabel ?? t('Thinking');
+  if (!expanded) {
+    const label = isPending
+      ? `${t('Thinking')}…${durationSuffix}`
+      : (completedLabel ?? t('Thinking'));
     const hint = clickable
       ? t('(click or {{keyHint}} to expand)', { keyHint: toggleKeyHint })
       : t('({{keyHint}} to expand)', { keyHint: toggleKeyHint });
     return (
       <Text dimColor italic>
-        {THINKING_ICON}
+        {isPending ? THINKING_ICON_PENDING : THINKING_ICON}
         {label} {hint}
       </Text>
     );
@@ -343,10 +345,9 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
   const label = isPending
     ? `${t('Thinking')}…${durationSuffix}`
     : (completedLabel ?? `${t('Thinking')}…`);
-  const collapseHint =
-    !isPending && expanded
-      ? ` ${t('({{keyHint}} to collapse)', { keyHint: toggleKeyHint })}`
-      : '';
+  const collapseHint = ` ${t('({{keyHint}} to collapse)', {
+    keyHint: toggleKeyHint,
+  })}`;
 
   return (
     <Box flexDirection="column">

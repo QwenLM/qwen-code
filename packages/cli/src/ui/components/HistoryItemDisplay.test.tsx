@@ -644,7 +644,10 @@ describe('<HistoryItemDisplay />', () => {
       button: 'left',
     });
 
-    const renderThoughtWithToggle = (toggle: (headId: number) => void) => {
+    const renderThoughtWithToggle = (
+      toggle: (headId: number) => void,
+      isPending = false,
+    ) => {
       vi.mocked(measureElementPosition).mockReturnValue({
         x: 0,
         y: 0,
@@ -663,7 +666,7 @@ describe('<HistoryItemDisplay />', () => {
           <HistoryItemDisplay
             item={thoughtItem}
             terminalWidth={100}
-            isPending={false}
+            isPending={isPending}
           />
         </ThoughtExpandedProvider>,
       );
@@ -701,6 +704,20 @@ describe('<HistoryItemDisplay />', () => {
       expect(lastFrame()).toContain(`click or ${toggleKeyHint} to expand`);
     });
 
+    it('shows the click hint while the thought is pending (streaming)', () => {
+      const { lastFrame } = renderWithProviders(
+        <VirtualViewportContext.Provider value={true}>
+          <HistoryItemDisplay
+            item={thoughtItem}
+            terminalWidth={100}
+            isPending={true}
+          />
+        </VirtualViewportContext.Provider>,
+      );
+
+      expect(lastFrame()).toContain(`click or ${toggleKeyHint} to expand`);
+    });
+
     it('hides the click hint when startup VP overrides an enabled setting', () => {
       const { lastFrame } = renderWithProviders(
         <VirtualViewportContext.Provider value={false}>
@@ -719,6 +736,39 @@ describe('<HistoryItemDisplay />', () => {
     it('toggles on a complete click', () => {
       const toggle = vi.fn();
       const handler = renderThoughtWithToggle(toggle);
+
+      handler?.(mouseEvent('left-press', 5));
+      expect(toggle).not.toHaveBeenCalled();
+      handler?.(mouseEvent('left-release', 5));
+      expect(toggle).toHaveBeenCalledWith(thoughtItem.id);
+    });
+
+    it('keeps the click handler active while the thought is pending', () => {
+      vi.mocked(useMouseEvents).mockClear();
+      vi.mocked(measureElementPosition).mockReturnValue({
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 3,
+      });
+      vi.mocked(layoutRowForEvent).mockImplementation((_node, row) => row - 1);
+      renderWithProviders(
+        <HistoryItemDisplay
+          item={thoughtItem}
+          terminalWidth={100}
+          isPending={true}
+        />,
+      );
+      const opts = vi.mocked(useMouseEvents).mock.calls.at(-1)?.[1];
+      // A streaming thought must stay clickable — the user expands it to
+      // watch the reasoning live.
+      expect(opts?.isActive).toBe(true);
+      expect(opts?.bypassVpGate ?? false).toBe(false);
+    });
+
+    it('toggles a pending thought on a complete click', () => {
+      const toggle = vi.fn();
+      const handler = renderThoughtWithToggle(toggle, true);
 
       handler?.(mouseEvent('left-press', 5));
       expect(toggle).not.toHaveBeenCalled();

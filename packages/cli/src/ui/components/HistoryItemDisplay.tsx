@@ -131,7 +131,6 @@ const ClickableThinkMessage: React.FC<{
   const clickable =
     useVirtualViewport(settings.merged.ui?.useTerminalBuffer) &&
     mouseTrackingEnabled;
-  const isActive = !isPending;
 
   useMouseEvents(
     useCallback(
@@ -173,11 +172,13 @@ const ClickableThinkMessage: React.FC<{
       },
       [onToggle, terminalHeight],
     ),
-    { isActive },
+    // Active while pending too: clicking a streaming thought expands it so the
+    // reasoning can be watched live (and collapsed again).
+    { isActive: true },
   );
 
   return (
-    <Box ref={isActive ? ref : undefined}>
+    <Box ref={ref}>
       <ThinkMessage
         text={text}
         isPending={isPending}
