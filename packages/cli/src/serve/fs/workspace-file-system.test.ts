@@ -279,7 +279,13 @@ describe('WorkspaceFileSystem - readText', () => {
     });
     expect(second.content).toBe('bb\r');
     expect(second.meta.lineEnding).toBe('crlf');
+
+    const trunc = await h.fs.readText(r, { maxBytes: 3 });
+    expect(trunc.content).toBe('aa\r');
+    expect(trunc.meta.truncated).toBe(true);
+    expect(trunc.meta.lineEnding).toBe('crlf');
   });
+
   it('pages a large log by cursor and reassembles it exactly', async () => {
     const target = path.join(h.workspace, 'cursor-page.log');
     const lines = Array.from(
