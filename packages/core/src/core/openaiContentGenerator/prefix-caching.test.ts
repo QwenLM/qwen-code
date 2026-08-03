@@ -143,4 +143,59 @@ describe('official OpenAI prompt caching', () => {
     expect(result.prompt_cache_options).toBeUndefined();
     expect(result.messages).toEqual(request.messages);
   });
+
+  it('does not rewrite regular GPT-5.6 requests', () => {
+    const request = {
+      model: 'gpt-5.6',
+      messages: [
+        { role: 'user', content: 'main request' },
+        { role: 'assistant', content: 'main response' },
+        { role: 'user', content: 'next request' },
+      ],
+    } as OpenAI.Chat.ChatCompletionCreateParams;
+
+    const result = applyOfficialOpenAIPromptCaching(
+      request,
+      'session-123',
+      false,
+    ) as OpenAI.Chat.ChatCompletionCreateParams & {
+      prompt_cache_options?: unknown;
+    };
+
+    expect(result.prompt_cache_key).toBe('qwen-code:session-123');
+    expect(result.prompt_cache_options).toBeUndefined();
+    expect(result.messages).toEqual(request.messages);
+  });
+
+  it('marks the last part of array content at a reusable boundary', () => {
+    const request = {
+      model: 'gpt-5.6',
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'first part' },
+            { type: 'text', text: 'last part' },
+          ],
+        },
+        { role: 'assistant', content: 'main response' },
+        { role: 'user', content: 'compression directive' },
+      ],
+    } as OpenAI.Chat.ChatCompletionCreateParams;
+
+    const result = applyOfficialOpenAIPromptCaching(
+      request,
+      'session-123',
+      true,
+    );
+
+    expect(result.messages[0]?.content).toEqual([
+      { type: 'text', text: 'first part' },
+      {
+        type: 'text',
+        text: 'last part',
+        prompt_cache_breakpoint: { mode: 'explicit' },
+      },
+    ]);
+  });
 });

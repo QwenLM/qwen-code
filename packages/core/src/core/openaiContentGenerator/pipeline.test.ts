@@ -4280,6 +4280,49 @@ describe('ContentGenerationPipeline', () => {
       expect(sent['prompt_cache_options']).toBeUndefined();
     });
 
+    it('does not add official OpenAI cache fields to third-party compatible endpoints', async () => {
+      mockContentGeneratorConfig.baseUrl = 'https://api.deepseek.com/v1';
+      mockContentGeneratorConfig.model = 'gpt-5.6';
+      mockCliConfig = {
+        getSessionId: vi.fn().mockReturnValue('session-123'),
+      } as unknown as Config;
+      mockConfig.cliConfig = mockCliConfig;
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      const messages = [
+        { role: 'system', content: 'system' },
+        { role: 'user', content: 'main request' },
+        { role: 'assistant', content: 'main response' },
+        { role: 'user', content: 'compression directive' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+        messages,
+      );
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'test',
+        choices: [{ message: { content: 'response' } }],
+      });
+
+      await pipeline.execute(
+        {
+          model: 'gpt-5.6',
+          contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+          promptCacheSharing: true,
+        } as GenerateContentParameters & { promptCacheSharing: boolean },
+        'prompt-id',
+      );
+
+      const sent = (mockClient.chat.completions.create as Mock).mock
+        .calls[0]?.[0] as OpenAI.Chat.ChatCompletionCreateParams & {
+        prompt_cache_options?: unknown;
+      };
+      expect(sent.prompt_cache_key).toBeUndefined();
+      expect(sent.prompt_cache_options).toBeUndefined();
+      expect(sent.messages).toEqual(messages);
+    });
+
     it('marks the stable official OpenAI prefix for GPT-5.6 compression', async () => {
       mockContentGeneratorConfig.baseUrl = 'https://api.openai.com/v1';
       mockContentGeneratorConfig.model = 'gpt-5.6';
