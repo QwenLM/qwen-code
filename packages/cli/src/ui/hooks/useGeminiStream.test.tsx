@@ -359,6 +359,7 @@ describe('useGeminiStream', () => {
     onCancelSubmit: Parameters<typeof useGeminiStream>[15] = () => {},
     logger?: Parameters<typeof useGeminiStream>[20],
     goalQueueRef?: Parameters<typeof useGeminiStream>[24],
+    settlePendingThoughtExpansion?: Parameters<typeof useGeminiStream>[25],
   ) => {
     let currentToolCalls = initialToolCalls;
     const setToolCalls = (newToolCalls: TrackedToolCall[]) => {
@@ -418,6 +419,7 @@ describe('useGeminiStream', () => {
           undefined, // terminalWidthRef
           undefined, // midTurnRestoreRef
           goalQueueRef,
+          settlePendingThoughtExpansion,
         );
       },
       {
@@ -10898,6 +10900,158 @@ describe('useGeminiStream', () => {
         (item) => item.type === 'error',
       );
       expect(errorItem).toBeUndefined();
+    });
+  });
+
+  describe('Pending thought expansion settlement', () => {
+    // The pending->committed expansion migration keeps a thought the user
+    // clicked open during streaming expanded after it commits. These tests
+    // pin the settle calls useGeminiStream owes AppContainer's reducer.
+    const findAddedItemId = (type: HistoryItem['type']): number => {
+      const index = mockAddItem.mock.calls.findIndex(
+        ([item]) => (item as HistoryItem).type === type,
+      );
+      expect(index).toBeGreaterThanOrEqual(0);
+      return mockAddItem.mock.results[index]?.value as number;
+    };
+
+    const renderWithSettleSpy = (settle: (id: number | null) => void) =>
+      renderTestHook(
+        [],
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        settle,
+      );
+
+    it('settles null when a fresh thought starts', async () => {
+      const settle = vi.fn();
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'thinking' },
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderWithSettleSpy(settle);
+
+      await act(async () => {
+        await result.current.submitQuery('test query');
+      });
+
+      // A fresh thought always settles null first, dropping any stale
+      // provisional key a previous turn may have left behind.
+      expect(settle).toHaveBeenNthCalledWith(1, null);
+    });
+
+    it('settles the committed head id when the thought commits', async () => {
+      const settle = vi.fn();
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'thinking' },
+          };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'the answer',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderWithSettleSpy(settle);
+
+      await act(async () => {
+        await result.current.submitQuery('test query');
+      });
+
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'gemini_thought' }),
+          expect.any(Number),
+        );
+      });
+
+      const committedId = findAddedItemId('gemini_thought');
+      expect(settle).toHaveBeenNthCalledWith(1, null);
+      expect(settle).toHaveBeenNthCalledWith(2, committedId);
+      expect(settle).toHaveBeenCalledTimes(2);
+    });
+
+    it('settles the split head id on an oversized thought split, never for content tails', async () => {
+      vi.useFakeTimers();
+
+      const settle = vi.fn();
+      const splitLimit = 16_384;
+      const tailLength = 123;
+      const longThought = 'a'.repeat(splitLimit * 2 + tailLength);
+      vi.mocked(findLastSafeSplitPoint).mockImplementation(
+        (s: string, max?: number) =>
+          max !== undefined && s.length > max ? max : s.length,
+      );
+
+      let releaseStream!: () => void;
+      const holdStream = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { description: longThought },
+          };
+          await holdStream;
+        })(),
+      );
+
+      const { result } = renderWithSettleSpy(settle);
+
+      act(() => {
+        void result.current.submitQuery('test query');
+      });
+
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        // Flush the macrotask yield (setImmediate) added after addItem()
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      await act(async () => {
+        vi.advanceTimersByTime(60);
+      });
+
+      // The head chunk commits as `gemini_thought` and carries the pending
+      // expansion over to its committed id.
+      const headId = findAddedItemId('gemini_thought');
+      expect(settle).toHaveBeenNthCalledWith(1, null);
+      expect(settle).toHaveBeenNthCalledWith(2, headId);
+      expect(settle).toHaveBeenCalledTimes(2);
+
+      act(() => {
+        result.current.cancelOngoingRequest();
+      });
+
+      await act(async () => {
+        releaseStream();
+      });
+
+      // Cancelling commits the pending `gemini_thought_content` tail; tails
+      // key off the head id and must not settle a second expansion entry.
+      expect(findAddedItemId('gemini_thought_content')).toBeDefined();
+      expect(settle).toHaveBeenCalledTimes(2);
     });
   });
 

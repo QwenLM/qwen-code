@@ -113,6 +113,7 @@ const ClickableThinkMessage: React.FC<{
   availableTerminalHeight?: number;
   contentWidth: number;
   durationMs?: number;
+  fullDetail: boolean;
   onToggle: () => void;
 }> = ({
   text,
@@ -121,6 +122,7 @@ const ClickableThinkMessage: React.FC<{
   availableTerminalHeight,
   contentWidth,
   durationMs,
+  fullDetail,
   onToggle,
 }) => {
   const ref = useRef<DOMElement>(null);
@@ -128,9 +130,13 @@ const ClickableThinkMessage: React.FC<{
   const { rows: terminalHeight } = useTerminalSize();
   const settings = useSettings();
   const mouseTrackingEnabled = useMouseTrackingEnabled();
+  // fullDetail (Ctrl+O) forces every thought open and the toggle guard
+  // ignores clicks while it is on, so do not advertise a click target that
+  // would be swallowed.
   const clickable =
     useVirtualViewport(settings.merged.ui?.useTerminalBuffer) &&
-    mouseTrackingEnabled;
+    mouseTrackingEnabled &&
+    !fullDetail;
 
   useMouseEvents(
     useCallback(
@@ -331,6 +337,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           }
           contentWidth={contentWidth}
           durationMs={itemForDisplay.durationMs}
+          fullDetail={fullDetail}
           onToggle={() => {
             // While fullDetail forces every thought open, a click would only
             // record a per-item toggle that flips state once fullDetail is

@@ -362,9 +362,9 @@ export function mapToDisplay(
             : trackedCall.tool.displayName;
         description = JSON.stringify(trackedCall.request.args);
       } else {
-        displayName = trackedCall.tool!.displayName;
-        description = trackedCall.invocation!.getDescription();
-        renderOutputAsMarkdown = trackedCall.tool!.isOutputMarkdown;
+        displayName = trackedCall.tool.displayName;
+        description = trackedCall.invocation.getDescription();
+        renderOutputAsMarkdown = trackedCall.tool.isOutputMarkdown;
       }
 
       const baseDisplayProperties: Omit<

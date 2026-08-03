@@ -810,6 +810,25 @@ describe('<HistoryItemDisplay />', () => {
       expect(toggle).not.toHaveBeenCalled();
     });
 
+    it('drops the click wording from the collapse hint while fullDetail is active', () => {
+      const { lastFrame } = renderWithProviders(
+        <VirtualViewportContext.Provider value={true}>
+          <HistoryItemDisplay
+            item={thoughtItem}
+            terminalWidth={100}
+            isPending={false}
+            fullDetail={true}
+          />
+        </VirtualViewportContext.Provider>,
+      );
+
+      const output = lastFrame() ?? '';
+      // fullDetail forces the thought open and swallows clicks, so the hint
+      // must stay keyboard-only instead of advertising a dead click target.
+      expect(output).toContain(`${toggleKeyHint} to collapse`);
+      expect(output).not.toContain('click');
+    });
+
     it('does not toggle when selecting text by dragging', () => {
       const toggle = vi.fn();
       const handler = renderThoughtWithToggle(toggle);
