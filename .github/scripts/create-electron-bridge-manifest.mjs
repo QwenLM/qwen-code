@@ -14,7 +14,6 @@ const names = [
 ];
 const artifacts = names.map((name) => readArtifact(assets, name));
 const primary = artifacts[0];
-const releaseDate = options['release-date'] ?? new Date().toISOString();
 
 const lines = [
   `version: ${options.version}`,
@@ -26,7 +25,7 @@ const lines = [
   ]),
   `path: ${primary.name}`,
   `sha512: ${primary.sha512}`,
-  `releaseDate: '${releaseDate}'`,
+  `releaseDate: '${new Date().toISOString()}'`,
 ];
 fs.writeFileSync(options.output, `${lines.join('\n')}\n`);
 

@@ -51,7 +51,7 @@ Draft and prerelease runs may build and publish bridge artifacts for inspection,
 
 The repository already stores the Electron-era Apple certificate and App Store Connect API key under `MAC_CSC_*` and `APPLE_NOTARY_*` secret names. The workflow accepts those names as fallbacks for the newer Tauri names, so the Developer ID identity remains unchanged.
 
-Tauri updater artifacts additionally require `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. The private key must match the public key in the Tauri configuration before the first published Tauri release.
+Tauri updater artifacts additionally require `TAURI_SIGNING_PRIVATE_KEY`; `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` is only needed for an encrypted private key. The private key must match the public key in the Tauri configuration before the first published Tauri release.
 
 ## Validation
 

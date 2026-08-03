@@ -206,14 +206,15 @@ function testElectronBridgeManifest(directory) {
     assets,
     '--version',
     '0.1.0',
-    '--release-date',
-    '2026-08-03T00:00:00.000Z',
     '--output',
     output,
   ]);
   const manifest = fs.readFileSync(output, 'utf8');
   assert.match(manifest, /^version: 0\.1\.0$/m);
-  assert.match(manifest, /^releaseDate: '2026-08-03T00:00:00\.000Z'$/m);
+  assert.match(
+    manifest,
+    /^releaseDate: '\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z'$/m,
+  );
   for (const artifact of artifacts) {
     const contents = fs.readFileSync(path.join(assets, artifact));
     const sha512 = crypto
