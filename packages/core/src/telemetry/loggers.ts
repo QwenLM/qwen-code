@@ -20,6 +20,7 @@ import {
   EVENT_EXTENSION_ENABLE,
   EVENT_IDE_CONNECTION,
   EVENT_TOOL_CALL,
+  EVENT_REPEATED_TOOL_FAILURE_GUARD,
   EVENT_USER_PROMPT,
   EVENT_USER_RETRY,
   EVENT_FLASH_FALLBACK,
@@ -72,6 +73,7 @@ import {
   recordTokenUsageMetrics,
   recordToolCallMetrics,
   recordToolExecutionMetrics,
+  recordRepeatedToolFailureGuardMetrics,
   recordArenaSessionStartedMetrics,
   recordArenaAgentCompletedMetrics,
   recordArenaSessionEndedMetrics,
@@ -96,6 +98,7 @@ import type {
   FlashFallbackEvent,
   NextSpeakerCheckEvent,
   LoopDetectedEvent,
+  RepeatedToolFailureGuardEvent,
   LoopDetectionDisabledEvent,
   SlashCommandEvent,
   ConversationFinishedEvent,
@@ -132,6 +135,7 @@ import type {
   MemoryRecallEvent,
   MemoryRecallDeliveryEvent,
 } from './types.js';
+import { LoopType } from './types.js';
 import type { HookCallEvent } from './types.js';
 import type { UiEvent } from './uiTelemetry.js';
 import { uiTelemetryService } from './uiTelemetry.js';
@@ -636,11 +640,15 @@ export function logLoopDetected(
   config: Config,
   event: LoopDetectedEvent,
 ): void {
-  QwenLogger.getInstance(config)?.logLoopDetectedEvent(event);
+  const privacyRestricted =
+    event.loop_type === LoopType.REPEATED_TOOL_EXECUTION_FAILURE;
+  if (!privacyRestricted) {
+    QwenLogger.getInstance(config)?.logLoopDetectedEvent(event);
+  }
   if (!isTelemetrySdkInitialized()) return;
 
   const attributes: LogAttributes = {
-    ...getCommonAttributes(config),
+    ...(privacyRestricted ? {} : getCommonAttributes(config)),
     ...event,
   };
 
@@ -650,6 +658,52 @@ export function logLoopDetected(
     attributes,
   };
   logger.emit(logRecord);
+}
+
+export function logRepeatedToolFailureGuard(
+  _config: Config,
+  event: RepeatedToolFailureGuardEvent,
+): void {
+  let sdkInitialized = false;
+  runToolTelemetrySink(() => {
+    sdkInitialized = isTelemetrySdkInitialized();
+  });
+  if (sdkInitialized) {
+    runToolTelemetrySink(() => {
+      const logger = logs.getLogger(SERVICE_NAME);
+      logger.emit({
+        body: `Repeated tool failure guard decision: ${event.decision}.`,
+        attributes: {
+          ...event,
+          'event.name': EVENT_REPEATED_TOOL_FAILURE_GUARD,
+        },
+      });
+    });
+  }
+  runToolTelemetrySink(() => {
+    recordRepeatedToolFailureGuardMetrics({
+      route: event.route,
+      mode: event.mode,
+      phase_before: event.phase_before,
+      phase_after: event.phase_after,
+      decision: event.decision,
+      failure_count_bucket: event.failure_count_bucket,
+      batch_count_bucket: event.batch_count_bucket,
+      ...(event.reset_reason !== undefined
+        ? { reset_reason: event.reset_reason }
+        : {}),
+      ...(event.terminal_status !== undefined
+        ? { terminal_status: event.terminal_status }
+        : {}),
+      ...(event.execution_status !== undefined
+        ? { execution_status: event.execution_status }
+        : {}),
+      ...(event.execution_error_type !== undefined
+        ? { execution_error_type: event.execution_error_type }
+        : {}),
+      ...(event.tool_type !== undefined ? { tool_type: event.tool_type } : {}),
+    });
+  });
 }
 
 export function logLoopDetectionDisabled(

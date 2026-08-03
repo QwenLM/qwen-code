@@ -35,6 +35,7 @@ export {
   logUserPrompt,
   logUserRetry,
   logToolCall,
+  logRepeatedToolFailureGuard,
   logApiRequest,
   logApiError,
   logApiCancel,
@@ -113,6 +114,7 @@ export {
   // Core metrics functions
   recordToolCallMetrics,
   recordToolExecutionMetrics,
+  recordRepeatedToolFailureGuardMetrics,
   recordTokenUsageMetrics,
   recordApiResponseMetrics,
   recordApiErrorMetrics,
@@ -150,6 +152,7 @@ export {
   ApiRequestPhase,
   FileOperation,
 } from './metrics.js';
+export { RepeatedToolFailureGuardEvent } from './types.js';
 export { QwenLogger } from './qwen-logger/qwen-logger.js';
 export { sanitizeHookName } from './sanitize.js';
 export {

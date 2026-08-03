@@ -20,6 +20,7 @@ import {
   ApiRequestPhase,
 } from './metrics.js';
 import { makeFakeConfig } from '../test-utils/config.js';
+import { ToolErrorType } from '../tools/tool-error.js';
 
 const mockCounterAddFn: Mock<
   (value: number, attributes?: Attributes, context?: Context) => void
@@ -70,6 +71,7 @@ describe('Telemetry Metrics', () => {
   let recordToolCallMetricsModule: typeof import('./metrics.js').recordToolCallMetrics;
   let recordTokenUsageMetricsModule: typeof import('./metrics.js').recordTokenUsageMetrics;
   let recordToolExecutionMetricsModule: typeof import('./metrics.js').recordToolExecutionMetrics;
+  let recordRepeatedToolFailureGuardMetricsModule: typeof import('./metrics.js').recordRepeatedToolFailureGuardMetrics;
   let recordFileOperationMetricModule: typeof import('./metrics.js').recordFileOperationMetric;
   let recordChatCompressionMetricsModule: typeof import('./metrics.js').recordChatCompressionMetrics;
   let recordStartupPerformanceModule: typeof import('./metrics.js').recordStartupPerformance;
@@ -99,6 +101,8 @@ describe('Telemetry Metrics', () => {
     recordTokenUsageMetricsModule = metricsJsModule.recordTokenUsageMetrics;
     recordToolExecutionMetricsModule =
       metricsJsModule.recordToolExecutionMetrics;
+    recordRepeatedToolFailureGuardMetricsModule =
+      metricsJsModule.recordRepeatedToolFailureGuardMetrics;
     recordFileOperationMetricModule = metricsJsModule.recordFileOperationMetric;
     recordChatCompressionMetricsModule =
       metricsJsModule.recordChatCompressionMetrics;
@@ -332,6 +336,49 @@ describe('Telemetry Metrics', () => {
         'session.id': 'test-session-id',
         execution_status: 'success',
         tool_type: 'native',
+      });
+    });
+  });
+
+  describe('recordRepeatedToolFailureGuardMetrics', () => {
+    const config = makeFakeConfig({
+      sessionId: 'test-session-id',
+    });
+
+    it('records only low-cardinality transition attributes', () => {
+      initializeMetricsModule(config);
+      mockCounterAddFn.mockClear();
+
+      recordRepeatedToolFailureGuardMetricsModule({
+        route: 'acp_foreground',
+        mode: 'enforce',
+        phase_before: 'warned',
+        phase_after: 'latched',
+        decision: 'stopped',
+        failure_count_bucket: '8+',
+        batch_count_bucket: '3+',
+        terminal_status: 'error',
+        execution_status: 'error',
+        execution_error_type: ToolErrorType.EXECUTION_TIMEOUT,
+        tool_type: 'mcp',
+      });
+
+      expect(mockCreateCounterFn).toHaveBeenCalledWith(
+        'qwen-code.repeated_tool_failure_guard.count',
+        expect.any(Object),
+      );
+      expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
+        route: 'acp_foreground',
+        mode: 'enforce',
+        phase_before: 'warned',
+        phase_after: 'latched',
+        decision: 'stopped',
+        failure_count_bucket: '8+',
+        batch_count_bucket: '3+',
+        terminal_status: 'error',
+        execution_status: 'error',
+        execution_error_type: ToolErrorType.EXECUTION_TIMEOUT,
+        tool_type: 'mcp',
       });
     });
   });

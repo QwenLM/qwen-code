@@ -362,6 +362,7 @@ describe('Session', () => {
   let session: Session;
   let currentModel: string;
   let currentAuthType: AuthType;
+  let originalProcessGuardMode: string | undefined;
   let switchModelSpy: ReturnType<typeof vi.fn>;
   let getAvailableCommandsSpy: ReturnType<typeof vi.fn>;
   let mockChatRecordingService: {
@@ -496,6 +497,9 @@ describe('Session', () => {
   }
 
   beforeEach(() => {
+    originalProcessGuardMode =
+      process.env['QWEN_CODE_ACP_REPEATED_TOOL_FAILURE_GUARD'];
+    process.env['QWEN_CODE_ACP_REPEATED_TOOL_FAILURE_GUARD'] = 'shadow';
     startToolSpanSpy.mockClear();
     addToolArgumentsAttributesSpy.mockClear();
     addToolCallResultAttributesSpy.mockClear();
@@ -704,6 +708,12 @@ describe('Session', () => {
   });
 
   afterEach(() => {
+    if (originalProcessGuardMode === undefined) {
+      delete process.env['QWEN_CODE_ACP_REPEATED_TOOL_FAILURE_GUARD'];
+    } else {
+      process.env['QWEN_CODE_ACP_REPEATED_TOOL_FAILURE_GUARD'] =
+        originalProcessGuardMode;
+    }
     // Reset global runtime base dir state to prevent state leakage between tests
     core.Storage.setRuntimeBaseDir(null);
     // Clear session reference to allow garbage collection
@@ -6183,6 +6193,221 @@ describe('Session', () => {
       });
     });
 
+    describe('repeated tool execution failure guard', () => {
+      const guardModeEnv = 'QWEN_CODE_ACP_REPEATED_TOOL_FAILURE_GUARD';
+      let originalGuardMode: string | undefined;
+
+      const recreateSessionWithGuardMode = (mode: 'warn' | 'enforce') => {
+        originalGuardMode = process.env[guardModeEnv];
+        process.env[guardModeEnv] = mode;
+        session = new Session(
+          'test-session-id',
+          mockConfig,
+          mockClient,
+          mockSettings,
+        );
+      };
+
+      const restoreGuardMode = () => {
+        if (originalGuardMode === undefined) {
+          delete process.env[guardModeEnv];
+        } else {
+          process.env[guardModeEnv] = originalGuardMode;
+        }
+      };
+
+      const failureBatch = (batch: number, count: number): FunctionCall[] =>
+        Array.from({ length: count }, (_, index) => ({
+          id: `failure_${batch}_${index}`,
+          name: 'failing_tool',
+          args: { attempt: `${batch}_${index}` },
+        }));
+
+      const streamForBatch = (batch: number, count: number) =>
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: { functionCalls: failureBatch(batch, count) },
+          },
+        ]);
+
+      const installFailingTool = () => {
+        const execute = vi.fn().mockResolvedValue({
+          llmContent: 'failed',
+          returnDisplay: 'failed',
+          error: {
+            message: 'execution failed',
+            type: core.ToolErrorType.EXECUTION_FAILED,
+          },
+        });
+        mockToolRegistry.getTool.mockReturnValue({
+          name: 'failing_tool',
+          kind: core.Kind.Execute,
+          displayName: 'Failing Tool',
+          description: 'Fails during execution',
+          build: vi.fn().mockReturnValue({
+            params: {},
+            execute,
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Failing Tool'),
+            toolLocations: vi.fn().mockReturnValue([]),
+          }),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        });
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+        return execute;
+      };
+
+      it('injects one corrective reminder in warn mode and keeps running', async () => {
+        recreateSessionWithGuardMode('warn');
+        try {
+          const execute = installFailingTool();
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(streamForBatch(1, 4))
+            .mockResolvedValueOnce(streamForBatch(2, 4))
+            .mockResolvedValueOnce(streamForBatch(3, 1))
+            .mockResolvedValueOnce(createEmptyStream());
+
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'run the failing tool' }],
+            }),
+          ).resolves.toEqual({ stopReason: 'end_turn' });
+
+          expect(execute).toHaveBeenCalledTimes(9);
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(4);
+          const correctiveSend = vi.mocked(mockChat.sendMessageStream).mock
+            .calls[2][1] as { message: Part[] };
+          expect(correctiveSend.message).toContainEqual(
+            expect.objectContaining({
+              text: expect.stringContaining('Do not repeat the same approach'),
+            }),
+          );
+          const allSentText = vi
+            .mocked(mockChat.sendMessageStream)
+            .mock.calls.flatMap(([, request]) =>
+              (request as { message: Part[] }).message
+                .map((part) => part.text)
+                .filter((text): text is string => text !== undefined),
+            );
+          expect(
+            allSentText.filter((text) =>
+              text.includes('Do not repeat the same approach'),
+            ),
+          ).toHaveLength(1);
+          expect(logLoopDetectedSpy).not.toHaveBeenCalledWith(
+            mockConfig,
+            expect.objectContaining({
+              loop_type: core.LoopType.REPEATED_TOOL_EXECUTION_FAILURE,
+            }),
+          );
+        } finally {
+          restoreGuardMode();
+        }
+      });
+
+      it('stops after the post-reminder matching batch in enforce mode', async () => {
+        recreateSessionWithGuardMode('enforce');
+        try {
+          const execute = installFailingTool();
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(streamForBatch(1, 4))
+            .mockResolvedValueOnce(streamForBatch(2, 4))
+            .mockResolvedValueOnce(streamForBatch(3, 1))
+            .mockResolvedValueOnce(createEmptyStream());
+
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'run the failing tool' }],
+            }),
+          ).resolves.toEqual({ stopReason: 'end_turn' });
+
+          expect(execute).toHaveBeenCalledTimes(9);
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
+          expect(logLoopDetectedSpy).toHaveBeenCalledWith(
+            mockConfig,
+            expect.objectContaining({
+              loop_type: core.LoopType.REPEATED_TOOL_EXECUTION_FAILURE,
+            }),
+          );
+          expect(mockChat.addHistory).toHaveBeenCalledWith({
+            role: 'user',
+            parts: expect.arrayContaining([
+              expect.objectContaining({
+                functionResponse: expect.objectContaining({
+                  id: 'failure_3_0',
+                }),
+              }),
+              expect.objectContaining({
+                text: expect.stringContaining('Automatic continuation stopped'),
+              }),
+            ]),
+          });
+          expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+            expect.objectContaining({
+              sessionId: 'test-session-id',
+              update: expect.objectContaining({
+                sessionUpdate: 'agent_message_chunk',
+                content: expect.objectContaining({
+                  type: 'text',
+                  text: expect.stringContaining(
+                    'Automatic continuation stopped',
+                  ),
+                }),
+              }),
+            }),
+          );
+        } finally {
+          restoreGuardMode();
+        }
+      });
+
+      it('lets a user cancellation during the final drain win over enforcement', async () => {
+        recreateSessionWithGuardMode('enforce');
+        try {
+          const execute = installFailingTool();
+          let drainCount = 0;
+          mockClient.extMethod = vi.fn().mockImplementation(async () => {
+            drainCount++;
+            if (drainCount === 3) {
+              void session.cancelPendingPrompt();
+            }
+            return { messages: [], hasQueuedPrompt: false };
+          });
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(streamForBatch(1, 4))
+            .mockResolvedValueOnce(streamForBatch(2, 4))
+            .mockResolvedValueOnce(streamForBatch(3, 1))
+            .mockResolvedValueOnce(createEmptyStream());
+
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'run the failing tool' }],
+            }),
+          ).resolves.toEqual({ stopReason: 'cancelled' });
+
+          expect(execute).toHaveBeenCalledTimes(9);
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
+          expect(logLoopDetectedSpy).not.toHaveBeenCalledWith(
+            mockConfig,
+            expect.objectContaining({
+              loop_type: core.LoopType.REPEATED_TOOL_EXECUTION_FAILURE,
+            }),
+          );
+        } finally {
+          restoreGuardMode();
+        }
+      });
+    });
+
     describe('shell heartbeat forwarding', () => {
       const runShellToolCall = async (
         execute: ReturnType<typeof vi.fn>,
@@ -7117,7 +7342,10 @@ describe('Session', () => {
 
         expect(mockClient.extMethod).toHaveBeenCalledWith(
           'craft/drainMidTurnQueue',
-          { sessionId: 'test-session-id' },
+          {
+            sessionId: 'test-session-id',
+            todoStopGuardWatchQueuedPrompt: true,
+          },
         );
         const secondCall = vi.mocked(mockChat.sendMessageStream).mock.calls[1];
         const midTurnPart = {
@@ -16446,6 +16674,17 @@ describe('Session', () => {
         stopAfterPermissionCancel: boolean;
         loopDetected?: boolean;
         repeatedDuplicateProviderToolCall?: boolean;
+        repeatedToolFailureBatch?: {
+          complete: boolean;
+          observations: Array<{
+            callId: string;
+            policyToolName?: string;
+            terminalStatus: 'success' | 'error' | 'cancelled';
+            executionStatus?: core.ToolExecutionStatus | 'unknown';
+            executionErrorType?: core.ToolErrorType;
+            providerDuplicate?: boolean;
+          }>;
+        };
       }>;
     };
 
@@ -17115,6 +17354,18 @@ describe('Session', () => {
           errorType: core.ToolErrorType.EXECUTION_TIMEOUT,
         }),
       );
+      expect(result.repeatedToolFailureBatch).toEqual({
+        complete: true,
+        observations: [
+          expect.objectContaining({
+            callId: 'structured_timeout_call',
+            policyToolName: 'timeout_tool',
+            terminalStatus: 'error',
+            executionStatus: 'error',
+            executionErrorType: core.ToolErrorType.EXECUTION_TIMEOUT,
+          }),
+        ],
+      });
       expect(messageBus.request).toHaveBeenCalledWith(
         expect.objectContaining({
           eventName: 'PostToolUseFailure',
@@ -17231,6 +17482,18 @@ describe('Session', () => {
           errorType: core.ToolErrorType.UNHANDLED_EXCEPTION,
         }),
       );
+      expect(result.repeatedToolFailureBatch).toEqual({
+        complete: true,
+        observations: [
+          expect.objectContaining({
+            callId: 'postprocess_success_call',
+            policyToolName: 'postprocess_tool',
+            terminalStatus: 'error',
+            executionStatus: 'success',
+            executionErrorType: undefined,
+          }),
+        ],
+      });
     });
 
     it('preserves a structured postprocessing error type after successful execution', async () => {
@@ -17457,6 +17720,18 @@ describe('Session', () => {
           errorType: core.ToolErrorType.UNHANDLED_EXCEPTION,
         }),
       );
+      expect(result.repeatedToolFailureBatch).toEqual({
+        complete: true,
+        observations: [
+          expect.objectContaining({
+            callId: 'postprocess_error_call',
+            policyToolName: 'timeout_tool',
+            terminalStatus: 'error',
+            executionStatus: 'error',
+            executionErrorType: core.ToolErrorType.EXECUTION_TIMEOUT,
+          }),
+        ],
+      });
     });
 
     it.each([
@@ -20220,6 +20495,16 @@ describe('Session', () => {
       const { parts } = result;
       expect(parts).toHaveLength(1);
       expect(result.stopAfterPermissionCancel).toBe(false);
+      expect(result.repeatedToolFailureBatch).toEqual({
+        complete: true,
+        observations: [
+          expect.objectContaining({
+            callId: 'shell_1__qwen_dup_2',
+            providerDuplicate: true,
+            executionStatus: 'not_started',
+          }),
+        ],
+      });
       expect(parts[0].functionResponse?.id).toBe('shell_1__qwen_dup_2');
       expect(parts[0].functionResponse?.response).toEqual({
         error: expect.stringContaining(
