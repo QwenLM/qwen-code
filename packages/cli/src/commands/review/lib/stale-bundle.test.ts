@@ -4,16 +4,33 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   mkdirSync,
   mkdtempSync,
   rmSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+// One listed file can be made unreadable, to reach the branch where the tree
+// changes underneath the walk. Everything else passes through to the real fs.
+const unreadable = vi.hoisted(() => ({ path: '' }));
+vi.mock('node:fs', async (importOriginal) => {
+  const real = (await importOriginal()) as typeof import('node:fs');
+  const readFileSync = ((p: unknown, ...rest: unknown[]) => {
+    if (unreadable.path && String(p) === unreadable.path) {
+      throw Object.assign(new Error('ENOENT: vanished mid-walk'), {
+        code: 'ENOENT',
+      });
+    }
+    return (real.readFileSync as (...a: unknown[]) => unknown)(p, ...rest);
+  }) as typeof real.readFileSync;
+  return { ...real, readFileSync, default: { ...real, readFileSync } };
+});
+
 import {
   bundleStaleness,
   reviewSourceRoots,
@@ -153,6 +170,36 @@ describe('reviewSourcesDigest', () => {
     const lone = join(root, 'review.test.ts');
     writeFileSync(lone, 'x');
     expect(reviewSourcesDigest(root, [lone])).toBeUndefined();
+  });
+
+  it('ignores symlinks, and terminates on a directory cycle', () => {
+    // The walk documents this and nothing pinned it: a mutant that follows
+    // links survived the whole suite. A cycle would send the first command of
+    // every review into unbounded recursion; a file link would fold foreign
+    // content into the digest and accuse a correct bundle.
+    writeFileSync(join(dir, 'drive.ts'), 'x');
+    const before = reviewSourcesDigest(root, [dir]);
+
+    const outside = join(root, 'outside.ts');
+    writeFileSync(outside, 'not this tree');
+    symlinkSync(outside, join(dir, 'linked.ts'));
+    symlinkSync(dir, join(dir, 'cycle'));
+
+    expect(reviewSourcesDigest(root, [dir])).toBe(before);
+  });
+
+  it('measures nothing when a listed file cannot be read', () => {
+    // A concurrent checkout deleting a source mid-walk. Hashing the survivors
+    // would differ from the stamp and accuse a tree that is merely mid-change;
+    // the honest answer is that nothing was measured.
+    writeFileSync(join(dir, 'a.ts'), 'x');
+    writeFileSync(join(dir, 'b.ts'), 'y');
+    unreadable.path = join(dir, 'b.ts');
+    try {
+      expect(reviewSourcesDigest(root, [dir])).toBeUndefined();
+    } finally {
+      unreadable.path = '';
+    }
   });
 
   it('yields nothing when there are no sources to hash', () => {

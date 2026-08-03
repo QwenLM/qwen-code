@@ -45,6 +45,7 @@ const BUNDLED_SKILL_TEST_FILE_RE =
 // Mirrors NOT_BUNDLED_RE in stale-bundle.ts; the parity test keeps them equal.
 const NOT_BUNDLED_RE = /\.(?:test|spec)\.[cm]?[jt]sx?$/;
 const NOT_BUNDLED_DIR = new Set(['__fixtures__']);
+const NOT_BUNDLED_FILE = new Set(['test-utils.ts', '.DS_Store']);
 
 export function reviewSourceDigestForBuild(root) {
   const cliCommands = join(root, 'packages', 'cli', 'src', 'commands');
@@ -66,7 +67,13 @@ export function reviewSourceDigestForBuild(root) {
       const full = join(dir, e.name);
       if (e.isDirectory()) {
         if (!NOT_BUNDLED_DIR.has(e.name)) walk(full);
-      } else if (e.isFile() && !NOT_BUNDLED_RE.test(e.name)) files.push(full);
+      } else if (
+        e.isFile() &&
+        !NOT_BUNDLED_RE.test(e.name) &&
+        !NOT_BUNDLED_FILE.has(e.name)
+      ) {
+        files.push(full);
+      }
     }
   };
   for (const r of roots) walk(r);

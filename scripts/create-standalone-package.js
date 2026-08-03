@@ -77,6 +77,11 @@ const DIST_ALLOWED_ENTRIES = new Set([
   'package.json',
   'README.md',
   'LICENSE',
+  // Digest of the review sources this bundle was built from, stamped by
+  // copy_bundle_assets.js. Harmless to ship: a standalone install has no
+  // `packages/` sources to compare against, so the staleness check reports
+  // that it could not measure and stays silent.
+  'review-sources.sha256',
   'locales',
   'examples',
   // Web Shell SPA served at the daemon root by `qwen serve` (index.html +

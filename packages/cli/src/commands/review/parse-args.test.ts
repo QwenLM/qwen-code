@@ -645,8 +645,20 @@ describe('parse-args warns when the bundle is not built from these sources', () 
     expect(writeStderrLineSafe).not.toHaveBeenCalled();
   });
 
-  it('says nothing when there is no stamp at all', () => {
-    // An installed package, or a bundle from before the build wrote one.
+  it('says it could not check when sources exist but the stamp does not', () => {
+    // A checkout whose dist predates the stamp is genuinely stale and
+    // unmeasurable — the state of every existing tree the moment this ships.
+    // Silence there is the failure this whole check exists to end.
+    run();
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+      'could not check whether the bundle is current',
+    );
+  });
+
+  it('stays silent for an installed package, which has no sources either', () => {
+    // No `packages/` beside the bundle: nothing to compare, nothing the user
+    // could do about it, and no reason to put a line in their terminal.
+    fsReal.rmSync(join(repo, 'packages'), { recursive: true, force: true });
     run();
     expect(writeStderrLineSafe).not.toHaveBeenCalled();
   });

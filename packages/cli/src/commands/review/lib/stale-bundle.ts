@@ -62,6 +62,17 @@ export const NOT_BUNDLED_RE = /\.(?:test|spec)\.[cm]?[jt]sx?$/;
  */
 export const NOT_BUNDLED_DIR = new Set(['__fixtures__']);
 
+/**
+ * Files under the review roots that no production import reaches.
+ *
+ * Test support without a `.test.`/`.spec.` name, and editor droppings the
+ * asset copier already skips. This list is the fourth patch to the same class,
+ * so it is not left to reviewers to find the fifth:
+ * `review-digest-covers-only-bundled.test.ts` fails when any file in the
+ * digest is imported by tests alone.
+ */
+export const NOT_BUNDLED_FILE = new Set(['test-utils.ts', '.DS_Store']);
+
 export interface BundleStaleness {
   /** `true` only when both digests are known and differ. */
   stale: boolean;
@@ -153,7 +164,13 @@ function* sourceFilesUnder(root: string): Generator<string> {
     const full = join(root, e.name);
     if (e.isDirectory()) {
       if (!NOT_BUNDLED_DIR.has(e.name)) yield* sourceFilesUnder(full);
-    } else if (e.isFile() && !NOT_BUNDLED_RE.test(e.name)) yield full;
+    } else if (
+      e.isFile() &&
+      !NOT_BUNDLED_RE.test(e.name) &&
+      !NOT_BUNDLED_FILE.has(e.name)
+    ) {
+      yield full;
+    }
   }
 }
 

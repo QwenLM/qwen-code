@@ -17,7 +17,10 @@ import {
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { copyBundleAssets } from '../copy_bundle_assets.js';
+import {
+  copyBundleAssets,
+  reviewSourceDigestForBuild,
+} from '../copy_bundle_assets.js';
 import { preparePackage } from '../prepare-package.js';
 
 describe('package asset scripts', () => {
@@ -28,6 +31,30 @@ describe('package asset scripts', () => {
     for (const tempDir of tempDirs.splice(0)) {
       rmSync(tempDir, { force: true, recursive: true });
     }
+  });
+
+  it('stamps the review source digest into dist', () => {
+    // Nothing gated this call site: removing it left the whole scripts suite
+    // green while `npm run bundle` silently stopped writing the stamp — and a
+    // missing stamp is `unmeasured`, so the staleness warning would never fire
+    // again with nothing in CI to notice.
+    const rootDir = createFixtureRoot();
+    writeFile(
+      rootDir,
+      'packages/cli/src/commands/review/drive.ts',
+      'export const drive = 1;\n',
+    );
+    writeFile(rootDir, 'packages/cli/src/commands/review.ts', 'registers\n');
+    stubConsole();
+
+    copyBundleAssets({ root: rootDir });
+
+    const stamped = readFileSync(
+      path.join(rootDir, 'dist', 'review-sources.sha256'),
+      'utf8',
+    );
+    expect(stamped).toBe(reviewSourceDigestForBuild(rootDir).digest);
+    expect(stamped).toMatch(/^[0-9a-f]{64}$/);
   });
 
   it('copies extension examples into the bundled runtime dist', () => {

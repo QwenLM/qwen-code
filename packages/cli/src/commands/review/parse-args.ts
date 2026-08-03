@@ -503,14 +503,24 @@ export const parseArgsCommand: CommandModule = {
       // `bundleStaleness` returns at its first guard, and reading a hundred
       // files for a value it never inspects is work on the path that always
       // short-circuits.
-      const warning = staleBundleWarning(
-        bundleStaleness(
-          stamped,
-          stamped
-            ? reviewSourcesDigest(repoRoot, reviewSourceRoots(repoRoot))
-            : undefined,
-        ),
+      // A checkout whose `dist/` predates the stamp is genuinely stale and
+      // cannot be measured — the state right after this shipped, in every
+      // existing tree until its next rebuild. Sources present with no stamp is
+      // the one unmeasured case worth saying out loud; an installed package
+      // has no sources either and stays silent, so users get no noise.
+      const current = reviewSourcesDigest(
+        repoRoot,
+        reviewSourceRoots(repoRoot),
       );
+      const staleness = bundleStaleness(stamped, current);
+      if (!stamped && current) {
+        writeStderrLineSafe(
+          `review: could not check whether the bundle is current — ${staleness.unmeasured}. ` +
+            `It predates the build that started recording one; rebuild with ` +
+            `\`npm run build:packages && npm run bundle\` to make this checkable.`,
+        );
+      }
+      const warning = staleBundleWarning(staleness);
       // `…Safe`, the convention for diagnostics in this subsystem: stderr
       // piped to `head` raises EPIPE, and a warning that kills the review it
       // is warning about would be worse than the staleness it reports.
