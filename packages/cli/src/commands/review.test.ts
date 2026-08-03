@@ -61,7 +61,9 @@ describe('reviewCommand', () => {
       'test-efficacy',
       'test-plan',
       'findings',
+      'publish-assets',
       'compose-review',
+      'save-artifact',
       'submit',
       'cleanup',
     ]);

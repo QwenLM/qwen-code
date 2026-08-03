@@ -9,11 +9,14 @@ import {
   type DaemonEvent,
   type DaemonRestoredSession,
   type DaemonSession,
+  type DaemonSessionArtifact,
+  type DaemonSessionArtifactsEnvelope,
   type DaemonSessionGroup,
   type DaemonSessionGroupCatalog,
   type DaemonSessionState,
   type DaemonSessionSummary,
   type DaemonWorkspaceExtensionsStatus,
+  type DaemonWorkspaceFile,
   type DaemonGitHubPullRequestList,
   type DaemonWorkspaceGitStatus,
   type DaemonWorkspaceMcpResourcesStatus,
@@ -61,6 +64,10 @@ export interface WebShellDaemonScenario {
   sessionGroups: DaemonSessionGroup[];
   events: DaemonEvent[];
   state: DaemonSessionState;
+  /** Artifact list returned by `GET /session/:id/artifacts`. */
+  artifacts: DaemonSessionArtifact[];
+  /** File contents served by `GET /file?path=...`, keyed by requested path. */
+  workspaceFiles: Record<string, string>;
   /**
    * Response for `GET /workspaces/:cwd/git`. Defaults to a null-branch status
    * (non-git workspace), matching the real daemon's graceful degradation.
@@ -343,6 +350,8 @@ export function createWebShellDaemonScenario(
     sessionGroups: overrides.sessionGroups ?? [],
     events: overrides.events ?? [],
     state,
+    artifacts: overrides.artifacts ?? [],
+    workspaceFiles: overrides.workspaceFiles ?? {},
     gitStatus: overrides.gitStatus,
     gitHubPrs: overrides.gitHubPrs,
     gitBranches: overrides.gitBranches,
@@ -575,6 +584,8 @@ function isDaemonPath(path: string): boolean {
     /^\/workspaces\/.+\/github\/(prs\/create|default-branch)\/?$/.test(path) ||
     /^\/workspace\/github\/(prs\/create|default-branch)\/?$/.test(path) ||
     path === '/session' ||
+    /^\/file\/?$/.test(path) ||
+    /^\/session\/[^/]+\/artifacts\/?$/.test(path) ||
     /^\/permission\/[^/]+\/?$/.test(path) ||
     /^\/session\/[^/]+\/pending-prompts(?:\/[^/]+)?\/?$/.test(path) ||
     /^\/session\/[^/]+\/(load|resume|prompt|permission\/[^/]+|context|supported-commands|events|model|approval-mode|heartbeat|cancel|detach|btw)\/?$/.test(
@@ -694,6 +705,10 @@ function isDaemonRoute(method: string, path: string): boolean {
   if (method === 'POST' && /^\/workspace\/github\/prs\/create\/?$/.test(path))
     return true;
   if (method === 'POST' && /^\/session\/[^/]+\/btw\/?$/.test(path)) return true;
+  if (method === 'GET' && /^\/file\/?$/.test(path)) return true;
+  if (method === 'GET' && /^\/session\/[^/]+\/artifacts\/?$/.test(path)) {
+    return true;
+  }
   if (method === 'POST' && path === '/session') return true;
   if (method === 'POST' && /^\/permission\/[^/]+\/?$/.test(path)) return true;
   if (
@@ -793,6 +808,16 @@ async function handleDaemonRoute(
   }
   if (method === 'GET' && path === '/workspace/voice') {
     await json(route, workspaceVoice(scenario));
+    return;
+  }
+  if (method === 'GET' && /^\/file\/?$/.test(path)) {
+    const filePath = searchParams.get('path') ?? '';
+    const content = scenario.workspaceFiles[filePath];
+    if (content === undefined) {
+      await json(route, { error: `No such file: ${filePath}` }, 404);
+      return;
+    }
+    await json(route, workspaceFile(filePath, content));
     return;
   }
   if (method === 'GET' && /^\/workspaces\/[^/]+\/voice\/?$/.test(path)) {
@@ -1198,6 +1223,10 @@ async function handleDaemonRoute(
       await json(route, restoredSessionEnvelope(scenario, sessionId));
       return;
     }
+    if (action === 'artifacts') {
+      await json(route, sessionArtifactsEnvelope(scenario, sessionId));
+      return;
+    }
     if (action === 'prompt') {
       if (!isPromptRequest(body)) {
         await badRequest(route, 'Invalid prompt request.');
@@ -1465,6 +1494,36 @@ function workspaceVoice(
   scenario: WebShellDaemonScenario,
 ): DaemonWorkspaceVoiceStatus {
   return scenario.voice;
+}
+
+function sessionArtifactsEnvelope(
+  scenario: WebShellDaemonScenario,
+  sessionId: string,
+): DaemonSessionArtifactsEnvelope {
+  return {
+    v: 1,
+    sessionId,
+    artifacts: scenario.artifacts,
+    generatedAt: now,
+    limits: { maxArtifacts: 100 },
+  };
+}
+
+function workspaceFile(path: string, content: string): DaemonWorkspaceFile {
+  const sizeBytes = new TextEncoder().encode(content).byteLength;
+  return {
+    kind: 'file',
+    path,
+    content,
+    encoding: 'utf-8',
+    bom: false,
+    lineEnding: 'lf',
+    sizeBytes,
+    returnedBytes: sizeBytes,
+    truncated: false,
+    matchedIgnore: null,
+    originalLineCount: null,
+  };
 }
 
 async function json(route: Route, body: unknown, status = 200): Promise<void> {

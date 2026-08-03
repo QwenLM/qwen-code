@@ -391,6 +391,17 @@ describe('SettingsSchema', () => {
       checkBooleanDefaults(getSettingsSchema() as SettingsSchema);
     });
 
+    it('keeps Session Workflow opt-in without requiring a restart', () => {
+      expect(
+        getSettingsSchema().experimental.properties.sessionWorkflow,
+      ).toMatchObject({
+        type: 'boolean',
+        default: false,
+        requiresRestart: false,
+        showInDialog: true,
+      });
+    });
+
     it('should have showInDialog property configured', () => {
       // Check that user-facing settings are marked for dialog display
       expect(getSettingsSchema().general.properties.vimMode.showInDialog).toBe(
