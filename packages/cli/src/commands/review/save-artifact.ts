@@ -57,6 +57,11 @@ interface SaveArtifactArgs {
   out: string;
 }
 
+// Every path resolves against the daemon workspace root, not cwd: in PR
+// worktree mode cwd is the disposable review worktree, while the durable
+// output and `markdownReportPath` must stay relative to the main project for
+// Web Shell's `readWorkspaceFile` to find them. The skill threads that root
+// through its subprocesses as QWEN_CODE_PROJECT_DIR.
 function workspaceRoot(): string {
   return resolve(process.env['QWEN_CODE_PROJECT_DIR'] ?? process.cwd());
 }
@@ -276,18 +281,29 @@ export function saveReviewArtifact(args: SaveArtifactArgs): string {
       `Unsupported review effort: ${JSON.stringify(args.effort)}.`,
     );
   }
+  if (args.effort === 'low') {
+    throw new Error(
+      'save-artifact does not support low-effort reviews: low has no canonical composed verdict to persist.',
+    );
+  }
   nonEmptyString(args.target, 'Target');
 
   const findings = validateFindingsReport(
     readJson(findingsPath, 'canonical findings'),
   );
   const verdict = validateVerdict(readJson(composedPath, 'composed verdict'));
-  readText(reportPath, 'Markdown report');
-  if (!statSync(reportPath).isFile()) {
+  let reportIsFile: boolean | undefined;
+  try {
+    reportIsFile = statSync(reportPath).isFile();
+  } catch {
+    // Missing or unreadable: readText below reports it with context.
+  }
+  if (reportIsFile === false) {
     throw new Error(
       `Markdown report is not a file: ${JSON.stringify(args.report)}.`,
     );
   }
+  readText(reportPath, 'Markdown report');
 
   const markdownReportPath = relative(root, reportPath).split(sep).join('/');
   const document: ReviewArtifactV1 = {
@@ -338,7 +354,7 @@ export const saveArtifactCommand: CommandModule = {
       })
       .option('effort', {
         type: 'string',
-        choices: [...EFFORT_LEVELS],
+        choices: [...EFFORT_LEVELS].filter((effort) => effort !== 'low'),
         demandOption: true,
         describe: 'Resolved review effort',
       })

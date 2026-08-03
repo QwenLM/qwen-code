@@ -36,6 +36,11 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 
+// These four lists have a second consumer: the Web Shell review renderer
+// (packages/web-shell/client/components/artifacts/CodeReviewArtifactDetail.tsx)
+// keeps its own copy and fails closed on any value it does not know, so a
+// value added here breaks rendering of every saved artifact that carries one.
+// Update the renderer copy in the same change.
 /** The severity ladder, most severe first — this array IS the sort order. */
 export const SEVERITIES = ['Critical', 'Suggestion', 'Nice to have'] as const;
 export type Severity = (typeof SEVERITIES)[number];

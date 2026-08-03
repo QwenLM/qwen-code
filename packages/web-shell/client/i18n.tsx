@@ -1047,6 +1047,8 @@ const EN: Messages = {
   'scheduledTasks.condition.cardPrefix': 'If:',
   'turnOutputs.filesEdited': (v) => `Edited ${v?.count ?? 0} files`,
   'turnOutputs.viewChanges': 'View changes',
+  // Key keeps its historical `review` name; the label moved to "Changes" when
+  // the code-review result view (`codeReview.*`) took over the word.
   'turnOutputs.review': 'Changes',
   'turnOutputs.reviewLatest': 'View recent file changes',
   'codeReview.authoritativeVerdict': 'Authoritative verdict',
@@ -1059,6 +1061,7 @@ const EN: Messages = {
   'codeReview.total': 'Total',
   'codeReview.confidence': (v) => `${v?.value ?? ''} confidence`,
   'codeReview.held': 'Held',
+  'codeReview.heldByMeasurement': 'Held back from Critical by measurement',
   'codeReview.caps': 'Caps',
   'codeReview.none': 'None',
   'codeReview.severity': 'Severity',
@@ -3697,6 +3700,8 @@ const ZH: Messages = {
   'scheduledTasks.condition.cardPrefix': '若：',
   'turnOutputs.filesEdited': (v) => `已编辑 ${v?.count ?? 0} 个文件`,
   'turnOutputs.viewChanges': '查看更改',
+  // 与英文键同理：键名保留历史 `review`，标签改为“文件更改”，
+  // 代码审查结果视图使用 `codeReview.*`，请勿“修正”此不一致。
   'turnOutputs.review': '文件更改',
   'turnOutputs.reviewLatest': '查看最近文件修改',
   'codeReview.authoritativeVerdict': '权威裁决',
@@ -3709,6 +3714,7 @@ const ZH: Messages = {
   'codeReview.total': '总计',
   'codeReview.confidence': (v) => `${v?.value ?? ''} 置信度`,
   'codeReview.held': '暂缓',
+  'codeReview.heldByMeasurement': '经基线测量暂缓，未保留 Critical',
   'codeReview.caps': '裁决上限',
   'codeReview.none': '无',
   'codeReview.severity': '严重级别',

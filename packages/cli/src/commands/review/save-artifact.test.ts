@@ -20,6 +20,19 @@ import { join } from 'node:path';
 import { buildReport, type Finding } from './findings.js';
 import { saveReviewArtifact } from './save-artifact.js';
 
+// On a case-sensitive filesystem the alias below never exists, so that test
+// can only run where the filesystem folds case. Probe once, at load time, so
+// the skip is visible in CI output instead of reading as a pass.
+const caseInsensitiveFs = (() => {
+  const dir = mkdtempSync(join(tmpdir(), 'review-artifact-case-probe-'));
+  try {
+    writeFileSync(join(dir, 'case-probe'), '');
+    return existsSync(join(dir, 'CASE-PROBE'));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+})();
+
 let root: string;
 let previousProjectDir: string | undefined;
 
@@ -293,22 +306,25 @@ describe('saveReviewArtifact', () => {
     },
   );
 
-  it('refuses a case-insensitive output alias of the Markdown report', () => {
-    const paths = fixture();
-    const alias = join(root, '.qwen/reviews/REVIEW.MD');
-    if (!existsSync(alias)) return;
-    const original = readFileSync(paths.report, 'utf8');
+  it.skipIf(!caseInsensitiveFs)(
+    'refuses a case-insensitive output alias of the Markdown report',
+    () => {
+      const paths = fixture();
+      const alias = join(root, '.qwen/reviews/REVIEW.MD');
+      expect(existsSync(alias)).toBe(true);
+      const original = readFileSync(paths.report, 'utf8');
 
-    expect(() =>
-      saveReviewArtifact({
-        ...paths,
-        out: alias,
-        target: 'local',
-        effort: 'medium',
-      }),
-    ).toThrow(/must not overwrite/);
-    expect(readFileSync(paths.report, 'utf8')).toBe(original);
-  });
+      expect(() =>
+        saveReviewArtifact({
+          ...paths,
+          out: alias,
+          target: 'local',
+          effort: 'medium',
+        }),
+      ).toThrow(/must not overwrite/);
+      expect(readFileSync(paths.report, 'utf8')).toBe(original);
+    },
+  );
 
   it('requires the Markdown report to be durable under .qwen/reviews', () => {
     const paths = fixture();
@@ -338,5 +354,56 @@ describe('saveReviewArtifact', () => {
       }),
     ).toThrow(/Could not read the Markdown report/);
     expect(existsSync(paths.out)).toBe(false);
+  });
+
+  it('names a directory Markdown report as not a file instead of unreadable', () => {
+    const paths = fixture();
+    rmSync(paths.report);
+    mkdirSync(paths.report);
+
+    expect(() =>
+      saveReviewArtifact({
+        ...paths,
+        target: 'local',
+        effort: 'medium',
+      }),
+    ).toThrow(/Markdown report is not a file/);
+    expect(existsSync(paths.out)).toBe(false);
+  });
+
+  it('refuses a low-effort artifact', () => {
+    const paths = fixture();
+
+    expect(() =>
+      saveReviewArtifact({
+        ...paths,
+        target: 'local',
+        effort: 'low',
+      }),
+    ).toThrow(/does not support low-effort reviews/);
+    expect(existsSync(paths.out)).toBe(false);
+  });
+
+  it('resolves relative paths against the workspace root, not cwd', () => {
+    // The form SKILL.md documents. beforeEach points QWEN_CODE_PROJECT_DIR at
+    // the temp root while cwd stays the package directory, so the two roots
+    // differ and the resolution direction is observable.
+    fixture();
+
+    const out = saveReviewArtifact({
+      findings: '.qwen/tmp/findings.json',
+      composed: '.qwen/tmp/composed.json',
+      report: '.qwen/reviews/review.md',
+      out: '.qwen/reviews/review.json',
+      target: 'pr-123',
+      effort: 'high',
+    });
+
+    expect(out).toBe(join(root, '.qwen/reviews/review.json'));
+    expect(JSON.parse(readFileSync(out, 'utf8'))).toMatchObject({
+      schemaVersion: 1,
+      target: 'pr-123',
+      markdownReportPath: '.qwen/reviews/review.md',
+    });
   });
 });

@@ -4,6 +4,10 @@ import { useI18n } from '../../i18n';
 import { isSafeHref, Markdown } from '../messages/Markdown';
 import styles from './CodeReviewArtifactDetail.module.css';
 
+// Hand-duplicated from the CLI's canonical lists in
+// packages/cli/src/commands/review/findings.ts. The parser below fails closed
+// on any value missing here, so when the CLI adds one, update this copy and
+// the contract fixture (__fixtures__/code-review-artifact-v1.json) with it.
 const SEVERITIES = ['Critical', 'Suggestion', 'Nice to have'] as const;
 const CONFIDENCES = ['high', 'low'] as const;
 const SOURCES = ['review', 'build', 'test', 'probe', 'lint'] as const;
@@ -34,6 +38,7 @@ interface ReviewFinding {
   assets?: string[];
   outcome?: Outcome;
   outcomeNote?: string;
+  heldByMeasurement?: { file: string };
 }
 
 interface ReviewCounts {
@@ -94,6 +99,23 @@ function lineNumber(value: unknown, label: string): number {
     throw new Error(`${label} must be a positive safe integer.`);
   }
   return line;
+}
+
+// The one field that becomes a file read. The daemon enforces workspace
+// containment, but the document's own contract is checked here like every
+// other field: relative, no traversal, and the durable report's extension.
+function markdownReportPath(value: unknown): string {
+  const path = string(value, 'markdownReportPath');
+  if (
+    path.startsWith('/') ||
+    path.split('/').includes('..') ||
+    !path.endsWith('.md')
+  ) {
+    throw new Error(
+      'markdownReportPath must be a relative .md path without ".." segments.',
+    );
+  }
+  return path;
 }
 
 function enumValue<T extends string>(
@@ -185,6 +207,18 @@ function parseFinding(value: unknown, index: number): ReviewFinding {
     ...(optionalString(source['outcomeNote'], `${label}.outcomeNote`)
       ? { outcomeNote: source['outcomeNote'] as string }
       : {}),
+    ...(source['heldByMeasurement'] === undefined
+      ? {}
+      : {
+          heldByMeasurement: {
+            file: string(
+              object(source['heldByMeasurement'], `${label}.heldByMeasurement`)[
+                'file'
+              ],
+              `${label}.heldByMeasurement.file`,
+            ),
+          },
+        }),
   };
 }
 
@@ -267,10 +301,7 @@ export function parseCodeReviewDocument(content: string): CodeReviewDocument {
       held: integer(counts['held'], 'counts.held'),
     },
     outcomesRecorded: root['outcomesRecorded'],
-    markdownReportPath: string(
-      root['markdownReportPath'],
-      'markdownReportPath',
-    ),
+    markdownReportPath: markdownReportPath(root['markdownReportPath']),
   };
 }
 
@@ -298,6 +329,8 @@ export function CodeReviewArtifactDetail({
     reportRequest.current += 1;
     setContent(null);
     setLoadError(null);
+    setSeverity('all');
+    setConfidence('all');
     setReportContent(null);
     setReportError(null);
     setReportLoading(false);
@@ -346,8 +379,8 @@ export function CodeReviewArtifactDetail({
     return <div className={styles.empty}>{t('codeReview.loading')}</div>;
   }
 
-  const document = parsed.document;
-  const findings = document.findings.filter(
+  const reviewDocument = parsed.document;
+  const findings = reviewDocument.findings.filter(
     (finding) =>
       (severity === 'all' || finding.severity === severity) &&
       (confidence === 'all' || finding.confidence === confidence),
@@ -358,7 +391,7 @@ export function CodeReviewArtifactDetail({
     setReportError(null);
     setReportLoading(true);
     workspaceActions
-      .readWorkspaceFile(document.markdownReportPath)
+      .readWorkspaceFile(reviewDocument.markdownReportPath)
       .then((file) => {
         if (request !== reportRequest.current) return;
         if (file.truncated) {
@@ -391,7 +424,7 @@ export function CodeReviewArtifactDetail({
         >
           {t('codeReview.back')}
         </button>
-        <div className={styles.path}>{document.markdownReportPath}</div>
+        <div className={styles.path}>{reviewDocument.markdownReportPath}</div>
         {reportError ? (
           <div className={styles.error} role="alert">
             {reportError}
@@ -410,11 +443,13 @@ export function CodeReviewArtifactDetail({
           <div className={styles.eyebrow}>
             {t('codeReview.authoritativeVerdict')}
           </div>
-          <h2 className={styles.verdict}>{document.verdict.verdictLine}</h2>
+          <h2 className={styles.verdict}>
+            {reviewDocument.verdict.verdictLine}
+          </h2>
           <div className={styles.meta}>
             {t('codeReview.targetEffort', {
-              target: document.target,
-              effort: document.effort,
+              target: reviewDocument.target,
+              effort: reviewDocument.effort,
             })}
           </div>
         </div>
@@ -434,29 +469,35 @@ export function CodeReviewArtifactDetail({
         className={styles.metrics}
         aria-label={t('codeReview.reviewCounts')}
       >
-        <Metric label={t('codeReview.total')} value={document.counts.total} />
+        <Metric
+          label={t('codeReview.total')}
+          value={reviewDocument.counts.total}
+        />
         {SEVERITIES.map((value) => (
           <Metric
             key={value}
             label={value}
-            value={document.counts.bySeverity[value]}
+            value={reviewDocument.counts.bySeverity[value]}
           />
         ))}
         {CONFIDENCES.map((value) => (
           <Metric
             key={value}
             label={t('codeReview.confidence', { value })}
-            value={document.counts.byConfidence[value]}
+            value={reviewDocument.counts.byConfidence[value]}
           />
         ))}
-        <Metric label={t('codeReview.held')} value={document.counts.held} />
+        <Metric
+          label={t('codeReview.held')}
+          value={reviewDocument.counts.held}
+        />
       </section>
 
       <section className={styles.caps}>
         <span className={styles.eyebrow}>{t('codeReview.caps')}</span>
         <span>
-          {document.verdict.cappedBy.length > 0
-            ? document.verdict.cappedBy.join(', ')
+          {reviewDocument.verdict.cappedBy.length > 0
+            ? reviewDocument.verdict.cappedBy.join(', ')
             : t('codeReview.none')}
         </span>
       </section>
@@ -474,7 +515,7 @@ export function CodeReviewArtifactDetail({
             <option value="all">{t('codeReview.all')}</option>
             {SEVERITIES.map((value) => (
               <option key={value} value={value}>
-                {value} ({document.counts.bySeverity[value]})
+                {value} ({reviewDocument.counts.bySeverity[value]})
               </option>
             ))}
           </select>
@@ -491,7 +532,7 @@ export function CodeReviewArtifactDetail({
             <option value="all">{t('codeReview.all')}</option>
             {CONFIDENCES.map((value) => (
               <option key={value} value={value}>
-                {value} ({document.counts.byConfidence[value]})
+                {value} ({reviewDocument.counts.byConfidence[value]})
               </option>
             ))}
           </select>
@@ -529,6 +570,12 @@ export function CodeReviewArtifactDetail({
                 <Detail
                   label={t('codeReview.outcome')}
                   value={`${finding.outcome}${finding.outcomeNote ? ` — ${finding.outcomeNote}` : ''}`}
+                />
+              )}
+              {finding.heldByMeasurement && (
+                <Detail
+                  label={t('codeReview.heldByMeasurement')}
+                  value={finding.heldByMeasurement.file}
                 />
               )}
               <div className={styles.detailBlock}>

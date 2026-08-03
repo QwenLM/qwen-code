@@ -50,6 +50,7 @@ const reviewDocument = {
       shortSummary: 'Ambiguous label',
       failureScenario: 'A user cannot distinguish changes from review results.',
       locations: [{ file: 'src/panel.tsx' }],
+      heldByMeasurement: { file: 'src/panel.test.tsx' },
     },
     {
       id: 'R1-3',
@@ -140,6 +141,10 @@ describe('CodeReviewArtifactDetail', () => {
       'skipped — Outside the reviewed diff.',
     );
     expect(container.textContent).toContain('src/write.ts:42');
+    expect(container.textContent).toContain(
+      'Held back from Critical by measurement',
+    );
+    expect(container.textContent).toContain('src/panel.test.tsx');
   });
 
   it('localizes the review chrome without translating canonical finding data', async () => {
@@ -315,6 +320,30 @@ describe('CodeReviewArtifactDetail', () => {
       JSON.stringify({ ...reviewDocument, counts: { total: 2 } }),
       'counts.bySeverity must be an object',
     ],
+    [
+      'traversing report path',
+      JSON.stringify({
+        ...reviewDocument,
+        markdownReportPath: '../outside.md',
+      }),
+      'markdownReportPath must be a relative .md path',
+    ],
+    [
+      'absolute report path',
+      JSON.stringify({
+        ...reviewDocument,
+        markdownReportPath: '/etc/review.md',
+      }),
+      'markdownReportPath must be a relative .md path',
+    ],
+    [
+      'non-Markdown report path',
+      JSON.stringify({
+        ...reviewDocument,
+        markdownReportPath: '.qwen/reviews/report.json',
+      }),
+      'markdownReportPath must be a relative .md path',
+    ],
   ])('shows a dedicated error for %s', async (_name, content, expected) => {
     const { container } = renderWith(content);
     await flush();
@@ -323,6 +352,78 @@ describe('CodeReviewArtifactDetail', () => {
       expected,
     );
     expect(container.querySelector('.cm-editor')).toBeNull();
+  });
+
+  it('resets filters when switching artifacts', async () => {
+    const firstDocument = JSON.stringify(reviewDocument);
+    const secondDocument = JSON.stringify({
+      ...reviewDocument,
+      target: 'PR #456',
+    });
+    const actions = {
+      readWorkspaceFile: vi.fn((path: string) =>
+        Promise.resolve({
+          content: path.endsWith('pr-123.json')
+            ? firstDocument
+            : secondDocument,
+          truncated: false,
+        }),
+      ),
+    } as unknown as DaemonWorkspaceActions;
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <CodeReviewArtifactDetail
+            workspacePath=".qwen/reviews/pr-123.json"
+            artifactVersion="1"
+            workspaceActions={actions}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+    const severity = container.querySelector<HTMLSelectElement>(
+      'select[aria-label="Severity"]',
+    );
+    await act(async () => {
+      if (severity) {
+        severity.value = 'Critical';
+        severity.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    });
+    expect(severity?.value).toBe('Critical');
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <CodeReviewArtifactDetail
+            workspacePath=".qwen/reviews/pr-456.json"
+            artifactVersion="2"
+            workspaceActions={actions}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    // A filter left over from the previous artifact would show "no matches"
+    // next to a nonzero total; the switch resets both filters instead.
+    expect(container.textContent).toContain('PR #456');
+    expect(
+      container.querySelector<HTMLSelectElement>(
+        'select[aria-label="Severity"]',
+      )?.value,
+    ).toBe('all');
+    expect(
+      container.querySelector<HTMLSelectElement>(
+        'select[aria-label="Confidence"]',
+      )?.value,
+    ).toBe('all');
   });
 
   it('fails closed for truncated input', async () => {
