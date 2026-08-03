@@ -360,21 +360,44 @@ function captureToolsSource() {
   expect(step).toBeDefined();
   // The YAML half of the never-fails promise.
   expect(step['continue-on-error']).toBe(true);
+  // A freeze bump edits exactly these two adjacent lines. The harness exports
+  // both into every stub, so a malformed or missing value can never disagree
+  // with itself downstream — only this shape check sees it.
+  expect(step.env.FREEZE_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
+  expect(step.env.FREEZE_SHA256).toMatch(/^[0-9a-f]{64}$/);
   return { run: step.run, env: step.env };
 }
 
-// The download half of the happy path: a curl that satisfies `-o <out>` with
-// an empty body, and a tar that "extracts" a runnable freeze stub. Shared by
-// the scenarios that vary only the verify/install half.
+// The download half of the happy path: a curl that satisfies `-o <out>` but
+// only for the exact pinned release URL, a sha256sum that only accepts the
+// pinned checksum over a file curl actually wrote, and a tar that only
+// "extracts" an existing file. Shared by the scenarios that vary only the
+// verify/install half — each stub models its real contract's consumption
+// side, so a wrong URL, hash variable, or severed file path fails the
+// download exactly like production would.
 const okCurlStub = [
-  'out=""; prev=""',
-  'for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done',
-  '[ -n "$out" ] && : > "$out"',
-  'exit 0',
+  'url=""; out=""; prev=""',
+  'for a in "$@"; do',
+  '  [ "$prev" = "-o" ] && out="$a"',
+  '  case "$a" in -*) ;; *) url="$a" ;; esac',
+  '  prev="$a"',
+  'done',
+  'want="https://github.com/charmbracelet/freeze/releases/download/v${FREEZE_VERSION}/freeze_${FREEZE_VERSION}_Linux_x86_64.tar.gz"',
+  '[ "$url" = "$want" ] && [ -n "$out" ] && : > "$out"',
+].join('\n');
+const okSha256Stub = [
+  'read -r hash file',
+  '[ "$hash" = "$FREEZE_SHA256" ] || exit 1',
+  '[ -f "$file" ] || exit 1',
 ].join('\n');
 const okTarStub = [
-  'dest=""; prev=""',
-  'for a in "$@"; do [ "$prev" = "-C" ] && dest="$a"; prev="$a"; done',
+  'src=""; dest=""; prev=""',
+  'for a in "$@"; do',
+  '  [ "$prev" = "-xzf" ] && src="$a"',
+  '  [ "$prev" = "-C" ] && dest="$a"',
+  '  prev="$a"',
+  'done',
+  '[ -f "$src" ] || exit 1',
   'mkdir -p "$dest/freeze_x"',
   'printf \'#!/bin/bash\\necho "freeze ${FREEZE_VERSION}"\\n\' > "$dest/freeze_x/freeze"',
   'chmod +x "$dest/freeze_x/freeze"',
@@ -385,9 +408,10 @@ function runCaptureToolsStep({ stubs = {} } = {}) {
   try {
     const bin = join(dir, 'bin');
     const homeDir = join(dir, 'home');
+    const tmpRoot = join(dir, 'tmp');
     const ghPath = join(dir, 'github_path');
     const calls = join(dir, 'calls');
-    execFileSync('mkdir', ['-p', bin, homeDir]);
+    execFileSync('mkdir', ['-p', bin, homeDir, tmpRoot]);
     writeFileSync(ghPath, '');
     writeFileSync(calls, '');
     const write = (name, body) => {
@@ -441,6 +465,9 @@ function runCaptureToolsStep({ stubs = {} } = {}) {
       `export HOME="${homeDir}"`,
       `export GITHUB_PATH="${ghPath}"`,
       `export CALLS="${calls}"`,
+      // Pin TMPDIR so the step's mktemp dir lands inside the scenario: its
+      // cleanup (`rm -rf "$tmp"`) is otherwise invisible to every test.
+      `export TMPDIR="${tmpRoot}"`,
       `export FREEZE_VERSION="${env.FREEZE_VERSION}"`,
       `export FREEZE_SHA256="${env.FREEZE_SHA256}"`,
       run,
@@ -465,6 +492,10 @@ function runCaptureToolsStep({ stubs = {} } = {}) {
       freezeVersion: env.FREEZE_VERSION,
       ghPath: readFileSync(ghPath, 'utf8'),
       calls: readFileSync(calls, 'utf8'),
+      // Snapshot the mktemp dir's fate before the scenario cleanup below:
+      // the step's `rm -rf "$tmp"` must leave TMPDIR empty, and on the
+      // persistent runner anything left behind accumulates forever.
+      tmpDirEntries: readdirSync(tmpRoot),
       installedFreeze: existsSync(freezePath),
       // Existence is not usability: later steps execute mode bits, not files.
       installedFreezeExecutable:
@@ -480,6 +511,8 @@ describe('capture-tools install step (real bash, stubbed binaries)', () => {
     const r = runCaptureToolsStep();
     expect(r.status).toBe(0);
     expect(r.stdout).toContain('freeze download failed');
+    // The other half of the every-degraded-path-says-why contract.
+    expect(r.stdout).toContain('tmux unavailable');
     // Part of the never-stalls contract: a hung connection must abort at the
     // cap, not run out the job budget.
     expect(r.calls).toContain('--connect-timeout 10 --max-time 120');
@@ -498,13 +531,21 @@ describe('capture-tools install step (real bash, stubbed binaries)', () => {
     expect(r.calls).toContain('sha256sum ');
     expect(r.calls).not.toContain('tar ');
     expect(r.installedFreeze).toBe(false);
+    // The mktemp cleanup is load-bearing on the persistent runner: /tmp
+    // survives across runs there, so a leaked tarball accumulates forever.
+    expect(r.tmpDirEntries).toStrictEqual([]);
   });
 
   it('happy path installs a USABLE pinned freeze into the step-owned dir', () => {
     const r = runCaptureToolsStep({
-      stubs: { curl: okCurlStub, sha256sum: 'exit 0', tar: okTarStub },
+      stubs: { curl: okCurlStub, sha256sum: okSha256Stub, tar: okTarStub },
     });
     expect(r.status).toBe(0);
+    // The full flag set: dropping `-L` leaves curl writing 0 bytes of a 302
+    // redirect, which the checksum stage then blames on the pin/SHA pair.
+    expect(r.calls).toContain(
+      'curl -fsSL --retry 3 --connect-timeout 10 --max-time 120 -o',
+    );
     // The pairing later steps depend on: the binary AT the path GITHUB_PATH
     // names — one without the other and freeze is invisible or missing.
     expect(r.installedFreeze).toBe(true);
@@ -517,6 +558,9 @@ describe('capture-tools install step (real bash, stubbed binaries)', () => {
     // that later steps cannot execute, silently degrading every capture.
     expect(r.installedFreezeExecutable).toBe(true);
     expect(r.stdout).toContain(r.freezeVersion);
+    // The pinned version resolved, so the stale-renderer warning stays silent.
+    expect(r.stdout).not.toContain('not the pinned');
+    expect(r.tmpDirEntries).toStrictEqual([]);
   });
 
   it('re-downloads when the cached freeze is the WRONG version', () => {
@@ -527,6 +571,9 @@ describe('capture-tools install step (real bash, stubbed binaries)', () => {
     });
     expect(r.status).toBe(0);
     expect(r.calls).toContain('curl ');
+    // The re-download fails (dead-network stub), so the stale cached freeze
+    // is what later steps resolve — the step must say so.
+    expect(r.stdout).toContain('not the pinned');
   });
 
   it('re-downloads when the cached version merely CONTAINS the pin', () => {
@@ -540,12 +587,33 @@ describe('capture-tools install step (real bash, stubbed binaries)', () => {
     expect(r.calls).toContain('curl ');
   });
 
+  it('re-downloads when the cached version extends the pin with a leading digit', () => {
+    // Mirror of the CONTAINS case (pin 0.2.2, cached 10.2.2): without the
+    // LEFT digit boundary the grep matches and the bump is a silent no-op.
+    const r = runCaptureToolsStep({
+      stubs: { freeze: 'echo "freeze version 1${FREEZE_VERSION}"' },
+    });
+    expect(r.status).toBe(0);
+    expect(r.calls).toContain('curl ');
+  });
+
   it('skips the download when the cached freeze already matches the pin', () => {
     const r = runCaptureToolsStep({
       stubs: { freeze: 'echo "freeze version ${FREEZE_VERSION}"' },
     });
     expect(r.status).toBe(0);
     expect(r.calls).not.toContain('curl ');
+  });
+
+  it('skips apt entirely when tmux is already present', () => {
+    // Both runner classes usually have tmux: without the guard every review
+    // would re-run apt-get update+install.
+    const r = runCaptureToolsStep({
+      stubs: { tmux: 'echo "tmux 3.4"', sudo: 'exit 0' },
+    });
+    expect(r.status).toBe(0);
+    expect(r.calls).not.toContain('apt-get');
+    expect(r.stdout).toContain('tmux 3.4');
   });
 
   it('uses passwordless sudo for tmux only — freeze installs without sudo', () => {
@@ -556,7 +624,7 @@ describe('capture-tools install step (real bash, stubbed binaries)', () => {
       stubs: {
         sudo: 'exit 0',
         curl: okCurlStub,
-        sha256sum: 'exit 0',
+        sha256sum: okSha256Stub,
         tar: okTarStub,
       },
     });
