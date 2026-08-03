@@ -34,6 +34,7 @@ import { submitCommand } from './review/submit.js';
 import { testEfficacyCommand } from './review/test-efficacy.js';
 import { testPlanCommand } from './review/test-plan.js';
 import { cleanupCommand } from './review/cleanup.js';
+import { costLedgerCommand } from './review/cost-ledger.js';
 import { runCommand } from './review/run.js';
 import { saveArtifactCommand } from './review/save-artifact.js';
 
@@ -61,6 +62,7 @@ export const reviewCommand: CommandModule = {
       .command(scriptLintCommand)
       .command(resolveAnchorsCommand)
       .command(checkCoverageCommand)
+      .command(costLedgerCommand)
       .command(presubmitCommand)
       .command(testEfficacyCommand)
       .command(testPlanCommand)
