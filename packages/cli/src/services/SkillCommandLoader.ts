@@ -165,6 +165,10 @@ export class SkillCommandLoader implements ICommandLoader {
                 this.config?.getPermissionManager(),
                 skill.allowedTools,
               );
+            } else if (skill.allowedTools?.length) {
+              debugLogger.warn(
+                `Skill "${skill.name}" declares allowedTools but the folder is not trusted; ignoring skill allowedTools.`,
+              );
             }
 
             const body = buildSkillLlmContent(
