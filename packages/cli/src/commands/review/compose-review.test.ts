@@ -920,6 +920,39 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     ).toBe(true);
   });
 
+  it('pins the persisted footer to the inherited startup version, not the resolved one', async () => {
+    // Same pin as `submit`: a shared runner rewrites installs under running
+    // processes, so the version resolved at compose time can disagree with
+    // the one the session started under. The archived verdict must carry the
+    // startup stamp, or it contradicts the review `submit` posts.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-startup-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    const outPath = join(dir, 'composed.json');
+    writeFileSync(inputPath, JSON.stringify({ modelId: MODEL }), 'utf8');
+    writeFileSync(commentsPath, '[]', 'utf8');
+    const inherited = process.env['QWEN_CODE_STARTUP_VERSION'];
+    process.env['QWEN_CODE_STARTUP_VERSION'] = '0.21.1';
+    try {
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+        out: outPath,
+      });
+      const written = JSON.parse(
+        readFileSync(outPath, 'utf8'),
+      ) as ComposeReviewResult;
+      expect(
+        written.body.endsWith(`_— ${MODEL} via Qwen Code /review (v0.21.1)_`),
+      ).toBe(true);
+    } finally {
+      if (inherited === undefined)
+        delete process.env['QWEN_CODE_STARTUP_VERSION'];
+      else process.env['QWEN_CODE_STARTUP_VERSION'] = inherited;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('routes its gh calls via the PR host — --host reaches setGhHost', async () => {
     // The bilingual body-language recovery calls `gh pr view`; on GitHub Enterprise
     // that call must hit the PR's host, or the composed body's language disagrees

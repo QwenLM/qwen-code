@@ -54,6 +54,7 @@ import {
   unmarkedComments,
   type DraftedComment,
 } from './lib/inline-counts.js';
+import { reviewFooter } from './lib/review-footer.js';
 
 export type ReviewEvent = 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
 
@@ -777,7 +778,7 @@ function composeReviewBody(
     }
   }
 
-  const footer = `_— ${modelId} via Qwen Code /review (v${cliVersion})_`;
+  const footer = reviewFooter(modelId, cliVersion);
   // Bilingual rendering: when the plan (fetch-pr's report) says the PR
   // description contains Han characters, the posted body carries the complete
   // Chinese version collapsed under the English one — the shape this repo's
@@ -1725,7 +1726,9 @@ export const composeReviewCommand: CommandModule = {
         ...countInlineFindings(drafted),
         draftedComments: drafted,
       },
-      await getCliVersion(),
+      // Same pin as `submit`: the startup stamp, not a version resolved at
+      // compose time — a shared runner can rewrite the install mid-session.
+      process.env['QWEN_CODE_STARTUP_VERSION'] || (await getCliVersion()),
     );
     // The exact terminal verdict, persisted beside the fields it is computed
     // from. `event` + `cappedBy` alone cannot reconstruct it — a presubmit

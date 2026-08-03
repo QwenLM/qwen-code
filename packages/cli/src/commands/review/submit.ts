@@ -59,6 +59,7 @@ import {
   countInlineFindings,
   severityOf,
 } from './lib/inline-counts.js';
+import { REVIEW_FOOTER_RE, reviewFooter } from './lib/review-footer.js';
 
 /** The only events GitHub's Create Review API accepts. */
 const EVENTS = new Set(['APPROVE', 'REQUEST_CHANGES', 'COMMENT']);
@@ -123,18 +124,18 @@ interface ReviewPayload {
   body?: unknown;
 }
 
-const REVIEW_FOOTER_RE =
-  /(?:\s*_— [^\n]* via Qwen Code \/review(?: \(v[^\n)]*\))?_\s*)+$/;
-
 function normalizeInlineComments(
   comments: ReviewComment[],
   modelId: unknown,
   cliVersion: string,
 ): ReviewComment[] {
   if (typeof modelId !== 'string' || modelId.trim() === '') return comments;
-  const footer = `_— ${modelId} via Qwen Code /review (v${cliVersion})_`;
+  const footer = reviewFooter(modelId, cliVersion);
   return comments.map((comment) =>
-    typeof comment.body === 'string'
+    // An empty body stays empty: this runs BEFORE the consistency check, and
+    // a footer pasted onto '' would hide the emptiness from the refusal that
+    // names it ('has no body — an empty comment').
+    typeof comment.body === 'string' && comment.body.trim() !== ''
       ? {
           ...comment,
           body: `${comment.body.replace(REVIEW_FOOTER_RE, '')}\n\n${footer}`,
@@ -240,6 +241,17 @@ function structuralProblems(payload: ReviewPayload): string[] {
   const problems: string[] = [];
 
   if (!payload.commit_id) problems.push('`commit_id` is missing');
+
+  // The review JSON is a document the model writes, and `comments` reaches
+  // `.map` in the normalisation below — OUTSIDE `compose`'s try/catch. Any
+  // other shape is refused here as the structured refusal the re-compose
+  // loop parses, not a bare TypeError.
+  if (payload.comments !== undefined && !Array.isArray(payload.comments)) {
+    problems.push(
+      '`comments` is not an array — it is the list of findings this post ' +
+        'carries; any other shape is not a list of findings.',
+    );
+  }
 
   // The verdict is not the caller's to write. Refusing is deliberate: silently
   // ignoring a hand-written `event` would let a run believe it had posted the
@@ -361,10 +373,7 @@ function isRepo(repo: string): boolean {
   );
 }
 
-export function runSubmit(
-  args: SubmitArgs,
-  cliVersion = process.env['QWEN_CODE_STARTUP_VERSION'] || 'unknown',
-): void {
+export function runSubmit(args: SubmitArgs, cliVersion = 'unknown'): void {
   setGhHost(args.host);
 
   // The repo goes straight into the API path. A malformed value does not fail
