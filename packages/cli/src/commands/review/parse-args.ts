@@ -18,7 +18,7 @@
 
 import type { CommandModule } from 'yargs';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import {
   writeStdoutLine,
   writeStderrLineSafe,
@@ -487,8 +487,14 @@ export const parseArgsCommand: CommandModule = {
     // first command of every review, which makes it the only place the notice
     // reaches a reader before they act on a result.
     const bundle = process.argv[1];
-    if (bundle) {
-      const distDir = join(bundle, '..');
+    const distDir = bundle ? join(bundle, '..') : '';
+    // Only a `<root>/dist/cli.js` layout carries a stamp. A dev launcher runs
+    // `node <root>/packages/cli`, where node sets argv[1] to the DIRECTORY —
+    // measured — so the derivation would find sources under `<root>` and no
+    // stamp beside them, and print "could not check" on every review forever,
+    // with advice its reader can never act on. A layout with no stamp to grow
+    // is not half-measured; it is not measured.
+    if (bundle && basename(distDir) === 'dist') {
       const repoRoot = join(distDir, '..');
       let stamped: string | undefined;
       try {

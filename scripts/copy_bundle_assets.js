@@ -89,7 +89,21 @@ export function reviewSourceDigestForBuild(root) {
 }
 
 function stampReviewSourceDigest(root, distDir) {
-  const { digest, count } = reviewSourceDigestForBuild(root);
+  // Never fatal. This is the last step of the copier, so a file vanishing
+  // mid-walk would fail the bundle after every asset was already in place —
+  // and a missing stamp is only `unmeasured`, which the runtime check already
+  // treats as an acceptable answer.
+  let digest, count;
+  try {
+    ({ digest, count } = reviewSourceDigestForBuild(root));
+  } catch (error) {
+    console.log(
+      `Could not read the review sources; skipped the source digest: ${
+        error instanceof Error ? error.message : error
+      }`,
+    );
+    return;
+  }
   if (!digest) {
     console.log('No review sources found; skipped the source digest.');
     return;

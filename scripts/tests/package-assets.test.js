@@ -17,6 +17,9 @@ import {
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs';
+
+const realReadFileSync = fs.readFileSync;
 import {
   copyBundleAssets,
   reviewSourceDigestForBuild,
@@ -55,6 +58,34 @@ describe('package asset scripts', () => {
     );
     expect(stamped).toBe(reviewSourceDigestForBuild(rootDir).digest);
     expect(stamped).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('does not fail the bundle when the review sources cannot be read', () => {
+    // The stamp is the copier's last step, so throwing here would fail a build
+    // whose every asset is already in place. A missing stamp is `unmeasured`,
+    // which the runtime check already accepts.
+    const rootDir = createFixtureRoot();
+    writeFile(
+      rootDir,
+      'packages/cli/src/commands/review/drive.ts',
+      'export const drive = 1;\n',
+    );
+    stubConsole();
+    // The file vanishes between the walk that listed it and the read that
+    // hashes it — a concurrent checkout, mid-build.
+    vi.spyOn(fs, 'readFileSync').mockImplementation((target, ...rest) => {
+      if (String(target).endsWith('drive.ts')) {
+        throw Object.assign(new Error('ENOENT: vanished mid-build'), {
+          code: 'ENOENT',
+        });
+      }
+      return realReadFileSync(target, ...rest);
+    });
+
+    expect(() => copyBundleAssets({ root: rootDir })).not.toThrow();
+    expect(
+      existsSync(path.join(rootDir, 'dist', 'review-sources.sha256')),
+    ).toBe(false);
   });
 
   it('copies extension examples into the bundled runtime dist', () => {

@@ -655,6 +655,24 @@ describe('parse-args warns when the bundle is not built from these sources', () 
     );
   });
 
+  it('stays silent for a layout that has nowhere to keep a stamp', () => {
+    // `npm start` runs `node <root>/packages/cli`, and node sets argv[1] to
+    // that DIRECTORY — so the derivation would find sources under <root> and
+    // no stamp beside them, and print "could not check" on every review
+    // forever, with advice that can never make it stop.
+    const original = process.argv[1];
+    process.argv[1] = join(repo, 'packages', 'cli');
+    try {
+      (parseArgsCommand.handler as (a: unknown) => void)({
+        raw: '8368',
+        _: ['review', 'parse-args'],
+      });
+    } finally {
+      process.argv[1] = original;
+    }
+    expect(writeStderrLineSafe).not.toHaveBeenCalled();
+  });
+
   it('stays silent for an installed package, which has no sources either', () => {
     // No `packages/` beside the bundle: nothing to compare, nothing the user
     // could do about it, and no reason to put a line in their terminal.

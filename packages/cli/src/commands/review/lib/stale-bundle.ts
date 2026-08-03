@@ -28,6 +28,13 @@
 //
 // The whole round had to be discarded and re-run after a rebuild.
 //
+// SCOPE, so silence is not read as more than it is: the roots are the review
+// commands, the file that registers them, and the bundled skill — not the
+// modules those import. Editing `utils/stdioHelpers.ts` or a core helper on a
+// review path and skipping the rebuild produces no warning. The line drawn
+// here is the code whose behaviour a review is about; a quiet run means that
+// code matches the bundle, not that the whole tree does.
+//
 // CONTENT, not timestamps. The first version compared the bundle's mtime
 // against the newest source file, and a warning that fires when nothing is
 // wrong is worse than none — it teaches its reader to skip the line. Measured:
