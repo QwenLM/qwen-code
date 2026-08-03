@@ -44,8 +44,8 @@ const configSchema = z.discriminatedUnion('version', [
   z
     .object({
       version: z.literal(2),
-      // Read only by the on-demand MCP path; the auto-recall Hook uses
-      // autoRecall.timeoutMs. Kept on the v2 schema for forward compatibility.
+      // Retained for compatibility with existing v2 configuration files. The
+      // auto-recall Hook uses autoRecall.timeoutMs, and the MCP rejects v2.
       timeoutMs: z.number().int().min(1).max(30_000).default(5000),
       autoRecall: z
         .object({

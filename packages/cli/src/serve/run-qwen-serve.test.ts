@@ -23,6 +23,7 @@ import {
   resolveRuntimeStartupTimeoutMs,
   runQwenServe,
   type RunHandle,
+  subSessionConcurrencyCapsFromSettings,
   validatePolicyConfig,
   waitForRuntimeStartingForShutdown,
 } from './run-qwen-serve.js';
@@ -817,6 +818,80 @@ describe('extractContextFilename (#4297 fold-in 7 P2-1 helper)', () => {
     expect(extractContextFilename(42)).toBeUndefined();
     expect(extractContextFilename(true)).toBeUndefined();
     expect(extractContextFilename({ fileName: 'AGENTS.md' })).toBeUndefined();
+  });
+});
+
+describe('subSessionConcurrencyCapsFromSettings', () => {
+  it('passes through positive integer caps', () => {
+    expect(
+      subSessionConcurrencyCapsFromSettings({
+        maxConcurrentSubSessionsPerCaller: 8,
+        maxConcurrentSubSessionsTotal: 12,
+      }),
+    ).toEqual({ maxConcurrentPerCaller: 8, maxConcurrentTotal: 12 });
+  });
+
+  it('omits absent keys so launcher defaults apply', () => {
+    expect(subSessionConcurrencyCapsFromSettings({})).toEqual({});
+  });
+
+  it('rejects values outside positive integers', () => {
+    // Hand-edited settings.json could land any of these; coercing (e.g.
+    // accepting 0 or "10") would silently disable or misread a resource cap.
+    const onWarning = vi.fn();
+    expect(
+      subSessionConcurrencyCapsFromSettings(
+        {
+          maxConcurrentSubSessionsPerCaller: 0,
+          maxConcurrentSubSessionsTotal: -1,
+        },
+        onWarning,
+      ),
+    ).toEqual({});
+    expect(
+      subSessionConcurrencyCapsFromSettings(
+        {
+          maxConcurrentSubSessionsPerCaller: 2.5,
+          maxConcurrentSubSessionsTotal: '10',
+        },
+        onWarning,
+      ),
+    ).toEqual({});
+    expect(onWarning).toHaveBeenCalledTimes(4);
+  });
+
+  it('keeps a valid cap when the sibling key is invalid', () => {
+    expect(
+      subSessionConcurrencyCapsFromSettings(
+        {
+          maxConcurrentSubSessionsPerCaller: 8,
+          maxConcurrentSubSessionsTotal: Number.NaN,
+        },
+        () => {},
+      ),
+    ).toEqual({ maxConcurrentPerCaller: 8 });
+  });
+
+  it('warns naming a present-but-invalid cap', () => {
+    const onWarning = vi.fn();
+    expect(
+      subSessionConcurrencyCapsFromSettings(
+        { maxConcurrentSubSessionsTotal: '50' },
+        onWarning,
+      ),
+    ).toEqual({});
+    expect(onWarning).toHaveBeenCalledTimes(1);
+    expect(onWarning.mock.calls[0][0]).toContain(
+      'maxConcurrentSubSessionsTotal',
+    );
+    // JSON.stringify keeps the quotes, revealing the value is a string.
+    expect(onWarning.mock.calls[0][0]).toContain('"50"');
+  });
+
+  it('does not warn when the keys are absent', () => {
+    const onWarning = vi.fn();
+    subSessionConcurrencyCapsFromSettings({}, onWarning);
+    expect(onWarning).not.toHaveBeenCalled();
   });
 });
 

@@ -183,6 +183,8 @@ export interface ChatPaneProps {
   voiceUserRevision?: number;
   voiceWorkspaceRevisions?: Readonly<Record<string, number>>;
   voiceWorkspaces?: readonly DaemonWorkspaceCapability[];
+  /** Enable the app-scoped experimental Session Workflow presentation. */
+  sessionWorkflowEnabled?: boolean;
 }
 
 /**
@@ -212,6 +214,7 @@ export function ChatPane({
   voiceUserRevision = 0,
   voiceWorkspaceRevisions = EMPTY_VOICE_WORKSPACE_REVISIONS,
   voiceWorkspaces,
+  sessionWorkflowEnabled = false,
 }: ChatPaneProps) {
   const { t } = useI18n();
   const { renderComposerFooter: CustomComposerFooter } =
@@ -347,8 +350,11 @@ export function ChatPane({
     pendingToolApproval?.toolKind === 'switch_mode' &&
     pendingToolApproval?.toolName?.toLowerCase() === 'exit_plan_mode';
   const planTodos = useMemo(
-    () => (isExitPlanApproval ? getLatestActiveTodos(messages) : []),
-    [isExitPlanApproval, messages],
+    () =>
+      sessionWorkflowEnabled && isExitPlanApproval
+        ? getLatestActiveTodos(messages)
+        : [],
+    [isExitPlanApproval, messages, sessionWorkflowEnabled],
   );
   // Tracked in a ref so an async approval-mode switch (handleSelectMode) reads
   // the approval current when setApprovalMode *resolves*, not a stale one
@@ -875,6 +881,7 @@ export function ChatPane({
           workspaceTitle={paneWorkspaceCwd}
           workspaceColor={workspaceAccent}
           currentMode={connection.currentMode ?? 'default'}
+          sessionWorkflowEnabled={sessionWorkflowEnabled}
           currentModel={connection.currentModel ?? ''}
           availableModels={availableModels}
           onSelectMode={handleSelectMode}

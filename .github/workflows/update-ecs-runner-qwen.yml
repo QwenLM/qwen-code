@@ -1,6 +1,9 @@
 name: 'Update ECS Runner Qwen'
 
 on:
+  push:
+    branches: ['main']
+    paths: ['.github/workflows/update-ecs-runner-qwen.yml']
   workflow_dispatch:
     inputs:
       version:
