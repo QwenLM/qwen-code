@@ -2294,14 +2294,16 @@ export class QQChannel extends ChannelBase {
     text: string;
     senderName: string;
   } | null {
-    const senderName =
-      event.author?.username ||
-      event.author?.id ||
-      event.author?.member_openid ||
-      'QQ User';
+    // Keep identity values out of the display-name position. In particular,
+    // falling back to member_openid would expose a full mentionable OPENID
+    // even when allowMention is disabled and duplicate it when enabled.
+    const senderName = event.author?.username || 'QQ User';
     const safeName = sanitizeSenderName(senderName);
     const senderOpenId =
-      event.author?.member_openid || event.author?.user_openid || '';
+      event.author?.member_openid ||
+      event.author?.user_openid ||
+      event.author?.id ||
+      '';
 
     const content = (event.content || '').trim();
     const cleanText = content.replace(/<@[^>]{1,64}>/g, '').trim();
@@ -2369,10 +2371,9 @@ export class QQChannel extends ChannelBase {
       this.qqConfig.allowMention !== false &&
       senderOpenId
     ) {
-      // member_openid is remote-controlled; cap the dedup key so an
-      // unbounded senderOpenId can't balloon the Set (mirrors the k.length
-      // <= 256 cap in restoreQQState).
-      const dedupKey = `${chatId}:${senderOpenId}`.slice(0, 64);
+      // chatId is already validated and bounded. Cap only the remote-controlled
+      // sender component so different senders in a long chatId remain distinct.
+      const dedupKey = `${chatId}:${senderOpenId.slice(0, 64)}`;
       if (!this.warnedSenderOpenIds.has(dedupKey)) {
         this.warnedSenderOpenIds.add(dedupKey);
         if (this.warnedSenderOpenIds.size > 500) {

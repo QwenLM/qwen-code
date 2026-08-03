@@ -437,6 +437,45 @@ describe('handleGroup', () => {
     expect(env['text']).toBe('[atMention=true] [Bob(ABCDEF01…)]: 帮我翻译这段');
   });
 
+  it('uses a neutral display name when QQ omits author.username', async () => {
+    const ch = makeChannel({ allowMention: false });
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: 'hello',
+        author: {
+          member_openid: 'ABCDEF0123456789ABCDEF0123456789',
+        },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['senderName']).toBe('QQ User');
+    expect(env['text']).toBe('[atMention=true] [QQ User(ABCDEF01…)]: hello');
+  });
+
+  it('does not duplicate an OPENID as both name and mention tag', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: 'hello',
+        author: {
+          member_openid: 'ABCDEF0123456789ABCDEF0123456789',
+        },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['text']).toBe(
+      '[atMention=true] [QQ User(ABCDEF0123456789ABCDEF0123456789)]: hello',
+    );
+  });
+
   it('清理 <@OPENID> 标签后的空消息不触发', async () => {
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
@@ -703,6 +742,38 @@ describe('handleGroup', () => {
     stderrSpy.mockRestore();
   });
 
+  it('keeps malformed-sender warning keys distinct for long chat IDs', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const longChatId = 'g'.repeat(80);
+
+    pvt['handleGroup'](
+      makeGroupEvent({
+        id: 'long-chat-warning-1',
+        group_openid: longChatId,
+        author: { member_openid: 'malformed-sender-one', username: 'Bob' },
+      }),
+    );
+    pvt['handleGroup'](
+      makeGroupEvent({
+        id: 'long-chat-warning-2',
+        group_openid: longChatId,
+        author: { member_openid: 'malformed-sender-two', username: 'Alice' },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+
+    const warnCalls = stderrSpy.mock.calls
+      .map((call) => String(call[0]))
+      .filter((line) => line.includes('Unexpected senderOpenId format'));
+    expect(warnCalls).toHaveLength(2);
+
+    stderrSpy.mockRestore();
+  });
+
   it('warnedSenderOpenIds 超过 500 条后重置，此前告警过的键重新告警', async () => {
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
@@ -847,6 +918,28 @@ describe('handleGroup', () => {
         text,
       ),
     ).toBe(false);
+  });
+
+  it('uses legacy author.id as the positional identity tag', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: 'hello',
+        author: {
+          id: 'legacy-user-id',
+          username: 'Eve(0123456789ABCDEF0123456789ABCDEF)',
+        },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['senderId']).toBe('legacy-user-id');
+    expect(env['text']).toBe(
+      '[atMention=true] [Eve(0123456789ABCDEF0123456789ABCDEF)(legacy-u…)]: hello',
+    );
   });
 });
 
