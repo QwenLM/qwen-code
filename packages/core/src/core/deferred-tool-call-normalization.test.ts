@@ -95,6 +95,37 @@ describe('normalizeDeferredToolCallRequest', () => {
     }
   });
 
+  it('normalizes a legacy migrated name to the canonical target', async () => {
+    const registry = createRegistry();
+    const target = new MockTool({
+      name: ToolNames.AGENT,
+      shouldDefer: true,
+    });
+    registry.registerTool(target);
+    registry.markProxySchemaPresented({
+      name: ToolNames.AGENT,
+      schemaFingerprint: getFunctionSchemaFingerprint(target.schema),
+    });
+
+    const result = await normalizeDeferredToolCallRequest(
+      request(ToolNames.DEFERRED_TOOL_CALL, {
+        name: 'task',
+        arguments: { description: 'legacy alias call' },
+      }),
+      registry,
+    );
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.resolvedTool).toBe(target);
+      expect(result.request.name).toBe(ToolNames.AGENT);
+      expect(result.request.args).toEqual({
+        description: 'legacy alias call',
+      });
+      expect(result.request.providerName).toBe(ToolNames.DEFERRED_TOOL_CALL);
+    }
+  });
+
   it('rejects a target replaced while normalization is in progress', async () => {
     const registry = createRegistry();
     const authorizedTool = new MockTool({

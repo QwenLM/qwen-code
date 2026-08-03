@@ -137,6 +137,9 @@ beforeAll(async () => {
 function createMockConfig(
   overrides: {
     fileReadCache?: Partial<FileReadCache>;
+    toolRegistry?: {
+      clearProxySchemaPresentations?: () => void;
+    };
     geminiClient?: {
       isInitialized?: () => boolean;
       getChat?: () => {
@@ -172,6 +175,11 @@ function createMockConfig(
         evictNotAccessedSince: vi.fn().mockReturnValue(0),
         ...overrides.fileReadCache,
       }) as unknown as FileReadCache,
+    getToolRegistry: () =>
+      ({
+        clearProxySchemaPresentations: vi.fn(),
+        ...overrides.toolRegistry,
+      }) as unknown as ReturnType<Config['getToolRegistry']>,
     getGeminiClient: () => client as never,
     getClearContextOnIdle: () => ({
       clearContextMinutes: 60,
@@ -1294,6 +1302,7 @@ describe('MemoryPressureMonitor', () => {
 
     it('handles empty history without errors', async () => {
       const setHistory = vi.fn();
+      const clearPresentations = vi.fn();
       const monitor = new MemoryPressureMonitor(
         createMockConfig({
           geminiClient: {
@@ -1304,6 +1313,9 @@ describe('MemoryPressureMonitor', () => {
               setHistory,
             }),
           },
+          toolRegistry: {
+            clearProxySchemaPresentations: clearPresentations,
+          },
         }),
         { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
       );
@@ -1313,6 +1325,8 @@ describe('MemoryPressureMonitor', () => {
       await drainCleanupMeasurement();
 
       expect(setHistory).not.toHaveBeenCalled();
+      // No history mutation happened, so presentations stay untouched.
+      expect(clearPresentations).not.toHaveBeenCalled();
     });
 
     it('handles exceptions during compaction gracefully', async () => {
@@ -1353,9 +1367,10 @@ describe('MemoryPressureMonitor', () => {
       expect(setHistory).not.toHaveBeenCalled();
     });
 
-    it('compacts history and clears fileReadCache when meta is non-null', async () => {
+    it('compacts history and clears fileReadCache and proxy presentations when meta is non-null', async () => {
       const setHistory = vi.fn();
       const clearCache = vi.fn();
+      const clearPresentations = vi.fn();
       // Build history with 7 read_file tool results (keep=5, so 2 get cleared)
       const toolHistory: Content[] = [];
       for (let i = 0; i < 7; i++) {
@@ -1403,6 +1418,9 @@ describe('MemoryPressureMonitor', () => {
             clear: clearCache,
             evictNotAccessedSince: vi.fn().mockReturnValue(0),
           },
+          toolRegistry: {
+            clearProxySchemaPresentations: clearPresentations,
+          },
           clearContextOnIdle: {
             clearContextMinutes: 60,
             toolResultsNumToKeep: 5,
@@ -1417,6 +1435,10 @@ describe('MemoryPressureMonitor', () => {
 
       expect(setHistory).toHaveBeenCalled();
       expect(clearCache).toHaveBeenCalled();
+      // Idle compaction bypasses GeminiClient.setHistory, so it must clear
+      // deferred-tool proxy presentations itself (fail closed on any
+      // history mutation).
+      expect(clearPresentations).toHaveBeenCalled();
       const compacted = setHistory.mock.calls[0][0] as Content[];
       // microcompactHistory blanks old tool responses with a cleared message
       // rather than removing entries — verify some were blanked.

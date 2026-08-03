@@ -906,6 +906,124 @@ describe('Gemini Client (client.ts)', () => {
       expect(registry.markProxySchemaPresented).toHaveBeenCalledTimes(2);
     });
 
+    it('drains pending resumed presentations on a later history mutation', async () => {
+      const registry = vi.mocked(mockConfig.getToolRegistry)();
+      vi.mocked(registry.getTool).mockImplementation((name: string) =>
+        isDeferredProxyControlTool(name) ? ({} as never) : undefined,
+      );
+      vi.mocked(registry.markProxySchemaPresented)
+        .mockClear()
+        .mockReturnValue(false);
+      const presentation = {
+        name: 'cron_create',
+        schemaFingerprint: 'cron-schema',
+      };
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: {
+          sessionId: 'resumed-session-id',
+          projectHash: 'project-hash',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          messages: [
+            {
+              type: 'tool_result',
+              message: {
+                role: 'user',
+                parts: [
+                  {
+                    functionResponse: {
+                      id: 'tool-search-pending',
+                      name: ToolNames.TOOL_SEARCH,
+                      response: { output: '<functions>...</functions>' },
+                    },
+                  },
+                ],
+              },
+              toolCallResult: {
+                callId: 'tool-search-pending',
+                status: 'success',
+                deferredToolPresentations: [presentation],
+              },
+            },
+          ],
+        },
+        filePath: '/test/session.jsonl',
+        lastCompletedUuid: null,
+      } as unknown as ReturnType<Config['getResumedSessionData']>);
+
+      const resumedClient = new GeminiClient(mockConfig);
+      await resumedClient.initialize();
+      // The tool is not registered yet, so the presentation stays pending.
+      expect(registry.markProxySchemaPresented).toHaveBeenCalledTimes(1);
+
+      // Any history mutation must fail closed and drop the pending restore.
+      vi.mocked(registry.clearProxySchemaPresentations).mockClear();
+      resumedClient.setHistory([]);
+      expect(registry.clearProxySchemaPresentations).toHaveBeenCalled();
+
+      vi.mocked(registry.markProxySchemaPresented).mockReturnValue(true);
+      await resumedClient.setTools();
+      expect(registry.markProxySchemaPresented).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not leak pending resumed presentations into the next session on the same client', async () => {
+      const registry = vi.mocked(mockConfig.getToolRegistry)();
+      vi.mocked(registry.getTool).mockImplementation((name: string) =>
+        isDeferredProxyControlTool(name) ? ({} as never) : undefined,
+      );
+      vi.mocked(registry.markProxySchemaPresented)
+        .mockClear()
+        .mockReturnValue(false);
+      const presentation = {
+        name: 'cron_create',
+        schemaFingerprint: 'cron-schema',
+      };
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: {
+          sessionId: 'resumed-session-id',
+          projectHash: 'project-hash',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          messages: [
+            {
+              type: 'tool_result',
+              message: {
+                role: 'user',
+                parts: [
+                  {
+                    functionResponse: {
+                      id: 'tool-search-pending',
+                      name: ToolNames.TOOL_SEARCH,
+                      response: { output: '<functions>...</functions>' },
+                    },
+                  },
+                ],
+              },
+              toolCallResult: {
+                callId: 'tool-search-pending',
+                status: 'success',
+                deferredToolPresentations: [presentation],
+              },
+            },
+          ],
+        },
+        filePath: '/test/session.jsonl',
+        lastCompletedUuid: null,
+      } as unknown as ReturnType<Config['getResumedSessionData']>);
+
+      const resumedClient = new GeminiClient(mockConfig);
+      await resumedClient.initialize();
+      // The tool is not registered yet, so the presentation stays pending.
+      expect(registry.markProxySchemaPresented).toHaveBeenCalledTimes(1);
+
+      // Starting a fresh session on the same client clears the pending map
+      // before any restore attempt.
+      vi.mocked(registry.markProxySchemaPresented).mockReturnValue(true);
+      await resumedClient.startChat(undefined, SessionStartSource.Clear);
+      await resumedClient.setTools();
+      expect(registry.markProxySchemaPresented).toHaveBeenCalledTimes(1);
+    });
+
     it('does not restore recorded tool-search presentations removed from resumed API history', async () => {
       const registry = vi.mocked(mockConfig.getToolRegistry)();
       vi.mocked(registry.getTool).mockImplementation((name: string) =>

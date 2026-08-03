@@ -47,6 +47,7 @@ import {
   findRepeatedDuplicateProviderToolCall,
   isToolCallConcurrencySafe,
   canonicalToolName,
+  unwrapDeferredToolCallShape,
   parsePositiveIntegerEnv,
   partitionByConcurrencySafety,
   PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
@@ -332,22 +333,7 @@ function getHeadlessExecutionRequest(
       ? request
       : { ...request, name: canonicalName };
   }
-  const targetName = request.args['name'];
-  const targetArgs = request.args['arguments'];
-  if (
-    typeof targetName !== 'string' ||
-    !targetArgs ||
-    typeof targetArgs !== 'object' ||
-    Array.isArray(targetArgs)
-  ) {
-    return request;
-  }
-  return {
-    ...request,
-    name: canonicalToolName(targetName),
-    args: targetArgs as Record<string, unknown>,
-    providerName: ToolNames.DEFERRED_TOOL_CALL,
-  };
+  return unwrapDeferredToolCallShape(request);
 }
 
 /**

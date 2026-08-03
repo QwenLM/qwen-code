@@ -7957,6 +7957,13 @@ export class Config {
         { allowReservedName: true },
       );
       if (!deferredToolCallRegistered) {
+        // The pairing is intentional: tool_search cannot authorize schema
+        // use without deferred_tool_call. Warn because the consequence is
+        // otherwise invisible — every deferred tool is eagerly revealed in
+        // the declaration list instead.
+        this.debugLogger.warn(
+          `"${ToolNames.DEFERRED_TOOL_CALL}" is disabled or denied, so "${ToolNames.TOOL_SEARCH}" was also removed. Deferred tools will be declared directly instead of loaded on demand. Allow or deny the two tools together to keep deferred discovery.`,
+        );
         registry.unregisterFactory(ToolNames.TOOL_SEARCH);
       }
     }

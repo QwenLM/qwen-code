@@ -287,6 +287,10 @@ import {
 } from './daemon-todo-stop-guard.js';
 
 const debugLogger = createDebugLogger('SESSION');
+// Staged on the Content instance by reference. Any structuredClone, spread,
+// or serialization between staging and commit drops the state — that fails
+// closed (authorization lost, the model re-searches), so keep hand-offs of
+// the staged message reference-preserving rather than adding a clone.
 const DEFERRED_TOOL_PRESENTATIONS = Symbol('deferredToolPresentations');
 type ContentWithDeferredToolPresentations = Content & {
   [DEFERRED_TOOL_PRESENTATIONS]?: {
@@ -2885,10 +2889,9 @@ export class Session implements SessionContext {
                 return { stopReason: 'end_turn' };
               }
               if (recoveryPlan.continuation.mode === 'retry_user_parts') {
-                strippedOrphanEntries =
-                  this.config
-                    .getGeminiClient()!
-                    .stripOrphanedUserEntriesFromHistory() ?? null;
+                strippedOrphanEntries = this.config
+                  .getGeminiClient()!
+                  .stripOrphanedUserEntriesFromHistory();
                 orphanPushCountSnapshot =
                   this.#getCurrentChat().getUserContentPushCount?.() ?? 0;
                 continuationParts = recoveryPlan.continuation.parts;

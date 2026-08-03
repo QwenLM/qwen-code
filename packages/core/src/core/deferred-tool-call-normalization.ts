@@ -62,6 +62,38 @@ export function withPermissionToolIdentity(
 }
 
 /**
+ * Pure shape transform of a `deferred_tool_call` request into the request
+ * for its embedded target — no registry access, no eligibility checks.
+ * Returns the request unchanged when it is not a well-formed proxy call.
+ * Shared by the normalization boundary and by display/telemetry-only call
+ * sites (e.g. headless batching) that must never re-implement the unwrap.
+ */
+export function unwrapDeferredToolCallShape(
+  request: ToolCallRequestInfo,
+): ToolCallRequestInfo {
+  if (request.name !== ToolNames.DEFERRED_TOOL_CALL) {
+    return request;
+  }
+  const targetName = request.args['name'];
+  const targetArgs = request.args['arguments'];
+  if (
+    typeof targetName !== 'string' ||
+    targetName.trim().length === 0 ||
+    !targetArgs ||
+    typeof targetArgs !== 'object' ||
+    Array.isArray(targetArgs)
+  ) {
+    return request;
+  }
+  return {
+    ...request,
+    name: canonicalToolName(targetName),
+    args: targetArgs as Record<string, unknown>,
+    providerName: ToolNames.DEFERRED_TOOL_CALL,
+  };
+}
+
+/**
  * Convert the stable provider-facing `deferred_tool_call` wrapper into the
  * real deferred tool request used internally. Callers should run permissions,
  * validation, hooks, execution, and telemetry against the real target, while

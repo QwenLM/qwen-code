@@ -5421,6 +5421,12 @@ export class CoreToolScheduler {
         // survives into a resumed active API history.
         this.recordToolResults(completedCalls);
 
+        // The handler may not settle until the next model request starts
+        // streaming (e.g. the TUI resolves it from the send's first stream
+        // event), so `isFinalizingToolCalls` — and any queued client-initiated
+        // schedule() — can stay held across a model round trip. Every settle
+        // path is bounded (context accepted, delivery failed, or the send
+        // promise settling), so this delays but cannot deadlock the queue.
         const completionAccepted = this.onAllToolCallsComplete
           ? (await this.onAllToolCallsComplete(completedCalls)) !== false
           : true;

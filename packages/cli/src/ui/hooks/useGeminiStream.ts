@@ -4158,6 +4158,10 @@ export const useGeminiStream = (
       );
       if (terminatesGoalTurn && toolGoalBinding) {
         geminiClient.addHistory({ role: 'user', parts: responsesToSend });
+        // Tool results cross the active-history boundary here without a
+        // follow-up submitQuery, so commit staged ToolSearch presentations
+        // like the other early-return preservation paths do.
+        commitDeferredToolPresentations();
         try {
           await config.getChatRecordingService()?.flush();
           const runtime = await config.getGoalRuntimeReady();

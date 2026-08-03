@@ -2378,6 +2378,18 @@ describe('useGeminiStream', () => {
     mockConfig.getGoalRuntime = vi.fn(() => runtime);
     mockConfig.getGoalRuntimeReady = vi.fn().mockResolvedValue(runtime);
     mockConfig.getChatRecordingService = vi.fn().mockReturnValue({ flush });
+    const markProxySchemaPresented = vi.fn().mockReturnValue(true);
+    mockConfig.getToolRegistry = vi.fn(
+      () =>
+        ({
+          getToolSchemaList: vi.fn(() => []),
+          markProxySchemaPresented,
+        }) as any,
+    );
+    const goalPresentation = {
+      name: 'mcp__weather__forecast',
+      schemaFingerprint: 'goal-schema',
+    };
     let capturedOnComplete:
       | ((completedTools: TrackedToolCall[]) => Promise<void>)
       | null = null;
@@ -2437,6 +2449,7 @@ describe('useGeminiStream', () => {
             responseParts,
             errorType: undefined,
             terminateTurn: true,
+            deferredToolPresentations: [goalPresentation],
           },
           tool: { displayName: 'UpdateGoal' },
           invocation: {
@@ -2451,6 +2464,9 @@ describe('useGeminiStream', () => {
       role: 'user',
       parts: responseParts,
     });
+    // The terminating path adds tool results to history without another
+    // submitQuery, so staged ToolSearch presentations must still commit.
+    expect(markProxySchemaPresented).toHaveBeenCalledWith(goalPresentation);
     expect(flush).toHaveBeenCalledOnce();
     expect(finishTurn).toHaveBeenCalledWith(permit);
     expect(mockAddItem).toHaveBeenCalledWith(
