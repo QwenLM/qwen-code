@@ -99,6 +99,38 @@ describe('OpenAIResponsesContentGenerator', () => {
     );
   });
 
+  it('forwards a real abortSignal from request.config to the pipeline', async () => {
+    const expected = new GenerateContentResponse();
+    mockExecute.mockResolvedValue(expected);
+    const { signal } = new AbortController();
+    await generator.generateContent(
+      { model: 'gpt-5', contents: [], config: { abortSignal: signal } },
+      'prompt-1',
+    );
+    expect(mockExecute).toHaveBeenCalledWith(
+      expect.anything(),
+      'prompt-1',
+      signal,
+    );
+  });
+
+  it('forwards a real abortSignal from request.config to the pipeline stream', async () => {
+    async function* fakeStream() {
+      yield new GenerateContentResponse();
+    }
+    mockExecuteStream.mockResolvedValue(fakeStream());
+    const { signal } = new AbortController();
+    await generator.generateContentStream(
+      { model: 'gpt-5', contents: [], config: { abortSignal: signal } },
+      'prompt-1',
+    );
+    expect(mockExecuteStream).toHaveBeenCalledWith(
+      expect.anything(),
+      'prompt-1',
+      signal,
+    );
+  });
+
   it('countTokens uses the request tokenizer', async () => {
     mockTokenizer.calculateTokens.mockResolvedValue({ totalTokens: 42 });
     const result = await generator.countTokens({
@@ -130,10 +162,35 @@ describe('OpenAIResponsesContentGenerator', () => {
         model: 'text-embedding-ada-002',
         contents: [{ role: 'user', parts: [{ text: 'hello world' }] }],
       });
+      // `generator` (from the outer beforeEach) is built with
+      // makeGeneratorConfig()'s model 'gpt-5', which does not contain
+      // 'embed' -- asserts the fallback branch of the model selection
+      // (`model.includes('embed') ? model : 'text-embedding-ada-002'`),
+      // previously untested by any embedContent assertion.
       expect(mockEmbeddingsCreate).toHaveBeenCalledWith(
-        expect.objectContaining({ input: 'hello world' }),
+        expect.objectContaining({
+          input: 'hello world',
+          model: 'text-embedding-ada-002',
+        }),
       );
       expect(result).toEqual({ embeddings: [{ values: [0.1, 0.2] }] });
+    });
+
+    it('uses the configured model when it contains "embed"', async () => {
+      mockEmbeddingsCreate.mockResolvedValue({
+        data: [{ embedding: [0.1] }],
+      });
+      const embedModelGenerator = new OpenAIResponsesContentGenerator(
+        { ...makeGeneratorConfig(), model: 'text-embedding-3-small' },
+        makeCliConfig(),
+      );
+      await embedModelGenerator.embedContent({
+        model: 'text-embedding-3-small',
+        contents: [{ role: 'user', parts: [{ text: 'hello world' }] }],
+      });
+      expect(mockEmbeddingsCreate).toHaveBeenCalledWith(
+        expect.objectContaining({ model: 'text-embedding-3-small' }),
+      );
     });
 
     it('extracts text from a single non-array Content', async () => {
@@ -215,6 +272,33 @@ describe('OpenAIResponsesContentGenerator', () => {
       });
       expect(mockOpenAIConstructor).toHaveBeenCalledWith(
         expect.objectContaining({ baseURL: 'https://api.openai.com/v1' }),
+      );
+    });
+
+    it('applies customHeaders to the embeddings SDK client', async () => {
+      // The streaming pipeline (responses-pipeline.ts) applies
+      // config.customHeaders to every request; embedContent's own SDK
+      // client construction skipped it, so a header configured for the
+      // streaming path (e.g. a proxy auth header) silently never reached
+      // embedding calls.
+      mockEmbeddingsCreate.mockResolvedValue({
+        data: [{ embedding: [0.1] }],
+      });
+      const generatorWithHeaders = new OpenAIResponsesContentGenerator(
+        {
+          ...makeGeneratorConfig(),
+          customHeaders: { 'X-Proxy-Auth': 'token' },
+        },
+        makeCliConfig(),
+      );
+      await generatorWithHeaders.embedContent({
+        model: 'text-embedding-ada-002',
+        contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+      });
+      expect(mockOpenAIConstructor).toHaveBeenCalledWith(
+        expect.objectContaining({
+          defaultHeaders: { 'X-Proxy-Auth': 'token' },
+        }),
       );
     });
 

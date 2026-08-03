@@ -353,6 +353,42 @@ export class ResponsesPipeline {
         }
       }
 
+      // A stream can also close with a final `data: ` line that has no
+      // trailing newline at all -- distinct from the missing-blank-line
+      // case below, since `buffer.split('\n')` never routes an
+      // unterminated line through the main per-line loop above. Process
+      // it here the same way that loop would, so a connection dropped
+      // mid-frame doesn't silently lose the last frame.
+      if (buffer.startsWith('data: ')) {
+        const dataContent = buffer.slice(6);
+        if (dataContent !== '[DONE]') {
+          if (currentEventType) {
+            dataAccumulator += (dataAccumulator ? '\n' : '') + dataContent;
+          } else {
+            try {
+              const data = JSON.parse(dataContent) as Record<string, unknown>;
+              const eventType = data['type'] as
+                | ResponsesSSEEventType
+                | undefined;
+              if (eventType) {
+                const geminiResp = convertParsedFrame(eventType, data);
+                if (geminiResp) {
+                  yield geminiResp;
+                }
+              }
+            } catch (err) {
+              if (err instanceof SyntaxError) {
+                debugLogger.debug(
+                  `Failed to parse SSE data: ${dataContent.substring(0, 200)}`,
+                );
+              } else {
+                throw redactProxyError(err);
+              }
+            }
+          }
+        }
+      }
+
       // The stream can close without a trailing blank line (a proxy that
       // strips trailing whitespace, or an interrupted connection) -- flush
       // any event still buffered so the final `response.completed` event

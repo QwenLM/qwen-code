@@ -70,6 +70,13 @@ export class OpenAIResponsesContentGenerator implements ContentGenerator {
       baseURL,
       timeout: this.contentGeneratorConfig.timeout,
       maxRetries: this.contentGeneratorConfig.maxRetries,
+      // Mirror the streaming pipeline (responses-pipeline.ts), which
+      // applies customHeaders to every request -- without this, headers
+      // configured for the streaming path (e.g. a proxy auth header)
+      // silently don't reach embedContent's requests.
+      ...(this.contentGeneratorConfig.customHeaders
+        ? { defaultHeaders: this.contentGeneratorConfig.customHeaders }
+        : {}),
       ...(runtimeOptions || {}),
     });
     return this.openaiClient;

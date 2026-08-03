@@ -71,6 +71,29 @@ vi.mock('./openaiContentGenerator/index.js', () => ({
   },
 }));
 
+const openaiResponsesMockState = vi.hoisted(() => ({
+  createCount: 0,
+}));
+
+vi.mock('./openaiResponsesContentGenerator/index.js', () => ({
+  createOpenAIResponsesContentGenerator: () => {
+    openaiResponsesMockState.createCount += 1;
+    return {
+      generateContent: async () => ({}),
+      generateContentStream: async () =>
+        (async function* () {
+          yield {};
+        })(),
+      // A sentinel distinct from the Chat mock's `{ totalTokens: 1 }` above,
+      // so a routing regression that sends USE_OPENAI_RESPONSES to the Chat
+      // generator instead (both mocks return `totalTokens > 0`) is caught.
+      countTokens: async () => ({ totalTokens: 999 }),
+      embedContent: async () => ({ embeddings: [] }),
+      useSummarizedThinking: () => false,
+    };
+  },
+}));
+
 vi.mock('../qwen/qwenOAuth2.js', () => ({
   getQwenOAuthClient: async () => {
     qwenMockState.oauthCount += 1;
@@ -118,6 +141,7 @@ describe('createContentGenerator', () => {
     qwenMockState.constructorCount = 0;
     qwenMockState.constructorModels = [];
     openaiLoggerMockState.constructorCalls = [];
+    openaiResponsesMockState.createCount = 0;
   });
 
   it('should defer Gemini content generator creation until first use', async () => {
@@ -253,7 +277,13 @@ describe('createContentGenerator', () => {
       model: 'gpt-5',
       contents: 'hello world',
     });
-    expect(result.totalTokens).toBeGreaterThan(0);
+    // The Responses mock's sentinel (999) is distinct from the Chat mock's
+    // (1), so this fails if a routing regression sends USE_OPENAI_RESPONSES
+    // to createOpenAIContentGenerator instead -- `> 0` alone couldn't tell
+    // the two generators apart.
+    expect(result.totalTokens).toBe(999);
+    expect(openaiResponsesMockState.createCount).toBe(1);
+    expect(openaiMockState.createCount).toBe(0);
   });
 
   it('does not preload non-lazy content generators', async () => {

@@ -836,6 +836,38 @@ describe('convertGeminiToolsToResponsesTools', () => {
       convertGeminiToolsToResponsesTools({ model: 'gpt-5', contents: [] }),
     ).toBeUndefined();
   });
+
+  it('normalizes a zero-arg tool schema missing properties (Azure/litellm compatibility)', () => {
+    // Every other case here already has `properties`, so
+    // normalizeResponsesParameters is a no-op for them -- this is the only
+    // case that actually exercises the normalization this function wires
+    // in, guarding against a regression that silently drops the call.
+    const tools = convertGeminiToolsToResponsesTools({
+      model: 'gpt-5',
+      contents: [],
+      config: {
+        tools: [
+          {
+            functionDeclarations: [
+              {
+                name: 'list_files',
+                description: 'lists files with no arguments',
+                parametersJsonSchema: { type: 'object' },
+              },
+            ],
+          },
+        ],
+      },
+    });
+    expect(tools).toEqual([
+      {
+        type: 'function',
+        name: 'list_files',
+        description: 'lists files with no arguments',
+        parameters: { type: 'object', properties: {} },
+      },
+    ]);
+  });
 });
 
 describe('normalizeResponsesParameters', () => {
