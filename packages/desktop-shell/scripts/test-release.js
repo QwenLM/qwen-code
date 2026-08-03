@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { resolveLogRoot, sliceNewLog } from './resolve-log-root.js';
 
 const packageDir = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -26,6 +27,12 @@ const electronBridgeScript = path.join(
   'create-electron-bridge-manifest.mjs',
 );
 const versionScript = path.join(packageDir, 'scripts', 'version.js');
+const tauriConfig = JSON.parse(
+  fs.readFileSync(
+    path.join(packageDir, 'src-tauri', 'tauri.conf.json'),
+    'utf8',
+  ),
+);
 
 const root = fs.mkdtempSync(
   path.join(os.tmpdir(), 'qwen-desktop-release-test-'),
@@ -34,6 +41,8 @@ try {
   testBootstrapBridgeConfiguration();
   testLegacyApplicationIdentity();
   testElectronBridgeWorkflow();
+  testResolveLogRoot();
+  testSliceNewLog();
   testUpdateManifest(path.join(root, 'manifest'));
   testElectronBridgeManifest(path.join(root, 'electron-bridge'));
   testVersionSynchronization(path.join(root, 'version'));
@@ -71,19 +80,13 @@ function testElectronBridgeWorkflow() {
 }
 
 function testBootstrapBridgeConfiguration() {
-  const config = JSON.parse(
-    fs.readFileSync(
-      path.join(packageDir, 'src-tauri', 'tauri.conf.json'),
-      'utf8',
-    ),
-  );
   assert.equal(
-    config.app?.withGlobalTauri,
+    tauriConfig.app?.withGlobalTauri,
     true,
     'The Bootstrap UI requires window.__TAURI__ for desktop commands.',
   );
   assert.deepEqual(
-    config.app?.security?.capabilities,
+    tauriConfig.app?.security?.capabilities,
     ['bootstrap'],
     'The Bootstrap UI capability must be enabled for the main window.',
   );
@@ -103,6 +106,105 @@ function testBootstrapBridgeConfiguration() {
     'core:event:allow-listen',
     'core:event:allow-unlisten',
   ]);
+}
+
+function testResolveLogRoot() {
+  const paths = {
+    isolatedHome: path.join('/', 'home'),
+    isolatedState: path.join('/', 'state'),
+    appId: tauriConfig.identifier,
+  };
+
+  assert.equal(
+    resolveLogRoot('darwin', {}, paths),
+    path.join('/', 'home', 'Library', 'Logs', tauriConfig.identifier),
+  );
+  assert.equal(
+    resolveLogRoot('linux', {}, paths),
+    path.join('/', 'state', tauriConfig.identifier, 'logs'),
+  );
+  assert.equal(
+    resolveLogRoot('win32', { LOCALAPPDATA: path.join('C:', 'x') }, paths),
+    path.join('C:', 'x', tauriConfig.identifier, 'logs'),
+  );
+  assert.throws(
+    () => resolveLogRoot('win32', {}, paths),
+    /LOCALAPPDATA is required/,
+  );
+
+  // Structural invariants that cannot be tested through the exported helper:
+  // the smoke must not override LOCALAPPDATA in the child env, and the
+  // pre-spawn snapshot must precede the spawn call.
+  const smoke = fs.readFileSync(
+    path.join(packageDir, 'scripts', 'smoke-packaged.js'),
+    'utf8',
+  );
+  assert.doesNotMatch(smoke, /^\s*LOCALAPPDATA:/m);
+  assert.match(
+    smoke,
+    /QWEN_DESKTOP_DISABLE_SETTINGS_PERSISTENCE: '1'/,
+    'Windows packaged smoke must not persist its temporary desktop state',
+  );
+  assert.match(
+    smoke,
+    /const logRoot = resolveLogRoot\(process\.platform, process\.env, \{/,
+    'smoke must resolve log root via resolveLogRoot',
+  );
+  assert.match(
+    smoke,
+    /const appId = JSON\.parse\(\s*fs\.readFileSync\(\s*path\.join\(packageDir, 'src-tauri', 'tauri\.conf\.json'\),\s*'utf8',\s*\),\s*\)\.identifier;/,
+    'smoke appId must be derived from the tauri.conf.json identifier',
+  );
+  const previousLogIndex = smoke.indexOf(
+    'let previousLog = fs.readFileSync(logPath',
+  );
+  const spawnIndex = smoke.indexOf('const child = spawn(executable');
+  assert.notEqual(previousLogIndex, -1, 'smoke must capture previousLog');
+  assert.notEqual(spawnIndex, -1, 'smoke must spawn the child');
+  assert.ok(
+    previousLogIndex < spawnIndex,
+    'previousLog must be captured before the child is spawned',
+  );
+  const readNewLogCalls = smoke.match(/const contents = readNewLog\(\)/g);
+  assert.ok(
+    readNewLogCalls && readNewLogCalls.length === 1,
+    'the polling loop must be the only incremental readNewLog() call site',
+  );
+  assert.match(
+    smoke,
+    /console\.warn\([\s\S]*?previousLog = contents;/,
+    'a rewritten log must warn and rebase the slice baseline',
+  );
+  assert.match(
+    smoke,
+    /const contents = fs\.readFileSync\(logPath, \{\s*encoding: 'utf8',\s*flag: 'a\+',\s*\}\);\s*throw smokeError\('Timed out waiting for packaged desktop runtime\.', contents\);/,
+    'the timeout error must embed the full log, not the incremental delta',
+  );
+  assert.match(
+    smoke,
+    /sliceNewLog\(/,
+    'smoke must slice the log via the tested sliceNewLog helper',
+  );
+  assert.match(
+    smoke,
+    /function smokeError[\s\S]*?Log: \$\{logPath\}/,
+    'smokeError must embed the log path like the timeout error does',
+  );
+}
+
+function testSliceNewLog() {
+  assert.deepEqual(sliceNewLog('hello', ''), {
+    text: 'hello',
+    baseline: '',
+  });
+  assert.deepEqual(sliceNewLog('hello world', 'hello'), {
+    text: ' world',
+    baseline: 'hello',
+  });
+  assert.deepEqual(sliceNewLog('new', 'old'), {
+    text: 'new',
+    baseline: '',
+  });
 }
 
 function testUpdateManifest(directory) {

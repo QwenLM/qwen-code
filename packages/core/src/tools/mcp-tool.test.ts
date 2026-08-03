@@ -12,6 +12,7 @@ import {
   DiscoveredMCPTool,
   generateValidName,
   type McpDirectClient,
+  type McpToolAnnotations,
 } from './mcp-tool.js';
 import type { ToolResult } from './tools.js';
 import { ToolConfirmationOutcome } from './tools.js';
@@ -1529,6 +1530,11 @@ describe('DiscoveredMCPTool', () => {
   });
 
   describe('auto-reconnect on connection error', () => {
+    const idempotentAnnotations = { idempotentHint: true } as const;
+    const readOnlyAnnotations = { readOnlyHint: true } as const;
+    const unsafeReplayErrorMessage =
+      'MCP tool execution may have completed before the connection failed. Automatic replay was skipped because the call could not be verified as safe to replay. Do not retry automatically; verify the outcome before trying again.';
+
     it('should attempt reconnect and retry on connection error', async () => {
       const params = { param: 'test' };
       const reconnectServerToolName = 'literature.search_pubmed';
@@ -1550,10 +1556,13 @@ describe('DiscoveredMCPTool', () => {
         reconnectServerToolName,
         baseDescription,
         inputSchema,
-        undefined,
+        true,
         undefined,
         undefined,
         newMockMcpClient,
+        undefined,
+        undefined,
+        idempotentAnnotations,
       );
 
       const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
@@ -1579,10 +1588,13 @@ describe('DiscoveredMCPTool', () => {
         reconnectServerToolName,
         baseDescription,
         inputSchema,
-        undefined,
+        true,
         undefined,
         mockConfig as any,
         mockMcpClient,
+        undefined,
+        undefined,
+        idempotentAnnotations,
       );
 
       const invocation = reconnectTool.build(params);
@@ -1615,10 +1627,13 @@ describe('DiscoveredMCPTool', () => {
           properties: { replacement: { type: 'string' } },
           required: ['replacement'],
         },
-        undefined,
+        true,
         undefined,
         undefined,
         newMockMcpClient,
+        undefined,
+        undefined,
+        idempotentAnnotations,
       );
       const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
       const mockConfig = {
@@ -1634,10 +1649,13 @@ describe('DiscoveredMCPTool', () => {
         serverToolName,
         baseDescription,
         inputSchema,
-        undefined,
+        true,
         undefined,
         mockConfig as any,
         mockMcpClient,
+        undefined,
+        undefined,
+        idempotentAnnotations,
       );
 
       await expect(
@@ -1646,6 +1664,284 @@ describe('DiscoveredMCPTool', () => {
 
       expect(discoverToolsForServer).toHaveBeenCalledWith(serverName);
       expect(newMockMcpClient.callTool).not.toHaveBeenCalled();
+    });
+
+    it.each<{
+      name: string;
+      trust: boolean;
+      trustedFolderAfterReconnect: boolean;
+      annotations: McpToolAnnotations | undefined;
+    }>([
+      {
+        name: 'loses its annotations',
+        trust: true,
+        trustedFolderAfterReconnect: true,
+        annotations: undefined,
+      },
+      {
+        name: 'is no longer trusted',
+        trust: false,
+        trustedFolderAfterReconnect: true,
+        annotations: idempotentAnnotations,
+      },
+      {
+        name: 'is now in an untrusted workspace',
+        trust: true,
+        trustedFolderAfterReconnect: false,
+        annotations: idempotentAnnotations,
+      },
+    ])(
+      'should not replay when the re-discovered tool $name',
+      async (testCase) => {
+        const initialClient: McpDirectClient = {
+          callTool: vi
+            .fn()
+            .mockRejectedValueOnce(new Error('Connection closed')),
+        };
+        const retryClient: McpDirectClient = {
+          callTool: vi.fn().mockResolvedValueOnce({
+            content: [{ type: 'text', text: 'Unexpected replay' }],
+          }),
+        };
+        const rediscoveredTool = new DiscoveredMCPTool(
+          mockCallableToolInstance,
+          serverName,
+          serverToolName,
+          baseDescription,
+          inputSchema,
+          testCase.trust,
+          undefined,
+          undefined,
+          retryClient,
+          undefined,
+          undefined,
+          testCase.annotations,
+        );
+        const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+        const ensureTool = vi.fn().mockResolvedValue(rediscoveredTool);
+        const isTrustedFolder = vi
+          .fn()
+          .mockReturnValueOnce(true)
+          .mockReturnValue(testCase.trustedFolderAfterReconnect);
+        const mockConfig = {
+          isTrustedFolder,
+          getToolRegistry: () => ({ discoverToolsForServer, ensureTool }),
+        };
+        const originalTool = new DiscoveredMCPTool(
+          mockCallableToolInstance,
+          serverName,
+          serverToolName,
+          baseDescription,
+          inputSchema,
+          true,
+          undefined,
+          mockConfig as any,
+          initialClient,
+          undefined,
+          undefined,
+          idempotentAnnotations,
+        );
+
+        updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+        await expect(
+          originalTool
+            .build({ param: 'test' })
+            .execute(new AbortController().signal),
+        ).rejects.toThrow(unsafeReplayErrorMessage);
+
+        expect(initialClient.callTool).toHaveBeenCalledTimes(1);
+        expect(discoverToolsForServer).toHaveBeenCalledTimes(1);
+        expect(ensureTool).toHaveBeenCalledTimes(1);
+        expect(retryClient.callTool).not.toHaveBeenCalled();
+      },
+    );
+
+    it('should reconnect consistent read-only calls through the callable fallback', async () => {
+      const initialCallable = {
+        tool: vi.fn(),
+        callTool: vi.fn().mockRejectedValueOnce(new Error('Connection closed')),
+      } as unknown as Mocked<CallableTool>;
+      const retryCallable = {
+        tool: vi.fn(),
+        callTool: vi.fn().mockResolvedValueOnce([
+          {
+            functionResponse: {
+              name: serverToolName,
+              response: { content: [{ type: 'text', text: 'OK' }] },
+            },
+          },
+        ]),
+      } as unknown as Mocked<CallableTool>;
+      const retryTool = new DiscoveredMCPTool(
+        retryCallable,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        readOnlyAnnotations,
+      );
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool: vi.fn().mockResolvedValue(retryTool),
+        }),
+        getTruncateToolOutputThreshold: () => 0,
+        getTruncateToolOutputLines: () => 0,
+      };
+      const reconnectTool = new DiscoveredMCPTool(
+        initialCallable,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true,
+        undefined,
+        mockConfig as any,
+        undefined,
+        undefined,
+        undefined,
+        readOnlyAnnotations,
+      );
+
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      const result = await reconnectTool
+        .build({ param: 'test' })
+        .execute(new AbortController().signal);
+
+      expect(initialCallable.callTool).toHaveBeenCalledTimes(1);
+      expect(retryCallable.callTool).toHaveBeenCalledTimes(1);
+      expect(discoverToolsForServer).toHaveBeenCalledTimes(1);
+      expect(result.llmContent).toEqual([{ text: 'OK' }]);
+    });
+
+    it('should not replay unsafe calls through the callable fallback', async () => {
+      const initialCallable = {
+        tool: vi.fn(),
+        callTool: vi.fn().mockRejectedValueOnce(new Error('Connection closed')),
+      } as unknown as Mocked<CallableTool>;
+      const discoverToolsForServer = vi.fn();
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool: vi.fn(),
+        }),
+      };
+      const unsafeTool = new DiscoveredMCPTool(
+        initialCallable,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true,
+        undefined,
+        mockConfig as any,
+        undefined,
+        undefined,
+        undefined,
+        { idempotentHint: false },
+      );
+
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      await expect(
+        unsafeTool
+          .build({ param: 'test' })
+          .execute(new AbortController().signal),
+      ).rejects.toThrow(unsafeReplayErrorMessage);
+
+      expect(initialCallable.callTool).toHaveBeenCalledTimes(1);
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+    });
+
+    it.each<{
+      name: string;
+      trust: boolean | undefined;
+      trustedFolder: boolean;
+      annotations: McpToolAnnotations | undefined;
+    }>([
+      {
+        name: 'missing annotations',
+        trust: true,
+        trustedFolder: true,
+        annotations: undefined,
+      },
+      {
+        name: 'explicitly non-idempotent annotations',
+        trust: true,
+        trustedFolder: true,
+        annotations: { idempotentHint: false },
+      },
+      {
+        name: 'conflicting read-only and destructive annotations',
+        trust: true,
+        trustedFolder: true,
+        annotations: { readOnlyHint: true, destructiveHint: true },
+      },
+      {
+        name: 'conflicting read-only and non-idempotent annotations',
+        trust: true,
+        trustedFolder: true,
+        annotations: { readOnlyHint: true, idempotentHint: false },
+      },
+      {
+        name: 'an untrusted server',
+        trust: false,
+        trustedFolder: true,
+        annotations: idempotentAnnotations,
+      },
+      {
+        name: 'an untrusted workspace',
+        trust: true,
+        trustedFolder: false,
+        annotations: idempotentAnnotations,
+      },
+    ])('should not replay $name', async (testCase) => {
+      const initialClient: McpDirectClient = {
+        callTool: vi
+          .fn()
+          .mockRejectedValueOnce(
+            new Error('Connection closed after side effect completed'),
+          ),
+      };
+      const discoverToolsForServer = vi.fn();
+      const ensureTool = vi.fn();
+      const mockConfig = {
+        isTrustedFolder: () => testCase.trustedFolder,
+        getToolRegistry: () => ({ discoverToolsForServer, ensureTool }),
+      };
+      const unsafeTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        testCase.trust,
+        undefined,
+        mockConfig as any,
+        initialClient,
+        undefined,
+        undefined,
+        testCase.annotations,
+      );
+
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      await expect(
+        unsafeTool
+          .build({ param: 'test' })
+          .execute(new AbortController().signal),
+      ).rejects.toThrow(unsafeReplayErrorMessage);
+
+      expect(initialClient.callTool).toHaveBeenCalledTimes(1);
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+      expect(ensureTool).not.toHaveBeenCalled();
     });
 
     it('should not retry on non-connection errors', async () => {
@@ -1770,7 +2066,85 @@ describe('DiscoveredMCPTool', () => {
       expect(retryClient.callTool).not.toHaveBeenCalled();
     });
 
-    it('should not retry after reconnection attempt fails', async () => {
+    it('should not reconnect for an MCP isError result', async () => {
+      const initialClient: McpDirectClient = {
+        callTool: vi.fn().mockResolvedValueOnce({
+          content: [{ type: 'text', text: 'Validation failed' }],
+          isError: true,
+        }),
+      };
+      const discoverToolsForServer = vi.fn();
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool: vi.fn(),
+        }),
+        getTruncateToolOutputThreshold: () => 0,
+        getTruncateToolOutputLines: () => 0,
+      };
+      const safeTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true,
+        undefined,
+        mockConfig as any,
+        initialClient,
+        undefined,
+        undefined,
+        idempotentAnnotations,
+      );
+
+      const result = await safeTool
+        .build({ param: 'test' })
+        .execute(new AbortController().signal);
+
+      expect(result.error?.type).toBe(ToolErrorType.MCP_TOOL_ERROR);
+      expect(initialClient.callTool).toHaveBeenCalledTimes(1);
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+    });
+
+    it('should preserve the connection error when reconnect discovery fails', async () => {
+      const connectionError = new Error('Connection closed');
+      const initialClient: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValueOnce(connectionError),
+      };
+      const discoverToolsForServer = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('Discovery failed'));
+      const ensureTool = vi.fn();
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({ discoverToolsForServer, ensureTool }),
+      };
+      const safeTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true,
+        undefined,
+        mockConfig as any,
+        initialClient,
+        undefined,
+        undefined,
+        idempotentAnnotations,
+      );
+
+      await expect(
+        safeTool.build({ param: 'test' }).execute(new AbortController().signal),
+      ).rejects.toBe(connectionError);
+
+      expect(initialClient.callTool).toHaveBeenCalledTimes(1);
+      expect(discoverToolsForServer).toHaveBeenCalledTimes(1);
+      expect(ensureTool).not.toHaveBeenCalled();
+    });
+
+    it('should stop after the maximum reconnection retries', async () => {
       const params = { param: 'test' };
       const mockMcpClient: McpDirectClient = {
         callTool: vi.fn(),
@@ -1786,10 +2160,13 @@ describe('DiscoveredMCPTool', () => {
         serverToolName,
         baseDescription,
         inputSchema,
-        undefined,
+        true,
         undefined,
         undefined,
         secondMockMcpClient,
+        undefined,
+        undefined,
+        idempotentAnnotations,
       );
 
       const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
@@ -1811,10 +2188,13 @@ describe('DiscoveredMCPTool', () => {
         serverToolName,
         baseDescription,
         inputSchema,
-        undefined,
+        true,
         undefined,
         mockConfig as any,
         mockMcpClient,
+        undefined,
+        undefined,
+        idempotentAnnotations,
       );
 
       const invocation = reconnectTool.build(params);
@@ -1858,10 +2238,13 @@ describe('DiscoveredMCPTool', () => {
           serverToolName,
           baseDescription,
           inputSchema,
-          undefined,
+          true,
           undefined,
           undefined,
           newMockMcpClient,
+          undefined,
+          undefined,
+          idempotentAnnotations,
         );
 
         const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
@@ -1881,10 +2264,13 @@ describe('DiscoveredMCPTool', () => {
           serverToolName,
           baseDescription,
           inputSchema,
-          undefined,
+          true,
           undefined,
           mockConfig as any,
           mockMcpClient,
+          undefined,
+          undefined,
+          idempotentAnnotations,
         );
 
         const invocation = reconnectTool.build(params);
@@ -1917,10 +2303,13 @@ describe('DiscoveredMCPTool', () => {
         serverToolName,
         baseDescription,
         inputSchema,
-        undefined,
+        true,
         undefined,
         undefined,
         newMockMcpClient,
+        undefined,
+        undefined,
+        idempotentAnnotations,
       );
 
       const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
@@ -1942,10 +2331,13 @@ describe('DiscoveredMCPTool', () => {
         serverToolName,
         baseDescription,
         inputSchema,
-        undefined,
+        true,
         undefined,
         mockConfig as any,
         mockMcpClient,
+        undefined,
+        undefined,
+        idempotentAnnotations,
       );
 
       const invocation = reconnectTool.build(params);
@@ -1976,10 +2368,13 @@ describe('DiscoveredMCPTool', () => {
         serverToolName,
         baseDescription,
         inputSchema,
-        undefined,
+        true,
         undefined,
         undefined,
         newMockMcpClient,
+        undefined,
+        undefined,
+        idempotentAnnotations,
       );
       const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
       const mockConfig = {
@@ -2000,10 +2395,13 @@ describe('DiscoveredMCPTool', () => {
         serverToolName,
         baseDescription,
         inputSchema,
-        undefined,
+        true,
         undefined,
         mockConfig as any,
         mockMcpClient,
+        undefined,
+        undefined,
+        idempotentAnnotations,
       );
 
       await reconnectTool.build(params).execute(new AbortController().signal);
