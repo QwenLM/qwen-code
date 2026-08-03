@@ -15,7 +15,7 @@ import type {
   DaemonWorkspaceGitDiffFile,
   DaemonWorkspaceGitDiffOptions,
 } from '@qwen-code/sdk/daemon';
-import { ChevronDownIcon, SearchIcon } from 'lucide-react';
+import { ArrowRightIcon, ChevronDownIcon, SearchIcon } from 'lucide-react';
 import type { BundledLanguage, ThemedToken } from 'shiki';
 import { useI18n } from '../../i18n';
 import { useTheme, WebShellThemeId } from '../../themeContext';
@@ -377,6 +377,7 @@ interface DiffRefItem {
 function SearchableDiffRefSelect({
   value,
   items,
+  prefix,
   label,
   searchPlaceholder,
   noMatches,
@@ -384,6 +385,7 @@ function SearchableDiffRefSelect({
 }: {
   value: string;
   items: DiffRefItem[];
+  prefix?: string;
   label: string;
   searchPlaceholder: string;
   noMatches: string;
@@ -417,6 +419,14 @@ function SearchableDiffRefSelect({
           aria-label={label}
           aria-expanded={open}
         >
+          {prefix && (
+            <>
+              <span className={styles.refPrefix} title={prefix}>
+                {prefix}
+              </span>
+              <ArrowRightIcon className={styles.refArrow} size={14} />
+            </>
+          )}
           <span className={styles.refValue}>{selected?.label ?? value}</span>
           <ChevronDownIcon size={14} />
         </button>
@@ -441,7 +451,12 @@ function SearchableDiffRefSelect({
             onChange={(event) => setQuery(event.target.value)}
           />
         </div>
-        <div className={styles.refList} role="listbox" aria-label={label}>
+        <div
+          className={styles.refList}
+          role="listbox"
+          aria-label={label}
+          onWheelCapture={(event) => event.stopPropagation()}
+        >
           {filteredItems.map((item) => (
             <button
               key={item.value}
@@ -545,7 +560,6 @@ export function GitDiffContent({
         setBranchRef(
           result.local.find((branch) => !branch.isHead)?.name ??
             result.remote[0]?.name ??
-            result.local[0]?.name ??
             '',
         );
       })
@@ -584,10 +598,12 @@ export function GitDiffContent({
 
   const branchItems = useMemo(
     () => [
-      ...(branches?.local ?? []).map((branch) => ({
-        value: branch.name,
-        label: branch.name,
-      })),
+      ...(branches?.local ?? [])
+        .filter((branch) => !branch.isHead)
+        .map((branch) => ({
+          value: branch.name,
+          label: branch.name,
+        })),
       ...(branches?.remote ?? []).map((branch) => ({
         value: branch.name,
         label: branch.name,
@@ -653,7 +669,7 @@ export function GitDiffContent({
         )}
       </div>
     );
-  } else if (diff.files.length === 0) {
+  } else if (diff.filesCount === 0) {
     body = <div className={styles.placeholder}>{t('gitDiff.empty')}</div>;
   } else {
     body = (
@@ -711,6 +727,7 @@ export function GitDiffContent({
           <SearchableDiffRefSelect
             value={branchRef}
             items={branchItems}
+            prefix={branches?.head}
             label={t('gitDiff.source.selectBranch')}
             searchPlaceholder={t('gitDiff.source.searchBranch')}
             noMatches={t('gitDiff.source.noMatches')}

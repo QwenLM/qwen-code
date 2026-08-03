@@ -128,6 +128,7 @@ function diffPayload(
   overrides: Partial<{
     available: boolean;
     files: Array<Record<string, unknown>>;
+    filesCount: number;
     hiddenCount: number;
   }> = {},
 ) {
@@ -146,7 +147,7 @@ function diffPayload(
     v: 1 as const,
     workspaceCwd: '/repo',
     available: overrides.available ?? true,
-    filesCount: files.length,
+    filesCount: overrides.filesCount ?? files.length,
     linesAdded: 2,
     linesRemoved: 1,
     files,
@@ -201,6 +202,7 @@ describe('GitDiffDialog', () => {
       hasMore: false,
     });
     workspaceGitBranches.mockResolvedValue({
+      head: 'current-branch',
       local: [
         { name: 'main', isHead: true },
         { name: 'topic', isHead: false },
@@ -238,6 +240,18 @@ describe('GitDiffDialog', () => {
     const commitSearch = document.body.querySelector(
       'input[aria-label="Search commits…"]',
     ) as HTMLInputElement;
+    const commitList = document.body.querySelector(
+      '[role="listbox"][aria-label="Select commit"]',
+    ) as HTMLDivElement;
+    const bubbledWheel = vi.fn();
+    document.body.addEventListener('wheel', bubbledWheel);
+    await act(async () => {
+      commitList.dispatchEvent(
+        new WheelEvent('wheel', { bubbles: true, deltaY: 100 }),
+      );
+    });
+    document.body.removeEventListener('wheel', bubbledWheel);
+    expect(bubbledWheel).not.toHaveBeenCalled();
     await act(async () => {
       typeInput(commitSearch, 'target');
     });
@@ -268,10 +282,17 @@ describe('GitDiffDialog', () => {
     const branchTrigger = document.body.querySelector(
       'button[aria-label="Select branch"]',
     ) as HTMLButtonElement;
+    expect(branchTrigger.textContent).toContain('current-branch');
+    expect(branchTrigger.textContent).toContain('topic');
     await act(async () => {
       branchTrigger.click();
     });
     await flush();
+    expect(
+      Array.from(document.body.querySelectorAll('[role="option"]')).map(
+        (option) => option.textContent,
+      ),
+    ).not.toContain('main');
     const branchSearch = document.body.querySelector(
       'input[aria-label="Search branches…"]',
     ) as HTMLInputElement;
@@ -507,6 +528,17 @@ describe('GitDiffDialog', () => {
     await flush();
 
     expect(document.body.textContent).toContain('No changes');
+  });
+
+  it('shows the hidden-file count when the detail cap omits every file', async () => {
+    workspaceGitDiff.mockResolvedValue(
+      diffPayload({ files: [], filesCount: 7277, hiddenCount: 7277 }),
+    );
+    mount();
+    await flush();
+
+    expect(document.body.textContent).not.toContain('No changes');
+    expect(document.body.textContent).toContain('7277 more file(s) not shown');
   });
 
   it('marks untracked and binary files in the list', async () => {

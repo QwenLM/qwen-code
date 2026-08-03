@@ -55,16 +55,29 @@
   white-space: nowrap;
 }
 
+.refPrefix {
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.refArrow {
+  flex-shrink: 0;
+  color: var(--muted-foreground);
+}
+
 .refPopover {
   width: var(--radix-popover-trigger-width);
   min-width: 280px;
-  max-height: 320px;
+  max-height: min(320px, var(--radix-popover-content-available-height));
   gap: 0;
   padding: 0;
   overflow: hidden;
 }
 
 .refSearch {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -89,9 +102,12 @@
 }
 
 .refList {
+  min-height: 0;
+  flex: 1 1 auto;
   max-height: 270px;
   padding: 4px 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .refItem {

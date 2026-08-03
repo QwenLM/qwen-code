@@ -39,8 +39,11 @@ The Web Shell Changes view owns the selected source. Commit and branch metadata
 come from the existing log and branch endpoints. Selecting a source reloads the
 file list, and expanding a file sends the same source to the per-file hunk
 endpoint. Commit and branch selectors filter their loaded choices by commit SHA,
-subject, or branch name. Branch selection never checks out or mutates the
-repository.
+subject, or branch name. The branch selector presents the current branch (or
+detached HEAD) before the selected baseline and excludes the current local
+branch from baseline choices. Branch selection never checks out or mutates the
+repository. When a large comparison omits all per-file details, the view shows
+the hidden-file count instead of reporting that there are no changes.
 
 ## Error handling
 
