@@ -2310,9 +2310,13 @@ describe('DiscoveredMCPTool', () => {
         baseDescription,
         inputSchema,
         undefined,
+        true, // trust: propagated to new invocation for canSafelyReplay
         undefined,
         undefined,
         newMockMcpClient,
+        undefined, // mcpTimeout
+        undefined, // mcpToolIdleTimeoutMs
+        { idempotentHint: true }, // annotations: propagated for canSafelyReplay
       );
       const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
       const mockConfig = {
@@ -2334,9 +2338,13 @@ describe('DiscoveredMCPTool', () => {
         baseDescription,
         inputSchema,
         undefined,
-        undefined,
+        true, // trust: required for canSafelyReplay
         mockConfig as any,
+        mockConfig as any, // cliConfig: has isTrustedFolder + getToolRegistry
         mockMcpClient,
+        undefined, // mcpTimeout
+        undefined, // mcpToolIdleTimeoutMs
+        { idempotentHint: true }, // annotations: required for canSafelyReplay
       );
 
       await reconnectTool.build(params).execute(new AbortController().signal);
