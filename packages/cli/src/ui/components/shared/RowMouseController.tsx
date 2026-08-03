@@ -8,6 +8,7 @@ import { type MutableRefObject, useCallback } from 'react';
 import { type DOMElement } from 'ink';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import { useMouseEvents } from '../../hooks/useMouseEvents.js';
+import { useContextMenu } from '../../context-menu/ContextMenuContext.js';
 import { type MouseEvent } from '../../utils/mouse.js';
 import {
   measureElementPosition,
@@ -66,6 +67,9 @@ export function RowMouseController({
   onSelectIndex,
 }: RowMouseControllerProps): null {
   const { rows: terminalHeight } = useTerminalSize();
+  // Quiet while the context menu owns the pointer so a click on the menu
+  // overlay can't also select a list row underneath it.
+  const { menu: contextMenu } = useContextMenu();
 
   const resolveIndex = useCallback(
     (event: MouseEvent): number | null => {
@@ -121,7 +125,10 @@ export function RowMouseController({
     [resolveIndex, isDisabled, onHoverIndex, onSelectIndex],
   );
 
-  useMouseEvents(handleMouse, { isActive: true, tracking: 'any' });
+  useMouseEvents(handleMouse, {
+    isActive: contextMenu === null,
+    tracking: 'any',
+  });
 
   return null;
 }

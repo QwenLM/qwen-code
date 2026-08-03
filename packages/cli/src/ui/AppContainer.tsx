@@ -211,6 +211,7 @@ import {
 } from './hooks/useExtensionUpdates.js';
 import { useProviderUpdates } from './hooks/useProviderUpdates.js';
 import { ShellFocusContext } from './contexts/ShellFocusContext.js';
+import { ContextMenuProvider } from './context-menu/ContextMenuContext.js';
 import {
   RenderModeProvider,
   type RenderMode,
@@ -4765,7 +4766,9 @@ export const AppContainer = (props: AppContainerProps) => {
                 <RenderModeProvider value={renderModeValue}>
                   <TerminalOutputProvider value={writeRaw}>
                     <ShellFocusContext.Provider value={isFocused}>
-                      <App />
+                      <ContextMenuProvider>
+                        <App />
+                      </ContextMenuProvider>
                     </ShellFocusContext.Provider>
                   </TerminalOutputProvider>
                 </RenderModeProvider>
