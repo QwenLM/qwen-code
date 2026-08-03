@@ -699,5 +699,162 @@ for (const theme of THEMES) {
       ).toBeVisible();
       await captureScreenshot(page, `permission-panel-${theme}`);
     });
+
+    test(`code review artifact`, async ({ page }, testInfo) => {
+      // The dedicated code-review renderer is gated three ways: the
+      // `session_artifacts` capability, an artifact whose metadata marks it
+      // `code_review`, and a readable workspace file behind it. Without a
+      // scenario seeding all three, the whole detail view stays invisible to
+      // the before/after preview.
+      const reviewPath = '.qwen/reviews/pr-1234.json';
+      const reviewDocument = {
+        schemaVersion: 1,
+        target: 'local',
+        effort: 'high',
+        verdict: {
+          event: 'REQUEST_CHANGES',
+          verdictLine: 'Verdict: Request changes (1 Critical, 1 Suggestion)',
+          baseEvent: 'REQUEST_CHANGES',
+          cappedBy: ['Critical finding f-critical is unresolved'],
+          downgraded: false,
+          downgradedFrom: null,
+        },
+        findings: [
+          {
+            id: 'f-critical',
+            severity: 'Critical',
+            confidence: 'high',
+            source: 'review',
+            summary:
+              'Review verdict is reported even when the child process times out',
+            shortSummary: 'timeout treated as success',
+            failureScenario:
+              'When `review run` times out, the CLI still prints a verdict as if the review completed.',
+            suggestedFix:
+              'Fail closed when timedOut is true instead of reporting the verdict.',
+            category: 'correctness',
+            locations: [
+              { file: 'packages/cli/src/commands/review.ts', line: 412 },
+            ],
+            outcome: 'fixed',
+            outcomeNote: 'Timeouts now surface as incomplete.',
+          },
+          {
+            id: 'f-suggestion',
+            severity: 'Suggestion',
+            confidence: 'low',
+            source: 'lint',
+            summary:
+              'Artifact evidence links should render their file name only',
+            shortSummary: 'verbose evidence labels',
+            failureScenario:
+              'Long asset URLs overflow the finding card in narrow panels.',
+            locations: [
+              {
+                file: 'packages/web-shell/client/components/artifacts/CodeReviewArtifactDetail.tsx',
+                line: 540,
+              },
+            ],
+            assets: [
+              'https://assets.example.com/reviews/pr-1234/f-suggestion.png',
+            ],
+          },
+        ],
+        counts: {
+          total: 2,
+          bySeverity: { Critical: 1, Suggestion: 1, 'Nice to have': 0 },
+          byConfidence: { high: 1, low: 1 },
+          byOutcome: { fixed: 1, skipped: 0, no_change_needed: 0 },
+          held: 0,
+        },
+        outcomesRecorded: true,
+        markdownReportPath: '.qwen/reviews/pr-1234.md',
+      };
+      const reviewDocumentJson = JSON.stringify(reviewDocument);
+      const scenario = createWebShellDaemonScenario({
+        capabilities: {
+          features: [
+            'session_events',
+            'permission_vote',
+            'session_permission_vote',
+            'session_scope_override',
+            'session_source_metadata',
+            'workspace_settings',
+            'workspace_voice',
+            'session_artifacts',
+          ],
+        },
+        events: [
+          userTextEvent('Review my changes and save the report.', { id: 1 }),
+          {
+            id: 2,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'tool_call',
+                toolCallId: 'call-record-review',
+                toolName: 'record_artifact',
+                title: 'record_artifact',
+                kind: 'other',
+                status: 'completed',
+                rawInput: {
+                  title: 'Code review result',
+                  workspacePath: reviewPath,
+                },
+                rawOutput: { recorded: true },
+              },
+            },
+          },
+          assistantTextEvent('Review saved to the workspace.', { id: 3 }),
+          turnCompleteEvent('prompt-review', { id: 4 }),
+        ],
+        artifacts: [
+          {
+            id: 'artifact-code-review',
+            kind: 'other',
+            storage: 'workspace',
+            source: 'tool',
+            status: 'available',
+            title: 'Code review result',
+            workspacePath: reviewPath,
+            mimeType: 'application/json',
+            sizeBytes: reviewDocumentJson.length,
+            metadata: { artifactType: 'code_review', schemaVersion: 1 },
+            retention: 'restorable',
+            clientRetained: false,
+            createdAt: '2026-07-03T00:00:00.000Z',
+            updatedAt: '2026-07-03T00:00:00.000Z',
+            toolCallId: 'call-record-review',
+            toolName: 'record_artifact',
+          },
+        ],
+        workspaceFiles: { [reviewPath]: reviewDocumentJson },
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      // Open the artifact card the turn outputs render for the recorded
+      // artifact; the right panel then loads the workspace file and renders
+      // the dedicated detail view instead of the generic file preview.
+      await page
+        .locator('[data-web-shell-message-list]')
+        .getByRole('button', { name: 'Open', exact: true })
+        .click();
+      await expect(page.getByText('Authoritative verdict')).toBeVisible();
+      await expect(
+        page.getByText('Verdict: Request changes (1 Critical, 1 Suggestion)'),
+      ).toBeVisible();
+      await expect(
+        page.getByText(
+          'Review verdict is reported even when the child process times out',
+        ),
+      ).toBeVisible();
+      await captureScreenshot(page, `code-review-artifact-${theme}`);
+    });
   });
 }

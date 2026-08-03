@@ -17,6 +17,11 @@ import {
   type Settings,
   type SettingsSchema,
 } from './settingsSchema.js';
+import {
+  MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER,
+  MAX_CONCURRENT_SUB_SESSIONS_TOTAL,
+  MAX_TRACKED_SPAWNED_SESSIONS,
+} from '../serve/create-sub-session.js';
 
 describe('SettingsSchema', () => {
   describe('getSettingsSchema', () => {
@@ -386,6 +391,17 @@ describe('SettingsSchema', () => {
       checkBooleanDefaults(getSettingsSchema() as SettingsSchema);
     });
 
+    it('keeps Session Workflow opt-in without requiring a restart', () => {
+      expect(
+        getSettingsSchema().experimental.properties.sessionWorkflow,
+      ).toMatchObject({
+        type: 'boolean',
+        default: false,
+        requiresRestart: false,
+        showInDialog: true,
+      });
+    });
+
     it('should have showInDialog property configured', () => {
       // Check that user-facing settings are marked for dialog display
       expect(getSettingsSchema().general.properties.vimMode.showInDialog).toBe(
@@ -480,6 +496,22 @@ describe('SettingsSchema', () => {
       expect(responseTokensPerSecond.default).toBe(false);
       expect(responseTokensPerSecond.showInDialog).toBe(true);
       expect(responseTokensPerSecond.requiresRestart).toBe(true);
+    });
+
+    it('should pin serve sub-session caps to the runtime defaults', () => {
+      const serve = getSettingsSchema().serve.properties;
+      expect(serve.maxConcurrentSubSessionsPerCaller.default).toBe(
+        MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER,
+      );
+      expect(serve.maxConcurrentSubSessionsTotal.default).toBe(
+        MAX_CONCURRENT_SUB_SESSIONS_TOTAL,
+      );
+      // The runtime clamps the total cap to the tracked-id set size; the
+      // schema maximum must match so editors reject values that the daemon
+      // would otherwise silently clamp.
+      expect(serve.maxConcurrentSubSessionsTotal.maximum).toBe(
+        MAX_TRACKED_SPAWNED_SESSIONS,
+      );
     });
 
     it('should infer Settings type correctly', () => {

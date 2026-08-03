@@ -76,6 +76,7 @@ import {
 } from './TurnOutputs';
 import { LineStats, sumLineStats } from './LineStats';
 import styles from './ArtifactPanel.module.css';
+import { CodeReviewArtifactDetail } from './CodeReviewArtifactDetail';
 import { SubagentDetail } from './SubagentDetail';
 import { SideTaskPanel } from './SideTaskPanel';
 import {
@@ -226,6 +227,7 @@ interface ArtifactPanelProps {
     workspaceActions: DaemonWorkspaceActions,
   ) => void;
   onError?: (error: unknown, fallback: string) => void;
+  sessionWorkflowEnabled?: boolean;
   onClose: () => void;
   variant?: 'docked' | 'drawer';
 }
@@ -257,6 +259,7 @@ export function ArtifactPanel({
   onNestedRightPanelOpen,
   onNestedArtifactsChange,
   onError,
+  sessionWorkflowEnabled,
   onClose,
   variant = 'docked',
 }: ArtifactPanelProps) {
@@ -650,6 +653,7 @@ export function ArtifactPanel({
             onRightPanelOpen={onNestedRightPanelOpen}
             onArtifactsChange={onNestedArtifactsChange}
             onError={onError}
+            sessionWorkflowEnabled={sessionWorkflowEnabled}
           />
         ) : (
           <ScheduledTaskDetail
@@ -2113,9 +2117,26 @@ function ArtifactDetail({
   const safeUrl = isSafeHref(artifact.url) ? artifact.url : undefined;
   const isAutomationSnapshot =
     artifact.metadata?.['artifactType'] === 'automation_snapshot';
+  const isCodeReview = artifact.metadata?.['artifactType'] === 'code_review';
   const canPreviewWorkspaceFile =
     artifact.storage === 'workspace' && Boolean(artifact.workspacePath);
   const imageMimeType = getArtifactImageMimeType(artifact);
+
+  if (isCodeReview) {
+    if (artifact.status !== 'available') {
+      return <CodeReviewUnavailable status={artifact.status} />;
+    }
+    if (!canPreviewWorkspaceFile || !artifact.workspacePath) {
+      return <CodeReviewWorkspaceRequired />;
+    }
+    return (
+      <CodeReviewArtifactDetail
+        workspacePath={artifact.workspacePath}
+        artifactVersion={`${artifact.status}:${artifact.updatedAt}`}
+        workspaceActions={workspaceActions}
+      />
+    );
+  }
 
   if (canPreviewWorkspaceFile && artifact.workspacePath) {
     return (
@@ -2199,6 +2220,24 @@ function ArtifactDetail({
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+function CodeReviewUnavailable({ status }: { status: string }) {
+  const { t } = useI18n();
+  return (
+    <div className={styles.previewError} role="alert">
+      {t('codeReview.unavailable', { status })}
+    </div>
+  );
+}
+
+function CodeReviewWorkspaceRequired() {
+  const { t } = useI18n();
+  return (
+    <div className={styles.previewError} role="alert">
+      {t('codeReview.workspaceRequired')}
     </div>
   );
 }

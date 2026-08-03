@@ -135,6 +135,20 @@ describe('PlanExecutionView', () => {
     });
   });
 
+  it('does not block a todo on an unknown dependency', () => {
+    const todo: TodoItem = {
+      id: 'standalone',
+      content: 'Standalone',
+      status: 'pending',
+      blockedBy: ['missing'],
+    };
+
+    expect(getPlanNodeState(todo, new Map([[todo.id, todo]]), [], [])).toEqual({
+      status: 'ready',
+      attention: false,
+    });
+  });
+
   it('restores cancellation from replay output after the live task leaves', () => {
     const cancelled = {
       ...agentTool('build'),

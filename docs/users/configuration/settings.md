@@ -264,6 +264,18 @@ The `extra_body` field allows you to add custom parameters to the request body s
 | ------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | `visionModel` | string | Image-capable model used as the vision bridge: when a text-only main model receives an image, or `read_file` needs the bounded PDF visual fallback, it is transcribed by this model first. Setting this explicitly authorizes bridge calls to that model even when it uses another provider; the tool display discloses the endpoint. Leave empty to auto-pick a same-provider vision model. Can also be set via `/model --vision`. | `""`    |
 
+#### compactionModel
+
+| Setting           | Type   | Description                                                                                                                                                                                                             | Default |
+| ----------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `compactionModel` | string | Model used for chat compression (auto-compaction). Leave empty to fall back to the main model. A smaller or faster model can reduce compression latency and cost. Can also be set or cleared via `/model --compaction`. | `""`    |
+
+#### imageModel
+
+| Setting      | Type   | Description                                                                                                                                                                                                                        | Default |
+| ------------ | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `imageModel` | string | Model used by the built-in `image_gen` tool. The selected model must have `imageOnly: true`, an HTTPS `baseUrl`, and `envKey` in `modelProviders`. Leave empty to keep the tool unavailable. Can also be set via `/model --image`. | `""`    |
+
 #### visionBridgeTimeoutMs
 
 | Setting                 | Type    | Description                                                                                                                                                                                                                                                        | Default |
@@ -356,6 +368,7 @@ If you are experiencing performance issues with file searching (e.g., with `@` c
 | `memory.enableTeamMemory`        | boolean | Enable a project memory tier shared with collaborators via the git-tracked `.qwen/team-memory/` directory. Writes to it are secret-scanned and reviewable in the git diff.                            | `false` |
 | `memory.enableTeamMemorySync`    | boolean | When team memory is enabled, automatically commit, fast-forward-pull, and push the `.qwen/team-memory/` directory at session start so collaborators stay in sync. Requires a configured git upstream. | `false` |
 | `memory.agentTimeoutMinutes`     | number  | Max runtime in minutes for background memory agents (extraction, dream, remember, skill review). Unset uses each agent's built-in default (2–5 minutes); `0` disables the time limit.                 | unset   |
+| `memory.agentMaxTurns`           | number  | Max turns for background memory agents (extraction, dream, remember, skill review). Unset uses each agent's built-in default (5–8); `0` disables the turn limit.                                      | unset   |
 
 See [Memory](../features/memory) for details on how auto-memory works and how to use the `/memory`, `/remember`, and `/dream` commands.
 
@@ -581,7 +594,7 @@ Configures connections to one or more Model-Context Protocol (MCP) servers for d
 | `mcpServers.<SERVER_NAME>.httpUrl`      | string           | The URL of an MCP server that uses streamable HTTP for communication.                                                                                                                                                                                              | Yes      |
 | `mcpServers.<SERVER_NAME>.headers`      | object           | A map of HTTP headers to send with requests to `url` or `httpUrl`.                                                                                                                                                                                                 | Yes      |
 | `mcpServers.<SERVER_NAME>.timeout`      | number           | Timeout in milliseconds for requests to this MCP server.                                                                                                                                                                                                           | Yes      |
-| `mcpServers.<SERVER_NAME>.trust`        | boolean          | Trust this server and bypass all tool call confirmations.                                                                                                                                                                                                          | Yes      |
+| `mcpServers.<SERVER_NAME>.trust`        | boolean          | Trust this server and bypass its tool call confirmations in a trusted workspace.                                                                                                                                                                                   | Yes      |
 | `mcpServers.<SERVER_NAME>.description`  | string           | A brief description of the server, which may be used for display purposes.                                                                                                                                                                                         | Yes      |
 | `mcpServers.<SERVER_NAME>.includeTools` | array of strings | List of tool names to include from this MCP server. When specified, only the tools listed here will be available from this server (allowlist behavior). If not specified, all tools from the server are enabled by default.                                        | Yes      |
 | `mcpServers.<SERVER_NAME>.excludeTools` | array of strings | List of tool names to exclude from this MCP server. Tools listed here will not be available to the model, even if they are exposed by the server. **Note:** `excludeTools` takes precedence over `includeTools` - if a tool is in both lists, it will be excluded. | Yes      |

@@ -961,6 +961,118 @@ process.stdout.write(JSON.stringify({
     expect(out.findings).toEqual([]);
   });
 
+  it('holds a mutant at inconclusive when its OWN test was red in the baseline', async () => {
+    // Measured live on PR #8213: six hunks in `bridge.ts` were correctly held
+    // at `inconclusive` because `bridge.test.ts` never ran green, while eight
+    // mutants in the SAME file were scored `survived` and shipped as findings.
+    // A mutant runs against `greenProbes` only, so the red collocated test is
+    // excluded from the run, and "every affected test still passed" is then
+    // computed over a set that omits the one test most likely to catch the
+    // deletion. Two files here: `f.ts` whose own test is red, and `g.ts`
+    // whose own test is green — the second is what shows the guard is
+    // targeted rather than a blanket refusal.
+    write('package.json', '{"private":true,"workspaces":["packages/*"]}\n');
+    write('packages/lib/src/f.ts', 'export const a = new Map();\n');
+    write('packages/lib/src/g.ts', 'export const b = new Map();\n');
+    const base = commitAll('base');
+    write(
+      'packages/lib/src/f.ts',
+      'export const a = new Map();\nexport function fReset() {\n  a.clear();\n}\n',
+    );
+    write(
+      'packages/lib/src/g.ts',
+      'export const b = new Map();\nexport function gReset() {\n  b.clear();\n}\n',
+    );
+    write(
+      'packages/lib/src/f.test.ts',
+      'import { fReset } from "./f.js"; import { it, expect } from "vitest"; it("t", () => expect(typeof fReset).toBe("function"));\n',
+    );
+    write(
+      'packages/lib/src/g.test.ts',
+      'import { gReset } from "./g.js"; import { it, expect } from "vitest"; it("t", () => expect(typeof gReset).toBe("function"));\n',
+    );
+    commitAll('pr');
+    const wt = join(repo, 'wt');
+    git(repo, 'worktree', 'add', '-q', '--detach', wt, 'HEAD');
+    writeFileSync(
+      join(repo, 'report.json'),
+      JSON.stringify({
+        files: [
+          { path: 'packages/lib/src/f.ts', kind: 'source' },
+          { path: 'packages/lib/src/g.ts', kind: 'source' },
+          { path: 'packages/lib/src/f.test.ts', kind: 'test' },
+          { path: 'packages/lib/src/g.test.ts', kind: 'test' },
+        ],
+      }),
+    );
+    // `f.test.ts` is red from the start — the baseline shape this is about.
+    // Everything else is green, and the injected control still turns the run
+    // red, so the harness is validated and survivors would be licensed.
+    writeFileSync(
+      vitestScript(),
+      `#!/usr/bin/env node
+import fs from 'node:fs';
+import path from 'node:path';
+const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+const st = (f) => {
+  try {
+    if (fs.readFileSync(f, 'utf8').includes('QWEN-REVIEW-POSITIVE-CONTROL')) return 'failed';
+  } catch {}
+  return path.basename(f) === 'f.test.ts' ? 'failed' : 'passed';
+};
+const results = files.map((f) => ({
+  name: path.resolve(f),
+  assertionResults: [{ status: st(f) }],
+}));
+const nf = results.filter((r) => r.assertionResults[0].status === 'failed').length;
+process.stdout.write(JSON.stringify({
+  numPassedTests: results.length - nf,
+  numFailedTests: nf,
+  testResults: results,
+}));
+`,
+    );
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    expect(out.harnessValidated).toBe(true);
+    const forF = out.mutants.probed.filter((m: { file: string }) =>
+      m.file.endsWith('f.ts'),
+    );
+    expect(forF.length).toBeGreaterThan(0);
+    for (const m of forF) {
+      expect(m.verdict).toBe('inconclusive');
+      expect(m.detail).toContain('f.test.ts');
+      expect(m.detail).toContain('did not run green');
+      // The clause that actually regressed. The old flat wording satisfied
+      // both assertions above, so only this one pins the chain the bug
+      // shipped on: baseline classification -> reason tag -> sentence.
+      // `f.test.ts` fails an assertion here, so `gated` is the measured state.
+      expect(m.detail).toContain('was RED there');
+      expect(m.detail).not.toContain('compile or import error');
+    }
+    // ...and nothing a reader acts on carries a survivor claim for that file.
+    expect(
+      (out.findings as Array<{ kind: string; file: string }>).filter(
+        (f) => f.kind === 'mutant-survived' && f.file.endsWith('f.ts'),
+      ),
+    ).toEqual([]);
+    // The guard is targeted: `g.ts`, whose own test IS green, still gets a
+    // real verdict rather than being swept up with it.
+    const forG = out.mutants.probed.filter((m: { file: string }) =>
+      m.file.endsWith('g.ts'),
+    );
+    expect(forG.length).toBeGreaterThan(0);
+    expect(
+      forG.every((m: { verdict: string }) => m.verdict !== 'inconclusive'),
+    ).toBe(true);
+  });
+
   it('a control that could not be SET UP leaves the window spendable', async () => {
     // `null` is not `false`, and this is where the difference is observable.
     // A control that never ran demonstrated nothing about the runner, so the
