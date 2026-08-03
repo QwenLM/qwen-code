@@ -923,15 +923,20 @@ jobs:
       # "running" line doesn't outlive the run. Neutral wording — the verdict
       # lives in the stage comments above; this only records that the run ended
       # and keeps the run link. Same marker → edits the one comment, no second
-      # post. Best-effort, on both success and failure.
+      # post. Best-effort, on success, failure, AND cancellation: always() (not
+      # success() || failure()) because the job-level timeout-minutes and a
+      # manual cancel both surface as cancellation, which would skip this step
+      # and leave the comment claiming the run is still in progress — the verify
+      # lane has publish-verify to catch that case, this lane only has us.
       - name: 'Finalize triage status comment'
-        if: "(success() || failure()) && steps.resolve.outputs.number != ''"
+        if: "always() && steps.resolve.outputs.number != ''"
         shell: 'bash'
         env:
           GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
           NUMBER: '${{ steps.resolve.outputs.number }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
           TRIAGE_OUTCOME: '${{ steps.triage.outcome }}'
+          JOB_STATUS: '${{ job.status }}'
         run: |-
           set -uo pipefail
           MARKER='<!-- qwen-triage lifecycle -->'
@@ -942,6 +947,9 @@ jobs:
             if [ "${TRIAGE_OUTCOME:-}" = 'success' ]; then
               EN="✅ **Qwen Triage finished** — [view run]($RUN_URL). See the stage comments in this thread for the result."
               ZH="✅ **Qwen Triage 已完成** —— [查看运行]($RUN_URL)。结果见本线程中的各阶段评论。"
+            elif [ "${JOB_STATUS:-}" = 'cancelled' ]; then
+              EN="🚫 **Qwen Triage was cancelled** — [view run]($RUN_URL). The run hit its time limit or was cancelled before finishing; re-run to get a result."
+              ZH="🚫 **Qwen Triage 已取消** —— [查看运行]($RUN_URL)。运行超时或被取消,未跑完;重新运行以获得结果。"
             else
               EN="⚠️ **Qwen Triage ended early** — [view run]($RUN_URL). It stopped before finishing; check the run log."
               ZH="⚠️ **Qwen Triage 提前结束** —— [查看运行]($RUN_URL)。未跑完,请查看运行日志。"

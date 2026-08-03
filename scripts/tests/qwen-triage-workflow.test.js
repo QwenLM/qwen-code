@@ -472,13 +472,21 @@ describe('qwen-triage tmux workflow', () => {
     expect(statusStep).toContain('continuing.');
 
     const finalizeStep = step('Finalize triage status comment');
-    // Runs on both outcomes and edits the SAME marker comment (no second post).
+    // Runs on EVERY terminal outcome and edits the SAME marker comment (no
+    // second post). always(), not success() || failure(): the job timeout and
+    // a manual cancel surface as cancellation, which skipped the step and left
+    // the early comment claiming the run was still in progress.
     expect(finalizeStep).toContain("MARKER='<!-- qwen-triage lifecycle -->'");
     expect(finalizeStep).toContain(
       "LEGACY_MARKER='<!-- qwen-triage stage=status -->'",
     );
-    expect(finalizeStep).toContain('success() || failure()');
+    expect(finalizeStep).toContain(
+      'if: "always() && steps.resolve.outputs.number != \'\'"',
+    );
+    expect(finalizeStep).not.toContain('success() || failure()');
     expect(finalizeStep).toContain('steps.triage.outcome');
+    expect(finalizeStep).toContain("JOB_STATUS: '${{ job.status }}'");
+    expect(finalizeStep).toContain('Qwen Triage was cancelled');
     expect(finalizeStep).toContain(
       'Cannot resolve bot identity; skipping final status comment upsert.',
     );
