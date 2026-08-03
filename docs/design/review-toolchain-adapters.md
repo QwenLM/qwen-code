@@ -2,9 +2,11 @@
 
 ## Status
 
-P0 implementation design. This phase extracts the existing npm-specific
-`qwen review build-test` behavior behind an internal toolchain adapter without
-changing its command-line interface or report format.
+P0 extraction plus P1 Maven implementation. P0 extracted the existing
+npm-specific `qwen review build-test` behavior behind an internal toolchain
+adapter without changing its command-line interface or report format. P1 adds
+the Maven adapter, which widens the report's `toolchain` discriminant to
+`"npm" | "maven" | "unsupported"` — see Report semantics below.
 
 ## Problem
 
@@ -199,9 +201,12 @@ when it produces useful deterministic evidence for those repository shapes.
 Fastjson2 and Druid establish these requirements:
 
 - Always run a checked-in wrapper from the resolved reactor root (`./mvnw`, or
-  `mvnw.cmd` on win32, where `./mvnw` is not runnable). Druid's older wrapper
-  depends on the process cwd and fails when invoked by absolute path from another
-  repository. When no wrapper exists, use the system `mvn`.
+  `mvnw.cmd` on win32, where `./mvnw` is not runnable). On POSIX a checked-in
+  `./mvnw` without the executable bit (a `core.fileMode=false` checkout) also
+  falls back to the system `mvn`, because running it would die with exit 126
+  and steer a launch failure at the PR. Druid's older wrapper depends on the
+  process cwd and fails when invoked by absolute path from another repository.
+  When no wrapper exists, use the system `mvn`.
 - Module directory and artifactId are not interchangeable. Druid's `core`
   directory produces artifactId `druid`; report paths use module directories,
   while Maven remains responsible for resolving the selected reactor projects.
@@ -284,7 +289,13 @@ Existing fields are generalized without changing their JSON shape:
 - `timedOut`, `ok`, and `note`: retain their current cross-toolchain meaning.
 
 Dependency/plugin resolution failures, unavailable wrapper/runtime, and timeout
-are infrastructure outcomes. Compiler and test failures remain deterministic
+are infrastructure outcomes, except when the diff changed the inputs that could
+have caused them: dependency-input changes (POMs, `.mvn/**`, the wrapper files)
+suppress the resolution carve-out, and a wrapper change suppresses the
+launch-failure carve-out, so a PR-caused breakage is filed against the PR, not
+the environment. A timeout or spawn death that still produced fresh failing
+reports discloses those failures as test evidence instead of framing the whole
+run as infrastructure. Compiler and test failures remain deterministic
 build/test evidence. Classification uses both command output and whether the
 current invocation produced fresh Surefire/Failsafe reports; a repository
 resolution failure with no fresh reports is never filed as a source defect.
@@ -372,10 +383,13 @@ specifying this before two real adapters demonstrate the common boundary.
   mutation, CI discovery, and multi-toolchain aggregation.
 - **False applicability:** P0's npm adapter applies only when the root
   `package.json` can scope something — workspaces or a root build/test script.
-  A package.json that exists only for a docs site, husky, or a lint config must
-  not claim a Java repository and hide its Maven verification behind a mixed
-  root; all finer-grained support decisions remain in the one execution path
-  whose existing tests already fail closed to a structured handoff.
+  A package.json with neither workspaces nor build/test scripts (husky, a lint
+  config, a script-less docs site) does not apply, so the Maven adapter owns
+  such a root alone. A docs manifest that DOES define a build/test script makes
+  both adapters apply and deliberately fails closed as a mixed root under the
+  P1 selection rule — all finer-grained support decisions remain in the one
+  execution path whose existing tests already fail closed to a structured
+  handoff.
 
 ## Open questions
 

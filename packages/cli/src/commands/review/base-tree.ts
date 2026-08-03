@@ -114,6 +114,23 @@ function gitHasPath(cwd: string, sha: string, path: string): boolean {
   return !r.error && r.status === 0;
 }
 
+/**
+ * Nested-pom bases (standalone modules, no root aggregator) miss the root
+ * `pom.xml` probe but are Maven just the same; when the base carries no root
+ * `package.json` either, one bounded tree listing settles it before checkout.
+ */
+function gitTreeHasNestedPom(cwd: string, sha: string): boolean {
+  const r = spawnSync('git', ['ls-tree', '-r', '--name-only', sha], {
+    cwd,
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  if (r.error || r.status !== 0) return false;
+  return (r.stdout ?? '')
+    .split('\n')
+    .some((treePath) => treePath.endsWith('/pom.xml'));
+}
+
 export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
   const unavailable = (note: string): BaseTreeReport => ({
     available: false,
@@ -160,8 +177,14 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
   // other toolchain has a delta consumer in this release — Agent 7's brief
   // says the same for Maven. `cat-file` answers before a full checkout of
   // what can be a very large Java reactor, so a Maven base never pays for a
-  // tree that would not be built.
-  if (gitHasPath(worktree, baseSha, 'pom.xml')) {
+  // tree that would not be built — including the nested-pom shape (standalone
+  // modules, no root aggregator), settled by a bounded tree listing when the
+  // base has no root package.json either.
+  if (
+    gitHasPath(worktree, baseSha, 'pom.xml') ||
+    (!gitHasPath(worktree, baseSha, 'package.json') &&
+      gitTreeHasNestedPom(worktree, baseSha))
+  ) {
     return unavailable(
       `the merge base is a Maven project, and this release's A/B attribution only reruns npm test ` +
         'commands — a base-side Maven build could not be consumed, so it was not run ' +

@@ -15,12 +15,20 @@ import {
 import type { Dirent } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { BuildTestReport, CommandResult } from '../build-test.js';
+import { INSTALL_MIN_FREE_BYTES, freeDiskBytes, gib } from './disk.js';
 import { shellQuotePath } from './shell-quote.js';
 import type { ReviewToolchainAdapter, ToolchainRunArgs } from './toolchain.js';
 
 export interface MavenReactor {
   modules: string[];
   projectDirs: string[];
+  /**
+   * Aggregation edges: aggregator module dir ('.' for the root) -> the module
+   * dirs it aggregates. A `<module>` entry can point OUTSIDE the aggregator's
+   * directory (`../its/app-it`), so descendant closure walks these edges
+   * rather than directory prefixes.
+   */
+  children: Record<string, string[]>;
 }
 
 export interface MavenOwnership {
@@ -131,6 +139,7 @@ export function readMavenReactor(root: string): MavenReactorResult {
 
   const modules = new Set<string>();
   const projectDirs = new Set<string>(['.']);
+  const children = new Map<string, string[]>();
   const visited = new Set<string>();
 
   const visit = (pomPath: string): string | null => {
@@ -149,6 +158,7 @@ export function readMavenReactor(root: string): MavenReactorResult {
     }
 
     const aggregatorDir = dirname(pomPath);
+    const aggregatorPath = toPosix(relative(reactorRoot, aggregatorDir)) || '.';
     for (const entry of entries) {
       if (isAbsolute(entry) || entry.includes('${') || entry.includes('@{')) {
         return `Maven module ${entry} in ${toPosix(relative(reactorRoot, pomPath))} is not a literal reactor-relative path.`;
@@ -164,6 +174,10 @@ export function readMavenReactor(root: string): MavenReactorResult {
       const modulePath = toPosix(relative(reactorRoot, moduleDir));
       modules.add(modulePath);
       projectDirs.add(modulePath);
+      children.set(aggregatorPath, [
+        ...(children.get(aggregatorPath) ?? []),
+        modulePath,
+      ]);
       const error = visit(childPom);
       if (error) return error;
     }
@@ -176,6 +190,12 @@ export function readMavenReactor(root: string): MavenReactorResult {
     reactor: {
       modules: [...modules].sort(),
       projectDirs: [...projectDirs].sort(),
+      children: Object.fromEntries(
+        [...children.entries()].map(([parent, aggregated]) => [
+          parent,
+          [...aggregated].sort(),
+        ]),
+      ),
     },
   };
 }
@@ -272,28 +292,42 @@ export function detectMavenOwnership(
       if (path === `${owner}/pom.xml`) {
         // A module POM is the parent config of every module aggregated
         // beneath it: the descendants inherit what changed, and `-am` alone
-        // would compile only the aggregator and test nothing.
+        // would compile only the aggregator and test nothing. The closure
+        // walks the recorded aggregation edges, not directory prefixes: a
+        // `<module>../its/app-it</module>` entry sits OUTSIDE the
+        // aggregator's directory and still inherits the parent change.
         modules.add(owner);
-        for (const module of reactor.modules) {
-          if (module.startsWith(`${owner}/`)) modules.add(module);
+        const queue = [owner];
+        while (queue.length > 0) {
+          const aggregator = queue.pop() as string;
+          for (const child of reactor.children[aggregator] ?? []) {
+            if (!modules.has(child)) {
+              modules.add(child);
+              queue.push(child);
+            }
+          }
         }
         continue;
       }
-      // Documentation is judged relative to the owning module so the `src/`
-      // guard means the MODULE's source tree: `core/README.md` is a no-op
-      // run, but `core/src/test/resources/expected.txt` is test data and
-      // must keep building.
+      // The out-of-reactor project check outranks the documentation
+      // exemption, exactly as in the unowned branch: a changed path that
+      // BELONGS to an inactive nested project fails closed no matter its
+      // extension. Documentation is then judged relative to the owning
+      // module so the `src/` guard means the MODULE's source tree:
+      // `core/README.md` is a no-op run, but
+      // `core/src/test/resources/expected.txt` is test data and must keep
+      // building.
+      const nearestProject = nearestMavenProject(
+        root,
+        path,
+        reactor.projectDirs,
+      );
+      if (nearestProject && !reactor.projectDirs.includes(nearestProject)) {
+        inactiveProjects.add(nearestProject);
+        continue;
+      }
       if (!isDocumentationPath(path.slice(owner.length + 1))) {
-        const nearestProject = nearestMavenProject(
-          root,
-          path,
-          reactor.projectDirs,
-        );
-        if (nearestProject && !reactor.projectDirs.includes(nearestProject)) {
-          inactiveProjects.add(nearestProject);
-        } else {
-          modules.add(owner);
-        }
+        modules.add(owner);
       }
       continue;
     }
@@ -307,6 +341,15 @@ export function detectMavenOwnership(
       continue;
     }
     if (isDocumentationPath(path) || isRepoMetadataPath(path)) continue;
+    // Source owned by the root project '.' scopes to `-pl . -am`: no other
+    // module compiles the root artifact's own `src/`, and on the large
+    // reactors this adapter targets, a reactor-wide run can spend its whole
+    // deadline proving nothing. Anything ELSE unowned (a root build script
+    // or checkstyle config) can affect every module and stays reactor-wide.
+    if (nearestProject === '.' && (path === 'src' || path.startsWith('src/'))) {
+      modules.add('.');
+      continue;
+    }
     reactorWide = true;
   }
 
@@ -473,8 +516,7 @@ function appendTestSummaries(
   }
 
   const lines: string[] = [];
-  const cleanLines: string[] = [];
-  for (const [project, group] of clean) {
+  const cleanGroups = [...clean.entries()].map(([project, group]) => {
     const totals = group.reduce(
       (sum, item) => ({
         tests: sum.tests + item.tests,
@@ -482,19 +524,32 @@ function appendTestSummaries(
       }),
       { tests: 0, skipped: 0 },
     );
-    cleanLines.push(
-      `[maven-test-report] ${project} (${group.length} report(s)): ` +
+    return {
+      line:
+        `[maven-test-report] ${project} (${group.length} report(s)): ` +
         `tests=${totals.tests}, failures=0, errors=0, skipped=${totals.skipped}`,
-    );
-  }
+      totals,
+    };
+  });
+  const cleanLines = cleanGroups.map((group) => group.line);
   // One line per project dir: bounded by module count, but a 300-module
   // reactor still appends 300 lines AFTER the command output was trimmed, so
-  // cap it like the failing-report and case blocks.
-  if (cleanLines.length > MAX_CLEAN_ROLLUP_LINES) {
-    const omitted = cleanLines.length - MAX_CLEAN_ROLLUP_LINES;
+  // cap it like the failing-report and case blocks. The marker carries the
+  // omitted totals so count adjudication still sees the whole run — a
+  // truncated total once "corrected" a right author count to a wrong one.
+  if (cleanGroups.length > MAX_CLEAN_ROLLUP_LINES) {
+    const omittedGroups = cleanGroups.slice(MAX_CLEAN_ROLLUP_LINES);
     cleanLines.length = MAX_CLEAN_ROLLUP_LINES;
+    const totals = omittedGroups.reduce(
+      (sum, group) => ({
+        tests: sum.tests + group.totals.tests,
+        skipped: sum.skipped + group.totals.skipped,
+      }),
+      { tests: 0, skipped: 0 },
+    );
     cleanLines.push(
-      `[maven-test-report] ${omitted} more clean project rollup(s) omitted`,
+      `[maven-test-report] ${omittedGroups.length} more clean project rollup(s) omitted: ` +
+        `tests=${totals.tests}, failures=0, errors=0, skipped=${totals.skipped}`,
     );
   }
   lines.push(...cleanLines);
@@ -505,10 +560,12 @@ function appendTestSummaries(
       `failures=${summary.failures}, errors=${summary.errors}, skipped=${summary.skipped}`,
   );
   if (reportLines.length > MAX_FAILING_REPORT_LINES) {
-    const omitted = reportLines.length - MAX_FAILING_REPORT_LINES;
+    const omittedSummaries = failing.slice(MAX_FAILING_REPORT_LINES);
     reportLines.length = MAX_FAILING_REPORT_LINES;
+    const totals = summaryTotals(omittedSummaries);
     reportLines.push(
-      `[maven-test-report] ${omitted} more failing report(s) omitted`,
+      `[maven-test-report] ${omittedSummaries.length} more failing report(s) omitted: ` +
+        `tests=${totals.tests}, failures=${totals.failures}, errors=${totals.errors}, skipped=${totals.skipped}`,
     );
   }
   lines.push(...reportLines);
@@ -587,10 +644,13 @@ function hasFreshTestFailure(summaries: MavenTestSummary[]): boolean {
 /**
  * Shell diagnostics for a wrapper that cannot start. `Permission denied` is
  * the missing executable bit; `bad interpreter` / `No such file or directory`
- * on the `./mvnw` line is a CRLF-committed shebang dying on Linux.
+ * on the `./mvnw` line is a CRLF-committed shebang dying on Linux. bash >=
+ * 5.2 reports the same death as `cannot execute: required file not found`
+ * and dash as a bare `not found`; a `#!/usr/bin/env sh\r` shebang names
+ * `/usr/bin/env`, not the wrapper, so that line gets its own alternant.
  */
 const WRAPPER_LAUNCH_FAILURE_RE =
-  /(?:^|\n).*\.\/mvnw[^\n]*(?:Permission denied|bad interpreter|No such file or directory)(?:\n|$)/i;
+  /(?:^|\n)(?:.*\.\/mvnw[^\n]*(?:Permission denied|bad interpreter|No such file or directory|cannot execute: required file not found|not found)|\/usr\/bin\/env:[^\n]*No such file or directory)(?:\n|$)/i;
 
 function summaryTotals(summaries: MavenTestSummary[]) {
   return summaries.reduce(
@@ -678,19 +738,26 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   const affected = ownership.reactorWide ? ['.'] : ownership.modules;
   const buildSet = ownership.reactorWide ? ['.'] : ownership.modules;
   const executable = mavenExecutable(args.root);
-  const wrapperChanged = args.changedFiles.some(
-    (file) => normalizedChangedPath(args.root, file) === 'mvnw',
-  );
+  const wrapperChanged = args.changedFiles.some((file) => {
+    const path = normalizedChangedPath(args.root, file);
+    return path === 'mvnw' || path === 'mvnw.cmd';
+  });
   // The dependency carve-out below must not file a PR-caused breakage as
-  // environmental: when the diff changed POMs or `.mvn/**`, the resolution
-  // failure may be the diff's own doing.
+  // environmental: when the diff changed POMs, `.mvn/**`, or the wrapper
+  // (which can redirect the local repository or settings), the resolution
+  // failure may be the diff's own doing. POMs under a project's `src/` tree
+  // are test fixtures (see isUnderTestSourceTree) and cannot change the
+  // reactor's dependency resolution, so they do not count.
   const dependencyInputsChanged = args.changedFiles.some((file) => {
     const path = normalizedChangedPath(args.root, file);
     return (
       path !== null &&
       (path === 'pom.xml' ||
-        path.endsWith('/pom.xml') ||
-        path.startsWith('.mvn/'))
+        path.startsWith('.mvn/') ||
+        path === 'mvnw' ||
+        path === 'mvnw.cmd' ||
+        (path.endsWith('/pom.xml') &&
+          !isUnderTestSourceTree(path, parsed.reactor.projectDirs)))
     );
   });
   const lifecycle = args.buildOnly ? 'test-compile' : 'test';
@@ -703,6 +770,27 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     ? ''
     : ` -pl ${shellSelector(ownership.modules)} -am`;
   const command = `${executable} --batch-mode --no-transfer-progress${narrowing} ${lifecycle}`;
+  // Disk preflight, mirroring the npm adapter: Maven resolves plugins and
+  // dependencies inside the lifecycle command, and a run that dies on ENOSPC
+  // leaves a full disk that fails every agent scheduled after this one.
+  const free = freeDiskBytes(args.root);
+  if (free !== null && free < INSTALL_MIN_FREE_BYTES) {
+    return mavenReport({
+      affected,
+      buildSet,
+      widenedWith: [],
+      install: null,
+      build: [],
+      test: [],
+      ok: false,
+      timedOut: [],
+      note:
+        `Insufficient disk space (${gib(free)}G free, need ~${gib(INSTALL_MIN_FREE_BYTES)}G): ` +
+        `skipped \`${command}\`. Maven resolves dependencies inside the lifecycle ` +
+        'command, so nothing could be built or tested. This is an environment ' +
+        'issue, not a code finding — report it as informational.',
+    });
+  }
   // A build-only run never reads the evidence, so it skips the snapshot too
   // — on a large reactor that is a readdir + statSync sweep of every
   // reports dir for nothing.
@@ -720,11 +808,14 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   // exit 0 over failing tests, and the verdict must read the evidence.
   const freshFailures = hasFreshTestFailure(summaries);
   const ok = result.exitCode === 0 && !result.timedOut && !freshFailures;
+  // Every carve-out carries a diff-inputs exception: when the PR changed
+  // the wrapper or the dependency inputs, the failure may be the diff's own
+  // doing and must not be laundered into an environmental result.
   const acquisitionFailure =
     !ok &&
     !freshFailures &&
     result.exitCode !== null &&
-    (isLaunchFailure(result.output) ||
+    ((isLaunchFailure(result.output) && !wrapperChanged) ||
       (isDependencyFailure(result.output) && !dependencyInputsChanged) ||
       (executable === './mvnw' &&
         !wrapperChanged &&
@@ -745,7 +836,20 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     note: '',
   });
 
-  if (result.timedOut) {
+  if ((result.timedOut || result.exitCode === null) && freshFailures) {
+    // A deadline kill or spawn death does not retroactively excuse the test
+    // failures Surefire/Failsafe already recorded: name the interruption as
+    // infrastructure, but keep the captured regressions as test evidence.
+    const totals = summaryTotals(summaries);
+    const cause = result.timedOut
+      ? `ran out of time (${args.timeout}s)`
+      : 'ended without an exit code (a spawn failure or signal outside the deadline)';
+    report.note =
+      `\`${result.command}\` ${cause} — that part is infrastructure. But fresh ` +
+      `Surefire/Failsafe reports written before it record ${totals.failures} ` +
+      `failure(s) and ${totals.errors} error(s): treat those as test failures, ` +
+      'not as a pass or as purely environmental.';
+  } else if (result.timedOut) {
     report.note =
       `\`${result.command}\` ran out of time (${args.timeout}s). This is an infrastructure result, ` +
       'not a defect in the diff — report it as informational.';
@@ -789,6 +893,11 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
       ' Scope: this run covered the changed modules and their upstream dependencies only ' +
       '(`-pl … -am`); downstream dependents were NOT built — a POM or API change can break ' +
       "modules this run never compiled, and that coverage stays with the project's CI.";
+  }
+  if (wrapperChanged && executable === 'mvn') {
+    report.note +=
+      ' Note: the diff changes the Maven wrapper, but this run used the system ' +
+      '`mvn` instead of it, so the wrapper change itself was not exercised.';
   }
   return report;
 }

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   chmodSync,
   mkdirSync,
@@ -23,6 +23,19 @@ import {
   readMavenReactor,
   shellSelector,
 } from './maven-toolchain.js';
+
+const statfsSyncMock = vi.hoisted(() => vi.fn());
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  const mock = { ...actual, statfsSync: statfsSyncMock };
+  return { ...mock, default: mock };
+});
+
+// Plenty of disk by default, so this suite behaves the same on a nearly-full
+// machine as on an empty one — the low-disk case below opts in explicitly.
+beforeEach(() => {
+  statfsSyncMock.mockReturnValue({ bavail: 16 * 1024 ** 3, bsize: 1 });
+});
 
 const pom = (modules: string[] = []): string => `
 <project>
@@ -106,6 +119,10 @@ describe('maven toolchain adapter', () => {
           'nested-parent',
           'nested-parent/nested-leaf',
         ],
+        children: {
+          '.': ['core', 'nested-parent'],
+          'nested-parent': ['nested-parent/nested-leaf'],
+        },
       },
     });
     if (!parsed.reactor) throw new Error('expected reactor');
@@ -146,7 +163,11 @@ describe('maven toolchain adapter', () => {
     writeProject('core');
 
     expect(readMavenReactor(root)).toEqual({
-      reactor: { modules: ['core'], projectDirs: ['.', 'core'] },
+      reactor: {
+        modules: ['core'],
+        projectDirs: ['.', 'core'],
+        children: { '.': ['core'] },
+      },
     });
   });
 
@@ -170,7 +191,11 @@ describe('maven toolchain adapter', () => {
     writeProject('core');
 
     expect(readMavenReactor(root)).toEqual({
-      reactor: { modules: ['core'], projectDirs: ['.', 'core'] },
+      reactor: {
+        modules: ['core'],
+        projectDirs: ['.', 'core'],
+        children: { '.': ['core'] },
+      },
     });
   });
 
@@ -209,7 +234,7 @@ describe('maven toolchain adapter', () => {
     ).toMatchObject({ toolchain: 'unsupported', build: [], test: [] });
   });
 
-  it('marks root code and Maven files reactor-wide and leaves docs without targets', () => {
+  it('marks Maven build files reactor-wide, scopes root sources to the root project, and leaves docs without targets', () => {
     writeReactor();
     const parsed = readMavenReactor(root);
     if (!parsed.reactor) throw new Error('expected reactor');
@@ -217,18 +242,26 @@ describe('maven toolchain adapter', () => {
     expect(
       detectMavenOwnership(
         root,
-        [
-          'pom.xml',
-          '.mvn/maven.config',
-          'mvnw',
-          'mvnw.cmd',
-          'src/main/java/example/Root.java',
-        ],
+        ['pom.xml', '.mvn/maven.config', 'mvnw', 'mvnw.cmd'],
         parsed.reactor,
       ),
     ).toEqual({
       reactorWide: true,
       modules: [],
+      inactiveProjects: [],
+    });
+
+    // The root artifact's own src/ is owned by the root project '.': it
+    // verifies with `-pl . -am`, not the entire reactor.
+    expect(
+      detectMavenOwnership(
+        root,
+        ['src/main/java/example/Root.java'],
+        parsed.reactor,
+      ),
+    ).toEqual({
+      reactorWide: false,
+      modules: ['.'],
       inactiveProjects: [],
     });
 
@@ -384,9 +417,12 @@ describe('maven toolchain adapter', () => {
       },
     });
 
-    // Not `unsupported`: the fixture belongs to the root project's test data.
+    // Not `unsupported`: the fixture belongs to the root project's test data,
+    // which runs narrowed to the root project.
     expect(report.toolchain).toBe('maven');
-    expect(calls).toEqual(['mvn --batch-mode --no-transfer-progress test']);
+    expect(calls).toEqual([
+      'mvn --batch-mode --no-transfer-progress -pl . -am test',
+    ]);
   });
 
   it('fails closed for an inactive Maven project nested under a reactor module', () => {
@@ -448,7 +484,7 @@ describe('maven toolchain adapter', () => {
     ]);
   });
 
-  it('runs the root reactor for source fixtures with documentation extensions', () => {
+  it('scopes root-project source fixtures with documentation extensions to the root project', () => {
     writeProject('.');
     const calls: string[] = [];
 
@@ -464,7 +500,9 @@ describe('maven toolchain adapter', () => {
     });
 
     expect(report.affected).toEqual(['.']);
-    expect(calls).toEqual(['mvn --batch-mode --no-transfer-progress test']);
+    expect(calls).toEqual([
+      'mvn --batch-mode --no-transfer-progress -pl . -am test',
+    ]);
   });
 
   it('prefers the wrapper, runs from root, narrows modules, and forwards timeout', () => {
@@ -550,6 +588,8 @@ describe('maven toolchain adapter', () => {
     expect(report.test[0]?.command).toBe(
       'mvn --batch-mode --no-transfer-progress test',
     );
+    // A full-reactor run must not carry the narrowed-run scope statement.
+    expect(report.note).not.toContain('downstream dependents were NOT built');
   });
 
   it('classifies timeout and dependency resolution without fresh reports as infrastructure', () => {
@@ -579,6 +619,8 @@ describe('maven toolchain adapter', () => {
         }),
     });
     expect(resolution.note).toContain('infrastructure evidence');
+    expect(resolution.test[0]).toMatchObject({ infrastructure: true });
+    expect(timeout.test[0]?.infrastructure).toBeUndefined();
   });
 
   it('does not classify a changed wrapper permission failure as infrastructure', () => {
@@ -628,6 +670,8 @@ describe('maven toolchain adapter', () => {
     // cmd.exe's wording when Maven is absent on Windows (exit 9009).
     ["'mvn' is not recognized as an internal or external command", 9009],
     ['java.io.IOException: No space left on device', 1],
+    ['Error: The JAVA_HOME environment variable is not defined correctly', 1],
+    ['Unable to locate a Java Runtime', 1],
   ])(
     'classifies unchanged Maven startup failures as infrastructure',
     (output, exitCode) => {
@@ -677,6 +721,24 @@ describe('maven toolchain adapter', () => {
         '/bin/sh: ./mvnw: /usr/bin/env: bad interpreter: No such file or directory',
       );
       expect(crlf127.note).toContain('infrastructure evidence');
+
+      // bash >= 5.2 reports the same death with new wording.
+      const bash52 = runWith(
+        127,
+        '/bin/sh: line 1: ./mvnw: cannot execute: required file not found',
+      );
+      expect(bash52.note).toContain('infrastructure evidence');
+
+      // dash's bare wording.
+      const dash = runWith(127, 'sh: ./mvnw: not found');
+      expect(dash.note).toContain('infrastructure evidence');
+
+      // A CRLF `#!/usr/bin/env sh` shebang names env, not the wrapper.
+      const envCrlf = runWith(
+        127,
+        "/usr/bin/env: 'sh\\r': No such file or directory",
+      );
+      expect(envCrlf.note).toContain('infrastructure evidence');
     },
   );
 
@@ -685,7 +747,13 @@ describe('maven toolchain adapter', () => {
     const output =
       '[ERROR] Could not resolve dependencies for project example:core';
 
-    for (const changed of ['pom.xml', '.mvn/maven.config', 'core/pom.xml']) {
+    for (const changed of [
+      'pom.xml',
+      '.mvn/maven.config',
+      'core/pom.xml',
+      'mvnw',
+      'mvnw.cmd',
+    ]) {
       const report = mavenToolchainAdapter.run({
         root,
         changedFiles: [changed],
@@ -746,6 +814,9 @@ describe('maven toolchain adapter', () => {
   });
 
   it('keeps fresh failing tests as source evidence despite infrastructure words', () => {
+    // The output is Maven-FRAMED: absent the fresh-failure guard it WOULD
+    // classify as infrastructure, so the assertions genuinely pin the
+    // precedence of fresh failing XML over the dependency carve-out.
     writeReactor();
 
     const report = mavenToolchainAdapter.run({
@@ -762,7 +833,8 @@ describe('maven toolchain adapter', () => {
         );
         return result(command, {
           exitCode: 1,
-          output: 'java.net.ConnectException: Connection refused',
+          output:
+            '[ERROR] Could not resolve dependencies for project example:extension',
         });
       },
     });
@@ -770,6 +842,7 @@ describe('maven toolchain adapter', () => {
     expect(report.test[0]?.output).toContain('[maven-test-failure]');
     expect(report.note).toContain('Correlate compiler or test errors');
     expect(report.note).not.toContain('infrastructure evidence');
+    expect(report.test[0]?.infrastructure).toBeUndefined();
   });
 
   it('treats exit 0 with fresh failing reports as a failure, not a pass', () => {
@@ -989,7 +1062,8 @@ describe('maven toolchain adapter', () => {
     // Failing reports keep per-report identity, capped.
     expect(output).toContain('TEST-Fail0.xml');
     expect(output).toContain(
-      '[maven-test-report] 20 more failing report(s) omitted',
+      '[maven-test-report] 20 more failing report(s) omitted: ' +
+        'tests=20, failures=20, errors=0, skipped=0',
     );
   });
 
@@ -1021,7 +1095,13 @@ describe('maven toolchain adapter', () => {
       output.match(/\[maven-test-report\] mod\d+ \(1 report\(s\)\)/g),
     ).toHaveLength(100);
     expect(output).toContain(
-      '[maven-test-report] 20 more clean project rollup(s) omitted',
+      '[maven-test-report] 20 more clean project rollup(s) omitted: ' +
+        'tests=20, failures=0, errors=0, skipped=0',
+    );
+    // The green note is the only test-count evidence on a passing Maven run;
+    // its totals are computed BEFORE the cap, over all 120 reports.
+    expect(report.note).toContain(
+      'Maven test passed with fresh reports: 120 tests',
     );
   });
 
@@ -1117,5 +1197,226 @@ describe('maven toolchain adapter', () => {
 
     expect(report.ok).toBe(true);
     expect(report.note).toContain('no fresh Surefire/Failsafe XML');
+  });
+
+  it('fails closed for documentation inside an inactive project nested under a module', () => {
+    // The out-of-reactor check outranks the documentation exemption in the
+    // OWNED branch too: core/legacy is a standalone project under the active
+    // module core, so its README belongs to an out-of-reactor project and
+    // must not slip past as a no-op doc change.
+    writeReactor();
+    writeProject('core/legacy');
+    const calls: string[] = [];
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/legacy/README.md'],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        calls.push(command);
+        return result(command);
+      },
+    });
+
+    expect(report.toolchain).toBe('unsupported');
+    expect(report.note).toContain('outside the root reactor: core/legacy');
+    expect(calls).toEqual([]);
+  });
+
+  it('fans a module POM change out to modules aggregated through ../ entries', () => {
+    // A `<module>../its/app-it</module>` entry sits outside the aggregator's
+    // directory; the descendant that inherits the changed parent config must
+    // still be selected — a directory-prefix scan silently drops it.
+    writeProject('.', ['app']);
+    writeProject('app', ['../its/app-it']);
+    writeProject('its/app-it');
+    const parsed = readMavenReactor(root);
+    if (!parsed.reactor) throw new Error('expected reactor');
+
+    expect(detectMavenOwnership(root, ['app/pom.xml'], parsed.reactor)).toEqual(
+      {
+        reactorWide: false,
+        modules: ['app', 'its/app-it'],
+        inactiveProjects: [],
+      },
+    );
+
+    const calls: string[] = [];
+    mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['app/pom.xml'],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        calls.push(command);
+        return result(command);
+      },
+    });
+    expect(calls).toEqual([
+      'mvn --batch-mode --no-transfer-progress -pl app,its/app-it -am test',
+    ]);
+  });
+
+  it('resolves mutually aggregating module POMs without recursing forever', () => {
+    // Mutually aggregating POMs are invalid Maven but legal file content;
+    // the visited guard must resolve them instead of overflowing the stack.
+    writeProject('.', ['a']);
+    writeProject('a', ['../b']);
+    writeProject('b', ['../a']);
+
+    expect(readMavenReactor(root)).toEqual({
+      reactor: {
+        modules: ['a', 'b'],
+        projectDirs: ['.', 'a', 'b'],
+        children: { '.': ['a'], a: ['b'], b: ['a'] },
+      },
+    });
+  });
+
+  it('keeps fresh failing reports as test evidence when the run times out', () => {
+    writeReactor();
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java'],
+      timeout: 2,
+      install: false,
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Core.xml'),
+          '<testsuite tests="2" failures="1" errors="1" skipped="0"><testcase classname="example.CoreTest" name="fails"><failure/></testcase></testsuite>',
+        );
+        return result(command, { exitCode: null, timedOut: true, seconds: 2 });
+      },
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.note).toContain('ran out of time');
+    expect(report.note).toContain('1 failure(s) and 1 error(s)');
+    expect(report.note).toContain('treat those as test failures');
+    expect(report.note).not.toContain('not a defect in the diff');
+    expect(report.test[0]?.output).toContain('[maven-test-failure]');
+  });
+
+  it('keeps fresh failing reports as test evidence when the run dies without an exit code', () => {
+    writeReactor();
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Core.xml'),
+          '<testsuite tests="1" failures="1" errors="0" skipped="0"><testcase classname="example.CoreTest" name="fails"><failure/></testcase></testsuite>',
+        );
+        return result(command, { exitCode: null });
+      },
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.note).toContain('ended without an exit code');
+    expect(report.note).toContain('1 failure(s) and 0 error(s)');
+    expect(report.note).toContain('treat those as test failures');
+    expect(report.note).not.toContain(
+      'This is infrastructure evidence, not a source finding.',
+    );
+  });
+
+  it('does not classify a launch failure as infrastructure when the wrapper changed', () => {
+    // The PR's own wrapper edit may be what broke startup; the pinned intent
+    // (changed-wrapper failures are never environmental) covers the
+    // launch-failure disjunct too, not just the 126/127 wrapper one.
+    writeReactor();
+    writeWrapper();
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['mvnw'],
+      timeout: 5,
+      install: false,
+      exec: (command) =>
+        result(command, {
+          exitCode: 1,
+          output:
+            'Error: The JAVA_HOME environment variable is not defined correctly',
+        }),
+    });
+
+    expect(report.note).toContain('Correlate compiler or test errors');
+    expect(report.note).not.toContain('infrastructure evidence');
+  });
+
+  it('discloses when a changed wrapper falls back to the system mvn', () => {
+    // No executable bit: mavenExecutable falls back to system mvn, so the
+    // wrapper the diff changes is never executed — the run must say so.
+    writeReactor();
+    writeFileSync(join(root, 'mvnw'), '#!/bin/sh\n');
+    const calls: string[] = [];
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['mvnw', 'core/src/main/java/example/Core.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        calls.push(command);
+        return result(command);
+      },
+    });
+
+    expect(calls).toEqual(['mvn --batch-mode --no-transfer-progress test']);
+    expect(report.note).toContain('wrapper change itself was not exercised');
+  });
+
+  it('does not treat a test-fixture POM as a dependency input', () => {
+    // A fixture pom.xml under a module's src/ tree cannot change the reactor's
+    // dependency resolution; a genuine outage there stays infrastructure.
+    writeReactor();
+    writeProject('core/src/test/resources/projects/sample');
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/test/resources/projects/sample/pom.xml'],
+      timeout: 5,
+      install: false,
+      exec: (command) =>
+        result(command, {
+          exitCode: 1,
+          output:
+            '[ERROR] Could not resolve dependencies for project example:core',
+        }),
+    });
+
+    expect(report.note).toContain('infrastructure evidence');
+  });
+
+  it('reports insufficient disk space instead of running Maven on a full disk', () => {
+    statfsSyncMock.mockReturnValue({ bavail: 5.4e8, bsize: 1 }); // ~0.5G free
+    writeReactor();
+    const calls: string[] = [];
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        calls.push(command);
+        return result(command);
+      },
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.build).toEqual([]);
+    expect(report.test).toEqual([]);
+    expect(calls).toEqual([]);
+    expect(report.note).toContain('Insufficient disk space');
   });
 });

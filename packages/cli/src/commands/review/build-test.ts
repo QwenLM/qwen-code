@@ -301,8 +301,9 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
       note:
         applicable.length > 1
           ? 'Both npm and Maven apply at the repository root. build-test will not ' +
-            'guess which toolchain owns this diff; run the project-specific checks ' +
-            'with explicit deadlines.'
+            'guess which toolchain owns this diff, so it ran nothing — report the ' +
+            'ambiguity as a handoff instead of substituting ad hoc build or test ' +
+            'commands.'
           : 'No supported npm or Maven project here to scope. Fall back to the ' +
             'build/test precedence in your brief — installing dependencies first — ' +
             'and give each command a deadline it can actually meet.',

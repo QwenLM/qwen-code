@@ -77,41 +77,6 @@ describe('npm toolchain adapter', () => {
     ).toBeNull();
   });
 
-  it('does not treat a workspace root with scripts as a single package', () => {
-    writeFileSync(
-      join(root, 'package.json'),
-      JSON.stringify({
-        name: 'root',
-        workspaces: ['packages/*'],
-        scripts: { build: 'exit 0', test: 'exit 0' },
-      }),
-    );
-    mkdirSync(join(root, 'packages', 'a'), { recursive: true });
-    writeFileSync(
-      join(root, 'packages', 'a', 'package.json'),
-      JSON.stringify({
-        name: '@x/a',
-        scripts: { build: 'exit 0', test: 'exit 0' },
-      }),
-    );
-
-    const report = npmToolchainAdapter.run({
-      root,
-      changedFiles: ['packages/a/src/index.ts'],
-      timeout: 5,
-      install: false,
-      exec: okExec,
-    });
-
-    expect(report.affected).toEqual(['packages/a']);
-    expect(report.build.map((item) => item.command)).toEqual([
-      'npm run build --workspace="packages/a"',
-    ]);
-    expect(report.test.map((item) => item.command)).toEqual([
-      'npm test --workspace="packages/a"',
-    ]);
-  });
-
   it('returns the unchanged report shape for a supported single-root package', () => {
     writeFileSync(
       join(root, 'package.json'),

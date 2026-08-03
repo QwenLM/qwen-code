@@ -261,6 +261,35 @@ describe('runBaseTree', () => {
     expect(existsSync(baseWorktreePath(worktree))).toBe(false);
   });
 
+  it('does NOT check out a nested-pom base the Maven gate exists to skip', () => {
+    // Standalone module poms with no root aggregator miss the root `pom.xml`
+    // probe, but the base is Maven just the same and cannot be consumed.
+    mkdirSync(join(repo, 'app'), { recursive: true });
+    writeFileSync(join(repo, 'app', 'pom.xml'), '<project/>');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-qam', 'nested maven base');
+    const nestedSha = git(repo, 'rev-parse', 'HEAD');
+
+    const plan = join(repo, 'plan.json');
+    writeFileSync(plan, JSON.stringify({ mergeBaseSha: nestedSha, files: [] }));
+    const builds: string[] = [];
+    const r = runBaseTree({
+      plan,
+      worktree,
+      timeout: 60,
+      install: false,
+      build: (w) => {
+        builds.push(w);
+        return okBuild;
+      },
+    });
+
+    expect(r.available).toBe(false);
+    expect(builds).toEqual([]);
+    expect(r.note).toContain('Maven');
+    expect(existsSync(baseWorktreePath(worktree))).toBe(false);
+  });
+
   it('is NOT available for a Maven build report the delta machinery cannot consume', () => {
     const mavenBuild = {
       ok: true,

@@ -412,6 +412,44 @@ describe('observedTestCounts', () => {
     ).toEqual([8919]);
   });
 
+  it('counts no tests from an interrupted or infrastructure-classified run', () => {
+    // An interrupted run's partial counts must not adjudicate a count claim
+    // — the same exclusion finished() applies to command claims.
+    const interrupted = {
+      test: [
+        {
+          command: './mvnw test',
+          exitCode: null,
+          seconds: 300,
+          timedOut: true,
+          output:
+            '[maven-test-report] core (43 report(s)): tests=43, failures=0, errors=0, skipped=0',
+        },
+        {
+          command: 'mvn test',
+          exitCode: 1,
+          seconds: 3,
+          timedOut: false,
+          infrastructure: true,
+          output:
+            '[maven-test-report] core (7 report(s)): tests=7, failures=0, errors=0, skipped=0',
+        },
+      ],
+    } as unknown as BuildTestReport;
+    expect(observedTestCounts(interrupted)).toEqual([]);
+  });
+
+  it('counts the omitted totals carried by capped rollup markers', () => {
+    expect(
+      observedTestCounts(
+        report([
+          '[maven-test-report] mod0 (1 report(s)): tests=1, failures=0, errors=0, skipped=0\n' +
+            '[maven-test-report] 20 more clean project rollup(s) omitted: tests=20, failures=0, errors=0, skipped=0',
+        ]),
+      ),
+    ).toEqual([21]);
+  });
+
   it('never counts a Maven report below zero passed tests', () => {
     // Surefire does not guarantee tests >= failures + errors + skipped
     // (class-level @Disabled and rerunFailingTestsCount reruns both perturb
@@ -1021,6 +1059,91 @@ describe('runTestPlan', () => {
       expect(claim?.verdict).toBe('unchecked');
       expect(claim?.note).toContain('environmental reasons');
       expect(claim?.note).not.toContain('not run');
+    });
+
+    it('does not reproduce a claim when the matched run recorded fresh test failures', () => {
+      // surefire testFailureIgnore lets `mvn test` exit 0 over failing tests;
+      // the adapter flags ok:false on the same result, so the Test Plan must
+      // not certify it as reproduced.
+      const bt = {
+        build: [],
+        test: [
+          {
+            command: './mvnw --batch-mode --no-transfer-progress test',
+            exitCode: 0,
+            seconds: 3,
+            timedOut: false,
+            output:
+              '[maven-test-report] core/target/surefire-reports/TEST-A.xml: tests=2, failures=1, errors=0, skipped=0\n' +
+              '[maven-test-failure] core/target/surefire-reports/TEST-A.xml: example.ATest#fails',
+          },
+        ],
+      } as unknown as BuildTestReport;
+      const r = run('## Test Plan\n\nRan `./mvnw test`', [], bt);
+      const claim = r.claims.find((c) => c.text === './mvnw test');
+      expect(claim?.verdict).toBe('contradicted');
+      expect(claim?.observed).toContain('fresh Surefire/Failsafe reports');
+    });
+
+    it('does not settle a bare Maven runner claim from a module-scoped run', () => {
+      // `./mvnw` alone carries no lifecycle: prefix-matching it would
+      // certify or deny the WHOLE wrapper run from one module's test.
+      const bt = {
+        build: [],
+        test: [
+          {
+            command:
+              './mvnw --batch-mode --no-transfer-progress -pl core -am test',
+            exitCode: 0,
+            seconds: 3,
+            timedOut: false,
+            output: '',
+          },
+        ],
+      } as unknown as BuildTestReport;
+      const r = run('## Test Plan\n\nRan `./mvnw`', [], bt);
+      const claim = r.claims.find((c) => c.text === './mvnw');
+      expect(claim?.verdict).toBe('unchecked');
+      expect(claim?.note).toContain('Maven command was not run');
+      // The bare runner token is not a path claim either.
+      expect(
+        r.claims.filter((c) => c.kind === 'path' && c.text === './mvnw'),
+      ).toEqual([]);
+    });
+
+    it('gives Maven wording to Maven claims whose final token is not a lifecycle', () => {
+      for (const command of ['mvn', 'mvn test -Dtest=ChangedTest']) {
+        const r = run(`## Test Plan\n\nRan \`${command}\``);
+        const claim = r.claims.find((c) => c.text === command);
+        expect(claim?.verdict).toBe('unchecked');
+        expect(claim?.note).toContain('Maven command was not run');
+        expect(claim?.note).not.toContain('npm script');
+      }
+    });
+
+    it('settles a multi-token Maven lifecycle claim on its final phase', () => {
+      const bt = {
+        build: [],
+        test: [
+          {
+            command:
+              './mvnw --batch-mode --no-transfer-progress -pl core -am test',
+            exitCode: 0,
+            seconds: 3,
+            timedOut: false,
+            output: '',
+          },
+        ],
+      } as unknown as BuildTestReport;
+
+      const green = run('## Test Plan\n\nRan `./mvnw clean test`', [], bt);
+      const claim = green.claims.find((c) => c.text === './mvnw clean test');
+      expect(claim?.verdict).toBe('reproduces');
+      expect(claim?.note).toContain('module-scoped');
+
+      // Flag-only additions do not scope the claim either.
+      const batch = run('## Test Plan\n\nRan `mvn -B test`', [], bt);
+      expect(verdictOf(batch.claims, 'mvn -B test')).toBe('reproduces');
     });
 
     it('says the full reactor ran when the recorded command did not narrow', () => {

@@ -344,7 +344,9 @@ export function extractClaims(section: string): Array<{
     if (/^(?:diff --git|---|\+\+\+|@@)\s/.test(span)) continue;
     if (RUNNER_RE.test(span)) push('command', span);
     if (PATH_RE.test(span)) {
-      if (isPathClaim(span)) push('path', span);
+      // A bare Maven runner token (`./mvnw`) is a command, not a claim
+      // about the tree, even though its spelling happens to match PATH_RE.
+      if (isPathClaim(span) && !MAVEN_RUNNER_RE.test(span)) push('path', span);
       continue;
     }
     // Paths named as ARGUMENTS of a command line. A Test Plan's most checkable
@@ -428,6 +430,10 @@ export function observedTestCounts(report: BuildTestReport | null): number[] {
   if (!report) return [];
   const counts: number[] = [];
   for (const cmd of report.test ?? []) {
+    // The same exclusion ruleCommand's finished() applies to command claims:
+    // an interrupted or infrastructure-classified run is not a completed
+    // suite, and its partial counts must not adjudicate a count claim.
+    if (cmd.timedOut || cmd.exitCode === null || cmd.infrastructure) continue;
     // vitest: `Tests  472 passed (472)`. jest: `Tests:  12 passed, 12 total`.
     let total = 0;
     let saw = false;
@@ -622,12 +628,30 @@ function ruleCommand(
   // the plan's bare command. Maven scopes before the lifecycle
   // (`./mvnw -pl core -am test`), so compare lifecycle phases there — but the
   // settling is module-scoped, and the note must not read as if the full
-  // reactor were verified.
+  // reactor were verified. Settling follows the claim's FINAL lifecycle when
+  // the claim carries no scoping of its own (`mvn clean test` settles on
+  // `test`); a claim naming its own `-pl`/`-P`/`-D` scope keeps its
+  // conservative treatment, because one scoped run cannot settle a
+  // differently scoped claim.
+  const mavenRunnerClaim = MAVEN_RUNNER_RE.test(claimed);
+  const claimedLifecycle = mavenLifecycle(claimed);
+  const claimScopesItself = claimed
+    .split(/\s+/)
+    .some(
+      (token) =>
+        token === '-pl' ||
+        token.startsWith('-pl=') ||
+        token === '--projects' ||
+        token.startsWith('--projects=') ||
+        token.startsWith('-P') ||
+        token.startsWith('-D'),
+    );
   const settledByLifecycle = (command: string): boolean =>
     command !== claimed &&
     !(command.startsWith(claimed) && command[claimed.length] === ' ') &&
-    bareMavenLifecycle(claimed) !== null &&
-    mavenLifecycle(command) === bareMavenLifecycle(claimed);
+    claimedLifecycle !== null &&
+    !claimScopesItself &&
+    mavenLifecycle(command) === claimedLifecycle;
   const matches = [
     ...(buildTest?.build ?? []),
     ...(buildTest?.test ?? []),
@@ -635,7 +659,12 @@ function ruleCommand(
     const command = c.command.trim();
     return (
       command === claimed ||
-      (command.startsWith(claimed) && command[claimed.length] === ' ') ||
+      // A bare Maven runner claim (`./mvnw`, `mvn`) carries no lifecycle, so
+      // prefix-matching it would settle the WHOLE wrapper run from one
+      // module-scoped run; such claims fall through to the Maven cascade.
+      (command.startsWith(claimed) &&
+        command[claimed.length] === ' ' &&
+        (!mavenRunnerClaim || bareMavenLifecycle(claimed) !== null)) ||
       settledByLifecycle(command)
     );
   });
@@ -649,15 +678,33 @@ function ruleCommand(
   // build-test note disavowed as environmental — it must not settle a claim.
   const finished = (c: CommandResult): boolean =>
     !c.timedOut && c.exitCode !== null && !c.infrastructure;
+  // A zero exit over fresh failing Surefire/Failsafe reports (surefire
+  // `testFailureIgnore`) is a FAILED run for ruling purposes: the Maven
+  // adapter marks the same result ok:false, so the claim must not read as
+  // reproduced.
+  const freshTestFailures = (c: CommandResult): boolean =>
+    /^\[maven-test-failure\] /m.test(c.output ?? '');
   const ran =
-    matches.find((c) => finished(c) && c.exitCode !== 0) ??
-    matches.find(finished);
+    matches.find(
+      (c) => finished(c) && (c.exitCode !== 0 || freshTestFailures(c)),
+    ) ?? matches.find(finished);
   if (ran) {
     // Reactor-wide recorded runs carry no `-pl`; calling those module-scoped
     // would understate what the evidence verified.
     const scoped =
       settledByLifecycle(ran.command.trim()) &&
       /(?:^|\s)-pl(?:\s|$)/.test(ran.command);
+    if (ran.exitCode === 0 && freshTestFailures(ran)) {
+      return {
+        kind: 'command',
+        text,
+        verdict: 'contradicted',
+        observed: 'exit 0, but fresh Surefire/Failsafe reports record failures',
+        note: scoped
+          ? 'this review ran a module-scoped form of it, and fresh test reports record failures despite the zero exit'
+          : 'this review ran it, but fresh test reports record failures despite the zero exit',
+      };
+    }
     return ran.exitCode === 0
       ? {
           kind: 'command',
@@ -679,8 +726,7 @@ function ruleCommand(
         };
   }
 
-  const claimedMavenLifecycle = mavenLifecycle(text);
-  if (claimedMavenLifecycle !== null) {
+  if (claimedLifecycle !== null || mavenRunnerClaim) {
     if (matches.some((c) => c.timedOut)) {
       return {
         kind: 'command',
