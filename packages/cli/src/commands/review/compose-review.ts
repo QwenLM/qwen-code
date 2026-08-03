@@ -1324,7 +1324,7 @@ export function repositoryContextGate(planPath: string): string[] {
     const context = repositoryContextOf(plan);
     return (context?.unverifiedDimensions ?? []).map(
       (dimension) =>
-        `${dimension} — the repository context marks this proof boundary as unverified`,
+        `${mdField(dimension)} — the repository context marks this proof boundary as unverified`,
     );
   } catch {
     // Coverage reads and validates the same plan and supplies the fail-closed

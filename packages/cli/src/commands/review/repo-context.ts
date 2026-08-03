@@ -16,6 +16,7 @@ import {
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { gitOpt } from './lib/git.js';
+import { manifestRepositoryContextProvider } from './lib/manifest-repository-context.js';
 import {
   isSafeRepositoryRelativePath,
   type RepositoryContext,
@@ -44,7 +45,7 @@ interface MutablePlan {
 }
 
 export const REPOSITORY_CONTEXT_PROVIDERS: readonly RepositoryContextProvider[] =
-  [];
+  [manifestRepositoryContextProvider];
 
 function sameFile(left: string, right: string): boolean {
   if (left === right) return true;

@@ -484,7 +484,31 @@ describe('repository context proof boundary', () => {
       }),
     );
     expect(repositoryContextGate(planPath)).toEqual([
-      'Alternate runtime was not exercised — the repository context marks this proof boundary as unverified',
+      '`Alternate runtime was not exercised` — the repository context marks this proof boundary as unverified',
+    ]);
+  });
+
+  it('renders manifest-controlled proof boundaries as inert Markdown', () => {
+    const planPath = join(dir, 'mention-plan.json');
+    writeFileSync(
+      planPath,
+      JSON.stringify({
+        repositoryContext: {
+          version: 1,
+          provider: 'manifest',
+          label: 'Example project',
+          domains: [],
+          relatedPaths: [],
+          recommendedTests: [],
+          requiredConfigurations: [],
+          requiredAgents: [],
+          unverifiedDimensions: ['@security-team'],
+          verificationNotes: [],
+        },
+      }),
+    );
+    expect(repositoryContextGate(planPath)).toEqual([
+      '`@security-team` — the repository context marks this proof boundary as unverified',
     ]);
   });
 

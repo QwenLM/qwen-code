@@ -161,6 +161,8 @@ Based on the parsed `target.type`:
 
   - **Do not install dependencies here.** The install belongs to Agent 7, and `qwen review build-test` runs it — nothing before Agent 7 needs `node_modules`: the diff-reading agents read the diff and grep the worktree's _sources_. Run from here it is a **blocking prefix** to the whole fan-out — measured at ~161 seconds on a cold worktree of this repo, because `npm ci` triggers this project's `prepare` hook, which builds and bundles every workspace; run from inside `build-test` (which sets `QWEN_SKIP_PREPARE=1`) the install skips that wasted full build and overlaps the other agents, still reading. At low effort nothing builds or tests at all, so there is no install on that path; medium and high run Agent 7's `build-test`, which does its own install (with `QWEN_SKIP_PREPARE=1`).
 
+  - **Attach repository context** at medium or high effort, before launching agents: run `qwen review repo-context` with absolute `--plan`, `--worktree`, and `--out` paths. See the repository-context step in the Diff capture section below; for same-repo PRs the manifest is read from the trusted merge base recorded by `fetch-pr`.
+
 - **`file`** (e.g., `src/foo.ts`):
   - Run `"${QWEN_CODE_CLI:-qwen}" review capture-local --file <file> --target <filename> --out .qwen/tmp/qwen-review-<filename>-plan.json` to get its changes (`--out` is required — see the capture block below for the full form). An **untracked** target file is captured whole (every line reads as added), which is the right frame for a file that does not exist upstream yet. The path is taken relative to **your** working directory and must be inside the repo.
   - If the plan is empty (the file is tracked and unmodified), read the file and review its current state — see the no-diff branch below
@@ -198,7 +200,18 @@ For **local-diff and file-path reviews**, capture and plan in one command:
 # the plan so the roster, check-coverage and compose-review all read one value.
 ```
 
-It writes the diff to `.qwen/tmp/qwen-review-<target>-diff.txt` and emits the same report `fetch-pr` does (`diffPathAbsolute`, `chunks[]`, `files[]`, the topology counts), plus two fields of its own:
+It writes the diff to `.qwen/tmp/qwen-review-<target>-diff.txt` and emits the same report `fetch-pr` does (`diffPathAbsolute`, `chunks[]`, `files[]`, the topology counts), plus two fields of its own.
+
+At **medium or high** effort, for local, file-path, and same-repository PR reviews, attach declarative repository context before launching agents:
+
+```bash
+"${QWEN_CODE_CLI:-qwen}" review repo-context \
+  --plan <absolute-plan-path> \
+  --worktree <absolute-worktree-path> \
+  --out <absolute-context-path>
+```
+
+Use the captured plan's absolute path and its resolved worktree path. The only manifest is strict JSON at `.qwen/review-context.json`; matching rules add generic domains, related files, tests, configurations, roles, and verification boundaries. For PRs the command reads that manifest from the trusted merge base, never from the PR head. Local reviews read it from the current worktree. All three arguments must be absolute so later agent working directories cannot change their meaning. A `null` artifact means no manifest or no matching rule and is not an error. Skip this command at low effort and in cross-repository lightweight mode, where there is no trusted local tree.
 
 - **`untrackedFiles`** — brand-new files, whose contents no `git diff` would have shown. **Name them in the review's summary.** A local review now reads files the user never staged, and the most common untracked-but-unignored file in the wild is a credentials file (`.env`, a key dump). Nothing is filtered — a hardcoded skip-list would reintroduce exactly the silent-skipping this command exists to end — so the user is told instead, and can re-run with `--no-untracked` or fix their `.gitignore`.
 - **`skippedFiles`** — untracked files that were **not** reviewed, each with a reason: too large, an embedded git repository, a symlink to a directory, a total-budget or file-count cap. **List these under "Not reviewed" in Step 6.** A capture that quietly dropped a file is the bug this command exists to fix; dropping one for a subtler reason would be the same bug wearing a hat.

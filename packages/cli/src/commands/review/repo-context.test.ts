@@ -68,15 +68,45 @@ function planAt(root: string, plan: object): string {
   return path;
 }
 
+function writeManifest(worktree: string, paths = ['src/**']): void {
+  write(
+    join(worktree, '.qwen', 'review-context.json'),
+    JSON.stringify({
+      version: 1,
+      label: 'Manifest project',
+      rules: [{ paths, domains: ['runtime'] }],
+    }),
+  );
+}
+
+function manifestContext() {
+  return {
+    version: 1,
+    provider: 'manifest',
+    label: 'Manifest project',
+    domains: ['runtime'],
+    relatedPaths: [],
+    recommendedTests: [],
+    requiredConfigurations: [],
+    requiredAgents: [],
+    unverifiedDimensions: [],
+    verificationNotes: [],
+  };
+}
+
 function run(
   root: string,
   worktree: string,
   plan: object,
-  providers: readonly RepositoryContextProvider[],
+  providers?: readonly RepositoryContextProvider[],
 ): { planPath: string; outPath: string } {
   const planPath = planAt(root, plan);
   const outPath = join(root, 'context.json');
-  runRepoContext({ plan: planPath, worktree, out: outPath }, providers);
+  if (providers === undefined) {
+    runRepoContext({ plan: planPath, worktree, out: outPath });
+  } else {
+    runRepoContext({ plan: planPath, worktree, out: outPath }, providers);
+  }
   return { planPath, outPath };
 }
 
@@ -124,6 +154,39 @@ describe('repo-context providers and trust boundary', () => {
     expect(provide).toHaveBeenCalledOnce();
     expect(readJson(outPath)).toEqual(context());
     expect(readJson(planPath)).toHaveProperty('repositoryContext', context());
+  });
+
+  it('uses the trusted base manifest for pull-request opt in and opt out', () => {
+    const root = temp();
+    const worktree = join(root, 'repository');
+    initGit(worktree);
+    writeManifest(worktree);
+    write(join(worktree, 'src', 'change.ts'), 'base\n');
+    const base = commitAll(worktree);
+    writeManifest(worktree, ['docs/**']);
+    expect(
+      readJson(
+        run(join(root, 'base-enabled'), worktree, {
+          files: [{ path: 'src/change.ts' }],
+          mergeBaseSha: base,
+        }).outPath,
+      ),
+    ).toEqual(manifestContext());
+
+    const second = join(root, 'second');
+    initGit(second);
+    writeManifest(second, ['docs/**']);
+    write(join(second, 'src', 'change.ts'), 'base\n');
+    const disabledBase = commitAll(second);
+    writeManifest(second);
+    expect(
+      readJson(
+        run(join(root, 'base-disabled'), second, {
+          files: [{ path: 'src/change.ts' }],
+          mergeBaseSha: disabledBase,
+        }).outPath,
+      ),
+    ).toBeNull();
   });
 
   it('reads pull-request identity only from the trusted base commit', () => {
@@ -340,7 +403,7 @@ describe('repo-context providers and trust boundary', () => {
     ).toThrow('unsupported role');
   });
 
-  it('declares all required command options and the default empty provider list writes null', () => {
+  it('declares all required command options and uses the default manifest provider', () => {
     const option = vi.fn().mockReturnThis();
     const built = (repoContextCommand.builder as (yargs: unknown) => unknown)({
       option,
@@ -354,7 +417,7 @@ describe('repo-context providers and trust boundary', () => {
 
     const root = temp();
     const worktree = join(root, 'worktree');
-    mkdirSync(worktree);
+    writeManifest(worktree);
     const plan = planAt(root, { files: [{ path: 'src/change.ts' }] });
     const out = join(root, 'context.json');
     (repoContextCommand.handler as (args: unknown) => void)({
@@ -362,6 +425,6 @@ describe('repo-context providers and trust boundary', () => {
       worktree,
       out,
     });
-    expect(readJson(out)).toBeNull();
+    expect(readJson(out)).toEqual(manifestContext());
   });
 });

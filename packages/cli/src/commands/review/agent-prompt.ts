@@ -48,7 +48,11 @@ import {
   type DiffChunk,
 } from './lib/diff-plan.js';
 import { recordPrompt, writeBrief } from './lib/prompt-record.js';
-import { BRIEFS, type RoleId } from './lib/agent-briefs.js';
+import {
+  BRIEFS,
+  isRepositoryContextRoleId,
+  type RoleId,
+} from './lib/agent-briefs.js';
 import { repositoryContextOf } from './lib/repository-context.js';
 import { pathRulesFor } from './lib/path-rules.js';
 import {
@@ -809,7 +813,8 @@ export function buildRoleBrief(
     if (buildBoundary.length > 0) parts.push('', ...buildBoundary);
   } else if (
     brief.reviewsCode ||
-    repositoryContext?.requiredAgents.includes(role)
+    (isRepositoryContextRoleId(role) &&
+      repositoryContext?.requiredAgents.includes(role))
   ) {
     const contextBlock = repositoryContextBlock(report);
     if (contextBlock.length > 0) {
