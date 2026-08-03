@@ -158,6 +158,65 @@ describe('workspace Git diff routes', () => {
     expect(response.body).toMatchObject({ available: false, files: [] });
   });
 
+  it('forwards a selected diff source to list and file reads', async () => {
+    fetchGitDiffMock.mockResolvedValue({
+      stats: { filesCount: 0, linesAdded: 0, linesRemoved: 0 },
+      perFileStats: new Map(),
+    });
+    fetchGitDiffHunksForFileMock.mockResolvedValue({
+      hunks: [],
+      truncated: false,
+    });
+    const app = express();
+    registerWorkspaceGitDiffRoutes(app, {
+      boundWorkspace: '/work/main',
+      sendBridgeError,
+    });
+
+    expect(
+      (await request(app).get('/workspace/git/diff?mode=branch&ref=topic'))
+        .status,
+    ).toBe(200);
+    expect(fetchGitDiffMock).toHaveBeenCalledWith('/work/main', {
+      mode: 'branch',
+      ref: 'topic',
+    });
+
+    expect(
+      (
+        await request(app).get(
+          '/workspace/git/diff/file?path=a.ts&mode=commit&ref=abc1234',
+        )
+      ).status,
+    ).toBe(200);
+    expect(fetchGitDiffHunksForFileMock).toHaveBeenCalledWith(
+      '/work/main',
+      'a.ts',
+      undefined,
+      { mode: 'commit', ref: 'abc1234' },
+    );
+  });
+
+  it('rejects invalid diff source queries', async () => {
+    const app = express();
+    registerWorkspaceGitDiffRoutes(app, {
+      boundWorkspace: '/work/main',
+      sendBridgeError,
+    });
+
+    expect(
+      (await request(app).get('/workspace/git/diff?mode=commit')).status,
+    ).toBe(400);
+    expect(
+      (await request(app).get('/workspace/git/diff?mode=unknown')).status,
+    ).toBe(400);
+    expect(
+      (await request(app).get('/workspace/git/diff?mode=staged&ref=main'))
+        .status,
+    ).toBe(400);
+    expect(fetchGitDiffMock).not.toHaveBeenCalled();
+  });
+
   it('rejects legacy reads when the live primary workspace is untrusted', async () => {
     const app = express();
     registerWorkspaceGitDiffRoutes(app, {
@@ -367,6 +426,30 @@ describe('workspace Git diff routes', () => {
       'b.ts',
       undefined,
     );
+  });
+
+  it('keeps source selection inside the selected runtime', async () => {
+    fetchGitDiffMock.mockResolvedValue({
+      stats: { filesCount: 0, linesAdded: 0, linesRemoved: 0 },
+      perFileStats: new Map(),
+    });
+    const app = express();
+    const primary = runtime('primary', '/work/main', true);
+    const secondary = runtime('secondary', '/work/secondary', true);
+    registerWorkspaceQualifiedGitDiffRoutes(app, {
+      workspaceRegistry: registry([primary, secondary]),
+      sendBridgeError,
+    });
+
+    const response = await request(app).get(
+      '/workspaces/secondary/git/diff?cwd=%2Fwork%2Fsecondary%2Fwt&mode=branch&ref=topic',
+    );
+
+    expect(response.status).toBe(200);
+    expect(fetchGitDiffMock).toHaveBeenCalledWith('/work/secondary', {
+      mode: 'branch',
+      ref: 'topic',
+    });
   });
 
   it('rejects an untrusted workspace before diffing', async () => {

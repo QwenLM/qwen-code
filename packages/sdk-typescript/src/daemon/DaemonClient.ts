@@ -76,6 +76,7 @@ import type {
   DaemonWorkspaceGitStatus,
   DaemonWorkspaceGitDiff,
   DaemonWorkspaceGitDiffHunks,
+  DaemonWorkspaceGitDiffOptions,
   DaemonGitLog,
   DaemonGitCommitDetail,
   DaemonGitBranchesResult,
@@ -1124,9 +1125,15 @@ export class DaemonClient {
     );
   }
 
-  async workspaceGitDiff(): Promise<DaemonWorkspaceGitDiff> {
+  async workspaceGitDiff(
+    options?: DaemonWorkspaceGitDiffOptions,
+  ): Promise<DaemonWorkspaceGitDiff> {
+    const params = new URLSearchParams();
+    if (options) params.set('mode', options.mode);
+    if (options?.ref) params.set('ref', options.ref);
+    const query = params.toString();
     return await this.jsonRequest<DaemonWorkspaceGitDiff>(
-      '/workspace/git/diff',
+      `/workspace/git/diff${query ? `?${query}` : ''}`,
       'GET /workspace/git/diff',
       { mode: 'rest' },
     );
@@ -1135,12 +1142,14 @@ export class DaemonClient {
   async workspaceGitDiffFile(
     path: string,
     oldPath?: string,
+    options?: DaemonWorkspaceGitDiffOptions,
   ): Promise<DaemonWorkspaceGitDiffHunks> {
-    const query =
-      `/workspace/git/diff/file?path=${urlEncode(path)}` +
-      (oldPath != null ? `&oldPath=${urlEncode(oldPath)}` : '');
+    const params = new URLSearchParams({ path });
+    if (oldPath != null) params.set('oldPath', oldPath);
+    if (options) params.set('mode', options.mode);
+    if (options?.ref) params.set('ref', options.ref);
     return await this.jsonRequest<DaemonWorkspaceGitDiffHunks>(
-      query,
+      `/workspace/git/diff/file?${params.toString()}`,
       'GET /workspace/git/diff/file',
       { mode: 'rest' },
     );
@@ -4958,9 +4967,16 @@ export class WorkspaceDaemonClient {
     );
   }
 
-  workspaceGitDiff(cwd?: string): Promise<DaemonWorkspaceGitDiff> {
-    const suffix =
-      cwd != null ? `/git/diff?cwd=${urlEncode(cwd)}` : '/git/diff';
+  workspaceGitDiff(
+    cwd?: string,
+    options?: DaemonWorkspaceGitDiffOptions,
+  ): Promise<DaemonWorkspaceGitDiff> {
+    const params = new URLSearchParams();
+    if (cwd != null) params.set('cwd', cwd);
+    if (options) params.set('mode', options.mode);
+    if (options?.ref) params.set('ref', options.ref);
+    const query = params.toString();
+    const suffix = `/git/diff${query ? `?${query}` : ''}`;
     return this.client.workspaceJsonRequest<DaemonWorkspaceGitDiff>(
       this.workspaceSelector,
       suffix,
@@ -4973,14 +4989,16 @@ export class WorkspaceDaemonClient {
     path: string,
     oldPath?: string,
     cwd?: string,
+    options?: DaemonWorkspaceGitDiffOptions,
   ): Promise<DaemonWorkspaceGitDiffHunks> {
-    const query =
-      `/git/diff/file?path=${urlEncode(path)}` +
-      (oldPath != null ? `&oldPath=${urlEncode(oldPath)}` : '') +
-      (cwd != null ? `&cwd=${urlEncode(cwd)}` : '');
+    const params = new URLSearchParams({ path });
+    if (oldPath != null) params.set('oldPath', oldPath);
+    if (cwd != null) params.set('cwd', cwd);
+    if (options) params.set('mode', options.mode);
+    if (options?.ref) params.set('ref', options.ref);
     return this.client.workspaceJsonRequest<DaemonWorkspaceGitDiffHunks>(
       this.workspaceSelector,
-      query,
+      `/git/diff/file?${params.toString()}`,
       'GET /workspaces/:workspace/git/diff/file',
       { mode: 'rest' },
     );

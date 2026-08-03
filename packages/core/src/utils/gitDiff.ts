@@ -15,7 +15,6 @@ import { execFile } from 'node:child_process';
 import * as nodeFs from 'node:fs';
 import { access, lstat, open, readFile, stat } from 'node:fs/promises';
 import * as path from 'node:path';
-import { promisify } from 'node:util';
 import type { Hunk } from 'diff';
 import { findGitRoot, readFirstLineNoFollow } from './gitUtils.js';
 
@@ -32,8 +31,6 @@ export interface GitDiffFileHunks {
   truncated: boolean;
 }
 
-const execFileAsync = promisify(execFile);
-
 export interface GitDiffStats {
   filesCount: number;
   linesAdded: number;
@@ -45,9 +42,9 @@ export interface PerFileStats {
   removed: number;
   isBinary: boolean;
   isUntracked?: boolean;
-  /** `true` when the file is removed in the worktree relative to HEAD.
+  /** `true` when the file is removed relative to the comparison base.
    *  Mutually exclusive with `isUntracked`. Detected via
-   *  `git diff HEAD --name-status -z` (status letter `D`); a row like
+   *  `git diff --name-status -z` (status letter `D`); a row like
    *  `0\t10\tfoo.ts` from numstat alone is not enough to distinguish
    *  "deleted" from "heavy edit that drops 10 lines". */
   isDeleted?: boolean;
@@ -63,6 +60,23 @@ export interface PerFileStats {
 export interface GitDiffResult {
   stats: GitDiffStats;
   perFileStats: Map<string, PerFileStats>;
+}
+
+export type GitDiffMode =
+  | 'uncommitted'
+  | 'unstaged'
+  | 'staged'
+  | 'commit'
+  | 'branch';
+
+export interface GitDiffOptions {
+  mode: GitDiffMode;
+  ref?: string;
+}
+
+interface GitDiffComparison {
+  args: string[];
+  includeUntracked: boolean;
 }
 
 const GIT_TIMEOUT_MS = 5000;
@@ -112,15 +126,19 @@ function getUntrackedOpenFlags(): number {
 
 /**
  * Fetch numstat-based git diff stats (files changed, lines added/removed) and
- * per-file summaries comparing the working tree to HEAD. Structured hunks are
- * available separately via `fetchGitDiffHunks`.
+ * per-file summaries for the selected comparison. Omitting options compares
+ * the working tree to HEAD. Structured hunks are available separately via
+ * `fetchGitDiffHunks`.
  *
  * Returns `null` when not inside a git repo, when git itself fails, or when
  * the working tree is in a transient state (merge, rebase, cherry-pick,
  * revert) — those states carry incoming changes that weren't intentionally
  * made by the user.
  */
-export async function fetchGitDiff(cwd: string): Promise<GitDiffResult | null> {
+export async function fetchGitDiff(
+  cwd: string,
+  options?: GitDiffOptions,
+): Promise<GitDiffResult | null> {
   // Walk ancestors once to find the worktree root; reuse the result for the
   // transient-state probe and every git invocation below. `findGitRoot`
   // doubles as the "is this a git repo" check — a non-null return implies a
@@ -132,6 +150,8 @@ export async function fetchGitDiff(cwd: string): Promise<GitDiffResult | null> {
   const gitRoot = findGitRoot(cwd);
   if (!gitRoot) return null;
   if (await isInTransientGitState(gitRoot)) return null;
+  const comparison = await resolveGitDiffComparison(gitRoot, options);
+  if (!comparison) return null;
 
   // Shortstat probe + untracked scan run in parallel — both are needed
   // regardless of which path we take, and shortstat is O(1) memory so it can
@@ -157,21 +177,23 @@ export async function fetchGitDiff(cwd: string): Promise<GitDiffResult | null> {
         'diff',
         '--no-ext-diff',
         '--no-textconv',
-        'HEAD',
+        ...comparison.args,
         '--shortstat',
       ],
       gitRoot,
     ),
-    runGit(
-      [
-        '--no-optional-locks',
-        'ls-files',
-        '-z',
-        '--others',
-        '--exclude-standard',
-      ],
-      gitRoot,
-    ),
+    comparison.includeUntracked
+      ? runGit(
+          [
+            '--no-optional-locks',
+            'ls-files',
+            '-z',
+            '--others',
+            '--exclude-standard',
+          ],
+          gitRoot,
+        )
+      : Promise.resolve(null),
   ]);
   const untrackedCount = countNulDelimited(untrackedOut);
 
@@ -206,7 +228,7 @@ export async function fetchGitDiff(cwd: string): Promise<GitDiffResult | null> {
         'diff',
         '--no-ext-diff',
         '--no-textconv',
-        'HEAD',
+        ...comparison.args,
         '--numstat',
         '-z',
       ],
@@ -218,7 +240,7 @@ export async function fetchGitDiff(cwd: string): Promise<GitDiffResult | null> {
         'diff',
         '--no-ext-diff',
         '--no-textconv',
-        'HEAD',
+        ...comparison.args,
         '--name-status',
         '-z',
       ],
@@ -321,9 +343,9 @@ export async function fetchGitDiffHunks(
 }
 
 /**
- * Fetch structured hunks for a single file (working tree vs HEAD). Cheaper than
- * `fetchGitDiffHunks`, which diffs the whole tree — this is for on-demand
- * rendering of one file in the diff viewer.
+ * Fetch structured hunks for one file in the selected comparison. Omitting
+ * options compares the working tree to HEAD. Cheaper than `fetchGitDiffHunks`,
+ * which diffs the whole tree — this is for on-demand rendering in the viewer.
  *
  * `filePath` may be a repo-root-relative path or an absolute path inside the
  * repo (the daemon passes the workspace-sandboxed absolute path). Relative
@@ -332,24 +354,26 @@ export async function fetchGitDiffHunks(
  * normalized to a git-root-relative path before any git call, so the path can
  * never escape the repository.
  *
- * Untracked files (which `git diff HEAD` omits) are synthesized as a single
- * all-added hunk by reading the file, so the viewer can show new files like any
- * other addition. `truncated` is set whenever the per-file caps cut content on
- * either path (parser cap for tracked diffs, byte/line caps for synthesized
- * untracked ones). Returns `null` for non-repos, transient states, paths
- * outside the repo, binary or unreadable untracked files, and tracked files
- * with no changes.
+ * Comparisons that target the working tree synthesize untracked files as a
+ * single all-added hunk, so the viewer can show new files like any other
+ * addition. `truncated` is set whenever the per-file caps cut content on either
+ * path (parser cap for tracked diffs, byte/line caps for synthesized untracked
+ * ones). Returns `null` for non-repos, transient states, paths outside the repo,
+ * binary or unreadable untracked files, and tracked files with no changes.
  */
 export async function fetchGitDiffHunksForFile(
   cwd: string,
   filePath: string,
   oldPath?: string,
+  options?: GitDiffOptions,
 ): Promise<GitDiffFileHunks | null> {
   const gitRoot = findGitRoot(cwd);
   if (!gitRoot) return null;
   const relPath = toRepoRelativePath(gitRoot, filePath);
   if (relPath === null) return null;
   if (await isInTransientGitState(gitRoot)) return null;
+  const comparison = await resolveGitDiffComparison(gitRoot, options);
+  if (!comparison) return null;
 
   // For a rename, include the pre-rename path with rename detection so git
   // diffs old→new content instead of reporting the new path as fully added
@@ -363,7 +387,7 @@ export async function fetchGitDiffHunksForFile(
     '--no-textconv',
   ];
   if (oldRelPath != null) diffArgs.push('-M');
-  diffArgs.push('HEAD', '--');
+  diffArgs.push(...comparison.args, '--');
   if (oldRelPath != null) diffArgs.push(oldRelPath);
   diffArgs.push(relPath);
   const diffOut = await runGit(diffArgs, gitRoot);
@@ -381,6 +405,7 @@ export async function fetchGitDiffHunksForFile(
   // untracked (and not ignored) file, matching the `--exclude-standard` listing
   // that drives the diff file list. A tracked-but-unchanged or ignored file
   // yields nothing here and returns null.
+  if (!comparison.includeUntracked) return null;
   const untrackedOut = await runGit(
     [
       '--no-optional-locks',
@@ -396,6 +421,47 @@ export async function fetchGitDiffHunksForFile(
     return synthesizeUntrackedHunk(gitRoot, relPath);
   }
   return null;
+}
+
+async function resolveGitDiffComparison(
+  gitRoot: string,
+  options?: GitDiffOptions,
+): Promise<GitDiffComparison | null> {
+  const mode = options?.mode ?? 'uncommitted';
+  if (mode === 'unstaged') return { args: [], includeUntracked: true };
+  if (mode === 'staged') {
+    return { args: ['--cached', 'HEAD'], includeUntracked: false };
+  }
+  if (mode === 'uncommitted') {
+    return { args: ['HEAD'], includeUntracked: true };
+  }
+  if (!options?.ref) return null;
+
+  const target = await resolveCommitRef(gitRoot, options.ref);
+  if (!target) return null;
+  if (mode === 'branch') return { args: [target], includeUntracked: true };
+
+  const parent = await resolveCommitRef(gitRoot, `${target}^1`);
+  if (parent) return { args: [parent, target], includeUntracked: false };
+  const emptyTree = (
+    await runGit(['hash-object', '-t', 'tree', '--stdin'], gitRoot, '')
+  )?.trim();
+  return emptyTree && /^[0-9a-f]{40,64}$/i.test(emptyTree)
+    ? { args: [emptyTree, target], includeUntracked: false }
+    : null;
+}
+
+async function resolveCommitRef(
+  gitRoot: string,
+  ref: string,
+): Promise<string | null> {
+  const resolved = (
+    await runGit(
+      ['rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`],
+      gitRoot,
+    )
+  )?.trim();
+  return resolved && /^[0-9a-f]{40,64}$/i.test(resolved) ? resolved : null;
 }
 
 /**
@@ -883,8 +949,8 @@ export function parseShortstat(stdout: string): GitDiffStats | null {
 }
 
 /**
- * Parse `git diff HEAD --name-status -z` output and return the paths whose
- * status is `D` (deleted in the worktree).
+ * Parse `git diff --name-status -z` output and return the paths whose status is
+ * `D` (deleted relative to the comparison base).
  *
  * Wire format with `-z`: `<status>\0<path>\0` per entry, except renames and
  * copies which span three tokens: `R<score>\0<oldpath>\0<newpath>\0` (and
@@ -1127,23 +1193,30 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
-async function runGit(args: string[], cwd: string): Promise<string | null> {
+async function runGit(
+  args: string[],
+  cwd: string,
+  input?: string,
+): Promise<string | null> {
   // `core.quotepath=false` keeps non-ASCII filenames as UTF-8 in git's output
   // instead of octal-escaping them (`\346\226\207.txt`), which would otherwise
   // end up as literal keys in `perFileStats`.
   const fullArgs = ['-c', 'core.quotepath=false', ...args];
-  try {
-    const { stdout } = await execFileAsync('git', fullArgs, {
-      cwd,
-      timeout: GIT_TIMEOUT_MS,
-      maxBuffer: 64 * 1024 * 1024,
-      windowsHide: true,
-      encoding: 'utf8',
-    });
-    return stdout;
-  } catch {
-    return null;
-  }
+  return await new Promise((resolve) => {
+    const child = execFile(
+      'git',
+      fullArgs,
+      {
+        cwd,
+        timeout: GIT_TIMEOUT_MS,
+        maxBuffer: 64 * 1024 * 1024,
+        windowsHide: true,
+        encoding: 'utf8',
+      },
+      (error, stdout) => resolve(error ? null : stdout),
+    );
+    if (input !== undefined) child.stdin?.end(input);
+  });
 }
 
 /** An in-progress git operation that the status indicator should surface. */

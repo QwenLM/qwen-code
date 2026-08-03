@@ -4,12 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
 import type {
   DaemonDiffHunk,
+  DaemonGitBranchesResult,
+  DaemonGitDiffMode,
+  DaemonGitLogEntry,
   DaemonWorkspaceGitDiff,
   DaemonWorkspaceGitDiffFile,
+  DaemonWorkspaceGitDiffOptions,
 } from '@qwen-code/sdk/daemon';
 import type { BundledLanguage, ThemedToken } from 'shiki';
 import { useI18n } from '../../i18n';
@@ -238,10 +242,12 @@ function DiffFileRow({
   workspaceCwd,
   gitCwd,
   file,
+  options,
 }: {
   workspaceCwd: string;
   gitCwd?: string;
   file: DaemonWorkspaceGitDiffFile;
+  options?: DaemonWorkspaceGitDiffOptions;
 }) {
   const { t } = useI18n();
   const { client } = useWorkspace();
@@ -269,11 +275,13 @@ function DiffFileRow({
     if (next && hunks === null && !loading && !file.isBinary) {
       setLoading(true);
       setError(false);
-      client
-        .workspaceByCwd(workspaceCwd)
-        // Pass the pre-rename path so a renamed file diffs old→new (rename
-        // detection) instead of showing the new path as fully added.
-        .workspaceGitDiffFile(file.path, file.oldPath, gitCwd)
+      const ws = client.workspaceByCwd(workspaceCwd);
+      // Pass the pre-rename path so a renamed file diffs old→new (rename
+      // detection) instead of showing the new path as fully added.
+      const request = options
+        ? ws.workspaceGitDiffFile(file.path, file.oldPath, gitCwd, options)
+        : ws.workspaceGitDiffFile(file.path, file.oldPath, gitCwd);
+      request
         .then((result) => {
           if (cancelledRef.current) return;
           setHunks(result.hunks);
@@ -373,14 +381,111 @@ export function GitDiffContent({
   const [diff, setDiff] = useState<DaemonWorkspaceGitDiff | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
+  const [mode, setMode] = useState<DaemonGitDiffMode>('uncommitted');
+  const [commitRef, setCommitRef] = useState('');
+  const [branchRef, setBranchRef] = useState('');
+  const [commits, setCommits] = useState<DaemonGitLogEntry[] | null>(null);
+  const [branches, setBranches] = useState<DaemonGitBranchesResult | null>(
+    null,
+  );
+  const [sourceLoading, setSourceLoading] = useState<
+    'commit' | 'branch' | null
+  >(null);
+  const [sourceError, setSourceError] = useState<'commit' | 'branch' | null>(
+    null,
+  );
 
   useEffect(() => {
+    setMode('uncommitted');
+    setCommitRef('');
+    setBranchRef('');
+    setCommits(null);
+    setBranches(null);
+    setSourceLoading(null);
+    setSourceError(null);
+  }, [workspaceCwd, gitCwd]);
+
+  useEffect(() => {
+    if (mode !== 'commit' || commits !== null) return;
+    let cancelled = false;
+    setSourceLoading('commit');
+    setSourceError(null);
+    client
+      .workspaceByCwd(workspaceCwd)
+      .workspaceGitLog(200, 0, gitCwd)
+      .then((result) => {
+        if (cancelled) return;
+        setCommits(result.entries);
+        setCommitRef(result.entries[0]?.sha ?? '');
+      })
+      .catch(() => {
+        if (!cancelled) setSourceError('commit');
+      })
+      .finally(() => {
+        if (!cancelled) setSourceLoading(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [client, workspaceCwd, gitCwd, mode, commits]);
+
+  useEffect(() => {
+    if (mode !== 'branch' || branches !== null) return;
+    let cancelled = false;
+    setSourceLoading('branch');
+    setSourceError(null);
+    client
+      .workspaceByCwd(workspaceCwd)
+      .workspaceGitBranches(gitCwd)
+      .then((result) => {
+        if (cancelled) return;
+        setBranches(result);
+        setBranchRef(
+          result.local.find((branch) => !branch.isHead)?.name ??
+            result.remote[0]?.name ??
+            result.local[0]?.name ??
+            '',
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setSourceError('branch');
+      })
+      .finally(() => {
+        if (!cancelled) setSourceLoading(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [client, workspaceCwd, gitCwd, mode, branches]);
+
+  const options = useMemo<
+    DaemonWorkspaceGitDiffOptions | undefined | null
+  >(() => {
+    if (mode === 'uncommitted') return undefined;
+    if (mode === 'commit') {
+      return commitRef ? { mode, ref: commitRef } : null;
+    }
+    if (mode === 'branch') {
+      return branchRef ? { mode, ref: branchRef } : null;
+    }
+    return { mode };
+  }, [mode, commitRef, branchRef]);
+
+  useEffect(() => {
+    if (options === null) {
+      setDiff(null);
+      setLoading(sourceLoading === mode);
+      setError(sourceError === mode);
+      return;
+    }
     let cancelled = false;
     setLoading(true);
     setError(false);
-    client
-      .workspaceByCwd(workspaceCwd)
-      .workspaceGitDiff(gitCwd)
+    const ws = client.workspaceByCwd(workspaceCwd);
+    const request = options
+      ? ws.workspaceGitDiff(gitCwd, options)
+      : ws.workspaceGitDiff(gitCwd);
+    request
       .then((result) => {
         if (!cancelled) setDiff(result);
       })
@@ -393,7 +498,7 @@ export function GitDiffContent({
     return () => {
       cancelled = true;
     };
-  }, [client, workspaceCwd, gitCwd]);
+  }, [client, workspaceCwd, gitCwd, mode, options, sourceLoading, sourceError]);
 
   const subtitle =
     diff && diff.available
@@ -414,7 +519,15 @@ export function GitDiffContent({
   } else if (error) {
     body = <div className={styles.placeholder}>{t('gitDiff.error')}</div>;
   } else if (!diff || !diff.available) {
-    body = <div className={styles.placeholder}>{t('gitDiff.unavailable')}</div>;
+    body = (
+      <div className={styles.placeholder}>
+        {t(
+          mode === 'uncommitted'
+            ? 'gitDiff.unavailable'
+            : 'gitDiff.comparisonUnavailable',
+        )}
+      </div>
+    );
   } else if (diff.files.length === 0) {
     body = <div className={styles.placeholder}>{t('gitDiff.empty')}</div>;
   } else {
@@ -425,10 +538,11 @@ export function GitDiffContent({
             // Key by workspace + path so switching workspace remounts the row
             // instead of reusing another workspace's hunks/open state for a
             // path both workspaces share.
-            key={`${workspaceCwd}:${gitCwd ?? ''}:${file.path}`}
+            key={`${workspaceCwd}:${gitCwd ?? ''}:${mode}:${options?.ref ?? ''}:${file.path}`}
             workspaceCwd={workspaceCwd}
             gitCwd={gitCwd}
             file={file}
+            options={options ?? undefined}
           />
         ))}
         {diff.hiddenCount > 0 && (
@@ -440,7 +554,61 @@ export function GitDiffContent({
     );
   }
 
-  return <div className={styles.content}>{body}</div>;
+  return (
+    <div className={styles.content}>
+      <div className={styles.sourceBar}>
+        <label className={styles.sourceLabel} htmlFor="git-diff-source">
+          {t('gitDiff.source.label')}
+        </label>
+        <select
+          id="git-diff-source"
+          className={styles.sourceSelect}
+          value={mode}
+          onChange={(event) => setMode(event.target.value as DaemonGitDiffMode)}
+        >
+          <option value="uncommitted">{t('gitDiff.source.uncommitted')}</option>
+          <option value="unstaged">{t('gitDiff.source.unstaged')}</option>
+          <option value="staged">{t('gitDiff.source.staged')}</option>
+          <option value="commit">{t('gitDiff.source.commit')}</option>
+          <option value="branch">{t('gitDiff.source.branch')}</option>
+        </select>
+        {mode === 'commit' && commits && commits.length > 0 && (
+          <select
+            className={`${styles.sourceSelect} ${styles.refSelect}`}
+            aria-label={t('gitDiff.source.selectCommit')}
+            value={commitRef}
+            onChange={(event) => setCommitRef(event.target.value)}
+          >
+            {commits.map((commit) => (
+              <option key={commit.sha} value={commit.sha}>
+                {commit.shortSha} {commit.subject}
+              </option>
+            ))}
+          </select>
+        )}
+        {mode === 'branch' && branches && (
+          <select
+            className={`${styles.sourceSelect} ${styles.refSelect}`}
+            aria-label={t('gitDiff.source.selectBranch')}
+            value={branchRef}
+            onChange={(event) => setBranchRef(event.target.value)}
+          >
+            {branches.local.map((branch) => (
+              <option key={`local:${branch.name}`} value={branch.name}>
+                {branch.name}
+              </option>
+            ))}
+            {branches.remote.map((branch) => (
+              <option key={`remote:${branch.name}`} value={branch.name}>
+                {branch.name}
+              </option>
+            ))}
+          </select>
+        )}
+      </div>
+      {body}
+    </div>
+  );
 }
 
 export function GitDiffDialog({

@@ -103,7 +103,20 @@ export interface DaemonWorkspaceGitStatus {
   computedAt?: number;
 }
 
-/** One changed file in the working-tree-vs-HEAD diff file list. */
+export type DaemonGitDiffMode =
+  | 'uncommitted'
+  | 'unstaged'
+  | 'staged'
+  | 'commit'
+  | 'branch';
+
+export interface DaemonWorkspaceGitDiffOptions {
+  mode: DaemonGitDiffMode;
+  /** Required for commit and branch comparisons. */
+  ref?: string;
+}
+
+/** One changed file in a workspace Git diff file list. */
 export interface DaemonWorkspaceGitDiffFile {
   /** Repo-root-relative path (render after sanitizing — git allows odd bytes). */
   path: string;
@@ -125,7 +138,7 @@ export interface DaemonWorkspaceGitDiffFile {
 export interface DaemonWorkspaceGitDiff {
   v: 1;
   workspaceCwd: string;
-  /** `false` for a non-repo / missing-HEAD / transient-state workspace. */
+  /** `false` when Git or the selected comparison is unavailable. */
   available: boolean;
   filesCount: number;
   linesAdded: number;

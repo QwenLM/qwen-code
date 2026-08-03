@@ -12,32 +12,47 @@ if (!Element.prototype.scrollIntoView) {
 
 // A STABLE client object: the dialog's fetch effect depends on `client`, so a
 // fresh object per render (as a naive mock returns) would re-fire it in a loop.
-const { workspaceGitDiff, workspaceGitDiffFile, workspaceClient, shikiState } =
-  vi.hoisted(() => {
-    const workspaceGitDiff = vi.fn();
-    const workspaceGitDiffFile = vi.fn();
-    const workspaceClient = {
-      workspaceByCwd: () => ({ workspaceGitDiff, workspaceGitDiffFile }),
-    };
-    // Per-test switch for the highlighter path: `resolvedLang` steers whether
-    // buildRows even asks for a highlighter ('text' skips it), `highlighter`
-    // (when set) makes getCodeHighlighter resolve instead of reject.
-    const shikiState = {
-      resolvedLang: 'text',
-      highlighter: null as {
-        codeToTokens: (
-          code: string,
-          opts: { lang: string; theme: string },
-        ) => { tokens: Array<Array<{ content: string; color?: string }>> };
-      } | null,
-    };
-    return {
+const {
+  workspaceGitDiff,
+  workspaceGitDiffFile,
+  workspaceGitLog,
+  workspaceGitBranches,
+  workspaceClient,
+  shikiState,
+} = vi.hoisted(() => {
+  const workspaceGitDiff = vi.fn();
+  const workspaceGitDiffFile = vi.fn();
+  const workspaceGitLog = vi.fn();
+  const workspaceGitBranches = vi.fn();
+  const workspaceClient = {
+    workspaceByCwd: () => ({
       workspaceGitDiff,
       workspaceGitDiffFile,
-      workspaceClient,
-      shikiState,
-    };
-  });
+      workspaceGitLog,
+      workspaceGitBranches,
+    }),
+  };
+  // Per-test switch for the highlighter path: `resolvedLang` steers whether
+  // buildRows even asks for a highlighter ('text' skips it), `highlighter`
+  // (when set) makes getCodeHighlighter resolve instead of reject.
+  const shikiState = {
+    resolvedLang: 'text',
+    highlighter: null as {
+      codeToTokens: (
+        code: string,
+        opts: { lang: string; theme: string },
+      ) => { tokens: Array<Array<{ content: string; color?: string }>> };
+    } | null,
+  };
+  return {
+    workspaceGitDiff,
+    workspaceGitDiffFile,
+    workspaceGitLog,
+    workspaceGitBranches,
+    workspaceClient,
+    shikiState,
+  };
+});
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useWorkspace: () => ({ client: workspaceClient }),
@@ -131,6 +146,134 @@ function diffPayload(
 }
 
 describe('GitDiffDialog', () => {
+  it('switches between uncommitted, unstaged, and staged sources', async () => {
+    workspaceGitDiff.mockResolvedValue(diffPayload());
+    mount();
+    await flush();
+
+    const source = document.body.querySelector(
+      '#git-diff-source',
+    ) as HTMLSelectElement;
+    await act(async () => {
+      source.value = 'unstaged';
+      source.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await flush();
+    expect(workspaceGitDiff).toHaveBeenLastCalledWith(undefined, {
+      mode: 'unstaged',
+    });
+
+    await act(async () => {
+      source.value = 'staged';
+      source.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await flush();
+    expect(workspaceGitDiff).toHaveBeenLastCalledWith(undefined, {
+      mode: 'staged',
+    });
+  });
+
+  it('loads commit and branch choices and forwards the selected ref', async () => {
+    workspaceGitDiff.mockResolvedValue(diffPayload());
+    workspaceGitLog.mockResolvedValue({
+      available: true,
+      entries: [
+        {
+          sha: 'abcdef1234567890',
+          shortSha: 'abcdef1',
+          subject: 'selected commit',
+        },
+      ],
+      hasMore: false,
+    });
+    workspaceGitBranches.mockResolvedValue({
+      local: [
+        { name: 'main', isHead: true },
+        { name: 'topic', isHead: false },
+      ],
+      remote: [{ name: 'origin/main', isHead: false }],
+      tags: [],
+    });
+    mount();
+    await flush();
+
+    const source = document.body.querySelector(
+      '#git-diff-source',
+    ) as HTMLSelectElement;
+    await act(async () => {
+      source.value = 'commit';
+      source.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await flush();
+    expect(workspaceGitLog).toHaveBeenCalledWith(200, 0, undefined);
+    expect(workspaceGitDiff).toHaveBeenLastCalledWith(undefined, {
+      mode: 'commit',
+      ref: 'abcdef1234567890',
+    });
+
+    await act(async () => {
+      source.value = 'branch';
+      source.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await flush();
+    expect(workspaceGitBranches).toHaveBeenCalledWith(undefined);
+    expect(workspaceGitDiff).toHaveBeenLastCalledWith(undefined, {
+      mode: 'branch',
+      ref: 'topic',
+    });
+
+    workspaceGitDiffFile.mockResolvedValue({ hunks: [], truncated: false });
+    const header = document.body.querySelector(
+      'button[aria-expanded="false"]',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      header.click();
+    });
+    await flush();
+    expect(workspaceGitDiffFile).toHaveBeenLastCalledWith(
+      'src/a.ts',
+      undefined,
+      undefined,
+      { mode: 'branch', ref: 'topic' },
+    );
+  });
+
+  it('resets the selected source when the workspace changes', async () => {
+    workspaceGitDiff.mockResolvedValue(diffPayload());
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GitDiffContent workspaceCwd="/repo-a" />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    const source = document.body.querySelector(
+      '#git-diff-source',
+    ) as HTMLSelectElement;
+    await act(async () => {
+      source.value = 'staged';
+      source.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await flush();
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GitDiffContent workspaceCwd="/repo-b" />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    expect(source.value).toBe('uncommitted');
+    expect(workspaceGitDiff).toHaveBeenLastCalledWith(undefined);
+  });
+
   it('renders the changed file list with stats', async () => {
     workspaceGitDiff.mockResolvedValue(diffPayload());
     mount();

@@ -4,6 +4,36 @@
   min-height: 50vh;
 }
 
+.sourceBar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.sourceLabel {
+  flex-shrink: 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.sourceSelect {
+  min-width: 132px;
+  height: 30px;
+  padding: 0 28px 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--foreground);
+  font: inherit;
+  font-size: 12px;
+}
+
+.refSelect {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
 .placeholder {
   padding: 24px 12px;
   text-align: center;
