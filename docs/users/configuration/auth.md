@@ -297,7 +297,7 @@ After launching Qwen Code, use the `/model` command to switch between all config
 /model
 ```
 
-The picker will show all models from your `modelProviders` configuration, grouped by their protocol (e.g. `openai`, `anthropic`, `gemini`). Your selection is persisted across sessions.
+The picker will show all models from your `modelProviders` configuration, grouped by their protocol (e.g. `openai`, `anthropic`, `gemini`). A selection from the ordinary `/model` picker applies only to the current session. To persist a selection for future sessions, use `/model --default <model-id>` or open the picker with `/model --default` and select a model.
 
 You can also switch models directly with a command-line argument, which is convenient when working across multiple terminals.
 
