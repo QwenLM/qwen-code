@@ -105,6 +105,18 @@ function voiceSetting(effective: string): DaemonSettingDescriptor {
   };
 }
 
+function sessionWorkflowSetting(): DaemonSettingDescriptor {
+  return {
+    key: 'experimental.sessionWorkflow',
+    type: 'boolean',
+    label: 'Session Workflow Plan & Review',
+    category: 'Experimental',
+    requiresRestart: false,
+    default: false,
+    values: { effective: true },
+  };
+}
+
 const {
   mockConnection,
   mockSessionActions,
@@ -2349,7 +2361,7 @@ afterEach(() => {
 });
 
 describe('App plan todos', () => {
-  it('passes the active workflow to an exit-plan approval', async () => {
+  it('gates the exit-plan workflow on the experimental setting', async () => {
     testState.messages = [
       {
         id: 'plan',
@@ -2373,7 +2385,13 @@ describe('App plan todos', () => {
       }),
     ];
 
-    renderApp();
+    const { rerender } = renderApp();
+    await flush();
+
+    expect(testState.latestToolApprovalPlanTodos).toEqual([]);
+
+    testState.settings = [sessionWorkflowSetting()];
+    rerender();
     await flush();
 
     expect(
@@ -2424,6 +2442,7 @@ describe('App plan todos', () => {
   });
 
   it('opens the workflow dialog with plan todos and linked agents', async () => {
+    testState.settings = [sessionWorkflowSetting()];
     testState.messages = [
       {
         id: 'plan',
