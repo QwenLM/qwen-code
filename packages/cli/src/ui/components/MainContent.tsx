@@ -14,7 +14,10 @@ import { Notifications } from './Notifications.js';
 import { OverflowProvider } from '../contexts/OverflowContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useAppContext } from '../contexts/AppContext.js';
-import { useThoughtExpanded } from '../contexts/ThoughtExpandedContext.js';
+import {
+  useThoughtExpanded,
+  PENDING_THOUGHT_HEAD_ID,
+} from '../contexts/ThoughtExpandedContext.js';
 import { AppHeader } from './AppHeader.js';
 import { DebugModeNotification } from './DebugModeNotification.js';
 import {
@@ -109,6 +112,21 @@ const virtualKeyExtractor = (item: VpItem) =>
       : `p-${-item.id - 1}`;
 const virtualIsStaticItem = (item: VpItem) =>
   item.type === 'vp-banner' || item.id > 0;
+
+// Head id a pending thought item keys its inline expansion off. A pending
+// `gemini_thought` head has no committed id yet, so it uses the shared
+// pending sentinel (migrated to the real head id when it commits). A pending
+// `gemini_thought_content` tail only exists after its head already committed
+// (long reasoning split past the pending-size cap), so it keys off that
+// committed head id and expands/collapses together with it.
+function pendingThoughtHeadId(
+  type: HistoryItemWithoutId['type'],
+  lastCommittedThoughtHeadId: number | undefined,
+): number | undefined {
+  if (type === 'gemini_thought') return PENDING_THOUGHT_HEAD_ID;
+  if (type === 'gemini_thought_content') return lastCommittedThoughtHeadId;
+  return undefined;
+}
 
 export const MainContent = () => {
   const { version } = useAppContext();
@@ -314,6 +332,18 @@ export const MainContent = () => {
   const thoughtHeadIdByItemRef = useRef(thoughtHeadIdByItem);
   thoughtHeadIdByItemRef.current = thoughtHeadIdByItem;
 
+  // Id of the most recently committed `gemini_thought` head. A pending
+  // `gemini_thought_content` tail (long reasoning split) belongs to this head.
+  const lastCommittedThoughtHeadId = useMemo(() => {
+    for (let i = visibleHistory.length - 1; i >= 0; i--) {
+      const item = visibleHistory[i];
+      if (item && item.type === 'gemini_thought') return item.id;
+    }
+    return undefined;
+  }, [visibleHistory]);
+  const lastCommittedThoughtHeadIdRef = useRef(lastCommittedThoughtHeadId);
+  lastCommittedThoughtHeadIdRef.current = lastCommittedThoughtHeadId;
+
   const pendingSourceCopyOffsetsByIndex = useMemo(
     () =>
       pendingHistoryItemsWithSourceCopyOffsets.map(
@@ -380,6 +410,10 @@ export const MainContent = () => {
               ps.constrainHeight ? ps.availableTerminalHeight : undefined
             }
             item={{ ...item, id: 0 }}
+            thoughtHeadId={pendingThoughtHeadId(
+              item.type,
+              lastCommittedThoughtHeadIdRef.current,
+            )}
             isPending={true}
             isFocused={!ps.isEditorDialogOpen}
             activeShellPtyId={ps.activePtyId}
@@ -542,6 +576,10 @@ export const MainContent = () => {
                   terminalWidth={terminalWidth}
                   mainAreaWidth={mainAreaWidth}
                   item={{ ...item, id: 0 }}
+                  thoughtHeadId={pendingThoughtHeadId(
+                    item.type,
+                    lastCommittedThoughtHeadId,
+                  )}
                   isPending={true}
                   isFocused={!uiState.isEditorDialogOpen}
                   activeShellPtyId={uiState.activePtyId}

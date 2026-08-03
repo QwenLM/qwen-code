@@ -146,7 +146,10 @@ import {
   useVimModeState,
   useVimModeActions,
 } from './contexts/VimModeContext.js';
-import { ThoughtExpandedProvider } from './contexts/ThoughtExpandedContext.js';
+import {
+  ThoughtExpandedProvider,
+  PENDING_THOUGHT_HEAD_ID,
+} from './contexts/ThoughtExpandedContext.js';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
 import { calculatePromptWidths } from './components/InputPrompt.js';
 import { useStdin, useStdout } from 'ink';
@@ -783,6 +786,23 @@ export const AppContainer = (props: AppContainerProps) => {
       return next;
     });
   }, []);
+  // While streaming, a thought has no committed head id yet, so its click
+  // expansion is keyed by PENDING_THOUGHT_HEAD_ID. When the thought commits,
+  // migrate that entry to the real committed head id so a thought expanded
+  // while streaming stays expanded; a `null` id means the pending thought was
+  // dropped without committing, so just drop the provisional key.
+  const settlePendingThoughtExpansion = useCallback(
+    (committedHeadId: number | null) => {
+      setExpandedThoughtHeadIds((prev) => {
+        if (!prev.has(PENDING_THOUGHT_HEAD_ID)) return prev;
+        const next = new Set(prev);
+        next.delete(PENDING_THOUGHT_HEAD_ID);
+        if (committedHeadId != null) next.add(committedHeadId);
+        return next;
+      });
+    },
+    [],
+  );
 
   // Terminal and layout hooks
   const { columns: terminalWidth, rows: terminalHeight } = useTerminalSize();
@@ -2077,6 +2097,7 @@ export const AppContainer = (props: AppContainerProps) => {
     terminalWidthRef,
     midTurnRestoreRef,
     goalQueueRef,
+    settlePendingThoughtExpansion,
   );
   cancelOngoingRequestRef.current = cancelOngoingRequest;
 

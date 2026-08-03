@@ -51,6 +51,28 @@ describe('<ThinkMessage />', () => {
     expect(output).toContain('Analyzing the code structure');
   });
 
+  it('hints click-to-collapse when expanded and clickable (VP mode)', () => {
+    const withoutClick = render(
+      <ThinkMessage {...defaultProps} isPending={true} expanded={true} />,
+    ).lastFrame();
+    // No click target: collapse stays a keyboard-only hint.
+    expect(withoutClick).toContain(`${toggleKeyHint} to collapse`);
+    expect(withoutClick).not.toContain('click');
+
+    const withClick = render(
+      <ThinkMessage
+        {...defaultProps}
+        isPending={true}
+        expanded={true}
+        clickable={true}
+      />,
+    ).lastFrame();
+    // A click-expanded thought cannot be collapsed by ctrl+o (that is the
+    // app-wide full-detail switch), so the hint must advertise clicking.
+    expect(withClick).toContain('click');
+    expect(withClick).toContain('to collapse');
+  });
+
   it('should render collapsed line when committed and not expanded', () => {
     const { lastFrame } = render(
       <ThinkMessage {...defaultProps} isPending={false} expanded={false} />,

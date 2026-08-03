@@ -326,33 +326,33 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
       : durationMs < BRIEF_THOUGHT_THRESHOLD_MS
         ? t('Thought briefly')
         : `${t('Thought for')} ${formatDuration(durationMs)}`;
+  const headerIcon = isPending ? THINKING_ICON_PENDING : THINKING_ICON;
+  const pendingLabel = `${t('Thinking')}…${durationSuffix}`;
 
   if (!expanded) {
-    const label = isPending
-      ? `${t('Thinking')}…${durationSuffix}`
-      : (completedLabel ?? t('Thinking'));
+    const label = isPending ? pendingLabel : (completedLabel ?? t('Thinking'));
     const hint = clickable
       ? t('(click or {{keyHint}} to expand)', { keyHint: toggleKeyHint })
       : t('({{keyHint}} to expand)', { keyHint: toggleKeyHint });
     return (
       <Text dimColor italic>
-        {isPending ? THINKING_ICON_PENDING : THINKING_ICON}
+        {headerIcon}
         {label} {hint}
       </Text>
     );
   }
 
   const label = isPending
-    ? `${t('Thinking')}…${durationSuffix}`
+    ? pendingLabel
     : (completedLabel ?? `${t('Thinking')}…`);
-  const collapseHint = ` ${t('({{keyHint}} to collapse)', {
-    keyHint: toggleKeyHint,
-  })}`;
+  const collapseHint = clickable
+    ? ` ${t('(click or {{keyHint}} to collapse)', { keyHint: toggleKeyHint })}`
+    : ` ${t('({{keyHint}} to collapse)', { keyHint: toggleKeyHint })}`;
 
   return (
     <Box flexDirection="column">
       <Text dimColor italic>
-        {isPending ? THINKING_ICON_PENDING : THINKING_ICON}
+        {headerIcon}
         {label}
         {collapseHint}
       </Text>

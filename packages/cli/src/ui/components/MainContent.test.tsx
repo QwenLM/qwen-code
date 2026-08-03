@@ -16,7 +16,10 @@ import {
 } from '../contexts/UIActionsContext.js';
 import { AppContext } from '../contexts/AppContext.js';
 import { OverflowProvider } from '../contexts/OverflowContext.js';
-import { ThoughtExpandedProvider } from '../contexts/ThoughtExpandedContext.js';
+import {
+  ThoughtExpandedProvider,
+  PENDING_THOUGHT_HEAD_ID,
+} from '../contexts/ThoughtExpandedContext.js';
 import { ToolCallStatus, StreamingState } from '../types.js';
 
 // Global compact mode was removed (#5666); type-based tool rendering no longer
@@ -1062,5 +1065,72 @@ describe('<MainContent />', () => {
     expect(
       wrapperProps().some((p: { maxHeight?: number }) => p.maxHeight === 5),
     ).toBe(true);
+  });
+
+  describe('pending thought expansion keying', () => {
+    it('keys a pending thought head off the pending sentinel, not the shared item id (Static path)', () => {
+      historyItemDisplayPropsSpy.mockClear();
+      renderMainContent(
+        createUIState({
+          pendingHistoryItems: [{ type: 'gemini_thought', text: 'reasoning…' }],
+        }),
+      );
+      const calls = historyItemDisplayPropsSpy.mock.calls.map((c) => c[0]);
+      const pendingThought = calls.find(
+        (c) => c.isPending && c.item.type === 'gemini_thought',
+      );
+      expect(pendingThought).toBeDefined();
+      // Pending items render with the shared item id 0; the expansion key must
+      // be the dedicated sentinel, not that shared id.
+      expect(pendingThought.item.id).toBe(0);
+      expect(pendingThought.thoughtHeadId).toBe(PENDING_THOUGHT_HEAD_ID);
+    });
+
+    it('keys a committed thought head off its own id (Static path)', () => {
+      historyItemDisplayPropsSpy.mockClear();
+      renderMainContent(
+        createUIState({
+          history: [{ id: 42, type: 'gemini_thought', text: 'done' }],
+        }),
+      );
+      const calls = historyItemDisplayPropsSpy.mock.calls.map((c) => c[0]);
+      const committed = calls.find((c) => c.item.id === 42);
+      expect(committed).toBeDefined();
+      expect(committed.thoughtHeadId).toBe(42);
+    });
+
+    it('keys a split pending tail off the committed head id (Static path)', () => {
+      historyItemDisplayPropsSpy.mockClear();
+      renderMainContent(
+        createUIState({
+          history: [{ id: 42, type: 'gemini_thought', text: 'head chunk' }],
+          pendingHistoryItems: [
+            { type: 'gemini_thought_content', text: 'streaming tail…' },
+          ],
+        }),
+      );
+      const calls = historyItemDisplayPropsSpy.mock.calls.map((c) => c[0]);
+      const pendingTail = calls.find(
+        (c) => c.isPending && c.item.type === 'gemini_thought_content',
+      );
+      expect(pendingTail).toBeDefined();
+      expect(pendingTail.thoughtHeadId).toBe(42);
+    });
+
+    it('keys a pending thought head off the sentinel in VP mode too', () => {
+      historyItemDisplayPropsSpy.mockClear();
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          pendingHistoryItems: [{ type: 'gemini_thought', text: 'reasoning…' }],
+        }),
+      );
+      const calls = historyItemDisplayPropsSpy.mock.calls.map((c) => c[0]);
+      const pendingThought = calls.find(
+        (c) => c.isPending && c.item.type === 'gemini_thought',
+      );
+      expect(pendingThought).toBeDefined();
+      expect(pendingThought.thoughtHeadId).toBe(PENDING_THOUGHT_HEAD_ID);
+    });
   });
 });

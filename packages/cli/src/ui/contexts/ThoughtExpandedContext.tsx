@@ -6,6 +6,16 @@
 
 import { createContext, useContext } from 'react';
 
+/**
+ * Head-id key used while a thought is still streaming (pending). A pending
+ * thought has no committed head id yet, so its inline expansion is recorded
+ * under this sentinel and migrated to the real committed head id when the
+ * thought commits (see `settlePendingThoughtExpansion` in AppContainer).
+ * Negative so it can never collide with a real committed head id, which is
+ * always a large positive `baseTimestamp + counter` value.
+ */
+export const PENDING_THOUGHT_HEAD_ID = -1;
+
 export interface ThoughtExpandedValue {
   /**
    * Ctrl+O / Alt+T global toggle. Despite the name this is the app-wide

@@ -776,6 +776,40 @@ describe('<HistoryItemDisplay />', () => {
       expect(toggle).toHaveBeenCalledWith(thoughtItem.id);
     });
 
+    it('does not record a toggle while fullDetail (Ctrl+O) is active', () => {
+      const toggle = vi.fn();
+      vi.mocked(measureElementPosition).mockReturnValue({
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 3,
+      });
+      vi.mocked(layoutRowForEvent).mockImplementation((_node, row) => row - 1);
+      renderWithProviders(
+        <ThoughtExpandedProvider
+          value={{
+            allExpanded: true,
+            expandedHeadIds: new Set<number>(),
+            toggle,
+          }}
+        >
+          <HistoryItemDisplay
+            item={thoughtItem}
+            terminalWidth={100}
+            isPending={true}
+            fullDetail={true}
+          />
+        </ThoughtExpandedProvider>,
+      );
+      const handler = vi.mocked(useMouseEvents).mock.calls.at(-1)?.[0];
+
+      handler?.(mouseEvent('left-press', 5));
+      handler?.(mouseEvent('left-release', 5));
+      // fullDetail already forces the thought open; a click must not silently
+      // record a per-item toggle that would flip once fullDetail turns off.
+      expect(toggle).not.toHaveBeenCalled();
+    });
+
     it('does not toggle when selecting text by dragging', () => {
       const toggle = vi.fn();
       const handler = renderThoughtWithToggle(toggle);

@@ -331,7 +331,12 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           }
           contentWidth={contentWidth}
           durationMs={itemForDisplay.durationMs}
-          onToggle={() => toggleThought(thoughtGroupHeadId)}
+          onToggle={() => {
+            // While fullDetail forces every thought open, a click would only
+            // record a per-item toggle that flips state once fullDetail is
+            // turned back off. Ignore it.
+            if (!fullDetail) toggleThought(thoughtGroupHeadId);
+          }}
         />
       )}
       {itemForDisplay.type === 'gemini_thought_content' && (
