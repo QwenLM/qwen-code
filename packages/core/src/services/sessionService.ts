@@ -287,7 +287,6 @@ interface BranchCreationManifestV1 {
   transcriptStagingName: string;
   backupStagingName: string;
   backupNames: string[];
-  createdAt: string;
 }
 
 interface BranchOwnerMarkerV1 {
@@ -331,8 +330,7 @@ function parseBranchCreationManifest(
           typeof name === 'string' &&
           name.length > 0 &&
           path.basename(name) === name,
-      ) ||
-      typeof parsed.createdAt !== 'string'
+      )
     ) {
       return undefined;
     }
@@ -2202,7 +2200,6 @@ export class SessionService {
       transcriptStagingName,
       backupStagingName,
       backupNames: [...backupNames].sort(),
-      createdAt: new Date().toISOString(),
     };
 
     fs.mkdirSync(chatsDir, { recursive: true });

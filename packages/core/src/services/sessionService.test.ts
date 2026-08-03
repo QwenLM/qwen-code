@@ -3108,7 +3108,6 @@ describe('SessionService', () => {
           transcriptStagingName,
           backupStagingName,
           backupNames: ['backup-a'],
-          createdAt: '2026-04-22T00:00:00.000Z',
         }),
       );
       fs.writeFileSync(stagedTranscriptPath, 'staged transcript');

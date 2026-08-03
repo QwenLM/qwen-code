@@ -190,6 +190,7 @@ describe('daemon transcript rewind', () => {
     expect(
       matchTurnEvent(
         {
+          v: 1,
           type: 'turn_complete',
           data: {
             promptId: 'prompt-1',
@@ -224,6 +225,7 @@ describe('daemon transcript rewind', () => {
       expect(
         matchTurnEvent(
           {
+            v: 1,
             type: 'turn_complete',
             data: {
               promptId: 'prompt-1',
