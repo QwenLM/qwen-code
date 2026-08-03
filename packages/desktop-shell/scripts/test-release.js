@@ -123,8 +123,18 @@ function testResolveLogRoot() {
   );
   const readNewLogCalls = smoke.match(/const contents = readNewLog\(\)/g);
   assert.ok(
-    readNewLogCalls && readNewLogCalls.length >= 2,
-    'readNewLog() must be called in both the polling loop and the timeout path',
+    readNewLogCalls && readNewLogCalls.length === 1,
+    'the polling loop must be the only incremental readNewLog() call site',
+  );
+  assert.match(
+    smoke,
+    /startupTruncationPending = false;\s*previousLog = contents;/,
+    'a truncation must rebase the slice baseline to the current contents',
+  );
+  assert.match(
+    smoke,
+    /const contents = fs\.readFileSync\(logPath, \{\s*encoding: 'utf8',\s*flag: 'a\+',\s*\}\);\s*throw smokeError\('Timed out waiting for packaged desktop runtime\.', contents\);/,
+    'the timeout error must embed the full log, not the incremental delta',
   );
   assert.match(
     smoke,

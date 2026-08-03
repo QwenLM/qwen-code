@@ -40,9 +40,9 @@ let previousLog = fs.readFileSync(logPath, {
 });
 // The packaged app truncates its own log on startup, so the first truncation
 // after this snapshot is expected; only warn on a later one (a live concurrent
-// instance writing the same machine-global log). sliceNewLog's baseline
-// collapses to '' after that first reset, so detect later truncations against
-// the last full read instead.
+// instance writing the same machine-global log). Detect later truncations
+// against the last full read so the slice baseline can rebase to the
+// truncated contents.
 let lastFullLog = previousLog;
 let startupTruncationPending = previousLog !== '';
 const child = spawn(executable, [], {
@@ -113,7 +113,10 @@ async function waitForReady() {
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  const contents = readNewLog();
+  const contents = fs.readFileSync(logPath, {
+    encoding: 'utf8',
+    flag: 'a+',
+  });
   throw smokeError('Timed out waiting for packaged desktop runtime.', contents);
 }
 
@@ -128,9 +131,9 @@ function readNewLog() {
       console.warn(`smoke: log was truncated, resetting baseline: ${logPath}`);
     }
     startupTruncationPending = false;
+    previousLog = contents;
   }
   lastFullLog = contents;
-  previousLog = result.baseline;
   return result.text;
 }
 
