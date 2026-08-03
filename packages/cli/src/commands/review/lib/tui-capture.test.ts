@@ -9,14 +9,13 @@ import {
   captureServerName,
   freezePlan,
   tmuxPlan,
+  tmuxSupportsCaptureN,
   validGeometry,
 } from './tui-capture.js';
 
 describe('captureServerName', () => {
   it('scopes by pid and nonce so concurrent reviews cannot collide', () => {
-    expect(captureServerName(123, 'abcd')).toBe(
-      'qwen-review-capture-123-abcd',
-    );
+    expect(captureServerName(123, 'abcd')).toBe('qwen-review-capture-123-abcd');
     expect(captureServerName(123, 'abcd')).not.toBe(
       captureServerName(123, 'efgh'),
     );
@@ -43,6 +42,24 @@ describe('validGeometry', () => {
       const v = validGeometry(c, r);
       expect(v.ok, `${c}x${r}`).toBe(false);
     }
+  });
+});
+
+describe('tmuxSupportsCaptureN', () => {
+  it('accepts 3.0a and later, refuses the older line, ignores the unparseable', () => {
+    // -N landed in 3.0a: 3.0 without a suffix is still too old, and a
+    // `v <= lo`-style off-by-one on the suffix must not refuse 3.0a itself.
+    for (const line of ['tmux 3.0a', 'tmux 3.0b', 'tmux 3.1', 'tmux 3.3a']) {
+      expect(tmuxSupportsCaptureN(line), `${line}`).toBe(true);
+    }
+    expect(tmuxSupportsCaptureN('tmux 4.0')).toBe(true);
+    for (const line of ['tmux 1.8', 'tmux 2.8', 'tmux 3.0']) {
+      expect(tmuxSupportsCaptureN(line), `${line}`).toBe(false);
+    }
+    // Unparseable is undefined, not false: a version that cannot be named
+    // is not a reason to refuse.
+    expect(tmuxSupportsCaptureN('')).toBeUndefined();
+    expect(tmuxSupportsCaptureN('no digits here')).toBeUndefined();
   });
 });
 

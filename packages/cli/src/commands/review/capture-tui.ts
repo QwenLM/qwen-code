@@ -48,6 +48,7 @@ import {
   captureServerName,
   freezePlan,
   tmuxPlan,
+  tmuxSupportsCaptureN,
   validGeometry,
   type CaptureManifest,
 } from './lib/tui-capture.js';
@@ -65,22 +66,19 @@ interface CaptureTuiArgs {
   timeoutMs: number;
 }
 
-/** Probe the binary itself (`tmux -V` / `freeze --version`), not `which`:
- * a host without `which` would otherwise misdiagnose an installed tmux as
- * missing, and the binary answering is the only fact that matters. */
-function available(bin: string, versionFlag: string): boolean {
-  const r = spawnSync(bin, [versionFlag], {
+/** Probe the binary itself (`tmux -V` / `freeze --help`), not `which`: a
+ * host without `which` would otherwise misdiagnose an installed binary as
+ * missing, and the binary answering is the only fact that matters. A clean
+ * answer returns its trimmed stdout; anything else returns undefined. */
+function probeOutput(bin: string, flag: string): string | undefined {
+  const r = spawnSync(bin, [flag], {
     encoding: 'utf8',
     timeout: 10_000,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-  return r.status === 0;
+  return r.status === 0 ? (r.stdout ?? '').trim() : undefined;
 }
 
-/** The availability probes, exported as a seam: the no-tmux refusal fires
- * exactly where `describe.skipIf(!hasTmux)` skips the real-tmux tests, so
- * without this seam that path is untestable in the one environment where it
- * matters. Tests override a probe and restore it; production never does. */
 /** The freeze render invocation, exported as a seam: the 30s belt against a
  * wedged freeze (measured hangs on this repo's own workflows) is otherwise
  * untestable — a test cannot wait out the real value to prove the belt
@@ -89,12 +87,19 @@ function available(bin: string, versionFlag: string): boolean {
  * Tests override and restore; production never does. */
 export const freezeRender = { bin: 'freeze', timeoutMs: 30_000 };
 
+/** The availability probes, exported as a seam: the no-tmux refusal fires
+ * exactly where `describe.skipIf(!hasTmux)` skips the real-tmux tests, so
+ * without this seam that path is untestable in the one environment where it
+ * matters. Tests override a probe and restore it; production never does. */
 export const probes = {
-  tmux: () => available('tmux', '-V'),
+  // The VERSION LINE, not a boolean: capture-pane -N needs tmux 3.0a, and a
+  // host with an older tmux must be told so up front — the real cause named,
+  // no server started — instead of dying mid-capture on the unknown flag.
+  tmux: (): string | undefined => probeOutput('tmux', '-V'),
   // `--help`, not `--version`: freeze ≤0.1.6 (the whole 2024 release line)
   // has no --version flag and would be misdiagnosed as absent; --help exits
   // 0 on both release lines (measured on v0.1.6 and v0.2.2).
-  freeze: () => available('freeze', '--help'),
+  freeze: () => probeOutput('freeze', '--help') !== undefined,
 };
 
 function tmux(argv: string[]): string {
@@ -118,24 +123,40 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/** `re.test` with a time budget: a backtracking-prone --until pattern can
- * spin one test() call past any deadline (the deadline is only checked
- * BETWEEN calls). vm interrupts the match; a budget overrun counts as "no
- * match yet", so the poll keeps making deadline progress. */
-function testWithBudget(re: RegExp, text: string): boolean {
+/** One marker match's time budget: a backtracking-prone --until/--ready
+ * pattern can spin a single test() call past any deadline (the deadline is
+ * only checked BETWEEN calls). vm interrupts the match; an overrun is
+ * reported as such — it is "the match was cut off", NOT "no match". */
+const MATCH_BUDGET_MS = 500;
+
+function testWithBudget(
+  re: RegExp,
+  text: string,
+): 'match' | 'miss' | 'overrun' {
   try {
-    return runInNewContext('re.test(text)', { re, text }, {
-      timeout: 500,
-    }) as boolean;
+    return runInNewContext(
+      're.test(text)',
+      { re, text },
+      {
+        timeout: MATCH_BUDGET_MS,
+      },
+    )
+      ? 'match'
+      : 'miss';
   } catch {
-    return false;
+    return 'overrun';
   }
 }
 
 export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   const refuse = (reason: string): void => {
     writeStderrLine(`capture-tui: refused — ${reason}`);
-    writeStdoutLine(JSON.stringify({ captured: false }));
+    // The reason rides on stdout too: the consumer is an agent that must
+    // tell an environment refusal from a caller mistake without scraping
+    // stderr, and `evidence: 'none'` names the ladder's bottom rung.
+    writeStdoutLine(
+      JSON.stringify({ captured: false, evidence: 'none', reason }),
+    );
     process.exitCode = 3;
   };
 
@@ -144,13 +165,23 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   // into a boolean (`--no-command` → false) — both sail through the `as`
   // casts and either throw uncaught TypeErrors past the refusal contract or
   // silently corrupt the capture (`--until A --until B` compiles /A,B/;
-  // `--no-keys` types the literal word "false" into the pane).
+  // `--no-keys` types the literal word "false" into the pane). The two
+  // REQUIRED options also refuse undefined: demandOption covers the CLI
+  // path, but runCaptureTui is exported, and an undefined command/out would
+  // throw on .trim() past the refusal contract.
   for (const [name, v] of [
     ['--command', args.command],
+    ['--out', args.out],
+  ] as const) {
+    if (typeof v !== 'string') {
+      refuse(`${name} must be given exactly once, as a string.`);
+      return;
+    }
+  }
+  for (const [name, v] of [
     ['--cwd', args.cwd],
     ['--until', args.until],
     ['--ready', args.ready],
-    ['--out', args.out],
   ] as const) {
     if (v !== undefined && typeof v !== 'string') {
       refuse(`${name} must be given exactly once, as a string.`);
@@ -158,16 +189,26 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     }
   }
   if (args.keys !== undefined) {
-    if (!Array.isArray(args.keys) || args.keys.some((k) => typeof k !== 'string')) {
+    if (
+      !Array.isArray(args.keys) ||
+      args.keys.some((k) => typeof k !== 'string')
+    ) {
       refuse('--keys must be strings.');
       return;
     }
   }
-  if (!probes.tmux()) {
+  const tmuxVersion = probes.tmux();
+  if (tmuxVersion === undefined) {
     refuse(
       'tmux is not installed. Rendering claims stay argued from the code on ' +
         'this host; say so in the finding rather than describing an imagined ' +
         'terminal as evidence.',
+    );
+    return;
+  }
+  if (tmuxSupportsCaptureN(tmuxVersion) === false) {
+    refuse(
+      `${tmuxVersion} is too old: capture-pane -N needs tmux 3.0a or newer.`,
     );
     return;
   }
@@ -284,9 +325,20 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // with `recursive` does no permission check on a directory that already
     // exists, so an unwritable --out would otherwise run the full capture —
     // up to the 1h ceiling — and lose the pane text at the very last write.
-    const fd = openSync(ansPath, 'w');
+    // The probe uses a UNIQUE sibling, never the .ans itself: truncating the
+    // real one would delete the previous run's text while its manifest/png
+    // survive to misdescribe it.
+    const probePath = `${outBase}.write-probe-${randomBytes(4).toString('hex')}`;
+    const fd = openSync(probePath, 'w');
     closeSync(fd);
+    rmSync(probePath, { force: true });
+    // Clear the previous run's artifacts before anything starts: every path
+    // from here must leave THIS run's artifacts or nothing — a refusal that
+    // left a stale manifest behind would hand a verifier evidence from a
+    // different capture, the exact failure this command exists to prevent.
     rmSync(ansPath, { force: true });
+    rmSync(pngPath, { force: true });
+    rmSync(manifestPath, { force: true });
   } catch (e) {
     refuse(
       `--out is not writable: ${e instanceof Error ? e.message : String(e)}`,
@@ -310,7 +362,10 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   // (an operator's Ctrl+C on an un-settling capture, a harness reaping a
   // stuck one) skips finally and would leave the server, its socket, and the
   // captured TUI alive. The handler reaps first and then re-raises so the
-  // exit code stays the conventional one for the signal.
+  // exit code stays the conventional one for the signal — removing only
+  // itself before the re-raise, so any OTHER handler the host process
+  // installed sees the signal a second time; accepted for a leaf
+  // subcommand, which this is.
   let reaped = false;
   const reap = (): void => {
     if (reaped) return;
@@ -358,6 +413,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   let settledBy: CaptureManifest['settledBy'] = 'fixed-delay';
   let readyFailed = false;
   let keysSent: boolean | undefined;
+  let matchOverruns = 0;
   try {
     tmux(plan.start);
     // One deadline covers the ready gate AND the until poll: two separate
@@ -367,10 +423,12 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       readyFailed = true;
       for (;;) {
         const logical = tmux(plan.captureText);
-        if (testWithBudget(readyRe, logical)) {
+        const m = testWithBudget(readyRe, logical);
+        if (m === 'match') {
           readyFailed = false;
           break;
         }
+        if (m === 'overrun') matchOverruns++;
         if (Date.now() >= deadline) break;
         await sleep(250);
       }
@@ -403,11 +461,13 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       settledBy = 'timeout';
       for (;;) {
         const logical = tmux(plan.captureText);
-        if (testWithBudget(untilRe, logical)) {
+        const m = testWithBudget(untilRe, logical);
+        if (m === 'match') {
           settledBy = 'until-match';
           ansText = tmux(plan.capture);
           break;
         }
+        if (m === 'overrun') matchOverruns++;
         if (Date.now() >= deadline) {
           ansText = tmux(plan.capture);
           break;
@@ -468,6 +528,14 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       `--until never matched within ${args.timeoutMs}ms — late frame captured`,
     );
   }
+  if (matchOverruns > 0) {
+    // A budget cutoff is not the same as an absent marker: the match may
+    // have been interrupted mid-backtrack, and the field's contract is that
+    // a reader learns WHY the settle landed where it did.
+    degradations.push(
+      `marker matching exceeded its ${MATCH_BUDGET_MS}ms budget ${matchOverruns} time(s) — the marker may be present, its match cut off`,
+    );
+  }
   if (ansText.trim() === '') {
     // A blank capture — zero bytes or nothing but whitespace — has no pixels
     // worth rendering: freeze fails empty input with a misleading bounds
@@ -498,8 +566,8 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       // nothing — and a verifier would publish a path with no pixels.
       png = pngPath;
     } else {
-      // The stderr tail rides along: a bare exit code is undiagnosable from a
-      // manifest, and the whole point of recording degradation is that a
+      // The stderr tail rides along: a bare exit code is undiagnosable from
+      // a manifest, and the whole point of recording degradation is that a
       // reader can tell WHY the ladder stopped. A spawn that never ran
       // (EMFILE, a binary vanishing between probe and render) has neither
       // status nor signal — its reason lives in r.error.

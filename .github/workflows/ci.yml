@@ -403,8 +403,10 @@ jobs:
           if command -v tmux > /dev/null 2>&1; then
             tmux -V
           elif command -v sudo > /dev/null 2>&1 && command -v apt-get > /dev/null 2>&1; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq tmux
+            # Advisory, not a gate: an apt hiccup must not fail the job for a
+            # suite that is describe.skipIf-gated and simply skips without tmux.
+            sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends tmux \
+              || echo 'tmux install failed; real-tmux capture tests will be skipped.'
           else
             echo 'tmux unavailable; real-tmux capture tests will be skipped.'
           fi

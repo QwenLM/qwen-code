@@ -51,6 +51,20 @@ export function validGeometry(
   return { ok: true };
 }
 
+/** Whether a `tmux -V` line ("tmux 3.3a") names a tmux with capture-pane
+ * `-N`: the trailing-space flag the physical capture is load-bearing on
+ * landed in 3.0a. Undefined when the version does not parse — an unnameable
+ * version is not a reason to refuse, but a NAMED old one is. */
+export function tmuxSupportsCaptureN(versionLine: string): boolean | undefined {
+  const m = /(\d+)\.(\d+)([a-z]*)/i.exec(versionLine);
+  if (!m) return undefined;
+  const major = Number(m[1]);
+  const minor = Number(m[2]);
+  if (major !== 3) return major > 3;
+  if (minor !== 0) return minor > 0;
+  return (m[3] ?? '') >= 'a'; // 3.0 shipped before -N; 3.0a added it
+}
+
 /**
  * How far the capture got, in evidence terms.
  *
@@ -80,8 +94,9 @@ export interface CaptureManifest {
   until?: string;
   settleMs?: number;
   timeoutMs?: number;
-  /** The raw pane text with escapes — always written when tmux ran. */
-  ansPath: string | null;
+  /** The raw pane text with escapes — always written; a refused capture
+   * writes no manifest at all. */
+  ansPath: string;
   /** The rendered image — null when freeze is unavailable or failed. */
   pngPath: string | null;
   /** Never `none`: a refused capture writes no manifest at all — `none` is

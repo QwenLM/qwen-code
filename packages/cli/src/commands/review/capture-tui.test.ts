@@ -10,6 +10,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -22,8 +23,15 @@ import {
   probes,
   runCaptureTui,
 } from './capture-tui.js';
+import { tmuxSupportsCaptureN } from './lib/tui-capture.js';
 
-const hasTmux = spawnSync('tmux', ['-V']).status === 0;
+const tmuxVersionProbe = spawnSync('tmux', ['-V'], { encoding: 'utf8' });
+// The suite needs capture-pane -N (tmux 3.0a+); on an older tmux every
+// capture would refuse with "too old", which is a skip-shaped outcome, not
+// a red suite.
+const hasTmux =
+  tmuxVersionProbe.status === 0 &&
+  tmuxSupportsCaptureN(tmuxVersionProbe.stdout ?? '') !== false;
 // --help, not --version: freeze <=0.1.6 has no --version flag and would be
 // misdiagnosed as absent (mirrors the production probe).
 const hasFreeze = spawnSync('freeze', ['--help']).status === 0;
@@ -38,23 +46,31 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/** Capture stderr text written during `fn` — the refusal REASON is part of
+/** Capture the stdio written during `fn` — the refusal REASON is part of
  * the contract, not just the exit code: two different refusal paths share
- * the exit-3/no-artifacts shape, and only the reason tells them apart. */
-async function withStderr(fn: () => Promise<void>): Promise<string> {
-  let text = '';
-  const spy = vi
-    .spyOn(process.stderr, 'write')
-    .mockImplementation(((chunk: string | Uint8Array) => {
-      text += typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString();
+ * the exit-3/no-artifacts shape, and only the reason tells them apart; and
+ * an agent consumer parses the refusal JSON from stdout, not stderr. */
+async function withStdio(
+  fn: () => Promise<void>,
+): Promise<{ stdout: string; stderr: string }> {
+  const sinks = { stdout: '', stderr: '' };
+  const capture = (stream: 'stdout' | 'stderr') =>
+    vi.spyOn(process[stream], 'write').mockImplementation(((
+      chunk: string | Uint8Array,
+    ) => {
+      sinks[stream] +=
+        typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString();
       return true;
     }) as never);
+  const outSpy = capture('stdout');
+  const errSpy = capture('stderr');
   try {
     await fn();
   } finally {
-    spy.mockRestore();
+    outSpy.mockRestore();
+    errSpy.mockRestore();
   }
-  return text;
+  return sinks;
 }
 
 // The no-tmux refusal fires exactly where the real-tmux block below is
@@ -72,10 +88,10 @@ describe('capture-tui without tmux (probe seam)', () => {
   });
 
   it('refuses with the contract — exit 3, no artifacts, the RIGHT reason', async () => {
-    probes.tmux = () => false;
+    probes.tmux = () => undefined;
     const dir = mkdtempSync(join(tmpdir(), 'capture-tui-notmux-'));
     try {
-      const stderr = await withStderr(() =>
+      const { stdout, stderr } = await withStdio(() =>
         runCaptureTui({
           command: 'printf hi',
           cwd: dir,
@@ -94,6 +110,94 @@ describe('capture-tui without tmux (probe seam)', () => {
       // The reason pins the PATH taken: an inverted probe would fall through
       // to the mid-capture catch and say "tmux failed mid-capture" instead.
       expect(stderr).toContain('tmux is not installed');
+      // The refusal JSON rides on stdout too: an agent consumer must not
+      // have to scrape stderr to tell WHY the ladder stopped at none.
+      expect(JSON.parse(stdout.trim())).toEqual({
+        captured: false,
+        evidence: 'none',
+        reason: expect.stringContaining('tmux is not installed'),
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a tmux too old for capture-pane -N, naming the version', async () => {
+    // -N landed in tmux 3.0a; an older host passes -V and would otherwise
+    // die MID-capture on the unknown flag — blaming tmux for a version
+    // problem, after paying for a server start.
+    probes.tmux = () => 'tmux 2.8';
+    const dir = mkdtempSync(join(tmpdir(), 'capture-tui-oldtmux-'));
+    try {
+      const { stderr } = await withStdio(() =>
+        runCaptureTui({
+          command: 'printf hi',
+          cwd: dir,
+          cols: 80,
+          rows: 24,
+          settleMs: 0,
+          until: undefined,
+          keys: undefined,
+          out: join(dir, 'cap'),
+          timeoutMs: 1000,
+        } as never),
+      );
+      expect(process.exitCode).toBe(3);
+      expect(stderr).toContain('tmux 2.8 is too old');
+      expect(stderr).toContain('capture-pane -N');
+      expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('leaves NO stale artifacts when a re-run refuses', async () => {
+    // The previous run's artifacts cannot survive a refused re-run: a stale
+    // manifest claiming a png rung whose .ans no longer exists is exactly
+    // the wrong-evidence failure this command exists to prevent. The fake
+    // tmux passes the version probe and fails every real command, so the
+    // refusal lands MID-capture — after the up-front clear.
+    const dir = mkdtempSync(join(tmpdir(), 'capture-tui-stale-'));
+    try {
+      writeFileSync(join(dir, 'cap.ans'), 'old run');
+      writeFileSync(join(dir, 'cap.png'), 'old run');
+      writeFileSync(join(dir, 'cap.json'), '{"evidence":"png"}');
+      const binDir = join(dir, 'fakebin');
+      mkdirSync(binDir, { recursive: true });
+      writeFileSync(
+        join(binDir, 'tmux'),
+        '#!/bin/sh\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\necho "fake tmux: refusing" >&2\nexit 1\n',
+        { mode: 0o755 },
+      );
+      const realPath = process.env['PATH'];
+      process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
+      try {
+        await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: undefined,
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 1000,
+          } as never),
+        );
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+      }
+      expect(process.exitCode).toBe(3);
+      expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
+      expect(existsSync(join(dir, 'cap.png'))).toBe(false);
+      expect(existsSync(join(dir, 'cap.json'))).toBe(false);
+      // The writability probe uses a unique sibling and removes it — it
+      // must not outlive the run either.
+      expect(readdirSync(dir).filter((f) => f.includes('write-probe'))).toEqual(
+        [],
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -102,7 +206,9 @@ describe('capture-tui without tmux (probe seam)', () => {
   it('refuses non-string argv shapes before anything else', async () => {
     // yargs parses duplicated options into arrays and --no-X into booleans;
     // both must refuse, not throw uncaught or silently corrupt the capture.
-    probes.tmux = () => false; // never reached — shapes refuse first
+    // Undefined required options are the exported-function vector of the
+    // same class: demandOption covers the CLI path only.
+    probes.tmux = () => undefined; // never reached — shapes refuse first
     const base = {
       cwd: undefined,
       cols: 80,
@@ -116,12 +222,14 @@ describe('capture-tui without tmux (probe seam)', () => {
     for (const over of [
       { command: ['a', 'b'] }, // --command A --command B
       { command: false }, // --no-command
+      { command: undefined },
       { command: 'x', until: ['A', 'B'] }, // --until A --until B
       { command: 'x', keys: [false] }, // --no-keys
       { command: 'x', out: ['x', 'y'] },
+      { command: 'x', out: undefined },
     ]) {
       process.exitCode = undefined;
-      const stderr = await withStderr(() =>
+      const { stderr } = await withStdio(() =>
         runCaptureTui({ ...base, ...over } as never),
       );
       expect(process.exitCode).toBe(3);
@@ -234,6 +342,10 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(process.exitCode).toBeUndefined();
     const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
     expect(manifest.settledBy).toBe('timeout');
+    // The budget cutoff is RECORDED, not swallowed: a backtracking-prone
+    // marker may be present, and "never matched" alone would hide that the
+    // match was cut off rather than the marker absent.
+    expect(manifest.degradedBecause).toContain('exceeded its');
     // Bounded TIGHT: vitest's own testTimeout kills anything over 15s, so a
     // 30s bound would have zero bite — and a budget regressed to ~13s would
     // still pass it. Healthy runs measure ~2s.
@@ -258,36 +370,39 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect((probe.stdout ?? Buffer.from('')).toString().trim()).toBe('');
   });
 
-  it.skipIf(!hasPgrep)('kills the tmux SERVER itself — pid probed while it was alive', async () => {
-    // The socket probe above cannot distinguish "server reaped" from "we
-    // unlinked a live server's socket" (the cleanup unlinks it either way).
-    // This pins server DEATH: grab the server's pid mid-capture, then
-    // assert the process is gone after the run.
-    const inFlight = run({ until: 'NEVER-MATCHES', timeoutMs: 3000 });
-    let serverPid = 0;
-    for (let i = 0; i < 100 && !serverPid; i++) {
-      const r = spawnSync(
-        'pgrep',
-        ['-f', `tmux -L qwen-review-capture-${process.pid}-`],
-        { encoding: 'utf8' },
-      );
-      const pid = Number((r.stdout ?? '').trim().split('\n')[0]);
-      if (Number.isInteger(pid) && pid > 1) serverPid = pid;
-      else await sleep(50);
-    }
-    await inFlight;
-    expect(serverPid).toBeGreaterThan(1);
-    let alive = true;
-    for (let i = 0; i < 40 && alive; i++) {
-      try {
-        process.kill(serverPid, 0);
-        await sleep(50);
-      } catch {
-        alive = false;
+  it.skipIf(!hasPgrep)(
+    'kills the tmux SERVER itself — pid probed while it was alive',
+    async () => {
+      // The socket probe above cannot distinguish "server reaped" from "we
+      // unlinked a live server's socket" (the cleanup unlinks it either way).
+      // This pins server DEATH: grab the server's pid mid-capture, then
+      // assert the process is gone after the run.
+      const inFlight = run({ until: 'NEVER-MATCHES', timeoutMs: 3000 });
+      let serverPid = 0;
+      for (let i = 0; i < 100 && !serverPid; i++) {
+        const r = spawnSync(
+          'pgrep',
+          ['-f', `tmux -L qwen-review-capture-${process.pid}-`],
+          { encoding: 'utf8' },
+        );
+        const pid = Number((r.stdout ?? '').trim().split('\n')[0]);
+        if (Number.isInteger(pid) && pid > 1) serverPid = pid;
+        else await sleep(50);
       }
-    }
-    expect(alive).toBe(false);
-  });
+      await inFlight;
+      expect(serverPid).toBeGreaterThan(1);
+      let alive = true;
+      for (let i = 0; i < 40 && alive; i++) {
+        try {
+          process.kill(serverPid, 0);
+          await sleep(50);
+        } catch {
+          alive = false;
+        }
+      }
+      expect(alive).toBe(false);
+    },
+  );
 
   it('kills the processes the capture started — not just the socket file', async () => {
     const pidFile = join(dir, 'shell.pid');
@@ -325,7 +440,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
     let stderr = '';
     try {
-      stderr = await withStderr(() => run());
+      ({ stderr } = await withStdio(() => run()));
     } finally {
       if (realPath === undefined) delete process.env['PATH'];
       else process.env['PATH'] = realPath;
@@ -494,7 +609,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
   });
 
   it('refuses an invalid --until regex BEFORE anything starts', async () => {
-    const stderr = await withStderr(() => run({ until: '[' }));
+    const { stderr } = await withStdio(() => run({ until: '[' }));
     expect(process.exitCode).toBe(3);
     expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
     expect(existsSync(join(dir, 'cap.json'))).toBe(false);
@@ -724,9 +839,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     // handler mapping. A wrong key (e.g. argv['settleMs']) leaves the field
     // undefined, the duration guard refuses, and this test turns red — the
     // option-contract bug class test-plan.test.ts documents.
-    await (
-      captureTuiCommand.handler as (argv: unknown) => Promise<void>
-    )({
+    await (captureTuiCommand.handler as (argv: unknown) => Promise<void>)({
       command: 'printf "MAPPED\\n"; sleep 30',
       cwd: dir,
       cols: 80,
@@ -738,9 +851,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
       'timeout-ms': 10_000,
     });
     expect(process.exitCode).toBeUndefined();
-    const manifest = JSON.parse(
-      readFileSync(join(dir, 'mapped.json'), 'utf8'),
-    );
+    const manifest = JSON.parse(readFileSync(join(dir, 'mapped.json'), 'utf8'));
     expect(manifest.settledBy).toBe('until-match');
   });
 
