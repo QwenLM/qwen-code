@@ -555,12 +555,12 @@ LSP server configuration is done through `.lsp.json` files in your project root 
 
 #### serve
 
-Persistent settings for [`qwen serve`](../qwen-serve). Changes require restarting the daemon. Non-positive or non-integer concurrency limits produce a warning and fall back to their built-in defaults.
+Persistent sub-session concurrency settings for [`qwen serve`](../qwen-serve). Changes require restarting the daemon. Non-positive or non-integer concurrency limits produce a warning and fall back to their built-in defaults.
 
-| Setting                                   | Type    | Description                                                                                                                     | Default |
-| ----------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| `serve.maxConcurrentSubSessionsPerCaller` | integer | Maximum number of in-flight sub-sessions that one caller session can create through `create_sub_session`. Must be at least `1`. | `16`    |
-| `serve.maxConcurrentSubSessionsTotal`     | integer | Maximum number of in-flight sub-sessions across all callers in one workspace. Must be an integer from `1` through `1024`.       | `24`    |
+| Setting                                   | Type    | Description                                                                                                                                                                            | Default |
+| ----------------------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `serve.maxConcurrentSubSessionsPerCaller` | integer | Maximum number of in-flight sub-sessions that one caller session can create through `create_sub_session`. Must be at least `1`.                                                        | `16`    |
+| `serve.maxConcurrentSubSessionsTotal`     | integer | Maximum number of in-flight sub-sessions across all callers in one workspace. Must be an integer from `1` through `1024`. Values above `1024` are clamped to `1024` without a warning. | `24`    |
 
 #### advanced
 
