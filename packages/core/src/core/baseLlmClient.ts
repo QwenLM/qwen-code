@@ -403,10 +403,7 @@ export class BaseLlmClient {
         model: requestModel,
         config: requestConfig,
         contents: requestContents,
-        ...(options.promptCacheSharing &&
-          contentGeneratorConfig.authType === AuthType.USE_OPENAI && {
-            promptCacheSharing: true,
-          }),
+        ...(options.promptCacheSharing && { promptCacheSharing: true }),
       };
 
       // Both branches resolve to the same `{ text, usage }` shape so a single

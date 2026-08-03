@@ -707,17 +707,12 @@ describe('BaseLlmClient', () => {
       );
     });
 
-    it.each([
-      AuthType.QWEN_OAUTH,
-      AuthType.USE_ANTHROPIC,
-      AuthType.USE_GEMINI,
-      AuthType.USE_VERTEX_AI,
-    ])(
-      'does not forward the OpenAI cache-sharing marker through %s',
-      async (authType) => {
+    it.each([false, undefined])(
+      'does not forward the prompt-cache-sharing marker when disabled (%s)',
+      async (promptCacheSharing) => {
         mockConfig.getContentGeneratorConfig.mockReturnValue({
           model: 'test-model',
-          authType,
+          authType: AuthType.USE_OPENAI,
         });
         mockGenerateContentStream.mockImplementation(async () =>
           mockTextStream(['summary']),
@@ -728,7 +723,7 @@ describe('BaseLlmClient', () => {
           model: 'test-model',
           abortSignal: abortController.signal,
           stream: true,
-          promptCacheSharing: true,
+          promptCacheSharing,
         });
 
         expect(mockGenerateContentStream).toHaveBeenCalledWith(
