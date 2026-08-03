@@ -7,7 +7,6 @@
 import type {
   Content,
   GenerateContentConfig,
-  GenerateContentParameters,
   GenerateContentResponseUsageMetadata,
   Part,
   EmbedContentParameters,
@@ -20,6 +19,7 @@ import type { Config } from '../config/config.js';
 import type {
   ContentGenerator,
   ContentGeneratorConfig,
+  PromptCacheSharingParameters,
 } from './contentGenerator.js';
 import { AuthType, createContentGenerator } from './contentGenerator.js';
 import type { ResolvedModelConfig } from '../models/types.js';
@@ -399,7 +399,7 @@ export class BaseLlmClient {
     ).slimmedHistory;
 
     try {
-      const request = {
+      const request: PromptCacheSharingParameters = {
         model: requestModel,
         config: requestConfig,
         contents: requestContents,
@@ -407,7 +407,7 @@ export class BaseLlmClient {
           contentGeneratorConfig.authType === AuthType.USE_OPENAI && {
             promptCacheSharing: true,
           }),
-      } as GenerateContentParameters & { promptCacheSharing?: boolean };
+      };
 
       // Both branches resolve to the same `{ text, usage }` shape so a single
       // retryWithBackoff governs the whole request (a mid-stream failure retries

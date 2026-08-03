@@ -6,7 +6,6 @@
 
 import type OpenAI from 'openai';
 import { AuthType, type ContentGeneratorConfig } from '../contentGenerator.js';
-import { DashScopeOpenAICompatibleProvider } from './provider/dashscope.js';
 
 type OpenAIRequestWithExplicitCaching =
   OpenAI.Chat.ChatCompletionCreateParams & {
@@ -26,12 +25,9 @@ const EXPLICIT_BREAKPOINT_COUNT = 2;
 export function supportsOpenAIPrefixCaching(
   contentGeneratorConfig: ContentGeneratorConfig,
 ): boolean {
-  if (contentGeneratorConfig.authType === AuthType.USE_OPENAI) return true;
   return (
-    contentGeneratorConfig.authType === AuthType.QWEN_OAUTH &&
-    DashScopeOpenAICompatibleProvider.isDashScopeProvider(
-      contentGeneratorConfig,
-    )
+    contentGeneratorConfig.authType === AuthType.USE_OPENAI ||
+    contentGeneratorConfig.authType === AuthType.QWEN_OAUTH
   );
 }
 

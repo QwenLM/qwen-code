@@ -61,6 +61,10 @@ export enum AuthType {
   USE_ANTHROPIC = 'anthropic',
 }
 
+export type PromptCacheSharingParameters = GenerateContentParameters & {
+  promptCacheSharing?: boolean;
+};
+
 /**
  * Supported input modalities for a model.
  * Omitted or false fields mean the model does not support that input type.

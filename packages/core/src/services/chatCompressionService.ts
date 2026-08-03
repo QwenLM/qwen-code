@@ -321,11 +321,7 @@ function supportsCompressionCacheSharing(config: Config): boolean {
   const provider = config.getContentGeneratorConfig();
   if (provider.enableCacheControl === false) return false;
   if (provider.authType === AuthType.USE_ANTHROPIC) return true;
-  return (
-    (provider.authType === AuthType.QWEN_OAUTH ||
-      provider.authType === AuthType.USE_OPENAI) &&
-    supportsOpenAIPrefixCaching(provider)
-  );
+  return supportsOpenAIPrefixCaching(provider);
 }
 
 function hasStateSnapshot(summary: string): boolean {

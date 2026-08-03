@@ -9,7 +9,10 @@ import {
   type GenerateContentParameters,
   GenerateContentResponse,
 } from '@google/genai';
-import type { ContentGeneratorConfig } from '../contentGenerator.js';
+import type {
+  ContentGeneratorConfig,
+  PromptCacheSharingParameters,
+} from '../contentGenerator.js';
 import { OpenAIContentConverter } from './converter.js';
 import { DashScopeOpenAICompatibleProvider } from './provider/dashscope.js';
 import {
@@ -783,7 +786,7 @@ export class ContentGenerationPipeline {
   }
 
   private async buildRequest(
-    request: GenerateContentParameters,
+    request: PromptCacheSharingParameters,
     userPromptId: string,
     context: RequestContext,
     isStreaming: boolean,
@@ -848,11 +851,7 @@ export class ContentGenerationPipeline {
       providerRequest = applyOfficialOpenAIPromptCaching(
         providerRequest,
         this.config.cliConfig.getSessionId?.(),
-        (
-          request as GenerateContentParameters & {
-            promptCacheSharing?: boolean;
-          }
-        ).promptCacheSharing === true,
+        request.promptCacheSharing === true,
       );
     }
 

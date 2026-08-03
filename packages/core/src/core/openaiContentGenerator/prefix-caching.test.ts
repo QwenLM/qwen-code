@@ -72,8 +72,10 @@ describe('official OpenAI prompt caching', () => {
   });
 
   it.each([
+    ['gpt-5', false],
     ['gpt-5.5', false],
     ['gpt-5.6', true],
+    ['gpt-5.6.1', true],
     ['gpt-5.6-2026-08-01', true],
     ['gpt-6', true],
     ['o4-mini', false],

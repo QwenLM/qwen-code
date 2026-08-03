@@ -19,7 +19,10 @@ import { tokenLimit } from '../core/tokenLimits.js';
 import type { GeminiChat } from '../core/geminiChat.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
-import type { BaseLlmClient } from '../core/baseLlmClient.js';
+import type {
+  BaseLlmClient,
+  GenerateTextOptions,
+} from '../core/baseLlmClient.js';
 import { AuthType } from '../core/contentGenerator.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
 import * as sideQueryModule from '../utils/sideQuery.js';
@@ -2247,19 +2250,7 @@ describe('ChatCompressionService.compress cache sharing', () => {
     });
 
     expect(generateText).toHaveBeenCalledTimes(1);
-    const request = generateText.mock.calls[0]![0] as {
-      contents: Content[];
-      systemInstruction?: string;
-      promptCacheSharing?: boolean;
-      config?: {
-        tools?: unknown;
-        thinkingConfig?: {
-          includeThoughts?: boolean;
-          thinkingBudget?: number;
-        };
-        maxOutputTokens?: number;
-      };
-    };
+    const request = generateText.mock.calls[0]![0] as GenerateTextOptions;
     expect(request.systemInstruction).toBe(mainSystemInstruction);
     expect(request.promptCacheSharing).toBe(true);
     expect(request.config?.tools).toBe(tools);
@@ -2349,6 +2340,8 @@ describe('ChatCompressionService.compress cache sharing', () => {
       });
 
       expect(generateText).toHaveBeenCalledTimes(1);
+      const request = generateText.mock.calls[0]![0] as GenerateTextOptions;
+      expect(request.promptCacheSharing).toBe(true);
       expect(coldSpy).not.toHaveBeenCalled();
     },
   );

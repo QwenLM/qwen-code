@@ -25,7 +25,11 @@ import { OpenAIContentConverter } from './converter.js';
 import { openaiRequestCaptureContext } from './requestCaptureContext.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import type { Config } from '../../config/config.js';
-import { AuthType, type ContentGeneratorConfig } from '../contentGenerator.js';
+import {
+  AuthType,
+  type ContentGeneratorConfig,
+  type PromptCacheSharingParameters,
+} from '../contentGenerator.js';
 import type { OpenAICompatibleProvider } from './provider/index.js';
 import { DefaultOpenAICompatibleProvider } from './provider/default.js';
 import {
@@ -4270,7 +4274,7 @@ describe('ContentGenerationPipeline', () => {
           model: 'gpt-5.6',
           contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
           promptCacheSharing: true,
-        } as GenerateContentParameters & { promptCacheSharing: boolean },
+        } as PromptCacheSharingParameters,
         'prompt-id',
       );
 
@@ -4310,7 +4314,7 @@ describe('ContentGenerationPipeline', () => {
           model: 'gpt-5.6',
           contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
           promptCacheSharing: true,
-        } as GenerateContentParameters & { promptCacheSharing: boolean },
+        } as PromptCacheSharingParameters,
         'prompt-id',
       );
 
@@ -4353,7 +4357,7 @@ describe('ContentGenerationPipeline', () => {
           model: 'gpt-5.6',
           contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
           promptCacheSharing: true,
-        } as GenerateContentParameters & { promptCacheSharing: boolean },
+        } as PromptCacheSharingParameters,
         'prompt-id',
       );
 
