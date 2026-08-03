@@ -189,7 +189,10 @@ env:
   # (a bot↔review-bot ping-pong is still bounded), it is just sized for
   # explicitly delegated work; removing the label restores the strict cap,
   # and re-engaging opens a fresh counting window (see REARM_KEY below).
-  TAKEOVER_MAX_ROUNDS: '100'
+  # Lowered from 100: #6739 showed a takeover can ping-pong with the review
+  # bot for ~50 productive rounds without converging; 30 still leaves headroom
+  # for genuinely large delegated work while bounding a runaway loop.
+  TAKEOVER_MAX_ROUNDS: '30'
   # Consecutive-failure sub-cap, distinct from the total round cap above. The
   # total cap bounds how many PRODUCTIVE rounds a PR may take; this bounds how
   # many rounds may fail IN A ROW with nothing pushed. Under takeover a PR gets
