@@ -1771,7 +1771,14 @@ jobs:
               permission_lookup_failed|author_permission_*|maintainer_edits_disabled|cross_repo_state_missing) ;;
               *) return 0 ;;
             esac
-            actor="$(gh api user --jq '.login' 2> /dev/null || echo '')"
+            actor=''
+            for attempt in 1 2 3; do
+              if actor="$(gh api user --jq '.login' 2> /dev/null)" && [[ -n "${actor}" ]]; then
+                break
+              fi
+              echo "::warning::PAT identity lookup failed (attempt ${attempt}/3)"
+              [[ "${attempt}" -lt 3 ]] && sleep "${attempt}"
+            done
             if [[ "${actor}" != "${AUTOFIX_BOT}" ]]; then
               echo "::warning::Blocked takeover status skipped: PAT authenticates as '${actor:-unknown}'"
               return 1
@@ -1801,16 +1808,23 @@ jobs:
             fi
             status_id="$(tail -1 <<< "${status_ids}")"
             if [[ -n "${status_id}" ]]; then
-              if ! gh api --method PATCH "repos/${REPO}/issues/comments/${status_id}" -f body="${body}" > /dev/null; then
-                echo "::warning::Failed to update blocked takeover status for #${FORCED_PR}"
-                return 1
-              fi
+              for attempt in 1 2 3; do
+                if gh api --method PATCH "repos/${REPO}/issues/comments/${status_id}" -f body="${body}" > /dev/null; then
+                  return 0
+                fi
+                echo "::warning::Failed to update blocked takeover status for #${FORCED_PR} (attempt ${attempt}/3)"
+                [[ "${attempt}" -lt 3 ]] && sleep "${attempt}"
+              done
             else
-              if ! gh pr comment "${FORCED_PR}" --repo "${REPO}" --body "${body}" > /dev/null; then
-                echo "::warning::Failed to post blocked takeover status for #${FORCED_PR}"
-                return 1
-              fi
+              for attempt in 1 2 3; do
+                if gh pr comment "${FORCED_PR}" --repo "${REPO}" --body "${body}" > /dev/null; then
+                  return 0
+                fi
+                echo "::warning::Failed to post blocked takeover status for #${FORCED_PR} (attempt ${attempt}/3)"
+                [[ "${attempt}" -lt 3 ]] && sleep "${attempt}"
+              done
             fi
+            return 1
           }
 
           # Candidate PRs: open, same-repo, targeting main, and either

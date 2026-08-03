@@ -3262,38 +3262,65 @@ describe('qwen-autofix workflow', () => {
         `#!/bin/bash
 printf '%q ' "$@" >> '${callsFile}'
 printf '\n' >> '${callsFile}'
-if [[ "$1 $2" == 'api user' ]]; then printf '%s' 'qwen-code-dev-bot'; exit 0; fi
+if [[ "$1 $2" == 'api user' ]]; then
+  if [[ "\${FAIL_ACTOR_ONCE:-false}" == 'true' && ! -f '${reporterDir}/actor-failed' ]]; then
+    printf '1' > '${reporterDir}/actor-failed'
+    exit 1
+  fi
+  printf '%s' 'qwen-code-dev-bot'
+  exit 0
+fi
 if [[ "$1 $2" == 'api repos/QwenLM/qwen-code/issues/8320/comments' ]]; then
   [[ "\${FAIL_STATUS_LOOKUP:-false}" == 'true' ]] && exit 1
+  [[ "\${NO_STATUS_MARKER:-false}" == 'true' ]] && exit 0
   printf '%s' '123'
   exit 0
 fi
-if [[ "$1 $2 $3" == 'api --method PATCH' ]]; then exit 0; fi
+if [[ "$1 $2 $3" == 'api --method PATCH' ]]; then
+  if [[ "\${FAIL_PATCH_ONCE:-false}" == 'true' && ! -f '${reporterDir}/patch-failed' ]]; then
+    printf '1' > '${reporterDir}/patch-failed'
+    exit 1
+  fi
+  exit 0
+fi
+if [[ "$1 $2" == 'pr comment' ]]; then
+  if [[ "\${FAIL_COMMENT_ONCE:-false}" == 'true' && ! -f '${reporterDir}/comment-failed' ]]; then
+    printf '1' > '${reporterDir}/comment-failed'
+    exit 1
+  fi
+  exit 0
+fi
 exit 1
 `,
       );
       chmodSync(join(reporterDir, 'gh'), 0o755);
-      const reporter = spawnSync(
-        'bash',
-        [
-          '-c',
-          `sleep() { :; }\n${reportBlocked.replace(/\n {10}/g, '\n')}\nreport_forced_takeover_blocked permission_lookup_failed`,
-        ],
-        {
-          env: {
-            ...process.env,
-            PATH: `${reporterDir}:${process.env.PATH}`,
-            REPO: 'QwenLM/qwen-code',
-            FORCED_PR: '8320',
-            DRY_RUN: 'false',
-            AUTOFIX_BOT: 'qwen-code-dev-bot',
-            TAKEOVER_LABEL: 'autofix/takeover',
-            GITHUB_RUN_ID: '30778039590',
-            META: meta,
+      const runReporter = (
+        extraEnv = {},
+        reason = 'permission_lookup_failed',
+      ) =>
+        spawnSync(
+          'bash',
+          [
+            '-c',
+            `sleep() { :; }\n${reportBlocked.replace(/\n {10}/g, '\n')}\nreport_forced_takeover_blocked ${reason}`,
+          ],
+          {
+            env: {
+              ...process.env,
+              PATH: `${reporterDir}:${process.env.PATH}`,
+              REPO: 'QwenLM/qwen-code',
+              FORCED_PR: '8320',
+              DRY_RUN: 'false',
+              AUTOFIX_BOT: 'qwen-code-dev-bot',
+              TAKEOVER_LABEL: 'autofix/takeover',
+              GITHUB_RUN_ID: '30778039590',
+              META: meta,
+              ...extraEnv,
+            },
+            encoding: 'utf8',
           },
-          encoding: 'utf8',
-        },
-      );
+        );
+      const reporter = runReporter();
       expect({ status: reporter.status, stderr: reporter.stderr }).toEqual({
         status: 0,
         stderr: '',
@@ -3306,26 +3333,33 @@ exit 1
       expect(calls).toContain('A later scheduled scan will retry');
 
       writeFileSync(callsFile, '');
-      const maintainerEditsReporter = spawnSync(
-        'bash',
-        [
-          '-c',
-          `sleep() { :; }\n${reportBlocked.replace(/\n {10}/g, '\n')}\nreport_forced_takeover_blocked maintainer_edits_disabled`,
-        ],
-        {
-          env: {
-            ...process.env,
-            PATH: `${reporterDir}:${process.env.PATH}`,
-            REPO: 'QwenLM/qwen-code',
-            FORCED_PR: '8320',
-            DRY_RUN: 'false',
-            AUTOFIX_BOT: 'qwen-code-dev-bot',
-            TAKEOVER_LABEL: 'autofix/takeover',
-            GITHUB_RUN_ID: '30778039590',
-            META: meta,
-          },
-          encoding: 'utf8',
-        },
+      const transientActorReporter = runReporter({ FAIL_ACTOR_ONCE: 'true' });
+      expect(transientActorReporter.status).toBe(0);
+      expect(readFileSync(callsFile, 'utf8').match(/api user/g)).toHaveLength(
+        2,
+      );
+
+      writeFileSync(callsFile, '');
+      const transientPatchReporter = runReporter({ FAIL_PATCH_ONCE: 'true' });
+      expect(transientPatchReporter.status).toBe(0);
+      expect(
+        readFileSync(callsFile, 'utf8').match(/api --method PATCH/g),
+      ).toHaveLength(2);
+
+      writeFileSync(callsFile, '');
+      const transientCommentReporter = runReporter({
+        NO_STATUS_MARKER: 'true',
+        FAIL_COMMENT_ONCE: 'true',
+      });
+      expect(transientCommentReporter.status).toBe(0);
+      expect(readFileSync(callsFile, 'utf8').match(/pr comment/g)).toHaveLength(
+        2,
+      );
+
+      writeFileSync(callsFile, '');
+      const maintainerEditsReporter = runReporter(
+        {},
+        'maintainer_edits_disabled',
       );
       expect(maintainerEditsReporter.status).toBe(0);
       const maintainerEditsCalls = readFileSync(callsFile, 'utf8');
@@ -3336,28 +3370,7 @@ exit 1
         'A later scheduled scan will retry',
       );
 
-      const failedReporter = spawnSync(
-        'bash',
-        [
-          '-c',
-          `sleep() { :; }\n${reportBlocked.replace(/\n {10}/g, '\n')}\nreport_forced_takeover_blocked permission_lookup_failed`,
-        ],
-        {
-          env: {
-            ...process.env,
-            PATH: `${reporterDir}:${process.env.PATH}`,
-            REPO: 'QwenLM/qwen-code',
-            FORCED_PR: '8320',
-            DRY_RUN: 'false',
-            AUTOFIX_BOT: 'qwen-code-dev-bot',
-            TAKEOVER_LABEL: 'autofix/takeover',
-            GITHUB_RUN_ID: '30778039590',
-            META: meta,
-            FAIL_STATUS_LOOKUP: 'true',
-          },
-          encoding: 'utf8',
-        },
-      );
+      const failedReporter = runReporter({ FAIL_STATUS_LOOKUP: 'true' });
       expect(failedReporter.status).toBe(1);
       expect(failedReporter.stdout).toContain('(attempt 3/3)');
       expect(failedReporter.stdout).toContain(
