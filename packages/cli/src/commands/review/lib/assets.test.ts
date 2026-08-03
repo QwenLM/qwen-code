@@ -177,11 +177,19 @@ describe('sniffImageFormat / validateAssetContent', () => {
   });
 
   it('returns null for non-images, truncated headers, and empty input', () => {
-    expect(sniffImageFormat(Uint8Array.from([...'#!/bin/sh\n'].map((c) => c.charCodeAt(0))))).toBeNull();
+    expect(
+      sniffImageFormat(
+        Uint8Array.from([...'#!/bin/sh\n'].map((c) => c.charCodeAt(0))),
+      ),
+    ).toBeNull();
     expect(sniffImageFormat(PNG.subarray(0, 4))).toBeNull();
     expect(sniffImageFormat(Uint8Array.from([]))).toBeNull();
     // RIFF alone is not WEBP — AVI and WAV share the container prefix.
-    expect(sniffImageFormat(Uint8Array.from([...'RIFF0000AVI '].map((c) => c.charCodeAt(0))))).toBeNull();
+    expect(
+      sniffImageFormat(
+        Uint8Array.from([...'RIFF0000AVI '].map((c) => c.charCodeAt(0))),
+      ),
+    ).toBeNull();
   });
 
   it('admits content that matches the extension claim', () => {
@@ -195,7 +203,9 @@ describe('sniffImageFormat / validateAssetContent', () => {
   it('refuses a name whose content is a different format — or no image at all', () => {
     // The attack shape: arbitrary bytes named *.png hosted at a github.com
     // URL through a review's evidence push.
-    const shell = Uint8Array.from([...'#!/bin/sh\n'].map((c) => c.charCodeAt(0)));
+    const shell = Uint8Array.from(
+      [...'#!/bin/sh\n'].map((c) => c.charCodeAt(0)),
+    );
     const r1 = validateAssetContent('evil.png', shell);
     expect(r1.ok).toBe(false);
     if (!r1.ok) expect(r1.reason).toContain('not a recognized image');
