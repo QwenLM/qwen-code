@@ -5,10 +5,11 @@
  */
 
 import type { Part } from '@google/genai';
-import type {
-  GoalRecord,
-  GoalTerminalProposal,
-  GoalTurnPermit,
+import {
+  GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
+  type GoalRecord,
+  type GoalTerminalProposal,
+  type GoalTurnPermit,
 } from './goal-protocol.js';
 
 const CATALOG_PREVIEW_LIMIT = 240;
@@ -179,7 +180,7 @@ export function validateGoalEvidenceReferences(
   if (input.proposal.status === 'complete' && analysis.catalogTruncated) {
     throw new InvalidGoalEvidenceReferenceError(
       'catalog_truncated',
-      'A complete Goal proposal requires an exhaustive bounded evidence catalog.',
+      GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
     );
   }
   const evidenceBytes = citedRecords.reduce(
