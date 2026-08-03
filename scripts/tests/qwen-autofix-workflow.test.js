@@ -2225,6 +2225,56 @@ describe('qwen-autofix workflow', () => {
     // under the fresh key.
     expect(reviewScanJob).toContain('takeover-ack engaged');
     expect(reviewScanJob).toContain('ic re-fetch after engage ack failed');
+    // The re-fetch must stay ATOMIC — write ic.next.json, then mv it onto
+    // ic.json only when the whole pipeline succeeded: ic.json already holds
+    // a successful full fetch, and a direct redirect truncates it BEFORE the
+    // pipeline runs, so a mid-stream jq failure would leave 0 bytes —
+    // MARKERS on empty input exits 0 with '' and the round cap silently
+    // resets. The other pins (--paginate count, normalizer count,
+    // not.toContain('--paginate > ')) all survive a 'simplification' to
+    // '> ic.json' under the if-guard, so pin the temp-file + swap shape.
+    expect(reviewScanJob).toMatch(
+      /issues\/\$\{PR\}\/comments" --paginate\s*\\?\s*\|\s*jq -s 'add \/\/ \[\]' > "\$\{WORKDIR\}\/ic\.next\.json"; then\s+mv "\$\{WORKDIR\}\/ic\.next\.json" "\$\{WORKDIR\}\/ic\.json"/,
+    );
+    // Behavioral, against real bash + jq: the truncation race the atomic
+    // pattern defends against. A direct redirect destroys the prior good
+    // fetch when the stream is truncated mid-page; the temp-file pattern
+    // keeps it on failure and still swaps in a fresh copy on success.
+    const priorFetch = JSON.stringify([
+      { user: { login: 'bot' }, body: 'prior fetch', id: 1 },
+    ]);
+    const truncatedStream = '[{"id":2'; // network cut mid-page
+    const atomicRefetch =
+      "if jq -s 'add // []' > ic.next.json; then mv ic.next.json ic.json; fi";
+    const atomicDir = mkdtempSync(join(tmpdir(), 'autofix-ic-atomic-'));
+    try {
+      writeFileSync(join(atomicDir, 'ic.json'), priorFetch);
+      // jq fails on the truncated stream…
+      expect(() =>
+        execFileSync('bash', ['-c', "jq -s 'add // []' > ic.json"], {
+          cwd: atomicDir,
+          input: truncatedStream,
+        }),
+      ).toThrow();
+      // …but only after the redirect already zeroed the good fetch.
+      expect(readFileSync(join(atomicDir, 'ic.json'), 'utf8')).toBe('');
+      writeFileSync(join(atomicDir, 'ic.json'), priorFetch);
+      execFileSync('bash', ['-c', atomicRefetch], {
+        cwd: atomicDir,
+        input: truncatedStream,
+      });
+      expect(readFileSync(join(atomicDir, 'ic.json'), 'utf8')).toBe(priorFetch);
+      const freshFetch = JSON.stringify([{ id: 3 }]);
+      execFileSync('bash', ['-c', atomicRefetch], {
+        cwd: atomicDir,
+        input: freshFetch,
+      });
+      expect(
+        JSON.parse(readFileSync(join(atomicDir, 'ic.json'), 'utf8')),
+      ).toEqual([{ id: 3 }]);
+    } finally {
+      rmSync(atomicDir, { recursive: true, force: true });
+    }
     // Ack dedup is author-filtered (a forged human marker must not suppress
     // the real ack) and re-armable: a takeover-label application newer than
     // the latest bot ack posts a fresh ack, resetting the round window.
@@ -2438,6 +2488,49 @@ describe('qwen-autofix workflow', () => {
     // scan ic + pr-events + ic re-fetch + scan rv/rc + prepare rv/rc/ic +
     // report COMMENTS_JSON fallback = nine normalized fetch sites.
     expect(workflow.split("jq -s 'add // []'").length - 1).toBe(9);
+    // Empty-input semantics: a total gh failure feeds the fallback an EMPTY
+    // stream, where the normalizer filter must yield '[]' and not 'null' —
+    // the PRIOR_HEADS consumer below iterates the result with .[], which
+    // dies on null ("Cannot iterate over null"). Every existing behavioral
+    // fixture is non-empty, where 'add // []' and bare 'add' are
+    // indistinguishable, so run the fallback's ACTUAL filter against empty
+    // stdin and pin the empty case explicitly.
+    const fallbackFilter = reviewAddressReportStep.match(
+      /COMMENTS_JSON="\$\(gh api "repos\/\$\{REPO\}\/issues\/\$\{PR\}\/comments" --paginate 2> \/dev\/null \| jq -s '([\s\S]*?)' \|\| true\)"/,
+    )?.[1];
+    expect(fallbackFilter).toBeTruthy();
+    expect(
+      execFileSync('jq', ['-s', fallbackFilter], {
+        encoding: 'utf8',
+        input: '',
+      }).trim(),
+    ).toBe('[]');
+    expect(
+      execFileSync('jq', ['-s', 'add'], {
+        encoding: 'utf8',
+        input: '',
+      }).trim(),
+    ).toBe('null'); // what dropping '// []' would silently produce
+    const priorHeadsProgram = reviewAddressReportStep
+      .match(
+        /PRIOR_HEADS="\$\(jq -r --arg ab "\$\{AUTOFIX_BOT\}" --arg win "\$\{WINDOW:-none\}" '([\s\S]*?)' <<< "\$\{COMMENTS_JSON\}"/,
+      )?.[1]
+      ?.replace(/\n {16}/g, '\n');
+    expect(priorHeadsProgram).toBeTruthy();
+    expect(() =>
+      execFileSync(
+        'jq',
+        ['-r', '--arg', 'ab', 'bot', '--arg', 'win', 'none', priorHeadsProgram],
+        { encoding: 'utf8', input: 'null' },
+      ),
+    ).toThrow(); // Cannot iterate over null
+    expect(
+      execFileSync(
+        'jq',
+        ['-r', '--arg', 'ab', 'bot', '--arg', 'win', 'none', priorHeadsProgram],
+        { encoding: 'utf8', input: '[]' },
+      ),
+    ).toBe(''); // cleanly empty — duplicate-report suppression stays intact
 
     // Behavioral, against real jq: markers split across two pages. The raw
     // page stream BREAKS the plain consumer (two outputs — the negative
