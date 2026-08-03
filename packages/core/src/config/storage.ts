@@ -10,6 +10,7 @@ import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { getProjectHash, QWEN_DIR, sanitizeCwd } from '../utils/paths.js';
+import { readRuntimeStatus } from '../utils/runtimeStatus.js';
 import { FatalConfigError } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
@@ -80,8 +81,17 @@ export async function sweepStaleWorktreeProjects(
 
     // One live worktree anywhere in the bucket is enough to keep it; the
     // snapshot is stale only when every parseable sidecar points at a gone
-    // worktree.
-    if (worktreePaths.some((worktreePath) => fs.existsSync(worktreePath))) {
+    // worktree. A plain file at the worktree path is not a worktree.
+    if (worktreePaths.some((worktreePath) => isDirectorySync(worktreePath))) {
+      continue;
+    }
+
+    // sanitizeCwd collapses distinct worktrees to one bucket name (dots and
+    // dashes both become dashes), so the name gate above cannot prove which
+    // worktree owns the bucket. A session started with a plain `cd` writes no
+    // sidecar, and its live transcript would be deleted with the bucket; a
+    // live runtime.json anywhere in the bucket vetoes the sweep.
+    if (await hasLiveRuntime(chatsDir)) {
       continue;
     }
 
@@ -143,6 +153,47 @@ async function readWorktreeSidecarPaths(chatsDir: string): Promise<string[]> {
     }
   }
   return worktreePaths;
+}
+
+function isDirectorySync(candidate: string): boolean {
+  try {
+    return fs.statSync(candidate).isDirectory();
+  } catch (error) {
+    // ENOENT means gone; anything else (permissions, transient fs errors)
+    // answers "cannot prove gone", which for a destructive sweep means keep.
+    return (error as NodeJS.ErrnoException).code !== 'ENOENT';
+  }
+}
+
+/**
+ * True when any `*.runtime.json` in the bucket reports a live process.
+ * Mirrors getRuntimeStatusPathState: a different hostname cannot be verified
+ * and counts as live, and a pid probe failure other than ESRCH does too.
+ */
+async function hasLiveRuntime(chatsDir: string): Promise<boolean> {
+  let names: string[];
+  try {
+    names = await fsp.readdir(chatsDir);
+  } catch {
+    return false;
+  }
+  for (const name of names) {
+    if (!name.endsWith('.runtime.json')) continue;
+    const status = await readRuntimeStatus(path.join(chatsDir, name));
+    if (!status) continue;
+    if (status.hostname !== os.hostname()) {
+      return true;
+    }
+    try {
+      process.kill(status.pid, 0);
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 const staleWorktreeSweepStarted = new Set<string>();
