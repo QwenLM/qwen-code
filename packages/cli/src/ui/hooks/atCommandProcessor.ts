@@ -668,7 +668,11 @@ export async function resolveAtCommandQuery({
     mcpResourceRefs.length === 0 &&
     mcpServerMentions.length === 0 &&
     extensionMentions.length === 0 &&
-    sessionMentions.length === 0
+    sessionMentions.length === 0 &&
+    // URL media refs count as content too: without this, a URL-only prompt
+    // would run the whole download→upload pipeline and then discard the
+    // delivered parts (and their display cards) via this early return.
+    urlMediaRefs.length === 0
   ) {
     onDebugMessage('No valid file paths found in @ commands to read.');
     if (initialQueryText === '@' && query.trim() === '@') {
