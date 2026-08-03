@@ -18,6 +18,7 @@ import {
   TRANSMITTED_KEY_LIMIT,
   wasKittyImageWritten,
 } from './terminal-image-renderer.js';
+import { MAX_INLINE_IMAGE_ENCODED_LENGTH } from './inline-image-parts.js';
 
 const PNG_1X1 = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=',
@@ -131,9 +132,7 @@ describe('terminalImageRenderer', () => {
   });
 
   it('rejects inline payloads above the shared image limit before decoding', () => {
-    const oversizedBase64 = 'A'.repeat(
-      Math.ceil(((8 * 1024 * 1024 + 1) * 4) / 3),
-    );
+    const oversizedBase64 = 'A'.repeat(MAX_INLINE_IMAGE_ENCODED_LENGTH + 1);
 
     expect(
       prepareInlineTerminalImage({

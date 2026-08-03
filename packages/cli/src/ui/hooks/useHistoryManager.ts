@@ -163,7 +163,7 @@ export function useHistory(): UseHistoryManagerReturn {
           totalThoughts++;
         } else if (
           (item.type === 'gemini' || item.type === 'gemini_content') &&
-          item.images?.length
+          (item.images?.length || item.omittedImageCount)
         ) {
           totalAssistantItemsWithImages++;
         } else if (
@@ -173,7 +173,7 @@ export function useHistory(): UseHistoryManagerReturn {
               (t.resultDisplay != null &&
                 t.resultDisplay !== UI_COMPACT_CLEARED_MESSAGE) ||
               t.detailedDisplay != null ||
-              Boolean(t.images?.length),
+              Boolean(t.images?.length || t.omittedImageCount),
           )
         ) {
           totalToolGroupsWithOutput++;
@@ -212,7 +212,7 @@ export function useHistory(): UseHistoryManagerReturn {
         .map((item) => {
           if (
             (item.type === 'gemini' || item.type === 'gemini_content') &&
-            item.images?.length
+            (item.images?.length || item.omittedImageCount)
           ) {
             assistantImageItemsSeen++;
             if (assistantImageItemsSeen <= assistantImageItemsToCompact) {
@@ -223,6 +223,7 @@ export function useHistory(): UseHistoryManagerReturn {
                   ? `${item.text}\n\n${UI_COMPACT_CLEARED_IMAGE_MESSAGE}`
                   : UI_COMPACT_CLEARED_IMAGE_MESSAGE,
                 images: undefined,
+                omittedImageCount: undefined,
               };
             }
           }
@@ -236,7 +237,7 @@ export function useHistory(): UseHistoryManagerReturn {
               (t.resultDisplay != null &&
                 t.resultDisplay !== UI_COMPACT_CLEARED_MESSAGE) ||
               t.detailedDisplay != null ||
-              Boolean(t.images?.length),
+              Boolean(t.images?.length || t.omittedImageCount),
           );
           if (!hasOldOutput) return item;
           toolGroupsSeen++;
@@ -249,7 +250,8 @@ export function useHistory(): UseHistoryManagerReturn {
                 (t.resultDisplay != null &&
                   t.resultDisplay !== UI_COMPACT_CLEARED_MESSAGE) ||
                 t.detailedDisplay != null ||
-                t.images?.length
+                t.images?.length ||
+                t.omittedImageCount
               ) {
                 // Also drop `detailedDisplay` (the raw functionResponse text
                 // kept for the Ctrl+O full-detail transcript): clearing only
@@ -263,6 +265,7 @@ export function useHistory(): UseHistoryManagerReturn {
                   resultDisplay: UI_COMPACT_CLEARED_MESSAGE,
                   detailedDisplay: undefined,
                   images: undefined,
+                  omittedImageCount: undefined,
                 };
               }
               return t;
