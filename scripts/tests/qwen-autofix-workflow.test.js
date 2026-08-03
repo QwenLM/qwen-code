@@ -116,6 +116,10 @@ const prepareBranchAndFeedbackStep =
   workflow.match(
     /- name: 'Prepare branch and feedback'[\s\S]*?(?=\n[ ]{6}- name: 'Post autofix status comment')/,
   )?.[0] ?? '';
+// Whitespace-tolerant shape of a normalized ic.json fetch: re-indenting or
+// re-wrapping the block must not break the presence/order pins using it.
+const normalizedIcFetch =
+  /issues\/\$\{PR\}\/comments" --paginate\s*\\?\s*\|\s*jq -s 'add \/\/ \[\]' > "\$\{WORKDIR\}\/ic\.json"/;
 const postStatusCommentStep =
   workflow.match(
     /- name: 'Post autofix status comment'[\s\S]*?(?=\n[ ]{6}- name: 'Triage and address')/,
@@ -2311,9 +2315,7 @@ describe('qwen-autofix workflow', () => {
     // ic.json fetch BEFORE the first ack-timestamp read (reading a previous
     // candidate's file mis-dedups; a missing file kills the scan step under
     // -eo pipefail). Same textual-order technique as the hooks-severed pins.
-    const icFetchAt = reviewScanJob.indexOf(
-      'gh api "repos/${REPO}/issues/${PR}/comments" --paginate \\\n              | jq -s \'add // []\' > "${WORKDIR}/ic.json"',
-    );
+    const icFetchAt = reviewScanJob.search(normalizedIcFetch);
     const ackReadAt = reviewScanJob.indexOf('LAST_ENGAGE_ACK_TS=');
     expect(icFetchAt).toBeGreaterThan(-1);
     expect(ackReadAt).toBeGreaterThan(icFetchAt);
@@ -2429,7 +2431,9 @@ describe('qwen-autofix workflow', () => {
     // its consumers, not the wire format current gh produces.
     expect(workflow).not.toContain('--paginate > "');
     // Pin the total --paginate code-site count so ANY new paginated site
-    // forces a deliberate test update, however it is spaced or line-wrapped.
+    // forces a deliberate test update, however it is spaced or line-wrapped:
+    // bump this count AND pipe the new site through the normalizer (bumping
+    // the count below too) — bumping this pin alone leaves toBe(9) green.
     expect(workflow.split('--paginate').length - 1).toBe(13);
     // scan ic + pr-events + ic re-fetch + scan rv/rc + prepare rv/rc/ic +
     // report COMMENTS_JSON fallback = nine normalized fetch sites.
@@ -4769,9 +4773,7 @@ describe('qwen-autofix workflow', () => {
     // The "nothing new" gate must check all three feedback sources.
     expect(reviewScanStep).toContain('"${N_ISSUE_COMMENTS}" -eq 0');
     // review-address must also fetch ic.json and render issue-level comments.
-    expect(workflow).toContain(
-      'repos/${REPO}/issues/${PR}/comments" --paginate \\\n            | jq -s \'add // []\' > "${WORKDIR}/ic.json"',
-    );
+    expect(prepareBranchAndFeedbackStep).toMatch(normalizedIcFetch);
     expect(prepareBranchAndFeedbackStep).toContain(
       '2> /dev/null || echo \'[]\' > "${WORKDIR}/checks.json"',
     );
