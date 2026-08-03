@@ -35,13 +35,15 @@ export function isAbortError(error: unknown): boolean {
     return true;
   }
 
-  // The OpenAI SDK is the request path for auth_type=openai (the most common
-  // provider here); a user cancel surfaces as its APIUserAbortError. That class
-  // does not set `.name` (it stays 'Error') and carries no ABORT_ERR code, so
-  // the checks above miss it — leaving user cancels logged as api_errors and
-  // classified 'unknown' rather than 'abort'. Key off the class name, which the
-  // build preserves (esbuild `keepNames: true`), to avoid importing the SDK
-  // into this provider-agnostic util.
+  // A user cancel on a provider SDK path surfaces as `APIUserAbortError`. That
+  // class does not set `.name` (it stays 'Error') and carries no ABORT_ERR
+  // code, so the checks above miss it — leaving user cancels logged as
+  // api_errors and classified 'unknown' rather than 'abort'. Both SDKs this
+  // package depends on (`openai`, `@anthropic-ai/sdk`) are Stainless-generated
+  // and share this class name, so one check covers both. Match on the class
+  // name — as `getErrorType` below already does for SDK errors — so this
+  // provider-agnostic util needs no SDK import; the build preserves class names
+  // (esbuild `keepNames: true`).
   if (
     error instanceof Error &&
     error.constructor?.name === 'APIUserAbortError'

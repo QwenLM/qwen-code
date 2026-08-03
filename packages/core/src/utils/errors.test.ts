@@ -5,7 +5,8 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { APIUserAbortError } from 'openai';
+import { APIUserAbortError as AnthropicAPIUserAbortError } from '@anthropic-ai/sdk';
+import { APIConnectionError, APIUserAbortError } from 'openai';
 import { getErrorMessage, isAbortError, isNodeError } from './errors.js';
 
 describe('getErrorMessage cause unwrapping', () => {
@@ -241,6 +242,28 @@ describe('isAbortError', () => {
 
     expect(error.name).toBe('Error');
     expect(isAbortError(error)).toBe(true);
+  });
+
+  it('should return true for the Anthropic SDK APIUserAbortError', () => {
+    // Both SDKs this package depends on are Stainless-generated and share the
+    // abort class name, so the same check covers auth_type=anthropic. Pinned so
+    // the cross-SDK coverage is intentional rather than incidental.
+    const error = new AnthropicAPIUserAbortError({
+      message: 'Request was aborted.',
+    });
+
+    expect(error.name).toBe('Error');
+    expect(isAbortError(error)).toBe(true);
+  });
+
+  it('should return false for other SDK errors such as APIConnectionError', () => {
+    // Guards the abort match against being broadened (e.g. to any `API*`
+    // class): a transient connection failure must stay retryable, not be
+    // reported as a user cancellation.
+    const error = new APIConnectionError({ message: 'Connection error.' });
+
+    expect(error.constructor.name).toBe('APIConnectionError');
+    expect(isAbortError(error)).toBe(false);
   });
 });
 
