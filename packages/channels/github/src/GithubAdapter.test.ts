@@ -26,6 +26,12 @@ import {
   type Envelope,
 } from '@qwen-code/channel-base';
 
+const mockExecFile = vi.hoisted(() => vi.fn());
+
+vi.mock('node:child_process', () => ({
+  execFile: mockExecFile,
+}));
+
 vi.mock('@octokit/rest', () => {
   const mockOctokit = {
     rest: {
@@ -68,11 +74,12 @@ vi.mock('@qwen-code/channel-base', async (importOriginal) => {
 
 import { GithubChannel } from './GithubAdapter.js';
 
-const mockOctokit = (
-  (await import('@octokit/rest')) as unknown as {
-    __mockOctokit: Record<string, unknown>;
-  }
-).__mockOctokit as {
+const octokitModule = (await import('@octokit/rest')) as unknown as {
+  Octokit: Mock;
+  __mockOctokit: Record<string, unknown>;
+};
+const mockOctokitConstructor = octokitModule.Octokit;
+const mockOctokit = octokitModule.__mockOctokit as {
   rest: {
     users: {
       getAuthenticated: ReturnType<typeof vi.fn>;
@@ -323,6 +330,7 @@ describe('GithubChannel', () => {
     rmSync(process.env.QWEN_HOME!, { recursive: true, force: true });
     if (savedQwenHome === undefined) delete process.env.QWEN_HOME;
     else process.env.QWEN_HOME = savedQwenHome;
+    vi.unstubAllEnvs();
   });
 
   async function initWithoutLoop(configOverrides?: Record<string, unknown>) {
@@ -350,6 +358,287 @@ describe('GithubChannel', () => {
       await channel.connect();
       expect(mockOctokit.rest.users.getAuthenticated).toHaveBeenCalled();
       channel.disconnect();
+    });
+
+    it('requires explicit opt-in before using local gh authentication', async () => {
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ token: '' }),
+        makeBridge(),
+      );
+
+      await expect(channel.connect()).rejects.toThrow(
+        'configure a GitHub token or enable local GitHub CLI authentication',
+      );
+      expect(mockExecFile).not.toHaveBeenCalled();
+    });
+
+    it('uses local gh authentication when explicitly enabled', async () => {
+      vi.stubEnv('GH_TOKEN', 'environment-token');
+      vi.stubEnv('GITHUB_TOKEN', 'environment-token');
+      vi.stubEnv('GH_ENTERPRISE_TOKEN', 'environment-token');
+      vi.stubEnv('GITHUB_ENTERPRISE_TOKEN', 'environment-token');
+      vi.stubEnv('GH_CONFIG_DIR', '/tmp/test-gh-config');
+      mockExecFile.mockImplementation(
+        (
+          _file: string,
+          _args: string[],
+          _options: unknown,
+          callback: (error: Error | null, stdout: string) => void,
+        ) => callback(null, 'local-gh-token\n'),
+      );
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ token: '', useLocalGh: true }),
+        makeBridge(),
+      );
+      mockOctokit.paginate.mockResolvedValue([]);
+
+      await channel.connect();
+
+      expect(mockExecFile).toHaveBeenCalledWith(
+        'gh',
+        ['auth', 'token', '--hostname', 'github.com'],
+        expect.objectContaining({
+          encoding: 'utf8',
+          maxBuffer: 64 * 1024,
+          timeout: 10_000,
+          windowsHide: true,
+          env: expect.objectContaining({
+            GH_CONFIG_DIR: '/tmp/test-gh-config',
+          }),
+        }),
+        expect.any(Function),
+      );
+      const options = mockExecFile.mock.calls[0]?.[2] as {
+        env: NodeJS.ProcessEnv;
+      };
+      expect(options.env).not.toHaveProperty('GH_TOKEN');
+      expect(options.env).not.toHaveProperty('GITHUB_TOKEN');
+      expect(options.env).not.toHaveProperty('GH_ENTERPRISE_TOKEN');
+      expect(options.env).not.toHaveProperty('GITHUB_ENTERPRISE_TOKEN');
+      expect(mockOctokitConstructor).toHaveBeenCalledWith(
+        expect.objectContaining({ auth: 'local-gh-token' }),
+      );
+      channel.disconnect();
+    });
+
+    it('uses the enterprise host for local gh authentication', async () => {
+      mockExecFile.mockImplementation(
+        (
+          _file: string,
+          _args: string[],
+          _options: unknown,
+          callback: (error: Error | null, stdout: string) => void,
+        ) => callback(null, 'enterprise-token\n'),
+      );
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({
+          token: '',
+          useLocalGh: true,
+          baseUrl: 'https://ghe.example.com:8443/api/v3',
+        }),
+        makeBridge(),
+      );
+      mockOctokit.paginate.mockResolvedValue([]);
+
+      await channel.connect();
+
+      expect(mockExecFile).toHaveBeenCalledWith(
+        'gh',
+        ['auth', 'token', '--hostname', 'ghe.example.com:8443'],
+        expect.any(Object),
+        expect.any(Function),
+      );
+      channel.disconnect();
+    });
+
+    it('rejects an insecure API URL before resolving local gh credentials', async () => {
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({
+          token: '',
+          useLocalGh: true,
+          baseUrl: 'http://api.github.com',
+        }),
+        makeBridge(),
+      );
+
+      await expect(channel.connect()).rejects.toThrow(
+        'local GitHub CLI authentication requires an HTTPS baseUrl',
+      );
+      expect(mockExecFile).not.toHaveBeenCalled();
+      expect(mockOctokitConstructor).not.toHaveBeenCalled();
+    });
+
+    it('preserves explicit token support for an HTTP base URL', async () => {
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({
+          token: 'test-token',
+          useLocalGh: true,
+          baseUrl: 'http://ghe.example.com/api/v3',
+        }),
+        makeBridge(),
+      );
+      mockOctokit.paginate.mockResolvedValue([]);
+
+      await channel.connect();
+
+      expect(mockExecFile).not.toHaveBeenCalled();
+      expect(mockOctokitConstructor).toHaveBeenCalledWith(
+        expect.objectContaining({
+          auth: 'test-token',
+          baseUrl: 'http://ghe.example.com/api/v3',
+        }),
+      );
+      channel.disconnect();
+    });
+
+    it('reports an empty token returned by GitHub CLI', async () => {
+      mockExecFile.mockImplementation(
+        (
+          _file: string,
+          _args: string[],
+          _options: unknown,
+          callback: (error: Error | null, stdout: string) => void,
+        ) => callback(null, ' \n'),
+      );
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ token: '', useLocalGh: true }),
+        makeBridge(),
+      );
+
+      await expect(channel.connect()).rejects.toThrow(
+        'GitHub CLI returned an empty token for github.com',
+      );
+    });
+
+    it('prefers an explicit token over enabled local gh authentication', async () => {
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ token: 'test-token', useLocalGh: true }),
+        makeBridge(),
+      );
+      mockOctokit.paginate.mockResolvedValue([]);
+
+      await channel.connect();
+
+      expect(mockExecFile).not.toHaveBeenCalled();
+      expect(mockOctokitConstructor).toHaveBeenCalledWith(
+        expect.objectContaining({ auth: 'test-token' }),
+      );
+      channel.disconnect();
+    });
+
+    it('reports when GitHub CLI is unavailable', async () => {
+      mockExecFile.mockImplementation(
+        (
+          _file: string,
+          _args: string[],
+          _options: unknown,
+          callback: (error: NodeJS.ErrnoException, stdout: string) => void,
+        ) =>
+          callback(
+            Object.assign(new Error('secret missing-cli failure'), {
+              code: 'ENOENT',
+            }),
+            '',
+          ),
+      );
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ token: '', useLocalGh: true }),
+        makeBridge(),
+      );
+
+      await expect(channel.connect()).rejects.toThrow(
+        'GitHub CLI (gh) is not installed on the daemon host',
+      );
+      await expect(channel.connect()).rejects.not.toThrow(
+        'secret missing-cli failure',
+      );
+    });
+
+    it('reports when the selected gh host is not authenticated', async () => {
+      mockExecFile.mockImplementation(
+        (
+          _file: string,
+          _args: string[],
+          _options: unknown,
+          callback: (error: Error & { code: number }, stdout: string) => void,
+        ) =>
+          callback(Object.assign(new Error('secret stderr'), { code: 1 }), ''),
+      );
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ token: '', useLocalGh: true }),
+        makeBridge(),
+      );
+
+      await expect(channel.connect()).rejects.toThrow(
+        'gh auth login --hostname github.com',
+      );
+      await expect(channel.connect()).rejects.not.toThrow('secret stderr');
+    });
+
+    it('reports when the GitHub CLI authentication lookup times out', async () => {
+      mockExecFile.mockImplementation(
+        (
+          _file: string,
+          _args: string[],
+          _options: unknown,
+          callback: (
+            error: Error & { killed: boolean },
+            stdout: string,
+          ) => void,
+        ) =>
+          callback(
+            Object.assign(new Error('secret timeout failure'), {
+              killed: true,
+            }),
+            '',
+          ),
+      );
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ token: '', useLocalGh: true }),
+        makeBridge(),
+      );
+
+      await expect(channel.connect()).rejects.toThrow(
+        'authentication lookup for github.com timed out after 10 seconds',
+      );
+      await expect(channel.connect()).rejects.not.toThrow(
+        'secret timeout failure',
+      );
+    });
+
+    it('reports when GitHub CLI authentication cannot execute', async () => {
+      mockExecFile.mockImplementation(
+        (
+          _file: string,
+          _args: string[],
+          _options: unknown,
+          callback: (error: NodeJS.ErrnoException, stdout: string) => void,
+        ) =>
+          callback(
+            Object.assign(new Error('secret failure'), { code: 'EACCES' }),
+            '',
+          ),
+      );
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ token: '', useLocalGh: true }),
+        makeBridge(),
+      );
+
+      await expect(channel.connect()).rejects.toThrow(
+        'authentication lookup for github.com failed to execute',
+      );
+      await expect(channel.connect()).rejects.not.toThrow('secret failure');
     });
 
     it('throws when bot identity fails', async () => {
@@ -3735,6 +4024,20 @@ describe('GithubChannel', () => {
     it('declares chat_thread as defaultSessionScope', async () => {
       const { plugin } = await import('./index.js');
       expect(plugin.defaultSessionScope).toBe('chat_thread');
+    });
+
+    it('allows explicit local gh authentication without a configured token', async () => {
+      const { plugin } = await import('./index.js');
+      const tokenField = plugin.management?.fields.find(
+        (field) => field.key === 'token',
+      );
+      const localGhField = plugin.management?.fields.find(
+        (field) => field.key === 'useLocalGh',
+      );
+      expect(plugin.requiredConfigFields).toBeUndefined();
+      expect(tokenField).toMatchObject({ kind: 'secret' });
+      expect(tokenField).not.toHaveProperty('required');
+      expect(localGhField).toMatchObject({ kind: 'boolean' });
     });
   });
 

@@ -28,6 +28,7 @@ export interface ChannelEditorDraft {
 
 export type ChannelEditorValidationCode =
   | 'required'
+  | 'credential'
   | 'duplicate'
   | 'invalid'
   | 'invalidOption'
@@ -175,6 +176,15 @@ export function validateChannelEditorDraft(
       }
     }
   }
+  if (descriptor.type === 'github') {
+    const token = draft.secrets['token'];
+    const hasToken =
+      token?.operation === 'preserve' ||
+      (token?.operation === 'replace' && Boolean(token.value?.trim()));
+    if (!hasToken && draft.values['useLocalGh'] !== true) {
+      errors['token'] = 'credential';
+    }
+  }
   if (!draft.senderPolicy && !hasDescriptorSenderPolicy(descriptor)) {
     errors['senderPolicy'] = 'policy';
   }
@@ -243,7 +253,11 @@ export function buildChannelUpsertRequest(
       const secret = draft.secrets[field.key] ?? { operation: 'preserve' };
       secrets[field.key] =
         secret.operation === 'replace'
-          ? { operation: 'replace', value: secret.value ?? '' }
+          ? !field.required &&
+            !instance?.secrets[field.key]?.present &&
+            !secret.value?.trim()
+            ? { operation: 'clear' }
+            : { operation: 'replace', value: secret.value ?? '' }
           : { operation: secret.operation };
       continue;
     }

@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { execFile } from 'node:child_process';
 import {
   appendFileSync,
   chmodSync,
@@ -31,6 +32,69 @@ import { testBotMention, stripBotMention } from './mention.js';
 interface GithubConfig extends ChannelConfig {
   baseUrl?: string;
   reasonFilter?: unknown;
+  useLocalGh?: boolean;
+}
+
+const GH_AUTH_TIMEOUT_MS = 10_000;
+const GH_AUTH_MAX_BUFFER = 64 * 1024;
+
+function ghHostname(channelName: string, baseUrl: string): string {
+  const url = new URL(baseUrl);
+  if (url.protocol !== 'https:') {
+    throw new Error(
+      `[Channel:${channelName}] local GitHub CLI authentication requires an HTTPS baseUrl.`,
+    );
+  }
+  return url.host === 'api.github.com' ? 'github.com' : url.host;
+}
+
+function resolveGhAuthToken(
+  channelName: string,
+  hostname: string,
+): Promise<string> {
+  const env = { ...process.env };
+  delete env['GH_TOKEN'];
+  delete env['GITHUB_TOKEN'];
+  delete env['GH_ENTERPRISE_TOKEN'];
+  delete env['GITHUB_ENTERPRISE_TOKEN'];
+  return new Promise((resolve, reject) => {
+    execFile(
+      'gh',
+      ['auth', 'token', '--hostname', hostname],
+      {
+        timeout: GH_AUTH_TIMEOUT_MS,
+        maxBuffer: GH_AUTH_MAX_BUFFER,
+        windowsHide: true,
+        encoding: 'utf8',
+        env,
+      },
+      (error, stdout) => {
+        if (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          const message =
+            code === 'ENOENT'
+              ? 'GitHub CLI (gh) is not installed on the daemon host.'
+              : (error as { killed?: unknown }).killed === true
+                ? `GitHub CLI authentication lookup for ${hostname} timed out after ${GH_AUTH_TIMEOUT_MS / 1000} seconds.`
+                : typeof code === 'number'
+                  ? `No GitHub CLI authentication is available for ${hostname}. Run \`gh auth login --hostname ${hostname}\` on the daemon host.`
+                  : `GitHub CLI authentication lookup for ${hostname} failed to execute.`;
+          reject(new Error(`[Channel:${channelName}] ${message}`));
+          return;
+        }
+        const token = stdout.trim();
+        if (!token) {
+          reject(
+            new Error(
+              `[Channel:${channelName}] GitHub CLI returned an empty token for ${hostname}. Run \`gh auth login --hostname ${hostname}\` on the daemon host.`,
+            ),
+          );
+          return;
+        }
+        resolve(token);
+      },
+    );
+  });
 }
 
 const KNOWN_NOTIFICATION_REASONS = new Set([
@@ -431,11 +495,20 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const cfg = this.config as GithubConfig;
     this.reasonFilter = normalizeReasonFilter(cfg, this.name);
     const baseUrl = cfg.baseUrl || 'https://api.github.com';
+    const configuredToken = cfg.token?.trim() ?? '';
+    if (!configuredToken && cfg.useLocalGh !== true) {
+      throw new Error(
+        `[Channel:${this.name}] configure a GitHub token or enable local GitHub CLI authentication.`,
+      );
+    }
+    const auth = configuredToken
+      ? configuredToken
+      : await resolveGhAuthToken(this.name, ghHostname(this.name, baseUrl));
     this.webOrigin = baseUrl
       .replace(/\/api\/v3\/?$/, '')
       .replace(/^https:\/\/api\.github\.com/, 'https://github.com');
     this.octokit = new Octokit({
-      auth: cfg.token,
+      auth,
       baseUrl,
       ...(this.proxy
         ? { request: { agent: new HttpsProxyAgent(this.proxy) } }

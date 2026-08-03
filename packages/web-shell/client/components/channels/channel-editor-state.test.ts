@@ -181,7 +181,11 @@ const GITHUB: DaemonChannelTypeDescriptor = {
       key: 'token',
       label: 'Personal Access Token',
       kind: 'secret',
-      required: true,
+    },
+    {
+      key: 'useLocalGh',
+      label: 'Use Local GitHub CLI Authentication',
+      kind: 'boolean',
     },
     {
       key: 'groupPolicy',
@@ -262,10 +266,53 @@ describe('Descriptor-driven senderPolicy', () => {
     const request = buildChannelUpsertRequest(GITHUB, draft, 'rev-1');
     expect(request.config).toEqual({
       type: 'github',
+      useLocalGh: false,
       groupPolicy: 'open',
       senderPolicy: 'allowlist',
       allowedUsers: ['alice', 'bob'],
     });
+  });
+
+  it('requires a token or explicit local gh authentication', () => {
+    const draft = createChannelEditorDraft(GITHUB);
+    draft.name = 'my-bot';
+
+    expect(validateChannelEditorDraft(GITHUB, draft, [])).toEqual({
+      token: 'credential',
+    });
+  });
+
+  it('allows a new GitHub channel to opt into local gh authentication', () => {
+    const draft = createChannelEditorDraft(GITHUB);
+    draft.name = 'my-bot';
+    draft.values.useLocalGh = true;
+    draft.secrets.token = { operation: 'replace', value: '  ' };
+
+    expect(validateChannelEditorDraft(GITHUB, draft, [])).toEqual({});
+    const request = buildChannelUpsertRequest(GITHUB, draft, 'rev-1');
+    expect(request.config).toMatchObject({ useLocalGh: true });
+    expect(request.secrets).toEqual({ token: { operation: 'clear' } });
+  });
+
+  it('does not clear an existing optional secret from a blank replacement', () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'my-bot',
+      config: {
+        type: 'github',
+        useLocalGh: true,
+        groupPolicy: 'open',
+        senderPolicy: 'allowlist',
+      },
+      secrets: { token: { present: true, source: 'stored' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(GITHUB, instance);
+    draft.secrets.token = { operation: 'replace', value: '  ' };
+
+    expect(
+      buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).secrets,
+    ).toEqual({ token: { operation: 'replace', value: '  ' } });
   });
 
   it('skips senderPolicy validation when descriptor declares it', () => {
