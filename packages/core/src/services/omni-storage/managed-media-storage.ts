@@ -248,7 +248,15 @@ export class ManagedMediaStorage {
             'Policy tools must write flat files only.',
         );
       }
-      if (!stat.isFile()) continue;
+      if (!stat.isFile()) {
+        debugLogger.warn(
+          `Refusing non-regular file in staging ${invocationId}: ${filePath}`,
+        );
+        throw new Error(
+          `Refusing non-regular file in staging ${invocationId}: "${file}". ` +
+            'Symlinks and special files are not allowed.',
+        );
+      }
       const ext = path.extname(file) || '.bin';
       const result = await this.commitObject(filePath, ext);
       objects.push(result);

@@ -295,6 +295,35 @@ describe('ManagedMediaStorage', () => {
       );
       await expect(storage.createStagingDir('a/b')).rejects.toThrow('Unsafe');
     });
+
+    it('rejects symlinked artifacts in staging', async () => {
+      const stagingDir = await storage.createStagingDir('inv-symlink');
+      const targetPath = path.join(tmpDir, 'outside.bin');
+      await fs.promises.writeFile(targetPath, Buffer.from('target'));
+      await fs.promises.symlink(
+        targetPath,
+        path.join(stagingDir, 'linked.bin'),
+      );
+
+      await expect(storage.promoteStaging('inv-symlink')).rejects.toThrow(
+        /non-regular file/,
+      );
+      // staging must survive the refusal so the orchestrator can quarantine it
+      await expect(fs.promises.stat(stagingDir)).resolves.toBeDefined();
+    });
+
+    it('rejects subdirectories in staging', async () => {
+      const stagingDir = await storage.createStagingDir('inv-subdir');
+      await fs.promises.mkdir(path.join(stagingDir, 'frames'));
+      await fs.promises.writeFile(
+        path.join(stagingDir, 'frames', 'keyframe.png'),
+        Buffer.from('x'),
+      );
+
+      await expect(storage.promoteStaging('inv-subdir')).rejects.toThrow(
+        /subdirectory/,
+      );
+    });
   });
 
   describe('downloads', () => {
