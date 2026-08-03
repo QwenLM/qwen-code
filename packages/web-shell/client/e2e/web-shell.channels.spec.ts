@@ -95,6 +95,19 @@ test('creates and deletes a typed Channel configuration', async ({
             required: true,
             envResolvable: true,
           },
+          {
+            key: 'sessionScope',
+            label: 'Session scope',
+            kind: 'enum',
+            required: true,
+            default: 'user',
+            options: [
+              { value: 'user', label: 'Per user and chat' },
+              { value: 'thread', label: 'Per thread' },
+              { value: 'chat_thread', label: 'Per chat and thread' },
+              { value: 'single', label: 'One shared session' },
+            ],
+          },
         ],
       },
       {
@@ -144,6 +157,8 @@ test('creates and deletes a typed Channel configuration', async ({
   await page.getByLabel('Instance name').fill('release-bot');
   await page.getByLabel('Client ID (AppKey)').fill('ding-client-id');
   await page.getByLabel('Client Secret (AppSecret)').fill('ding-client-secret');
+  await page.getByLabel('Session scope').click();
+  await page.getByRole('option', { name: 'Per thread' }).click();
   await page.getByRole('button', { name: 'Save' }).click();
 
   await expect(
@@ -165,6 +180,7 @@ test('creates and deletes a typed Channel configuration', async ({
           config: {
             type: 'dingtalk',
             clientId: 'ding-client-id',
+            sessionScope: 'thread',
             senderPolicy: 'pairing',
           },
           secrets: {
@@ -181,6 +197,7 @@ test('creates and deletes a typed Channel configuration', async ({
   await expect(
     page.getByRole('heading', { name: 'Edit DingTalk' }),
   ).toBeVisible();
+  await expect(page.getByLabel('Session scope')).toHaveText('Per thread');
   await expect(page.getByText('Ada', { exact: true })).toBeVisible();
   await expect(page.getByText('ABCD1234', { exact: true })).toBeVisible();
   await page
