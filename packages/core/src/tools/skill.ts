@@ -518,11 +518,27 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
 
       this.onSkillLoaded(this.params.skill);
 
-      // Auto-approve the skill's declared allowedTools for the rest of the session.
-      applySkillAllowedTools(
-        this.config.getPermissionManager(),
-        skill.allowedTools,
-      );
+      // Project skills are discovered regardless of folder trust, but
+      // repo-supplied side effects are gated until the folder is trusted:
+      // allowedTools become session-wide permission auto-approvals, and
+      // hooks are code execution (the same gate Config.getProjectHooks()
+      // applies to settings-file hooks).
+      const untrustedProjectSkill =
+        skill.level === 'project' && !this.config.isTrustedFolder();
+
+      if (untrustedProjectSkill) {
+        if (skill.allowedTools?.length) {
+          debugLogger.warn(
+            `Skill "${this.params.skill}" declares allowedTools but the folder is not trusted; ignoring skill allowedTools.`,
+          );
+        }
+      } else {
+        // Auto-approve the skill's declared allowedTools for the rest of the session.
+        applySkillAllowedTools(
+          this.config.getPermissionManager(),
+          skill.allowedTools,
+        );
+      }
 
       // Register skill hooks if present
       debugLogger.debug('Skill hooks check:', {
@@ -531,11 +547,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
         skillName: skill.name,
       });
       if (skill.hooks) {
-        if (skill.level === 'project' && !this.config.isTrustedFolder()) {
-          // Project skills are discovered regardless of folder trust
-          // (their instructions only influence the model), but their
-          // hooks are repo-supplied code execution — the same gate
-          // Config.getProjectHooks() applies to settings-file hooks.
+        if (untrustedProjectSkill) {
           debugLogger.warn(
             `Skill "${this.params.skill}" declares hooks but the folder is not trusted; ignoring skill hooks.`,
           );

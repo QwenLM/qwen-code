@@ -605,6 +605,67 @@ describe('SkillTool', () => {
     });
   });
 
+  describe('allowedTools trust gating', () => {
+    const projectSkill: SkillConfig = {
+      name: 'build',
+      description: 'Project skill with allowedTools',
+      level: 'project',
+      filePath: '/project/.qwen/skills/build/SKILL.md',
+      body: 'Body.',
+      allowedTools: ['Edit', 'Bash(git push *)'],
+    };
+
+    beforeEach(() => {
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(
+        projectSkill,
+      );
+    });
+
+    it('does not grant allowedTools for a project skill in an untrusted folder', async () => {
+      vi.mocked(config.isTrustedFolder).mockReturnValue(false);
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'build' });
+      const result = await invocation.execute();
+
+      expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+      // The skill itself still loads — only the permission grants are gated.
+      expect(partToString(result.llmContent)).toContain('Body.');
+    });
+
+    it('grants allowedTools for a project skill in a trusted folder', async () => {
+      vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'build' });
+      await invocation.execute();
+
+      expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
+      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(1, 'Edit');
+      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(
+        2,
+        'Bash(git push *)',
+      );
+    });
+
+    it('grants allowedTools for a user-level skill regardless of folder trust', async () => {
+      vi.mocked(config.isTrustedFolder).mockReturnValue(false);
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue({
+        ...projectSkill,
+        level: 'user',
+      });
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'build' });
+      await invocation.execute();
+
+      expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
+    });
+  });
+
   describe('refreshSkills', () => {
     it('should refresh when change listener fires', async () => {
       const newSkills: SkillConfig[] = [

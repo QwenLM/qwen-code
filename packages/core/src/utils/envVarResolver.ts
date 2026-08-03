@@ -6,6 +6,10 @@
 
 import { isInternalSecretEnvVar } from './sanitize-child-env.js';
 
+// Exposed so CLI-side resolvers (e.g. channel config) apply the same
+// denylist through this leaf import instead of the full core bundle.
+export { isInternalSecretEnvVar };
+
 /**
  * Resolves environment variables in a string.
  * Replaces $VAR_NAME and ${VAR_NAME} with their corresponding environment variable values.

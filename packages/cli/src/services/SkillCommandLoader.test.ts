@@ -57,6 +57,7 @@ describe('SkillCommandLoader', () => {
       getBareMode: vi.fn().mockReturnValue(false),
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
       getAutoSkillEnabled: vi.fn().mockReturnValue(true),
+      isTrustedFolder: vi.fn().mockReturnValue(true),
       getPermissionManager: vi
         .fn()
         .mockReturnValue({ addSessionAllowRule: mockAddSessionAllowRule }),
@@ -496,6 +497,66 @@ describe('SkillCommandLoader', () => {
       await commands[0].action?.({} as CommandContext, '');
 
       expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+    });
+
+    it('does not grant allowedTools for a project skill in an untrusted folder', async () => {
+      (mockConfig.isTrustedFolder as ReturnType<typeof vi.fn>).mockReturnValue(
+        false,
+      );
+      const skill = makeSkill({
+        level: 'project',
+        allowedTools: ['Bash(git *)', 'Edit'],
+      });
+      mockSkillManager.listSkills.mockImplementation(
+        ({ level }: { level: string }) =>
+          Promise.resolve(level === 'project' ? [skill] : []),
+      );
+
+      const loader = new SkillCommandLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+      await commands[0].action?.({} as CommandContext, '');
+
+      expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+    });
+
+    it('grants allowedTools for a project skill in a trusted folder', async () => {
+      (mockConfig.isTrustedFolder as ReturnType<typeof vi.fn>).mockReturnValue(
+        true,
+      );
+      const skill = makeSkill({
+        level: 'project',
+        allowedTools: ['Bash(git *)', 'Edit'],
+      });
+      mockSkillManager.listSkills.mockImplementation(
+        ({ level }: { level: string }) =>
+          Promise.resolve(level === 'project' ? [skill] : []),
+      );
+
+      const loader = new SkillCommandLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+      await commands[0].action?.({} as CommandContext, '');
+
+      expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
+    });
+
+    it('grants allowedTools for a user-level skill regardless of folder trust', async () => {
+      (mockConfig.isTrustedFolder as ReturnType<typeof vi.fn>).mockReturnValue(
+        false,
+      );
+      const skill = makeSkill({
+        level: 'user',
+        allowedTools: ['Bash(git *)', 'Edit'],
+      });
+      mockSkillManager.listSkills.mockImplementation(
+        ({ level }: { level: string }) =>
+          Promise.resolve(level === 'user' ? [skill] : []),
+      );
+
+      const loader = new SkillCommandLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+      await commands[0].action?.({} as CommandContext, '');
+
+      expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
     });
   });
 

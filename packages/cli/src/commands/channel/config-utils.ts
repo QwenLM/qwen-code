@@ -4,6 +4,7 @@ import type {
   ChannelWebhookSourceConfig,
   ChannelWebhookTargetConfig,
 } from '@qwen-code/channel-base';
+import { isInternalSecretEnvVar } from '@qwen-code/qwen-code-core/envVarResolver';
 import { resolveChannelCwd } from './channel-cwd.js';
 import { getPlugin, supportedTypes } from './channel-registry.js';
 
@@ -29,6 +30,12 @@ export function resolveEnvVars(
   }
   if (value.startsWith('$')) {
     const envName = value.substring(1);
+    // Qwen-internal secrets never resolve into channel config: resolved
+    // values are sent to repo-configured endpoints. Leave the placeholder
+    // unresolved, mirroring the core resolver.
+    if (isInternalSecretEnvVar(envName)) {
+      return value;
+    }
     const envValue = env[envName];
     if (envValue === undefined) {
       throw new Error(
@@ -76,6 +83,9 @@ function resolveConfigEnvVar(value: string, mode: EnvResolution): string {
   if (value.startsWith('$$')) return value.substring(1);
   if (mode === 'available' && value.startsWith('$')) {
     const envName = value.substring(1);
+    if (isInternalSecretEnvVar(envName)) {
+      return value;
+    }
     const envValue = process.env[envName];
     if (envValue === undefined) {
       throw new Error(
@@ -289,6 +299,9 @@ function resolveWebhookSecretEnv(
     throw new Error(
       `Channel "${channelName}" field "${path}.secretEnv" must be an environment variable name or $-prefixed reference.`,
     );
+  }
+  if (isInternalSecretEnvVar(envName)) {
+    return secretEnv;
   }
   const envValue = env[envName];
   if (envValue === undefined) {

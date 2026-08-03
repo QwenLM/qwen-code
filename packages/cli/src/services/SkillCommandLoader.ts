@@ -151,11 +151,16 @@ export class SkillCommandLoader implements ICommandLoader {
               : {}),
           },
           action: async (context, _args): Promise<SlashCommandActionReturn> => {
-            // Auto-approve the skill's declared allowedTools before its body is submitted.
-            applySkillAllowedTools(
-              this.config?.getPermissionManager(),
-              skill.allowedTools,
-            );
+            // Auto-approve the skill's declared allowedTools before its body
+            // is submitted — never for project skills in an untrusted folder,
+            // where repo-supplied frontmatter would otherwise grant
+            // session-wide permission auto-approvals (same gate as SkillTool).
+            if (skill.level !== 'project' || this.config?.isTrustedFolder()) {
+              applySkillAllowedTools(
+                this.config?.getPermissionManager(),
+                skill.allowedTools,
+              );
+            }
 
             const body = buildSkillLlmContent(
               dirname(skill.filePath),

@@ -796,3 +796,74 @@ describe('parseChannelConfig', () => {
     );
   });
 });
+
+describe('internal-secret denylist', () => {
+  const SECRET = 'QWEN_SERVER_TOKEN';
+
+  afterEach(() => {
+    delete process.env[SECRET];
+    delete process.env[SECRET.toLowerCase()];
+  });
+
+  it('resolveEnvVars leaves Qwen-internal secrets unresolved', () => {
+    process.env[SECRET] = 'daemon-secret';
+    expect(resolveEnvVars(`$${SECRET}`)).toBe(`$${SECRET}`);
+  });
+
+  it('resolveEnvVars blocks case variants (Windows-style process.env)', () => {
+    process.env[SECRET.toLowerCase()] = 'daemon-secret';
+    expect(resolveEnvVars(`$${SECRET.toLowerCase()}`)).toBe(
+      `$${SECRET.toLowerCase()}`,
+    );
+  });
+
+  it('parseChannelConfig never resolves internal secrets into channel credentials', async () => {
+    process.env[SECRET] = 'daemon-secret';
+
+    const defaultMode = await parseChannelConfig('bot', {
+      type: 'github',
+      token: `$${SECRET}`,
+    });
+    expect(defaultMode.token).toBe(`$${SECRET}`);
+
+    const availableMode = await parseChannelConfig(
+      'bot',
+      { type: 'github', token: `$${SECRET}` },
+      undefined,
+      { resolveEnvVars: 'available' },
+    );
+    expect(availableMode.token).toBe(`$${SECRET}`);
+  });
+
+  it('webhook secret and secretEnv never resolve Qwen-internal secrets', async () => {
+    process.env[SECRET] = 'daemon-secret';
+
+    const viaSecret = await parseChannelConfig('dingtalk-main', {
+      type: 'bare',
+      token: 'token',
+      webhooks: {
+        sources: {
+          custom: {
+            secret: `$${SECRET}`,
+            targets: { default: { chatId: 'group-1', senderId: 'webhook' } },
+          },
+        },
+      },
+    });
+    expect(viaSecret['webhooks']?.sources['custom']?.secret).toBe(`$${SECRET}`);
+
+    const viaSecretEnv = await parseChannelConfig('dingtalk-main', {
+      type: 'bare',
+      token: 'token',
+      webhooks: {
+        sources: {
+          custom: {
+            secretEnv: SECRET,
+            targets: { default: { chatId: 'group-1', senderId: 'webhook' } },
+          },
+        },
+      },
+    });
+    expect(viaSecretEnv['webhooks']?.sources['custom']?.secret).toBe(SECRET);
+  });
+});

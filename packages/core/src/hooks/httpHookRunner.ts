@@ -261,17 +261,25 @@ export class HttpHookRunner {
             // With redirect: 'manual' a 3xx lands here; the endpoint is
             // behind a redirecting LB and silently no-ops unless the user
             // knows to repoint it, so name the target and the remedy.
-            debugLogger.warn(
+            // debugLogger.warn alone is invisible in default runs, so also
+            // surface it the way command-hook non-blocking errors do.
+            const message =
               `HTTP hook ${hookId} returned a redirect (${response.status}) to ` +
-                `"${response.headers.get('location') ?? 'unknown'}"; redirects ` +
-                `are never followed (SSRF protection). Point the hook at the ` +
-                `final URL (non-blocking).`,
-            );
-          } else {
-            debugLogger.warn(
-              `HTTP hook ${hookId} returned non-2xx status ${response.status} (non-blocking)`,
-            );
+              `"${response.headers.get('location') ?? 'unknown'}"; redirects ` +
+              `are never followed (SSRF protection). Point the hook at the ` +
+              `final URL (non-blocking).`;
+            debugLogger.warn(message);
+            return {
+              hookConfig,
+              eventName,
+              success: true,
+              output: { continue: true, systemMessage: `Warning: ${message}` },
+              duration,
+            };
           }
+          debugLogger.warn(
+            `HTTP hook ${hookId} returned non-2xx status ${response.status} (non-blocking)`,
+          );
           // Return success: true with continue: true for non-blocking error
           return {
             hookConfig,

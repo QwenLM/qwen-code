@@ -176,6 +176,7 @@ describe('HttpHookRunner', () => {
         ok: false,
         status: 500,
         statusText: 'Internal Server Error',
+        headers: new Headers(),
       });
 
       const config = createMockConfig();
@@ -190,6 +191,16 @@ describe('HttpHookRunner', () => {
       // Non-2xx is a non-blocking error, so success should be true
       expect(result.success).toBe(true);
       expect(result.output?.continue).toBe(true);
+      // Pins the branch condition: a plain server error must get the
+      // generic non-2xx message, never the redirect diagnostics.
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('returned non-2xx status 500'),
+      );
+      expect(mockDebugLogger.warn).not.toHaveBeenCalledWith(
+        expect.stringContaining('returned a redirect'),
+      );
+      // Only 3xx responses surface a user-visible warning.
+      expect(result.output?.systemMessage).toBeUndefined();
     });
 
     it('should handle timeout as non-blocking error', async () => {
@@ -266,6 +277,10 @@ describe('HttpHookRunner', () => {
       expect(result.output?.continue).toBe(true);
       // Exactly one request: the redirect target is never fetched
       expect(mockFetch).toHaveBeenCalledTimes(1);
+      // The remedy reaches the user in default runs, not just the debug log
+      expect(result.output?.systemMessage).toContain(
+        'returned a redirect (302)',
+      );
       // The 3xx gets a dedicated, self-service warning naming the target
       expect(mockDebugLogger.warn).toHaveBeenCalledWith(
         expect.stringContaining('returned a redirect (302)'),
