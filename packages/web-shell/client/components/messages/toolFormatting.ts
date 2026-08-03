@@ -1,12 +1,6 @@
 import type { ACPToolCall } from '../../adapters/types';
 
-export function isActiveToolStatus(
-  status: ACPToolCall['status'] | string,
-): boolean {
-  return (
-    status === 'pending' || status === 'running' || status === 'in_progress'
-  );
-}
+export { isActiveToolStatus } from '../../adapters/toolClassification';
 
 /**
  * Internal-tool-name → display-name lookup. This is a standalone copy of
