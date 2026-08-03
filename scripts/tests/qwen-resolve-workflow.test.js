@@ -346,7 +346,9 @@ describe('qwen resolve workflow', () => {
     const contextStep = step(reviewJob, 'Resolve PR context');
     const runStep = step(reviewJob, 'Run review');
 
-    expect(reviewJob).toContain('timeout-minutes: 300');
+    expect(reviewJob).toContain(
+      "timeout-minutes: '${{ fromJSON(vars.QWEN_REVIEW_JOB_TIMEOUT_MINUTES) }}'",
+    );
     expect(contextStep).toContain('DEFAULT_TIMEOUT_MINUTES=180');
     expect(contextStep).toContain('case "$token" in');
     expect(contextStep).toContain('--timeout=*)');
@@ -354,7 +356,12 @@ describe('qwen resolve workflow', () => {
     expect(contextStep).toContain('timeout=*)');
     expect(contextStep).toContain('TIMEOUT_MINUTES="${token#timeout=}"');
     expect(runStep).toContain('if [ "${#TIMEOUT_MINUTES}" -gt 3 ]; then');
-    expect(runStep).toContain('timeout_minutes must not exceed 240 minutes');
+    expect(runStep).toContain(
+      'MAX_TIMEOUT_MINUTES="${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}"',
+    );
+    expect(runStep).toContain(
+      'timeout_minutes must not exceed ${MAX_TIMEOUT_MINUTES} minutes',
+    );
     expect(runStep).toContain('QWEN_TIMEOUT="$EFFECTIVE_TIMEOUT_MINUTES"');
     expect(runStep).not.toContain('QWEN_TIMEOUT=$((TIMEOUT_MINUTES - 5))');
   });
@@ -372,8 +379,9 @@ describe('qwen resolve workflow', () => {
     );
 
     // Auto-tiering only applies without an explicit --timeout, keys off
-    // additions + deletions, and never exceeds the 240 cap: small PRs keep 180,
-    // anything larger gets the full 240.
+    // additions + deletions, and never exceeds the
+    // QWEN_REVIEW_MAX_TIMEOUT_MINUTES cap: small PRs keep 180, anything
+    // larger gets the full cap.
     expect(runStep).toContain('EFFECTIVE_TIMEOUT_MINUTES="$TIMEOUT_MINUTES"');
     expect(runStep).toContain(
       'if [ "${TIMEOUT_EXPLICIT:-false}" != "true" ]; then',
@@ -381,7 +389,9 @@ describe('qwen resolve workflow', () => {
     expect(runStep).toContain('--json additions,deletions');
     expect(runStep).toContain('if [ "$PR_SIZE_LINES" -le 300 ]; then');
     expect(runStep).toContain('EFFECTIVE_TIMEOUT_MINUTES=180');
-    expect(runStep).toContain('EFFECTIVE_TIMEOUT_MINUTES=240');
+    expect(runStep).toContain(
+      'EFFECTIVE_TIMEOUT_MINUTES="${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}"',
+    );
     expect(runStep).not.toContain('EFFECTIVE_TIMEOUT_MINUTES=210');
     expect(runStep).toContain(
       'echo "effective_timeout_minutes=$EFFECTIVE_TIMEOUT_MINUTES"',
@@ -403,9 +413,14 @@ describe('qwen resolve workflow', () => {
     expect(fallbackStep).toContain(
       "TIMEOUT_MINUTES: '${{ steps.review.outputs.effective_timeout_minutes || steps.context.outputs.timeout_minutes }}'",
     );
-    expect(fallbackStep).toContain('@qwen-code /review --timeout=240');
     expect(fallbackStep).toContain(
-      'This run already used the maximum 240 minute timeout.',
+      'MAX_TIMEOUT_MINUTES="${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}"',
+    );
+    expect(fallbackStep).toContain(
+      '@qwen-code /review --timeout=${MAX_TIMEOUT_MINUTES}',
+    );
+    expect(fallbackStep).toContain(
+      'This run already used the maximum ${MAX_TIMEOUT_MINUTES} minute timeout.',
     );
     expect(fallbackStep).toContain('**Qwen Code review timed out.**');
     expect(fallbackStep).not.toContain(
