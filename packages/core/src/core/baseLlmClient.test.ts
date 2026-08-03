@@ -726,9 +726,8 @@ describe('BaseLlmClient', () => {
           promptCacheSharing,
         });
 
-        expect(mockGenerateContentStream).toHaveBeenCalledWith(
-          expect.not.objectContaining({ promptCacheSharing: true }),
-          '',
+        expect(mockGenerateContentStream.mock.calls[0]?.[0]).not.toHaveProperty(
+          'promptCacheSharing',
         );
       },
     );
