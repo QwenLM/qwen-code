@@ -368,6 +368,12 @@ function buildKeptFilePaths(
     if (!keepRefs.has(refKey(ref))) continue;
     const part = getPart(history, ref);
     if (!part || isErrorResponse(part) || isAlreadyCleared(part)) continue;
+    // Only write_file/edit results anchor bytes the model authored.
+    // read_file results can be cache-hit placeholders or partial slices,
+    // so they cannot prove a file stays resident (issue #4239).
+    if (part.functionResponse?.name === ToolNames.READ_FILE) {
+      continue;
+    }
     const paths = getFilePathsForResponse(part, callIdToFilePath);
     // If an id maps to multiple possible paths, a kept result cannot prove
     // which file is still resident. Keep the #4239-safe behavior and do not

@@ -3266,6 +3266,9 @@ describe('Gemini Client (client.ts)', () => {
           'history now 120000 (+50000 pending), target 250000',
         ),
       );
+      expect(mockClientDebugLogger.info).not.toHaveBeenCalledWith(
+        expect.stringContaining('(soft-exceeded)'),
+      );
     });
 
     it('logs size overages when protected results leave nothing to clear', async () => {

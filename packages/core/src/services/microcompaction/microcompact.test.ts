@@ -1625,7 +1625,10 @@ describe('microcompactHistory evictedReadPaths (issue #4239)', () => {
     expect(result.meta!.unresolvedEvictedReads).toBe(0);
   });
 
-  it('does not report a path when a kept read_file result for the same file remains', () => {
+  it('does not let a kept read_file result vouch for residency (issue #4239)', () => {
+    // A kept read_file result may be a cache-hit placeholder or partial
+    // slice, so it cannot prove the file's bytes stay resident. The path
+    // must be reported so the caller disarms the fast path.
     const history: Content[] = [
       fileCall('old', 'read_file', '/proj/same.ts'),
       fileResult('old', 'read_file', 'old long content '.repeat(50)),
@@ -1639,7 +1642,7 @@ describe('microcompactHistory evictedReadPaths (issue #4239)', () => {
     });
 
     expect(result.meta!.toolsCleared).toBe(1);
-    expect(result.meta!.evictedReadPaths).toEqual([]);
+    expect(result.meta!.evictedReadPaths).toEqual(['/proj/same.ts']);
     expect(result.meta!.unresolvedEvictedReads).toBe(0);
   });
 
