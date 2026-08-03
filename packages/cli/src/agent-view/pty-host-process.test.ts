@@ -10,7 +10,7 @@ import * as fs from 'node:fs/promises';
 import * as net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createAgentViewPtyHostServer,
   connectAgentViewPtyHostProcess,
@@ -209,6 +209,27 @@ describe('Agent View PTY host process server', () => {
     connected.shutdown?.();
 
     await expect(connected.exited).resolves.toEqual({ exitCode: 0 });
+  });
+
+  it('resolves connected host exit when status polling fails', async () => {
+    vi.useFakeTimers();
+    try {
+      const host = fakeHost();
+      const socketPath = shortSocketPath();
+      const server = createAgentViewPtyHostServer(host, socketPath);
+      await server.listen();
+      const connected = await connectAgentViewPtyHostProcess(
+        createLaunch('session-1'),
+        socketPath,
+      );
+
+      await server.close();
+      await vi.advanceTimersByTimeAsync(5000);
+
+      await expect(connected.exited).resolves.toEqual({ exitCode: 1 });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('fails fast when connecting with the wrong host token', async () => {
