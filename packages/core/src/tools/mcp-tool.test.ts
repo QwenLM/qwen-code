@@ -1900,6 +1900,100 @@ describe('DiscoveredMCPTool', () => {
 
       expect(discoverToolsForServer).toHaveBeenCalled();
     });
+
+    it('reconnects instead of reporting a timeout when the server is known disconnected', async () => {
+      const params = { param: 'test' };
+      // -32001 with a dead transport means the connection died mid-request,
+      // not that the tool ran too long. Classifying it as EXECUTION_TIMEOUT
+      // would strand a call the reconnect path can still recover.
+      const requestTimeout = Object.assign(new Error('Request timed out'), {
+        code: -32001,
+      });
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValueOnce(requestTimeout),
+      };
+      const newMockMcpClient: McpDirectClient = {
+        callTool: vi
+          .fn()
+          .mockResolvedValueOnce({ content: [{ type: 'text', text: 'OK' }] }),
+      };
+      const newTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        undefined,
+        newMockMcpClient,
+      );
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool: vi.fn().mockResolvedValue(newTool),
+        }),
+        getTruncateToolOutputThreshold: () => 0,
+        getTruncateToolOutputLines: () => 0,
+      };
+
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+
+      const reconnectTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        mockConfig as any,
+        mockMcpClient,
+      );
+
+      await reconnectTool.build(params).execute(new AbortController().signal);
+
+      expect(discoverToolsForServer).toHaveBeenCalled();
+    });
+
+    it('still reports a timeout when the server is connected', async () => {
+      const requestTimeout = Object.assign(new Error('Request timed out'), {
+        code: -32001,
+      });
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValue(requestTimeout),
+      };
+      const mockConfig = {
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool: vi.fn(),
+        }),
+      };
+
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+
+      const tool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        mockConfig as any,
+        mockMcpClient,
+      );
+
+      await expect(
+        tool.build({ param: 'test' }).execute(new AbortController().signal),
+      ).rejects.toMatchObject({
+        errorType: ToolErrorType.EXECUTION_TIMEOUT,
+      });
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+    });
   });
 
   describe('MCP Tool Idle Timeout', () => {

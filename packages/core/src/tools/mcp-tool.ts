@@ -28,7 +28,11 @@ import type { Config } from '../config/config.js';
 import { truncateToolOutput } from '../utils/truncation.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { getErrorMessage, isAbortError } from '../utils/errors.js';
-import { getMCPServerStatus, MCPServerStatus } from './mcp-status.js';
+import {
+  getAllMCPServerStatuses,
+  getMCPServerStatus,
+  MCPServerStatus,
+} from './mcp-status.js';
 import {
   getInvocationContext,
   INVOCATION_CONTEXT_META_KEY,
@@ -63,6 +67,33 @@ function isMcpRequestTimeout(error: unknown): boolean {
     error !== null &&
     'code' in error &&
     (error as { code?: unknown }).code === MCP_REQUEST_TIMEOUT_CODE
+  );
+}
+
+/**
+ * A `-32001` rejection only tells us the request never got a response. That is
+ * a genuine execution timeout while the transport is believed healthy, but
+ * when the server is known to be DISCONNECTED the same code just means the
+ * connection died mid-request — which `handleReconnectOnError` can still
+ * recover from by reconnecting and retrying. Classifying that as
+ * EXECUTION_TIMEOUT would turn a recoverable transport failure into a hard
+ * error the user has to retry by hand.
+ *
+ * Deliberately checks for a *recorded* DISCONNECTED rather than
+ * `getMCPServerStatus(...) !== CONNECTED`: that getter reports DISCONNECTED
+ * for servers it has never seen, so the simpler comparison would misroute
+ * every timeout from a server whose status was never registered. Default to
+ * "timeout" and only divert on positive evidence the transport is dead.
+ */
+function isExecutionTimeoutFailure(
+  error: unknown,
+  serverName: string,
+): boolean {
+  if (!isMcpRequestTimeout(error)) return false;
+  const statuses = getAllMCPServerStatuses();
+  return !(
+    statuses.has(serverName) &&
+    statuses.get(serverName) === MCPServerStatus.DISCONNECTED
   );
 }
 
@@ -522,7 +553,9 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
         persistedOutputFiles: truncated.persistedOutputFiles,
       };
     } catch (error) {
-      if (idleTimeoutWon || isMcpRequestTimeout(error)) {
+      // `idleTimeoutWon` is our own client-side timer firing, so it is an
+      // execution timeout regardless of what the transport thinks.
+      if (idleTimeoutWon || isExecutionTimeoutFailure(error, this.serverName)) {
         throw new StructuredToolError(
           getErrorMessage(error),
           ToolErrorType.EXECUTION_TIMEOUT,
@@ -585,7 +618,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
         persistedOutputFiles: truncated.persistedOutputFiles,
       };
     } catch (error) {
-      if (isMcpRequestTimeout(error)) {
+      if (isExecutionTimeoutFailure(error, this.serverName)) {
         throw new StructuredToolError(
           getErrorMessage(error),
           ToolErrorType.EXECUTION_TIMEOUT,
