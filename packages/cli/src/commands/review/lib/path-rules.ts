@@ -132,7 +132,9 @@ function isOutOfScope(p: string): boolean {
       p,
     ) ||
     /(?:^|\/)(?:package-info|module-info)\.java$/i.test(p) ||
-    /(?:^|\/)(?:target|build)\/(?:generated-sources|generated)\//i.test(p)
+    /(?:^|\/)(?:target|build)\/(?:generated-sources|generated-test-sources|generated)\//i.test(
+      p,
+    )
   );
 }
 
