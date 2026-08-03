@@ -1889,12 +1889,14 @@ describe('qwen-autofix workflow', () => {
     // Issue-phase mutual exclusion: forced dispatches key per issue, label
     // events key on the payload issue, and every scan-and-pick run (cron or
     // unforced dispatch) shares ONE group. A run-unique fallback here let two
-    // overlapping scans double-claim the same issue — the claim recheck only
-    // narrows the race to the assess call's duration, it does not close it.
+    // overlapping scans double-claim the same issue — the claim recheck runs
+    // after assess and only narrows the race to the short gap between the
+    // recheck and the claim's label write; it does not close it.
     expect(issueAutofixJob).toContain(
-      "group: 'qwen-autofix-issue-${{ needs.route.outputs.issue_number || github.event.issue.number || ''scheduled'' }}'",
+      "group: >-\n        qwen-autofix-issue-${{ needs.route.outputs.issue_number || github.event.issue.number || 'scheduled' }}",
     );
     expect(issueAutofixJob).not.toContain('|| github.run_id }}');
+    expect(issueAutofixJob).toContain('cancel-in-progress: false');
     expect(workflow).toContain(
       '(.labels // []) | map(.name) as $labels | ($labels | index($ready))',
     );

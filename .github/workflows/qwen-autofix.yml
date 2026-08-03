@@ -664,12 +664,16 @@ jobs:
     # the issue in the payload, and scan-and-pick runs (cron, unforced
     # dispatch) share one 'scheduled' group. The old github.run_id fallback
     # made every scan-and-pick run its own group, so two overlapping scans
-    # (cron fires every 40-70min, this job runs up to 180) could both pass the
-    # claim recheck during the minutes-long assess call and double-claim the
-    # same issue. Queued (never cancelled) so a superseded tick still runs if
-    # targets remain.
+    # (cron fires every 40-70min, this job runs up to 180) could double-claim
+    # the same issue — the claim recheck runs after assess and only narrows
+    # the race to the short gap between the recheck and the claim's label
+    # write; it does not close it. Queued (never cancelled) so the newest
+    # pending tick still runs after a long scan if targets remain;
+    # intermediate ticks are superseded, which is fine because each run
+    # rescans from scratch.
     concurrency:
-      group: 'qwen-autofix-issue-${{ needs.route.outputs.issue_number || github.event.issue.number || ''scheduled'' }}'
+      group: >-
+        qwen-autofix-issue-${{ needs.route.outputs.issue_number || github.event.issue.number || 'scheduled' }}
       cancel-in-progress: false
     permissions:
       contents: 'read'
