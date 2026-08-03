@@ -166,6 +166,11 @@ describe('getMaxItemsToShow', () => {
     expect(getMaxItemsToShow(24, 4, 7)).toBe(4);
     expect(getMaxItemsToShow(18, 6, 7)).toBe(2);
   });
+
+  it('shows every item when the height fits and guards an empty list', () => {
+    expect(getMaxItemsToShow(100, 4, 7)).toBe(4);
+    expect(getMaxItemsToShow(24, 0, 7)).toBe(1);
+  });
 });
 
 const expectSelectedOption = (frame: string | undefined, label: string) => {
