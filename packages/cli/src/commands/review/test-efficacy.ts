@@ -76,6 +76,71 @@ import { isWorkspaceMember } from './lib/workspaces.js';
 
 export type ProbeVerdict = 'gated' | 'inert' | 'inconclusive';
 
+/**
+ * WHY a probe was `inconclusive`, as the run knew it at the time.
+ *
+ * Seven different things arrive at the same verdict and they are not
+ * interchangeable:
+ *
+ * - `control-failed` — the suite ran and read green, but the positive control
+ *   proved the runner could not have gone red, so the reading is not evidence.
+ * - `not-run` — no suite ran for it: the tree could not be prepared, or the
+ *   runner could not be started at all. Nothing was measured.
+ * - `runner-died` — a suite WAS started and did not survive: killed at the
+ *   deadline, or by a signal. It may have executed most of its tests, so
+ *   "nothing ran" is a claim about it that nothing checked.
+ * - `no-output` — the runner ran and produced nothing parseable, so whether it
+ *   collected anything is unknown.
+ * - `not-in-results` — the run produced results and this file was not among
+ *   them. A compile or import error looks like this, and so does a path that
+ *   failed to match.
+ * - `no-tests` — the file WAS in the results and collected zero assertions.
+ * - `all-skipped` — it collected tests and executed none of them.
+ *
+ * Anything downstream that explains an `inconclusive` has to pick between
+ * these, and the prose `detail` is written for a human, not for that decision.
+ */
+export type ProbeReason =
+  | 'control-failed'
+  | 'not-run'
+  | 'runner-died'
+  | 'no-output'
+  | 'not-in-results'
+  | 'no-tests'
+  | 'all-skipped';
+
+/**
+ * A union, not an optional field: every `inconclusive` MUST say which way, and
+ * the compiler is what enforces it. Left optional, a branch that forgot to tag
+ * itself fell through to a vague catch-all wording with nothing failing —
+ * measured, deleting one tag left all 116 tests green while every hold of that
+ * kind silently degraded. The one part of this file that has to be right is the
+ * part a runtime fallback was quietly covering for.
+ */
+export type ProbeResult =
+  | { file: string; verdict: 'gated' | 'inert'; detail: string }
+  | {
+      file: string;
+      verdict: 'inconclusive';
+      detail: string;
+      reason: ProbeReason;
+    };
+
+/**
+ * `Omit` applied across each arm instead of to the union as a whole. A plain
+ * `Omit`/`Pick` collapses `ProbeResult` into one object type and makes `reason`
+ * optional again — which is how an `inert` entry could reach the explanation
+ * helper and come back described as "did not come back green", the opposite of
+ * what `inert` means. Distributing keeps the discrimination, so the helper
+ * cannot read `reason` without first narrowing on `verdict`.
+ */
+type DistributiveOmit<T, K extends PropertyKey> = T extends unknown
+  ? Omit<T, K>
+  : never;
+
+/** What the two explanation helpers read: `ProbeResult` without its prose. */
+export type ProbeOutcome = DistributiveOmit<ProbeResult, 'detail'>;
+
 export interface FileEntry {
   path: string;
   kind: string;
@@ -808,13 +873,157 @@ export function parseAddedLines(diffText: string): Map<string, number[]> {
  */
 export function collocatedProbe(
   file: string,
-  testPaths: string[],
+  testPaths: readonly string[],
 ): string | undefined {
   const stem = file.replace(/\.[^./]+$/, '');
   return testPaths.find((t) => {
     const tstem = t.replace(/\.[^./]+$/, '');
     return tstem === `${stem}.test` || tstem === `${stem}.spec`;
   });
+}
+
+/**
+ * Should this candidate be held `inconclusive` because the test collocated with
+ * the file it touches was not green in the unmutated baseline — and if so, with
+ * what explanation?
+ *
+ * ONE decision for both loops. The rule and its wording had already been
+ * duplicated across the mutant and hunk guards, and the duplication had already
+ * drifted twice: the hunk loop had the rule first and the mutant loop shipped
+ * eight survivors through the gap before it was copied over, and the shared
+ * explanation was then corrected in one place and hand-copied to the other.
+ * A rule stated twice is a rule that will be true in one place.
+ */
+export function heldForRedCollocatedTest(
+  kind: 'mutant' | 'hunk',
+  file: string,
+  probes: readonly string[],
+  greenProbes: readonly string[],
+  baselinePerFile: readonly ProbeOutcome[],
+): string | undefined {
+  const own = collocatedProbe(file, probes);
+  if (!own || greenProbes.includes(own)) return undefined;
+  return collocatedNotGreenDetail(kind, own, baselinePerFile);
+}
+
+/**
+ * Did this spawn result start a suite and lose it, or never start one?
+ *
+ * Read off the result's STRUCTURE, not its message. The first version of this
+ * matched `/^runner (killed|spawn failed)/` against the thrown text and was
+ * inoperative: `spawnSync` reports a timeout as `error` (`ETIMEDOUT`, with
+ * `signal` also set) and `runProbeSuite` throws `r.error` before it ever
+ * composes a "runner killed by" sentence, so the real messages are
+ * `spawnSync … ETIMEDOUT` and `spawnSync … ENOENT` and neither matched. The
+ * tag it exists to produce was therefore never produced, and the test that
+ * covered it asserted strings the code does not emit.
+ *
+ * A deadline kill may have executed most of the suite; a runner that could not
+ * be started ran nothing. That is the distinction a reader acts on.
+ */
+export function runnerFailureReason(r: {
+  error?: (Error & { code?: string }) | undefined;
+  signal?: NodeJS.Signals | null;
+}): ProbeReason {
+  return r.signal || r.error?.code === 'ETIMEDOUT' ? 'runner-died' : 'not-run';
+}
+
+/** A probe run that threw, carrying WHY rather than leaving it to be parsed
+ *  back out of the message. */
+export class ProbeRunFailure extends Error {
+  constructor(
+    message: string,
+    readonly reason: ProbeReason,
+  ) {
+    super(message);
+    this.name = 'ProbeRunFailure';
+  }
+}
+
+/** The reasons `classifyProbeRun` can produce — the only ones a baseline entry
+ *  can carry, and so the only ones this explanation is written for. */
+const BASELINE_REASON = new Set<ProbeReason>([
+  'no-output',
+  'not-in-results',
+  'no-tests',
+  'all-skipped',
+]);
+
+const REASON_PHRASE: Record<ProbeReason, string> = {
+  // The suite ran and read green, but the control proved the runner could not
+  // have reported otherwise.
+  'control-failed':
+    'it read green there, but the positive control failed, so nothing could have turned that run red',
+  // Nothing ran: no worktree, the checkout failed, or the runner could not be
+  // started at all — a spawn that fails with ENOENT never gets to a test.
+  'not-run': 'no probe suite ran for it at all there',
+  // Started and did not survive. How much of it ran before that is unknown.
+  'runner-died':
+    'the probe suite was started there and did not survive (killed at the deadline, or by a signal)',
+  // Nothing is known about collection here — the runner never produced output
+  // to read. Saying "collected no tests" would be the same invented cause this
+  // function exists to stop, one layer down: a reader sent after a compile
+  // error that is not there, while the runner itself is what fell over.
+  'no-output':
+    'the runner produced no parseable output there, so nothing at all is known about it',
+  // The run answered, and this file was not in the answer. A compile or import
+  // error looks like this — and so does a path that failed to match, which the
+  // boundary and case rules in `classifyProbeRun` exist because of. Naming one
+  // would be picking between two live possibilities.
+  'not-in-results':
+    'the run produced results there but none for it — which a compile or import error looks like, and so does a path that did not match',
+  'no-tests':
+    'it collected no tests there — the shape a compile or import error in the probe tree takes',
+  'all-skipped': 'it collected tests there but executed none of them',
+};
+
+/** No entry at all — the baseline never reported this probe. Absent is its own
+ *  state, and is not evidence that its tests failed. */
+const NOT_REPORTED = 'the baseline did not report it';
+
+/**
+ * The whole sentence a mutant or hunk is held `inconclusive` with when its own
+ * collocated test was not green in the unmutated baseline — the ONLY wording
+ * either guard has, so what this returns is what the report says.
+ *
+ * It reads the reason off the baseline rather than asserting one. The ways a
+ * probe fails to be green are different failures with different fixes, and the
+ * guards used to name one of them flatly: measured on PR #8368,
+ * `AuthDialog.test.tsx` compiled, collected 26 tests and failed exactly one,
+ * and all three mutants in its source were held with "likely a compile or
+ * import error in the probe tree" — sending a reader after an import problem
+ * that was never there.
+ *
+ * A probe with no baseline entry at all is reported as not measured, which is a
+ * different claim from measured-and-empty and the one the run actually
+ * supports. It cannot arise in this pipeline — `classifyProbeRun` maps over
+ * exactly the probe list `own` is drawn from — so it is a default, not a case.
+ */
+export function collocatedNotGreenDetail(
+  kind: 'mutant' | 'hunk',
+  probe: string,
+  baselinePerFile: readonly ProbeOutcome[],
+): string {
+  const entry = baselinePerFile.find((p) => p.file === probe);
+  const reason =
+    entry === undefined
+      ? NOT_REPORTED
+      : entry.verdict === 'inconclusive'
+        ? // Three reasons are set on the run-level `results` array and never by
+          // `classifyProbeRun`, so a baseline entry cannot carry them. Reaching
+          // one means the caller passed something other than the baseline —
+          // say that, rather than emit "did not run green … it read green".
+          BASELINE_REASON.has(entry.reason)
+          ? REASON_PHRASE[entry.reason]
+          : `the baseline did not classify it (${REASON_PHRASE[entry.reason]}), so this explanation does not apply to it`
+        : entry.verdict === 'gated'
+          ? 'it was RED there'
+          : // `inert` IS green, so the sentence this function builds does not
+            // apply to it. Say that, rather than produce a fluent claim that
+            // contradicts the measurement — the caller is what is wrong here.
+            'the baseline reported it GREEN, so this explanation does not apply to it';
+  const what = kind === 'mutant' ? 'the statement' : 'the hunk';
+  return `this ${kind}'s collocated test ${probe} did not run green in the unmutated baseline — ${reason}, so the remaining probes passing cannot show ${what} is uncovered`;
 }
 
 /**
@@ -906,7 +1115,7 @@ export function classifyProbeRun(
   stdout: string,
   probes: string[],
   stderr = '',
-): Array<{ file: string; verdict: ProbeVerdict; detail: string }> {
+): ProbeResult[] {
   let parsed: VitestJson | undefined;
   const start = stdout.indexOf('{');
   if (start >= 0) {
@@ -923,6 +1132,7 @@ export function classifyProbeRun(
     return probes.map((file) => ({
       file,
       verdict: 'inconclusive' as const,
+      reason: 'no-output' as const,
       detail: `runner produced no parseable JSON (exit ${exitCode})${why ? `: ${why}` : ''}`,
     }));
   }
@@ -957,10 +1167,23 @@ export function classifyProbeRun(
     const failed = assertions.filter((a) => a.status === 'failed').length;
     const passed = assertions.filter((a) => a.status === 'passed').length;
 
-    if (!result || assertions.length === 0) {
+    if (!result) {
+      // The run produced results and this file is not among them. A compile or
+      // import error looks like this — and so does a path that did not match
+      // (the boundary and case rules above are why that is not hypothetical),
+      // and those are different problems. Say only what was observed.
       return {
         file,
         verdict: 'inconclusive' as const,
+        reason: 'not-in-results' as const,
+        detail: `the run produced results but none for this file (run exit ${exitCode}) — a compile or import error looks like this, and so does a path that did not match; not evidence either way`,
+      };
+    }
+    if (assertions.length === 0) {
+      return {
+        file,
+        verdict: 'inconclusive' as const,
+        reason: 'no-tests' as const,
         detail: `collected no tests with the source reverted (run exit ${exitCode}) — likely a compile or import error, which is not evidence either way`,
       };
     }
@@ -979,6 +1202,7 @@ export function classifyProbeRun(
       return {
         file,
         verdict: 'inconclusive' as const,
+        reason: 'all-skipped' as const,
         detail: `${assertions.length} test(s) collected but none executed with the source reverted (all skipped) — not evidence either way`,
       };
     }
@@ -1129,17 +1353,10 @@ export function safeRmWithin(worktree: string, relPath: string): void {
 const existsAtBase = (cwd: string, base: string, path: string) =>
   existsAtRev(cwd, base, path);
 
-export function probeCreateFailureDetail(
-  err: unknown,
-  sweepStderr: string,
-): string {
-  return worktreeCreateFailureDetail('probe', err, sweepStderr);
-}
-
 /**
  * The warning for a probe worktree that survived its discard.
  *
- * Pure, and for the same reason as its sibling above: the branch it lives on
+ * Pure, and for the same reason as `worktreeCreateFailureDetail`: the branch it lives on
  * fires only when the path outlives both `worktree remove` and `rmSync`, which
  * no portable test can force. The reason is what makes it useful — whoever has
  * to delete the tree by hand needs to know WHY it would not go, and a bare
@@ -1241,7 +1458,7 @@ function runProbeSuite(
   now: () => number = Date.now,
   dependencyRoot: string = probeTree,
 ): {
-  perFile: Array<{ file: string; verdict: ProbeVerdict; detail: string }>;
+  perFile: ProbeResult[];
   ms: number;
   exposed: { linked: number; failed: number };
 } {
@@ -1269,10 +1486,18 @@ function runProbeSuite(
   // fires SIGTERM). Ignoring it reports those as "the runner produced no
   // parseable JSON", which
   // blames the runner's output for a run that produced none.
-  if (r.error) throw r.error;
+  // `r.error` first, as before: when both are set — ENOBUFS on a run that was
+  // also killed — the error names the actual failure and the signal only says
+  // it did not finish. Reversing them buried `ENOBUFS` under "killed by
+  // SIGTERM", which is a less useful sentence about the same event. The reason
+  // tag is derived from the whole result either way, so it does not depend on
+  // which message wins.
+  if (r.error)
+    throw new ProbeRunFailure(r.error.message, runnerFailureReason(r));
   if (r.signal) {
-    throw new Error(
+    throw new ProbeRunFailure(
       `runner killed by ${r.signal}${r.signal === 'SIGTERM' ? ` (probe timed out after ${Math.round(timeout / 1000)}s)` : ''}`,
+      runnerFailureReason(r),
     );
   }
   return {
@@ -1541,6 +1766,56 @@ export function runOneHunkProbe(
   }
 }
 
+/**
+ * The positive control: append one always-failing test to a GREEN probe file,
+ * run that file, restore. Red = the harness demonstrably executes assertions
+ * (true), green = it does not (false). Restore is by content in finally, the
+ * same discipline as every other probe edit in this file.
+ *
+ * `null` is the THIRD outcome, and it is not the same as `false`: the control
+ * never ran, so nothing was demonstrated either way. Returning `false` there
+ * would state as fact that an injected test stayed green when none was ever
+ * injected — the fabricated verdict this file's budget path already refuses
+ * ("never a fabricated true or false"), and it would additionally discard the
+ * whole mutant/hunk window over an I/O error.
+ *
+ * KNOWN BOUND: it validates ONE file, not the collection. The injection goes
+ * into `greenProbes[0]`, so a collector that silently drops a DIFFERENT probe
+ * file still passes the control while that file's survivors stand. The
+ * per-file baseline gate bounds the residual window — a file that collected
+ * nothing is never scored green to begin with — so what is left is a collector
+ * that runs one file and skips another. Named because a `true` here is read as
+ * covering the whole run.
+ */
+export function runControlMutant(
+  probeTree: string,
+  probeFile: string,
+  deadlineAt?: number,
+  now: () => number = Date.now,
+): boolean | null {
+  const abs = join(probeTree, probeFile);
+  let original: string;
+  try {
+    original = readFileSync(abs, 'utf8');
+  } catch {
+    return null; // cannot even read the probe file — nothing was demonstrated
+  }
+  try {
+    writeFileSync(
+      abs,
+      `${original}\n;import { it as __qcIt, expect as __qcExpect } from 'vitest';\n__qcIt('QWEN-REVIEW-POSITIVE-CONTROL', () => {\n  __qcExpect(1).toBe(2);\n});\n`,
+      'utf8',
+    );
+    const { perFile } = runProbeSuite(probeTree, [probeFile], deadlineAt, now);
+    // `gated` is the runner's "went red" verdict; anything else — still green,
+    // collected nothing, crashed — means the control did NOT demonstrate a
+    // working kill path.
+    return perFile.some((r) => r.verdict === 'gated');
+  } finally {
+    writeFileSync(abs, original, 'utf8');
+  }
+}
+
 export function runOneMutant(
   probeTree: string,
   mutant: MutantCandidate,
@@ -1692,11 +1967,12 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
     }
   }
 
-  const results: Array<{
-    file: string;
-    verdict: ProbeVerdict;
-    detail: string;
-  }> = [];
+  // `ProbeResult`, not a structural echo of it: this array is what `probed`
+  // serialises, so an entry pushed here without a reason is an untagged
+  // `inconclusive` in the artifact — the exact hole the union was introduced to
+  // close, reopened one level up. Typed this way, neither catch below nor the
+  // control-failed re-class compiles until it says which way it failed.
+  const results: ProbeResult[] = [];
   let cleanupFailure: string | undefined;
   const mutantResults: MutantResult[] = [];
   let mutantsSkippedForBudget = 0;
@@ -1705,6 +1981,14 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
   let hunksSkippedForBudget = 0;
   let hunksSkippedForCap = 0;
   let hunksSkippedForBaseline = 0;
+  /** Null until the positive control ran; false = dead runner, survivors lie. */
+  let harnessValidated: boolean | null = null;
+  // Its OWN counter, not the budget's or the baseline's: a control that came
+  // back red stops the run with candidates still unprobed, and folding them
+  // into `skippedForBudget` would say the window ran out when it did not. The
+  // note explains why; these numbers are what a reader can count.
+  let mutantsSkippedForControl = 0;
+  let hunksSkippedForControl = 0;
   let mutantsSkippedForBaseline = 0;
   let mutantsNote: string | undefined;
   // Notes can stack (a derailed file AND a red baseline); never clobber one
@@ -1837,9 +2121,18 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       // Could not isolate — probe nothing rather than fall back to mutating the
       // shared tree. Probes are inconclusive; the unreachable findings, which
       // need no probe, still ship.
-      const detail = probeCreateFailureDetail(e, String(sweep?.stderr ?? ''));
+      const detail = worktreeCreateFailureDetail(
+        'probe',
+        e,
+        String(sweep?.stderr ?? ''),
+      );
       for (const file of probes) {
-        results.push({ file, verdict: 'inconclusive' as const, detail });
+        results.push({
+          file,
+          verdict: 'inconclusive' as const,
+          reason: 'not-run' as const,
+          detail,
+        });
       }
       for (const c of candidates) {
         mutantResults.push({ ...c, verdict: 'inconclusive' as const, detail });
@@ -1895,7 +2188,85 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           );
         } else {
           const estimatedRunMs = baseline.ms + RUN_ESTIMATE_MARGIN_MS;
-          for (const c of candidates) {
+          // POSITIVE CONTROL, before any real mutant spends the window: inject
+          // one test that must fail into a green probe file and confirm the
+          // runner actually goes red. A runner that stays green while executing
+          // a false assertion is not running assertions at all — and against a
+          // dead runner every real mutant "survives", which is precisely the
+          // false gap-report this command exists to prevent. Control green →
+          // every survivor this run would report is re-classed inconclusive.
+          // (A live review measured the cost of lacking this: four survivors
+          // reported off a runner whose collected suite never covered them.)
+          // The control pays for its run like any other experiment: without
+          // this check it silently ate one budgeted slot and skippedForBudget
+          // under-reported by one. No budget for the control — and equally, a
+          // control that could not be set up at all — means nothing was
+          // validated (null), never a fabricated true or false.
+          // Nothing to pre-set here: both loops below run with
+          // `harnessValidated` still null, re-check the same budget against a
+          // later clock, and set their own counters. Assigning full counts
+          // first was dead in every path and worse than dead in one — the hunk
+          // loop pushes collocated-probe inconclusives BEFORE its budget
+          // check, so its own figure excludes them and this one did not.
+          if (fitsAnotherMutantRun(mutantDeadline - now(), estimatedRunMs)) {
+            harnessValidated = runControlMutant(
+              probeTree,
+              greenProbes[0],
+              mutantDeadline,
+              now,
+            );
+            if (harnessValidated === null) {
+              // The probe file could not be read, so no test was injected and
+              // no run happened. That is not a verdict about the runner —
+              // fall through and let the mutants spend the window as usual.
+              noteMutants(
+                `the positive control could not be set up (${greenProbes[0]} could not be read in the probe tree), so the harness was NOT validated this run — read every survivor below as unconfirmed by a control`,
+              );
+            }
+          }
+          if (harnessValidated === false) {
+            // Three causes share this shape — a runner that executes nothing,
+            // a collector that skips the injected test, a reporter that drops
+            // failures — and none of them can kill, so spending the rest of
+            // the window would only manufacture survivors to re-class.
+            mutantsSkippedForControl = candidates.length;
+            hunksSkippedForControl = hunkCandidates.length;
+            noteMutants(
+              'positive control FAILED (the injected always-failing test did not turn the run red — a dead runner, a collector that skipped it, or a reporter that dropped the failure): nothing here can kill, every would-be survivor is reported inconclusive, and the remaining mutant/hunk window was not spent',
+            );
+          }
+          for (const c of harnessValidated === false ? [] : candidates) {
+            // The hunk loop's rule, which the mutants needed just as much.
+            // A mutant runs against `greenProbes` only, so a file whose OWN
+            // test was red in the unmutated baseline has that test excluded
+            // from the run — and then "every affected test still passed"
+            // is computed over a set that omits the one test most likely to
+            // catch the deletion. Measured live on PR #8213: six hunks in
+            // `bridge.ts` were correctly held at `inconclusive` because
+            // `bridge.test.ts` was not green, while eight mutants in the SAME
+            // file were scored `survived` and shipped as findings.
+            //
+            // The comment below this loop framed the asymmetry as "mutants
+            // guard the killed direction, hunks guard the survived one". That
+            // is true of an inconclusive RUN; it left the survived direction
+            // of a mutant unguarded against an absent covering test. Checked
+            // before the budget, because a candidate that cannot yield a
+            // verdict should not spend a suite run to say so.
+            const heldDetail = heldForRedCollocatedTest(
+              'mutant',
+              c.file,
+              probes,
+              greenProbes,
+              baseline.perFile,
+            );
+            if (heldDetail) {
+              mutantResults.push({
+                ...c,
+                verdict: 'inconclusive' as const,
+                detail: heldDetail,
+              });
+              continue;
+            }
             const remaining = mutantDeadline - now();
             if (!fitsAnotherMutantRun(remaining, estimatedRunMs)) {
               mutantsSkippedForBudget =
@@ -1920,21 +2291,30 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           // the budget first, and a hunk probe is what the leftovers buy. It
           // also means a diff whose mutants consumed the window reports zero
           // hunk probes with `skippedForBudget` set — never a silent zero.
-          for (const h of hunkCandidates) {
+          for (const h of harnessValidated === false ? [] : hunkCandidates) {
             // A hunk whose OWN collocated test the baseline dropped (red, or the
             // case this exists for: a probe-tree import error that collected
             // nothing) cannot be scored `survived`: the other probes passing
             // shows only that THEY do not cover it, not that nothing does, since
-            // the one test that would catch it never ran. Same asymmetry the
-            // mutants hold, pointed the other way: there an inconclusive run is
-            // never `killed`, here an absent covering test is never `survived`.
-            const own = collocatedProbe(h.file, probes);
-            if (own && !greenProbes.includes(own)) {
+            // the one test that would catch it never ran. The mutants hold
+            // BOTH halves of this now: an inconclusive run is never `killed`,
+            // and — since the loop above gained the same collocated check —
+            // an absent covering test is never `survived` there either. The
+            // two halves are separate guards; having one was read as having
+            // the rule, and eight mutant survivors shipped through the gap.
+            const heldDetail = heldForRedCollocatedTest(
+              'hunk',
+              h.file,
+              probes,
+              greenProbes,
+              baseline.perFile,
+            );
+            if (heldDetail) {
               const { patch: _patch, ...meta } = h;
               hunkResults.push({
                 ...meta,
                 verdict: 'inconclusive' as const,
-                detail: `this hunk's collocated test ${own} did not run green in the unmutated baseline (likely a compile or import error in the probe tree), so the remaining probes passing cannot show the hunk is uncovered`,
+                detail: heldDetail,
               });
               continue;
             }
@@ -2000,11 +2380,15 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         // The probe could not be set up or run. That is not evidence about any
         // test — record it and keep going, so the report (and the unreachable
         // findings, which needed no probe at all) still reaches the caller.
-        const detail = `probe could not run: ${e instanceof Error ? e.message : String(e)}`;
+        const message = e instanceof Error ? e.message : String(e);
+        const detail = `probe could not run: ${message}`;
+        const reason =
+          e instanceof ProbeRunFailure ? e.reason : ('not-run' as const);
         results.push(
           ...probes.map((file) => ({
             file,
             verdict: 'inconclusive' as const,
+            reason,
             detail,
           })),
         );
@@ -2033,6 +2417,43 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
             String(discard?.stderr ?? ''),
           );
         }
+      }
+    }
+  }
+
+  // A dead runner cannot kill, so its "survivors" are non-evidence: re-class
+  // them before findings are derived, keeping the control's verdict upstream
+  // of everything a reader acts on.
+  if (harnessValidated === false) {
+    const detail =
+      'the positive control failed (an injected always-failing test stayed green), so a surviving mutant proves nothing about coverage';
+    for (const m of mutantResults) {
+      if (m.verdict === 'survived') {
+        m.verdict = 'inconclusive';
+        m.detail = detail;
+      }
+    }
+    for (const h of hunkResults) {
+      if (h.verdict === 'survived') {
+        h.verdict = 'inconclusive';
+        h.detail = detail;
+      }
+    }
+    // The file-level revert probe's "inert" is the same survivor claim one
+    // level up — a dead runner reports every reverted file green too.
+    for (let i = 0; i < results.length; i++) {
+      const r = results[i];
+      if (r.verdict === 'inert') {
+        // Replaced rather than mutated in place: the union makes `reason`
+        // mandatory on the arm this becomes, and assigning `verdict` alone
+        // would leave the entry untagged — which is the whole failure the
+        // union exists to make impossible.
+        results[i] = {
+          file: r.file,
+          verdict: 'inconclusive',
+          reason: 'control-failed',
+          detail,
+        };
       }
     }
   }
@@ -2096,8 +2517,17 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       skippedForBudget: mutantsSkippedForBudget,
       skippedForCap: mutantsSkippedForCap,
       skippedForBaseline: mutantsSkippedForBaseline,
+      skippedForControl: mutantsSkippedForControl,
       ...(mutantsNote ? { note: mutantsNote } : {}),
     },
+    /**
+     * `true` — an injected always-failing test turned the runner red, so this
+     * harness can kill. `false` — it stayed green: nothing here can kill, and
+     * every survivor was re-classed. `null` — the control never ran (no green
+     * baseline, no candidates, no budget, or the probe file was unreadable):
+     * the run is neither validated nor refuted, and it is NOT a survivor claim.
+     */
+    harnessValidated,
     hunks: {
       probed: hunkResults,
       killed: hunkResults.filter((h) => h.verdict === 'killed').length,
@@ -2107,6 +2537,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       skippedForBudget: hunksSkippedForBudget,
       skippedForCap: hunksSkippedForCap,
       skippedForBaseline: hunksSkippedForBaseline,
+      skippedForControl: hunksSkippedForControl,
     },
     findings,
     cleanupFailure,

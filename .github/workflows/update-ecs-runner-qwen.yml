@@ -1,6 +1,9 @@
 name: 'Update ECS Runner Qwen'
 
 on:
+  push:
+    branches: ['main']
+    paths: ['.github/workflows/update-ecs-runner-qwen.yml']
   workflow_dispatch:
     inputs:
       version:
@@ -55,7 +58,24 @@ jobs:
           # carry a runner user's custom npm prefix into the sudo install.
           (
             cd "${RUNNER_TEMP:?}"
-            sudo env -u NPM_CONFIG_PREFIX npm install -g --registry=https://registry.npmjs.org "@qwen-code/qwen-code@${VERSION}"
+            # All runner processes of a region share one machine, so another
+            # job's concurrent `npm install -g` can race npm's rename of the
+            # package dir (ENOTEMPTY). Clear trash left by crashed installs
+            # and retry through the seconds-long race window.
+            PKG_DIR='/usr/local/lib/node_modules/@qwen-code'
+            for attempt in 1 2 3; do
+              sudo rm -rf "${PKG_DIR}"/.qwen-code-* 2>/dev/null || true
+              if sudo env -u NPM_CONFIG_PREFIX npm install -g --registry=https://registry.npmjs.org "@qwen-code/qwen-code@${VERSION}"; then
+                exit 0
+              fi
+              if [[ "${attempt}" -lt 3 ]]; then
+                echo "::warning::npm install attempt ${attempt} failed; retrying"
+                sleep $((attempt * 10))
+              else
+                echo "::error::npm install of @qwen-code/qwen-code@${VERSION} failed after 3 attempts"
+              fi
+            done
+            exit 1
           )
 
       - name: 'Verify version'

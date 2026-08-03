@@ -13,10 +13,96 @@ import {
 } from './types.js';
 import {
   getProjectSummaryPrompt,
+  isSubpath,
+  resolvePath,
   runSideQuery,
 } from '@qwen-code/qwen-code-core';
 import type { HistoryItemSummary } from '../types.js';
 import { t } from '../../i18n/index.js';
+
+// Resolves the real path of the nearest existing ancestor of targetPath. The
+// target file itself usually does not exist yet, but a symlinked parent
+// directory can still point outside the project root, so the ancestor must be
+// resolved to detect that. Unlike the realpathNearestExisting copies in
+// exportCommand.ts/statsCommand.ts, this one does not guard the upward walk
+// itself (they loop while isSubpath(cwd, currentPath) and throw on escape);
+// every call site here must check containment on the returned path.
+const realpathNearestExisting = async (targetPath: string): Promise<string> => {
+  let currentPath = targetPath;
+  for (;;) {
+    try {
+      return await fsPromises.realpath(currentPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw error;
+      }
+      const parentPath = path.dirname(currentPath);
+      if (parentPath === currentPath) {
+        return currentPath;
+      }
+      currentPath = parentPath;
+    }
+  }
+};
+
+// Follows the full symlink chain at filePath (with cycle detection) and
+// verifies the final target is contained within realProjectRoot. A broken
+// chain whose terminal target is absent still resolves via
+// realpathNearestExisting, catching multi-hop escapes.
+const assertLeafNotSymlinkEscape = async (
+  filePath: string,
+  realProjectRoot: string,
+): Promise<void> => {
+  let current = filePath;
+  const seen = new Set<string>();
+  for (;;) {
+    const linkStat = await fsPromises.lstat(current).catch(() => null);
+    if (!linkStat?.isSymbolicLink()) break;
+    if (seen.has(current)) {
+      throw new Error(t('Summary path must be within the project root.'));
+    }
+    seen.add(current);
+    const linkTarget = await fsPromises.readlink(current);
+    current = path.isAbsolute(linkTarget)
+      ? linkTarget
+      : path.resolve(path.dirname(current), linkTarget);
+  }
+  const realTarget = await realpathNearestExisting(current);
+  if (!isSubpath(realProjectRoot, realTarget)) {
+    throw new Error(t('Summary path must be within the project root.'));
+  }
+};
+
+// Static footer prefix shared by the writer (saveSummaryToDisk) and the
+// detector below, kept in one place so the two cannot drift apart.
+const SUMMARY_FOOTER_PREFIX = '\n---\n\n## Summary Metadata\n**Update time**: ';
+
+const buildSummaryFooter = (timestamp: string): string =>
+  `${SUMMARY_FOOTER_PREFIX}${timestamp}\n`;
+
+// Reads only the file tail: the footer always lives in the last ~90 bytes, so
+// a mistyped multi-GB path is not loaded fully into memory just to test for it.
+const readSummaryTail = async (p: string, bytes = 4096): Promise<string> => {
+  const handle = await fsPromises.open(p, 'r');
+  try {
+    const { size } = await handle.stat();
+    const length = Math.min(size, bytes);
+    const buffer = Buffer.alloc(length);
+    await handle.read(buffer, 0, length, Math.max(0, size - length));
+    return buffer.toString('utf8');
+  } finally {
+    await handle.close();
+  }
+};
+
+// Built from the same prefix the writer emits (escaped so the literal `**` is
+// not read as a quantifier) and anchored to end-of-file, so a document that
+// merely embeds a sample footer is not mistaken for a generated summary and
+// clobbered.
+const isGeneratedSummary = (content: string): boolean =>
+  new RegExp(
+    `${SUMMARY_FOOTER_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[^\\n]*\\n?$`,
+  ).test(content.replace(/\r\n/g, '\n'));
 
 export const summaryCommand: SlashCommand = {
   name: 'summary',
@@ -25,9 +111,10 @@ export const summaryCommand: SlashCommand = {
       'Generate a project summary and save it to .qwen/PROJECT_SUMMARY.md',
     );
   },
+  argumentHint: '[path]',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
-  action: async (context): Promise<SlashCommandActionReturn> => {
+  action: async (context, args): Promise<SlashCommandActionReturn> => {
     const { config } = context.services;
     const { ui } = context;
     const executionMode = context.executionMode ?? 'interactive';
@@ -134,36 +221,190 @@ export const summaryCommand: SlashCommand = {
       return result.text;
     };
 
+    const resolveSummaryTarget = async (): Promise<{
+      summaryPath: string;
+      filePathForDisplay: string;
+      isDefaultTarget: boolean;
+      realProjectRoot: string;
+    }> => {
+      const projectRoot = config.getProjectRoot();
+      const defaultSummaryPath = path.join(
+        projectRoot,
+        '.qwen',
+        'PROJECT_SUMMARY.md',
+      );
+      const customPath = args?.trim();
+
+      if (!customPath) {
+        // The default target always overwrites: regenerating the summary is
+        // the command's purpose, and .qwen/PROJECT_SUMMARY.md is a generated
+        // artifact — not user prose the overwrite guard protects.
+        return {
+          summaryPath: defaultSummaryPath,
+          filePathForDisplay: '.qwen/PROJECT_SUMMARY.md',
+          isDefaultTarget: true,
+          realProjectRoot: await fsPromises.realpath(projectRoot),
+        };
+      }
+
+      // resolvePath expands a leading ~ so the path is honest before the
+      // containment check rejects it, instead of creating a literal "~" dir.
+      const resolved = resolvePath(projectRoot, customPath);
+
+      if (!isSubpath(projectRoot, resolved)) {
+        throw new Error(t('Summary path must be within the project root.'));
+      }
+
+      // A lexical check cannot see through symlinks: a link inside the project
+      // root may point outside it. Re-check containment on the real paths.
+      const realProjectRoot = await fsPromises.realpath(projectRoot);
+
+      await assertLeafNotSymlinkEscape(resolved, realProjectRoot);
+
+      const realResolved = await realpathNearestExisting(resolved);
+      if (!isSubpath(realProjectRoot, realResolved)) {
+        throw new Error(t('Summary path must be within the project root.'));
+      }
+
+      const hasTrailingSep =
+        customPath.endsWith('/') || customPath.endsWith(path.sep);
+      const resolvedStat = await fsPromises.stat(resolved).catch(() => null);
+      if (hasTrailingSep && resolvedStat?.isFile()) {
+        throw new Error(
+          t(
+            'Summary path ends with a separator but is an existing file: {{path}}',
+            { path: customPath },
+          ),
+        );
+      }
+      const isDir = hasTrailingSep || (resolvedStat?.isDirectory() ?? false);
+
+      const summaryPath = isDir
+        ? path.join(resolved, 'PROJECT_SUMMARY.md')
+        : resolved;
+
+      // The appended filename may itself be a symlink escaping the project
+      // root (e.g. a malicious repo tracks docs/PROJECT_SUMMARY.md -> /etc/
+      // passwd). Re-check the leaf after the join.
+      if (isDir) {
+        await assertLeafNotSymlinkEscape(summaryPath, realProjectRoot);
+      }
+
+      const filePathForDisplay = (
+        path.isAbsolute(customPath)
+          ? summaryPath
+          : path.relative(projectRoot, summaryPath)
+      ).replaceAll(path.sep, '/');
+
+      // Compute the default-target flag before the guards so an explicitly
+      // spelled default path (`.qwen/PROJECT_SUMMARY.md` or `.qwen/`) is
+      // treated as the default target for the overwrite guard and always
+      // overwrites. Unlike the no-arg command, a spelled path still runs the
+      // custom-path symlink containment checks.
+      const isDefaultTarget = summaryPath === defaultSummaryPath;
+
+      const existingStat = await fsPromises.stat(summaryPath).catch(() => null);
+
+      // Reject an existing directory at the leaf (e.g. `/summary docs` where
+      // docs/PROJECT_SUMMARY.md is itself a directory) before the LLM call,
+      // instead of surfacing a raw EISDIR only at write time.
+      if (existingStat?.isDirectory()) {
+        throw new Error(
+          t('Summary path resolves to an existing directory: {{path}}', {
+            path: filePathForDisplay,
+          }),
+        );
+      }
+
+      // For any non-default path, refuse to clobber a pre-existing file that is
+      // not a generated summary (e.g. a mistyped `package.json`). A generated
+      // summary carries a `## Summary Metadata` footer, so regenerating one is
+      // allowed.
+      if (!isDefaultTarget && existingStat?.isFile() && existingStat.size > 0) {
+        const existing = await readSummaryTail(summaryPath).catch(() => '');
+        if (!isGeneratedSummary(existing)) {
+          throw new Error(
+            t(
+              'Summary path already exists and is not a generated summary: {{path}}',
+              { path: filePathForDisplay },
+            ),
+          );
+        }
+      }
+
+      return {
+        summaryPath,
+        filePathForDisplay,
+        isDefaultTarget,
+        realProjectRoot,
+      };
+    };
+
     const saveSummaryToDisk = async (
       markdownSummary: string,
+      target: {
+        summaryPath: string;
+        filePathForDisplay: string;
+        isDefaultTarget: boolean;
+        realProjectRoot: string;
+      },
     ): Promise<{
       filePathForDisplay: string;
       fullPath: string;
     }> => {
-      // Ensure .qwen directory exists
-      const projectRoot = config.getProjectRoot();
-      const qwenDir = path.join(projectRoot, '.qwen');
-      try {
-        await fsPromises.mkdir(qwenDir, { recursive: true });
-      } catch (_err) {
-        // Directory might already exist, ignore error
+      const summaryContent = `${markdownSummary}\n${buildSummaryFooter(
+        new Date().toISOString(),
+      )}`;
+
+      // Re-check the leaf right before writing to narrow the TOCTOU window
+      // between resolveSummaryTarget (pre-LLM) and the write (post-LLM).
+      // The default target is the user's own .qwen/ directory — a symlinked
+      // .qwen/ is a deliberate setup, not an attack vector.
+      if (!target.isDefaultTarget) {
+        await assertLeafNotSymlinkEscape(
+          target.summaryPath,
+          target.realProjectRoot,
+        );
       }
 
-      // Save the summary to PROJECT_SUMMARY.md
-      const summaryPath = path.join(qwenDir, 'PROJECT_SUMMARY.md');
-      const summaryContent = `${markdownSummary}
+      const preWriteStat = await fsPromises
+        .stat(target.summaryPath)
+        .catch(() => null);
 
----
+      // Re-run the overwrite guard: a file created during generation (the
+      // slow step) would otherwise be silently destroyed.
+      if (
+        !target.isDefaultTarget &&
+        preWriteStat?.isFile() &&
+        preWriteStat.size > 0
+      ) {
+        const existing = await readSummaryTail(target.summaryPath).catch(
+          () => '',
+        );
+        if (!isGeneratedSummary(existing)) {
+          throw new Error(
+            t(
+              'Summary path already exists and is not a generated summary: {{path}}',
+              { path: target.filePathForDisplay },
+            ),
+          );
+        }
+      }
 
-## Summary Metadata
-**Update time**: ${new Date().toISOString()} 
-`;
-
-      await fsPromises.writeFile(summaryPath, summaryContent, 'utf8');
+      await fsPromises.mkdir(path.dirname(target.summaryPath), {
+        recursive: true,
+        ...(target.isDefaultTarget ? { mode: 0o700 } : {}),
+      });
+      // writeFile's mode applies at creation; for an existing file the user may
+      // have relaxed, the mode argument is ignored and permissions are kept.
+      await fsPromises.writeFile(target.summaryPath, summaryContent, {
+        encoding: 'utf8',
+        mode: 0o600,
+      });
 
       return {
-        filePathForDisplay: '.qwen/PROJECT_SUMMARY.md',
-        fullPath: summaryPath,
+        filePathForDisplay: target.filePathForDisplay,
+        fullPath: target.summaryPath,
       };
     };
 
@@ -252,13 +493,17 @@ export const summaryCommand: SlashCommand = {
       markdownSummary: string;
       filePathForDisplay: string;
     }> => {
+      const target = await resolveSummaryTarget();
       emitInteractivePending('generating');
       const markdownSummary = await generateSummaryMarkdown(history);
       if (abortSignal?.aborted) {
         throw new DOMException('Summary generation cancelled.', 'AbortError');
       }
       emitInteractivePending('saving');
-      const { filePathForDisplay } = await saveSummaryToDisk(markdownSummary);
+      const { filePathForDisplay } = await saveSummaryToDisk(
+        markdownSummary,
+        target,
+      );
       completeInteractive(filePathForDisplay);
       return { markdownSummary, filePathForDisplay };
     };
@@ -324,7 +569,8 @@ export const summaryCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'error',
-        content: formatErrorMessage(error),
+        content:
+          executionMode === 'interactive' ? '' : formatErrorMessage(error),
       };
     }
   },
