@@ -43,6 +43,7 @@ import type {
   PromptRequest,
   RequestPermissionResponse,
   SessionNotification,
+  SessionUpdate,
 } from '@agentclientprotocol/sdk';
 import type { LoadedSettings } from '../../config/settings.js';
 import * as nonInteractiveCliCommands from '../../nonInteractiveCliCommands.js';
@@ -13531,141 +13532,181 @@ describe('Session', () => {
       );
     });
 
-    it('keeps exit_plan_mode in PLAN until ACP approval executes and then notifies once', async () => {
-      let mode = ApprovalMode.PLAN;
-      const hookSpy = vi
-        .spyOn(core, 'firePermissionRequestHook')
-        .mockResolvedValue({
-          hasDecision: true,
-          shouldAllow: true,
-          updatedInput: { plan: 'Hook-replaced plan' },
-          denyMessage: undefined,
+    it.each([
+      ['live update', 'live', true],
+      ['bulk replay restore', 'replay', true],
+      ['failed replacement', 'failed', false],
+    ] as const)(
+      'keeps exit_plan_mode approval revision correct after %s',
+      async (_label, revisionSource, expectsRevision) => {
+        let mode = ApprovalMode.PLAN;
+        const hookSpy = vi
+          .spyOn(core, 'firePermissionRequestHook')
+          .mockResolvedValue({
+            hasDecision: true,
+            shouldAllow: true,
+            updatedInput: { plan: 'Hook-replaced plan' },
+            denyMessage: undefined,
+          });
+        const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
+        const executeSpy = vi.fn().mockImplementation(async () => {
+          const updatesBeforeExecute = vi
+            .mocked(mockClient.sessionUpdate)
+            .mock.calls.filter(
+              ([params]) =>
+                params.update.sessionUpdate === 'current_mode_update',
+            );
+          expect(mode).toBe(ApprovalMode.PLAN);
+          expect(updatesBeforeExecute).toHaveLength(0);
+          mode = ApprovalMode.DEFAULT;
+          return { llmContent: 'approved', returnDisplay: 'approved' };
         });
-      const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
-      const executeSpy = vi.fn().mockImplementation(async () => {
-        const updatesBeforeExecute = vi
+        const invocation = {
+          params: { plan: 'Original plan' },
+          requiresUserInteraction: vi.fn().mockReturnValue(true),
+          getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+          getConfirmationDetails: vi.fn().mockResolvedValue({
+            type: 'plan',
+            title: 'Approve plan',
+            plan: 'Original plan',
+            hideAlwaysAllow: true,
+            onConfirm: onConfirmSpy,
+          }),
+          getDescription: vi.fn().mockReturnValue('Plan:'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute: executeSpy,
+        };
+        const tool = {
+          name: core.ToolNames.EXIT_PLAN_MODE,
+          kind: core.Kind.Think,
+          build: vi.fn().mockReturnValue(invocation),
+        };
+
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn(() => mode);
+        mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+        mockConfig.getMessageBus = vi.fn().mockReturnValue({});
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'call-exit-plan',
+                    name: core.ToolNames.EXIT_PLAN_MODE,
+                    args: { plan: 'Original plan' },
+                  },
+                ],
+              },
+            },
+          ]),
+        );
+        const planUpdate: SessionUpdate = {
+          sessionUpdate: 'plan',
+          entries: [
+            {
+              content: 'Ship',
+              priority: 'medium',
+              status: 'pending',
+            },
+          ],
+          _meta: {
+            qwenTodoPlan: { id: 'plan-1' },
+            qwenTranscript: { planToolCallId: 'todo-call-1' },
+          },
+        };
+        if (revisionSource === 'replay') {
+          session.restoreTodoPlanRevisionFromReplay([
+            {
+              ...planUpdate,
+              _meta: {
+                qwenTodoPlan: { id: 'stale-plan' },
+                qwenTranscript: { planToolCallId: 'stale-call' },
+              },
+            },
+            planUpdate,
+          ]);
+        } else {
+          await session.sendUpdate(planUpdate);
+        }
+        if (revisionSource === 'failed') {
+          vi.mocked(mockClient.sessionUpdate).mockRejectedValueOnce(
+            new Error('connection lost'),
+          );
+          await expect(
+            session.sendUpdate({
+              ...planUpdate,
+              _meta: {
+                qwenTodoPlan: { id: 'plan-2' },
+                qwenTranscript: { planToolCallId: 'todo-call-2' },
+              },
+            }),
+          ).rejects.toThrow('connection lost');
+        }
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'approve the plan' }],
+          });
+        } finally {
+          hookSpy.mockRestore();
+        }
+
+        expect(mockClient.requestPermission).toHaveBeenCalledWith(
+          expect.objectContaining({
+            options: [
+              expect.objectContaining({
+                kind: 'allow_once',
+                optionId: core.ToolConfirmationOutcome.RestorePrevious,
+              }),
+              expect.objectContaining({
+                kind: 'allow_always',
+                optionId: core.ToolConfirmationOutcome.ProceedAlways,
+              }),
+              expect.objectContaining({
+                kind: 'allow_once',
+                optionId: core.ToolConfirmationOutcome.ProceedOnce,
+              }),
+              expect.objectContaining({
+                kind: 'reject_once',
+                optionId: core.ToolConfirmationOutcome.Cancel,
+              }),
+            ],
+            toolCall: expect.objectContaining({
+              kind: 'switch_mode',
+              rawInput: { plan: 'Original plan' },
+              _meta: expectsRevision
+                ? expect.objectContaining({
+                    qwenTodoApproval: {
+                      planId: 'plan-1',
+                      sourceCallId: 'todo-call-1',
+                    },
+                  })
+                : expect.not.objectContaining({
+                    qwenTodoApproval: expect.anything(),
+                  }),
+            }),
+          }),
+        );
+        expect(onConfirmSpy).toHaveBeenCalledWith(
+          core.ToolConfirmationOutcome.ProceedOnce,
+          { answers: undefined },
+        );
+        expect(invocation.params).toEqual({ plan: 'Original plan' });
+        const modeUpdates = vi
           .mocked(mockClient.sessionUpdate)
           .mock.calls.filter(
             ([params]) => params.update.sessionUpdate === 'current_mode_update',
           );
-        expect(mode).toBe(ApprovalMode.PLAN);
-        expect(updatesBeforeExecute).toHaveLength(0);
-        mode = ApprovalMode.DEFAULT;
-        return { llmContent: 'approved', returnDisplay: 'approved' };
-      });
-      const invocation = {
-        params: { plan: 'Original plan' },
-        requiresUserInteraction: vi.fn().mockReturnValue(true),
-        getDefaultPermission: vi.fn().mockResolvedValue('ask'),
-        getConfirmationDetails: vi.fn().mockResolvedValue({
-          type: 'plan',
-          title: 'Approve plan',
-          plan: 'Original plan',
-          hideAlwaysAllow: true,
-          onConfirm: onConfirmSpy,
-        }),
-        getDescription: vi.fn().mockReturnValue('Plan:'),
-        toolLocations: vi.fn().mockReturnValue([]),
-        execute: executeSpy,
-      };
-      const tool = {
-        name: core.ToolNames.EXIT_PLAN_MODE,
-        kind: core.Kind.Think,
-        build: vi.fn().mockReturnValue(invocation),
-      };
-
-      mockToolRegistry.getTool.mockReturnValue(tool);
-      mockConfig.getApprovalMode = vi.fn(() => mode);
-      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
-      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
-      mockConfig.getMessageBus = vi.fn().mockReturnValue({});
-      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
-        createStreamWithChunks([
-          {
-            type: core.StreamEventType.CHUNK,
-            value: {
-              functionCalls: [
-                {
-                  id: 'call-exit-plan',
-                  name: core.ToolNames.EXIT_PLAN_MODE,
-                  args: { plan: 'Original plan' },
-                },
-              ],
-            },
-          },
-        ]),
-      );
-      await session.sendUpdate({
-        sessionUpdate: 'plan',
-        entries: [
-          {
-            content: 'Ship',
-            priority: 'medium',
-            status: 'pending',
-          },
-        ],
-        _meta: {
-          qwenTodoPlan: { id: 'plan-1' },
-          qwenTranscript: { planToolCallId: 'todo-call-1' },
-        },
-      });
-
-      try {
-        await session.prompt({
-          sessionId: 'test-session-id',
-          prompt: [{ type: 'text', text: 'approve the plan' }],
+        expect(modeUpdates).toHaveLength(1);
+        expect(modeUpdates[0]?.[0].update).toMatchObject({
+          currentModeId: ApprovalMode.DEFAULT,
         });
-      } finally {
-        hookSpy.mockRestore();
-      }
-
-      expect(mockClient.requestPermission).toHaveBeenCalledWith(
-        expect.objectContaining({
-          options: [
-            expect.objectContaining({
-              kind: 'allow_once',
-              optionId: core.ToolConfirmationOutcome.RestorePrevious,
-            }),
-            expect.objectContaining({
-              kind: 'allow_always',
-              optionId: core.ToolConfirmationOutcome.ProceedAlways,
-            }),
-            expect.objectContaining({
-              kind: 'allow_once',
-              optionId: core.ToolConfirmationOutcome.ProceedOnce,
-            }),
-            expect.objectContaining({
-              kind: 'reject_once',
-              optionId: core.ToolConfirmationOutcome.Cancel,
-            }),
-          ],
-          toolCall: expect.objectContaining({
-            kind: 'switch_mode',
-            rawInput: { plan: 'Original plan' },
-            _meta: expect.objectContaining({
-              qwenTodoApproval: {
-                planId: 'plan-1',
-                sourceCallId: 'todo-call-1',
-              },
-            }),
-          }),
-        }),
-      );
-      expect(onConfirmSpy).toHaveBeenCalledWith(
-        core.ToolConfirmationOutcome.ProceedOnce,
-        { answers: undefined },
-      );
-      expect(invocation.params).toEqual({ plan: 'Original plan' });
-      const modeUpdates = vi
-        .mocked(mockClient.sessionUpdate)
-        .mock.calls.filter(
-          ([params]) => params.update.sessionUpdate === 'current_mode_update',
-        );
-      expect(modeUpdates).toHaveLength(1);
-      expect(modeUpdates[0]?.[0].update).toMatchObject({
-        currentModeId: ApprovalMode.DEFAULT,
-      });
-    });
+      },
+    );
 
     it('routes ACP protected L4 allow writes through AUTO review', async () => {
       const cwd = '/repo';

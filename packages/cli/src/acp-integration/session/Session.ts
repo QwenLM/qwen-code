@@ -4432,8 +4432,19 @@ export class Session implements SessionContext {
       update,
     };
 
+    if (update.sessionUpdate === 'plan') {
+      this.activeTodoPlanRevision = undefined;
+    }
     await this.client.sessionUpdate(params);
 
+    this.#captureTodoPlanRevision(update);
+  }
+
+  restoreTodoPlanRevisionFromReplay(updates: readonly SessionUpdate[]): void {
+    for (const update of updates) this.#captureTodoPlanRevision(update);
+  }
+
+  #captureTodoPlanRevision(update: SessionUpdate): void {
     if (update.sessionUpdate === 'plan') {
       const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
       const plan = isRecord(meta?.['qwenTodoPlan'])
@@ -8000,9 +8011,7 @@ export class Session implements SessionContext {
                     ...interactionMetaFields(confirmationDetails),
                     ...(isExitPlanModeTool && this.activeTodoPlanRevision
                       ? {
-                          qwenTodoApproval: {
-                            ...this.activeTodoPlanRevision,
-                          },
+                          qwenTodoApproval: this.activeTodoPlanRevision,
                         }
                       : {}),
                   },
@@ -8847,6 +8856,11 @@ export class Session implements SessionContext {
         const unsupportedError = `Slash command not supported in ACP integration: ${result.reason}`;
         throw new Error(unsupportedError);
       }
+
+      case 'goal_control':
+        throw new Error(
+          'Canonical Goal control is not available in ACP integration yet.',
+        );
 
       case 'no_command':
         // No command was found or executed, resolve the original prompt

@@ -13473,6 +13473,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         sendAvailableCommandsUpdate: ReturnType<typeof vi.fn>;
         replayHistory: ReturnType<typeof vi.fn>;
         primeTurnFromHistory: ReturnType<typeof vi.fn>;
+        restoreTodoPlanRevisionFromReplay: ReturnType<typeof vi.fn>;
         cumulativeUsage: {
           promptTokens: number;
           cachedTokens: number;
@@ -13665,6 +13666,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
             opts.replayHistoryImpl ?? (async () => undefined),
           ),
         primeTurnFromHistory: vi.fn(opts.primeTurnFromHistoryImpl),
+        restoreTodoPlanRevisionFromReplay: vi.fn(),
         cumulativeUsage: {
           promptTokens: 7,
           cachedTokens: 3,
@@ -14222,8 +14224,13 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       },
     });
     const replayUpdate = {
-      sessionUpdate: 'agent_message_chunk',
-      _meta: { timestamp: 4242 },
+      sessionUpdate: 'plan',
+      entries: [{ content: 'Ship', priority: 'medium', status: 'pending' }],
+      _meta: {
+        timestamp: 4242,
+        qwenTodoPlan: { id: 'plan-1' },
+        qwenTranscript: { planToolCallId: 'todo-call-1' },
+      },
     };
     mockHistoryReplay.mockImplementation(
       async (
@@ -14282,6 +14289,9 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     expect(lastSessionMock?.primeTurnFromHistory).toHaveBeenCalledWith(
       messages,
     );
+    expect(
+      lastSessionMock?.restoreTodoPlanRevisionFromReplay,
+    ).toHaveBeenCalledWith([{ ...replayUpdate, timestamp: 4242 }]);
     expect(mockHistoryReplay).toHaveBeenCalledTimes(1);
 
     expect(
@@ -14465,6 +14475,9 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     });
     expect(lastSessionMock?.installRewriter).toHaveBeenCalledTimes(1);
     expect(lastSessionMock?.startCronScheduler).toHaveBeenCalledTimes(1);
+    expect(
+      lastSessionMock?.restoreTodoPlanRevisionFromReplay,
+    ).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;
