@@ -5,6 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { readFile } from 'node:fs/promises';
 
 const { spawnSyncMock, existsSyncMock, homedirMock, tmpdirMock } = vi.hoisted(
   () => ({
@@ -95,6 +96,16 @@ describe('scripts/cli-entry.js production entry', () => {
       if (inherited === undefined) delete process.env.QWEN_CODE_STARTUP_VERSION;
       else process.env.QWEN_CODE_STARTUP_VERSION = inherited;
     }
+  });
+
+  it('clears the startup version before a managed-update relaunch', async () => {
+    const source = await readFile(
+      new URL('../cli-entry.js', import.meta.url),
+      'utf8',
+    );
+    expect(source).toMatch(
+      /const relaunchEnv = \{[\s\S]*?delete relaunchEnv\['QWEN_CODE_STARTUP_VERSION'\]/,
+    );
   });
 
   it('prefers the standalone launcher shim, which carries the bundled Node', async () => {
