@@ -13,13 +13,15 @@ Compression first attempts a specialized single-turn request when all of the
 following are true:
 
 - the compression model is the current main model;
-- the active provider is Anthropic or DashScope and cache control is enabled;
+- the active provider is Anthropic, DashScope, Gemini, or Vertex AI and cache
+  control is enabled;
 - slimming found no media that would change the provider-facing history.
 
 The request uses the current turn's effective generation config, including
 per-request tool overrides used by subagents, and the complete curated
 history. The existing compression instruction is appended as the final user
 message.
+Gemini and Vertex AI rely on their provider-managed implicit prefix cache.
 Nothing consumes or executes function calls from this request. A response
 containing a function call, an empty response, a malformed state snapshot, or
 a request error is discarded and retried once through the existing cold side
