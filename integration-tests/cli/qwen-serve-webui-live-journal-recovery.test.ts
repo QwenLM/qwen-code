@@ -109,6 +109,16 @@ describe('qwen serve WebUI live journal recovery', () => {
     const originalFetch = globalThis.fetch;
     const requestPaths: string[] = [];
     try {
+      globalThis.fetch = async (input, init) => {
+        const url =
+          typeof input === 'string'
+            ? input
+            : input instanceof URL
+              ? input.href
+              : input.url;
+        requestPaths.push(new URL(url, 'http://localhost').pathname);
+        return await originalFetch(input, init);
+      };
       activeDaemon = await spawnDaemon({
         workspaceCwd: workspace,
         extraArgs: ['--max-journal-events', '3'],
@@ -134,16 +144,6 @@ describe('qwen serve WebUI live journal recovery', () => {
       const prompt = activeDaemon.client.prompt(created.sessionId, {
         prompt: [{ type: 'text', text: 'repair this turn in WebUI' }],
       });
-      globalThis.fetch = async (input, init) => {
-        const url =
-          typeof input === 'string'
-            ? input
-            : input instanceof URL
-              ? input.href
-              : input.url;
-        requestPaths.push(new URL(url).pathname);
-        return await originalFetch(input, init);
-      };
       await sawLastChunk;
       observerAbort.abort();
 
@@ -197,7 +197,7 @@ describe('qwen serve WebUI live journal recovery', () => {
       ).toHaveLength(2);
       expect(
         requestPaths.filter((pathname) => pathname.endsWith('/prompt')),
-      ).toHaveLength(0);
+      ).toHaveLength(1);
       expect(JSON.stringify(blocks).match(/chunk-0/g)).toHaveLength(1);
     } finally {
       globalThis.fetch = originalFetch;

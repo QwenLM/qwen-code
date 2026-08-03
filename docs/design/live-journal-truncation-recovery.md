@@ -22,7 +22,7 @@ Recovery performs one same-session `session/load` with in-memory replay and no c
 
 On success, WebUI rebuilds the target suffix from the earliest matching user input through the fresh snapshot tail. It starts from the checkpoint when the marker block is still retained; otherwise it rebuilds a bounded full snapshot. Replayed events rebuild transcript state, including `assistant.done`, but events at or below the episode watermark do not repeat notices, workspace signals, pending-prompt publications, follow-up publications, or other side effects. Newer event IDs retain their normal effects.
 
-The resulting state is committed with one store reset. Retained history block IDs, pagination cursor, loaded depth, and capacity state remain stable. A fresh suffix that ends with another recoverable live marker creates a separate episode for that prompt.
+The resulting state is committed with one store reset. When the complete suffix fits within the checkpoint's `maxBlocks`, retained history block IDs, pagination cursor, loaded depth, and capacity state remain stable. If it crosses that limit, the existing store policy may trim the oldest loaded blocks rather than create an unbounded repair exception. A fresh suffix that ends with another recoverable live marker creates a separate episode for that prompt.
 
 ## Concurrency and lifecycle
 
