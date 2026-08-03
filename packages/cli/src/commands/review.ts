@@ -36,6 +36,7 @@ import { testEfficacyCommand } from './review/test-efficacy.js';
 import { testPlanCommand } from './review/test-plan.js';
 import { cleanupCommand } from './review/cleanup.js';
 import { runCommand } from './review/run.js';
+import { saveArtifactCommand } from './review/save-artifact.js';
 
 export const reviewCommand: CommandModule = {
   command: 'review',
@@ -68,11 +69,12 @@ export const reviewCommand: CommandModule = {
       .command(findingsCommand)
       .command(publishAssetsCommand)
       .command(composeReviewCommand)
+      .command(saveArtifactCommand)
       .command(submitCommand)
       .command(cleanupCommand)
       .demandCommand(
         1,
-        'Specify a subcommand: run, parse-args, fetch-pr, capture-local, capture-tui, plan-diff, pr-context, comment-status, load-rules, agent-prompt, build-test, base-tree, test-delta, drive, mock-provider, extract-step, script-lint, resolve-anchors, check-coverage, presubmit, test-efficacy, test-plan, findings, publish-assets, compose-review, submit, or cleanup.',
+        'Specify a subcommand: run, parse-args, fetch-pr, capture-local, capture-tui, plan-diff, pr-context, comment-status, load-rules, agent-prompt, build-test, base-tree, test-delta, drive, mock-provider, extract-step, script-lint, resolve-anchors, check-coverage, presubmit, test-efficacy, test-plan, findings, publish-assets, compose-review, save-artifact, submit, or cleanup.',
       )
       .version(false),
   handler: () => {
