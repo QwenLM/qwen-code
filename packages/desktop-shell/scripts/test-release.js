@@ -2,6 +2,7 @@
 
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -19,6 +20,12 @@ const manifestScript = path.join(
   'scripts',
   'create-desktop-update-manifest.mjs',
 );
+const electronBridgeScript = path.join(
+  repoRoot,
+  '.github',
+  'scripts',
+  'create-electron-bridge-manifest.mjs',
+);
 const versionScript = path.join(packageDir, 'scripts', 'version.js');
 const tauriConfig = JSON.parse(
   fs.readFileSync(
@@ -32,13 +39,44 @@ const root = fs.mkdtempSync(
 );
 try {
   testBootstrapBridgeConfiguration();
+  testLegacyApplicationIdentity();
+  testElectronBridgeWorkflow();
   testResolveLogRoot();
   testSliceNewLog();
   testUpdateManifest(path.join(root, 'manifest'));
+  testElectronBridgeManifest(path.join(root, 'electron-bridge'));
   testVersionSynchronization(path.join(root, 'version'));
   console.log('Desktop release helper checks passed.');
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
+}
+
+function testLegacyApplicationIdentity() {
+  const config = JSON.parse(
+    fs.readFileSync(
+      path.join(packageDir, 'src-tauri', 'tauri.conf.json'),
+      'utf8',
+    ),
+  );
+  assert.equal(config.productName, 'Qwen Code Desktop');
+  assert.equal(config.identifier, 'com.alibaba.qwen-code');
+}
+
+function testElectronBridgeWorkflow() {
+  const workflow = fs.readFileSync(
+    path.join(repoRoot, '.github', 'workflows', 'desktop-release.yml'),
+    'utf8',
+  );
+  assert.match(workflow, /^ {6}electron_bridge:$/m);
+  assert.match(workflow, /create-electron-bridge-manifest\.mjs/);
+  for (const artifact of [
+    'Qwen-Code-Desktop-arm64.zip',
+    'Qwen-Code-Desktop-x64.zip',
+    'Qwen-Code-Desktop-arm64.dmg',
+    'Qwen-Code-Desktop-x64.dmg',
+  ]) {
+    assert.match(workflow, new RegExp(artifact.replaceAll('.', '\\.')));
+  }
 }
 
 function testBootstrapBridgeConfiguration() {
@@ -107,9 +145,10 @@ function testResolveLogRoot() {
     /const logRoot = resolveLogRoot\(process\.platform, process\.env, \{/,
     'smoke must resolve log root via resolveLogRoot',
   );
-  assert.ok(
-    smoke.includes(`const appId = '${tauriConfig.identifier}'`),
-    'smoke appId must match tauri.conf.json identifier',
+  assert.match(
+    smoke,
+    /const appId = JSON\.parse\(\s*fs\.readFileSync\(\s*path\.join\(packageDir, 'src-tauri', 'tauri\.conf\.json'\),\s*'utf8',\s*\),\s*\)\.identifier;/,
+    'smoke appId must be derived from the tauri.conf.json identifier',
   );
   const previousLogIndex = smoke.indexOf(
     'let previousLog = fs.readFileSync(logPath',
@@ -243,6 +282,101 @@ function testUpdateManifest(directory) {
   );
   assert.notEqual(failure.status, 0);
   assert.match(failure.stderr, /Missing updater signature/);
+}
+
+function testElectronBridgeManifest(directory) {
+  const assets = path.join(directory, 'assets');
+  fs.mkdirSync(assets, { recursive: true });
+  const artifacts = [
+    'Qwen-Code-Desktop-arm64.zip',
+    'Qwen-Code-Desktop-x64.zip',
+    'Qwen-Code-Desktop-arm64.dmg',
+    'Qwen-Code-Desktop-x64.dmg',
+  ];
+  for (const artifact of artifacts) {
+    fs.writeFileSync(path.join(assets, artifact), `contents:${artifact}`);
+  }
+  const output = path.join(directory, 'latest-mac.yml');
+  execFileSync(process.execPath, [
+    electronBridgeScript,
+    '--assets',
+    assets,
+    '--version',
+    '0.1.0',
+    '--output',
+    output,
+  ]);
+  const manifest = fs.readFileSync(output, 'utf8');
+  assert.match(manifest, /^version: 0\.1\.0$/m);
+  assert.match(
+    manifest,
+    /^releaseDate: '\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z'$/m,
+  );
+  for (const artifact of artifacts) {
+    const contents = fs.readFileSync(path.join(assets, artifact));
+    const sha512 = crypto
+      .createHash('sha512')
+      .update(contents)
+      .digest('base64');
+    assert.match(
+      manifest,
+      new RegExp(
+        `^  - url: ${artifact.replaceAll('.', '\\.')}\\n    sha512: ${sha512.replaceAll('+', '\\+')}\\n    size: ${contents.length}$`,
+        'm',
+      ),
+    );
+  }
+  const arm64Contents = fs.readFileSync(path.join(assets, artifacts[0]));
+  const arm64Sha512 = crypto
+    .createHash('sha512')
+    .update(arm64Contents)
+    .digest('base64');
+  assert.match(manifest, /^path: Qwen-Code-Desktop-arm64\.zip$/m);
+  assert.match(
+    manifest,
+    new RegExp(`^sha512: ${arm64Sha512.replaceAll('+', '\\+')}$`, 'm'),
+  );
+
+  fs.rmSync(path.join(assets, artifacts[1]));
+  const failure = spawnSync(
+    process.execPath,
+    [
+      electronBridgeScript,
+      '--assets',
+      assets,
+      '--version',
+      '0.1.0',
+      '--output',
+      output,
+    ],
+    { encoding: 'utf8' },
+  );
+  assert.notEqual(failure.status, 0);
+  assert.match(failure.stderr, /Missing Electron bridge artifact/);
+
+  const invalidVersion = spawnSync(
+    process.execPath,
+    [
+      electronBridgeScript,
+      '--assets',
+      assets,
+      '--version',
+      '0.1',
+      '--output',
+      output,
+    ],
+    { encoding: 'utf8' },
+  );
+  assert.notEqual(invalidVersion.status, 0);
+  assert.match(invalidVersion.stderr, /Invalid --version/);
+
+  const missingOutput = spawnSync(
+    process.execPath,
+    [electronBridgeScript, '--assets', assets, '--version', '0.1.0'],
+    { encoding: 'utf8' },
+  );
+  assert.notEqual(missingOutput.status, 0);
+  assert.match(missingOutput.stderr, /Missing --output/);
 }
 
 function testVersionSynchronization(directory) {

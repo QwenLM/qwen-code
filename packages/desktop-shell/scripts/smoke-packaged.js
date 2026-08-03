@@ -23,7 +23,12 @@ const isolatedHome = path.join(workspace, 'home');
 const isolatedState = path.join(workspace, 'state');
 fs.mkdirSync(isolatedHome);
 fs.mkdirSync(isolatedState);
-const appId = 'com.qwen.code.desktop';
+const appId = JSON.parse(
+  fs.readFileSync(
+    path.join(packageDir, 'src-tauri', 'tauri.conf.json'),
+    'utf8',
+  ),
+).identifier;
 // On Windows the log lives under the real %LOCALAPPDATA% (a machine-global
 // path shared with any running desktop app), not the smoke workspace.
 // Do not run this smoke alongside a live Qwen Code desktop instance on Windows.
