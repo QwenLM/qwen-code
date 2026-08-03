@@ -87,8 +87,9 @@ full-snapshot refusal.
 
 ## Verification
 
-- A mixed-EOL large file reports the ending style present in the returned
-  slice.
+- A mixed-EOL large file's line window reports the ending style present in
+  the returned slice; a byte-cursor page may also report a terminator
+  outside its returned slice (see Decision).
 - Concurrent append, truncation, pathname replacement, and symlink replacement
   are rejected. A same-size in-place rewrite is rejected whenever the change
   lands in a later timestamp quantum: the checks compare modification time and
