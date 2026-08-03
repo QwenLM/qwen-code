@@ -6,6 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   rmSync,
@@ -49,13 +50,19 @@ const result = (
 
 describe('maven toolchain adapter', () => {
   let root: string;
+  let sandbox: string;
 
   beforeEach(() => {
-    root = mkdtempSync(join(tmpdir(), 'maven-toolchain-'));
+    sandbox = mkdtempSync(join(tmpdir(), 'maven-toolchain-'));
+    // One level deeper than the mkdtemp root: the reactor-escape fixtures
+    // create `../outside`, which must land inside this sandbox and get
+    // cleaned, not at a fixed path in the shared OS tmpdir.
+    root = join(sandbox, 'repo');
+    mkdirSync(root);
   });
 
   afterEach(() => {
-    rmSync(root, { recursive: true, force: true });
+    rmSync(sandbox, { recursive: true, force: true });
   });
 
   function writeProject(dir: string, modules: string[] = []): void {
@@ -70,6 +77,11 @@ describe('maven toolchain adapter', () => {
     writeProject('extension');
     writeProject('nested-parent', ['nested-leaf']);
     writeProject('nested-parent/nested-leaf');
+  }
+
+  function writeWrapper(): void {
+    writeFileSync(join(root, 'mvnw'), '#!/bin/sh\n');
+    chmodSync(join(root, 'mvnw'), 0o755);
   }
 
   it('recursively reads literal modules, ignores comments, and assigns deepest ownership', () => {
@@ -303,6 +315,30 @@ describe('maven toolchain adapter', () => {
     expect(calls).toEqual([]);
   });
 
+  it('fails closed for documentation in a project outside the root reactor', () => {
+    // The out-of-reactor check outranks the documentation exemption: the
+    // fail-closed rule applies to ANY changed path belonging to such a
+    // project, whatever its extension.
+    writeReactor();
+    writeProject('standalone');
+    const calls: string[] = [];
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['standalone/README.md'],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        calls.push(command);
+        return result(command);
+      },
+    });
+
+    expect(report.toolchain).toBe('unsupported');
+    expect(report.note).toContain('outside the root reactor: standalone');
+    expect(calls).toEqual([]);
+  });
+
   it('keeps verifying the owning module when a test-fixture POM sits under its src/', () => {
     // maven-invoker ITs, archetype fixtures, and src/test/resources/projects/*
     // trees are test DATA: Maven never builds them as reactor modules and no
@@ -378,6 +414,40 @@ describe('maven toolchain adapter', () => {
     expect(calls).toEqual([]);
   });
 
+  it('fans a module POM change out to the modules aggregated beneath it', () => {
+    // A nested aggregator's pom.xml is inherited by its descendants; `-pl
+    // <aggregator> -am` alone would compile the packaging=pom parent and
+    // test nothing that inherits the change.
+    writeReactor();
+    const parsed = readMavenReactor(root);
+    if (!parsed.reactor) throw new Error('expected reactor');
+
+    expect(
+      detectMavenOwnership(root, ['nested-parent/pom.xml'], parsed.reactor),
+    ).toEqual({
+      reactorWide: false,
+      modules: ['nested-parent', 'nested-parent/nested-leaf'],
+      inactiveProjects: [],
+    });
+
+    const calls: string[] = [];
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['nested-parent/pom.xml'],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        calls.push(command);
+        return result(command);
+      },
+    });
+
+    expect(report.toolchain).toBe('maven');
+    expect(calls).toEqual([
+      'mvn --batch-mode --no-transfer-progress -pl nested-parent,nested-parent/nested-leaf -am test',
+    ]);
+  });
+
   it('runs the root reactor for source fixtures with documentation extensions', () => {
     writeProject('.');
     const calls: string[] = [];
@@ -399,7 +469,14 @@ describe('maven toolchain adapter', () => {
 
   it('prefers the wrapper, runs from root, narrows modules, and forwards timeout', () => {
     writeReactor();
-    writeFileSync(join(root, 'mvnw'), '#!/bin/sh\n');
+    // The wrapper a platform can actually execute: win32 `cmd.exe` runs
+    // `mvnw.cmd` and cannot run `./mvnw`; POSIX needs the executable bit.
+    const windows = process.platform === 'win32';
+    if (windows) {
+      writeFileSync(join(root, 'mvnw.cmd'), '@echo off\n');
+    } else {
+      writeWrapper();
+    }
     const calls: Array<[string, string, number]> = [];
 
     const report = mavenToolchainAdapter.run({
@@ -416,9 +493,10 @@ describe('maven toolchain adapter', () => {
       },
     });
 
+    const executable = windows ? 'mvnw.cmd' : './mvnw';
     expect(calls).toEqual([
       [
-        './mvnw --batch-mode --no-transfer-progress -pl core,extension -am test',
+        `${executable} --batch-mode --no-transfer-progress -pl core,extension -am test`,
         root,
         17_000,
       ],
@@ -505,7 +583,7 @@ describe('maven toolchain adapter', () => {
 
   it('does not classify a changed wrapper permission failure as infrastructure', () => {
     writeReactor();
-    writeFileSync(join(root, 'mvnw'), '#!/bin/sh\n');
+    writeWrapper();
 
     const report = mavenToolchainAdapter.run({
       root,
@@ -527,7 +605,7 @@ describe('maven toolchain adapter', () => {
     // The guard compares normalized paths: `./mvnw` and absolute paths name
     // the same wrapper the raw comparison missed.
     writeReactor();
-    writeFileSync(join(root, 'mvnw'), '#!/bin/sh\n');
+    writeWrapper();
 
     const report = mavenToolchainAdapter.run({
       root,
@@ -546,14 +624,14 @@ describe('maven toolchain adapter', () => {
   });
 
   it.each([
-    ['/bin/sh: ./mvnw: Permission denied', true, 126],
-    ['sh: 1: mvn: not found', false, 127],
-    ['java.io.IOException: No space left on device', false, 1],
+    ['sh: 1: mvn: not found', 127],
+    // cmd.exe's wording when Maven is absent on Windows (exit 9009).
+    ["'mvn' is not recognized as an internal or external command", 9009],
+    ['java.io.IOException: No space left on device', 1],
   ])(
     'classifies unchanged Maven startup failures as infrastructure',
-    (output, wrapper, exitCode) => {
+    (output, exitCode) => {
       writeReactor();
-      if (wrapper) writeFileSync(join(root, 'mvnw'), '#!/bin/sh\n');
 
       const report = mavenToolchainAdapter.run({
         root,
@@ -567,9 +645,62 @@ describe('maven toolchain adapter', () => {
     },
   );
 
+  it.skipIf(process.platform === 'win32')(
+    'classifies an unchanged wrapper launch failure as infrastructure',
+    () => {
+      // The guard needs `executable === './mvnw'`, unreachable on win32.
+      writeReactor();
+      writeWrapper();
+
+      const runWith = (exitCode: number, output: string) =>
+        mavenToolchainAdapter.run({
+          root,
+          changedFiles: ['core/src/Main.java'],
+          timeout: 5,
+          install: false,
+          exec: (command) => result(command, { exitCode, output }),
+        });
+
+      const denied = runWith(126, '/bin/sh: ./mvnw: Permission denied');
+      expect(denied.note).toContain('infrastructure evidence');
+
+      // A CRLF-committed wrapper dies at shebang resolution on Linux.
+      const crlf = runWith(
+        126,
+        '/bin/sh: ./mvnw: /bin/sh^M: bad interpreter: No such file or directory',
+      );
+      expect(crlf.note).toContain('infrastructure evidence');
+
+      // Some shells report the same death with exit 127.
+      const crlf127 = runWith(
+        127,
+        '/bin/sh: ./mvnw: /usr/bin/env: bad interpreter: No such file or directory',
+      );
+      expect(crlf127.note).toContain('infrastructure evidence');
+    },
+  );
+
+  it('does not file a dependency failure as infrastructure when the diff changed build inputs', () => {
+    writeReactor();
+    const output =
+      '[ERROR] Could not resolve dependencies for project example:core';
+
+    for (const changed of ['pom.xml', '.mvn/maven.config', 'core/pom.xml']) {
+      const report = mavenToolchainAdapter.run({
+        root,
+        changedFiles: [changed],
+        timeout: 5,
+        install: false,
+        exec: (command) => result(command, { exitCode: 1, output }),
+      });
+      expect(report.note).toContain('Correlate compiler or test errors');
+      expect(report.note).not.toContain('infrastructure evidence');
+    }
+  });
+
   it('does not treat an inner permission error as a wrapper startup failure', () => {
     writeReactor();
-    writeFileSync(join(root, 'mvnw'), '#!/bin/sh\n');
+    writeWrapper();
 
     const report = mavenToolchainAdapter.run({
       root,
@@ -639,6 +770,34 @@ describe('maven toolchain adapter', () => {
     expect(report.test[0]?.output).toContain('[maven-test-failure]');
     expect(report.note).toContain('Correlate compiler or test errors');
     expect(report.note).not.toContain('infrastructure evidence');
+  });
+
+  it('treats exit 0 with fresh failing reports as a failure, not a pass', () => {
+    // surefire `testFailureIgnore` (or -Dmaven.test.failure.ignore) lets
+    // `mvn test` exit 0 over failing tests; the verdict must read the XML.
+    writeReactor();
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Core.xml'),
+          '<testsuite tests="2" failures="1" errors="1" skipped="0"><testcase classname="example.CoreTest" name="fails"><failure/></testcase></testsuite>',
+        );
+        return result(command);
+      },
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.output).toContain('[maven-test-failure]');
+    expect(report.note).toContain('exited 0');
+    expect(report.note).toContain('test failures, not a pass');
+    expect(report.note).not.toContain('Maven test passed');
   });
 
   it('skips malformed report directories without aborting Maven', () => {
@@ -731,6 +890,7 @@ describe('maven toolchain adapter', () => {
   it('selects the wrapper a platform can execute', () => {
     writeProject('.');
     writeFileSync(join(root, 'mvnw'), '#!/bin/sh\n');
+    chmodSync(join(root, 'mvnw'), 0o755);
     writeFileSync(join(root, 'mvnw.cmd'), '@echo off\n');
 
     expect(mavenExecutable(root, 'linux')).toBe('./mvnw');
@@ -742,6 +902,20 @@ describe('maven toolchain adapter', () => {
     expect(mavenExecutable(root, 'linux')).toBe('mvn');
     expect(mavenExecutable(root, 'win32')).toBe('mvn');
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'falls back to mvn for a wrapper without the executable bit',
+    () => {
+      // A `core.fileMode=false` checkout commits mvnw mode 644; running it
+      // would die with exit 126 and zero verification, so prefer system mvn.
+      writeProject('.');
+      writeFileSync(join(root, 'mvnw'), '#!/bin/sh\n');
+      expect(mavenExecutable(root, 'linux')).toBe('mvn');
+
+      chmodSync(join(root, 'mvnw'), 0o755);
+      expect(mavenExecutable(root, 'linux')).toBe('./mvnw');
+    },
+  );
 
   it('leaves repository metadata without Maven targets', () => {
     writeReactor();

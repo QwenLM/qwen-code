@@ -67,6 +67,12 @@ export interface CommandResult {
   timedOut: boolean;
   /** Trimmed output: enough to correlate a failure with the diff. */
   output: string;
+  /**
+   * The adapter classified this failure as infrastructure — Maven/Java or
+   * dependency acquisition, an unlaunchable wrapper: a result `test-plan`
+   * must not settle a Test Plan claim against.
+   */
+  infrastructure?: boolean;
 }
 
 export interface BuildTestReport {

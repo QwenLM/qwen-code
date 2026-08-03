@@ -251,6 +251,10 @@ describe('runBaseTree', () => {
     expect(builds).toEqual([]);
     expect(r.note).toContain('Maven');
     expect(r.note).toContain('not run');
+    // The attribution guard is what stops a downstream agent from reading an
+    // unavailable A/B as something attributable to the PR — pin it like the
+    // sibling failed-build note does.
+    expect(r.note).toMatch(/never a finding against the PR/);
     // The gate answers from the object store (git cat-file) BEFORE the
     // checkout: a large Java reactor never materialises a tree just to
     // learn it will not be built.

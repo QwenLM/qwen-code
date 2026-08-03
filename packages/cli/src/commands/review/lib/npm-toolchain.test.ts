@@ -4,12 +4,25 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { npmToolchainAdapter } from './npm-toolchain.js';
 import { selectToolchainAdapter } from './toolchain.js';
+
+const statfsSyncMock = vi.hoisted(() => vi.fn());
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  const mock = { ...actual, statfsSync: statfsSyncMock };
+  return { ...mock, default: mock };
+});
+
+// Plenty of disk by default, so this suite behaves the same on a nearly-full
+// machine as on an empty one — the low-disk case below opts in explicitly.
+beforeEach(() => {
+  statfsSyncMock.mockReturnValue({ bavail: 16 * 1024 ** 3, bsize: 1 });
+});
 
 const okExec = (command: string) => ({
   command,
@@ -177,6 +190,30 @@ describe('npm toolchain adapter', () => {
         'which packages the diff touches. Fall back to the build/test precedence in ' +
         'your brief, and give each command a deadline it can actually meet.',
     });
+  });
+
+  it('reports insufficient disk space instead of building on a full disk', () => {
+    statfsSyncMock.mockReturnValue({ bavail: 5.4e8, bsize: 1 }); // ~0.5G free
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'root',
+        scripts: { build: 'exit 0', test: 'exit 0' },
+      }),
+    );
+
+    const report = npmToolchainAdapter.run({
+      root,
+      changedFiles: ['src/index.ts'],
+      timeout: 5,
+      install: false,
+      exec: okExec,
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.build).toEqual([]);
+    expect(report.test).toEqual([]);
+    expect(report.note).toContain('Insufficient disk space');
   });
 
   it('does not treat a workspace repo as single-root when the root has scripts', () => {

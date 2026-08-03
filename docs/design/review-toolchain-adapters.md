@@ -110,7 +110,8 @@ than freezing a speculative priority rule now.
 
 1. Resolves the worktree.
 2. Reads and validates changed file paths from the review plan.
-3. Selects the first applicable built-in adapter.
+3. Selects the sole applicable built-in adapter, failing closed to the
+   unsupported report when zero or more than one apply.
 4. Calls the adapter.
 5. Emits the unchanged JSON report.
 
@@ -156,7 +157,7 @@ P0 changes:
   - Selects and invokes the built-in adapter.
 - `packages/cli/src/commands/review/lib/toolchain.ts`
   - Defines the internal adapter and detection contracts.
-  - Selects the first applicable adapter.
+  - Selects the sole applicable adapter (zero or more than one fails closed).
 - `packages/cli/src/commands/review/lib/npm-toolchain.ts`
   - Owns npm detection and the existing npm verification algorithm.
 - `packages/cli/src/commands/review/lib/npm-toolchain.test.ts`
@@ -337,8 +338,6 @@ P1 does not implement:
 - automatic JDK/OS matrix execution;
 - multi-toolchain result aggregation;
 - Maven-aware base-side test-delta.
-
-The automated test plan is in `.qwen/e2e-tests/review-maven-toolchain.md`.
 
 ## Future phases
 

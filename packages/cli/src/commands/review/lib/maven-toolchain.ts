@@ -4,7 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import {
+  accessSync,
+  constants,
+  existsSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+} from 'node:fs';
 import type { Dirent } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { BuildTestReport, CommandResult } from '../build-test.js';
@@ -262,6 +269,16 @@ export function detectMavenOwnership(
       (module) => path === module || path.startsWith(`${module}/`),
     );
     if (owner) {
+      if (path === `${owner}/pom.xml`) {
+        // A module POM is the parent config of every module aggregated
+        // beneath it: the descendants inherit what changed, and `-am` alone
+        // would compile only the aggregator and test nothing.
+        modules.add(owner);
+        for (const module of reactor.modules) {
+          if (module.startsWith(`${owner}/`)) modules.add(module);
+        }
+        continue;
+      }
       // Documentation is judged relative to the owning module so the `src/`
       // guard means the MODULE's source tree: `core/README.md` is a no-op
       // run, but `core/src/test/resources/expected.txt` is test data and
@@ -280,13 +297,17 @@ export function detectMavenOwnership(
       }
       continue;
     }
-    if (isDocumentationPath(path) || isRepoMetadataPath(path)) continue;
+    // The project check outranks the documentation exemption: a changed path
+    // that BELONGS to an out-of-reactor project fails closed no matter its
+    // extension, as step 5 of the ownership rules mandates. Root-level docs
+    // still fall through — the root project '.' is always in the reactor.
     const nearestProject = nearestMavenProject(root, path, reactor.projectDirs);
     if (nearestProject && !reactor.projectDirs.includes(nearestProject)) {
       inactiveProjects.add(nearestProject);
-    } else {
-      reactorWide = true;
+      continue;
     }
+    if (isDocumentationPath(path) || isRepoMetadataPath(path)) continue;
+    reactorWide = true;
   }
 
   return {
@@ -422,7 +443,11 @@ function freshTestSummaries(
     const summary = parseTestReport(root, path);
     if (summary) summaries.push(summary);
   }
-  return summaries.sort((a, b) => a.report.localeCompare(b.report));
+  // Byte-order, not localeCompare: evidence-line order must not depend on
+  // the host's ICU/locale settings.
+  return summaries.sort((a, b) =>
+    a.report < b.report ? -1 : a.report > b.report ? 1 : 0,
+  );
 }
 
 /** Report paths are always `<projectDir>/target/<report-dir>/<file>` (see reportPaths). */
@@ -528,7 +553,7 @@ function mavenReport(
 
 /** Shell- and JVM-level facts that need no Maven framing to be recognized. */
 function isLaunchFailure(output: string): boolean {
-  return /(?:mvn|java): (?:command )?not found|No space left on device|JAVA_HOME.*(?:not defined|incorrectly)|Unable to locate a Java Runtime/i.test(
+  return /(?:mvn|java): (?:command )?not found|(?:mvn|java)(?:\.cmd)?'? is not recognized as an internal or external command|No space left on device|JAVA_HOME.*(?:not defined|incorrectly)|Unable to locate a Java Runtime/i.test(
     output,
   );
 }
@@ -553,13 +578,29 @@ function isDependencyFailure(output: string): boolean {
   return output.split('\n').some(isDependencyFailureLine);
 }
 
-function isInfrastructureFailure(output: string): boolean {
-  return isLaunchFailure(output) || isDependencyFailure(output);
-}
-
 function hasFreshTestFailure(summaries: MavenTestSummary[]): boolean {
   return summaries.some(
     (summary) => summary.failures > 0 || summary.errors > 0,
+  );
+}
+
+/**
+ * Shell diagnostics for a wrapper that cannot start. `Permission denied` is
+ * the missing executable bit; `bad interpreter` / `No such file or directory`
+ * on the `./mvnw` line is a CRLF-committed shebang dying on Linux.
+ */
+const WRAPPER_LAUNCH_FAILURE_RE =
+  /(?:^|\n).*\.\/mvnw[^\n]*(?:Permission denied|bad interpreter|No such file or directory)(?:\n|$)/i;
+
+function summaryTotals(summaries: MavenTestSummary[]) {
+  return summaries.reduce(
+    (sum, item) => ({
+      tests: sum.tests + item.tests,
+      failures: sum.failures + item.failures,
+      errors: sum.errors + item.errors,
+      skipped: sum.skipped + item.skipped,
+    }),
+    { tests: 0, failures: 0, errors: 0, skipped: 0 },
   );
 }
 
@@ -579,9 +620,10 @@ export function shellSelector(
 
 /**
  * The wrapper a platform can actually execute. Every wrapper repo ships both
- * `mvnw` and `mvnw.cmd`; `./mvnw` is not runnable under win32 `cmd.exe`, and
- * an unexecutable wrapper must fall back to the system `mvn` rather than
- * steering a launch failure at the PR.
+ * `mvnw` and `mvnw.cmd`; `./mvnw` is not runnable under win32 `cmd.exe`. On
+ * POSIX a wrapper without the executable bit (a `core.fileMode=false`
+ * checkout) falls back to the system `mvn` rather than dying with exit 126
+ * and steering a launch failure at the PR.
  */
 export function mavenExecutable(
   root: string,
@@ -590,7 +632,12 @@ export function mavenExecutable(
   if (platform === 'win32') {
     return existsSync(join(root, 'mvnw.cmd')) ? 'mvnw.cmd' : 'mvn';
   }
-  return existsSync(join(root, 'mvnw')) ? './mvnw' : 'mvn';
+  try {
+    accessSync(join(root, 'mvnw'), constants.X_OK);
+    return './mvnw';
+  } catch {
+    return 'mvn';
+  }
 }
 
 function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
@@ -634,6 +681,18 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   const wrapperChanged = args.changedFiles.some(
     (file) => normalizedChangedPath(args.root, file) === 'mvnw',
   );
+  // The dependency carve-out below must not file a PR-caused breakage as
+  // environmental: when the diff changed POMs or `.mvn/**`, the resolution
+  // failure may be the diff's own doing.
+  const dependencyInputsChanged = args.changedFiles.some((file) => {
+    const path = normalizedChangedPath(args.root, file);
+    return (
+      path !== null &&
+      (path === 'pom.xml' ||
+        path.endsWith('/pom.xml') ||
+        path.startsWith('.mvn/'))
+    );
+  });
   const lifecycle = args.buildOnly ? 'test-compile' : 'test';
   // `-am` builds the changed modules plus their upstream closure. `-amd`
   // (downstream) selects the whole reactor on exactly the repos this adapter
@@ -656,14 +715,31 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     : [];
   const result = appendTestSummaries(executed, summaries);
   const timedOut = result.timedOut ? [result.command] : [];
-  const ok = result.exitCode === 0 && !result.timedOut;
+  // A fresh report recording failures outranks a green exit: surefire's
+  // `testFailureIgnore` (or `-Dmaven.test.failure.ignore`) lets `mvn test`
+  // exit 0 over failing tests, and the verdict must read the evidence.
+  const freshFailures = hasFreshTestFailure(summaries);
+  const ok = result.exitCode === 0 && !result.timedOut && !freshFailures;
+  const acquisitionFailure =
+    !ok &&
+    !freshFailures &&
+    result.exitCode !== null &&
+    (isLaunchFailure(result.output) ||
+      (isDependencyFailure(result.output) && !dependencyInputsChanged) ||
+      (executable === './mvnw' &&
+        !wrapperChanged &&
+        (result.exitCode === 126 || result.exitCode === 127) &&
+        WRAPPER_LAUNCH_FAILURE_RE.test(result.output)));
+  const recorded = acquisitionFailure
+    ? { ...result, infrastructure: true }
+    : result;
   const report = mavenReport({
     affected,
     buildSet,
     widenedWith: [],
     install: null,
-    build: args.buildOnly ? [result] : [],
-    test: args.buildOnly ? [] : [result],
+    build: args.buildOnly ? [recorded] : [],
+    test: args.buildOnly ? [] : [recorded],
     ok,
     timedOut,
     note: '',
@@ -679,18 +755,16 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     report.note =
       `\`${result.command}\` ended without an exit code (a spawn failure or signal outside the deadline). ` +
       'This is infrastructure evidence, not a source finding.';
-  } else if (
-    !ok &&
-    !hasFreshTestFailure(summaries) &&
-    (isInfrastructureFailure(result.output) ||
-      (executable === './mvnw' &&
-        !wrapperChanged &&
-        result.exitCode === 126 &&
-        /(?:^|\n).*\.\/mvnw:\s*Permission denied(?:\n|$)/i.test(result.output)))
-  ) {
+  } else if (acquisitionFailure) {
     report.note =
       `\`${result.command}\` failed while acquiring or starting Maven, Java, plugins, or dependencies. ` +
       'This is infrastructure evidence, not a source finding.';
+  } else if (!ok && result.exitCode === 0) {
+    const totals = summaryTotals(summaries);
+    report.note =
+      `\`${result.command}\` exited 0 but fresh Surefire/Failsafe reports record ` +
+      `${totals.failures} failure(s) and ${totals.errors} error(s) — a testFailureIgnore-style ` +
+      'setting is swallowing them. Treat these as test failures, not a pass.';
   } else if (!ok) {
     report.note =
       `\`${result.command}\` failed. Correlate compiler or test errors with the changed files; ` +
@@ -705,15 +779,7 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
       'but produced no fresh Surefire/Failsafe XML (reports written to a non-default directory are not seen here), ' +
       'so test-count evidence is unavailable.';
   } else {
-    const totals = summaries.reduce(
-      (sum, item) => ({
-        tests: sum.tests + item.tests,
-        failures: sum.failures + item.failures,
-        errors: sum.errors + item.errors,
-        skipped: sum.skipped + item.skipped,
-      }),
-      { tests: 0, failures: 0, errors: 0, skipped: 0 },
-    );
+    const totals = summaryTotals(summaries);
     report.note =
       `Maven test passed with fresh reports: ${totals.tests} tests, ${totals.failures} failures, ` +
       `${totals.errors} errors, ${totals.skipped} skipped across ${summaries.length} report(s).`;

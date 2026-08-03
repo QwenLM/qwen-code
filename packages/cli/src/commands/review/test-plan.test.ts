@@ -975,6 +975,73 @@ describe('runTestPlan', () => {
       expect(claim?.note).not.toContain('not run');
     });
 
+    it('does not rule on a Maven run that ended without an exit code', () => {
+      // A spawn-level death (OOM kill, outside signal) is infrastructure —
+      // the adapter says so about the same result; it must not read as a
+      // contradiction of the author's claim.
+      const bt = {
+        build: [],
+        test: [
+          {
+            command:
+              './mvnw --batch-mode --no-transfer-progress -pl core -am test',
+            exitCode: null,
+            seconds: 3,
+            timedOut: false,
+            output: '',
+          },
+        ],
+      } as unknown as BuildTestReport;
+      const r = run('## Test Plan\n\nRan `./mvnw test`', [], bt);
+      const claim = r.claims.find((c) => c.text === './mvnw test');
+      expect(claim?.verdict).toBe('unchecked');
+      expect(claim?.note).toContain('ended without an exit code');
+      expect(claim?.note).not.toContain('not run');
+    });
+
+    it('does not settle a claim on an infrastructure-classified Maven run', () => {
+      // A dependency-resolution failure the same review labels
+      // 'infrastructure evidence' must not falsify the author's claim.
+      const bt = {
+        build: [],
+        test: [
+          {
+            command:
+              './mvnw --batch-mode --no-transfer-progress -pl core -am test',
+            exitCode: 1,
+            seconds: 3,
+            timedOut: false,
+            output: '[ERROR] Could not resolve dependencies',
+            infrastructure: true,
+          },
+        ],
+      } as unknown as BuildTestReport;
+      const r = run('## Test Plan\n\nRan `./mvnw test`', [], bt);
+      const claim = r.claims.find((c) => c.text === './mvnw test');
+      expect(claim?.verdict).toBe('unchecked');
+      expect(claim?.note).toContain('environmental reasons');
+      expect(claim?.note).not.toContain('not run');
+    });
+
+    it('says the full reactor ran when the recorded command did not narrow', () => {
+      const bt = {
+        build: [],
+        test: [
+          {
+            command: 'mvn --batch-mode --no-transfer-progress test',
+            exitCode: 0,
+            seconds: 3,
+            timedOut: false,
+            output: '',
+          },
+        ],
+      } as unknown as BuildTestReport;
+      const r = run('## Test Plan\n\nRan `mvn test`', [], bt);
+      const claim = r.claims.find((c) => c.text === 'mvn test');
+      expect(claim?.verdict).toBe('reproduces');
+      expect(claim?.note).toBe('this review ran it');
+    });
+
     it('leaves an unobserved Maven command unchecked with Maven wording', () => {
       const r = run('## Test Plan\n\nRan `mvn -q verify`');
       const claim = r.claims.find((c) => c.text === 'mvn -q verify');

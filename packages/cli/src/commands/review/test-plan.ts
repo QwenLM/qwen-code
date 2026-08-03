@@ -52,7 +52,7 @@ import { gh, setGhHost } from './lib/gh.js';
 import { git } from './lib/git.js';
 import { diffHashOf } from './script-lint.js';
 import { readWorkspacePackages } from './lib/workspaces.js';
-import type { BuildTestReport } from './build-test.js';
+import type { BuildTestReport, CommandResult } from './build-test.js';
 import type { FileMetric } from './lib/report.js';
 
 /** What kind of assertion a claim is, which decides how it can be ruled. */
@@ -644,11 +644,20 @@ function ruleCommand(
   // scoped run failed, the phase failed, and the bare claim must read
   // `contradicted` — the first match could be a green package that merely
   // sorted first, stating the opposite of the authoritative `ok: false`.
+  // A run this review itself classified as infrastructure (a timeout, a
+  // spawn-level death, a Maven acquisition failure) is the same evidence the
+  // build-test note disavowed as environmental — it must not settle a claim.
+  const finished = (c: CommandResult): boolean =>
+    !c.timedOut && c.exitCode !== null && !c.infrastructure;
   const ran =
-    matches.find((c) => !c.timedOut && c.exitCode !== 0) ??
-    matches.find((c) => !c.timedOut);
+    matches.find((c) => finished(c) && c.exitCode !== 0) ??
+    matches.find(finished);
   if (ran) {
-    const scoped = settledByLifecycle(ran.command.trim());
+    // Reactor-wide recorded runs carry no `-pl`; calling those module-scoped
+    // would understate what the evidence verified.
+    const scoped =
+      settledByLifecycle(ran.command.trim()) &&
+      /(?:^|\s)-pl(?:\s|$)/.test(ran.command);
     return ran.exitCode === 0
       ? {
           kind: 'command',
@@ -671,19 +680,32 @@ function ruleCommand(
   }
 
   const claimedMavenLifecycle = mavenLifecycle(text);
-  if (
-    claimedMavenLifecycle !== null &&
-    matches.some((command) => command.timedOut)
-  ) {
-    return {
-      kind: 'command',
-      text,
-      verdict: 'unchecked',
-      note: 'this Maven command was run by this review but timed out',
-    };
-  }
-
   if (claimedMavenLifecycle !== null) {
+    if (matches.some((c) => c.timedOut)) {
+      return {
+        kind: 'command',
+        text,
+        verdict: 'unchecked',
+        note: 'this Maven command was run by this review but timed out',
+      };
+    }
+    if (matches.some((c) => c.exitCode === null)) {
+      return {
+        kind: 'command',
+        text,
+        verdict: 'unchecked',
+        note: 'this Maven command was run by this review but ended without an exit code',
+      };
+    }
+    if (matches.some((c) => c.infrastructure)) {
+      return {
+        kind: 'command',
+        text,
+        verdict: 'unchecked',
+        note: 'this Maven command was run by this review but failed for environmental reasons',
+      };
+    }
+
     return {
       kind: 'command',
       text,
