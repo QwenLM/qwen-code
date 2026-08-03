@@ -74,7 +74,7 @@ export const reviewCommand: CommandModule = {
       .command(cleanupCommand)
       .demandCommand(
         1,
-        'Specify a subcommand: run, parse-args, fetch-pr, capture-local, plan-diff, pr-context, comment-status, load-rules, agent-prompt, build-test, base-tree, test-delta, drive, mock-provider, extract-step, script-lint, resolve-anchors, check-coverage, presubmit, test-efficacy, test-plan, findings, publish-assets, compose-review, save-artifact, submit, or cleanup.',
+        'Specify a subcommand: run, parse-args, fetch-pr, capture-local, plan-diff, pr-context, comment-status, load-rules, agent-prompt, build-test, base-tree, test-delta, drive, mock-provider, extract-step, script-lint, resolve-anchors, check-coverage, cost-ledger, presubmit, test-efficacy, test-plan, findings, publish-assets, compose-review, save-artifact, submit, or cleanup.',
       )
       .version(false),
   handler: () => {
