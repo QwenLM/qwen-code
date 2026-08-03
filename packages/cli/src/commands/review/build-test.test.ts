@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   runBuildTest,
+  rebaseToRepoRoot,
   trimOutput,
   unresolvedWorkspaceDeps,
   buildRunEnv,
@@ -1299,6 +1300,8 @@ describe('runBuildTest (Maven)', () => {
     ]);
     expect(rep.ok).toBe(true);
     expect(rep.note).toContain('libs/dqc-all/dqc-core');
+    // `-am` puts the upstream closure into the test phase too; say so.
+    expect(rep.note).toContain('`-am` added');
   });
 
   it('scopes across two changed modules, sorted and comma-joined', () => {
@@ -1383,6 +1386,30 @@ describe('runBuildTest (Maven)', () => {
     expect(rep.ok).toBe(true);
   });
 
+  it('widens a changed parent pom whose dir is NOT itself a declared module', () => {
+    // The widening's other branch: an inheritance-only parent pom sits at a
+    // strict prefix of module dirs without being a module itself, so the
+    // file-mapping puts it under no module. Without the widening, the
+    // children inheriting the change would never build.
+    mavenRepo();
+    pom('libs', '<project/>');
+    writePlan(['libs/pom.xml']);
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec(calls),
+    });
+
+    expect(rep.affected).toEqual(['libs/dqc-all', 'libs/dqc-all/dqc-core']);
+    expect(calls[0]).toBe(
+      'mvn -B -pl libs/dqc-all,libs/dqc-all/dqc-core -am compile',
+    );
+  });
+
   it('unions widened descendants with the modules the diff also touches', () => {
     mavenRepo();
     writePlan(['libs/dqc-all/pom.xml', 'common/src/A.java']);
@@ -1418,41 +1445,73 @@ describe('runBuildTest (Maven)', () => {
     expect(calls).toEqual(['mvn -B compile', 'mvn -B test']);
   });
 
-  it('prefers ./mvnw when the repo pins a Maven wrapper', () => {
+  it.skipIf(process.platform === 'win32')(
+    'prefers ./mvnw when the repo pins a Maven wrapper',
+    () => {
+      mavenRepo();
+      writeFileSync(join(root, 'mvnw'), '#!/bin/sh\n', { mode: 0o755 });
+      writePlan(['common/src/A.java']);
+
+      const calls: string[] = [];
+      runBuildTest({
+        plan: planPath,
+        worktree: root,
+        timeout: 60,
+        install: false,
+        exec: okExec(calls),
+      });
+
+      expect(calls[0]).toBe('./mvnw -B -pl common -am compile');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'falls back to mvn when the wrapper lacks the exec bit',
+    () => {
+      // A wrapper committed from a Windows checkout has mode 644; `./mvnw`
+      // would exit 126 on every command and misroute into the correlate-with-
+      // diff framing. Degrade to `mvn` instead.
+      mavenRepo();
+      writeFileSync(join(root, 'mvnw'), '#!/bin/sh\n', { mode: 0o644 });
+      writePlan(['common/src/A.java']);
+
+      const calls: string[] = [];
+      runBuildTest({
+        plan: planPath,
+        worktree: root,
+        timeout: 60,
+        install: false,
+        exec: okExec(calls),
+      });
+
+      expect(calls[0]).toBe('mvn -B -pl common -am compile');
+    },
+  );
+
+  it('uses mvnw.cmd on Windows, where the POSIX exec-bit gate never fires', () => {
+    // Node synthesizes the mode without 0o111 on Windows, so the exec-bit
+    // gate can never pick the wrapper there — and `./mvnw` is a shell script
+    // cmd cannot run anyway. The pinned wrapper on Windows is `mvnw.cmd`.
     mavenRepo();
-    writeFileSync(join(root, 'mvnw'), '#!/bin/sh\n', { mode: 0o755 });
+    writeFileSync(join(root, 'mvnw.cmd'), '@echo off\r\n');
     writePlan(['common/src/A.java']);
 
-    const calls: string[] = [];
-    runBuildTest({
-      plan: planPath,
-      worktree: root,
-      timeout: 60,
-      install: false,
-      exec: okExec(calls),
-    });
-
-    expect(calls[0]).toBe('./mvnw -B -pl common -am compile');
-  });
-
-  it('falls back to mvn when the wrapper lacks the exec bit', () => {
-    // A wrapper committed from a Windows checkout has mode 644; `./mvnw`
-    // would exit 126 on every command and misroute into the correlate-with-
-    // diff framing. Degrade to `mvn` instead.
-    mavenRepo();
-    writeFileSync(join(root, 'mvnw'), '#!/bin/sh\n', { mode: 0o644 });
-    writePlan(['common/src/A.java']);
-
-    const calls: string[] = [];
-    runBuildTest({
-      plan: planPath,
-      worktree: root,
-      timeout: 60,
-      install: false,
-      exec: okExec(calls),
-    });
-
-    expect(calls[0]).toBe('mvn -B -pl common -am compile');
+    const platform = vi
+      .spyOn(process, 'platform', 'get')
+      .mockReturnValue('win32');
+    try {
+      const calls: string[] = [];
+      runBuildTest({
+        plan: planPath,
+        worktree: root,
+        timeout: 60,
+        install: false,
+        exec: okExec(calls),
+      });
+      expect(calls[0]).toBe('mvnw.cmd -B -pl common -am compile');
+    } finally {
+      platform.mockRestore();
+    }
   });
 
   it('skips the test command on --buildOnly', () => {
@@ -1490,6 +1549,50 @@ describe('runBuildTest (Maven)', () => {
 
     expect(rep.toolchain).toBe('unsupported');
     expect(rep.note).toContain('cannot model');
+  });
+
+  it('hands off when -pl selects a module only an inactive profile declares', () => {
+    // A profile-declared module is captured by the layout walk, but `-pl`
+    // selects against the DEFAULT reactor, which does not include it while
+    // the profile is inactive — Maven refuses the selection itself. Framing
+    // that as a diff-correlated build failure would push a Critical for a
+    // reactor-selection error; hand off instead.
+    pom(
+      '',
+      '<project><modules><module>common</module></modules>' +
+        '<profiles><profile><id>release</id><modules>' +
+        '<module>distribution</module></modules></profile></profiles>' +
+        '</project>',
+    );
+    pom('common', '<project/>');
+    pom('distribution', '<project/>');
+    writePlan(['distribution/src/X.java']);
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: (command) => {
+        calls.push(command);
+        return {
+          command,
+          exitCode: 1,
+          seconds: 1,
+          timedOut: false,
+          output:
+            '[ERROR] Could not find the selected project in the reactor: ' +
+            'distribution',
+        };
+      },
+    });
+
+    expect(calls).toHaveLength(1); // the failed selection is not evidence
+    expect(rep.toolchain).toBe('unsupported');
+    expect(rep.ok).toBe(true);
+    expect(rep.note).toContain('profile');
+    expect(rep.note).not.toContain('Critical');
   });
 
   it('stops after a failed build and frames it for correlation with the diff', () => {
@@ -1817,5 +1920,13 @@ describe('runBuildTest (workspace in a repo subdirectory)', () => {
 
     expect(rep.toolchain).toBe('maven');
     expect(rep.affected).toEqual(['common']);
+  });
+
+  it('never moves a linked worktree — it IS its own --show-toplevel', () => {
+    // The load-bearing claim behind "PR reviews never re-anchor", pinned
+    // with a real linked worktree instead of a comment.
+    const linked = join(repo, 'linked-wt');
+    git('worktree', 'add', '--detach', '-q', linked, 'HEAD');
+    expect(rebaseToRepoRoot(linked)).toBe(linked);
   });
 });

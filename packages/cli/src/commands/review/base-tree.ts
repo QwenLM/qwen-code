@@ -59,7 +59,17 @@ import {
   worktreeCreateFailureDetail,
   type SweepResult,
 } from './lib/worktree.js';
-import { runBuildTest, type BuildTestReport } from './build-test.js';
+import {
+  rebaseToRepoRoot,
+  runBuildTest,
+  type BuildTestReport,
+} from './build-test.js';
+import {
+  hasUnmodeledWorkspaceGlob,
+  readRootPackage,
+  readWorkspaceGlobs,
+  readWorkspacePackages,
+} from './lib/workspaces.js';
 
 export interface BaseTreeReport {
   /**
@@ -148,6 +158,28 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
     return unavailable(`the review worktree ${worktree} does not exist`);
   }
 
+  // The gate below accepts only an npm build, but it learns that only AFTER
+  // a worktree add and a full build when it rejects — a Maven review would
+  // spend a checkout plus up to a per-command deadline to be told what the
+  // source worktree's layout already says. Decide it up front; the gate
+  // still catches the rare case where the base tree's layout differs.
+  const scopable = rebaseToRepoRoot(worktree);
+  const globs = readWorkspaceGlobs(scopable);
+  const npmScopable =
+    globs.length > 0
+      ? !hasUnmodeledWorkspaceGlob(globs) &&
+        readWorkspacePackages(scopable).length > 0
+      : readRootPackage(scopable) !== null;
+  if (!npmScopable) {
+    return unavailable(
+      'the review worktree has no npm layout build-test can scope (a Maven ' +
+        'repo, unmodeled workspace globs, or no package to build), and the ' +
+        'A/B gate accepts only npm toolchains — the base build is refused up ' +
+        'front instead of paid for and rejected (infrastructure, never a ' +
+        'finding against the PR)',
+    );
+  }
+
   const tree = baseWorktreePath(worktree);
   // Idempotent fast path — and the CONCURRENCY guard. Step 4 launches its
   // verifier shards together, the brief offers every one of them this command,
@@ -161,7 +193,7 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
   // is a build error, not a wrong verdict. A marker of the wrong SHA — a
   // rebase between runs — falls through to the rebuild below.)
   const marker = () => join(tree, '.qwen-review-base-ok');
-  const failedMarker = () => join(tree, '.qwen-review-base-failed');
+  const unavailableMarker = () => join(tree, '.qwen-review-base-unavailable');
   try {
     if (
       existsSync(tree) &&
@@ -179,14 +211,15 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
   } catch {
     // No marker, unreadable marker, or a tree git cannot answer for: rebuild.
   }
-  // A base that FAILED to build is a settled answer too. Without this marker,
-  // every shard that asks re-sweeps and re-pays the install+build to relearn
-  // the same "unavailable" — and the sweep destroys the evidence tree the
-  // failure deliberately leaves standing.
+  // A base whose A/B is SETTLED UNAVAILABLE — it failed to build, or built
+  // under a toolchain failures cannot be attributed on — is a settled answer
+  // too. Without this marker, every shard that asks re-sweeps and re-pays the
+  // install+build to relearn the same "unavailable" — and the sweep destroys
+  // the evidence tree the failure deliberately leaves standing.
   try {
     if (
       existsSync(tree) &&
-      readFileSync(failedMarker(), 'utf8').trim() === baseSha
+      readFileSync(unavailableMarker(), 'utf8').trim() === baseSha
     ) {
       return {
         available: false,
@@ -194,12 +227,14 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
         baseSha,
         build: null,
         note:
-          `the base tree at ${baseSha.slice(0, 9)} already failed to build (an earlier probe measured it); ` +
-          'an A/B is not available for this review (infrastructure, never a finding against the PR)',
+          `the base tree at ${baseSha.slice(0, 9)} already settled as A/B-unavailable ` +
+          '(an earlier probe measured it — the build failed, or its toolchain cannot be ' +
+          'attributed); an A/B is not available for this review (infrastructure, never a ' +
+          'finding against the PR)',
       };
     }
   } catch {
-    // No failed-marker: proceed to build.
+    // No unavailable-marker: proceed to build.
   }
   // A real mutual-exclusion lock around sweep+add+build, not just the marker.
   // The reuse fast path covers the AFTER-build window; this covers the build
@@ -284,9 +319,9 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
       // Leave the tree standing. A base that does not build is a fact worth
       // looking at by hand, and deleting the evidence to save a directory is a
       // bad trade — `cleanup` sweeps it at the end of the review either way.
-      // The marker makes the failure a SETTLED answer for every later shard.
+      // The marker makes the verdict a SETTLED answer for every later shard.
       try {
-        writeFileSync(failedMarker(), `${baseSha}\n`);
+        writeFileSync(unavailableMarker(), `${baseSha}\n`);
       } catch {
         // The tree may be too broken to hold a marker; the next shard repays.
       }

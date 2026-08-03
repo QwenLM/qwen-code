@@ -82,6 +82,13 @@ describe('runBaseTree', () => {
     git(repo, 'config', 'user.email', 't@t.t');
     git(repo, 'config', 'user.name', 't');
     writeFileSync(join(repo, 'a.txt'), 'before\n');
+    writeFileSync(
+      join(repo, 'package.json'),
+      JSON.stringify({
+        name: 'fixture',
+        scripts: { build: 'true', test: 'true' },
+      }),
+    );
     git(repo, 'add', '-A');
     git(repo, 'commit', '-qm', 'base');
     baseSha = git(repo, 'rev-parse', 'HEAD');
@@ -184,7 +191,7 @@ describe('runBaseTree', () => {
     expect(run({}, build).available).toBe(false);
     const second = run({}, build);
     expect(second.available).toBe(false);
-    expect(second.note).toContain('already failed');
+    expect(second.note).toContain('already settled');
     expect(builds).toHaveLength(1);
   });
 
@@ -268,6 +275,25 @@ describe('runBaseTree', () => {
     const r = run({ plan: { baseFetchFailed: true } });
     expect(r.available).toBe(false);
     expect(r.note).toMatch(/stale/);
+    expect(existsSync(baseWorktreePath(worktree))).toBe(false);
+  });
+
+  it('refuses BEFORE any worktree add when the repo is not npm-scopable', () => {
+    // The A/B gate accepts only npm builds; a Maven review used to pay a
+    // checkout plus up to a full per-command deadline to learn that. The
+    // source worktree's layout tells it for free.
+    rmSync(join(worktree, 'package.json'));
+    writeFileSync(join(worktree, 'pom.xml'), '<project/>');
+
+    const builds: string[] = [];
+    const r = run({}, (w) => {
+      builds.push(w);
+      return okBuild;
+    });
+
+    expect(r.available).toBe(false);
+    expect(r.note).toMatch(/no npm layout/);
+    expect(builds).toEqual([]); // no checkout, no build
     expect(existsSync(baseWorktreePath(worktree))).toBe(false);
   });
 

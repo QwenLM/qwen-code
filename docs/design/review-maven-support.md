@@ -59,10 +59,13 @@ A new `lib/maven.ts` (sibling of `lib/workspaces.ts`) provides:
 
 - `readMavenLayout(root)` → `{ modules, unmodeled }` — the repo's full reactor
   module list as repo-relative dirs. Parses every `<module>…</module>` entry
-  out of a pom with a regex (the project has no XML dependency and pom module
-  lists are simple element text; this also picks up profile-declared modules),
-  then recurses into each module's own `pom.xml` so nested modules
-  (`libs/dqc-all/dqc-core`) are discovered. Depth-capped and cycle-guarded.
+  out of a pom's `<modules>` blocks with a regex (the project has no XML
+  dependency and pom module lists are simple element text; profiles declare
+  their modules in `<modules>` too, so this picks them up, while bare
+  `<module>` elements in plugin `<configuration>`s are not reactor entries
+  and are ignored), then recurses into each module's own `pom.xml` so
+  nested modules (`libs/dqc-all/dqc-core`) are discovered. Depth-capped and
+  cycle-guarded.
   `unmodeled` is the safety flag: a declared dir without a `pom.xml`, an
   outside-the-basedir / absolute / shell-unsafe entry, an entry the capture
   regex cannot see (element attributes, CDATA), or a depth-cap breach all set
@@ -93,7 +96,10 @@ every npm monorepo is unchanged. The Maven branch:
   single-root: any change builds/tests the root unscoped.
 - Runs at most one build command and one test command:
   - build: `<mvn> -B -pl <mods> -am compile`
-  - test: `<mvn> -B -pl <mods> -am test` (skipped when `buildOnly`)
+  - test: `<mvn> -B -pl <mods> -am test` (skipped when `buildOnly`). The
+    test phase covers the same `-am` reactor, so upstream modules are
+    tested too — the success note says so rather than claiming the test
+    ran only over the selected modules.
 
   `-am` keeps the run sound: everything the selected modules compile against
   is in the reactor, so no resolution depends on whatever happens to be in the
@@ -104,7 +110,15 @@ every npm monorepo is unchanged. The Maven branch:
 - `<mvn>` is `./mvnw` when a `mvnw` exists at the repo root AND carries an
   exec bit, else `mvn` — a wrapper committed without the bit (common from
   Windows-authored repos) would exit 126 on every command and misroute into
-  the "correlate with the diff" framing.
+  the "correlate with the diff" framing. On Windows there is no exec bit to
+  gate on and `./mvnw` is a shell script cmd cannot run, so the pinned
+  wrapper there is `mvnw.cmd` when present.
+- A build that fails with `Could not find the selected project in the
+reactor` is a module the layout walk captured from a profile that is not
+  active by default — `-pl` selects against the default reactor only. The
+  scoping cannot be trusted, so the repo hands off to the brief's fallback
+  instead of framing a reactor-selection error for correlation with the
+  diff (which would push a false Critical on the PR's changed paths).
 - No install step: Maven resolves dependencies itself during the build
   (user's `~/.m2` + `settings.xml`). The deadline, disk preflight,
   timeout-as-data, and failure-note semantics are reused unchanged.
@@ -140,9 +154,11 @@ defensively (a Maven repo only reaches it if `build-test` was never run).
   `unparsed` and inconclusive anyway — building the base would buy nothing but
   cost minutes. Maven reviews get `available: false` and the path rule, which
   is exactly what the brief already does with that state. The maven bullet
-  additionally tells Agent 7 to SKIP the base-tree call entirely — without
-  that, `base-tree` would spend up to a full deadline building the base tree
-  before its gate declares it unavailable.
+  additionally tells Agent 7 to SKIP the base-tree call entirely, and
+  `base-tree` itself refuses up front when the review worktree has no npm
+  layout it can scope — without those guards it would spend a checkout plus
+  up to a full deadline building the base tree before its gate declares it
+  unavailable.
 - `test-delta`, `test-plan`, `script-lint`: unchanged; their npm-shaped
   reasoning degrades to "cannot rule"/no-op on Maven reports as designed.
 - PR-flow subcommands: out of scope (GitLab support is a separate effort).

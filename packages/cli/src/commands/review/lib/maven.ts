@@ -65,12 +65,14 @@ function normalizeModuleDir(raw: string): string | null {
  * The module dirs one pom declares, in order.
  *
  * A regex over the element text rather than an XML parse: the project carries
- * no XML dependency, `<module>` entries are plain element text, and the only
- * other place a `<module>` element appears in a pom is inside a profile —
- * which this also wants, since a profile-declared module holds code a diff
- * can touch just the same. XML comments are stripped first: a commented-out
- * `<module>ghost</module>` whose directory does not exist would otherwise
- * flag the whole layout unmodeled and lose the scoping entirely.
+ * no XML dependency and `<module>` entries are plain element text. Only
+ * entries inside a `<modules>` block are reactor entries — `<module>` also
+ * appears in plugin `<configuration>`s (a JPMS module list), where capturing
+ * it would name a directory that is not a module. Profiles declare theirs
+ * inside `<modules>` too, so a profile-declared module — code a diff can
+ * touch just the same — is captured. XML comments are stripped first: a
+ * commented-out `<module>ghost</module>` whose directory does not exist would
+ * otherwise flag the whole layout unmodeled and lose the scoping entirely.
  *
  * `unmodeled` is true when a declared entry could not be normalized — an
  * outside-the-basedir path, an empty element, or a shell-unsafe segment.
@@ -88,21 +90,34 @@ export function declaredModulesOf(pomXml: string): {
   const dirs: string[] = [];
   let unmodeled = false;
   let matched = 0;
-  const re = /<module>\s*([^<]*?)\s*<\/module>/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(withoutComments)) !== null) {
-    matched++;
-    const dir = normalizeModuleDir(m[1] ?? '');
-    if (dir) {
-      dirs.push(dir);
-    } else {
-      unmodeled = true;
+  let rawModuleTokens = 0;
+  let blockCount = 0;
+  const blocks = /<modules>([\s\S]*?)<\/modules>/g;
+  let block: RegExpExecArray | null;
+  while ((block = blocks.exec(withoutComments)) !== null) {
+    blockCount++;
+    const body = block[1] ?? '';
+    const re = /<module>\s*([^<]*?)\s*<\/module>/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(body)) !== null) {
+      matched++;
+      const dir = normalizeModuleDir(m[1] ?? '');
+      if (dir) {
+        dirs.push(dir);
+      } else {
+        unmodeled = true;
+      }
     }
+    // `<modules>` does not match — the char after `<module` is `s`, not
+    // whitespace, `/` or `>` — so this counts module elements only.
+    rawModuleTokens += (body.match(/<module[\s/>]/g) ?? []).length;
   }
-  // `<modules>` does not match — the char after `<module` is `s`, not
-  // whitespace, `/` or `>` — so this counts module elements only.
-  const rawModuleTokens = withoutComments.match(/<module[\s/>]/g) ?? [];
-  if (rawModuleTokens.length > matched) unmodeled = true;
+  if (rawModuleTokens > matched) unmodeled = true;
+  // A `<modules` opener the block regex cannot see (an attribute on the
+  // element) hides every entry inside it; files under those modules would
+  // map to nothing and report a false green, so flag instead of guessing.
+  const modulesOpeners = withoutComments.match(/<modules[\s/>]/g) ?? [];
+  if (modulesOpeners.length > blockCount) unmodeled = true;
   return { dirs, unmodeled };
 }
 

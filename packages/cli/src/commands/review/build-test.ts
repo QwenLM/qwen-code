@@ -822,20 +822,26 @@ function runMavenBuildTest(
   if (layout.unmodeled) {
     return unsupportedMaven(
       'This Maven repo declares a module this command cannot model (an ' +
-        'outside-the-basedir entry, or a module directory with no pom.xml), so it ' +
-        'cannot safely decide which modules the diff touches. Fall back to the ' +
-        'build/test precedence in your brief, and give each command a deadline it ' +
-        'can actually meet.',
+        'outside-the-basedir or shell-unsafe entry, a module directory with no ' +
+        'pom.xml, an entry the parser cannot see, or nesting past its depth cap), ' +
+        'so it cannot safely decide which modules the diff touches. Fall back to ' +
+        'the build/test precedence in your brief, and give each command a deadline ' +
+        'it can actually meet.',
     );
   }
 
-  // The wrapper pins the Maven version the repo expects. Prefer it only when
-  // it is ALSO executable: one committed without the exec bit (common in
-  // repos authored on Windows) exits every command 126 Permission denied,
-  // which would misroute into the "correlate with the diff" framing instead
-  // of falling back to a `mvn` that works.
+  // The wrapper pins the Maven version the repo expects. On POSIX prefer it
+  // only when it is ALSO executable: one committed without the exec bit
+  // (common in repos authored on Windows) exits every command 126 Permission
+  // denied, which would misroute into the "correlate with the diff" framing
+  // instead of falling back to a `mvn` that works. On Windows there is no
+  // exec bit to gate on — Node synthesizes the mode without it — and `./mvnw`
+  // is a shell script cmd cannot run, so the pinned wrapper there is
+  // `mvnw.cmd`, used when present.
   let mvn = 'mvn';
-  if (existsSync(join(root, 'mvnw'))) {
+  if (process.platform === 'win32') {
+    if (existsSync(join(root, 'mvnw.cmd'))) mvn = 'mvnw.cmd';
+  } else if (existsSync(join(root, 'mvnw'))) {
     try {
       if (statSync(join(root, 'mvnw')).mode & 0o111) mvn = './mvnw';
     } catch {
@@ -853,17 +859,24 @@ function runMavenBuildTest(
   // the whole project. A file under no module is the Maven docs/root-config
   // case and builds nothing.
   let rootPomChanged = false;
-  const pomWidened = new Set<string>();
   for (const f of changed) {
-    const norm = f.replace(/^\.\//, '');
-    if (norm === 'pom.xml') {
+    if (f.replace(/^\.\//, '') === 'pom.xml') {
       rootPomChanged = true;
       break;
     }
-    if (norm.endsWith('/pom.xml')) {
-      const dir = norm.slice(0, -'/pom.xml'.length);
-      for (const m of layout.modules) {
-        if (m.startsWith(`${dir}/`)) pomWidened.add(m);
+  }
+  // A separate pass, and only when the root pom did not already take the
+  // whole reactor: collecting in the same loop that `break`s on the root pom
+  // would leave the set partially populated.
+  const pomWidened = new Set<string>();
+  if (!rootPomChanged) {
+    for (const f of changed) {
+      const norm = f.replace(/^\.\//, '');
+      if (norm.endsWith('/pom.xml')) {
+        const dir = norm.slice(0, -'/pom.xml'.length);
+        for (const m of layout.modules) {
+          if (m.startsWith(`${dir}/`)) pomWidened.add(m);
+        }
       }
     }
   }
@@ -882,7 +895,7 @@ function runMavenBuildTest(
   const results: BuildTestReport = {
     toolchain: 'maven',
     affected,
-    buildSet: affected,
+    buildSet: [...affected],
     widenedWith: [],
     install: null,
     build: [],
@@ -919,6 +932,23 @@ function runMavenBuildTest(
   const b = exec(buildCmd, root, perCommandMs);
   results.build.push(b);
   if (b.timedOut) results.timedOut.push(b.command);
+  // A module declared only under an inactive profile is captured by the
+  // layout walk but is not in the DEFAULT reactor `-pl` selects against, so
+  // Maven refuses the selection itself. That is a scoping mistake, not a
+  // compile error — the correlate-with-diff framing below would push a
+  // Critical for it. Hand the repo to the fallback instead.
+  if (
+    b.exitCode !== 0 &&
+    !b.timedOut &&
+    b.output.includes('Could not find the selected project in the reactor')
+  ) {
+    return unsupportedMaven(
+      '`mvn -pl` could not find a selected module in the default reactor — it ' +
+        'is declared only under a profile that is not active by default, so the ' +
+        'module scoping cannot be trusted. Fall back to the build/test precedence ' +
+        'in your brief, and give each command a deadline it can actually meet.',
+    );
+  }
   if (b.exitCode !== 0) {
     results.ok = false;
     results.note = b.timedOut
@@ -945,7 +975,10 @@ function runMavenBuildTest(
     const realFailures = failed.filter((r) => !r.timedOut);
     const testClause = args.buildOnly
       ? ' Tests were not run (build-only).'
-      : ' Tests ran over that set. Everything passed.';
+      : scoped
+        ? ' Tests ran over that same reactor — the selected modules plus what ' +
+          '`-am` added. Everything passed.'
+        : ' Tests ran over the whole reactor. Everything passed.';
     if (results.ok) {
       results.note = scoped
         ? `Scoped the build to ${affected.length} of ${layout.modules.length} Maven ` +

@@ -80,6 +80,29 @@ describe('declaredModulesOf', () => {
     expect(declaredModulesOf(pom)).toEqual({ dirs: ['a'], unmodeled: false });
   });
 
+  it('ignores a <module> outside any <modules> block — plugin configuration', () => {
+    // Plugin `<configuration>`s use bare `<module>` elements (a JPMS module
+    // list); they are not reactor entries, and capturing one would name a
+    // directory that is not a module.
+    const pom =
+      '<project><modules><module>real</module></modules>' +
+      '<build><plugins><plugin><configuration>' +
+      '<module>java.sql</module></configuration></plugin></plugins></build>' +
+      '</project>';
+    expect(declaredModulesOf(pom)).toEqual({
+      dirs: ['real'],
+      unmodeled: false,
+    });
+  });
+
+  it('flags a <modules> opener the block regex cannot see', () => {
+    // An attribute on `<modules>` hides every entry inside it; files under
+    // those modules would map to nothing and report a false green, so flag
+    // instead of guessing.
+    const pom = '<modules xml:space="preserve"><module>a</module></modules>';
+    expect(declaredModulesOf(pom)).toEqual({ dirs: [], unmodeled: true });
+  });
+
   it('picks up profile-declared modules too — they hold code a diff can touch', () => {
     const pom =
       '<project><profiles><profile><id>x</id><modules>' +
