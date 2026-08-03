@@ -47,6 +47,8 @@ import type {
   SessionWriterLeaseTestResponse,
 } from './session-writer-lease.test-helper.js';
 
+const itPosix = process.platform === 'win32' ? it.skip : it;
+
 const lstatFault = vi.hoisted(() => ({
   path: undefined as string | undefined,
   remainingFailures: 0,
@@ -1671,45 +1673,44 @@ describe('SessionWriterLease', () => {
     }
   });
 
-  it.runIf(process.platform !== 'win32')(
-    'detects an atomic replacement during content verification',
-    async () => {
-      const fixture = await createFixture();
-      await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
-      await fs.writeFile(fixture.transcriptPath, '{"seed":true}\n');
-      const lease = await SessionWriterLease.acquire(fixture.options);
-      const initial = await fs.stat(fixture.transcriptPath);
-      await fs.utimes(
-        fixture.transcriptPath,
-        initial.atime,
-        new Date(initial.mtimeMs + 1000),
-      );
-      const replacement = `${fixture.transcriptPath}.replacement`;
-      await fs.writeFile(replacement, '{"sEEd":true}\n');
-      const originalRead = nativeFileHandleRead;
-      let replaced = false;
-      const read = vi
-        .spyOn(fileHandlePrototype, 'read')
-        .mockImplementation(async function (this: fs.FileHandle, ...args) {
-          const result = await originalRead.apply(this, args);
-          if ((positionalReadLength(args) ?? 0) > 1 && !replaced) {
-            replaced = true;
-            await fs.rename(replacement, fixture.transcriptPath);
-          }
-          return result;
-        });
+  const replacementDuringReadName =
+    'detects an atomic replacement during content verification';
+  itPosix(replacementDuringReadName, async () => {
+    const fixture = await createFixture();
+    await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+    await fs.writeFile(fixture.transcriptPath, '{"seed":true}\n');
+    const lease = await SessionWriterLease.acquire(fixture.options);
+    const initial = await fs.stat(fixture.transcriptPath);
+    await fs.utimes(
+      fixture.transcriptPath,
+      initial.atime,
+      new Date(initial.mtimeMs + 1000),
+    );
+    const replacement = `${fixture.transcriptPath}.replacement`;
+    await fs.writeFile(replacement, '{"sEEd":true}\n');
+    const originalRead = nativeFileHandleRead;
+    let replaced = false;
+    const read = vi
+      .spyOn(fileHandlePrototype, 'read')
+      .mockImplementation(async function (this: fs.FileHandle, ...args) {
+        const result = await originalRead.apply(this, args);
+        if ((positionalReadLength(args) ?? 0) > 1 && !replaced) {
+          replaced = true;
+          await fs.rename(replacement, fixture.transcriptPath);
+        }
+        return result;
+      });
 
-      try {
-        await expect(lease.assertOwnedAndUnchanged()).rejects.toBeInstanceOf(
-          SessionTranscriptChangedError,
-        );
-        expect(replaced).toBe(true);
-      } finally {
-        read.mockRestore();
-        await lease.release();
-      }
-    },
-  );
+    try {
+      await expect(lease.assertOwnedAndUnchanged()).rejects.toBeInstanceOf(
+        SessionTranscriptChangedError,
+      );
+      expect(replaced).toBe(true);
+    } finally {
+      read.mockRestore();
+      await lease.release();
+    }
+  });
 
   it('detects truncation during content verification', async () => {
     const fixture = await createFixture();

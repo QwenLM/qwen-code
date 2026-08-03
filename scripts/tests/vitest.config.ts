@@ -15,10 +15,8 @@ export default defineConfig({
       process.platform === 'win32'
         ? [
             'scripts/tests/lint.test.js',
-            'scripts/tests/pr-self-report-label.test.js',
             'scripts/tests/qwen-autofix-workflow.test.js',
             'scripts/tests/qwen-fleet-shepherd-workflow.test.js',
-            'scripts/tests/qwen-pr-review-workflow.test.js',
             'scripts/tests/qwen-repo-hygiene-workflow.test.js',
             'scripts/tests/qwen-resolve-workflow.test.js',
             'scripts/tests/qwen-triage-finalize-workflow.test.js',
