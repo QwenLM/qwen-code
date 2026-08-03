@@ -3303,6 +3303,38 @@ exit 1
       expect(calls).toContain('autofix-status');
       expect(calls).toContain('AutoFix blocked');
       expect(calls).toContain('permission_lookup_failed');
+      expect(calls).toContain('A later scheduled scan will retry');
+
+      writeFileSync(callsFile, '');
+      const maintainerEditsReporter = spawnSync(
+        'bash',
+        [
+          '-c',
+          `sleep() { :; }\n${reportBlocked.replace(/\n {10}/g, '\n')}\nreport_forced_takeover_blocked maintainer_edits_disabled`,
+        ],
+        {
+          env: {
+            ...process.env,
+            PATH: `${reporterDir}:${process.env.PATH}`,
+            REPO: 'QwenLM/qwen-code',
+            FORCED_PR: '8320',
+            DRY_RUN: 'false',
+            AUTOFIX_BOT: 'qwen-code-dev-bot',
+            TAKEOVER_LABEL: 'autofix/takeover',
+            GITHUB_RUN_ID: '30778039590',
+            META: meta,
+          },
+          encoding: 'utf8',
+        },
+      );
+      expect(maintainerEditsReporter.status).toBe(0);
+      const maintainerEditsCalls = readFileSync(callsFile, 'utf8');
+      expect(maintainerEditsCalls).toContain(
+        'Re-enable maintainer edits on the fork PR to resume takeover',
+      );
+      expect(maintainerEditsCalls).not.toContain(
+        'A later scheduled scan will retry',
+      );
 
       const failedReporter = spawnSync(
         'bash',
@@ -3342,6 +3374,9 @@ exit 1
     ).toHaveLength(2);
     expect(reviewScanJob).toContain('metadata_fetch_failed');
     expect(reviewScanJob).toContain('permission_lookup_failed');
+    expect(reviewScanJob).toContain(
+      'fleet_row "${FPR}" \'blocked\' "author_permission_${FPERM:-none}"',
+    );
     expect(reviewScanJob).toContain('report_forced_takeover_blocked');
     expect(reviewScanJob).toContain('<!-- autofix-status -->');
     expect(reviewScanJob).toContain('AutoFix blocked');

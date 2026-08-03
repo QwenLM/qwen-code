@@ -1764,7 +1764,7 @@ jobs:
           }
 
           report_forced_takeover_blocked() {
-            local reason="$1" actor status_ids status_id body attempt status_lookup_ok
+            local reason="$1" actor status_ids status_id body attempt status_lookup_ok next_en next_zh
             [[ "${DRY_RUN}" == 'true' ]] && return 0
             [[ "$(jq -r --arg take "${TAKEOVER_LABEL}" '[.labels[]?.name] | index($take) != null' <<< "${META}")" == 'true' ]] || return 0
             case "${reason}" in
@@ -1776,7 +1776,14 @@ jobs:
               echo "::warning::Blocked takeover status skipped: PAT authenticates as '${actor:-unknown}'"
               return 1
             fi
-            body="$(printf '<!-- autofix-status -->\n\n⛔ **AutoFix blocked** — the latest review event was not addressed because takeover admission stopped at `%s`. [View run](https://github.com/%s/actions/runs/%s). A later scheduled scan will retry without advancing the feedback watermark.\n\n<details>\n<summary>中文说明</summary>\n\n⛔ **AutoFix 已阻塞** —— 最新评审事件未被处理，takeover 准入停在 `%s`。[查看运行](https://github.com/%s/actions/runs/%s)。后续定时扫描会重试，本次不会推进反馈水位。\n\n</details>' "${reason}" "${REPO}" "${GITHUB_RUN_ID}" "${reason}" "${REPO}" "${GITHUB_RUN_ID}")"
+            if [[ "${reason}" == 'maintainer_edits_disabled' ]]; then
+              next_en='Re-enable maintainer edits on the fork PR to resume takeover.'
+              next_zh='请在 fork PR 上重新允许 maintainer edits，以恢复 takeover。'
+            else
+              next_en='A later scheduled scan will retry without advancing the feedback watermark.'
+              next_zh='后续定时扫描会重试，本次不会推进反馈水位。'
+            fi
+            body="$(printf '<!-- autofix-status -->\n\n⛔ **AutoFix blocked** — takeover admission stopped at `%s`, so no work was started. [View run](https://github.com/%s/actions/runs/%s). %s\n\n<details>\n<summary>中文说明</summary>\n\n⛔ **AutoFix 已阻塞** —— takeover 准入停在 `%s`，因此本轮未开始处理。[查看运行](https://github.com/%s/actions/runs/%s)。%s\n\n</details>' "${reason}" "${REPO}" "${GITHUB_RUN_ID}" "${next_en}" "${reason}" "${REPO}" "${GITHUB_RUN_ID}" "${next_zh}")"
             status_ids=''
             status_lookup_ok=false
             for attempt in 1 2 3; do
@@ -1921,6 +1928,7 @@ jobs:
                   ;;
                 *)
                   echo "🧭 fork takeover candidate #${FPR} skipped: author ${FAUTHOR} permission='${FPERM:-none}' below write"
+                  fleet_row "${FPR}" 'blocked' "author_permission_${FPERM:-none}"
                   ;;
               esac
             done < <(jq -rs --arg skip "${SKIP_LABEL}" '
