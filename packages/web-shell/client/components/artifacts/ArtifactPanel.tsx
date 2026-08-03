@@ -226,6 +226,7 @@ interface ArtifactPanelProps {
     workspaceActions: DaemonWorkspaceActions,
   ) => void;
   onError?: (error: unknown, fallback: string) => void;
+  sessionWorkflowEnabled?: boolean;
   onClose: () => void;
   variant?: 'docked' | 'drawer';
 }
@@ -257,6 +258,7 @@ export function ArtifactPanel({
   onNestedRightPanelOpen,
   onNestedArtifactsChange,
   onError,
+  sessionWorkflowEnabled,
   onClose,
   variant = 'docked',
 }: ArtifactPanelProps) {
@@ -650,6 +652,7 @@ export function ArtifactPanel({
             onRightPanelOpen={onNestedRightPanelOpen}
             onArtifactsChange={onNestedArtifactsChange}
             onError={onError}
+            sessionWorkflowEnabled={sessionWorkflowEnabled}
           />
         ) : (
           <ScheduledTaskDetail
