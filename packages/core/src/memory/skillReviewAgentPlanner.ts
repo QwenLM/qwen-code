@@ -416,7 +416,9 @@ export async function runSkillReviewByAgent(params: {
   config: Config;
   projectRoot: string;
   history: Content[];
+  /** Per-call turn override; the shared memory setting is used otherwise. */
   maxTurns?: number;
+  /** Per-call timeout override; the shared memory setting is used otherwise. */
   timeoutMs?: number;
 }): Promise<SkillReviewExecutionResult> {
   const scopedConfig = createSkillScopedAgentConfig(
@@ -428,7 +430,10 @@ export async function runSkillReviewByAgent(params: {
     config: scopedConfig,
     taskPrompt: await buildTaskPrompt(params.projectRoot),
     systemPrompt: SKILL_REVIEW_SYSTEM_PROMPT,
-    maxTurns: params.maxTurns ?? DEFAULT_AUTO_SKILL_MAX_TURNS,
+    maxTurns:
+      params.maxTurns ??
+      params.config.getMemoryAgentMaxTurns() ??
+      DEFAULT_AUTO_SKILL_MAX_TURNS,
     maxTimeMinutes:
       params.timeoutMs !== undefined
         ? params.timeoutMs / 60_000

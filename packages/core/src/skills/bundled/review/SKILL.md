@@ -10,6 +10,7 @@ allowedTools:
   - write_file
   - edit
   - glob
+  - record_artifact
 ---
 
 # Code Review
@@ -381,7 +382,7 @@ It reads the harness's own per-agent transcripts: a record you do not author, ar
 - **Agents that never ran** — the roster, derived from the plan. This is the one failure the others cannot see: they all ask a question of an agent that ran, and an agent that did not run leaves no transcript to ask. Dogfooded, a real PR review **never launched Agent 0** — the agent whose whole job is asking whether the PR fixes the thing it claims to — and every other check passed. The report names the exact `agent-prompt` call that builds each missing one.
 - **Agents that never opened their brief** — the launch prompt points at the brief rather than containing it, so an agent that did not read it reviewed with no dimension, no severity definitions and no project rules. Relaunch each once.
 - **Agents launched blind** — the launch prompt never named the diff file, so the agent could not have read it. **Do not relaunch it as it was**; the second is as blind as the first. Rebuild the prompt with `qwen review agent-prompt` and launch with that.
-- **Agents not launched with the prompt the CLI built** — `agent-prompt` was run and then what it printed was **rewritten** on the way to the agent. Dogfooded, one run called the command for all five chunks and then delivered a paraphrase: it dropped the rule against reciting a stock sentence, dropped the half-read warning, and replaced the project's review rules with three sentences of its own. Nothing else in the run can see this, because a paraphrase keeps the diff path. **Copy what the command prints. Do not retype it.** You may wrap it; you may not edit it.
+- **Agents not launched with the prompt the CLI built** — `agent-prompt` was run and then what it printed was **rewritten** on the way to the agent. Dogfooded, one run called the command for all five chunks and then delivered a paraphrase: it dropped the rule against reciting a stock sentence, dropped the half-read warning, and replaced the project's review rules with three sentences of its own. Nothing else in the run can see this, because a paraphrase keeps the diff path. **Copy what the command prints. Do not retype it.** You may wrap it; you may not edit it. One carve-out, decided by the gate and not by you: a launch whose text drifted while the transcript proves the payload arrived — the agent opened its brief, and read the diff where its role reads the diff — is reported as a `NOTE` under `driftedLaunches`, it does not fail the gate, and it owes **no relaunch**. Measured: a model asked to copy twelve blocks normalized one word in every block's tail, and the repair relaunched the entire fan-out to redeliver text the agents had already acted on. The NOTE names the drift so you stop doing it; it does not ask you to spend a fan-out on it.
 - **Agents pointed at the diff that never opened it** — they made tool calls, so they are not idle; they simply worked on something else, usually the post-change source. Relaunch each once.
 - **Agents that made no tool call** — they read nothing, whatever they wrote. Relaunch each once.
 - **Chunks nobody reviewed** — launch an agent for each.
@@ -1108,6 +1109,36 @@ Report content should include:
 **The report's verdict is not yours to type.** `compose-review` printed the exact `Verdict:` line in Step 6 and persisted the same line as `verdictLine` inside `.qwen/tmp/qwen-review-{target}-composed.json` — copy either, verbatim. Do not reconstruct it from `event` + `cappedBy`: a presubmit downgrade also depends on fields that pair does not carry, and a rebuilt line can differ from the computed one. (And not `$(jq …)`: a `jq` binary is not guaranteed on the host, and a substitution that fails leaves the archived verdict blank or literal — worse than absent, because it looks written.)
 
 A run that had read `Verdict: Comment — an Approve was NOT available` wrote `**Verdict:** Approve` into its saved report minutes later. The terminal is prose and the archive is forever; this line is the one place the archive can be made to tell the truth for free. If the composed event is not the one you expected, fix the run — not the report.
+
+After the Markdown report exists, and before cleanup, create and register the structured review artifact for **medium and high** effort (low has no canonical composed verdict and must not invent one). Use the same filename stem as the Markdown report with a `.json` extension:
+
+```bash
+"${QWEN_CODE_CLI:-qwen}" review save-artifact \
+  --findings .qwen/tmp/qwen-review-<target>-findings.json \
+  --composed .qwen/tmp/qwen-review-<target>-composed.json \
+  --report .qwen/reviews/<report>.md \
+  --target <target> \
+  --effort <effort> \
+  --out .qwen/reviews/<report>.json
+```
+
+For PR worktree mode, the findings and composed inputs were created inside `worktreePath`, while the durable report and output belong to the main project directory. Pass absolute paths for all four: resolve `--findings` and `--composed` against `worktreePath`, and resolve `--report` and `--out` against the main project directory. The worktree lives under the main project's `.qwen/tmp/`, so all four remain inside the session workspace accepted by the helper. `save-artifact` prints one JSON object on stdout — `{"path": "<absolute path>", "workspacePath": "<path relative to the main project directory>"}`. Then call `record_artifact` in the current session with exactly this registration shape, copying `workspacePath` from that stdout object verbatim (do not re-derive it from the absolute path):
+
+```json
+{
+  "title": "Code review result",
+  "kind": "other",
+  "storage": "workspace",
+  "workspacePath": ".qwen/reviews/<report>.json",
+  "mimeType": "application/vnd.qwen.code-review+json",
+  "metadata": {
+    "artifactType": "code_review",
+    "schemaVersion": 1
+  }
+}
+```
+
+The JSON helper is fail-closed because it carries the authoritative review result: if it fails, do not synthesize a replacement or register a partial artifact. A `record_artifact` failure is a UI-delivery failure, not a review-verdict input: disclose the failure to the user, keep the Markdown report, and do **not** change, soften, or recompute the existing composed verdict.
 
 ### Incremental review cache
 
