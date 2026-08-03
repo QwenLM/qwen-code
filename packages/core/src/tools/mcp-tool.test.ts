@@ -2077,8 +2077,12 @@ describe('DiscoveredMCPTool', () => {
       });
     });
 
-    it('keeps a direct request timeout that settles before a parent abort', async () => {
-      const requestTimeout = Object.assign(new Error('direct timeout won'), {
+    it('does not classify a direct -32001 that races with a parent abort as a timeout', async () => {
+      // Once the caller has cancelled, a `-32001` is indistinguishable from
+      // the SDK's own abort rejection, so a timeout that settles the race
+      // first must not reclassify the cancellation — the abort side wins
+      // regardless of ordering (#8180 review).
+      const requestTimeout = Object.assign(new Error('raced timeout'), {
         code: -32001,
       });
       let rejectRequest: ((reason?: unknown) => void) | undefined;
@@ -2108,10 +2112,7 @@ describe('DiscoveredMCPTool', () => {
       rejectRequest?.(requestTimeout);
       abortController.abort();
 
-      await expect(executePromise).rejects.toMatchObject({
-        message: 'direct timeout won',
-        errorType: ToolErrorType.EXECUTION_TIMEOUT,
-      });
+      await expect(executePromise).rejects.toBe(requestTimeout);
     });
 
     it('classifies an MCP SDK request timeout on the callable fallback', async () => {
@@ -2129,10 +2130,11 @@ describe('DiscoveredMCPTool', () => {
       });
     });
 
-    it('keeps a callable request timeout that settles before a parent abort', async () => {
-      const requestTimeout = Object.assign(new Error('fallback timeout won'), {
-        code: -32001,
-      });
+    it('does not classify a callable -32001 that races with a parent abort as a timeout', async () => {
+      const requestTimeout = Object.assign(
+        new Error('raced fallback timeout'),
+        { code: -32001 },
+      );
       let rejectRequest: ((reason?: unknown) => void) | undefined;
       mockCallTool.mockReturnValueOnce(
         new Promise((_resolve, reject) => {
@@ -2147,10 +2149,7 @@ describe('DiscoveredMCPTool', () => {
       rejectRequest?.(requestTimeout);
       abortController.abort();
 
-      await expect(executePromise).rejects.toMatchObject({
-        message: 'fallback timeout won',
-        errorType: ToolErrorType.EXECUTION_TIMEOUT,
-      });
+      await expect(executePromise).rejects.toBe(requestTimeout);
     });
 
     it('should abort when MCP server does not respond within idle timeout', async () => {

@@ -11665,6 +11665,66 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(responseText).not.toContain('User cancelled tool execution.');
   });
 
+  // A post-execution cancellation drops the model-visible output, but the
+  // references to files the tool already spilled to disk must survive —
+  // otherwise nothing points at them and they are orphaned (#8180 review).
+
+  it('keeps persisted output files on a post-completion cancellation', async () => {
+    const abortController = new AbortController();
+    const { completedCalls } = await runSingleTool({
+      abortController,
+      execute: vi.fn().mockImplementation(async () => {
+        abortController.abort();
+        return {
+          llmContent: 'done',
+          returnDisplay: 'done',
+          persistedOutputFiles: ['/tmp/tool-results/span-call.txt'],
+        };
+      }),
+    });
+
+    const completedCall = completedCalls[0] as CompletedToolCall;
+    expect(completedCall.status).toBe('cancelled');
+    expect(completedCall.response.executionStatus).toBe('cancelled');
+    expect(completedCall.response.persistedOutputFiles).toEqual([
+      '/tmp/tool-results/span-call.txt',
+    ]);
+  });
+
+  it('keeps persisted output files when cancellation lands during post-processing', async () => {
+    const abortController = new AbortController();
+    const messageBus = {
+      request: vi.fn(async (request: { eventName: string }) => {
+        if (request.eventName === 'PostToolUse') {
+          abortController.abort();
+        }
+        return {
+          type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+          correlationId: `${request.eventName}-hook`,
+          success: true,
+          output: { decision: 'allow' },
+        };
+      }),
+    };
+    const { completedCalls } = await runSingleTool({
+      abortController,
+      messageBus,
+      disableHooks: false,
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'done',
+        returnDisplay: 'done',
+        persistedOutputFiles: ['/tmp/tool-results/span-call.txt'],
+      }),
+    });
+
+    const completedCall = completedCalls[0] as CompletedToolCall;
+    expect(completedCall.status).toBe('cancelled');
+    expect(completedCall.response.executionStatus).toBe('success');
+    expect(completedCall.response.persistedOutputFiles).toEqual([
+      '/tmp/tool-results/span-call.txt',
+    ]);
+  });
+
   it('classifies a thrown MCP invocation as an MCP execution error', async () => {
     const mcpTool = new DiscoveredMCPTool(
       {

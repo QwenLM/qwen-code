@@ -956,6 +956,10 @@ const createCancelledResponse = (
   reason: string,
   executionStatus: ToolExecutionStatus,
   artifacts?: ToolArtifact[],
+  // Disk references and bridge notices survive cancellation: dropping the
+  // model-visible output must not orphan files already persisted to disk.
+  persistedOutputFiles?: string[],
+  visionBridgeNotice?: string,
 ): CoreToolCallResponseInfo => {
   const errorMessage = `[Operation Cancelled] Reason: ${reason}`;
   return {
@@ -975,6 +979,8 @@ const createCancelledResponse = (
     executionStatus,
     contentLength: errorMessage.length,
     ...(artifacts && artifacts.length > 0 ? { artifacts } : {}),
+    ...(persistedOutputFiles !== undefined ? { persistedOutputFiles } : {}),
+    ...(visionBridgeNotice !== undefined ? { visionBridgeNotice } : {}),
   };
 };
 
@@ -4825,6 +4831,7 @@ export class CoreToolScheduler {
             cancelMessage,
             executionStatus,
             failureHookArtifacts,
+            toolResult.persistedOutputFiles,
           ),
         );
         setToolSpanCancelled(span);
@@ -4833,6 +4840,10 @@ export class CoreToolScheduler {
 
       const cancelAfterPostProcessing = (
         artifacts?: ToolArtifact[],
+        preserved?: {
+          persistedOutputFiles?: string[];
+          visionBridgeNotice?: string;
+        },
       ): boolean => {
         if (!signal.aborted || (isTimeout && parentAbortedAtExecutionSettle)) {
           return false;
@@ -4846,6 +4857,8 @@ export class CoreToolScheduler {
             TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE,
             executionStatus,
             artifacts,
+            preserved?.persistedOutputFiles,
+            preserved?.visionBridgeNotice,
           ),
         );
         setToolSpanCancelled(span);
@@ -4927,7 +4940,11 @@ export class CoreToolScheduler {
 
           // Check if hook requested to stop execution
           if (postHookResult.shouldStop) {
-            if (cancelAfterPostProcessing(postHookResult.artifacts)) {
+            if (
+              cancelAfterPostProcessing(postHookResult.artifacts, {
+                persistedOutputFiles,
+              })
+            ) {
               return;
             }
             const stopMessage =
@@ -4938,6 +4955,9 @@ export class CoreToolScheduler {
               ToolErrorType.EXECUTION_DENIED,
               executionStatus,
             );
+            if (persistedOutputFiles !== undefined) {
+              errorResponse.persistedOutputFiles = persistedOutputFiles;
+            }
             this.setStatusInternal(callId, 'error', errorResponse);
             setToolSpanFailure(
               span,
@@ -5288,7 +5308,12 @@ export class CoreToolScheduler {
             );
           }
         }
-        if (cancelAfterPostProcessing(artifacts)) {
+        if (
+          cancelAfterPostProcessing(artifacts, {
+            persistedOutputFiles: successResponse.persistedOutputFiles,
+            visionBridgeNotice: successResponse.visionBridgeNotice,
+          })
+        ) {
           return;
         }
         this.setStatusInternal(callId, 'success', successResponse);
@@ -5395,7 +5420,12 @@ export class CoreToolScheduler {
                     ...(timeoutContent.persistedOutputFiles ?? []),
                   ]),
                 );
-          if (cancelAfterPostProcessing(artifacts)) {
+          if (
+            cancelAfterPostProcessing(artifacts, {
+              persistedOutputFiles: timeoutPersistedOutputFiles,
+              visionBridgeNotice: processedImages.visionBridgeNotice,
+            })
+          ) {
             return;
           }
           this.setStatusInternal(callId, 'error', {
@@ -5516,10 +5546,13 @@ export class CoreToolScheduler {
           }
         }
         if (
-          cancelAfterPostProcessing([
-            ...(toolResult.artifacts ?? []),
-            ...(failureHookArtifacts ?? []),
-          ])
+          cancelAfterPostProcessing(
+            [...(toolResult.artifacts ?? []), ...(failureHookArtifacts ?? [])],
+            {
+              persistedOutputFiles: errorResponse.persistedOutputFiles,
+              visionBridgeNotice: errorResponse.visionBridgeNotice,
+            },
+          )
         ) {
           return;
         }

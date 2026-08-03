@@ -88,7 +88,13 @@ function isMcpRequestTimeout(error: unknown): boolean {
 function isExecutionTimeoutFailure(
   error: unknown,
   serverName: string,
+  signal: AbortSignal,
 ): boolean {
+  // A `-32001` that lands while the parent signal is aborted is the SDK's
+  // abort rejection (forwarded by createParentAbortRace) or a timeout that
+  // raced with a cancel. Classifying it as EXECUTION_TIMEOUT would count a
+  // user cancellation against the timeout SLI, so the abort side wins.
+  if (signal.aborted) return false;
   if (!isMcpRequestTimeout(error)) return false;
   const statuses = getAllMCPServerStatuses();
   return !(
@@ -555,7 +561,10 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     } catch (error) {
       // `idleTimeoutWon` is our own client-side timer firing, so it is an
       // execution timeout regardless of what the transport thinks.
-      if (idleTimeoutWon || isExecutionTimeoutFailure(error, this.serverName)) {
+      if (
+        idleTimeoutWon ||
+        isExecutionTimeoutFailure(error, this.serverName, signal)
+      ) {
         throw new StructuredToolError(
           getErrorMessage(error),
           ToolErrorType.EXECUTION_TIMEOUT,
@@ -618,7 +627,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
         persistedOutputFiles: truncated.persistedOutputFiles,
       };
     } catch (error) {
-      if (isExecutionTimeoutFailure(error, this.serverName)) {
+      if (isExecutionTimeoutFailure(error, this.serverName, signal)) {
         throw new StructuredToolError(
           getErrorMessage(error),
           ToolErrorType.EXECUTION_TIMEOUT,
