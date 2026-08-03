@@ -241,16 +241,17 @@ describe('getFloatingTodos', () => {
 describe('getActiveTodosForPlanRevision', () => {
   it('returns only the snapshot named by the approval revision', () => {
     const todos = [todo('1', 'in_progress')];
+    const revisedTodos = [todo('2', 'pending')];
     expect(
       getActiveTodosForPlanRevision(
         [
           todoWriteMessage('m1', todos, undefined, 'plan-1'),
           userMessage('revision'),
-          todoWriteMessage('m2', [todo('2', 'pending')], undefined, 'plan-1'),
+          todoWriteMessage('m2', revisedTodos, undefined, 'plan-1'),
         ],
-        { planId: 'plan-1', sourceCallId: 'call-m1' },
+        { planId: 'plan-1', sourceCallId: 'call-m2' },
       ),
-    ).toEqual(todos);
+    ).toEqual(revisedTodos);
   });
 
   it('rejects missing and mismatched revisions but preserves terminal ones', () => {
