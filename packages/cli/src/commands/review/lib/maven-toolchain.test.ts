@@ -108,7 +108,9 @@ describe('maven toolchain adapter', () => {
       ),
     ).toEqual({
       reactorWide: false,
-      modules: ['nested-parent', 'nested-parent/nested-leaf'],
+      // The nested-parent README is documentation, so it produces no target;
+      // only the real source change selects a module.
+      modules: ['nested-parent/nested-leaf'],
       inactiveProjects: [],
     });
   });
@@ -234,6 +236,50 @@ describe('maven toolchain adapter', () => {
       test: [],
       ok: true,
     });
+  });
+
+  it('leaves module documentation changes without a Maven target', () => {
+    writeReactor();
+    const calls: string[] = [];
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/README.md', 'core/docs/guide.md'],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        calls.push(command);
+        return result(command);
+      },
+    });
+
+    expect(report.toolchain).toBe('maven');
+    expect(report.ok).toBe(true);
+    expect(report.affected).toEqual([]);
+    expect(calls).toEqual([]);
+  });
+
+  it('still builds the owning module for documentation-extension files under its src/', () => {
+    // The src/ guard is re-rooted to the owning module: a .txt under a
+    // module's source tree is test data, not documentation.
+    writeReactor();
+    const calls: string[] = [];
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/test/resources/expected.txt'],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        calls.push(command);
+        return result(command);
+      },
+    });
+
+    expect(report.toolchain).toBe('maven');
+    expect(calls).toEqual([
+      'mvn --batch-mode --no-transfer-progress -pl core -am test',
+    ]);
   });
 
   it('fails closed for a Maven project outside the root reactor', () => {
@@ -770,6 +816,38 @@ describe('maven toolchain adapter', () => {
     expect(output).toContain('TEST-Fail0.xml');
     expect(output).toContain(
       '[maven-test-report] 20 more failing report(s) omitted',
+    );
+  });
+
+  it('caps the clean per-project rollup lines', () => {
+    const modules = Array.from({ length: 120 }, (_, i) => `mod${i}`);
+    writeProject('.', modules);
+    for (const module of modules) writeProject(module);
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['mod0/src/main/java/Main.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        for (const module of modules) {
+          const dir = join(root, module, 'target', 'surefire-reports');
+          mkdirSync(dir, { recursive: true });
+          writeFileSync(
+            join(dir, 'TEST-Clean.xml'),
+            '<testsuite tests="1" failures="0" errors="0" skipped="0"/>',
+          );
+        }
+        return result(command);
+      },
+    });
+
+    const output = report.test[0]?.output ?? '';
+    expect(
+      output.match(/\[maven-test-report\] mod\d+ \(1 report\(s\)\)/g),
+    ).toHaveLength(100);
+    expect(output).toContain(
+      '[maven-test-report] 20 more clean project rollup(s) omitted',
     );
   });
 

@@ -412,6 +412,21 @@ describe('observedTestCounts', () => {
     ).toEqual([8919]);
   });
 
+  it('never counts a Maven report below zero passed tests', () => {
+    // Surefire does not guarantee tests >= failures + errors + skipped
+    // (class-level @Disabled and rerunFailingTestsCount reruns both perturb
+    // it), and the sum spans every report of the command: one negative value
+    // would silently cancel legitimate counts from its neighbours.
+    expect(
+      observedTestCounts(
+        report([
+          '[maven-test-report] core/target/surefire-reports/TEST-A.xml: tests=0, failures=0, errors=0, skipped=1\n' +
+            '[maven-test-report] app/target/surefire-reports/TEST-B.xml: tests=8, failures=0, errors=0, skipped=1',
+        ]),
+      ),
+    ).toEqual([7]);
+  });
+
   it('reads a summary interleaved with ANSI color codes', () => {
     // What a real color-enabled pipe delivers — the codes sit BETWEEN tokens,
     // so a token-level regex without the strip finds nothing. From a live

@@ -27,6 +27,12 @@ export type MavenReactorResult =
   | { reactor?: never; error: string };
 
 const REACTOR_WIDE_FILES = new Set(['pom.xml', 'mvnw', 'mvnw.cmd']);
+/**
+ * `failsafe-reports` is forward-looking today: this adapter only ever runs
+ * `test` and `test-compile`, and Failsafe binds to `integration-test` /
+ * `verify`, so any XML found there is filtered out as stale. The scan stays
+ * so the evidence is picked up if a later change ever runs a Failsafe phase.
+ */
 const REPORT_DIRS = ['surefire-reports', 'failsafe-reports'];
 
 /**
@@ -37,6 +43,7 @@ const REPORT_DIRS = ['surefire-reports', 'failsafe-reports'];
  */
 const MAX_FAILING_REPORT_LINES = 100;
 const MAX_FAILURE_CASE_LINES = 200;
+const MAX_CLEAN_ROLLUP_LINES = 100;
 
 function toPosix(path: string): string {
   return path.split(sep).join('/');
@@ -255,15 +262,21 @@ export function detectMavenOwnership(
       (module) => path === module || path.startsWith(`${module}/`),
     );
     if (owner) {
-      const nearestProject = nearestMavenProject(
-        root,
-        path,
-        reactor.projectDirs,
-      );
-      if (nearestProject && !reactor.projectDirs.includes(nearestProject)) {
-        inactiveProjects.add(nearestProject);
-      } else {
-        modules.add(owner);
+      // Documentation is judged relative to the owning module so the `src/`
+      // guard means the MODULE's source tree: `core/README.md` is a no-op
+      // run, but `core/src/test/resources/expected.txt` is test data and
+      // must keep building.
+      if (!isDocumentationPath(path.slice(owner.length + 1))) {
+        const nearestProject = nearestMavenProject(
+          root,
+          path,
+          reactor.projectDirs,
+        );
+        if (nearestProject && !reactor.projectDirs.includes(nearestProject)) {
+          inactiveProjects.add(nearestProject);
+        } else {
+          modules.add(owner);
+        }
       }
       continue;
     }
@@ -435,6 +448,7 @@ function appendTestSummaries(
   }
 
   const lines: string[] = [];
+  const cleanLines: string[] = [];
   for (const [project, group] of clean) {
     const totals = group.reduce(
       (sum, item) => ({
@@ -443,11 +457,22 @@ function appendTestSummaries(
       }),
       { tests: 0, skipped: 0 },
     );
-    lines.push(
+    cleanLines.push(
       `[maven-test-report] ${project} (${group.length} report(s)): ` +
         `tests=${totals.tests}, failures=0, errors=0, skipped=${totals.skipped}`,
     );
   }
+  // One line per project dir: bounded by module count, but a 300-module
+  // reactor still appends 300 lines AFTER the command output was trimmed, so
+  // cap it like the failing-report and case blocks.
+  if (cleanLines.length > MAX_CLEAN_ROLLUP_LINES) {
+    const omitted = cleanLines.length - MAX_CLEAN_ROLLUP_LINES;
+    cleanLines.length = MAX_CLEAN_ROLLUP_LINES;
+    cleanLines.push(
+      `[maven-test-report] ${omitted} more clean project rollup(s) omitted`,
+    );
+  }
+  lines.push(...cleanLines);
 
   const reportLines = failing.map(
     (summary) =>
@@ -544,7 +569,11 @@ export function shellSelector(
 ): string {
   const selector = modules.join(',');
   if (/^[A-Za-z0-9_./,-]+$/.test(selector)) return selector;
-  // The command runs through cmd.exe on Windows, where POSIX quoting is literal.
+  // The command runs through cmd.exe on Windows, where POSIX quoting is
+  // literal and a `"…"` wrap does not stop %VAR% expansion or an embedded
+  // quote. That stays safe only because readMavenReactor rejects any module
+  // entry whose pom.xml is missing from disk (the existsSync gate), and a
+  // Windows filename cannot contain `"` or `|` — do not remove that gate.
   return platform === 'win32' ? `"${selector}"` : shellQuotePath(selector);
 }
 
@@ -593,8 +622,9 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
       ok: true,
       timedOut: [],
       note:
-        `The diff changes ${args.changedFiles.length} file(s), none of them inside a Maven module ` +
-        'or reactor-wide Maven configuration. There is no Maven target to build or test — this is a complete answer.',
+        `The diff changes ${args.changedFiles.length} file(s), but none of them needs a Maven build ` +
+        'or test (documentation, repository metadata, or nothing inside a Maven module). There is no ' +
+        'Maven target to run — this is a complete answer.',
     });
   }
 
@@ -614,11 +644,16 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     ? ''
     : ` -pl ${shellSelector(ownership.modules)} -am`;
   const command = `${executable} --batch-mode --no-transfer-progress${narrowing} ${lifecycle}`;
-  const before = snapshotReports(args.root, parsed.reactor);
+  // A build-only run never reads the evidence, so it skips the snapshot too
+  // — on a large reactor that is a readdir + statSync sweep of every
+  // reports dir for nothing.
+  const before = args.buildOnly
+    ? null
+    : snapshotReports(args.root, parsed.reactor);
   const executed = args.exec(command, args.root, args.timeout * 1000);
-  const summaries = args.buildOnly
-    ? []
-    : freshTestSummaries(args.root, parsed.reactor, before);
+  const summaries = before
+    ? freshTestSummaries(args.root, parsed.reactor, before)
+    : [];
   const result = appendTestSummaries(executed, summaries);
   const timedOut = result.timedOut ? [result.command] : [];
   const ok = result.exitCode === 0 && !result.timedOut;

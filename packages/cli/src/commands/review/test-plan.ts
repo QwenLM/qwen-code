@@ -451,7 +451,14 @@ export function observedTestCounts(report: BuildTestReport | null): number[] {
       saw = true;
     }
     while ((m = mavenRe.exec(text))) {
-      total += Number(m[1]) - Number(m[2]) - Number(m[3]) - Number(m[4]);
+      // Surefire does not guarantee tests >= failures + errors + skipped
+      // (class-level @Disabled and rerunFailingTestsCount reruns both perturb
+      // it), and this sum spans every report of the command: one negative
+      // value would silently cancel legitimate counts from its neighbours.
+      total += Math.max(
+        0,
+        Number(m[1]) - Number(m[2]) - Number(m[3]) - Number(m[4]),
+      );
       saw = true;
     }
     if (saw) counts.push(total);
