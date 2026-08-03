@@ -2347,10 +2347,13 @@ describe('DiscoveredMCPTool', () => {
         serverToolName,
         baseDescription,
         inputSchema,
-        undefined,
+        true,
         undefined,
         undefined,
         newMockMcpClient,
+        undefined,
+        undefined,
+        idempotentAnnotations,
       );
       const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
       const mockConfig = {
@@ -2371,10 +2374,13 @@ describe('DiscoveredMCPTool', () => {
         serverToolName,
         baseDescription,
         inputSchema,
-        undefined,
+        true,
         undefined,
         mockConfig as any,
         mockMcpClient,
+        undefined,
+        undefined,
+        idempotentAnnotations,
       );
 
       await reconnectTool.build(params).execute(new AbortController().signal);
