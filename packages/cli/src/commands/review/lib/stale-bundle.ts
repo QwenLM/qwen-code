@@ -53,6 +53,15 @@ export const DIGEST_FILE = 'review-sources.sha256';
  */
 export const NOT_BUNDLED_RE = /\.(?:test|spec)\.[cm]?[jt]sx?$/;
 
+/**
+ * Directories whose contents exist only for tests.
+ *
+ * A fixture is loaded by a test at runtime and is reachable from no import the
+ * bundler follows — measured, none of the four under `review/__fixtures__` is
+ * in `dist`. Editing one is the same nothing-changed warning a test file was.
+ */
+export const NOT_BUNDLED_DIR = new Set(['__fixtures__']);
+
 export interface BundleStaleness {
   /** `true` only when both digests are known and differ. */
   stale: boolean;
@@ -142,8 +151,9 @@ function* sourceFilesUnder(root: string): Generator<string> {
   }
   for (const e of entries) {
     const full = join(root, e.name);
-    if (e.isDirectory()) yield* sourceFilesUnder(full);
-    else if (e.isFile() && !NOT_BUNDLED_RE.test(e.name)) yield full;
+    if (e.isDirectory()) {
+      if (!NOT_BUNDLED_DIR.has(e.name)) yield* sourceFilesUnder(full);
+    } else if (e.isFile() && !NOT_BUNDLED_RE.test(e.name)) yield full;
   }
 }
 

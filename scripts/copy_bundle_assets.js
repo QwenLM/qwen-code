@@ -37,13 +37,14 @@ const BUNDLED_SKILL_TEST_FILE_RE =
  * it would import has been built. `scripts/tests/review-source-digest.test.ts`
  * is what holds the two equal; nothing here is imported from there.
  *
- * Test files are excluded on both sides: esbuild follows imports from the CLI
- * entry, no test is reachable that way, and a warning fired by an edit that
- * cannot change a byte of the bundle is the false positive this check exists
- * not to produce.
+ * Tests and fixtures are excluded on both sides: esbuild follows imports from
+ * the CLI entry, neither is reachable that way, and a warning fired by an edit
+ * that cannot change a byte of the bundle is the false positive this check
+ * exists not to produce.
  */
 // Mirrors NOT_BUNDLED_RE in stale-bundle.ts; the parity test keeps them equal.
 const NOT_BUNDLED_RE = /\.(?:test|spec)\.[cm]?[jt]sx?$/;
+const NOT_BUNDLED_DIR = new Set(['__fixtures__']);
 
 export function reviewSourceDigestForBuild(root) {
   const cliCommands = join(root, 'packages', 'cli', 'src', 'commands');
@@ -63,8 +64,9 @@ export function reviewSourceDigestForBuild(root) {
     }
     for (const e of entries) {
       const full = join(dir, e.name);
-      if (e.isDirectory()) walk(full);
-      else if (e.isFile() && !NOT_BUNDLED_RE.test(e.name)) files.push(full);
+      if (e.isDirectory()) {
+        if (!NOT_BUNDLED_DIR.has(e.name)) walk(full);
+      } else if (e.isFile() && !NOT_BUNDLED_RE.test(e.name)) files.push(full);
     }
   };
   for (const r of roots) walk(r);

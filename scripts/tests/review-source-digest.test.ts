@@ -90,8 +90,14 @@ describe('the build stamp and the staleness check agree', () => {
       );
       expect(reviewSourceDigestForBuild(root).count).toBe(4);
 
-      // ...and a test file moves neither.
+      // ...and neither a test file, nor a spec, nor a fixture moves either.
       writeFileSync(join(cli, 'review', 'drive.test.ts'), 'a test');
+      writeFileSync(join(cli, 'review', 'drive.spec.tsx'), 'a spec');
+      mkdirSync(join(cli, 'review', '__fixtures__'), { recursive: true });
+      writeFileSync(
+        join(cli, 'review', '__fixtures__', 'responder.mjs'),
+        'export const a = 1;',
+      );
       expect(reviewSourceDigestForBuild(root).digest).toBe(
         reviewSourcesDigest(root, reviewSourceRoots(root)),
       );

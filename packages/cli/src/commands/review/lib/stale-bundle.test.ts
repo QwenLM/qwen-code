@@ -136,6 +136,19 @@ describe('reviewSourcesDigest', () => {
     expect(reviewSourcesDigest(root, [dir])).toBe(before);
   });
 
+  it('ignores a fixtures directory, which the bundle never contains', () => {
+    // Measured: none of the four files under `review/__fixtures__` appears in
+    // `dist`. A fixture is loaded by a test at runtime, from no import the
+    // bundler follows.
+    writeFileSync(join(dir, 'drive.ts'), 'x');
+    const before = reviewSourcesDigest(root, [dir]);
+    const fixtures = join(dir, '__fixtures__');
+    mkdirSync(fixtures, { recursive: true });
+    writeFileSync(join(fixtures, 'responder.mjs'), 'export const a = 1;');
+    writeFileSync(join(fixtures, 'comment.md'), '# a comment');
+    expect(reviewSourcesDigest(root, [dir])).toBe(before);
+  });
+
   it('ignores a test file passed as a root in its own right', () => {
     const lone = join(root, 'review.test.ts');
     writeFileSync(lone, 'x');
