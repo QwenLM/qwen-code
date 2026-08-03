@@ -39,6 +39,7 @@ interface ResolvedCredentials {
 interface ResolveDesktopVoiceConfigDeps {
   readQwenJson?: <T>(file: string) => Promise<T | undefined>;
   readSystemJson?: <T>(file: string) => Promise<T | undefined>;
+  readHomeEnvFile?: (file: string) => Promise<string | undefined>;
   systemSettingsPath?: string;
   systemDefaultsPath?: string;
   getVoiceModel?: () => string;
@@ -126,8 +127,95 @@ async function readJsonFileFromDisk<T>(file: string): Promise<T | undefined> {
   }
 }
 
-async function readNoJson<T>(): Promise<T | undefined> {
-  return undefined;
+async function readEnvFileFromDisk(
+  file: string,
+): Promise<string | undefined> {
+  try {
+    return await readFile(file, 'utf-8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      voiceConfigLogger.warn(
+        `[voice] Failed to read home .env file ${file}:`,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    return undefined;
+  }
+}
+
+// Minimal dotenv-compatible parser for the home .env fallback: KEY=VALUE lines
+// with an optional `export` prefix, quoted values, and inline comments.
+function parseEnvFileContent(content: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) {
+      continue;
+    }
+    const match = line.match(
+      /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/,
+    );
+    if (!match) {
+      continue;
+    }
+    let value = match[2] ?? '';
+    const quote = value[0];
+    if (
+      value.length >= 2 &&
+      (quote === '"' || quote === "'") &&
+      value.endsWith(quote)
+    ) {
+      value = value.slice(1, -1);
+      if (quote === '"') {
+        value = value.replace(
+          /\\(n|r|t|\\)/g,
+          (_all, escaped: string) =>
+            escaped === 'n'
+              ? '\n'
+              : escaped === 'r'
+                ? '\r'
+                : escaped === 't'
+                  ? '\t'
+                  : '\\',
+        );
+      }
+    } else {
+      const commentStart = value.startsWith('#') ? 0 : value.search(/\s#/);
+      if (commentStart !== -1) {
+        value = value.slice(0, commentStart);
+      }
+      value = value.trim();
+    }
+    result[match[1]!] = value;
+  }
+  return result;
+}
+
+// Mirrors the CLI's getHomeEnvFallbackVars: <qwen dir>/.env first, ~/.env only
+// when QWEN_HOME is unset, the first definition of a key wins, and the process
+// env always takes precedence over file values.
+async function getHomeEnvFallback(
+  env: NodeJS.ProcessEnv,
+  readHomeEnvFile: (file: string) => Promise<string | undefined>,
+): Promise<Record<string, string>> {
+  const qwenDir = getQwenConfigDir();
+  const candidates = [join(qwenDir, '.env')];
+  if (!process.env.QWEN_HOME) {
+    candidates.push(join(dirname(qwenDir), '.env'));
+  }
+  const result: Record<string, string> = {};
+  for (const candidate of candidates) {
+    const content = await readHomeEnvFile(candidate);
+    if (content === undefined) {
+      continue;
+    }
+    for (const [key, value] of Object.entries(parseEnvFileContent(content))) {
+      if (!Object.hasOwn(env, key)) {
+        result[key] ??= value;
+      }
+    }
+  }
+  return result;
 }
 
 // Duplicates packages/cli/src/config/storage-paths-lite.ts; the bun workspace
@@ -233,6 +321,27 @@ function resolveSettingsEnvVars<T>(value: T, env: NodeJS.ProcessEnv): T {
   return resolveValue(value) as T;
 }
 
+// Legacy v5 settings wrap each modelProviders entry as `{ protocol, models }`;
+// the CLI migrates that shape back to plain arrays on load. Unwrap at read
+// time so the same settings file resolves identically on both surfaces.
+function unwrapWrappedProviderConfigs(
+  modelProviders: Record<string, QwenProvider[]> | undefined,
+): Record<string, QwenProvider[]> | undefined {
+  if (!modelProviders) {
+    return modelProviders;
+  }
+  let unwrapped: Record<string, QwenProvider[]> | undefined;
+  for (const [key, value] of Object.entries(modelProviders)) {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      continue;
+    }
+    const models = (value as unknown as { models?: unknown }).models;
+    unwrapped ??= { ...modelProviders };
+    unwrapped[key] = Array.isArray(models) ? (models as QwenProvider[]) : [];
+  }
+  return unwrapped ?? modelProviders;
+}
+
 function mergeTrustedQwenSettings(
   systemDefaults: QwenSettings | undefined,
   user: QwenSettings | undefined,
@@ -248,10 +357,11 @@ function mergeTrustedQwenSettings(
     // highest-precedence scope that defines it supplies the whole object.
     // Mirror that so a managed System scope can fully override a user's
     // provider set instead of unioning with it.
-    modelProviders:
+    modelProviders: unwrapWrappedProviderConfigs(
       system?.modelProviders ??
-      user?.modelProviders ??
-      systemDefaults?.modelProviders,
+        user?.modelProviders ??
+        systemDefaults?.modelProviders,
+    ),
     security: {
       ...(systemDefaults?.security ?? {}),
       ...(user?.security ?? {}),
@@ -314,6 +424,9 @@ function readProviderApiKey(
   );
 }
 
+const PROVIDER_ENTRY_REMEDY =
+  'Remove or complete this provider entry to fall back to your Qwen sign-in.';
+
 /**
  * 1) The provider whose `id` matches the selected voice model. Authoritative:
  * resolves before OAuth so a managed gateway wins for OAuth-signed-in users,
@@ -334,13 +447,23 @@ function fromExactModelProvider(
   if (!provider) return undefined;
   if (!provider.baseUrl?.trim()) {
     throw new Error(
-      `Voice model '${voiceModel}' does not define a baseUrl.`,
+      `Voice model '${voiceModel}' does not define a baseUrl. ${PROVIDER_ENTRY_REMEDY}`,
     );
   }
-  const normalizedBaseUrl = normalizeAllowedVoiceBaseUrl(provider.baseUrl);
-  if (!normalizedBaseUrl) {
-    throw new Error(`Voice model '${voiceModel}' has an invalid baseUrl.`);
+  let parsedBaseUrl: URL;
+  try {
+    parsedBaseUrl = new URL(provider.baseUrl.trim());
+  } catch {
+    throw new Error(
+      `Voice model '${voiceModel}' has an invalid baseUrl. ${PROVIDER_ENTRY_REMEDY}`,
+    );
   }
+  if (parsedBaseUrl.username || parsedBaseUrl.password) {
+    throw new Error(
+      `Voice model '${voiceModel}' baseUrl must not contain embedded credentials. ${PROVIDER_ENTRY_REMEDY}`,
+    );
+  }
+  const normalizedBaseUrl = parsedBaseUrl.toString().replace(/\/+$/, '');
   // Preserve the legacy /v1 inference only for the official DashScope
   // compatible-mode endpoint. Custom and regional gateway paths remain
   // authoritative and are never rewritten.
@@ -349,11 +472,15 @@ function fromExactModelProvider(
     : normalizedBaseUrl;
   const envKey = provider.envKey?.trim();
   if (!envKey) {
-    throw new Error(`Voice model '${voiceModel}' does not define an envKey.`);
+    throw new Error(
+      `Voice model '${voiceModel}' does not define an envKey. ${PROVIDER_ENTRY_REMEDY}`,
+    );
   }
   const apiKey = readProviderApiKey(provider, settings, envSource);
   if (!apiKey) {
-    throw new Error(`Voice model '${voiceModel}' requires ${envKey}.`);
+    throw new Error(
+      `Voice model '${voiceModel}' requires ${envKey}. ${PROVIDER_ENTRY_REMEDY}`,
+    );
   }
   return { baseUrl, apiKey };
 }
@@ -412,11 +539,8 @@ export async function resolveDesktopVoiceConfig(
 ): Promise<VoiceConfig> {
   const resolvedDeps = {
     readQwenJson: deps.readQwenJson ?? readQwenJsonFromDisk,
-    // Supplying a user-settings reader is test dependency injection; do not
-    // unexpectedly fall through to the host machine's real system settings.
-    readSystemJson:
-      deps.readSystemJson ??
-      (deps.readQwenJson ? readNoJson : readJsonFileFromDisk),
+    readSystemJson: deps.readSystemJson ?? readJsonFileFromDisk,
+    readHomeEnvFile: deps.readHomeEnvFile ?? readEnvFileFromDisk,
     env: deps.env ?? process.env,
     now: deps.now ?? Date.now,
     platform: deps.platform ?? platform(),
@@ -440,28 +564,29 @@ export async function resolveDesktopVoiceConfig(
     resolvedDeps.readQwenJson<QwenSettings>('settings.json'),
     resolvedDeps.readSystemJson<QwenSettings>(systemSettingsPath),
     ]);
-  const systemDefaults = resolveSettingsEnvVars(
-    rawSystemDefaults,
+  const homeEnvFallback = await getHomeEnvFallback(
     resolvedDeps.env,
+    resolvedDeps.readHomeEnvFile,
   );
-  const userSettings = resolveSettingsEnvVars(
-    rawUserSettings,
-    resolvedDeps.env,
-  );
-  const systemSettings = resolveSettingsEnvVars(
-    rawSystemSettings,
-    resolvedDeps.env,
-  );
+  // Same precedence as the CLI: the process env wins; the home .env only fills
+  // keys the process env does not define.
+  const effectiveEnv: NodeJS.ProcessEnv = {
+    ...homeEnvFallback,
+    ...resolvedDeps.env,
+  };
+  const systemDefaults = resolveSettingsEnvVars(rawSystemDefaults, effectiveEnv);
+  const userSettings = resolveSettingsEnvVars(rawUserSettings, effectiveEnv);
+  const systemSettings = resolveSettingsEnvVars(rawSystemSettings, effectiveEnv);
   const qwenSettings = mergeTrustedQwenSettings(
     systemDefaults,
     userSettings,
     systemSettings,
   );
   const creds =
-    fromExactModelProvider(qwenSettings, resolvedDeps.env, voiceModel) ??
+    fromExactModelProvider(qwenSettings, effectiveEnv, voiceModel) ??
     (await fromOAuth(resolvedDeps)) ??
-    fromLegacyDashscopeProvider(qwenSettings, resolvedDeps.env) ??
-    fromEnv(resolvedDeps.env);
+    fromLegacyDashscopeProvider(qwenSettings, effectiveEnv) ??
+    fromEnv(effectiveEnv);
   if (!creds) {
     throw new Error(NO_CREDENTIALS_ERROR);
   }

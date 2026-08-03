@@ -58,7 +58,9 @@ describe('net-guard host classification', () => {
     expect(isLoopbackHost('localhost')).toBe(true)
     expect(isLoopbackHost('127.0.0.1')).toBe(true)
     expect(isLoopbackHost('::1')).toBe(true)
-    expect(isLoopbackHost('::ffff:127.0.0.1')).toBe(true)
+    // Callers normalize IPv6 literals first (URL parsing /
+    // normalizeIpAddress), so the mapped form arrives as canonical hex.
+    expect(isLoopbackHost('::ffff:7f00:1')).toBe(true)
     expect(isLoopbackHost('dashscope.aliyuncs.com')).toBe(false)
   })
 

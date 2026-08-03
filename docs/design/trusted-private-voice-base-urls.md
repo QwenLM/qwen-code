@@ -26,7 +26,7 @@ Desktop voice merges SystemDefaults, User, and System settings with the same tru
 
 ## Configuration ownership
 
-The operator that provisions a regional gateway owns the allowlist entry. Managed deployments should render the provider `baseUrl` and the allowlist entry from the same declarative endpoint value. Adding a region therefore requires no Qwen Code change and cannot drift into a hostname-wide exception.
+The operator that provisions a regional gateway owns the allowlist entry. Managed deployments should render the provider `baseUrl` and the allowlist entry from the same declarative endpoint value. Adding a region therefore requires no Qwen Code change and cannot drift into a hostname-wide exception. An allowlisted hostname is only as trustworthy as its DNS — a later DNS record change redirects the exception (and the provider credentials) wherever the name points. Prefer IP-literal entries when the gateway address is stable.
 
 ## Failure and rollback behavior
 

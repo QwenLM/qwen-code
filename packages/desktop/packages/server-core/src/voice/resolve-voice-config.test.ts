@@ -41,6 +41,8 @@ describe('resolveDesktopVoiceConfig', () => {
         }
         return undefined
       },
+      readSystemJson: async () => undefined,
+      readHomeEnvFile: async () => undefined,
     })
 
     expect(config).toEqual({
@@ -74,6 +76,8 @@ describe('resolveDesktopVoiceConfig', () => {
                 ],
               },
             }) as T | undefined,
+      readSystemJson: async () => undefined,
+      readHomeEnvFile: async () => undefined,
     })
 
     expect(config.apiKey).toBe('oauth-token')
@@ -102,6 +106,8 @@ describe('resolveDesktopVoiceConfig', () => {
                 ],
               },
             }) as T | undefined,
+      readSystemJson: async () => undefined,
+      readHomeEnvFile: async () => undefined,
     })
 
     expect(config.apiKey).toBe('settings-key')
@@ -113,6 +119,8 @@ describe('resolveDesktopVoiceConfig', () => {
         getVoiceModel: () => 'qwen3-asr-flash',
         env: {},
         readQwenJson: async () => undefined,
+        readSystemJson: async () => undefined,
+        readHomeEnvFile: async () => undefined,
       }),
     ).rejects.toThrow('Voice dictation needs Qwen credentials')
 
@@ -121,6 +129,8 @@ describe('resolveDesktopVoiceConfig', () => {
         getVoiceModel: () => 'qwen3-asr-flash',
         env: { OPENAI_API_KEY: 'key', OPENAI_BASE_URL: 'http://api.example' },
         readQwenJson: async () => undefined,
+        readSystemJson: async () => undefined,
+        readHomeEnvFile: async () => undefined,
       }),
     ).rejects.toThrow('https baseUrl')
   })
@@ -131,6 +141,8 @@ describe('resolveDesktopVoiceConfig', () => {
         getVoiceModel: () => 'qwen3-asr-flash',
         env: { OPENAI_API_KEY: 'openai-key' },
         readQwenJson: async () => undefined,
+        readSystemJson: async () => undefined,
+        readHomeEnvFile: async () => undefined,
       }),
     ).rejects.toThrow('Set OPENAI_BASE_URL')
 
@@ -141,6 +153,8 @@ describe('resolveDesktopVoiceConfig', () => {
         OPENAI_BASE_URL: 'https://proxy.example.com/openai',
       },
       readQwenJson: async () => undefined,
+      readSystemJson: async () => undefined,
+      readHomeEnvFile: async () => undefined,
     })
 
     expect(config.apiKey).toBe('openai-key')
@@ -155,6 +169,8 @@ describe('resolveDesktopVoiceConfig', () => {
         OPENAI_BASE_URL: 'https://proxy.example.com/openai',
       },
       readQwenJson: async () => undefined,
+      readSystemJson: async () => undefined,
+      readHomeEnvFile: async () => undefined,
     })
 
     expect(config.apiKey).toBe('dashscope-key')
@@ -171,6 +187,8 @@ describe('resolveDesktopVoiceConfig', () => {
         DASHSCOPE_PROXY_BASE_URL: 'https://dashscope-proxy.example.com/asr',
       },
       readQwenJson: async () => undefined,
+      readSystemJson: async () => undefined,
+      readHomeEnvFile: async () => undefined,
     })
 
     expect(config.baseUrl).toBe('https://dashscope-proxy.example.com/asr/v1')
@@ -196,6 +214,8 @@ describe('resolveDesktopVoiceConfig', () => {
                 },
               }
             : undefined) as T | undefined,
+        readSystemJson: async () => undefined,
+        readHomeEnvFile: async () => undefined,
       }),
     ).rejects.toThrow("Voice model 'qwen3-asr-flash' has an invalid baseUrl")
   })
@@ -220,6 +240,8 @@ describe('resolveDesktopVoiceConfig', () => {
               },
             }
           : undefined) as T | undefined,
+      readSystemJson: async () => undefined,
+      readHomeEnvFile: async () => undefined,
     })
 
     expect(config.baseUrl).toBe(baseUrl)
@@ -245,6 +267,8 @@ describe('resolveDesktopVoiceConfig', () => {
               },
             }
           : undefined) as T | undefined,
+      readSystemJson: async () => undefined,
+      readHomeEnvFile: async () => undefined,
     })
 
     expect(config.baseUrl).toBe(
@@ -273,6 +297,8 @@ describe('resolveDesktopVoiceConfig', () => {
               },
             }
           : undefined) as T | undefined,
+      readSystemJson: async () => undefined,
+      readHomeEnvFile: async () => undefined,
     })
 
     expect(config).toEqual({
@@ -312,6 +338,8 @@ describe('resolveDesktopVoiceConfig', () => {
                   },
                 }
               : undefined) as T | undefined,
+          readSystemJson: async () => undefined,
+          readHomeEnvFile: async () => undefined,
         }),
       ).rejects.toThrow('security.allowedInsecureVoiceBaseUrls')
     }
@@ -337,6 +365,8 @@ describe('resolveDesktopVoiceConfig', () => {
               },
             }
           : undefined) as T | undefined,
+      readSystemJson: async () => undefined,
+      readHomeEnvFile: async () => undefined,
     })
 
     expect(config).toEqual({
@@ -385,6 +415,7 @@ describe('resolveDesktopVoiceConfig', () => {
                 },
               }
             : undefined) as T | undefined,
+        readHomeEnvFile: async () => undefined,
       }),
     ).rejects.toThrow('Voice dictation needs Qwen credentials')
   })
@@ -417,6 +448,7 @@ describe('resolveDesktopVoiceConfig', () => {
                 },
               }
             : undefined) as T | undefined,
+        readHomeEnvFile: async () => undefined,
       }),
     ).rejects.toThrow('security.allowedInsecureVoiceBaseUrls')
   })
@@ -443,6 +475,8 @@ describe('resolveDesktopVoiceConfig', () => {
                 },
               }
             : undefined) as T | undefined,
+        readSystemJson: async () => undefined,
+        readHomeEnvFile: async () => undefined,
       }),
     ).rejects.toThrow(/http or https/)
   })
@@ -456,6 +490,8 @@ describe('resolveDesktopVoiceConfig', () => {
         (file === 'settings.json'
           ? { security: { allowedInsecureVoiceBaseUrls: [baseUrl] } }
           : undefined) as T | undefined,
+      readSystemJson: async () => undefined,
+      readHomeEnvFile: async () => undefined,
     })
 
     expect(config.allowInsecureBaseUrl).toBe(true)
@@ -483,6 +519,8 @@ describe('resolveDesktopVoiceConfig', () => {
           OPENAI_BASE_URL: configuredBaseUrl,
         },
         readQwenJson,
+        readSystemJson: async () => undefined,
+        readHomeEnvFile: async () => undefined,
       }),
     ).rejects.toThrow(normalizedBaseUrl)
 
@@ -500,6 +538,8 @@ describe('resolveDesktopVoiceConfig', () => {
               },
             }
           : undefined) as T | undefined,
+      readSystemJson: async () => undefined,
+      readHomeEnvFile: async () => undefined,
     })
 
     expect(config).toMatchObject({
@@ -534,6 +574,8 @@ describe('resolveDesktopVoiceConfig', () => {
                 },
               }
             : undefined) as T | undefined,
+        readSystemJson: async () => undefined,
+        readHomeEnvFile: async () => undefined,
       }),
     ).rejects.toThrow('security.allowedInsecureVoiceBaseUrls')
   })
@@ -554,6 +596,8 @@ describe('resolveDesktopVoiceConfig', () => {
               (file === 'settings.json' && allowlisted
                 ? { security: { allowedInsecureVoiceBaseUrls: [baseUrl] } }
                 : undefined) as T | undefined,
+            readSystemJson: async () => undefined,
+            readHomeEnvFile: async () => undefined,
           }),
         ).rejects.toThrow(
           'Voice endpoint must not use a private-network baseUrl.',
@@ -583,8 +627,12 @@ describe('resolveDesktopVoiceConfig', () => {
                 },
               }
             : undefined) as T | undefined,
+        readSystemJson: async () => undefined,
+        readHomeEnvFile: async () => undefined,
       }),
-    ).rejects.toThrow("Voice model 'qwen3-asr-flash' requires PRIVATE_ASR_KEY")
+    ).rejects.toThrow(
+      /Voice model 'qwen3-asr-flash' requires PRIVATE_ASR_KEY\. Remove or complete this provider entry/,
+    )
   })
 
   it('reports an exact model provider without a baseUrl', async () => {
@@ -605,13 +653,15 @@ describe('resolveDesktopVoiceConfig', () => {
                 },
               }
             : undefined) as T | undefined,
+        readSystemJson: async () => undefined,
+        readHomeEnvFile: async () => undefined,
       }),
     ).rejects.toThrow(
       "Voice model 'qwen3-asr-flash' does not define a baseUrl",
     )
   })
 
-  it('reports an invalid baseUrl for an exact model provider', async () => {
+  it('reports embedded credentials in an exact model provider baseUrl', async () => {
     await expect(
       resolveDesktopVoiceConfig({
         getVoiceModel: () => 'qwen3-asr-flash',
@@ -631,8 +681,12 @@ describe('resolveDesktopVoiceConfig', () => {
                 },
               }
             : undefined) as T | undefined,
+        readSystemJson: async () => undefined,
+        readHomeEnvFile: async () => undefined,
       }),
-    ).rejects.toThrow("Voice model 'qwen3-asr-flash' has an invalid baseUrl")
+    ).rejects.toThrow(
+      "Voice model 'qwen3-asr-flash' baseUrl must not contain embedded credentials",
+    )
   })
 
   it('reports an exact model provider without an envKey', async () => {
@@ -654,6 +708,8 @@ describe('resolveDesktopVoiceConfig', () => {
                 },
               }
             : undefined) as T | undefined,
+        readSystemJson: async () => undefined,
+        readHomeEnvFile: async () => undefined,
       }),
     ).rejects.toThrow(
       "Voice model 'qwen3-asr-flash' does not define an envKey",
@@ -713,6 +769,7 @@ describe('resolveDesktopVoiceConfig', () => {
               },
             }
           : undefined) as T | undefined,
+      readHomeEnvFile: async () => undefined,
     })
 
     expect(config).toEqual({
@@ -765,6 +822,7 @@ describe('resolveDesktopVoiceConfig', () => {
           readPaths.add(file)
           return undefined as T | undefined
         },
+        readHomeEnvFile: async () => undefined,
       })
 
       expect(readPaths).toEqual(new Set(expectedPaths))
@@ -787,6 +845,7 @@ describe('resolveDesktopVoiceConfig', () => {
         readPaths.add(file)
         return undefined as T | undefined
       },
+      readHomeEnvFile: async () => undefined,
     })
 
     expect(readPaths).toEqual(
@@ -855,6 +914,7 @@ describe('resolveDesktopVoiceConfig', () => {
           ? { security: { allowedInsecureVoiceBaseUrls: [baseUrl] } }
           : undefined) as T | undefined,
       readQwenJson: async () => undefined,
+      readHomeEnvFile: async () => undefined,
     })
 
     expect(config.allowInsecureBaseUrl).toBe(true)
@@ -890,6 +950,7 @@ describe('resolveDesktopVoiceConfig', () => {
               },
             }
           : undefined) as T | undefined,
+      readHomeEnvFile: async () => undefined,
     })
 
     expect(config.baseUrl).toBe(selectedUrl)
@@ -922,6 +983,8 @@ describe('resolveDesktopVoiceConfig', () => {
                 },
               }
             : undefined) as T | undefined,
+        readSystemJson: async () => undefined,
+        readHomeEnvFile: async () => undefined,
       }),
     ).rejects.toThrow('security.allowedInsecureVoiceBaseUrls')
   })
@@ -944,6 +1007,7 @@ describe('resolveDesktopVoiceConfig', () => {
         systemFiles.add(file)
         return undefined as T | undefined
       },
+      readHomeEnvFile: async () => undefined,
     })
 
     expect(qwenFiles).toEqual(new Set(['oauth_creds.json', 'settings.json']))
@@ -953,6 +1017,125 @@ describe('resolveDesktopVoiceConfig', () => {
         '/etc/qwen-code/settings.json',
       ]),
     )
+  })
+
+  it('resolves settings placeholders and provider keys from the home .env fallback', async () => {
+    const baseUrl = 'http://voice.region-a.internal.example/v1'
+    const envFileContent =
+      'VOICE_GW=http://voice.region-a.internal.example\nVOICE_KEY=home-env-key\n'
+    const readHomeEnvFile = async (file: string) =>
+      file.endsWith(join('.qwen', '.env')) ? envFileContent : undefined
+
+    const config = await resolveDesktopVoiceConfig({
+      getVoiceModel: () => 'qwen3-asr-flash',
+      env: {},
+      readQwenJson: async <T,>(file: string) =>
+        (file === 'settings.json'
+          ? {
+              modelProviders: {
+                openai: [
+                  {
+                    id: 'qwen3-asr-flash',
+                    baseUrl: '$VOICE_GW/v1',
+                    envKey: 'VOICE_KEY',
+                  },
+                ],
+              },
+            }
+          : undefined) as T | undefined,
+      readSystemJson: async () => undefined,
+      readHomeEnvFile,
+    })
+
+    expect(config).toEqual({
+      model: 'qwen3-asr-flash',
+      baseUrl,
+      apiKey: 'home-env-key',
+    })
+
+    // The process env takes precedence over the home .env for the same key.
+    const overridden = await resolveDesktopVoiceConfig({
+      getVoiceModel: () => 'qwen3-asr-flash',
+      env: { VOICE_KEY: 'process-key' },
+      readQwenJson: async <T,>(file: string) =>
+        (file === 'settings.json'
+          ? {
+              modelProviders: {
+                openai: [
+                  {
+                    id: 'qwen3-asr-flash',
+                    baseUrl: '$VOICE_GW/v1',
+                    envKey: 'VOICE_KEY',
+                  },
+                ],
+              },
+            }
+          : undefined) as T | undefined,
+      readSystemJson: async () => undefined,
+      readHomeEnvFile,
+    })
+
+    expect(overridden.apiKey).toBe('process-key')
+  })
+
+  it('unwraps legacy v5 modelProviders wrappers like the CLI migration', async () => {
+    const baseUrl = 'https://voice.example.com/v1'
+    const config = await resolveDesktopVoiceConfig({
+      getVoiceModel: () => 'qwen3-asr-flash',
+      env: {},
+      readQwenJson: async <T,>(file: string) =>
+        (file === 'settings.json'
+          ? ({
+              env: { VOICE_KEY: 'wrapped-key' },
+              modelProviders: {
+                openai: {
+                  protocol: 'openai',
+                  models: [
+                    {
+                      id: 'qwen3-asr-flash',
+                      baseUrl,
+                      envKey: 'VOICE_KEY',
+                    },
+                  ],
+                },
+              },
+            } as unknown as T)
+          : undefined) as T | undefined,
+      readSystemJson: async () => undefined,
+      readHomeEnvFile: async () => undefined,
+    })
+
+    expect(config).toEqual({
+      model: 'qwen3-asr-flash',
+      baseUrl,
+      apiKey: 'wrapped-key',
+    })
+  })
+
+  it('still reads managed system settings when only the user reader is injected', async () => {
+    // Regression: injecting readQwenJson must not silently stop reading the
+    // System scope, or a managed allowlist/revocation would be dropped.
+    const root = await mkdtemp(join(tmpdir(), 'qwen-voice-system-'))
+    const baseUrl = 'http://voice.system.internal.example/v1'
+    try {
+      await writeFile(
+        join(root, 'settings.json'),
+        JSON.stringify({
+          security: { allowedInsecureVoiceBaseUrls: [baseUrl] },
+        }),
+      )
+      const config = await resolveDesktopVoiceConfig({
+        getVoiceModel: () => 'qwen3-asr-flash',
+        env: { OPENAI_API_KEY: 'env-key', OPENAI_BASE_URL: baseUrl },
+        systemSettingsPath: join(root, 'settings.json'),
+        systemDefaultsPath: join(root, 'system-defaults.json'),
+        readQwenJson: async () => undefined,
+        readHomeEnvFile: async () => undefined,
+      })
+      expect(config.allowInsecureBaseUrl).toBe(true)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
   })
 
   it('rejects duplicate providers for the selected voice model', async () => {
@@ -986,6 +1169,7 @@ describe('resolveDesktopVoiceConfig', () => {
                 },
               }
             : undefined) as T | undefined,
+        readHomeEnvFile: async () => undefined,
       }),
     ).rejects.toThrow("Voice model 'qwen3-asr-flash' is ambiguous")
   })

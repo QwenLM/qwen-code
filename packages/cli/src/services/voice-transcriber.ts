@@ -206,18 +206,13 @@ function readIpv4CompatibleIpv6(host: string): string | undefined {
     return undefined;
   }
   const parts = host.slice(2).split(':');
-  if (parts.length === 0 || parts.length > 2 || parts.some((p) => !p)) {
+  if (parts.length === 0 || parts.length > 2 || parts.some((part) => !part)) {
     return undefined;
   }
   if (parts.some((part) => !/^[0-9a-f]{1,4}$/i.test(part))) {
     return undefined;
   }
   const hextets = parts.map((part) => Number.parseInt(part, 16));
-  if (
-    hextets.some((part) => !Number.isInteger(part) || part < 0 || part > 0xffff)
-  ) {
-    return undefined;
-  }
   const value =
     hextets.length === 1 ? hextets[0]! : (hextets[0]! << 16) | hextets[1]!;
   return [
@@ -280,13 +275,9 @@ function unwrapIpv6TransitionStep(
   if (ipv4Mapped) {
     return { address: ipv4Mapped };
   }
-  const ipv4Compatible = host.match(/^::(\d+\.\d+\.\d+\.\d+)$/);
+  const ipv4Compatible = readIpv4CompatibleIpv6(host);
   if (ipv4Compatible) {
-    return { address: ipv4Compatible[1]! };
-  }
-  const normalizedIpv4Compatible = readIpv4CompatibleIpv6(host);
-  if (normalizedIpv4Compatible) {
-    return { address: normalizedIpv4Compatible };
+    return { address: ipv4Compatible };
   }
   const nat64 = readWellKnownNat64Ipv6(host);
   if (nat64) {
@@ -328,16 +319,18 @@ function isPrivateNetworkIp(hostname: string): boolean {
     );
   }
   if (isIP(host) === 6) {
-    const firstHextet = Number.parseInt(host.split(':', 1)[0] || '', 16);
-    const isLinkLocal = firstHextet >= 0xfe80 && firstHextet <= 0xfebf;
-    const isUniqueLocal = (firstHextet & 0xfe00) === 0xfc00;
-    return host === '::' || isLinkLocal || isUniqueLocal;
+    const firstHextet = Number.parseInt(host.split(':', 1)[0] || '0', 16);
+    return (
+      host === '::' ||
+      (firstHextet & 0xffc0) === 0xfe80 ||
+      (firstHextet & 0xfe00) === 0xfc00
+    );
   }
   return false;
 }
 
-function isAlwaysBlockedVoiceAddress(hostname: string): boolean {
-  const host = normalizeIpAddress(hostname);
+function isAlwaysBlockedVoiceAddress(address: string): boolean {
+  const host = normalizeIpAddress(address);
   if (isBlockedTransitionIpv6Address(host)) {
     return true;
   }
@@ -361,18 +354,18 @@ function isAlwaysBlockedVoiceAddress(hostname: string): boolean {
     );
   }
   if (isIP(host) === 6) {
-    const firstHextet = Number.parseInt(host.split(':', 1)[0] || '', 16);
+    const firstHextet = Number.parseInt(host.split(':', 1)[0] || '0', 16);
     return (
       host === '::' ||
       isAwsIpv6MetadataAddress(host) ||
-      (firstHextet >= 0xfe80 && firstHextet <= 0xfebf)
+      (firstHextet & 0xffc0) === 0xfe80
     );
   }
   return false;
 }
 
-function isLoopbackVoiceAddress(hostname: string): boolean {
-  const host = normalizeIpAddress(hostname);
+function isLoopbackVoiceAddress(address: string): boolean {
+  const host = normalizeIpAddress(address);
   if (isLoopbackHost(host)) {
     return true;
   }
@@ -540,7 +533,7 @@ export function resolveVoiceTranscriptionConfig({
     !allowInsecureBaseUrl
   ) {
     throw new Error(
-      `Voice model '${voiceModel}' must use an https baseUrl. Voice audio must not be transmitted in cleartext. To trust this managed endpoint, add its exact complete URL to security.allowedInsecureVoiceBaseUrls.`,
+      `Voice model '${voiceModel}' must use an https baseUrl. Voice audio must not be transmitted in cleartext. To trust this managed endpoint, add its exact complete normalized URL (${normalizedBaseUrl}) to security.allowedInsecureVoiceBaseUrls.`,
     );
   }
   if (
@@ -549,7 +542,7 @@ export function resolveVoiceTranscriptionConfig({
     isPrivateNetworkIp(parsedBaseUrl.hostname)
   ) {
     throw new Error(
-      `Voice model '${voiceModel}' must not use a private-network baseUrl. To trust this managed endpoint, add its exact complete URL to security.allowedInsecureVoiceBaseUrls.`,
+      `Voice model '${voiceModel}' must not use a private-network baseUrl. To trust this managed endpoint, add its exact complete normalized URL (${normalizedBaseUrl}) to security.allowedInsecureVoiceBaseUrls.`,
     );
   }
 

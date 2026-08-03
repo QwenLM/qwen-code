@@ -869,6 +869,46 @@ describe('voice-transcriber', () => {
     }
   });
 
+  it('names the exact normalized URL to allowlist in both rejection messages', () => {
+    // Default ports and trailing slashes normalize away before matching, so
+    // the message must carry the canonical string the operator has to paste.
+    const cleartextConfig = createConfig([
+      {
+        id: 'qwen3-asr-flash',
+        label: 'Private ASR',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'http://voice.region-a.internal.example:80/v1/',
+      },
+    ]);
+    expect(() =>
+      resolveVoiceTranscriptionConfig({
+        config: cleartextConfig,
+        settings: createSettings(),
+        voiceModel: 'qwen3-asr-flash',
+      }),
+    ).toThrow(
+      /add its exact complete normalized URL \(http:\/\/voice\.region-a\.internal\.example\/v1\) to security\.allowedInsecureVoiceBaseUrls/,
+    );
+
+    const privateConfig = createConfig([
+      {
+        id: 'qwen3-asr-flash',
+        label: 'Private ASR',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://10.0.0.5:443/v1/',
+      },
+    ]);
+    expect(() =>
+      resolveVoiceTranscriptionConfig({
+        config: privateConfig,
+        settings: createSettings(),
+        voiceModel: 'qwen3-asr-flash',
+      }),
+    ).toThrow(
+      /add its exact complete normalized URL \(https:\/\/10\.0\.0\.5\/v1\) to security\.allowedInsecureVoiceBaseUrls/,
+    );
+  });
+
   it('does not classify an IPv4-mapped public address as private', () => {
     const config = createConfig([
       {

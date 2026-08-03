@@ -42,13 +42,7 @@ function normalizeIpAddress(address: string): string {
 
 export function isLoopbackHost(hostname: string): boolean {
   const host = normalizeHostname(hostname);
-  const ipv4Mapped = host.match(/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/);
-  return (
-    host === 'localhost' ||
-    host === '127.0.0.1' ||
-    host === '::1' ||
-    (ipv4Mapped ? isLoopbackHost(ipv4Mapped[1]!) : false)
-  );
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1';
 }
 
 function isAwsIpv6MetadataAddress(hostname: string): boolean {
@@ -135,12 +129,6 @@ function isBlockedTransitionIpv6Address(host: string): boolean {
 function unwrapIpv6TransitionStep(
   host: string,
 ): { address: string } | 'blocked' | undefined {
-  if (host.includes(':')) {
-    const ipv4Embedded = host.match(/(?:(?:^|:))(\d{1,3}(?:\.\d{1,3}){3})$/);
-    if (ipv4Embedded) {
-      return { address: ipv4Embedded[1]! };
-    }
-  }
   const ipv4Mapped = readIpv4MappedIpv6(host);
   if (ipv4Mapped) {
     return { address: ipv4Mapped };
