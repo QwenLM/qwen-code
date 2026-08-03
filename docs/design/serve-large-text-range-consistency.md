@@ -64,9 +64,11 @@ that a byte-cursor page also counts a terminator outside its returned slice —
 the one it resumes after, and, when its first line is cut by the byte budget,
 the one the re-snap walks over — so an unterminated tail page agrees with the
 page before it, and a byte-truncated page with the page after it, in a file
-with uniform line endings (mixed-ending files can still flip between pages;
-unifying the paths is a candidate follow-up — no tracking issue exists yet).
-Core can continue reporting file-level metadata for its other consumers.
+with uniform line endings (mixed-ending files can still flip between pages,
+and a large-file line window of a uniform file can disagree with a
+byte-cursor page of the same bytes; unifying the paths is a candidate
+follow-up — no tracking issue exists yet). Core can continue reporting
+file-level metadata for its other consumers.
 
 Every large-file window keeps `truncated: true`, even when the scan happens to
 reach EOF. This boundary uses the flag to distinguish a window without a
