@@ -53,7 +53,10 @@ import {
   isRepositoryContextRoleId,
   type RoleId,
 } from './lib/agent-briefs.js';
-import { repositoryContextOf } from './lib/repository-context.js';
+import {
+  repositoryContextOf,
+  type RepositoryContext,
+} from './lib/repository-context.js';
 import { pathRulesFor } from './lib/path-rules.js';
 import {
   requiredAgents,
@@ -359,9 +362,9 @@ export function buildChunkAgentPrompt(
     parts.push('', '## Project rules', '', rules.trim());
   }
 
-  const repositoryContext = repositoryContextBlock(report);
-  if (repositoryContext.length > 0) {
-    parts.push('', ...repositoryContext);
+  const repositoryContext = repositoryContextOf(report);
+  if (repositoryContext) {
+    parts.push('', ...repositoryContextBlock(repositoryContext));
   }
 
   // Deliberately NOT included: a sentence for the agent to recite when it finds
@@ -722,35 +725,31 @@ function invariantFileBlock(
   return parts;
 }
 
-function repositoryContextBlock(report: PlanReport): string[] {
-  const context = repositoryContextOf(report);
-  if (!context) return [];
-  const list = (values: string[]) =>
-    values.length > 0 ? values.map((value) => `- ${value}`) : ['- (none)'];
+function contextList(values: string[]): string[] {
+  return values.length > 0 ? values.map((value) => `- ${value}`) : ['- (none)'];
+}
+
+function repositoryContextBlock(context: RepositoryContext): string[] {
   return [
     `## ${context.label} repository context`,
     '',
     `Domains: ${context.domains.join(', ') || '(none)'}`,
     '',
     'Related paths:',
-    ...list(context.relatedPaths),
+    ...contextList(context.relatedPaths),
     '',
     `Recommended tests: ${context.recommendedTests.join(', ') || '(none)'}`,
     `Required configurations: ${context.requiredConfigurations.join(', ') || '(none)'}`,
     '',
     'Unverified dimensions:',
-    ...list(context.unverifiedDimensions),
+    ...contextList(context.unverifiedDimensions),
     '',
     'Verification notes:',
-    ...list(context.verificationNotes),
+    ...contextList(context.verificationNotes),
   ];
 }
 
-function repositoryBuildBoundary(report: PlanReport): string[] {
-  const context = repositoryContextOf(report);
-  if (!context) return [];
-  const list = (values: string[]) =>
-    values.length > 0 ? values.map((value) => `- ${value}`) : ['- (none)'];
+function repositoryBuildBoundary(context: RepositoryContext): string[] {
   return [
     '## Repository-specific verification boundary',
     '',
@@ -758,7 +757,7 @@ function repositoryBuildBoundary(report: PlanReport): string[] {
     `Required configurations: ${context.requiredConfigurations.join(', ') || '(none)'}`,
     '',
     'Verification notes:',
-    ...list(context.verificationNotes),
+    ...contextList(context.verificationNotes),
   ];
 }
 
@@ -809,16 +808,16 @@ export function buildRoleBrief(
   parts.push('## Your dimension', '', brief.brief);
   const repositoryContext = repositoryContextOf(report);
   if (role === '7') {
-    const buildBoundary = repositoryBuildBoundary(report);
-    if (buildBoundary.length > 0) parts.push('', ...buildBoundary);
+    if (repositoryContext) {
+      parts.push('', ...repositoryBuildBoundary(repositoryContext));
+    }
   } else if (
     brief.reviewsCode ||
     (isRepositoryContextRoleId(role) &&
       repositoryContext?.requiredAgents.includes(role))
   ) {
-    const contextBlock = repositoryContextBlock(report);
-    if (contextBlock.length > 0) {
-      parts.push('', ...contextBlock);
+    if (repositoryContext) {
+      parts.push('', ...repositoryContextBlock(repositoryContext));
     }
   }
 

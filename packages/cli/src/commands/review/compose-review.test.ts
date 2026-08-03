@@ -518,6 +518,24 @@ describe('repository context proof boundary', () => {
     expect(repositoryContextGate(planPath)).toEqual([]);
   });
 
+  it('returns nothing for an unreadable plan but fails closed on a malformed context', () => {
+    // Unreadable plan: the coverage gate owns plan validity; the disclosure
+    // has nothing to say. Present-but-INVALID context: every consumer of the
+    // field fails closed, so the gate throws instead of silently dropping the
+    // disclosure.
+    const missing = join(dir, 'missing-plan.json');
+    expect(repositoryContextGate(missing)).toEqual([]);
+
+    const malformed = join(dir, 'malformed-plan.json');
+    writeFileSync(
+      malformed,
+      JSON.stringify({ repositoryContext: { version: 1 } }),
+    );
+    expect(() => repositoryContextGate(malformed)).toThrow(
+      'unknown or missing fields',
+    );
+  });
+
   it('discloses repository proof boundaries without permanently capping approval', () => {
     const planPath = coveredPlan(undefined, {
       repositoryContext: {

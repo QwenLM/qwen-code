@@ -5,6 +5,7 @@
  */
 
 import {
+  chmodSync,
   linkSync,
   mkdirSync,
   mkdtempSync,
@@ -135,7 +136,7 @@ describe('repo-context providers and trust boundary', () => {
     const provide = vi.fn<RepositoryContextProvider['provide']>((input) => {
       expect(input.worktree).toBe(realpathSync(worktree));
       expect(input.changedPaths).toEqual(['src/a.ts', 'src/b.ts']);
-      expect(input.readIdentityFile('.review/identity')).toBe('local\n');
+      expect(input.readIdentityFile('.review/identity')).toBe('local');
       expect(input.readIdentityFile('.review/missing')).toBeNull();
       return context();
     });
@@ -301,6 +302,156 @@ describe('repo-context providers and trust boundary', () => {
     ).toThrow('cannot be resolved');
   });
 
+  it('writes null without consulting the worktree when the base never resolved', () => {
+    // fetch-pr records `mergeBaseSha: null` and degrades rather than failing
+    // the review; repo-context must degrade the same way — and MUST NOT fall
+    // back to the worktree reader, which would take the manifest from the PR
+    // head, the exact read the trust boundary forbids.
+    const root = temp();
+    const worktree = join(root, 'repository');
+    initGit(worktree);
+    writeManifest(worktree); // a head-side manifest that must never be read
+    write(join(worktree, 'src', 'change.ts'), 'base\n');
+    commitAll(worktree);
+    const provide = vi.fn<RepositoryContextProvider['provide']>(() =>
+      context(),
+    );
+
+    const first = run(
+      join(root, 'null-base'),
+      worktree,
+      { files: [{ path: 'src/change.ts' }], mergeBaseSha: null },
+      [{ provide }],
+    );
+    expect(provide).not.toHaveBeenCalled();
+    expect(readJson(first.outPath)).toBeNull();
+    expect(readJson(first.planPath)).not.toHaveProperty('repositoryContext');
+
+    // A failed base fetch with no resolved sha degrades the same way: there
+    // is nothing stale, and nothing to trust.
+    const second = run(
+      join(root, 'null-base-fetch-failed'),
+      worktree,
+      {
+        files: [{ path: 'src/change.ts' }],
+        mergeBaseSha: null,
+        baseFetchFailed: true,
+      },
+      [{ provide }],
+    );
+    expect(provide).not.toHaveBeenCalled();
+    expect(readJson(second.outPath)).toBeNull();
+  });
+
+  it('normalizes identity content identically in local and pull-request modes', () => {
+    // A provider that exact-compares a marker file must get the same value in
+    // both modes: CRLF normalised to LF, surrounding whitespace trimmed.
+    const root = temp();
+    const worktree = join(root, 'worktree');
+    write(join(worktree, '.review', 'identity'), 'token\r\n');
+    const localProvider: RepositoryContextProvider = {
+      provide(input) {
+        expect(input.readIdentityFile('.review/identity')).toBe('token');
+        return context();
+      },
+    };
+    run(root, worktree, { files: [{ path: 'src/change.ts' }] }, [
+      localProvider,
+    ]);
+
+    const repository = join(root, 'repository');
+    initGit(repository);
+    execFileSync('git', ['-C', repository, 'config', 'core.autocrlf', 'false']);
+    write(join(repository, '.review', 'identity'), 'token\r\n');
+    write(join(repository, 'src', 'change.ts'), 'base\n');
+    const base = commitAll(repository);
+    const prProvider: RepositoryContextProvider = {
+      provide(input) {
+        expect(input.readIdentityFile('.review/identity')).toBe('token');
+        return context();
+      },
+    };
+    run(
+      root,
+      repository,
+      { files: [{ path: 'src/change.ts' }], mergeBaseSha: base },
+      [prProvider],
+    );
+  });
+
+  it('treats an identity path resolving to the worktree root as absent', () => {
+    const root = temp();
+    const worktree = join(root, 'worktree');
+    mkdirSync(worktree);
+    symlinkSync(worktree, join(worktree, 'root-link'));
+    const provider: RepositoryContextProvider = {
+      provide(input) {
+        expect(input.readIdentityFile('root-link')).toBeNull();
+        return context();
+      },
+    };
+    run(root, worktree, { files: [{ path: 'src/change.ts' }] }, [provider]);
+  });
+
+  // Permission-based failure injection is meaningless to root.
+  const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+
+  it.skipIf(isRoot)(
+    'fails closed when a present local identity file cannot be read',
+    () => {
+      const root = temp();
+      const worktree = join(root, 'worktree');
+      const identity = join(worktree, '.review', 'identity');
+      write(identity, 'token\n');
+      chmodSync(identity, 0);
+      try {
+        expect(() =>
+          run(root, worktree, { files: [{ path: 'src/change.ts' }] }, [
+            {
+              provide(input) {
+                input.readIdentityFile('.review/identity');
+                return context();
+              },
+            },
+          ]),
+        ).toThrow();
+      } finally {
+        chmodSync(identity, 0o644);
+      }
+    },
+  );
+
+  it.skipIf(isRoot)('keeps the artifact when the plan write fails', () => {
+    // Write ordering is artifact-then-plan on purpose: when the plan write is
+    // the one that fails, the artifact has landed but the plan is untouched,
+    // so the two never disagree about a run — the next invocation rewrites
+    // both.
+    const root = temp();
+    const worktree = join(root, 'worktree');
+    mkdirSync(worktree);
+    const planDir = join(root, 'plan-dir');
+    mkdirSync(planDir);
+    const planPath = join(planDir, 'plan.json');
+    write(
+      planPath,
+      `${JSON.stringify({ files: [{ path: 'src/change.ts' }] })}\n`,
+    );
+    const outPath = join(root, 'context.json');
+    const before = readFileSync(planPath, 'utf8');
+    chmodSync(planDir, 0o555);
+    try {
+      expect(() =>
+        runRepoContext({ plan: planPath, worktree, out: outPath }, [
+          { provide: () => context() },
+        ]),
+      ).toThrow();
+      expect(readJson(outPath)).toEqual(context());
+      expect(readFileSync(planPath, 'utf8')).toBe(before);
+    } finally {
+      chmodSync(planDir, 0o755);
+    }
+  });
+
   it('supports recorded linked-worktree paths', () => {
     const root = temp();
     const repository = join(root, 'repository');
@@ -345,15 +496,33 @@ describe('repo-context providers and trust boundary', () => {
     }
   });
 
-  it('rejects changed-path traversal before providers run', () => {
+  it('skips unsafe changed paths instead of aborting the step', () => {
+    // Changed paths are only matched against manifest globs, never opened, so
+    // an unsafe-but-real path (a backslash is a legal POSIX filename byte)
+    // must not kill a step that runs on every review — it just cannot match.
     const root = temp();
     const worktree = join(root, 'worktree');
     mkdirSync(worktree);
-    const provide = vi.fn<RepositoryContextProvider['provide']>();
-    expect(() =>
-      run(root, worktree, { files: [{ path: '../secret' }] }, [{ provide }]),
-    ).toThrow('plan.files[0].path is invalid');
-    expect(provide).not.toHaveBeenCalled();
+    const provide = vi.fn<RepositoryContextProvider['provide']>((input) => {
+      expect(input.changedPaths).toEqual(['src/ok.ts']);
+      return context();
+    });
+    run(
+      root,
+      worktree,
+      { files: [{ path: '../secret' }, { path: 'src/ok.ts' }] },
+      [{ provide }],
+    );
+    expect(provide).toHaveBeenCalledOnce();
+  });
+
+  it('still rejects a corrupted plan whose file paths are not strings', () => {
+    const root = temp();
+    const worktree = join(root, 'worktree');
+    mkdirSync(worktree);
+    expect(() => run(root, worktree, { files: [{ path: 42 }] })).toThrow(
+      'plan.files[0].path is invalid',
+    );
   });
 
   it('rejects plan/out aliases and preserves the plan on artifact failure', () => {

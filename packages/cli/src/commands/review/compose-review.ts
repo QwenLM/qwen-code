@@ -770,17 +770,21 @@ function composeReviewBody(
   // keeps its bare Approve — there, finding nothing is the expected outcome.
   let lowSignal: ComposeReviewResult['lowSignal'] = null;
   if (event === 'APPROVE' && input.planPath) {
+    let plan: RosterPlan | undefined;
     try {
-      const plan = JSON.parse(
-        readFileSync(input.planPath, 'utf8'),
-      ) as RosterPlan;
+      plan = JSON.parse(readFileSync(input.planPath, 'utf8')) as RosterPlan;
+    } catch {
+      // Unreadable plan, no disclosure — the coverage gate owns plan validity.
+    }
+    // A malformed repositoryContext inside an otherwise-readable plan is NOT
+    // swallowed here: requiredAgents throws, fail-closed like every other
+    // consumer of the field. On a real APPROVE the coverage gate already
+    // validated it.
+    if (plan) {
       const src = Number(plan.srcDiffLines ?? 0);
       if (src > LOW_SIGNAL_SRC_DIFF_LINES) {
         lowSignal = { agents: requiredAgents(plan).length, srcDiffLines: src };
       }
-    } catch {
-      // Unreachable on a real APPROVE — the coverage gate already read this
-      // plan — and a disclosure must never take the review down.
     }
   }
 
@@ -1319,18 +1323,22 @@ const fetchPrBodyViaGh: PrBodyFetcher = (ownerRepo, prNumber) => {
 };
 
 export function repositoryContextGate(planPath: string): string[] {
+  let plan: RosterPlan;
   try {
-    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as RosterPlan;
-    const context = repositoryContextOf(plan);
-    return (context?.unverifiedDimensions ?? []).map(
-      (dimension) =>
-        `${mdField(dimension)} — the repository context marks this proof boundary as unverified`,
-    );
+    plan = JSON.parse(readFileSync(planPath, 'utf8')) as RosterPlan;
   } catch {
-    // Coverage reads and validates the same plan and supplies the fail-closed
-    // disclosure. Repeating it here would post the same broken-plan cause twice.
+    // An unreadable plan has nothing to disclose; the coverage gate owns plan
+    // validity and already fails closed on it.
     return [];
   }
+  // A PRESENT-but-invalid context is a corrupted plan, and every consumer of
+  // this field fails closed on one — coverage throws, the roster throws; the
+  // disclosure cannot be the one place that silently shrugs.
+  const context = repositoryContextOf(plan);
+  return (context?.unverifiedDimensions ?? []).map(
+    (dimension) =>
+      `${mdField(dimension)} — the repository context marks this proof boundary as unverified`,
+  );
 }
 
 /**

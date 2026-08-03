@@ -55,32 +55,34 @@ export type RoleId =
   | 'verify'
   | 'reverse-audit';
 
-export type RepositoryContextRoleId = Exclude<
-  RoleId,
-  | '0'
-  | '7'
-  | 'invariant-a'
-  | 'invariant-b'
-  | 'invariant-c'
-  | 'verify'
-  | 'reverse-audit'
->;
+/**
+ * The roles a repository context may require. One list is the single source for
+ * BOTH the type and the runtime guard: an allow-list the type admitted while the
+ * guard rejected it (or the reverse) would make the `is` predicate a lie, so
+ * neither half is written by hand any more.
+ */
+export const REPOSITORY_CONTEXT_ROLES = [
+  '1a',
+  '1b',
+  '1c',
+  '2',
+  '3a',
+  '3b',
+  '3c',
+  '4',
+  '5',
+  '6a',
+  '6b',
+  '6c',
+  'test-matrix',
+] as const satisfies readonly RoleId[];
 
-export function isRoleId(value: string): value is RoleId {
-  return Object.hasOwn(BRIEFS, value);
-}
+export type RepositoryContextRoleId = (typeof REPOSITORY_CONTEXT_ROLES)[number];
 
 export function isRepositoryContextRoleId(
   value: string,
 ): value is RepositoryContextRoleId {
-  return (
-    isRoleId(value) &&
-    value !== '0' &&
-    value !== '7' &&
-    !value.startsWith('invariant-') &&
-    value !== 'verify' &&
-    value !== 'reverse-audit'
-  );
+  return (REPOSITORY_CONTEXT_ROLES as readonly string[]).includes(value);
 }
 
 export interface Brief {

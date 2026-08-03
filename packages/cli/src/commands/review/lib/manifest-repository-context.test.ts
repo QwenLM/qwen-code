@@ -14,7 +14,10 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { manifestRepositoryContextProvider } from './manifest-repository-context.js';
+import {
+  manifestRepositoryContextProvider,
+  MAX_GLOB_CANDIDATES,
+} from './manifest-repository-context.js';
 
 function temp(): string {
   return realpathSync(mkdtempSync(join(tmpdir(), 'manifest-context-')));
@@ -106,10 +109,6 @@ describe('manifest repository context provider', () => {
       'unknown rule field',
       manifest({ rules: [{ paths: ['src/**'], extra: [] }] }),
     ],
-    [
-      'unsorted array',
-      manifest({ rules: [{ paths: ['src/b/**', 'src/a/**'] }] }),
-    ],
     ['duplicate array', manifest({ rules: [{ paths: ['src/**', 'src/**'] }] })],
     ['unsafe traversal glob', manifest({ rules: [{ paths: ['src/../**'] }] })],
     ['unsafe absolute glob', manifest({ rules: [{ paths: ['/src/**'] }] })],
@@ -166,11 +165,14 @@ describe('manifest repository context provider', () => {
     const worktree = temp();
     const source = join(worktree, 'src');
     mkdirSync(source);
-    const changedPaths = Array.from({ length: 1025 }, (_, index) => {
-      const name = `${String(index).padStart(4, '0')}.ts`;
-      writeFileSync(join(source, name), '');
-      return `src/${name}`;
-    });
+    const changedPaths = Array.from(
+      { length: MAX_GLOB_CANDIDATES + 1 },
+      (_, index) => {
+        const name = `${String(index).padStart(6, '0')}.ts`;
+        writeFileSync(join(source, name), '');
+        return `src/${name}`;
+      },
+    );
     expect(() =>
       provide(
         worktree,
@@ -180,6 +182,27 @@ describe('manifest repository context provider', () => {
         }),
       ),
     ).toThrow('scan exceeds limit');
+  }, 30_000);
+
+  it('accepts unsorted manifest arrays and sorts the merged output', () => {
+    // The manifest is human-authored: only uniqueness is enforced there; the
+    // provider sorts before the wire format's strict sorted-and-unique
+    // validator sees the result.
+    const worktree = temp();
+    write(join(worktree, 'src', 'a.ts'));
+    write(join(worktree, 'src', 'b.ts'));
+    const content = manifest({
+      rules: [
+        {
+          paths: ['src/b.ts', 'src/a.ts'],
+          relatedPaths: ['src/b.ts', 'src/a.ts'],
+          domains: ['zeta', 'alpha'],
+        },
+      ],
+    });
+    const context = provide(worktree, ['src/a.ts'], content);
+    expect(context?.domains).toEqual(['alpha', 'zeta']);
+    expect(context?.relatedPaths).toEqual(['src/b.ts']);
   });
 
   it('deduplicates related patterns before applying the scan bound', () => {

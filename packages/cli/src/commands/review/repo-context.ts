@@ -15,7 +15,7 @@ import {
 } from 'node:fs';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
-import { gitOpt } from './lib/git.js';
+import { git, gitOpt } from './lib/git.js';
 import { manifestRepositoryContextProvider } from './lib/manifest-repository-context.js';
 import {
   isSafeRepositoryRelativePath,
@@ -74,13 +74,32 @@ function recordedWorktreeMatches(
   );
 }
 
-function trustedMergeBase(plan: MutablePlan, worktree: string): string | null {
-  if (plan.mergeBaseSha === undefined) return null;
-  if (plan.baseFetchFailed === true) {
+/**
+ * Which identity source this plan may read from. `local` — no merge base was
+ * ever recorded (a capture-local / plan-diff plan): the worktree. `base` — a
+ * trusted, resolved merge base: that commit only. `none` — a PR plan whose
+ * base never resolved (`fetch-pr` records `mergeBaseSha: null` and degrades
+ * rather than failing): NO source. That third state is the whole point: the
+ * natural-looking fallback would read the manifest from the PR head, the exact
+ * read the trust boundary exists to forbid, so the command writes a `null`
+ * artifact instead — the same degradation `fetch-pr` chose, taken one step.
+ */
+type MergeBaseResolution =
+  | { kind: 'local' }
+  | { kind: 'base'; sha: string }
+  | { kind: 'none' };
+
+function trustedMergeBase(
+  plan: MutablePlan,
+  worktree: string,
+): MergeBaseResolution {
+  if (plan.mergeBaseSha === undefined) return { kind: 'local' };
+  if (plan.baseFetchFailed === true && plan.mergeBaseSha !== null) {
     throw new Error(
       'repo-context: base fetch failed, so plan.mergeBaseSha may be stale',
     );
   }
+  if (plan.mergeBaseSha === null) return { kind: 'none' };
   if (
     typeof plan.mergeBaseSha !== 'string' ||
     !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(plan.mergeBaseSha)
@@ -98,7 +117,19 @@ function trustedMergeBase(plan: MutablePlan, worktree: string): string | null {
   ) {
     throw new Error('repo-context: plan.mergeBaseSha cannot be resolved');
   }
-  return plan.mergeBaseSha;
+  return { kind: 'base', sha: plan.mergeBaseSha };
+}
+
+// `git` normalises stdout (CRLF to LF, trimmed); the worktree read must return
+// the same shape, or a provider that exact-compares an identity file gets one
+// value in a PR review and another in a local review of the same repository.
+function normalizeIdentityContent(content: string): string {
+  return content.replace(/\r\n/g, '\n').trim();
+}
+
+function isAbsentError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  return code === 'ENOENT' || code === 'ENOTDIR';
 }
 
 function identityReader(
@@ -112,32 +143,55 @@ function identityReader(
       );
     }
     if (mergeBase !== null) {
-      return gitOpt('-C', worktree, 'show', `${mergeBase}:${relativePath}`);
-    }
-    const candidate = resolve(worktree, relativePath);
-    try {
-      const resolved = realpathSync(candidate);
-      const contained = relative(worktree, resolved);
+      // Probe existence first so "absent at the base" and "git failed" stay
+      // distinct: once the path IS there, a failing `show` throws (fail
+      // closed) instead of masquerading as "not this repository".
       if (
-        contained === '' ||
-        isAbsolute(contained) ||
-        contained === '..' ||
-        contained.startsWith(`..${sep}`)
+        gitOpt(
+          '-C',
+          worktree,
+          'cat-file',
+          '-e',
+          `${mergeBase}:${relativePath}`,
+        ) === null
       ) {
+        return null;
+      }
+      try {
+        return git('-C', worktree, 'show', `${mergeBase}:${relativePath}`);
+      } catch (error) {
         throw new Error(
-          `repo-context: identity path escapes the worktree: ${JSON.stringify(relativePath)}`,
+          `repo-context: identity read failed for ${relativePath}: ` +
+            `${(error as Error).message}`,
         );
       }
-      if (!statSync(resolved).isFile()) return null;
-      return readFileSync(resolved, 'utf8');
+    }
+    const candidate = resolve(worktree, relativePath);
+    let resolved: string;
+    try {
+      resolved = realpathSync(candidate);
     } catch (error) {
-      if (
-        error instanceof Error &&
-        error.message.startsWith('repo-context: identity path escapes')
-      ) {
-        throw error;
-      }
-      return null;
+      if (isAbsentError(error)) return null;
+      throw error;
+    }
+    const contained = relative(worktree, resolved);
+    // A path resolving to the worktree root itself is a directory, never an
+    // identity file; it falls out at the isFile check, not here.
+    if (
+      isAbsolute(contained) ||
+      contained === '..' ||
+      contained.startsWith(`..${sep}`)
+    ) {
+      throw new Error(
+        `repo-context: identity path escapes the worktree: ${JSON.stringify(relativePath)}`,
+      );
+    }
+    try {
+      if (!statSync(resolved).isFile()) return null;
+      return normalizeIdentityContent(readFileSync(resolved, 'utf8'));
+    } catch (error) {
+      if (isAbsentError(error)) return null;
+      throw error;
     }
   };
 }
@@ -159,16 +213,20 @@ function changedPaths(plan: MutablePlan): string[] {
   if (!Array.isArray(plan.files)) {
     throw new Error('repo-context: plan.files must be an array');
   }
-  const paths = plan.files.map((file, index) => {
+  const paths: string[] = [];
+  for (const [index, file] of plan.files.entries()) {
     const path =
       typeof file === 'object' && file !== null
         ? (file as PlanFile).path
         : undefined;
-    if (typeof path !== 'string' || !isSafeRepositoryRelativePath(path)) {
+    if (typeof path !== 'string') {
       throw new Error(`repo-context: plan.files[${index}].path is invalid`);
     }
-    return path;
-  });
+    // Changed paths are only ever MATCHED against manifest globs, never opened,
+    // so an unsafe-but-real path (a backslash is a legal POSIX filename byte)
+    // is skipped rather than aborting a step that runs on every review.
+    if (isSafeRepositoryRelativePath(path)) paths.push(path);
+  }
   return [...new Set(paths)].sort();
 }
 
@@ -219,20 +277,29 @@ export function runRepoContext(
   }
 
   const mergeBase = trustedMergeBase(plan, worktree);
-  const context = contextFromProviders(
-    providers,
-    worktree,
-    changedPaths(plan),
-    identityReader(worktree, mergeBase),
-  );
+  const context =
+    mergeBase.kind === 'none'
+      ? null
+      : contextFromProviders(
+          providers,
+          worktree,
+          changedPaths(plan),
+          identityReader(
+            worktree,
+            mergeBase.kind === 'base' ? mergeBase.sha : null,
+          ),
+        );
   if (context === null) delete plan.repositoryContext;
   else plan.repositoryContext = context;
 
   mkdirSync(dirname(outPath), { recursive: true });
-  mkdirSync(dirname(planPath), { recursive: true });
   atomicWriteFileSync(outPath, `${JSON.stringify(context, null, 2)}\n`);
   atomicWriteFileSync(planPath, stringifyPlanReport(plan));
-  writeStdoutLine(`Wrote repository context to ${outPath}`);
+  writeStdoutLine(
+    context === null
+      ? `Wrote null repository context to ${outPath}`
+      : `Wrote repository context (${context.provider}) to ${outPath}`,
+  );
 }
 
 export const repoContextCommand: CommandModule = {

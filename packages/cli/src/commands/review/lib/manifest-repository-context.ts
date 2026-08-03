@@ -12,16 +12,30 @@ import type {
   RepositoryContext,
   RepositoryContextProvider,
 } from './repository-context.js';
-import { validateRepositoryContext } from './repository-context.js';
+import {
+  compareText,
+  isControlFree,
+  MAX_ARRAY_ITEMS,
+  MAX_LABEL_LENGTH,
+  MAX_NOTE_LENGTH,
+  MAX_PATH_LENGTH,
+  MAX_TOKEN_LENGTH,
+  validateBoundedString,
+  validateBoundedStringArray,
+  validateRepositoryContext,
+} from './repository-context.js';
 
 const MANIFEST_PATH = '.qwen/review-context.json';
-const MAX_ARRAY_ITEMS = 128;
-const MAX_GLOB_CANDIDATES = 1024;
+/**
+ * Visited-entry ceiling for one `relatedPaths` expansion, counted across all
+ * scan roots. Deliberately far above any realistic subtree — this repository's
+ * whole `packages/` tree is under it — so a honestly scoped manifest never
+ * fails a review, while a `**`-at-the-root style pathological scan still ends.
+ * Exceeded, the provider throws (fail closed), like every other manifest error.
+ */
+export const MAX_GLOB_CANDIDATES = 16384;
 const MAX_RULES = 128;
-const MAX_LABEL_LENGTH = 120;
-const MAX_TOKEN_LENGTH = 160;
-const MAX_PATH_LENGTH = 512;
-const MAX_NOTE_LENGTH = 512;
+const MANIFEST_PREFIX = 'repository context manifest ';
 
 const MANIFEST_KEYS = ['label', 'rules', 'version'].sort();
 const RULE_KEYS = [
@@ -51,25 +65,6 @@ interface Manifest {
   rules: ManifestRule[];
 }
 
-function compareText(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0;
-}
-
-function isControlFree(value: string): boolean {
-  for (let index = 0; index < value.length; index++) {
-    const code = value.charCodeAt(index);
-    if (
-      code < 0x20 ||
-      (code >= 0x7f && code <= 0x9f) ||
-      code === 0x2028 ||
-      code === 0x2029
-    ) {
-      return false;
-    }
-  }
-  return true;
-}
-
 function hasExactKeys(
   value: Record<string, unknown>,
   expected: string[],
@@ -81,47 +76,28 @@ function hasExactKeys(
   );
 }
 
-function validateString(
+function validateManifestString(
   value: unknown,
   field: string,
   maxLength: number,
 ): asserts value is string {
-  if (
-    typeof value !== 'string' ||
-    value.length === 0 ||
-    value.length > maxLength ||
-    !isControlFree(value)
-  ) {
-    throw new Error(`repository context manifest ${field} is invalid`);
-  }
+  validateBoundedString(value, field, maxLength, MANIFEST_PREFIX);
 }
 
-function validateStringArray(
+/**
+ * Manifest arrays are human-authored, so they need only be UNIQUE — hand-
+ * sorting a config file is a sharp edge that would fail whole reviews over
+ * cosmetics. The provider merges and sorts before the wire format's strict
+ * sorted-and-unique validator ever sees the result (see sortedUnique below).
+ */
+function validateManifestStringArray(
   value: unknown,
   field: string,
   maxLength: number,
 ): asserts value is string[] {
-  if (
-    !Array.isArray(value) ||
-    value.length > MAX_ARRAY_ITEMS ||
-    value.some(
-      (item) =>
-        typeof item !== 'string' ||
-        item.length === 0 ||
-        item.length > maxLength ||
-        !isControlFree(item),
-    )
-  ) {
-    throw new Error(`repository context manifest ${field} is invalid`);
-  }
-  if (
-    value.some(
-      (item, index) => index > 0 && compareText(value[index - 1], item) >= 0,
-    )
-  ) {
-    throw new Error(
-      `repository context manifest ${field} must be sorted and unique`,
-    );
+  validateBoundedStringArray(value, field, maxLength, MANIFEST_PREFIX);
+  if (new Set(value).size !== value.length) {
+    throw new Error(`${MANIFEST_PREFIX}${field} must not contain duplicates`);
   }
 }
 
@@ -154,7 +130,7 @@ function validateGlobArray(
   field: string,
   requireDirectoryPrefix: boolean,
 ): asserts value is string[] {
-  validateStringArray(value, field, MAX_PATH_LENGTH);
+  validateManifestStringArray(value, field, MAX_PATH_LENGTH);
   for (const pattern of value) {
     validateGlob(pattern, field);
     if (
@@ -175,7 +151,7 @@ function optionalStringArray(
 ): string[] {
   const value = rule[field];
   if (value === undefined) return [];
-  validateStringArray(value, field, maxLength);
+  validateManifestStringArray(value, field, maxLength);
   return value;
 }
 
@@ -200,7 +176,7 @@ function parseManifest(content: string): Manifest {
   if (manifest['version'] !== 1) {
     throw new Error('unsupported repository context manifest version');
   }
-  validateString(manifest['label'], 'label', MAX_LABEL_LENGTH);
+  validateManifestString(manifest['label'], 'label', MAX_LABEL_LENGTH);
   if (
     !Array.isArray(manifest['rules']) ||
     manifest['rules'].length > MAX_RULES
@@ -230,7 +206,7 @@ function parseManifest(content: string): Manifest {
     }
     const requiredAgents = rule['requiredAgents'];
     if (requiredAgents !== undefined) {
-      validateStringArray(
+      validateManifestStringArray(
         requiredAgents,
         `rules[${index}].requiredAgents`,
         MAX_TOKEN_LENGTH,
@@ -273,14 +249,24 @@ function parseManifest(content: string): Manifest {
   return { label: manifest['label'], rules };
 }
 
+// One compiled expression per pattern segment: at the bounds (thousands of
+// candidates x dozens of patterns) recompiling per (pattern, path) pair is six
+// figures of throwaway RegExp constructions for one repo-context run.
+const segmentExpressions = new Map<string, RegExp>();
+
 function segmentMatches(pattern: string, value: string): boolean {
-  let expression = '^';
-  for (const character of pattern) {
-    if (character === '*') expression += '[^/]*';
-    else if (character === '?') expression += '[^/]';
-    else expression += character.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
+  let expression = segmentExpressions.get(pattern);
+  if (expression === undefined) {
+    let source = '^';
+    for (const character of pattern) {
+      if (character === '*') source += '[^/]*';
+      else if (character === '?') source += '[^/]';
+      else source += character.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
+    }
+    expression = new RegExp(`${source}$`);
+    segmentExpressions.set(pattern, expression);
   }
-  return new RegExp(`${expression}$`).test(value);
+  return expression.test(value);
 }
 
 function globMatches(pattern: string, path: string): boolean {

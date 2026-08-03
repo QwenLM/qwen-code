@@ -9,12 +9,16 @@ import { isRepositoryContextRoleId } from './agent-briefs.js';
 
 export const REPOSITORY_CONTEXT_VERSION = 1 as const;
 
-const MAX_ARRAY_ITEMS = 128;
+// Shared bounds for the context contract and every provider that produces one:
+// a provider validator must emit exactly what validateRepositoryContext accepts,
+// so both read the same constants instead of keeping lockstep copies that can
+// drift.
+export const MAX_ARRAY_ITEMS = 128;
 const MAX_PROVIDER_LENGTH = 64;
-const MAX_LABEL_LENGTH = 120;
-const MAX_TOKEN_LENGTH = 160;
-const MAX_PATH_LENGTH = 512;
-const MAX_NOTE_LENGTH = 512;
+export const MAX_LABEL_LENGTH = 120;
+export const MAX_TOKEN_LENGTH = 160;
+export const MAX_PATH_LENGTH = 512;
+export const MAX_NOTE_LENGTH = 512;
 
 export interface RepositoryContext {
   version: typeof REPOSITORY_CONTEXT_VERSION;
@@ -36,6 +40,15 @@ export interface RepositoryContextPlan {
 export interface RepositoryContextProviderInput {
   worktree: string;
   changedPaths: string[];
+  /**
+   * Read an identity file the provider keys on. The content is identical in
+   * every mode — CRLF normalised to LF, surrounding whitespace trimmed — so a
+   * provider that exact-compares a marker file gets the same value in a pull
+   * request review (read from the trusted merge base) and a local one (read
+   * from the worktree). `null` means the file is absent; a read failure
+   * THROWS, fail-closed, so a broken read cannot pose as "not this
+   * repository".
+   */
   readIdentityFile(relativePath: string): string | null;
 }
 
@@ -57,9 +70,8 @@ const CONTEXT_KEYS = [
 ].sort();
 
 const SAFE_PROVIDER = /^[a-z0-9][a-z0-9._-]*$/;
-const SAFE_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._/@:+-]*$/;
 
-function isControlFree(value: string): boolean {
+export function isControlFree(value: string): boolean {
   for (let index = 0; index < value.length; index++) {
     const code = value.charCodeAt(index);
     if (
@@ -74,7 +86,7 @@ function isControlFree(value: string): boolean {
   return true;
 }
 
-function compareText(left: string, right: string): number {
+export function compareText(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
@@ -99,10 +111,17 @@ export function isSafeRepositoryRelativePath(path: string): boolean {
   );
 }
 
-function validateString(
+/**
+ * Bounded, non-empty, control-character-free string. `prefix` names the owner
+ * of the field in the error (`repositoryContext.` for the wire format, the
+ * manifest's own wording for manifest parsing), so one validator serves both
+ * without their bounds drifting apart.
+ */
+export function validateBoundedString(
   value: unknown,
   field: string,
   maxLength: number,
+  prefix: string,
   pattern?: RegExp,
 ): asserts value is string {
   if (
@@ -112,14 +131,16 @@ function validateString(
     !isControlFree(value) ||
     (pattern !== undefined && !pattern.test(value))
   ) {
-    throw new Error(`repositoryContext.${field} is invalid`);
+    throw new Error(`${prefix}${field} is invalid`);
   }
 }
 
-function validateStringArray(
+/** Item-shape half of {@link validateBoundedString}; ordering is the caller's. */
+export function validateBoundedStringArray(
   value: unknown,
   field: string,
   maxLength: number,
+  prefix: string,
   pattern?: RegExp,
 ): asserts value is string[] {
   if (
@@ -134,10 +155,7 @@ function validateStringArray(
         (pattern !== undefined && !pattern.test(item)),
     )
   ) {
-    throw new Error(`repositoryContext.${field} is invalid`);
-  }
-  if (!isSortedUnique(value)) {
-    throw new Error(`repositoryContext.${field} must be sorted and unique`);
+    throw new Error(`${prefix}${field} is invalid`);
   }
 }
 
@@ -158,32 +176,53 @@ export function validateRepositoryContext(value: unknown): RepositoryContext {
     throw new Error('unsupported repositoryContext version');
   }
 
-  validateString(
+  const prefix = 'repositoryContext.';
+  // The wire format every downstream consumer trusts is deterministic by
+  // construction: sorted and unique. Providers earn that shape on the way in
+  // (the manifest provider sorts and dedupes); the validator enforces it.
+  const requireSortedUnique = (values: readonly string[], field: string) => {
+    if (!isSortedUnique(values)) {
+      throw new Error(`${prefix}${field} must be sorted and unique`);
+    }
+  };
+
+  validateBoundedString(
     context['provider'],
     'provider',
     MAX_PROVIDER_LENGTH,
+    prefix,
     SAFE_PROVIDER,
   );
-  validateString(context['label'], 'label', MAX_LABEL_LENGTH);
+  validateBoundedString(context['label'], 'label', MAX_LABEL_LENGTH, prefix);
   for (const field of [
     'domains',
     'recommendedTests',
     'requiredConfigurations',
   ] as const) {
-    validateStringArray(context[field], field, MAX_TOKEN_LENGTH);
+    validateBoundedStringArray(context[field], field, MAX_TOKEN_LENGTH, prefix);
+    requireSortedUnique(context[field], field);
   }
-  validateStringArray(context['relatedPaths'], 'relatedPaths', MAX_PATH_LENGTH);
+  validateBoundedStringArray(
+    context['relatedPaths'],
+    'relatedPaths',
+    MAX_PATH_LENGTH,
+    prefix,
+  );
+  requireSortedUnique(context['relatedPaths'], 'relatedPaths');
   if (
     context['relatedPaths'].some((path) => !isSafeRepositoryRelativePath(path))
   ) {
     throw new Error('repositoryContext.relatedPaths contains an unsafe path');
   }
-  validateStringArray(
+  // requiredAgents carries no token pattern: the role allow-list membership
+  // check below is strictly tighter than any shape check.
+  validateBoundedStringArray(
     context['requiredAgents'],
     'requiredAgents',
     MAX_TOKEN_LENGTH,
-    SAFE_TOKEN,
+    prefix,
   );
+  requireSortedUnique(context['requiredAgents'], 'requiredAgents');
   if (
     context['requiredAgents'].some((role) => !isRepositoryContextRoleId(role))
   ) {
@@ -192,7 +231,8 @@ export function validateRepositoryContext(value: unknown): RepositoryContext {
     );
   }
   for (const field of ['unverifiedDimensions', 'verificationNotes'] as const) {
-    validateStringArray(context[field], field, MAX_NOTE_LENGTH);
+    validateBoundedStringArray(context[field], field, MAX_NOTE_LENGTH, prefix);
+    requireSortedUnique(context[field], field);
   }
 
   return context as unknown as RepositoryContext;
