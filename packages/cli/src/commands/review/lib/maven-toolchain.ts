@@ -206,7 +206,12 @@ export function detectMavenOwnership(
       (module) => path === module || path.startsWith(`${module}/`),
     );
     if (owner) {
-      modules.add(owner);
+      const nearestProject = nearestMavenProject(root, path);
+      if (nearestProject && !reactor.projectDirs.includes(nearestProject)) {
+        inactiveProjects.add(nearestProject);
+      } else {
+        modules.add(owner);
+      }
       continue;
     }
     if (isDocumentationPath(path)) {

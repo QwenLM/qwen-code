@@ -223,6 +223,31 @@ describe('maven toolchain adapter', () => {
     expect(calls).toEqual([]);
   });
 
+  it('fails closed for an inactive Maven project nested under a reactor module', () => {
+    writeReactor();
+    writeProject('nested-parent/profile-child');
+    const calls: string[] = [];
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: [
+        'nested-parent/profile-child/src/main/java/example/ProfileChild.java',
+      ],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        calls.push(command);
+        return result(command);
+      },
+    });
+
+    expect(report.toolchain).toBe('unsupported');
+    expect(report.note).toContain(
+      'outside the root reactor: nested-parent/profile-child',
+    );
+    expect(calls).toEqual([]);
+  });
+
   it('runs the root reactor for source fixtures with documentation extensions', () => {
     writeProject('.');
     const calls: string[] = [];
