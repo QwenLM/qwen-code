@@ -75,6 +75,23 @@ describe('Agent View PTY host process server', () => {
     secondSocket.destroy();
   });
 
+  it('closes while an attach stream is active', async () => {
+    const host = fakeHost();
+    const socketPath = shortSocketPath();
+    const server = createAgentViewPtyHostServer(host, socketPath);
+    await server.listen();
+
+    const socket = net.createConnection(socketPath);
+    socket.write(`${JSON.stringify({ id: '1', op: 'attachStream' })}\n`);
+    await expect(readLine(socket)).resolves.toMatchObject({
+      id: '1',
+      ok: true,
+    });
+
+    await expect(server.close()).resolves.toBeUndefined();
+    await expect(waitForClose(socket)).resolves.toBeUndefined();
+  });
+
   it('handles resize, logs, and kill requests', async () => {
     const host = fakeHost();
     const socketPath = shortSocketPath();
@@ -194,6 +211,46 @@ describe('Agent View PTY host process server', () => {
     await expect(connected.exited).resolves.toEqual({ exitCode: 0 });
   });
 
+  it('disposes a connected host by asking the remote host to shut down', async () => {
+    const host = fakeHost();
+    const socketPath = shortSocketPath();
+    const server = createAgentViewPtyHostServer(host, socketPath);
+    servers.push(server);
+    await server.listen();
+
+    const connected = await connectAgentViewPtyHostProcess(
+      createLaunch('session-1'),
+      socketPath,
+    );
+
+    connected.dispose();
+
+    await waitFor(() => host.shutdowns === 1);
+    await expect(connected.exited).resolves.toEqual({ exitCode: 1 });
+  });
+
+  it('bridges data through a connected host handle', async () => {
+    const host = fakeHost();
+    const socketPath = shortSocketPath();
+    const server = createAgentViewPtyHostServer(host, socketPath);
+    servers.push(server);
+    await server.listen();
+    const connected = await connectAgentViewPtyHostProcess(
+      createLaunch('session-1'),
+      socketPath,
+    );
+    const data: string[] = [];
+
+    const disposable = connected.onData((chunk) => data.push(chunk));
+
+    connected.write(Buffer.from('hello'));
+    await waitFor(() => host.input === 'hello');
+    host.emitData('output');
+    await waitFor(() => data.join('') === 'output');
+
+    disposable?.dispose();
+  });
+
   it('computes Unix and Windows host socket paths', () => {
     expect(
       getAgentViewPtyHostSocketPath('session-1', {
@@ -234,13 +291,75 @@ describe('Agent View PTY host process server', () => {
       'Agent View PTY host exited before ready (code 1).',
     );
   });
+
+  it('kills a spawned child when the handle is disposed', async () => {
+    const globalDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pty-launch-'),
+    );
+    const launch = createLaunch('session-dispose-child');
+    const socketPath = getAgentViewPtyHostSocketPath(launch.sessionId, {
+      globalDir,
+    });
+    const server = await createStatusServer(socketPath);
+    const child = fakeChildProcess(2468);
+    try {
+      const handle = await launchAgentViewPtyHostProcess(launch, {
+        globalDir,
+        spawnProcess: () => child,
+      });
+
+      handle.dispose();
+
+      expect(child.killedWith).toBe('SIGTERM');
+      await expect(handle.exited).resolves.toEqual({ exitCode: 1 });
+    } finally {
+      server.close();
+      await fs.rm(globalDir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports child exit signals when they are known', async () => {
+    const globalDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pty-signal-'),
+    );
+    const launch = createLaunch('session-child-signal');
+    const socketPath = getAgentViewPtyHostSocketPath(launch.sessionId, {
+      globalDir,
+    });
+    const server = await createStatusServer(socketPath);
+    const child = fakeChildProcess(2468);
+    try {
+      const handle = await launchAgentViewPtyHostProcess(launch, {
+        globalDir,
+        spawnProcess: () => child,
+      });
+
+      child.emit('exit', null, 'SIGKILL');
+
+      await expect(handle.exited).resolves.toEqual({
+        exitCode: 1,
+        signal: os.constants.signals.SIGKILL,
+      });
+    } finally {
+      server.close();
+      await fs.rm(globalDir, { recursive: true, force: true });
+    }
+  });
 });
 
-function fakeChildProcess(pid: number): ChildProcess {
+type FakeChildProcess = ChildProcess & { killedWith?: NodeJS.Signals };
+
+function fakeChildProcess(pid: number): FakeChildProcess {
   const child = new EventEmitter() as ChildProcess;
   Object.defineProperty(child, 'pid', { value: pid });
   child.unref = () => child;
-  return child;
+  child.kill = ((signal?: NodeJS.Signals | number) => {
+    if (typeof signal === 'string') {
+      (child as FakeChildProcess).killedWith = signal;
+    }
+    return true;
+  }) as ChildProcess['kill'];
+  return child as FakeChildProcess;
 }
 
 function fakeHost(): AgentViewPtyHostHandle & {
@@ -336,6 +455,41 @@ async function requestHost(
     throw new Error(message);
   }
   return response['result'];
+}
+
+async function createStatusServer(socketPath: string): Promise<net.Server> {
+  await fs.mkdir(path.dirname(socketPath), { recursive: true });
+  const server = net.createServer((socket) => {
+    socket.setEncoding('utf8');
+    let buffer = '';
+    socket.on('data', (chunk) => {
+      buffer += chunk;
+      const newline = buffer.indexOf('\n');
+      if (newline === -1) return;
+      const request = JSON.parse(buffer.slice(0, newline)) as {
+        id: string;
+        op: string;
+      };
+      socket.end(
+        `${JSON.stringify({
+          id: request.id,
+          ok: true,
+          result:
+            request.op === 'status'
+              ? { pid: process.pid, workerPid: 1234 }
+              : { shuttingDown: true },
+        })}\n`,
+      );
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(socketPath, () => {
+      server.off('error', reject);
+      resolve();
+    });
+  });
+  return server;
 }
 
 async function waitForClose(socket: net.Socket): Promise<void> {

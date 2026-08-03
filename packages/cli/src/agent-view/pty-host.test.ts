@@ -165,6 +165,16 @@ describe('launchAgentViewPtyHost', () => {
     expect(data).toEqual(['output']);
   });
 
+  it('kills the PTY process when disposed', async () => {
+    const pty = createFakePty();
+    const handle = await launchAgentViewPtyHost(createLaunch(), { pty });
+
+    handle.dispose();
+
+    expect(pty.process.killedWith).toBeUndefined();
+    expect(pty.process.killCalls).toEqual([undefined]);
+  });
+
   it('throws a typed error when PTY is unavailable', async () => {
     await expect(
       launchAgentViewPtyHost(createLaunch(), { pty: null }),
@@ -232,6 +242,7 @@ class FakePtyProcess implements AgentViewPtyProcess {
   input = '';
   resizes: Array<{ columns: number; rows: number }> = [];
   killedWith: string | undefined;
+  killCalls: Array<string | undefined> = [];
 
   write(data: string): void {
     this.input += data;
@@ -260,6 +271,7 @@ class FakePtyProcess implements AgentViewPtyProcess {
   }
 
   kill(signal?: string): void {
+    this.killCalls.push(signal);
     this.killedWith = signal;
   }
 

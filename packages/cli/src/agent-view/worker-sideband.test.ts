@@ -258,6 +258,23 @@ describe('worker sideband env', () => {
     expect(mockCallAgentViewSupervisor).toHaveBeenCalledTimes(1);
   });
 
+  it('retries identical worker state reports after a send failure', async () => {
+    const env = createAgentViewWorkerSidebandEnv({
+      sessionId: 'session-1',
+      sidebandEndpoint: '/tmp/qwen-agent-view.sock',
+      token: 'token-1',
+      activeCwd: '/repo',
+    });
+    mockCallAgentViewSupervisor
+      .mockRejectedValueOnce(new Error('supervisor unavailable'))
+      .mockResolvedValueOnce({ accepted: true });
+
+    await reportAgentViewWorkerState({ sessionState: 'working' }, env);
+    await reportAgentViewWorkerState({ sessionState: 'working' }, env);
+
+    expect(mockCallAgentViewSupervisor).toHaveBeenCalledTimes(2);
+  });
+
   it('skips worker state reports outside worker mode', async () => {
     await reportAgentViewWorkerState({ sessionState: 'idle' }, {});
 
@@ -291,6 +308,29 @@ describe('worker sideband env', () => {
       mockCallAgentViewSupervisor.mockClear();
       await vi.advanceTimersByTimeAsync(100);
       expect(mockCallAgentViewSupervisor).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('ignores heartbeat send failures', async () => {
+    vi.useFakeTimers();
+    try {
+      const env = createAgentViewWorkerSidebandEnv({
+        sessionId: 'session-1',
+        sidebandEndpoint: '/tmp/qwen-agent-view.sock',
+        token: 'token-1',
+        activeCwd: '/repo',
+      });
+      mockCallAgentViewSupervisor.mockRejectedValueOnce(
+        new Error('supervisor unavailable'),
+      );
+
+      const heartbeat = startAgentViewWorkerHeartbeat(env, 100);
+      await vi.advanceTimersByTimeAsync(100);
+
+      expect(mockCallAgentViewSupervisor).toHaveBeenCalledTimes(1);
+      heartbeat?.dispose();
     } finally {
       vi.useRealTimers();
     }

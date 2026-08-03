@@ -309,6 +309,7 @@ export async function launchAgentViewPtyHost(
       ptyProcess.kill('SIGTERM');
     },
     dispose(): void {
+      ptyProcess.kill();
       for (const disposable of disposables.splice(0)) {
         disposable.dispose();
       }
