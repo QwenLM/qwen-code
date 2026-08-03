@@ -12,9 +12,13 @@ import {
   applyOutcomes,
   buildReport,
   compressSummary,
+  CONFIDENCES,
   findingsCommand,
+  OUTCOMES,
   renderFindings,
+  SEVERITIES,
   sortFindings,
+  SOURCES,
   validateFindings,
   validateOutcomes,
   type Finding,
@@ -33,6 +37,21 @@ const base = {
   file: 'src/retry.ts',
   line: 42,
 };
+
+describe('review vocabulary contract', () => {
+  // The Web Shell renderer
+  // (packages/web-shell/client/components/artifacts/CodeReviewArtifactDetail.tsx)
+  // keeps its own copies of these four lists and fails closed on any value it
+  // does not know. This snapshot makes a CLI-side addition turn red HERE —
+  // next to the pointer to the renderer copy — instead of surfacing later as
+  // saved artifacts that silently stop rendering.
+  it('matches the copies the Web Shell renderer duplicates', () => {
+    expect([...SEVERITIES]).toEqual(['Critical', 'Suggestion', 'Nice to have']);
+    expect([...CONFIDENCES]).toEqual(['high', 'low']);
+    expect([...SOURCES]).toEqual(['review', 'build', 'test', 'probe', 'lint']);
+    expect([...OUTCOMES]).toEqual(['fixed', 'skipped', 'no_change_needed']);
+  });
+});
 
 describe('validateFindings', () => {
   it('accepts the minimal shape and defaults confidence and source', () => {
@@ -131,10 +150,25 @@ describe('validateFindings', () => {
     ).toThrow(/non-empty array/);
   });
 
-  it('rejects a non-numeric line', () => {
-    expect(() => validateFindings([{ ...base, line: '42' }])).toThrow(
-      /non-numeric "line"/,
-    );
+  it.each(['42', -1, 0, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    'rejects an invalid line value %s',
+    (line) => {
+      expect(() => validateFindings([{ ...base, line }])).toThrow(
+        /invalid "line"/,
+      );
+    },
+  );
+
+  it('rejects invalid aggregate location lines', () => {
+    expect(() =>
+      validateFindings([
+        {
+          ...base,
+          file: undefined,
+          locations: [{ file: 'a.ts', line: 0 }],
+        },
+      ]),
+    ).toThrow(/location 0 has an invalid "line"/);
   });
 
   it('rejects a top-level input that is not an array', () => {
