@@ -1886,9 +1886,15 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain(
       'if [[ "${ISSUE_STATE}" == \'open\' && "${_late_ready}" == \'true\' && "${_late_approved}" == \'true\' && "${sender_is_trusted}" == \'true\' ]]; then',
     );
+    // Issue-phase mutual exclusion: forced dispatches key per issue, label
+    // events key on the payload issue, and every scan-and-pick run (cron or
+    // unforced dispatch) shares ONE group. A run-unique fallback here let two
+    // overlapping scans double-claim the same issue — the claim recheck only
+    // narrows the race to the assess call's duration, it does not close it.
     expect(issueAutofixJob).toContain(
-      "group: 'qwen-autofix-issue-${{ needs.route.outputs.issue_number || github.run_id }}'",
+      "group: 'qwen-autofix-issue-${{ needs.route.outputs.issue_number || github.event.issue.number || ''scheduled'' }}'",
     );
+    expect(issueAutofixJob).not.toContain('|| github.run_id }}');
     expect(workflow).toContain(
       '(.labels // []) | map(.name) as $labels | ($labels | index($ready))',
     );

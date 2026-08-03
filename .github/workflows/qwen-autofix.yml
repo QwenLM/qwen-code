@@ -660,8 +660,16 @@ jobs:
       }}
     runs-on: 'ubuntu-latest'
     timeout-minutes: 180
+    # route.issue_number is only set for forced dispatches; label events carry
+    # the issue in the payload, and scan-and-pick runs (cron, unforced
+    # dispatch) share one 'scheduled' group. The old github.run_id fallback
+    # made every scan-and-pick run its own group, so two overlapping scans
+    # (cron fires every 40-70min, this job runs up to 180) could both pass the
+    # claim recheck during the minutes-long assess call and double-claim the
+    # same issue. Queued (never cancelled) so a superseded tick still runs if
+    # targets remain.
     concurrency:
-      group: 'qwen-autofix-issue-${{ needs.route.outputs.issue_number || github.run_id }}'
+      group: 'qwen-autofix-issue-${{ needs.route.outputs.issue_number || github.event.issue.number || ''scheduled'' }}'
       cancel-in-progress: false
     permissions:
       contents: 'read'
