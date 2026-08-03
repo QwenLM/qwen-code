@@ -399,6 +399,43 @@ describe('createTranscriptReplayMachine', () => {
       expect(projected).toHaveLength(2);
     });
 
+    it('does not append empty displayText after an image-only record', () => {
+      const onDiagnostic = vi.fn();
+      const projected = updates(
+        createTranscriptReplayMachine({ onDiagnostic }),
+        record('user-img-only-empty-display', 'user', {
+          message: {
+            role: 'user',
+            parts: [
+              {
+                inlineData: {
+                  data: 'abc',
+                  mimeType: 'image/png',
+                },
+              },
+            ],
+          },
+          systemPayload: {
+            displayText: '',
+            hookContext: 'injected hook context',
+          },
+        }),
+      );
+
+      expect(projected).toMatchObject([
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: {
+            type: 'image',
+            data: 'abc',
+            mimeType: 'image/png',
+          },
+        },
+      ]);
+      expect(projected).toHaveLength(1);
+      expect(onDiagnostic).not.toHaveBeenCalled();
+    });
+
     it('strips a trailing whole-part tagged block when displayText is absent', () => {
       const projected = updates(
         createTranscriptReplayMachine(),
