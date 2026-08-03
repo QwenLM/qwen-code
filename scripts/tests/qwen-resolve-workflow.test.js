@@ -356,7 +356,15 @@ describe('qwen resolve workflow', () => {
     expect(contextStep).toContain('timeout=*)');
     expect(contextStep).toContain('TIMEOUT_MINUTES="${token#timeout=}"');
     expect(runStep).toContain('if [ "${#TIMEOUT_MINUTES}" -gt 3 ]; then');
-    expect(runStep).toContain('timeout_minutes must not exceed ${MAX_TIMEOUT_MINUTES} minutes');
+    expect(runStep).toContain(
+      'MAX_TIMEOUT_MINUTES="${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}"',
+    );
+    expect(runStep).toContain(
+      'if [ "$TIMEOUT_MINUTES" -gt "$MAX_TIMEOUT_MINUTES" ]; then',
+    );
+    expect(runStep).toContain(
+      'fail "timeout_minutes must not exceed ${MAX_TIMEOUT_MINUTES} minutes"',
+    );
     expect(runStep).toContain('QWEN_TIMEOUT="$EFFECTIVE_TIMEOUT_MINUTES"');
     expect(runStep).not.toContain('QWEN_TIMEOUT=$((TIMEOUT_MINUTES - 5))');
   });
@@ -374,17 +382,25 @@ describe('qwen resolve workflow', () => {
     );
 
     // Auto-tiering only applies without an explicit --timeout, keys off
-    // additions + deletions, and never exceeds the 240 cap: small PRs keep 180,
-    // anything larger gets the full 240.
+    // additions + deletions, and never exceeds the QWEN_REVIEW_MAX_TIMEOUT_MINUTES
+    // cap: small PRs keep 180, anything larger gets the full cap.
     expect(runStep).toContain('EFFECTIVE_TIMEOUT_MINUTES="$TIMEOUT_MINUTES"');
     expect(runStep).toContain(
       'if [ "${TIMEOUT_EXPLICIT:-false}" != "true" ]; then',
     );
     expect(runStep).toContain('--json additions,deletions');
+    expect(runStep).toContain('if [ -n "$PR_SIZE_LINES" ]; then');
     expect(runStep).toContain('if [ "$PR_SIZE_LINES" -le 300 ]; then');
     expect(runStep).toContain('EFFECTIVE_TIMEOUT_MINUTES=180');
     expect(runStep).toContain(
       'EFFECTIVE_TIMEOUT_MINUTES="${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}"',
+    );
+    // Unordered containment would survive swapping the two assignments between
+    // the branches, which silently inverts the tiers.
+    expect(runStep.indexOf('EFFECTIVE_TIMEOUT_MINUTES=180')).toBeLessThan(
+      runStep.indexOf(
+        'EFFECTIVE_TIMEOUT_MINUTES="${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}"',
+      ),
     );
     expect(runStep).not.toContain('EFFECTIVE_TIMEOUT_MINUTES=210');
     expect(runStep).toContain(
@@ -402,17 +418,33 @@ describe('qwen resolve workflow', () => {
       'REASON="Qwen review timed out after ${attempt_timeout} seconds (of the ${QWEN_TIMEOUT}-minute budget)."',
     );
     expect(runStep).toContain('[ "$qwen_status" -eq 137 ]');
-    expect(fallbackStep).toContain('FAILURE_KIND:');
+    expect(fallbackStep).toContain('failure() &&');
+    expect(fallbackStep).toContain(
+      'FAILURE_KIND: "${{ steps.review.outputs.failure_kind || \'\' }}"',
+    );
     expect(fallbackStep).toContain('TIMEOUT_MINUTES:');
     expect(fallbackStep).toContain(
       "TIMEOUT_MINUTES: '${{ steps.review.outputs.effective_timeout_minutes || steps.context.outputs.timeout_minutes }}'",
     );
     expect(fallbackStep).toContain(
+      'MAX_TIMEOUT_MINUTES="${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}"',
+    );
+    expect(fallbackStep).toContain('if [ "$FAILURE_KIND" = "timeout" ]; then');
+    // Slice the below-max arm so a transposition of the two bodies fails:
+    // unordered containment keeps both texts present in the wrong arms.
+    const belowMaxArm = fallbackStep.slice(
+      fallbackStep.indexOf(
+        'if [ "$TIMEOUT_MINUTES" -lt "$MAX_TIMEOUT_MINUTES" ]; then',
+      ),
+      fallbackStep.indexOf('else'),
+    );
+    expect(belowMaxArm).toContain(
       '@qwen-code /review --timeout=${MAX_TIMEOUT_MINUTES}',
     );
     expect(fallbackStep).toContain(
       'This run already used the maximum ${MAX_TIMEOUT_MINUTES} minute timeout.',
     );
+    expect(fallbackStep).toContain('gh pr comment "$PR_NUMBER"');
     expect(fallbackStep).toContain('**Qwen Code review timed out.**');
     expect(fallbackStep).not.toContain(
       '_Qwen Code review did not complete successfully:',
