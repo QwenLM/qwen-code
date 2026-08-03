@@ -30,8 +30,9 @@ const appId = JSON.parse(
   ),
 ).identifier;
 // On Windows the log lives under the real %LOCALAPPDATA% (a machine-global
-// path shared with any running desktop app), not the smoke workspace.
-// Do not run this smoke alongside a live Qwen Code desktop instance on Windows.
+// path shared with any running desktop app), not the smoke workspace. The
+// packaged app also uses a Windows-known config directory, so opt this smoke
+// out of desktop-state writes before deleting its temporary workspace.
 const logRoot = resolveLogRoot(process.platform, process.env, {
   isolatedHome,
   isolatedState,
@@ -67,6 +68,9 @@ const child = spawn(executable, [], {
             'qwen-code',
           ),
         }),
+    ...(process.platform === 'win32'
+      ? { QWEN_DESKTOP_DISABLE_SETTINGS_PERSISTENCE: '1' }
+      : {}),
   },
   stdio: ['ignore', 'pipe', 'pipe'],
 });

@@ -142,6 +142,11 @@ function testResolveLogRoot() {
   assert.doesNotMatch(smoke, /^\s*LOCALAPPDATA:/m);
   assert.match(
     smoke,
+    /QWEN_DESKTOP_DISABLE_SETTINGS_PERSISTENCE: '1'/,
+    'Windows packaged smoke must not persist its temporary desktop state',
+  );
+  assert.match(
+    smoke,
     /const logRoot = resolveLogRoot\(process\.platform, process\.env, \{/,
     'smoke must resolve log root via resolveLogRoot',
   );
