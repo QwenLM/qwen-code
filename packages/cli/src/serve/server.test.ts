@@ -3114,6 +3114,19 @@ describe('createServeApp', () => {
       expect(res.text).toContain('<div id="root">');
     });
 
+    it('falls back to the shell for non-session SPA deep-link navigations', async () => {
+      // The pre-auth `/session/:id` route claims the session deep-link shapes
+      // above, so this non-session navigation is the only direct coverage of
+      // mountWebShellSpaFallback's shell branch.
+      const app = createServeApp(baseOpts, undefined, { webShellDir });
+      const res = await request(app)
+        .get('/deep/link')
+        .set('Host', host)
+        .set('Accept', 'text/html');
+      expect(res.status).toBe(200);
+      expect(res.text).toContain('<div id="root">');
+    });
+
     it('does not shadow /health on a browser navigation (Critical #1)', async () => {
       // Non-loopback + requireAuth registers /health POST-auth. A browser
       // navigation (Accept text/html) must fall THROUGH the SPA fallback to
