@@ -368,6 +368,7 @@ If you are experiencing performance issues with file searching (e.g., with `@` c
 | `memory.enableTeamMemory`        | boolean | Enable a project memory tier shared with collaborators via the git-tracked `.qwen/team-memory/` directory. Writes to it are secret-scanned and reviewable in the git diff.                            | `false` |
 | `memory.enableTeamMemorySync`    | boolean | When team memory is enabled, automatically commit, fast-forward-pull, and push the `.qwen/team-memory/` directory at session start so collaborators stay in sync. Requires a configured git upstream. | `false` |
 | `memory.agentTimeoutMinutes`     | number  | Max runtime in minutes for background memory agents (extraction, dream, remember, skill review). Unset uses each agent's built-in default (2–5 minutes); `0` disables the time limit.                 | unset   |
+| `memory.agentMaxTurns`           | number  | Max turns for background memory agents (extraction, dream, remember, skill review). Unset uses each agent's built-in default (5–8); `0` disables the turn limit.                                      | unset   |
 
 See [Memory](../features/memory) for details on how auto-memory works and how to use the `/memory`, `/remember`, and `/dream` commands.
 

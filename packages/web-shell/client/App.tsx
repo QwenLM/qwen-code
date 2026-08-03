@@ -5036,6 +5036,10 @@ export function App({
     setValue: setWorkspaceSetting,
     reload: reloadWorkspaceSettings,
   } = workspaceSettingsState;
+  const sessionWorkflowEnabled =
+    workspaceSettings.find(
+      (setting) => setting.key === 'experimental.sessionWorkflow',
+    )?.values.effective === true;
   const reloadTargetedWorkspaceSettings = useCallback(async () => {
     const status = await reloadWorkspaceSettings();
     if (mainVoiceTarget?.route === 'workspace-qualified') {
@@ -8769,6 +8773,7 @@ export function App({
             >
               <ApprovalModeDialog
                 currentMode={currentMode}
+                sessionWorkflowEnabled={sessionWorkflowEnabled}
                 onSelect={(modeId) => {
                   handleSetMode(modeId);
                   setShowApprovalModeDialog(false);
@@ -8799,7 +8804,7 @@ export function App({
           {tasksDialogMessage && (
             <DialogShell
               title={
-                floatingTodos.length > 0
+                sessionWorkflowEnabled && floatingTodos.length > 0
                   ? t('planExecution.dialogTitle')
                   : t('tasks.title')
               }
@@ -8811,8 +8816,8 @@ export function App({
                 embedded
                 manageActiveEvent={false}
                 onClose={() => setTasksDialogMessage(null)}
-                planTodos={floatingTodos}
-                agentTools={planAgentTools}
+                planTodos={sessionWorkflowEnabled ? floatingTodos : []}
+                agentTools={sessionWorkflowEnabled ? planAgentTools : []}
                 onOpenSubagent={(tool) => {
                   setTasksDialogMessage(null);
                   openSubagentPanel(tool);
@@ -9710,6 +9715,7 @@ export function App({
                             ? workspaces
                             : undefined
                         }
+                        sessionWorkflowEnabled={sessionWorkflowEnabled}
                       />
                     </CompactModeContext.Provider>
                   </WebShellCustomizationProvider>
@@ -9997,7 +10003,9 @@ export function App({
                             onConfirm={handleConfirm}
                             variant="floating"
                             keyboardActive={toolApprovalOverlayVisible}
-                            planTodos={approvalPlanTodos}
+                            planTodos={
+                              sessionWorkflowEnabled ? approvalPlanTodos : []
+                            }
                           />
                         </div>
                       )}
@@ -10129,6 +10137,7 @@ export function App({
                           onPopQueuedMessages={editLastQueuedPrompt}
                           onClearQueuedMessages={clearQueuedPrompts}
                           currentMode={currentMode}
+                          sessionWorkflowEnabled={sessionWorkflowEnabled}
                           currentModel={currentModel}
                           gitBranch={activeGitBranch}
                           gitWorktree={Boolean(sessionWorktree)}
@@ -10379,6 +10388,7 @@ export function App({
                     onNestedRightPanelOpen={handleTurnOutputOpen}
                     onNestedArtifactsChange={handlePaneArtifactsChange}
                     onError={reportError}
+                    sessionWorkflowEnabled={sessionWorkflowEnabled}
                     onClose={closeArtifactPanel}
                     variant="drawer"
                   />
@@ -10433,6 +10443,7 @@ export function App({
                     onNestedRightPanelOpen={handleTurnOutputOpen}
                     onNestedArtifactsChange={handlePaneArtifactsChange}
                     onError={reportError}
+                    sessionWorkflowEnabled={sessionWorkflowEnabled}
                     onClose={closeArtifactPanel}
                   />
                 </div>
