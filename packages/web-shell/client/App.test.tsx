@@ -3864,6 +3864,51 @@ describe('App session callbacks', () => {
     );
   });
 
+  it('does not reload an unrelated session when the branch source was switched away', async () => {
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    mockConnection.capabilities.features = ['session_transcript_pagination'];
+    let rejectBranch!: (error: unknown) => void;
+    mockSessionActions.branchSession.mockReturnValue(
+      new Promise((_resolve, reject) => {
+        rejectBranch = reject;
+      }),
+    );
+    const onToast = vi.fn();
+    const { rerender } = renderApp({ onToast });
+    await flush();
+
+    let request: void | Promise<void>;
+    act(() => {
+      request =
+        testState.latestMessageListProps?.onBranchSession?.('stale-checkpoint');
+    });
+    expect(mockSessionActions.branchSession).toHaveBeenCalledWith(
+      undefined,
+      'stale-checkpoint',
+    );
+
+    // The user switches to another session before the branch call returns.
+    act(() => {
+      mockConnection.sessionId = 'session-2';
+      rerender({ onToast });
+    });
+    await flush();
+
+    await act(async () => {
+      rejectBranch(
+        new DaemonHttpError(
+          409,
+          { code: 'branch_point_invalid' },
+          'Invalid branch point',
+        ),
+      );
+      await request;
+    });
+
+    expect(mockSessionActions.reloadSession).not.toHaveBeenCalled();
+    expect(onToast).toHaveBeenCalledWith('error', 'Failed to branch session.');
+  });
+
   it('binds the main composer Voice target to its active secondary session', async () => {
     mockConnection.workspaceCwd = '/work/secondary';
     mockWorkspace.capabilities = {

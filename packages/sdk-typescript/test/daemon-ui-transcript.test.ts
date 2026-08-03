@@ -168,6 +168,40 @@ describe('daemon transcript rewind', () => {
     });
   });
 
+  it('backfills the merged promptId so assistant.done attaches the checkpoint', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        {
+          type: 'assistant.text.delta',
+          text: 'first ',
+        },
+        {
+          type: 'assistant.text.delta',
+          text: 'second',
+          promptId: 'prompt-1',
+        },
+        {
+          type: 'assistant.done',
+          reason: 'end_turn',
+          promptId: 'prompt-1',
+          sourceRecordIds: ['assistant-record'],
+          branchRecordId: 'checkpoint-record',
+        },
+      ],
+      { now: 1 },
+    );
+
+    expect(state.blocks).toHaveLength(1);
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'assistant',
+      text: 'first second',
+      promptId: 'prompt-1',
+      sourceRecordIds: ['assistant-record'],
+      branchRecordId: 'checkpoint-record',
+    });
+  });
+
   it('does not attach replay branch metadata to a user block', () => {
     const state = reduceDaemonTranscriptEvents(
       createDaemonTranscriptState({ now: 1 }),

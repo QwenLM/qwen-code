@@ -241,6 +241,23 @@ export interface ReplayedTranscriptPage {
   replayError?: string;
 }
 
+function readTranscriptSourceRecordIds(
+  update: SessionUpdate,
+): string[] | undefined {
+  const value = update as unknown as Record<string, unknown>;
+  const meta =
+    value['_meta'] && typeof value['_meta'] === 'object'
+      ? (value['_meta'] as Record<string, unknown>)
+      : undefined;
+  const transcript =
+    meta?.['qwenTranscript'] && typeof meta['qwenTranscript'] === 'object'
+      ? (meta['qwenTranscript'] as Record<string, unknown>)
+      : undefined;
+  const sourceRecordIds = transcript?.['sourceRecordIds'];
+  if (!Array.isArray(sourceRecordIds)) return undefined;
+  return sourceRecordIds.filter((id): id is string => typeof id === 'string');
+}
+
 export async function replayTranscriptRecordPage({
   sessionId,
   page,
@@ -282,8 +299,29 @@ export async function replayTranscriptRecordPage({
   }
 
   if (page.branchPointsByAssistantUuid) {
-    for (const update of updates) {
-      const value = update as unknown as Record<string, unknown>;
+    const branchPoints = page.branchPointsByAssistantUuid;
+    // A checkpoint marks the END of its source record, which can replay as
+    // several chunks (text/thought/text). Only the LAST visible assistant
+    // chunk of the record may expose the branch point: an earlier chunk
+    // would restore the record's later content when branched from, and an
+    // empty-text usage chunk normalizes to `assistant.usage`, which drops
+    // the metadata.
+    const lastChunkIndexByRecordId = new Map<string, number>();
+    updates.forEach((update, index) => {
+      if (update.sessionUpdate !== 'agent_message_chunk') return;
+      const text = (update as { content?: { text?: unknown } }).content?.text;
+      if (typeof text !== 'string' || text.length === 0) return;
+      for (const recordId of readTranscriptSourceRecordIds(update) ?? []) {
+        if (branchPoints[recordId] !== undefined) {
+          lastChunkIndexByRecordId.set(recordId, index);
+        }
+      }
+    });
+    const decoratedIndexes = new Set<number>();
+    for (const [recordId, index] of lastChunkIndexByRecordId) {
+      if (decoratedIndexes.has(index)) continue;
+      decoratedIndexes.add(index);
+      const value = updates[index] as unknown as Record<string, unknown>;
       const meta =
         value['_meta'] && typeof value['_meta'] === 'object'
           ? (value['_meta'] as Record<string, unknown>)
@@ -292,16 +330,12 @@ export async function replayTranscriptRecordPage({
         meta?.['qwenTranscript'] && typeof meta['qwenTranscript'] === 'object'
           ? (meta['qwenTranscript'] as Record<string, unknown>)
           : undefined;
-      const sourceRecordIds = transcript?.['sourceRecordIds'];
-      if (!Array.isArray(sourceRecordIds)) continue;
-      const branchRecordId = sourceRecordIds
-        .filter((id): id is string => typeof id === 'string')
-        .map((id) => page.branchPointsByAssistantUuid?.[id])
-        .find((id): id is string => typeof id === 'string');
-      if (!branchRecordId) continue;
       value['_meta'] = {
         ...meta,
-        qwenTranscript: { ...transcript, branchRecordId },
+        qwenTranscript: {
+          ...transcript,
+          branchRecordId: branchPoints[recordId],
+        },
       };
     }
   }

@@ -467,6 +467,65 @@ describe('ChatRecordingService', () => {
       },
     );
 
+    it('settles buffered appends without stalling when the checkpoint write fails', async () => {
+      const writeError = new Error('disk full');
+      chatRecordingService.recordUserMessage([{ text: 'hello' }]);
+      chatRecordingService.recordAssistantTurn({
+        model: 'gemini-pro',
+        message: [{ text: 'hi' }],
+      });
+
+      // Fail only the checkpoint append; the turn's records still write.
+      vi.mocked(mockLease.appendJsonLine).mockImplementation(
+        async (record: unknown) => {
+          if ((record as ChatRecord).subtype === 'branch_checkpoint') {
+            throw writeError;
+          }
+          return jsonl.writeLine('/test/session.jsonl', record);
+        },
+      );
+
+      const checkpoint = chatRecordingService.recordBranchCheckpointTransaction(
+        {
+          startExclusiveRecordUuid: null,
+          stopReason: 'end_turn',
+        },
+      );
+      // Buffered behind the topology fence while validation is in flight:
+      // one strict append and one fire-and-forget append.
+      const title = chatRecordingService.recordCustomTitle('Title', 'manual');
+      chatRecordingService.recordUserMessage([{ text: 'next turn' }]);
+
+      await expect(checkpoint).rejects.toBe(writeError);
+      // The buffered strict append settles (rejected with the write
+      // failure, surfaced as `false`) instead of hanging on the fence.
+      await expect(title).resolves.toBe(false);
+
+      const records = vi
+        .mocked(mockLease.appendJsonLine)
+        .mock.calls.map((call) => call[0] as ChatRecord);
+      const checkpointRecord = records.find(
+        (record) => record.subtype === 'branch_checkpoint',
+      );
+      expect(checkpointRecord).toBeDefined();
+      // Nothing was appended after the failed checkpoint: the buffered
+      // records were dropped, so no child references the failed
+      // checkpoint and the recorder is not wedged behind the fence.
+      expect(records.at(-1)).toBe(checkpointRecord);
+      expect(
+        records.some((record) => record.parentUuid === checkpointRecord?.uuid),
+      ).toBe(false);
+
+      // The fence is released: a fresh transaction attempt fails with the
+      // write failure, not with 'topology transaction already active'.
+      await expect(
+        chatRecordingService.recordBranchCheckpointTransaction({
+          startExclusiveRecordUuid: null,
+          stopReason: 'end_turn',
+        }),
+      ).rejects.toBe(writeError);
+    });
+
     it('rejects a concurrent recordBranchCheckpointTransaction', async () => {
       chatRecordingService.recordUserMessage([{ text: 'hello' }]);
       chatRecordingService.recordAssistantTurn({

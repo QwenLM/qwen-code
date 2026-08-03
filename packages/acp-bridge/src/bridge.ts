@@ -6305,14 +6305,19 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
 
       const concurrentSideTask = isSideTask && entry.promptActive;
+      // Admission-time check: a prompt's `finally` clears `promptActive`
+      // BEFORE a queued branch callback runs, so a check inside the
+      // callback would observe post-prompt state and silently wait
+      // instead of rejecting. Reject synchronously per the design doc's
+      // "branch rejects while a prompt is active" semantics.
+      if (!isSideTask && entry.promptActive) {
+        throw new BranchWhilePromptActiveError(sessionId);
+      }
       const branchResult = (
         concurrentSideTask ? Promise.resolve() : entry.promptQueue
       ).then(async () => {
         if (entry.closing || byId.get(sessionId) !== entry) {
           throw new SessionNotFoundError(sessionId, 'The session is closing');
-        }
-        if (entry.promptActive && !isSideTask) {
-          throw new BranchWhilePromptActiveError(sessionId);
         }
 
         if (
@@ -6335,8 +6340,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         };
         try {
           const ci = await ensureChannel();
+          // HAZARD: dispatch the source-session mutation on the entry's
+          // OWN connection, not `ci.connection` (the current attach
+          // target). During the channel-overlap window (A dying, B
+          // freshly spawned as `channelInfo`) the source session still
+          // lives on A; routing through B reports session-not-found or
+          // operates on the wrong runtime state. The NEW session's
+          // restore below stays on the intended channel.
           const result = (await withTimeout(
-            ci.connection.extMethod(
+            entry.connection.extMethod(
               isSideTask
                 ? SERVE_CONTROL_EXT_METHODS.sessionSideTask
                 : SERVE_CONTROL_EXT_METHODS.sessionBranch,

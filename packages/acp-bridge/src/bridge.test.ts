@@ -26,6 +26,7 @@ import type {
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
 import {
+  BranchWhilePromptActiveError,
   InvalidClientIdError,
   InvalidPermissionOptionError,
   InvalidSessionMetadataError,
@@ -7045,15 +7046,8 @@ describe('createAcpSessionBridge', () => {
     });
 
     it('rejects a queued branch when the source starts closing', async () => {
-      const promptStarted = deferred<void>();
-      const promptGate = deferred<void>();
       const closeGate = deferred<Record<string, unknown>>();
       const handle = makeChannel({
-        promptImpl: async () => {
-          promptStarted.resolve();
-          await promptGate.promise;
-          return { stopReason: 'end_turn' };
-        },
         extMethodImpl: (method) => {
           if (method === SERVE_CONTROL_EXT_METHODS.sessionClose) {
             return closeGate.promise;
@@ -7066,16 +7060,9 @@ describe('createAcpSessionBridge', () => {
       });
       const bridge = makeBridge({ channelFactory: async () => handle.channel });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-      const prompt = bridge.sendPrompt(session.sessionId, {
-        sessionId: session.sessionId,
-        prompt: [{ type: 'text', text: 'active' }],
-      });
-      await promptStarted.promise;
       const branch = bridge.branchSession(session.sessionId, {});
       const close = bridge.closeSession(session.sessionId);
 
-      promptGate.resolve();
-      await prompt;
       await expect(branch).rejects.toBeInstanceOf(SessionNotFoundError);
       expect(handle.agent.extMethodCalls).not.toContainEqual(
         expect.objectContaining({
@@ -7086,6 +7073,123 @@ describe('createAcpSessionBridge', () => {
       closeGate.resolve({});
       await close;
       await bridge.shutdown();
+    });
+
+    it('rejects a normal branch at admission while a prompt is active', async () => {
+      const promptStarted = deferred<void>();
+      const promptGate = deferred<void>();
+      const handle = makeChannel({
+        promptImpl: async () => {
+          promptStarted.resolve();
+          await promptGate.promise;
+          return { stopReason: 'end_turn' };
+        },
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionBranch) {
+            throw new Error('branch must not run while the prompt is active');
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const prompt = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'active' }],
+      });
+      await promptStarted.promise;
+
+      // Admission rejects synchronously — queuing behind the prompt would
+      // observe post-prompt state (the prompt's `finally` clears
+      // `promptActive` first) and silently succeed instead.
+      await expect(
+        bridge.branchSession(session.sessionId, {}),
+      ).rejects.toBeInstanceOf(BranchWhilePromptActiveError);
+
+      promptGate.resolve();
+      await prompt;
+      await new Promise((r) => setImmediate(r));
+      expect(handle.agent.extMethodCalls).not.toContainEqual(
+        expect.objectContaining({
+          method: SERVE_CONTROL_EXT_METHODS.sessionBranch,
+        }),
+      );
+      await bridge.shutdown();
+    });
+
+    it('dispatches branchSession on the source channel during channel overlap', async () => {
+      // Overlap construction: channel A hosts two sessions; killing the
+      // first one fails at the agent close, so the bridge marks A dying
+      // and starts a kill that never completes (factory override). The
+      // second session stays live on A while the next `ensureChannel()`
+      // spawns a fresh channel B. Pre-fix, branchSession dispatched the
+      // source-session mutation through B (`ensureChannel().connection`),
+      // which does not own the session.
+      const handles: ChannelHandle[] = [];
+      const factory: ChannelFactory = async () => {
+        const h = makeChannel({
+          sessionIdPrefix: `s${handles.length}`,
+          resumeSessionImpl: () => ({}),
+          extMethodImpl: (method) => {
+            if (method === SERVE_CONTROL_EXT_METHODS.sessionClose) {
+              throw new Error('agent refuses close (overlap test)');
+            }
+            if (method === SERVE_CONTROL_EXT_METHODS.sessionBranch) {
+              return { newSessionId: 'branch-overlap', title: 'Branch' };
+            }
+            return {};
+          },
+        });
+        h.channel = { ...h.channel, kill: () => new Promise(() => {}) };
+        handles.push(h);
+        return h.channel;
+      };
+      // Thread scope so the second spawn gets its own session multiplexed
+      // onto channel A instead of attaching to the first one.
+      const bridge = makeBridge({
+        channelFactory: factory,
+        sessionScope: 'thread',
+      });
+      const first = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const second = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(handles).toHaveLength(1);
+      expect(handles[0]?.agent.newSessionCalls).toHaveLength(2);
+
+      // Force-kill the first session; the refused agent close marks
+      // channel A dying and hangs on the never-resolving kill.
+      const killPromise = bridge.killSession(first.sessionId);
+      await vi.waitFor(() =>
+        expect(
+          handles[0]?.agent.extMethodCalls.some(
+            (call) => call.method === SERVE_CONTROL_EXT_METHODS.sessionClose,
+          ),
+        ).toBe(true),
+      );
+      await new Promise((r) => setImmediate(r));
+
+      const branch = await bridge.branchSession(second.sessionId, {
+        name: 'Overlap branch',
+      });
+      expect(branch.sessionId).toBe('branch-overlap');
+
+      // The source-session mutation landed on A (the owner channel), not
+      // on the freshly spawned attach target B.
+      expect(handles).toHaveLength(2);
+      expect(handles[0]?.agent.extMethodCalls).toContainEqual(
+        expect.objectContaining({
+          method: SERVE_CONTROL_EXT_METHODS.sessionBranch,
+          params: expect.objectContaining({ sessionId: second.sessionId }),
+        }),
+      );
+      expect(handles[1]?.agent.extMethodCalls).not.toContainEqual(
+        expect.objectContaining({
+          method: SERVE_CONTROL_EXT_METHODS.sessionBranch,
+        }),
+      );
+
+      // Cleanup: the kill and the dying channel never settle — same
+      // fire-and-forget pattern as the other hanging-kill overlap tests.
+      void killPromise;
     });
 
     it('publishes session_branched only on the new session stream', async () => {

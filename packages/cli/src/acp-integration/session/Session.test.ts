@@ -19197,6 +19197,133 @@ describe('Session', () => {
     });
   });
 
+  describe('automatic drain serialization on the history mutation gate', () => {
+    // Mirrors acpAgent's `runExclusiveHistoryMutation` FIFO gate that the
+    // interactive prompt + checkpoint transaction runs under, and that
+    // Session receives as `runExclusiveAutomaticHistoryMutation`.
+    function createGatedRunner() {
+      let tail: Promise<void> = Promise.resolve();
+      const run = <T>(operation: () => Promise<T>): Promise<T> => {
+        const previous = tail;
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        tail = previous.then(() => gate);
+        return (async () => {
+          await previous;
+          try {
+            return await operation();
+          } finally {
+            release();
+          }
+        })();
+      };
+      return run;
+    }
+
+    async function settlePendingWork() {
+      for (let i = 0; i < 5; i++) {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    }
+
+    it('waits for an interactive checkpoint mutation before draining cron', async () => {
+      const runExclusive = createGatedRunner();
+      const gateSession = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+        runExclusive,
+      );
+      vi.mocked(mockConfig.assertCanStartTurn).mockRejectedValue(
+        new Error('turn admission closed for gate test'),
+      );
+      let fireCron:
+        | ((job: { id: string; prompt: string; cronExpr: string }) => void)
+        | undefined;
+      const scheduler = {
+        hasPendingWork: true,
+        enableDurable: vi.fn().mockResolvedValue(undefined),
+        start: vi.fn((callback: typeof fireCron) => {
+          fireCron = callback;
+        }),
+        stop: vi.fn(),
+        getExitSummary: vi.fn().mockReturnValue(undefined),
+      };
+      mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+      gateSession.startCronScheduler();
+      await vi.waitFor(() => expect(scheduler.start).toHaveBeenCalled());
+
+      // The interactive prompt + checkpoint transaction holds the gate.
+      let releaseCheckpoint!: () => void;
+      const checkpointGate = new Promise<void>((resolve) => {
+        releaseCheckpoint = resolve;
+      });
+      const checkpointMutation = runExclusive(() => checkpointGate);
+
+      fireCron?.({ id: 'task-1', prompt: 'scheduled', cronExpr: '* * * * *' });
+      await settlePendingWork();
+
+      // The cron drain queued behind the checkpoint mutation and its
+      // exclusive body has not started.
+      expect(mockConfig.assertCanStartTurn).not.toHaveBeenCalled();
+
+      releaseCheckpoint();
+      await checkpointMutation;
+      await vi.waitFor(() =>
+        expect(mockConfig.assertCanStartTurn).toHaveBeenCalled(),
+      );
+
+      gateSession.dispose();
+    });
+
+    it('waits for an interactive checkpoint mutation before draining notifications', async () => {
+      const runExclusive = createGatedRunner();
+      const gateSession = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+        runExclusive,
+      );
+      vi.mocked(mockConfig.assertCanStartTurn).mockRejectedValue(
+        new Error('turn admission closed for gate test'),
+      );
+      const notify = vi
+        .mocked(mockBackgroundTaskRegistry.setNotificationCallback)
+        .mock.calls.at(-1)?.[0];
+      expect(notify).toBeDefined();
+
+      // The interactive prompt + checkpoint transaction holds the gate.
+      let releaseCheckpoint!: () => void;
+      const checkpointGate = new Promise<void>((resolve) => {
+        releaseCheckpoint = resolve;
+      });
+      const checkpointMutation = runExclusive(() => checkpointGate);
+
+      notify?.('Agent done', 'agent finished', {
+        agentId: 'agent-1',
+        status: 'completed',
+      });
+      await settlePendingWork();
+
+      // The notification drain queued behind the checkpoint mutation and
+      // its exclusive body has not started.
+      expect(mockConfig.assertCanStartTurn).not.toHaveBeenCalled();
+
+      releaseCheckpoint();
+      await checkpointMutation;
+      await vi.waitFor(() =>
+        expect(mockConfig.assertCanStartTurn).toHaveBeenCalled(),
+      );
+
+      gateSession.dispose();
+    });
+  });
+
   describe('daemon Todo Stop Guard', () => {
     const pendingTodos = [
       { id: 'task-1', content: 'finish task', status: 'pending' as const },

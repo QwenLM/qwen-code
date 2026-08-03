@@ -3980,17 +3980,91 @@ describe('SessionService', () => {
       const oldId = '31313131-3131-3131-3131-313131313133';
       const newId = '41414141-4141-4141-4141-414141414143';
       const { file, lines } = seedSession(oldId);
-      appendFileHistorySnapshot(oldId, file, lines, ['backup-a', 'backup-a']);
+      const snapshot = (
+        uuid: string,
+        parentUuid: string,
+        backupFileName: string,
+        promptId: string,
+      ) => ({
+        uuid,
+        parentUuid,
+        sessionId: oldId,
+        type: 'system',
+        subtype: 'file_history_snapshot',
+        timestamp: '2026-04-22T00:00:02.000Z',
+        cwd,
+        version: 'test',
+        systemPayload: {
+          snapshots: [
+            {
+              promptId,
+              timestamp: '2026-04-22T00:00:00.000Z',
+              trackedFileBackups: {
+                'file-0.txt': {
+                  backupFileName,
+                  version: 1,
+                  backupTime: '2026-04-22T00:00:00.000Z',
+                },
+              },
+            },
+          ],
+        },
+      });
+      // The turn's snapshot sits on the active chain ahead of the
+      // checkpoint (the recorder appends it before the checkpoint
+      // transaction), and a LATER snapshot follows the checkpoint. Its
+      // backup must not leak into the historical fork: transcript
+      // truncation has to happen before backup selection.
+      const checkpoint = {
+        uuid: 'checkpoint-bounded',
+        parentUuid: 'snapshot-before',
+        sessionId: oldId,
+        type: 'system',
+        subtype: 'branch_checkpoint',
+        timestamp: '2026-04-22T00:00:03.000Z',
+        cwd,
+        version: 'test',
+        systemPayload: {
+          v: 1,
+          startExclusiveRecordUuid: null,
+          assistantRecordUuid: 'u2',
+        },
+      };
+      fs.writeFileSync(
+        file,
+        [
+          ...lines,
+          snapshot('snapshot-before', 'u2', 'backup-a', `${oldId}########0`),
+          checkpoint,
+          {
+            ...snapshot(
+              'snapshot-after',
+              'checkpoint-bounded',
+              'later-backup',
+              `${oldId}########1`,
+            ),
+            timestamp: '2026-04-22T00:00:04.000Z',
+          },
+        ]
+          .map((record) => JSON.stringify(record))
+          .join('\n') + '\n',
+      );
       const sourceBackupDir = realPath.join(realTmpDir, 'file-history', oldId);
       const targetBackupDir = realPath.join(realTmpDir, 'file-history', newId);
       fs.mkdirSync(sourceBackupDir, { recursive: true });
       fs.writeFileSync(realPath.join(sourceBackupDir, 'backup-a'), 'kept');
       fs.writeFileSync(
+        realPath.join(sourceBackupDir, 'later-backup'),
+        'created after the checkpoint',
+      );
+      fs.writeFileSync(
         realPath.join(sourceBackupDir, 'unreferenced-backup'),
         'not copied',
       );
 
-      await service.forkSession(oldId, newId);
+      await service.forkSession(oldId, newId, {
+        atRecordId: checkpoint.uuid,
+      });
 
       expect(fs.readdirSync(targetBackupDir)).toEqual(['backup-a']);
     });

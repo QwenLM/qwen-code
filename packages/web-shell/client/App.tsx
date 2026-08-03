@@ -5893,6 +5893,7 @@ export function App({
   const branchCurrentSession = useCallback(
     (name?: string, atRecordId?: string) => {
       if (!requireActiveSessionForLocalCommand()) return;
+      const sourceSessionId = connectionRef.current.sessionId;
       return sessionActions
         .branchSession(name || undefined, atRecordId)
         .then((result) => {
@@ -5914,6 +5915,13 @@ export function App({
           ) {
             if (!transcriptReloadSupported) {
               pushToast('error', t('branch.staleUnsupported'));
+              return;
+            }
+            // The recovery reload targets whatever session is selected when
+            // the branch call returns. If the user switched away in flight,
+            // report the failure without refreshing the unrelated session.
+            if (connectionRef.current.sessionId !== sourceSessionId) {
+              pushToast('error', t('branch.failed'));
               return;
             }
             let refreshed = false;

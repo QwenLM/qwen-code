@@ -679,6 +679,12 @@ function appendTextDelta(
     if ('meta' in event && event.meta) {
       existing.meta = { ...existing.meta, ...event.meta };
     }
+    // The merge predicate admits deltas when one side omits `promptId`;
+    // backfill so a late exact-promptId lookup (e.g. `assistant.done`
+    // attaching the branch checkpoint) still matches the merged block.
+    if (existing.promptId === undefined && event.promptId !== undefined) {
+      existing.promptId = event.promptId;
+    }
     if (kind === 'assistant' && event.branchRecordId) {
       existing.branchRecordId = event.branchRecordId;
     }
