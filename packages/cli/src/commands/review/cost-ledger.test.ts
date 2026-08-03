@@ -4,17 +4,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
+  existsSync,
   mkdtempSync,
   mkdirSync,
+  readFileSync,
   rmSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { computeLedger, renderLedger } from './cost-ledger.js';
+import {
+  computeLedger,
+  renderLedger,
+  costLedgerCommand,
+} from './cost-ledger.js';
 
 const SESSION = 'S-ledger';
 
@@ -36,8 +42,9 @@ function event(
       cachedContentTokenCount: usage.cached ?? 0,
       candidatesTokenCount: usage.output ?? 0,
       thoughtsTokenCount: usage.thoughts ?? 0,
-      totalTokenCount:
-        (usage.input ?? 0) + (usage.output ?? 0) + (usage.thoughts ?? 0),
+      // The records' own contract: total = prompt + candidates. Thinking is a
+      // subset of candidates, not a sibling — never add it here.
+      totalTokenCount: (usage.input ?? 0) + (usage.output ?? 0),
     },
     ...extra,
   });
@@ -155,8 +162,11 @@ describe('cost-ledger — the spend, from the records already on disk', () => {
     const text = renderLedger(computeLedger(plan, env));
     expect(text).toContain('1 model calls');
     expect(text).toContain('1.2M input (50% cached)');
-    expect(text).toContain('15k output (5k thinking)');
+    // Thinking is a subset of output: the total reports output once, with the
+    // thinking inside it — never output + thinking.
+    expect(text).toContain('10k output (5k thinking)');
     expect(text).toContain('main loop: 1 calls');
+    expect(text).toContain('10k out');
   });
 
   it('reports an empty review as zeros, not a crash', () => {
@@ -173,5 +183,217 @@ describe('cost-ledger — the spend, from the records already on disk', () => {
     expect(() => computeLedger(plan, {} as NodeJS.ProcessEnv)).toThrow(
       /QWEN_CODE_PROJECT_DIR/,
     );
+  });
+
+  it('names a missing plan as the plan, not the usage records', () => {
+    const { env } = fixture();
+    expect(() => computeLedger('/nonexistent/plan.json', env)).toThrow(
+      /could not read the plan report/,
+    );
+  });
+
+  it('orders mixed-precision timestamps by time, not by string', () => {
+    const { plan, env, project } = fixture();
+    writeFileSync(
+      join(project, 'chats', `${SESSION}.jsonl`),
+      [
+        // Lexically "…:00.500Z" < "…:00Z" ('.' < 'Z'), but it is the later
+        // instant. String comparison would swap first and last.
+        event('2026-08-03T10:01:00Z', { input: 1_000, output: 100 }),
+        event('2026-08-03T10:01:00.500Z', { input: 1_000, output: 100 }),
+      ].join('\n'),
+    );
+    const ledger = computeLedger(plan, env);
+    expect(ledger.main?.firstAt).toBe('2026-08-03T10:01:00Z');
+    expect(ledger.main?.lastAt).toBe('2026-08-03T10:01:00.500Z');
+  });
+
+  it('rounds 999.5k up to 1.0M, not 1000k', () => {
+    const { plan, env, project } = fixture();
+    writeFileSync(
+      join(project, 'chats', `${SESSION}.jsonl`),
+      event('2026-08-03T10:01:00Z', { input: 999_500, output: 100 }),
+    );
+    expect(renderLedger(computeLedger(plan, env))).toContain('1.0M input');
+  });
+
+  it('falls back to the chunk label when the prompt names no role', () => {
+    const { plan, env, project } = fixture();
+    writeFileSync(
+      join(project, 'subagents', SESSION, 'agent-general-purpose-b7.jsonl'),
+      [
+        JSON.stringify({
+          type: 'user',
+          timestamp: '2026-08-03T10:06:00Z',
+          message: {
+            role: 'user',
+            parts: [{ text: 'Task: reviewing chunk 3 of 5 for this PR.' }],
+          },
+        }),
+        event('2026-08-03T10:06:30Z', { input: 1_000, output: 100 }),
+      ].join('\n'),
+    );
+    const ledger = computeLedger(plan, env);
+    expect(ledger.agents[0].label).toBe('chunk 3');
+  });
+
+  it('folds a relaunched agent into one (×N) row', () => {
+    const { plan, env, project } = fixture();
+    for (const [file, input] of [
+      ['agent-general-purpose-a1.jsonl', 10_000],
+      ['agent-general-purpose-d9.jsonl', 12_000],
+    ] as const) {
+      writeFileSync(
+        join(project, 'subagents', SESSION, file),
+        [
+          JSON.stringify({
+            type: 'user',
+            timestamp: '2026-08-03T10:06:00Z',
+            message: {
+              role: 'user',
+              parts: [
+                { text: 'You are review agent `2` — Agent 2: Security.' },
+              ],
+            },
+          }),
+          event('2026-08-03T10:06:30Z', { input, output: 100 }),
+        ].join('\n'),
+      );
+    }
+    const text = renderLedger(computeLedger(plan, env));
+    // The doubled run reads as one marked row, not two rows named alike.
+    expect(text).toContain('agent 2 (×2)');
+    expect(text).toContain('22k in');
+    expect(text).toContain('agents: 2');
+  });
+
+  it('truncates the agent block past eight rows', () => {
+    const { plan, env, project } = fixture();
+    for (let i = 1; i <= 9; i++) {
+      writeFileSync(
+        join(project, 'subagents', SESSION, `agent-role-${i}.jsonl`),
+        [
+          JSON.stringify({
+            type: 'user',
+            timestamp: '2026-08-03T10:06:00Z',
+            message: {
+              role: 'user',
+              parts: [
+                { text: `You are review agent \`${i}\` — dimension ${i}.` },
+              ],
+            },
+          }),
+          event('2026-08-03T10:06:30Z', { input: 10_000 + i, output: 100 }),
+        ].join('\n'),
+      );
+    }
+    const text = renderLedger(computeLedger(plan, env));
+    expect(text).toContain('agents: 9');
+    expect(text).toContain('…and 1 more agents');
+  });
+});
+
+describe('cost-ledger command boundary — informational, never a failure', () => {
+  const dirs: string[] = [];
+  const savedEnv: Record<string, string | undefined> = {};
+
+  function setEnv(env: NodeJS.ProcessEnv): void {
+    for (const k of ['QWEN_CODE_PROJECT_DIR', 'QWEN_CODE_SESSION_ID']) {
+      if (!(k in savedEnv)) savedEnv[k] = process.env[k];
+      if (env[k] === undefined) delete process.env[k];
+      else process.env[k] = env[k];
+    }
+  }
+
+  afterEach(() => {
+    for (const [k, v] of Object.entries(savedEnv)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  function fixture(): { plan: string; project: string } {
+    const project = mkdtempSync(join(tmpdir(), 'ledger-cmd-'));
+    dirs.push(project);
+    mkdirSync(join(project, 'chats'), { recursive: true });
+    const plan = join(project, 'plan.json');
+    writeFileSync(plan, '{}');
+    return { plan, project };
+  }
+
+  /** Drive the real yargs handler, as `qwen review cost-ledger` does. */
+  function run(args: Record<string, unknown>): {
+    stdout: string;
+    stderr: string;
+  } {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const outSpy = vi
+      .spyOn(process.stdout, 'write')
+      .mockImplementation((chunk) => {
+        stdout.push(chunk.toString());
+        return true;
+      });
+    const errSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderr.push(chunk.toString());
+        return true;
+      });
+    try {
+      (costLedgerCommand.handler as (a: unknown) => void)(args);
+    } finally {
+      outSpy.mockRestore();
+      errSpy.mockRestore();
+    }
+    return { stdout: stdout.join(''), stderr: stderr.join('') };
+  }
+
+  it('exits 0 with a reason when the ledger cannot be computed', () => {
+    const { plan } = fixture();
+    setEnv({} as NodeJS.ProcessEnv);
+    const { stderr } = run({ plan });
+    expect(stderr).toContain('cost-ledger unavailable');
+    expect(stderr).toContain('QWEN_CODE_PROJECT_DIR');
+  });
+
+  it('exits 0 and names the plan when the plan is missing', () => {
+    setEnv({
+      QWEN_CODE_PROJECT_DIR: '/tmp',
+      QWEN_CODE_SESSION_ID: SESSION,
+    } as NodeJS.ProcessEnv);
+    const { stderr } = run({ plan: '/nonexistent/plan.json' });
+    expect(stderr).toContain('cost-ledger unavailable');
+    expect(stderr).toContain('could not read the plan report');
+  });
+
+  it('writes --out into a directory it creates', () => {
+    const { plan, project } = fixture();
+    setEnv({
+      QWEN_CODE_PROJECT_DIR: project,
+      QWEN_CODE_SESSION_ID: SESSION,
+    } as NodeJS.ProcessEnv);
+    const out = join(project, 'archive', 'nested', 'ledger.json');
+    const { stdout } = run({ plan, out });
+    expect(stdout).toContain('Cost ledger:');
+    const written = JSON.parse(readFileSync(out, 'utf8')) as {
+      totals: { calls: number };
+    };
+    expect(written.totals.calls).toBe(0);
+  });
+
+  it('degrades a failed --out write to a warning and still exits 0', () => {
+    const { plan, project } = fixture();
+    setEnv({
+      QWEN_CODE_PROJECT_DIR: project,
+      QWEN_CODE_SESSION_ID: SESSION,
+    } as NodeJS.ProcessEnv);
+    const blocked = join(project, 'blocked');
+    writeFileSync(blocked, 'a file where the archive directory would go');
+    const { stdout, stderr } = run({ plan, out: join(blocked, 'ledger.json') });
+    expect(stderr).toContain('could not write');
+    expect(stdout).toContain('Cost ledger:');
+    expect(existsSync(join(blocked, 'ledger.json'))).toBe(false);
   });
 });

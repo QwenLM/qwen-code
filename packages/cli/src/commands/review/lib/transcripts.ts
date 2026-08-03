@@ -87,16 +87,22 @@ export interface AgentRecord {
 export class TranscriptsUnavailableError extends Error {}
 
 /**
- * Where this session's subagent transcripts live.
+ * The environment this module reads, validated once and returned together.
  *
  * Both halves come from the environment the CLI exported, never from an argument:
  * a path the model can choose is a path the model can point somewhere flattering.
  * `QWEN_CODE_PROJECT_DIR` exists because the project dir is keyed on the session's
  * *launch* cwd, and this subcommand may well be running inside a PR worktree the
  * skill `cd`-ed into — recomputing it from `process.cwd()` yields a directory that
- * never existed.
+ * never existed. Callers that need both halves (the chat file lives beside the
+ * subagent dir) take them here rather than re-reading the env after `transcriptDir`
+ * validated it.
  */
-export function transcriptDir(env: NodeJS.ProcessEnv = process.env): string {
+export function transcriptPaths(env: NodeJS.ProcessEnv = process.env): {
+  projectDir: string;
+  sessionId: string;
+  dir: string;
+} {
   const projectDir = env['QWEN_CODE_PROJECT_DIR']?.trim();
   const sessionId = env['QWEN_CODE_SESSION_ID']?.trim();
   if (!projectDir || !sessionId) {
@@ -105,7 +111,16 @@ export function transcriptDir(env: NodeJS.ProcessEnv = process.env): string {
         "this run cannot find the harness's record of what its agents did",
     );
   }
-  return join(projectDir, 'subagents', sessionId);
+  return {
+    projectDir,
+    sessionId,
+    dir: join(projectDir, 'subagents', sessionId),
+  };
+}
+
+/** Where this session's subagent transcripts live. */
+export function transcriptDir(env: NodeJS.ProcessEnv = process.env): string {
+  return transcriptPaths(env).dir;
 }
 
 /** Text out of a record's message parts. */
