@@ -107,6 +107,15 @@ async function flush() {
   });
 }
 
+function typeInput(input: HTMLInputElement, value: string) {
+  const nativeSetter = Object.getOwnPropertyDescriptor(
+    HTMLInputElement.prototype,
+    'value',
+  )?.set;
+  nativeSetter?.call(input, value);
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
 afterEach(() => {
   act(() => root.unmount());
   container.remove();
@@ -183,6 +192,11 @@ describe('GitDiffDialog', () => {
           shortSha: 'abcdef1',
           subject: 'selected commit',
         },
+        {
+          sha: '1234567890abcdef',
+          shortSha: '1234567',
+          subject: 'search target',
+        },
       ],
       hasMore: false,
     });
@@ -191,7 +205,10 @@ describe('GitDiffDialog', () => {
         { name: 'main', isHead: true },
         { name: 'topic', isHead: false },
       ],
-      remote: [{ name: 'origin/main', isHead: false }],
+      remote: [
+        { name: 'origin/main', isHead: false },
+        { name: 'origin/search-target', isHead: false },
+      ],
       tags: [],
     });
     mount();
@@ -211,6 +228,32 @@ describe('GitDiffDialog', () => {
       ref: 'abcdef1234567890',
     });
 
+    const commitTrigger = document.body.querySelector(
+      'button[aria-label="Select commit"]',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      commitTrigger.click();
+    });
+    await flush();
+    const commitSearch = document.body.querySelector(
+      'input[aria-label="Search commits…"]',
+    ) as HTMLInputElement;
+    await act(async () => {
+      typeInput(commitSearch, 'target');
+    });
+    await flush();
+    const commitOptions = document.body.querySelectorAll('[role="option"]');
+    expect(commitOptions).toHaveLength(1);
+    expect(commitOptions[0]?.textContent).toContain('search target');
+    await act(async () => {
+      (commitOptions[0] as HTMLButtonElement).click();
+    });
+    await flush();
+    expect(workspaceGitDiff).toHaveBeenLastCalledWith(undefined, {
+      mode: 'commit',
+      ref: '1234567890abcdef',
+    });
+
     await act(async () => {
       source.value = 'branch';
       source.dispatchEvent(new Event('change', { bubbles: true }));
@@ -222,9 +265,34 @@ describe('GitDiffDialog', () => {
       ref: 'topic',
     });
 
+    const branchTrigger = document.body.querySelector(
+      'button[aria-label="Select branch"]',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      branchTrigger.click();
+    });
+    await flush();
+    const branchSearch = document.body.querySelector(
+      'input[aria-label="Search branches…"]',
+    ) as HTMLInputElement;
+    await act(async () => {
+      typeInput(branchSearch, 'origin/search');
+    });
+    await flush();
+    const branchOptions = document.body.querySelectorAll('[role="option"]');
+    expect(branchOptions).toHaveLength(1);
+    await act(async () => {
+      (branchOptions[0] as HTMLButtonElement).click();
+    });
+    await flush();
+    expect(workspaceGitDiff).toHaveBeenLastCalledWith(undefined, {
+      mode: 'branch',
+      ref: 'origin/search-target',
+    });
+
     workspaceGitDiffFile.mockResolvedValue({ hunks: [], truncated: false });
     const header = document.body.querySelector(
-      'button[aria-expanded="false"]',
+      'button[aria-label^="Show changes for"]',
     ) as HTMLButtonElement;
     await act(async () => {
       header.click();
@@ -234,7 +302,7 @@ describe('GitDiffDialog', () => {
       'src/a.ts',
       undefined,
       undefined,
-      { mode: 'branch', ref: 'topic' },
+      { mode: 'branch', ref: 'origin/search-target' },
     );
   });
 

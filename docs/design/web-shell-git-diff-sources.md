@@ -38,7 +38,9 @@ parameter so existing callers remain source compatible.
 The Web Shell Changes view owns the selected source. Commit and branch metadata
 come from the existing log and branch endpoints. Selecting a source reloads the
 file list, and expanding a file sends the same source to the per-file hunk
-endpoint. Branch selection never checks out or mutates the repository.
+endpoint. Commit and branch selectors filter their loaded choices by commit SHA,
+subject, or branch name. Branch selection never checks out or mutates the
+repository.
 
 ## Error handling
 

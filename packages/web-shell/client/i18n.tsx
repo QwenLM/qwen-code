@@ -91,6 +91,9 @@ const EN: Messages = {
   'gitDiff.source.branch': 'Branch',
   'gitDiff.source.selectCommit': 'Select commit',
   'gitDiff.source.selectBranch': 'Select branch',
+  'gitDiff.source.searchCommit': 'Search commits…',
+  'gitDiff.source.searchBranch': 'Search branches…',
+  'gitDiff.source.noMatches': 'No matches',
   'gitDiff.summary': (v) =>
     `${v?.count ?? 0} files · +${v?.added ?? 0} −${v?.removed ?? 0}`,
   'gitDiff.loading': 'Loading changes…',
@@ -2711,6 +2714,9 @@ const ZH: Messages = {
   'gitDiff.source.branch': '分支',
   'gitDiff.source.selectCommit': '选择提交',
   'gitDiff.source.selectBranch': '选择分支',
+  'gitDiff.source.searchCommit': '搜索提交…',
+  'gitDiff.source.searchBranch': '搜索分支…',
+  'gitDiff.source.noMatches': '无匹配',
   'gitDiff.summary': (v) =>
     `${v?.count ?? 0} 个文件 · +${v?.added ?? 0} −${v?.removed ?? 0}`,
   'gitDiff.loading': '加载变更中…',

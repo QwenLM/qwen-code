@@ -29,9 +29,101 @@
   font-size: 12px;
 }
 
-.refSelect {
+.refTrigger {
   min-width: 0;
   flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+
+.refValue {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.refPopover {
+  width: var(--radix-popover-trigger-width);
+  min-width: 280px;
+  max-height: 320px;
+  gap: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.refSearch {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted-foreground);
+}
+
+.refSearchInput {
+  min-width: 0;
+  flex: 1 1 auto;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  font-size: 12px;
+}
+
+.refSearchInput::placeholder {
+  color: var(--muted-foreground);
+}
+
+.refList {
+  max-height: 270px;
+  padding: 4px 0;
+  overflow-y: auto;
+}
+
+.refItem {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  overflow: hidden;
+  border: 0;
+  background: transparent;
+  color: var(--foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.refItem:hover {
+  background: var(--accent);
+}
+
+.refItemActive {
+  color: var(--primary);
+  font-weight: 500;
+}
+
+.refEmpty {
+  padding: 16px 10px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  text-align: center;
 }
 
 .placeholder {

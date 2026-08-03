@@ -15,6 +15,7 @@ import type {
   DaemonWorkspaceGitDiffFile,
   DaemonWorkspaceGitDiffOptions,
 } from '@qwen-code/sdk/daemon';
+import { ChevronDownIcon, SearchIcon } from 'lucide-react';
 import type { BundledLanguage, ThemedToken } from 'shiki';
 import { useI18n } from '../../i18n';
 import { useTheme, WebShellThemeId } from '../../themeContext';
@@ -25,6 +26,7 @@ import {
 import { resolveFenceLanguage } from '../messages/Markdown';
 import { languageForPath } from '../messages/ToolGroup';
 import { sanitizeControlChars } from '../messages/toolFormatting';
+import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { DialogShell } from './DialogShell';
 import styles from './GitDiffDialog.module.css';
 
@@ -367,6 +369,106 @@ function DiffFileRow({
   );
 }
 
+interface DiffRefItem {
+  value: string;
+  label: string;
+}
+
+function SearchableDiffRefSelect({
+  value,
+  items,
+  label,
+  searchPlaceholder,
+  noMatches,
+  onChange,
+}: {
+  value: string;
+  items: DiffRefItem[];
+  label: string;
+  searchPlaceholder: string;
+  noMatches: string;
+  onChange: (value: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
+  const normalizedQuery = query.trim().toLowerCase();
+  const filteredItems = normalizedQuery
+    ? items.filter(
+        (item) =>
+          item.value.toLowerCase().includes(normalizedQuery) ||
+          item.label.toLowerCase().includes(normalizedQuery),
+      )
+    : items;
+  const selected = items.find((item) => item.value === value);
+
+  return (
+    <Popover
+      open={open}
+      onOpenChange={(nextOpen) => {
+        setOpen(nextOpen);
+        if (!nextOpen) setQuery('');
+      }}
+    >
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className={styles.refTrigger}
+          aria-label={label}
+          aria-expanded={open}
+        >
+          <span className={styles.refValue}>{selected?.label ?? value}</span>
+          <ChevronDownIcon size={14} />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        className={styles.refPopover}
+        align="start"
+        sideOffset={4}
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+          inputRef.current?.focus();
+        }}
+      >
+        <div className={styles.refSearch}>
+          <SearchIcon size={14} />
+          <input
+            ref={inputRef}
+            className={styles.refSearchInput}
+            value={query}
+            placeholder={searchPlaceholder}
+            aria-label={searchPlaceholder}
+            onChange={(event) => setQuery(event.target.value)}
+          />
+        </div>
+        <div className={styles.refList} role="listbox" aria-label={label}>
+          {filteredItems.map((item) => (
+            <button
+              key={item.value}
+              type="button"
+              role="option"
+              aria-selected={item.value === value}
+              className={`${styles.refItem} ${
+                item.value === value ? styles.refItemActive : ''
+              }`}
+              onClick={() => {
+                onChange(item.value);
+                setOpen(false);
+                setQuery('');
+              }}
+            >
+              {item.label}
+            </button>
+          ))}
+          {filteredItems.length === 0 && (
+            <div className={styles.refEmpty}>{noMatches}</div>
+          )}
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 export function GitDiffContent({
   workspaceCwd,
   gitCwd,
@@ -471,6 +573,29 @@ export function GitDiffContent({
     return { mode };
   }, [mode, commitRef, branchRef]);
 
+  const commitItems = useMemo(
+    () =>
+      (commits ?? []).map((commit) => ({
+        value: commit.sha,
+        label: `${commit.shortSha} ${commit.subject}`,
+      })),
+    [commits],
+  );
+
+  const branchItems = useMemo(
+    () => [
+      ...(branches?.local ?? []).map((branch) => ({
+        value: branch.name,
+        label: branch.name,
+      })),
+      ...(branches?.remote ?? []).map((branch) => ({
+        value: branch.name,
+        label: branch.name,
+      })),
+    ],
+    [branches],
+  );
+
   useEffect(() => {
     if (options === null) {
       setDiff(null);
@@ -572,38 +697,25 @@ export function GitDiffContent({
           <option value="commit">{t('gitDiff.source.commit')}</option>
           <option value="branch">{t('gitDiff.source.branch')}</option>
         </select>
-        {mode === 'commit' && commits && commits.length > 0 && (
-          <select
-            className={`${styles.sourceSelect} ${styles.refSelect}`}
-            aria-label={t('gitDiff.source.selectCommit')}
+        {mode === 'commit' && commitItems.length > 0 && (
+          <SearchableDiffRefSelect
             value={commitRef}
-            onChange={(event) => setCommitRef(event.target.value)}
-          >
-            {commits.map((commit) => (
-              <option key={commit.sha} value={commit.sha}>
-                {commit.shortSha} {commit.subject}
-              </option>
-            ))}
-          </select>
+            items={commitItems}
+            label={t('gitDiff.source.selectCommit')}
+            searchPlaceholder={t('gitDiff.source.searchCommit')}
+            noMatches={t('gitDiff.source.noMatches')}
+            onChange={setCommitRef}
+          />
         )}
-        {mode === 'branch' && branches && (
-          <select
-            className={`${styles.sourceSelect} ${styles.refSelect}`}
-            aria-label={t('gitDiff.source.selectBranch')}
+        {mode === 'branch' && branchItems.length > 0 && (
+          <SearchableDiffRefSelect
             value={branchRef}
-            onChange={(event) => setBranchRef(event.target.value)}
-          >
-            {branches.local.map((branch) => (
-              <option key={`local:${branch.name}`} value={branch.name}>
-                {branch.name}
-              </option>
-            ))}
-            {branches.remote.map((branch) => (
-              <option key={`remote:${branch.name}`} value={branch.name}>
-                {branch.name}
-              </option>
-            ))}
-          </select>
+            items={branchItems}
+            label={t('gitDiff.source.selectBranch')}
+            searchPlaceholder={t('gitDiff.source.searchBranch')}
+            noMatches={t('gitDiff.source.noMatches')}
+            onChange={setBranchRef}
+          />
         )}
       </div>
       {body}
