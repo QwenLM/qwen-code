@@ -19,15 +19,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
-import {
-  basename,
-  dirname,
-  extname,
-  join,
-  relative,
-  resolve,
-  sep,
-} from 'node:path';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import {
   NOT_BUNDLED_DIR,
   NOT_BUNDLED_FILE,
@@ -71,7 +63,9 @@ const isFixture = (f: string) =>
 function localImports(f: string): string[] {
   const src = readFileSync(f, 'utf8');
   const out: string[] = [];
-  for (const m of src.matchAll(/from\s+'(\.[^']+)'/g)) {
+  // `from '…'` and `await import('…')` alike — the directory has nine dynamic
+  // edges, and a helper reached only that way would be invisible here.
+  for (const m of src.matchAll(/(?:from\s+|import\s*\(\s*)'(\.[^']+)'/g)) {
     const spec = m[1].replace(/\.js$/, '');
     for (const ext of ['.ts', '.tsx', '.mts', '/index.ts']) {
       const candidate = resolve(dirname(f), spec + ext);
@@ -93,8 +87,10 @@ describe('the staleness digest covers only what the bundle can contain', () => {
   const digestedFiles = files.filter(
     (f) => !isTest(f) && !isFixture(f) && !NOT_BUNDLED_FILE.has(basename(f)),
   );
-  // Production for import purposes is anything that is not a test — an
-  // excluded helper still counts as an importer when deciding reachability.
+  // Production for import purposes is anything that is not a test.
+  // `NOT_BUNDLED_FILE` helpers are dropped from the importer set below: they
+  // are not bundled themselves, so what they import only reaches the bundle
+  // through some real production importer.
   const production = files.filter((f) => !isTest(f) && !isFixture(f));
 
   // What production code imports — including `review.ts`, which sits outside
@@ -113,15 +109,17 @@ describe('the staleness digest covers only what the bundle can contain', () => {
     // `lib/test-utils.ts` is the one that got through: a `.ts` with no `.test.`
     // in its name, imported by two test files and nothing else. A future one
     // fails here instead of in a review.
-    const digested = digestedFiles.filter((f) => extname(f) === '.ts');
-    const importedBySomeTest = new Set<string>();
-    for (const t of files.filter(isTest)) {
-      for (const dep of localImports(t)) importedBySomeTest.add(dep);
-    }
-    const testOnly = digested.filter(
-      (f) => !importedByProduction.has(f) && importedBySomeTest.has(f),
+    // Every extension, not just `.ts`: a test-only `.tsx` or `.mts` helper is
+    // the same defect with a different suffix.
+    const digested = digestedFiles;
+    // No `importedBySomeTest` conjunct: a file nothing imports at all is just
+    // as unreachable from the bundle as one only tests import, and requiring a
+    // test importer let an orphan through.
+    const entryPoints = new Set([join(reviewDir, '..', 'review.ts')]);
+    const unreachable = digested.filter(
+      (f) => !importedByProduction.has(f) && !entryPoints.has(f),
     );
-    expect(testOnly.map((f) => relative(repoRoot, f))).toEqual([]);
+    expect(unreachable.map((f) => relative(repoRoot, f))).toEqual([]);
   });
 
   it('leaves out nothing production imports', () => {

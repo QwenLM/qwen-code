@@ -215,18 +215,31 @@ describe('bundleStaleness', () => {
   });
 
   it.each([
-    ['no stamp beside the bundle', undefined, 'aaa'],
-    ['no sources to compare', 'aaa', undefined],
-    ['neither', undefined, undefined],
+    [
+      'no stamp beside the bundle',
+      undefined,
+      'aaa',
+      'the bundle carries no source digest',
+    ],
+    [
+      'no sources to compare',
+      'aaa',
+      undefined,
+      'no review sources found to compare',
+    ],
+    ['neither', undefined, undefined, 'the bundle carries no source digest'],
   ])(
     'says it could not measure with %s, and does not accuse the build',
-    (_n, stamped, current) => {
+    (_n, stamped, current, reason) => {
       // An installed package has neither half. A check that cannot see both
       // must not report the build as stale, and must say why rather than pass
       // silently.
       const s = bundleStaleness(stamped, current);
       expect(s.stale).toBe(false);
-      expect(s.unmeasured).toBeTruthy();
+      // The reason itself, not just that there is one: swapping the two
+      // arguments at the call site keeps every stale/fresh assertion green
+      // while telling a pre-stamp checkout its sources are missing.
+      expect(s.unmeasured).toBe(reason);
       expect(staleBundleWarning(s)).toBeUndefined();
     },
   );

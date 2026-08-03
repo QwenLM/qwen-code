@@ -795,4 +795,12 @@ function fail(message) {
   throw new Error(`Error: ${message}`);
 }
 
-export { TARGET_CLIPBOARD_PACKAGE, TARGETS, writeSha256Sums };
+export {
+  TARGET_CLIPBOARD_PACKAGE,
+  TARGETS,
+  writeSha256Sums,
+  // Exported so a test can hold the allowlist and the build's stamp together:
+  // the packager aborts on any dist entry it does not know, and nothing else
+  // would notice a one-sided rename until a release was cut.
+  isAllowedDistEntry,
+};

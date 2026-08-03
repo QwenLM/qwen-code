@@ -24,6 +24,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { reviewSourceDigestForBuild } from '../copy_bundle_assets.js';
+import { isAllowedDistEntry } from '../create-standalone-package.js';
 import {
   DIGEST_FILE,
   reviewSourceRoots,
@@ -55,6 +56,14 @@ describe('the build stamp and the staleness check agree', () => {
     // and the warning silently never firing again — with the digest parity
     // above still green, because it never touches the name.
     expect(DIGEST_FILE).toBe(STAMP_FILENAME_IN_BUILD);
+  });
+
+  it('stamps a file the standalone packager will accept', () => {
+    // `createStandalonePackage` fails on any top-level dist entry outside its
+    // allowlist, and no PR-time job runs it — so without this, dropping the
+    // entry or renaming the stamp on one side is discovered when a release is
+    // cut, on all five targets at once.
+    expect(isAllowedDistEntry(DIGEST_FILE)).toBe(true);
   });
 
   it('counts the same files', () => {
@@ -93,6 +102,15 @@ describe('the build stamp and the staleness check agree', () => {
       // ...and neither a test file, nor a spec, nor a fixture moves either.
       writeFileSync(join(cli, 'review', 'drive.test.ts'), 'a test');
       writeFileSync(join(cli, 'review', 'drive.spec.tsx'), 'a spec');
+      // A NOT_BUNDLED_FILE entry and a snapshot dir, pinned on both sides:
+      // neither exists in the repo tree, so only a synthetic one can catch a
+      // one-sided edit to either list.
+      writeFileSync(join(cli, 'review', '.DS_Store'), 'finder droppings');
+      mkdirSync(join(cli, 'review', '__snapshots__'), { recursive: true });
+      writeFileSync(
+        join(cli, 'review', '__snapshots__', 'x.test.ts.snap'),
+        'exports[`a`] = `b`;',
+      );
       mkdirSync(join(cli, 'review', '__fixtures__'), { recursive: true });
       writeFileSync(
         join(cli, 'review', '__fixtures__', 'responder.mjs'),

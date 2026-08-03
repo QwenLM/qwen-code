@@ -498,11 +498,11 @@ export const parseArgsCommand: CommandModule = {
         // wrote one. Nothing to compare against, and it self-heals on the
         // next rebuild.
       }
-      // Only hashed when there is a stamp to compare it against: without one
-      // — an installed package, a bundle from before the build wrote one —
-      // `bundleStaleness` returns at its first guard, and reading a hundred
-      // files for a value it never inspects is work on the path that always
-      // short-circuits.
+      // Always hashed, even with no stamp to compare against: the
+      // `!stamped && current` branch below needs this value to tell a
+      // pre-stamp checkout apart from an installed package. Gating the walk on
+      // `stamped` would make that branch dead and silence the one unmeasured
+      // case worth saying out loud.
       // A checkout whose `dist/` predates the stamp is genuinely stale and
       // cannot be measured — the state right after this shipped, in every
       // existing tree until its next rebuild. Sources present with no stamp is

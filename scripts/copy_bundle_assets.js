@@ -44,7 +44,7 @@ const BUNDLED_SKILL_TEST_FILE_RE =
  */
 // Mirrors NOT_BUNDLED_RE in stale-bundle.ts; the parity test keeps them equal.
 const NOT_BUNDLED_RE = /\.(?:test|spec)\.[cm]?[jt]sx?$/;
-const NOT_BUNDLED_DIR = new Set(['__fixtures__']);
+const NOT_BUNDLED_DIR = new Set(['__fixtures__', '__snapshots__']);
 const NOT_BUNDLED_FILE = new Set(['test-utils.ts', '.DS_Store']);
 
 export function reviewSourceDigestForBuild(root) {

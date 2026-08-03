@@ -60,7 +60,7 @@ export const NOT_BUNDLED_RE = /\.(?:test|spec)\.[cm]?[jt]sx?$/;
  * bundler follows — measured, none of the four under `review/__fixtures__` is
  * in `dist`. Editing one is the same nothing-changed warning a test file was.
  */
-export const NOT_BUNDLED_DIR = new Set(['__fixtures__']);
+export const NOT_BUNDLED_DIR = new Set(['__fixtures__', '__snapshots__']);
 
 /**
  * Files under the review roots that no production import reaches.
