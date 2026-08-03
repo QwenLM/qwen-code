@@ -1797,46 +1797,50 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(p).not.toMatch(/If you find no issues, say/i);
   });
 
-  it('injects repository context into reviewers and a verification boundary into Agent 7', () => {
+  it('injects generic repository context into reviewers and a narrow verification boundary into Agent 7', () => {
     const contextPlan = {
       ...PR_PLAN,
       repositoryContext: {
         version: 1,
-        adapter: 'openjdk',
-        domains: ['c2', 'compiler', 'hotspot'],
-        relatedPaths: [
-          'src/hotspot/share/opto/loopTransform.hpp',
-          'test/hotspot/jtreg/compiler/loopopts',
-        ],
-        testSelections: ['hotspot:hotspot_compiler'],
-        requiredConfigurations: ['fastdebug', 'server'],
-        specialists: ['openjdk-platform-impact'],
-        unverifiedDimensions: [
-          'CPU backend interactions were not verified on every target architecture',
-        ],
+        provider: 'fake-provider',
+        label: 'Example project',
+        domains: ['compiler', 'runtime'],
+        relatedPaths: ['src/compiler.ts', 'src/runtime.ts'],
+        recommendedTests: ['test:compiler'],
+        requiredConfigurations: ['debug', 'linux-x64'],
+        requiredAgents: ['test-matrix'],
+        unverifiedDimensions: ['Alternate runtime was not exercised'],
+        verificationNotes: ['Use the repository native test runner'],
       },
     };
 
-    for (const role of ['1a', 'openjdk-platform-impact'] as const) {
-      const p = buildRoleBrief(contextPlan, role);
-      expect(p).toContain('OpenJDK repository context');
-      expect(p).toContain('c2, compiler, hotspot');
-      expect(p).toContain('src/hotspot/share/opto/loopTransform.hpp');
-      expect(p).toContain('hotspot:hotspot_compiler');
-      expect(p).toContain('fastdebug, server');
-      expect(p).toContain(
-        'CPU backend interactions were not verified on every target architecture',
-      );
-    }
+    const reviewerBrief = buildRoleBrief(contextPlan, '1a');
+    expect(reviewerBrief).toContain('Example project repository context');
+    expect(reviewerBrief).toContain('compiler, runtime');
+    expect(reviewerBrief).toContain('src/compiler.ts');
+    expect(reviewerBrief).toContain('test:compiler');
+    expect(reviewerBrief).toContain('debug, linux-x64');
+    expect(reviewerBrief).toContain('Alternate runtime was not exercised');
+    expect(reviewerBrief).toContain('Use the repository native test runner');
+
+    const territoryBrief = buildChunkAgentPrompt(contextPlan, 13);
+    expect(territoryBrief).toContain('Example project repository context');
+    expect(territoryBrief).toContain('src/compiler.ts');
+
+    const requiredAgentBrief = buildRoleBrief(contextPlan, 'test-matrix');
+    expect(requiredAgentBrief).toContain('Example project repository context');
+    expect(requiredAgentBrief).toContain('src/compiler.ts');
+    expect(requiredAgentBrief).toContain('test:compiler');
 
     const buildBrief = buildRoleBrief(contextPlan, '7');
-    expect(buildBrief).not.toContain('OpenJDK repository context');
+    expect(buildBrief).not.toContain('Example project repository context');
+    expect(buildBrief).not.toContain('compiler, runtime');
+    expect(buildBrief).not.toContain('src/compiler.ts');
+    expect(buildBrief).not.toContain('Alternate runtime was not exercised');
     expect(buildBrief).toContain('Repository-specific verification boundary');
-    expect(buildBrief).toContain('hotspot:hotspot_compiler');
-    expect(buildBrief).toContain('fastdebug, server');
-    expect(buildBrief).toContain(
-      'Do not treat the OpenJDK root Makefile as a generic `make build` project',
-    );
+    expect(buildBrief).toContain('test:compiler');
+    expect(buildBrief).toContain('debug, linux-x64');
+    expect(buildBrief).toContain('Use the repository native test runner');
   });
 
   it('carries the mutation-testing lens into Agent 5, equivalent-mutant escape hatch included', () => {

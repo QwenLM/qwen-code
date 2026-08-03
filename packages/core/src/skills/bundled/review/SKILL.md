@@ -73,7 +73,7 @@ At every effort level, the mechanics of obtaining the diff — worktree flow, di
 
 The parser already classified the target, so there is nothing to disambiguate by hand. For a `pr-url` target, determine if the local repo can access this PR:
 
-1. Check if any git remote matches the URL's **host and owner/repo — by exact segment equality, never substring**: run `git remote -v` and parse each remote URL structurally (`git@<host>:<owner>/<repo>.git` and `https://<host>/<owner>/<repo>(.git)` are the two shapes). A remote matches only when its host equals the verdict's `host` AND its `<owner>/<repo>` (with any `.git` suffix stripped) equals the verdict's `owner/repo`, both compared case-insensitively as whole segments — `shao/qwen-code` does NOT match a `wenshao/qwen-code` remote, and a `github.com` PR does not match a same-named repo on another host. Substring "contains" matching once allowed exactly those, which is reviewing one repository and posting to another. This still handles forks — a local clone of `wenshao/jdk` with an `upstream` remote pointing to `openjdk/jdk` still matches `openjdk/jdk` PRs exactly.
+1. Check if any git remote matches the URL's **host and owner/repo — by exact segment equality, never substring**: run `git remote -v` and parse each remote URL structurally (`git@<host>:<owner>/<repo>.git` and `https://<host>/<owner>/<repo>(.git)` are the two shapes). A remote matches only when its host equals the verdict's `host` AND its `<owner>/<repo>` (with any `.git` suffix stripped) equals the verdict's `owner/repo`, both compared case-insensitively as whole segments — `shao/qwen-code` does NOT match a `wenshao/qwen-code` remote, and a `github.com` PR does not match a same-named repo on another host. Substring "contains" matching once allowed exactly those, which is reviewing one repository and posting to another. This still handles forks — a local clone with an `upstream` remote pointing to the target repository matches that repository's PRs exactly.
 2. If a matching remote is found, proceed with the **normal worktree flow** — use that remote name (instead of hardcoded `origin`) for `git fetch <remote> pull/<number>/head:qwen-review/pr-<number>`. In Step 7, use the owner/repo from the URL for posting comments.
 
 For a `pr-url` whose `host` is not `github.com` (GitHub Enterprise), **pass `--host <host>` to every review subcommand that talks to GitHub — `fetch-pr`, `pr-context`, `comment-status`, `presubmit`, and `compose-review`** — which routes all of their `gh` calls via GH_HOST in code; a forgotten host cannot silently retarget them at github.com. The `gh` commands you run directly are still yours to route: prefix Agent 0's `gh pr view`/`gh issue view`, Step 6's residual body fetch, and the Step 7 submission with `GH_HOST=<host> ` (e.g. `GH_HOST=github.example.com gh api ...`). `gh` defaults to `github.com`, so a dropped host makes a call read from and post to the wrong site's `owner/repo`.
@@ -226,24 +226,6 @@ gh pr diff <pr_number> --repo <owner>/<repo> > .qwen/tmp/qwen-review-pr-<n>-diff
 `plan-diff` and `capture-local` emit the same `diffPathAbsolute`, `chunks[]`, `files[]` and topology counts as `fetch-pr`, so Steps 3A, 3B and 7 work identically on all four review paths. Neither can decide `heavy` — that needs a tree to read the post-change file from — so no invariant agents run on a bare diff.
 
 If `diffPath` is `null` (merge-base could not be resolved), fall back to giving agents the `git diff` command and **tell the user coverage will be partial on a large diff**.
-
-At **medium and high effort**, when the review has a local tree, enrich the plan with repository-native context before building the roster:
-
-```bash
-# same-repo PR: use absolute paths because this command runs from the isolated worktree
-"${QWEN_CODE_CLI:-qwen}" review repo-context \
-  --plan <absolute path to the Step 1 plan in the main checkout> \
-  --worktree <absolute worktreePath> \
-  --out <absolute path to .qwen/tmp/qwen-review-<target>-repository-context.json in the main checkout>
-
-# local-diff or file-path review: use the current repository tree
-"${QWEN_CODE_CLI:-qwen}" review repo-context \
-  --plan <absolute path to the Step 1 plan> \
-  --worktree . \
-  --out <absolute path to .qwen/tmp/qwen-review-<target>-repository-context.json>
-```
-
-The command currently recognizes OpenJDK from `.jcheck/conf`. For same-repo PR plans it reads repository identity from the trusted `mergeBaseSha` recorded by `fetch-pr`, so the PR cannot opt out by editing that file; it still uses the isolated PR worktree for post-change sibling inspection. Local plans have no merge base and use the current tree for both. The command writes a diagnostic artifact and embeds the same validated object into the plan. That embedded field is what `agent-prompt --roster`, `check-coverage`, and `compose-review` trust; do not hand-edit it or pass a second context path downstream. If no supported repository is detected, the artifact is `null` and the plan retains the generic roster. Skip this command for cross-repo lightweight mode (there is no tree) and at low effort (there is no agent roster to enrich).
 
 **Choose the topology from `srcDiffLines`, not from `diffLines`.**
 

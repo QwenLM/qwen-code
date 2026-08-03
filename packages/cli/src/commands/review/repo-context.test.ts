@@ -4,412 +4,343 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { execFileSync } from 'node:child_process';
 import {
   linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  rmSync,
+  realpathSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { describe, expect, it, vi } from 'vitest';
+import type { RepositoryContextProvider } from './lib/repository-context.js';
 import { repoContextCommand, runRepoContext } from './repo-context.js';
 
-const dirs: string[] = [];
-afterEach(() => {
-  vi.restoreAllMocks();
-  for (const dir of dirs.splice(0))
-    rmSync(dir, { recursive: true, force: true });
-});
-
-function tempDir(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'repo-context-command-'));
-  dirs.push(dir);
-  return dir;
+function temp(): string {
+  return realpathSync(mkdtempSync(join(tmpdir(), 'repo-context-')));
 }
 
-function write(root: string, path: string, text = ''): string {
-  const file = join(root, path);
-  mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, text, 'utf8');
-  return file;
+function write(path: string, content: string): void {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, content);
 }
 
-function git(root: string, ...args: string[]): string {
-  return execFileSync('git', args, {
-    cwd: root,
+function readJson(path: string): unknown {
+  return JSON.parse(readFileSync(path, 'utf8'));
+}
+
+function initGit(root: string): void {
+  execFileSync('git', ['init', '-q', root]);
+  execFileSync('git', ['-C', root, 'config', 'user.email', 'test@example.com']);
+  execFileSync('git', ['-C', root, 'config', 'user.name', 'Test']);
+}
+
+function commitAll(root: string): string {
+  execFileSync('git', ['-C', root, 'add', '.']);
+  execFileSync('git', ['-C', root, 'commit', '-qm', 'snapshot']);
+  return execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], {
     encoding: 'utf8',
-    env: {
-      ...process.env,
-      GIT_CONFIG_GLOBAL: join(root, 'global.gitconfig'),
-      GIT_CONFIG_NOSYSTEM: '1',
-    },
   }).trim();
 }
 
-function makePlan(
-  root: string,
-  worktree: string,
-  repositoryContext: unknown = undefined,
-): string {
-  return write(
-    root,
-    'plan.json',
-    JSON.stringify({
-      worktreePath: worktree,
-      files: [{ path: 'src/hotspot/share/opto/a.cpp' }],
-      ...(repositoryContext === undefined ? {} : { repositoryContext }),
-    }),
-  );
+function context(provider = 'fake-provider') {
+  return {
+    version: 1 as const,
+    provider,
+    label: 'Fake project',
+    domains: ['runtime'],
+    relatedPaths: ['src/related.ts'],
+    recommendedTests: ['test:runtime'],
+    requiredConfigurations: ['debug'],
+    requiredAgents: ['test-matrix' as const],
+    unverifiedDimensions: ['Alternate runtime was not exercised'],
+    verificationNotes: ['Use the repository native test runner'],
+  };
 }
 
-describe('repo-context command', () => {
-  it('reads plan.files paths, writes the artifact, and embeds identical context', () => {
-    const root = tempDir();
-    const worktree = join(root, 'jdk');
-    write(worktree, '.jcheck/conf', '[general]\nproject=jdk\n');
-    write(worktree, 'src/hotspot/share/opto/a.cpp');
-    write(worktree, 'src/hotspot/share/opto/a.hpp');
-    write(
+function planAt(root: string, plan: object): string {
+  const path = join(root, 'plan.json');
+  write(path, `${JSON.stringify(plan)}\n`);
+  return path;
+}
+
+function run(
+  root: string,
+  worktree: string,
+  plan: object,
+  providers: readonly RepositoryContextProvider[],
+): { planPath: string; outPath: string } {
+  const planPath = planAt(root, plan);
+  const outPath = join(root, 'context.json');
+  runRepoContext({ plan: planPath, worktree, out: outPath }, providers);
+  return { planPath, outPath };
+}
+
+describe('repo-context providers and trust boundary', () => {
+  it('writes null and clears stale context when no provider matches', () => {
+    const root = temp();
+    const worktree = join(root, 'worktree');
+    mkdirSync(worktree);
+    const { planPath, outPath } = run(
+      root,
       worktree,
-      'test/hotspot/jtreg/TEST.groups',
-      'hotspot_compiler = compiler\n',
+      {
+        files: [{ path: 'src/change.ts' }],
+        repositoryContext: context(),
+      },
+      [],
     );
-    const plan = makePlan(root, worktree);
-    const out = join(root, 'artifacts', 'repository-context.json');
+    expect(readJson(outPath)).toBeNull();
+    expect(readJson(planPath)).not.toHaveProperty('repositoryContext');
+  });
 
-    runRepoContext({ plan, worktree, out });
+  it('passes sorted unique changed paths and local identity to a provider', () => {
+    const root = temp();
+    const worktree = join(root, 'worktree');
+    write(join(worktree, '.review', 'identity'), 'local\n');
+    const provide = vi.fn<RepositoryContextProvider['provide']>((input) => {
+      expect(input.worktree).toBe(realpathSync(worktree));
+      expect(input.changedPaths).toEqual(['src/a.ts', 'src/b.ts']);
+      expect(input.readIdentityFile('.review/identity')).toBe('local\n');
+      expect(input.readIdentityFile('.review/missing')).toBeNull();
+      return context();
+    });
+    const { planPath, outPath } = run(
+      root,
+      worktree,
+      {
+        files: [
+          { path: 'src/b.ts' },
+          { path: 'src/a.ts' },
+          { path: 'src/a.ts' },
+        ],
+      },
+      [{ provide }],
+    );
+    expect(provide).toHaveBeenCalledOnce();
+    expect(readJson(outPath)).toEqual(context());
+    expect(readJson(planPath)).toHaveProperty('repositoryContext', context());
+  });
 
-    const artifact = JSON.parse(readFileSync(out, 'utf8')) as unknown;
-    const updated = JSON.parse(readFileSync(plan, 'utf8')) as {
-      repositoryContext: unknown;
+  it('reads pull-request identity only from the trusted base commit', () => {
+    const root = temp();
+    const worktree = join(root, 'repository');
+    initGit(worktree);
+    write(join(worktree, '.review', 'identity'), 'base\n');
+    write(join(worktree, 'src', 'change.ts'), 'base\n');
+    const base = commitAll(worktree);
+    write(join(worktree, '.review', 'identity'), 'head\n');
+    const provider: RepositoryContextProvider = {
+      provide(input) {
+        expect(input.readIdentityFile('.review/identity')).toBe('base');
+        return context();
+      },
     };
-    expect(updated.repositoryContext).toEqual(artifact);
-    expect(artifact).toMatchObject({
-      adapter: 'openjdk',
-      relatedPaths: ['src/hotspot/share/opto/a.hpp'],
-    });
-    expect(readFileSync(plan, 'utf8')).toContain('\n  "files":');
-  });
-
-  it('writes null and removes stale context for a non-OpenJDK worktree', () => {
-    const root = tempDir();
-    const worktree = join(root, 'ordinary-repo');
-    mkdirSync(worktree);
-    const plan = makePlan(root, worktree, { version: 999 });
-    const out = join(root, 'context.json');
-
-    runRepoContext({ plan, worktree, out });
-
-    expect(JSON.parse(readFileSync(out, 'utf8'))).toBeNull();
-    expect(JSON.parse(readFileSync(plan, 'utf8'))).not.toHaveProperty(
-      'repositoryContext',
+    run(
+      root,
+      worktree,
+      {
+        files: [{ path: 'src/change.ts' }],
+        mergeBaseSha: base,
+      },
+      [provider],
     );
   });
 
-  it('rejects a different worktree, including a symlink alias to another tree', () => {
-    const root = tempDir();
-    const recorded = join(root, 'recorded');
-    const other = join(root, 'other');
-    mkdirSync(recorded);
-    mkdirSync(other);
-    const alias = join(root, 'other-alias');
-    symlinkSync(other, alias);
-    const plan = makePlan(root, recorded);
+  it('does not let the current tree opt in or opt out of base identity', () => {
+    const root = temp();
+    const worktree = join(root, 'repository');
+    initGit(worktree);
+    write(join(worktree, '.review', 'identity'), 'enabled\n');
+    write(join(worktree, 'src', 'change.ts'), 'base\n');
+    const base = commitAll(worktree);
+    write(join(worktree, '.review', 'identity'), 'disabled\n');
+    const enabled: RepositoryContextProvider = {
+      provide(input) {
+        return input.readIdentityFile('.review/identity') === 'enabled'
+          ? context()
+          : null;
+      },
+    };
+    expect(
+      readJson(
+        run(
+          join(root, 'base-enabled'),
+          worktree,
+          { files: [{ path: 'src/change.ts' }], mergeBaseSha: base },
+          [enabled],
+        ).outPath,
+      ),
+    ).toEqual(context());
 
+    const second = join(root, 'second');
+    initGit(second);
+    write(join(second, '.review', 'identity'), 'disabled\n');
+    write(join(second, 'src', 'change.ts'), 'base\n');
+    const disabledBase = commitAll(second);
+    write(join(second, '.review', 'identity'), 'enabled\n');
+    expect(
+      readJson(
+        run(
+          join(root, 'base-disabled'),
+          second,
+          {
+            files: [{ path: 'src/change.ts' }],
+            mergeBaseSha: disabledBase,
+          },
+          [enabled],
+        ).outPath,
+      ),
+    ).toBeNull();
+  });
+
+  it('fails closed for failed, stale, or invalid base identity', () => {
+    const root = temp();
+    const worktree = join(root, 'repository');
+    initGit(worktree);
+    write(join(worktree, 'src', 'change.ts'), 'base\n');
+    const base = commitAll(worktree);
+    const provider: RepositoryContextProvider = { provide: () => context() };
     expect(() =>
-      runRepoContext({ plan, worktree: alias, out: join(root, 'out.json') }),
-    ).toThrow(/does not match plan\.worktreePath/);
-  });
-
-  it('uses merge-base metadata when the reviewed tree deletes jcheck config', () => {
-    const root = tempDir();
-    const worktree = join(root, 'jdk');
-    mkdirSync(worktree);
-    git(worktree, 'init', '-q');
-    write(worktree, '.jcheck/conf', '[general]\nproject=jdk\n');
-    write(worktree, 'src/hotspot/share/opto/a.cpp');
-    git(worktree, 'add', '.');
-    git(
-      worktree,
-      '-c',
-      'user.name=Test',
-      '-c',
-      'user.email=test@example.com',
-      'commit',
-      '-qm',
-      'base',
-    );
-    const mergeBaseSha = git(worktree, 'rev-parse', 'HEAD');
-    rmSync(join(worktree, '.jcheck'), { recursive: true });
-    const plan = write(
-      root,
-      'plan.json',
-      JSON.stringify({
-        worktreePath: worktree,
-        mergeBaseSha,
-        files: [{ path: 'src/hotspot/share/opto/a.cpp' }],
-      }),
-    );
-
-    runRepoContext({
-      plan,
-      worktree,
-      out: join(root, 'context.json'),
-    });
-
-    expect(JSON.parse(readFileSync(plan, 'utf8'))).toHaveProperty(
-      'repositoryContext.adapter',
-      'openjdk',
-    );
-  });
-
-  it('does not let a reviewed tree opt into OpenJDK context', () => {
-    const root = tempDir();
-    const worktree = join(root, 'repo');
-    mkdirSync(worktree);
-    git(worktree, 'init', '-q');
-    write(worktree, 'src/hotspot/share/opto/a.cpp');
-    git(worktree, 'add', '.');
-    git(
-      worktree,
-      '-c',
-      'user.name=Test',
-      '-c',
-      'user.email=test@example.com',
-      'commit',
-      '-qm',
-      'base',
-    );
-    const mergeBaseSha = git(worktree, 'rev-parse', 'HEAD');
-    write(worktree, '.jcheck/conf', '[general]\nproject=jdk\n');
-    const plan = write(
-      root,
-      'plan.json',
-      JSON.stringify({
-        worktreePath: worktree,
-        mergeBaseSha,
-        files: [{ path: 'src/hotspot/share/opto/a.cpp' }],
-      }),
-    );
-    const out = join(root, 'context.json');
-
-    runRepoContext({ plan, worktree, out });
-
-    expect(JSON.parse(readFileSync(out, 'utf8'))).toBeNull();
-    expect(JSON.parse(readFileSync(plan, 'utf8'))).not.toHaveProperty(
-      'repositoryContext',
-    );
-  });
-
-  it('fails closed when the recorded merge base cannot be resolved', () => {
-    const root = tempDir();
-    const worktree = join(root, 'repo');
-    mkdirSync(worktree);
-    git(worktree, 'init', '-q');
-    const plan = write(
-      root,
-      'plan.json',
-      JSON.stringify({
-        worktreePath: worktree,
-        mergeBaseSha: '0000000000000000000000000000000000000000',
-        files: [{ path: 'src/a.ts' }],
-      }),
-    );
-
-    expect(() =>
-      runRepoContext({
-        plan,
+      run(
+        join(root, 'fetch-failed'),
         worktree,
-        out: join(root, 'context.json'),
-      }),
-    ).toThrow(/mergeBaseSha cannot be resolved/);
-  });
-
-  it('fails closed when the merge base may come from a stale base ref', () => {
-    const root = tempDir();
-    const worktree = join(root, 'repo');
-    mkdirSync(worktree);
-    git(worktree, 'init', '-q');
-    write(worktree, '.jcheck/conf', '[general]\nproject=jdk\n');
-    write(worktree, 'src/hotspot/share/opto/a.cpp');
-    git(worktree, 'add', '.');
-    git(
-      worktree,
-      '-c',
-      'user.name=Test',
-      '-c',
-      'user.email=test@example.com',
-      'commit',
-      '-qm',
-      'base',
-    );
-    const plan = write(
-      root,
-      'plan.json',
-      JSON.stringify({
-        worktreePath: worktree,
-        mergeBaseSha: git(worktree, 'rev-parse', 'HEAD'),
-        baseFetchFailed: true,
-        files: [{ path: 'src/hotspot/share/opto/a.cpp' }],
-      }),
-    );
-
+        {
+          files: [{ path: 'src/change.ts' }],
+          mergeBaseSha: base,
+          baseFetchFailed: true,
+        },
+        [provider],
+      ),
+    ).toThrow('base fetch failed');
     expect(() =>
-      runRepoContext({
-        plan,
+      run(
+        join(root, 'invalid'),
         worktree,
-        out: join(root, 'context.json'),
-      }),
-    ).toThrow(/mergeBaseSha may be stale/);
+        { files: [{ path: 'src/change.ts' }], mergeBaseSha: 'nope' },
+        [provider],
+      ),
+    ).toThrow('mergeBaseSha is invalid');
+    expect(() =>
+      run(
+        join(root, 'stale'),
+        worktree,
+        {
+          files: [{ path: 'src/change.ts' }],
+          mergeBaseSha: '0'.repeat(40),
+        },
+        [provider],
+      ),
+    ).toThrow('cannot be resolved');
   });
 
-  it('leaves the plan unchanged when the artifact cannot be written', () => {
-    const root = tempDir();
-    const worktree = join(root, 'jdk');
-    write(worktree, '.jcheck/conf', '[general]\nproject=jdk\n');
-    write(worktree, 'src/hotspot/share/opto/a.cpp');
-    const plan = makePlan(root, worktree);
-    const original = readFileSync(plan, 'utf8');
-    const out = join(root, 'out-directory');
-    mkdirSync(out);
-
-    expect(() => runRepoContext({ plan, worktree, out })).toThrow();
-    expect(readFileSync(plan, 'utf8')).toBe(original);
+  it('supports recorded linked-worktree paths', () => {
+    const root = temp();
+    const repository = join(root, 'repository');
+    initGit(repository);
+    write(join(repository, 'src', 'change.ts'), 'base\n');
+    commitAll(repository);
+    const linked = join(root, 'linked');
+    execFileSync('git', ['-C', repository, 'worktree', 'add', '-q', linked]);
+    run(
+      root,
+      linked,
+      {
+        files: [{ path: 'src/change.ts' }],
+        worktreePath: '../linked',
+      },
+      [{ provide: () => context() }],
+    );
   });
 
-  it('rejects output aliases of the plan before overwriting either file', () => {
-    const root = tempDir();
-    const worktree = join(root, 'repo');
+  it('rejects identity traversal and symlink escapes', () => {
+    const root = temp();
+    const worktree = join(root, 'worktree');
     mkdirSync(worktree);
-    const plan = makePlan(root, worktree);
+    write(join(root, 'outside'), 'secret\n');
+    symlinkSync(join(root, 'outside'), join(worktree, 'identity'));
+    for (const identityPath of ['../outside', '/outside', 'identity']) {
+      expect(() =>
+        run(
+          join(root, identityPath.replaceAll('/', '_')),
+          worktree,
+          { files: [{ path: 'src/change.ts' }] },
+          [
+            {
+              provide(input) {
+                input.readIdentityFile(identityPath);
+                return context();
+              },
+            },
+          ],
+        ),
+      ).toThrow();
+    }
+  });
+
+  it('rejects changed-path traversal before providers run', () => {
+    const root = temp();
+    const worktree = join(root, 'worktree');
+    mkdirSync(worktree);
+    const provide = vi.fn<RepositoryContextProvider['provide']>();
+    expect(() =>
+      run(root, worktree, { files: [{ path: '../secret' }] }, [{ provide }]),
+    ).toThrow('plan.files[0].path is invalid');
+    expect(provide).not.toHaveBeenCalled();
+  });
+
+  it('rejects plan/out aliases and preserves the plan on artifact failure', () => {
+    const root = temp();
+    const worktree = join(root, 'worktree');
+    mkdirSync(worktree);
+    const planPath = planAt(root, { files: [{ path: 'src/change.ts' }] });
+    expect(() =>
+      runRepoContext({ plan: planPath, worktree, out: planPath }, [
+        { provide: () => context() },
+      ]),
+    ).toThrow('--out must differ');
+
     const alias = join(root, 'alias.json');
-    linkSync(plan, alias);
-    const original = readFileSync(plan, 'utf8');
-
-    expect(() => runRepoContext({ plan, worktree, out: alias })).toThrow(
-      /--out must differ from --plan/,
-    );
-    expect(readFileSync(plan, 'utf8')).toBe(original);
-  });
-
-  it('resolves relative worktree paths from the project cwd', () => {
-    const root = tempDir();
-    const worktree = join(root, 'jdk');
-    write(worktree, '.jcheck/conf', '[general]\nproject=jdk\n');
-    write(worktree, 'src/hotspot/share/opto/a.cpp');
-    const plan = write(
-      root,
-      'artifacts/plan.json',
-      JSON.stringify({
-        worktreePath: 'jdk',
-        files: [{ path: 'src/hotspot/share/opto/a.cpp' }],
-      }),
-    );
-    const previousCwd = process.cwd();
-    try {
-      process.chdir(root);
-      runRepoContext({
-        plan,
-        worktree: 'jdk',
-        out: join(root, 'artifacts/context.json'),
-      });
-    } finally {
-      process.chdir(previousCwd);
-    }
-
-    expect(JSON.parse(readFileSync(plan, 'utf8'))).toHaveProperty(
-      'repositoryContext.adapter',
-      'openjdk',
-    );
-  });
-
-  it('resolves a relative recorded path from the main checkout when run in a linked worktree', () => {
-    const root = tempDir();
-    const repository = join(root, 'repo');
-    mkdirSync(repository);
-    git(repository, 'init', '-q');
-    write(repository, '.jcheck/conf', '[general]\nproject=jdk\n');
-    write(repository, 'src/hotspot/share/opto/a.cpp');
-    git(repository, 'add', '.');
-    git(
-      repository,
-      '-c',
-      'user.name=Test',
-      '-c',
-      'user.email=test@example.com',
-      'commit',
-      '-qm',
-      'base',
-    );
-    const relativeWorktree = '.qwen/tmp/review-pr-1';
-    const worktree = join(repository, relativeWorktree);
-    git(repository, 'worktree', 'add', '-q', '-b', 'review-pr-1', worktree);
-    const plan = write(
-      root,
-      'plan.json',
-      JSON.stringify({
-        worktreePath: relativeWorktree,
-        files: [{ path: 'src/hotspot/share/opto/a.cpp' }],
-      }),
-    );
-    const previousCwd = process.cwd();
-    try {
-      process.chdir(worktree);
-      runRepoContext({
-        plan,
-        worktree,
-        out: join(root, 'context.json'),
-      });
-    } finally {
-      process.chdir(previousCwd);
-    }
-
-    expect(JSON.parse(readFileSync(plan, 'utf8'))).toHaveProperty(
-      'repositoryContext.adapter',
-      'openjdk',
-    );
-  });
-
-  it('rejects malformed file entries and changed-path traversal before writing', () => {
-    const root = tempDir();
-    const worktree = join(root, 'jdk');
-    write(worktree, '.jcheck/conf', '[general]\nproject=jdk\n');
-    const malformed = write(
-      root,
-      'malformed.json',
-      JSON.stringify({ worktreePath: worktree, files: [{}] }),
-    );
+    linkSync(planPath, alias);
     expect(() =>
-      runRepoContext({
-        plan: malformed,
-        worktree,
-        out: join(root, 'malformed-out.json'),
-      }),
-    ).toThrow(/files\[0\]\.path/);
+      runRepoContext({ plan: planPath, worktree, out: alias }, [
+        { provide: () => context() },
+      ]),
+    ).toThrow('--out must differ');
 
-    const escaping = write(
-      root,
-      'escaping.json',
-      JSON.stringify({
-        worktreePath: worktree,
-        files: [{ path: '../secret.cpp' }],
-      }),
-    );
+    const before = readFileSync(planPath, 'utf8');
+    const outDirectory = join(root, 'out-directory');
+    mkdirSync(outDirectory);
     expect(() =>
-      runRepoContext({
-        plan: escaping,
-        worktree,
-        out: join(root, 'escaping-out.json'),
-      }),
-    ).toThrow(/escapes the worktree/);
+      runRepoContext({ plan: planPath, worktree, out: outDirectory }, [
+        { provide: () => context() },
+      ]),
+    ).toThrow();
+    expect(readFileSync(planPath, 'utf8')).toBe(before);
   });
 
-  it('declares all three required CLI options and delegates through the handler', () => {
+  it('rejects invalid provider output', () => {
+    const root = temp();
+    const worktree = join(root, 'worktree');
+    mkdirSync(worktree);
+    expect(() =>
+      run(root, worktree, { files: [{ path: 'src/change.ts' }] }, [
+        {
+          provide: () =>
+            ({
+              ...context(),
+              requiredAgents: ['unknown-role'],
+            }) as never,
+        },
+      ]),
+    ).toThrow('unsupported role');
+  });
+
+  it('declares all required command options and the default empty provider list writes null', () => {
     const option = vi.fn().mockReturnThis();
     const built = (repoContextCommand.builder as (yargs: unknown) => unknown)({
       option,
@@ -421,16 +352,16 @@ describe('repo-context command', () => {
       'out',
     ]);
 
-    const root = tempDir();
-    const worktree = join(root, 'repo');
+    const root = temp();
+    const worktree = join(root, 'worktree');
     mkdirSync(worktree);
-    const plan = makePlan(root, worktree);
-    const out = join(root, 'out.json');
+    const plan = planAt(root, { files: [{ path: 'src/change.ts' }] });
+    const out = join(root, 'context.json');
     (repoContextCommand.handler as (args: unknown) => void)({
       plan,
       worktree,
       out,
     });
-    expect(JSON.parse(readFileSync(out, 'utf8'))).toBeNull();
+    expect(readJson(out)).toBeNull();
   });
 });

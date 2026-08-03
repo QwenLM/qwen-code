@@ -471,20 +471,20 @@ describe('repository context proof boundary', () => {
       JSON.stringify({
         repositoryContext: {
           version: 1,
-          adapter: 'openjdk',
-          domains: ['hotspot'],
+          provider: 'fake-provider',
+          label: 'Example project',
+          domains: ['runtime'],
           relatedPaths: [],
-          testSelections: [],
+          recommendedTests: [],
           requiredConfigurations: ['linux-x64'],
-          specialists: ['openjdk-platform-impact'],
-          unverifiedDimensions: [
-            'cross-platform implementations were not verified on every affected target',
-          ],
+          requiredAgents: ['test-matrix'],
+          unverifiedDimensions: ['Alternate runtime was not exercised'],
+          verificationNotes: [],
         },
       }),
     );
     expect(repositoryContextGate(planPath)).toEqual([
-      'cross-platform implementations were not verified on every affected target — the repository context marks this proof boundary as unverified',
+      'Alternate runtime was not exercised — the repository context marks this proof boundary as unverified',
     ]);
   });
 
@@ -498,15 +498,15 @@ describe('repository context proof boundary', () => {
     const planPath = coveredPlan(undefined, {
       repositoryContext: {
         version: 1,
-        adapter: 'openjdk',
-        domains: ['hotspot'],
+        provider: 'fake-provider',
+        label: 'Example project',
+        domains: ['runtime'],
         relatedPaths: [],
-        testSelections: [],
+        recommendedTests: [],
         requiredConfigurations: ['linux-x64'],
-        specialists: [],
-        unverifiedDimensions: [
-          'cross-platform implementations were not verified on every affected target',
-        ],
+        requiredAgents: [],
+        unverifiedDimensions: ['Alternate runtime was not exercised'],
+        verificationNotes: [],
       },
     });
 
@@ -515,9 +515,7 @@ describe('repository context proof boundary', () => {
     expect(result.event).toBe('APPROVE');
     expect(result.cappedBy).not.toContain('unreviewed-dimension');
     expect(result.body).toContain('Repository proof boundary (not a blocker)');
-    expect(result.body).toContain(
-      'cross-platform implementations were not verified on every affected target',
-    );
+    expect(result.body).toContain('Alternate runtime was not exercised');
   });
 });
 

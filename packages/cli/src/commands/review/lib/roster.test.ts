@@ -166,26 +166,26 @@ describe('requiredAgents — Step 3A', () => {
     expect(keys(local)).toEqual(expect.arrayContaining(['1c', '7']));
   });
 
-  it('requires the specialist recorded by validated repository context', () => {
+  it('requires existing roles recorded by validated repository context without duplicates', () => {
     const context = {
       version: 1,
-      adapter: 'openjdk',
-      domains: ['hotspot', 'platform-native'],
-      relatedPaths: ['src/hotspot/share/runtime/os.hpp'],
-      testSelections: ['hotspot:hotspot_runtime'],
+      provider: 'fake-provider',
+      label: 'Example project',
+      domains: ['runtime'],
+      relatedPaths: ['src/runtime.ts'],
+      recommendedTests: ['test:runtime'],
       requiredConfigurations: ['linux-x64'],
-      specialists: ['openjdk-platform-impact'],
-      unverifiedDimensions: [
-        'cross-platform implementations were not verified on every affected target',
-      ],
+      requiredAgents: ['1a', 'test-matrix'],
+      unverifiedDimensions: ['Alternate runtime was not exercised'],
+      verificationNotes: ['Use the repository native test runner'],
     };
-    expect(keys({ ...PR, repositoryContext: context })).toContain(
-      'openjdk-platform-impact',
-    );
+    const roster = keys({ ...PR, repositoryContext: context });
+    expect(roster).toContain('test-matrix');
+    expect(roster.filter((role) => role === '1a')).toHaveLength(1);
   });
 
   it('keeps the generic roster when repository context is absent', () => {
-    expect(keys(PR)).not.toContain('openjdk-platform-impact');
+    expect(keys(PR)).not.toContain('test-matrix');
   });
 });
 

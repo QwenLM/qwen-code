@@ -276,8 +276,10 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
   }
 
   const repositoryContext = repositoryContextOf(plan);
-  for (const specialist of repositoryContext?.specialists ?? []) {
-    add(specialist);
+  for (const role of repositoryContext?.requiredAgents ?? []) {
+    if (!out.some((agent) => agent.role === role && agent.file === undefined)) {
+      add(role);
+    }
   }
 
   return out;

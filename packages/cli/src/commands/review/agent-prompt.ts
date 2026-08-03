@@ -355,6 +355,11 @@ export function buildChunkAgentPrompt(
     parts.push('', '## Project rules', '', rules.trim());
   }
 
+  const repositoryContext = repositoryContextBlock(report);
+  if (repositoryContext.length > 0) {
+    parts.push('', ...repositoryContext);
+  }
+
   // Deliberately NOT included: a sentence for the agent to recite when it finds
   // nothing. Every real launch handed the agent its own receipt text — `If you
   // find no issues, say "No issues found — reviewed chunk 13 (...)"` — and an
@@ -719,33 +724,37 @@ function repositoryContextBlock(report: PlanReport): string[] {
   const list = (values: string[]) =>
     values.length > 0 ? values.map((value) => `- ${value}`) : ['- (none)'];
   return [
-    '## OpenJDK repository context',
+    `## ${context.label} repository context`,
     '',
     `Domains: ${context.domains.join(', ') || '(none)'}`,
     '',
     'Related paths:',
     ...list(context.relatedPaths),
     '',
-    `Recommended tests: ${context.testSelections.join(', ') || '(none)'}`,
+    `Recommended tests: ${context.recommendedTests.join(', ') || '(none)'}`,
     `Required configurations: ${context.requiredConfigurations.join(', ') || '(none)'}`,
     '',
     'Unverified dimensions:',
     ...list(context.unverifiedDimensions),
+    '',
+    'Verification notes:',
+    ...list(context.verificationNotes),
   ];
 }
 
 function repositoryBuildBoundary(report: PlanReport): string[] {
   const context = repositoryContextOf(report);
   if (!context) return [];
+  const list = (values: string[]) =>
+    values.length > 0 ? values.map((value) => `- ${value}`) : ['- (none)'];
   return [
     '## Repository-specific verification boundary',
     '',
-    `Recommended tests: ${context.testSelections.join(', ') || '(none)'}`,
+    `Recommended tests: ${context.recommendedTests.join(', ') || '(none)'}`,
     `Required configurations: ${context.requiredConfigurations.join(', ') || '(none)'}`,
     '',
-    'Do not treat the OpenJDK root Makefile as a generic `make build` project. ' +
-      'This context is advisory in version 1: report these selections and configurations ' +
-      'as unexecuted unless an already-configured OpenJDK build provides an explicit command.',
+    'Verification notes:',
+    ...list(context.verificationNotes),
   ];
 }
 
@@ -794,14 +803,18 @@ export function buildRoleBrief(
   }
 
   parts.push('## Your dimension', '', brief.brief);
-  if (brief.reviewsCode) {
-    const repositoryContext = repositoryContextBlock(report);
-    if (repositoryContext.length > 0) {
-      parts.push('', ...repositoryContext);
-    }
-  } else if (role === '7') {
+  const repositoryContext = repositoryContextOf(report);
+  if (role === '7') {
     const buildBoundary = repositoryBuildBoundary(report);
     if (buildBoundary.length > 0) parts.push('', ...buildBoundary);
+  } else if (
+    brief.reviewsCode ||
+    repositoryContext?.requiredAgents.includes(role)
+  ) {
+    const contextBlock = repositoryContextBlock(report);
+    if (contextBlock.length > 0) {
+      parts.push('', ...contextBlock);
+    }
   }
 
   // Cross-repo lightweight mode: there is no tree, only the diff. Two briefs assume

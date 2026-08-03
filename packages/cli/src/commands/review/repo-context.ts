@@ -13,10 +13,15 @@ import {
   realpathSync,
   statSync,
 } from 'node:fs';
-import { dirname, isAbsolute, resolve } from 'node:path';
+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { gitOpt } from './lib/git.js';
-import { buildRepositoryContext } from './lib/repository-context.js';
+import {
+  isSafeRepositoryRelativePath,
+  type RepositoryContext,
+  type RepositoryContextProvider,
+  validateRepositoryContext,
+} from './lib/repository-context.js';
 import { stringifyPlanReport } from './lib/report.js';
 
 interface RepoContextArgs {
@@ -37,6 +42,9 @@ interface MutablePlan {
   repositoryContext?: unknown;
   [key: string]: unknown;
 }
+
+export const REPOSITORY_CONTEXT_PROVIDERS: readonly RepositoryContextProvider[] =
+  [];
 
 function sameFile(left: string, right: string): boolean {
   if (left === right) return true;
@@ -65,17 +73,13 @@ function recordedWorktreeMatches(
   );
 }
 
-function trustedJcheckConf(
-  plan: MutablePlan,
-  worktree: string,
-): string | undefined {
-  if (plan.mergeBaseSha === undefined) return undefined;
+function trustedMergeBase(plan: MutablePlan, worktree: string): string | null {
+  if (plan.mergeBaseSha === undefined) return null;
   if (plan.baseFetchFailed === true) {
     throw new Error(
       'repo-context: base fetch failed, so plan.mergeBaseSha may be stale',
     );
   }
-  if (plan.mergeBaseSha === null) return '';
   if (
     typeof plan.mergeBaseSha !== 'string' ||
     !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(plan.mergeBaseSha)
@@ -93,9 +97,48 @@ function trustedJcheckConf(
   ) {
     throw new Error('repo-context: plan.mergeBaseSha cannot be resolved');
   }
-  return (
-    gitOpt('-C', worktree, 'show', `${plan.mergeBaseSha}:.jcheck/conf`) ?? ''
-  );
+  return plan.mergeBaseSha;
+}
+
+function identityReader(
+  worktree: string,
+  mergeBase: string | null,
+): (relativePath: string) => string | null {
+  return (relativePath) => {
+    if (!isSafeRepositoryRelativePath(relativePath)) {
+      throw new Error(
+        `repo-context: identity path is unsafe: ${JSON.stringify(relativePath)}`,
+      );
+    }
+    if (mergeBase !== null) {
+      return gitOpt('-C', worktree, 'show', `${mergeBase}:${relativePath}`);
+    }
+    const candidate = resolve(worktree, relativePath);
+    try {
+      const resolved = realpathSync(candidate);
+      const contained = relative(worktree, resolved);
+      if (
+        contained === '' ||
+        isAbsolute(contained) ||
+        contained === '..' ||
+        contained.startsWith(`..${sep}`)
+      ) {
+        throw new Error(
+          `repo-context: identity path escapes the worktree: ${JSON.stringify(relativePath)}`,
+        );
+      }
+      if (!statSync(resolved).isFile()) return null;
+      return readFileSync(resolved, 'utf8');
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message.startsWith('repo-context: identity path escapes')
+      ) {
+        throw error;
+      }
+      return null;
+    }
+  };
 }
 
 function readPlan(path: string): MutablePlan {
@@ -115,19 +158,40 @@ function changedPaths(plan: MutablePlan): string[] {
   if (!Array.isArray(plan.files)) {
     throw new Error('repo-context: plan.files must be an array');
   }
-  return plan.files.map((file, index) => {
+  const paths = plan.files.map((file, index) => {
     const path =
       typeof file === 'object' && file !== null
         ? (file as PlanFile).path
         : undefined;
-    if (typeof path !== 'string' || path.length === 0) {
+    if (typeof path !== 'string' || !isSafeRepositoryRelativePath(path)) {
       throw new Error(`repo-context: plan.files[${index}].path is invalid`);
     }
     return path;
   });
+  return [...new Set(paths)].sort();
 }
 
-export function runRepoContext(args: RepoContextArgs): void {
+function contextFromProviders(
+  providers: readonly RepositoryContextProvider[],
+  worktree: string,
+  paths: string[],
+  readIdentityFile: (relativePath: string) => string | null,
+): RepositoryContext | null {
+  for (const provider of providers) {
+    const context = provider.provide({
+      worktree,
+      changedPaths: paths,
+      readIdentityFile,
+    });
+    if (context !== null) return validateRepositoryContext(context);
+  }
+  return null;
+}
+
+export function runRepoContext(
+  args: RepoContextArgs,
+  providers: readonly RepositoryContextProvider[] = REPOSITORY_CONTEXT_PROVIDERS,
+): void {
   const planPath = resolve(args.plan);
   const outPath = resolve(args.out);
   if (sameFile(planPath, outPath)) {
@@ -153,16 +217,15 @@ export function runRepoContext(args: RepoContextArgs): void {
     }
   }
 
-  const context = buildRepositoryContext(
+  const mergeBase = trustedMergeBase(plan, worktree);
+  const context = contextFromProviders(
+    providers,
     worktree,
     changedPaths(plan),
-    trustedJcheckConf(plan, worktree),
+    identityReader(worktree, mergeBase),
   );
-  if (context === null) {
-    delete plan.repositoryContext;
-  } else {
-    plan.repositoryContext = context;
-  }
+  if (context === null) delete plan.repositoryContext;
+  else plan.repositoryContext = context;
 
   mkdirSync(dirname(outPath), { recursive: true });
   mkdirSync(dirname(planPath), { recursive: true });
