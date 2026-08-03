@@ -3059,8 +3059,15 @@ export interface DaemonChannelMutationResult {
 export interface DaemonChannelPairingRequest {
   senderId: string;
   senderName: string;
+  subject?: DaemonChannelPairingSubject;
   code: string;
   createdAt: number;
+}
+
+export interface DaemonChannelPairingSubject {
+  type: 'user' | 'group';
+  id: string;
+  name: string;
 }
 
 export interface DaemonChannelPairingRequestsSnapshot {
@@ -3078,11 +3085,12 @@ export interface DaemonChannelPairingApprovalResult
 
 export interface DaemonChannelPairingApprovalsSnapshot {
   senderIds: string[];
+  groupIds?: string[];
 }
 
-export interface DaemonChannelPairingRevocationRequest {
-  senderId: string;
-}
+export type DaemonChannelPairingRevocationRequest =
+  | { senderId: string; groupId?: never }
+  | { senderId?: never; groupId: string };
 
 export interface DaemonChannelPairingRevocationResult
   extends DaemonChannelPairingApprovalsSnapshot {

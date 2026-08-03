@@ -6,7 +6,7 @@ import type { ChannelWebhookConfig } from './ChannelWebhookTask.js';
 export type SenderPolicy = 'allowlist' | 'pairing' | 'open';
 export type SessionScope = 'user' | 'thread' | 'chat_thread' | 'single';
 export type ChannelType = string;
-export type GroupPolicy = 'disabled' | 'allowlist' | 'open';
+export type GroupPolicy = 'disabled' | 'allowlist' | 'pairing' | 'open';
 export type DmPolicy = 'disabled' | 'open';
 export type DispatchMode = 'collect' | 'steer' | 'followup';
 

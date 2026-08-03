@@ -105,6 +105,27 @@ describe('GroupGate', () => {
     });
   });
 
+  describe('pairing policy', () => {
+    it('does not create a pairing request for ambient group messages', () => {
+      const gate = new GroupGate('pairing');
+      const result = gate.check(envelope({ isGroup: true }));
+      expect(result).toEqual({
+        allowed: false,
+        reason: 'pairing_trigger_required',
+      });
+    });
+
+    it('requests pairing after an explicit mention', () => {
+      const gate = new GroupGate('pairing');
+      const result = gate.check(envelope({ isGroup: true, isMentioned: true }));
+      expect(result).toEqual({
+        allowed: false,
+        reason: 'pairing_required',
+        pairingCode: null,
+      });
+    });
+  });
+
   describe('defaults', () => {
     it('defaults to disabled policy', () => {
       const gate = new GroupGate();

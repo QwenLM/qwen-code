@@ -12,14 +12,26 @@ const MAX_PENDING = 3;
 export interface PairingRequest {
   senderId: string;
   senderName: string;
+  subject: PairingSubject;
   code: string;
   createdAt: number; // epoch ms
 }
+
+export interface PairingSubject {
+  type: 'user' | 'group';
+  id: string;
+  name: string;
+}
+
+type StoredPairingRequest = Omit<PairingRequest, 'subject'> & {
+  subject?: PairingSubject;
+};
 
 export class PairingStore {
   private dir: string;
   private pendingPath: string;
   private allowlistPath: string;
+  private groupAllowlistPath: string;
   private migratedSentinelPath: string;
 
   /**
@@ -49,6 +61,10 @@ export class PairingStore {
     this.allowlistPath = path.join(
       this.dir,
       `${safeChannelName}-allowlist.json`,
+    );
+    this.groupAllowlistPath = path.join(
+      this.dir,
+      `${safeChannelName}-group-allowlist.json`,
     );
     this.migratedSentinelPath = path.join(
       this.dir,
@@ -151,20 +167,53 @@ export class PairingStore {
     return list.includes(senderId);
   }
 
+  isGroupApproved(groupId: string): boolean {
+    return this.readGroupAllowlist().includes(groupId);
+  }
+
   /**
    * Create a pairing request for an unknown sender.
    * Returns the code if created, or null if the pending cap is reached.
    * If the sender already has a non-expired pending request, returns that code.
    */
   createRequest(senderId: string, senderName: string): string | null {
+    return this.createSubjectRequest(
+      { type: 'user', id: senderId, name: senderName },
+      senderId,
+      senderName,
+    );
+  }
+
+  createGroupRequest(
+    groupId: string,
+    groupName: string,
+    senderId: string,
+    senderName: string,
+  ): string | null {
+    return this.createSubjectRequest(
+      { type: 'group', id: groupId, name: groupName },
+      senderId,
+      senderName,
+    );
+  }
+
+  private createSubjectRequest(
+    subject: PairingSubject,
+    senderId: string,
+    senderName: string,
+  ): string | null {
     const pending = this.readPending();
 
     // Purge expired
     const now = Date.now();
     const active = pending.filter((r) => now - r.createdAt < EXPIRY_MS);
 
-    // Check if sender already has a pending request
-    const existing = active.find((r) => r.senderId === senderId);
+    // Check if the same user or group already has a pending request
+    const existing = active.find(
+      (request) =>
+        request.subject.type === subject.type &&
+        request.subject.id === subject.id,
+    );
     if (existing) {
       return existing.code;
     }
@@ -175,14 +224,14 @@ export class PairingStore {
     }
 
     const code = generateCode();
-    active.push({ senderId, senderName, code, createdAt: now });
+    active.push({ senderId, senderName, subject, code, createdAt: now });
     this.writePending(active);
     return code;
   }
 
   /**
    * Approve a pairing request by code.
-   * Returns the sender ID if found, or null if not found / expired.
+   * Returns the request if found, or null if not found / expired.
    */
   approve(code: string): PairingRequest | null {
     const pending = this.readPending();
@@ -196,11 +245,18 @@ export class PairingStore {
     pending.splice(idx, 1);
     this.writePending(pending);
 
-    // Add to allowlist
-    const list = this.readAllowlist();
-    if (!list.includes(request.senderId)) {
-      list.push(request.senderId);
-      this.writeAllowlist(list);
+    if (request.subject.type === 'group') {
+      const groups = this.readGroupAllowlist();
+      if (!groups.includes(request.subject.id)) {
+        groups.push(request.subject.id);
+        this.writeGroupAllowlist(groups);
+      }
+    } else {
+      const users = this.readAllowlist();
+      if (!users.includes(request.subject.id)) {
+        users.push(request.subject.id);
+        this.writeAllowlist(users);
+      }
     }
 
     return request;
@@ -216,6 +272,10 @@ export class PairingStore {
     return this.readAllowlist();
   }
 
+  getGroupAllowlist(): string[] {
+    return this.readGroupAllowlist();
+  }
+
   revoke(senderId: string): boolean {
     const list = this.readAllowlist();
     const next = list.filter((id) => id !== senderId);
@@ -223,6 +283,16 @@ export class PairingStore {
       return false;
     }
     this.writeAllowlist(next);
+    return true;
+  }
+
+  revokeGroup(groupId: string): boolean {
+    const list = this.readGroupAllowlist();
+    const next = list.filter((id) => id !== groupId);
+    if (next.length === list.length) {
+      return false;
+    }
+    this.writeGroupAllowlist(next);
     return true;
   }
 
@@ -235,7 +305,15 @@ export class PairingStore {
   private readPending(): PairingRequest[] {
     try {
       const data = fs.readFileSync(this.pendingPath, 'utf-8');
-      return JSON.parse(data) as PairingRequest[];
+      const requests = JSON.parse(data) as StoredPairingRequest[];
+      return requests.map((request) => ({
+        ...request,
+        subject: request.subject ?? {
+          type: 'user',
+          id: request.senderId,
+          name: request.senderName,
+        },
+      }));
     } catch {
       return [];
     }
@@ -258,6 +336,20 @@ export class PairingStore {
   private writeAllowlist(list: string[]): void {
     this.ensureDir();
     fs.writeFileSync(this.allowlistPath, JSON.stringify(list, null, 2));
+  }
+
+  private readGroupAllowlist(): string[] {
+    try {
+      const data = fs.readFileSync(this.groupAllowlistPath, 'utf-8');
+      return JSON.parse(data) as string[];
+    } catch {
+      return [];
+    }
+  }
+
+  private writeGroupAllowlist(list: string[]): void {
+    this.ensureDir();
+    fs.writeFileSync(this.groupAllowlistPath, JSON.stringify(list, null, 2));
   }
 }
 

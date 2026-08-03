@@ -66,7 +66,7 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 | `approvalMode`           | No               | Tool approval mode for channel sessions. Unattended webhook tasks require `yolo`; the setting applies to every session on the channel                                  |
 | `instructions`           | No               | Custom instructions prepended to the first message of each session                                                                                                     |
 | `webhooks`               | No               | Webhook sources and delivery targets for daemon-managed channels. See [Webhook-triggered tasks](#webhook-triggered-tasks)                                              |
-| `groupPolicy`            | No               | Group chat access: `disabled` (default), `allowlist`, or `open`. See [Group Chats](#group-chats)                                                                       |
+| `groupPolicy`            | No               | Group chat access: `disabled` (default), `allowlist`, `pairing`, or `open`. See [Group Chats](#group-chats)                                                            |
 | `dmPolicy`               | No               | Private/DM access: `open` (default) or `disabled` (silently drop all DMs). Useful for group-only bots                                                                  |
 | `groupHistoryLimit`      | No               | Opt-in group history backfill. `0` or omitted disables it. A positive number persists that many authorized, unmentioned group messages for the next bot mention/reply. |
 | `groups`                 | No               | Per-group settings. Keys are group chat IDs or `"*"` for defaults. See [Group Chats](#group-chats)                                                                     |
@@ -206,7 +206,7 @@ Run these from the channel's workspace directory (or pass `--cwd <dir>`) — pai
 
 ## Group Chats
 
-By default, the bot only works in direct messages. To enable group chat support, set `groupPolicy` to `"allowlist"` or `"open"`.
+By default, the bot only works in direct messages. To enable group chat support, set `groupPolicy` to `"allowlist"`, `"pairing"`, or `"open"`.
 
 ### Group Policy
 
@@ -214,7 +214,20 @@ Controls whether the bot participates in group chats at all:
 
 - **`disabled`** (default) — The bot ignores all group messages. Safest option.
 - **`allowlist`** — The bot only responds in groups explicitly listed in `groups` by chat ID. The `"*"` key provides default settings but does **not** act as a wildcard allow.
+- **`pairing`** — A deliberate mention or reply from an unknown group creates one pairing request for the group. Once approved, every member can use the bot in that group; `senderPolicy` continues to control direct messages.
 - **`open`** — The bot responds in all groups it's added to. Use with caution.
+
+Approve a group with the same CLI command used for user pairing. The pending
+request identifies the group and the member who initiated it:
+
+```bash
+qwen channel pairing approve my-channel <CODE>
+```
+
+Group approvals are stored by stable chat ID in the channel's workspace scope.
+An unmentioned message never creates a group pairing request, even when a group
+sets `requireMention` to `false`; after approval, the configured mention policy
+applies normally.
 
 ### Mention Gating
 
@@ -262,7 +275,7 @@ By default, Qwen ignores unmentioned group messages and does not store them as s
 
 - Omitted or `0` disables backfill.
 - Group-level `groupHistoryLimit` overrides the channel-level value.
-- Only messages from authorized senders are persisted.
+- Only messages from authorized senders, or members of an approved paired group, are persisted.
 - Messages rejected by `groupPolicy` or group allowlist are not persisted.
 - Pending group history is stored as local JSONL under `~/.qwen/channels/<channel-name>-group-history.jsonl` or `$QWEN_HOME/channels/<channel-name>-group-history.jsonl`.
 - Cached messages are injected as untrusted context on the next real trigger and are not written as standalone session turns.
@@ -270,10 +283,10 @@ By default, Qwen ignores unmentioned group messages and does not store them as s
 ### How group messages are evaluated
 
 ```
-1. groupPolicy — is this group allowed?           (no → ignore)
-2. dmPolicy  — is this DM allowed?               (disabled → ignore)
+1. groupPolicy — is this group disabled, listed, paired, or open? (no → ignore/pairing flow)
+2. dmPolicy — is this DM allowed?                      (disabled → ignore)
 3. requireMention — was the bot mentioned/replied to? (no → ignore)
-4. senderPolicy — is this sender approved?         (no → pairing flow)
+4. senderPolicy — is this sender approved?             (skipped for a paired group; otherwise no → user pairing flow)
 5. Route to session
 ```
 

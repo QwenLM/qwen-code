@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type {
@@ -34,6 +34,7 @@ import {
   ChannelProactiveDeliveryError,
   isChannelProactiveDeliveryError,
 } from './ChannelProactiveDeliveryError.js';
+import { PairingStore } from './PairingStore.js';
 
 // Concrete test implementation
 class TestChannel extends ChannelBase {
@@ -2660,6 +2661,59 @@ describe('ChannelBase', () => {
       expect(prompt).toBe(
         '[Chat messages since your last reply - for context]\n- [Alice] first background\n- [Bob] second background\n\n[Current message - respond to this]\n[Carol] @bot summarize',
       );
+    });
+
+    it('backfills messages from members of an approved paired group', async () => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const qwenHome = mkdtempSync(join(tmpdir(), 'qwen-group-pairing-'));
+      process.env['QWEN_HOME'] = qwenHome;
+      try {
+        const store = new PairingStore('test-chan', '/tmp');
+        const code = store.createGroupRequest(
+          'chat1',
+          'Release Team',
+          'alice',
+          'Alice',
+        );
+        store.approve(code!);
+        const ch = createChannel(
+          {
+            groupPolicy: 'pairing',
+            senderPolicy: 'allowlist',
+            allowedUsers: [],
+            groupHistoryLimit: 10,
+            groups: { '*': { requireMention: true } },
+          },
+          { groupHistoryPath: groupHistoryPath() },
+        );
+
+        await ch.handleInbound(
+          envelope({
+            isGroup: true,
+            senderId: 'bob',
+            senderName: 'Bob',
+            text: 'background',
+          }),
+        );
+        await ch.handleInbound(
+          envelope({
+            isGroup: true,
+            isMentioned: true,
+            senderId: 'carol',
+            senderName: 'Carol',
+            text: '@bot summarize',
+          }),
+        );
+
+        const prompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+          .calls[0][1] as string;
+        expect(prompt).toContain('- [Bob] background');
+        expect(prompt).toContain('[Carol] @bot summarize');
+      } finally {
+        if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+        else process.env['QWEN_HOME'] = previousQwenHome;
+        rmSync(qwenHome, { recursive: true, force: true });
+      }
     });
 
     it('persists group history across channel instances', async () => {
@@ -13348,6 +13402,73 @@ describe('ChannelBase', () => {
       expect(threadMessages[0]!.threadId).toBe('issue:42');
       expect(threadMessages[0]!.text).toContain('pairing code');
     });
+
+    it('pairs a mentioned group once and lets other members use it', async () => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const qwenHome = mkdtempSync(join(tmpdir(), 'qwen-group-pairing-'));
+      process.env['QWEN_HOME'] = qwenHome;
+      try {
+        const ch = createChannel({
+          groupPolicy: 'pairing',
+          senderPolicy: 'allowlist',
+          allowedUsers: [],
+        });
+        const first = envelope({
+          isGroup: true,
+          isMentioned: true,
+          chatId: 'group-1',
+          chatName: 'Release Team',
+          senderId: 'alice',
+          senderName: 'Alice',
+        });
+
+        await ch.handleInbound(first);
+
+        expect(ch.sent).toHaveLength(1);
+        expect(bridge.prompt).not.toHaveBeenCalled();
+        const store = new PairingStore('test-chan', '/tmp');
+        const request = store.listPending()[0];
+        expect(request?.subject).toEqual({
+          type: 'group',
+          id: 'group-1',
+          name: 'Release Team',
+        });
+        store.approve(request!.code);
+
+        await ch.handleInbound({
+          ...first,
+          senderId: 'bob',
+          senderName: 'Bob',
+        });
+
+        expect(bridge.prompt).toHaveBeenCalledOnce();
+        expect(store.isApproved('alice')).toBe(false);
+        expect(store.isApproved('bob')).toBe(false);
+      } finally {
+        if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+        else process.env['QWEN_HOME'] = previousQwenHome;
+        rmSync(qwenHome, { recursive: true, force: true });
+      }
+    });
+
+    it('does not create group pairing requests from ambient messages', async () => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const qwenHome = mkdtempSync(join(tmpdir(), 'qwen-group-pairing-'));
+      process.env['QWEN_HOME'] = qwenHome;
+      try {
+        const ch = createChannel({ groupPolicy: 'pairing' });
+
+        await ch.handleInbound(envelope({ isGroup: true, chatId: 'group-1' }));
+
+        expect(ch.sent).toEqual([]);
+        expect(bridge.prompt).not.toHaveBeenCalled();
+        expect(new PairingStore('test-chan', '/tmp').listPending()).toEqual([]);
+      } finally {
+        if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+        else process.env['QWEN_HOME'] = previousQwenHome;
+        rmSync(qwenHome, { recursive: true, force: true });
+      }
+    });
   });
 
   describe('setBridge', () => {
@@ -18316,6 +18437,96 @@ describe('ChannelBase', () => {
 
       expect(disable).not.toHaveBeenCalled();
       expect(bridge.prompt).toHaveBeenCalled();
+    });
+
+    it('allows a stored group job after the group is paired', async () => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const qwenHome = mkdtempSync(join(tmpdir(), 'qwen-group-pairing-'));
+      process.env['QWEN_HOME'] = qwenHome;
+      try {
+        const store = new PairingStore('test-chan', '/tmp');
+        const code = store.createGroupRequest(
+          'group-1',
+          'Release Team',
+          'alice',
+          'Alice',
+        );
+        store.approve(code!);
+        const disable = vi.fn().mockResolvedValue(true);
+        const ch = createChannel(
+          {
+            groupPolicy: 'pairing',
+            senderPolicy: 'allowlist',
+            allowedUsers: [],
+          },
+          {
+            loopController: {
+              create: vi.fn(),
+              listForTarget: vi.fn(),
+              disable,
+              validateCron: vi.fn(),
+            },
+          },
+        );
+        ch.proactiveSupported = true;
+
+        await ch.runLoopPrompt({
+          id: 'job-1',
+          channelName: 'test-chan',
+          target: {
+            channelName: 'test-chan',
+            senderId: 'bob',
+            chatId: 'group-1',
+            isGroup: true,
+          },
+          cwd: '/tmp',
+          cron: '0 9 * * *',
+          prompt: 'post summary',
+          recurring: true,
+          enabled: true,
+          createdBy: 'Bob',
+          createdAt: '2026-06-30T01:00:00.000Z',
+          consecutiveFailures: 0,
+          runCount: 0,
+        });
+
+        expect(disable).not.toHaveBeenCalled();
+        expect(bridge.prompt).toHaveBeenCalled();
+
+        store.revokeGroup('group-1');
+        disable.mockClear();
+        (bridge.prompt as ReturnType<typeof vi.fn>).mockClear();
+
+        await expect(
+          ch.runLoopPrompt({
+            id: 'job-2',
+            channelName: 'test-chan',
+            target: {
+              channelName: 'test-chan',
+              senderId: 'bob',
+              chatId: 'group-1',
+              isGroup: true,
+            },
+            cwd: '/tmp',
+            cron: '0 9 * * *',
+            prompt: 'post summary',
+            recurring: true,
+            enabled: true,
+            createdBy: 'Bob',
+            createdAt: '2026-06-30T01:00:00.000Z',
+            consecutiveFailures: 0,
+            runCount: 1,
+          }),
+        ).rejects.toThrow('no longer authorized');
+
+        expect(disable).toHaveBeenCalledWith('job-2');
+        expect(bridge.prompt).not.toHaveBeenCalled();
+        expect(store.listPending()).toEqual([]);
+      } finally {
+        if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+        else process.env['QWEN_HOME'] = previousQwenHome;
+        rmSync(qwenHome, { recursive: true, force: true });
+      }
     });
 
     it('rejects stored threaded jobs unless the adapter supports the target', async () => {

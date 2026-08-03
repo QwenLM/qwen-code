@@ -306,7 +306,10 @@ describe('createChannelManagementService', () => {
       code: 'channel_workspace_mismatch',
     });
     await expect(
-      service.revokePairingApproval('bot', 'sender-1'),
+      service.revokePairingApproval('bot', {
+        type: 'user',
+        id: 'sender-1',
+      }),
     ).rejects.toMatchObject({
       code: 'channel_workspace_mismatch',
     });
@@ -354,18 +357,86 @@ describe('createChannelManagementService', () => {
       expect(pairing.isApproved('sender-1')).toBe(true);
       await expect(service.pairingApprovals('bot')).resolves.toEqual({
         senderIds: ['sender-1'],
+        groupIds: [],
       });
       await expect(
-        service.revokePairingApproval('bot', 'sender-1'),
+        service.revokePairingApproval('bot', {
+          type: 'user',
+          id: 'sender-1',
+        }),
       ).resolves.toEqual({
         revoked: 'sender-1',
         senderIds: [],
+        groupIds: [],
       });
       expect(pairing.isApproved('sender-1')).toBe(false);
       await expect(
-        service.revokePairingApproval('bot', 'sender-1'),
+        service.revokePairingApproval('bot', {
+          type: 'user',
+          id: 'sender-1',
+        }),
       ).rejects.toMatchObject({
         code: 'channel_pairing_approval_not_found',
+      });
+    } finally {
+      if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = previousQwenHome;
+      await fs.rm(qwenHome, { recursive: true, force: true });
+    }
+  });
+
+  it('manages group pairing when groupPolicy uses pairing mode', async () => {
+    const previousQwenHome = process.env['QWEN_HOME'];
+    const qwenHome = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'channel-management-group-pairing-'),
+    );
+    process.env['QWEN_HOME'] = qwenHome;
+    try {
+      const { service } = setup({
+        snapshot: settingsSnapshot({
+          channels: {
+            bot: {
+              type: 'dingtalk',
+              senderPolicy: 'open',
+              groupPolicy: 'pairing',
+            },
+          },
+        }),
+      });
+      const pairing = new PairingStore('bot', WORKSPACE);
+      const code = pairing.createGroupRequest(
+        'group-1',
+        'Release Team',
+        'sender-1',
+        'Alice',
+      );
+
+      await expect(service.pairingRequests('bot')).resolves.toEqual({
+        requests: [
+          expect.objectContaining({
+            senderId: 'sender-1',
+            subject: {
+              type: 'group',
+              id: 'group-1',
+              name: 'Release Team',
+            },
+          }),
+        ],
+      });
+      await service.approvePairing('bot', code!);
+      await expect(service.pairingApprovals('bot')).resolves.toEqual({
+        senderIds: [],
+        groupIds: ['group-1'],
+      });
+      await expect(
+        service.revokePairingApproval('bot', {
+          type: 'group',
+          id: 'group-1',
+        }),
+      ).resolves.toEqual({
+        revoked: 'group-1',
+        senderIds: [],
+        groupIds: [],
       });
     } finally {
       if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
@@ -847,7 +918,10 @@ describe('createChannelManagementService', () => {
       code: 'channel_pairing_not_enabled',
     });
     await expect(
-      service.revokePairingApproval('bot', 'sender-1'),
+      service.revokePairingApproval('bot', {
+        type: 'user',
+        id: 'sender-1',
+      }),
     ).rejects.toMatchObject({ code: 'channel_pairing_not_enabled' });
   });
 });

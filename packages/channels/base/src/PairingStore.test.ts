@@ -55,6 +55,53 @@ describe('PairingStore workspace scoping (#7017)', () => {
     expect(storeB.isApproved('sender-1')).toBe(false);
   });
 
+  it('approves a group without approving the member who requested it', () => {
+    const store = new PairingStore('support-bot', workspaceA);
+    const code = store.createGroupRequest(
+      'group-1',
+      'Release Team',
+      'sender-1',
+      'Alice',
+    );
+
+    expect(code).toBeTruthy();
+    expect(store.listPending()).toEqual([
+      expect.objectContaining({
+        senderId: 'sender-1',
+        senderName: 'Alice',
+        subject: {
+          type: 'group',
+          id: 'group-1',
+          name: 'Release Team',
+        },
+      }),
+    ]);
+
+    store.approve(code!);
+
+    expect(store.isGroupApproved('group-1')).toBe(true);
+    expect(store.isApproved('sender-1')).toBe(false);
+  });
+
+  it('isolates group approvals and revocation by workspace', () => {
+    const storeA = new PairingStore('support-bot', workspaceA);
+    const storeB = new PairingStore('support-bot', workspaceB);
+
+    for (const store of [storeA, storeB]) {
+      const code = store.createGroupRequest(
+        'group-1',
+        'Release Team',
+        'sender-1',
+        'Alice',
+      );
+      store.approve(code!);
+    }
+
+    expect(storeA.revokeGroup('group-1')).toBe(true);
+    expect(storeA.isGroupApproved('group-1')).toBe(false);
+    expect(storeB.isGroupApproved('group-1')).toBe(true);
+  });
+
   it('revokes an approved sender only from the selected workspace', () => {
     const storeA = new PairingStore('support-bot', workspaceA);
     const storeB = new PairingStore('support-bot', workspaceB);
@@ -153,6 +200,21 @@ describe('PairingStore workspace scoping (#7017)', () => {
       expect(store.listPending().map((r) => r.senderId)).toEqual([
         'pending-sender',
       ]);
+    });
+
+    it('approves a legacy pending request as a user request', () => {
+      seedLegacy();
+      const store = new PairingStore('support-bot', workspaceA);
+
+      const approved = store.approve('ABCDEFGH');
+
+      expect(approved?.subject).toEqual({
+        type: 'user',
+        id: 'pending-sender',
+        name: 'Pending',
+      });
+      expect(store.isApproved('pending-sender')).toBe(true);
+      expect(store.getGroupAllowlist()).toEqual([]);
     });
 
     it('lets every workspace grandfather the same legacy baseline (copy, not move)', () => {
