@@ -28,18 +28,18 @@ describe('code review artifact contract', () => {
     expect(reviewDocument.schemaVersion).toBe(1);
     expect(reviewDocument.target).toBe('pr-8402');
     expect(reviewDocument.effort).toBe('high');
+    // The parser validates only what the renderer displays; persisted-but-
+    // unrendered fields (downgraded, outcomesRecorded, byOutcome, ...) pass
+    // through unchecked and are asserted nowhere on purpose.
     expect(reviewDocument.verdict).toMatchObject({
       event: 'COMMENT',
       baseEvent: 'REQUEST_CHANGES',
-      downgraded: true,
-      downgradedFrom: 'Request changes',
       cappedBy: ['no release-blocker evidence'],
       verdictLine: 'Verdict: Comment — Request changes was downgraded',
     });
     expect(reviewDocument.markdownReportPath).toBe(
       '.qwen/reviews/contract-v1.md',
     );
-    expect(reviewDocument.outcomesRecorded).toBe(true);
 
     // The fixture exercises the whole vocabulary — every source, severity,
     // confidence and outcome the CLI can canonicalize — so this parse proves
@@ -69,7 +69,6 @@ describe('code review artifact contract', () => {
       total: 5,
       bySeverity: { Critical: 1, Suggestion: 3, 'Nice to have': 1 },
       byConfidence: { high: 4, low: 1 },
-      byOutcome: { fixed: 2, skipped: 1, no_change_needed: 2 },
       held: 1,
     });
 

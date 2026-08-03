@@ -54,10 +54,10 @@ Web Shell detects `metadata.artifactType === 'code_review'` and renders a dedica
 - severity and confidence counts;
 - filterable findings;
 - finding source, failure scenario, suggested fix, outcomes, and locations;
-- evidence images as safe links;
-- a link to the durable Markdown report.
+- published evidence images as safe links and local evidence files (`assetFiles`) as inline images;
+- a link to the durable Markdown report, offered from the error view too when it can be derived from the artifact path.
 
-The renderer never parses transcript prose and never computes a verdict. Malformed documents display an artifact error rather than falling back to a misleading source-code preview.
+The renderer never parses transcript prose and never computes a verdict. Malformed documents display an artifact error rather than falling back to a misleading source-code preview, and the error view offers the durable Markdown report derived from the artifact path so a truncated or unparsable document is not a dead end.
 
 ### Existing file-change view
 

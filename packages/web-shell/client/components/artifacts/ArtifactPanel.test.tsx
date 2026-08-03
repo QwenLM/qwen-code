@@ -259,6 +259,29 @@ describe('ArtifactPanel code review artifacts', () => {
     );
     expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
   });
+
+  it('still sends an ordinary JSON artifact to the generic editor', async () => {
+    // The regression the early `return` in the dispatch can cause: an
+    // artifact WITHOUT the code_review metadata must keep reaching the
+    // generic file preview, not the dedicated renderer.
+    mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
+      content: '{}',
+      truncated: false,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(artifactPanel(codeReviewArtifact({ metadata: {} }))));
+    await flush();
+
+    expect(container.querySelector('.cm-editor')).not.toBeNull();
+    expect(container.textContent).not.toContain('Authoritative verdict');
+    expect(mockWorkspaceActions.readWorkspaceFile).toHaveBeenCalledWith(
+      '.qwen/reviews/review.json',
+    );
+  });
 });
 
 describe('ArtifactPanel add menu', () => {

@@ -390,7 +390,7 @@ describe('saveReviewArtifact', () => {
     // differ and the resolution direction is observable.
     fixture();
 
-    const out = saveReviewArtifact({
+    const saved = saveReviewArtifact({
       findings: '.qwen/tmp/findings.json',
       composed: '.qwen/tmp/composed.json',
       report: '.qwen/reviews/review.md',
@@ -399,8 +399,12 @@ describe('saveReviewArtifact', () => {
       effort: 'high',
     });
 
-    expect(out).toBe(join(root, '.qwen/reviews/review.json'));
-    expect(JSON.parse(readFileSync(out, 'utf8'))).toMatchObject({
+    expect(saved.path).toBe(join(root, '.qwen/reviews/review.json'));
+    // The registration value `record_artifact` wants, printed so the skill
+    // copies it verbatim — including from a PR worktree run where cwd (the
+    // disposable review worktree) differs from the workspace root.
+    expect(saved.workspacePath).toBe('.qwen/reviews/review.json');
+    expect(JSON.parse(readFileSync(saved.path, 'utf8'))).toMatchObject({
       schemaVersion: 1,
       target: 'pr-123',
       markdownReportPath: '.qwen/reviews/review.md',

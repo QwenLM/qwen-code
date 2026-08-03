@@ -1074,7 +1074,7 @@ const EN: Messages = {
   'codeReview.outcome': 'Outcome',
   'codeReview.locations': 'Locations',
   'codeReview.evidence': 'Evidence',
-  'codeReview.unsafeLink': 'unsafe link',
+  'codeReview.notLinked': 'not linked',
   'codeReview.loadErrorTitle': 'Unable to display code review',
   'codeReview.loading': 'Loading code review...',
   'codeReview.artifactTruncated':
@@ -3727,7 +3727,7 @@ const ZH: Messages = {
   'codeReview.outcome': '处理结果',
   'codeReview.locations': '位置',
   'codeReview.evidence': '证据',
-  'codeReview.unsafeLink': '不安全链接',
+  'codeReview.notLinked': '未链接',
   'codeReview.loadErrorTitle': '无法显示代码审查结果',
   'codeReview.loading': '正在加载代码审查结果…',
   'codeReview.artifactTruncated': '代码审查制品已截断，无法验证。',

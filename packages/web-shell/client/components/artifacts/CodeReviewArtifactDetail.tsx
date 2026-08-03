@@ -2,12 +2,18 @@ import type { DaemonWorkspaceActions } from '@qwen-code/webui/daemon-react-sdk';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useI18n } from '../../i18n';
 import { isSafeHref, Markdown } from '../messages/Markdown';
+import {
+  getImageMimeTypeFromPath,
+  readWorkspaceFileAsBlob,
+} from './artifactUtils';
 import styles from './CodeReviewArtifactDetail.module.css';
 
 // Hand-duplicated from the CLI's canonical lists in
 // packages/cli/src/commands/review/findings.ts. The parser below fails closed
 // on any value missing here, so when the CLI adds one, update this copy and
 // the contract fixture (__fixtures__/code-review-artifact-v1.json) with it.
+// The CLI-side vocabulary snapshot (packages/cli/src/commands/review/
+// findings.test.ts) turns red on that change and names this file.
 const SEVERITIES = ['Critical', 'Suggestion', 'Nice to have'] as const;
 const CONFIDENCES = ['high', 'low'] as const;
 const SOURCES = ['review', 'build', 'test', 'probe', 'lint'] as const;
@@ -35,6 +41,8 @@ interface ReviewFinding {
   suggestedFix?: string;
   category?: string;
   locations: FindingLocation[];
+  /** Local evidence paths; rendered as workspace images where possible. */
+  assetFiles?: string[];
   assets?: string[];
   outcome?: Outcome;
   outcomeNote?: string;
@@ -45,10 +53,14 @@ interface ReviewCounts {
   total: number;
   bySeverity: Record<Severity, number>;
   byConfidence: Record<Confidence, number>;
-  byOutcome?: Record<Outcome, number>;
   held: number;
 }
 
+// Only fields the renderer displays are validated: every required field here
+// can fail the whole document, so the fail-closed surface stays no larger
+// than the visible one. Fields the CLI persists but this view ignores
+// (verdict.downgraded, verdict.body, remediation, outcomesRecorded,
+// counts.byOutcome, ...) are deliberately absent and pass through unchecked.
 interface CodeReviewDocument {
   schemaVersion: 1;
   target: string;
@@ -58,12 +70,9 @@ interface CodeReviewDocument {
     verdictLine: string;
     baseEvent: 'APPROVE' | 'COMMENT' | 'REQUEST_CHANGES';
     cappedBy: string[];
-    downgraded: boolean;
-    downgradedFrom: 'Approve' | 'Request changes' | null;
   };
   findings: ReviewFinding[];
   counts: ReviewCounts;
-  outcomesRecorded: boolean;
   markdownReportPath: string;
 }
 
@@ -103,7 +112,10 @@ function lineNumber(value: unknown, label: string): number {
 
 // The one field that becomes a file read. The daemon enforces workspace
 // containment, but the document's own contract is checked here like every
-// other field: relative, no traversal, and the durable report's extension.
+// other field: relative, no traversal, the durable report's extension, and
+// the directory the writer guarantees — save-artifact confines its report to
+// .qwen/reviews/, so the renderer never follows a report the CLI would not
+// have written.
 function markdownReportPath(value: unknown): string {
   const path = string(value, 'markdownReportPath');
   if (
@@ -114,6 +126,9 @@ function markdownReportPath(value: unknown): string {
     throw new Error(
       'markdownReportPath must be a relative .md path without ".." segments.',
     );
+  }
+  if (!path.startsWith('.qwen/reviews/')) {
+    throw new Error('markdownReportPath must be a file under .qwen/reviews/.');
   }
   return path;
 }
@@ -200,6 +215,11 @@ function parseFinding(value: unknown, index: number): ReviewFinding {
       ? { category: source['category'] as string }
       : {}),
     locations,
+    ...(source['assetFiles'] === undefined
+      ? {}
+      : {
+          assetFiles: stringArray(source['assetFiles'], `${label}.assetFiles`),
+        }),
     ...(source['assets'] === undefined
       ? {}
       : { assets: stringArray(source['assets'], `${label}.assets`) }),
@@ -242,20 +262,6 @@ export function parseCodeReviewDocument(content: string): CodeReviewDocument {
   }
   const verdict = object(root['verdict'], 'verdict');
   const counts = object(root['counts'], 'counts');
-  const downgradedFrom = verdict['downgradedFrom'];
-  if (
-    downgradedFrom !== null &&
-    downgradedFrom !== 'Approve' &&
-    downgradedFrom !== 'Request changes'
-  ) {
-    throw new Error('verdict.downgradedFrom has an unsupported value.');
-  }
-  if (typeof verdict['downgraded'] !== 'boolean') {
-    throw new Error('verdict.downgraded must be a boolean.');
-  }
-  if (typeof root['outcomesRecorded'] !== 'boolean') {
-    throw new Error('outcomesRecorded must be a boolean.');
-  }
   return {
     schemaVersion: 1,
     target: string(root['target'], 'target'),
@@ -273,8 +279,6 @@ export function parseCodeReviewDocument(content: string): CodeReviewDocument {
         'verdict.baseEvent',
       ),
       cappedBy: stringArray(verdict['cappedBy'], 'verdict.cappedBy'),
-      downgraded: verdict['downgraded'],
-      downgradedFrom,
     },
     findings: root['findings'].map(parseFinding),
     counts: {
@@ -289,18 +293,8 @@ export function parseCodeReviewDocument(content: string): CodeReviewDocument {
         CONFIDENCES,
         'counts.byConfidence',
       ),
-      ...(counts['byOutcome'] === undefined
-        ? {}
-        : {
-            byOutcome: countRecord(
-              counts['byOutcome'],
-              OUTCOMES,
-              'counts.byOutcome',
-            ),
-          }),
       held: integer(counts['held'], 'counts.held'),
     },
-    outcomesRecorded: root['outcomesRecorded'],
     markdownReportPath: markdownReportPath(root['markdownReportPath']),
   };
 }
@@ -317,20 +311,27 @@ export function CodeReviewArtifactDetail({
   const { t } = useI18n();
   const [content, setContent] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [artifactTruncated, setArtifactTruncated] = useState(false);
   const [severity, setSeverity] = useState<'all' | Severity>('all');
   const [confidence, setConfidence] = useState<'all' | Confidence>('all');
+  const [reportPath, setReportPath] = useState<string | null>(null);
   const [reportContent, setReportContent] = useState<string | null>(null);
   const [reportError, setReportError] = useState<string | null>(null);
   const [reportLoading, setReportLoading] = useState(false);
   const reportRequest = useRef(0);
 
+  // `t` is deliberately NOT a dependency: i18n memoizes it per language, and
+  // including it would re-read the artifact and reset every filter on a
+  // language switch. The truncated message is resolved at render time.
   useEffect(() => {
     let cancelled = false;
     reportRequest.current += 1;
     setContent(null);
     setLoadError(null);
+    setArtifactTruncated(false);
     setSeverity('all');
     setConfidence('all');
+    setReportPath(null);
     setReportContent(null);
     setReportError(null);
     setReportLoading(false);
@@ -339,7 +340,7 @@ export function CodeReviewArtifactDetail({
       .then((file) => {
         if (cancelled) return;
         if (file.truncated) {
-          setLoadError(t('codeReview.artifactTruncated'));
+          setArtifactTruncated(true);
           return;
         }
         setContent(file.content);
@@ -353,7 +354,7 @@ export function CodeReviewArtifactDetail({
       cancelled = true;
       reportRequest.current += 1;
     };
-  }, [artifactVersion, t, workspaceActions, workspacePath]);
+  }, [artifactVersion, workspaceActions, workspacePath]);
 
   const parsed = useMemo(() => {
     if (content === null) return null;
@@ -367,31 +368,14 @@ export function CodeReviewArtifactDetail({
     }
   }, [content]);
 
-  if (loadError || parsed?.error) {
-    return (
-      <div className={styles.error} role="alert">
-        <strong>{t('codeReview.loadErrorTitle')}</strong>
-        <span>{loadError ?? parsed?.error}</span>
-      </div>
-    );
-  }
-  if (!parsed?.document) {
-    return <div className={styles.empty}>{t('codeReview.loading')}</div>;
-  }
-
-  const reviewDocument = parsed.document;
-  const findings = reviewDocument.findings.filter(
-    (finding) =>
-      (severity === 'all' || finding.severity === severity) &&
-      (confidence === 'all' || finding.confidence === confidence),
-  );
-  const openReport = () => {
+  const openReport = (path: string) => {
     const request = ++reportRequest.current;
+    setReportPath(path);
     setReportContent(null);
     setReportError(null);
     setReportLoading(true);
     workspaceActions
-      .readWorkspaceFile(reviewDocument.markdownReportPath)
+      .readWorkspaceFile(path)
       .then((file) => {
         if (request !== reportRequest.current) return;
         if (file.truncated) {
@@ -417,6 +401,7 @@ export function CodeReviewArtifactDetail({
           className={styles.secondaryButton}
           onClick={() => {
             reportRequest.current += 1;
+            setReportPath(null);
             setReportContent(null);
             setReportError(null);
             setReportLoading(false);
@@ -424,7 +409,7 @@ export function CodeReviewArtifactDetail({
         >
           {t('codeReview.back')}
         </button>
-        <div className={styles.path}>{reviewDocument.markdownReportPath}</div>
+        <div className={styles.path}>{reportPath}</div>
         {reportError ? (
           <div className={styles.error} role="alert">
             {reportError}
@@ -435,6 +420,49 @@ export function CodeReviewArtifactDetail({
       </div>
     );
   }
+
+  const loadFailure = artifactTruncated
+    ? t('codeReview.artifactTruncated')
+    : loadError;
+  if (loadFailure || parsed?.error) {
+    // The document that names the durable report failed to load, so derive
+    // the report from the artifact path by the same-stem convention
+    // save-artifact is invoked with: a truncated or unparsable artifact must
+    // not become a dead end when its Markdown report is still readable.
+    const fallbackReport = workspacePath.endsWith('.json')
+      ? `${workspacePath.slice(0, -'.json'.length)}.md`
+      : null;
+    return (
+      <div className={styles.errorFallback}>
+        <div className={styles.error} role="alert">
+          <strong>{t('codeReview.loadErrorTitle')}</strong>
+          <span>{loadFailure ?? parsed?.error}</span>
+        </div>
+        {fallbackReport && (
+          <button
+            type="button"
+            className={styles.secondaryButton}
+            onClick={() => openReport(fallbackReport)}
+            disabled={reportLoading}
+          >
+            {reportLoading
+              ? t('codeReview.loadingReport')
+              : t('codeReview.openReport')}
+          </button>
+        )}
+      </div>
+    );
+  }
+  if (!parsed?.document) {
+    return <div className={styles.empty}>{t('codeReview.loading')}</div>;
+  }
+
+  const reviewDocument = parsed.document;
+  const findings = reviewDocument.findings.filter(
+    (finding) =>
+      (severity === 'all' || finding.severity === severity) &&
+      (confidence === 'all' || finding.confidence === confidence),
+  );
 
   return (
     <div className={styles.root}>
@@ -456,7 +484,7 @@ export function CodeReviewArtifactDetail({
         <button
           type="button"
           className={styles.primaryButton}
-          onClick={openReport}
+          onClick={() => openReport(reviewDocument.markdownReportPath)}
           disabled={reportLoading}
         >
           {reportLoading
@@ -594,12 +622,13 @@ export function CodeReviewArtifactDetail({
                   ))}
                 </ul>
               </div>
-              {finding.assets && finding.assets.length > 0 && (
+              {((finding.assets && finding.assets.length > 0) ||
+                (finding.assetFiles && finding.assetFiles.length > 0)) && (
                 <div className={styles.detailBlock}>
                   <strong>{t('codeReview.evidence')}</strong>
                   <ul>
-                    {finding.assets.map((asset) => (
-                      <li key={asset}>
+                    {(finding.assets ?? []).map((asset, index) => (
+                      <li key={`${asset}-${index}`}>
                         {isSafeHref(asset) ? (
                           <a
                             href={asset}
@@ -609,11 +638,18 @@ export function CodeReviewArtifactDetail({
                             {asset}
                           </a>
                         ) : (
-                          <span className={styles.unsafeLink}>
-                            {asset} ({t('codeReview.unsafeLink')})
+                          <span className={styles.notLinked}>
+                            {asset} ({t('codeReview.notLinked')})
                           </span>
                         )}
                       </li>
+                    ))}
+                    {(finding.assetFiles ?? []).map((file, index) => (
+                      <EvidenceFile
+                        key={`${file}-${index}`}
+                        path={file}
+                        workspaceActions={workspaceActions}
+                      />
                     ))}
                   </ul>
                 </div>
@@ -623,6 +659,53 @@ export function CodeReviewArtifactDetail({
         )}
       </div>
     </div>
+  );
+}
+
+// A local evidence file (`assetFiles`): an inline image when the workspace
+// file is readable, the bare path when it is not. Local evidence usually
+// lives under `.qwen/tmp/`, which review cleanup removes, so a path that no
+// longer resolves is an ordinary state — the caption stays either way.
+function EvidenceFile({
+  path,
+  workspaceActions,
+}: {
+  path: string;
+  workspaceActions: DaemonWorkspaceActions;
+}) {
+  const mimeType = getImageMimeTypeFromPath(path);
+  const [src, setSrc] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!mimeType) return;
+    let cancelled = false;
+    let objectUrl: string | undefined;
+    readWorkspaceFileAsBlob(
+      (filePath, opts) => workspaceActions.readFileBytes(filePath, opts),
+      path,
+      mimeType,
+      {
+        statFile: (filePath) => workspaceActions.stat(filePath),
+        isCancelled: () => cancelled,
+      },
+    )
+      .then((blob) => {
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(blob);
+        setSrc(objectUrl);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [mimeType, path, workspaceActions]);
+
+  return (
+    <li>
+      {src && <img className={styles.evidenceImage} src={src} alt={path} />}
+      <code>{path}</code>
+    </li>
   );
 }
 

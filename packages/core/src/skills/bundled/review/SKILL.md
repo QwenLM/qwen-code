@@ -1122,7 +1122,7 @@ After the Markdown report exists, and before cleanup, create and register the st
   --out .qwen/reviews/<report>.json
 ```
 
-For PR worktree mode, the findings and composed inputs were created inside `worktreePath`, while the durable report and output belong to the main project directory. Pass absolute paths for all four: resolve `--findings` and `--composed` against `worktreePath`, and resolve `--report` and `--out` against the main project directory. The worktree lives under the main project's `.qwen/tmp/`, so all four remain inside the session workspace accepted by the helper. Then call `record_artifact` in the current session with exactly this registration shape (using the actual JSON path relative to the main project directory):
+For PR worktree mode, the findings and composed inputs were created inside `worktreePath`, while the durable report and output belong to the main project directory. Pass absolute paths for all four: resolve `--findings` and `--composed` against `worktreePath`, and resolve `--report` and `--out` against the main project directory. The worktree lives under the main project's `.qwen/tmp/`, so all four remain inside the session workspace accepted by the helper. `save-artifact` prints one JSON object on stdout — `{"path": "<absolute path>", "workspacePath": "<path relative to the main project directory>"}`. Then call `record_artifact` in the current session with exactly this registration shape, copying `workspacePath` from that stdout object verbatim (do not re-derive it from the absolute path):
 
 ```json
 {

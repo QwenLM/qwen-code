@@ -48,6 +48,17 @@ export interface ReviewArtifactV1 {
   markdownReportPath: string;
 }
 
+export interface SavedReviewArtifact {
+  /** Absolute path of the written document. */
+  path: string;
+  /**
+   * The same path relative to the workspace root — the exact value
+   * `record_artifact` wants as `workspacePath`, so the skill copies it
+   * verbatim instead of re-deriving it from the absolute path.
+   */
+  workspacePath: string;
+}
+
 interface SaveArtifactArgs {
   findings: string;
   composed: string;
@@ -245,7 +256,9 @@ function validateFindingsReport(value: unknown): FindingsReport {
   return supplied;
 }
 
-export function saveReviewArtifact(args: SaveArtifactArgs): string {
+export function saveReviewArtifact(
+  args: SaveArtifactArgs,
+): SavedReviewArtifact {
   const root = workspaceRoot();
   const findingsPath = workspacePath(root, args.findings, 'Findings input');
   const composedPath = workspacePath(root, args.composed, 'Composed input');
@@ -323,7 +336,10 @@ export function saveReviewArtifact(args: SaveArtifactArgs): string {
     `${JSON.stringify(document, null, 2)}\n`,
     { encoding: 'utf8', noFollow: true },
   );
-  return outputPath;
+  return {
+    path: outputPath,
+    workspacePath: relative(root, outputPath).split(sep).join('/'),
+  };
 }
 
 export const saveArtifactCommand: CommandModule = {
@@ -364,8 +380,8 @@ export const saveArtifactCommand: CommandModule = {
         describe: 'Output path under .qwen/reviews/',
       }),
   handler: (argv) => {
-    const output = saveReviewArtifact(argv as unknown as SaveArtifactArgs);
-    writeStdoutLine(output);
-    writeStderrLine(`save-artifact: wrote ${output}`);
+    const saved = saveReviewArtifact(argv as unknown as SaveArtifactArgs);
+    writeStdoutLine(JSON.stringify(saved));
+    writeStderrLine(`save-artifact: wrote ${saved.path}`);
   },
 };

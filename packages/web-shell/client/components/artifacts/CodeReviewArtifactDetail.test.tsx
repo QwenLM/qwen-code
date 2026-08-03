@@ -203,9 +203,7 @@ describe('CodeReviewArtifactDetail', () => {
     expect(safe?.target).toBe('_blank');
     expect(safe?.rel).toBe('noopener noreferrer');
     expect(container.querySelector('a[href^="javascript:"]')).toBeNull();
-    expect(container.textContent).toContain(
-      'javascript:alert(1) (unsafe link)',
-    );
+    expect(container.textContent).toContain('javascript:alert(1) (not linked)');
   });
 
   it('opens the Markdown report through workspace actions', async () => {
@@ -344,6 +342,14 @@ describe('CodeReviewArtifactDetail', () => {
       }),
       'markdownReportPath must be a relative .md path',
     ],
+    [
+      'report path outside the reviews directory',
+      JSON.stringify({
+        ...reviewDocument,
+        markdownReportPath: 'docs/report.md',
+      }),
+      'markdownReportPath must be a file under .qwen/reviews/',
+    ],
   ])('shows a dedicated error for %s', async (_name, content, expected) => {
     const { container } = renderWith(content);
     await flush();
@@ -424,6 +430,181 @@ describe('CodeReviewArtifactDetail', () => {
         'select[aria-label="Confidence"]',
       )?.value,
     ).toBe('all');
+  });
+
+  it('renders local assetFiles as workspace images and bare paths', async () => {
+    const createdUrls: string[] = [];
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: vi.fn(() => {
+        const url = `blob:evidence-${createdUrls.length}`;
+        createdUrls.push(url);
+        return url;
+      }),
+    });
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: vi.fn(),
+    });
+    const assetDocument = {
+      ...reviewDocument,
+      findings: [
+        {
+          ...reviewDocument.findings[2],
+          assetFiles: ['.qwen/tmp/shots/evidence.png', '.qwen/tmp/notes.txt'],
+        },
+      ],
+    };
+    const actions = {
+      readWorkspaceFile: vi.fn().mockResolvedValue({
+        content: JSON.stringify(assetDocument),
+        truncated: false,
+      }),
+      readFileBytes: vi.fn().mockResolvedValue({
+        contentBase64: btoa('img'),
+        offset: 0,
+        returnedBytes: 3,
+        sizeBytes: 3,
+      }),
+      stat: vi.fn().mockResolvedValue({ sizeBytes: 3, modifiedMs: 1 }),
+    } as unknown as DaemonWorkspaceActions;
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <CodeReviewArtifactDetail
+            workspacePath=".qwen/reviews/pr-123.json"
+            workspaceActions={actions}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    const image = container.querySelector<HTMLImageElement>(
+      'img[alt=".qwen/tmp/shots/evidence.png"]',
+    );
+    expect(image?.src).toBe('blob:evidence-0');
+    expect(actions.readFileBytes).toHaveBeenCalledWith(
+      '.qwen/tmp/shots/evidence.png',
+      expect.objectContaining({ offset: 0 }),
+    );
+    // A non-image assetFile stays a bare path and is never fetched.
+    expect(container.textContent).toContain('.qwen/tmp/notes.txt');
+    expect(actions.readFileBytes).toHaveBeenCalledTimes(1);
+  });
+
+  it('offers the derived Markdown report when the artifact is invalid', async () => {
+    const { actions, container } = renderWith('{not-json');
+    await flush();
+
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      'Malformed code review JSON',
+    );
+    const fallback = Array.from(container.querySelectorAll('button')).find(
+      (item) => item.textContent === 'Open Markdown report',
+    );
+    expect(fallback).not.toBeUndefined();
+    await act(async () => {
+      fallback?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(actions.readWorkspaceFile).toHaveBeenCalledWith(
+      '.qwen/reviews/pr-123.md',
+    );
+    expect(container.textContent).toContain('Durable report');
+  });
+
+  it('offers the derived Markdown report when the artifact is truncated', async () => {
+    const actions = {
+      readWorkspaceFile: vi.fn((path: string) =>
+        Promise.resolve({
+          content: path.endsWith('.md') ? '# Durable report' : 'partial',
+          truncated: !path.endsWith('.md'),
+        }),
+      ),
+    } as unknown as DaemonWorkspaceActions;
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <CodeReviewArtifactDetail
+            workspacePath=".qwen/reviews/pr-123.json"
+            workspaceActions={actions}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      'truncated',
+    );
+    const fallback = Array.from(container.querySelectorAll('button')).find(
+      (item) => item.textContent === 'Open Markdown report',
+    );
+    await act(async () => {
+      fallback?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain('Durable report');
+  });
+
+  it('does not re-read the artifact or reset filters on a language switch', async () => {
+    const actions = {
+      readWorkspaceFile: vi.fn().mockResolvedValue({
+        content: JSON.stringify(reviewDocument),
+        truncated: false,
+      }),
+    } as unknown as DaemonWorkspaceActions;
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const renderAt = (language: 'en' | 'zh-CN') =>
+      act(() => {
+        root.render(
+          <I18nProvider language={language}>
+            <CodeReviewArtifactDetail
+              workspacePath=".qwen/reviews/pr-123.json"
+              workspaceActions={actions}
+            />
+          </I18nProvider>,
+        );
+      });
+
+    renderAt('en');
+    await flush();
+    const severity = container.querySelector<HTMLSelectElement>(
+      'select[aria-label="Severity"]',
+    );
+    await act(async () => {
+      if (severity) {
+        severity.value = 'Critical';
+        severity.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    });
+    expect(severity?.value).toBe('Critical');
+
+    renderAt('zh-CN');
+    await flush();
+
+    expect(actions.readWorkspaceFile).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain('严重级别');
+    expect(
+      container.querySelector<HTMLSelectElement>(
+        'select[aria-label="严重级别"]',
+      )?.value,
+    ).toBe('Critical');
   });
 
   it('fails closed for truncated input', async () => {

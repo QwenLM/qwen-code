@@ -2292,11 +2292,16 @@ export function App({
           previous.artifacts.length === paneArtifacts.length &&
           previous.artifacts.every((artifact, index) => {
             const nextArtifact = paneArtifacts[index];
+            // `metadata` is deliberately not compared: artifact events carry
+            // freshly parsed objects, so an identity check here would defeat
+            // the guard without catching a realistic change.
             return (
               nextArtifact?.id === artifact.id &&
               nextArtifact.status === artifact.status &&
               nextArtifact.updatedAt === artifact.updatedAt &&
-              nextArtifact.sizeBytes === artifact.sizeBytes
+              nextArtifact.sizeBytes === artifact.sizeBytes &&
+              nextArtifact.title === artifact.title &&
+              nextArtifact.workspacePath === artifact.workspacePath
             );
           });
         if (unchanged) return current;
