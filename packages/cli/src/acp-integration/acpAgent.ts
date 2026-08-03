@@ -296,7 +296,9 @@ import {
 } from '@qwen-code/acp-bridge/status';
 import {
   EXTERNAL_TOOL_GUARD_READY_META_KEY,
+  EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
   EXTERNAL_TOOL_GUARD_TOKEN_ENV,
+  isValidExternalToolGuardDenialReason,
   PRIVATE_EXTERNAL_TOOL_GUARD_ENV,
 } from '@qwen-code/acp-bridge/externalToolGuard';
 import {
@@ -2796,20 +2798,7 @@ export function createManagedExternalToolGuard(
       }
       const reason = response['reason'];
       if (reason === undefined) return { allowed: false };
-      if (
-        typeof reason !== 'string' ||
-        reason.trim().length === 0 ||
-        reason.length > 500 ||
-        [...reason].some((character) => {
-          const code = character.charCodeAt(0);
-          return (
-            code < 0x20 ||
-            (code >= 0x7f && code <= 0x9f) ||
-            code === 0x2028 ||
-            code === 0x2029
-          );
-        })
-      ) {
+      if (!isValidExternalToolGuardDenialReason(reason)) {
         throw new Error(
           'Managed external tool guard denial reason is invalid.',
         );
@@ -4520,7 +4509,10 @@ class QwenAgent implements Agent {
 
     const responseMeta: Record<string, unknown> = {
       ...(this.managedToolInvocationGuard
-        ? { [EXTERNAL_TOOL_GUARD_READY_META_KEY]: 'required-v1' }
+        ? {
+            [EXTERNAL_TOOL_GUARD_READY_META_KEY]:
+              EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+          }
         : {}),
       ...(profileRequested && startupProfile
         ? { [CHANNEL_STARTUP_PROFILE_META_KEY]: startupProfile }

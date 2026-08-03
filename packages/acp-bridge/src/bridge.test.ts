@@ -54,7 +54,10 @@ import {
   SERVE_CONTROL_EXT_METHODS,
   SERVE_STATUS_EXT_METHODS,
 } from './status.js';
-import { EXTERNAL_TOOL_GUARD_READY_META_KEY } from './externalToolGuard.js';
+import {
+  EXTERNAL_TOOL_GUARD_READY_META_KEY,
+  EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+} from './externalToolGuard.js';
 import type { ChannelFactory } from './channel.js';
 import type { BridgeTelemetry } from './bridgeOptions.js';
 import { createInMemoryChannel } from './inMemoryChannel.js';
@@ -1284,7 +1287,8 @@ describe('createAcpSessionBridge', () => {
         authMethods: [],
         agentCapabilities: {},
         _meta: {
-          [EXTERNAL_TOOL_GUARD_READY_META_KEY]: 'required-v1',
+          [EXTERNAL_TOOL_GUARD_READY_META_KEY]:
+            EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
         },
       }),
     });

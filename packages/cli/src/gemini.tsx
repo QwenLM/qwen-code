@@ -22,6 +22,7 @@ import {
   uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
 import {
+  EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
   EXTERNAL_TOOL_GUARD_TOKEN_ENV,
   PRIVATE_EXTERNAL_TOOL_GUARD_ENV,
 } from '@qwen-code/acp-bridge/externalToolGuard';
@@ -359,8 +360,9 @@ export async function main() {
   const privateAcpParentCapability = process.env[PRIVATE_ACP_CAPABILITY_ENV];
   delete process.env[PRIVATE_ACP_CAPABILITY_ENV];
   const privateExternalToolGuard =
-    process.env[PRIVATE_EXTERNAL_TOOL_GUARD_ENV] === 'required-v1'
-      ? 'required-v1'
+    process.env[PRIVATE_EXTERNAL_TOOL_GUARD_ENV] ===
+    EXTERNAL_TOOL_GUARD_REQUIRED_VALUE
+      ? EXTERNAL_TOOL_GUARD_REQUIRED_VALUE
       : undefined;
   delete process.env[PRIVATE_EXTERNAL_TOOL_GUARD_ENV];
 
@@ -1039,7 +1041,7 @@ export async function main() {
         externalToolGuardRequired:
           isAcpMode &&
           privateAcpParentCapability !== undefined &&
-          privateExternalToolGuard === 'required-v1',
+          privateExternalToolGuard === EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
       });
       // Clean up child processes and force exit, matching other non-interactive modes
       await runExitCleanup();

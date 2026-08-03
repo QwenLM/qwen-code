@@ -221,6 +221,33 @@ describe('BridgeClient — managed external tool guard', () => {
     await expect(pending).rejects.toThrow('no longer active');
   });
 
+  it('does not route unrelated extension methods through the tool guard handler', async () => {
+    const handler = vi.fn<ExternalToolGuardHandler>().mockResolvedValue({
+      allowed: true,
+    });
+    const client = makeClient(undefined, {
+      resolveEntry: () => ({
+        sessionId: 'session-1',
+        promptActive: true,
+        activePromptId: 'prompt-1',
+      }),
+      handler,
+    });
+
+    const err = await client
+      .extMethod('qwen/control/unrelated-method', {
+        sessionId: 'session-1',
+        promptId: 'prompt-1',
+        toolCallId: 'call-1',
+        toolName: 'write_file',
+        arguments: {},
+      })
+      .catch((caught: unknown) => caught);
+    expect(err).toBeInstanceOf(RequestError);
+    expect((err as RequestError).code).toBe(-32601);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
   it('rejects a session not owned by this channel', async () => {
     const handler = vi.fn<ExternalToolGuardHandler>().mockResolvedValue({
       allowed: true,

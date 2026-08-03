@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 import * as http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import {
@@ -394,6 +394,47 @@ describe('RequiredExternalToolGuard', () => {
     expect(
       fake.requests.filter((request) => request.path === '/v1/prepare'),
     ).toHaveLength(1);
+  });
+
+  it('unrefs the request timeout timer so a pending request cannot hold the event loop', async () => {
+    const timeoutMs = 4321;
+    const fake = await startFakeGuard((request, response) => {
+      sendJson(response, {
+        protocolVersion: EXTERNAL_TOOL_GUARD_PROTOCOL_VERSION,
+        nonce: request.body['nonce'],
+        capabilities: { prepare: true },
+      });
+    });
+
+    const unrefSpies: MockInstance[] = [];
+    const nativeSetTimeout = globalThis.setTimeout;
+    const setTimeoutSpy = vi
+      .spyOn(globalThis, 'setTimeout')
+      .mockImplementation(((
+        callback: (...args: unknown[]) => void,
+        delay?: number,
+        ...args: unknown[]
+      ) => {
+        const timer = nativeSetTimeout(callback, delay, ...args);
+        if (delay === timeoutMs) {
+          unrefSpies.push(vi.spyOn(timer, 'unref'));
+        }
+        return timer;
+      }) as typeof setTimeout);
+
+    try {
+      const provider = new RequiredExternalToolGuard({
+        endpoint: fake.endpoint,
+        token: 'secret',
+        timeoutMs,
+      });
+      await provider.initialize();
+    } finally {
+      setTimeoutSpy.mockRestore();
+    }
+
+    expect(unrefSpies).toHaveLength(1);
+    expect(unrefSpies[0]).toHaveBeenCalledOnce();
   });
 
   it('fails a broken connection without retrying', async () => {

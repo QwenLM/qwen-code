@@ -65,7 +65,10 @@ import {
   type ServeWorkspaceMcpStatus,
   type ServeWorkspaceMcpToolsStatus,
 } from './status.js';
-import { EXTERNAL_TOOL_GUARD_READY_META_KEY } from './externalToolGuard.js';
+import {
+  EXTERNAL_TOOL_GUARD_READY_META_KEY,
+  EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+} from './externalToolGuard.js';
 import {
   BranchWhilePromptActiveError,
   CdWhilePromptActiveError,
@@ -2533,14 +2536,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               initTimeoutMs,
               'initialize',
             );
-            if (
-              opts.externalToolGuard &&
-              response._meta?.[EXTERNAL_TOOL_GUARD_READY_META_KEY] !==
-                'required-v1'
-            ) {
-              throw new Error(
-                'ACP child did not acknowledge the required external tool guard.',
-              );
+            if (opts.externalToolGuard) {
+              const guardAck =
+                response._meta?.[EXTERNAL_TOOL_GUARD_READY_META_KEY];
+              if (guardAck !== EXTERNAL_TOOL_GUARD_REQUIRED_VALUE) {
+                throw new Error(
+                  `ACP child did not acknowledge the required external tool guard (received: ${JSON.stringify(guardAck)}).`,
+                );
+              }
             }
             try {
               const attributes = getChannelStartupProfileAttributes(

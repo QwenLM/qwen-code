@@ -28,6 +28,7 @@ import { type LoadedSettings } from './config/settings.js';
 import { appEvents, AppEvent } from './utils/events.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { ApprovalMode, OutputFormat } from '@qwen-code/qwen-code-core';
+import { EXTERNAL_TOOL_GUARD_REQUIRED_VALUE } from '@qwen-code/acp-bridge/externalToolGuard';
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockConsumeLastRenderError = vi.hoisted(() => vi.fn());
@@ -316,7 +317,10 @@ describe('gemini.tsx main function', () => {
     vi.mocked(loadSandboxConfig).mockResolvedValue(undefined);
     vi.mocked(parseArguments).mockResolvedValue({ acp: true } as CliArgs);
     vi.stubEnv('QWEN_CODE_PRIVATE_ACP_CAPABILITY', 'private-capability');
-    vi.stubEnv('QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD', 'required-v1');
+    vi.stubEnv(
+      'QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD',
+      EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+    );
     vi.stubEnv('QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN', 'guard-secret');
     vi.stubEnv('QWEN_CODE_NO_RELAUNCH', '');
 
@@ -333,7 +337,8 @@ describe('gemini.tsx main function', () => {
         ).toBeUndefined();
         expect(options?.childEnv).toEqual({
           QWEN_CODE_PRIVATE_ACP_CAPABILITY: 'private-capability',
-          QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD: 'required-v1',
+          QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD:
+            EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
         });
       },
     );
@@ -400,7 +405,8 @@ describe('gemini.tsx main function', () => {
       expect.objectContaining({
         childEnv: {
           QWEN_CODE_PRIVATE_ACP_CAPABILITY: 'private-capability',
-          QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD: 'required-v1',
+          QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD:
+            EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
         },
         onUpdateRelaunch: expect.any(Function),
       }),

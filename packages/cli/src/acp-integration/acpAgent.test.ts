@@ -871,7 +871,10 @@ import {
   SERVE_STATUS_EXT_METHODS,
   SERVE_CONTROL_EXT_METHODS,
 } from '@qwen-code/acp-bridge/status';
-import { EXTERNAL_TOOL_GUARD_READY_META_KEY } from '@qwen-code/acp-bridge/externalToolGuard';
+import {
+  EXTERNAL_TOOL_GUARD_READY_META_KEY,
+  EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+} from '@qwen-code/acp-bridge/externalToolGuard';
 import type { ServeWorkspaceSkillsStatus } from '@qwen-code/acp-bridge/status';
 import {
   resolveOutputLanguageOrPreserveAuto,
@@ -1454,7 +1457,8 @@ describe('runAcpAgent shutdown cleanup', () => {
   });
 
   it('rejects a required managed guard without a private parent and scrubs its marker', async () => {
-    process.env['QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD'] = 'required-v1';
+    process.env['QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD'] =
+      EXTERNAL_TOOL_GUARD_REQUIRED_VALUE;
 
     await expect(
       runAcpAgent(mockConfig, mockSettings, mockArgv, {
@@ -7828,7 +7832,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       },
     })) as { _meta?: Record<string, unknown> };
     expect(initializeResponse._meta?.[EXTERNAL_TOOL_GUARD_READY_META_KEY]).toBe(
-      'required-v1',
+      EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
     );
 
     await expect(
@@ -17476,6 +17480,33 @@ describe('createManagedExternalToolGuard', () => {
         arguments: { command: 'pwd' },
       },
     );
+  });
+
+  it('preserves a validated denial reason from the provider', async () => {
+    const extMethod = vi.fn().mockResolvedValue({
+      allowed: false,
+      reason: 'Change ticket is not approved',
+    });
+    const guard = createManagedExternalToolGuard({
+      extMethod,
+    } as unknown as AgentSideConnection);
+
+    await expect(
+      guard({
+        callId: 'call-1',
+        toolName: 'run_shell_command',
+        args: { command: 'pwd' },
+        signal: new AbortController().signal,
+        invocationContext: {
+          version: 1,
+          sessionId: 'session-1',
+          promptId: 'prompt-1',
+        },
+      }),
+    ).resolves.toEqual({
+      allowed: false,
+      reason: 'Change ticket is not approved',
+    });
   });
 
   it('fails closed without a managed invocation context', async () => {

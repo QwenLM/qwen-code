@@ -36,6 +36,7 @@ import type {
   PendingPromptEntry,
 } from './bridgeTypes.js';
 import { SERVE_CONTROL_EXT_METHODS } from './status.js';
+import { isValidExternalToolGuardDenialReason } from './externalToolGuard.js';
 import type {
   ChannelDeliveryErrorCode,
   ChannelDeliveryHandler,
@@ -127,20 +128,7 @@ function normalizeExternalToolGuardResult(
   }
   if (!Object.hasOwn(value, 'reason')) return { allowed: false };
   const reason = value['reason'];
-  if (
-    typeof reason !== 'string' ||
-    reason.trim().length === 0 ||
-    reason.length > 500 ||
-    [...reason].some((character) => {
-      const code = character.charCodeAt(0);
-      return (
-        code < 0x20 ||
-        (code >= 0x7f && code <= 0x9f) ||
-        code === 0x2028 ||
-        code === 0x2029
-      );
-    })
-  ) {
+  if (!isValidExternalToolGuardDenialReason(reason)) {
     throw new Error('External tool guard handler returned an invalid result.');
   }
   return { allowed: false, reason };

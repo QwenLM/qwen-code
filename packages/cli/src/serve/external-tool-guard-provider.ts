@@ -12,7 +12,11 @@ import type {
   ExternalToolGuardPrepareRequest,
   ExternalToolGuardPrepareResult,
 } from '@qwen-code/acp-bridge/bridgeOptions';
-import { EXTERNAL_TOOL_GUARD_TOKEN_ENV } from '@qwen-code/acp-bridge/externalToolGuard';
+import {
+  containsUnsafeExternalToolGuardControlCharacter,
+  EXTERNAL_TOOL_GUARD_TOKEN_ENV,
+  isValidExternalToolGuardDenialReason,
+} from '@qwen-code/acp-bridge/externalToolGuard';
 
 export const EXTERNAL_TOOL_GUARD_PROTOCOL_VERSION = 1 as const;
 export const DEFAULT_EXTERNAL_TOOL_GUARD_TIMEOUT_MS = 3000;
@@ -21,7 +25,6 @@ export const MAX_EXTERNAL_TOOL_GUARD_TIMEOUT_MS = 30_000;
 
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const MAX_REQUEST_BYTES = 1024 * 1024;
-const MAX_DENIAL_REASON_CHARS = 500;
 
 export interface RequiredExternalToolGuardOptions {
   endpoint: string;
@@ -81,7 +84,10 @@ function normalizeEndpoint(raw: unknown): URL {
 }
 
 function normalizeToken(raw: unknown): string {
-  if (typeof raw !== 'string' || containsUnsafeControlCharacter(raw)) {
+  if (
+    typeof raw !== 'string' ||
+    containsUnsafeExternalToolGuardControlCharacter(raw)
+  ) {
     throw new TypeError(
       `Invalid ${EXTERNAL_TOOL_GUARD_TOKEN_ENV}: expected a non-blank token without control characters.`,
     );
@@ -108,18 +114,6 @@ function normalizeTimeout(timeoutMs: unknown): number {
     );
   }
   return value;
-}
-
-function containsUnsafeControlCharacter(value: string): boolean {
-  return [...value].some((character) => {
-    const code = character.charCodeAt(0);
-    return (
-      code < 0x20 ||
-      (code >= 0x7f && code <= 0x9f) ||
-      code === 0x2028 ||
-      code === 0x2029
-    );
-  });
 }
 
 function validateHandshakeResponse(value: unknown, nonce: string): void {
@@ -161,12 +155,7 @@ function validatePrepareResponse(
   }
   if (!Object.hasOwn(value, 'reason')) return { allowed: false };
   const reason = value['reason'];
-  if (
-    typeof reason !== 'string' ||
-    reason.trim().length === 0 ||
-    reason.length > MAX_DENIAL_REASON_CHARS ||
-    containsUnsafeControlCharacter(reason)
-  ) {
+  if (!isValidExternalToolGuardDenialReason(reason)) {
     throw new Error(
       'External tool guard denial response contains an unsafe reason.',
     );
