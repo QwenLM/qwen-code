@@ -52,6 +52,14 @@ export function terminalSupportsSynchronizedOutput(
     return false;
   }
 
+  // Windows Terminal supports synchronized output (DEC mode 2026) since
+  // v1.18. Detect via WT_SESSION set by Windows Terminal. #7634.
+  if (env['WT_SESSION']) return true;
+
+  // ConEmu/Cmder supports synchronized output (DEC mode 2026). Detect
+  // via ConEmuPID (set by ConEmu) or CMDER_ROOT (set by Cmder). #8385.
+  if (env['ConEmuPID'] || env['CMDER_ROOT']) return true;
+
   const termProgram = env['TERM_PROGRAM'];
   if (termProgram === 'WezTerm' || termProgram === 'iTerm.app') {
     return true;
