@@ -806,7 +806,9 @@ describe('resumeHistoryUtils', () => {
     expect(items[0]).not.toHaveProperty('sentToModel');
   });
 
-  it('restores assistant text and images in their original order', () => {
+  // The current Core recorder flattens assistant output before persistence.
+  // This fixture covers the parser for records written by a compatible writer.
+  it('parses persisted assistant text and images in their original order', () => {
     const conversation = {
       messages: [
         {
@@ -858,7 +860,7 @@ describe('resumeHistoryUtils', () => {
     ]);
   });
 
-  it('caps restored assistant images and retains the overflow count', () => {
+  it('caps persisted assistant images and retains the overflow count', () => {
     const images = Array.from(
       { length: MAX_INLINE_IMAGES_PER_ITEM + 2 },
       (_, index) => ({

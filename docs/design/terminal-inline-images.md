@@ -20,9 +20,9 @@ This is the render-and-forget slice requested by issue #8090:
 
 - preserve ordered text and image parts on content events without changing the
   existing concatenated `value` contract;
-- render live and restored assistant PNGs through the #8217 component and
-  renderer;
-- render PNGs nested in successful, failed, or cancelled tool responses;
+- render live assistant PNGs and restored successful tool PNGs through the
+  #8217 component and renderer;
+- render PNGs nested in successful tool responses;
 - keep text/image ordering across retry, model fallback, cancellation, stream
   boundaries, and goal-state events;
 - bound retained image payloads during UI history compaction;
@@ -53,16 +53,21 @@ Text-only events keep their existing runtime shape, so non-interactive output,
 SDK, ACP, daemon, channel, Web UI, and VS Code consumers continue using
 `value` unchanged.
 
-Recorded assistant messages already retain their original parts. Resume logic
-reconstructs ordered text/image runs instead of flattening images away.
+Resume logic reconstructs ordered text/image runs when persisted parts contain
+them. Tool responses retain nested image parts in the session record. The
+current Core recorder flattens assistant output to text, so live assistant
+images are not restored by `--continue`; assistant-image persistence is outside
+this slice.
 
 ### Tool output
 
 Tool media is stored in `functionResponse.parts`. A CLI extractor reads image
 `inlineData` from top-level and nested response parts. Live scheduler mapping
 and resume mapping attach the images to the existing
-`IndividualToolCallDisplay`. Each tool row keeps the first four images and an
-overflow count for the rest.
+`IndividualToolCallDisplay`. Each successful tool row keeps the first four
+images and an overflow count for the rest. Failed and cancelled tool records
+currently do not carry inline image parts from Core, so their image handling is
+defensive rather than a supported output path in this slice.
 
 Tools carrying images render individually even when their text-only form would
 normally collapse into a read/search summary. `ToolMessage` routes the images
@@ -92,7 +97,7 @@ placeholder and emits no raw image sequence.
 
 The same encoded-length limit is applied before inline data enters CLI history
 or tool-display state. Payloads that exceed the renderer's 8 MiB decoded-image
-budget are therefore not retained by the UI.
+budget are dropped before rendering and do not produce a placeholder.
 
 The first slice renders validated PNG data only. Other image MIME types remain
 visible as deterministic placeholders rather than entering a second protocol
@@ -116,8 +121,10 @@ each assistant output and tool row.
   retaining the old `value` and text-only event shape.
 - Verify live TUI ordering across retry, fallback, cancellation, stream
   boundaries, and goal-state events.
-- Verify live and restored tool responses expose nested images.
-- Verify restored assistant history preserves text/image ordering.
-- Verify live, restored, and tool output enforce the image cap and expose the
-  overflow count without retaining oversized payloads.
+- Verify live and restored successful tool responses expose nested images.
+- Verify the resume parser preserves assistant text/image ordering for records
+  that already contain persisted parts; the current recorder's assistant-image
+  persistence gap remains outside this slice.
+- Verify live assistant and successful tool output enforce the image cap and
+  expose the overflow count; oversized payloads are dropped before UI history.
 - Verify memory compaction clears old assistant and tool image payloads.

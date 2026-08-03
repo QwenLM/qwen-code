@@ -29,10 +29,12 @@ baseline is grounded in issue #8090 and the unchanged `main` event mapping.
 
 1. Return a 1x1 PNG between two assistant text parts.
 2. Confirm the transcript order is `text -> image -> text`.
-3. Return a PNG in a tool's top-level and nested `functionResponse.parts`.
-4. Confirm both successful and failed/cancelled tool rows retain their images.
-5. Open Ctrl+O and resume the session; confirm assistant and tool image order is
-   reconstructed from persisted parts.
+3. Return a PNG in a successful tool's top-level and nested
+   `functionResponse.parts`.
+4. Confirm the successful tool row retains its images.
+5. Open Ctrl+O and resume the session; confirm successful tool image order is
+   reconstructed from persisted parts. Assistant output resumes its persisted
+   text; assistant inline images are not persisted by the current Core recorder.
 6. Return six images in one assistant output and one tool response; confirm the
    first four render and the row ends with `[+2 more images]`.
 
@@ -62,7 +64,7 @@ baseline is grounded in issue #8090 and the unchanged `main` event mapping.
 3. Repeat with malformed base64, a payload above 8 MiB, invalid IHDR
    dimensions, and a non-PNG MIME type.
 4. Confirm no raw image sequence is written. Confirm the oversized payload is
-   excluded from UI history, while admitted malformed/non-PNG data uses a
+   dropped before UI history, while admitted malformed/non-PNG data uses a
    deterministic placeholder.
 5. Repeat with `INK_SCREEN_READER=true`; confirm only the placeholder is
    emitted.
