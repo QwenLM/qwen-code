@@ -36,12 +36,16 @@ import {
   reviewSourceRoots,
   reviewSourcesDigest,
   staleBundleWarning,
+  type ReviewSourceRoot,
 } from './stale-bundle.js';
 
 // The build stamps this digest from `scripts/copy_bundle_assets.js`, which
 // cannot import this module — it runs before the package is built. The two
 // implementations are held equal by `scripts/tests/review-source-digest.test.ts`,
 // which is the side of the boundary allowed to reach across it.
+
+const code = (path: string): ReviewSourceRoot => ({ path, kind: 'code' });
+const skill = (path: string): ReviewSourceRoot => ({ path, kind: 'skill' });
 
 describe('reviewSourcesDigest', () => {
   let root: string;
@@ -56,9 +60,9 @@ describe('reviewSourcesDigest', () => {
 
   it('changes when a source changes', () => {
     writeFileSync(join(dir, 'drive.ts'), 'before');
-    const before = reviewSourcesDigest(root, [dir]);
+    const before = reviewSourcesDigest(root, [code(dir)]);
     writeFileSync(join(dir, 'drive.ts'), 'after');
-    expect(reviewSourcesDigest(root, [dir])).not.toBe(before);
+    expect(reviewSourcesDigest(root, [code(dir)])).not.toBe(before);
   });
 
   it('does not change when only timestamps do', () => {
@@ -68,52 +72,52 @@ describe('reviewSourcesDigest', () => {
     // what was built — a timestamp check calls that stale and is wrong.
     const file = join(dir, 'drive.ts');
     writeFileSync(file, 'same');
-    const before = reviewSourcesDigest(root, [dir]);
+    const before = reviewSourcesDigest(root, [code(dir)]);
     const later = new Date(Date.now() + 86_400_000);
     utimesSync(file, later, later);
-    expect(reviewSourcesDigest(root, [dir])).toBe(before);
+    expect(reviewSourcesDigest(root, [code(dir)])).toBe(before);
   });
 
   it('changes when a source is added, and comes back when it is removed', () => {
     writeFileSync(join(dir, 'a.ts'), 'x');
-    const one = reviewSourcesDigest(root, [dir]);
+    const one = reviewSourcesDigest(root, [code(dir)]);
     writeFileSync(join(dir, 'b.ts'), 'y');
-    expect(reviewSourcesDigest(root, [dir])).not.toBe(one);
+    expect(reviewSourcesDigest(root, [code(dir)])).not.toBe(one);
     rmSync(join(dir, 'b.ts'));
-    expect(reviewSourcesDigest(root, [dir])).toBe(one);
+    expect(reviewSourcesDigest(root, [code(dir)])).toBe(one);
   });
 
   it('folds the path, so moving a file changes the digest', () => {
     // The same bytes under a different name is a different source: a command
     // that moved is a command that no longer registers where it did.
     writeFileSync(join(dir, 'a.ts'), 'x');
-    const before = reviewSourcesDigest(root, [dir]);
+    const before = reviewSourcesDigest(root, [code(dir)]);
     rmSync(join(dir, 'a.ts'));
     writeFileSync(join(dir, 'b.ts'), 'x');
-    expect(reviewSourcesDigest(root, [dir])).not.toBe(before);
+    expect(reviewSourcesDigest(root, [code(dir)])).not.toBe(before);
   });
 
   it('is independent of where the checkout sits', () => {
     // Relative to `repoRoot` with separators normalised, so a bundle built in
     // CI and a tree cloned elsewhere agree.
     writeFileSync(join(dir, 'a.ts'), 'x');
-    const here = reviewSourcesDigest(root, [dir]);
+    const here = reviewSourcesDigest(root, [code(dir)]);
 
     const other = mkdtempSync(join(tmpdir(), 'stale-bundle-elsewhere-'));
     const otherDir = join(other, 'src');
     mkdirSync(otherDir, { recursive: true });
     writeFileSync(join(otherDir, 'a.ts'), 'x');
-    expect(reviewSourcesDigest(other, [otherDir])).toBe(here);
+    expect(reviewSourcesDigest(other, [code(otherDir)])).toBe(here);
     rmSync(other, { recursive: true, force: true });
   });
 
   it('finds a source nested below the root', () => {
     writeFileSync(join(dir, 'a.ts'), 'x');
-    const flat = reviewSourcesDigest(root, [dir]);
+    const flat = reviewSourcesDigest(root, [code(dir)]);
     const deep = join(dir, 'lib', 'nested');
     mkdirSync(deep, { recursive: true });
     writeFileSync(join(deep, 'ledger.ts'), 'y');
-    expect(reviewSourcesDigest(root, [dir])).not.toBe(flat);
+    expect(reviewSourcesDigest(root, [code(dir)])).not.toBe(flat);
   });
 
   it('accepts a single file as a root, not only a directory', () => {
@@ -122,10 +126,10 @@ describe('reviewSourcesDigest', () => {
     // nowhere else.
     const lone = join(root, 'review.ts');
     writeFileSync(lone, 'registers');
-    const before = reviewSourcesDigest(root, [lone]);
+    const before = reviewSourcesDigest(root, [code(lone)]);
     expect(before).toBeDefined();
     writeFileSync(lone, 'registers one more');
-    expect(reviewSourcesDigest(root, [lone])).not.toBe(before);
+    expect(reviewSourcesDigest(root, [code(lone)])).not.toBe(before);
   });
 
   it('does not depend on the order the files are found in', () => {
@@ -136,8 +140,8 @@ describe('reviewSourcesDigest', () => {
     const b = join(dir, 'b.ts');
     writeFileSync(a, 'x');
     writeFileSync(b, 'y');
-    expect(reviewSourcesDigest(root, [a, b])).toBe(
-      reviewSourcesDigest(root, [b, a]),
+    expect(reviewSourcesDigest(root, [code(a), code(b)])).toBe(
+      reviewSourcesDigest(root, [code(b), code(a)]),
     );
   });
 
@@ -146,11 +150,11 @@ describe('reviewSourcesDigest', () => {
     // way, so an edit to one cannot change a byte of the bundle. Folding them
     // in would warn about a build that is exactly correct.
     writeFileSync(join(dir, 'drive.ts'), 'x');
-    const before = reviewSourcesDigest(root, [dir]);
+    const before = reviewSourcesDigest(root, [code(dir)]);
     writeFileSync(join(dir, 'drive.test.ts'), 'a test');
-    expect(reviewSourcesDigest(root, [dir])).toBe(before);
+    expect(reviewSourcesDigest(root, [code(dir)])).toBe(before);
     writeFileSync(join(dir, 'drive.spec.tsx'), 'another');
-    expect(reviewSourcesDigest(root, [dir])).toBe(before);
+    expect(reviewSourcesDigest(root, [code(dir)])).toBe(before);
   });
 
   it('ignores a fixtures directory, which the bundle never contains', () => {
@@ -158,18 +162,18 @@ describe('reviewSourcesDigest', () => {
     // `dist`. A fixture is loaded by a test at runtime, from no import the
     // bundler follows.
     writeFileSync(join(dir, 'drive.ts'), 'x');
-    const before = reviewSourcesDigest(root, [dir]);
+    const before = reviewSourcesDigest(root, [code(dir)]);
     const fixtures = join(dir, '__fixtures__');
     mkdirSync(fixtures, { recursive: true });
     writeFileSync(join(fixtures, 'responder.mjs'), 'export const a = 1;');
     writeFileSync(join(fixtures, 'comment.md'), '# a comment');
-    expect(reviewSourcesDigest(root, [dir])).toBe(before);
+    expect(reviewSourcesDigest(root, [code(dir)])).toBe(before);
   });
 
   it('ignores a test file passed as a root in its own right', () => {
     const lone = join(root, 'review.test.ts');
     writeFileSync(lone, 'x');
-    expect(reviewSourcesDigest(root, [lone])).toBeUndefined();
+    expect(reviewSourcesDigest(root, [code(lone)])).toBeUndefined();
   });
 
   it('ignores symlinks, and terminates on a directory cycle', () => {
@@ -178,14 +182,14 @@ describe('reviewSourcesDigest', () => {
     // every review into unbounded recursion; a file link would fold foreign
     // content into the digest and accuse a correct bundle.
     writeFileSync(join(dir, 'drive.ts'), 'x');
-    const before = reviewSourcesDigest(root, [dir]);
+    const before = reviewSourcesDigest(root, [code(dir)]);
 
     const outside = join(root, 'outside.ts');
     writeFileSync(outside, 'not this tree');
     symlinkSync(outside, join(dir, 'linked.ts'));
     symlinkSync(dir, join(dir, 'cycle'));
 
-    expect(reviewSourcesDigest(root, [dir])).toBe(before);
+    expect(reviewSourcesDigest(root, [code(dir)])).toBe(before);
   });
 
   it('measures nothing when a listed file cannot be read', () => {
@@ -196,14 +200,49 @@ describe('reviewSourcesDigest', () => {
     writeFileSync(join(dir, 'b.ts'), 'y');
     unreadable.path = join(dir, 'b.ts');
     try {
-      expect(reviewSourcesDigest(root, [dir])).toBeUndefined();
+      expect(reviewSourcesDigest(root, [code(dir)])).toBeUndefined();
     } finally {
       unreadable.path = '';
     }
   });
 
   it('yields nothing when there are no sources to hash', () => {
-    expect(reviewSourcesDigest(root, [join(root, 'nope')])).toBeUndefined();
+    expect(
+      reviewSourcesDigest(root, [code(join(root, 'nope'))]),
+    ).toBeUndefined();
+  });
+
+  it('ignores stray files no build can fold into the bundle', () => {
+    // A conflicted rebase leaves `drive.ts.orig` and `drive.ts.rej`, an editor
+    // leaves a swapfile, a reader leaves a note — none of them can reach
+    // `cli.js`, so none of them may move the digest. The blocklist this check
+    // once used had been patched four times for this class; the allowlist
+    // ends the class instead of extending it.
+    writeFileSync(join(dir, 'drive.ts'), 'x');
+    const before = reviewSourcesDigest(root, [code(dir)]);
+    writeFileSync(join(dir, 'drive.ts.orig'), 'rebase droppings');
+    writeFileSync(join(dir, 'drive.ts.rej'), 'a rejected hunk');
+    writeFileSync(join(dir, 'notes.md'), 'scratch');
+    writeFileSync(join(dir, 'drive.ts.swp'), 'an editor swapfile');
+    writeFileSync(join(dir, '.DS_Store'), 'finder droppings');
+    expect(reviewSourcesDigest(root, [code(dir)])).toBe(before);
+  });
+
+  it('digests a skill root by the documents the copier ships', () => {
+    // The skill root is copied whole, not imported: its allowlist is the
+    // markdown it holds. Stray files are the same class the code roots'
+    // allowlist ends — a `SKILL.md.orig` from a rebase must not accuse a
+    // correct bundle.
+    const skillDir = join(root, 'skill');
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(join(skillDir, 'SKILL.md'), '# skill');
+    const before = reviewSourcesDigest(root, [skill(skillDir)]);
+    expect(before).toBeDefined();
+    writeFileSync(join(skillDir, 'SKILL.md.orig'), 'droppings');
+    writeFileSync(join(skillDir, 'scratch.txt'), 'x');
+    expect(reviewSourcesDigest(root, [skill(skillDir)])).toBe(before);
+    writeFileSync(join(skillDir, 'DESIGN.md'), '# design');
+    expect(reviewSourcesDigest(root, [skill(skillDir)])).not.toBe(before);
   });
 });
 
@@ -267,11 +306,28 @@ describe('reviewSourceRoots', () => {
     // with forward slashes passes on Linux and fails every element on the
     // Windows leg of the merge queue, which the PR event never runs.
     expect(reviewSourceRoots('/w')).toEqual([
-      join('/w', 'packages', 'cli', 'src', 'commands', 'review'),
+      {
+        path: join('/w', 'packages', 'cli', 'src', 'commands', 'review'),
+        kind: 'code',
+      },
       // A subcommand added without a rebuild is a change here and nowhere
       // under `review/`.
-      join('/w', 'packages', 'cli', 'src', 'commands', 'review.ts'),
-      join('/w', 'packages', 'core', 'src', 'skills', 'bundled', 'review'),
+      {
+        path: join('/w', 'packages', 'cli', 'src', 'commands', 'review.ts'),
+        kind: 'code',
+      },
+      {
+        path: join(
+          '/w',
+          'packages',
+          'core',
+          'src',
+          'skills',
+          'bundled',
+          'review',
+        ),
+        kind: 'skill',
+      },
     ]);
   });
 });

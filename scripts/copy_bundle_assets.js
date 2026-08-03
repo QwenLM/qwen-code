@@ -18,7 +18,15 @@
 // limitations under the License.
 
 import { copyFileSync, existsSync, mkdirSync, statSync } from 'node:fs';
-import { dirname, join, basename, resolve, relative, sep } from 'node:path';
+import {
+  dirname,
+  join,
+  basename,
+  resolve,
+  relative,
+  sep,
+  extname,
+} from 'node:path';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { glob } from 'glob';
@@ -26,7 +34,11 @@ import fs from 'node:fs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const defaultRoot = join(__dirname, '..');
-const BUNDLED_SKILL_TEST_FILE_RE =
+// Exported for `scripts/tests/review-source-digest.test.ts`, which holds the
+// skill root's digest allowlist up to everything this rule lets the copier
+// ship — a file the copier would carry but the digest cannot see is a
+// staleness check with a blind spot.
+export const BUNDLED_SKILL_TEST_FILE_RE =
   /\.(?:test|spec)\.(?:d\.)?[cm]?[jt]sx?(?:\.map)?$/;
 
 /**
@@ -42,20 +54,42 @@ const BUNDLED_SKILL_TEST_FILE_RE =
  * that cannot change a byte of the bundle is the false positive this check
  * exists not to produce.
  */
-// Mirrors NOT_BUNDLED_RE in stale-bundle.ts; the parity test keeps them equal.
+// Mirrors NOT_BUNDLED_RE / NOT_BUNDLED_DIR / NOT_BUNDLED_FILE /
+// DIGESTED_EXTENSIONS in stale-bundle.ts; the parity test keeps them equal.
 const NOT_BUNDLED_RE = /\.(?:test|spec)\.[cm]?[jt]sx?$/;
 const NOT_BUNDLED_DIR = new Set(['__fixtures__', '__snapshots__']);
-const NOT_BUNDLED_FILE = new Set(['test-utils.ts', '.DS_Store']);
+const NOT_BUNDLED_FILE = new Set(['test-utils.ts']);
+const DIGESTED_EXTENSIONS = {
+  code: new Set(['.ts', '.tsx', '.mts', '.cts', '.js', '.mjs', '.json']),
+  skill: new Set(['.md']),
+};
+
+function isDigestedFile(kind, name) {
+  if (!DIGESTED_EXTENSIONS[kind].has(extname(name))) return false;
+  if (kind !== 'code') return true;
+  return !NOT_BUNDLED_RE.test(name) && !NOT_BUNDLED_FILE.has(name);
+}
 
 export function reviewSourceDigestForBuild(root) {
   const cliCommands = join(root, 'packages', 'cli', 'src', 'commands');
   const roots = [
-    join(cliCommands, 'review'),
-    join(cliCommands, 'review.ts'),
-    join(root, 'packages', 'core', 'src', 'skills', 'bundled', 'review'),
+    { path: join(cliCommands, 'review'), kind: 'code' },
+    { path: join(cliCommands, 'review.ts'), kind: 'code' },
+    {
+      path: join(
+        root,
+        'packages',
+        'core',
+        'src',
+        'skills',
+        'bundled',
+        'review',
+      ),
+      kind: 'skill',
+    },
   ];
   const files = [];
-  const walk = (dir) => {
+  const walk = (dir, kind) => {
     let entries;
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -66,7 +100,7 @@ export function reviewSourceDigestForBuild(root) {
       // one digest and not the other — a bundle that is byte-for-byte correct
       // warning on every review, forever, on that platform alone.
       try {
-        if (fs.statSync(dir).isFile() && !NOT_BUNDLED_RE.test(dir)) {
+        if (fs.statSync(dir).isFile() && isDigestedFile(kind, basename(dir))) {
           files.push(dir);
         }
       } catch {
@@ -77,17 +111,13 @@ export function reviewSourceDigestForBuild(root) {
     for (const e of entries) {
       const full = join(dir, e.name);
       if (e.isDirectory()) {
-        if (!NOT_BUNDLED_DIR.has(e.name)) walk(full);
-      } else if (
-        e.isFile() &&
-        !NOT_BUNDLED_RE.test(e.name) &&
-        !NOT_BUNDLED_FILE.has(e.name)
-      ) {
+        if (kind !== 'code' || !NOT_BUNDLED_DIR.has(e.name)) walk(full, kind);
+      } else if (e.isFile() && isDigestedFile(kind, e.name)) {
         files.push(full);
       }
     }
   };
-  for (const r of roots) walk(r);
+  for (const r of roots) walk(r.path, r.kind);
   if (files.length === 0)
     return { digest: undefined, count: 0, newest: undefined };
   const hash = createHash('sha256');
@@ -110,7 +140,10 @@ function stampReviewSourceDigest(root, distDir) {
   // refusal exists to avoid, and `unmeasured` is the state each refusal means.
   const refuse = (why) => {
     fs.rmSync(stampPath, { force: true });
-    console.log(why);
+    // `warn`, not `log`: the runtime message sends its reader back to this
+    // build's output, and a refusal hidden among plain logs is not what they
+    // are being sent to find.
+    console.warn(why);
   };
   // Never fatal. This is the last step of the copier, so a file vanishing
   // mid-walk would fail the bundle after every asset was already in place —

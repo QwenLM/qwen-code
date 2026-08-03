@@ -16,11 +16,23 @@
 // So the rule stops being a list somebody remembers to extend. This asserts
 // the property the list is trying to approximate: every file the digest folds
 // in is reachable from production code, and nothing reachable is left out.
+//
+// The walk is over the real working tree, so it needs a full checkout: a
+// sparse or partial clone fails this test without anything being wrong.
 
 import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
-import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import {
+  basename,
+  dirname,
+  extname,
+  join,
+  relative,
+  resolve,
+  sep,
+} from 'node:path';
+import {
+  DIGESTED_EXTENSIONS,
   NOT_BUNDLED_DIR,
   NOT_BUNDLED_FILE,
   NOT_BUNDLED_RE,
@@ -83,15 +95,15 @@ function localImports(f: string): string[] {
 
 describe('the staleness digest covers only what the bundle can contain', () => {
   const files = [...allFiles(reviewDir)];
-  // Exactly what the digest folds in: the walk's three exclusions applied.
+  // Exactly what the digest folds in: the code roots' walk, extension
+  // allowlist first and the test/fixture exclusions on top of it.
   const digestedFiles = files.filter(
-    (f) => !isTest(f) && !isFixture(f) && !NOT_BUNDLED_FILE.has(basename(f)),
+    (f) =>
+      DIGESTED_EXTENSIONS.code.has(extname(f)) &&
+      !isTest(f) &&
+      !isFixture(f) &&
+      !NOT_BUNDLED_FILE.has(basename(f)),
   );
-  // Production for import purposes is anything that is not a test.
-  // `NOT_BUNDLED_FILE` helpers are dropped from the importer set below: they
-  // are not bundled themselves, so what they import only reaches the bundle
-  // through some real production importer.
-  const production = files.filter((f) => !isTest(f) && !isFixture(f));
 
   // What production code imports — including `review.ts`, which sits outside
   // this directory and is where every subcommand is registered. Leaving it out
@@ -101,10 +113,7 @@ describe('the staleness digest covers only what the bundle can contain', () => {
   // read as unreachable and this test fails on a change that is correct —
   // widen the closure before believing the finding.
   const importedByProduction = new Set<string>();
-  for (const f of [
-    ...production.filter((f) => !NOT_BUNDLED_FILE.has(basename(f))),
-    join(reviewDir, '..', 'review.ts'),
-  ]) {
+  for (const f of [...digestedFiles, join(reviewDir, '..', 'review.ts')]) {
     for (const dep of localImports(f)) importedByProduction.add(dep);
   }
 
@@ -127,10 +136,10 @@ describe('the staleness digest covers only what the bundle can contain', () => {
   it('leaves out nothing production imports', () => {
     // The other direction: an exclusion that overshoots would stop the check
     // seeing a real change. Anything production imports must survive the
-    // filters.
-    const excluded = files.filter(
-      (f) => isTest(f) || isFixture(f) || NOT_BUNDLED_FILE.has(basename(f)),
-    );
+    // filters — so `excluded` is the exact complement of what the walk folds
+    // in, not a restatement of any single rule.
+    const digested = new Set(digestedFiles);
+    const excluded = files.filter((f) => !digested.has(f));
     const wronglyExcluded = excluded.filter((f) => importedByProduction.has(f));
     expect(wronglyExcluded.map((f) => relative(repoRoot, f))).toEqual([]);
   });

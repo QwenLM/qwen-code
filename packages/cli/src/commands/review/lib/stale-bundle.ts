@@ -45,7 +45,15 @@
 
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { basename, dirname, join, relative, sep } from 'node:path';
+import {
+  basename,
+  dirname,
+  extname,
+  join,
+  relative,
+  resolve,
+  sep,
+} from 'node:path';
 
 /** Where the build stamps the digest of the sources it bundled. */
 export const DIGEST_FILE = 'review-sources.sha256';
@@ -70,15 +78,56 @@ export const NOT_BUNDLED_RE = /\.(?:test|spec)\.[cm]?[jt]sx?$/;
 export const NOT_BUNDLED_DIR = new Set(['__fixtures__', '__snapshots__']);
 
 /**
- * Files under the review roots that no production import reaches.
+ * Code-root files no production import reaches, named the way production
+ * files are.
  *
- * Test support without a `.test.`/`.spec.` name, and editor droppings the
- * asset copier already skips. This list is the fourth patch to the same class,
- * so it is not left to reviewers to find the fifth:
- * `review-digest-covers-only-bundled.test.ts` fails when any file in the
- * digest is imported by tests alone.
+ * `lib/test-utils.ts` is test support imported only by tests; the extension
+ * allowlist cannot tell it apart from a command. Editor droppings no longer
+ * need an entry here — no extension they carry is digested. The class is
+ * policed, not remembered: `review-digest-covers-only-bundled.test.ts` fails
+ * when any file in the digest is imported by tests alone.
  */
-export const NOT_BUNDLED_FILE = new Set(['test-utils.ts', '.DS_Store']);
+export const NOT_BUNDLED_FILE = new Set(['test-utils.ts']);
+
+/** Which half of the build carries a root into the bundle. */
+export type ReviewSourceKind = 'code' | 'skill';
+
+export interface ReviewSourceRoot {
+  path: string;
+  kind: ReviewSourceKind;
+}
+
+/**
+ * The extensions each root kind can put in the bundle.
+ *
+ * Bounded on purpose: a file that appears after a build — `drive.ts.orig`
+ * from a conflicted rebase, an editor swapfile, a scratch note — cannot reach
+ * the bundle, so it must not move the digest either. The blocklist this
+ * replaces had been patched four times for that class; an allowlist has no
+ * fifth patch to apply. Code roots reach the bundle through esbuild's import
+ * graph; the skill root is the markdown the asset copier ships, so extend its
+ * set the day the skill grows a file the copier would carry.
+ */
+export const DIGESTED_EXTENSIONS: Record<
+  ReviewSourceKind,
+  ReadonlySet<string>
+> = {
+  code: new Set(['.ts', '.tsx', '.mts', '.cts', '.js', '.mjs', '.json']),
+  skill: new Set(['.md']),
+};
+
+/**
+ * Whether a file of this root kind belongs in the digest.
+ *
+ * The skill rule is the allowlist alone — its root holds no importable code,
+ * only the documents the copier ships. The code roots additionally drop the
+ * files and names the bundler cannot reach from the CLI entry.
+ */
+function isDigestedFile(kind: ReviewSourceKind, name: string): boolean {
+  if (!DIGESTED_EXTENSIONS[kind].has(extname(name))) return false;
+  if (kind !== 'code') return true;
+  return !NOT_BUNDLED_RE.test(name) && !NOT_BUNDLED_FILE.has(name);
+}
 
 export interface BundleStaleness {
   /** `true` only when both digests are known and differ. */
@@ -97,7 +146,7 @@ export interface BundleStaleness {
  */
 export function reviewSourcesDigest(
   repoRoot: string,
-  roots: readonly string[],
+  roots: readonly ReviewSourceRoot[],
 ): string | undefined {
   const files: string[] = [];
   for (const root of roots) files.push(...sourceFilesUnder(root));
@@ -152,31 +201,36 @@ export function bundleStaleness(
  * tree's source, and a directory cycle would hang the one check that must
  * never cost the run anything.
  */
-function* sourceFilesUnder(root: string): Generator<string> {
+function* sourceFilesUnder(root: ReviewSourceRoot): Generator<string> {
+  const { kind } = root;
   let entries;
   try {
-    entries = readdirSync(root, { withFileTypes: true });
+    entries = readdirSync(root.path, { withFileTypes: true });
   } catch {
     // Not a directory. Asking whether it is a file states that directly, where
     // inferring it from `ENOTDIR` assumed every platform's libuv maps the case
     // the same way — and the one root that is a file is `review.ts`, which is
     // exactly where "a new subcommand was registered" lives.
     try {
-      if (statSync(root).isFile() && !NOT_BUNDLED_RE.test(root)) yield root;
+      if (
+        statSync(root.path).isFile() &&
+        isDigestedFile(kind, basename(root.path))
+      )
+        yield root.path;
     } catch {
       // Absent or unreadable: nothing to walk and nothing to say.
     }
     return;
   }
   for (const e of entries) {
-    const full = join(root, e.name);
+    const full = join(root.path, e.name);
     if (e.isDirectory()) {
-      if (!NOT_BUNDLED_DIR.has(e.name)) yield* sourceFilesUnder(full);
-    } else if (
-      e.isFile() &&
-      !NOT_BUNDLED_RE.test(e.name) &&
-      !NOT_BUNDLED_FILE.has(e.name)
-    ) {
+      // Fixtures are a code-root concern: they sit beside importable modules
+      // but are loaded by tests at runtime. Nothing under the skill root is
+      // reachable by import in the first place; the allowlist already decides.
+      if (kind !== 'code' || !NOT_BUNDLED_DIR.has(e.name))
+        yield* sourceFilesUnder({ path: full, kind });
+    } else if (e.isFile() && isDigestedFile(kind, e.name)) {
       yield full;
     }
   }
@@ -189,15 +243,26 @@ function* sourceFilesUnder(root: string): Generator<string> {
  * finds no files and reports that it could not measure — the right answer for
  * a user who never had sources to differ from.
  */
-export function reviewSourceRoots(repoRoot: string): string[] {
+export function reviewSourceRoots(repoRoot: string): ReviewSourceRoot[] {
   const cli = join(repoRoot, 'packages', 'cli', 'src', 'commands');
   return [
-    join(cli, 'review'),
+    { path: join(cli, 'review'), kind: 'code' },
     // The parent file, which is where every subcommand is registered — a new
     // command, or a changed dispatch, lives here and nowhere under `review/`.
     // A root may be a single file for exactly this reason.
-    join(cli, 'review.ts'),
-    join(repoRoot, 'packages', 'core', 'src', 'skills', 'bundled', 'review'),
+    { path: join(cli, 'review.ts'), kind: 'code' },
+    {
+      path: join(
+        repoRoot,
+        'packages',
+        'core',
+        'src',
+        'skills',
+        'bundled',
+        'review',
+      ),
+      kind: 'skill',
+    },
   ];
 }
 
@@ -217,7 +282,9 @@ export function bundleStalenessNotices(
   entryPath: string | undefined,
 ): string[] {
   if (!entryPath) return [];
-  const distDir = dirname(entryPath);
+  // `resolve`, because `argv[1]` can be relative (`node dist/cli.js`), and a
+  // `repoRoot` derived from it must stay printable and absolute.
+  const distDir = dirname(resolve(entryPath));
   // Only a `<root>/dist/cli.js` layout carries a stamp. A dev launcher runs
   // `node <root>/packages/cli`, where node sets argv[1] to the DIRECTORY —
   // measured — so the derivation would find sources under `<root>` and no
@@ -249,7 +316,7 @@ export function bundleStalenessNotices(
   // the check has switched itself off for someone about to read a verdict. An
   // installed package reaches the same branch with no roots at all, and gets
   // nothing, because there is nothing it could do.
-  if (stamped && !current && roots.some((r) => existsSync(r))) {
+  if (stamped && !current && roots.some((r) => existsSync(r.path))) {
     return [
       `review: could not check whether the bundle is current — a review source could not be read, ` +
         `so nothing was compared. Re-run once the tree is settled.`,
