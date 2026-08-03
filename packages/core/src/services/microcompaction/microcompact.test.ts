@@ -1143,6 +1143,105 @@ describe('microcompactHistory', () => {
     expect(second.history).toBe(first.history);
   });
 
+  it('does not let trailing zero-char results consume keepRecent slots', () => {
+    // Errors, prior placeholders, and empty outputs can never be cleared,
+    // so they must not absorb protection slots — otherwise the real
+    // recent outputs go unprotected and deep clearing strands them.
+    const history: Content[] = [];
+    for (let i = 0; i < 10; i++) {
+      history.push(
+        makeToolCall('run_shell_command'),
+        makeToolResult('run_shell_command', 'Y'.repeat(60_000)),
+      );
+    }
+    history.push(
+      makeToolCall('run_shell_command'),
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'run_shell_command',
+              response: { error: 'boom' },
+            },
+          },
+        ],
+      },
+      makeToolCall('run_shell_command'),
+      makeToolResult('run_shell_command', MICROCOMPACT_CLEARED_MESSAGE),
+      makeToolCall('run_shell_command'),
+      makeToolResult('run_shell_command', ''),
+    );
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: 60,
+      toolResultsNumToKeep: 5,
+      toolResultsTotalCharsThreshold: 500_000,
+    });
+
+    expect(result.meta!.triggerReason).toBe('size');
+    // The 5 oldest 60K outputs are cleared; the 5 most recent 60K
+    // outputs stay protected even though 3 zero-char refs trail them.
+    expect(result.meta!.toolsCleared).toBe(5);
+    expect(result.meta!.toolsKept).toBe(5);
+    expect(result.meta!.toolResultCharsAfter).toBe(300_000);
+    for (const idx of [11, 13, 15, 17, 19]) {
+      expect(
+        result.history[idx]!.parts![0]!.functionResponse!.response!['output'],
+      ).toBe('Y'.repeat(60_000));
+    }
+    expect(
+      result.history[21]!.parts![0]!.functionResponse!.response!['error'],
+    ).toBe('boom');
+  });
+
+  it('can re-trigger on consecutive checkpoints when protections pin the total above the threshold', () => {
+    // Narrowed guarantee: when keepRecent-protected results alone exceed
+    // the threshold, the watermark is unreachable and the size trigger
+    // fires again on the next checkpoint (matching the pre-watermark
+    // rolling regime) until the total drops below the threshold.
+    const settings = {
+      toolResultsThresholdMinutes: 60,
+      toolResultsNumToKeep: 5,
+      toolResultsTotalCharsThreshold: 500_000,
+    };
+    let history: Content[] = [
+      makeToolCall('run_shell_command'),
+      makeToolResult('run_shell_command', 'a'),
+    ];
+    for (let i = 0; i < 5; i++) {
+      history.push(
+        makeToolCall('run_shell_command'),
+        makeToolResult('run_shell_command', 'Y'.repeat(100_000)),
+      );
+    }
+
+    const checkpoint = (h: Content[], pendingText: string) => {
+      const pending = makeToolResult('run_shell_command', pendingText);
+      const result = microcompactHistory(h, Date.now(), settings, {
+        sizeOnly: true,
+        pendingContent: pending,
+      });
+      return { result, committed: [...result.history, pending] };
+    };
+
+    // Checkpoint 1: 500_002 > H; only the 1-char result is clearable —
+    // the five protected 100K results keep the total above H.
+    const first = checkpoint(history, 'b');
+    expect(first.result.meta!.toolsCleared).toBe(1);
+    history = first.committed;
+
+    // Checkpoint 2: still over H, fires again — the oldest 100K result
+    // rotated out of the protection window and is cleared now.
+    const second = checkpoint(history, 'c');
+    expect(second.result.meta!.toolsCleared).toBe(1);
+    history = second.committed;
+
+    // Checkpoint 3: total is back under H — stable again.
+    const third = checkpoint(history, 'd');
+    expect(third.result.meta).toBeUndefined();
+  });
+
   it('treats a negative legacy idle threshold as disabling the size trigger when unset', () => {
     const history: Content[] = [];
     for (let i = 0; i < 20; i++) {
@@ -1544,10 +1643,12 @@ describe('microcompactHistory evictedReadPaths (issue #4239)', () => {
     expect(result.meta!.unresolvedEvictedReads).toBe(0);
   });
 
-  it('does not report a path when a pending kept result for the same file remains', () => {
-    // The pending re-read of /proj/same.ts must keep that path alive in
-    // the disarm set even though keepRecent only protects committed
-    // results; an older read of a different file absorbs the keep slot.
+  it('reports the path even when a pending same-path read exists (conservative disarm)', () => {
+    // A pending read_file result may be the file_unchanged cache-hit
+    // placeholder rather than file bytes, and pending content is not
+    // committed yet — it cannot prove the file's bytes stay resident.
+    // The eviction must be reported; over-disarming only costs a
+    // redundant re-read (issue #4239).
     const history: Content[] = [
       fileCall('old', 'read_file', '/proj/same.ts'),
       fileResult('old', 'read_file', 'old long content '.repeat(50)),
@@ -1572,7 +1673,49 @@ describe('microcompactHistory evictedReadPaths (issue #4239)', () => {
 
     expect(result.meta!.triggerReason).toBe('size');
     expect(result.meta!.toolsCleared).toBe(1);
-    expect(result.meta!.evictedReadPaths).toEqual([]);
+    expect(result.meta!.evictedReadPaths).toEqual(['/proj/same.ts']);
+    expect(result.meta!.unresolvedEvictedReads).toBe(0);
+  });
+
+  it('does not let a pending cache-hit placeholder suppress eviction of the full read', () => {
+    // The pending same-file read is the file_unchanged placeholder — it
+    // points AT the old full read, so once that full read is blanked the
+    // path must be disarmed or the next Read serves a dangling
+    // placeholder.
+    const history: Content[] = [
+      makeToolCall('run_shell_command'),
+      makeToolResult('run_shell_command', 'S'.repeat(200_000)),
+      fileCall('rf1', 'read_file', '/proj/big.ts'),
+      fileResult('rf1', 'read_file', 'F'.repeat(200_000)),
+      makeToolCall('run_shell_command'),
+      makeToolResult('run_shell_command', 'R'.repeat(120_000)),
+      fileCall('rf2', 'read_file', '/proj/big.ts'),
+    ];
+
+    const result = microcompactHistory(
+      history,
+      Date.now(),
+      {
+        toolResultsThresholdMinutes: 60,
+        toolResultsNumToKeep: 1,
+        toolResultsTotalCharsThreshold: 500_000,
+      },
+      {
+        sizeOnly: true,
+        pendingContent: fileResult(
+          'rf2',
+          'read_file',
+          '[File big.ts unchanged since last read in this session]',
+        ),
+      },
+    );
+
+    expect(result.meta!.triggerReason).toBe('size');
+    expect(result.meta!.toolsCleared).toBe(2);
+    expect(
+      result.history[3]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+    expect(result.meta!.evictedReadPaths).toEqual(['/proj/big.ts']);
     expect(result.meta!.unresolvedEvictedReads).toBe(0);
   });
 

@@ -434,19 +434,22 @@ function planSizeBasedClearing(
   const compactableToolRefs = tool.filter(
     (ref) => !preservedToolRefs.has(refKey(ref)),
   );
-  // keepRecent protects the most-recent *committed* results only — pending
-  // refs must not consume protection slots (a batch of keepRecent+ pending
-  // results would leave zero history protected). Pending refs still join
-  // the set so kept-path resolution treats their file reads as live.
-  const keepToolRefs = new Set([
-    ...buildKeepRefs(
-      compactableToolRefs.filter((ref) => ref.contentIndex < history.length),
-      keepRecent,
+  // keepRecent protects the most-recent committed results that are
+  // actually at risk of clearing — refs present in charsByRef (positive,
+  // successful, uncleared output). Zero-char refs (errors, prior
+  // placeholders, empty output) are never cleared, so letting them absorb
+  // protection slots would strand real recent outputs unprotected.
+  // Pending refs are excluded entirely: they are uncleared by
+  // construction (contentIndex guard below), and a pending read_file
+  // result may be a cache-hit placeholder rather than file bytes, so it
+  // must not vouch for path residency either — an over-disarm only costs
+  // a redundant re-read (issue #4239).
+  const keepToolRefs = buildKeepRefs(
+    compactableToolRefs.filter(
+      (ref) => ref.contentIndex < history.length && charsByRef.has(refKey(ref)),
     ),
-    ...compactableToolRefs
-      .filter((ref) => ref.contentIndex >= history.length)
-      .map(refKey),
-  ]);
+    keepRecent,
+  );
   const clearRefs: PartRef[] = [];
   let remainingChars = totalChars;
   for (const ref of compactableToolRefs) {
