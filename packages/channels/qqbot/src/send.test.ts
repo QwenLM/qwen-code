@@ -130,6 +130,10 @@ type QQChannelRouter = NonNullable<QQChannelOptions>['router'];
 
 afterEach(() => {
   vi.useRealTimers();
+  // Restore every spyOn-created spy even when an assertion fails mid-test —
+  // tests that put spy.mockRestore() at the end leak the mock (e.g. a
+  // mocked QQChannel.prototype.sendMessage) into subsequent tests otherwise.
+  vi.restoreAllMocks();
 });
 
 /** Create a mock Response-like object for sendQQMessage. */
@@ -336,6 +340,15 @@ describe('groupAllPolicy session-scope warning (no forcing)', () => {
     expect(capturedStderr()).not.toContain('WARNING');
   });
 
+  it('emits NO warning for groupAllPolicy=all when sessionScope is single (global-session exemption)', () => {
+    // 'single' is a shared-context scope too (one global session keyed as
+    // channel:__single__) — the warning exists only for per-sender scopes.
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const ch = makeChannel({ groupAllPolicy: 'all', sessionScope: 'single' });
+    expect(ch.config.sessionScope).toBe('single');
+    expect(capturedStderr()).not.toContain('WARNING');
+  });
+
   it('emits NO warning for log policy with non-thread scope (baseline)', () => {
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const ch = makeChannel({ groupAllPolicy: 'log', sessionScope: 'user' });
@@ -398,17 +411,45 @@ describe('purgeSingleScopeOrphans', () => {
       (sid: string) =>
         sid.startsWith('single-era-') || sid.startsWith('user-era-'),
     );
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
     const router = {
       getAll: () => [
-        { key: 'test-bot:__single__', sessionId: 'single-era-1' },
+        {
+          key: 'test-bot:__single__',
+          sessionId: 'single-era-1',
+          target: { channelName: 'test-bot' },
+        },
         // Sibling channel's live single-scope route: the exact-match guard
         // (entry.key === `${this.name}:__single__`) must NOT purge it — a
         // suffix match would silently reset the sibling channel's session.
-        { key: 'other-bot:__single__', sessionId: 'sibling-live' },
+        {
+          key: 'other-bot:__single__',
+          sessionId: 'sibling-live',
+          target: { channelName: 'other-bot' },
+        },
         // Live two-part keys under thread scope are never purged.
-        { key: 'test-bot:group-openid-1', sessionId: 'normal-1' },
+        {
+          key: 'test-bot:group-openid-1',
+          sessionId: 'normal-1',
+          target: { channelName: 'test-bot' },
+        },
         // User-scope three-part key under thread scope: orphan (PR #8241).
-        { key: 'test-bot:user-1:chat-1', sessionId: 'user-era-1' },
+        {
+          key: 'test-bot:user-1:chat-1',
+          sessionId: 'user-era-1',
+          target: { channelName: 'test-bot' },
+        },
+        // Sibling channel's live user-scope route: the owned-by-name guard
+        // (entry.target?.channelName === this.name) must NOT purge it — a
+        // string-prefix match would hit a sibling whose name is a prefix of
+        // ours, and a suffix match would reset its live per-sender sessions.
+        {
+          key: 'other-bot:user-9:chat-9',
+          sessionId: 'sibling-3part',
+          target: { channelName: 'other-bot' },
+        },
       ],
       removeSessionId,
     };
@@ -419,6 +460,10 @@ describe('purgeSingleScopeOrphans', () => {
     expect(removeSessionId).toHaveBeenCalledWith('user-era-1');
     expect(removeSessionId).not.toHaveBeenCalledWith('sibling-live');
     expect(removeSessionId).not.toHaveBeenCalledWith('normal-1');
+    expect(removeSessionId).not.toHaveBeenCalledWith('sibling-3part');
+    // The purge reports what it dropped on stderr (thread 57 gate).
+    const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(logged).toContain('Purged 2 orphaned session mapping(s)');
   });
 
   it('releases the daemon-side session for each purged orphan (bridge.discardSession)', () => {
@@ -467,11 +512,31 @@ describe('purgeSingleScopeOrphans', () => {
       getAll: () => [
         // User-scope three-part key: unreachable under thread scope (the
         // router re-keys those sessions as two-part) → orphan.
-        { key: 'test-bot:u1:c1', sessionId: 'user-scope-1' },
+        {
+          key: 'test-bot:u1:c1',
+          sessionId: 'user-scope-1',
+          target: { channelName: 'test-bot' },
+        },
         // Live thread-scope two-part key: never purged.
-        { key: 'test-bot:g1', sessionId: 'thread-scope-1' },
+        {
+          key: 'test-bot:g1',
+          sessionId: 'thread-scope-1',
+          target: { channelName: 'test-bot' },
+        },
         // Legacy single-scope orphan.
-        { key: 'test-bot:__single__', sessionId: 'single-era-1' },
+        {
+          key: 'test-bot:__single__',
+          sessionId: 'single-era-1',
+          target: { channelName: 'test-bot' },
+        },
+        // Sibling channel's live user-scope route: owned-by-name guard must
+        // keep it — the three-part split alone is not enough to call it an
+        // orphan (thread 60).
+        {
+          key: 'other-bot:user-9:chat-9',
+          sessionId: 'sibling-3part',
+          target: { channelName: 'other-bot' },
+        },
       ],
       removeSessionId,
     };
@@ -498,19 +563,39 @@ describe('purgeSingleScopeOrphans', () => {
     expect(removeSessionId).toHaveBeenCalledWith('user-scope-1');
     expect(removeSessionId).toHaveBeenCalledWith('single-era-1');
     expect(removeSessionId).not.toHaveBeenCalledWith('thread-scope-1');
+    expect(removeSessionId).not.toHaveBeenCalledWith('sibling-3part');
     // The daemon-side user-scope session is discarded like the others.
     expect(discardSession).toHaveBeenCalledWith('user-scope-1');
+    expect(discardSession).not.toHaveBeenCalledWith('sibling-3part');
   });
 
   it('keeps user-scope 3-part keys when sessionScope is user (live routing state)', () => {
-    const removeSessionId = vi.fn();
+    const removeSessionId = vi.fn(() => true);
     const router = {
-      getAll: () => [{ key: 'test-bot:u1:c1', sessionId: 'live-user-session' }],
+      getAll: () => [
+        {
+          key: 'test-bot:u1:c1',
+          sessionId: 'live-user-session',
+          target: { channelName: 'test-bot' },
+        },
+        // Under 'user' scope the single-era `channel:__single__` key is
+        // still dead weight: the single-scope router re-keys the global
+        // session as `channel:__single__`, which the user-scope router can
+        // never route to again — so it is purged even though the 3-part key
+        // above is live (thread 61).
+        {
+          key: 'test-bot:__single__',
+          sessionId: 'single-era-1',
+          target: { channelName: 'test-bot' },
+        },
+      ],
       removeSessionId,
     };
     const ch = makeChannelWithRouter(router, { sessionScope: 'user' });
     callPurge(ch);
-    expect(removeSessionId).not.toHaveBeenCalled();
+    expect(removeSessionId).toHaveBeenCalledTimes(1);
+    expect(removeSessionId).toHaveBeenCalledWith('single-era-1');
+    expect(removeSessionId).not.toHaveBeenCalledWith('live-user-session');
   });
 
   it('is a safe no-op when bridge.discardSession rejects or throws', () => {
@@ -2413,7 +2498,12 @@ describe('replyMsgId cleanup timer', () => {
 
       const state = {
         chatId: 'test-chat-id',
-        buffer: 'test buffer',
+        // Distinct seed text so the re-buffer ORDER is observable: the
+        // failed send's text must come FIRST, the concurrently accumulated
+        // buffer SECOND (current.buffer = buffer + (current.buffer || '')).
+        // A reversed implementation would produce 'accumulatedflushed-text'
+        // and fail this gate (thread 69).
+        buffer: 'accumulated',
         timer: null as ReturnType<typeof setTimeout> | null,
         retryCount: 0,
       };
@@ -2429,14 +2519,12 @@ describe('replyMsgId cleanup timer', () => {
       streamState.set('session-1', state);
 
       // Spy on sendMessage to throw RATE_LIMITED
-      const sendSpy = vi
-        .spyOn(
-          QQChannel.prototype as unknown as {
-            sendMessage: () => Promise<void>;
-          },
-          'sendMessage',
-        )
-        .mockRejectedValue(new DeliveryError('RATE_LIMITED', 'rate limited'));
+      vi.spyOn(
+        QQChannel.prototype as unknown as {
+          sendMessage: () => Promise<void>;
+        },
+        'sendMessage',
+      ).mockRejectedValue(new DeliveryError('RATE_LIMITED', 'rate limited'));
 
       // Call flushAndTrack
       (
@@ -2446,7 +2534,7 @@ describe('replyMsgId cleanup timer', () => {
           state: typeof state,
           logLabel: string,
         ) => void
-      )('session-1', 'test buffer', state, 'test');
+      )('session-1', 'flushed-text', state, 'test');
 
       // Drain the full microtask chain so the .catch() handler actually runs
       // before asserting. A single `await Promise.resolve()` is NOT enough —
@@ -2461,13 +2549,12 @@ describe('replyMsgId cleanup timer', () => {
       // and a retry timer is armed.
       expect(streamState.has('session-1')).toBe(true);
       // catch re-buffered: current.buffer = buffer + (current.buffer || '')
-      expect(state.buffer).toBe('test buffertest buffer');
+      expect(state.buffer).toBe('flushed-textaccumulated');
       // retryCount incremented by the re-buffer path
       expect(state.retryCount).toBe(1);
       // retry timer armed (IDLE_FLUSH_MS) — 0ms advance must not have fired it
       expect(state.timer).not.toBeNull();
 
-      sendSpy.mockRestore();
       vi.useRealTimers();
     });
 
@@ -2523,7 +2610,8 @@ describe('replyMsgId cleanup timer', () => {
         // Anchor the session to msg-X (as onPromptStart would) and seed a
         // msg_seq counter for it. No chat-level replyMsgId entry points at
         // msg-X, so a release must cascade: session anchor dropped + the
-        // orphaned seq purged.
+        // orphaned seq purged — and the cascade persists via saveQQState
+        // (thread 52 gate: the release path must not silently skip saving).
         const sessionAnchors = chp['sessionReplyMsgId'] as Map<
           string,
           { msgId: string; timestamp: number }
@@ -2535,16 +2623,19 @@ describe('replyMsgId cleanup timer', () => {
         });
         seqMap.set('msg-X', 4);
 
-        const sendSpy = vi
-          .spyOn(
-            QQChannel.prototype as unknown as {
-              sendMessage: () => Promise<void>;
-            },
-            'sendMessage',
-          )
-          .mockRejectedValue(
-            new DeliveryError('RETRY_EXHAUSTED', 'permanent failure'),
-          );
+        const saveSpy = vi.spyOn(
+          chp as { saveQQState: () => void },
+          'saveQQState',
+        );
+
+        vi.spyOn(
+          QQChannel.prototype as unknown as {
+            sendMessage: () => Promise<void>;
+          },
+          'sendMessage',
+        ).mockRejectedValue(
+          new DeliveryError('RETRY_EXHAUSTED', 'permanent failure'),
+        );
 
         (
           chp['flushAndTrack'] as (
@@ -2563,12 +2654,168 @@ describe('replyMsgId cleanup timer', () => {
         await vi.advanceTimersByTimeAsync(0);
 
         // RETRY_EXHAUSTED is permanent: the entry is dropped and the reply
-        // anchor released, cascading to the orphaned msg_seq counter.
+        // anchor released, cascading to the orphaned msg_seq counter — whose
+        // removal is persisted (saveQQState must have been called).
         expect(streamState.has('session-perm')).toBe(false);
         expect(sessionAnchors.has('session-perm')).toBe(false);
         expect(seqMap.has('msg-X')).toBe(false);
+        expect(saveSpy).toHaveBeenCalled();
 
-        sendSpy.mockRestore();
+        vi.useRealTimers();
+      });
+
+      it('clears pending-cleanup flags on RETRY_EXHAUSTED (permanent-catch teardown)', async () => {
+        // A dead-session tail chain (pendingStreamDelete + flushedSessions +
+        // turnCounter parked) that hits a permanent failure must be torn
+        // down entirely by the catch branch — onResponseComplete/onPromptEnd
+        // would otherwise have cleaned these, but the permanent failure
+        // settles the turn without them (thread 53).
+        vi.useFakeTimers();
+        const ch = makeChannelForPerm();
+        const chp = ch as unknown as Record<string, unknown>;
+
+        const state = {
+          chatId: 'test-chat-id',
+          buffer: 'test buffer',
+          timer: null as ReturnType<typeof setTimeout> | null,
+          retryCount: 0,
+          msgId: 'msg-P',
+          turn: 1,
+        };
+        const streamState = chp['streamState'] as Map<
+          string,
+          {
+            chatId: string;
+            buffer: string;
+            timer: ReturnType<typeof setTimeout> | null;
+            retryCount: number;
+            msgId?: string;
+            turn: number;
+          }
+        >;
+        streamState.set('session-pc', state);
+
+        const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+        const flushedSessions = chp['flushedSessions'] as Set<string>;
+        const turnCounter = chp['turnCounter'] as Map<string, number>;
+        pendingStreamDelete.add('session-pc');
+        flushedSessions.add('session-pc');
+        turnCounter.set('session-pc', 1);
+
+        const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+          string,
+          { msgId: string; timestamp: number }
+        >;
+        const seqMap = chp['msgSeqMap'] as Map<string, number>;
+        sessionAnchors.set('session-pc', {
+          msgId: 'msg-P',
+          timestamp: Date.now(),
+        });
+        seqMap.set('msg-P', 4);
+
+        vi.spyOn(
+          QQChannel.prototype as unknown as {
+            sendMessage: () => Promise<void>;
+          },
+          'sendMessage',
+        ).mockRejectedValue(
+          new DeliveryError('RETRY_EXHAUSTED', 'permanent failure'),
+        );
+
+        (
+          chp['flushAndTrack'] as (
+            sessionId: string,
+            buffer: string,
+            state: typeof state,
+            logLabel: string,
+          ) => void
+        )('session-pc', 'test buffer', state, 'test');
+
+        await vi.advanceTimersByTimeAsync(0);
+
+        // The permanent-catch branch deletes the stream entry, clears the
+        // pending-delete flag, and drops the deferred turn's flushedSessions
+        // + turnCounter records.
+        expect(streamState.has('session-pc')).toBe(false);
+        expect(pendingStreamDelete.has('session-pc')).toBe(false);
+        expect(flushedSessions.has('session-pc')).toBe(false);
+        expect(turnCounter.has('session-pc')).toBe(false);
+        // The anchor + orphaned seq are released/cascaded as usual.
+        expect(sessionAnchors.has('session-pc')).toBe(false);
+        expect(seqMap.has('msg-P')).toBe(false);
+
+        vi.useRealTimers();
+      });
+
+      it('keeps the successor anchor when the failed flush had no own msgId', async () => {
+        // A flush started without a per-session reply anchor (msgId
+        // undefined, e.g. a proactive turn) that fails permanently must NOT
+        // release — the release path is guarded on state.msgId, and an
+        // unconditional release here would delete the successor turn's
+        // anchor (thread 54).
+        vi.useFakeTimers();
+        const ch = makeChannelForPerm();
+        const chp = ch as unknown as Record<string, unknown>;
+
+        const state = {
+          chatId: 'test-chat-id',
+          buffer: 'test buffer',
+          timer: null as ReturnType<typeof setTimeout> | null,
+          retryCount: 0,
+          msgId: undefined,
+          turn: 1,
+        };
+        const streamState = chp['streamState'] as Map<
+          string,
+          {
+            chatId: string;
+            buffer: string;
+            timer: ReturnType<typeof setTimeout> | null;
+            retryCount: number;
+            msgId?: string;
+            turn: number;
+          }
+        >;
+        streamState.set('session-guard', state);
+
+        // A successor turn holds the anchor (msg-B) with its seq counter.
+        const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+          string,
+          { msgId: string; timestamp: number }
+        >;
+        const seqMap = chp['msgSeqMap'] as Map<string, number>;
+        sessionAnchors.set('session-guard', {
+          msgId: 'msg-B',
+          timestamp: Date.now(),
+        });
+        seqMap.set('msg-B', 1);
+
+        vi.spyOn(
+          QQChannel.prototype as unknown as {
+            sendMessage: () => Promise<void>;
+          },
+          'sendMessage',
+        ).mockRejectedValue(
+          new DeliveryError('RETRY_EXHAUSTED', 'permanent failure'),
+        );
+
+        (
+          chp['flushAndTrack'] as (
+            sessionId: string,
+            buffer: string,
+            state: typeof state,
+            logLabel: string,
+          ) => void
+        )('session-guard', 'test buffer', state, 'test');
+
+        await vi.advanceTimersByTimeAsync(0);
+
+        // The failed flush's stream entry is dropped...
+        expect(streamState.has('session-guard')).toBe(false);
+        // ...but the successor's anchor and its seq survive untouched.
+        expect(sessionAnchors.get('session-guard')!.msgId).toBe('msg-B');
+        expect(seqMap.get('msg-B')).toBe(1);
+
         vi.useRealTimers();
       });
 
@@ -2611,19 +2858,14 @@ describe('replyMsgId cleanup timer', () => {
         });
         seqMap.set('msg-Y', 4);
 
-        const sendSpy = vi
-          .spyOn(
-            QQChannel.prototype as unknown as {
-              sendMessage: () => Promise<void>;
-            },
-            'sendMessage',
-          )
-          .mockRejectedValue(
-            new DeliveryError(
-              'ACTIVE_MSG_DISABLED',
-              'active messages disabled',
-            ),
-          );
+        vi.spyOn(
+          QQChannel.prototype as unknown as {
+            sendMessage: () => Promise<void>;
+          },
+          'sendMessage',
+        ).mockRejectedValue(
+          new DeliveryError('ACTIVE_MSG_DISABLED', 'active messages disabled'),
+        );
 
         (
           chp['flushAndTrack'] as (
@@ -2643,8 +2885,111 @@ describe('replyMsgId cleanup timer', () => {
         expect(sessionAnchors.has('session-ads')).toBe(false);
         expect(seqMap.has('msg-Y')).toBe(false);
 
-        sendSpy.mockRestore();
         vi.useRealTimers();
+      });
+
+      it('deletes streamState and releases anchor on FALLBACK_FAILED', async () => {
+        // FALLBACK_FAILED is the passive-markdown → active-message fallback
+        // exhaustion: permanent, same teardown as RETRY_EXHAUSTED (thread
+        // 67 — this code path previously had zero coverage).
+        vi.useFakeTimers();
+        const ch = makeChannelForPerm();
+        const chp = ch as unknown as Record<string, unknown>;
+
+        const state = {
+          chatId: 'test-chat-id',
+          buffer: 'test buffer',
+          timer: null as ReturnType<typeof setTimeout> | null,
+          retryCount: 0,
+          // Per-session reply anchor this flush is sending under.
+          msgId: 'msg-Z',
+        };
+        const streamState = chp['streamState'] as Map<
+          string,
+          {
+            chatId: string;
+            buffer: string;
+            timer: ReturnType<typeof setTimeout> | null;
+            retryCount: number;
+            msgId?: string;
+          }
+        >;
+        streamState.set('session-fb', state);
+
+        // Anchor the session to msg-Z and seed its msg_seq counter, with no
+        // chat-level entry pointing at msg-Z — a release must cascade to the
+        // orphaned seq (same as the RETRY_EXHAUSTED case).
+        const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+          string,
+          { msgId: string; timestamp: number }
+        >;
+        const seqMap = chp['msgSeqMap'] as Map<string, number>;
+        sessionAnchors.set('session-fb', {
+          msgId: 'msg-Z',
+          timestamp: Date.now(),
+        });
+        seqMap.set('msg-Z', 4);
+
+        vi.spyOn(
+          QQChannel.prototype as unknown as {
+            sendMessage: () => Promise<void>;
+          },
+          'sendMessage',
+        ).mockRejectedValue(
+          new DeliveryError('FALLBACK_FAILED', 'passive fallback failed'),
+        );
+
+        (
+          chp['flushAndTrack'] as (
+            sessionId: string,
+            buffer: string,
+            state: typeof state,
+            logLabel: string,
+          ) => void
+        )('session-fb', 'test buffer', state, 'test');
+
+        // Drain the full microtask chain so the .catch() handler runs.
+        await vi.advanceTimersByTimeAsync(0);
+
+        // FALLBACK_FAILED is permanent: the entry is dropped and the reply
+        // anchor released, cascading to the orphaned msg_seq counter.
+        expect(streamState.has('session-fb')).toBe(false);
+        expect(sessionAnchors.has('session-fb')).toBe(false);
+        expect(seqMap.has('msg-Z')).toBe(false);
+
+        vi.useRealTimers();
+      });
+
+      it('does not call saveQQState when another session still anchors the released msgId', () => {
+        // The release cascade is what persists (msgSeqMap.delete → saveQQState);
+        // when a sibling session still anchors the same msgId the counter is
+        // kept and nothing must be written (thread 52 keep-scenario gate).
+        const ch = makeChannelForPerm();
+        const chp = ch as unknown as Record<string, unknown>;
+        const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+          string,
+          { msgId: string; timestamp: number }
+        >;
+        const seqMap = chp['msgSeqMap'] as Map<string, number>;
+        sessionAnchors.set('s-1', { msgId: 'msg-K', timestamp: Date.now() });
+        sessionAnchors.set('s-2', { msgId: 'msg-K', timestamp: Date.now() });
+        seqMap.set('msg-K', 3);
+
+        const saveSpy = vi.spyOn(
+          chp as { saveQQState: () => void },
+          'saveQQState',
+        );
+
+        (chp['releaseSessionReplyAnchor'] as (sessionId: string) => void)(
+          's-1',
+        );
+
+        // s-1's own anchor is released, but msg-K is still live (s-2 holds
+        // it), so its seq counter survives — and no state write happens.
+        expect(sessionAnchors.has('s-1')).toBe(false);
+        expect(sessionAnchors.get('s-2')!.msgId).toBe('msg-K');
+        expect(seqMap.get('msg-K')).toBe(3);
+        expect(saveSpy).not.toHaveBeenCalled();
       });
     });
   });

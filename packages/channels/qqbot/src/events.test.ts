@@ -1372,7 +1372,13 @@ describe('群管理事件', () => {
       botOpenIdByGroup.set(groupId, 'bot-openid-1');
       _lastKeywordNoMatchLog.set(groupId, Date.now());
 
-      const onSessionDiedSpy = vi.spyOn(ch, 'onSessionDied');
+      // mockImplementation: let the real onSessionDied NOT run, so the
+      // assertions below are gated on handleGroupDelRobot's OWN cleanup loop
+      // (the delete/release statements before the call), not on the method
+      // body being re-entered (thread 68).
+      const onSessionDiedSpy = vi
+        .spyOn(ch, 'onSessionDied')
+        .mockImplementation(() => {});
 
       const evt: GroupDelRobotEvent = {
         group_openid: groupId,
@@ -1793,6 +1799,74 @@ describe('Gateway message handling', () => {
 
     restoreQQSpy.mockRestore();
     restoreSessionsSpy.mockRestore();
+    ch.disconnect();
+  });
+
+  it('READY cold start: purgeSingleScopeOrphans clears orphaned router mappings', async () => {
+    // The purge must run as part of the READY restore chain and drop
+    // single-era + user-scope orphan keys from the router (thread 62 gate:
+    // previously the purge had no wiring-level test).
+    const ch = makeChannel({ sessionScope: 'thread' });
+    const pvt = ch as unknown as QQChannelRaw;
+    const chp = ch as unknown as Record<string, unknown>;
+
+    chp['ws'] = { send: vi.fn(), close: vi.fn() };
+    chp['accessToken'] = 'test-token';
+    chp['tokenExpiresAt'] = Date.now() + 3600_000;
+
+    expect(chp['coldStart']).toBe(true);
+
+    const removeSessionId = vi.fn(
+      (sid: string) =>
+        sid.startsWith('single-era-') || sid.startsWith('user-era-'),
+    );
+    chp['router'] = {
+      restoreSessions: vi.fn().mockResolvedValue(undefined),
+      getAll: () => [
+        // Single-era orphan (exact-match on this channel's name).
+        {
+          key: 'test-bot:__single__',
+          sessionId: 'single-era-1',
+          target: { channelName: 'test-bot' },
+        },
+        // User-scope 3-part key under thread scope: orphan.
+        {
+          key: 'test-bot:user-1:chat-1',
+          sessionId: 'user-era-1',
+          target: { channelName: 'test-bot' },
+        },
+        // Live thread-scope two-part key: never purged.
+        {
+          key: 'test-bot:g1',
+          sessionId: 'live-1',
+          target: { channelName: 'test-bot' },
+        },
+      ],
+      removeSessionId,
+    };
+
+    const restoreQQSpy = vi
+      .spyOn(
+        ch as unknown as { restoreQQState: () => boolean },
+        'restoreQQState',
+      )
+      .mockReturnValue(true);
+
+    await (
+      pvt['handleGatewayMessage'] as (
+        msg: Record<string, unknown>,
+        onReady: () => void,
+      ) => Promise<void>
+    )({ op: 0, t: 'READY', s: 1, d: { session_id: 'sess-cold' } }, () => {});
+
+    // purgeSingleScopeOrphans ran inside the restore chain and removed the
+    // two orphan keys, keeping the live two-part key.
+    expect(removeSessionId).toHaveBeenCalledWith('single-era-1');
+    expect(removeSessionId).toHaveBeenCalledWith('user-era-1');
+    expect(removeSessionId).not.toHaveBeenCalledWith('live-1');
+    expect(chp['_ready']).toBe(true);
+
+    restoreQQSpy.mockRestore();
     ch.disconnect();
   });
 

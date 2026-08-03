@@ -262,6 +262,17 @@ export class QQChannel extends ChannelBase {
   private _reconnectId: number = 0;
   private blockStreaming: boolean = false;
   private flushedSessions: Set<string> = new Set();
+  /**
+   * Side buffer for chunks arriving while a previous turn's deferred flush
+   * chain still owns the session's streamState entry (the stale parked
+   * early-return in onResponseChunk). The chunks are prepended to the new
+   * turn's first fresh state entry once the chain settles and frees the
+   * entry, so the HEAD of a reply is never silently dropped during the
+   * chain's settle window (up to ~10s under rate-limit backoff). Entries
+   * are cleared when a turn completes, the session dies, or the channel
+   * disconnects.
+   */
+  private streamOrphanBuffer: Map<string, string> = new Map();
   private readonly qqStatePath: string;
   /**
    * Path to the global sessions.json managed by start.ts.
@@ -1040,6 +1051,7 @@ export class QQChannel extends ChannelBase {
     this.flushingSessions.clear();
     this.pendingStreamDelete.clear();
     this.flushedSessions.clear();
+    this.streamOrphanBuffer.clear();
   }
 
   /**
@@ -1149,6 +1161,7 @@ export class QQChannel extends ChannelBase {
     this.pendingStreamDelete.delete(sessionId);
     this.flushedSessions.delete(sessionId);
     this.turnCounter.delete(sessionId);
+    this.streamOrphanBuffer.delete(sessionId);
     this.releaseSessionReplyAnchor(sessionId);
   }
 
@@ -1174,6 +1187,16 @@ export class QQChannel extends ChannelBase {
       // consumed (dropped); the next chunk will find the map empty once the
       // chain settles and start fresh.
       if (state.buffer && this.pendingStreamDelete.has(sessionId)) {
+        // The old turn's deferred flush chain still owns the streamState
+        // entry; stash this turn's chunks in a side buffer so the HEAD of
+        // this turn's reply is not silently dropped (the chain may take up
+        // to ~10s under rate-limit backoff before it settles and frees the
+        // entry). The stashed chunks are prepended to this turn's first
+        // fresh entry once the chain settles.
+        this.streamOrphanBuffer.set(
+          sessionId,
+          (this.streamOrphanBuffer.get(sessionId) ?? '') + chunk,
+        );
         return;
       }
       // Stale state left behind by a previous turn of this session (a
@@ -1202,6 +1225,15 @@ export class QQChannel extends ChannelBase {
       this.flushingSessions.delete(sessionId);
       this.pendingStreamDelete.delete(sessionId);
       this.flushedSessions.delete(sessionId);
+      // Release the superseded turn's anchor explicitly: with the entry gone,
+      // the old chain's settle paths (its .then() early-returns on `current
+      // !== state`, and the transient-failure guard fails the same way) can
+      // never reach their own release, orphaning this msgId's msg_seq
+      // counter. The expectedMsgId identity check keeps a successor turn's
+      // anchor untouched while still cascading the counter away.
+      if (state.msgId !== undefined) {
+        this.releaseSessionReplyAnchor(sessionId, state.msgId);
+      }
       state = undefined;
     }
     if (!state) {
@@ -1211,6 +1243,14 @@ export class QQChannel extends ChannelBase {
       // triggering message's id; drop it when stale (past the 5-minute TTL)
       // so a long stream's later windows fall back to the active send path
       // instead of sending chunks with an expired msg_id.
+      const orphaned = this.streamOrphanBuffer.get(sessionId);
+      if (orphaned !== undefined) {
+        // The previous turn's deferred chain has settled and freed the
+        // streamState entry — prepend the stashed chunks so this turn's
+        // reply HEAD is delivered in order.
+        this.streamOrphanBuffer.delete(sessionId);
+        chunk = orphaned + chunk;
+      }
       let anchor: string | undefined;
       const anchorEntry = this.sessionReplyMsgId.get(sessionId);
       if (anchorEntry) {
@@ -1482,9 +1522,11 @@ export class QQChannel extends ChannelBase {
                 current.retryCount >= this.maxFlushRetries
               ) {
                 this.streamState.delete(sessionId);
-                if (state.msgId !== undefined) {
-                  this.releaseSessionReplyAnchor(sessionId, state.msgId);
-                }
+                // No release here: the turn is not over (onResponseComplete
+                // has not fired) — the anchor still belongs to this reply,
+                // and onResponseComplete's terminal release cleans it up.
+                // Releasing now would make later chunks fall back to the
+                // racy chat-level entry.
                 this.flushedSessions.delete(sessionId);
                 process.stderr.write(
                   `[QQ:${this.name}] ${logLabel} retries exhausted (buffer exceeds limit) for ${sanitizeLogText(sessionId, 64)}\n`,
@@ -1511,9 +1553,10 @@ export class QQChannel extends ChannelBase {
                 }
               } else {
                 this.streamState.delete(sessionId);
-                if (state.msgId !== undefined) {
-                  this.releaseSessionReplyAnchor(sessionId, state.msgId);
-                }
+                // No release here — same rationale as the buffer-over-limit
+                // branch above: the turn has not ended, so the anchor is
+                // still this reply's and onResponseComplete's terminal
+                // release will clean it up.
                 // #2: Clean up flushedSessions on retry exhaustion
                 this.flushedSessions.delete(sessionId);
                 process.stderr.write(
@@ -1588,8 +1631,23 @@ export class QQChannel extends ChannelBase {
       // will deliver its own residual and tear itself down. Send this turn's
       // text through the base path so it is neither lost nor mixed with the
       // old turn's anchor.
-      await super.onResponseComplete(chatId, fullText, sessionId);
-      this.releaseSessionReplyAnchor(sessionId);
+      // This turn's own anchor (set by onPromptStart) may still be valid —
+      // use it instead of falling back to the racy chat-level entry, which
+      // this PR exists to avoid re-parenting onto.
+      this.streamOrphanBuffer.delete(sessionId);
+      const anchorEntry = this.sessionReplyMsgId.get(sessionId);
+      const captured =
+        anchorEntry &&
+        Date.now() - anchorEntry.timestamp < QQChannel.REPLY_MSG_ID_TTL_MS
+          ? anchorEntry.msgId
+          : undefined;
+      if (captured) {
+        await this.sendMessage(chatId, fullText, captured);
+        this.releaseSessionReplyAnchor(sessionId, captured);
+      } else {
+        await super.onResponseComplete(chatId, fullText, sessionId);
+        this.releaseSessionReplyAnchor(sessionId);
+      }
       return;
     }
     if (state?.timer) {
@@ -1629,10 +1687,25 @@ export class QQChannel extends ChannelBase {
         // passing msgIdOverride here is the only way to carry the anchor
         // through, and it adds no behavior sendResponseMessage would.
         await this.sendMessage(chatId, remaining, capturedMsgId);
+      } else if (anchorEntry) {
+        // The anchor existed but outlived its TTL — a long turn whose final
+        // segment arrived late. Fall back to the base path (active send) and
+        // say so: a silent fallback here is what made the final segment race
+        // the chat-level entry in the first place.
+        process.stderr.write(
+          `[QQ:${this.name}] per-session reply anchor expired for final segment of ${sanitizeLogText(sessionId, 64)}\n`,
+        );
+        await super.onResponseComplete(chatId, remaining, sessionId);
       } else {
         await super.onResponseComplete(chatId, remaining, sessionId);
       }
     }
+    // Drop any orphan-side-buffer residue for this session: whichever
+    // delivery path ran above, the full reply text has now gone out (via
+    // state.buffer or fullText), so a leftover side-buffer entry could only
+    // leak into the NEXT turn's reply HEAD. The stale branch above already
+    // deleted it; this covers the normal path.
+    this.streamOrphanBuffer.delete(sessionId);
     // Release the anchor only AFTER the final segment went out. Releasing
     // first would drop the msgSeqMap counter for capturedMsgId (when no other
     // session is anchored to it and the chat entry has moved on), making the
@@ -1653,6 +1726,7 @@ export class QQChannel extends ChannelBase {
     this.pendingStreamDelete.delete(sessionId);
     this.flushedSessions.delete(sessionId);
     this.turnCounter.delete(sessionId);
+    this.streamOrphanBuffer.delete(sessionId);
     this.releaseSessionReplyAnchor(sessionId);
     super.onSessionDied(sessionId);
   }
@@ -2020,13 +2094,18 @@ export class QQChannel extends ChannelBase {
         // also hit sibling channels' live single-scope routing state and
         // silently reset their sessions. Orphan keys from the single-scope
         // era are `<thisChannel>:__single__`, so the exact match still cleans
-        // up this channel's orphans without touching sibling routes. The
-        // three-part keys are matched by prefix (`<thisChannel>:` + two more
-        // segments); a sibling's three-part keys carry a different prefix.
+        // up this channel's orphans without touching sibling routes.
         const isSingleOrphan = entry.key === `${this.name}:__single__`;
+        // 3-part user-scope keys are orphans only when this channel is NOT
+        // running a per-sender scope AND the entry genuinely belongs to this
+        // channel. Owned-by-name: routing keys are `channel:...` prefixed, so
+        // match the entry's channelName (the router records it in target)
+        // instead of string-prefixing — a channel named `my:bot` or a sibling
+        // whose name is a prefix of ours must not have its live keys purged.
         const isUserScopeOrphan =
-          this.config.sessionScope !== 'user' &&
-          entry.key.startsWith(`${this.name}:`) &&
+          (this.config.sessionScope === 'thread' ||
+            this.config.sessionScope === 'chat_thread') &&
+          entry.target?.channelName === this.name &&
           entry.key.split(':').length === 3;
         if (isSingleOrphan || isUserScopeOrphan) {
           // Release the daemon-side session too: restoreSessions() already
@@ -2169,6 +2248,19 @@ export class QQChannel extends ChannelBase {
             this.msgSeqMap.delete(entry.msgId);
           }
           this.replyMsgId.delete(chatId);
+          dirty = true;
+        }
+      }
+      // TTL safety net for orphaned per-session anchors: every release path
+      // cleans its own entry, but any missed release would otherwise leak
+      // the anchor (and its msgSeqMap counter) forever. The release helper
+      // guards on the streamState entry, so an expired anchor still held by
+      // a live stream is left alone — and a long stream's anchor, once
+      // expired, was already dropped by onResponseChunk's TTL check, so
+      // nothing here can double-release.
+      for (const [sessionId, entry] of this.sessionReplyMsgId) {
+        if (entry.timestamp < cutoff) {
+          this.releaseSessionReplyAnchor(sessionId, entry.msgId);
           dirty = true;
         }
       }
