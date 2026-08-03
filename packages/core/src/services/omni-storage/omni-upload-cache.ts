@@ -31,7 +31,11 @@ export class OmniUploadCache {
     if (this.cache !== undefined) return this.cache;
     try {
       const raw = fs.readFileSync(this.filePath, 'utf8');
-      this.cache = JSON.parse(raw) as CacheMap;
+      const parsed: unknown = JSON.parse(raw);
+      this.cache =
+        parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+          ? (parsed as CacheMap)
+          : {};
     } catch {
       this.cache = {};
     }

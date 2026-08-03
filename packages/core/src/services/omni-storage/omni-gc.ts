@@ -133,6 +133,7 @@ export async function runGc(
 
   let sweptBytes = 0;
   let sweptCount = 0;
+  let failedSweepBytes = 0;
   const sweptHashes: string[] = [];
   for (const obj of toSweep) {
     try {
@@ -141,17 +142,18 @@ export async function runGc(
       sweptCount++;
       sweptHashes.push(obj.sha256);
       debugLogger.debug(`Swept object ${obj.sha256}`);
-    } catch {
-      // already gone or permission error — skip
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        failedSweepBytes += obj.sizeBytes;
+      }
     }
   }
 
   // Phase 2: if still over budget, sweep oldest unreferenced (within retention)
-  const totalBytes =
+  let currentBytes =
     referenced.reduce((s, o) => s + o.sizeBytes, 0) +
     graceRetained.reduce((s, o) => s + o.sizeBytes, 0) +
-    sweptBytes;
-  let currentBytes = totalBytes - sweptBytes;
+    failedSweepBytes;
 
   if (currentBytes > config.maxTotalBytes) {
     graceRetained.sort((a, b) => a.mtimeMs - b.mtimeMs);
@@ -368,6 +370,7 @@ export async function runStartupRecovery(
           debugLogger.warn(
             `Hash mismatch for object ${obj.sha256}: actual ${actual}`,
           );
+          await fs.promises.unlink(obj.filePath).catch(() => {});
         }
       } catch {
         // unreadable object — skip

@@ -129,7 +129,10 @@ export class ManagedMediaStorage {
     const tmpPath = path.join(this.paths.objectsDir, tmpName);
     const hash = createHash('sha256');
 
-    await fs.promises.mkdir(this.paths.objectsDir, { recursive: true });
+    await fs.promises.mkdir(this.paths.objectsDir, {
+      recursive: true,
+      mode: 0o700,
+    });
 
     const sourceStat = await fs.promises.stat(sourcePath);
     const readStream = fs.createReadStream(sourcePath);
@@ -239,6 +242,12 @@ export class ManagedMediaStorage {
     for (const file of files) {
       const filePath = path.join(stagingPath, file);
       const stat = await fs.promises.lstat(filePath);
+      if (stat.isDirectory()) {
+        throw new Error(
+          `Unexpected subdirectory in staging ${invocationId}: "${file}". ` +
+            'Policy tools must write flat files only.',
+        );
+      }
       if (!stat.isFile()) continue;
       const ext = path.extname(file) || '.bin';
       const result = await this.commitObject(filePath, ext);
@@ -263,7 +272,10 @@ export class ManagedMediaStorage {
     const stagingPath = path.join(this.paths.stagingDir, invocationId);
     const quarantinePath = path.join(this.paths.quarantineDir, invocationId);
 
-    await fs.promises.mkdir(this.paths.quarantineDir, { recursive: true });
+    await fs.promises.mkdir(this.paths.quarantineDir, {
+      recursive: true,
+      mode: 0o700,
+    });
     await fs.promises.rename(stagingPath, quarantinePath);
     await fs.promises.writeFile(
       path.join(quarantinePath, 'reason.json'),
