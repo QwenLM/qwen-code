@@ -2303,6 +2303,13 @@ export class GeminiChat {
           params.config?.abortSignal,
           {
             pendingUserMessage: userContent,
+            // A restored/inherited chat has no API token count yet. Use the
+            // same local estimate that opened the compression gate as the
+            // accounting baseline instead of comparing the compacted history
+            // against zero.
+            ...(this.lastPromptTokenCount === 0 && {
+              originalTokenCountOverride: effectiveTokens,
+            }),
             precomputedEffectiveTokens: effectiveTokens,
             requestGenerationConfig: params.config,
             deferChatCompressionRecord: shouldForceFromHard,
