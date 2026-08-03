@@ -2625,6 +2625,48 @@ describe('modelCommand', () => {
       });
     });
 
+    it('should reject --project with a model id when --default is absent', async () => {
+      const setValue = vi.fn();
+      const settings = {
+        ...createMockSettings(setValue),
+        _merged: {},
+        computeMergedSettings: vi.fn(),
+        isTrusted: true,
+      } as unknown as LoadedSettings;
+      const ctx = setupContext();
+      ctx.services.settings = settings;
+      const result = await modelCommand.action!(ctx, '--project qwen-max');
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining(
+          'Use --default with --project or --global when persisting the main model.',
+        ),
+      });
+      expect(setValue).not.toHaveBeenCalled();
+    });
+
+    it('should reject --global with a model id when --default is absent', async () => {
+      const setValue = vi.fn();
+      const settings = {
+        ...createMockSettings(setValue),
+        _merged: {},
+        computeMergedSettings: vi.fn(),
+        isTrusted: true,
+      } as unknown as LoadedSettings;
+      const ctx = setupContext();
+      ctx.services.settings = settings;
+      const result = await modelCommand.action!(ctx, '--global qwen-max');
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining(
+          'Use --default with --project or --global when persisting the main model.',
+        ),
+      });
+      expect(setValue).not.toHaveBeenCalled();
+    });
+
     it('should include persistScope in dialog return for /model --default --project', async () => {
       const ctx = setupContext();
       const result = await modelCommand.action!(ctx, '--default --project');
@@ -2892,6 +2934,56 @@ describe('modelCommand', () => {
         'model.name',
         'qwen-max',
       );
+    });
+
+    it('persists the main model for the trailing-flag form after a whitespace run', async () => {
+      const setValue = vi.fn();
+      const settings = {
+        ...createMockSettings(setValue),
+        _merged: {},
+        computeMergedSettings: vi.fn(),
+        isTrusted: true,
+      } as unknown as LoadedSettings;
+      const mockGenerator = {
+        authType: AuthType.USE_OPENAI,
+        model: 'qwen-max',
+      };
+      const ctx = setupContext();
+      ctx.services.settings = settings;
+      const cfg = ctx.services.config as unknown as Partial<Config> & {
+        [key: string]: unknown;
+      };
+      cfg.getAvailableModelsForAuthType = vi
+        .fn()
+        .mockReturnValue([
+          { id: 'qwen-max', voiceOnly: false, fastOnly: false },
+        ]);
+      cfg.switchModel = vi.fn().mockResolvedValue(mockGenerator);
+      const result = await modelCommand.action!(ctx, 'qwen-max  --default');
+      expect(result).toMatchObject({
+        type: 'message',
+        content: expect.stringContaining('(default)'),
+      });
+      expect(setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'model.name',
+        'qwen-max',
+      );
+    });
+
+    it('should reject --default trailing an auxiliary flag model id', async () => {
+      const ctx = setupContext();
+      const result = await modelCommand.action!(
+        ctx,
+        '--fast qwen-max --default',
+      );
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining(
+          '--default only applies to the main model',
+        ),
+      });
     });
 
     it('should not include persistScope when no scope flag is given', async () => {

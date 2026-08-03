@@ -73,13 +73,26 @@ function parseScopeFlags(args: string): {
   return { scopeOverride, remaining, hasProject, hasGlobal };
 }
 
+const AUX_MODEL_FLAGS = [
+  '--fast',
+  '--voice',
+  '--vision',
+  '--compaction',
+  '--image',
+];
+
+// Detection is limited to flag positions so an inline prompt body that merely
+// mentions --default is preserved verbatim.
 function parseDefaultFlag(args: string): {
   persistDefault: boolean;
   remaining: string;
 } {
-  const leadingTokens = args.trim().split(/\s/);
+  const leadingTokens = args.trim().split(/\s+/);
   const persistDefault =
-    leadingTokens[0] === '--default' || leadingTokens[1] === '--default';
+    leadingTokens[0] === '--default' ||
+    leadingTokens[1] === '--default' ||
+    (AUX_MODEL_FLAGS.includes(leadingTokens[0]) &&
+      leadingTokens[2] === '--default');
   const remaining = persistDefault
     ? args.replace(/(?:^|\s)--default(?:\s|$)/, ' ').trim()
     : args;
@@ -539,12 +552,7 @@ export const modelCommand: SlashCommand = {
           : t(' (default)')
       : '';
     const leadingFlag = args.trim().split(/\s/)[0];
-    if (
-      persistDefault &&
-      ['--fast', '--voice', '--vision', '--compaction', '--image'].includes(
-        leadingFlag,
-      )
-    ) {
+    if (persistDefault && AUX_MODEL_FLAGS.includes(leadingFlag)) {
       return {
         type: 'message',
         messageType: 'error',
