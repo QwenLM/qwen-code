@@ -2338,9 +2338,12 @@ describe('AppContainer State Management', () => {
     it('cancels the ongoing request on a single Esc with an empty buffer and queued follow-ups', async () => {
       // Positive counterpart to the vim-INSERT guard above: while the agent
       // is Responding and the buffer is empty, one Esc must reach the
-      // cancel-work branch of the global handler — even with queued
-      // follow-up prompts present, which InputPrompt must NOT pop into the
-      // buffer (its own Responding guard handles that side; #8201).
+      // cancel-work branch of the global handler. InputPrompt must NOT pop
+      // the queue into the buffer on that Esc (its Responding guard skips
+      // the pop; #8201). The global handler itself does not touch the
+      // queue either — end-to-end the cancel path drains it back into the
+      // buffer via the cancel handler, but that hop is severed here because
+      // cancelOngoingRequest is replaced by a spy.
       const cancelSpy = vi.fn();
       const mockPopAllMessages = vi.fn().mockReturnValue(null);
       installCancelCapture({
@@ -2400,8 +2403,11 @@ describe('AppContainer State Management', () => {
 
       // A single Esc cancels the in-flight request...
       expect(cancelSpy).toHaveBeenCalledOnce();
-      // ...and must not consume the queued follow-ups (InputPrompt owns
-      // that decision and skips the pop while Responding; #8201).
+      // ...and the global keypress handler itself must not pop the queue
+      // (InputPrompt owns the ESC pop decision and skips it while Responding;
+      // #8201). End-to-end the cancel path then drains the queue back into
+      // the buffer via the cancel handler - that hop is severed here because
+      // cancelOngoingRequest is replaced by a spy.
       expect(mockPopAllMessages).not.toHaveBeenCalled();
     });
 
