@@ -595,6 +595,42 @@ describe('LogToSpanProcessor', () => {
     expect(exportedSpans[0].status.code).toBe(SpanStatusCode.OK);
   });
 
+  it('keeps cancelled tool calls UNSET even when legacy errors are present', async () => {
+    const logRecord = {
+      body: 'tool call cancelled',
+      hrTime: [1000, 0] as [number, number],
+      attributes: {
+        'event.name': 'qwen-code.tool_call',
+        status: 'cancelled',
+        success: false,
+        error: 'cancelled by user',
+        error_type: 'unhandled_exception',
+      },
+    } as unknown as ReadableLogRecord;
+
+    processor.onEmit(logRecord);
+    await processor.forceFlush();
+
+    expect(exportedSpans[0].status.code).toBe(SpanStatusCode.UNSET);
+  });
+
+  it('keeps ERROR for cancelled non-tool events that carry an error', async () => {
+    const logRecord = {
+      body: 'auth cancelled with error',
+      hrTime: [1000, 0] as [number, number],
+      attributes: {
+        'event.name': 'qwen-code.auth',
+        status: 'cancelled',
+        error_message: 'auth flow failed',
+      },
+    } as unknown as ReadableLogRecord;
+
+    processor.onEmit(logRecord);
+    await processor.forceFlush();
+
+    expect(exportedSpans[0].status.code).toBe(SpanStatusCode.ERROR);
+  });
+
   it('does not set ERROR for falsy error attributes', async () => {
     const logRecord = {
       body: 'ok event',
