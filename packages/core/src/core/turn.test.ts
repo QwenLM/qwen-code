@@ -14,6 +14,7 @@ import {
   CompressionStatus,
   Turn,
   GeminiEventType,
+  createDuplicateProviderToolCallResponse,
   findRepeatedDuplicateProviderToolCall,
 } from './turn.js';
 import type {
@@ -98,6 +99,21 @@ describe('findRepeatedDuplicateProviderToolCall', () => {
         new Set<string>(),
       ),
     ).toBeUndefined();
+  });
+});
+
+describe('createDuplicateProviderToolCallResponse', () => {
+  it('marks the synthetic response as not started', () => {
+    const response = createDuplicateProviderToolCallResponse({
+      callId: 'duplicate-response',
+      providerCallId: 'provider-call',
+      name: 'read_file',
+      args: {},
+      isClientInitiated: false,
+      prompt_id: 'prompt-duplicate',
+    });
+
+    expect(response.executionStatus).toBe('not_started');
   });
 });
 
