@@ -3221,6 +3221,64 @@ describe('GeminiChat', async () => {
       ]);
     });
 
+    it('records interleaved reasoning episodes in the JSONL turn, not just in-memory history', async () => {
+      // Regression guard: `getHistory()` and the recorded JSONL message are
+      // built from separately-maintained data (recordAssistantTurn takes
+      // its own `message` argument). A regression that drops reasoning
+      // before recording (e.g. filtering thought parts out of the recorded
+      // message only) would keep every history-only assertion above green
+      // while silently losing every thoughtSignature on `--resume` replay.
+      const recordAssistantTurn = vi.fn();
+      const chatWithRecording = new GeminiChat(
+        mockConfig,
+        config,
+        [],
+        {
+          recordAssistantTurn,
+          recordChatCompression: vi.fn(),
+        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        uiTelemetryService,
+      );
+      const stream = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [
+                  { text: 'A', thought: true },
+                  { thought: true, thoughtSignature: 'sigA' },
+                  { functionCall: { id: 'call1', name: 'tool', args: {} } },
+                  { text: 'B', thought: true },
+                  { thought: true, thoughtSignature: 'sigB' },
+                  { functionCall: { id: 'call2', name: 'tool', args: {} } },
+                ],
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        stream,
+      );
+
+      const res = await chatWithRecording.sendMessageStream(
+        'm1',
+        { message: 'interleave' },
+        'p-interleave-recording',
+      );
+      for await (const _ of res);
+
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      expect(recordAssistantTurn.mock.calls[0]?.[0].message).toEqual([
+        { text: 'A', thought: true, thoughtSignature: 'sigA' },
+        { functionCall: { id: 'call1', name: 'tool', args: {} } },
+        { text: 'B', thought: true, thoughtSignature: 'sigB' },
+        { functionCall: { id: 'call2', name: 'tool', args: {} } },
+      ]);
+    });
+
     it('should split back-to-back reasoning episodes with no intervening tool call, once the first episode has its signature', async () => {
       // Both wires terminate an episode with a text-less, signature-only
       // chunk. Fresh text arriving after an already-signed open episode can
@@ -16123,6 +16181,62 @@ describe('GeminiChat', async () => {
       const callIndex = parts.findIndex((p) => p.functionCall);
       expect(textIndex).toBeGreaterThanOrEqual(0);
       expect(callIndex).toBeGreaterThan(textIndex);
+      expect(parts.some((p) => p.text && p.text.includes('<invoke'))).toBe(
+        false,
+      );
+    });
+
+    it('recovers XML tool calls from a plain-text part carrying a stray thoughtSignature (no thought flag)', async () => {
+      // Regression for a predicate-divergence bug: loggingContentGenerator's
+      // stream aggregation spreads `thought` and `thoughtSignature`
+      // independently (see loggingContentGenerator.ts), so a real wire shape
+      // can carry `thoughtSignature` on a part that is NOT flagged
+      // `thought: true`. contentText's filter (`part.text && !part.thought`)
+      // picks this part up for XML detection, but the removal loop must use
+      // an identical predicate or the part survives untouched -- leaking the
+      // raw XML into durable history right alongside the recovered
+      // functionCall.
+      const xml =
+        '<invoke name="read_file"><parameter name="file_path">a.ts</parameter></invoke>';
+      const text = 'Sure.\n' + xml;
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: {
+                  role: 'model',
+                  parts: [{ text, thoughtSignature: 'stray-sig' }],
+                },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-pro',
+        { message: 'read the file' },
+        'prompt-xml-fallback-stray-signature',
+      );
+
+      const chunks: GenerateContentResponse[] = [];
+      for await (const event of stream) {
+        if (event.type === StreamEventType.CHUNK) {
+          chunks.push(event.value);
+        }
+      }
+
+      const syntheticChunk = chunks.find((c) =>
+        c.candidates?.[0]?.content?.parts?.some((p) => p.functionCall),
+      );
+      expect(syntheticChunk).toBeDefined();
+
+      const history = chat.getHistory();
+      const lastEntry = history[history.length - 1]!;
+      const parts = lastEntry.parts ?? [];
+      expect(parts.some((p) => p.functionCall)).toBe(true);
       expect(parts.some((p) => p.text && p.text.includes('<invoke'))).toBe(
         false,
       );

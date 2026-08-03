@@ -1174,6 +1174,67 @@ describe('AnthropicContentConverter', () => {
       expect(blocks[0]?.signature).toBe('sigB');
     });
 
+    it('ensureLeadingAssistantThinking moves only the first thinking run when the assistant turn has multiple thinking/tool_use pairs', () => {
+      // Guards the "only the first thinking run moves" invariant: a
+      // mutation that scans with `blocks.filter(isThinking)` (hoist every
+      // thinking block, the exact corruption this option was added to
+      // avoid) produces the identical result as the single-run test above
+      // and would pass undetected without this multi-run case.
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            { role: 'model', parts: [{ text: 'text A' }] },
+            {
+              role: 'model',
+              parts: [
+                {
+                  text: 'thinking 1',
+                  thought: true,
+                  thoughtSignature: 'sig1',
+                },
+                { functionCall: { id: 't1', name: 'tool', args: {} } },
+              ],
+            },
+            {
+              role: 'model',
+              parts: [
+                {
+                  text: 'thinking 2',
+                  thought: true,
+                  thoughtSignature: 'sig2',
+                },
+                { functionCall: { id: 't2', name: 'tool', args: {} } },
+              ],
+            },
+          ],
+        },
+        { ensureLeadingAssistantThinking: true },
+      );
+
+      const assistant = messages[1];
+      const blocks = assistant?.content as Array<{
+        type: string;
+        text?: string;
+        thinking?: string;
+        id?: string;
+      }>;
+      expect(blocks.map((b) => b.type)).toEqual([
+        'thinking',
+        'text',
+        'tool_use',
+        'thinking',
+        'tool_use',
+      ]);
+      expect(blocks[0]?.thinking).toBe('thinking 1');
+      expect(blocks[1]?.text).toBe('text A');
+      expect(blocks[2]?.id).toBe('t1');
+      // The second thinking run stays exactly where it was chronologically.
+      expect(blocks[3]?.thinking).toBe('thinking 2');
+      expect(blocks[4]?.id).toBe('t2');
+    });
+
     it('cleans orphaned tool_use blocks without matching tool_result', () => {
       // A genuine orphan requires a subsequent message that was actually
       // scanned and found lacking a matching tool_result -- not merely the

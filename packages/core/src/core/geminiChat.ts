@@ -4318,6 +4318,24 @@ export class GeminiChat {
     }
     flushThoughtEpisode();
 
+    // Single predicate for "visible text part", shared by contentText's
+    // computation here, its post-recovery recompute below, and the
+    // XML-recovery removal loop -- so a part that contributes to contentText
+    // is always exactly the set of parts recovery removes and replaces with
+    // remainingText. A prior divergence (contentText used `part.text &&
+    // !part.thought` while the removal loop used the stricter
+    // isValidNonThoughtTextPart, which also excludes any part carrying a
+    // thoughtSignature) let a real wire shape slip through: a part with
+    // `thoughtSignature` set but no `thought: true` (see
+    // loggingContentGenerator.ts's independent thought/thoughtSignature
+    // spreads) was scanned for XML here but survived the removal loop
+    // untouched, leaking raw tool-call XML into durable history alongside
+    // the recovered functionCall. Intentionally looser than
+    // isValidNonThoughtTextPart: hasAnyContent below must keep treating such
+    // a part as visible text, not silently empty.
+    const isVisibleTextPart = (part: Part): boolean =>
+      Boolean(part.text) && !part.thought;
+
     const thoughtText = consolidatedHistoryParts
       .filter((part) => part.thought)
       .map((part) => part.text)
@@ -4325,7 +4343,7 @@ export class GeminiChat {
       .trim();
 
     let contentText = consolidatedHistoryParts
-      .filter((part) => part.text && !part.thought)
+      .filter(isVisibleTextPart)
       .map((part) => part.text)
       .join('')
       .trim();
@@ -4354,16 +4372,18 @@ export class GeminiChat {
         // only those are consumed here. Remove them, reinsert remainingText
         // at the first text position so non-text parts (inlineData/fileData)
         // keep their original relative order, and append functionCallParts
-        // at the end. Must use isValidNonThoughtTextPart rather than a bare
-        // `.text !== undefined` check: flushThoughtEpisode always sets
-        // `episodePart.text` (even '' for a signature-only episode), so a
-        // reasoning episode Part satisfies a bare text check exactly like a
-        // plain-text Part -- a raw check here would delete the turn's
-        // reasoning episode (text and thoughtSignature) whenever XML
-        // recovery fires on the same turn.
+        // at the end. Must use isVisibleTextPart (the same predicate as
+        // contentText above) rather than a bare `.text !== undefined` check
+        // or the stricter isValidNonThoughtTextPart -- see isVisibleTextPart's
+        // doc for why both alternatives are wrong here: a bare text check
+        // would delete a reasoning episode's text and thoughtSignature
+        // whenever XML recovery fires on the same turn (flushThoughtEpisode
+        // always sets `episodePart.text`, even '' for a signature-only
+        // episode), while isValidNonThoughtTextPart would leave a
+        // thoughtSignature-bearing non-thought part's raw XML behind.
         const textIndices: number[] = [];
         for (let i = 0; i < consolidatedHistoryParts.length; i++) {
-          if (isValidNonThoughtTextPart(consolidatedHistoryParts[i]!))
+          if (isVisibleTextPart(consolidatedHistoryParts[i]!))
             textIndices.push(i);
         }
         for (let j = textIndices.length - 1; j >= 0; j--) {
@@ -4382,7 +4402,7 @@ export class GeminiChat {
         // Recompute contentText so the JSONL recording below stays
         // aligned with in-memory history (--resume fidelity).
         contentText = consolidatedHistoryParts
-          .filter((part) => part.text && !part.thought)
+          .filter(isVisibleTextPart)
           .map((part) => part.text)
           .join('')
           .trim();

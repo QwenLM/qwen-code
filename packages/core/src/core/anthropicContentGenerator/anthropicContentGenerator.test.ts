@@ -3004,6 +3004,82 @@ describe('AnthropicContentGenerator', () => {
       });
       expect(latestAssistant.content[2]?.type).toBe('tool_use');
     });
+
+    it('leaves the latest assistant turn in chronological order under adaptive thinking (no explicit budget)', async () => {
+      // Guards the generator's `ensureLeadingAssistantThinking:
+      // thinking?.type === 'enabled'` gate: a regression to `!!thinking`
+      // (truthy for both `{type:'enabled'}` and `{type:'adaptive'}`) would
+      // silently reintroduce the hoist-every-thinking corruption this PR
+      // removed from the merge path, but only on adaptive-thinking models
+      // -- which the manual-mode test above cannot catch.
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'msg-2',
+        model: 'claude-opus-4-6',
+        content: [{ type: 'text', text: 'ok' }],
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-opus-4-6',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500 },
+          schemaCompliance: 'auto',
+          // No explicit budget_tokens: claude-opus-4-6 (a 4.6+ model)
+          // defaults to adaptive thinking.
+        },
+        mockConfig,
+      );
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: [
+          { role: 'user' as const, parts: [{ text: 'Run tool' }] },
+          {
+            role: 'model' as const,
+            parts: [{ text: 'Sure, one moment.' }],
+          },
+          {
+            role: 'model' as const,
+            parts: [
+              {
+                text: 'reasoning about the tool call',
+                thought: true,
+                thoughtSignature: 'sig-1',
+              },
+              { functionCall: { id: 't1', name: 'tool', args: {} } },
+            ],
+          },
+        ],
+      } as unknown as GenerateContentParameters);
+
+      const [rawRequest] = anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      const anthropicRequest = rawRequest as {
+        thinking?: unknown;
+        messages: Array<{
+          role: string;
+          content: Array<{ type: string; text?: string }>;
+        }>;
+      };
+
+      expect(anthropicRequest.thinking).toEqual({
+        type: 'adaptive',
+        display: 'summarized',
+      });
+
+      const assistantMessages = anthropicRequest.messages.filter(
+        (m) => m.role === 'assistant',
+      );
+      const latestAssistant = assistantMessages.at(-1)!;
+      expect(latestAssistant.content.map((b) => b.type)).toEqual([
+        'text',
+        'thinking',
+        'tool_use',
+      ]);
+    });
   });
 
   // https://github.com/QwenLM/qwen-code/issues/3786 — DeepSeek's
