@@ -215,7 +215,10 @@ import {
   encodeVisionModelForSetting,
   extractBareModelId,
 } from './utils/modelEncoding';
-import { appendOrDeferLocalUserMessage } from './utils/localCommandQueue';
+import {
+  appendLocalUserEchoIfIdle,
+  appendOrDeferLocalUserMessage,
+} from './utils/localCommandQueue';
 import { QueuedPromptDisplay } from './components/QueuedPromptDisplay';
 import { useQueuedPrompts } from './hooks/useQueuedPrompts';
 import { useNewSessionSuggestion } from './hooks/useNewSessionSuggestion';
@@ -5003,6 +5006,19 @@ export function App({
     [store],
   );
 
+  // Echo a local command when idle, but never block it. Read-only display
+  // commands (/stats, /about, /context) render their result as a status
+  // block, which does not split the active turn, so they run immediately
+  // mid-turn with only the echo skipped (see appendLocalUserEchoIfIdle).
+  const echoLocalCommandIfIdle = useCallback(
+    (text: string): void => {
+      appendLocalUserEchoIfIdle(streamingStateRef.current !== 'idle', text, {
+        append: (value: string) => store.appendLocalUserMessage(value),
+      });
+    },
+    [store],
+  );
+
   const blockLocalCommandDuringTurn = useCallback((): false => {
     pushToast('error', t('queue.commandBlocked'));
     return false;
@@ -5865,10 +5881,11 @@ export function App({
   // is revealed even when the click comes while scrolled up.
   const showContextUsage = useCallback(
     (commandText: string, detail: boolean) => {
-      // Self-guard so every entry point (keyboard, status-bar button, in-chat
-      // "context detail" click) defers mid-turn instead of splitting the turn.
+      // Read-only: every entry point (keyboard, status-bar button, in-chat
+      // "context detail" click) runs immediately, even mid-turn — only the
+      // echo is skipped while streaming so the active turn is not split.
       if (!requireActiveSessionForLocalCommand()) return;
-      if (echoOrDeferLocalCommand(commandText)) return;
+      echoLocalCommandIfIdle(commandText);
       sessionActions
         .getContextUsage({ detail })
         .then((result) => {
@@ -5885,7 +5902,7 @@ export function App({
         });
     },
     [
-      echoOrDeferLocalCommand,
+      echoLocalCommandIfIdle,
       store,
       requireActiveSessionForLocalCommand,
       sessionActions,
@@ -7561,7 +7578,7 @@ export function App({
             if (statsArg === 'model') statsView = 'model';
             else if (statsArg === 'tools') statsView = 'tools';
             if (!requireActiveSessionForLocalCommand()) return false;
-            if (echoOrDeferLocalCommand(text, images)) return true;
+            echoLocalCommandIfIdle(text);
             sessionActions
               .getStats()
               .then((result) => {
@@ -7577,7 +7594,7 @@ export function App({
             return true;
           }
           if (cmd === 'status' || cmd === 'about') {
-            if (echoOrDeferLocalCommand(text, images)) return true;
+            echoLocalCommandIfIdle(text);
             Promise.all([
               workspaceActions.loadPreflight().catch(() => null),
               workspaceActions.loadProviders().catch(() => null),
@@ -7780,6 +7797,7 @@ export function App({
       store,
       enqueuePrompt,
       echoOrDeferLocalCommand,
+      echoLocalCommandIfIdle,
       branchCurrentSession,
       closeMobileDrawer,
       closePanel,
