@@ -14,6 +14,8 @@ import {
   remoteAssetPath,
   validateAssetBatch,
   validateAssetFile,
+  sniffImageFormat,
+  validateAssetContent,
 } from './assets.js';
 
 describe('assetsBranch', () => {
@@ -156,5 +158,54 @@ describe('validateAssetBatch', () => {
     ]);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toContain('evil.svg');
+  });
+});
+
+describe('sniffImageFormat / validateAssetContent', () => {
+  const PNG = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const JPEG = Uint8Array.from([0xff, 0xd8, 0xff, 0xe0]);
+  const GIF = Uint8Array.from([...'GIF89a'].map((c) => c.charCodeAt(0)));
+  const WEBP = Uint8Array.from(
+    [...'RIFF\u0000\u0000\u0000\u0000WEBP'].map((c) => c.charCodeAt(0)),
+  );
+
+  it('recognizes the four admitted signatures', () => {
+    expect(sniffImageFormat(PNG)).toBe('png');
+    expect(sniffImageFormat(JPEG)).toBe('jpeg');
+    expect(sniffImageFormat(GIF)).toBe('gif');
+    expect(sniffImageFormat(WEBP)).toBe('webp');
+  });
+
+  it('returns null for non-images, truncated headers, and empty input', () => {
+    expect(sniffImageFormat(Uint8Array.from([...'#!/bin/sh\n'].map((c) => c.charCodeAt(0))))).toBeNull();
+    expect(sniffImageFormat(PNG.subarray(0, 4))).toBeNull();
+    expect(sniffImageFormat(Uint8Array.from([]))).toBeNull();
+    // RIFF alone is not WEBP — AVI and WAV share the container prefix.
+    expect(sniffImageFormat(Uint8Array.from([...'RIFF0000AVI '].map((c) => c.charCodeAt(0))))).toBeNull();
+  });
+
+  it('admits content that matches the extension claim', () => {
+    expect(validateAssetContent('a.png', PNG).ok).toBe(true);
+    expect(validateAssetContent('b.jpg', JPEG).ok).toBe(true);
+    expect(validateAssetContent('b.jpeg', JPEG).ok).toBe(true);
+    expect(validateAssetContent('c.gif', GIF).ok).toBe(true);
+    expect(validateAssetContent('d.webp', WEBP).ok).toBe(true);
+  });
+
+  it('refuses a name whose content is a different format — or no image at all', () => {
+    // The attack shape: arbitrary bytes named *.png hosted at a github.com
+    // URL through a review's evidence push.
+    const shell = Uint8Array.from([...'#!/bin/sh\n'].map((c) => c.charCodeAt(0)));
+    const r1 = validateAssetContent('evil.png', shell);
+    expect(r1.ok).toBe(false);
+    if (!r1.ok) expect(r1.reason).toContain('not a recognized image');
+    const r2 = validateAssetContent('mislabeled.png', JPEG);
+    expect(r2.ok).toBe(false);
+    if (!r2.ok) expect(r2.reason).toContain('jpeg');
+  });
+
+  it('fails closed on an extension outside the allowlist', () => {
+    expect(validateAssetContent('x.svg', PNG).ok).toBe(false);
+    expect(validateAssetContent('noext', PNG).ok).toBe(false);
   });
 });

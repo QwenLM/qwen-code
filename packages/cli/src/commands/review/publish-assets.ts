@@ -45,6 +45,7 @@ import {
   rawAssetUrl,
   remoteAssetPath,
   validateAssetBatch,
+  validateAssetContent,
   type AssetsManifest,
   type PublishedAsset,
 } from './lib/assets.js';
@@ -386,6 +387,17 @@ export function runPublishAssets(args: PublishAssetsArgs): void {
           err instanceof Error ? err.message : String(err)
         }`,
       );
+      return;
+    }
+    // The batch ruling above admitted the file by name and size; this one
+    // admits it by CONTENT — an extension is a claim anyone can make, and
+    // the allowlist is only as strong as the bytes behind it.
+    const contentRuling = validateAssetContent(
+      st.basename,
+      content.subarray(0, 16),
+    );
+    if (!contentRuling.ok) {
+      refuse(contentRuling.reason);
       return;
     }
     const sha256 = createHash('sha256').update(content).digest('hex');

@@ -290,6 +290,23 @@ describe('publish-assets', () => {
     );
   });
 
+  it('refuses bytes that are not the image their name claims — exit 3, nothing pushed', () => {
+    // The extension allowlist is only as strong as the bytes behind it: a
+    // shell script named evidence.png must refuse on CONTENT, before any
+    // upload happens.
+    happyGh();
+    const impostor = join(dir, 'evidence.png');
+    writeFileSync(impostor, '#!/bin/sh\necho pwned\n');
+    run({ files: [impostor] });
+    expect(process.exitCode).toBe(3);
+    const why = (stderrSpy.mock.calls.map((c) => c[0]) as string[]).join(' ');
+    expect(why).toContain('not a recognized image');
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+    expect(stdoutSpy).toHaveBeenCalledWith(
+      JSON.stringify({ published: false }),
+    );
+  });
+
   it('refuses an unreadable file the same way', () => {
     run({ files: [join(dir, 'absent.png')] });
     expect(process.exitCode).toBe(3);

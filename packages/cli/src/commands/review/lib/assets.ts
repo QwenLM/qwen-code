@@ -25,6 +25,86 @@
  * evidence, not arbitrary files. */
 export const ASSET_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp']);
 
+/** The container format each allowed extension claims to carry. */
+const EXTENSION_FORMAT: Record<string, 'png' | 'jpeg' | 'gif' | 'webp'> = {
+  png: 'png',
+  jpg: 'jpeg',
+  jpeg: 'jpeg',
+  gif: 'gif',
+  webp: 'webp',
+};
+
+/**
+ * Detect the image format from a file's first bytes.
+ *
+ * The allowlist above is extension-based, and an extension is a claim anyone
+ * can make: without content sniffing, whatever can name a file `*.png` can
+ * host up to the size cap of arbitrary bytes at a `github.com` URL through a
+ * review's evidence push. Magic bytes bind the claim to the content — the
+ * four admitted formats all carry unambiguous fixed signatures.
+ */
+export function sniffImageFormat(
+  header: Uint8Array,
+): 'png' | 'jpeg' | 'gif' | 'webp' | null {
+  const at = (i: number): number => header[i] ?? -1;
+  const ascii = (i: number, s: string): boolean =>
+    [...s].every((ch, k) => at(i + k) === ch.charCodeAt(0));
+  if (
+    at(0) === 0x89 &&
+    ascii(1, 'PNG') &&
+    at(4) === 0x0d &&
+    at(5) === 0x0a &&
+    at(6) === 0x1a &&
+    at(7) === 0x0a
+  ) {
+    return 'png';
+  }
+  if (at(0) === 0xff && at(1) === 0xd8 && at(2) === 0xff) {
+    return 'jpeg';
+  }
+  if (ascii(0, 'GIF87a') || ascii(0, 'GIF89a')) {
+    return 'gif';
+  }
+  if (ascii(0, 'RIFF') && ascii(8, 'WEBP')) {
+    return 'webp';
+  }
+  return null;
+}
+
+/**
+ * Rule on a file's CONTENT against the format its extension claims. Pure —
+ * the caller hands over the first bytes — and fail-closed: an unrecognized
+ * signature refuses even when the extension is allowed.
+ */
+export function validateAssetContent(
+  basename: string,
+  header: Uint8Array,
+): { ok: true } | { ok: false; reason: string } {
+  const ext = basename.includes('.')
+    ? basename.slice(basename.lastIndexOf('.') + 1).toLowerCase()
+    : '';
+  const claimed = EXTENSION_FORMAT[ext];
+  if (claimed === undefined) {
+    return {
+      ok: false,
+      reason:
+        `${basename}: extension ${JSON.stringify(ext)} is not an allowed ` +
+        `evidence image type (${[...ASSET_EXTENSIONS].join(', ')})`,
+    };
+  }
+  const actual = sniffImageFormat(header);
+  if (actual !== claimed) {
+    return {
+      ok: false,
+      reason:
+        `${basename}: content is ${actual ?? 'not a recognized image'} but ` +
+        `the extension claims ${claimed} — evidence is admitted by content, ` +
+        `not by name`,
+    };
+  }
+  return { ok: true };
+}
+
 /** Per-file and per-run size caps. Evidence screenshots are hundreds of
  * kilobytes; a cap far above that catches the accidental screen-recording or
  * bundled binary without ever bothering a legitimate run. */
