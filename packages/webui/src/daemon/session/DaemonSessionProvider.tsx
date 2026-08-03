@@ -38,6 +38,7 @@ import {
   getStableClientId,
   persistStableClientId,
 } from './clientLifecycle.js';
+import { extractHttpStatus, isRecord } from './httpErrors.js';
 import { useOptionalDaemonWorkspace } from '../workspace/DaemonWorkspaceProvider.js';
 import {
   getCurrentMode,
@@ -120,7 +121,7 @@ export interface DaemonTranscriptHistory {
   loading: boolean;
   capacityReached: boolean;
   paginationError: boolean;
-  loadMore(): Promise<void>;
+  loadMore(options?: { force?: boolean }): Promise<void>;
 }
 
 const SESSION_TRANSCRIPT_PAGINATION_FEATURE = 'session_transcript_pagination';
@@ -255,6 +256,8 @@ function projectSubagentToolUpdate(
   const subagentType = boundedString(rawInput?.['subagent_type'], 120);
   const prompt = boundedString(rawInput?.['prompt'], 240);
   const description = boundedString(rawInput?.['description'], 240);
+  const todoId =
+    typeof rawInput?.['todo_id'] === 'string' ? rawInput['todo_id'] : undefined;
   const subagentName = boundedString(rawOutput?.['subagentName'], 120);
   const subagentColor = boundedString(rawOutput?.['subagentColor'], 80);
   const taskDescription = boundedString(rawOutput?.['taskDescription'], 240);
@@ -265,6 +268,7 @@ function projectSubagentToolUpdate(
         ...(subagentType ? { subagent_type: subagentType } : {}),
         ...(prompt ? { prompt } : {}),
         ...(description ? { description } : {}),
+        ...(todoId ? { todo_id: todoId } : {}),
         ...(rawInput['run_in_background'] === true
           ? { run_in_background: true }
           : {}),
@@ -2405,163 +2409,177 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       store,
     ],
   );
-  const loadMoreTranscript = useCallback(async () => {
-    const history = transcriptHistoryRef.current;
-    const activeSession = sessionRef.current;
-    if (
-      !history.hasMore ||
-      history.loading ||
-      history.paginationError ||
-      !activeSession ||
-      activeSession.sessionId !== history.sessionId
-    ) {
-      return;
-    }
-
-    history.loading = true;
-    setTranscriptHistoryState({
-      hasMore: true,
-      loading: true,
-      capacityReached: false,
-      paginationError: false,
-    });
-    let terminalFailure = false;
-    try {
-      const page = await activeSession.client.getSessionTranscriptPage(
-        activeSession.sessionId,
-        {
-          ...(history.cursor !== undefined
-            ? { cursor: history.cursor }
-            : history.beforeRecordId !== undefined
-              ? { beforeRecordId: history.beforeRecordId }
-              : {}),
-          limit: historyPageSizeRef.current ?? 100,
-          clientId: activeSession.clientId,
-        },
-      );
+  const loadMoreTranscript = useCallback(
+    async (options?: { force?: boolean }) => {
+      const history = transcriptHistoryRef.current;
+      const activeSession = sessionRef.current;
       if (
-        sessionRef.current !== activeSession ||
-        transcriptHistoryRef.current !== history
+        history.loading ||
+        !activeSession ||
+        activeSession.sessionId !== history.sessionId
       ) {
         return;
       }
-      if (page.partial || page.replayError) {
-        terminalFailure = true;
-        throw new Error(
-          page.replayError ?? 'Earlier session history was only partially read',
-        );
-      }
-
-      const replayOpts = {
-        ...eventOptionsRef.current,
-        suppressOwnUserEcho: false,
-      };
-      const nextBeforeRecordId = page.events
-        .map(getPersistedReplayRecordId)
-        .find((recordId): recordId is string => recordId !== undefined);
-      const uiEvents: DaemonUiEvent[] = [];
-      for (const replayEvent of page.events) {
-        try {
-          const transcriptEvents = filterDaemonUiEventsForTranscript(
-            replayEvent,
-            normalizeAndFilterEvent(
-              replayEvent,
-              activeSession.clientId,
-              replayOpts,
-              setConnection,
-              { updateConnection: false },
-            ),
-            addNotice,
-            dismissNotice,
-          );
-          uiEvents.push(
-            ...(subagentTranscriptModeRef.current === 'summary'
-              ? projectMainTranscriptEvents(transcriptEvents)
-              : transcriptEvents),
-          );
-        } catch (error) {
-          const message =
-            error instanceof Error ? error.message : String(error);
-          addNotice({
-            severity: 'warning',
-            category: 'protocol',
-            operation: 'normalize_event',
-            code: 'daemon.replay_event_malformed',
-            message: 'Skipped malformed history event',
-            debugMessage: message,
-            recoverable: true,
-          });
-          console.warn(
-            '[DaemonSessionProvider] skipped malformed history event:',
-            error,
-          );
+      if (history.paginationError) {
+        if (options?.force !== true) {
+          return;
         }
-      }
-      if (
-        uiEvents.length > 0 &&
-        !prependTranscriptHistory(store, uiEvents, maxBlocks)
-      ) {
-        history.hasMore = false;
-        history.loading = false;
-        history.capacityReached = true;
-        setTranscriptHistoryState({
-          hasMore: false,
-          loading: false,
-          capacityReached: true,
-          paginationError: false,
-        });
+        // The failed page's cursor was never advanced, so clearing the
+        // latched error retries that exact page.
+        history.paginationError = false;
+        history.hasMore = true;
+      } else if (!history.hasMore) {
         return;
       }
-      const hasCapacity = store.getSnapshot().blocks.length < maxBlocks;
-      history.capacityReached = page.hasMore && !hasCapacity;
-      history.cursor =
-        nextBeforeRecordId === undefined ? page.nextCursor : undefined;
-      history.beforeRecordId = nextBeforeRecordId;
-      history.hasMore = page.hasMore && hasCapacity;
-      history.loading = false;
+
+      history.loading = true;
       setTranscriptHistoryState({
-        hasMore: history.hasMore,
-        loading: false,
-        capacityReached: history.capacityReached,
+        hasMore: true,
+        loading: true,
+        capacityReached: false,
         paginationError: false,
       });
-    } catch (error) {
-      if (
-        sessionRef.current !== activeSession ||
-        transcriptHistoryRef.current !== history
-      ) {
-        return;
-      }
-      const retryable =
-        !terminalFailure &&
-        (!(error instanceof DaemonHttpError) ||
-          error.status >= 500 ||
-          error.status === 408 ||
-          error.status === 429);
-      history.hasMore = retryable;
-      history.loading = false;
-      history.capacityReached = false;
-      history.paginationError = !retryable;
-      setTranscriptHistoryState({
-        hasMore: retryable,
-        loading: false,
-        capacityReached: false,
-        paginationError: !retryable,
-      });
-      if (retryable) {
-        addNotice({
-          severity: 'warning',
-          category: 'user_action',
-          operation: 'load_session',
-          code: 'daemon.transcript_history.failed',
-          message: 'Failed to load earlier session history',
-          debugMessage: error instanceof Error ? error.message : String(error),
-          recoverable: retryable,
+      let terminalFailure = false;
+      try {
+        const page = await activeSession.client.getSessionTranscriptPage(
+          activeSession.sessionId,
+          {
+            ...(history.cursor !== undefined
+              ? { cursor: history.cursor }
+              : history.beforeRecordId !== undefined
+                ? { beforeRecordId: history.beforeRecordId }
+                : {}),
+            limit: historyPageSizeRef.current ?? 100,
+            clientId: activeSession.clientId,
+          },
+        );
+        if (
+          sessionRef.current !== activeSession ||
+          transcriptHistoryRef.current !== history
+        ) {
+          return;
+        }
+        if (page.partial || page.replayError) {
+          terminalFailure = true;
+          throw new Error(
+            page.replayError ??
+              'Earlier session history was only partially read',
+          );
+        }
+
+        const replayOpts = {
+          ...eventOptionsRef.current,
+          suppressOwnUserEcho: false,
+        };
+        const nextBeforeRecordId = page.events
+          .map(getPersistedReplayRecordId)
+          .find((recordId): recordId is string => recordId !== undefined);
+        const uiEvents: DaemonUiEvent[] = [];
+        for (const replayEvent of page.events) {
+          try {
+            const transcriptEvents = filterDaemonUiEventsForTranscript(
+              replayEvent,
+              normalizeAndFilterEvent(
+                replayEvent,
+                activeSession.clientId,
+                replayOpts,
+                setConnection,
+                { updateConnection: false },
+              ),
+              addNotice,
+              dismissNotice,
+            );
+            uiEvents.push(
+              ...(subagentTranscriptModeRef.current === 'summary'
+                ? projectMainTranscriptEvents(transcriptEvents)
+                : transcriptEvents),
+            );
+          } catch (error) {
+            const message =
+              error instanceof Error ? error.message : String(error);
+            addNotice({
+              severity: 'warning',
+              category: 'protocol',
+              operation: 'normalize_event',
+              code: 'daemon.replay_event_malformed',
+              message: 'Skipped malformed history event',
+              debugMessage: message,
+              recoverable: true,
+            });
+            console.warn(
+              '[DaemonSessionProvider] skipped malformed history event:',
+              error,
+            );
+          }
+        }
+        if (
+          uiEvents.length > 0 &&
+          !prependTranscriptHistory(store, uiEvents, maxBlocks)
+        ) {
+          history.hasMore = false;
+          history.loading = false;
+          history.capacityReached = true;
+          setTranscriptHistoryState({
+            hasMore: false,
+            loading: false,
+            capacityReached: true,
+            paginationError: false,
+          });
+          return;
+        }
+        const hasCapacity = store.getSnapshot().blocks.length < maxBlocks;
+        history.capacityReached = page.hasMore && !hasCapacity;
+        history.cursor =
+          nextBeforeRecordId === undefined ? page.nextCursor : undefined;
+        history.beforeRecordId = nextBeforeRecordId;
+        history.hasMore = page.hasMore && hasCapacity;
+        history.loading = false;
+        setTranscriptHistoryState({
+          hasMore: history.hasMore,
+          loading: false,
+          capacityReached: history.capacityReached,
+          paginationError: false,
         });
+      } catch (error) {
+        if (
+          sessionRef.current !== activeSession ||
+          transcriptHistoryRef.current !== history
+        ) {
+          return;
+        }
+        const retryable =
+          !terminalFailure &&
+          (!(error instanceof DaemonHttpError) ||
+            error.status >= 500 ||
+            error.status === 408 ||
+            error.status === 429);
+        history.hasMore = retryable;
+        history.loading = false;
+        history.capacityReached = false;
+        history.paginationError = !retryable;
+        setTranscriptHistoryState({
+          hasMore: retryable,
+          loading: false,
+          capacityReached: false,
+          paginationError: !retryable,
+        });
+        if (retryable) {
+          addNotice({
+            severity: 'warning',
+            category: 'user_action',
+            operation: 'load_session',
+            code: 'daemon.transcript_history.failed',
+            message: 'Failed to load earlier session history',
+            debugMessage:
+              error instanceof Error ? error.message : String(error),
+            recoverable: retryable,
+          });
+        }
+        throw error;
       }
-      throw error;
-    }
-  }, [addNotice, dismissNotice, maxBlocks, store]);
+    },
+    [addNotice, dismissNotice, maxBlocks, store],
+  );
   const transcriptHistoryValue = useMemo<DaemonTranscriptHistory>(() => {
     const active =
       connection.sessionId === transcriptHistoryRef.current.sessionId &&
@@ -3237,16 +3255,4 @@ function isTerminalSessionHttpError(error: unknown): boolean {
 function isAuthFailureHttpError(error: unknown): boolean {
   const status = extractHttpStatus(error);
   return status !== undefined && AUTH_FAILURE_HTTP_STATUSES.has(status);
-}
-
-function extractHttpStatus(error: unknown): number | undefined {
-  if (error instanceof DaemonHttpError) return error.status;
-  if (isRecord(error) && typeof error['status'] === 'number') {
-    return error['status'];
-  }
-  return undefined;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

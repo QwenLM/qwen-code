@@ -152,6 +152,8 @@ function pushQueue(signal?: AbortSignal): PushIterable {
   };
 }
 
+const TEST_WORKSPACE = path.resolve('/ws');
+
 // A controllable fake bridge: tests register what `sendPrompt` should do.
 class FakeBridge {
   queues = new Map<string, PushIterable>();
@@ -193,7 +195,7 @@ class FakeBridge {
     if (this.gate) await this.gate;
     return {
       sessionId: this.spawnSessionId,
-      workspaceCwd: '/ws',
+      workspaceCwd: TEST_WORKSPACE,
       attached: false,
       clientId: this.spawnClientId,
     };
@@ -217,7 +219,7 @@ class FakeBridge {
     if (this.gate) await this.gate;
     return {
       sessionId: req.sessionId,
-      workspaceCwd: '/ws',
+      workspaceCwd: TEST_WORKSPACE,
       attached: this.loadAttached,
       clientId: 'client-load',
       state: this.loadState,
@@ -233,7 +235,7 @@ class FakeBridge {
   async resumeSession(req: { sessionId: string }) {
     return {
       sessionId: req.sessionId,
-      workspaceCwd: '/ws',
+      workspaceCwd: TEST_WORKSPACE,
       attached: true,
       clientId: 'client-resume',
       state: { resumed: true },
@@ -316,7 +318,7 @@ class FakeBridge {
     return {
       v: 1,
       sessionId,
-      workspaceCwd: '/ws',
+      workspaceCwd: TEST_WORKSPACE,
       state: {
         configOptions: [
           {
@@ -354,7 +356,7 @@ class FakeBridge {
     );
     if (summary) return summary;
     if (sessionId === 'sess-1') {
-      return { sessionId, workspaceCwd: '/ws' };
+      return { sessionId, workspaceCwd: TEST_WORKSPACE };
     }
     throw new Error(`Session not found: ${sessionId}`);
   }
@@ -415,7 +417,7 @@ class FakeBridge {
     return {
       v: 1,
       sessionId,
-      workspaceCwd: '/ws',
+      workspaceCwd: TEST_WORKSPACE,
       enabled: true,
       configuredServers: 1,
       readyServers: 1,
@@ -563,7 +565,7 @@ async function writeJson(file: string, value: unknown): Promise<void> {
 // A minimal fake workspace service for dispatch tests.
 const fakeWorkspace = {
   async getWorkspaceMcpStatus() {
-    return { ok: true, v: 1, workspaceCwd: '/ws' };
+    return { ok: true, v: 1, workspaceCwd: TEST_WORKSPACE };
   },
   async getWorkspaceSkillsStatus() {
     return { ok: true };
@@ -580,7 +582,7 @@ const fakeWorkspace = {
   async getWorkspaceTrustStatus() {
     return {
       v: 1,
-      workspaceCwd: '/ws',
+      workspaceCwd: TEST_WORKSPACE,
       folderTrustEnabled: true,
       effective: { state: 'trusted', source: 'file' },
       explicitTrustLevel: 'TRUST_FOLDER',
@@ -629,7 +631,7 @@ const fakeWorkspace = {
   async getWorkspaceVoiceStatus() {
     return {
       v: 1,
-      workspaceCwd: '/ws',
+      workspaceCwd: TEST_WORKSPACE,
       enabled: false,
       mode: 'hold',
       language: '',
@@ -646,7 +648,7 @@ const fakeWorkspace = {
     };
     return {
       v: 1,
-      workspaceCwd: '/ws',
+      workspaceCwd: TEST_WORKSPACE,
       enabled: update.enabled === true,
       mode: update.mode ?? 'hold',
       language: update.language ?? '',
@@ -836,6 +838,7 @@ async function waitUntil(
 }
 
 describe('ACP Streamable HTTP transport (over the wire)', () => {
+  const boundWorkspace = TEST_WORKSPACE;
   let server: Server;
   let base: string;
   let bridge: FakeBridge;
@@ -851,8 +854,8 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     setupGithubMocks.setupGithub.mockReset();
     setupGithubMocks.setupGithub.mockResolvedValue({
       kind: 'github_setup',
-      workspaceCwd: '/ws',
-      gitRepoRoot: '/ws',
+      workspaceCwd: TEST_WORKSPACE,
+      gitRepoRoot: TEST_WORKSPACE,
       releaseTag: 'v1.2.3',
       readmeUrl: 'https://github.com/QwenLM/qwen-code-action',
       workflows: [],
@@ -891,7 +894,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       },
     });
     acpHandle = mountAcpHttp(app, bridge as unknown as HttpAcpBridge, {
-      boundWorkspace: '/ws',
+      boundWorkspace,
       workspace: fakeWorkspace,
       enabled: true,
       workspaceRememberLane,
@@ -928,7 +931,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     server.closeAllConnections?.();
     await new Promise<void>((r) => server.close(() => r()));
     bridge = opts.nextBridge ?? new FakeBridge();
-    const boundWorkspace = opts.boundWorkspace ?? '/ws';
+    const boundWorkspace = opts.boundWorkspace ?? TEST_WORKSPACE;
     const app = express();
     app.use(express.json());
     const workspaceRegistry = opts.generationGuard
@@ -1043,7 +1046,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     sourceId?: string,
   ): Promise<void> {
     const chatsDir = path.join(
-      new Storage('/ws').getProjectDir(),
+      new Storage(TEST_WORKSPACE).getProjectDir(),
       'chats',
       ...(state === 'archived' ? ['archive'] : []),
     );
@@ -1056,7 +1059,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         timestamp: '2026-06-30T00:00:00.000Z',
         type: 'user',
         message: { role: 'user', parts: [{ text: 'hello' }] },
-        cwd: '/ws',
+        cwd: TEST_WORKSPACE,
       }),
     ];
     if (parentSessionId !== undefined) {
@@ -1072,7 +1075,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           type: 'system',
           subtype: 'parent_session',
           systemPayload: { parentSessionId },
-          cwd: '/ws',
+          cwd: TEST_WORKSPACE,
         }),
       );
     }
@@ -1089,7 +1092,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
             sourceType,
             ...(sourceId !== undefined ? { sourceId } : {}),
           },
-          cwd: '/ws',
+          cwd: TEST_WORKSPACE,
         }),
       );
     }
@@ -1267,7 +1270,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       jsonrpc: '2.0',
       id: 2,
       method: 'session/new',
-      params: { cwd: '/ws' },
+      params: { cwd: TEST_WORKSPACE },
     });
     expect(ack.status).toBe(202);
     const [frame] = (await got) as Array<{
@@ -1290,7 +1293,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       jsonrpc: '2.0',
       id: 3,
       method: 'session/new',
-      params: { cwd: '/ws' },
+      params: { cwd: TEST_WORKSPACE },
     });
     expect(ack.status).toBe(202);
     const [frame] = (await got) as Array<{
@@ -1327,7 +1330,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       jsonrpc: '2.0',
       id: 3,
       method: 'session/new',
-      params: { cwd: '/ws' },
+      params: { cwd: TEST_WORKSPACE },
     });
     expect(ack.status).toBe(202);
     const [frame] = (await got) as Array<{
@@ -3119,7 +3122,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     bridge.workspaceSessions = [
       {
         sessionId: '11111111-bbbb-cccc-dddd-eeeeeeeeeeee',
-        workspaceCwd: '/ws',
+        workspaceCwd: TEST_WORKSPACE,
         createdAt: '2026-06-30T00:00:00.000Z',
         updatedAt: '2026-06-30T00:01:00.000Z',
         displayName: 'Listed Session',
@@ -3137,7 +3140,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       jsonrpc: '2.0',
       id: 13,
       method: 'session/list',
-      params: { workspaceCwd: '/ws' },
+      params: { workspaceCwd: TEST_WORKSPACE },
     });
 
     const [frame] = (await got) as Array<{
@@ -3147,8 +3150,8 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(frame.id).toBe(13);
     expect(frame.result.sessions[0]).toMatchObject({
       sessionId: '11111111-bbbb-cccc-dddd-eeeeeeeeeeee',
-      workspaceCwd: '/ws',
-      cwd: '/ws',
+      workspaceCwd: TEST_WORKSPACE,
+      cwd: TEST_WORKSPACE,
       createdAt: '2026-06-30T00:00:00.000Z',
       updatedAt: '2026-06-30T00:01:00.000Z',
       displayName: 'Listed Session',
@@ -3740,7 +3743,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440123';
       await withRuntimeDir(async () => {
         const chatsDir = path.join(
-          new Storage('/ws').getProjectDir(),
+          new Storage(TEST_WORKSPACE).getProjectDir(),
           'chats',
           'archive',
         );
@@ -3754,7 +3757,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
             timestamp: '2026-06-30T00:00:00.000Z',
             type: 'user',
             message: { role: 'user', parts: [{ text: 'archived' }] },
-            cwd: '/ws',
+            cwd: TEST_WORKSPACE,
           })}\n`,
           'utf8',
         );
@@ -3865,7 +3868,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         await loadReleasedPromise;
         return {
           sessionId: req.sessionId,
-          workspaceCwd: '/ws',
+          workspaceCwd: TEST_WORKSPACE,
           attached: true,
           clientId: 'client-load',
           state: { replayed: true },
@@ -3928,7 +3931,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           loadParent = (req as { parentSessionId?: string }).parentSessionId;
           return {
             sessionId: req.sessionId,
-            workspaceCwd: '/ws',
+            workspaceCwd: TEST_WORKSPACE,
             attached: true,
             clientId: 'client-load',
             state: { replayed: true },
@@ -3938,7 +3941,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           resumeParent = (req as { parentSessionId?: string }).parentSessionId;
           return {
             sessionId: req.sessionId,
-            workspaceCwd: '/ws',
+            workspaceCwd: TEST_WORKSPACE,
             attached: true,
             clientId: 'client-resume',
             state: { resumed: true },
@@ -4796,7 +4799,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const app2 = express();
     app2.use(express.json());
     mountAcpHttp(app2, bridge as unknown as HttpAcpBridge, {
-      boundWorkspace: '/ws',
+      boundWorkspace: TEST_WORKSPACE,
       workspace: fakeWorkspace,
       enabled: true,
       maxConnections: 1,
@@ -5007,7 +5010,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       id: 213,
       result: {
         v: 1,
-        workspaceCwd: '/ws',
+        workspaceCwd: TEST_WORKSPACE,
         folderTrustEnabled: true,
       },
     });
@@ -5080,7 +5083,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       .spyOn(fakeWorkspace, 'getWorkspaceTrustStatus')
       .mockResolvedValueOnce({
         v: 1,
-        workspaceCwd: '/ws',
+        workspaceCwd: TEST_WORKSPACE,
         folderTrustEnabled: false,
         effective: { state: 'trusted', source: 'disabled' },
         explicitTrustLevel: null,
@@ -5311,7 +5314,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       id: 219,
       result: {
         v: 1,
-        workspaceCwd: '/ws',
+        workspaceCwd: TEST_WORKSPACE,
         enabled: false,
       },
     });
@@ -5511,14 +5514,14 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       id: 221,
       result: {
         kind: 'github_setup',
-        workspaceCwd: '/ws',
+        workspaceCwd: TEST_WORKSPACE,
         releaseTag: 'v1.2.3',
       },
     });
     expect(setupGithubMocks.setupGithub).toHaveBeenCalledWith(
       expect.objectContaining({
-        cwd: '/ws',
-        workspaceRoot: '/ws',
+        cwd: TEST_WORKSPACE,
+        workspaceRoot: TEST_WORKSPACE,
         proxy: 'http://runtime-proxy.example:8080',
         abortSignal: expect.any(AbortSignal),
         fileOps: expect.any(Object),
@@ -5586,8 +5589,8 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     await restartServer({ fsFactory: makeFileFsFactory({}) });
     const partial: SetupGithubResult = {
       kind: 'github_setup',
-      workspaceCwd: '/ws',
-      gitRepoRoot: '/ws',
+      workspaceCwd: TEST_WORKSPACE,
+      gitRepoRoot: TEST_WORKSPACE,
       releaseTag: 'v1.2.3',
       readmeUrl: 'https://github.com/QwenLM/qwen-code-action',
       workflows: [
@@ -5595,7 +5598,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           sourcePath: 'qwen-invoke.yml',
           path: '.github/workflows/qwen-invoke.yml',
           status: 'failed',
-          error: 'ENOSPC: open /ws/.github/workflows/qwen-invoke.yml',
+          error: `ENOSPC: open ${path.join(TEST_WORKSPACE, '.github', 'workflows', 'qwen-invoke.yml')}`,
         },
       ],
       gitignore: { path: '.gitignore', status: 'created' },
@@ -5630,7 +5633,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       workflows: [
         {
           ...partial.workflows[0],
-          error: 'ENOSPC: open <workspace>/.github/workflows/qwen-invoke.yml',
+          error: `ENOSPC: open <workspace>${path.sep}.github${path.sep}workflows${path.sep}qwen-invoke.yml`,
         },
       ],
     };
@@ -6841,15 +6844,15 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     it.each([
       [
         '_qwen/workspace/session_groups/create',
-        { workspaceCwd: '/ws', name: 'Blocked', color: 'blue' },
+        { workspaceCwd: TEST_WORKSPACE, name: 'Blocked', color: 'blue' },
       ],
       [
         '_qwen/workspace/session_groups/update',
-        { workspaceCwd: '/ws', groupId: 'blocked', name: 'Blocked' },
+        { workspaceCwd: TEST_WORKSPACE, groupId: 'blocked', name: 'Blocked' },
       ],
       [
         '_qwen/workspace/session_groups/delete',
-        { workspaceCwd: '/ws', groupId: 'blocked' },
+        { workspaceCwd: TEST_WORKSPACE, groupId: 'blocked' },
       ],
     ])(
       'rejects untrusted session group mutation %s',
@@ -6895,7 +6898,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           await readReleased;
           return {
             v: 1,
-            workspaceCwd: '/ws',
+            workspaceCwd: TEST_WORKSPACE,
             initialized: false,
             servers: [],
           };
@@ -6954,7 +6957,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           id: 593,
           method: '_qwen/workspace/session_groups/create',
           params: {
-            workspaceCwd: '/ws',
+            workspaceCwd: TEST_WORKSPACE,
             name: 'Stale',
             color: 'blue',
           },
@@ -7004,7 +7007,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           id: 70,
           method: '_qwen/workspace/session_groups/create',
           params: {
-            workspaceCwd: '/ws',
+            workspaceCwd: TEST_WORKSPACE,
             name: 'Frontend',
             color: '#12ABEF',
           },
@@ -7041,7 +7044,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           id: 72,
           method: 'session/list',
           params: {
-            workspaceCwd: '/ws',
+            workspaceCwd: TEST_WORKSPACE,
             view: 'organized',
             group: group.id,
             _meta: { size: 20 },
@@ -7063,7 +7066,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           jsonrpc: '2.0',
           id: 73,
           method: '_qwen/workspace/session_groups/delete',
-          params: { workspaceCwd: '/ws', groupId: group.id },
+          params: { workspaceCwd: TEST_WORKSPACE, groupId: group.id },
         });
         expect(await reader.next()).toMatchObject({
           result: { deleted: true },
@@ -7074,7 +7077,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           id: 74,
           method: 'session/list',
           params: {
-            workspaceCwd: '/ws',
+            workspaceCwd: TEST_WORKSPACE,
             view: 'organized',
             group: 'ungrouped',
             _meta: { size: 20 },
@@ -7119,7 +7122,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           id: 81,
           method: 'session/list',
           params: {
-            workspaceCwd: '/ws',
+            workspaceCwd: TEST_WORKSPACE,
             view: 'organized',
             group: 'all',
             _meta: { size: 20 },
@@ -7158,7 +7161,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           id: 87,
           method: 'session/list',
           params: {
-            workspaceCwd: '/ws',
+            workspaceCwd: TEST_WORKSPACE,
             view: 'organized',
             group: 'all',
             sourceType: 'default',
@@ -7206,7 +7209,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           id: 83,
           method: 'session/list',
           params: {
-            workspaceCwd: '/ws',
+            workspaceCwd: TEST_WORKSPACE,
             view: 'organized',
             group: 'ungrouped',
             _meta: { size: 20 },
@@ -7232,7 +7235,11 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           jsonrpc: '2.0',
           id: 84,
           method: '_qwen/workspace/session_groups/create',
-          params: { workspaceCwd: '/ws', name: 'Frontend', color: 'blue' },
+          params: {
+            workspaceCwd: TEST_WORKSPACE,
+            name: 'Frontend',
+            color: 'blue',
+          },
         });
         const createFrame = (await reader.next()) as {
           result: { group: { id: string } };
@@ -7257,7 +7264,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           id: 86,
           method: 'session/list',
           params: {
-            workspaceCwd: '/ws',
+            workspaceCwd: TEST_WORKSPACE,
             view: 'organized',
             group: groupId,
             _meta: { size: 20 },
@@ -7279,7 +7286,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         id: 75,
         method: 'session/list',
         params: {
-          workspaceCwd: '/ws',
+          workspaceCwd: TEST_WORKSPACE,
           group: 'pinned',
         },
       });
@@ -7302,7 +7309,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         id: 76,
         method: 'session/list',
         params: {
-          workspaceCwd: '/ws',
+          workspaceCwd: TEST_WORKSPACE,
           parentSessionId: '',
         },
       });
@@ -7325,7 +7332,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         id: 77,
         method: 'session/list',
         params: {
-          workspaceCwd: '/ws',
+          workspaceCwd: TEST_WORKSPACE,
           view: 'organized',
           parentSessionId: 'parent-1',
         },
@@ -7358,7 +7365,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           id: 78,
           method: 'session/list',
           params: {
-            workspaceCwd: '/ws',
+            workspaceCwd: TEST_WORKSPACE,
             parentSessionId: parentId,
             _meta: { size: 20 },
           },
@@ -7634,7 +7641,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           }
           return {
             sessionId: req.sessionId,
-            workspaceCwd: '/ws',
+            workspaceCwd: TEST_WORKSPACE,
             attached: true,
             clientId: 'client-load',
             state: { replayed: true },
@@ -8546,7 +8553,7 @@ describe('ACP WebSocket transport security', () => {
       const app = express();
       app.use(express.json());
       const handle = mountAcpHttp(app, bridge as unknown as HttpAcpBridge, {
-        boundWorkspace: '/ws',
+        boundWorkspace: TEST_WORKSPACE,
         workspace: fakeWorkspace,
         enabled: true,
         daemonEnv: opts.daemonEnv,

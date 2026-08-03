@@ -18,9 +18,13 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { promptRecordDir, briefPath } from './lib/prompt-record.js';
 import { getGhHost, setGhHost } from './lib/gh.js';
+import { parseLedger } from './lib/ledger.js';
+import { countInlineFindings } from './lib/inline-counts.js';
 import {
   composeReview,
+  buildLedger,
   scriptLintGate,
+  testPlanGate,
   composeReviewCommand,
   describeChunkGap,
   verdictLine,
@@ -33,7 +37,13 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: vi.fn(),
   writeStderrLine: vi.fn(),
 }));
+vi.mock('../../utils/version.js', () => ({
+  getCliVersion: vi.fn().mockResolvedValue('0.21.2'),
+}));
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+
+const runComposeReviewCommand = (argv: unknown): Promise<void> =>
+  Promise.resolve(composeReviewCommand.handler(argv as never) as void);
 
 const ghMock = vi.hoisted(() => vi.fn((..._args: string[]) => ''));
 vi.mock('./lib/gh.js', async (importOriginal) => {
@@ -347,7 +357,7 @@ function blindPlan(): string {
   return plan();
 }
 
-const FOOTER = `_— ${MODEL} via Qwen Code /review_`;
+const FOOTER = `_— ${MODEL} via Qwen Code /review (vunknown)_`;
 
 function base(overrides: Partial<ComposeReviewInput>): ComposeReviewInput {
   return {
@@ -369,6 +379,14 @@ describe('composeReview — the C/S table', () => {
     const r = composeReview(base({}));
     expect(r.event).toBe('APPROVE');
     expect(r.body).toBe(`No issues found. LGTM! ✅\n\n${FOOTER}`);
+  });
+
+  it('includes the injected CLI version without breaking the stable marker', () => {
+    const r = composeReview(base({}), '0.21.2');
+    expect(r.body).toContain('via Qwen Code /review');
+    expect(
+      r.body.endsWith(`_— ${MODEL} via Qwen Code /review (v0.21.2)_`),
+    ).toBe(true);
   });
 
   it('C=0, S≥1 → COMMENT with the no-blockers opener', () => {
@@ -872,7 +890,7 @@ describe('composeReview — presubmit permission gates certification even when n
 });
 
 describe('composeReviewCommand handler (the CLI glue)', () => {
-  it('reads --input, counts the drafted comments, and writes the result JSON to --out', () => {
+  it('reads --input, counts the drafted comments, and writes the result JSON to --out', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'compose-review-test-'));
     const inputPath = join(dir, 'compose.json');
     const commentsPath = join(dir, 'comments.json');
@@ -887,7 +905,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
       ]),
       'utf8',
     );
-    (composeReviewCommand.handler as (argv: unknown) => void)({
+    await runComposeReviewCommand({
       input: inputPath,
       comments: commentsPath,
       out: outPath,
@@ -897,10 +915,12 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     ) as ComposeReviewResult;
     expect(written.event).toBe('COMMENT');
     expect(written.body).toContain('Suggestions are inline.');
-    expect(written.body.endsWith(FOOTER)).toBe(true);
+    expect(
+      written.body.endsWith(`_— ${MODEL} via Qwen Code /review (v0.21.2)_`),
+    ).toBe(true);
   });
 
-  it('routes its gh calls via the PR host — --host reaches setGhHost', () => {
+  it('routes its gh calls via the PR host — --host reaches setGhHost', async () => {
     // The bilingual body-language recovery calls `gh pr view`; on GitHub Enterprise
     // that call must hit the PR's host, or the composed body's language disagrees
     // with what `submit` (which routes by host) posts. Drop the `setGhHost(host)`
@@ -912,7 +932,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     writeFileSync(commentsPath, '[]', 'utf8');
     setGhHost(undefined);
     try {
-      (composeReviewCommand.handler as (argv: unknown) => void)({
+      await runComposeReviewCommand({
         input: inputPath,
         comments: commentsPath,
         host: 'github.example.com',
@@ -923,7 +943,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     }
   });
 
-  it('a drafted inline Critical reaches the verdict line — the report-only hole', () => {
+  it('a drafted inline Critical reaches the verdict line — the report-only hole', async () => {
     // The dogfooded failure this boundary exists for: a report-only run (no
     // submit, so nothing downstream recounts) moved its one Critical from
     // `bodyCriticals` to an inline comment, dropped the count on the way, and
@@ -947,7 +967,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
         ]),
         'utf8',
       );
-      (composeReviewCommand.handler as (argv: unknown) => void)({
+      await runComposeReviewCommand({
         input: inputPath,
         comments: commentsPath,
         out: outPath,
@@ -969,7 +989,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     }
   });
 
-  it('accepts the review-payload shape too — the same file submit takes', () => {
+  it('accepts the review-payload shape too — the same file submit takes', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'compose-payload-shape-'));
     try {
       const inputPath = join(dir, 'compose.json');
@@ -984,7 +1004,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
         }),
         'utf8',
       );
-      (composeReviewCommand.handler as (argv: unknown) => void)({
+      await runComposeReviewCommand({
         input: inputPath,
         comments: commentsPath,
         out: outPath,
@@ -1003,7 +1023,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     ['suggestionsInline', { suggestionsInline: 2 }],
   ])(
     'refuses a state JSON carrying %s — counts are counted, not typed',
-    (_, extra) => {
+    async (_, extra) => {
       const dir = mkdtempSync(join(tmpdir(), 'compose-typed-count-'));
       try {
         const inputPath = join(dir, 'compose.json');
@@ -1014,19 +1034,19 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
           'utf8',
         );
         writeFileSync(commentsPath, '[]', 'utf8');
-        expect(() =>
-          (composeReviewCommand.handler as (argv: unknown) => void)({
+        await expect(
+          runComposeReviewCommand({
             input: inputPath,
             comments: commentsPath,
           }),
-        ).toThrow(/counted from the --comments file/);
+        ).rejects.toThrow(/counted from the --comments file/);
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
     },
   );
 
-  it('refuses a drafted comment with no severity marker — it would weigh nothing', () => {
+  it('refuses a drafted comment with no severity marker — it would weigh nothing', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'compose-unmarked-'));
     try {
       const inputPath = join(dir, 'compose.json');
@@ -1040,12 +1060,12 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
         ]),
         'utf8',
       );
-      expect(() =>
-        (composeReviewCommand.handler as (argv: unknown) => void)({
+      await expect(
+        runComposeReviewCommand({
           input: inputPath,
           comments: commentsPath,
         }),
-      ).toThrow(/comments\[1\].*neither/s);
+      ).rejects.toThrow(/comments\[1\].*neither/s);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1060,42 +1080,42 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     ],
   ])(
     'refuses %s — omission is the failure mode, not a default',
-    (_, commentsPath, pattern) => {
+    async (_, commentsPath, pattern) => {
       const dir = mkdtempSync(join(tmpdir(), 'compose-no-comments-'));
       try {
         const inputPath = join(dir, 'compose.json');
         writeFileSync(inputPath, JSON.stringify({ modelId: MODEL }), 'utf8');
-        expect(() =>
-          (composeReviewCommand.handler as (argv: unknown) => void)({
+        await expect(
+          runComposeReviewCommand({
             input: inputPath,
             comments: commentsPath,
           }),
-        ).toThrow(pattern as RegExp);
+        ).rejects.toThrow(pattern as RegExp);
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
     },
   );
 
-  it('refuses a comments file that is not an array (nor a payload with one)', () => {
+  it('refuses a comments file that is not an array (nor a payload with one)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'compose-bad-comments-'));
     try {
       const inputPath = join(dir, 'compose.json');
       const commentsPath = join(dir, 'comments.json');
       writeFileSync(inputPath, JSON.stringify({ modelId: MODEL }), 'utf8');
       writeFileSync(commentsPath, JSON.stringify({ criticals: 3 }), 'utf8');
-      expect(() =>
-        (composeReviewCommand.handler as (argv: unknown) => void)({
+      await expect(
+        runComposeReviewCommand({
           input: inputPath,
           comments: commentsPath,
         }),
-      ).toThrow(/must be a JSON array of comment objects/);
+      ).rejects.toThrow(/must be a JSON array of comment objects/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it('strips a model-supplied `env` — it cannot redirect the transcript lookup', () => {
+  it('strips a model-supplied `env` — it cannot redirect the transcript lookup', async () => {
     // The input is a JSON the model wrote. `env` decides where the harness
     // transcripts are read from; if the handler honoured it, a model could point
     // it at a directory of transcripts it fabricated — the whole gate reopened
@@ -1189,7 +1209,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
       const prevProj = process.env['QWEN_CODE_PROJECT_DIR'];
       delete process.env['QWEN_CODE_PROJECT_DIR']; // real env cannot find transcripts
       try {
-        (composeReviewCommand.handler as (argv: unknown) => void)({
+        await runComposeReviewCommand({
           input: inputPath,
           comments: commentsPath,
           out: outPath,
@@ -1633,7 +1653,7 @@ describe('coverage is recomputed, never accepted', () => {
     expect(r.body).toContain('never opened its brief, so it reviewed without');
   });
 
-  it('the handler prints every FIX to stderr, before the verdict, never to stdout', () => {
+  it('the handler prints every FIX to stderr, before the verdict, never to stdout', async () => {
     // The array on the result is data; the command boundary is the interface the
     // orchestrator actually reads. Without this, rerouting FIX lines to stdout
     // (corrupting the JSON callers parse) or printing them after `Verdict:` (so
@@ -1662,7 +1682,7 @@ describe('coverage is recomputed, never accepted', () => {
     try {
       vi.mocked(writeStderrLine).mockClear();
       vi.mocked(writeStdoutLine).mockClear();
-      (composeReviewCommand.handler as (a: Record<string, unknown>) => void)({
+      await runComposeReviewCommand({
         input,
         comments: commentsPath,
       });
@@ -2464,7 +2484,7 @@ describe('bilingual body — recovered from the live PR when the plan omits the 
     expect(r.body).toContain('<details>\n<summary>中文说明</summary>');
   });
 
-  it('strips a model-supplied prBodyFetcher — it cannot suppress the Chinese fold', () => {
+  it('strips a model-supplied prBodyFetcher — it cannot suppress the Chinese fold', async () => {
     // The handler deletes prBodyFetcher from the input JSON (the same way it
     // deletes env). Without that delete, "suppress" reaches bilingualFromPlan,
     // is called as a function, throws, and the catch drops the fold — the exact
@@ -2489,7 +2509,7 @@ describe('bilingual body — recovered from the live PR when the plan omits the 
       const commentsPath = join(handlerDir, 'comments.json');
       writeFileSync(commentsPath, '[]', 'utf8');
       const outPath = join(handlerDir, 'out.json');
-      (composeReviewCommand.handler as (argv: unknown) => void)({
+      await runComposeReviewCommand({
         input: inputPath,
         comments: commentsPath,
         out: outPath,
@@ -2988,5 +3008,317 @@ describe('composeReview — the script-lint gate wired to the verdict', () => {
     expect(r.body).toContain('source mapping not yet supported');
     // the LGTM copy is still there — the disclosure augments, it doesn't replace
     expect(r.body).toContain('LGTM');
+  });
+});
+
+describe('testPlanGate — Test Plan rulings, disclosed but never capping', () => {
+  // The gate's whole contract is that it produces NOTES and nothing else: no
+  // critical, no cap, no unreviewed scope. Every test here is really the same
+  // assertion from a different angle — a Test Plan defect must never be able to
+  // change what the review does to the pull request.
+  let diffPath: string;
+  let diffHash: string;
+
+  beforeEach(() => {
+    diffPath = join(dir, 'pr.diff');
+    writeFileSync(diffPath, 'diff --git a/x b/x\n@@ -0,0 +1 @@\n+added\n');
+    diffHash = createHash('sha256')
+      .update(readFileSync(diffPath))
+      .digest('hex');
+  });
+
+  const writePlan = (over: Record<string, unknown> = {}): string => {
+    const p = join(dir, 'plan.json');
+    writeFileSync(
+      p,
+      JSON.stringify({ prNumber: 1, diffPathAbsolute: diffPath, ...over }),
+    );
+    return p;
+  };
+  const writeReport = (
+    claims: Array<Record<string, unknown>>,
+    over: Record<string, unknown> = {},
+    name = 'qwen-review-pr-1-test-plan.json',
+  ) =>
+    writeFileSync(
+      join(dir, name),
+      JSON.stringify({ found: true, claims, diffHash, note: '', ...over }),
+    );
+
+  it('renders a contradicted claim with what was observed', () => {
+    const p = writePlan();
+    writeReport([
+      {
+        kind: 'path',
+        text: 'src/ghost.test.ts',
+        verdict: 'contradicted',
+        observed: 'no such file or directory',
+      },
+    ]);
+    // Both halves go through `mdField`: the claim is the author's text and the
+    // observation is read back off disk, so neither is trusted to be inert
+    // markdown.
+    expect(testPlanGate(p).notes).toEqual([
+      '`src/ghost.test.ts` — `no such file or directory`',
+    ]);
+  });
+
+  it('renders a differing count as an observation, not a contradiction', () => {
+    const p = writePlan();
+    writeReport([
+      {
+        kind: 'count',
+        text: '471 tests passed',
+        verdict: 'differs',
+        observed: '472 passed',
+      },
+    ]);
+    expect(testPlanGate(p).notes).toEqual([
+      '`471 tests passed` — this review observed `472 passed`',
+    ]);
+  });
+
+  it('says nothing about claims that reproduced or could not be checked', () => {
+    const p = writePlan();
+    writeReport([
+      { kind: 'command', text: 'npm run build', verdict: 'reproduces' },
+      { kind: 'count', text: '9 tests passed', verdict: 'unchecked' },
+    ]);
+    expect(testPlanGate(p).notes).toEqual([]);
+  });
+
+  it('stays silent on a local review — there is no PR body to have checked', () => {
+    const p = writePlan({ prNumber: undefined });
+    writeReport([
+      { kind: 'path', text: 'src/ghost.ts', verdict: 'contradicted' },
+    ]);
+    expect(testPlanGate(p).notes).toEqual([]);
+  });
+
+  it('drops a STALE report rather than quoting a previous commit Test Plan', () => {
+    const p = writePlan();
+    writeReport([{ kind: 'path', text: 'src/g.ts', verdict: 'contradicted' }], {
+      diffHash: 'a-different-hash',
+    });
+    expect(testPlanGate(p).notes).toEqual([]);
+  });
+
+  it('does not cap or block when the report is missing or the plan is unreadable', () => {
+    // The `deferred`-checker precedent: a limitation the author cannot fix must
+    // never make a PR un-Approvable. Both paths return notes only.
+    expect(testPlanGate(writePlan()).notes).toEqual([]);
+    expect(testPlanGate(join(dir, 'nope.json')).notes).toEqual([]);
+  });
+
+  it('caps notes at five plus a summary line', () => {
+    const p = writePlan();
+    writeReport(
+      Array.from({ length: 8 }, (_, i) => ({
+        kind: 'count',
+        text: `${i + 1} passed`,
+        verdict: 'differs',
+        observed: '999 passed',
+      })),
+    );
+    const notes = testPlanGate(p).notes;
+    expect(notes).toHaveLength(6);
+    expect(notes[5]).toBe('and 3 more');
+  });
+});
+
+describe('buildLedger', () => {
+  it('gives a text-less finding a locating title instead of an empty one', () => {
+    // A comment that is nothing but its severity marker used to yield an empty
+    // title, and an empty title jams the review rather than merely degrading
+    // the entry: the next round is told every ledger entry is owed a ruling,
+    // has no claim to rule on, answers `cannot tell`, and that is
+    // `cannot-tell-existing-critical` — a cap that nothing between rounds can
+    // lift. Keep the entry (the Critical really was posted) and hand over the
+    // one handle there is.
+    const l = buildLedger(
+      2,
+      [{ path: 'packages/cli/src/a.ts', line: 42, body: '**[Critical]**' }],
+      ['   '],
+    );
+    expect(l.findings[0].title).toContain('packages/cli/src/a.ts:42');
+    expect(l.findings[0].title).not.toBe('');
+    expect(l.findings[1].title).toContain('the review body');
+    // A finding that DID carry text is untouched.
+    expect(
+      buildLedger(
+        2,
+        [{ path: 'a.ts', line: 1, body: '**[Critical]** real claim' }],
+        [],
+      ).findings[0].title,
+    ).toBe('real claim');
+  });
+
+  it('numbers findings round-scoped, inline first then body Criticals', () => {
+    const l = buildLedger(
+      3,
+      [
+        {
+          path: 'src/a.ts',
+          line: 12,
+          body: '**[Critical]**: double free\ndetail',
+        },
+        { path: 'src/b.ts', line: 4, body: '**[Suggestion]** untested guard' },
+        { path: 'src/c.ts', body: 'no marker — not a finding' },
+      ],
+      ['`src/d.ts` unanchorable blocker'],
+    );
+    expect(l.round).toBe(3);
+    expect(l.findings).toEqual([
+      {
+        id: 'R3-1',
+        sev: 'C',
+        file: 'src/a.ts',
+        line: 12,
+        title: 'double free',
+      },
+      {
+        id: 'R3-2',
+        sev: 'S',
+        file: 'src/b.ts',
+        line: 4,
+        title: 'untested guard',
+      },
+      {
+        id: 'R3-3',
+        sev: 'C',
+        file: '(body)',
+        title: '`src/d.ts` unanchorable blocker',
+      },
+    ]);
+  });
+
+  it('classifies through `severityOf`, whitespace and all', () => {
+    // The ledger restated the severity predicate as a bare `startsWith`, while
+    // `countInlineFindings` — the count the VERDICT is computed from — trims
+    // first. A Critical whose body opened with a newline was therefore counted,
+    // posted, blocked the merge, and was silently missing from the ledger,
+    // shifting the id of every finding after it.
+    const drafted = [
+      { path: 'src/a.ts', line: 1, body: '\n  **[Critical]** leading space' },
+      { path: 'src/b.ts', line: 2, body: '**[Suggestion]** plain' },
+    ];
+    expect(countInlineFindings(drafted)).toEqual({
+      criticalsInline: 1,
+      suggestionsInline: 1,
+    });
+    expect(buildLedger(1, drafted, []).findings).toEqual([
+      {
+        id: 'R1-1',
+        sev: 'C',
+        file: 'src/a.ts',
+        line: 1,
+        title: 'leading space',
+      },
+      { id: 'R1-2', sev: 'S', file: 'src/b.ts', line: 2, title: 'plain' },
+    ]);
+  });
+
+  it('keeps a carried-forward id instead of renumbering it by position', () => {
+    // Step 6 re-reports a still-standing finding under its ORIGINAL id, so the
+    // report says `R1-2 still stands` — and a ledger that renumbered it `R3-1`
+    // handed the next round a work list keyed by ids the report never used,
+    // which is the whole thing `R1-2 names the same claim every round` promised.
+    const l = buildLedger(
+      3,
+      [
+        { path: 'a.ts', line: 4, body: '**[Critical]** R1-2: still leaking' },
+        { path: 'b.ts', body: '**[Suggestion]** brand new this round' },
+        { path: 'c.ts', body: '**[Critical]** R2-1 — moved but the same' },
+      ],
+      ['R1-5) the unanchorable one, still open'],
+    );
+    expect(l.findings.map((f) => `${f.id}|${f.title}`)).toEqual([
+      'R1-2|still leaking',
+      'R3-1|brand new this round',
+      'R2-1|— moved but the same',
+      'R1-5|the unanchorable one, still open',
+    ]);
+  });
+
+  it('never issues one id twice, however the comments are worded', () => {
+    // A duplicated carried id (a copy-paste, or a title that merely opens like
+    // one) must not collapse two claims onto one ledger entry.
+    const l = buildLedger(
+      2,
+      [
+        { path: 'a.ts', body: '**[Critical]** R1-1: one' },
+        { path: 'b.ts', body: '**[Critical]** R1-1: two, same id' },
+      ],
+      [],
+    );
+    expect(l.findings.map((f) => f.id)).toEqual(['R1-1', 'R2-1']);
+  });
+});
+
+describe('the ledger marker reaches the POSTED body', () => {
+  // The feature was inert end to end: the marker was appended in the CLI
+  // handler, after composeReview() returned, so it reached only the composed
+  // JSON on disk — and `submit` posts what the PURE function returns. Every
+  // assertion here goes through composeReview, the path GitHub receives.
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'ledger-e2e-'));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  const plan = (over: Record<string, unknown> = {}) => {
+    const p = join(dir, 'plan.json');
+    writeFileSync(p, JSON.stringify({ prNumber: 8255, ...over }));
+    return p;
+  };
+
+  it('appends the marker to the body composeReview returns', () => {
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested guard' },
+      ],
+    });
+    expect(r.body).toContain('<!-- qwen-review-ledger ');
+    const ledger = parseLedger(r.body)!;
+    expect(ledger.round).toBe(1);
+    expect(ledger.findings).toEqual([
+      {
+        id: 'R1-1',
+        sev: 'S',
+        file: 'src/a.ts',
+        line: 3,
+        title: 'untested guard',
+      },
+    ]);
+  });
+
+  it('counts the round from the side file pr-context recovered, +1', () => {
+    writeFileSync(
+      join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify({ v: 1, round: 4, findings: [] }),
+    );
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      draftedComments: [{ path: 'a.ts', body: '**[Critical]** boom' }],
+    });
+    expect(parseLedger(r.body)?.round).toBe(5);
+  });
+
+  it('carries NO marker on a local review — there is no PR to hold it', () => {
+    const r = composeReview({
+      planPath: plan({ prNumber: undefined }),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      draftedComments: [{ path: 'a.ts', body: '**[Critical]** boom' }],
+    });
+    expect(r.body).not.toContain('qwen-review-ledger');
   });
 });

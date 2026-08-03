@@ -146,6 +146,38 @@ describe('extractPendingPermission', () => {
     expect(result?.toolName).toBe('agent');
   });
 
+  it('extracts the plan body from exit-plan permission content', () => {
+    const permission = {
+      id: 'perm-plan',
+      kind: 'permission',
+      sessionId: 'session-1',
+      requestId: 'request-plan',
+      title: 'Plan:',
+      options: [{ optionId: 'allow', label: 'Allow', raw: {} }],
+      toolCall: {
+        toolCallId: 'call-plan',
+        kind: 'switch_mode',
+        _meta: { toolName: 'exit_plan_mode' },
+        content: [
+          {
+            type: 'content',
+            content: { type: 'text', text: '1. Prepare\n2. Ship' },
+          },
+        ],
+        rawInput: { plan: '1. Prepare\n2. Ship' },
+      },
+      preview: { kind: 'generic' },
+      createdAt: 1,
+      updatedAt: 1,
+    } as DaemonTranscriptBlock;
+
+    expect(extractPendingPermission(state([permission]).blocks)).toMatchObject({
+      toolKind: 'switch_mode',
+      toolName: 'exit_plan_mode',
+      content: [{ type: 'text', text: '1. Prepare\n2. Ship' }],
+    });
+  });
+
   it('leaves toolName undefined when _meta is absent', () => {
     const permission = {
       id: 'perm-no-meta',

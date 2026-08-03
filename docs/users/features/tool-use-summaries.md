@@ -1,6 +1,6 @@
 # Tool-Use Summaries
 
-Qwen Code can generate a short, git-commit-subject-style label after each tool batch completes, summarizing what the batch accomplished. The label appears inline: for a completed tool group in the main view it replaces the generic `Tool × N` header; when the group is force-expanded (in the `Ctrl+O` full-detail transcript, or for error / user-initiated batches) it appears as a dim `● <label>` line below the group.
+Qwen Code can generate a short, git-commit-subject-style label after each tool batch completes, summarizing what the batch accomplished. The label appears inline: for a completed tool group in the main view it replaces the generic `Tool × N` header; when the group is force-expanded (in `Ctrl+O` expanded detail mode, or for error / user-initiated batches) it appears as a dim `● <label>` line below the group.
 
 This is a UX aid for parallel tool calls: when the model fans out into several `Read` + `Grep` + `Bash` calls at once, the summary tells you the intent at a glance instead of forcing you to scan the tool list.
 
@@ -18,11 +18,11 @@ In the main transcript, a completed collapsible batch folds into a single labele
 ╰──────────────────────────────────────────────╯
 ```
 
-The full per-tool output is a keystroke away: press `Ctrl+O` to open the full-detail transcript.
+The full per-tool output is a keystroke away: press `Ctrl+O` to toggle expanded detail mode.
 
-### Full-detail transcript (`Ctrl+O`) and force-expanded groups
+### Expanded detail mode (`Ctrl+O`) and force-expanded groups
 
-When a group is force-expanded — in the `Ctrl+O` transcript, or for error / user-initiated batches in the main view — each tool renders individually and the summary appears as a dim badge line below the group:
+When a group is force-expanded — in `Ctrl+O` expanded detail mode, or for error / user-initiated batches in the main view — each tool renders individually and the summary appears as a dim badge line below the group:
 
 ```
 ╭──────────────────────────────────────────────╮
@@ -122,7 +122,7 @@ These settings can be configured in `settings.json`:
 
 Three points that tend to trip up a first read of this feature:
 
-1. **One generation per batch, shared by both display modes.** The fast-model call happens exactly once in `handleCompletedTools` when a tool batch finalizes. Opening the `Ctrl+O` transcript afterwards does **not** trigger a new call — both the main view and the full-detail transcript read from the same `tool_use_summary` history entry that was captured the first time.
+1. **One generation per batch, shared by both display modes.** The fast-model call happens exactly once in `handleCompletedTools` when a tool batch finalizes. Toggling `Ctrl+O` expanded detail mode afterwards does **not** trigger a new call — both the collapsed and the expanded rendering read from the same `tool_use_summary` history entry that was captured the first time.
 2. **No backfill on toggle or on session resume.** A `tool_group` that completed before the feature was enabled (or before you flipped the setting on, or in a resumed session — `ChatRecordingService` does not persist summary entries) will never get a label. There is no "sweep existing history" pass. If you turn this setting on mid-session, only _future_ batches will show a label; older groups keep the default rendering with no indicator that a label is missing.
 3. **Main-agent batches only.** The trigger lives in the main session's turn loop (`useGeminiStream`), so:
    - ✅ Shell, MCP, file operations, and the `Task` / subagent tool _call itself_ (as it appears in the main batch) are summarized.
@@ -132,7 +132,7 @@ Three points that tend to trip up a first read of this feature:
 
 ## Display behavior
 
-The main view already folds a completed collapsible batch into a single labeled row (`✓  Read 4 text files`) — the summary does the work of the old per-tool list. For full per-tool detail, press `Ctrl+O` to open the full-detail transcript, where each tool renders individually with the summary as a trailing `● <label>` line below the group.
+The main view already folds a completed collapsible batch into a single labeled row (`✓  Read 4 text files`) — the summary does the work of the old per-tool list. For full per-tool detail, press `Ctrl+O` to toggle expanded detail mode, where each tool renders individually with the summary as a trailing `● <label>` line below the group.
 
 ```json
 {
@@ -170,5 +170,5 @@ If you do not want the extra cost, turn the feature off via `experimental.emitTo
 
 ## Related
 
-- [Full-detail transcript](../configuration/settings#ui) — press `Ctrl+O` to open the frozen full-detail transcript; the summary replaces the generic tool-group header for completed groups in the main view.
+- [Expanded detail mode](../configuration/settings#ui) — press `Ctrl+O` to expand all tool outputs inline; the summary replaces the generic tool-group header for completed groups in the main view.
 - [Followup Suggestions](./followup-suggestions) — another fast-model-driven UX enhancement that shares the same `fastModel` setting.

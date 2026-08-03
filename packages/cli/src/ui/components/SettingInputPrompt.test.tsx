@@ -6,8 +6,10 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render } from 'ink-testing-library';
+import { act } from 'react';
 import { SettingInputPrompt } from './SettingInputPrompt.js';
 import { TextInput } from './shared/TextInput.js';
+import { useKeypress, type Key } from '../hooks/useKeypress.js';
 
 vi.mock('./shared/TextInput.js', () => ({
   TextInput: vi.fn(() => null),
@@ -18,6 +20,19 @@ vi.mock('../hooks/useKeypress.js', () => ({
 }));
 
 const MockedTextInput = vi.mocked(TextInput);
+const mockedUseKeypress = vi.mocked(useKeypress);
+
+function makeKey(overrides: Partial<Key>): Key {
+  return {
+    name: '',
+    ctrl: false,
+    meta: false,
+    shift: false,
+    paste: false,
+    sequence: '',
+    ...overrides,
+  };
+}
 
 describe('SettingInputPrompt', () => {
   const onSubmit = vi.fn();
@@ -91,6 +106,50 @@ describe('SettingInputPrompt', () => {
     // Should show the sensitive placeholder hint
     expect(lastFrame()).toContain('PASSWORD');
     expect(lastFrame()).toContain('Enter your password');
+  });
+
+  it('keeps printable ASCII boundaries and ignores control-only pastes', () => {
+    const prefix = 'X';
+    const secret = 'AIza~ test-key';
+    const { lastFrame } = render(
+      <SettingInputPrompt
+        settingName="API_KEY"
+        settingDescription="Enter your API key"
+        sensitive={true}
+        onSubmit={onSubmit}
+        onCancel={onCancel}
+        terminalWidth={terminalWidth}
+      />,
+    );
+
+    act(() => {
+      mockedUseKeypress.mock.calls.at(-1)?.[0](makeKey({ sequence: prefix }));
+    });
+
+    act(() => {
+      mockedUseKeypress.mock.calls.at(-1)?.[0](
+        makeKey({ paste: true, sequence: `${secret}\x1f\x7f\r\n\x1b` }),
+      );
+    });
+
+    expect(lastFrame()).not.toContain(secret);
+    expect(lastFrame()).toContain('*'.repeat(prefix.length + secret.length));
+
+    act(() => {
+      mockedUseKeypress.mock.calls.at(-1)?.[0](
+        makeKey({ paste: true, sequence: '\x1f\x7f\r\n\x1b' }),
+      );
+    });
+
+    expect(lastFrame()).toContain('*'.repeat(prefix.length + secret.length));
+
+    act(() => {
+      mockedUseKeypress.mock.calls.at(-1)?.[0](
+        makeKey({ name: 'return', sequence: '\r' }),
+      );
+    });
+
+    expect(onSubmit).toHaveBeenCalledWith(prefix + secret);
   });
 
   it('displays help text for submit and cancel', () => {
