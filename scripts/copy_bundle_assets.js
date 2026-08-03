@@ -59,8 +59,19 @@ export function reviewSourceDigestForBuild(root) {
     let entries;
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch (err) {
-      if (err.code === 'ENOTDIR' && !NOT_BUNDLED_RE.test(dir)) files.push(dir);
+    } catch {
+      // `statSync(...).isFile()`, matching stale-bundle.ts: inferring "this is
+      // a file" from `ENOTDIR` assumes every platform's libuv maps the case
+      // the same way, and a one-sided divergence would drop `review.ts` from
+      // one digest and not the other — a bundle that is byte-for-byte correct
+      // warning on every review, forever, on that platform alone.
+      try {
+        if (fs.statSync(dir).isFile() && !NOT_BUNDLED_RE.test(dir)) {
+          files.push(dir);
+        }
+      } catch {
+        // Absent or unreadable: nothing to walk and nothing to say.
+      }
       return;
     }
     for (const e of entries) {
@@ -93,6 +104,14 @@ export function reviewSourceDigestForBuild(root) {
 }
 
 function stampReviewSourceDigest(root, distDir) {
+  const stampPath = join(distDir, 'review-sources.sha256');
+  // Every refusal below removes an existing stamp first. Leaving an older
+  // attestation beside a newer bundle is a weaker form of the certifying the
+  // refusal exists to avoid, and `unmeasured` is the state each refusal means.
+  const refuse = (why) => {
+    fs.rmSync(stampPath, { force: true });
+    console.log(why);
+  };
   // Never fatal. This is the last step of the copier, so a file vanishing
   // mid-walk would fail the bundle after every asset was already in place —
   // and a missing stamp is only `unmeasured`, which the runtime check already
@@ -101,7 +120,7 @@ function stampReviewSourceDigest(root, distDir) {
   try {
     ({ digest, count, newest } = reviewSourceDigestForBuild(root));
   } catch (error) {
-    console.log(
+    refuse(
       `Could not read the review sources; skipped the source digest: ${
         error instanceof Error ? error.message : error
       }`,
@@ -109,7 +128,7 @@ function stampReviewSourceDigest(root, distDir) {
     return;
   }
   if (!digest) {
-    console.log('No review sources found; skipped the source digest.');
+    refuse('No review sources found; skipped the source digest.');
     return;
   }
   // The digest describes the tree as the COPIER sees it, and the copier runs
@@ -124,18 +143,18 @@ function stampReviewSourceDigest(root, distDir) {
   try {
     builtAt = fs.statSync(bundlePath).mtimeMs;
   } catch {
-    console.log('No bundle to attest to; skipped the source digest.');
+    refuse('No bundle to attest to; skipped the source digest.');
     return;
   }
   const newestSource = newest.mtimeMs;
   if (newestSource > builtAt) {
-    console.log(
+    refuse(
       `A review source is newer than ${bundlePath}; skipped the source digest ` +
         `rather than certify a bundle it may not describe.`,
     );
     return;
   }
-  fs.writeFileSync(join(distDir, 'review-sources.sha256'), digest);
+  fs.writeFileSync(stampPath, digest);
   console.log(`Stamped the review source digest over ${count} files.`);
 }
 

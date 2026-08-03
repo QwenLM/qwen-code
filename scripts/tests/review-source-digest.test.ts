@@ -16,14 +16,18 @@ import { describe, expect, it } from 'vitest';
 import {
   mkdtempSync,
   mkdirSync,
-  readFileSync,
+  readdirSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { reviewSourceDigestForBuild } from '../copy_bundle_assets.js';
+import {
+  copyBundleAssets,
+  reviewSourceDigestForBuild,
+} from '../copy_bundle_assets.js';
 import { isAllowedDistEntry } from '../create-standalone-package.js';
 import {
   DIGEST_FILE,
@@ -33,12 +37,29 @@ import {
 
 const repoRoot = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..');
 
-/** The literal `copy_bundle_assets.js` writes. Read from the built artifact
- *  below rather than copied by hand, so this cannot agree by coincidence. */
-const STAMP_FILENAME_IN_BUILD = readFileSync(
-  join(repoRoot, 'scripts', 'copy_bundle_assets.js'),
-  'utf8',
-).match(/writeFileSync\(\s*join\(distDir, '([^']+)'\)/)?.[1];
+/**
+ * The name the build actually writes, taken by running it — not by matching a
+ * pattern against its source, which is how the first version of this broke:
+ * the literal moved into a `stampPath` variable and the regex quietly returned
+ * `undefined`, so the assertion compared against nothing and the test went red
+ * only when something else happened to run it.
+ */
+function stampNameWrittenByBuild(): string | undefined {
+  const root = mkdtempSync(join(tmpdir(), 'stamp-name-'));
+  try {
+    const cli = join(root, 'packages', 'cli', 'src', 'commands');
+    mkdirSync(join(cli, 'review'), { recursive: true });
+    writeFileSync(join(cli, 'review', 'drive.ts'), 'export const a = 1;');
+    mkdirSync(join(root, 'dist'), { recursive: true });
+    writeFileSync(join(root, 'dist', 'cli.js'), 'bundle');
+    const before = new Date(Date.now() - 60_000);
+    utimesSync(join(cli, 'review', 'drive.ts'), before, before);
+    copyBundleAssets({ root });
+    return readdirSync(join(root, 'dist')).find((f) => f.endsWith('.sha256'));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
 
 describe('the build stamp and the staleness check agree', () => {
   it('hashes this repository to the same digest', () => {
@@ -55,7 +76,7 @@ describe('the build stamp and the staleness check agree', () => {
     // one-sided rename leaves the read throwing, the comparison unmeasured,
     // and the warning silently never firing again — with the digest parity
     // above still green, because it never touches the name.
-    expect(DIGEST_FILE).toBe(STAMP_FILENAME_IN_BUILD);
+    expect(stampNameWrittenByBuild()).toBe(DIGEST_FILE);
   });
 
   it('stamps a file the standalone packager will accept', () => {

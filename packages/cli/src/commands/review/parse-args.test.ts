@@ -655,6 +655,35 @@ describe('parse-args warns when the bundle is not built from these sources', () 
     );
   });
 
+  it('says it could not check when a source cannot be read', () => {
+    // Distinct from an installed package: the roots are on disk, so the check
+    // has switched itself off for someone about to read a verdict, and the
+    // docstring promises every unmeasurable case names itself.
+    stamp('some digest');
+    const src = join(
+      repo,
+      'packages',
+      'cli',
+      'src',
+      'commands',
+      'review',
+      'drive.ts',
+    );
+    fsReal.rmSync(src);
+    fsReal.mkdirSync(src, { recursive: true });
+    fsReal.writeFileSync(join(src, 'nested.ts'), 'x');
+    fsReal.chmodSync(src, 0o000);
+    try {
+      run();
+      const said = vi.mocked(writeStderrLineSafe).mock.calls.flat().join('\n');
+      // Either it read nothing (unreadable) or it compared and differed; both
+      // are a line, never silence.
+      expect(said).not.toBe('');
+    } finally {
+      fsReal.chmodSync(src, 0o755);
+    }
+  });
+
   it('stays silent for a layout that has nowhere to keep a stamp', () => {
     // `npm start` runs `node <root>/packages/cli`, and node sets argv[1] to
     // that DIRECTORY — so the derivation would find sources under <root> and

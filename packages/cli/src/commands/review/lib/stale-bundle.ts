@@ -44,7 +44,7 @@
 // tune, no clock to trust, and no answer but the true one.
 
 import { createHash } from 'node:crypto';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { basename, join, relative, sep } from 'node:path';
 
 /** Where the build stamps the digest of the sources it bundled. */
@@ -238,11 +238,23 @@ export function bundleStalenessNotices(
   // needs this value to tell a pre-stamp checkout apart from an installed
   // package. Gating the walk on `stamped` would make that branch dead and
   // silence the one unmeasured case worth saying out loud.
-  const current = reviewSourcesDigest(repoRoot, reviewSourceRoots(repoRoot));
+  const roots = reviewSourceRoots(repoRoot);
+  const current = reviewSourcesDigest(repoRoot, roots);
   const staleness = bundleStaleness(stamped, current);
 
   const warning = staleBundleWarning(staleness);
   if (warning) return [warning];
+
+  // No digest, but the sources are on disk: one of them could not be read, and
+  // the check has switched itself off for someone about to read a verdict. An
+  // installed package reaches the same branch with no roots at all, and gets
+  // nothing, because there is nothing it could do.
+  if (stamped && !current && roots.some((r) => existsSync(r))) {
+    return [
+      `review: could not check whether the bundle is current — a review source could not be read, ` +
+        `so nothing was compared. Re-run once the tree is settled.`,
+    ];
+  }
   // A checkout whose `dist/` predates the stamp is genuinely stale and cannot
   // be measured — the state of every existing tree until its next rebuild. An
   // installed package has no sources either and gets nothing, so a user who
@@ -250,8 +262,9 @@ export function bundleStalenessNotices(
   if (!stamped && current) {
     return [
       `review: could not check whether the bundle is current — ${staleness.unmeasured}. ` +
-        `It predates the build that started recording one; rebuild with ` +
-        `\`npm run build:packages && npm run bundle\` to make this checkable.`,
+        `Either it was built before this check existed, or the build declined to ` +
+        `record one; rebuild with \`npm run build:packages && npm run bundle\` and, ` +
+        `if the line persists, read that build's output for why it refused.`,
     ];
   }
   return [];
