@@ -619,6 +619,84 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result['enable_thinking']).toBe(true);
     });
 
+    describe.each(['qwen3.8-max', 'qwen3.8-max-preview'])(
+      '%s reasoning effort',
+      (model) => {
+        it.each(['low', 'medium', 'high', 'xhigh', 'max'] as const)(
+          'passes %s through as reasoning_effort',
+          (effort) => {
+            const generator = new DashScopeOpenAICompatibleProvider(
+              {
+                ...mockContentGeneratorConfig,
+                model,
+                reasoning: { effort },
+              } as ContentGeneratorConfig,
+              mockCliConfig,
+            );
+            const requestWithReasoning = {
+              ...baseRequest,
+              model,
+              reasoning: { effort },
+            } as unknown as Parameters<typeof generator.buildRequest>[0];
+
+            const result = generator.buildRequest(
+              requestWithReasoning,
+              'test-prompt-id',
+            ) as unknown as Record<string, unknown>;
+
+            expect(result['reasoning_effort']).toBe(effort);
+            expect(result['enable_thinking']).toBeUndefined();
+            expect(result['reasoning']).toBeUndefined();
+          },
+        );
+      },
+    );
+
+    it('lets extra_body override qwen3.8-max reasoning_effort', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'qwen3.8-max',
+          reasoning: { effort: 'low' },
+          extra_body: { reasoning_effort: 'max' },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const result = generator.buildRequest(
+        {
+          ...baseRequest,
+          model: 'qwen3.8-max',
+          reasoning: { effort: 'low' },
+        } as unknown as Parameters<typeof generator.buildRequest>[0],
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning_effort']).toBe('max');
+    });
+
+    it('preserves a request-level qwen3.8-max reasoning_effort override', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'qwen3.8-max',
+          reasoning: { effort: 'low' },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const result = generator.buildRequest(
+        {
+          ...baseRequest,
+          model: 'qwen3.8-max',
+          reasoning_effort: 'max',
+          reasoning: { effort: 'low' },
+        } as unknown as Parameters<typeof generator.buildRequest>[0],
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning_effort']).toBe('max');
+      expect(result['reasoning']).toBeUndefined();
+    });
+
     it('strips the pipeline-injected nested reasoning when enable_thinking is added on a qwen model', () => {
       // The pipeline injects a nested `reasoning: { effort }` object for
       // OpenAI-compatible endpoints. qwen drives thinking via `enable_thinking`,
