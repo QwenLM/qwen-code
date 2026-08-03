@@ -306,5 +306,19 @@ describe('markdownUtilities', () => {
     it('returns text without fences unchanged', () => {
       expect(normalizeCodeFences('plain text')).toBe('plain text');
     });
+
+    it('does not split a mid-line fence inside an open code block', () => {
+      // A review quoting a line that contains a fence must not close the
+      // outer block early: runs inside an open fence are code content.
+      const text = '```python\nconst s = "```";\n```';
+      expect(normalizeCodeFences(text)).toBe(text);
+    });
+
+    it('does not split a line-start run of four or more backticks', () => {
+      // A nested fence wrapped in a longer run must pass through whole so
+      // MarkdownDisplay's length-aware parser can render it.
+      const text = '````\n```\ninner\n```\n````';
+      expect(normalizeCodeFences(text)).toBe(text);
+    });
   });
 });

@@ -2515,6 +2515,8 @@ export default {
   'Focus too long (max {{max}} chars)': 'Focus too long (max {{max}} chars)',
   'Another operation is in progress, wait for it to complete before running /advisor':
     'Another operation is in progress, wait for it to complete before running /advisor',
+  'No response received.': 'No response received.',
+  'No model configured.': 'No model configured.',
   'Manage Arena sessions': 'Manage Arena sessions',
   'Start an Arena session with multiple models competing on the same task':
     'Start an Arena session with multiple models competing on the same task',

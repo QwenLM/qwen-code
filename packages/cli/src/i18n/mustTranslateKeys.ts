@@ -51,6 +51,8 @@ export const MUST_TRANSLATE_KEYS = [
   'No conversation context available for /advisor',
   'Focus too long (max {{max}} chars)',
   'Another operation is in progress, wait for it to complete before running /advisor',
+  'No response received.',
+  'No model configured.',
   'Manage Arena sessions',
   'Start an Arena session with multiple models competing on the same task',
   'Stop the current Arena session',

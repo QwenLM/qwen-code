@@ -2240,6 +2240,8 @@ export default {
   'Focus too long (max {{max}} chars)': '关注点过长（最多 {{max}} 个字符）',
   'Another operation is in progress, wait for it to complete before running /advisor':
     '另一个操作正在进行中，请等待其完成后再运行 /advisor',
+  'No response received.': '未收到回复。',
+  'No model configured.': '未配置模型。',
   'Manage Arena sessions': '管理 Arena 会话',
   'Start an Arena session with multiple models competing on the same task':
     '启动一个 Arena 会话，让多个模型在同一任务上竞争',

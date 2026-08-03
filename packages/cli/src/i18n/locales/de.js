@@ -1991,6 +1991,8 @@ export default {
   'Focus too long (max {{max}} chars)': 'Fokus zu lang (max. {{max}} Zeichen)',
   'Another operation is in progress, wait for it to complete before running /advisor':
     'Ein anderer Vorgang läuft gerade. Warten Sie, bis er abgeschlossen ist, bevor Sie /advisor ausführen',
+  'No response received.': 'Keine Antwort erhalten.',
+  'No model configured.': 'Kein Modell konfiguriert.',
   'Manage Arena sessions': 'Arena-Sitzungen verwalten',
   'Start an Arena session with multiple models competing on the same task':
     'Eine Arena-Sitzung starten, in der mehrere Modelle dieselbe Aufgabe bearbeiten',

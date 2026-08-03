@@ -144,6 +144,11 @@ describe('advisorCommand', () => {
         type: MessageType.INFO,
         text: 'Consulting advisor...',
       });
+      // The indicator must be raised before the forked model call starts —
+      // that call is the only window the pending state exists for.
+      expect(
+        (mockContext.ui.setPendingItem as vi.Mock).mock.invocationCallOrder[0],
+      ).toBeLessThan(mockRunForkedAgent.mock.invocationCallOrder[0]);
       expect(mockContext.ui.addItem).toHaveBeenCalledWith(
         {
           type: MessageType.ADVISOR,
@@ -388,6 +393,7 @@ describe('advisorCommand', () => {
 
       expect(mockRunForkedAgent).not.toHaveBeenCalled();
       expect(busyContext.ui.addItem).not.toHaveBeenCalled();
+      expect(busyContext.ui.setPendingItem).not.toHaveBeenCalled();
       expect(result).toEqual({
         type: 'message',
         messageType: 'error',
@@ -405,6 +411,7 @@ describe('advisorCommand', () => {
 
       expect(mockRunForkedAgent).not.toHaveBeenCalled();
       expect(busyContext.ui.addItem).not.toHaveBeenCalled();
+      expect(busyContext.ui.setPendingItem).not.toHaveBeenCalled();
       expect(result).toEqual({
         type: 'message',
         messageType: 'error',
@@ -430,6 +437,10 @@ describe('advisorCommand', () => {
       await advisorCommand.action!(abortableContext, '');
 
       expect(abortableContext.ui.addItem).not.toHaveBeenCalled();
+      expect(abortableContext.ui.setPendingItem).toHaveBeenCalledWith({
+        type: MessageType.INFO,
+        text: 'Consulting advisor...',
+      });
       expect(abortableContext.ui.setPendingItem).not.toHaveBeenLastCalledWith(
         null,
       );
@@ -449,6 +460,10 @@ describe('advisorCommand', () => {
       await advisorCommand.action!(abortableContext, '');
 
       expect(abortableContext.ui.addItem).not.toHaveBeenCalled();
+      expect(abortableContext.ui.setPendingItem).toHaveBeenCalledWith({
+        type: MessageType.INFO,
+        text: 'Consulting advisor...',
+      });
       expect(abortableContext.ui.setPendingItem).not.toHaveBeenLastCalledWith(
         null,
       );

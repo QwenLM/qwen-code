@@ -39,12 +39,38 @@ describe('AdvisorMessage', () => {
     expect(output).toContain('review body');
   });
 
+  it('falls back to terminal width when containerWidth is omitted', () => {
+    const original = Object.getOwnPropertyDescriptor(process.stdout, 'columns');
+    Object.defineProperty(process.stdout, 'columns', {
+      value: 40,
+      configurable: true,
+    });
+    try {
+      const { lastFrame } = renderWithProviders(
+        <AdvisorMessage text={'```\n' + 'x'.repeat(80) + '\n```'} model="m" />,
+      );
+
+      const output = lastFrame() ?? '';
+      // contentWidth derives from the terminal (40 - 4 chrome = 36), so the
+      // 80-char code line wraps well below 40 chars per line. Without the
+      // fallback the box would lay out at the full test-stdout width and a
+      // single line of x's would far exceed the terminal width.
+      expect(output).toContain('x'.repeat(20));
+      expect(output).not.toContain('x'.repeat(40));
+    } finally {
+      if (original) {
+        Object.defineProperty(process.stdout, 'columns', original);
+      } else {
+        delete (process.stdout as unknown as Record<string, unknown>)[
+          'columns'
+        ];
+      }
+    }
+  });
+
   it('normalizes code fences emitted immediately after prose', () => {
     const { lastFrame } = renderWithProviders(
-      <AdvisorMessage
-        text={'Intro```ts\nconst answer = 42;\n```'}
-        model="m"
-      />,
+      <AdvisorMessage text={'Intro```ts\nconst answer = 42;\n```'} model="m" />,
     );
 
     const output = lastFrame() ?? '';

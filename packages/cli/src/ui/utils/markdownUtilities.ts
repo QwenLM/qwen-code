@@ -257,9 +257,42 @@ const countHeadContentLines = (
  * the opening fence right after prose without a preceding newline. Shared by
  * the boxed single-turn renderers (/btw, /advisor) so fence edge cases only
  * need one fix.
+ *
+ * Fence-aware: delimiter runs inside an already-open block are code content
+ * and are left alone, so a review quoting a mid-line fence cannot close the
+ * outer block early. Only a run outside any fence that does not already
+ * start a line gets a newline inserted. Fence tracking mirrors
+ * MarkdownDisplay's parser: leading spaces are allowed, and a run closes the
+ * open fence only when its delimiter matches and is at least as long.
  */
 export function normalizeCodeFences(text: string): string {
-  return text.replace(/([^\n])(```|~~~)/g, '$1\n$2');
+  let result = '';
+  let lastIndex = 0;
+  let openFence: { char: string; length: number } | null = null;
+
+  for (const match of text.matchAll(/(`{3,}|~{3,})/g)) {
+    const runStart = match.index ?? 0;
+    const run = match[0];
+    const lineStart = text.lastIndexOf('\n', runStart - 1) + 1;
+    const startsLine = /^ *$/.test(text.slice(lineStart, runStart));
+    const closesOpenFence =
+      openFence !== null &&
+      startsLine &&
+      run[0] === openFence.char &&
+      run.length >= openFence.length;
+
+    result += text.slice(lastIndex, runStart);
+    if (closesOpenFence) {
+      openFence = null;
+    } else if (openFence === null) {
+      if (!startsLine) result += '\n';
+      openFence = { char: run[0], length: run.length };
+    }
+    result += run;
+    lastIndex = runStart + run.length;
+  }
+
+  return result + text.slice(lastIndex);
 }
 
 /**

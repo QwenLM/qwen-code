@@ -1973,6 +1973,8 @@ export default {
     'Foco muito longo (máx. {{max}} caracteres)',
   'Another operation is in progress, wait for it to complete before running /advisor':
     'Outra operação está em andamento, aguarde a conclusão antes de executar /advisor',
+  'No response received.': 'Nenhuma resposta recebida.',
+  'No model configured.': 'Nenhum modelo configurado.',
   'Manage Arena sessions': 'Gerenciar sessões da Arena',
   'Start an Arena session with multiple models competing on the same task':
     'Iniciar uma sessão da Arena com vários modelos competindo na mesma tarefa',
