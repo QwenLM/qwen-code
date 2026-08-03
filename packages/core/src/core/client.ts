@@ -3954,8 +3954,6 @@ export class GeminiClient {
       customInstructions ? { customInstructions } : undefined,
     );
     if (info.compressionStatus === CompressionStatus.COMPRESSED) {
-      const lastPromptTokenCountIsEstimated =
-        previousChat.isLastPromptTokenCountEstimated();
       const compressedHistory =
         previousChat.getHistoryShallow?.() ?? previousChat.getHistory();
       await this.startChat(compressedHistory, SessionStartSource.Compact);
@@ -3979,7 +3977,7 @@ export class GeminiClient {
       this.config.getFileReadCache().clear();
       this.getChat().setLastPromptTokenCount(
         info.newTokenCount,
-        lastPromptTokenCountIsEstimated,
+        info.newTokenCountIsEstimated ?? false,
       );
       // Re-send a full IDE context blob on the next regular message
       // compression may have summarized away the merged IDE context

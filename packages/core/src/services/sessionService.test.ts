@@ -2423,9 +2423,9 @@ describe('SessionService', () => {
         info: {
           originalTokenCount: 1000,
           newTokenCount: 300,
+          newTokenCountIsEstimated: true,
           compressionStatus: CompressionStatus.COMPRESSED,
         },
-        newTokenCountIsEstimated: true,
         compressedHistory: [],
       },
     };

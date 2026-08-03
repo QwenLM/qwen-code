@@ -2512,7 +2512,7 @@ export function getResumeTokenCounts(
           // Checkpoints created before provenance was persisted are safest to
           // treat as estimates: this keeps the output clamp's overhead pad on
           // and prevents an optimistic resume from overflowing the window.
-          isEstimated: payload.newTokenCountIsEstimated ?? true,
+          isEstimated: payload.info.newTokenCountIsEstimated ?? true,
         };
       }
     }

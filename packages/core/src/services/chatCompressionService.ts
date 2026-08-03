@@ -47,11 +47,11 @@ import {
 const debugLogger = createDebugLogger('COMPRESSION');
 
 /**
- * Hard cap on compression generation. The cold path disables thinking; the
- * cache-sharing path inherits the main request's cache-sensitive thinking
- * setting while keeping this same provider output ceiling. Mirrors
- * claude-code's MAX_OUTPUT_TOKENS_FOR_SUMMARY (autoCompact.ts:30), which is
- * based on p99.99 of real compaction outputs.
+ * Hard cap on compression generation. The cold path disables thinking. The
+ * cache-sharing path preserves Anthropic's cache-sensitive thinking setting,
+ * but disables returned thoughts for Google GenAI so they cannot consume the
+ * summary budget. Mirrors claude-code's MAX_OUTPUT_TOKENS_FOR_SUMMARY
+ * (autoCompact.ts:30), which is based on p99.99 of real compaction outputs.
  */
 export const COMPACT_MAX_OUTPUT_TOKENS = 20_000;
 
@@ -659,6 +659,7 @@ export class ChatCompressionService {
         const mainSystemInstruction = generationConfig.systemInstruction;
         delete generationConfig.systemInstruction;
         delete generationConfig.abortSignal;
+        const authType = config.getContentGeneratorConfig().authType;
         const sharedResult = await config.getBaseLlmClient().generateText({
           contents: [
             ...sideQueryHistory,
@@ -678,8 +679,7 @@ export class ChatCompressionService {
           systemInstruction: mainSystemInstruction,
           config: {
             ...generationConfig,
-            ...(config.getContentGeneratorConfig().authType ===
-            AuthType.USE_ANTHROPIC
+            ...(authType === AuthType.USE_ANTHROPIC
               ? {
                   thinkingConfig: {
                     ...generationConfig.thinkingConfig,
@@ -689,7 +689,15 @@ export class ChatCompressionService {
                     thinkingBudget: COMPACT_MAX_OUTPUT_TOKENS - 1,
                   },
                 }
-              : {}),
+              : authType === AuthType.USE_GEMINI ||
+                  authType === AuthType.USE_VERTEX_AI
+                ? {
+                    thinkingConfig: {
+                      ...generationConfig.thinkingConfig,
+                      includeThoughts: false,
+                    },
+                  }
+                : {}),
             maxOutputTokens: COMPACT_MAX_OUTPUT_TOKENS,
           },
           abortSignal,

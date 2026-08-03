@@ -2340,6 +2340,10 @@ describe('ChatCompressionService.compress cache sharing', () => {
       });
 
       expect(generateText).toHaveBeenCalledTimes(1);
+      const request = generateText.mock.calls[0]![0] as {
+        config?: { thinkingConfig?: { includeThoughts?: boolean } };
+      };
+      expect(request.config?.thinkingConfig?.includeThoughts).toBe(false);
       expect(coldSpy).not.toHaveBeenCalled();
     },
   );

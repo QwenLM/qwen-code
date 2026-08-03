@@ -444,12 +444,6 @@ export interface ChatCompressionRecordPayload {
   /** Compression metrics/status returned by the compression service */
   info: ChatCompressionInfo;
   /**
-   * Whether info.newTokenCount ultimately came from a local estimate instead
-   * of provider usage metadata. Older checkpoints omit this field; resume
-   * treats those conservatively as estimated.
-   */
-  newTokenCountIsEstimated?: boolean;
-  /**
    * Snapshot of the new history contents that the model should see after
    * compression (summary turns + retained tail). Stored as Content[] for
    * resume reconstruction.

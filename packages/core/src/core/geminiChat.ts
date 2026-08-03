@@ -1972,19 +1972,20 @@ export class GeminiChat {
     });
 
     if (info.compressionStatus === CompressionStatus.COMPRESSED && newHistory) {
+      info.newTokenCountIsEstimated = originalTokenCountIsEstimated;
       if (!options?.deferChatCompressionRecord) {
         this.chatRecordingService?.recordChatCompression({
           info,
-          newTokenCountIsEstimated: originalTokenCountIsEstimated,
           compressedHistory: newHistory,
         });
       }
       this.setHistory(newHistory);
       debugLogger.debug('[FILE_READ_CACHE] clear after auto tryCompress');
       this.config.getFileReadCache().clear();
-      this.lastPromptTokenCount = info.newTokenCount;
-      this.lastPromptTokenCountIsEstimated = originalTokenCountIsEstimated;
-      this.lastOutputTokenCount = 0;
+      this.setLastPromptTokenCount(
+        info.newTokenCount,
+        originalTokenCountIsEstimated,
+      );
       this.telemetryService?.setLastPromptTokenCount(info.newTokenCount);
       // Reset the consecutive-failure counter on success so a forced /compress
       // (or any successful compaction) recovers a chat whose breaker had
@@ -2070,13 +2071,13 @@ export class GeminiChat {
     const info: ChatCompressionInfo = {
       originalTokenCount: apiBaseline,
       newTokenCount: adjustedTokenCount,
+      newTokenCountIsEstimated: baselineIsEstimated,
       compressionStatus: CompressionStatus.COMPRESSED,
       triggerReason: 'manual',
     };
 
     this.chatRecordingService?.recordChatCompression({
       info,
-      newTokenCountIsEstimated: baselineIsEstimated,
       compressedHistory: newHistory,
     });
     logChatCompression(
@@ -2418,7 +2419,6 @@ export class GeminiChat {
       ) {
         this.chatRecordingService?.recordChatCompression({
           info: compressionInfo,
-          newTokenCountIsEstimated: this.lastPromptTokenCountIsEstimated,
           compressedHistory: this.getHistoryShallow(),
         });
       }

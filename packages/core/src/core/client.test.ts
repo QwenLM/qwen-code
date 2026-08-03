@@ -784,9 +784,9 @@ describe('Gemini Client (client.ts)', () => {
                 info: {
                   originalTokenCount: 1000,
                   newTokenCount: 200,
+                  newTokenCountIsEstimated: true,
                   compressionStatus: CompressionStatus.COMPRESSED,
                 },
-                newTokenCountIsEstimated: true,
                 compressedHistory: [],
               },
             },
@@ -3964,6 +3964,7 @@ describe('Gemini Client (client.ts)', () => {
         return {
           originalTokenCount: 1000,
           newTokenCount: 200,
+          newTokenCountIsEstimated: true,
           compressionStatus: CompressionStatus.COMPRESSED,
         };
       });

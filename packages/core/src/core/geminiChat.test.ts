@@ -3284,7 +3284,7 @@ describe('GeminiChat', async () => {
       // never runs. Exercise the full chain here:
       //   sendMessageStream → tryCompress → service.compress (REAL) →
       //   cheap-gate (real estimate via getHistory + userMessage) →
-      //   splitter (real) → runSideQuery (mocked at baseLlmClient) →
+      //   splitter (real) → cache-sharing request (mocked at baseLlmClient) →
       //   persistence.
       const largeChars = 'x'.repeat(688_000); // ~172K estimated tokens
       const inheritedHistory: Content[] = [
@@ -3965,7 +3965,7 @@ describe('GeminiChat', async () => {
           newTokenCount: 40_000,
         }),
       );
-      expect(recordPayload.newTokenCountIsEstimated).toBe(false);
+      expect(recordPayload.info.newTokenCountIsEstimated).toBe(false);
       expect(recordPayload.compressedHistory).toEqual([
         { role: 'user', parts: [{ text: 'summary' }] },
         { role: 'model', parts: [{ text: 'ack' }] },
@@ -14329,7 +14329,9 @@ describe('GeminiChat', async () => {
       await recordingChat.tryCompress('p-estimated-checkpoint', true);
 
       expect(recordChatCompression).toHaveBeenCalledWith(
-        expect.objectContaining({ newTokenCountIsEstimated: true }),
+        expect.objectContaining({
+          info: expect.objectContaining({ newTokenCountIsEstimated: true }),
+        }),
       );
     });
 
@@ -14362,9 +14364,13 @@ describe('GeminiChat', async () => {
       const result = recordingChat.compressFast();
 
       expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(result.info.newTokenCount).toBeGreaterThan(0);
+      expect(result.info.newTokenCount).toBeLessThan(1000);
       expect(recordingChat.isLastPromptTokenCountEstimated()).toBe(true);
       expect(recordChatCompression).toHaveBeenCalledWith(
-        expect.objectContaining({ newTokenCountIsEstimated: true }),
+        expect.objectContaining({
+          info: expect.objectContaining({ newTokenCountIsEstimated: true }),
+        }),
       );
     });
   });
