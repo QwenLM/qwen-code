@@ -843,7 +843,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     for (const until of ['.?', '(MARKER)?', 'x*', '\\s', '\\n']) {
       process.exitCode = undefined;
       const { stderr } = await withStdio(() => run({ until }));
-      expect(process.exitCode, until).toBe(3);
+      expect(process.exitCode).toBe(3);
       expect(stderr).toContain('matches a blank pane');
     }
     process.exitCode = undefined;
@@ -1071,7 +1071,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
           if ((r.stdout ?? '').trim() !== '') seen = true;
           else await sleep(50);
         }
-        expect(seen, `${signal}: server appeared`).toBe(true);
+        expect(seen).toBe(true);
         child.kill(signal);
         await new Promise((resolve) => child.once('exit', resolve));
         // The reap ran before the re-raise: no server named for the child.
@@ -1085,7 +1085,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
           if ((r.stdout ?? '').trim() === '') gone = true;
           else await sleep(50);
         }
-        expect(gone, `${signal}: server reaped`).toBe(true);
+        expect(gone).toBe(true);
       }
     },
   );
