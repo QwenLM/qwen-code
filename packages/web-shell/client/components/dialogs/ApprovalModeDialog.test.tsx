@@ -55,6 +55,24 @@ afterEach(() => {
 });
 
 describe('ApprovalModeDialog', () => {
+  it('renames only the plan entry when Session Workflow is enabled', () => {
+    mount(<ApprovalModeDialog currentMode="default" onSelect={vi.fn()} />);
+    expect(
+      container!.querySelector('[data-mode-id="plan"]')?.textContent,
+    ).toContain('Plan (plan)');
+
+    rerender(
+      <ApprovalModeDialog
+        currentMode="default"
+        sessionWorkflowEnabled
+        onSelect={vi.fn()}
+      />,
+    );
+    expect(
+      container!.querySelector('[data-mode-id="plan"]')?.textContent,
+    ).toContain('Plan & Review (plan)');
+  });
+
   it('opens with the highlight on the current mode and confirms on Enter', () => {
     const onSelect = vi.fn();
     mount(<ApprovalModeDialog currentMode="default" onSelect={onSelect} />);

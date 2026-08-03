@@ -126,14 +126,23 @@ describe('the wrapper, driven for real', () => {
     expect(sentinelExitCode(readFileSync(rc, 'utf8'))).toBe(0);
   });
 
-  it('capping the STREAM would FABRICATE an exit code — measured, not assumed', () => {
+  it('capping the STREAM never yields the true exit code — measured, not assumed', () => {
     // Why the log is bounded by watching its size rather than by `head -c`.
     // Piping the drive through `head` kills the writer with SIGPIPE mid-loop,
-    // and the EXIT trap then fires with `$?` from the last successful echo: a
-    // script whose final statement is `exit 5` reports rc=0. Not a lost
-    // verdict — a fabricated one, a failing run presented as a clean pass.
-    // Pinned so the shortcut is not reintroduced by someone who reasons about
-    // it instead of running it.
+    // and what survives is bash-version-dependent — measured, per version:
+    //   - bash 5.2 (CI's ubuntu): the EXIT trap fires with `$?` from the last
+    //     successful echo — rc=0, a FABRICATED clean pass;
+    //   - bash 5.3 (homebrew macOS): the trap's redirect creates the sentinel
+    //     file but the write is LOST — an empty file, no verdict;
+    //   - bash 3.2 (stock macOS): the trap records the echo's EPIPE write
+    //     error — rc=1, a fabricated FAILURE code, with a stray padding line
+    //     leaked into the sentinel file for good measure.
+    // Three shells, three different wrong answers — which is why the
+    // assertion pins the one invariant they share instead of any version's
+    // flavor of wrong: the script's real `exit 5` NEVER survives the cap.
+    // (The first draft of this fix enumerated the wrong answers and was
+    // immediately falsified by running it on a fourth shell; the enumeration
+    // is a moving target, the invariant is not.)
     const dir = mkdtempSync(join(tmpdir(), 'drv-'));
     const rc = join(dir, 'drive.rc');
     const sh = join(dir, 's.sh');
@@ -149,7 +158,13 @@ describe('the wrapper, driven for real', () => {
       ['-c', `bash ${sh} 2>&1 | head -c 4096 > ${join(dir, 'log')}`],
       { encoding: 'utf8' },
     );
-    expect(sentinelExitCode(readFileSync(rc, 'utf8'))).toBe(0); // NOT 5
+    const reported = existsSync(rc)
+      ? sentinelExitCode(readFileSync(rc, 'utf8'))
+      : null;
+    // Fabricated (0, 1, …) or lost (null) — any of them is an untrustworthy
+    // verdict, and all prove the design point. What must never appear is the
+    // truth.
+    expect(reported).not.toBe(5);
   });
 });
 
