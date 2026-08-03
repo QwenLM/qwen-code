@@ -488,6 +488,9 @@ describe('qwen-triage tmux workflow', () => {
     expect(finalizeStep).toContain("JOB_STATUS: '${{ job.status }}'");
     expect(finalizeStep).toContain('Qwen Triage was cancelled');
     expect(finalizeStep).toContain(
+      'elif [ "${JOB_STATUS:-}" = \'cancelled\' ]',
+    );
+    expect(finalizeStep).toContain(
       'Cannot resolve bot identity; skipping final status comment upsert.',
     );
     expect(finalizeStep).toContain('select(.user.login == $bot)');
