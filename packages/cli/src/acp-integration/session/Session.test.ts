@@ -13536,6 +13536,7 @@ describe('Session', () => {
       ['live update', 'live', true],
       ['bulk replay restore', 'replay', true],
       ['failed replacement', 'failed', false],
+      ['mode transition', 'cleared', false],
     ] as const)(
       'keeps exit_plan_mode approval revision correct after %s',
       async (_label, revisionSource, expectsRevision) => {
@@ -13644,6 +13645,9 @@ describe('Session', () => {
               },
             }),
           ).rejects.toThrow('connection lost');
+        }
+        if (revisionSource === 'cleared') {
+          session.clearActiveTodoPlanRevision();
         }
 
         try {

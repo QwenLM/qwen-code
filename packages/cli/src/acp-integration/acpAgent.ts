@@ -9162,7 +9162,8 @@ class QwenAgent implements Agent {
           throw err;
         }
         const current = config.getApprovalMode();
-        if (current === 'plan') {
+        if (current === 'plan' && previous !== 'plan') {
+          session.clearActiveTodoPlanRevision();
           session.clearTodoStopGuardTrust();
         }
         return { previous, current };
@@ -10642,6 +10643,7 @@ class QwenAgent implements Agent {
                 try {
                   config.setApprovalMode(newMode as ApprovalMode);
                   if (newMode === 'plan') {
+                    session.clearActiveTodoPlanRevision();
                     session.clearTodoStopGuardTrust();
                   }
                 } catch (err) {

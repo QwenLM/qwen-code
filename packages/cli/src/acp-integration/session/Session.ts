@@ -1636,6 +1636,10 @@ export class Session implements SessionContext {
     this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
   }
 
+  clearActiveTodoPlanRevision(): void {
+    this.activeTodoPlanRevision = undefined;
+  }
+
   hardSuspendTodoStopGuard(): void {
     this.#clearTodoStopGuardQueuedPromptWait();
     this.todoStopGuardDrainAutomaticQueuesWhenIdle = false;

@@ -1834,6 +1834,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         restoreHistory: ReturnType<typeof vi.fn>;
         rewindToTurn: ReturnType<typeof vi.fn>;
         getRewindableUserTurnCount: ReturnType<typeof vi.fn>;
+        clearActiveTodoPlanRevision: ReturnType<typeof vi.fn>;
         clearTodoStopGuardTrust: ReturnType<typeof vi.fn>;
         hardSuspendTodoStopGuard: ReturnType<typeof vi.fn>;
         beginCloseIfAvailable: ReturnType<typeof vi.fn>;
@@ -3390,6 +3391,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           .fn()
           .mockReturnValue({ targetTurnIndex: 1, apiTruncateIndex: 2 }),
         getRewindableUserTurnCount: vi.fn().mockReturnValue(1),
+        clearActiveTodoPlanRevision: vi.fn(),
         clearTodoStopGuardTrust: vi.fn(),
         hardSuspendTodoStopGuard: vi.fn(),
         releaseTodoStopGuardQueuedPromptWait: vi.fn().mockReturnValue(true),
@@ -3792,6 +3794,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           mode: 'plan',
         }),
       ).resolves.toEqual({ previous: 'default', current: 'plan' });
+      expect(
+        lastSessionMock?.clearActiveTodoPlanRevision,
+      ).toHaveBeenCalledOnce();
       expect(lastSessionMock?.clearTodoStopGuardTrust).toHaveBeenCalledOnce();
     } finally {
       approvalModes.splice(0, approvalModes.length, ...originalApprovalModes);
@@ -16648,6 +16653,7 @@ describe('sessionLanguage multi-session propagation', () => {
       }),
       setDisabledTools: vi.fn(),
     });
+    const clearActiveTodoPlanRevision = vi.fn();
     const clearTodoStopGuardTrust = vi.fn();
 
     vi.mocked(loadSettings).mockReturnValue(settings);
@@ -16658,6 +16664,7 @@ describe('sessionLanguage multi-session propagation', () => {
           getId: vi.fn().mockReturnValue('s-plan-reload'),
           getConfig: vi.fn().mockReturnValue(cfg),
           isIdle: vi.fn().mockReturnValue(true),
+          clearActiveTodoPlanRevision,
           clearTodoStopGuardTrust,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
@@ -16698,6 +16705,7 @@ describe('sessionLanguage multi-session propagation', () => {
         (cfg as typeof cfg & { setApprovalMode: ReturnType<typeof vi.fn> })
           .setApprovalMode,
       ).toHaveBeenCalledWith('plan');
+      expect(clearActiveTodoPlanRevision).toHaveBeenCalledOnce();
       expect(clearTodoStopGuardTrust).toHaveBeenCalledOnce();
     } finally {
       approvalModes.splice(0, approvalModes.length, ...originalApprovalModes);
