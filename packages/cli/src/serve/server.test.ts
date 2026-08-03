@@ -27765,6 +27765,8 @@ describe('Live conversation runtime lifecycle', () => {
       liveConversationWorkspace: conversationWorkspace,
       workspaceRuntimeRemoval,
       voiceCoordinator: new WorkspaceVoiceCoordinator(),
+      getSessionBridges: () =>
+        registry.listManaged().map((runtime) => runtime.bridge),
       daemonEnv: { QWEN_SERVE_ACP_HTTP: '1' },
       runtimePlatform: 'darwin',
       webShellDir: path.join(os.tmpdir(), 'qwen-live-web-shell'),
