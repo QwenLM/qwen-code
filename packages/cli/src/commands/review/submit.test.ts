@@ -461,27 +461,29 @@ describe('payload consistency — refuse before GitHub sees it', () => {
   });
 
   it('uses the inherited startup version instead of the bundled package version', () => {
-    const inherited = process.env.QWEN_CODE_STARTUP_VERSION;
-    process.env.QWEN_CODE_STARTUP_VERSION = '0.21.3';
+    const inherited = process.env['QWEN_CODE_STARTUP_VERSION'];
+    process.env['QWEN_CODE_STARTUP_VERSION'] = '0.21.3';
     try {
       runSubmit(authorized({}));
       expect(posted().body).toContain('(v0.21.3)');
       expect(posted().body).not.toContain('(v0.21.4)');
     } finally {
-      if (inherited === undefined) delete process.env.QWEN_CODE_STARTUP_VERSION;
-      else process.env.QWEN_CODE_STARTUP_VERSION = inherited;
+      if (inherited === undefined)
+        delete process.env['QWEN_CODE_STARTUP_VERSION'];
+      else process.env['QWEN_CODE_STARTUP_VERSION'] = inherited;
     }
   });
 
   it('falls back to the package version when no startup version is inherited', async () => {
-    const inherited = process.env.QWEN_CODE_STARTUP_VERSION;
-    delete process.env.QWEN_CODE_STARTUP_VERSION;
+    const inherited = process.env['QWEN_CODE_STARTUP_VERSION'];
+    delete process.env['QWEN_CODE_STARTUP_VERSION'];
     try {
       await submitCommand.handler?.(authorized({}) as never);
       expect(posted().body).toContain('(v0.21.4)');
     } finally {
-      if (inherited === undefined) delete process.env.QWEN_CODE_STARTUP_VERSION;
-      else process.env.QWEN_CODE_STARTUP_VERSION = inherited;
+      if (inherited === undefined)
+        delete process.env['QWEN_CODE_STARTUP_VERSION'];
+      else process.env['QWEN_CODE_STARTUP_VERSION'] = inherited;
     }
   });
 
