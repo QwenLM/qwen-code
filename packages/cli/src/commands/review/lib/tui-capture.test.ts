@@ -46,14 +46,15 @@ describe('validGeometry', () => {
 });
 
 describe('tmuxSupportsCaptureN', () => {
-  it('accepts 3.0a and later, refuses the older line, ignores the unparseable', () => {
-    // -N landed in 3.0a: 3.0 without a suffix is still too old, and a
-    // `v <= lo`-style off-by-one on the suffix must not refuse 3.0a itself.
-    for (const line of ['tmux 3.0a', 'tmux 3.0b', 'tmux 3.1', 'tmux 3.3a']) {
+  it('accepts 3.1 and later, refuses the whole 3.0 line, ignores the unparseable', () => {
+    // -N landed in 3.1 (upstream CHANGES lists it under "CHANGES FROM 3.0a
+    // TO 3.1"; the 3.0a man page has no -N) — 3.0a/3.0b are TOO OLD, and
+    // Ubuntu 20.04 ships 3.0a: accepting them would die mid-capture on the
+    // unknown flag after paying for a server start.
+    for (const line of ['tmux 3.1', 'tmux 3.1b', 'tmux 3.3a', 'tmux 4.0']) {
       expect(tmuxSupportsCaptureN(line), `${line}`).toBe(true);
     }
-    expect(tmuxSupportsCaptureN('tmux 4.0')).toBe(true);
-    for (const line of ['tmux 1.8', 'tmux 2.8', 'tmux 3.0']) {
+    for (const line of ['tmux 1.8', 'tmux 2.8', 'tmux 3.0', 'tmux 3.0a', 'tmux 3.0b']) {
       expect(tmuxSupportsCaptureN(line), `${line}`).toBe(false);
     }
     // Unparseable is undefined, not false: a version that cannot be named
@@ -73,13 +74,41 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
     cwd: '/work',
   });
 
-  it('carries -L on start, capture and kill alike', () => {
+  it('carries -L on every call — start, capture, captureText, kill', () => {
     // One stray unscoped call is the entire isolation property gone: an
     // unscoped kill-server would kill the USER's tmux server.
-    for (const argv of [plan.start, plan.capture, plan.kill]) {
-      expect(argv[0]).toBe('-L');
-      expect(argv[1]).toBe('srv');
+    for (const argv of [
+      plan.start,
+      plan.capture,
+      plan.captureText,
+      plan.kill,
+    ]) {
+      const i = argv.indexOf('-L');
+      expect(i).toBeGreaterThan(-1);
+      expect(argv[i + 1]).toBe('srv');
     }
+  });
+
+  it('starts CONFIG-FREE with a POSIX pane shell, in ONE client invocation', () => {
+    // -f /dev/null: without it the private server loads ~/.tmux.conf
+    // (measured: destroy-unattached killed the detached session). The
+    // default-shell pin rides the SAME invocation as new-session, chained
+    // with `;`, because a session-less server exits the moment its first
+    // client leaves — and it must run BEFORE the pane exists (measured:
+    // tcsh as default-shell killed the holder instantly).
+    expect(plan.start.slice(0, 2)).toEqual(['-f', '/dev/null']);
+    const set = plan.start.indexOf('set-option');
+    const sep = plan.start.indexOf(';');
+    const news = plan.start.indexOf('new-session');
+    expect(set).toBeGreaterThan(-1);
+    expect(plan.start.slice(set, set + 4)).toEqual([
+      'set-option',
+      '-g',
+      'default-shell',
+      '/bin/sh',
+    ]);
+    expect(sep).toBeGreaterThan(set);
+    expect(news).toBeGreaterThan(sep);
   });
 
   it('kills the SERVER, not the session — reaping everything it started', () => {
@@ -125,19 +154,20 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
     expect(plan.start[c + 1]).toBe('/work');
   });
 
-  it('holds the pane open past the command — one-shot commands stay capturable', () => {
+  it('holds the pane open past the command in a NESTED shell', () => {
     // tmux's remain-on-exit off destroys the session the moment the command
-    // exits (measured: a render-and-exit fixture was uncapturable 0/10);
-    // the sh -c holder keeps the pane alive and kill-server reaps it.
-    // The hold sits on its OWN LINE: appended with `;` it is voided by the
-    // command's own tail — a trailing `;` yields `;;` (syntax error), a
-    // trailing `#` comment swallows it.
+    // exits (measured: a render-and-exit fixture was uncapturable 0/10).
+    // TWO shells, not one: in a single shell a command ending in `exit N`
+    // (or `exec`, or its own `set -e`) takes the keep-alive down with it —
+    // measured, deterministic "no server running" on `printf ...; exit 0`.
+    // The inner sh absorbs the exit; the outer holds the pane, with the
+    // hold on its OWN LINE so no command tail (`;`, `#`) can void it.
     expect(plan.start[plan.start.length - 1]).toBe(
-      "sh -c 'node cli.js\nsleep 7200'",
+      `sh -c 'sh -c '\\''node cli.js'\\''\nsleep 7200'`,
     );
   });
 
-  it('quote-escapes the command inside the holder', () => {
+  it('quote-escapes the command through BOTH holder layers', () => {
     const p = tmuxPlan({
       server: 'srv',
       session: 'cap',
@@ -146,10 +176,14 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
       command: `printf '%s' "it's"`,
       cwd: '/work',
     });
-    // A single quote in the command must not close the holder's quoting.
-    expect(p.start[p.start.length - 1]).toBe(
-      `sh -c 'printf '\\''%s'\\'' "it'\\''s"\nsleep 7200'`,
-    );
+    // A single quote in the command must not close either layer's quoting:
+    // the outer wrapper starts and ends the holder, the hold line survives
+    // verbatim, and the command's own text is still present inside.
+    const held = p.start[p.start.length - 1];
+    expect(held.startsWith("sh -c 'sh -c ")).toBe(true);
+    expect(held.endsWith("\nsleep 7200'")).toBe(true);
+    expect(held).toContain('%s');
+    expect(held).toContain('it');
   });
 
   it('matches --until on a joined, escape-free view while .ans stays physical', () => {
