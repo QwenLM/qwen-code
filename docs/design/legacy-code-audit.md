@@ -24,13 +24,16 @@ untracked; key results below) audited
   zero self-adjudicated false positives, ~32.5M tokens.
 
 The findings the fan-out added were not marginal. The single most severe —
-`cat $(rm -rf /tmp/x)` evaluating to `allow` under `deny: ["Bash(rm *)"]`,
-end-to-end — was touched by the naive agent but filed as a Suggestion
-without proving the consequence. The cross-file tracer (1c) found the two
-Criticals nobody else could: the AUTO destructive-command guard being
-skipped on any L4-allow, and session-rule deletion silently no-oping in the
-permissions dialog. Both required assembling a three-file chain — the
-finding class that only exists because one agent owns the cross-file walk.
+a command substitution nested inside an allow-matched outer command
+bypassing the deny rules end-to-end, the denied inner command never
+consulted (the working payload is withheld from this document because the
+bypass is unpatched as of writing) — was touched by the naive agent but
+filed as a Suggestion without proving the consequence. The cross-file
+tracer (1c) found the two Criticals nobody else could: the AUTO
+destructive-command guard being skipped on any L4-allow, and session-rule
+deletion silently no-oping in the permissions dialog. Both required
+assembling a three-file chain — the finding class that only exists because
+one agent owns the cross-file walk.
 
 Two more measurements shape this design:
 
@@ -48,12 +51,14 @@ Two more measurements shape this design:
 **Replication (2026-08-03, `packages/core/src/hooks/` — 23 files, 8,516
 lines, a lifecycle/event-dispatch module, deliberately different in
 character from the parser-heavy permissions module):** the margin
-reproduced and widened. The naive arm was much stronger this time (3
-confirmed Criticals, including a redirect-based SSRF bypass) — and the
-fan-out still covered all three while adding 19 more (22 total, zero
-self-adjudicated false positives on both arms, ~7× recall margin,
-pre-declared success criterion was 3×; cost ratio ~24×, dominated by the
-cross-file tracer — see the budget rule below). Two replication findings
+reproduced — and widened in absolute terms (19 added findings vs Round
+1's 15) — though the recall ratio narrowed from ~8.5× to ~7×. The naive
+arm was much stronger this time (3 confirmed Criticals, including a
+redirect-based SSRF bypass) — and the fan-out still covered all three
+while adding 19 more (22 total, zero self-adjudicated false positives on
+both arms, ~7× recall margin, pre-declared success criterion was 3×;
+cost ratio ~24×, dominated by the cross-file tracer — see the budget
+rule below). Two replication findings
 changed this document: the cross-file tracer's event-coverage walk ("does
 every firing path fire?") produced two Criticals unique in the field — both
 adjacent-class siblings of a historical fix; and the security agent,
@@ -101,9 +106,14 @@ supplies the line counts), and the chunk-tiling logic from `plan-diff`.
 **Needs a target-kind parameter, not a lift:** the roster machinery
 (`lib/roster.ts`) keys on diff metrics — the `srcDiffLines`/`diffLines`
 topology gate, `hasDeletions()` (true on an empty file list by design), a
-resolved PR number — so a diff-free plan misfires through it (it would
-require 1b and 7, which this design drops, and report no territory fan-out
-at any module size); `check-coverage`'s core predicate is "the agent was
+resolved PR number — so a diff-free plan misfires through it (once
+`plan-files` populates per-file entries, `hasDeletions()` returns false —
+its true-on-empty fail-safe only fires on an empty list — so 1b is not
+required, and with no worktree or untracked files, `reviewMode()` resolves
+`diff-only`, the one mode where `requiredAgents()` drops both 7 and 1c,
+so the roster comes back missing the 1c this design keeps as mandatory,
+and reports no territory fan-out at any module size); `check-coverage`'s
+core predicate is "the agent was
 pointed at diff lines AND opened the diff file", and an audit has no diff
 file, so it must be re-expressed as "opened file F / range R"; and the
 chunk constant counts diff lines (`DEFAULT_MAX_CHUNK_LINES = 400`), so its
@@ -140,25 +150,38 @@ subcommand, `qwen audit plan-files <path>`, which plays the role
   refuses the run and asks for a narrower path. The above-gate branch is
   untested extrapolation — neither experiment routed a module through it —
   and a run that does says so in the report header;
-- marks heavy files for the invariant-checklist triple — untested in the
-  experiments; expected to transfer by analogy from the diff-based
-  checklist, flagged as extrapolation. The predicate is legacy-specific,
-  because `classifyHeavy` (`lib/heavy.ts`) does not lift: it triggers on
-  diff metrics (≥ 300 pre-lines AND rewrite ratio ≥ 0.4 or ≥ 800 changed
-  lines), and an audit target is merged, unchanged code — every file has
-  zero changed lines, so a lifted `classifyHeavy` marks nothing heavy and
-  the triple silently never runs. Legacy heaviness is instead: a source
-  file at or above the same 300-line floor that holds long-lived mutable
-  state — the checklist's subject: class-level fields, caches, timers,
-  registries, error taxonomy. As in `/review`'s roster, the triple runs
-  only above the topology gate: below it every dimension agent already
-  reads every file whole, so three more whole-file agents would add cost
-  but no new view;
+- nominates heavy-file candidates for the invariant-checklist triple —
+  untested in the experiments; expected to transfer by analogy from the
+  diff-based checklist, flagged as extrapolation in the report header.
+  Heaviness splits by decider: `plan-files` does the deterministic half —
+  nominating every source file at or above the same 300-line floor
+  `classifyHeavy` uses (the legacy floor, because `classifyHeavy`
+  (`lib/heavy.ts`) does not lift: it triggers on diff metrics — ≥ 300
+  pre-lines AND rewrite ratio ≥ 0.4 or ≥ 800 changed lines — and an audit
+  target is merged, unchanged code, so a lifted `classifyHeavy` marks
+  nothing heavy and the triple silently never runs) — and the orchestrator
+  makes the semantic call over the nominees: which of them hold
+  long-lived mutable state (class-level fields, caches, timers,
+  registries) or carry the checklist's other subject, an error taxonomy.
+  A deterministic subcommand cannot decide a semantic predicate, and the
+  marking is disclosed in the report header. As in `/review`'s roster,
+  the triple runs only above the topology gate: below it every dimension
+  agent already reads every file whole, so three more whole-file agents
+  would add cost but no new view;
 - detects event/lifecycle modules by emit/dispatch/subscribe call
-  patterns and flags them for the 1c event-coverage brief.
+  patterns and flags them for the 1c event-coverage brief; the detection
+  outcome (detected / not detected, heuristic) rides into the report
+  header, because a false negative otherwise withholds the walk silently
+  — 1c still completes with its plain brief, so "walks completed" cannot
+  tell "not an event module" from "detection missed".
 
 No worktree, no base resolution, no merge base — the tree under audit is
-the user's own checkout, read-only.
+the user's own checkout, read-only for the walks. The exceptions execute
+and mutate: a runnable probe flips under the implied fix on a scratch
+copy of the probed file (never the checkout's copy), and the surviving
+baseline test run (Open questions) executes the module's own tests.
+Audited-module code may be vendored or third-party, so the header states
+that the run executed code, rather than framing execution as a read.
 
 ### Budget ceiling
 
@@ -167,17 +190,26 @@ the product — so it ships with a stated bound, not an open tab:
 
 - **Pre-launch estimate, confirmed.** `plan-files` prints what the run
   will launch (roster by role, chunk count) and an expected token range —
-  the two measured arms came in at ~4–6M tokens per 1,000 module lines at
-  medium (32.5M at 7,638 lines; ~46M at 8,516, derived from the
-  cross-file tracer's 16M at ~35% of its arm) — and the run starts only
-  on user confirmation.
-- **Ceiling.** Medium is capped at 60M tokens and 40 agents, whichever
-  binds first; a plan that estimates over either refuses and asks for a
-  narrower path or a lower tier. Both constants are unmeasured first cuts
-  — 60M is ~1.3× the larger measured arm — and they ride into the report
-  header with the other unexercised-machinery flags. High is
-  extrapolation: it prints and confirms the same estimate, but its
-  ceiling waits for its first measurement.
+  the two measured arms came in at ~4–6M tokens per 1,000 module lines
+  for the 8-dimension core (32.5M at 7,638 lines; ~46M at 8,516, derived
+  from the cross-file tracer's 16M at ~35% of its arm) — and the run
+  starts only on user confirmation. Medium adds work no measurement
+  covers (6a, the invariant triple on heavy files, verification), so the
+  confirmation names that delta as unmeasured rather than pricing it
+  into the range.
+- **Ceiling.** Medium is capped at 60M tokens and 40 agents, both
+  enforced at plan time — the agent count against the deterministic
+  roster, the token cap against the estimate range's top, the
+  conservative reading since actual consumption is only known at runtime
+  and this design has no runtime accounting; a plan over either refuses
+  and asks for a narrower path or a lower tier. Both constants are
+  unmeasured first cuts — 60M is ~1.3× the larger measured arm — and they
+  ride into the report header with the other unexercised-machinery flags.
+  High is extrapolation: its estimate is the medium estimate multiplied
+  by the round structure — a range from the earliest dry stop (initial
+  fan-out + 2 rounds) to the 5-round hard cap — and the confirmation
+  names that range, not the single-pass number; its total ceiling waits
+  for its first measurement, and the header says so.
 
 The ceiling bounds the total; it does not pick which agents get cut — that
 stays the marginal-yield decision above.
@@ -327,18 +359,32 @@ brief must name both cases.
   identically to verified ones. The report opens with a run-metadata
   header: the audited commit SHA and dirty/clean state of the checkout
   (file:line anchors drift with HEAD, so a re-audit after fixes must be
-  alignable with the run it follows), the effort tier, and the walks
+  alignable with the run it follows — a promise the SHA keeps only when
+  the checkout was clean; on a dirty run `/audit` writes the dirty
+  `git diff` alongside the report in `.qwen/audits/` so the anchors stay
+  resolvable, and the header names which case applied), the effort tier,
+  and the walks
   completed or skipped with reason — a partially failed run (1c
   budget-exhausted, security agent errored) must be distinguishable from
   a full one, because "0 security findings" on a run whose security agent
   never completed is not "safe" (`/review` solves this with
   `unreviewedDimensions`). The header also carries every flag this design
-  attaches to unexercised machinery — above-gate topology, the high-tier
-  loop, twice-whiffed reverse-audit scopes, budget-bound walks, unmeasured
-  tiers — since `/audit` has no verdict for them to cap.
-- **Local-only by construction:** `.qwen/*` is gitignored, so the report
-  never lands in version control — a real security property, since an
-  audit of a security module will quote exploitable code.
+  attaches to unexercised machinery — above-gate topology, the invariant
+  triple's extrapolation, 6a's untested status, the event-module
+  detection outcome, the unmeasured ceiling constants (60M tokens /
+  40 agents), the high-tier loop, twice-whiffed reverse-audit scopes,
+  budget-bound walks, unmeasured tiers — since `/audit` has no verdict
+  for them to cap.
+- **Local-only, verified not assumed:** the report must never land in
+  version control — a real security property, since an audit of a
+  security module will quote exploitable code. The property holds only
+  when the project ignores `.qwen/*` and nothing re-includes or
+  force-adds the audits path: this repo's own `.gitignore` re-includes
+  four `.qwen/` subtrees and tracks force-added files under `.qwen/`,
+  and `/audit` runs in arbitrary repositories where `.qwen/` may not be
+  ignored at all. So `/audit` checks before writing — `git check-ignore`
+  on the audits path, the probe `team-memory-git-status.ts` already uses
+  — and refuses the run when the report would be tracked.
 - **The terminal:** a short summary — counts by severity and theme, plus
   the top clusters — not the full list. The report is for acting on; the
   terminal is for deciding whether to.
@@ -350,8 +396,13 @@ brief must name both cases.
 
 - **low** — inline read by the orchestrator itself, angle rotation as in
   `/review` low minus angle B (removed behaviour — merged code has no
-  deletions; the same absence that dropped agent 1b); unverified
-  findings, capped. Unmeasured in the experiments — both rounds ran only
+  deletions; the same absence that dropped agent 1b), with the surviving
+  angles re-anchored from diff to module by the Roster section's
+  mechanical change — B is the only outright removal — and the lifted
+  three-angle floor rebased to A and C: two angles at the floor,
+  disclosed in the header, since a silent shrink would land on exactly
+  the small triage targets the floor exists for; unverified findings,
+  capped. Unmeasured in the experiments — both rounds ran only
   the naive and fan-out arms — and flagged as such in the report header,
   like its siblings. For "is this module worth a real audit". It shares
   the single-reader shape the naive-exclusion argument below rejects,
@@ -362,10 +413,10 @@ brief must name both cases.
   module.
 - **medium** (default) — the replicated 8-dimension core plus the 6a
   blind-spot hedge: 1a, 1c, 2, 3a/3b/3c, 4, 5, **6a**, plus invariant
-  a/b/c on files `plan-files` marks as heavy (above the topology gate
-  only, as in `/review`'s roster) + verification. Rounds 1-2 measured
-  the 8-dimension core; 6a rests on the near-miss argument above, not
-  on experiment.
+  a/b/c on the files the heavy-marking above selects (above the topology
+  gate only, as in `/review`'s roster) + verification. Rounds 1-2
+  measured the 8-dimension core; 6a rests on the near-miss argument
+  above, not on experiment.
 - **high** — medium + the other two personas (6b/6c) + iterative reverse
   audit carrying the full `/review` Step 5 semantics, not just its stop
   rule. Each round fans out over the module with the cumulative confirmed
@@ -428,8 +479,10 @@ capped, sold as triage — as above.)
 
 ## Verification
 
-- Unit: `plan-files` tiling/classification/topology gates and the legacy
-  heaviness predicate; roster selection per tier; the dedup clusterer's
+- Unit: `plan-files` tiling/classification/topology gates and its
+  heavy-candidate nomination (the deterministic 300-line half; the
+  orchestrator's semantic marking is model-driven, not unit-testable);
+  roster selection per tier; the dedup clusterer's
   merge behavior on synthetic overlapping findings — including the
   max-severity rule (a cluster whose mildest copy is a Suggestion must
   come out at its Critical member's severity, with both scenarios
