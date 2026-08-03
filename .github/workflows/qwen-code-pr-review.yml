@@ -493,6 +493,50 @@ jobs:
           npm install -g --registry=https://registry.npmjs.org '@qwen-code/qwen-code@latest'
           qwen --version
 
+      # Evidence tooling for rendering claims: `qwen review capture-tui` (the
+      # /review evidence producer) needs tmux to drive a private-server
+      # capture and freeze to render the .ans into a publishable PNG. Both
+      # are OPTIONAL — the evidence ladder degrades honestly without them
+      # (png → ans-only → refused, recorded in the capture manifest) — so
+      # this step NEVER fails the review; it only decides which rung this
+      # runner can reach.
+      - name: 'Install capture tools (tmux + freeze)'
+        if: "steps.context.outputs.should_run == 'true'"
+        env:
+          FREEZE_VERSION: '0.2.2'
+          FREEZE_SHA256: '012fdbdd16c0c19570f9052aac34d16d93d7d0d3b565b05374cc59492f53539b'
+        run: |-
+          if ! command -v tmux >/dev/null 2>&1; then
+            if command -v sudo >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
+              sudo apt-get update -qq && sudo apt-get install -y -qq tmux || true
+            fi
+          fi
+          if command -v tmux >/dev/null 2>&1; then
+            tmux -V
+          else
+            echo 'tmux unavailable; rendering captures will refuse and claims stay argued in prose.'
+          fi
+          if ! command -v freeze >/dev/null 2>&1 && [ "$(uname -sm)" = 'Linux x86_64' ]; then
+            tmp=$(mktemp -d)
+            url="https://github.com/charmbracelet/freeze/releases/download/v${FREEZE_VERSION}/freeze_${FREEZE_VERSION}_Linux_x86_64.tar.gz"
+            if curl -fsSL --retry 3 -o "$tmp/freeze.tar.gz" "$url" \
+              && echo "${FREEZE_SHA256}  $tmp/freeze.tar.gz" | sha256sum -c - >/dev/null \
+              && tar -xzf "$tmp/freeze.tar.gz" -C "$tmp"; then
+              bin=$(find "$tmp" -type f -name freeze | head -1)
+              if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+                sudo install -m 0755 "$bin" /usr/local/bin/freeze
+              else
+                mkdir -p "$HOME/.local/bin"
+                install -m 0755 "$bin" "$HOME/.local/bin/freeze"
+                echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+              fi
+            else
+              echo 'freeze download/verify failed; captures degrade to ans-only.'
+            fi
+            rm -rf "$tmp"
+          fi
+          command -v freeze >/dev/null 2>&1 && freeze --version || true
+
       - name: 'Run review'
         id: 'review'
         if: "steps.context.outputs.should_run == 'true'"
@@ -505,6 +549,15 @@ jobs:
           REVIEW_MODE: '${{ steps.context.outputs.review_mode }}'
           TIMEOUT_MINUTES: '${{ steps.context.outputs.timeout_minutes }}'
           TIMEOUT_EXPLICIT: '${{ steps.context.outputs.timeout_explicit }}'
+          # Evidence-image destination for `qwen review publish-assets` —
+          # OPT-IN by design: the command refuses to push images anywhere the
+          # user did not designate, so with the repository variable unset the
+          # review simply keeps its evidence as prose and local paths. Set the
+          # variable (e.g. to this repository) to let reviews embed capture
+          # PNGs; images land on commit-pinned pr-assets/<pr>-review branches
+          # (already covered by the visuals cleanup workflow), pushed with the
+          # same CI_BOT_PAT this step already uses for gh.
+          QWEN_REVIEW_ASSETS_REPO: '${{ vars.QWEN_REVIEW_ASSETS_REPO }}'
           # Per-run agent home so this review's session/memory cannot leak into
           # the next on the reused self-hosted workspace (reset in "Clean stale
           # agent state"). Must match the QWEN_HOME computed there.
