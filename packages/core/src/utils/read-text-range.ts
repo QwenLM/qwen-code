@@ -391,6 +391,12 @@ export async function readTextCursorWindowFromHandle(
       true,
     );
     consumedBytes = resumeAt - startOffset;
+    // The skip walked over the cut line's terminator without decoding it —
+    // the same pair the next page's seed reads — so count it here too or the
+    // two pages of one file disagree.
+    if (!sawCrlf) {
+      sawCrlf = await precededByCrlfTerminator(fileHandle, resumeAt);
+    }
   }
 
   const content = lines.join('\n');
