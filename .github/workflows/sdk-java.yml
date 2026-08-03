@@ -41,6 +41,10 @@ on:
 permissions:
   contents: 'read'
 
+env:
+  MAVEN_VERSION: '3.9.11'
+  MAVEN_SHA512: 'bcfe4fe305c962ace56ac7b5fc7a08b87d5abd8b7e89027ab251069faebee516b0ded8961445d6d91ec1985dfe30f8153268843c89aa392733d1a3ec956c9978'
+
 concurrency:
   group: 'sdk-java-${{ github.event.pull_request.number || github.run_id }}'
   cancel-in-progress: true
@@ -99,6 +103,15 @@ jobs:
           java-version: '${{ matrix.java }}'
           cache: 'maven'
           cache-dependency-path: 'packages/sdk-java/qwencode/pom.xml'
+
+      - name: 'Set up Maven (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          archive="${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+          curl -fsSL "https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"
+          echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status
+          tar -xzf "${archive}" -C "${RUNNER_TEMP}"
+          echo "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}/bin" >> "${GITHUB_PATH}"
 
       - name: 'Run Java SDK tests'
         working-directory: 'packages/sdk-java/qwencode'
@@ -173,6 +186,15 @@ jobs:
           java-version: '11'
           cache: 'maven'
           cache-dependency-path: 'packages/sdk-java/qwencode/pom.xml'
+
+      - name: 'Set up Maven (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          archive="${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+          curl -fsSL "https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"
+          echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status
+          tar -xzf "${archive}" -C "${RUNNER_TEMP}"
+          echo "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}/bin" >> "${GITHUB_PATH}"
 
       - name: 'Install Node.js dependencies'
         run: 'npm ci --prefer-offline --no-audit --progress=false'
