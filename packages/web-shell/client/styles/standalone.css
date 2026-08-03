@@ -110,7 +110,7 @@ textarea,
  * highlight where the default painting fails. #8214.
  */
 [data-user-selectable] ::selection {
-  background: hsl(var(--selection-bg, 210 100% 50% / 30%));
+  background: hsl(210 100% 50% / 30%);
 }
 
 /*
