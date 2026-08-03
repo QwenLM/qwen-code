@@ -2335,6 +2335,76 @@ describe('AppContainer State Management', () => {
       expect(cancelSpy).not.toHaveBeenCalled();
     });
 
+    it('cancels the ongoing request on a single Esc with an empty buffer and queued follow-ups', async () => {
+      // Positive counterpart to the vim-INSERT guard above: while the agent
+      // is Responding and the buffer is empty, one Esc must reach the
+      // cancel-work branch of the global handler — even with queued
+      // follow-up prompts present, which InputPrompt must NOT pop into the
+      // buffer (its own Responding guard handles that side; #8201).
+      const cancelSpy = vi.fn();
+      const mockPopAllMessages = vi.fn().mockReturnValue(null);
+      installCancelCapture({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: cancelSpy,
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: ['queued follow-up'],
+        addMessage: vi.fn(),
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue('queued follow-up'),
+        popAllMessages: mockPopAllMessages,
+        drainQueue: vi.fn().mockReturnValue(['queued follow-up']),
+        popNextTurn: vi.fn().mockReturnValue({ modelText: 'queued follow-up' }),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      const handleKeypress = mockedUseKeypress.mock.calls
+        .map((call) => call[0])
+        .reverse()
+        .find(
+          (handler): handler is (key: Key) => void =>
+            typeof handler === 'function' &&
+            handler.toString().includes('TOGGLE_THINKING_EXPANDED'),
+        ) as ((key: Key) => void) | undefined;
+      expect(handleKeypress).toBeDefined();
+
+      const escKey: Key = {
+        name: 'escape',
+        sequence: '',
+        ctrl: false,
+        meta: false,
+        shift: false,
+        paste: false,
+      };
+      handleKeypress!(escKey);
+
+      // A single Esc cancels the in-flight request...
+      expect(cancelSpy).toHaveBeenCalledOnce();
+      // ...and must not consume the queued follow-ups (InputPrompt owns
+      // that decision and skips the pop while Responding; #8201).
+      expect(mockPopAllMessages).not.toHaveBeenCalled();
+    });
+
     it('does not repopulate the buffer with the previous prompt on ESC cancel', async () => {
       const mockSetText = vi.fn();
       mockedUseTextBuffer.mockReturnValue({
