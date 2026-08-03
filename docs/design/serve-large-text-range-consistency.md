@@ -60,11 +60,13 @@ unreachable.
 
 Serve's full-snapshot reads derive `lineEnding` from the whole decoded file.
 The large-file window paths still derive it from the returned window, except
-that a byte-cursor page also counts the terminator it resumes after, so an
-unterminated tail page agrees with the page before it in a file with uniform
-line endings (mixed-ending files can still flip between pages; unifying the
-paths is tracked as a follow-up). Core can continue reporting file-level
-metadata for its other consumers.
+that a byte-cursor page also counts a terminator outside its returned slice —
+the one it resumes after, and, when its first line is cut by the byte budget,
+the one the re-snap walks over — so an unterminated tail page agrees with the
+page before it, and a byte-truncated page with the page after it, in a file
+with uniform line endings (mixed-ending files can still flip between pages;
+unifying the paths is a candidate follow-up — no tracking issue exists yet).
+Core can continue reporting file-level metadata for its other consumers.
 
 Every large-file window keeps `truncated: true`, even when the scan happens to
 reach EOF. This boundary uses the flag to distinguish a window without a
