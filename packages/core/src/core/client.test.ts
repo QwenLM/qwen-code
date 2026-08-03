@@ -756,7 +756,53 @@ describe('Gemini Client (client.ts)', () => {
       await resumedClient.initialize();
 
       expect(resumedClient.getChat().getLastPromptTokenCount()).toBe(200);
-      expect(seedResumeTokenCountsSpy).toHaveBeenCalledWith(200, 80);
+      expect(seedResumeTokenCountsSpy).toHaveBeenCalledWith(200, 80, false);
+    });
+
+    it('restores estimated provenance from a compression checkpoint', async () => {
+      const seedResumeTokenCountsSpy = vi.spyOn(
+        GeminiChat.prototype,
+        'seedResumeTokenCounts',
+      );
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: {
+          sessionId: 'resumed-session-id',
+          projectHash: 'project-hash',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          messages: [
+            {
+              uuid: 'compression-1',
+              parentUuid: null,
+              sessionId: 'resumed-session-id',
+              timestamp: new Date(0).toISOString(),
+              type: 'system',
+              subtype: 'chat_compression',
+              cwd: '/test/project',
+              version: '1.0.0',
+              systemPayload: {
+                info: {
+                  originalTokenCount: 1000,
+                  newTokenCount: 200,
+                  compressionStatus: CompressionStatus.COMPRESSED,
+                },
+                newTokenCountIsEstimated: true,
+                compressedHistory: [],
+              },
+            },
+          ],
+        },
+        filePath: '/test/session.jsonl',
+        lastCompletedUuid: null,
+      });
+
+      const resumedClient = new GeminiClient(mockConfig);
+      await resumedClient.initialize();
+
+      expect(seedResumeTokenCountsSpy).toHaveBeenCalledWith(200, 0, true);
+      expect(resumedClient.getChat().isLastPromptTokenCountEstimated()).toBe(
+        true,
+      );
     });
 
     it('seeds recently completed tools from resumed history', async () => {

@@ -447,6 +447,7 @@ export class GeminiClient {
         chat.seedResumeTokenCounts(
           resumeTokenCounts.promptTokenCount,
           resumeTokenCounts.outputTokenCount,
+          resumeTokenCounts.isEstimated,
         );
       } else {
         chat.setLastPromptTokenCount(

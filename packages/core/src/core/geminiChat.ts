@@ -503,14 +503,15 @@ const TRANSPORT_STREAM_RETRY_CONFIG = {
 };
 
 /**
- * Pad added to the first-send prompt estimate when sizing the output clamp
- * (`lastPromptTokenCount === 0` — fresh session, --continue restore, or
- * subagent inheritance). The char/4 history walk misses the system prompt,
- * tool definitions, and skill content — estimatePromptTokens documents this
- * as "typically ~15-20K of under-estimate" — and an under-counted prompt is
- * the one way `prompt + max_tokens` can overflow the window (issue #5950).
- * Sized to the documented worst case; costs nothing on large windows (the
- * output ceiling binds long before the pad matters).
+ * Pad added when sizing the output clamp from an estimate-derived prompt
+ * count. This includes a fresh session (`lastPromptTokenCount === 0`) and
+ * counts propagated through compression or resume before provider usage is
+ * available. The char/4 history walk misses the system prompt, tool
+ * definitions, and skill content — estimatePromptTokens documents this as
+ * "typically ~15-20K of under-estimate" — and an under-counted prompt is the
+ * one way `prompt + max_tokens` can overflow the window (issue #5950). Sized
+ * to the documented worst case; costs nothing on large windows (the output
+ * ceiling binds long before the pad matters).
  */
 const FIRST_SEND_CLAMP_OVERHEAD_PAD = 20_000;
 
@@ -1902,18 +1903,19 @@ export class GeminiChat {
 
   /**
    * Seed the restored prompt and previous-response output token counts in one
-   * step. Resume restores chat history plus both counters from the same
-   * assistant usage record, so callers must avoid the normal
+   * step. Resume restores chat history plus both counters and their provenance
+   * from the same checkpoint, so callers must avoid the normal
    * setLastPromptTokenCount() clearing behavior.
    */
   seedResumeTokenCounts(
     promptTokenCount: number,
     outputTokenCount: number,
+    isEstimated = false,
   ): void {
     this.lastPromptTokenCount = Number.isFinite(promptTokenCount)
       ? Math.max(0, promptTokenCount)
       : 0;
-    this.lastPromptTokenCountIsEstimated = false;
+    this.lastPromptTokenCountIsEstimated = isEstimated;
     this.lastOutputTokenCount = Number.isFinite(outputTokenCount)
       ? Math.max(0, outputTokenCount)
       : 0;
@@ -1949,6 +1951,11 @@ export class GeminiChat {
             .imageTokenEstimate,
         ))
       : (options?.originalTokenCountOverride ?? this.lastPromptTokenCount);
+    debugLogger.debug(
+      `[compaction] token-count provenance: prompt_id=${promptId}, ` +
+        `originalTokenCount=${originalTokenCount}, ` +
+        `estimated=${originalTokenCountIsEstimated}`,
+    );
     const service = new ChatCompressionService();
     const { newHistory, info } = await service.compress(this, {
       promptId,
@@ -1968,6 +1975,7 @@ export class GeminiChat {
       if (!options?.deferChatCompressionRecord) {
         this.chatRecordingService?.recordChatCompression({
           info,
+          newTokenCountIsEstimated: originalTokenCountIsEstimated,
           compressedHistory: newHistory,
         });
       }
@@ -2054,6 +2062,11 @@ export class GeminiChat {
       this.lastPromptTokenCount === 0 || this.lastPromptTokenCountIsEstimated;
     const adjustedTokenCount = Math.max(0, apiBaseline - reduction);
 
+    debugLogger.debug(
+      `[compaction] fast token-count provenance: ` +
+        `originalTokenCount=${apiBaseline}, estimated=${baselineIsEstimated}`,
+    );
+
     const info: ChatCompressionInfo = {
       originalTokenCount: apiBaseline,
       newTokenCount: adjustedTokenCount,
@@ -2063,6 +2076,7 @@ export class GeminiChat {
 
     this.chatRecordingService?.recordChatCompression({
       info,
+      newTokenCountIsEstimated: baselineIsEstimated,
       compressedHistory: newHistory,
     });
     logChatCompression(
@@ -2404,6 +2418,7 @@ export class GeminiChat {
       ) {
         this.chatRecordingService?.recordChatCompression({
           info: compressionInfo,
+          newTokenCountIsEstimated: this.lastPromptTokenCountIsEstimated,
           compressedHistory: this.getHistoryShallow(),
         });
       }
@@ -2476,17 +2491,15 @@ export class GeminiChat {
       // on every main-turn request (issue #5950).
       //
       // When lastPromptTokenCount > 0 (steady state, or refreshed to
-      // newTokenCount by a compression), re-estimate from the counts — cheap,
-      // no history walk. When it is still 0 (first send, compression NOOPed),
-      // reuse the pre-push gate estimate: userContent is already in history
-      // here, so a fresh history walk would double-count it. That fallback
-      // estimate misses the system prompt, tool definitions, and skill
-      // content (see estimatePromptTokens — "typically ~15-20K of
-      // under-estimate"), and an under-count is the ONE way
-      // `prompt + max_tokens` can still overflow the window, so pad it by
-      // the documented worst case. The pad only trims output on the very
-      // first send of small-window sessions; from the second send on the
-      // API-authoritative count takes over.
+      // newTokenCount by compression/resume), re-estimate from the counts —
+      // cheap, no history walk. When it is still 0, reuse the pre-push gate
+      // estimate: userContent is already in history here, so a fresh history
+      // walk would double-count it. Any estimate-derived count misses the
+      // system prompt, tool definitions, and skill content (see
+      // estimatePromptTokens — "typically ~15-20K of under-estimate"), and
+      // an under-count is the ONE way `prompt + max_tokens` can still
+      // overflow the window, so keep the pad until provider usage replaces
+      // the estimate.
       promptTokensForClamp =
         this.lastPromptTokenCount > 0
           ? estimatePromptTokens(
