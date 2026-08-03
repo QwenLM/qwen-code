@@ -60,7 +60,6 @@ const daemonActions = {
 };
 const enqueuePrompt = vi.fn(() => true);
 const removeQueuedPrompt = vi.fn();
-const insertQueuedPrompt = vi.fn();
 const editQueuedPrompt = vi.fn();
 const editLastQueuedPrompt = vi.fn(() => false);
 const clearQueuedPrompts = vi.fn(() => false);
@@ -105,7 +104,6 @@ vi.mock('../hooks/useQueuedPrompts', () => ({
     queuedTexts: queuedTextsMock,
     enqueuePrompt,
     removeQueuedPrompt,
-    insertQueuedPrompt,
     editQueuedPrompt,
     editLastQueuedPrompt,
     clearQueuedPrompts,
@@ -221,7 +219,12 @@ vi.mock('./ChatEditor', () => ({
 }));
 vi.mock('./QueuedPromptDisplay', () => ({
   QueuedPromptDisplay: (props: any) => (
-    <div data-testid="pane-queue">{String(props.prompts.length)}</div>
+    <div
+      data-testid="pane-queue"
+      data-can-mutate-mid-turn={String(props.canMutateMidTurn)}
+    >
+      {String(props.prompts.length)}
+    </div>
   ),
 }));
 vi.mock('./messages/ToolApproval', () => ({
@@ -229,6 +232,9 @@ vi.mock('./messages/ToolApproval', () => ({
     <button
       data-testid="tool-approval"
       data-keyboard-active={String(props.keyboardActive)}
+      data-plan-todos={JSON.stringify(
+        props.planTodos?.map((todo: any) => todo.id) ?? [],
+      )}
       onClick={() => props.onConfirm(props.request.id, 'proceed')}
     >
       approve
@@ -289,7 +295,6 @@ beforeEach(() => {
   enqueuePrompt.mockClear();
   enqueuePrompt.mockReturnValue(true);
   removeQueuedPrompt.mockClear();
-  insertQueuedPrompt.mockClear();
   editQueuedPrompt.mockClear();
   editLastQueuedPrompt.mockClear();
   clearQueuedPrompts.mockClear();
@@ -971,6 +976,41 @@ describe('ChatPane', () => {
     );
   });
 
+  it('passes this pane workflow to its exit-plan approval', () => {
+    messagesState = [
+      {
+        id: 'plan',
+        role: 'plan',
+        todos: [
+          { id: 'prepare', content: 'Prepare', status: 'completed' },
+          {
+            id: 'ship',
+            content: 'Ship',
+            status: 'pending',
+            blockedBy: ['prepare'],
+          },
+        ],
+      },
+    ];
+    messagesState.push({
+      id: 'revision',
+      role: 'user',
+      content: 'Revise the wording',
+    });
+    pendingPermission = {
+      id: 'perm-plan',
+      toolKind: 'switch_mode',
+      toolName: 'exit_plan_mode',
+      rawInput: {},
+    };
+
+    render({ sessionWorkflowEnabled: true });
+
+    expect(testid('tool-approval')?.getAttribute('data-plan-todos')).toBe(
+      '["prepare","ship"]',
+    );
+  });
+
   it('reflects streaming state on the composer', () => {
     streamingStateValue = 'responding';
     render();
@@ -1106,6 +1146,20 @@ describe('ChatPane', () => {
     expect(latestChatEditorProps.onClearQueuedMessages()).toBe(false);
     expect(editLastQueuedPrompt).toHaveBeenCalledTimes(1);
     expect(clearQueuedPrompts).toHaveBeenCalledTimes(1);
+  });
+
+  it('enables mid-turn queue mutations only when advertised', () => {
+    connectionState.capabilities = {
+      features: ['session_mid_turn_message_mutation'],
+    };
+    render();
+
+    expect(testid('pane-queue')?.dataset.canMutateMidTurn).toBe('true');
+  });
+
+  it('disables mid-turn queue mutations when not advertised', () => {
+    render();
+    expect(testid('pane-queue')?.dataset.canMutateMidTurn).toBe('false');
   });
 
   it('passes follow-up suggestions to the pane editor', () => {

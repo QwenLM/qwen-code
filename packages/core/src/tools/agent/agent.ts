@@ -49,6 +49,8 @@ import {
   buildPinnedWorktreeNotice,
   buildWorktreeNotice,
   normalizeForkTurns,
+  registerForkDisplayImageForCache,
+  resolveForkExecutionAllowedTools,
   runInForkContext,
   selectForkHistory,
   validateForkToolList,
@@ -217,6 +219,8 @@ function createLocalExternalInputQueue(): {
 export interface AgentParams {
   description: string;
   prompt: string;
+  /** Todo ID this top-level execution implements, when a visible plan exists. */
+  todo_id?: string;
   subagent_type?: string;
   /** User-defined model grade for this subagent invocation. */
   model?: string;
@@ -804,6 +808,12 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
           type: 'string',
           description: 'The task for the agent to perform',
         },
+        todo_id: {
+          type: 'string',
+          maxLength: 500,
+          description:
+            'ID of the todo this top-level agent execution implements. Use an ID from the current todo list when one exists.',
+        },
         subagent_type: {
           type: 'string',
           description:
@@ -950,6 +960,7 @@ ${teamGuidance}
 
 Usage notes:
 - Always include a short description (3-5 words) summarizing what the agent will do
+- When a user-visible todo plan exists, set \`todo_id\` to the ID of the plan node this top-level agent execution implements. Create the todo before launching the agent when practical. Omit \`todo_id\` for work that is not represented by the current plan.
 - Delegate only concrete, bounded tasks that can run independently.
 - Keep immediate critical-path work local when your next action depends on it.
 - Do not duplicate work between the parent and subagents.
@@ -1076,6 +1087,15 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
       params.prompt.trim() === ''
     ) {
       return 'Parameter "prompt" must be a non-empty string.';
+    }
+
+    if (
+      params.todo_id !== undefined &&
+      (typeof params.todo_id !== 'string' ||
+        params.todo_id.trim() === '' ||
+        params.todo_id.length > 500)
+    ) {
+      return 'Parameter "todo_id" must be a non-empty string of at most 500 characters.';
     }
 
     if (params.subagent_type !== undefined) {
@@ -1684,12 +1704,20 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     toolConfig: ToolConfig;
   }> {
     const geminiClient = this.config.getGeminiClient();
+    const generationConfig = geminiClient?.getChat().getGenerationConfig();
+    const parentToolNames = generationConfig?.systemInstruction
+      ? extractParentToolNames(generationConfig)
+      : [];
+    registerForkDisplayImageForCache(agentConfig, parentToolNames);
     const forkTurns = normalizeForkTurns(this.params.fork_turns);
     const requestedTools = this.forkProfile?.tools ?? this.params.fork_tools;
     const requestedExecutionAllowedTools =
       requestedTools === undefined
         ? undefined
-        : buildForkExecutionAllowlist(requestedTools, []);
+        : resolveForkExecutionAllowedTools(
+            parentToolNames,
+            buildForkExecutionAllowlist(requestedTools, []),
+          );
     const profilePromptHint = this.forkProfile?.promptHint;
     let rawHistory: Content[] = [];
     if (geminiClient) {
@@ -1790,14 +1818,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     let promptConfig: PromptConfig;
     let toolConfig: ToolConfig;
 
-    const generationConfig = geminiClient?.getChat().getGenerationConfig();
     if (generationConfig?.systemInstruction) {
       // Keep the parent's current allowlist, but pass names rather than inline
       // schemas so AgentCore resolves every declaration through the fork's
       // current ToolRegistry. This preserves the parent's tool surface and
       // cache prefix when schemas are unchanged without letting a persisted or
       // stale declaration bypass the live registry.
-      const parentToolNames = extractParentToolNames(generationConfig);
       const declaredExecutionToolNames =
         parentToolNames.length > 0
           ? parentToolNames
@@ -1816,9 +1842,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       };
       toolConfig = {
         tools: parentToolNames.length > 0 ? parentToolNames : ['*'],
-        executionAllowedTools: buildForkExecutionAllowlist(
-          requestedTools,
-          declaredExecutionToolNames,
+        executionAllowedTools: resolveForkExecutionAllowedTools(
+          parentToolNames,
+          buildForkExecutionAllowlist(
+            requestedTools,
+            declaredExecutionToolNames,
+          ),
         ),
       };
     } else {
@@ -1832,9 +1861,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       };
       toolConfig = {
         tools: ['*'],
-        executionAllowedTools: buildForkExecutionAllowlist(
-          requestedTools,
-          registeredToolNames,
+        executionAllowedTools: resolveForkExecutionAllowedTools(
+          parentToolNames,
+          buildForkExecutionAllowlist(requestedTools, registeredToolNames),
         ),
       };
     }

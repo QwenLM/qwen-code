@@ -20,8 +20,10 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { reviewWriteAuthorization } from './lib/authorization.js';
 import { join } from 'node:path';
 import { promptRecordDir, briefPath } from './lib/prompt-record.js';
+import { parseLedger } from './lib/ledger.js';
 
 const ghMock = vi.hoisted(() =>
   vi.fn((_payload: string, ..._rest: string[]) => ''),
@@ -96,6 +98,62 @@ afterEach(() => {
   process.exitCode = undefined;
   if (savedSessionId === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
   else process.env['QWEN_CODE_SESSION_ID'] = savedSessionId;
+});
+
+describe('authorization — URL-shaped host and repo binding at the submit call site', () => {
+  // The pr-url binding (repo + bidirectional host) was, until now, exercised
+  // only through publish-assets' suite; the gate is shared, and submit is the
+  // caller that always binds the repo. Pin it here too.
+  let dir: string;
+  let savedGhHost: string | undefined;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'submit-auth-'));
+    savedGhHost = process.env['GH_HOST'];
+    delete process.env['GH_HOST'];
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+    if (savedGhHost !== undefined) process.env['GH_HOST'] = savedGhHost;
+    else delete process.env['GH_HOST'];
+  });
+
+  function authFor(rawArgs: string, over: Record<string, unknown> = {}) {
+    const argsFile = join(dir, 'args.txt');
+    writeFileSync(argsFile, `${rawArgs}\n`);
+    return reviewWriteAuthorization({
+      userAuthorized: false,
+      skillArgs: argsFile,
+      pr: 123,
+      repo: 'o/r',
+      host: undefined,
+      ...over,
+    } as never);
+  }
+
+  it('binds the repo of a URL-shaped authorisation', () => {
+    expect(authFor('https://github.com/o/r/pull/123 --comment').ok).toBe(true);
+    const wrong = authFor('https://github.com/other/repo/pull/123 --comment');
+    expect(wrong.ok).toBe(false);
+    expect(wrong.why).toContain('other/repo');
+  });
+
+  it('binds the host in both directions, defaulting an absent host to github.com', () => {
+    // Enterprise authorisation, host-less write → refused.
+    const up = authFor('https://ghe.corp.example/o/r/pull/123 --comment');
+    expect(up.ok).toBe(false);
+    expect(up.why).toContain('ghe.corp.example');
+    // github.com authorisation, Enterprise write → refused.
+    const down = authFor('https://github.com/o/r/pull/123 --comment', {
+      host: 'ghe.corp.example',
+    });
+    expect(down.ok).toBe(false);
+    // Matching Enterprise pair → passes.
+    expect(
+      authFor('https://ghe.corp.example/o/r/pull/123 --comment', {
+        host: 'ghe.corp.example',
+      }).ok,
+    ).toBe(true);
+  });
 });
 
 describe('the posting gate', () => {
@@ -393,6 +451,15 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     expect(posted().comments).toEqual([]);
   });
 
+  it('posts the injected CLI version in the review footer', () => {
+    runSubmit(authorized({}), '0.21.2');
+
+    expect(posted().body).toContain('via Qwen Code /review');
+    expect(
+      posted().body.endsWith('_— qwen3.7-max via Qwen Code /review (v0.21.2)_'),
+    ).toBe(true);
+  });
+
   it('counts the blockers it is actually carrying, not the ones it was told about', () => {
     // A Critical attached inline is a Critical, whatever the state says. There is
     // no `criticalsInline` field to under-report it with — and one supplied
@@ -666,6 +733,73 @@ describe('the verdict is computed, not carried', () => {
 
     expect(() => runSubmit(authorized({ review }))).toThrow(/not inputs/);
     expect(ghMock).not.toHaveBeenCalled();
+  });
+});
+
+// The ledger's whole premise is that the marker rides the body GITHUB receives.
+// It was once appended one layer above this path and reached only a file on
+// disk, so the assertions that matter are the ones made on the posted payload —
+// compose-review.test.ts owns the composition, this owns the wire.
+describe('the ledger marker on the body that reaches GitHub', () => {
+  const authorized = (over: Record<string, unknown> = {}) =>
+    args({ userAuthorized: true, ...over });
+  const posted = () => JSON.parse(ghMock.mock.calls[0][0] as string);
+
+  it('carries the findings of this round, numbered off the recovered one', () => {
+    const planPath = file('plan.json', { prNumber: 6771 });
+    file('qwen-review-pr-6771-prev-ledger.json', {
+      v: 1,
+      round: 2,
+      findings: [],
+    });
+    const review = file('ledger.json', {
+      commit_id: 'abc',
+      comments: [
+        { path: 'src/a.ts', line: 12, body: '**[Critical]** double free' },
+      ],
+      state: { modelId: 'm', planPath },
+    });
+
+    runSubmit(authorized({ review }));
+
+    const ledger = parseLedger(posted().body);
+    expect(ledger?.round).toBe(3);
+    expect(ledger?.findings).toEqual([
+      {
+        id: 'R3-1',
+        sev: 'C',
+        file: 'src/a.ts',
+        line: 12,
+        title: 'double free',
+      },
+    ]);
+  });
+
+  it('takes its contents from the comments posted, not from `state`', () => {
+    // `draftedComments` is stripped off `state` here for the same reason `env`
+    // and `prBodyFetcher` are: what the review carries is not a claim the
+    // caller's JSON gets to make about what it reviewed.
+    const planPath = file('plan2.json', { prNumber: 6771 });
+    const review = file('forged-ledger.json', {
+      commit_id: 'abc',
+      comments: [
+        { path: 'real.ts', line: 1, body: '**[Suggestion]** the real one' },
+      ],
+      state: {
+        modelId: 'm',
+        planPath,
+        draftedComments: [
+          { path: 'forged.ts', line: 9, body: '**[Critical]** never drafted' },
+        ],
+      },
+    });
+
+    runSubmit(authorized({ review }));
+
+    const ledger = parseLedger(posted().body);
+    expect(ledger?.findings).toEqual([
+      { id: 'R1-1', sev: 'S', file: 'real.ts', line: 1, title: 'the real one' },
+    ]);
   });
 });
 

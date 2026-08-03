@@ -2106,6 +2106,14 @@ export async function loadCliConfig(
       disabledSlashCommands.length > 0 ? disabledSlashCommands : undefined,
     disabledSkillNamesProvider:
       bareMode || safeMode ? undefined : disabledSkillNamesProvider,
+    terminalImageRenderSupportProvider: interactive
+      ? async () => {
+          const { getTerminalImageRenderSupport } = await import(
+            '../ui/utils/terminal-image-renderer.js'
+          );
+          return getTerminalImageRenderSupport();
+        }
+      : undefined,
     disabledSkillLevels:
       bareMode || safeMode || !Array.isArray(settings.skills?.disabledLevels)
         ? undefined
@@ -2328,10 +2336,12 @@ export async function loadCliConfig(
         ? false
         : (settings.memory?.autoSkillConfirm ?? true),
     memoryAgentTimeoutMinutes: settings.memory?.agentTimeoutMinutes,
+    memoryAgentMaxTurns: settings.memory?.agentMaxTurns,
     fastModel: settings.fastModel || undefined,
     webSearch:
       bareMode || safeMode ? undefined : resolveWebSearchSettings(settings),
     visionModel: settings.visionModel || undefined,
+    compactionModel: settings.compactionModel || undefined,
     imageModel: settings.imageModel || undefined,
     visionBridgeTimeoutMs: settings.visionBridgeTimeoutMs,
     modelFallbacks: resolveModelFallbacks(

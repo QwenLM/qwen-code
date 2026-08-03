@@ -50,11 +50,11 @@ import {
   type CronTaskRun,
 } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
-import { isChannelDeliveryError } from '../channel-delivery-ipc.js';
+import { isChannelDeliveryError } from '../../runtime/channel-delivery-ipc.js';
 import {
   parseChannelDelivery,
   type PublicChannelDelivery,
-} from '../channel-delivery.js';
+} from '../../runtime/channel-delivery.js';
 import type { ChannelDeliveryAuthorizationStore } from '../channel-delivery-authorization.js';
 import type {
   WorkspaceRegistry,

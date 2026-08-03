@@ -256,7 +256,9 @@ import { isBackgroundSubAgentToolCall } from './adapters/toolClassification';
 import {
   computeTodoDetails,
   computeTodoTimeline,
+  getAgentToolsForPlan,
   getFloatingTodos,
+  getLatestActiveTodos,
   todoDetailSignature,
   todoTimelineSignature,
   type TodoDetail,
@@ -3225,6 +3227,10 @@ export function App({
     () => getFloatingTodos(messages),
     [messages],
   );
+  const approvalPlanTodos = useMemo(
+    () => getLatestActiveTodos(messages),
+    [messages],
+  );
   // Keep the timeline Map referentially stable across streaming ticks that
   // don't touch any todo snapshot. The Map is a context value, so a fresh
   // reference would re-render every todo/plan row regardless of memoization;
@@ -3260,9 +3266,8 @@ export function App({
     todoDetailRef.current = { signature, details };
     return details;
   }, [messages]);
-  const floatingTodos = useStableArray(
-    floatingTodosState.todos,
-    (t) => `${t.id}:${t.status}:${t.content}`,
+  const floatingTodos = useStableArray(floatingTodosState.todos, (todo) =>
+    JSON.stringify([todo.id, todo.status, todo.content, todo.blockedBy ?? []]),
   );
   const floatingTodosAllCompleted = floatingTodosState.allCompleted;
   const [todoPanelMode, setTodoPanelMode] = useState<'hidden' | 'active'>(
@@ -4089,6 +4094,13 @@ export function App({
   const escapeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [tasksDialogMessage, setTasksDialogMessage] =
     useState<SerializedTasksMessage | null>(null);
+  const planAgentTools = useMemo(
+    () =>
+      tasksDialogMessage
+        ? getAgentToolsForPlan(messages, floatingTodosState)
+        : [],
+    [floatingTodosState, messages, tasksDialogMessage],
+  );
   const handleOpenMonitorDetails = useCallback(
     (task: DaemonSessionMonitorTaskStatus) => {
       setTasksDialogMessage(null);
@@ -4688,17 +4700,15 @@ export function App({
         );
       });
   }, [reportError, sendPrompt, store, updateFailedPrompt]);
-  const notifySuccess = useCallback(
-    (message: string) => pushToast('success', message),
-    [pushToast],
-  );
-
+  const canMutateMidTurn =
+    connection.capabilities?.features.includes(
+      'session_mid_turn_message_mutation',
+    ) === true;
   const {
     queuedPrompts,
     queuedTexts,
     enqueuePrompt: rawEnqueuePrompt,
     removeQueuedPrompt,
-    insertQueuedPrompt,
     editQueuedPrompt,
     editLastQueuedPrompt,
     clearQueuedPrompts,
@@ -4706,12 +4716,12 @@ export function App({
     connected,
     sessionId: connection.sessionId,
     clientId: connection.clientId,
+    canMutateMidTurn,
     streamingState,
     sessionActions,
     store,
     editorRef,
     reportError,
-    notifySuccess,
     t,
   });
 
@@ -5026,6 +5036,10 @@ export function App({
     setValue: setWorkspaceSetting,
     reload: reloadWorkspaceSettings,
   } = workspaceSettingsState;
+  const sessionWorkflowEnabled =
+    workspaceSettings.find(
+      (setting) => setting.key === 'experimental.sessionWorkflow',
+    )?.values.effective === true;
   const reloadTargetedWorkspaceSettings = useCallback(async () => {
     const status = await reloadWorkspaceSettings();
     if (mainVoiceTarget?.route === 'workspace-qualified') {
@@ -5410,6 +5424,8 @@ export function App({
       store.dispatch([{ type: 'status', text: t('clear.blocked') }]);
       return;
     }
+    autoRecapVersionRef.current += 1;
+    lastRecapBlockCountRef.current = 0;
     store.reset();
   }, [store, t]);
 
@@ -5764,8 +5780,10 @@ export function App({
   // Auto-recap: fire when the user returns after being away ≥ 3 minutes
   const hiddenAtRef = useRef<number | null>(null);
   const lastRecapBlockCountRef = useRef(0);
+  const autoRecapVersionRef = useRef(0);
   useEffect(() => {
     lastRecapBlockCountRef.current = 0;
+    autoRecapVersionRef.current += 1;
   }, [connection.sessionId]);
   useEffect(() => {
     const AWAY_THRESHOLD_MS = 3 * 60 * 1000;
@@ -5785,8 +5803,28 @@ export function App({
       if (currentCount - lastRecapBlockCountRef.current < MIN_NEW_BLOCKS)
         return;
       lastRecapBlockCountRef.current = currentCount;
+      const sessionId = connection.sessionId;
+      const version = autoRecapVersionRef.current;
       sessionActions.recapSession().then(
         (result) => {
+          // result.sessionId only pins the daemon wire contract (the daemon
+          // echoes the id back), not a real race; the epoch/connection checks
+          // catch those. Kept so it is not simplified away as redundant.
+          if (
+            autoRecapVersionRef.current !== version ||
+            connectionRef.current.sessionId !== sessionId ||
+            result.sessionId !== sessionId
+          ) {
+            console.warn('[auto-recap] discarding stale recap', {
+              captured: { sessionId, version },
+              current: {
+                sessionId: connectionRef.current.sessionId,
+                version: autoRecapVersionRef.current,
+              },
+              result: result.sessionId,
+            });
+            return;
+          }
           if (result.recap) {
             store.dispatch([
               {
@@ -5930,6 +5968,7 @@ export function App({
       if (!opts?.keepView) setMainView('chat');
       let focusRequest: number | undefined;
       try {
+        autoRecapVersionRef.current += 1;
         const clearPromise = (
           sessionActions as typeof sessionActions & SessionActionsWithCreate
         ).clearSession();
@@ -6382,6 +6421,7 @@ export function App({
       // Settings/Status panel (no-op when the panel is closed).
       closePanel();
       try {
+        autoRecapVersionRef.current += 1;
         await sessionActions.loadSession(sessionId, { workspaceCwd });
       } catch (error) {
         setSidebarSwitchingSessionId((current) =>
@@ -7478,6 +7518,7 @@ export function App({
               // close any open Settings/Status panel (no-op when already closed),
               // consistent with createNewSession / loadSidebarSession.
               closePanel();
+              autoRecapVersionRef.current += 1;
               sessionActions.loadSession(sessionId).catch((error: unknown) => {
                 reportError(error, 'Failed to load session');
               });
@@ -8686,6 +8727,7 @@ export function App({
                 onSelect={(sessionId) => {
                   closeMobileDrawer();
                   closePanel();
+                  autoRecapVersionRef.current += 1;
                   sessionActions
                     .loadSession(sessionId)
                     .catch((error: unknown) => {
@@ -8731,6 +8773,7 @@ export function App({
             >
               <ApprovalModeDialog
                 currentMode={currentMode}
+                sessionWorkflowEnabled={sessionWorkflowEnabled}
                 onSelect={(modeId) => {
                   handleSetMode(modeId);
                   setShowApprovalModeDialog(false);
@@ -8760,7 +8803,11 @@ export function App({
           )}
           {tasksDialogMessage && (
             <DialogShell
-              title={t('tasks.title')}
+              title={
+                sessionWorkflowEnabled && floatingTodos.length > 0
+                  ? t('planExecution.dialogTitle')
+                  : t('tasks.title')
+              }
               size="lg"
               onClose={() => setTasksDialogMessage(null)}
             >
@@ -8769,6 +8816,12 @@ export function App({
                 embedded
                 manageActiveEvent={false}
                 onClose={() => setTasksDialogMessage(null)}
+                planTodos={sessionWorkflowEnabled ? floatingTodos : []}
+                agentTools={sessionWorkflowEnabled ? planAgentTools : []}
+                onOpenSubagent={(tool) => {
+                  setTasksDialogMessage(null);
+                  openSubagentPanel(tool);
+                }}
                 onOpenMonitor={handleOpenMonitorDetails}
               />
             </DialogShell>
@@ -9662,6 +9715,7 @@ export function App({
                             ? workspaces
                             : undefined
                         }
+                        sessionWorkflowEnabled={sessionWorkflowEnabled}
                       />
                     </CompactModeContext.Provider>
                   </WebShellCustomizationProvider>
@@ -9928,6 +9982,9 @@ export function App({
                           <TodoPanel
                             todos={showFloatingTodos ? floatingTodos : []}
                             statusItems={floatingBottomStatusItems}
+                            onOpen={
+                              showFloatingTodos ? openTasksPanel : undefined
+                            }
                           />
                         </div>
                       )}
@@ -9946,6 +10003,9 @@ export function App({
                             onConfirm={handleConfirm}
                             variant="floating"
                             keyboardActive={toolApprovalOverlayVisible}
+                            planTodos={
+                              sessionWorkflowEnabled ? approvalPlanTodos : []
+                            }
                           />
                         </div>
                       )}
@@ -10024,8 +10084,8 @@ export function App({
                         <QueuedPromptDisplay
                           prompts={queuedPrompts}
                           t={t}
+                          canMutateMidTurn={canMutateMidTurn}
                           onDelete={removeQueuedPrompt}
-                          onInsert={insertQueuedPrompt}
                           onEdit={editQueuedPrompt}
                         />
                         {CustomComposerHeader && (
@@ -10077,6 +10137,7 @@ export function App({
                           onPopQueuedMessages={editLastQueuedPrompt}
                           onClearQueuedMessages={clearQueuedPrompts}
                           currentMode={currentMode}
+                          sessionWorkflowEnabled={sessionWorkflowEnabled}
                           currentModel={currentModel}
                           gitBranch={activeGitBranch}
                           gitWorktree={Boolean(sessionWorktree)}
@@ -10150,6 +10211,7 @@ export function App({
                           composerInput={composerInput}
                           composerInputVersion={composerInputVersion}
                           placeholderText={composerPlaceholderText}
+                          animatePlaceholder={isChatEmptyState}
                         />
                         {CustomComposerFooter && (
                           <CustomComposerFooter
@@ -10326,6 +10388,7 @@ export function App({
                     onNestedRightPanelOpen={handleTurnOutputOpen}
                     onNestedArtifactsChange={handlePaneArtifactsChange}
                     onError={reportError}
+                    sessionWorkflowEnabled={sessionWorkflowEnabled}
                     onClose={closeArtifactPanel}
                     variant="drawer"
                   />
@@ -10380,6 +10443,7 @@ export function App({
                     onNestedRightPanelOpen={handleTurnOutputOpen}
                     onNestedArtifactsChange={handlePaneArtifactsChange}
                     onError={reportError}
+                    sessionWorkflowEnabled={sessionWorkflowEnabled}
                     onClose={closeArtifactPanel}
                   />
                 </div>

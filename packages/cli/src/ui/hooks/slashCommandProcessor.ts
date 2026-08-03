@@ -54,7 +54,10 @@ import { BundledSkillLoader } from '../../services/BundledSkillLoader.js';
 import { FileCommandLoader } from '../../services/FileCommandLoader.js';
 import { SavedWorkflowLoader } from '../../services/saved-workflow-loader.js';
 import { McpPromptLoader } from '../../services/McpPromptLoader.js';
-import { SkillCommandLoader } from '../../services/SkillCommandLoader.js';
+import {
+  recordAutoSkillCommandUsage,
+  SkillCommandLoader,
+} from '../../services/SkillCommandLoader.js';
 import {
   parseSlashCommand,
   parseStackedSlashCommands,
@@ -134,6 +137,7 @@ export interface SlashCommandProcessorActions {
     fastModelMode?: boolean;
     voiceModelMode?: boolean;
     visionModelMode?: boolean;
+    compactionModelMode?: boolean;
     imageModelMode?: boolean;
     persistScope?: 'workspace' | 'user';
   }) => void;
@@ -930,10 +934,14 @@ export const useSlashCommandProcessor = (
             }
 
             if (config) {
+              const succeeded = skillResult?.type === 'submit_prompt';
               recordSkillInvocation(config, {
                 skillName: getSkillCommandName(skill),
-                success: skillResult?.type === 'submit_prompt',
+                success: succeeded,
               });
+              if (succeeded) {
+                void recordAutoSkillCommandUsage(config, skill);
+              }
             }
           }
 
@@ -1065,6 +1073,36 @@ export const useSlashCommandProcessor = (
                     });
                   }
                   return { type: 'handled' };
+                case 'goal_control': {
+                  // A causeless result (a `status` read, or a `clear` when no
+                  // Goal is active) emits no runtime broadcast, so it must render
+                  // its own card even mid-turn. Mutations broadcast a GoalState
+                  // event the active stream renders, so they defer to it while a
+                  // turn is running.
+                  const rendersHere =
+                    result.cause === undefined ||
+                    commandContext.ui.isIdleRef.current;
+                  if (rendersHere) {
+                    const snapshot = result.response.snapshot;
+                    if (snapshot.goal || result.cause === 'clear') {
+                      addItem(
+                        {
+                          type: MessageType.GOAL_STATE,
+                          snapshot,
+                          ...(result.cause ? { cause: result.cause } : {}),
+                        },
+                        Date.now(),
+                      );
+                    } else {
+                      addMessage({
+                        type: MessageType.INFO,
+                        content: 'No Goal set.',
+                        timestamp: new Date(),
+                      });
+                    }
+                  }
+                  return { type: 'handled' };
+                }
                 case 'dialog':
                   switch (result.dialog) {
                     case 'arena_start':
@@ -1117,6 +1155,12 @@ export const useSlashCommandProcessor = (
                     case 'vision-model':
                       actions.openModelDialog({
                         visionModelMode: true,
+                        persistScope: result.persistScope,
+                      });
+                      return { type: 'handled' };
+                    case 'compaction-model':
+                      actions.openModelDialog({
+                        compactionModelMode: true,
                         persistScope: result.persistScope,
                       });
                       return { type: 'handled' };
@@ -1256,6 +1300,7 @@ export const useSlashCommandProcessor = (
                     updateItem(invocationItemId, { sentToModel: true });
                   }
                   recordSkillCommandInvocation(true);
+                  void recordAutoSkillCommandUsage(config, commandToExecute);
                   return {
                     type: 'submit_prompt',
                     content,

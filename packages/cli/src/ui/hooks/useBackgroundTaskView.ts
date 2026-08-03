@@ -308,6 +308,7 @@ export function useBackgroundTaskView(
     // purpose to avoid per-tool-call churn), approval changes are rare and
     // user-actionable, so refreshing the snapshot on them is worthwhile.
     agentRegistry.setApprovalChangeCallback(refreshFromRegistry);
+    workflowRegistry.setApprovalChangeCallback(refreshFromRegistry);
 
     // Memory listener fires only on dream-task transitions —
     // `subscribe({ taskType: 'dream' })` skips the per-extract notify
@@ -334,6 +335,7 @@ export function useBackgroundTaskView(
       monitorRegistry.setStatusChangeCallback(undefined);
       workflowRegistry.setStatusChangeCallback(undefined);
       agentRegistry.setApprovalChangeCallback(undefined);
+      workflowRegistry.setApprovalChangeCallback(undefined);
       unsubscribeMemory();
     };
   }, [config]);

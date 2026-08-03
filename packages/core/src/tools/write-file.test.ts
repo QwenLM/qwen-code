@@ -153,6 +153,26 @@ describe('WriteFileTool', () => {
     });
   }
 
+  describe('description', () => {
+    it('requires uncertain targets to be read before writing', () => {
+      const description = tool.schema.description;
+
+      expect(description).toContain(
+        'A request to create or generate a file does not establish that the target path is new.',
+      );
+      expect(description).toContain(
+        "Unless the target's absence or current text contents have already been established in this session",
+      );
+      expect(description).toContain('MUST use the read_file tool first');
+      expect(description).toContain(
+        'if the file does not exist, then create it',
+      );
+      expect(description).toContain(
+        'With prior-read enforcement enabled, blind overwrites are rejected.',
+      );
+    });
+  });
+
   describe('build', () => {
     it('should return an invocation for a valid absolute path within root', () => {
       const params = {
