@@ -583,10 +583,13 @@ export function createGoalRuntime(
     } catch (error) {
       if (attempt.controller.signal.aborted) return;
       if (error instanceof InvalidGoalEvidenceReferenceError) {
-        outcome = {
-          kind: 'decision',
-          result: { decision: 'reject', reason: error.message },
-        };
+        outcome =
+          error.code === 'catalog_truncated'
+            ? { kind: 'usage_limited', reason: error.message }
+            : {
+                kind: 'decision',
+                result: { decision: 'reject', reason: error.message },
+              };
       } else {
         const reason =
           error instanceof EvidenceSourceUnavailableError
