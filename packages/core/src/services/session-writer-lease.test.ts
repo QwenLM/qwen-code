@@ -300,8 +300,21 @@ async function requestChild(
 }
 
 async function waitForClose(child: ChildProcess): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return;
-  await new Promise<void>((resolve) => child.once('close', () => resolve()));
+  const pid = child.pid;
+  if (child.exitCode === null && child.signalCode === null) {
+    await new Promise<void>((resolve) => child.once('close', () => resolve()));
+  }
+  if (pid === undefined) return;
+  for (let attempt = 0; attempt < 100; attempt++) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ESRCH') return;
+      throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Process ${pid} remained live after close`);
 }
 
 function record(
