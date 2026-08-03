@@ -1099,6 +1099,11 @@ export interface ConfigParameters {
   artifactPublisher?: 'local' | 'host' | 'oss';
   artifactHost?: ArtifactHostConfig;
   artifactOss?: ArtifactOssConfig;
+  /** Omni multimodal experiment: enable the upload-based media delivery
+   * pipeline (omni-experiment branch). */
+  omniEnabled?: boolean;
+  /** Per-file byte ceiling for omni media uploads (default 1 GiB). */
+  omniUploadMaxFileBytes?: number;
   /** Image generation model selected through `/model --image`. */
   imageModel?: string;
   /**
@@ -1924,6 +1929,8 @@ export class Config {
   private readonly artifactPublisher: 'local' | 'host' | 'oss' = 'local';
   private readonly artifactHost?: ArtifactHostConfig;
   private readonly artifactOss?: ArtifactOssConfig;
+  private readonly omniEnabled: boolean = false;
+  private readonly omniUploadMaxFileBytes?: number;
   private workflowsEnabled = false;
   private readonly skipWorkflowUsageWarning: boolean = false;
   private readonly computerUseEnabled: boolean = true;
@@ -2199,6 +2206,8 @@ export class Config {
     this.artifactPublisher = params.artifactPublisher ?? 'local';
     this.artifactHost = params.artifactHost;
     this.artifactOss = params.artifactOss;
+    this.omniEnabled = params.omniEnabled ?? false;
+    this.omniUploadMaxFileBytes = params.omniUploadMaxFileBytes;
     this.workflowsEnabled = params.workflowsEnabled ?? false;
     this.skipWorkflowUsageWarning = params.skipWorkflowUsageWarning ?? false;
     this.computerUseEnabled = params.computerUseEnabled ?? true;
@@ -2544,6 +2553,17 @@ export class Config {
   ): Promise<void> {
     this.debugLogger.info('Config initialization started');
     await this.proxyDispatcherReady;
+
+    // Omni multimodal support declares ffmpeg/ffprobe as hard runtime
+    // prerequisites: fail fast at startup with an actionable message
+    // instead of erroring midway through the first video interaction.
+    if (this.isOmniEnabled()) {
+      const { assertOmniRuntimeDependencies } = await import(
+        '../omni/ffmpeg.js'
+      );
+      await assertOmniRuntimeDependencies();
+    }
+
     if (options?.skipFileCheckpointing === true) {
       this.fileCheckpointingEnabled = false;
       this.fileHistoryService = undefined;
@@ -6340,6 +6360,16 @@ export class Config {
 
   getArtifactOssConfig(): ArtifactOssConfig | undefined {
     return this.artifactOss;
+  }
+
+  isOmniEnabled(): boolean {
+    // Omni is experimental and opt-in: enabled via settings or env var.
+    if (process.env['QWEN_CODE_ENABLE_OMNI'] === '1') return true;
+    return this.omniEnabled;
+  }
+
+  getOmniUploadMaxFileBytes(): number | undefined {
+    return this.omniUploadMaxFileBytes;
   }
 
   resolveImageGenerationModel(

@@ -3621,6 +3621,64 @@ const SETTINGS_SCHEMA = {
       },
     },
   },
+
+  omni: {
+    type: 'object',
+    label: 'Omni Multimodal',
+    category: 'Experimental',
+    requiresRestart: true,
+    default: {},
+    description:
+      'Omni multimodal experiment (omni-experiment branch): upload-based ' +
+      'media delivery via the DashScope temporary upload channel. Requires ' +
+      'ffmpeg/ffprobe on PATH when enabled.',
+    showInDialog: false,
+    properties: {
+      enabled: {
+        type: 'boolean',
+        label: 'Enable Omni Media Delivery',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Enable the omni media pipeline. Local video files referenced ' +
+          'with @ are recognized (ffprobe), stored content-addressed under ' +
+          '.qwen/omni/objects/, uploaded through the DashScope temporary ' +
+          'upload channel, and delivered as oss:// URLs instead of inline ' +
+          'base64. Only active for DashScope-compatible endpoints. Can ' +
+          'also be enabled via QWEN_CODE_ENABLE_OMNI=1.',
+        showInDialog: true,
+      },
+      upload: {
+        type: 'object',
+        label: 'Omni Upload',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: {},
+        description: 'Upload-channel limits for omni media delivery.',
+        showInDialog: false,
+        properties: {
+          maxFileBytes: {
+            type: 'number',
+            label: 'Max Upload File Bytes',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: 1073741824,
+            description:
+              'Per-file byte ceiling for omni media uploads. Defaults to ' +
+              '1 GiB, the DashScope temporary-upload per-file cap. Inputs ' +
+              'above the limit fail closed with an explanatory error.',
+            showInDialog: false,
+            jsonSchemaOverride: {
+              type: 'number',
+              minimum: 1,
+              default: 1073741824,
+            },
+          },
+        },
+      },
+    },
+  },
 } as const satisfies SettingsSchema;
 
 export type SettingsSchemaType = typeof SETTINGS_SCHEMA;
