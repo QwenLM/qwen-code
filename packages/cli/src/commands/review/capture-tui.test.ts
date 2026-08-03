@@ -124,7 +124,7 @@ describe('capture-tui without tmux (probe seam)', () => {
       const stderr = await withStderr(() =>
         runCaptureTui({ ...base, ...over } as never),
       );
-      expect(process.exitCode, JSON.stringify(over)).toBe(3);
+      expect(process.exitCode).toBe(3);
       expect(stderr).toContain('must');
     }
   });
