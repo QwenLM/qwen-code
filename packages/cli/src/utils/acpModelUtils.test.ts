@@ -249,6 +249,19 @@ describe('acpModelUtils', () => {
     ['https://user:p?x@api.example/v1', 'https://api.example/v1'],
     ['https://user:p#x@api.example/v1', 'https://api.example/v1'],
     ['https://user:secret@api.example', 'https://api.example'],
+    // Pathless URLs mixed with prose: the authority must be bounded by
+    // whitespace too, otherwise a later '@' (an email, a mention) becomes the
+    // strip point and the host + prose get corrupted. Mirrors the warning
+    // message shapes from #8136. See findAuthorityEnd.
+    [
+      'https://api.example:8443 — contact admin@example.com',
+      'https://api.example:8443 — contact admin@example.com',
+    ],
+    [
+      'https://ollama.local — contact admin@example.com',
+      'https://ollama.local — contact admin@example.com',
+    ],
+    ['https://user:pass@h admin@example.com', 'https://h admin@example.com'],
   ])('sanitizes provider base URL credentials for %s', (input, expected) => {
     expect(sanitizeProviderBaseUrl(input)).toBe(expected);
   });

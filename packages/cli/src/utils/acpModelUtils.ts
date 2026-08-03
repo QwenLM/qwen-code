@@ -180,9 +180,19 @@ export function sanitizeProviderBaseUrl(baseUrl: string): string {
   try {
     const parsed = new URL(baseUrl);
     if (parsed.username || parsed.password) {
-      return authorityAtIndex >= authorityStart
-        ? stripAt(authorityAtIndex)
-        : baseUrl;
+      if (authorityAtIndex >= authorityStart) {
+        return stripAt(authorityAtIndex);
+      }
+      // new URL() percent-encodes whitespace inside userinfo, so a space in a
+      // password pushes the '@' past the whitespace-bounded authority and
+      // authorityAtIndex is -1 here. Fall through to the colon/port heuristic
+      // to find the real userinfo terminator. #8136.
+      const fallbackAt = findUnescapedUserInfoFallbackAt(
+        baseUrl,
+        authorityStart,
+        authorityEnd,
+      );
+      return fallbackAt === -1 ? baseUrl : stripAt(fallbackAt);
     }
     return baseUrl;
   } catch {
@@ -226,6 +236,12 @@ function findAuthorityEnd(baseUrl: string, authorityStart: number): number {
   if (slash !== -1) end = Math.min(end, slash);
   if (query !== -1) end = Math.min(end, query);
   if (hash !== -1) end = Math.min(end, hash);
+  // A URL authority never contains whitespace, so bound by it too. Without
+  // this, a pathless URL followed by prose (emails, mentions) lets the
+  // "authority" swallow the rest of the message and a later '@' becomes the
+  // strip point. #8136.
+  const whitespace = baseUrl.slice(authorityStart).search(/\s/);
+  if (whitespace !== -1) end = Math.min(end, authorityStart + whitespace);
   return end;
 }
 
