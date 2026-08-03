@@ -92,8 +92,10 @@ discipline); the benefit is that neither document lies about its flow.
 
 What is reused is the **TypeScript layer**, which is mostly
 target-agnostic: `agent-prompt` roster/brief printing, the findings schema,
-`check-coverage` transcript verification, budget/ledger machinery, and the
-chunk-tiling logic from `plan-diff`.
+`check-coverage` transcript verification, budget machinery (a plan-derived
+size→work mapping; `plan-files` supplies the line counts), and the
+chunk-tiling logic from `plan-diff`. The cross-round findings ledger does
+not lift into v1 — see Open questions.
 
 ### Target resolution and planning
 
@@ -105,18 +107,31 @@ subcommand, `qwen audit plan-files <path>`, which plays the role
   exclusions: no `*.test.*` as _subjects_ — tests are evidence and the
   test-coverage agent's subject), classifies them (source / docs /
   generated) with the same rules `plan-diff` uses;
-- counts source lines and applies the topology gate: below it, dimension
-  agents each read the whole file set (the experiment's topology, good to
-  roughly 5–8k lines); above it, tiles files into ~400-line chunks and
-  fans out per-chunk agents with folded-in dimension briefs, mirroring
-  Step 3B — with whole-module agents retained for the walks that are
-  meaningless per-chunk (1c cross-file, 3a reuse, 5 test-coverage, and
-  any personas the tier includes — these are whole-module by
-  construction);
-- marks heavy files (large, mostly-rewritten equivalents: big stateful
-  classes) for the invariant-checklist triple — untested in the
+- counts source lines and applies the topology gate, pinned at 9,000
+  source lines — above the largest module the experiments validated
+  whole-file (8,516): below it, dimension agents each read the whole file
+  set — the only topology either experiment exercised, validated at 7,638
+  and 8,516 lines; above it, tiles files into ~400-line chunks and fans
+  out per-chunk agents with folded-in dimension briefs, mirroring Step 3B
+  — with whole-module agents retained for the walks that are meaningless
+  per-chunk (1c cross-file, 3a reuse, 5 test-coverage, and any personas
+  the tier includes — these are whole-module by construction). The
+  above-gate branch is untested extrapolation — neither experiment routed
+  a module through it — and a run that does says so in the report header;
+- marks heavy files for the invariant-checklist triple — untested in the
   experiments; expected to transfer by analogy from the diff-based
-  checklist, flagged as extrapolation;
+  checklist, flagged as extrapolation. The predicate is legacy-specific,
+  because `classifyHeavy` (`lib/heavy.ts`) does not lift: it triggers on
+  diff metrics (≥ 300 pre-lines AND rewrite ratio ≥ 0.4 or ≥ 800 changed
+  lines), and an audit target is merged, unchanged code — every file has
+  zero changed lines, so a lifted `classifyHeavy` marks nothing heavy and
+  the triple silently never runs. Legacy heaviness is instead: a source
+  file at or above the same 300-line floor that holds long-lived mutable
+  state — the checklist's subject: class-level fields, caches, timers,
+  registries, error taxonomy. As in `/review`'s roster, the triple runs
+  only above the topology gate: below it every dimension agent already
+  reads every file whole, so three more whole-file agents would add cost
+  but no new view;
 - detects event/lifecycle modules by emit/dispatch/subscribe call
   patterns and flags them for the 1c event-coverage brief.
 
@@ -161,7 +176,14 @@ also made 1c the single most expensive agent of either round (16M
 tokens, ~35% of the arm)** — repo-wide path enumeration scales with the
 module's fan-out, so the brief needs a budget rule: deep-read at most N
 call sites per event and register the rest by name, instead of reading
-every caller in full.
+every caller in full — and spend the N deep-read slots on callers'
+early-return, error, and abort paths first, because a fire-miss is only
+visible there and happy-path callers are the cheap ones to register by
+name (Round 2's two unique-in-the-field Criticals were both fire-misses
+on exactly those paths — the class a flat per-event quota is most likely
+to starve). When the budget binds, the run discloses it — which events hit
+the cap and which callers were name-registered only — so the residual
+coverage trade-off is stated in the report, not implicit in it.
 
 **Dropped:** Agent 0 (no issue), 1b (no deletions — its entire evidence
 source is `-` lines), 7 (nothing was merged; build/test state is the
@@ -202,12 +224,21 @@ cause**, not by location — a naive path:line merge would have kept the
 experiment's three substitution findings separate. This is an LLM
 clustering step over the findings file, with each cluster keeping the
 strongest evidence (an end-to-end probe beats a unit probe beats a
-read-based claim). **Independent discovery is evidence, not noise:** a
-root cause hit by several agents from different dimensions is a
-high-confidence signal, and the cluster's report entry should say "found
-independently by N agents" — Round 2's most-confirmed findings (a
-redirect SSRF and a permission-merge flaw, 3-4 independent discoveries
-each) were also its most severe.
+read-based claim). **Dedup must never downgrade severity:** the cluster's
+severity is the highest severity any member carried — the `/review` Step 4
+rule — and each member's severity and failure scenario ride along on the
+cluster, because a severity split is by definition one root cause graded
+differently by different agents, and root-cause clustering merges those
+copies before verification; without the carried members, the split rule
+below would have no input to fire on. The experiments recorded the failure
+mode twice: Round 1's most severe finding filed as a Suggestion by one
+arm, and Round 2's explicit severity split.
+
+**Independent discovery is evidence, not noise:** a root cause hit by
+several agents from different dimensions is a high-confidence signal, and
+the cluster's report entry should say "found independently by N agents" —
+Round 2's most-confirmed findings (a redirect SSRF and a permission-merge
+flaw, 3-4 independent discoveries each) were also its most severe.
 
 Verification keeps the `/review` shape — sharded batches ruling on each
 finding's failure scenario against the real code — with two additions
@@ -227,8 +258,25 @@ brief must name both cases.
 - **The artifact:** a markdown report at `.qwen/audit/<path-slug>-<ts>.md`,
   findings clustered by theme/root cause, each with severity, locations,
   failure scenario, evidence tier (end-to-end probe / unit probe /
-  code read), and independent-discovery count ("found independently by N
-  agents").
+  code read), independent-discovery count ("found independently by N
+  agents"), and the verification's confidence mark (confirmed-high /
+  confirmed-low, keeping the `/review` shape — the reused findings schema
+  carries `confidence` on every validated finding). Confirmed-low findings
+  sit in their own "needs human review" section, never mixed into the
+  confirmed counts — the `/review` analog is terminal-only — and findings
+  from a low-tier run are labeled unverified, so they never print
+  identically to verified ones. The report opens with a run-metadata
+  header: the audited commit SHA and dirty/clean state of the checkout
+  (file:line anchors drift with HEAD, so a re-audit after fixes must be
+  alignable with the run it follows), the effort tier, and the walks
+  completed or skipped with reason — a partially failed run (1c
+  budget-exhausted, security agent errored) must be distinguishable from
+  a full one, because "0 security findings" on a run whose security agent
+  never completed is not "safe" (`/review` solves this with
+  `unreviewedDimensions`). The header also carries every flag this design
+  attaches to unexercised machinery — above-gate topology, the high-tier
+  loop, twice-whiffed reverse-audit scopes, budget-bound walks, unmeasured
+  tiers — since `/audit` has no verdict for them to cap.
 - **The terminal:** a short summary — counts by severity and theme, plus
   the top clusters — not the full list. The report is for acting on; the
   terminal is for deciding whether to.
@@ -239,20 +287,47 @@ brief must name both cases.
 ### Effort tiers
 
 - **low** — inline read by the orchestrator itself, angle rotation as in
-  `/review` low; unverified findings, capped. For "is this module worth a
-  real audit".
+  `/review` low minus angle B (removed behaviour — merged code has no
+  deletions; the same absence that dropped agent 1b); unverified
+  findings, capped. Unmeasured in the experiments — both rounds ran only
+  the naive and fan-out arms — and flagged as such in the report header,
+  like its siblings. For "is this module worth a real audit". It shares
+  the single-reader shape the naive-exclusion argument below rejects,
+  with the measurement against it (~7× recall behind fan-out), and
+  survives that argument only because it claims no audit standing:
+  labeled unverified, capped, sold as triage — a thin result reads as
+  "run a real audit before concluding anything", not as a verdict on the
+  module.
 - **medium** (default) — the replicated 8-dimension core plus the 6a
   blind-spot hedge: 1a, 1c, 2, 3a/3b/3c, 4, 5, **6a**, plus invariant
-  a/b/c on files `plan-files` marks as heavy + verification.
-  Rounds 1-2 measured the 8-dimension core; 6a rests on the near-miss
-  argument above, not on experiment.
+  a/b/c on files `plan-files` marks as heavy (above the topology gate
+  only, as in `/review`'s roster) + verification. Rounds 1-2 measured
+  the 8-dimension core; 6a rests on the near-miss argument above, not
+  on experiment.
 - **high** — medium + the other two personas (6b/6c) + iterative reverse
-  audit with the two-consecutive-dry-rounds stop rule. Unmeasured;
-  flagged as extrapolation in the report header until replicated.
+  audit carrying the full `/review` Step 5 semantics, not just its stop
+  rule. Each round fans out over the module with the cumulative confirmed
+  list as its baseline, hunting only gaps; every return gets the
+  substantive-return check — a bare "No issues found." with no evidence
+  of what the auditor re-examined is a whiff, relaunched once, and a
+  second bare return marks that scope not audited, cleared only when a
+  later round's auditor for it returns substantively. A round is **dry**
+  only when every auditor returned zero new findings _with_ the
+  evidence-bearing receipt, so a round containing a twice-whiffed auditor
+  is not dry and cannot end the loop on silence. Stop after two
+  consecutive dry rounds, or after 5 rounds hard cap, reported as a cap
+  rather than as convergence. Reverse-audit findings route through the
+  same dedup and verification as fan-out findings, and each round's
+  confirmed results merge into the cumulative list before the next round
+  begins. Unmeasured; flagged as extrapolation in the report header until
+  replicated — alongside any twice-whiffed scopes, since `/audit` has no
+  verdict for that disclosure to cap.
 
 The naive single-agent pass is **not** a tier: it measured strictly worse
 than every tier that includes the fan-out, and offering it would launder
-an inferior audit under the same command name.
+an inferior audit under the same command name. (The low tier carries the
+same single-reader shape and survives only on its labeling — unverified,
+capped, sold as triage — as above.)
 
 ## Rejected alternatives
 
@@ -276,13 +351,21 @@ an inferior audit under the same command name.
   domain-specific brief per diff; whether a per-module equivalent (cron
   schedulers, protocol state machines) earns its cost is untested.
 - **Incremental re-audit.** Content-hash per file would let a re-audit
-  scope to changed files; plausible, unmeasured, not v1.
+  scope to changed files; plausible, unmeasured, not v1. It is also why
+  `/review`'s cross-round findings ledger is not a v1 reuse: the ledger
+  is an HTML comment serialized into a posted PR review body and parsed
+  back by the next round, and v1 removes every anchor it needs — no PR,
+  no posted body, no verdict for the rounds to rule against. If re-audit
+  lands, the ledger is the carry-forward model to reach for.
 
 ## Verification
 
-- Unit: `plan-files` tiling/classification/topology gates; roster
-  selection per tier; the dedup clusterer's merge behavior on synthetic
-  overlapping findings.
+- Unit: `plan-files` tiling/classification/topology gates and the legacy
+  heaviness predicate; roster selection per tier; the dedup clusterer's
+  merge behavior on synthetic overlapping findings — including the
+  max-severity rule (a cluster whose mildest copy is a Suggestion must
+  come out at its Critical member's severity, with both scenarios
+  intact).
 - ~~Integration: second-module replication~~ — **done** (hooks module,
   2026-08-03; margin reproduced at ~7× against a pre-declared 3×
   criterion, zero false positives both arms).
