@@ -2592,6 +2592,13 @@ describe('ChatCompressionService.compress cache sharing', () => {
       options: { enableCacheControl: false },
     },
     {
+      name: 'Google GenAI with disabled cache control',
+      options: {
+        authType: AuthType.USE_GEMINI,
+        enableCacheControl: false,
+      },
+    },
+    {
       name: 'media-bearing history',
       options: {
         history: [

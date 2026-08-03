@@ -1697,6 +1697,7 @@ export class GeminiChat {
    * still make compaction decisions based on their *own* context size.
    */
   private lastPromptTokenCount = 0;
+  private lastPromptTokenCountIsEstimated = false;
 
   /**
    * Per-chat output-token count from the previous model response. The
@@ -1889,9 +1890,14 @@ export class GeminiChat {
    * comes from a different chat instance and should not inherit this chat's
    * last response size.
    */
-  setLastPromptTokenCount(count: number): void {
+  setLastPromptTokenCount(count: number, isEstimated = false): void {
     this.lastPromptTokenCount = count;
+    this.lastPromptTokenCountIsEstimated = isEstimated;
     this.lastOutputTokenCount = 0;
+  }
+
+  isLastPromptTokenCountEstimated(): boolean {
+    return this.lastPromptTokenCountIsEstimated;
   }
 
   /**
@@ -1907,6 +1913,7 @@ export class GeminiChat {
     this.lastPromptTokenCount = Number.isFinite(promptTokenCount)
       ? Math.max(0, promptTokenCount)
       : 0;
+    this.lastPromptTokenCountIsEstimated = false;
     this.lastOutputTokenCount = Number.isFinite(outputTokenCount)
       ? Math.max(0, outputTokenCount)
       : 0;
@@ -1929,14 +1936,26 @@ export class GeminiChat {
     signal?: AbortSignal,
     options?: TryCompressOptions,
   ): Promise<ChatCompressionInfo> {
+    const originalTokenCountIsEstimated =
+      options?.originalTokenCountOverride === undefined &&
+      (this.lastPromptTokenCount === 0 || this.lastPromptTokenCountIsEstimated);
+    const originalTokenCount = originalTokenCountIsEstimated
+      ? (options?.precomputedEffectiveTokens ??
+        estimateContentTokens(
+          options?.pendingUserMessage
+            ? [...this.getHistoryShallow(true), options.pendingUserMessage]
+            : this.getHistoryShallow(true),
+          resolveSlimmingConfig(this.config.getChatCompression())
+            .imageTokenEstimate,
+        ))
+      : (options?.originalTokenCountOverride ?? this.lastPromptTokenCount);
     const service = new ChatCompressionService();
     const { newHistory, info } = await service.compress(this, {
       promptId,
       force,
       config: this.config,
       consecutiveFailures: this.consecutiveFailures,
-      originalTokenCount:
-        options?.originalTokenCountOverride ?? this.lastPromptTokenCount,
+      originalTokenCount,
       pendingUserMessage: options?.pendingUserMessage,
       precomputedEffectiveTokens: options?.precomputedEffectiveTokens,
       requestGenerationConfig: options?.requestGenerationConfig,
@@ -1956,6 +1975,7 @@ export class GeminiChat {
       debugLogger.debug('[FILE_READ_CACHE] clear after auto tryCompress');
       this.config.getFileReadCache().clear();
       this.lastPromptTokenCount = info.newTokenCount;
+      this.lastPromptTokenCountIsEstimated = originalTokenCountIsEstimated;
       this.lastOutputTokenCount = 0;
       this.telemetryService?.setLastPromptTokenCount(info.newTokenCount);
       // Reset the consecutive-failure counter on success so a forced /compress
@@ -2030,6 +2050,8 @@ export class GeminiChat {
 
     const reduction = beforeEstimate - afterEstimate;
     const apiBaseline = this.lastPromptTokenCount || beforeEstimate;
+    const baselineIsEstimated =
+      this.lastPromptTokenCount === 0 || this.lastPromptTokenCountIsEstimated;
     const adjustedTokenCount = Math.max(0, apiBaseline - reduction);
 
     const info: ChatCompressionInfo = {
@@ -2052,6 +2074,7 @@ export class GeminiChat {
     );
     this.setHistory(newHistory);
     this.lastPromptTokenCount = adjustedTokenCount;
+    this.lastPromptTokenCountIsEstimated = baselineIsEstimated;
     this.telemetryService?.setLastPromptTokenCount(adjustedTokenCount);
     this.consecutiveFailures = 0;
 
@@ -2278,6 +2301,8 @@ export class GeminiChat {
         ? this.getHistoryShallow()
         : undefined;
       const lastPromptTokenCountBeforeHardRescue = this.lastPromptTokenCount;
+      const lastPromptTokenCountWasEstimatedBeforeHardRescue =
+        this.lastPromptTokenCountIsEstimated;
       const hardRescueFailureCountBeforeHardRescue =
         this.hardRescueFailureCount;
       if (shouldForceFromHard) {
@@ -2303,13 +2328,6 @@ export class GeminiChat {
           params.config?.abortSignal,
           {
             pendingUserMessage: userContent,
-            // A restored/inherited chat has no API token count yet. Use the
-            // same local estimate that opened the compression gate as the
-            // accounting baseline instead of comparing the compacted history
-            // against zero.
-            ...(this.lastPromptTokenCount === 0 && {
-              originalTokenCountOverride: effectiveTokens,
-            }),
             precomputedEffectiveTokens: effectiveTokens,
             requestGenerationConfig: params.config,
             deferChatCompressionRecord: shouldForceFromHard,
@@ -2359,6 +2377,8 @@ export class GeminiChat {
           // written because the send is about to be rejected.
           this.setHistory(historyBeforeHardRescue);
           this.lastPromptTokenCount = lastPromptTokenCountBeforeHardRescue;
+          this.lastPromptTokenCountIsEstimated =
+            lastPromptTokenCountWasEstimatedBeforeHardRescue;
           this.telemetryService?.setLastPromptTokenCount(
             lastPromptTokenCountBeforeHardRescue,
           );
@@ -2476,7 +2496,10 @@ export class GeminiChat {
               this.lastOutputTokenCount,
               imageTokenEstimate,
               /* conservative= */ true,
-            )
+            ) +
+            (this.lastPromptTokenCountIsEstimated
+              ? FIRST_SEND_CLAMP_OVERHEAD_PAD
+              : 0)
           : effectiveTokens + FIRST_SEND_CLAMP_OVERHEAD_PAD;
       const clampedMaxOutputTokens = clampOutputTokensToWindow(
         outputCeiling,
@@ -4542,6 +4565,7 @@ export class GeminiChat {
             // Always update the per-chat counter so this chat (including
             // subagents) can make its own compaction decisions.
             this.lastPromptTokenCount = lastPromptTokenCount;
+            this.lastPromptTokenCountIsEstimated = false;
             this.lastOutputTokenCount = hasUsablePromptTokenCount
               ? getUsageOutputTokenCountForPromptEstimate({
                   promptTokenCount,

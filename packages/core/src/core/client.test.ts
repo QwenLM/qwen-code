@@ -3896,6 +3896,7 @@ describe('Gemini Client (client.ts)', () => {
           newTokenCount: 200,
           compressionStatus: CompressionStatus.COMPRESSED,
         }),
+        isLastPromptTokenCountEstimated: vi.fn().mockReturnValue(false),
         getHistory: vi.fn().mockReturnValue([]),
       } as unknown as GeminiChat;
       client['forceFullIdeContext'] = false;
@@ -3911,6 +3912,7 @@ describe('Gemini Client (client.ts)', () => {
         { role: 'model', parts: [{ text: 'ok' }] },
       ];
       const originalChat = client.getChat();
+      originalChat.setLastPromptTokenCount(200, true);
       vi.spyOn(originalChat, 'tryCompress').mockImplementation(async () => {
         originalChat.setHistory(compressedHistory);
         return {
@@ -3936,6 +3938,7 @@ describe('Gemini Client (client.ts)', () => {
         ...compressedHistory,
       ]);
       expect(client.getChat().getLastPromptTokenCount()).toBe(200);
+      expect(client.getChat().isLastPromptTokenCountEstimated()).toBe(true);
       expect(client['forceFullIdeContext']).toBe(true);
     });
 

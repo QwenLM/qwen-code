@@ -5169,6 +5169,65 @@ describe('GeminiChat', async () => {
       expect(requestConfig.maxOutputTokens).toBe(9_999);
     });
 
+    it('keeps the overhead pad after compression uses an estimated baseline', async () => {
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_GEMINI,
+        model: 'test-model',
+        contextWindowSize: 40_000,
+      });
+
+      vi.spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValueOnce({
+          newHistory: [
+            { role: 'user', parts: [{ text: 'summary' }] },
+            { role: 'model', parts: [{ text: 'ok' }] },
+          ],
+          info: {
+            originalTokenCount: 1000,
+            newTokenCount: 79,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+        })
+        .mockResolvedValueOnce({
+          newHistory: null,
+          info: {
+            originalTokenCount: 79,
+            newTokenCount: 79,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        });
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        makeStreamResponse('first send after compression'),
+      );
+
+      const chatInstance = new GeminiChat(
+        mockConfig,
+        config,
+        [
+          { role: 'user', parts: [{ text: 'history without usage' }] },
+          { role: 'model', parts: [{ text: 'response' }] },
+        ],
+        undefined,
+        uiTelemetryService,
+      );
+      await chatInstance.tryCompress('prompt-estimated-compression', true);
+      expect(chatInstance.isLastPromptTokenCountEstimated()).toBe(true);
+
+      const stream = await chatInstance.sendMessageStream(
+        'test-model',
+        { message: 'hi' },
+        'prompt-estimated-clamp-pad',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      const requestConfig = vi.mocked(
+        mockContentGenerator.generateContentStream,
+      ).mock.calls[0][0].config as { maxOutputTokens?: number };
+      expect(requestConfig.maxOutputTokens).toBe(9_919);
+    });
+
     it('keeps a sane input budget on small custom windows (issue #6144)', async () => {
       // Custom local model with a 65,536-token window. Under the old
       // reservation a flat 64K was subtracted from the window, collapsing
@@ -14178,6 +14237,30 @@ describe('GeminiChat', async () => {
 
       await chat.tryCompress('p1', true);
       expect(compressSpy.mock.calls[0][1].force).toBe(true);
+    });
+
+    it('derives a compression baseline when no API token count is available', async () => {
+      const compressSpy = mockCompressionService('compressed');
+      chat.setHistory([userMsg('x'.repeat(4000)), modelMsg('acknowledged')]);
+
+      await chat.tryCompress('p-zero-baseline', true);
+
+      expect(compressSpy.mock.calls[0][1].originalTokenCount).toBeGreaterThan(
+        0,
+      );
+      expect(chat.isLastPromptTokenCountEstimated()).toBe(true);
+    });
+
+    it('retains estimated provenance across repeated compression', async () => {
+      const compressSpy = mockCompressionService('compressed');
+
+      await chat.tryCompress('p-estimated-first', true);
+      expect(chat.isLastPromptTokenCountEstimated()).toBe(true);
+
+      await chat.tryCompress('p-estimated-second', true);
+
+      expect(compressSpy).toHaveBeenCalledTimes(2);
+      expect(chat.isLastPromptTokenCountEstimated()).toBe(true);
     });
   });
 
