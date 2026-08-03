@@ -41,7 +41,7 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLine: vi.fn(),
 }));
 
-const { runSubmit } = await import('./submit.js');
+const { runSubmit, submitCommand } = await import('./submit.js');
 
 let dir: string;
 let savedSessionId: string | undefined;
@@ -458,6 +458,31 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     expect(
       posted().body.endsWith('_— qwen3.7-max via Qwen Code /review (v0.21.2)_'),
     ).toBe(true);
+  });
+
+  it('uses the inherited startup version instead of the bundled package version', () => {
+    const inherited = process.env.QWEN_CODE_STARTUP_VERSION;
+    process.env.QWEN_CODE_STARTUP_VERSION = '0.21.3';
+    try {
+      runSubmit(authorized({}));
+      expect(posted().body).toContain('(v0.21.3)');
+      expect(posted().body).not.toContain('(v0.21.4)');
+    } finally {
+      if (inherited === undefined) delete process.env.QWEN_CODE_STARTUP_VERSION;
+      else process.env.QWEN_CODE_STARTUP_VERSION = inherited;
+    }
+  });
+
+  it('falls back to the package version when no startup version is inherited', async () => {
+    const inherited = process.env.QWEN_CODE_STARTUP_VERSION;
+    delete process.env.QWEN_CODE_STARTUP_VERSION;
+    try {
+      await submitCommand.handler?.(authorized({}) as never);
+      expect(posted().body).toContain('(v0.21.4)');
+    } finally {
+      if (inherited === undefined) delete process.env.QWEN_CODE_STARTUP_VERSION;
+      else process.env.QWEN_CODE_STARTUP_VERSION = inherited;
+    }
   });
 
   it('normalizes summary and inline footers to the running CLI version', () => {

@@ -74,26 +74,26 @@ describe('scripts/cli-entry.js production entry', () => {
   });
 
   it('preserves the startup version in child review commands', async () => {
-    const inherited = process.env.CLI_VERSION;
-    process.env.CLI_VERSION = '0.21.3';
+    const inherited = process.env.QWEN_CODE_STARTUP_VERSION;
+    process.env.QWEN_CODE_STARTUP_VERSION = '0.21.3';
     try {
       await import('../cli-entry.js?stamps-version');
-      expect(process.env.CLI_VERSION).toBe('0.21.3');
+      expect(process.env.QWEN_CODE_STARTUP_VERSION).toBe('0.21.3');
     } finally {
-      if (inherited === undefined) delete process.env.CLI_VERSION;
-      else process.env.CLI_VERSION = inherited;
+      if (inherited === undefined) delete process.env.QWEN_CODE_STARTUP_VERSION;
+      else process.env.QWEN_CODE_STARTUP_VERSION = inherited;
     }
   });
 
   it('initializes the version for a fresh CLI process', async () => {
-    const inherited = process.env.CLI_VERSION;
-    delete process.env.CLI_VERSION;
+    const inherited = process.env.QWEN_CODE_STARTUP_VERSION;
+    delete process.env.QWEN_CODE_STARTUP_VERSION;
     try {
       await import('../cli-entry.js?initializes-version');
-      expect(process.env.CLI_VERSION).toBe('0.0.0-test');
+      expect(process.env.QWEN_CODE_STARTUP_VERSION).toBe('0.0.0-test');
     } finally {
-      if (inherited === undefined) delete process.env.CLI_VERSION;
-      else process.env.CLI_VERSION = inherited;
+      if (inherited === undefined) delete process.env.QWEN_CODE_STARTUP_VERSION;
+      else process.env.QWEN_CODE_STARTUP_VERSION = inherited;
     }
   });
 

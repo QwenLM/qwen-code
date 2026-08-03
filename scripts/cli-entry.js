@@ -270,10 +270,12 @@ const packageJsonPath =
   packageJsonPathCandidates.find((candidate) => existsSync(candidate)) ??
   packageJsonPathCandidates[0];
 
-if (!process.env['CLI_VERSION']?.trim()) {
+// Keep this separate from CLI_VERSION: esbuild replaces CLI_VERSION with the
+// build package version, while this value must survive nested wrapper calls.
+if (!process.env['QWEN_CODE_STARTUP_VERSION']?.trim()) {
   try {
     const pkg = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
-    process.env['CLI_VERSION'] = pkg.version || 'unknown';
+    process.env['QWEN_CODE_STARTUP_VERSION'] = pkg.version || 'unknown';
   } catch {
     // The CLI has its own version fallback when package metadata is unavailable.
   }

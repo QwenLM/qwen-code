@@ -47,6 +47,7 @@ import type { CommandModule } from 'yargs';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import { getCliVersion } from '../../utils/version.js';
 import { ghWithInput, setGhHost } from './lib/gh.js';
 import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
 import { parseReceiptIds } from './lib/receipt.js';
@@ -362,7 +363,7 @@ function isRepo(repo: string): boolean {
 
 export function runSubmit(
   args: SubmitArgs,
-  cliVersion = process.env['CLI_VERSION'] || 'unknown',
+  cliVersion = process.env['QWEN_CODE_STARTUP_VERSION'] || 'unknown',
 ): void {
   setGhHost(args.host);
 
@@ -579,7 +580,10 @@ export const submitCommand: CommandModule = {
         default: false,
         describe: 'Check authorisation and payload consistency, then stop.',
       }),
-  handler: (argv) => {
-    runSubmit(argv as unknown as SubmitArgs);
+  handler: async (argv) => {
+    // Do not use CLI_VERSION here: esbuild replaces it with a build-time value.
+    const cliVersion =
+      process.env['QWEN_CODE_STARTUP_VERSION'] || (await getCliVersion());
+    runSubmit(argv as unknown as SubmitArgs, cliVersion);
   },
 };
