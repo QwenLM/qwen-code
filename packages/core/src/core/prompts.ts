@@ -690,6 +690,9 @@ Okay, I can write those tests. First, I'll read someFile.ts to understand its fu
 Now I'll look for existing or related test files to understand current testing conventions and dependencies.
 [tool_call: ${ToolNames.READ_FILE} for file_path '/path/to/existingTest.test.ts']
 (After reviewing existing tests and the file content)
+I'll check whether the intended test file already exists.
+[tool_call: ${ToolNames.READ_FILE} for file_path '/path/to/someFile.test.ts']
+(After read_file reports that /path/to/someFile.test.ts does not exist)
 [tool_call: ${ToolNames.WRITE_FILE} for file_path '/path/to/someFile.test.ts' with content '(test code content)']
 I've written the tests. Now I'll run the project's test command to verify them.
 [tool_call: ${ToolNames.SHELL} for 'npm run test']
@@ -830,6 +833,15 @@ Now I'll look for existing or related test files to understand current testing c
 </function>
 </tool_call>
 (After reviewing existing tests and the file content)
+I'll check whether the intended test file already exists.
+<tool_call>
+<function=${ToolNames.READ_FILE}>
+<parameter=file_path>
+/path/to/someFile.test.ts
+</parameter>
+</function>
+</tool_call>
+(After read_file reports that /path/to/someFile.test.ts does not exist)
 <tool_call>
 <function=${ToolNames.WRITE_FILE}>
 <parameter=file_path>
@@ -943,6 +955,11 @@ Now I'll look for existing or related test files to understand current testing c
 {"name": "${ToolNames.READ_FILE}", "arguments": {"file_path": "/path/to/existingTest.test.ts"}}
 </tool_call>
 (After reviewing existing tests and the file content)
+I'll check whether the intended test file already exists.
+<tool_call>
+{"name": "${ToolNames.READ_FILE}", "arguments": {"file_path": "/path/to/someFile.test.ts"}}
+</tool_call>
+(After read_file reports that /path/to/someFile.test.ts does not exist)
 <tool_call>
 {"name": "${ToolNames.WRITE_FILE}", "arguments": {"file_path": "/path/to/someFile.test.ts", "content": "(test code content)"}}
 </tool_call>
@@ -1025,6 +1042,9 @@ Okay, I can write those tests. First, I'll read someFile.ts to understand its fu
 Now I'll look for existing or related test files to understand current testing conventions and dependencies.
 <|tool_call>call:${ToolNames.READ_FILE}{file_path:<|"|>/path/to/existingTest.test.ts<|"|>}<tool_call|>
 (After reviewing existing tests and the file content)
+I'll check whether the intended test file already exists.
+<|tool_call>call:${ToolNames.READ_FILE}{file_path:<|"|>/path/to/someFile.test.ts<|"|>}<tool_call|>
+(After read_file reports that /path/to/someFile.test.ts does not exist)
 <|tool_call>call:${ToolNames.WRITE_FILE}{file_path:<|"|>/path/to/someFile.test.ts<|"|>,content:<|"|>(test code content)<|"|>}<tool_call|>
 I've written the tests. Now I'll run the project's test command to verify them.
 <|tool_call>call:${ToolNames.SHELL}{command:<|"|>npm run test<|"|>}<tool_call|>
