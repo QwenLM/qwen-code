@@ -4,8 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useMemo, useRef, useState } from 'react';
-import { CircleDotIcon, GitBranchIcon, GitForkIcon } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonGitBranchesResult } from '@qwen-code/sdk/daemon';
+import {
+  CircleDotIcon,
+  GitBranchIcon,
+  GitForkIcon,
+  Loader2Icon,
+  SearchIcon,
+} from 'lucide-react';
 import { useI18n } from '../i18n';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import styles from './GitModePopover.module.css';
@@ -52,25 +60,36 @@ export function validateBranchName(name: string): boolean {
 
 interface GitModePopoverProps {
   branch: string;
+  workspaceCwd: string;
   compact?: boolean;
   intent: SessionGitIntent;
   onIntentChange: (intent: SessionGitIntent) => void;
+  onBranchChanged?: () => void;
 }
 
 export function GitModePopover({
   branch,
+  workspaceCwd,
   compact = false,
   intent,
   onIntentChange,
+  onBranchChanged,
 }: GitModePopoverProps) {
   const { t } = useI18n();
+  const { client } = useWorkspace();
   const [open, setOpen] = useState(false);
   const [selectedMode, setSelectedMode] = useState<
-    'current' | 'branch' | 'worktree'
+    'current' | 'existing' | 'branch' | 'worktree'
   >(intent.mode);
   const [branchName, setBranchName] = useState(
     intent.mode === 'branch' ? intent.name : '',
   );
+  const [existingBranches, setExistingBranches] =
+    useState<DaemonGitBranchesResult | null>(null);
+  const [existingSearch, setExistingSearch] = useState('');
+  const [existingLoading, setExistingLoading] = useState(false);
+  const [existingError, setExistingError] = useState<string | null>(null);
+  const [checkoutRef, setCheckoutRef] = useState<string | null>(null);
 
   const contentRef = useRef<HTMLDivElement>(null);
 
@@ -85,6 +104,8 @@ export function GitModePopover({
       if (v) {
         setSelectedMode(intent.mode);
         setBranchName(intent.mode === 'branch' ? intent.name : '');
+        setExistingSearch('');
+        setExistingError(null);
       }
     },
     [intent],
@@ -105,6 +126,74 @@ export function GitModePopover({
     onIntentChange({ mode: 'worktree' });
     setOpen(false);
   }, [onIntentChange]);
+
+  useEffect(() => {
+    if (!open || selectedMode !== 'existing') return;
+    let cancelled = false;
+    setExistingBranches(null);
+    setExistingLoading(true);
+    setExistingError(null);
+    client
+      .workspaceByCwd(workspaceCwd)
+      .workspaceGitBranches()
+      .then((result) => {
+        if (!cancelled) setExistingBranches(result);
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setExistingError(
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setExistingLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [client, open, selectedMode, workspaceCwd]);
+
+  const existingGroups = useMemo(() => {
+    const query = existingSearch.trim().toLowerCase();
+    const groups = new Map<string, Array<{ name: string; ref: string }>>();
+    const add = (group: string, name: string, ref = name) => {
+      if (query && !ref.toLowerCase().includes(query)) return;
+      const items = groups.get(group) ?? [];
+      items.push({ name, ref });
+      groups.set(group, items);
+    };
+    for (const item of existingBranches?.local ?? []) {
+      if (!item.isHead) add(t('gitMode.existingLocal'), item.name);
+    }
+    for (const item of existingBranches?.remote ?? []) {
+      const slash = item.name.indexOf('/');
+      const remote = slash > 0 ? item.name.slice(0, slash) : 'remote';
+      add(t('gitMode.existingRemote', { remote }), item.name);
+    }
+    return groups;
+  }, [existingBranches, existingSearch, t]);
+
+  const handleCheckoutExisting = useCallback(
+    async (ref: string) => {
+      if (checkoutRef) return;
+      setCheckoutRef(ref);
+      setExistingError(null);
+      try {
+        await client.workspaceByCwd(workspaceCwd).workspaceGitCheckout(ref);
+        onIntentChange({ mode: 'current' });
+        onBranchChanged?.();
+        setOpen(false);
+      } catch (error) {
+        setExistingError(
+          error instanceof Error ? error.message : String(error),
+        );
+      } finally {
+        setCheckoutRef(null);
+      }
+    },
+    [checkoutRef, client, onBranchChanged, onIntentChange, workspaceCwd],
+  );
 
   const handleClear = useCallback(
     (e: React.MouseEvent) => {
@@ -201,6 +290,87 @@ export function GitModePopover({
               </span>
             )}
           </button>
+
+          <button
+            type="button"
+            role="radio"
+            aria-checked={selectedMode === 'existing'}
+            className={`${styles.option} ${selectedMode === 'existing' ? styles.optionSelected : ''}`}
+            onClick={() => setSelectedMode('existing')}
+          >
+            <span className={`${styles.optionIcon} ${styles.iconExisting}`}>
+              <GitBranchIcon size={15} strokeWidth={1.5} />
+            </span>
+            <span className={styles.optionText}>
+              <span className={styles.optionName}>{t('gitMode.existing')}</span>
+              <span className={styles.optionDesc}>
+                {t('gitMode.existingDesc')}
+              </span>
+            </span>
+            {selectedMode === 'existing' && (
+              <span className={styles.checkExisting} aria-hidden="true">
+                ✓
+              </span>
+            )}
+          </button>
+
+          {selectedMode === 'existing' && (
+            <div className={styles.existingBox}>
+              <div className={styles.existingSearch}>
+                <SearchIcon size={13} />
+                <input
+                  value={existingSearch}
+                  onChange={(event) => setExistingSearch(event.target.value)}
+                  placeholder={t('gitMode.existingSearch')}
+                  aria-label={t('gitMode.existingSearch')}
+                  autoFocus
+                />
+              </div>
+              <div
+                className={styles.existingList}
+                role="listbox"
+                aria-label={t('gitMode.existing')}
+                onWheelCapture={(event) => event.stopPropagation()}
+              >
+                {existingError && (
+                  <div className={styles.existingError}>{existingError}</div>
+                )}
+                {existingLoading ? (
+                  <div className={styles.existingStatus}>
+                    <Loader2Icon className={styles.spin} size={14} />
+                    {t('gitMode.existingLoading')}
+                  </div>
+                ) : existingGroups.size === 0 && !existingError ? (
+                  <div className={styles.existingStatus}>
+                    {t('gitMode.existingEmpty')}
+                  </div>
+                ) : (
+                  Array.from(existingGroups.entries()).map(([group, items]) => (
+                    <div key={group}>
+                      <div className={styles.existingGroup}>{group}</div>
+                      {items.map((item) => (
+                        <button
+                          key={item.ref}
+                          type="button"
+                          role="option"
+                          aria-selected={false}
+                          className={styles.existingItem}
+                          disabled={checkoutRef !== null}
+                          onClick={() => void handleCheckoutExisting(item.ref)}
+                        >
+                          <GitBranchIcon size={13} />
+                          <span>{item.name}</span>
+                          {checkoutRef === item.ref && (
+                            <Loader2Icon className={styles.spin} size={13} />
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
 
           <button
             type="button"
@@ -307,9 +477,11 @@ export function GitModePopover({
             <span className={styles.cmd}>
               {selectedMode === 'branch'
                 ? `$ git checkout -b ${branchName || '…'} ← ${branch}`
-                : selectedMode === 'worktree'
-                  ? '$ git worktree add .qwen/worktrees/<slug>'
-                  : `$ git checkout ${branch}`}
+                : selectedMode === 'existing'
+                  ? '$ git checkout <branch>'
+                  : selectedMode === 'worktree'
+                    ? '$ git worktree add .qwen/worktrees/<slug>'
+                    : `$ git checkout ${branch}`}
             </span>
             {selectedMode === 'branch' && (
               <button

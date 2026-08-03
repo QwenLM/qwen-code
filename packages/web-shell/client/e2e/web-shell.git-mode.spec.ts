@@ -48,7 +48,7 @@ function sessionCreateBody(
   return record?.body as Record<string, unknown> | undefined;
 }
 
-test('git mode chip shows popover with three modes and captures screenshots', async ({
+test('git mode chip shows popover with four modes and captures screenshots', async ({
   page,
 }, testInfo) => {
   const scenario = createGitWorkspaceScenario();
@@ -77,7 +77,7 @@ test('git mode chip shows popover with three modes and captures screenshots', as
   const popover = page.locator('[data-slot="popover-content"]');
   await expect(popover).toBeVisible({ timeout: 5_000 });
 
-  // Screenshot 2: popover open showing three modes
+  // Screenshot 2: popover open showing four modes
   await page.screenshot({
     path: 'client/e2e/test-results/git-mode-2-popover.png',
     animations: 'disabled',
@@ -131,6 +131,62 @@ test('git mode chip shows popover with three modes and captures screenshots', as
     name: 'feat/git-mode-selector',
   });
   expect(sessionCreateBody(daemon)?.['worktree']).toBeUndefined();
+});
+
+test('git mode chip checks out an existing branch', async ({
+  page,
+}, testInfo) => {
+  const scenario = createGitWorkspaceScenario({
+    gitBranches: {
+      v: 1,
+      workspaceCwd: WORKSPACE_CWD,
+      available: true,
+      local: [
+        { name: 'main', isHead: true },
+        { name: 'topic', isHead: false },
+      ],
+      remote: [{ name: 'origin/develop', isHead: false }],
+      tags: [],
+      recent: [],
+      head: 'main',
+      detached: false,
+    },
+  });
+  const daemon = await installScenario(
+    page,
+    scenario,
+    String(testInfo.project.use.baseURL),
+  );
+
+  await page.goto('/');
+
+  const chip = page.locator('[data-testid="git-mode-chip"]');
+  await expect(chip).toBeVisible({ timeout: 10_000 });
+  await chip.click();
+
+  const popover = page.locator('[data-slot="popover-content"]');
+  await popover.getByRole('radio', { name: /Existing branch/ }).click();
+
+  const list = popover.getByRole('listbox', { name: 'Existing branch' });
+  await expect(list.getByRole('option')).toHaveCount(2);
+  await expect(list.getByRole('option', { name: 'main' })).toHaveCount(0);
+
+  await popover
+    .getByRole('textbox', { name: 'Search branches…' })
+    .fill('origin');
+  await expect(list.getByRole('option')).toHaveCount(1);
+  await list.getByRole('option', { name: 'origin/develop' }).click();
+
+  await expect(popover).not.toBeVisible();
+  await expect
+    .poll(() =>
+      daemon.requests.find(
+        (request) =>
+          request.method === 'POST' && request.path.endsWith('/git/checkout'),
+      ),
+    )
+    .toMatchObject({ body: { ref: 'origin/develop' } });
+  expect(sessionCreateBody(daemon)).toBeUndefined();
 });
 
 test('git mode chip worktree mode sends worktree intent', async ({

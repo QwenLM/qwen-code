@@ -143,10 +143,14 @@ interface ChatEditorProps {
   gitWorktree?: boolean;
   /** Git working directory for worktree sessions; targets git operations. */
   gitCwd?: string;
+  /** Workspace targeted by Git Mode operations before a session exists. */
+  gitWorkspaceCwd?: string;
   /** Git mode intent for the empty-state composer chip (branch/worktree selection). */
   gitModeIntent?: SessionGitIntent;
   /** Callback when the user changes the git mode intent via the composer chip popover. */
   onGitModeIntentChange?: (intent: SessionGitIntent) => void;
+  /** Refreshes the displayed Git status after Git Mode checks out an existing branch. */
+  onGitBranchChanged?: () => void;
   /** Enriched working-tree summary (dirty / ahead-behind / stash / operation). */
   gitStatus?: DaemonWorkspaceGitStatus;
   /** Opens the working-tree Changes dialog; makes the git chip clickable. */
@@ -1162,8 +1166,10 @@ export const ChatEditor = memo(
       gitBranch,
       gitWorktree,
       gitCwd,
+      gitWorkspaceCwd,
       gitModeIntent,
       onGitModeIntentChange,
+      onGitBranchChanged,
       gitStatus,
       onOpenGitDiff,
       onOpenCommit,
@@ -2160,9 +2166,13 @@ export const ChatEditor = memo(
                     (gitModeIntent && onGitModeIntentChange ? (
                       <GitModePopover
                         branch={gitBranch}
+                        workspaceCwd={
+                          gitWorkspaceCwd ?? selectedWorkspace?.cwd ?? ''
+                        }
                         compact={!showGitBranchLabel}
                         intent={gitModeIntent}
                         onIntentChange={onGitModeIntentChange}
+                        onBranchChanged={onGitBranchChanged}
                       />
                     ) : (
                       <BranchPickerPopover

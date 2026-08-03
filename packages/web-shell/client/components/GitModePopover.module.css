@@ -15,8 +15,7 @@
   padding: 3px 9px;
   border-radius: 20px;
   cursor: pointer;
-  border: 1px solid
-    color-mix(in srgb, var(--git-mode-current) 20%, transparent);
+  border: 1px solid color-mix(in srgb, var(--git-mode-current) 20%, transparent);
   background: color-mix(in srgb, var(--git-mode-current) 10%, transparent);
   color: var(--git-mode-current);
   transition:
@@ -161,6 +160,11 @@
   color: var(--git-mode-current);
   border-color: color-mix(in srgb, var(--git-mode-current) 18%, transparent);
 }
+.iconExisting {
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+  color: var(--primary);
+  border-color: color-mix(in srgb, var(--primary) 18%, transparent);
+}
 .iconBranch {
   background: color-mix(in srgb, var(--git-mode-branch) 10%, transparent);
   color: var(--git-mode-branch);
@@ -191,6 +195,7 @@
 }
 
 .checkCurrent,
+.checkExisting,
 .checkBranch,
 .checkWorktree {
   position: absolute;
@@ -201,6 +206,9 @@
 }
 .checkCurrent {
   color: var(--git-mode-current);
+}
+.checkExisting {
+  color: var(--primary);
 }
 .checkBranch {
   color: var(--git-mode-branch);
@@ -279,6 +287,111 @@
 }
 .branchHintError {
   color: var(--error-color);
+}
+
+.existingBox {
+  margin: 2px 4px 4px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--subtle-bg-strong);
+}
+
+.existingSearch {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 9px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted-foreground);
+}
+
+.existingSearch input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--popover-foreground);
+  font: inherit;
+  font-size: 11px;
+}
+
+.existingList {
+  max-height: 160px;
+  padding: 4px 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.existingGroup {
+  padding: 5px 9px 2px;
+  color: var(--muted-foreground);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.existingItem {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 6px 9px;
+  overflow: hidden;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+}
+
+.existingItem:hover,
+.existingItem:focus-visible {
+  background: var(--subtle-bg);
+}
+
+.existingItem:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.existingItem span {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.existingStatus,
+.existingError {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 12px 9px;
+  color: var(--muted-foreground);
+  font-size: 10.5px;
+  text-align: center;
+}
+
+.existingError {
+  color: var(--error-color);
+}
+
+.spin {
+  flex-shrink: 0;
+  animation: git-mode-spin 0.8s linear infinite;
+}
+
+@keyframes git-mode-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 /* ── footer ───────────────────────────────── */

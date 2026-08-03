@@ -2,22 +2,25 @@
 
 ## 背景
 
-日常开发中，用户新建会话时有三种 Git 工作流：
+日常开发中，用户新建会话时有四种 Git 工作流：
 
 1. **当前分支** — 直接在当前分支上开发（默认行为）
-2. **Worktree 隔离** — 创建独立 worktree + 分支，主目录不受影响
-3. **新建分支** — 在同一工作目录创建并切换到新分支
+2. **已有分支** — 在同一工作目录切换到已有的本地或远程分支
+3. **Worktree 隔离** — 创建独立 worktree + 分支，主目录不受影响
+4. **新建分支** — 在同一工作目录创建并切换到新分支
 
-场景 1 和 2 已有完整支持（场景 2 见
+场景 1、3 和 4 已有完整支持（场景 3 见
 [2026-07-19-webshell-worktree-sessions.md](./2026-07-19-webshell-worktree-sessions.md)
 和
 [2026-07-20-worktree-empty-state-toggle.md](./2026-07-20-worktree-empty-state-toggle.md)）。
-场景 3 缺失——用户想"开个新分支做这个任务"时，只能先手动 `git checkout -b`
-再建会话，或者被迫使用 worktree（引入不必要的目录隔离）。
+场景 2 缺失——用户只能从环境面板切换已有分支，无法在新会话的 Git 模式
+入口中完成选择。
 
 ## 目标
 
-- 在聊天空状态提供统一的 **Git 模式选择器**，覆盖三种场景。
+- 在聊天空状态提供统一的 **Git 模式选择器**，覆盖四种场景。
+- “已有分支”模式：加载可搜索的本地与远程分支，选择后通过已有 Git
+  checkout 路由立即切换共享工作目录，并刷新当前分支状态。
 - "新建分支"模式：daemon 在 `POST /session` 时自动 `git checkout -b`，
   session 直接在新分支上启动。
 - 复用现有 worktree 创建链路，不改变 worktree 行为。
@@ -25,7 +28,6 @@
 
 ## 非目标
 
-- 不支持 checkout 已有分支（v1 只做新建；已有分支切换可后续增量）。
 - 不做会话结束时自动切回原分支（避免丢失用户状态）。
 - 不做 merge-back UI。
 - 不改变 `enter_worktree` / `exit_worktree` 工具行为。
@@ -48,6 +50,8 @@
                               ▼
               ┌─ Git 模式 popover ─────────────┐
               │  ● 当前分支   直接在 main 上    │
+              │  ○ 已有分支   切换到其他分支    │
+              │    [搜索与分支列表 — 选中时展开] │
               │  ○ 新建分支   从 main 创建      │
               │    [分支名输入框 — 选中时展开]   │
               │  ○ Worktree   独立副本，可并行   │
@@ -59,6 +63,9 @@
 
 - **当前分支**（默认）：chip 显示 `⎇ main`（绿色），等同于现有行为。
   选中后 popover 自动关闭。
+- **已有分支**：展开可搜索分支列表，排除当前本地分支；本地分支直接显示，
+  远程分支保留完整 remote 前缀。选择后立即调用现有 checkout 路由；成功时
+  关闭 popover 并刷新 chip，失败时在列表内保留并展示错误。
 - **新建分支**：popover 内展开分支名输入框 + 并发提示，实时校验
   （合法 git 分支名、不与现有分支冲突）。确认后 chip 变为
   `⎇ → feat/xxx`（橙色），带 ✕ 可一键恢复默认。
@@ -86,6 +93,8 @@ type SessionGitIntent =
 ```
 
 - 选择"当前分支"→ `{ mode: 'current' }`（等同于 `undefined`，不传参）。
+- 选择"已有分支"→ 不产生 pending intent；立即 checkout，成功后仍为
+  `{ mode: 'current' }`。
 - 选择"新建分支"→ `{ mode: 'branch', name }`。
 - 选择"Worktree"→ `{ mode: 'worktree', slug? }`（复用现有逻辑）。
 - 发送首条消息 → `ensureSessionForPrompt` 根据 intent 携带对应参数。
@@ -210,6 +219,11 @@ Worktree session 不受此限制（各自独立目录）。
 | Key                              | EN                                                     | ZH                                       |
 | -------------------------------- | ------------------------------------------------------ | ---------------------------------------- |
 | `gitMode.current`                | `Current branch`                                       | `当前分支`                               |
+| `gitMode.existing`               | `Existing branch`                                      | `已有分支`                               |
+| `gitMode.existingDesc`           | `Switch to another branch`                             | `切换到其他分支`                         |
+| `gitMode.existingSearch`         | `Search branches…`                                     | `搜索分支…`                              |
+| `gitMode.existingLoading`        | `Loading branches…`                                    | `正在加载分支…`                          |
+| `gitMode.existingEmpty`          | `No matching branches`                                 | `没有匹配的分支`                         |
 | `gitMode.branch`                 | `New branch`                                           | `新建分支`                               |
 | `gitMode.worktree`               | `Worktree`                                             | `Worktree 隔离`                          |
 | `gitMode.branch.placeholder`     | `Branch name`                                          | `分支名`                                 |
