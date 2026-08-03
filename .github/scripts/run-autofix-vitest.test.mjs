@@ -63,6 +63,16 @@ test('keeps the JSON proof root-owned and kills all candidate processes', () => 
       worktree.indexOf('sudo install -d -o root -g root -m 0711'),
   );
   assert.match(worktree, /install -d -o root -g root -m 0700/);
+  assert.match(
+    wrapper,
+    /expected_report="\$\{5:\?expected report path is required\}"/,
+  );
+  assert.match(wrapper, /vitest report path disagreement/);
+  assert.ok(
+    wrapper.indexOf('report="${home}/reports/${report_name}/report.json"') <
+      wrapper.indexOf('vitest report path disagreement'),
+  );
+  assert.match(worktree, /id -u "\$\{user\}" > \/dev\/null 2>&1 \|\|/);
   assert.match(wrapper, /sudo chown "root:\$\{user\}" "\$\{run_home\}"/);
   assert.match(wrapper, /sudo chmod 0770 "\$\{run_home\}"/);
   assert.match(wrapper, /sudo install -d -o root -g "\$\{user\}" -m 0770/);

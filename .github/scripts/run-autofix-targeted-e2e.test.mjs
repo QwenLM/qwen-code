@@ -123,7 +123,9 @@ test('validates candidate scope and rebuilds before targeted E2E cases', () => {
   const outputAuditAt = source.indexOf("run('node', [outputValidator]");
   const finalizeAt = source.indexOf("[workspace, 'finalize']");
   const reportAt = source.indexOf("[workspace, 'report', reportName]");
-  const vitestAt = source.indexOf('run(vitestWrapper,');
+  const vitestAt = source.indexOf(
+    '[workspace, reportName, testCase.file, pattern, jsonPath]',
+  );
   const readReportAt = source.indexOf(
     'JSON.parse(readFileSync(jsonPath',
     vitestAt,
@@ -553,7 +555,7 @@ test('runs targeted E2E cases through the trusted wrappers end to end', () => {
           'validator',
           `worktree ${workspace} finalize`,
           `worktree ${workspace} report case-0`,
-          `vitest ${workspace} case-0 ${testCase.file} ^${escapeRegex(expectedFullName(testCase))}$`,
+          `vitest ${workspace} case-0 ${testCase.file} ^${escapeRegex(expectedFullName(testCase))}$ /tmp/qwen-autofix-verify-home/reports/case-0/report.json`,
           `worktree ${workspace} remove-report case-0`,
           `worktree ${workspace} cleanup`,
           'validator',

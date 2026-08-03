@@ -674,6 +674,8 @@ jobs:
       claim_oid: '${{ steps.claim.outputs.claim_oid }}'
       approved_prose_sha256: '${{ steps.claim.outputs.approved_prose_sha256 }}'
       base_oid: '${{ steps.trusted-base.outputs.oid }}'
+      agent_declined: '${{ steps.decline.outputs.agent_declined }}'
+      agent_detail: '${{ steps.decline.outputs.agent_detail }}'
     env:
       REPO: '${{ github.repository }}'
       WORKDIR: '/tmp/autofix'
@@ -685,7 +687,8 @@ jobs:
       AUTOFIX_ISSUE_EXCLUDES: '-linked:pr -label:autofix/skip -label:autofix/in-progress -label:autofix/routing -label:status/need-information -label:status/need-retesting sort:created-desc'
       # Approvals labeled before this date predate the approval-marker
       # rollout; the scan backfills their marker from the label event time
-      # instead of rejecting them forever.
+      # instead of rejecting them forever — but only while the issue itself
+      # has seen no post-cutover activity (its current prose was approved).
       APPROVAL_MARKER_CUTOVER: '2026-08-02T00:00:00Z'
     steps:
       - name: 'Checkout'
@@ -842,7 +845,7 @@ jobs:
             echo "🎯 Forced issue #${FORCED_ISSUE}"
             forced_issue_json="${WORKDIR}/forced-issue.json"
             gh issue view "${FORCED_ISSUE}" --repo "${REPO}" \
-              --json number,title,body,labels,assignees,closedByPullRequestsReferences,createdAt,url,state \
+              --json number,title,body,labels,assignees,closedByPullRequestsReferences,createdAt,url,state,updatedAt \
               > "${forced_issue_json}"
             if jq -e \
               '(.labels // []) | map(.name) | any(. == "autofix/skip" or . == "autofix/in-progress" or . == "autofix/routing" or . == "status/need-information" or . == "status/need-retesting")' \
@@ -853,10 +856,10 @@ jobs:
               echo "⏭️ Forced issue #${FORCED_ISSUE} is not open; skipping."
               jq -n -c '[]' > "${WORKDIR}/candidates.json"
             elif jq -e --arg bot "${AUTOFIX_BOT}" '
-              ((.assignees // []) | any(.login != $bot)) or
+              ((.assignees // []) | length == 0 or any(.login != $bot)) or
               ((.closedByPullRequestsReferences // []) | length > 0)
             ' "${forced_issue_json}" > /dev/null; then
-              echo "⏭️ Forced issue #${FORCED_ISSUE} has another owner or linked PR; skipping."
+              echo "⏭️ Forced issue #${FORCED_ISSUE} has no bot assignee, another owner, or a linked PR; skipping."
               jq -n -c '[]' > "${WORKDIR}/candidates.json"
             # workflow_dispatch is a maintainer-initiated escape hatch, so it
             # intentionally bypasses the label gates that protect event/cron
@@ -894,14 +897,14 @@ jobs:
               echo "🔍 Ready-for-agent issues (newest first)..."
               if ! gh issue list --repo "${REPO}" \
               --search "is:open is:issue label:${READY_FOR_AGENT_LABEL} label:${AUTOFIX_APPROVED_LABEL} ${AUTOFIX_ISSUE_EXCLUDES}" \
-              --limit 30 --json number,title,body,labels,assignees,closedByPullRequestsReferences,createdAt,url \
+              --limit 30 --json number,title,body,labels,assignees,closedByPullRequestsReferences,createdAt,url,updatedAt \
               > "${WORKDIR}/scan.json"; then
                 echo "::warning::Ready-for-agent issue scan failed; falling back to an empty candidate list."
                 jq -n -c '[]' > "${WORKDIR}/candidates.json"
               else
                 if ! jq -c --arg bot "${AUTOFIX_BOT}" '
                   [ .[] |
-                    select(((.assignees // []) | all(.login == $bot)) and
+                    select(((.assignees // []) | length > 0 and all(.login == $bot)) and
                       ((.closedByPullRequestsReferences // []) | length == 0))
                   ][0:10] | map(. + {autofixTier: 1})
                 ' "${WORKDIR}/scan.json" > "${WORKDIR}/candidates.json"; then
@@ -933,13 +936,19 @@ jobs:
               # Rollout grandfather: approvals labeled before the marker
               # existed have no bot comment to match. Backfill the marker
               # from the approval label event time; post-cutover approvals
-              # must keep the marker the labeled-event step records.
+              # must keep the marker the labeled-event step records. An issue
+              # updated after the cutover is not backfilled — its current
+              # prose was never approved, so it fails closed until a
+              # maintainer re-applies the approval label.
               approval_labeled_at="$(gh api --paginate \
                 "repos/${REPO}/issues/${candidate_issue}/timeline?per_page=100" --slurp \
                 | jq -r --arg approved "${AUTOFIX_APPROVED_LABEL}" \
                   '[ .[][] | select(.event == "labeled" and (.label.name // "") == $approved) | .created_at ] | max // empty')" \
                 || approval_labeled_at=''
               if [[ -n "${approval_labeled_at}" && "${approval_labeled_at}" < "${APPROVAL_MARKER_CUTOVER}" ]] &&
+                jq -e --arg cutover "${APPROVAL_MARKER_CUTOVER}" \
+                  '(.updatedAt // "") | . != "" and . < $cutover' \
+                  <<< "${candidate}" > /dev/null &&
                 gh issue comment "${candidate_issue}" --repo "${REPO}" \
                   --body "${approval_marker}"; then
                 echo "🕰️ Issue #${candidate_issue} approval predates the marker rollout; recorded the marker and continuing."
@@ -1124,7 +1133,7 @@ jobs:
                 (($labels | index($ready)) and
                  ($labels | index($approved)) and
                  (($labels | index($routing)) == null)) and
-                ((.assignees // []) | all(.login == $bot)) and
+                ((.assignees // []) | length > 0 and all(.login == $bot)) and
                 ((.closedByPullRequestsReferences // []) | length == 0)' \
               <<< "${live_issue_json}" > /dev/null; then
               echo "⏭️ Selected issue #${GO} no longer has both required labels or is still routing; skipping."
@@ -1258,7 +1267,7 @@ jobs:
               index("autofix/routing") == null and
               index("status/need-information") == null and
               index("status/need-retesting") == null) and
-            ((.assignees // []) | all(.login == $bot)) and
+            ((.assignees // []) | length > 0 and all(.login == $bot)) and
             ((.closedByPullRequestsReferences // []) | length == 0)
           ' <<< "${live_issue_json}" > /dev/null; then
             echo "::error::Issue #${ISSUE} changed ownership or eligibility before claim."
@@ -1390,6 +1399,27 @@ jobs:
             --mode develop-issue \
             --issue "${ISSUE}" \
             --workdir "${WORKDIR}"
+
+      - name: 'Record agent decline'
+        id: 'decline'
+        if: |-
+          ${{ always() && steps.decision.outputs.go_issue != '' }}
+        run: |-
+          # The runner harness also writes failure.md for transient timeouts
+          # and API errors (with matching sentinel files); only a failure.md
+          # without them is the agent's own terminal verdict.
+          if [[ -s "${WORKDIR}/failure.md" &&
+            ! -f "${WORKDIR}/agent-timeout" &&
+            ! -f "${WORKDIR}/agent-api-error" ]]; then
+            delim="AUTOFIX_AGENT_DETAIL_$(openssl rand -hex 8)"
+            {
+              echo 'agent_declined=true'
+              echo "agent_detail<<${delim}"
+              head -c 1500 "${WORKDIR}/failure.md"
+              echo
+              echo "${delim}"
+            } >> "${GITHUB_OUTPUT}"
+          fi
 
       - name: 'Package candidate'
         if: |-
@@ -1852,6 +1882,11 @@ jobs:
       TRUSTED_BASE_OID: '${{ needs.issue-autofix.outputs.base_oid }}'
       VERIFIED_CANDIDATE_OID: '${{ needs.issue-autofix-verify.outputs.candidate_oid }}'
       MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
+      AGENT_DECLINED: '${{ needs.issue-autofix.outputs.agent_declined }}'
+      AGENT_DETAIL: '${{ needs.issue-autofix.outputs.agent_detail }}'
+      AGENT_RESULT: '${{ needs.issue-autofix.result }}'
+      VERIFY_RESULT: '${{ needs.issue-autofix-verify.result }}'
+      TARGETED_RESULT: '${{ needs.issue-autofix-targeted-e2e.result }}'
     steps:
       - name: 'Checkout trusted base'
         if: |-
@@ -2245,8 +2280,21 @@ jobs:
             echo '::warning::Autofix claim ownership changed; leaving the issue and claim ref untouched.'
             exit 0
           fi
-          REASON='the issue will require the `autofix/approved` label to be re-added before any future automated attempt.'
-          DETAIL='The isolated verification or publication stage failed. Check the issue-autofix verification and publication job logs.'
+          if [[ "${AGENT_DECLINED}" == 'true' ]]; then
+            REASON='no further automated attempts will be made on this issue.'
+            DETAIL="${AGENT_DETAIL}"
+          else
+            REASON='the issue will require the `autofix/approved` label to be re-added before any future automated attempt.'
+            if [[ "${AGENT_RESULT}" != 'success' ]]; then
+              DETAIL='The agent stage failed before a candidate could be verified. Check the issue-autofix job logs.'
+            elif [[ "${VERIFY_RESULT}" != 'success' ]]; then
+              DETAIL='Deterministic verification of the candidate failed. Check the issue-autofix-verify job logs.'
+            elif [[ "${TARGETED_RESULT}" != 'success' ]]; then
+              DETAIL='Isolated targeted E2E verification failed. Check the issue-autofix-targeted-e2e job logs.'
+            else
+              DETAIL='The publication stage failed after verification. Check the issue-autofix-publish job logs.'
+            fi
+          fi
           if ! live_issue_json="$(gh issue view "${ISSUE}" --repo "${REPO}" \
             --json labels,assignees)"; then
             echo '::warning::Failed to read visible issue ownership; preserving the claim ref for recovery.'
@@ -2258,6 +2306,16 @@ jobs:
               --remove-label 'autofix/in-progress'; then
             echo '::warning::Failed to remove the visible claim label; preserving the claim ref for recovery.'
             exit 1
+          fi
+          if [[ "${AGENT_DECLINED}" == 'true' ]]; then
+            gh label create 'autofix/skip' --repo "${REPO}" \
+              --description 'Not eligible for the scheduled autofix agent' \
+              --color 'ededed' 2> /dev/null || true
+            if ! gh issue edit "${ISSUE}" --repo "${REPO}" \
+              --add-label 'autofix/skip'; then
+              echo '::warning::Failed to record the permanent decline; preserving the claim ref for recovery.'
+              exit 1
+            fi
           fi
           if jq -e --arg bot "${AUTOFIX_BOT}" \
             '(.assignees // []) | map(.login) | index($bot) != null' \
@@ -2294,11 +2352,19 @@ jobs:
             echo '::warning::Visible issue ownership was withdrawn, but the claim ref could not be released.'
             exit 1
           fi
-          gh issue comment "${ISSUE}" --repo "${REPO}" --body "🤖 Withdrawing the claim above — the automated fix attempt did not succeed; ${REASON}
+          comment_body="🤖 Withdrawing the claim above — the automated fix attempt did not succeed; ${REASON}"
+          if [[ "${AGENT_DECLINED}" == 'true' ]]; then
+            comment_body="${comment_body}
 
           What the agent found, in case it helps a human contributor:
 
-          ${DETAIL}" || true
+          ${DETAIL}"
+          else
+            comment_body="${comment_body}
+
+          ${DETAIL}"
+          fi
+          gh issue comment "${ISSUE}" --repo "${REPO}" --body "${comment_body}" || true
 
       - name: 'Report publication failure'
         if: |-

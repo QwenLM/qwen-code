@@ -262,9 +262,11 @@ describe('qwen-autofix workflow', () => {
     );
     expect(workflow).toContain('-label:autofix/routing');
     expect(workflow).toContain('index("autofix/routing") == null');
-    expect(workflow).toContain('((.assignees // []) | any(.login != $bot)) or');
     expect(workflow).toContain(
-      'select(((.assignees // []) | all(.login == $bot)) and',
+      '((.assignees // []) | length == 0 or any(.login != $bot)) or',
+    );
+    expect(workflow).toContain(
+      'select(((.assignees // []) | length > 0 and all(.login == $bot)) and',
     );
     // Collision-free negative pin: reintroducing no:assignee anywhere in the
     // excludes silently drops unassigned approved issues from every scan.
@@ -1921,7 +1923,7 @@ describe('qwen-autofix workflow', () => {
       '--json state,title,body,labels,assignees,closedByPullRequestsReferences',
     );
     expect(claimIssueStep).toContain(
-      '((.assignees // []) | all(.login == $bot))',
+      '((.assignees // []) | length > 0 and all(.login == $bot))',
     );
     expect(claimIssueStep).toContain('--arg bot "${AUTOFIX_BOT}"');
     expect(claimIssueStep).toContain(
@@ -2638,6 +2640,14 @@ printf '%s\\n' "\${status}"
     expect(findCandidateIssuesStep).toContain(
       'approval predates the marker rollout; recorded the marker',
     );
+    // The grandfather window expires once the issue sees post-cutover
+    // activity: the current prose of a touched issue was never approved, so
+    // the backfill fails closed instead of blessing edited text indefinitely.
+    expect(findCandidateIssuesStep).toContain(
+      '(.updatedAt // "") | . != "" and . < $cutover',
+    );
+    expect(findCandidateIssuesStep).toContain('url,updatedAt');
+    expect(findCandidateIssuesStep).toContain('state,updatedAt');
     expect(claimIssueStep).toContain(
       '--json state,title,body,labels,assignees,closedByPullRequestsReferences',
     );
@@ -5544,7 +5554,7 @@ printf '%s\\n' "\${status}"
     // form also matters: piping into `as` re-roots the input and breaks
     // `.assignees`/`.closedByPullRequestsReferences` at runtime.
     expect(readDecisionStep.replace(/\s+/g, ' ')).toContain(
-      '(.labels // [] | map(.name)) as $labels | (($labels | index($ready)) and ($labels | index($approved)) and (($labels | index($routing)) == null)) and ((.assignees // []) | all(.login == $bot)) and ((.closedByPullRequestsReferences // []) | length == 0)',
+      '(.labels // [] | map(.name)) as $labels | (($labels | index($ready)) and ($labels | index($approved)) and (($labels | index($routing)) == null)) and ((.assignees // []) | length > 0 and all(.login == $bot)) and ((.closedByPullRequestsReferences // []) | length == 0)',
     );
     expect(readDecisionStep).toContain(
       '::warning::Failed to re-validate live labels for issue #${GO}; skipping due to API error',
@@ -5621,6 +5631,48 @@ printf '%s\\n' "\${status}"
     expect(withdrawClaimStep).not.toContain(
       '--add-label "${AUTOFIX_APPROVED_LABEL}"',
     );
+  });
+
+  it('applies autofix/skip and relays the agent verdict when the agent declines', () => {
+    // The decline verdict travels as job outputs because the publish job
+    // cannot read the agent's workdir from a different job.
+    expect(issueAutofixJob).toContain(
+      "agent_declined: '${{ steps.decline.outputs.agent_declined }}'",
+    );
+    expect(issueAutofixJob).toContain(
+      "agent_detail: '${{ steps.decline.outputs.agent_detail }}'",
+    );
+    expect(issueAutofixJob).toContain("- name: 'Record agent decline'");
+    // Only an agent-authored failure.md is a decline: the harness writes
+    // failure.md for transient timeouts and API errors too, and those stay
+    // retryable instead of permanently skipping the issue.
+    expect(issueAutofixJob).toContain('! -f "${WORKDIR}/agent-timeout"');
+    expect(issueAutofixJob).toContain('! -f "${WORKDIR}/agent-api-error"');
+    expect(issueAutofixJob).toContain('head -c 1500 "${WORKDIR}/failure.md"');
+    expect(issueAutofixPublishJob).toContain(
+      "AGENT_DECLINED: '${{ needs.issue-autofix.outputs.agent_declined }}'",
+    );
+    expect(issueAutofixPublishJob).toContain(
+      "AGENT_DETAIL: '${{ needs.issue-autofix.outputs.agent_detail }}'",
+    );
+    expect(withdrawClaimStep).toContain(
+      'no further automated attempts will be made on this issue.',
+    );
+    expect(withdrawClaimStep).toContain("--add-label 'autofix/skip'");
+    expect(withdrawClaimStep).toContain(
+      'Failed to record the permanent decline; preserving the claim ref for recovery.',
+    );
+    expect(
+      withdrawClaimStep.indexOf("--add-label 'autofix/skip'"),
+    ).toBeLessThan(
+      withdrawClaimStep.indexOf('--delete "${claim_ref#refs/heads/}"'),
+    );
+    // The "what the agent found" header may only introduce real agent detail,
+    // never the stage boilerplate.
+    expect(withdrawClaimStep).toContain(
+      'What the agent found, in case it helps a human contributor:',
+    );
+    expect(withdrawClaimStep).toContain('"${AGENT_DECLINED}" == \'true\'');
   });
 
   it('fails claim cleanly before commenting when label updates fail', () => {
@@ -5819,11 +5871,19 @@ printf '%s\\n' "\${status}"
       "steps.proof.outputs.preserve_claim != 'true'",
     );
     expect(withdrawClaimStep).toContain('always()');
+    // Each possible failure stage names its own logs instead of one
+    // boilerplate line that lies about where the attempt actually stopped.
     expect(withdrawClaimStep).toContain(
-      'The isolated verification or publication stage failed.',
+      'The agent stage failed before a candidate could be verified. Check the issue-autofix job logs.',
     );
     expect(withdrawClaimStep).toContain(
-      'issue-autofix verification and publication job logs',
+      'Deterministic verification of the candidate failed. Check the issue-autofix-verify job logs.',
+    );
+    expect(withdrawClaimStep).toContain(
+      'Isolated targeted E2E verification failed. Check the issue-autofix-targeted-e2e job logs.',
+    );
+    expect(withdrawClaimStep).toContain(
+      'The publication stage failed after verification. Check the issue-autofix-publish job logs.',
     );
     expect(withdrawClaimStep).toContain(
       'Visible issue ownership was withdrawn, but the claim ref could not be released.',

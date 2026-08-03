@@ -325,6 +325,9 @@ test('creates a body carrying every dedupe marker and the first recurrence', () 
   assert.match(body, /<!-- qwen-main-ci-failure-sig:[0-9a-f]{12} -->/);
   assert.ok(body.includes(`<!-- ${analysis.markers[0]} -->`));
   assert.ok(body.includes(`- \`${VITEST_TEST_ID}\``));
+  // Only machine-routed eligible issues redact; human-triaged bodies keep
+  // the readable identifiers and need no redaction note.
+  assert.ok(!body.includes('Test names are redacted to case keys'));
   assert.ok(body.includes(OCCURRENCE_MARKER));
   assert.ok(
     body.includes(
@@ -741,6 +744,8 @@ test('keeps exact eligible E2E identifiers out of public issue prose', () => {
   assert.ok(!planned.title.includes(TRUSTED_VITEST_TEST_ID));
   assert.ok(!planned.body.includes(TRUSTED_VITEST_TEST_ID));
   assert.match(planned.title, /case [0-9a-f]{12}/);
+  // The allowlisted test file is trusted and keeps the title identifiable.
+  assert.ok(planned.title.includes('cli/qwen-serve-client-mcp.test.ts'));
   assert.equal(
     planned.targetedE2e.verification.cases[0].id,
     TRUSTED_VITEST_TEST_ID,
@@ -789,6 +794,53 @@ test('keeps exact eligible E2E identifiers out of public issue prose', () => {
   assert.ok(!recurrence.body.includes('0123456789abcdef'));
   assert.ok(recurrence.body.includes('[run 301]'));
   assert.ok(recurrence.body.includes('[run 302]'));
+  // The redaction note is present on creation and survives the machine
+  // rebuild, so humans always see where the exact failures are visible and
+  // that body prose is discarded on the next recurrence.
+  assert.ok(planned.body.includes('Test names are redacted to case keys'));
+  assert.ok(recurrence.body.includes('Test names are redacted to case keys'));
+  assert.ok(recurrence.body.includes('keep investigative notes in'));
+
+  // An occurrence line pointing away from this repository's runs is not
+  // trusted machine content; the rebuild must drop it.
+  const forgedPath = join(dir, 'forged.md');
+  writeFileSync(
+    forgedPath,
+    `${planned.body}- \`ffffffffffff\` · 2026-07-28T00:00:00Z · [run 999](https://evil.example/runs/999)\n`,
+  );
+  output = '';
+  process.stdout.write = (chunk) => {
+    output += chunk;
+    return true;
+  };
+  try {
+    runCli([
+      'plan',
+      '--analysis',
+      analysisPath,
+      '--existing',
+      forgedPath,
+      '--sha',
+      OCCURRENCE.sha,
+      '--run-url',
+      OCCURRENCE.runUrl,
+      '--run-id',
+      '303',
+      '--run-attempt',
+      OCCURRENCE.runAttempt,
+      '--at',
+      OCCURRENCE.at,
+      '--repository',
+      'QwenLM/qwen-code',
+    ]);
+  } finally {
+    process.stdout.write = original;
+  }
+  const forged = JSON.parse(output);
+  assert.ok(!forged.body.includes('[run 999]'));
+  assert.ok(!forged.body.includes('evil.example'));
+  assert.ok(forged.body.includes('[run 301]'));
+  assert.ok(forged.body.includes('[run 303]'));
 });
 
 test('runCli analyze --jobs maps manifest logPath to log content', () => {

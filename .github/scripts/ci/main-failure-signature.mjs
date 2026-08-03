@@ -306,6 +306,15 @@ const ALSO_FAILING_HEADING = '## Also failing';
 // is the heading plus its contiguous bullet list — nothing else is ever written
 // under it.
 const ALSO_FAILING_BLOCK = /\n*##\s+Also failing\s*\n+(?:- [^\n]*\n?)+/;
+// Eligible issues are machine-routed and auto-approved, so their prose keeps
+// no log-sourced test names; the note tells humans where the exact failures
+// are visible and that body prose does not survive the next recurrence.
+const AUTOFIX_REDACTION_NOTE = [
+  'Test names are redacted to case keys because this issue is machine-routed;',
+  'the source run linked under each recurrence shows the exact failing tests.',
+  'The body is rebuilt on every recurrence, so keep investigative notes in',
+  'comments instead of editing the body.',
+].join('\n');
 
 function splitOccurrenceBlock(body) {
   const index = body.indexOf(OCCURRENCE_MARKER);
@@ -384,6 +393,7 @@ export function renderIssueBody({
   occurrence,
   maxOccurrences = MAX_OCCURRENCES,
   existingBody = '',
+  autofixEligible = false,
 }) {
   if (!analysis.tests.length) {
     // Nothing to merge into: the per-commit path opens one issue per commit and
@@ -400,7 +410,7 @@ export function renderIssueBody({
   const testLines = cappedTestLines(analysis.tests);
 
   if (!existingBody.trim()) {
-    const head = [
+    const headLines = [
       `<!-- ${SIGNATURE_MARKER_PREFIX}${analysis.signature} -->`,
       ...bodyMarkers.map((marker) => `<!-- ${marker} -->`),
       '',
@@ -413,7 +423,10 @@ export function renderIssueBody({
       autofixDisposition(analysis),
       'It is deduped by failing test, so every later commit that hits the same',
       'failure is appended below instead of opening another issue.',
-    ].join('\n');
+    ];
+    if (autofixEligible)
+      headLines.push('', ...AUTOFIX_REDACTION_NOTE.split('\n'));
+    const head = headLines.join('\n');
     return [
       head,
       '',
@@ -444,9 +457,13 @@ export function renderIssueBody({
   const missingTests = testLines.filter(
     (line) => line.startsWith('- `') && !strippedProse.includes(line),
   );
+  const notedProse =
+    autofixEligible && !strippedProse.includes(AUTOFIX_REDACTION_NOTE)
+      ? `${strippedProse}\n\n${AUTOFIX_REDACTION_NOTE}`
+      : strippedProse;
   const withMarkers = missingMarkers.length
-    ? `${missingMarkers.map((marker) => `<!-- ${marker} -->`).join('\n')}\n${strippedProse}`
-    : strippedProse;
+    ? `${missingMarkers.map((marker) => `<!-- ${marker} -->`).join('\n')}\n${notedProse}`
+    : notedProse;
   const withTests = missingTests.length
     ? `${withMarkers}\n\n${ALSO_FAILING_HEADING}\n\n${missingTests.join('\n')}`
     : withMarkers;
@@ -480,14 +497,22 @@ function publicIssueAnalysis(analysis) {
     id: `case ${test.key}`,
   }));
   const extra = tests.length > 1 ? ` (+${tests.length - 1} more)` : '';
+  // Eligibility requires every case file to be on the trusted allowlist, so
+  // the file name is safe to show; the log-sourced test name stays redacted.
+  const file = analysis.targetedE2e?.cases?.[0]?.file ?? '';
+  const label = file ? `${file} (${tests[0].id})` : tests[0].id;
   return {
     ...analysis,
     tests,
-    title: `Main CI failed: ${analysis.workflow} — ${tests[0].id}${extra}`,
+    title: `Main CI failed: ${analysis.workflow} — ${label}${extra}`,
   };
 }
 
-function publicMachineMarkers(body) {
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function publicMachineMarkers(body, repository) {
   const text = String(body ?? '');
   const testMarkerPattern = new RegExp(
     `<!-- ${TEST_MARKER_PREFIX}([0-9a-f]{12}) -->`,
@@ -503,8 +528,9 @@ function publicMachineMarkers(body) {
     .split('\n')
     .find((line) => signaturePattern.test(line));
   const { lines } = splitOccurrenceBlock(text);
-  const occurrencePattern =
-    /^- \x60[0-9a-f]{12}\x60 \u00b7 .+ \u00b7 \[run \d+\]\(.+\)$/;
+  const occurrencePattern = new RegExp(
+    `^- \x60[0-9a-f]{12}\x60 \u00b7 .+ \u00b7 \\[run \\d+\\]\\(https://github\\.com/${escapeRegExp(repository)}/actions/runs/\\d+\\)$`,
+  );
   const validLines = lines.filter((line) => occurrencePattern.test(line));
   const parts = [];
   if (signatureLine) parts.push(signatureLine);
@@ -564,7 +590,7 @@ export function runCli(argv) {
     };
     const issueAnalysis = publicIssueAnalysis(analysis);
     const publicExistingBody = isAutofixEligible(analysis)
-      ? publicMachineMarkers(existingBody)
+      ? publicMachineMarkers(existingBody, options.repository ?? '')
       : existingBody;
     process.stdout.write(
       `${JSON.stringify({
@@ -573,6 +599,7 @@ export function runCli(argv) {
           analysis: issueAnalysis,
           existingBody: publicExistingBody,
           occurrence,
+          autofixEligible: isAutofixEligible(analysis),
         }),
         searchMarkers: analysis.tests.length
           ? analysis.searchMarkers

@@ -9,7 +9,8 @@ home='/tmp/qwen-autofix-verify-home'
 
 case "${phase}" in
   prepare)
-    sudo useradd --create-home --home-dir "${home}" --shell /bin/bash "${user}"
+    id -u "${user}" > /dev/null 2>&1 ||
+      sudo useradd --create-home --home-dir "${home}" --shell /bin/bash "${user}"
     sudo chown root:root "${home}"
     git config --global --add safe.directory "${workspace}"
     sudo chown -R root:root "${workspace}"

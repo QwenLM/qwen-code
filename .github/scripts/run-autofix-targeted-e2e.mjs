@@ -227,9 +227,23 @@ function run(command, args, options = {}) {
     timeout: options.timeout,
     maxBuffer: 10 * 1024 * 1024,
   });
-  if (result.error) fail(`${command} failed: ${result.error.message}`);
-  if (result.status !== 0)
-    fail(`${command} exited with status ${result.status}`);
+  if (result.error) {
+    const timedOut =
+      result.error.code === 'ETIMEDOUT' && options.timeout !== undefined
+        ? ` (timeout ${options.timeout} ms)`
+        : '';
+    fail(`${command} failed: ${result.error.message}${timedOut}`);
+  }
+  if (result.status !== 0) {
+    const signalNote = result.signal
+      ? `, signal ${result.signal}${
+          options.timeout !== undefined
+            ? ` (timeout ${options.timeout} ms)`
+            : ''
+        }`
+      : '';
+    fail(`${command} exited with status ${result.status}${signalNote}`);
+  }
   return result;
 }
 
@@ -295,10 +309,14 @@ export function runTargetedE2e({
       }
       const jsonPath = `/tmp/qwen-autofix-verify-home/reports/${reportName}/report.json`;
       const pattern = `^${escapeRegex(testCase.fullName)}$`;
-      run(vitestWrapper, [workspace, reportName, testCase.file, pattern], {
-        cwd: workspace,
-        timeout: CASE_TIMEOUT_MS,
-      });
+      run(
+        vitestWrapper,
+        [workspace, reportName, testCase.file, pattern, jsonPath],
+        {
+          cwd: workspace,
+          timeout: CASE_TIMEOUT_MS,
+        },
+      );
       const report = JSON.parse(readFileSync(jsonPath, 'utf8'));
       validateVitestReport(report, testCase, workspace);
       if (commandWrapper && worktreeHelper) {

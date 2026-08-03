@@ -5,6 +5,7 @@ workspace="${1:?workspace is required}"
 report_name="${2:?report name is required}"
 test_file="${3:?test file is required}"
 test_pattern="${4:?test pattern is required}"
+expected_report="${5:?expected report path is required}"
 user='qwen-autofix-verify'
 home='/tmp/qwen-autofix-verify-home'
 uid="$(id -u "${user}")"
@@ -16,6 +17,12 @@ launcher="${script_dir}/autofix-cli-launcher.mjs"
 [[ "${report_name}" =~ ^case-[0-9]+$ ]]
 [[ "${test_file}" != /* && "${test_file}" != *$'\n'* && "${test_file}" != *'..'* ]]
 report="${home}/reports/${report_name}/report.json"
+# The verifier reads this exact path after the run; disagreeing here means
+# the home constant drifted, which must fail loud instead of as a later ENOENT.
+if [[ "${report}" != "${expected_report}" ]]; then
+  echo "vitest report path disagreement: wrapper writes ${report} but the caller expects ${expected_report}" >&2
+  exit 1
+fi
 run_home="$(sudo mktemp -d "${home}/runs/vitest.XXXXXX")"
 sudo chown "root:${user}" "${run_home}"
 sudo chmod 0770 "${run_home}"

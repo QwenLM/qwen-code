@@ -248,8 +248,14 @@ Implement the selected issue in the checked-out repository:
    environment-specific failures, inspect the exact error, its source, callers,
    and relevant history even when the original environment cannot run locally;
    then construct the closest focused regression test or surrogate.
-4. Make the minimal root-cause change and add/update focused Vitest coverage
-   for the behavior.
+4. Make the minimal root-cause change. The independent verification gate
+   rejects candidate commits that touch tests, fixtures, mocks, snapshots,
+   scripts, CI files, or any other protected verification input (see
+   `isProtectedVerificationPath` in
+   `.github/scripts/validate-autofix-verification-outputs.mjs`), so the commit
+   must be production source only: scratch tests for local verification are
+   fine but must stay uncommitted, and a fix that requires committed test
+   changes must write `<workdir>/failure.md` and stop instead.
 5. For TypeScript changes, read the relevant type definitions and preserve
    strict nullability; do not assume optional fields are present.
 6. Run `npm run build`, `npm run typecheck`, `npm run lint`, focused Vitest
