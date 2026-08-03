@@ -14,6 +14,11 @@ on:
         required: true
         default: 'main'
         type: 'string'
+      electron_bridge:
+        description: 'Publish the one-time macOS Electron-to-Tauri update bridge.'
+        required: true
+        default: false
+        type: 'boolean'
       dry_run:
         description: 'Build unsigned installers without publishing.'
         required: true
@@ -64,6 +69,7 @@ jobs:
         id: 'version'
         shell: 'bash'
         env:
+          ELECTRON_BRIDGE: '${{ inputs.electron_bridge }}'
           INPUT_VERSION: '${{ inputs.version }}'
         run: |
           set -euo pipefail
@@ -71,6 +77,14 @@ jobs:
           if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
             echo "::error::Desktop version must be valid SemVer: $INPUT_VERSION"
             exit 1
+          fi
+          if [ "$ELECTRON_BRIDGE" = 'true' ]; then
+            core="${version%%[-+]*}"
+            IFS='.' read -r major minor patch <<< "$core"
+            if [ "$major" -eq 0 ] && [ "$minor" -eq 0 ] && [ "$patch" -le 5 ]; then
+              echo '::error::The Electron bridge version must be newer than desktop-v0.0.5.'
+              exit 1
+            fi
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=desktop-v$version" >> "$GITHUB_OUTPUT"
@@ -109,18 +123,22 @@ jobs:
         include:
           - name: 'macOS arm64'
             os: 'macos-latest'
+            legacy_arch: 'arm64'
             rust_target: 'aarch64-apple-darwin'
             tauri_args: '--target aarch64-apple-darwin --bundles app,dmg'
           - name: 'macOS x64'
             os: 'macos-15'
+            legacy_arch: 'x64'
             rust_target: 'x86_64-apple-darwin'
             tauri_args: '--target x86_64-apple-darwin --bundles app,dmg'
           - name: 'Windows x64'
             os: 'windows-latest'
+            legacy_arch: ''
             rust_target: 'x86_64-pc-windows-msvc'
             tauri_args: '--target x86_64-pc-windows-msvc --bundles nsis'
           - name: 'Linux x64'
             os: 'ubuntu-22.04'
+            legacy_arch: ''
             rust_target: 'x86_64-unknown-linux-gnu'
             tauri_args: '--target x86_64-unknown-linux-gnu --bundles appimage,deb'
     env:
@@ -195,21 +213,32 @@ jobs:
         env:
           APPLE_CERTIFICATE: '${{ secrets.APPLE_CERTIFICATE }}'
           APPLE_CERTIFICATE_PASSWORD: '${{ secrets.APPLE_CERTIFICATE_PASSWORD }}'
+          LEGACY_APPLE_CERTIFICATE: '${{ secrets.MAC_CSC_LINK }}'
+          LEGACY_APPLE_CERTIFICATE_PASSWORD: '${{ secrets.MAC_CSC_KEY_PASSWORD }}'
           KEYCHAIN_PASSWORD: '${{ secrets.APPLE_KEYCHAIN_PASSWORD }}'
         run: |
           set -euo pipefail
-          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD KEYCHAIN_PASSWORD; do
-            if [ -z "${!name}" ]; then echo "::error::$name is required for published macOS releases."; exit 1; fi
-          done
+          if [ -n "$APPLE_CERTIFICATE" ] && [ -n "$APPLE_CERTIFICATE_PASSWORD" ]; then
+            certificate_data="$APPLE_CERTIFICATE"
+            certificate_password="$APPLE_CERTIFICATE_PASSWORD"
+          elif [ -n "$LEGACY_APPLE_CERTIFICATE" ] && [ -n "$LEGACY_APPLE_CERTIFICATE_PASSWORD" ]; then
+            certificate_data="$LEGACY_APPLE_CERTIFICATE"
+            certificate_password="$LEGACY_APPLE_CERTIFICATE_PASSWORD"
+          else
+            echo '::error::A complete APPLE_CERTIFICATE pair or MAC_CSC pair is required for published macOS releases.'
+            exit 1
+          fi
+          keychain_password="${KEYCHAIN_PASSWORD:-$(openssl rand -hex 32)}"
           certificate="$RUNNER_TEMP/qwen-code-desktop.p12"
           keychain="$RUNNER_TEMP/qwen-code-desktop.keychain-db"
-          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$certificate"
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
+          certificate_data="${certificate_data#*base64,}"
+          printf '%s' "$certificate_data" | base64 --decode > "$certificate"
+          security create-keychain -p "$keychain_password" "$keychain"
           security set-keychain-settings -lut 21600 "$keychain"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
-          security import "$certificate" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$certificate" -P "$certificate_password" -A -t cert -f pkcs12 -k "$keychain"
           security list-keychains -d user -s "$keychain" login.keychain-db
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$keychain"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain"
           identity="$(security find-identity -v -p codesigning "$keychain" | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' | head -n 1)"
           if [ -z "$identity" ]; then echo '::error::Developer ID Application identity was not found.'; exit 1; fi
           echo "APPLE_SIGNING_IDENTITY=$identity" >> "$GITHUB_ENV"
@@ -221,17 +250,29 @@ jobs:
           APPLE_API_ISSUER: '${{ secrets.APPLE_API_ISSUER }}'
           APPLE_API_KEY: '${{ secrets.APPLE_API_KEY }}'
           APPLE_API_KEY_P8: '${{ secrets.APPLE_API_KEY_P8 }}'
+          LEGACY_APPLE_API_ISSUER: '${{ secrets.APPLE_NOTARY_ISSUER_ID }}'
+          LEGACY_APPLE_API_KEY: '${{ secrets.APPLE_NOTARY_KEY_ID }}'
+          LEGACY_APPLE_API_KEY_P8: '${{ secrets.APPLE_NOTARY_API_KEY_P8_BASE64 }}'
         run: |
           set -euo pipefail
-          for name in APPLE_API_ISSUER APPLE_API_KEY APPLE_API_KEY_P8; do
-            if [ -z "${!name}" ]; then echo "::error::$name is required for macOS notarization."; exit 1; fi
-          done
-          key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
-          printf '%s' "$APPLE_API_KEY_P8" > "$key_path"
+          if [ -n "$APPLE_API_ISSUER" ] && [ -n "$APPLE_API_KEY" ] && [ -n "$APPLE_API_KEY_P8" ]; then
+            api_issuer="$APPLE_API_ISSUER"
+            api_key="$APPLE_API_KEY"
+            key_path="$RUNNER_TEMP/AuthKey_${api_key}.p8"
+            printf '%s' "$APPLE_API_KEY_P8" > "$key_path"
+          elif [ -n "$LEGACY_APPLE_API_ISSUER" ] && [ -n "$LEGACY_APPLE_API_KEY" ] && [ -n "$LEGACY_APPLE_API_KEY_P8" ]; then
+            api_issuer="$LEGACY_APPLE_API_ISSUER"
+            api_key="$LEGACY_APPLE_API_KEY"
+            key_path="$RUNNER_TEMP/AuthKey_${api_key}.p8"
+            printf '%s' "$LEGACY_APPLE_API_KEY_P8" | base64 --decode > "$key_path"
+          else
+            echo '::error::A complete APPLE_API notarization set or APPLE_NOTARY set is required.'
+            exit 1
+          fi
           {
             echo "APPLE_API_KEY_PATH=$key_path"
-            echo "APPLE_API_ISSUER=$APPLE_API_ISSUER"
-            echo "APPLE_API_KEY=$APPLE_API_KEY"
+            echo "APPLE_API_ISSUER=$api_issuer"
+            echo "APPLE_API_KEY=$api_key"
           } >> "$GITHUB_ENV"
 
       - name: 'Import Windows certificate'
@@ -302,6 +343,22 @@ jobs:
           $signature = Get-AuthenticodeSignature $installer.FullName
           if ($signature.Status -ne 'Valid') { throw "Invalid Authenticode signature: $($signature.Status)" }
 
+      - name: 'Create Electron bridge archive'
+        if: "runner.os == 'macOS' && inputs.electron_bridge"
+        shell: 'bash'
+        env:
+          LEGACY_ARCH: '${{ matrix.legacy_arch }}'
+        run: |
+          set -euo pipefail
+          app="$(find packages/desktop-shell/src-tauri/target/${{ matrix.rust_target }}/release/bundle/macos -maxdepth 1 -name 'Qwen Code Desktop.app' -print -quit)"
+          if [ -z "$app" ]; then
+            echo '::error::The legacy-named macOS app bundle was not produced.'
+            exit 1
+          fi
+          destination="packages/desktop-shell/src-tauri/target/${{ matrix.rust_target }}/release/bundle/electron-bridge"
+          mkdir -p "$destination"
+          ditto -c -k --sequesterRsrc --keepParent "$app" "$destination/Qwen-Code-Desktop-$LEGACY_ARCH.zip"
+
       - name: 'Smoke packaged application'
         if: "runner.os == 'macOS'"
         working-directory: 'packages/desktop-shell'
@@ -329,6 +386,8 @@ jobs:
 
       - name: 'Collect artifacts'
         shell: 'bash'
+        env:
+          LEGACY_ARCH: '${{ matrix.legacy_arch }}'
         run: |
           set -euo pipefail
           destination="$RUNNER_TEMP/desktop-artifacts"
@@ -342,14 +401,17 @@ jobs:
               case "$name" in
                 *.app.tar.gz.sig) stem="${name%.app.tar.gz.sig}"; extension='.app.tar.gz.sig' ;;
                 *.app.tar.gz) stem="${name%.app.tar.gz}"; extension='.app.tar.gz' ;;
-                *.dmg) stem="${name%.dmg}"; extension='.dmg' ;;
+                *.dmg) name="Qwen-Code-Desktop-$LEGACY_ARCH.dmg" ;;
+                Qwen-Code-Desktop-*.zip) ;;
                 *) continue ;;
               esac
-              name="${stem}-${{ matrix.rust_target }}${extension}"
+              if [ -n "$extension" ]; then
+                name="${stem}-${{ matrix.rust_target }}${extension}"
+              fi
             fi
             name="${name// /-}"
             cp "$artifact" "$destination/$name"
-          done < <(find "$bundle_root" -type f \( -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.exe' -o -name '*.app.tar.gz' -o -name '*.sig' \) -print0)
+          done < <(find "$bundle_root" -type f \( -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.exe' -o -name '*.zip' -o -name '*.app.tar.gz' -o -name '*.sig' \) -print0)
           if [ -z "$(find "$destination" -type f -print -quit)" ]; then
             echo '::error::No desktop artifacts were produced.'
             exit 1
@@ -371,7 +433,7 @@ jobs:
 
   publish:
     name: 'Publish GitHub release'
-    if: '${{ inputs.dry_run == false && github.repository == ''QwenLM/qwen-code'' }}'
+    if: "${{ inputs.dry_run == false && github.repository == 'QwenLM/qwen-code' }}"
     needs:
       - 'prepare'
       - 'build'
@@ -390,6 +452,7 @@ jobs:
       - name: 'Generate checksums and updater manifest'
         shell: 'bash'
         env:
+          ELECTRON_BRIDGE: '${{ inputs.electron_bridge }}'
           GH_REPO: '${{ github.repository }}'
           RELEASE_TAG: '${{ needs.prepare.outputs.tag }}'
           RELEASE_VERSION: '${{ needs.prepare.outputs.version }}'
@@ -404,6 +467,12 @@ jobs:
             --tag "$RELEASE_TAG" \
             --version "$RELEASE_VERSION" \
             --output desktop-latest.json
+          if [ "$ELECTRON_BRIDGE" = 'true' ]; then
+            node ../.github/scripts/create-electron-bridge-manifest.mjs \
+              --assets . \
+              --version "$RELEASE_VERSION" \
+              --output latest-mac.yml
+          fi
           sha256sum -- * > SHA256SUMS.txt
 
       - name: 'Create GitHub release'
@@ -439,14 +508,25 @@ jobs:
       - name: 'Update stable updater feed'
         if: '${{ inputs.draft == false && inputs.prerelease == false }}'
         env:
+          ELECTRON_BRIDGE: '${{ inputs.electron_bridge }}'
           GH_TOKEN: '${{ github.token }}'
           FEED_TAG: '${{ env.DESKTOP_FEED_TAG }}'
         run: |
           set -euo pipefail
+          feed_assets=(release-assets/desktop-latest.json)
+          if [ "$ELECTRON_BRIDGE" = 'true' ]; then
+            feed_assets+=(
+              release-assets/latest-mac.yml
+              release-assets/Qwen-Code-Desktop-arm64.zip
+              release-assets/Qwen-Code-Desktop-x64.zip
+              release-assets/Qwen-Code-Desktop-arm64.dmg
+              release-assets/Qwen-Code-Desktop-x64.dmg
+            )
+          fi
           if gh release view "$FEED_TAG" >/dev/null 2>&1; then
-            gh release upload "$FEED_TAG" release-assets/desktop-latest.json --clobber
+            gh release upload "$FEED_TAG" "${feed_assets[@]}" --clobber
           else
-            gh release create "$FEED_TAG" release-assets/desktop-latest.json --title 'Qwen Code Desktop latest' --notes 'Stable desktop updater feed.' --latest=false
+            gh release create "$FEED_TAG" "${feed_assets[@]}" --title 'Qwen Code Desktop latest' --notes 'Stable desktop updater feed.' --latest=false
           fi
 
       - name: 'Publish release summary'

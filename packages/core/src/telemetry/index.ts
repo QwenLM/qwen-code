@@ -112,6 +112,7 @@ export * from './api-activity-tracker.js';
 export {
   // Core metrics functions
   recordToolCallMetrics,
+  recordToolExecutionMetrics,
   recordTokenUsageMetrics,
   recordApiResponseMetrics,
   recordApiErrorMetrics,

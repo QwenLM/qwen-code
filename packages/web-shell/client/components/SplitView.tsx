@@ -91,6 +91,7 @@ export interface SplitViewProps {
   voiceUserRevision?: number;
   voiceWorkspaceRevisions?: Readonly<Record<string, number>>;
   voiceWorkspaces?: readonly DaemonWorkspaceCapability[];
+  sessionWorkflowEnabled?: boolean;
 }
 
 /**
@@ -119,6 +120,7 @@ export function SplitView({
   voiceUserRevision = 0,
   voiceWorkspaceRevisions = {},
   voiceWorkspaces,
+  sessionWorkflowEnabled = false,
 }: SplitViewProps) {
   const { t } = useI18n();
   const connection = useConnection();
@@ -532,6 +534,7 @@ export function SplitView({
                       onPaneArtifactsChange={onPaneArtifactsChange}
                       messageTurnOutputs={messageTurnOutputs}
                       restartSseOnPrompt={restartSseOnPrompt}
+                      sessionWorkflowEnabled={sessionWorkflowEnabled}
                     />
                   </DaemonSessionProvider>
                 </ErrorBoundary>
