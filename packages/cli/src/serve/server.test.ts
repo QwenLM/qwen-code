@@ -12436,6 +12436,7 @@ describe('createServeApp', () => {
           nextCursor: 1,
           hasMore: true,
         });
+      mockWt.readSidecar = () => Promise.resolve(null);
 
       try {
         const bridge = fakeBridge();
@@ -12455,6 +12456,7 @@ describe('createServeApp', () => {
         expect(res.body.truncated).toBe(true);
       } finally {
         listSessionsSpy.mockRestore();
+        mockWt.readSidecar = undefined;
       }
     });
 
