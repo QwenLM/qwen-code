@@ -11,6 +11,54 @@ import {
   replayCompleteEvent,
 } from './utils/mockDaemon';
 
+test('shows channel sessions in the sidebar channel catalog', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    capabilities: {
+      features: [
+        'session_events',
+        'permission_vote',
+        'session_permission_vote',
+        'session_scope_override',
+        'session_source_metadata',
+      ],
+    },
+    sessions: [
+      {
+        sessionId: 'task-session',
+        displayName: 'Web Shell task',
+        sourceType: 'default',
+      },
+      {
+        sessionId: 'dingtalk-session',
+        displayName: 'DingTalk conversation',
+        sourceType: 'channel',
+        sourceId: 'release-bot',
+      },
+    ],
+  });
+  const daemon = await installMockDaemon(page, scenario, {
+    baseURL: String(testInfo.project.use.baseURL),
+  });
+
+  await page.goto(`/session/${encodeURIComponent(scenario.sessionId)}`);
+  await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+  const connection = await daemon.sse.waitForConnection(scenario.sessionId);
+  await daemon.sendEvent(
+    replayCompleteEvent({ sessionId: connection.sessionId }),
+  );
+  await expect(page.getByText('Loading...')).toHaveCount(0);
+
+  await expect(page.getByText('Web Shell task', { exact: true })).toBeVisible();
+  await expect(page.getByText('DingTalk conversation')).toHaveCount(0);
+  await page.getByRole('tab', { name: 'Channels' }).click();
+  await expect(
+    page.getByText('DingTalk conversation', { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText('Web Shell task')).toHaveCount(0);
+});
+
 test('creates and deletes a typed Channel configuration', async ({
   page,
 }, testInfo) => {

@@ -2890,6 +2890,68 @@ describe('WebShellSidebar primary workspace header', () => {
   });
 });
 
+describe('WebShellSidebar session source switch', () => {
+  it('switches primary and workspace-qualified lists from tasks to channels', async () => {
+    renderSidebar();
+
+    const sourceTabs = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    );
+    const tasksTab = sourceTabs.find(
+      (button) => button.textContent?.trim() === 'Tasks',
+    );
+    const channelsTab = sourceTabs.find(
+      (button) => button.textContent?.trim() === 'Channels',
+    );
+    expect(tasksTab?.getAttribute('data-state')).toBe('active');
+    expect(channelsTab).toBeDefined();
+    expect(
+      useSessions.mock.calls.some(
+        ([options]) => options?.sourceType === 'default',
+      ),
+    ).toBe(true);
+
+    await act(async () => {
+      channelsTab!.dispatchEvent(
+        new MouseEvent('mousedown', { bubbles: true, button: 0 }),
+      );
+      channelsTab!.click();
+      await Promise.resolve();
+    });
+
+    expect(channelsTab?.getAttribute('data-state')).toBe('active');
+    expect(
+      useSessions.mock.calls.some(
+        ([options]) => options?.sourceType === 'channel',
+      ),
+    ).toBe(true);
+
+    await expandWorkspace('other');
+    expect(
+      listWorkspaceSessions.mock.calls.some(
+        ([options]) => options?.sourceType === 'channel',
+      ),
+    ).toBe(true);
+  });
+
+  it('hides the switch and keeps legacy session requests unfiltered', () => {
+    connection.capabilities = {
+      ...capabilities,
+      features: capabilities.features.filter(
+        (feature) => feature !== 'session_source_metadata',
+      ),
+    };
+    renderSidebar();
+
+    expect(container.querySelector('[aria-label="Session source"]')).toBeNull();
+    expect(
+      useSessions.mock.calls.every(
+        ([options]) => options?.sourceType === undefined,
+      ),
+    ).toBe(true);
+  });
+});
+
 describe('WebShellSidebar archived session export', () => {
   const exportResult = {
     content: '<p>exported</p>',

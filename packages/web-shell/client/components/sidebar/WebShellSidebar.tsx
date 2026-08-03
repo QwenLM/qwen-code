@@ -35,6 +35,8 @@ import {
   ChevronRightIcon,
   Columns2Icon,
   LayoutGridIcon,
+  ListTodoIcon,
+  MessageCircleIcon,
   EllipsisVerticalIcon,
   ArchiveIcon,
   ArchiveRestoreIcon,
@@ -60,6 +62,7 @@ import { WebShellThemeId, type WebShellTheme } from '../../themeContext';
 import { useI18n } from '../../i18n';
 import { Input } from '../ui/input';
 import { Button } from '../ui/button';
+import { Tabs, TabsList, TabsTrigger } from '../ui/tabs';
 import { Field, FieldGroup, FieldLabel } from '../ui/field';
 import {
   Select,
@@ -90,7 +93,6 @@ import {
 import {
   SESSION_LIST_PAGE_SIZE,
   SESSION_ORGANIZATION_FEATURE,
-  WEB_SHELL_SESSION_SOURCE_TYPE,
 } from '../../constants/sessions';
 import styles from './WebShellSidebar.module.css';
 
@@ -113,6 +115,8 @@ const GROUP_MENU_WIDTH = 240;
 const GROUP_MENU_MARGIN = 8;
 const CUSTOM_GROUP_COLOR_OPTION = '__custom__';
 const DEFAULT_CUSTOM_GROUP_COLOR: DaemonSessionGroupHexColor = '#416ef5';
+
+type SidebarSessionSource = 'default' | 'channel';
 
 function getSessionIdentity(
   sessionId: string,
@@ -565,6 +569,11 @@ export function WebShellSidebar({
   const sourceMetadataEnabled = Boolean(
     connection.capabilities?.features?.includes('session_source_metadata'),
   );
+  const [sessionSource, setSessionSource] =
+    useState<SidebarSessionSource>('default');
+  const selectedSessionSource = sourceMetadataEnabled
+    ? sessionSource
+    : undefined;
   const sessionArchiveEnabled = Boolean(
     connection.capabilities?.features?.includes('session_archive'),
   );
@@ -606,9 +615,7 @@ export function WebShellSidebar({
     enabled: includePrimaryWorkspaceSessions,
     pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'active',
-    ...(sourceMetadataEnabled
-      ? { sourceType: WEB_SHELL_SESSION_SOURCE_TYPE }
-      : {}),
+    ...(selectedSessionSource ? { sourceType: selectedSessionSource } : {}),
     ...(organizationEnabled
       ? { view: 'organized' as const, group: 'all' }
       : {}),
@@ -629,9 +636,7 @@ export function WebShellSidebar({
       enabled: organizationEnabled && includePrimaryWorkspaceSessions,
       pageSize: SESSION_LIST_PAGE_SIZE,
       archiveState: 'active',
-      ...(sourceMetadataEnabled
-        ? { sourceType: WEB_SHELL_SESSION_SOURCE_TYPE }
-        : {}),
+      ...(selectedSessionSource ? { sourceType: selectedSessionSource } : {}),
       view: 'organized',
       group: 'pinned',
     });
@@ -655,9 +660,7 @@ export function WebShellSidebar({
       includePrimaryWorkspaceSessions,
     pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'archived',
-    ...(sourceMetadataEnabled
-      ? { sourceType: WEB_SHELL_SESSION_SOURCE_TYPE }
-      : {}),
+    ...(selectedSessionSource ? { sourceType: selectedSessionSource } : {}),
     ...(organizationEnabled
       ? { view: 'organized' as const, group: 'all' }
       : {}),
@@ -1065,8 +1068,8 @@ export function WebShellSidebar({
           .listWorkspaceSessions({
             pageSize: SESSION_LIST_PAGE_SIZE,
             archiveState: 'active',
-            ...(sourceMetadataEnabled
-              ? { sourceType: WEB_SHELL_SESSION_SOURCE_TYPE }
+            ...(selectedSessionSource
+              ? { sourceType: selectedSessionSource }
               : {}),
             view: 'organized',
             group: 'pinned',
@@ -1090,7 +1093,7 @@ export function WebShellSidebar({
   }, [
     displayedWorkspaces,
     organizationEnabled,
-    sourceMetadataEnabled,
+    selectedSessionSource,
     workspace.client,
     workspaceSessionsReloadToken,
   ]);
@@ -1142,8 +1145,8 @@ export function WebShellSidebar({
           .listWorkspaceSessions({
             pageSize: SESSION_LIST_PAGE_SIZE,
             archiveState: 'archived',
-            ...(sourceMetadataEnabled
-              ? { sourceType: WEB_SHELL_SESSION_SOURCE_TYPE }
+            ...(selectedSessionSource
+              ? { sourceType: selectedSessionSource }
               : {}),
             ...(organizationEnabled
               ? { view: 'organized' as const, group: 'all' }
@@ -1185,7 +1188,7 @@ export function WebShellSidebar({
     organizationEnabled,
     secondaryArchivedReloadToken,
     sessionArchiveEnabled,
-    sourceMetadataEnabled,
+    selectedSessionSource,
     workspace.client,
     workspaceQualifiedRestCoreEnabled,
     workspaceSessionsReloadToken,
@@ -4073,6 +4076,29 @@ export function WebShellSidebar({
         </div>
         <div className={styles.body}>
           <div className={styles.sessionList}>
+            {!collapsed && sourceMetadataEnabled && (
+              <Tabs
+                className="px-2 pb-2"
+                value={sessionSource}
+                onValueChange={(value) =>
+                  setSessionSource(value as SidebarSessionSource)
+                }
+              >
+                <TabsList
+                  className="w-full"
+                  aria-label={t('sidebar.sessionSource')}
+                >
+                  <TabsTrigger value="default">
+                    <ListTodoIcon />
+                    {t('sidebar.sessionSource.tasks')}
+                  </TabsTrigger>
+                  <TabsTrigger value="channel">
+                    <MessageCircleIcon />
+                    {t('sidebar.sessionSource.channels')}
+                  </TabsTrigger>
+                </TabsList>
+              </Tabs>
+            )}
             {!collapsed && pinnedSessions.length > 0 && (
               <>
                 <div className={styles.projectsHeader}>
@@ -4182,7 +4208,7 @@ export function WebShellSidebar({
                             noSessionsLabel={t('sidebar.noSessions')}
                             loadErrorLabel={t('sidebar.loadFailed')}
                             organizationEnabled={organizationEnabled}
-                            sourceMetadataEnabled={sourceMetadataEnabled}
+                            sourceType={selectedSessionSource}
                             ungroupedLabel={t('sidebar.groupUngrouped')}
                             onRenameGroup={
                               canOrganizeWorkspace(ws.cwd)
