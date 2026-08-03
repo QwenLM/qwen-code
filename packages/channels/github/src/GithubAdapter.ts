@@ -39,7 +39,14 @@ const GH_AUTH_TIMEOUT_MS = 10_000;
 const GH_AUTH_MAX_BUFFER = 64 * 1024;
 
 function ghHostname(channelName: string, baseUrl: string): string {
-  const url = new URL(baseUrl);
+  let url: URL;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    throw new Error(
+      `[Channel:${channelName}] baseUrl is not a valid URL: ${baseUrl}`,
+    );
+  }
   if (url.protocol !== 'https:') {
     throw new Error(
       `[Channel:${channelName}] local GitHub CLI authentication requires an HTTPS baseUrl.`,
@@ -68,7 +75,7 @@ function resolveGhAuthToken(
         encoding: 'utf8',
         env,
       },
-      (error, stdout) => {
+      (error, stdout, stderr) => {
         if (error) {
           const code = (error as NodeJS.ErrnoException).code;
           const message =
@@ -79,7 +86,14 @@ function resolveGhAuthToken(
                 : typeof code === 'number'
                   ? `No GitHub CLI authentication is available for ${hostname}. Run \`gh auth login --hostname ${hostname}\` on the daemon host.`
                   : `GitHub CLI authentication lookup for ${hostname} failed to execute.`;
-          reject(new Error(`[Channel:${channelName}] ${message}`));
+          const stderrHint = stderr ? sanitizeLogText(stderr, 512).trim() : '';
+          reject(
+            new Error(
+              `[Channel:${channelName}] ${message}${
+                stderrHint ? ` gh stderr: ${stderrHint}` : ''
+              }`,
+            ),
+          );
           return;
         }
         const token = stdout.trim();

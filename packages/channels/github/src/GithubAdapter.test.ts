@@ -472,6 +472,24 @@ describe('GithubChannel', () => {
       expect(mockOctokitConstructor).not.toHaveBeenCalled();
     });
 
+    it('reports a malformed baseUrl before resolving local gh credentials', async () => {
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({
+          token: '',
+          useLocalGh: true,
+          baseUrl: 'ghe.example.com/api/v3',
+        }),
+        makeBridge(),
+      );
+
+      await expect(channel.connect()).rejects.toThrow(
+        '[Channel:test-github] baseUrl is not a valid URL: ghe.example.com/api/v3',
+      );
+      expect(mockExecFile).not.toHaveBeenCalled();
+      expect(mockOctokitConstructor).not.toHaveBeenCalled();
+    });
+
     it('preserves explicit token support for an HTTP base URL', async () => {
       channel = new TestableGithubChannel(
         'test-github',
@@ -582,6 +600,38 @@ describe('GithubChannel', () => {
         'gh auth login --hostname github.com',
       );
       await expect(channel.connect()).rejects.not.toThrow('secret stderr');
+    });
+
+    it('surfaces bounded gh stderr in the authentication failure', async () => {
+      mockExecFile.mockImplementation(
+        (
+          _file: string,
+          _args: string[],
+          _options: unknown,
+          callback: (
+            error: Error & { code: number },
+            stdout: string,
+            stderr: string,
+          ) => void,
+        ) =>
+          callback(
+            Object.assign(new Error('exit 1'), { code: 1 }),
+            '',
+            'gh: no oauth token stored for github.com',
+          ),
+      );
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ token: '', useLocalGh: true }),
+        makeBridge(),
+      );
+
+      await expect(channel.connect()).rejects.toThrow(
+        'gh auth login --hostname github.com',
+      );
+      await expect(channel.connect()).rejects.toThrow(
+        'gh stderr: gh: no oauth token stored for github.com',
+      );
     });
 
     it('reports when the GitHub CLI authentication lookup times out', async () => {

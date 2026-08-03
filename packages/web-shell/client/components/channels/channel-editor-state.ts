@@ -177,10 +177,8 @@ export function validateChannelEditorDraft(
     }
   }
   if (descriptor.type === 'github') {
-    const token = draft.secrets['token'];
-    const hasToken =
-      token?.operation === 'preserve' ||
-      (token?.operation === 'replace' && Boolean(token.value?.trim()));
+    const tokenField = descriptor.fields.find((f) => f.key === 'token');
+    const hasToken = tokenField ? !isMissingField(tokenField, draft) : false;
     if (!hasToken && draft.values['useLocalGh'] !== true) {
       errors['token'] = 'credential';
     }
@@ -253,9 +251,7 @@ export function buildChannelUpsertRequest(
       const secret = draft.secrets[field.key] ?? { operation: 'preserve' };
       secrets[field.key] =
         secret.operation === 'replace'
-          ? !field.required &&
-            !instance?.secrets[field.key]?.present &&
-            !secret.value?.trim()
+          ? !field.required && !secret.value?.trim()
             ? { operation: 'clear' }
             : { operation: 'replace', value: secret.value ?? '' }
           : { operation: secret.operation };

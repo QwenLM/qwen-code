@@ -294,7 +294,7 @@ describe('Descriptor-driven senderPolicy', () => {
     expect(request.secrets).toEqual({ token: { operation: 'clear' } });
   });
 
-  it('does not clear an existing optional secret from a blank replacement', () => {
+  it('clears an existing optional secret from a blank replacement', () => {
     const instance: DaemonChannelInstanceSnapshot = {
       name: 'my-bot',
       config: {
@@ -312,7 +312,24 @@ describe('Descriptor-driven senderPolicy', () => {
 
     expect(
       buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).secrets,
-    ).toEqual({ token: { operation: 'replace', value: '  ' } });
+    ).toEqual({ token: { operation: 'clear' } });
+  });
+
+  it('keeps an unchanged stored token valid while editing an existing channel', () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'my-bot',
+      config: {
+        type: 'github',
+        groupPolicy: 'open',
+        senderPolicy: 'allowlist',
+      },
+      secrets: { token: { present: true, source: 'stored' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(GITHUB, instance);
+
+    expect(validateChannelEditorDraft(GITHUB, draft, [])).toEqual({});
   });
 
   it('skips senderPolicy validation when descriptor declares it', () => {
