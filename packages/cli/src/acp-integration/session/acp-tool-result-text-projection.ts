@@ -270,13 +270,47 @@ function projectContent(
   const skeletonBytes = contentSkeletonBytes(original.length);
   const availablePayloadBytes =
     ACP_TOOL_RESULT_TEXT_JSON_BYTE_BUDGET - skeletonBytes;
-  const payloadBytes = original.map((block) =>
-    jsonStringPayloadByteLength(block.content.text, availablePayloadBytes),
-  );
-  const totalPayloadBytes = payloadBytes.reduce((sum, bytes) => sum + bytes, 0);
-  if (totalPayloadBytes <= availablePayloadBytes) {
-    return original;
+  let remainingPayloadBytes = availablePayloadBytes;
+  let needsProjection = false;
+  for (const block of original) {
+    const payloadBytes = jsonStringPayloadByteLength(
+      block.content.text,
+      remainingPayloadBytes,
+    );
+    if (payloadBytes > remainingPayloadBytes) {
+      needsProjection = true;
+      break;
+    }
+    remainingPayloadBytes -= payloadBytes;
   }
+  if (!needsProjection) return original;
+
+  const baseScans = original.map((block) =>
+    jsonStringPayloadByteLength(
+      block.content.text,
+      TRUNCATION_MARKER_PAYLOAD_BYTES,
+    ),
+  );
+  const basePayloadBytes = baseScans.map((bytes) =>
+    Math.min(bytes, TRUNCATION_MARKER_PAYLOAD_BYTES),
+  );
+  const baseTotal = basePayloadBytes.reduce((sum, bytes) => sum + bytes, 0);
+  if (baseTotal > availablePayloadBytes) return fallbackContent();
+
+  const payloadBytes = original.map((block, index) => {
+    if (baseScans[index] <= TRUNCATION_MARKER_PAYLOAD_BYTES) {
+      return baseScans[index];
+    }
+    const maximumAllocation =
+      availablePayloadBytes - baseTotal + basePayloadBytes[index];
+    const bytes = jsonStringPayloadByteLength(
+      block.content.text,
+      maximumAllocation,
+    );
+    // Other blocks always retain their base, so this block cannot receive
+    // more than maximumAllocation. One extra byte is enough to mean truncated.
+    return bytes <= maximumAllocation ? bytes : maximumAllocation + 1;
+  });
 
   const allocations = allocatePayloadBudgets(
     payloadBytes,

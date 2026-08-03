@@ -33,8 +33,10 @@ copied so a bounded preview does not retain an oversized backing string.
 For multi-block content, the array and object wrappers count toward the same
 field budget. A deterministic max-min allocation preserves block order and
 lets small blocks remain complete. Reduced blocks reserve marker space before
-sharing the remaining payload budget. If the empty structure or minimum marker
-set cannot fit, the field collapses to one canonical omission marker.
+sharing the remaining payload budget. Fit is decided with a cumulative
+early-stopping scan, then each block is scanned only through its largest
+possible allocation. If the empty structure or minimum marker set cannot fit,
+the field collapses to one canonical omission marker.
 
 The projector does not stringify an original oversized field, join blocks, or
 perform repeated binary searches. Native serialization is used only to verify

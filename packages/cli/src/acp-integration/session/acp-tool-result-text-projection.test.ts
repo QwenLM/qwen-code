@@ -186,9 +186,7 @@ describe('ACP tool-result text projection', () => {
     expect(texts[0]).toBe('small');
     expect(texts[1]).toContain(ACP_TOOL_RESULT_TEXT_TRUNCATION_MARKER);
     expect(texts[2]).toContain(ACP_TOOL_RESULT_TEXT_TRUNCATION_MARKER);
-    expect(jsonBytes(asRecord(projected)['content'])).toBeLessThanOrEqual(
-      65_536,
-    );
+    expect(jsonBytes(asRecord(projected)['content'])).toBe(65_536);
   });
 
   it('saturates the budget after smaller blocks reach their capacity', () => {
@@ -203,6 +201,22 @@ describe('ACP tool-result text projection', () => {
     expect(texts[0]).toBe(content[0].content.text);
     expect(texts[1]).toContain(ACP_TOOL_RESULT_TEXT_TRUNCATION_MARKER);
     expect(texts[2]).toContain(ACP_TOOL_RESULT_TEXT_TRUNCATION_MARKER);
+    expect(jsonBytes(asRecord(projected)['content'])).toBe(65_536);
+  });
+
+  it('bounds pathological many-block content without collapsing it', () => {
+    const content = Array.from({ length: 600 }, (_, index) =>
+      textBlock(`${index}:${'x'.repeat(40_000)}`),
+    );
+    const projected = projectAcpToolResultUpdate(toolUpdate(content));
+    const texts = contentTexts(projected);
+
+    expect(texts).toHaveLength(content.length);
+    expect(
+      texts.every((text) =>
+        text.includes(ACP_TOOL_RESULT_TEXT_TRUNCATION_MARKER),
+      ),
+    ).toBe(true);
     expect(jsonBytes(asRecord(projected)['content'])).toBe(65_536);
   });
 
