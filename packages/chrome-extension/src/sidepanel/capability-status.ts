@@ -4,6 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// Server name the daemon registers for the runtime adapter. Matched by string
+// across the package boundary; capability-status.test.ts pins it against
+// CHROME_DEVTOOLS_MCP_SERVER_NAME in packages/cli/src/serve/acp-http/index.ts.
+export const CHROME_DEVTOOLS_SERVER_NAME = 'chrome-devtools';
+
+// Tunnel-endpoint path pattern; capability-status.test.ts pins the same
+// literal in run-real-chrome.mjs's acceptance wait.
+export const CDP_TUNNEL_ENDPOINT_PATTERN = /\/cdp(?:$|[/?#])/;
+
 export type CapabilityStatusState =
   | 'down'
   | 'needs-allow-origin'
@@ -91,9 +100,8 @@ export function deriveCapabilityStatus(
       };
     }
 
-    // Must match CHROME_DEVTOOLS_MCP_SERVER_NAME in packages/cli/src/serve/acp-http/index.ts.
     const server = mcpSnapshot.servers?.find(
-      (candidate) => candidate.name === 'chrome-devtools',
+      (candidate) => candidate.name === CHROME_DEVTOOLS_SERVER_NAME,
     );
     if (!server) {
       return {
@@ -103,10 +111,9 @@ export function deriveCapabilityStatus(
           'Browser tools are configured but the adapter is not connected.',
       };
     }
-    // The /cdp path pattern mirrors run-real-chrome.mjs's acceptance wait.
     const usesTunnel = server.config?.args?.some((arg) => {
       const candidate = arg.replace(/^--?[\w-]+=/, '');
-      if (!/\/cdp(?:$|[/?#])/.test(candidate)) return false;
+      if (!CDP_TUNNEL_ENDPOINT_PATTERN.test(candidate)) return false;
       if (!baseUrl) return true;
       try {
         const argUrl = new URL(candidate);

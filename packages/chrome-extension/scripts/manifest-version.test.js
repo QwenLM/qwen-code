@@ -36,6 +36,16 @@ const packageRoot = path.resolve(
   '..',
 );
 
+const dateDerivedBuildNumber = (digits) => {
+  const year = Math.floor(digits / 10000);
+  const month = Math.floor((digits % 10000) / 100);
+  const day = digits % 100;
+  return (
+    Math.floor(Date.UTC(year, month - 1, day) / 86_400_000) -
+    Math.floor(Date.UTC(2000, 0, 1) / 86_400_000)
+  );
+};
+
 describe('toChromeManifestVersion', () => {
   it('preserves a stable semantic version', () => {
     expect(toChromeManifestVersion('0.19.9')).toBe('0.19.9.65535');
@@ -182,16 +192,19 @@ describe('toChromeManifestVersion', () => {
 describe('resolveNightlyBuildNumber', () => {
   const ENV_KEY = 'QWEN_CHROME_EXTENSION_BUILD_NUMBER';
   let savedEnv;
+  let warnSpy;
 
   beforeEach(() => {
     savedEnv = process.env[ENV_KEY];
     delete process.env[ENV_KEY];
+    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     mockExecFileSync.mockClear();
   });
 
   afterEach(() => {
     if (savedEnv === undefined) delete process.env[ENV_KEY];
     else process.env[ENV_KEY] = savedEnv;
+    warnSpy.mockRestore();
     mockExecFileSync.mockImplementation((...args) =>
       originalExecFileSync.current(...args),
     );
@@ -208,11 +221,19 @@ describe('resolveNightlyBuildNumber', () => {
     expect(mockExecFileSync).not.toHaveBeenCalled();
   });
 
-  it('throws on a shallow clone', () => {
-    mockExecFileSync.mockReturnValue('true\n');
+  it('rejects a malformed environment variable override by name', () => {
+    process.env[ENV_KEY] = 'abc';
     expect(() =>
       resolveNightlyBuildNumber('0.21.2-nightly.20260712.abc'),
-    ).toThrow('shallow clone');
+    ).toThrow(`Invalid ${ENV_KEY} "abc"`);
+  });
+
+  it('falls back to the nightly date on a shallow clone', () => {
+    mockExecFileSync.mockReturnValue('true\n');
+    expect(resolveNightlyBuildNumber('0.21.2-nightly.20260712.abc')).toBe(
+      dateDerivedBuildNumber(20260712),
+    );
+    expect(warnSpy).toHaveBeenCalled();
   });
 
   it('derives the build number from git history', () => {
@@ -222,24 +243,36 @@ describe('resolveNightlyBuildNumber', () => {
       throw new Error(`unexpected: ${args}`);
     });
     expect(resolveNightlyBuildNumber('0.21.2-nightly.20260712.abc')).toBe(1234);
+    expect(warnSpy).not.toHaveBeenCalled();
   });
 
-  it('throws when git rev-list fails', () => {
+  it('falls back to the nightly date when git rev-list fails', () => {
     mockExecFileSync.mockImplementation((_cmd, args) => {
       if (args.includes('--is-shallow-repository')) return 'false\n';
       throw new Error('git failed');
     });
-    expect(() =>
-      resolveNightlyBuildNumber('0.21.2-nightly.20260712.abc'),
-    ).toThrow('Unable to derive');
+    expect(resolveNightlyBuildNumber('0.21.2-nightly.20260712.abc')).toBe(
+      dateDerivedBuildNumber(20260712),
+    );
+    expect(warnSpy).toHaveBeenCalled();
   });
 
-  it('throws an actionable error when git is unavailable', () => {
+  it('falls back to the nightly date when git is unavailable', () => {
+    mockExecFileSync.mockImplementation(() => {
+      throw new Error('spawn git ENOENT');
+    });
+    expect(resolveNightlyBuildNumber('0.21.2-nightly.20260712.abc')).toBe(
+      dateDerivedBuildNumber(20260712),
+    );
+    expect(warnSpy).toHaveBeenCalled();
+  });
+
+  it('throws an actionable error without git history or a nightly date', () => {
     mockExecFileSync.mockImplementation(() => {
       throw new Error('spawn git ENOENT');
     });
     expect(() =>
-      resolveNightlyBuildNumber('0.21.2-nightly.20260712.abc'),
-    ).toThrow('Set QWEN_CHROME_EXTENSION_BUILD_NUMBER');
+      resolveNightlyBuildNumber('0.21.2-nightly.notadate.abc'),
+    ).toThrow(`Set ${ENV_KEY}`);
   });
 });

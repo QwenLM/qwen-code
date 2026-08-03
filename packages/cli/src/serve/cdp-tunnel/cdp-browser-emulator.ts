@@ -73,7 +73,7 @@ export class CdpBrowserEmulator {
   private nextPageSessionId = 1;
   private autoAttachActive = false;
   private pageSessionDetached = false;
-  private warnedNoListener = false;
+  private droppedTabEvents = 0;
 
   constructor(
     private readonly cb: CdpEmulatorCallbacks,
@@ -218,6 +218,11 @@ export class CdpBrowserEmulator {
                 },
               });
             }
+            // Without a prior handshake the session was never announced, so
+            // there is no detachedFromTarget to emit, and PAGE_SESSION_ID
+            // stays a valid lazy-attach command route (cdp-reverse-link.ts).
+            // Deliberately asymmetric with the auto-attach path, where detach
+            // ends both events and commands: see the setAutoAttach note.
           } else if (
             typeof attachedSessionId === 'string' &&
             this.attachedPageSessions.delete(attachedSessionId)
@@ -256,6 +261,9 @@ export class CdpBrowserEmulator {
     if (sessionId === TAB_SESSION_ID) {
       if (method === 'Target.setAutoAttach') {
         this.autoAttachActive = params?.['autoAttach'] !== false;
+        // autoAttach:false pauses event delivery on PAGE_SESSION_ID but keeps
+        // its command forwarding alive (lazy-attach compat); only
+        // detachFromTarget ends both.
         if (this.autoAttachActive) {
           this.pageSessionDetached = false;
           this.cb.reply({
@@ -346,15 +354,15 @@ export class CdpBrowserEmulator {
     for (const sessionId of this.attachedPageSessions) {
       this.cb.reply({ method, params, sessionId });
     }
-    if (
-      !this.autoAttachActive &&
-      this.attachedPageSessions.size === 0 &&
-      !this.warnedNoListener
-    ) {
-      this.warnedNoListener = true;
-      this.cb.log?.(
-        `qwen serve: /cdp tab event "${method}" dropped — no active page session (lazy-attach clients are command-only until Target.setAutoAttach)`,
-      );
+    if (!this.autoAttachActive && this.attachedPageSessions.size === 0) {
+      this.droppedTabEvents += 1;
+      // A one-shot warning hides mid-session regressions; re-log periodically
+      // with a running total so the drop stream stays diagnosable.
+      if (this.droppedTabEvents === 1 || this.droppedTabEvents % 100 === 0) {
+        this.cb.log?.(
+          `qwen serve: /cdp tab event "${method}" dropped (${this.droppedTabEvents} total) — no active page session (lazy-attach clients are command-only until Target.setAutoAttach)`,
+        );
+      }
     }
   }
 }

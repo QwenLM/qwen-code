@@ -133,3 +133,9 @@ The generated manifest version follows this package's version. Upload the zip
 to a GitHub prerelease for alpha side-loading, or to the Chrome Web Store
 Developer Dashboard for managed distribution. The `debugger` permission will
 draw manual review and must be justified in the store listing.
+
+**Version note:** the manifest version is derived from this package's semver
+(e.g. `0.21.2.65535`), which is lower than the legacy side-loaded `1.0.0`
+alpha. Chrome refuses to update an extension to a lower version, so testers
+upgrading from the `1.0.0` build must remove it in `chrome://extensions`
+before loading this package.

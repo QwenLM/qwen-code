@@ -56,17 +56,21 @@ export const waitForJson = async (
   );
 };
 
+// Wait for 'close' rather than 'exit': a child that fails to spawn never
+// emits 'exit', but it always emits 'close' (after the 'error' event).
 const waitForExit = (child) => {
   if (child.exitCode !== null || child.signalCode !== null)
     return Promise.resolve();
-  return new Promise((resolve, reject) => {
-    child.once('error', reject);
-    child.once('exit', resolve);
+  return new Promise((resolve) => {
+    child.once('close', resolve);
   });
 };
 
 export const stopChild = async (child, { graceMs = 3_000 } = {}) => {
-  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  // A failed spawn leaves pid undefined with exitCode/signalCode both null,
+  // and its 'close' already fired — there is nothing to stop or wait for.
+  if (!child || child.pid === undefined) return;
+  if (child.exitCode !== null || child.signalCode !== null) return;
   child.kill('SIGTERM');
   let graceTimer;
   await Promise.race([
@@ -77,7 +81,8 @@ export const stopChild = async (child, { graceMs = 3_000 } = {}) => {
   ]);
   clearTimeout(graceTimer);
   if (child.exitCode === null && child.signalCode === null) {
-    child.kill('SIGKILL');
+    // kill() returning false means the process is already gone.
+    if (!child.kill('SIGKILL')) return;
     await waitForExit(child);
   }
 };

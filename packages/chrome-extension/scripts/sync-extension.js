@@ -9,6 +9,7 @@
 
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { realpathSync } from 'fs';
 import fs from 'fs/promises';
 import { watch } from 'fs';
 import {
@@ -104,7 +105,12 @@ async function main() {
   }
 }
 
-if (fileURLToPath(import.meta.url) === process.argv[1]) {
+// Node realpaths the ESM main entry but not process.argv[1], so comparing the
+// raw paths silently skips main() under a symlinked checkout.
+const isMainEntry = () =>
+  Boolean(process.argv[1]) && __filename === realpathSync(process.argv[1]);
+
+if (isMainEntry()) {
   main().catch((err) => {
     console.error('Failed to sync extension assets:', err);
     process.exit(1);

@@ -16,7 +16,10 @@ const projectRoot = path.resolve(__dirname, '..');
 
 const isWatch = process.argv.includes('--watch');
 const isProduction = process.argv.includes('--production');
-const outDir = process.env.EXTENSION_OUT_DIR || 'dist/extension';
+const outDir = path.resolve(
+  projectRoot,
+  process.env.EXTENSION_OUT_DIR || 'dist/extension',
+);
 
 // Resolve an entry point, preferring .ts when present (fallback to .js)
 function resolveEntry(relativePathWithoutExt) {
@@ -49,7 +52,7 @@ async function build() {
         minify: isProduction,
         sourcemap: !isProduction,
         metafile: !isWatch,
-        outdir: path.join(projectRoot, outDir),
+        outdir: outDir,
         outbase: path.join(projectRoot, 'src'),
         logLevel: 'info',
       }),
@@ -68,7 +71,9 @@ async function build() {
       }),
       { inputs: {}, outputs: {} },
     );
-    const metafilePath = path.join(projectRoot, 'dist/esbuild.json');
+    // Lands next to the output directory root (dist/esbuild.json by default)
+    // so artifact-scan.js resolves the same path, including overrides.
+    const metafilePath = path.join(path.dirname(outDir), 'esbuild.json');
     fs.mkdirSync(path.dirname(metafilePath), { recursive: true });
     fs.writeFileSync(metafilePath, JSON.stringify(metafile, null, 2));
     await Promise.all(contexts.map((ctx) => ctx.dispose()));

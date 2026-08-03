@@ -5,6 +5,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import { realpathSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -43,7 +44,13 @@ export async function packageExtension({
   });
 }
 
-if (fileURLToPath(import.meta.url) === process.argv[1]) {
+// Node realpaths the ESM main entry but not process.argv[1], so comparing the
+// raw paths silently skips the packaging step under a symlinked checkout.
+const isMainEntry = () =>
+  Boolean(process.argv[1]) &&
+  fileURLToPath(import.meta.url) === realpathSync(process.argv[1]);
+
+if (isMainEntry()) {
   packageExtension().catch((error) => {
     console.error(error.message);
     process.exitCode = 1;

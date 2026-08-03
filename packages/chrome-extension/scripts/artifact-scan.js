@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { realpathSync } from 'node:fs';
 import { access, readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,7 +16,7 @@ import yauzl from 'yauzl';
 // would not survive). Both scans are needed.
 const DEFAULT_SIGNATURES = [
   'class McpContext',
-  'PageCollector',
+  'class PageCollector',
   'chrome-devtools-mcp/build/src',
   'node_modules/chrome-devtools-mcp',
   'puppeteer-core/lib/cjs/puppeteer',
@@ -149,6 +150,9 @@ const BINARY_EXTENSIONS = new Set([
   '.woff2',
   '.ttf',
   '.eot',
+  '.wasm',
+  '.node',
+  '.map',
 ]);
 
 export async function scanArtifactRoots(
@@ -168,12 +172,20 @@ export async function scanArtifactRoots(
   return findings;
 }
 
+// Node realpaths the ESM main entry but not process.argv[1], so comparing the
+// raw paths silently skips main() under a symlinked checkout (macOS /tmp ->
+// /private/tmp, symlinked worktrees). Compare realpaths on both sides.
+const isMainEntry = () =>
+  Boolean(process.argv[1]) &&
+  fileURLToPath(import.meta.url) === realpathSync(process.argv[1]);
+
 async function main() {
   const packageRoot = path.resolve(
     path.dirname(fileURLToPath(import.meta.url)),
     '..',
   );
   const repoRoot = path.resolve(packageRoot, '../..');
+  const outDir = process.env.EXTENSION_OUT_DIR || 'dist/extension';
   const roots = process.argv.slice(2);
   let positionalMode = false;
   let optionalRoots;
@@ -181,12 +193,19 @@ async function main() {
   let optionalMetafilePaths;
   let zipPath;
   if (roots.length === 0) {
-    roots.push(path.join(packageRoot, 'dist/extension'));
+    roots.push(path.resolve(packageRoot, outDir));
     // The root CLI bundle and its metafile only exist after `npm run bundle`
     // (and `cross-env DEV=true npm run bundle` for the metafile), so a
     // package-level run skips them with a warning instead of failing.
     optionalRoots = [path.join(repoRoot, 'dist')];
-    requiredMetafilePaths = [path.join(packageRoot, 'dist/esbuild.json')];
+    // Mirrors esbuild.background.config.js: the metafile lands next to the
+    // output directory root, including EXTENSION_OUT_DIR overrides.
+    requiredMetafilePaths = [
+      path.join(
+        path.dirname(path.resolve(packageRoot, outDir)),
+        'esbuild.json',
+      ),
+    ];
     optionalMetafilePaths = [path.join(repoRoot, 'dist/esbuild.json')];
     zipPath = path.join(packageRoot, 'chrome-extension.zip');
   } else {
@@ -225,6 +244,7 @@ async function main() {
     roots.push(root);
   }
   const findings = await scanArtifactRoots(roots);
+  const scannedMetafiles = [];
   for (const metafilePath of requiredMetafilePaths ?? []) {
     await access(metafilePath).catch(() => {
       throw new Error(
@@ -232,6 +252,7 @@ async function main() {
       );
     });
     findings.push(...(await scanEsbuildMetafile(metafilePath)));
+    scannedMetafiles.push(metafilePath);
   }
   for (const metafilePath of optionalMetafilePaths ?? []) {
     const present = await access(metafilePath).then(
@@ -245,6 +266,7 @@ async function main() {
       continue;
     }
     findings.push(...(await scanEsbuildMetafile(metafilePath)));
+    scannedMetafiles.push(metafilePath);
   }
   if (zipPath) findings.push(...(await scanZipArtifact(zipPath)));
   if (findings.length > 0) {
@@ -256,10 +278,12 @@ async function main() {
     process.exitCode = 1;
     return;
   }
-  console.log(`ARTIFACT-SCAN: PASS (${roots.join(', ')})`);
+  console.log(
+    `ARTIFACT-SCAN: PASS (${[...roots, ...scannedMetafiles, ...(zipPath ? [zipPath] : [])].join(', ')})`,
+  );
 }
 
-if (fileURLToPath(import.meta.url) === process.argv[1]) {
+if (isMainEntry()) {
   main().catch((error) => {
     console.error(error.message);
     process.exitCode = 1;

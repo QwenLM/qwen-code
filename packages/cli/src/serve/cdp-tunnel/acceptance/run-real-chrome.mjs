@@ -42,7 +42,9 @@ const spawnChild = (command, args, options = {}) => {
     stdio: ['ignore', 'pipe', 'pipe'],
     ...options,
   });
-  child.on('error', () => {});
+  child.on('error', (error) => {
+    console.error(`Child process failed (${command}): ${error.message}`);
+  });
   children.add(child);
   child.once('exit', () => children.delete(child));
   return child;

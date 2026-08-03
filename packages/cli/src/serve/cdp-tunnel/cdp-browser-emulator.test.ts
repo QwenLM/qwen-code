@@ -450,13 +450,18 @@ describe('CdpBrowserEmulator (Plan C #5626)', () => {
     });
   });
 
-  it('logs once when a tab event has no active listener', async () => {
+  it('re-logs periodically while tab events keep dropping', async () => {
     const { emu, log } = setup();
     emu.emitTabEvent('Console.messageAdded', { message: 'm1' });
     expect(log).toHaveBeenCalledTimes(1);
     expect(log.mock.calls[0][0]).toContain('dropped');
     emu.emitTabEvent('Console.messageAdded', { message: 'm2' });
     expect(log).toHaveBeenCalledTimes(1);
+    for (let i = 0; i < 98; i += 1) {
+      emu.emitTabEvent('Console.messageAdded', { message: `m${i + 3}` });
+    }
+    expect(log).toHaveBeenCalledTimes(2);
+    expect(log.mock.calls[1][0]).toContain('100 total');
   });
 
   it('does not emit detachedFromTarget for a never-attached session', async () => {
@@ -471,6 +476,24 @@ describe('CdpBrowserEmulator (Plan C #5626)', () => {
     ).toBeUndefined();
     expect(replies.at(-1)).toEqual({ id: 14, result: {} });
     expect(log).not.toHaveBeenCalled();
+  });
+
+  it('keeps forwarding page-session commands after a no-handshake detach', async () => {
+    const { emu, forwardToTab } = setup(async () => ({ value: 1 }));
+    await emu.handleFromClient({
+      id: 15,
+      method: 'Target.detachFromTarget',
+      params: { sessionId: 'qwen-cdp-page-session' },
+    });
+    await emu.handleFromClient({
+      id: 16,
+      method: 'Runtime.evaluate',
+      params: { expression: '1' },
+      sessionId: 'qwen-cdp-page-session',
+    });
+    expect(forwardToTab).toHaveBeenCalledWith('Runtime.evaluate', {
+      expression: '1',
+    });
   });
 
   it('errors when detaching an unrecognized session id', async () => {

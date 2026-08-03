@@ -114,4 +114,11 @@ describe('CDP acceptance helpers', () => {
       ),
     ).toBe('https://en.wikipedia.org/wiki/Rust');
   });
+
+  it('stopChild resolves for a child that failed to spawn', async () => {
+    const child = spawn('qwen-nonexistent-binary-for-test');
+    child.on('error', () => {});
+    await stopChild(child, { graceMs: 10 });
+    expect(child.pid).toBeUndefined();
+  }, 15_000);
 });

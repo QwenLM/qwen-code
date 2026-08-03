@@ -15,6 +15,10 @@ const packageRoot = path.resolve(
   '../..',
 );
 
+// The panel scripts below are executed through Function(script)(), which only
+// accepts classic scripts: an import/export statement added to a public/*.js
+// file surfaces here as a SyntaxError in a test, not as a build error.
+
 describe('side panel capability status assets', () => {
   afterEach(() => {
     vi.restoreAllMocks();

@@ -4,8 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { deriveCapabilityStatus } from './capability-status.js';
+import {
+  CDP_TUNNEL_ENDPOINT_PATTERN,
+  CHROME_DEVTOOLS_SERVER_NAME,
+  deriveCapabilityStatus,
+} from './capability-status.js';
 
 describe('deriveCapabilityStatus', () => {
   it('reports a stopped daemon before inspecting capabilities', () => {
@@ -437,5 +444,34 @@ describe('deriveCapabilityStatus', () => {
       shellReady: true,
       warning: null,
     });
+  });
+});
+
+describe('cross-package contracts', () => {
+  const repoRoot = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    '../../../..',
+  );
+
+  it('keeps the runtime MCP server name aligned with the daemon', () => {
+    const daemonSource = readFileSync(
+      path.join(repoRoot, 'packages/cli/src/serve/acp-http/index.ts'),
+      'utf8',
+    );
+    const declaration = daemonSource.match(
+      /const CHROME_DEVTOOLS_MCP_SERVER_NAME = '([^']+)'/,
+    );
+    expect(declaration?.[1]).toBe(CHROME_DEVTOOLS_SERVER_NAME);
+  });
+
+  it('keeps the tunnel endpoint pattern aligned with the acceptance runner', () => {
+    const runnerSource = readFileSync(
+      path.join(
+        repoRoot,
+        'packages/cli/src/serve/cdp-tunnel/acceptance/run-real-chrome.mjs',
+      ),
+      'utf8',
+    );
+    expect(runnerSource).toContain(String(CDP_TUNNEL_ENDPOINT_PATTERN));
   });
 });

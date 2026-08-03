@@ -47,11 +47,11 @@ describe('scanArtifactRoots', () => {
     const root = mkdtempSync(path.join(os.tmpdir(), 'qwen-artifact-dirty-'));
     try {
       const file = path.join(root, 'adapter.js');
-      writeFileSync(file, 'class McpContext { /* PageCollector */ }');
+      writeFileSync(file, 'class McpContext {} class PageCollector {}');
 
       await expect(scanArtifactRoots([root])).resolves.toEqual([
         { file, signature: 'class McpContext' },
-        { file, signature: 'PageCollector' },
+        { file, signature: 'class PageCollector' },
       ]);
     } finally {
       rmSync(root, { recursive: true, force: true });
