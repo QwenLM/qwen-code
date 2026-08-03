@@ -631,20 +631,15 @@ describe('voice-transcriber', () => {
 
     for (const address of [
       '0.0.0.0',
-      '127.0.0.1',
-      '::1',
       '169.254.169.254',
       '100.100.100.200',
       '::',
-      '::ffff:127.0.0.1',
-      '::ffff:7f00:1',
       '::a9fe:a9fe',
       '::6464:64c8',
       '::5db8',
       'fe80::1',
       'fd00:ec2::254',
       '::ffff:a9fe:a9fe',
-      '64:ff9b::7f00:1',
       '64:ff9b::a9fe:a9fe',
       '64:ff9b::6464:64c8',
       '64:ff9b::',
@@ -663,6 +658,28 @@ describe('voice-transcriber', () => {
       await expect(
         assertVoiceBaseUrlNetworkAllowed(trusted, async () => ({ address })),
       ).rejects.toThrow(/private-network address/);
+    }
+  });
+
+  it('rejects loopback DNS results for a trusted voice URL with loopback guidance', async () => {
+    const trusted = {
+      model: 'qwen3-asr-flash',
+      baseUrl: 'http://voice.internal.example/v1',
+      allowInsecureBaseUrl: true,
+    };
+
+    for (const address of [
+      '127.0.0.1',
+      '127.0.0.5',
+      '::1',
+      '0:0:0:0:0:0:0:1',
+      '::ffff:127.0.0.1',
+      '::ffff:7f00:1',
+      '64:ff9b::7f00:1',
+    ]) {
+      await expect(
+        assertVoiceBaseUrlNetworkAllowed(trusted, async () => ({ address })),
+      ).rejects.toThrow(/loopback/);
     }
   });
 
@@ -691,6 +708,25 @@ describe('voice-transcriber', () => {
         }),
       ).toThrow(/must use an https baseUrl/);
     }
+  });
+
+  it('matches allowlist paths case-sensitively', () => {
+    expect(() =>
+      resolveVoiceTranscriptionConfig({
+        config: createConfig([
+          {
+            id: 'qwen3-asr-flash',
+            label: 'Private Qwen ASR',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'http://voice.region-a.internal.example/v1',
+          },
+        ]),
+        settings: createSettings({}, undefined, [
+          'http://voice.region-a.internal.example/V1',
+        ]),
+        voiceModel: 'qwen3-asr-flash',
+      }),
+    ).toThrow(/security\.allowedInsecureVoiceBaseUrls/);
   });
 
   it('does not apply an HTTP exception to the HTTPS variant', async () => {
@@ -906,7 +942,6 @@ describe('voice-transcriber', () => {
 
     for (const address of [
       '0:0:0:0:0:0:a00:8',
-      '0:0:0:0:0:0:0:1',
       '0:0:0:0:0:0:a9fe:a9fe',
       '0:0:0:0:0:ffff:a9fe:a9fe',
       '::ffff:a17:2d43',

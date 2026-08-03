@@ -4,10 +4,13 @@
  * The desktop drives Qwen over ACP and stores no voice baseUrl/apiKey of its
  * own — the real credentials live in Qwen's trusted configuration. We resolve
  * them from, in order:
- *   1. OAuth login        — `~/.qwen/oauth_creds.json` (access_token + resource_url)
- *   2. API-key login      — SystemDefaults → User → System settings (the selected
- *                           modelProvider, or the legacy shared DashScope provider)
- *   3. Environment        — DASHSCOPE_API_KEY, or OPENAI_API_KEY with OPENAI_BASE_URL
+ *   1. Exact model provider — the trusted-settings provider whose `id` matches
+ *                           the selected voice model (authoritative; an
+ *                           incomplete entry fails instead of falling through)
+ *   2. OAuth login        — `~/.qwen/oauth_creds.json` (access_token + resource_url)
+ *   3. Legacy DashScope provider — a shared DashScope compatible-mode provider
+ *                           in trusted settings
+ *   4. Environment        — DASHSCOPE_API_KEY, or OPENAI_API_KEY with OPENAI_BASE_URL
  *
  * The voice model is the user-selected one persisted in desktop settings
  * (defaults to qwen3-asr-flash); its transport (batch vs realtime) is derived
@@ -54,7 +57,7 @@ export function normalizeBaseUrl(raw: string): string {
   const trimmed = raw.trim().replace(/\/+$/, '');
   const withProto = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)
     ? trimmed
-    : 'https://' + trimmed;
+    : `https://${trimmed}`;
   let url: URL;
   try {
     url = new URL(withProto);
@@ -127,6 +130,9 @@ async function readNoJson<T>(): Promise<T | undefined> {
   return undefined;
 }
 
+// Duplicates packages/cli/src/config/storage-paths-lite.ts; the bun workspace
+// boundary prevents sharing, and env/platform are injectable here for tests.
+// Keep the two implementations in sync.
 function getSystemSettingsPath(
   env: NodeJS.ProcessEnv,
   currentPlatform: NodeJS.Platform,
@@ -159,7 +165,7 @@ async function getStoredVoiceModel(): Promise<string> {
   return getVoiceModel();
 }
 
-/** 1) Qwen OAuth device-flow credentials. */
+/** 2) Qwen OAuth device-flow credentials. */
 async function fromOAuth(
   deps: Required<Pick<ResolveDesktopVoiceConfigDeps, 'readQwenJson' | 'now'>>,
 ): Promise<ResolvedCredentials | undefined> {
@@ -232,25 +238,20 @@ function mergeTrustedQwenSettings(
   user: QwenSettings | undefined,
   system: QwenSettings | undefined,
 ): QwenSettings {
-  const scopes = [systemDefaults, user, system];
-  const hasModelProviders = scopes.some(
-    (scope) =>
-      scope &&
-      Object.prototype.hasOwnProperty.call(scope, 'modelProviders'),
-  );
-  const modelProviders = {
-    ...(systemDefaults?.modelProviders ?? {}),
-    ...(user?.modelProviders ?? {}),
-    ...(system?.modelProviders ?? {}),
-  };
-
   return {
     env: {
       ...(systemDefaults?.env ?? {}),
       ...(user?.env ?? {}),
       ...(system?.env ?? {}),
     },
-    ...(hasModelProviders ? { modelProviders } : {}),
+    // The CLI declares modelProviders with MergeStrategy.REPLACE: the
+    // highest-precedence scope that defines it supplies the whole object.
+    // Mirror that so a managed System scope can fully override a user's
+    // provider set instead of unioning with it.
+    modelProviders:
+      system?.modelProviders ??
+      user?.modelProviders ??
+      systemDefaults?.modelProviders,
     security: {
       ...(systemDefaults?.security ?? {}),
       ...(user?.security ?? {}),
@@ -299,63 +300,79 @@ export function isDashscopeCompatible(url: string): boolean {
   }
 }
 
-/** 2) API-key login: a DashScope compatible-mode provider in settings.json. */
-function fromQwenSettings(
+function readProviderApiKey(
+  provider: QwenProvider,
+  settings: QwenSettings | undefined,
+  envSource: NodeJS.ProcessEnv,
+): string | undefined {
+  const envKey = provider.envKey?.trim();
+  if (!envKey) return undefined;
+  return (
+    envSource[envKey]?.trim() ||
+    settings?.env?.[envKey]?.trim() ||
+    undefined
+  );
+}
+
+/**
+ * 1) The provider whose `id` matches the selected voice model. Authoritative:
+ * resolves before OAuth so a managed gateway wins for OAuth-signed-in users,
+ * and an incomplete entry fails instead of silently falling through.
+ */
+function fromExactModelProvider(
   settings: QwenSettings | undefined,
   envSource: NodeJS.ProcessEnv,
   voiceModel: string,
 ): ResolvedCredentials | undefined {
   if (!settings) return undefined;
-  const settingsEnv = settings.env ?? {};
-  const keyFor = (p: QwenProvider): string | undefined => {
-    const envKey = p.envKey?.trim();
-    if (!envKey) return undefined;
-    return (
-      envSource[envKey]?.trim() ||
-      settingsEnv[envKey]?.trim() ||
-      undefined
-    );
-  };
   const providers = Object.values(settings.modelProviders ?? {}).flat();
   const matches = providers.filter((provider) => provider.id === voiceModel);
   if (matches.length > 1) {
     throw new Error(`Voice model '${voiceModel}' is ambiguous.`);
   }
   const provider = matches[0];
-  if (provider) {
-    if (!provider.baseUrl?.trim()) {
-      throw new Error(
-        `Voice model '${voiceModel}' does not define a baseUrl.`,
-      );
-    }
-    const normalizedBaseUrl = normalizeAllowedVoiceBaseUrl(provider.baseUrl);
-    if (!normalizedBaseUrl) {
-      throw new Error(`Voice model '${voiceModel}' has an invalid baseUrl.`);
-    }
-    // Preserve the legacy /v1 inference only for the official DashScope
-    // compatible-mode endpoint. Custom and regional gateway paths remain
-    // authoritative and are never rewritten.
-    const baseUrl = isDashscopeCompatible(normalizedBaseUrl)
-      ? normalizeBaseUrl(normalizedBaseUrl)
-      : normalizedBaseUrl;
-    const envKey = provider.envKey?.trim();
-    if (!envKey) {
-      throw new Error(`Voice model '${voiceModel}' does not define an envKey.`);
-    }
-    const apiKey = keyFor(provider);
-    if (!apiKey) {
-      throw new Error(`Voice model '${voiceModel}' requires ${envKey}.`);
-    }
-    return { baseUrl, apiKey };
+  if (!provider) return undefined;
+  if (!provider.baseUrl?.trim()) {
+    throw new Error(
+      `Voice model '${voiceModel}' does not define a baseUrl.`,
+    );
   }
+  const normalizedBaseUrl = normalizeAllowedVoiceBaseUrl(provider.baseUrl);
+  if (!normalizedBaseUrl) {
+    throw new Error(`Voice model '${voiceModel}' has an invalid baseUrl.`);
+  }
+  // Preserve the legacy /v1 inference only for the official DashScope
+  // compatible-mode endpoint. Custom and regional gateway paths remain
+  // authoritative and are never rewritten.
+  const baseUrl = isDashscopeCompatible(normalizedBaseUrl)
+    ? normalizeBaseUrl(normalizedBaseUrl)
+    : normalizedBaseUrl;
+  const envKey = provider.envKey?.trim();
+  if (!envKey) {
+    throw new Error(`Voice model '${voiceModel}' does not define an envKey.`);
+  }
+  const apiKey = readProviderApiKey(provider, settings, envSource);
+  if (!apiKey) {
+    throw new Error(`Voice model '${voiceModel}' requires ${envKey}.`);
+  }
+  return { baseUrl, apiKey };
+}
 
-  // Preserve the pre-existing API-key flow for settings that provide a shared
-  // DashScope endpoint rather than a model-specific voice entry. Custom
-  // endpoints never use this fallback because selecting one for an unrelated
-  // model could cross a region or trust boundary.
+/**
+ * 3) Legacy API-key flow for settings that provide a shared DashScope
+ * endpoint rather than a model-specific voice entry. Custom endpoints never
+ * use this fallback because selecting one for an unrelated model could cross
+ * a region or trust boundary.
+ */
+function fromLegacyDashscopeProvider(
+  settings: QwenSettings | undefined,
+  envSource: NodeJS.ProcessEnv,
+): ResolvedCredentials | undefined {
+  if (!settings) return undefined;
+  const providers = Object.values(settings.modelProviders ?? {}).flat();
   for (const fallback of providers) {
     if (fallback.baseUrl && isDashscopeCompatible(fallback.baseUrl)) {
-      const apiKey = keyFor(fallback);
+      const apiKey = readProviderApiKey(fallback, settings, envSource);
       if (apiKey) {
         return { baseUrl: normalizeBaseUrl(fallback.baseUrl), apiKey };
       }
@@ -364,7 +381,7 @@ function fromQwenSettings(
   return undefined;
 }
 
-/** 3) Explicit environment override. */
+/** 4) Explicit environment override. */
 function fromEnv(env: NodeJS.ProcessEnv): ResolvedCredentials | undefined {
   const dashscopeKey = env['DASHSCOPE_API_KEY']?.trim();
   if (dashscopeKey) {
@@ -441,8 +458,9 @@ export async function resolveDesktopVoiceConfig(
     systemSettings,
   );
   const creds =
+    fromExactModelProvider(qwenSettings, resolvedDeps.env, voiceModel) ??
     (await fromOAuth(resolvedDeps)) ??
-    fromQwenSettings(qwenSettings, resolvedDeps.env, voiceModel) ??
+    fromLegacyDashscopeProvider(qwenSettings, resolvedDeps.env) ??
     fromEnv(resolvedDeps.env);
   if (!creds) {
     throw new Error(NO_CREDENTIALS_ERROR);

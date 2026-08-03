@@ -215,19 +215,20 @@ describe('assertVoiceBaseUrlNetworkAllowed', () => {
     }
 
     await expect(
-      assertVoiceBaseUrlNetworkAllowed('https://10.0.0.1:443', 'm', lookup),
-    ).rejects.toThrow(/private-network/)
-    await expect(
       assertVoiceBaseUrlNetworkAllowed(
-        'https://169.254.169.254',
-        'm',
+        { baseUrl: 'https://10.0.0.1:443', model: 'm' },
         lookup,
       ),
     ).rejects.toThrow(/private-network/)
     await expect(
       assertVoiceBaseUrlNetworkAllowed(
-        'https://[::a9fe:a9fe]',
-        'm',
+        { baseUrl: 'https://169.254.169.254', model: 'm' },
+        lookup,
+      ),
+    ).rejects.toThrow(/private-network/)
+    await expect(
+      assertVoiceBaseUrlNetworkAllowed(
+        { baseUrl: 'https://[::a9fe:a9fe]', model: 'm' },
         lookup,
       ),
     ).rejects.toThrow(/private-network/)
@@ -236,26 +237,14 @@ describe('assertVoiceBaseUrlNetworkAllowed', () => {
 
   it('rejects a hostname that resolves to a private address', async () => {
     await expect(
-      assertVoiceBaseUrlNetworkAllowed('https://evil.example', 'm', async () => [
-        { address: '10.1.2.3' },
-      ]),
-    ).rejects.toThrow(/private-network/)
-
-    await expect(
-      assertVoiceBaseUrlNetworkAllowed('https://evil.example', 'm', async () => [
-        { address: '127.0.0.1' },
-      ]),
-    ).rejects.toThrow(/private-network/)
-
-    await expect(
-      assertVoiceBaseUrlNetworkAllowed('https://evil.example', 'm', async () => [
-        { address: '::ffff:127.0.0.1' },
-      ]),
+      assertVoiceBaseUrlNetworkAllowed(
+        { baseUrl: 'https://evil.example', model: 'm' },
+        async () => [{ address: '10.1.2.3' }],
+      ),
     ).rejects.toThrow(/private-network/)
 
     for (const address of [
       '0:0:0:0:0:0:a00:8',
-      '0:0:0:0:0:0:0:1',
       '0:0:0:0:0:0:a9fe:a9fe',
       '0:0:0:0:0:ffff:a9fe:a9fe',
       '::ffff:a17:2d43',
@@ -272,65 +261,92 @@ describe('assertVoiceBaseUrlNetworkAllowed', () => {
     ]) {
       await expect(
         assertVoiceBaseUrlNetworkAllowed(
-          'https://evil.example',
-          'm',
+          { baseUrl: 'https://evil.example', model: 'm' },
           async () => [{ address }],
         ),
       ).rejects.toThrow(/private-network/)
     }
   })
 
+  it('rejects loopback DNS results even when trusted, with loopback guidance', async () => {
+    for (const address of [
+      '127.0.0.1',
+      '127.0.0.5',
+      '::1',
+      '0:0:0:0:0:0:0:1',
+      '::ffff:127.0.0.1',
+      '::ffff:7f00:1',
+      '64:ff9b::7f00:1',
+    ]) {
+      await expect(
+        assertVoiceBaseUrlNetworkAllowed(
+          {
+            baseUrl: 'http://voice.internal.example/v1',
+            model: 'm',
+            allowInsecureBaseUrl: true,
+          },
+          async () => [{ address }],
+        ),
+      ).rejects.toThrow(/loopback/)
+    }
+  })
+
   it('allows a hostname that resolves to a public address', async () => {
     await expect(
-      assertVoiceBaseUrlNetworkAllowed('https://api.example', 'm', async () => [
-        { address: '93.184.216.34' },
-      ]),
+      assertVoiceBaseUrlNetworkAllowed(
+        { baseUrl: 'https://api.example', model: 'm' },
+        async () => [{ address: '93.184.216.34' }],
+      ),
     ).resolves.toBeUndefined()
   })
 
   it('allows an explicitly trusted private address', async () => {
     await expect(
-      assertVoiceBaseUrlNetworkAllowed(
-        'http://10.0.0.8/v1',
-        'm',
-        undefined,
-        true,
-      ),
+      assertVoiceBaseUrlNetworkAllowed({
+        baseUrl: 'http://10.0.0.8/v1',
+        model: 'm',
+        allowInsecureBaseUrl: true,
+      }),
+    ).resolves.toBeUndefined()
+
+    await expect(
+      assertVoiceBaseUrlNetworkAllowed({
+        baseUrl: 'http://[::ffff:10.0.0.8]/v1',
+        model: 'm',
+        allowInsecureBaseUrl: true,
+      }),
     ).resolves.toBeUndefined()
 
     await expect(
       assertVoiceBaseUrlNetworkAllowed(
-        'http://[::ffff:10.0.0.8]/v1',
-        'm',
-        undefined,
-        true,
-      ),
-    ).resolves.toBeUndefined()
-
-    await expect(
-      assertVoiceBaseUrlNetworkAllowed(
-        'http://voice.internal.example/v1',
-        'm',
+        {
+          baseUrl: 'http://voice.internal.example/v1',
+          model: 'm',
+          allowInsecureBaseUrl: true,
+        },
         async () => [{ address: '10.0.0.9' }],
-        true,
       ),
     ).resolves.toBeUndefined()
 
     await expect(
       assertVoiceBaseUrlNetworkAllowed(
-        'http://voice.internal.example/v1',
-        'm',
+        {
+          baseUrl: 'http://voice.internal.example/v1',
+          model: 'm',
+          allowInsecureBaseUrl: true,
+        },
         async () => [{ address: '::ffff:a00:9' }],
-        true,
       ),
     ).resolves.toBeUndefined()
 
     await expect(
       assertVoiceBaseUrlNetworkAllowed(
-        'http://voice.internal.example/v1',
-        'm',
+        {
+          baseUrl: 'http://voice.internal.example/v1',
+          model: 'm',
+          allowInsecureBaseUrl: true,
+        },
         async () => [{ address: '64:ff9b::a00:9' }],
-        true,
       ),
     ).resolves.toBeUndefined()
   })
@@ -363,39 +379,35 @@ describe('assertVoiceBaseUrlNetworkAllowed', () => {
       '[fe80::1]',
     ]) {
       await expect(
-        assertVoiceBaseUrlNetworkAllowed(
-          `http://${address}/v1`,
-          'm',
-          undefined,
-          true,
-        ),
+        assertVoiceBaseUrlNetworkAllowed({
+          baseUrl: `http://${address}/v1`,
+          model: 'm',
+          allowInsecureBaseUrl: true,
+        }),
       ).rejects.toThrow(/private-network/)
     }
 
     await expect(
       assertVoiceBaseUrlNetworkAllowed(
-        'http://voice.internal.example/v1',
-        'm',
+        {
+          baseUrl: 'http://voice.internal.example/v1',
+          model: 'm',
+          allowInsecureBaseUrl: true,
+        },
         async () => [{ address: '169.254.169.254' }],
-        true,
       ),
     ).rejects.toThrow(/private-network/)
 
     for (const address of [
       '0.0.0.0',
       '::',
-      '::ffff:127.0.0.1',
-      '::ffff:7f00:1',
       'fe80::1',
       'fd00:ec2::254',
       '::5db8',
       '100.100.100.200',
-      '127.0.0.1',
-      '::1',
       '::ffff:a9fe:a9fe',
       '::a9fe:a9fe',
       '::6464:64c8',
-      '64:ff9b::7f00:1',
       '64:ff9b::a9fe:a9fe',
       '64:ff9b::6464:64c8',
       '64:ff9b::',
@@ -412,22 +424,26 @@ describe('assertVoiceBaseUrlNetworkAllowed', () => {
     ]) {
       await expect(
         assertVoiceBaseUrlNetworkAllowed(
-          'http://voice.internal.example/v1',
-          'm',
+          {
+            baseUrl: 'http://voice.internal.example/v1',
+            model: 'm',
+            allowInsecureBaseUrl: true,
+          },
           async () => [{ address }],
-          true,
         ),
       ).rejects.toThrow(/private-network/)
     }
 
     await expect(
       assertVoiceBaseUrlNetworkAllowed(
-        'http://voice.internal.example/v1',
-        'm',
+        {
+          baseUrl: 'http://voice.internal.example/v1',
+          model: 'm',
+          allowInsecureBaseUrl: true,
+        },
         async () => [
           { address: 'fd00:0ec2:0000:0000:0000:0000:0000:0254' },
         ],
-        true,
       ),
     ).rejects.toThrow(/private-network/)
   })
@@ -444,7 +460,7 @@ describe('assertVoiceBaseUrlNetworkAllowed', () => {
       'http://[::1]:8080/v1',
     ]) {
       await expect(
-        assertVoiceBaseUrlNetworkAllowed(baseUrl, 'm', lookup),
+        assertVoiceBaseUrlNetworkAllowed({ baseUrl, model: 'm' }, lookup),
       ).resolves.toBeUndefined()
     }
     expect(called).toBe(false)
@@ -455,7 +471,10 @@ describe('assertVoiceBaseUrlNetworkAllowed', () => {
       throw new Error('ENOTFOUND voice.example')
     }
     await expect(
-      assertVoiceBaseUrlNetworkAllowed('https://voice.example', 'm', lookup),
+      assertVoiceBaseUrlNetworkAllowed(
+        { baseUrl: 'https://voice.example', model: 'm' },
+        lookup,
+      ),
     ).rejects.toThrow(
       "Voice model 'm': DNS lookup failed for voice.example. Cannot verify network safety.",
     )

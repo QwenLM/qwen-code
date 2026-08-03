@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'bun:test'
 import {
-  assertVoiceConfigNetworkAllowed,
   createVoiceConnectionHandler,
   toStreamConfig,
 } from './voice-ws-handler'
+import { assertVoiceBaseUrlNetworkAllowed } from './net-guard'
 
 class FakeWebSocket {
   readonly OPEN = 1
@@ -63,9 +63,9 @@ describe('createVoiceConnectionHandler', () => {
       allowInsecureBaseUrl: true,
     }
 
-    await expect(assertVoiceConfigNetworkAllowed(config)).resolves.toBeUndefined()
+    await expect(assertVoiceBaseUrlNetworkAllowed(config)).resolves.toBeUndefined()
     await expect(
-      assertVoiceConfigNetworkAllowed({
+      assertVoiceBaseUrlNetworkAllowed({
         ...config,
         allowInsecureBaseUrl: undefined,
       }),

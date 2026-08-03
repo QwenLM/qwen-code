@@ -24,6 +24,9 @@ const MIN_KEYTERM_ECHO_TOKENS = 8;
 const MIN_ABSOLUTE_KEYTERM_ECHO_TOKENS = 10;
 const MIN_KEYTERM_SET_ECHO_RATIO = 0.3;
 const debugLogger = createDebugLogger('VOICE_TRANSCRIBER');
+// The address classification in this file is mirrored in
+// packages/desktop/packages/server-core/src/voice/net-guard.ts. The bun
+// workspace boundary prevents sharing a module; keep the two in sync.
 const BLOCKED_TRANSITION_IPV6_ADDRESSES = new BlockList();
 for (const [address, prefix] of [
   ['64:ff9b:1::', 48],
@@ -368,6 +371,21 @@ function isAlwaysBlockedVoiceAddress(hostname: string): boolean {
   return false;
 }
 
+function isLoopbackVoiceAddress(hostname: string): boolean {
+  const host = normalizeIpAddress(hostname);
+  if (isLoopbackHost(host)) {
+    return true;
+  }
+  const step = unwrapIpv6TransitionStep(host);
+  if (step && step !== 'blocked') {
+    return isLoopbackVoiceAddress(step.address);
+  }
+  if (isIP(host) === 4) {
+    return host.startsWith('127.');
+  }
+  return false;
+}
+
 async function defaultLookupHost(
   hostname: string,
 ): Promise<Array<{ address: string }>> {
@@ -433,7 +451,9 @@ export async function assertVoiceBaseUrlNetworkAllowed(
     )
   ) {
     throw new Error(
-      `Voice model '${voiceConfig.model}' resolved to a private-network address.`,
+      records.some((record) => isLoopbackVoiceAddress(record.address))
+        ? `Voice model '${voiceConfig.model}' resolved to a loopback address. Loopback DNS results are always blocked; to use a local ASR endpoint, configure an explicit loopback baseUrl such as http://localhost.`
+        : `Voice model '${voiceConfig.model}' resolved to a private-network address.`,
     );
   }
 }

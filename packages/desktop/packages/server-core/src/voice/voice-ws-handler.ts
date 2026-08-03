@@ -26,10 +26,7 @@
 import type { RawData, WebSocket } from 'ws';
 import type { Logger } from '../runtime/platform';
 import { encodeWav } from './wav';
-import {
-  assertVoiceBaseUrlNetworkAllowed,
-  type VoiceHostLookup,
-} from './net-guard';
+import { assertVoiceBaseUrlNetworkAllowed } from './net-guard';
 import {
   MAX_AUDIO_BYTES,
   sanitizeResponseDetails,
@@ -95,23 +92,11 @@ export function toStreamConfig(config: VoiceConfig): VoiceStreamConfig {
   };
 }
 
-export async function assertVoiceConfigNetworkAllowed(
-  config: VoiceConfig,
-  lookupHost?: VoiceHostLookup,
-): Promise<void> {
-  await assertVoiceBaseUrlNetworkAllowed(
-    config.baseUrl,
-    config.model,
-    lookupHost,
-    config.allowInsecureBaseUrl,
-  );
-}
-
 async function defaultOpenStreamFor(
   config: VoiceConfig,
   callbacks: VoiceStreamCallbacks,
 ): Promise<VoiceStreamSession> {
-  await assertVoiceConfigNetworkAllowed(config);
+  await assertVoiceBaseUrlNetworkAllowed(config);
   const cfg = toStreamConfig(config);
   const transport = resolveVoiceTransport(config.model);
   return openVoiceStreamWithRetry(() =>
@@ -126,7 +111,7 @@ async function defaultTranscribeBatch(
   pcm: Uint8Array,
   signal: AbortSignal,
 ): Promise<string> {
-  await assertVoiceConfigNetworkAllowed(config);
+  await assertVoiceBaseUrlNetworkAllowed(config);
   return transcribeQwenAsrBatch(
     { data: encodeWav(pcm), mimeType: 'audio/wav' },
     config,

@@ -12,7 +12,7 @@ Voice transcription rejects non-loopback HTTP endpoints and endpoints that resol
 
 Add `security.allowedInsecureVoiceBaseUrls`, an empty-by-default list of complete base URLs. Every entry must include an explicit `http://` or `https://` scheme and the full provider path. A configured voice provider receives the exception only when its normalized base URL exactly matches a list entry, including scheme, host, port, and path; URL serialization and trailing slashes are normalized, but missing schemes or path segments such as `/v1` are not inferred for custom or regional gateways. The pre-existing `/v1` inference is preserved only for official DashScope compatible-mode endpoints. Wildcards and hostname suffix matching are not supported.
 
-The setting is trusted configuration. User, System, and SystemDefaults scopes may provide it; Workspace values are ignored and reported as a settings warning. This prevents a cloned repository from granting itself access to an insecure or private endpoint.
+The setting is trusted configuration. User, System, and SystemDefaults scopes may provide it; Workspace values are ignored and reported as a settings warning. This prevents a cloned repository from granting itself access to an insecure or private endpoint. Settings values pass through environment-variable interpolation before matching, so anything that controls the process environment can supply an interpolated allowlist entry or provider `baseUrl`; treat the process environment as part of the trusted configuration surface.
 
 The exact-match result travels with the resolved voice configuration so every egress path applies the same decision:
 
@@ -22,7 +22,7 @@ The exact-match result travels with the resolved voice configuration so every eg
 
 An exact match permits cleartext transport and private RFC 1918, CGNAT, or IPv6 unique-local addresses. Loopback aliases, unspecified addresses, link-local ranges, and known cloud metadata addresses remain blocked. Explicit localhost behavior remains unchanged.
 
-Desktop voice merges SystemDefaults, User, and System settings with the same trusted-scope precedence as the CLI; it never reads Workspace settings for this exception. It resolves the selected voice model before credentials and accepts exactly one provider entry with the same model ID, preventing an unrelated model or region from supplying the endpoint and API key. Public HTTPS providers do not require an insecure allowlist entry; cleartext or private-network providers still require an exact match.
+Desktop voice merges SystemDefaults, User, and System settings with the same trusted-scope precedence as the CLI; `modelProviders` applies the CLI's REPLACE strategy, so the highest-precedence scope that defines it supplies the whole provider set. It never reads Workspace settings for this exception. It resolves the selected voice model before credentials and accepts exactly one provider entry with the same model ID, preventing an unrelated model or region from supplying the endpoint and API key. Public HTTPS providers do not require an insecure allowlist entry; cleartext or private-network providers still require an exact match.
 
 ## Configuration ownership
 
@@ -32,7 +32,9 @@ The operator that provisions a regional gateway owns the allowlist entry. Manage
 
 Malformed entries and non-matches fail closed. Removing the entry immediately restores the existing HTTPS/public-network requirement after settings reload or process restart.
 
-Desktop now treats a provider whose ID exactly matches the selected voice model as authoritative. Duplicate providers, a provider without a complete explicit base URL, an incomplete provider, or an unresolved provider key fail instead of silently falling back to environment credentials. Operators with such an existing entry must either complete it or remove it so the legacy DashScope/environment fallback can apply. This fail-closed behavior prevents an accidental fallback to a different provider or region.
+Desktop now treats a provider whose ID exactly matches the selected voice model as authoritative, resolving it before OAuth credentials so a managed gateway wins for OAuth-signed-in users. Duplicate providers, a provider without a complete explicit base URL, an incomplete provider, or an unresolved provider key fail instead of silently falling back to environment credentials. Operators with such an existing entry must either complete it or remove it so the legacy DashScope/environment fallback can apply. This fail-closed behavior prevents an accidental fallback to a different provider or region. A scheme-less `baseUrl` such as `dashscope.aliyuncs.com/compatible-mode/v1` previously received an inferred `https://` prefix on Desktop; as an exact model provider it now fails with `has an invalid baseUrl` and must be written with an explicit scheme.
+
+Hostnames whose DNS records resolve to loopback addresses (for example `asr.localtest.me` or `/etc/hosts` aliases for a local ASR server) are always blocked, with or without an allowlist entry; the CLI previously allowed such DNS results. To reach a local endpoint, configure an explicit loopback baseUrl such as `http://localhost`, `http://127.0.0.1`, or `http://[::1]`, which remains allowed.
 
 ## Verification
 

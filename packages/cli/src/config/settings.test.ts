@@ -3415,6 +3415,38 @@ describe('Settings Loading and Merging', () => {
         'http://voice.region-a.internal.example/v1',
       ]);
     });
+
+    it('should let a system-scope empty allowlist revoke a user entry', () => {
+      const systemSettingsPath = '/mock/system/settings.json';
+      process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'] = systemSettingsPath;
+      try {
+        (mockFsExistsSync as Mock).mockReturnValue(true);
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH)
+              return JSON.stringify({
+                security: {
+                  allowedInsecureVoiceBaseUrls: [
+                    'http://voice.region-a.internal.example/v1',
+                  ],
+                },
+              });
+            if (p === systemSettingsPath)
+              return JSON.stringify({
+                security: { allowedInsecureVoiceBaseUrls: [] },
+              });
+            return '{}';
+          },
+        );
+
+        const settings = loadSettings(MOCK_WORKSPACE_DIR);
+        expect(settings.merged.security?.allowedInsecureVoiceBaseUrls).toEqual(
+          [],
+        );
+      } finally {
+        delete process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];
+      }
+    });
   });
 
   describe('reloadScopeFromDisk', () => {

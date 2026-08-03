@@ -4,7 +4,10 @@
  * required to be https (or loopback) and is checked against private IP ranges —
  * including a DNS resolution so a public hostname can't point at an internal IP.
  *
- * Ported from the CLI voice pipeline (packages/cli/src/ui/voice/voice-transcriber.ts).
+ * Twin of the CLI voice network guard in
+ * packages/cli/src/services/voice-transcriber.ts. The bun workspace boundary
+ * prevents sharing a module; keep the address classification and messages in
+ * the two files in sync.
  */
 
 import { lookup as dnsLookup } from 'node:dns/promises';
@@ -234,19 +237,33 @@ function isBlockedResolvedIp(
   );
 }
 
+function isLoopbackVoiceAddress(address: string): boolean {
+  const host = normalizeIpAddress(address);
+  if (isLoopbackHost(host)) return true;
+  const step = unwrapIpv6TransitionStep(host);
+  if (step && step !== 'blocked') return isLoopbackVoiceAddress(step.address);
+  if (isIP(host) === 4) return host.startsWith('127.');
+  return false;
+}
+
 async function defaultLookupHost(
   hostname: string,
 ): Promise<Array<{ address: string }>> {
   return dnsLookup(hostname, { all: true });
 }
 
+export interface VoiceNetworkGuardTarget {
+  baseUrl: string;
+  model: string;
+  allowInsecureBaseUrl?: boolean;
+}
+
 /** Reject a voice baseUrl that resolves to a private-network address. */
 export async function assertVoiceBaseUrlNetworkAllowed(
-  baseUrl: string,
-  model: string,
+  voiceConfig: VoiceNetworkGuardTarget,
   lookupHost?: VoiceHostLookup,
-  allowInsecureBaseUrl = false,
 ): Promise<void> {
+  const { baseUrl, model, allowInsecureBaseUrl = false } = voiceConfig;
   const hostname = new URL(baseUrl).hostname;
   if (isLoopbackHost(hostname)) {
     return;
@@ -278,7 +295,9 @@ export async function assertVoiceBaseUrlNetworkAllowed(
     )
   ) {
     throw new Error(
-      `Voice model '${model}' resolved to a private-network address.`,
+      records.some((record) => isLoopbackVoiceAddress(record.address))
+        ? `Voice model '${model}' resolved to a loopback address. Loopback DNS results are always blocked; to use a local ASR endpoint, configure an explicit loopback baseUrl such as http://localhost.`
+        : `Voice model '${model}' resolved to a private-network address.`,
     );
   }
 }
