@@ -6,7 +6,7 @@ name: 'PR Asset Branch Cleanup'
 # context (pull_request_target) but never checks out or runs PR code — it
 # only deletes refs by name.
 #
-# Both producers are covered, and every new `pr-assets/*` producer must be
+# All producers are covered, and every new `pr-assets/*` producer must be
 # added here: a branch nothing deletes is permanent.
 on:
   pull_request_target:
@@ -35,7 +35,8 @@ jobs:
           status=0
           for branch in \
             "pr-assets/web-shell-visuals-${PR_NUMBER}" \
-            "pr-assets/${PR_NUMBER}-verify"; do
+            "pr-assets/${PR_NUMBER}-verify" \
+            "pr-assets/${PR_NUMBER}-review"; do
             if ! gh api "repos/${GITHUB_REPOSITORY}/git/refs/heads/${branch}" >/dev/null 2>&1; then
               echo "No asset branch ${branch}; nothing to delete."
               continue
