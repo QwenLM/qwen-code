@@ -298,6 +298,14 @@ describe('pathRulesFor — the Java/JVM rule', () => {
       ),
     ],
     [
+      'Maven generated test sources',
+      Array.from(
+        { length: 11 },
+        (_, i) =>
+          `target/generated-test-sources/test-annotations/com/x/S${i}.java`,
+      ),
+    ],
+    [
       'Gradle generated output',
       Array.from({ length: 11 }, (_, i) => `build/generated/com/x/S${i}.java`),
     ],
