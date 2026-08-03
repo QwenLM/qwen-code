@@ -1004,7 +1004,7 @@ describe('ChatPane', () => {
       rawInput: {},
     };
 
-    render();
+    render({ sessionWorkflowEnabled: true });
 
     expect(testid('tool-approval')?.getAttribute('data-plan-todos')).toBe(
       '["prepare","ship"]',
