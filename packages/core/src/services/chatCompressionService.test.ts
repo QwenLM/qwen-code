@@ -2698,16 +2698,25 @@ describe('ChatCompressionService.compress cache sharing', () => {
     const { chat, config, generateText } = makeFixture({
       contextWindowSize: null,
     });
+    const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
 
     await new ChatCompressionService().compress(chat, {
       promptId: 'p',
       force: true,
       config,
       consecutiveFailures: 0,
-      originalTokenCount: 180_000,
+      originalTokenCount: 150_000,
     });
 
     expect(generateText).toHaveBeenCalledTimes(1);
+    expect(coldSpy).not.toHaveBeenCalled();
+    expect(logChatCompression).toHaveBeenLastCalledWith(
+      config,
+      expect.objectContaining({
+        cache_sharing_attempted: true,
+        cache_sharing_used: true,
+      }),
+    );
   });
 
   it('includes the previous model output in the shared-request window check', async () => {
@@ -2737,6 +2746,27 @@ describe('ChatCompressionService.compress cache sharing', () => {
 
     expect(generateText).not.toHaveBeenCalled();
     expect(coldSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not add previous output to an all-inclusive prompt count', async () => {
+    const { chat, config, generateText } = makeFixture({
+      contextWindowSize: 200_000,
+      lastPromptTokenCount: 170_000,
+      lastOutputTokenCount: 20_000,
+    });
+    const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 170_000,
+      precomputedEffectiveTokens: 170_000,
+    });
+
+    expect(generateText).toHaveBeenCalledTimes(1);
+    expect(coldSpy).not.toHaveBeenCalled();
   });
 
   it('skips cache sharing when the chat has no provider token-count anchor', async () => {

@@ -55,6 +55,9 @@ const debugLogger = createDebugLogger('COMPRESSION');
  */
 export const COMPACT_MAX_OUTPUT_TOKENS = 20_000;
 
+const COMPRESSION_REQUEST_DIRECTIVE =
+  'First, reason in your <analysis> block. Then, produce the <state_snapshot> XML.';
+
 /**
  * Default proportional auto-compaction threshold — the preferred trigger and an
  * upper bound on how high it can sit. See computeThresholds for how it combines
@@ -237,12 +240,10 @@ export interface CompressOptions {
    */
   pendingUserMessage?: Content;
   /**
-   * Pre-computed effective-token count from `estimatePromptTokens()`. When
-   * provided, the cheap-gate skips its own estimation pass (and the
-   * accompanying `chat.getHistoryShallow(true)` clone). Callers that already
-   * computed this value upstream — primarily `sendMessageStream` for the
-   * hard-tier rescue — pass it through to avoid duplicate work.
-   * (review #4168 R1.3 / R1.4)
+   * Pre-computed all-inclusive effective-token count. This is normally from
+   * `estimatePromptTokens()`, or from a provider-reported count after reactive
+   * overflow. When provided, the cheap-gate skips its estimation pass and the
+   * cache-sharing preflight does not add the previous model output again.
    */
   precomputedEffectiveTokens?: number;
   /** Per-request overrides used by the main turn, including transient tools. */
@@ -626,7 +627,7 @@ export class ChatCompressionService {
             role: 'user',
             parts: [
               {
-                text: 'First, reason in your <analysis> block. Then, produce the <state_snapshot> XML.',
+                text: COMPRESSION_REQUEST_DIRECTIVE,
               },
             ],
           },
@@ -649,7 +650,7 @@ export class ChatCompressionService {
     const sharedRequestText =
       `${systemInstruction}\n\n` +
       'Do not call tools; tool execution is disabled for this request. ' +
-      'First, reason in your <analysis> block. Then, produce the <state_snapshot> XML.';
+      COMPRESSION_REQUEST_DIRECTIVE;
     const sharedPromptTokenCount =
       opts.precomputedEffectiveTokens ??
       originalTokenCount + (chat.getLastOutputTokenCount?.() ?? 0);

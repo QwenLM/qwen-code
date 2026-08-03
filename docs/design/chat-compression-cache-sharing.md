@@ -14,6 +14,7 @@ following are true:
 
 - the compression model is the current main model;
 - the active provider is Anthropic or DashScope and cache control is enabled;
+- the chat has a provider-reported prompt token count to anchor the estimate;
 - the effective prompt token count plus the bounded compression output reserve
   fits the model's context window.
 
