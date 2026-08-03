@@ -41,7 +41,11 @@ import type { CommandModule } from 'yargs';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { writeStdoutLine } from '../../utils/stdioHelpers.js';
+import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import {
+  reverseAuditBudgetExhausted,
+  reverseAuditBudgetMessage,
+} from './lib/deadline.js';
 import {
   READ_FILE_CHAR_CAP,
   chunkIdsProblem,
@@ -1573,6 +1577,19 @@ function runAgentPrompt(args: AgentPromptArgs): void {
           `--round is a 1-based round number (--round 1, --round 2, …); ` +
             `got "${args.round}".`,
         );
+      }
+    }
+    // The budget gate — after every validation, because a malformed call
+    // deserves its own error, and before any build or record: a refused round
+    // must leave no prompt on disk for a later check to expect an agent for.
+    // Reverse-audit only: the loop is the one open-ended stage, and the
+    // reserve this gate protects exists precisely to let verify/compose run.
+    if (role === 'reverse-audit') {
+      const spent = reverseAuditBudgetExhausted(process.env);
+      if (spent !== null) {
+        writeStderrLine(reverseAuditBudgetMessage(spent, args.round));
+        process.exitCode = 4;
+        return;
       }
     }
   } else if (hasFindings) {

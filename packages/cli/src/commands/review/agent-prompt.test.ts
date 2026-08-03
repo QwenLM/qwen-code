@@ -24,8 +24,12 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
-vi.mock('../../utils/stdioHelpers.js', () => ({ writeStdoutLine: vi.fn() }));
-import { writeStdoutLine } from '../../utils/stdioHelpers.js';
+vi.mock('../../utils/stdioHelpers.js', () => ({
+  writeStdoutLine: vi.fn(),
+  writeStderrLine: vi.fn(),
+}));
+import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import { DEADLINE_ENV, RESERVE_ENV } from './lib/deadline.js';
 import {
   buildChunkAgentPrompt,
   buildChunkLaunchPrompt,
@@ -2418,5 +2422,98 @@ describe('verify and reverse-audit briefs — the Step 4/5 methodology, in code'
       expect(launch).toContain(`read_file(file_path="/t/${role}.brief.md")`);
       expect(launch).toContain(PLAN.diffPathAbsolute);
     }
+  });
+});
+
+describe('the reverse-audit budget gate — the loop must end by reporting', () => {
+  // Measured on CI run #8368 (+1699 lines): the audit loop ran to the 5-round
+  // cap, spent 3.5 of the job's 4 budgeted hours, and the outer kill arrived
+  // while round 5's findings were still being verified — nothing was posted.
+  // The gate turns that into a refusal at the round BUILDER, where the
+  // orchestrator has to come for its prompts.
+  const dirs: string[] = [];
+  beforeEach(() => {
+    (writeStdoutLine as unknown as Mock).mockClear();
+    (writeStderrLine as unknown as Mock).mockClear();
+  });
+  afterEach(() => {
+    delete process.env[DEADLINE_ENV];
+    delete process.env[RESERVE_ENV];
+    process.exitCode = undefined;
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  function call(role: string, extra: Record<string, unknown> = {}): string {
+    const dir = mkdtempSync(join(tmpdir(), 'ap-budget-'));
+    dirs.push(dir);
+    const plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(PLAN));
+    const findings = join(dir, 'findings.md');
+    writeFileSync(findings, '');
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role,
+      findings,
+      ...extra,
+    });
+    return plan;
+  }
+
+  it('refuses a round inside the reserve: exit 4, no prompt, no record', () => {
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 60);
+    const plan = call('reverse-audit', { round: 2 });
+
+    expect(process.exitCode).toBe(4);
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(0);
+    // A refused round leaves no record for a delivery check to expect an
+    // agent against.
+    expect(readRecordedPrompts(plan).size).toBe(0);
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('BUDGET:');
+    expect(msg).toContain(
+      '`reverse audit — stopped before round 2 by the review time budget`',
+    );
+    expect(msg).toContain('proceed to Step 6');
+  });
+
+  it('builds normally when the deadline is far, and when there is none', () => {
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 7200);
+    call('reverse-audit', { round: 1 });
+    expect(process.exitCode).toBeUndefined();
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(1);
+
+    (writeStdoutLine as unknown as Mock).mockClear();
+    delete process.env[DEADLINE_ENV];
+    call('reverse-audit', { round: 1 });
+    expect(process.exitCode).toBeUndefined();
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(1);
+  });
+
+  it('does not gate the verifier — the reserve exists so it can run', () => {
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 60);
+    const dir = mkdtempSync(join(tmpdir(), 'ap-budget-v-'));
+    dirs.push(dir);
+    const plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(PLAN));
+    const findings = join(dir, 'findings.md');
+    writeFileSync(findings, '- x.test.ts:3 — off-by-one in retry cap\n');
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'verify',
+      findings,
+    });
+    expect(process.exitCode).toBeUndefined();
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(1);
+    expect((writeStderrLine as unknown as Mock).mock.calls).toHaveLength(0);
+  });
+
+  it('honours a shorter reserve override', () => {
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 900);
+    process.env[RESERVE_ENV] = '600';
+    call('reverse-audit', { round: 4 });
+    expect(process.exitCode).toBeUndefined();
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(1);
   });
 });

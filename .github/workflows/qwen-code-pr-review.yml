@@ -814,6 +814,15 @@ jobs:
             OUTCOME='fatal'
             REASON=''
             KIND=''
+            # The in-process soft deadline: the review's reverse-audit loop
+            # stops itself while there is still time to verify, compose and
+            # post, instead of being killed by the GNU timeout below holding
+            # hours of confirmed findings (#8368: five audit rounds, 3.5h,
+            # killed mid-verification, nothing posted). Recomputed per attempt
+            # so a retry gets a fresh deadline; ignored by CLIs that predate
+            # the gate.
+            QWEN_REVIEW_DEADLINE_EPOCH="$(( $(date +%s) + attempt_timeout ))"
+            export QWEN_REVIEW_DEADLINE_EPOCH
             set +e
             # GNU timeout times out command children unless --foreground is used.
             timeout --kill-after=10s "${attempt_timeout}s" qwen \
