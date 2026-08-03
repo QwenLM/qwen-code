@@ -8,31 +8,15 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
+import { getWorkflowJob, getWorkflowStep } from './workflow-helpers.js';
+
 const ROOT = path.resolve(import.meta.dirname, '../..');
 const NO_AK_SCRIPT = 'test:integration:no-ak:sandbox:none';
 const GUARD_ACTION_PATH = '.github/actions/verify-checkout-head/action.yml';
-
-function getWorkflowJob(workflow, jobName) {
-  const marker = `  ${jobName}:`;
-  const start = workflow.indexOf(marker);
-  expect(start).toBeGreaterThanOrEqual(0);
-
-  const afterMarker = workflow.slice(start + marker.length);
-  const nextJob = afterMarker.match(/\n {2}[a-zA-Z0-9_-]+:\n/);
-
-  return workflow.slice(
-    start,
-    nextJob ? start + marker.length + nextJob.index : undefined,
-  );
-}
-
-function getGuardCall(job, jobName) {
-  const marker = "name: 'Verify checkout includes expected head commit'";
-  const start = job.indexOf(marker);
-  expect(start, `${jobName} lost its checkout guard`).toBeGreaterThanOrEqual(0);
-  const nextStep = job.indexOf('\n      - name:', start + marker.length);
-  return job.slice(start, nextStep > 0 ? nextStep : undefined);
-}
+const CONFIGURE_ACTION_PATH =
+  '.github/actions/configure-windows-runner/action.yml';
+const NODE_ACTION_PATH = '.github/actions/self-hosted-node/action.yml';
+const GUARD_STEP = 'Verify checkout includes expected head commit';
 
 describe('no-AK integration CI wiring', () => {
   it('defines a focused no-AK integration script', () => {
@@ -176,17 +160,21 @@ describe('no-AK integration CI wiring', () => {
       path.join(ROOT, GUARD_ACTION_PATH),
       'utf8',
     );
-    expect(guardAction).toContain('git merge-base --is-ancestor');
+    // Pin the full negated condition: dropping the `!` would turn the guard
+    // into a pass-through for exactly the stale checkouts it must reject.
+    expect(guardAction).toContain(
+      'if ! git merge-base --is-ancestor "${EXPECTED_SHA}" HEAD; then',
+    );
     expect(guardAction).toContain(
       '::error::Checked out ref does not contain expected head',
     );
     expect(guardAction).toContain('exit 1');
 
     const guardCalls = {
-      test: getGuardCall(ubuntuJob, 'test'),
-      web_shell_e2e_smoke: getGuardCall(webShellJob, 'web_shell_e2e_smoke'),
-      test_windows: getGuardCall(windowsJob, 'test_windows'),
-      integration_cli: getGuardCall(integrationJob, 'integration_cli'),
+      test: getWorkflowStep(ubuntuJob, GUARD_STEP),
+      web_shell_e2e_smoke: getWorkflowStep(webShellJob, GUARD_STEP),
+      test_windows: getWorkflowStep(windowsJob, GUARD_STEP),
+      integration_cli: getWorkflowStep(integrationJob, GUARD_STEP),
     };
     for (const [jobName, call] of Object.entries(guardCalls)) {
       expect(call, `${jobName} guard must use the shared action`).toContain(
@@ -205,9 +193,23 @@ describe('no-AK integration CI wiring', () => {
     expect(guardCalls.integration_cli).toContain(
       "expected_sha: '${{ github.event.merge_group.head_sha }}'",
     );
+
+    // The run conditions are part of the guard's contract: scoping a guard to
+    // the wrong runner class or dropping an event would silently disable it.
+    // integration_cli has no step-level if; its job-level merge_group gate
+    // already covers it.
+    expect(guardCalls.test).toContain(
+      "if: \"${{ needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}\"",
+    );
+    expect(guardCalls.web_shell_e2e_smoke).toContain(
+      'if: "${{ github.event_name == \'pull_request\' }}"',
+    );
+    expect(guardCalls.test_windows).toContain(
+      'if: "${{ needs.classify_pr.outputs.skip_ci != \'true\' }}"',
+    );
   });
 
-  it('pins the Windows gate kill-switch routing and checkout guard', () => {
+  it('pins the Windows gate kill-switch routing, tuning, and Node split', () => {
     const workflow = readFileSync(
       path.join(ROOT, '.github/workflows/ci.yml'),
       'utf8',
@@ -224,12 +226,81 @@ describe('no-AK integration CI wiring', () => {
     expect(windowsRunsOn).toBe(
       `    runs-on: '\${{ (vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event.pull_request.head.repo.full_name == github.repository || github.event_name == ''merge_group'')) && fromJSON(''["self-hosted", "Windows", "X64", "ecs-win"]'') || fromJSON(''["windows-2022"]'') }}'`,
     );
+    expect(windowsJob).toContain('timeout-minutes: 60');
 
     // The guard must stay wired to the merge-queue head for this job.
-    const guard = getGuardCall(windowsJob, 'test_windows');
+    const guard = getWorkflowStep(windowsJob, GUARD_STEP);
     expect(guard).toContain("uses: './.github/actions/verify-checkout-head'");
     expect(guard).toContain(
       "expected_sha: '${{ github.event.merge_group.head_sha }}'",
+    );
+
+    // The self-hosted-only tuning comes from the composite action shared with
+    // windows-runner-smoke.yml, and only runs on self-hosted machines.
+    const configure = getWorkflowStep(
+      windowsJob,
+      'Configure self-hosted Windows test environment',
+    );
+    expect(configure).toContain(
+      "if: \"${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' }}\"",
+    );
+    expect(configure).toContain(
+      "uses: './.github/actions/configure-windows-runner'",
+    );
+    const configureAction = readFileSync(
+      path.join(ROOT, CONFIGURE_ACTION_PATH),
+      'utf8',
+    );
+    expect(configureAction).toContain("shell: 'powershell'");
+    expect(configureAction).toContain(
+      'git config --global core.autocrlf false',
+    );
+    for (const line of [
+      '"TEMP=$env:RUNNER_TEMP"',
+      '"TMP=$env:RUNNER_TEMP"',
+      '"LC_ALL=C.UTF-8"',
+    ]) {
+      expect(configureAction).toContain(
+        `${line} | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append`,
+      );
+    }
+    expect(configureAction).toContain(
+      "'C:\\Program Files\\Git\\bin' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append",
+    );
+    // The runner-validation smoke must consume the same action, or it
+    // validates a different configuration than the gate actually uses.
+    const smokeWorkflow = readFileSync(
+      path.join(ROOT, '.github/workflows/windows-runner-smoke.yml'),
+      'utf8',
+    );
+    expect(smokeWorkflow).toContain(
+      "uses: './.github/actions/configure-windows-runner'",
+    );
+
+    // Node split: hosted runners download Node, self-hosted runners reuse
+    // their pre-installed one and fail loud when it is missing or off-major.
+    const hostedSetup = getWorkflowStep(
+      windowsJob,
+      'Set up Node.js 22.x (hosted)',
+    );
+    expect(hostedSetup).toContain(
+      "if: \"${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'github-hosted' }}\"",
+    );
+    const selfHostedNode = getWorkflowStep(
+      windowsJob,
+      'Use pre-installed Node.js (self-hosted)',
+    );
+    expect(selfHostedNode).toContain(
+      "if: \"${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' }}\"",
+    );
+    expect(selfHostedNode).toContain(
+      "uses: './.github/actions/self-hosted-node'",
+    );
+    const nodeAction = readFileSync(path.join(ROOT, NODE_ACTION_PATH), 'utf8');
+    expect(nodeAction).toContain('if ! command -v node >/dev/null 2>&1; then');
+    expect(nodeAction).toContain('exit 1');
+    expect(nodeAction).toContain(
+      'if [[ "$(node -p \'process.versions.node.split(".")[0]\')" != "22" ]]; then',
     );
   });
 

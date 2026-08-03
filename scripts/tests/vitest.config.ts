@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { defineConfig } from 'vitest/config';
+import { configDefaults, defineConfig } from 'vitest/config';
 
 export default defineConfig({
   test: {
@@ -20,6 +20,7 @@ export default defineConfig({
     exclude:
       process.platform === 'win32'
         ? [
+            ...configDefaults.exclude,
             'scripts/tests/pr-self-report-label.test.js',
             'scripts/tests/qwen-autofix-workflow.test.js',
             'scripts/tests/qwen-fleet-shepherd-workflow.test.js',
@@ -29,7 +30,7 @@ export default defineConfig({
             'scripts/tests/qwen-triage-finalize-workflow.test.js',
             'scripts/tests/qwen-triage-workflow.test.js',
           ]
-        : [],
+        : [...configDefaults.exclude],
     setupFiles: ['scripts/tests/test-setup.ts'],
     // Several tests in install-script.test.js shell out to `node` to run
     // create-standalone-package.js, which on Windows runs a full

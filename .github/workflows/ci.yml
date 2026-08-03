@@ -255,15 +255,7 @@ jobs:
 
       - name: 'Use pre-installed Node.js (self-hosted)'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
-        run: |-
-          if ! command -v node >/dev/null 2>&1; then
-            echo "::error::Node.js is not on PATH for this self-hosted runner. Provision Node 22.x or set the MAINTAINER_ECS_RUNNER_DISABLED repository variable to 'true' to route PRs back to hosted runners."
-            exit 1
-          fi
-          echo "Using pre-installed Node $(node -v) / npm $(npm -v)"
-          if [[ "$(node -p 'process.versions.node.split(".")[0]')" != "22" ]]; then
-            echo "::warning::Expected Node 22.x but found $(node -v); tests will run against the runner's Node."
-          fi
+        uses: './.github/actions/self-hosted-node'
 
       - name: 'Configure persistent npm cache (self-hosted)'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
@@ -519,15 +511,7 @@ jobs:
 
       - name: 'Use pre-installed Node.js (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
-        run: |-
-          if ! command -v node >/dev/null 2>&1; then
-            echo "::error::Node.js is not on PATH for this self-hosted runner. Provision Node 22.x or set the MAINTAINER_ECS_RUNNER_DISABLED repository variable to 'true' to route PRs back to hosted runners."
-            exit 1
-          fi
-          echo "Using pre-installed Node $(node -v) / npm $(npm -v)"
-          if [[ "$(node -p 'process.versions.node.split(".")[0]')" != "22" ]]; then
-            echo "::warning::Expected Node 22.x but found $(node -v); web-shell smoke tests will run against the runner's Node."
-          fi
+        uses: './.github/actions/self-hosted-node'
 
       - name: 'Configure persistent npm cache (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -654,19 +638,14 @@ jobs:
     permissions:
       contents: 'read'
     steps:
-      # Self-hosted-only tuning: C.UTF-8 keeps deterministic C collation with
-      # UTF-8 output for non-ASCII assertions, and Git Bash goes on PATH so the
-      # remaining steps can run under the workflow's default bash shell.
+      # Self-hosted-only tuning, shared verbatim with windows-runner-smoke.yml
+      # via the configure-windows-runner action so the runner-validation smoke
+      # exercises exactly what this gate uses. C.UTF-8 keeps deterministic C
+      # collation with UTF-8 output for non-ASCII assertions, and Git Bash goes
+      # on PATH so the remaining steps can run under the default bash shell.
       - name: 'Configure self-hosted Windows test environment'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' }}"
-        shell: 'powershell'
-        run: |-
-          $ErrorActionPreference = 'Stop'
-          git config --global core.autocrlf false
-          "TEMP=$env:RUNNER_TEMP" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "TMP=$env:RUNNER_TEMP" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "LC_ALL=C.UTF-8" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          'C:\Program Files\Git\bin' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        uses: './.github/actions/configure-windows-runner'
 
       - name: 'Checkout'
         id: 'checkout'
@@ -696,15 +675,7 @@ jobs:
 
       - name: 'Use pre-installed Node.js (self-hosted)'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' }}"
-        run: |-
-          if ! command -v node >/dev/null 2>&1; then
-            echo "::error::Node.js is not on PATH for this self-hosted runner. Provision Node 22.x or set the MAINTAINER_ECS_RUNNER_DISABLED repository variable to 'true' to route the Windows gate back to hosted runners."
-            exit 1
-          fi
-          echo "Using pre-installed Node $(node -v) / npm $(npm -v)"
-          if [[ "$(node -p 'process.versions.node.split(".")[0]')" != "22" ]]; then
-            echo "::warning::Expected Node 22.x but found $(node -v); tests will run against the runner's Node."
-          fi
+        uses: './.github/actions/self-hosted-node'
 
       - name: 'Configure npm for rate limiting'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
@@ -850,15 +821,7 @@ jobs:
 
       - name: 'Use pre-installed Node.js (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
-        run: |-
-          if ! command -v node >/dev/null 2>&1; then
-            echo "::error::Node.js is not on PATH for this self-hosted runner. Provision Node 22.x or set the MAINTAINER_ECS_RUNNER_DISABLED repository variable to 'true' to route the merge queue back to hosted runners."
-            exit 1
-          fi
-          echo "Using pre-installed Node $(node -v) / npm $(npm -v)"
-          if [[ "$(node -p 'process.versions.node.split(".")[0]')" != "22" ]]; then
-            echo "::warning::Expected Node 22.x but found $(node -v); integration tests will run against the runner's Node."
-          fi
+        uses: './.github/actions/self-hosted-node'
 
       - name: 'Configure persistent npm cache (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"

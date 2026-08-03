@@ -11,20 +11,11 @@ jobs:
     name: 'Validate runner'
     runs-on: ['self-hosted', 'Windows', 'X64', 'ecs-win']
     timeout-minutes: 60
-    env:
-      # LC_ALL overrides LANG, so set only LC_ALL. C.UTF-8 keeps deterministic
-      # C collation while preserving UTF-8 output for any non-ASCII assertions.
-      LC_ALL: 'C.UTF-8'
     steps:
+      # Shared verbatim with the Windows merge-queue gate in ci.yml, so this
+      # smoke validates exactly the configuration that gate runs.
       - name: 'Configure Windows test environment'
-        # The self-hosted runner has Windows PowerShell, not necessarily pwsh.
-        # Force UTF-8 so GITHUB_ENV is not written as UTF-16LE.
-        shell: 'powershell'
-        run: |-
-          $ErrorActionPreference = 'Stop'
-          git config --global core.autocrlf false
-          "TEMP=$env:RUNNER_TEMP" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "TMP=$env:RUNNER_TEMP" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        uses: './.github/actions/configure-windows-runner'
 
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
