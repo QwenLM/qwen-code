@@ -12,8 +12,9 @@
  * even after the originating prompt has already returned.
  *
  * Uses fake-openai-server for deterministic model responses, eliminating
- * model output variance as a failure source. The cron scheduler still
- * operates on real minute-boundary timing.
+ * model output variance as a failure source. The QWEN_CODE_TEST_CRON_FAST
+ * test seam auto-fires cron jobs after a short delay instead of waiting
+ * for the wall-clock minute boundary.
  */
 
 import { spawn } from 'node:child_process';
@@ -110,6 +111,11 @@ function setupAcpCronTest(rig: TestRig, fakeServer: FakeOpenAIServer) {
         // Defends against an ambient proxy intercepting the local fake server.
         NO_PROXY: '127.0.0.1,localhost',
         no_proxy: '127.0.0.1,localhost',
+        // Enable the CronScheduler test seam: newly created session-only
+        // jobs auto-fire after 5s instead of waiting for the wall-clock
+        // minute boundary (see cron-interactive.test.ts).
+        QWEN_CODE_TEST_CRON_FAST: '1',
+        QWEN_CODE_TEST_CRON_DELAY_MS: '5000',
       },
     },
   );
@@ -370,13 +376,11 @@ async function initSession(
           // Fail fast if the cron_create tool call was not served to the first
           // user prompt. An internal model call before the first prompt (title
           // generation, a classifier pass) would shift dispatch and otherwise
-          // surface only as an opaque 75s timeout in Part 3.
+          // surface only as an opaque 75s timeout in Part 3a.
           expect(
             JSON.stringify(fakeServer.requests[0]?.body['messages']),
             'requestIndex 0 was not the cron_create prompt — dispatch shifted',
           ).toContain('CRONFIRE7742');
-
-          const promptDoneAt = Date.now();
 
           // --- Part 2: Session stays responsive while cron is pending ---
           const interactiveResult = (await sendRequest('session/prompt', {
@@ -390,33 +394,40 @@ async function initSession(
           })) as { stopReason: string };
           expect(interactiveResult.stopReason).toBe('end_turn');
 
-          // --- Part 3: Wait for cron-fired notification (up to 75s) ---
-          // The cron fires at the next minute boundary. The model response
-          // should stream back as sessionUpdate notifications after the
-          // originating prompt has already returned.
+          // --- Part 3: Wait for cron-fired notification ---
+          // With QWEN_CODE_TEST_CRON_FAST the job auto-fires ~5s after
+          // creation. The model response should stream back as
+          // sessionUpdate notifications after the originating prompt has
+          // already returned.
 
-          // 3a: Check for user_message_chunk echoing the cron prompt with _meta.source
+          // 3a: Check for the user_message_chunk echoing the cron prompt.
+          // Select it by _meta.source === 'cron' rather than a wall-clock
+          // comparison: the Part 1 prompt text also contains CRONFIRE7742,
+          // and the cron notification races the Part 1 RPC response over the
+          // same stdout pipe, so a timestamp guard can non-deterministically
+          // exclude the one fast fire. The cron-sourced echo is the only
+          // user_message_chunk carrying _meta.source === 'cron'
+          // (see Session.#executeCronPromptInner).
           const cronUserMsg = await waitForSessionUpdate(
             (u) =>
               u.update?.sessionUpdate === 'user_message_chunk' &&
-              (u.update?.content?.text ?? '').includes('CRONFIRE7742') &&
-              u.receivedAt > promptDoneAt,
-            'cron-fired user_message_chunk with CRONFIRE7742',
+              u.update?._meta?.source === 'cron',
+            "cron-sourced user_message_chunk (_meta.source === 'cron')",
             75_000,
           );
-          expect(cronUserMsg.update?._meta).toBeDefined();
-          expect(cronUserMsg.update?._meta?.source).toBe('cron');
+          expect(cronUserMsg.update?.content?.text).toContain('CRONFIRE7742');
 
           // 3b: Check for agent_message_chunk after the cron user message
-          // (the model's response to the cron prompt)
-          const cronAgentMsg = await waitForSessionUpdate(
+          // (the model's response to the cron prompt). The predicate matches
+          // any agent_message_chunk after cronUserMsg; ordering is safe
+          // because the fast fire lands ~5s in, well after Part 2 completes.
+          await waitForSessionUpdate(
             (u) =>
               u.update?.sessionUpdate === 'agent_message_chunk' &&
               u.receivedAt > cronUserMsg.receivedAt,
             'agent_message_chunk after cron fire',
             15_000, // should already be here by now
           );
-          expect(cronAgentMsg.receivedAt).toBeGreaterThan(promptDoneAt);
         } catch (e) {
           if (stderr.length) console.error('Agent stderr:', stderr.join(''));
           console.error(
