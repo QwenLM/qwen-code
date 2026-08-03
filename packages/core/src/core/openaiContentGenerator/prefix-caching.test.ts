@@ -169,6 +169,68 @@ describe('official OpenAI prompt caching', () => {
     expect(result.messages).toEqual(request.messages);
   });
 
+  it('preserves an existing prompt cache key', () => {
+    const request = {
+      model: 'gpt-5.6',
+      messages: [{ role: 'user', content: 'main request' }],
+      prompt_cache_key: 'custom-cache-key',
+    } as OpenAI.Chat.ChatCompletionCreateParams & {
+      prompt_cache_key: string;
+    };
+
+    const result = applyOfficialOpenAIPromptCaching(
+      request,
+      'session-123',
+      false,
+    );
+
+    expect(result.prompt_cache_key).toBe('custom-cache-key');
+  });
+
+  it('marks only the two most recent reusable boundaries', () => {
+    const request = {
+      model: 'gpt-5.6',
+      messages: [
+        { role: 'system', content: 'system' },
+        { role: 'user', content: 'old request' },
+        { role: 'assistant', content: 'old tool call' },
+        { role: 'tool', tool_call_id: 'call-1', content: 'old tool result' },
+        { role: 'assistant', content: 'middle response' },
+        { role: 'user', content: 'recent request' },
+        { role: 'assistant', content: 'recent tool call' },
+        {
+          role: 'tool',
+          tool_call_id: 'call-2',
+          content: 'recent tool result',
+        },
+        { role: 'user', content: 'compression directive' },
+      ],
+    } as OpenAI.Chat.ChatCompletionCreateParams;
+
+    const result = applyOfficialOpenAIPromptCaching(
+      request,
+      'session-123',
+      true,
+    );
+
+    expect(result.messages[1]?.content).toBe('old request');
+    expect(result.messages[3]?.content).toBe('old tool result');
+    expect(result.messages[5]?.content).toEqual([
+      {
+        type: 'text',
+        text: 'recent request',
+        prompt_cache_breakpoint: { mode: 'explicit' },
+      },
+    ]);
+    expect(result.messages[7]?.content).toEqual([
+      {
+        type: 'text',
+        text: 'recent tool result',
+        prompt_cache_breakpoint: { mode: 'explicit' },
+      },
+    ]);
+  });
+
   it('marks the last part of array content at a reusable boundary', () => {
     const request = {
       model: 'gpt-5.6',
