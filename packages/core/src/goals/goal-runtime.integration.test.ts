@@ -12,7 +12,6 @@ import type {
 } from './goal-protocol.js';
 import {
   createGoalRuntime,
-  MAX_GOAL_CONTINUATION_TURNS,
   type GoalJournal,
   type GoalTurnHost,
 } from './goal-runtime.js';
@@ -31,8 +30,8 @@ function journal(): GoalJournal {
 }
 
 describe('Goal runtime host integration', () => {
-  it('keeps sequential automatic admissions independent within the turn budget', async () => {
-    const turns = MAX_GOAL_CONTINUATION_TURNS - 1;
+  it('keeps sequential automatic admissions independent beyond the former fixed limit', async () => {
+    const turns = 75;
     const started: GoalTurnPermit[] = [];
     const host: GoalTurnHost = {
       startGoalTurn: vi.fn(async ({ permit }) => {

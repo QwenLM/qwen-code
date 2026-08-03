@@ -9,7 +9,6 @@ import type { Config } from '../config/config.js';
 import type { GeminiChat } from './geminiChat.js';
 import {
   createGoalRuntime,
-  MAX_GOAL_CONTINUATION_TURNS,
   GoalPersistenceUnavailableError,
   type GoalJournal,
   type GoalRuntime,
@@ -983,7 +982,7 @@ describe('GeminiClient Goal admission', () => {
     expect(runtime.finishTurn).not.toHaveBeenCalled();
   });
 
-  it('runs runtime-scheduled Goal turns within the continuation budget without session budgets', async () => {
+  it('runs runtime-scheduled Goal turns beyond the former fixed limit without session budgets', async () => {
     const { client, config } = setupGoalClient();
     const goalJournal: GoalJournal = {
       getTranscriptCursor: () => ({ recordId: null }),
@@ -1017,7 +1016,7 @@ describe('GeminiClient Goal admission', () => {
     vi.mocked(config.getGoalRuntime).mockReturnValue(runtime);
     await runtime.dispatch({ action: 'create', objective: 'ship' });
 
-    const turns = MAX_GOAL_CONTINUATION_TURNS - 1;
+    const turns = 75;
     for (let turn = 0; turn < turns; turn += 1) {
       const current = started[turn]!;
       await drain(

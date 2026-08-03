@@ -243,7 +243,7 @@ describe('goal reducer', () => {
     },
   );
 
-  it('resets the continuation turn budget when resuming an exhausted goal', () => {
+  it('preserves the cumulative turn count when resuming a limited goal', () => {
     const resumed = reduceGoalControl(
       goalRecord({ status: 'usage_limited', revision: 4, turnCount: 50 }),
       {
@@ -261,7 +261,7 @@ describe('goal reducer', () => {
     expect(resumed).toMatchObject({
       status: 'active',
       revision: 4,
-      turnCount: 0,
+      turnCount: 50,
       evidenceCursor: { recordId: 'r-100' },
     });
   });
