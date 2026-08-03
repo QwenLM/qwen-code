@@ -51,6 +51,12 @@ function claimedExtension(basename: string): string {
  * host up to the size cap of arbitrary bytes at a `github.com` URL through a
  * review's evidence push. Magic bytes bind the claim to the content — the
  * four admitted formats all carry unambiguous fixed signatures.
+ *
+ * A sibling signature table lives in core: `sniffFileKind` in
+ * `packages/core/src/utils/binary-content.ts` (best-effort kind detection for
+ * fetched web content, deliberately looser) and the dimension extractors in
+ * `packages/core/src/utils/request-tokenizer/imageTokenizer.ts`. Admitting or
+ * correcting a format here means checking those sites too.
  */
 export function sniffImageFormat(
   header: Uint8Array,
@@ -90,7 +96,11 @@ export function validateAssetContent(
   header: Uint8Array,
 ): { ok: true } | { ok: false; reason: string } {
   const ext = claimedExtension(basename);
-  const claimed = EXTENSION_FORMAT[ext];
+  // hasOwn, not a bare index: `__proto__`/`constructor` extensions would
+  // otherwise resolve to Object.prototype values and skip this refusal.
+  const claimed = Object.hasOwn(EXTENSION_FORMAT, ext)
+    ? EXTENSION_FORMAT[ext]
+    : undefined;
   if (claimed === undefined) {
     return {
       ok: false,

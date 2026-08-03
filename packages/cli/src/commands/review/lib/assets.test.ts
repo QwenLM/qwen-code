@@ -192,17 +192,51 @@ describe('sniffImageFormat / validateAssetContent', () => {
         Uint8Array.from([...'RIFF0000AVI '].map((c) => c.charCodeAt(0))),
       ),
     ).toBeNull();
-    // Depth pins: each signature is checked to its full length, so bytes
-    // that stop one compare short of a real signature are not admitted.
+    // Depth pins: each signature component is checked to its full length, so
+    // bytes one compare short of a real signature — in ANY position — are not
+    // admitted. A WEBP marker without the RIFF container prefix is not WEBP
+    // either.
     expect(sniffImageFormat(Uint8Array.from([0xff, 0xd8, 0x00]))).toBeNull();
+    expect(sniffImageFormat(Uint8Array.from([0x00, 0xd8, 0xff]))).toBeNull();
+    expect(sniffImageFormat(Uint8Array.from([0xff, 0x00, 0xff]))).toBeNull();
     expect(
       sniffImageFormat(
-        Uint8Array.from([...'RIFF0000WEB '].map((c) => c.charCodeAt(0))),
+        Uint8Array.from([0x00, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      ),
+    ).toBeNull();
+    expect(
+      sniffImageFormat(
+        Uint8Array.from([0x89, 0x58, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      ),
+    ).toBeNull();
+    expect(
+      sniffImageFormat(
+        Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x0a, 0x1a, 0x0a]),
+      ),
+    ).toBeNull();
+    expect(
+      sniffImageFormat(
+        Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x00, 0x1a, 0x0a]),
+      ),
+    ).toBeNull();
+    expect(
+      sniffImageFormat(
+        Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x00, 0x0a]),
       ),
     ).toBeNull();
     const pngByte7Off = Uint8Array.from(PNG);
     pngByte7Off[7] = 0x0b;
     expect(sniffImageFormat(pngByte7Off)).toBeNull();
+    expect(
+      sniffImageFormat(
+        Uint8Array.from([...'RIFF0000WEB '].map((c) => c.charCodeAt(0))),
+      ),
+    ).toBeNull();
+    expect(
+      sniffImageFormat(
+        Uint8Array.from([...'XXXX0000WEBP'].map((c) => c.charCodeAt(0))),
+      ),
+    ).toBeNull();
     expect(
       sniffImageFormat(
         Uint8Array.from([...'GIF89b'].map((c) => c.charCodeAt(0))),
@@ -245,5 +279,10 @@ describe('sniffImageFormat / validateAssetContent', () => {
   it('fails closed on an extension outside the allowlist', () => {
     expect(validateAssetContent('x.svg', PNG).ok).toBe(false);
     expect(validateAssetContent('noext', PNG).ok).toBe(false);
+    // Inherited Object.prototype keys are not allowlist hits: the refusal
+    // must come from the allowlist branch, not the content comparison.
+    const proto = validateAssetContent('x.__proto__', PNG);
+    expect(proto.ok).toBe(false);
+    if (!proto.ok) expect(proto.reason).toContain('is not an allowed');
   });
 });
