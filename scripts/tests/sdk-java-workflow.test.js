@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 const workflow = readFileSync('.github/workflows/sdk-java.yml', 'utf8');
 const job = (name) => {
   const start = workflow.indexOf(`  ${name}:`);
-  const next = workflow.slice(start + 1).search(/\n  [a-z0-9-]+:\n/);
+  const next = workflow.slice(start + 1).search(/\n {2}[a-z0-9-]+:\n/);
   return workflow.slice(start, next < 0 ? undefined : start + 1 + next);
 };
 

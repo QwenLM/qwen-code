@@ -131,7 +131,6 @@ const daemon = spawn(
 let stderr = '';
 let javaTest: ChildProcess | undefined;
 let receivedSignal: NodeJS.Signals | undefined;
-let succeeded = false;
 daemon.stderr?.on('data', (chunk) => {
   stderr += chunk.toString();
 });
@@ -297,7 +296,6 @@ try {
       'Java E2E completed without exercising the daemon model path; the integration tests may have been skipped',
     );
   }
-  succeeded = true;
 } catch (error) {
   runFailure = error;
 }
