@@ -18,3 +18,7 @@ The Windows script suite continues to run `install-script.test.js`, including al
 ## Verification gate
 
 The change is ready when formatting, lint configuration checks, targeted CLI and core tests, and the script suite pass locally where applicable, followed by a complete `npm run test:ci` on the Windows ECS runner.
+
+## Operations
+
+An offline ecs-win runner makes the job queue rather than fail, which blocks the merge queue until a maintainer intervenes. Setting the `MAINTAINER_ECS_RUNNER_DISABLED` repository variable to `true` routes the Windows gate back to `windows-2022`.

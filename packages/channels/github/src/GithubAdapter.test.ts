@@ -1664,6 +1664,7 @@ describe('GithubChannel', () => {
       ).rejects.toThrow('rate limited');
 
       expect(JSON.parse(readFileSync(pendingPath(), 'utf-8'))).toHaveLength(1);
+      // Windows has no POSIX mode bits; stat reports 0o666.
       if (process.platform !== 'win32') {
         expect(statSync(pendingPath()).mode & 0o777).toBe(0o600);
       }

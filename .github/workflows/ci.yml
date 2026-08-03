@@ -651,14 +651,15 @@ jobs:
 
   # Windows counterpart of test_macos (see that job's note). ECS is the default
   # with a windows-2022 kill-switch fallback; the check name stays unchanged so
-  # it matches the required-status-check context. ECS-only tuning is gated on
-  # runner.environment so the hosted fallback stays the exact pre-ECS job apart
-  # from the job-level timeout-minutes.
+  # it matches the required-status-check context. The runs-on fork guard mirrors
+  # the Classify PR gate. ECS-only tuning is gated on runner.environment; the
+  # hosted fallback is the pre-ECS job plus the checkout guard and a job-level
+  # timeout-minutes.
   test_windows:
     name: 'Test (windows-latest, Node 22.x)'
     needs: 'classify_pr'
     if: "${{ !cancelled() && github.event_name == 'merge_group' }}"
-    runs-on: '${{ vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && fromJSON(''["self-hosted", "Windows", "X64", "ecs-win"]'') || fromJSON(''["windows-2022"]'') }}'
+    runs-on: '${{ (vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event.pull_request.head.repo.full_name == github.repository || github.event_name == ''merge_group'')) && fromJSON(''["self-hosted", "Windows", "X64", "ecs-win"]'') || fromJSON(''["windows-2022"]'') }}'
     timeout-minutes: 60
     permissions:
       contents: 'read'
