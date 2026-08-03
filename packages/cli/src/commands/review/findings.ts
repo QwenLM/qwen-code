@@ -32,7 +32,7 @@
 //     coverage is the error.
 
 import type { CommandModule } from 'yargs';
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 
@@ -95,6 +95,15 @@ export interface Finding {
   outcome?: Outcome;
   /** The fixer's reason, carried from the ledger — mainly for `skipped`. */
   outcomeNote?: string;
+  /**
+   * Set when `--test-delta` lowered this finding's severity: the test file the
+   * measurement matched. Structured, not prose only — the sibling command makes
+   * the same argument about its own budget skips, and for the same reason. A
+   * later round reads the artifact, not the paragraph, so a hold discoverable
+   * only by substring-matching `failureScenario` is a hold the round ledger
+   * cannot see, and it re-files the finding at whatever severity it likes.
+   */
+  heldByMeasurement?: { file: string };
 }
 
 export interface FindingsReport {
@@ -105,6 +114,9 @@ export interface FindingsReport {
     byConfidence: Record<Confidence, number>;
     /** Present only once outcomes have been recorded. */
     byOutcome?: Record<Outcome, number>;
+    /** How many findings a measurement lowered. Counted, not inferred from
+     *  prose, so a later round can act on it. */
+    held: number;
   };
   /** True once every finding carries an outcome. */
   outcomesRecorded: boolean;
@@ -311,6 +323,16 @@ export function validateFindings(raw: unknown): Finding[] {
     const outcomeNote =
       asString(o, 'outcomeNote') ?? asString(o, 'outcome_note');
 
+    // And `heldByMeasurement`, for the same reason and with more riding on it:
+    // the field exists so a later round can see that a measurement lowered this
+    // finding, and a round reads the artifact by feeding it back through
+    // `--input`. Dropped here, the hold survives exactly one command.
+    const heldRaw = (o as { heldByMeasurement?: unknown }).heldByMeasurement;
+    const heldFile =
+      heldRaw && typeof heldRaw === 'object'
+        ? asString(heldRaw as Record<string, unknown>, 'file')
+        : undefined;
+
     const shortSummary =
       asString(o, 'shortSummary') ?? asString(o, 'short_summary');
 
@@ -336,6 +358,7 @@ export function validateFindings(raw: unknown): Finding[] {
       locations: parseLocations(o, i),
       ...(assetFiles ? { assetFiles } : {}),
       ...(assets ? { assets } : {}),
+      ...(heldFile ? { heldByMeasurement: { file: heldFile } } : {}),
       ...(outcome ? { outcome } : {}),
       ...(outcome && outcomeNote ? { outcomeNote } : {}),
     } satisfies Finding;
@@ -355,6 +378,229 @@ export function validateFindings(raw: unknown): Finding[] {
     seen.add(f.id);
   }
   return findings;
+}
+
+/**
+ * Does `text` name `probe`? Both are repo-relative by the time this runs —
+ * `sharedFailingFilesOf` qualifies what `test-delta` reported. Match on a name
+ * boundary so `src/a.test.ts` is satisfied by neither `vendor/other-src/a.test.ts`
+ * nor `src/a.test.tsx`.
+ */
+function namesPath(text: string, probe: string): boolean {
+  const isNameChar = (c: string | undefined) =>
+    c !== undefined && /[A-Za-z0-9._-]/.test(c);
+  // `/` is NOT a leading boundary. Probes reach here repo-relative, so a `/`
+  // in front means the match sits under some other root —
+  // `third_party/packages/cli/src/a.test.ts` is a vendored copy, not this
+  // file, and treating the slash as a boundary demoted a Critical about the
+  // real one. The trailing side already required both ends; this is the same
+  // rule on the side that was left open.
+  const isBoundary = (c: string | undefined) =>
+    c === undefined || (!isNameChar(c) && c !== '/');
+  let from = 0;
+  for (;;) {
+    const at = text.indexOf(probe, from);
+    if (at < 0) return false;
+    const after = text[at + probe.length];
+    // A trailing `.` is the end of a sentence far more often than the start of
+    // another extension — findings are prose, and "…in src/a.test.ts." is the
+    // ordinary way to write it. So a dot only extends the name when something
+    // alphanumeric follows it (`.snap`), and never at the end of the text.
+    const extendsName =
+      after !== undefined &&
+      (/[A-Za-z0-9_-]/.test(after) ||
+        (after === '.' &&
+          /[A-Za-z0-9]/.test(text[at + probe.length + 1] ?? '')));
+    // Both ends: the leading check alone cannot see a probe matching inside a
+    // longer name, where `src/a.test.ts` is satisfied by `src/a.test.tsx`.
+    if (isBoundary(at === 0 ? undefined : text[at - 1]) && !extendsName) {
+      return true;
+    }
+    from = at + 1;
+  }
+}
+
+/**
+ * Hold a Critical that blames the PR for a test failure the base tree already
+ * had — the one contradiction this pipeline measures and then used to ignore.
+ *
+ * `test-delta` reruns the PR side's failed test commands on the merge base and
+ * splits the failures into `netNew` (the PR's own) and `shared` (failing on both
+ * sides, whatever files the diff touches). A Critical naming a `shared` test file
+ * is asserting a breakage against a file that was already red without the PR.
+ *
+ * Measured on #8368: `AuthDialog.test.tsx` was `shared` in two independent runs,
+ * and the base tree fails the very same test — `drives API key provider steps
+ * from endpoint options metadata` — at merge-base `e967cc90`. A Critical reading
+ * "height-based pagination breaks the pre-existing test" was carried across four
+ * rounds and into the composed review anyway, because nothing reconciled the two
+ * artifacts. The path rule this replaced was closed off in `test-delta` itself;
+ * the round ledger reopened it from the other side.
+ *
+ * Downgrade, never drop. The measurement contradicts the SEVERITY — the PR is
+ * not breaking a passing test — but the finding may still describe something
+ * real about a test that is red for two reasons. A Suggestion stays in front of
+ * a human, carrying the measurement that demoted it; a deletion would not. Only
+ * Critical is touched, and nothing is ever raised.
+ */
+export function holdCriticalsFailingOnBase(
+  findings: readonly Finding[],
+  sharedFailingFiles: readonly string[],
+): {
+  findings: Finding[];
+  held: Array<{ id: string; file: string }>;
+  readjudicated: Array<{ id: string; file: string }>;
+} {
+  const held: Array<{ id: string; file: string }> = [];
+  const readjudicated: Array<{ id: string; file: string }> = [];
+  const out = findings.map((f) => {
+    if (f.severity !== 'Critical') return f;
+    // `summary` and `failureScenario` only — the two fields where a finding
+    // states its claim.
+    //
+    // `suggestedFix` is where it proposes work ("add a case in src/x.test.ts"),
+    // and `locations[].file` is its subject. Both name a test file routinely
+    // without asserting anything about that file being red, and the second is
+    // the sharper trap: for a finding ABOUT a test's content — "this new
+    // assertion checks the wrong thing" — the location IS the test file, and a
+    // PR touching an already-red test is exactly when such a finding gets
+    // written. Demoting it would use the measurement against a claim the
+    // measurement says nothing about.
+    const haystack = [f.summary, f.failureScenario].join('\n');
+    const hit = sharedFailingFiles.find((p) => p && namesPath(haystack, p));
+    if (!hit) return f;
+    // Already held for this file, and back at Critical anyway. The ledger
+    // carries a held finding forward as the Suggestion it became, so Critical
+    // plus this marker takes a deliberate act: someone read the measurement and
+    // raised it again. Re-applying the same measurement to the same finding
+    // adds nothing and silently overrides that decision — and the escape the
+    // report offers ("say which test fails for a NEW reason") names the test
+    // file, which is the match condition, so without this the door the
+    // documentation promises cannot be opened at all.
+    if (f.heldByMeasurement?.file === hit) {
+      readjudicated.push({ id: f.id, file: hit });
+      return f;
+    }
+    held.push({ id: f.id, file: hit });
+    return {
+      ...f,
+      severity: 'Suggestion' as Severity,
+      heldByMeasurement: { file: hit },
+      failureScenario: `${f.failureScenario}\n\nHeld back from Critical by measurement: \`test-delta\` reran the failing test command on the merge base and ${hit} failed there too, so this is not a passing test the PR turns red. If the PR makes an already-red test fail for a NEW reason, say which test, quote both sides, and file it at Critical again: a finding that already carries this measurement and is raised anyway is left where you put it.`,
+    };
+  });
+  return { findings: out, held, readjudicated };
+}
+
+const WORKSPACE_IN_COMMAND_RE = /--workspace="([^"]+)"/;
+
+/**
+ * One `test-delta` path as a finding would write it: repo-relative, unkeyed.
+ *
+ * Two things are stripped away. `failingFilesOf` keys a file by its vitest
+ * project when the runner prints one (`@qwen-code/qwen-code::src/x.test.ts`) —
+ * a finding never writes that prefix, so a keyed entry could never match and the
+ * guard no-opped silently on the one shape a real projects run emits. And a
+ * per-workspace command prints paths relative to that workspace, so
+ * `src/utils/errors.test.ts` from the `packages/cli` command is qualified back
+ * to `packages/cli/src/utils/errors.test.ts`.
+ *
+ * The qualification is the part that matters. Five test paths in this repo exist
+ * under BOTH `packages/cli/src` and `packages/core/src` (`utils/errors.test.ts`
+ * among them), so a bare suffix cannot tell them apart: a Critical about core's
+ * copy would be held by cli's copy being red — demoting a real finding on a
+ * measurement that was never about it. `failingFilesOf` keeps the project token
+ * in its identity for exactly this reason; discarding it here would reopen from
+ * the consumer side what the producer closed.
+ */
+function repoRelative(
+  path: string,
+  workspace: string | undefined,
+): string | undefined {
+  const at = path.indexOf('::');
+  const bare = at < 0 ? path : path.slice(at + 2);
+  // A key with no workspace to put back cannot be re-qualified, and the bare
+  // remainder is project-relative: `namesPath` would then match it as a suffix
+  // of ANY directory, which is the cross-project collapse this whole function
+  // exists to prevent. The two shapes are mutually exclusive in practice — a
+  // project tag comes from a runner printing one, and a `--workspace=` command
+  // in this repo never does — so the qualifying half was never covering for the
+  // stripping half. Refuse: a measurement whose subject cannot be identified
+  // licenses nothing, and a missed hold costs less than a demoted Critical.
+  if (at >= 0 && !workspace) return undefined;
+  if (!workspace || bare.startsWith(`${workspace}/`)) return bare;
+  return `${workspace}/${bare}`;
+}
+
+/**
+ * Every file `test-delta` measured as failing on BOTH sides, repo-relative.
+ *
+ * Read from `entries` only, because only an entry carries the `--workspace=`
+ * its paths are relative to. The top-level `shared` is the union of the same
+ * files with that context already lost, so it is never honoured — an artifact
+ * with no entries measured nothing this can safely act on, and a bare
+ * workspace-relative path matches inside any package.
+ *
+ * A file measured `netNew` anywhere in the run is dropped even if some other
+ * command called it `shared`: the two claims cannot both license a hold, and the
+ * direction that suppresses a real finding is the worse one to get wrong.
+ *
+ * A shape it does not recognise yields none: an unreadable measurement must not
+ * silently hold a Critical back, and must not throw either — the review has
+ * findings to report whether or not this file parsed.
+ */
+export function sharedFailingFilesOf(raw: unknown): {
+  shared: string[];
+  unidentifiable: string[];
+} {
+  if (!raw || typeof raw !== 'object')
+    return { shared: [], unidentifiable: [] };
+  const shared = new Set<string>();
+  const netNew = new Set<string>();
+  const unidentifiable = new Set<string>();
+  const take = (
+    into: Set<string>,
+    v: unknown,
+    workspace: string | undefined,
+  ) => {
+    if (!Array.isArray(v)) return;
+    for (const e of v) {
+      if (typeof e !== 'string' || !e) continue;
+      const qualified = repoRelative(e, workspace);
+      // Reported only for `shared`: a `netNew` path was never eligible to hold
+      // anything back, so nothing was set aside by dropping it, and saying
+      // otherwise would make the disclosure noise on the very shape (a plain
+      // `npm test` with vitest projects) that produces most of these keys.
+      if (qualified === undefined) {
+        if (into === shared) unidentifiable.add(e);
+      } else into.add(qualified);
+    }
+  };
+
+  const entries = (raw as { entries?: unknown }).entries;
+  const rows = Array.isArray(entries) ? entries : [];
+  if (rows.length > 0) {
+    for (const e of rows) {
+      if (!e || typeof e !== 'object') continue;
+      const command = (e as { command?: unknown }).command;
+      const workspace =
+        typeof command === 'string'
+          ? (WORKSPACE_IN_COMMAND_RE.exec(command)?.[1] ?? undefined)
+          : undefined;
+      take(shared, (e as { shared?: unknown }).shared, workspace);
+      take(netNew, (e as { netNew?: unknown }).netNew, workspace);
+    }
+  }
+  // No `entries` and therefore no `--workspace=` to qualify against. The
+  // top-level list is the union of the entries with that context already lost,
+  // so honouring it would put back the bare workspace-relative path that
+  // matches inside ANY package — the collapse `repoRelative` exists to stop,
+  // through the one door left open. A real artifact always has entries;
+  // anything else measured nothing this can safely act on.
+  return {
+    shared: [...shared].filter((f) => !netNew.has(f)),
+    unidentifiable: [...unidentifiable],
+  };
 }
 
 /** Most severe first, then high-confidence before low, then file and line. */
@@ -494,6 +740,7 @@ export function buildReport(findings: readonly Finding[]): FindingsReport {
       total: sorted.length,
       bySeverity,
       byConfidence,
+      held: sorted.filter((f) => f.heldByMeasurement !== undefined).length,
       ...(byOutcome ? { byOutcome } : {}),
     },
     outcomesRecorded,
@@ -520,6 +767,7 @@ interface FindingsArgs {
   out: string;
   outcomes: string | undefined;
   print: boolean | undefined;
+  testDelta: string | undefined;
 }
 
 function readJson(path: string, what: string): unknown {
@@ -565,12 +813,18 @@ export const findingsCommand: CommandModule = {
         describe:
           'JSON array of {id, outcome, note?} recording what --fix did to each finding. Must cover every finding.',
       })
+      .option('test-delta', {
+        type: 'string',
+        describe:
+          'The test-delta artifact. A Critical naming a test file that also failed on the merge base is held back to Suggestion, carrying the measurement that demoted it.',
+      })
       .option('print', {
         type: 'boolean',
         describe: 'Also print one line per finding to stdout',
       }),
   handler: (argv) => {
-    const { input, out, outcomes, print } = argv as unknown as FindingsArgs;
+    const { input, out, outcomes, print, testDelta } =
+      argv as unknown as FindingsArgs;
 
     let findings = validateFindings(readJson(input, 'findings'));
     if (outcomes !== undefined) {
@@ -578,6 +832,46 @@ export const findingsCommand: CommandModule = {
         findings,
         validateOutcomes(readJson(outcomes, 'outcomes')),
       );
+    }
+    let held: Array<{ id: string; file: string }> = [];
+    let readjudicated: Array<{ id: string; file: string }> = [];
+    if (testDelta !== undefined) {
+      // A measurement that will not read is a measurement, absent — and an
+      // absent measurement holds nothing back. It must not take the review
+      // down with it either: the findings are the deliverable, this is a
+      // cross-check on them. `readJson` throws on a missing file and on
+      // invalid JSON, so the loud-but-fatal path is caught here and the
+      // shape-level tolerance in `sharedFailingFilesOf` covers the rest.
+      // Never silent, though — a hold that did not happen because the file was
+      // unreadable is exactly what a reader needs told.
+      // A file that is not there and a file that will not parse are different
+      // facts, and only the second is worth alarming about. `test-delta` runs
+      // only when a test command failed AND a base tree was available, so on
+      // the ordinary review — tests green — the artifact does not exist, and a
+      // loud line there would report the normal path as a failure on every run.
+      let measurement: unknown;
+      if (existsSync(resolve(testDelta))) {
+        try {
+          measurement = readJson(testDelta, 'test-delta');
+        } catch (err) {
+          writeStderrLine(
+            `findings: no holds applied — ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+      const { shared, unidentifiable } = sharedFailingFilesOf(measurement);
+      // Never a silent drop: a measured file this could not place is coverage
+      // the command chose not to use, and saying so is the difference between
+      // "nothing matched" and "something was set aside".
+      for (const f of unidentifiable) {
+        writeStderrLine(
+          `findings: ignored the measured file ${f} — it carries a vitest project key and no workspace to resolve it against, so which project it names cannot be established`,
+        );
+      }
+      ({ findings, held, readjudicated } = holdCriticalsFailingOnBase(
+        findings,
+        shared,
+      ));
     }
     const report = buildReport(findings);
 
@@ -592,6 +886,21 @@ export const findingsCommand: CommandModule = {
         `${bySeverity['Nice to have']} Nice to have; ` +
         `${byConfidence['low']} low-confidence. Wrote ${target}`,
     );
+    // Never silent: a severity this command lowered is a change to what the
+    // review says, and the reader has to be told which finding and on what
+    // evidence — otherwise the demotion reads as the reviewer's own judgement.
+    for (const h of held) {
+      writeStderrLine(
+        `findings: ${h.id} held back from Critical — test-delta measured ${h.file} as failing on the merge base too`,
+      );
+    }
+    // A hold that was weighed and reversed is a decision, and a decision this
+    // command declined to overrule is exactly as reportable as one it made.
+    for (const r of readjudicated) {
+      writeStderrLine(
+        `findings: ${r.id} left at Critical — it already carries the ${r.file} measurement and was raised again anyway`,
+      );
+    }
     if (report.counts.byOutcome) {
       const o = report.counts.byOutcome;
       writeStderrLine(

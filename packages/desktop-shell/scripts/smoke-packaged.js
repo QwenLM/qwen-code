@@ -22,7 +22,12 @@ const isolatedHome = path.join(workspace, 'home');
 const isolatedState = path.join(workspace, 'state');
 fs.mkdirSync(isolatedHome);
 fs.mkdirSync(isolatedState);
-const appId = 'com.qwen.code.desktop';
+const appId = JSON.parse(
+  fs.readFileSync(
+    path.join(packageDir, 'src-tauri', 'tauri.conf.json'),
+    'utf8',
+  ),
+).identifier;
 const logRoot =
   process.platform === 'darwin'
     ? path.join(isolatedHome, 'Library', 'Logs', appId)
