@@ -6,7 +6,6 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os'; // Import os module
 
 // --- Configuration ---
 const cliPackageDir = path.resolve('packages', 'cli'); // Base directory for the CLI package
@@ -17,7 +16,7 @@ const filesToWatch = [
   path.join(cliPackageDir, 'tsconfig.json'),
 ]; // Specific files within the CLI package
 const buildDir = path.join(cliPackageDir, 'dist'); // Build output directory within the CLI package
-const warningsFilePath = path.join(os.tmpdir(), 'qwen-code-warnings.txt'); // Temp file for warnings
+const warningsFilePath = process.env['QWEN_CODE_WARNINGS_FILE'];
 // ---------------------
 
 function getMtime(filePath) {
@@ -58,14 +57,16 @@ function findSourceFiles(dir, allFiles = []) {
 console.error('Checking build status...');
 
 // Clean up old warnings file before check
-try {
-  if (fs.existsSync(warningsFilePath)) {
-    fs.unlinkSync(warningsFilePath);
+if (warningsFilePath) {
+  try {
+    if (fs.existsSync(warningsFilePath)) {
+      fs.unlinkSync(warningsFilePath);
+    }
+  } catch (err) {
+    console.warn(
+      `[Check Script] Warning: Could not delete previous warnings file: ${err.message}`,
+    );
   }
-} catch (err) {
-  console.warn(
-    `[Check Script] Warning: Could not delete previous warnings file: ${err.message}`,
-  );
 }
 
 const buildMtime = getMtime(buildTimestampPath);
@@ -73,12 +74,14 @@ if (!buildMtime) {
   // If build is missing, write that as a warning and exit(0) so app can display it
   const errorMessage = `ERROR: Build timestamp file (${path.relative(process.cwd(), buildTimestampPath)}) not found. Run \`npm run build\` first.`;
   console.error(errorMessage); // Still log error here
-  try {
-    fs.writeFileSync(warningsFilePath, errorMessage);
-  } catch (writeErr) {
-    console.error(
-      `[Check Script] Error writing missing build warning file: ${writeErr.message}`,
-    );
+  if (warningsFilePath) {
+    try {
+      fs.writeFileSync(warningsFilePath, errorMessage);
+    } catch (writeErr) {
+      console.error(
+        `[Check Script] Error writing missing build warning file: ${writeErr.message}`,
+      );
+    }
   }
   process.exit(0); // Allow app to start and show the error
 }
@@ -129,24 +132,30 @@ if (newerSourceFileFound) {
   console.warn(finalWarning);
 
   // Write warnings to the temp file
-  try {
-    fs.writeFileSync(warningsFilePath, warningMessages.join('\n'));
-    // Removed debug log
-  } catch (err) {
-    console.error(`[Check Script] Error writing warnings file: ${err.message}`);
-    // Proceed without writing, app won't show warnings
+  if (warningsFilePath) {
+    try {
+      fs.writeFileSync(warningsFilePath, warningMessages.join('\n'));
+      // Removed debug log
+    } catch (err) {
+      console.error(
+        `[Check Script] Error writing warnings file: ${err.message}`,
+      );
+      // Proceed without writing, app won't show warnings
+    }
   }
 } else {
   console.error('Build is up-to-date.');
   // Ensure no stale warning file exists if build is ok
-  try {
-    if (fs.existsSync(warningsFilePath)) {
-      fs.unlinkSync(warningsFilePath);
+  if (warningsFilePath) {
+    try {
+      if (fs.existsSync(warningsFilePath)) {
+        fs.unlinkSync(warningsFilePath);
+      }
+    } catch (err) {
+      console.warn(
+        `[Check Script] Warning: Could not delete previous warnings file: ${err.message}`,
+      );
     }
-  } catch (err) {
-    console.warn(
-      `[Check Script] Warning: Could not delete previous warnings file: ${err.message}`,
-    );
   }
 }
 

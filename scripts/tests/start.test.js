@@ -76,4 +76,17 @@ describe('scripts/start.js launcher', () => {
       else process.env.QWEN_CODE_CLI = inherited;
     }
   });
+
+  it('passes one scoped warnings file to the checker and child process', async () => {
+    await import('../start.js?scopes-startup-warnings');
+
+    const [, checkerOptions] = execSyncMock.mock.calls[0];
+    const [, , childOptions] = spawnMock.mock.calls[0];
+    const checkerPath = checkerOptions.env.QWEN_CODE_WARNINGS_FILE;
+
+    expect(checkerPath).toBe(childOptions.env.QWEN_CODE_WARNINGS_FILE);
+    expect(normalizePath(checkerPath)).toMatch(
+      /qwen-code-warnings-\d+-[0-9a-f-]+\.txt$/,
+    );
+  });
 });
