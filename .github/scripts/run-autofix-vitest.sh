@@ -112,7 +112,8 @@ if ! cleanup_workers; then
 fi
 sudo rm -rf -- "${runtime_dir}"
 if [[ "${status}" == '0' ]]; then
-  [[ -f "${report}" && ! -L "${report}" ]]
+  sudo test -f "${report}"
+  sudo test ! -L "${report}"
   sudo chown root:root "${report}"
   sudo chmod 0444 "${report}"
   sudo chmod 0555 "${home}/reports/${report_name}"

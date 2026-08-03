@@ -362,6 +362,171 @@ test('loads only metadata whose artifact producer and source run validate', () =
   }
 });
 
+test('rejects a source run whose live SHA no longer matches the metadata', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'load-e2e-sha-test-'));
+  const bin = join(directory, 'bin');
+  const output = join(directory, 'metadata.json');
+  const originalPath = process.env['PATH'];
+  const encodedMetadata = Buffer.from(JSON.stringify(metadata)).toString(
+    'base64',
+  );
+  try {
+    mkdirSync(bin);
+    writeFileSync(
+      join(bin, 'gh'),
+      [
+        '#!/usr/bin/env bash',
+        'case "$*" in',
+        '  *"actions/artifacts?per_page=100"*) printf \'%s\' \'[{"artifacts":[{"id":9,"name":"autofix-e2e-failure-123-456-2-700-1","expired":false,"workflow_run":{"id":700}}]}]\';;',
+        '  *"actions/runs/700"*) printf \'%s\' \'{"path":".github/workflows/main-ci-failure-issue.yml","event":"workflow_run"}\';;',
+        '  *"actions/artifacts/9/zip"*) printf \'zip-bytes\';;',
+        '  *"actions/runs/456"*) printf \'%s\' \'{"name":"E2E Tests","run_attempt":2,"event":"push","head_branch":"main","conclusion":"failure","head_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}\';;',
+        '  *) exit 1;;',
+        'esac',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(bin, 'unzip'),
+      [
+        '#!/usr/bin/env bash',
+        'if [[ "$1" == "-Z1" ]]; then',
+        "  printf 'metadata.json\\n'",
+        'else',
+        `  printf '%s' '${encodedMetadata}' | base64 --decode`,
+        'fi',
+        '',
+      ].join('\n'),
+    );
+    chmodSync(join(bin, 'gh'), 0o755);
+    chmodSync(join(bin, 'unzip'), 0o755);
+    process.env['PATH'] = `${bin}:${originalPath}`;
+    assert.throws(
+      () =>
+        loadMetadata({
+          issue: 123,
+          repository: 'QwenLM/qwen-code',
+          output,
+        }),
+      /Source run SHA mismatch/,
+    );
+  } finally {
+    process.env['PATH'] = originalPath;
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('rejects a source run whose live conclusion is no longer failure', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'load-e2e-conclusion-test-'));
+  const bin = join(directory, 'bin');
+  const output = join(directory, 'metadata.json');
+  const originalPath = process.env['PATH'];
+  const encodedMetadata = Buffer.from(JSON.stringify(metadata)).toString(
+    'base64',
+  );
+  try {
+    mkdirSync(bin);
+    writeFileSync(
+      join(bin, 'gh'),
+      [
+        '#!/usr/bin/env bash',
+        'case "$*" in',
+        '  *"actions/artifacts?per_page=100"*) printf \'%s\' \'[{"artifacts":[{"id":9,"name":"autofix-e2e-failure-123-456-2-700-1","expired":false,"workflow_run":{"id":700}}]}]\';;',
+        '  *"actions/runs/700"*) printf \'%s\' \'{"path":".github/workflows/main-ci-failure-issue.yml","event":"workflow_run"}\';;',
+        '  *"actions/artifacts/9/zip"*) printf \'zip-bytes\';;',
+        '  *"actions/runs/456"*) printf \'%s\' \'{"name":"E2E Tests","run_attempt":2,"event":"push","head_branch":"main","conclusion":"success","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\';;',
+        '  *) exit 1;;',
+        'esac',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(bin, 'unzip'),
+      [
+        '#!/usr/bin/env bash',
+        'if [[ "$1" == "-Z1" ]]; then',
+        "  printf 'metadata.json\\n'",
+        'else',
+        `  printf '%s' '${encodedMetadata}' | base64 --decode`,
+        'fi',
+        '',
+      ].join('\n'),
+    );
+    chmodSync(join(bin, 'gh'), 0o755);
+    chmodSync(join(bin, 'unzip'), 0o755);
+    process.env['PATH'] = `${bin}:${originalPath}`;
+    assert.throws(
+      () =>
+        loadMetadata({
+          issue: 123,
+          repository: 'QwenLM/qwen-code',
+          output,
+        }),
+      /Source run conclusion mismatch/,
+    );
+  } finally {
+    process.env['PATH'] = originalPath;
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('rejects zip metadata naming a different source run than the artifact name', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'load-e2e-namebind-test-'));
+  const bin = join(directory, 'bin');
+  const output = join(directory, 'metadata.json');
+  const originalPath = process.env['PATH'];
+  const renamedSource = {
+    ...metadata,
+    source: { ...metadata.source, runId: 999 },
+  };
+  const encodedMetadata = Buffer.from(JSON.stringify(renamedSource)).toString(
+    'base64',
+  );
+  try {
+    mkdirSync(bin);
+    writeFileSync(
+      join(bin, 'gh'),
+      [
+        '#!/usr/bin/env bash',
+        'case "$*" in',
+        '  *"actions/artifacts?per_page=100"*) printf \'%s\' \'[{"artifacts":[{"id":9,"name":"autofix-e2e-failure-123-456-2-700-1","expired":false,"workflow_run":{"id":700}}]}]\';;',
+        '  *"actions/runs/700"*) printf \'%s\' \'{"path":".github/workflows/main-ci-failure-issue.yml","event":"workflow_run"}\';;',
+        '  *"actions/artifacts/9/zip"*) printf \'zip-bytes\';;',
+        '  *) exit 1;;',
+        'esac',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(bin, 'unzip'),
+      [
+        '#!/usr/bin/env bash',
+        'if [[ "$1" == "-Z1" ]]; then',
+        "  printf 'metadata.json\\n'",
+        'else',
+        `  printf '%s' '${encodedMetadata}' | base64 --decode`,
+        'fi',
+        '',
+      ].join('\n'),
+    );
+    chmodSync(join(bin, 'gh'), 0o755);
+    chmodSync(join(bin, 'unzip'), 0o755);
+    process.env['PATH'] = `${bin}:${originalPath}`;
+    assert.throws(
+      () =>
+        loadMetadata({
+          issue: 123,
+          repository: 'QwenLM/qwen-code',
+          output,
+        }),
+      /Artifact name does not match source metadata/,
+    );
+  } finally {
+    process.env['PATH'] = originalPath;
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('rejects an artifact whose real producer run differs from its name', () => {
   const directory = mkdtempSync(join(tmpdir(), 'load-e2e-mismatch-test-'));
   const bin = join(directory, 'bin');

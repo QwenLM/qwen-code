@@ -683,6 +683,10 @@ jobs:
       E2E_REQUIRED_LABEL: 'autofix/e2e-verification-required'
       AUTOFIX_ROUTING_LABEL: 'autofix/routing'
       AUTOFIX_ISSUE_EXCLUDES: '-linked:pr -label:autofix/skip -label:autofix/in-progress -label:autofix/routing -label:status/need-information -label:status/need-retesting sort:created-desc'
+      # Approvals labeled before this date predate the approval-marker
+      # rollout; the scan backfills their marker from the label event time
+      # instead of rejecting them forever.
+      APPROVAL_MARKER_CUTOVER: '2026-08-02T00:00:00Z'
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
@@ -924,6 +928,22 @@ jobs:
                 'any(.[].[]; .user.login == $bot and (.body // "") == $marker)' \
                 <<< "${approval_comments}" > /dev/null; then
                 printf '%s\n' "${candidate}" >> "${approved_candidates}"
+                continue
+              fi
+              # Rollout grandfather: approvals labeled before the marker
+              # existed have no bot comment to match. Backfill the marker
+              # from the approval label event time; post-cutover approvals
+              # must keep the marker the labeled-event step records.
+              approval_labeled_at="$(gh api --paginate \
+                "repos/${REPO}/issues/${candidate_issue}/timeline?per_page=100" --slurp \
+                | jq -r --arg approved "${AUTOFIX_APPROVED_LABEL}" \
+                  '[ .[][] | select(.event == "labeled" and (.label.name // "") == $approved) | .created_at ] | max // empty')" \
+                || approval_labeled_at=''
+              if [[ -n "${approval_labeled_at}" && "${approval_labeled_at}" < "${APPROVAL_MARKER_CUTOVER}" ]] &&
+                gh issue comment "${candidate_issue}" --repo "${REPO}" \
+                  --body "${approval_marker}"; then
+                echo "🕰️ Issue #${candidate_issue} approval predates the marker rollout; recorded the marker and continuing."
+                printf '%s\n' "${candidate}" >> "${approved_candidates}"
               else
                 echo "⏭️ Issue #${candidate_issue} prose does not match a bot-recorded approval; skipping."
               fi
@@ -1100,7 +1120,7 @@ jobs:
               exit 0
             fi
             if ! jq -e --arg bot "${AUTOFIX_BOT}" --arg ready "${READY_FOR_AGENT_LABEL}" --arg approved "${AUTOFIX_APPROVED_LABEL}" --arg routing "${AUTOFIX_ROUTING_LABEL}" \
-              '(.labels // []) | map(.name) as $labels |
+              '(.labels // [] | map(.name)) as $labels |
                 (($labels | index($ready)) and
                  ($labels | index($approved)) and
                  (($labels | index($routing)) == null)) and
@@ -1155,11 +1175,45 @@ jobs:
             exit 0
           fi
 
-          node "${RUNNER_TEMP}/load-autofix-e2e-metadata.mjs" \
+          if ! node "${RUNNER_TEMP}/load-autofix-e2e-metadata.mjs" \
             --issue "${ISSUE}" \
             --repository "${REPO}" \
-            --output "${WORKDIR}/ci-failure.json"
+            --output "${WORKDIR}/ci-failure.json" 2>&1 |
+            tee "${WORKDIR}/e2e-load.log"; then
+            exit 1
+          fi
           echo 'required=true' >> "${GITHUB_OUTPUT}"
+
+      - name: 'Neutralize expired targeted E2E requirement'
+        if: |-
+          ${{ failure() && steps.targeted-e2e.outcome == 'failure' && needs.route.outputs.dry_run != 'true' }}
+        env:
+          GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+          ISSUE: '${{ steps.decision.outputs.go_issue }}'
+        run: |-
+          if ! grep -Eq 'No (live|trusted) artifact with prefix' \
+            "${WORKDIR}/e2e-load.log" 2> /dev/null; then
+            echo 'Metadata load failed without a definitive missing-artifact diagnosis; leaving routing state untouched.'
+            exit 0
+          fi
+          if ! live_issue_json="$(gh issue view "${ISSUE}" --repo "${REPO}" --json labels)"; then
+            echo '::warning::Failed to re-read issue labels; leaving routing state untouched.'
+            exit 0
+          fi
+          if ! jq -e --arg label "${E2E_REQUIRED_LABEL}" \
+            '(.labels // []) | map(.name) | index($label) != null' \
+            <<< "${live_issue_json}" > /dev/null; then
+            echo "Issue #${ISSUE} no longer carries ${E2E_REQUIRED_LABEL}; nothing to neutralize."
+            exit 0
+          fi
+          if ! gh issue edit "${ISSUE}" --repo "${REPO}" \
+            --remove-label "${E2E_REQUIRED_LABEL}"; then
+            echo '::error::Failed to remove the expired targeted E2E requirement label.'
+            exit 1
+          fi
+          gh issue comment "${ISSUE}" --repo "${REPO}" \
+            --body "🤖 The targeted E2E metadata artifact for this issue expired or no longer exists, so the \`autofix/e2e-verification-required\` label was removed to keep the issue from failing closed forever. The issue can now proceed through the standard deterministic gates; a future authenticated main E2E failure will re-route it with fresh metadata." \
+            || echo '::warning::Failed to post the targeted E2E neutralization comment.'
 
       - name: 'Claim issue'
         id: 'claim'
@@ -1521,8 +1575,6 @@ jobs:
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '22.x'
-          cache: 'npm'
-          cache-dependency-path: 'package-lock.json'
 
       - name: 'Protect candidate worktree'
         run: |-
@@ -1587,6 +1639,27 @@ jobs:
             git status --short
             exit 1
           fi
+
+      - name: 'Report verification failure'
+        if: |-
+          ${{ always() && failure() }}
+        run: |-
+          {
+            echo "### Autofix deterministic verification failed for issue #${ISSUE}"
+            echo
+            echo 'The packaged candidate failed the re-run deterministic gates; the gate output in this job log is authoritative. The agent-authored files below are context only.'
+            echo
+            workdir="${RUNNER_TEMP}/autofix-candidate/workdir"
+            for f in pr-title.txt pr-body.md e2e-report.md; do
+              if [[ -s "${workdir}/${f}" ]]; then
+                echo "**${f}:**"
+                echo '```'
+                cat "${workdir}/${f}"
+                echo '```'
+                echo
+              fi
+            done
+          } >> "${GITHUB_STEP_SUMMARY}"
 
   issue-autofix-targeted-e2e:
     needs: ['issue-autofix', 'issue-autofix-verify']
@@ -1682,8 +1755,6 @@ jobs:
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '22.x'
-          cache: 'npm'
-          cache-dependency-path: 'package-lock.json'
 
       - name: 'Protect candidate worktree'
         if: |-
@@ -1735,6 +1806,22 @@ jobs:
           path: '${{ runner.temp }}/autofix-verified/'
           if-no-files-found: 'error'
           retention-days: 1
+
+      - name: 'Report targeted E2E failure'
+        if: |-
+          ${{ always() && failure() }}
+        run: |-
+          {
+            echo "### Autofix targeted E2E verification failed for issue #${ISSUE}"
+            echo
+            if [[ -s "${RUNNER_TEMP}/targeted-e2e-report.md" ]]; then
+              echo '```'
+              cat "${RUNNER_TEMP}/targeted-e2e-report.md"
+              echo '```'
+            else
+              echo 'No targeted E2E report was produced.'
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
 
   issue-autofix-publish:
     needs:
@@ -2064,12 +2151,8 @@ jobs:
             exit 1
           fi
           if [[ "${published_oid}" != "${EXPECTED_OID}" ]]; then
-            if ! remove_verified_branch; then
-              preserve_claim
-              echo '::error::The unexpected Autofix branch could not be removed; preserving it for recovery.'
-              exit 1
-            fi
-            echo '::error::Autofix branch did not resolve to the verified candidate commit.'
+            preserve_claim
+            echo '::error::Autofix branch did not resolve to the verified candidate commit; preserving it for recovery.'
             exit 1
           fi
           set +e
@@ -2154,9 +2237,12 @@ jobs:
           [[ -z "$(git status --porcelain)" ]]
           claim_ref="refs/heads/autofix/claim-issue-${ISSUE}"
           [[ "${CLAIM_OID}" =~ ^[0-9a-f]{40}$ ]] || exit 0
-          if ! claim_oid="$(gh api "repos/${REPO}/git/ref/${claim_ref#refs/}" --jq '.object.sha')" ||
-            [[ "${claim_oid}" != "${CLAIM_OID}" ]]; then
-            echo '::warning::Autofix claim ownership changed or could not be confirmed; leaving the issue and claim ref untouched.'
+          if ! claim_oid="$(gh api "repos/${REPO}/git/ref/${claim_ref#refs/}" --jq '.object.sha')"; then
+            echo '::warning::Could not confirm Autofix claim ownership; preserving the claim ref for recovery.'
+            exit 1
+          fi
+          if [[ "${claim_oid}" != "${CLAIM_OID}" ]]; then
+            echo '::warning::Autofix claim ownership changed; leaving the issue and claim ref untouched.'
             exit 0
           fi
           REASON='the issue will require the `autofix/approved` label to be re-added before any future automated attempt.'
@@ -2181,7 +2267,9 @@ jobs:
             echo '::warning::Failed to remove the visible claim assignee; preserving the claim ref for recovery.'
             exit 1
           fi
-          claim_comment_marker="<!-- autofix-claim issue=${ISSUE} run=${GITHUB_RUN_ID} attempt=${GITHUB_RUN_ATTEMPT} -->"
+          # Attempt-independent prefix: after 'Re-run failed jobs' the attempt
+          # number no longer matches the comment posted by the original claim.
+          claim_comment_marker="<!-- autofix-claim issue=${ISSUE} run=${GITHUB_RUN_ID}"
           if ! claim_comment_ids="$(gh api --paginate \
             "repos/${REPO}/issues/${ISSUE}/comments?per_page=100" --slurp |
             jq -c --arg bot "${AUTOFIX_BOT}" --arg marker "${claim_comment_marker}" \
@@ -2211,6 +2299,16 @@ jobs:
           What the agent found, in case it helps a human contributor:
 
           ${DETAIL}" || true
+
+      - name: 'Report publication failure'
+        if: |-
+          ${{ always() && failure() }}
+        run: |-
+          {
+            echo "### Autofix publication failed for issue #${ISSUE}"
+            echo
+            echo 'Publication stopped before a verified PR was created. Check the proof, publish, and withdraw steps above; the claim is preserved or withdrawn as reported there.'
+          } >> "${GITHUB_STEP_SUMMARY}"
 
   # ===========================================================================
   # TAKEOVER COMMAND — the accepted comment command's side effects are the

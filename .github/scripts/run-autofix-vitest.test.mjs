@@ -77,6 +77,19 @@ test('keeps the JSON proof root-owned and kills all candidate processes', () => 
   assert.match(wrapper, /sudo pkill -KILL -u "\$\{uid\}"/);
   assert.match(wrapper, /sudo chown root:root "\$\{report\}"/);
   assert.match(wrapper, /sudo chmod 0444 "\$\{report\}"/);
+  // The proof check must run privileged BEFORE the downgrade: the report
+  // directory is 0700 root:root, so an unprivileged [[ -f ]] stats EACCES
+  // and every passing run would abort via the EXIT trap.
+  assert.match(wrapper, /sudo test -f "\$\{report\}"/);
+  assert.match(wrapper, /sudo test ! -L "\$\{report\}"/);
+  assert.ok(
+    wrapper.indexOf('sudo test -f "${report}"') <
+      wrapper.indexOf('sudo chown root:root "${report}"'),
+  );
+  assert.ok(
+    wrapper.indexOf('sudo test ! -L "${report}"') <
+      wrapper.indexOf('sudo chown root:root "${report}"'),
+  );
   assert.match(
     wrapper,
     /sudo chmod 0555 "\$\{home\}\/reports\/\$\{report_name\}"/,

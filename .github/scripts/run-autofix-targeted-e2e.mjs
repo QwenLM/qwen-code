@@ -11,7 +11,10 @@ import { tmpdir } from 'node:os';
 import { isAbsolute, join, normalize, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { isProtectedVerificationPath } from './validate-autofix-verification-outputs.mjs';
+import {
+  isProtectedVerificationPath,
+  listProtectedCandidateChanges,
+} from './validate-autofix-verification-outputs.mjs';
 
 export { isProtectedVerificationPath };
 
@@ -148,16 +151,7 @@ export function validateCandidateScope(
     cwd: workspace,
     stdio: 'pipe',
   });
-  const changedOutput = run(
-    'git',
-    ['diff', '--name-only', '--no-renames', '-z', `${base}...HEAD`],
-    { cwd: workspace, stdio: 'pipe', encoding: 'buffer' },
-  ).stdout;
-  const changedText = changedOutput.toString('utf8');
-  if (!Buffer.from(changedText).equals(changedOutput))
-    fail('Candidate changed a path that is not valid UTF-8');
-  const changed = changedText.split('\0').filter(Boolean);
-  const protectedChanges = changed.filter(isProtectedVerificationPath);
+  const protectedChanges = listProtectedCandidateChanges(base, workspace);
   if (protectedChanges.length)
     fail(
       `Candidate changes trusted targeted E2E inputs: ${protectedChanges.join(', ')}`,

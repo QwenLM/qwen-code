@@ -142,16 +142,14 @@ export function loadMetadata({ issue, repository, output }) {
   try {
     const trusted = [];
     for (const artifact of artifacts) {
-      let producerRunId;
-      let producerRun;
+      const producerRunId = positiveInteger(
+        artifact.workflow_run?.id,
+        'artifact producer run ID',
+      );
+      const producerRun = ghJson(
+        `repos/${repository}/actions/runs/${producerRunId}`,
+      );
       try {
-        producerRunId = positiveInteger(
-          artifact.workflow_run?.id,
-          'artifact producer run ID',
-        );
-        producerRun = ghJson(
-          `repos/${repository}/actions/runs/${producerRunId}`,
-        );
         validateProducerRun(producerRun);
       } catch (error) {
         process.stderr.write(`Skipping artifact ${artifact.id}: ${error}\n`);

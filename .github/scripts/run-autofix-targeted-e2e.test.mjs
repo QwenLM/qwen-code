@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import {
+  chmodSync,
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -21,6 +24,7 @@ import {
   escapeRegex,
   expectedFullName,
   isProtectedVerificationPath,
+  runTargetedE2e,
   validateCandidateScope,
   validateMetadata,
   validateTestPath,
@@ -121,7 +125,7 @@ test('validates candidate scope and rebuilds before targeted E2E cases', () => {
   const reportAt = source.indexOf("[workspace, 'report', reportName]");
   const vitestAt = source.indexOf('run(vitestWrapper,');
   const readReportAt = source.indexOf(
-    "JSON.parse(readFileSync(jsonPath",
+    'JSON.parse(readFileSync(jsonPath',
     vitestAt,
   );
   const validateReportAt = source.indexOf(
@@ -338,6 +342,34 @@ test('rejects candidates that change trusted targeted E2E inputs', () => {
   });
 });
 
+test('rejects candidates that add symbolic links outside protected paths', () => {
+  withWorkspace((workspace) => {
+    mkdirSync(join(workspace, 'packages', 'core', 'src'), { recursive: true });
+    writeFileSync(
+      join(workspace, 'packages', 'core', 'src', 'feature.ts'),
+      'v1',
+    );
+    initRepository(workspace);
+    commit(workspace, 'source');
+    const sourceSha = headSha(workspace);
+
+    symlinkSync(
+      join(workspace, 'packages', 'core', 'src', 'feature.ts'),
+      join(workspace, 'link.ts'),
+    );
+    commit(workspace, 'add symlink');
+    assert.throws(
+      () =>
+        validateCandidateScope(
+          { source: { headSha: sourceSha } },
+          sourceSha,
+          workspace,
+        ),
+      /Candidate changes trusted targeted E2E inputs: link\.ts/,
+    );
+  });
+});
+
 test('scopes the candidate diff to the candidate base, not the failed source SHA', () => {
   withWorkspace((workspace) => {
     mkdirSync(join(workspace, 'packages', 'core', 'src'), { recursive: true });
@@ -394,6 +426,193 @@ test('rejects protected paths containing Git quoting characters', () => {
         ),
       /Candidate changes trusted targeted E2E inputs/,
     );
+  });
+});
+
+function withRunMocks(workspace, sourceSha, run) {
+  const home = mkdtempSync(join(tmpdir(), 'targeted-e2e-run-test-'));
+  const log = join(home, 'calls.log');
+  const wrappers = join(home, 'wrappers');
+  mkdirSync(wrappers);
+  const metadataPath = join(home, 'metadata.json');
+  writeFileSync(
+    metadataPath,
+    JSON.stringify({ ...metadata(testCase), source: { headSha: sourceSha } }),
+  );
+  const commandWrapper = join(wrappers, 'command-wrapper.sh');
+  const worktreeHelper = join(wrappers, 'worktree-helper.sh');
+  const vitestWrapper = join(wrappers, 'vitest-wrapper.sh');
+  const outputValidator = join(wrappers, 'output-validator.mjs');
+  writeFileSync(
+    commandWrapper,
+    `#!/usr/bin/env bash\nprintf 'command %s\\n' "$*" >> ${JSON.stringify(log)}\n`,
+  );
+  writeFileSync(
+    worktreeHelper,
+    [
+      '#!/usr/bin/env bash',
+      'set -euo pipefail',
+      `printf 'worktree %s\\n' "$*" >> ${JSON.stringify(log)}`,
+      'case "${2:-}" in',
+      '  report) mkdir -p "/tmp/qwen-autofix-verify-home/reports/${3}";;',
+      '  remove-report) rm -rf "/tmp/qwen-autofix-verify-home/reports/${3}";;',
+      'esac',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(
+    vitestWrapper,
+    [
+      '#!/usr/bin/env bash',
+      'set -euo pipefail',
+      `printf 'vitest %s\\n' "$*" >> ${JSON.stringify(log)}`,
+      'if [[ "${VITEST_WRAPPER_FAIL:-}" == "true" ]]; then',
+      '  exit 2',
+      'fi',
+      'report_dir="/tmp/qwen-autofix-verify-home/reports/${2}"',
+      'mkdir -p "${report_dir}"',
+      'cat > "${report_dir}/report.json" <<EOF',
+      '{',
+      '  "success": true,',
+      '  "testResults": [',
+      '    {',
+      `      "name": "${workspace}/integration-tests/${testCase.file}",`,
+      '      "assertionResults": [',
+      `        { "fullName": "${expectedFullName(testCase)}", "status": "passed" }`,
+      '      ]',
+      '    }',
+      '  ]',
+      '}',
+      'EOF',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(
+    outputValidator,
+    `import { appendFileSync } from 'node:fs';\nappendFileSync(${JSON.stringify(log)}, 'validator\\n');\n`,
+  );
+  for (const script of [commandWrapper, worktreeHelper, vitestWrapper]) {
+    chmodSync(script, 0o755);
+  }
+  try {
+    return run({
+      home,
+      log,
+      metadataPath,
+      reportPath: join(home, 'report.md'),
+      commandWrapper,
+      worktreeHelper,
+      vitestWrapper,
+      outputValidator,
+    });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+test('runs targeted E2E cases through the trusted wrappers end to end', () => {
+  withWorkspace((workspace) => {
+    mkdirSync(join(workspace, 'packages', 'core', 'src'), { recursive: true });
+    writeFileSync(
+      join(workspace, 'packages', 'core', 'src', 'feature.ts'),
+      'v1',
+    );
+    initRepository(workspace);
+    commit(workspace, 'source');
+    const sourceSha = headSha(workspace);
+    writeFileSync(
+      join(workspace, 'packages', 'core', 'src', 'feature.ts'),
+      'v2',
+    );
+    commit(workspace, 'production fix');
+
+    withRunMocks(workspace, sourceSha, (mocks) => {
+      runTargetedE2e({
+        metadataPath: mocks.metadataPath,
+        reportPath: mocks.reportPath,
+        base: sourceSha,
+        workspace,
+        commandWrapper: mocks.commandWrapper,
+        vitestWrapper: mocks.vitestWrapper,
+        worktreeHelper: mocks.worktreeHelper,
+        outputValidator: mocks.outputValidator,
+      });
+      assert.equal(
+        readFileSync(mocks.reportPath, 'utf8'),
+        `# Targeted E2E verification\n\n- ${testCase.id} — passed (${testCase.sandbox})\n`,
+      );
+      assert.deepEqual(
+        readFileSync(mocks.log, 'utf8').split('\n').filter(Boolean),
+        [
+          `command ${workspace} npm ci --ignore-scripts --prefer-offline --no-audit --progress=false`,
+          `command ${workspace} npx --no-install patch-package`,
+          `worktree ${workspace} dependencies`,
+          `command ${workspace} npm run generate`,
+          `command ${workspace} npm run build`,
+          `command ${workspace} npm run bundle`,
+          'validator',
+          `worktree ${workspace} finalize`,
+          `worktree ${workspace} report case-0`,
+          `vitest ${workspace} case-0 ${testCase.file} ^${escapeRegex(expectedFullName(testCase))}$`,
+          `worktree ${workspace} remove-report case-0`,
+          `worktree ${workspace} cleanup`,
+          'validator',
+        ],
+      );
+      assert.equal(
+        existsSync('/tmp/qwen-autofix-verify-home/reports/case-0'),
+        false,
+      );
+    });
+  });
+});
+
+test('removes the sealed report directory when a targeted case fails', () => {
+  withWorkspace((workspace) => {
+    mkdirSync(join(workspace, 'packages', 'core', 'src'), { recursive: true });
+    writeFileSync(
+      join(workspace, 'packages', 'core', 'src', 'feature.ts'),
+      'v1',
+    );
+    initRepository(workspace);
+    commit(workspace, 'source');
+    const sourceSha = headSha(workspace);
+
+    withRunMocks(workspace, sourceSha, (mocks) => {
+      process.env['VITEST_WRAPPER_FAIL'] = 'true';
+      try {
+        assert.throws(
+          () =>
+            runTargetedE2e({
+              metadataPath: mocks.metadataPath,
+              reportPath: mocks.reportPath,
+              base: sourceSha,
+              workspace,
+              commandWrapper: mocks.commandWrapper,
+              vitestWrapper: mocks.vitestWrapper,
+              worktreeHelper: mocks.worktreeHelper,
+              outputValidator: mocks.outputValidator,
+            }),
+          /exited with status 2/,
+        );
+      } finally {
+        delete process.env['VITEST_WRAPPER_FAIL'];
+      }
+      const report = readFileSync(mocks.reportPath, 'utf8');
+      assert.match(report, /^# Targeted E2E verification/);
+      assert.match(report, /- failed: .*exited with status 2/);
+      // The finally-block cleanup must still remove the sealed report dir.
+      const calls = readFileSync(mocks.log, 'utf8');
+      assert.match(calls, new RegExp(`worktree ${workspace} report case-0`));
+      assert.match(
+        calls,
+        new RegExp(`worktree ${workspace} remove-report case-0`),
+      );
+      assert.equal(
+        existsSync('/tmp/qwen-autofix-verify-home/reports/case-0'),
+        false,
+      );
+    });
   });
 });
 

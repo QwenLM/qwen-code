@@ -103,6 +103,11 @@ describe('main CI failure issue workflow', () => {
     const requiredLabelIndex = workflow.indexOf(
       '--add-label "${E2E_REQUIRED_LABEL}"',
     );
+    // Link the two chains: the required label must come AFTER the upload
+    // step, so relocating the add-label into an earlier step fails here.
+    expect(
+      workflow.indexOf("- name: 'Upload targeted E2E metadata'"),
+    ).toBeLessThan(requiredLabelIndex);
     const approvalMarkerIndex = workflow.indexOf(
       'autofix-approved-prose-sha256:${approval_digest}',
     );

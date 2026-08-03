@@ -111,7 +111,11 @@ const readDecisionStep =
   )?.[0] ?? '';
 const loadTargetedE2eStep =
   workflow.match(
-    /- name: 'Load targeted E2E requirement'[\s\S]*?(?=\n[ ]{6}- name: 'Claim issue')/,
+    /- name: 'Load targeted E2E requirement'[\s\S]*?(?=\n[ ]{6}- name: 'Neutralize expired targeted E2E requirement')/,
+  )?.[0] ?? '';
+const neutralizeE2eRequirementStep =
+  workflow.match(
+    /- name: 'Neutralize expired targeted E2E requirement'[\s\S]*?(?=\n[ ]{6}- name: 'Claim issue')/,
   )?.[0] ?? '';
 const claimIssueStep =
   workflow.match(
@@ -262,7 +266,9 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain(
       'select(((.assignees // []) | all(.login == $bot)) and',
     );
-    expect(workflow).not.toContain("AUTOFIX_ISSUE_EXCLUDES: 'no:assignee");
+    // Collision-free negative pin: reintroducing no:assignee anywhere in the
+    // excludes silently drops unassigned approved issues from every scan.
+    expect(workflow).not.toContain('no:assignee');
     expect(workflow).toContain(
       '--search "is:open is:issue label:${READY_FOR_AGENT_LABEL} label:${AUTOFIX_APPROVED_LABEL} ${AUTOFIX_ISSUE_EXCLUDES}"',
     );
@@ -1859,6 +1865,46 @@ describe('qwen-autofix workflow', () => {
       'node "${RUNNER_TEMP}/load-autofix-e2e-metadata.mjs"',
     );
     expect(loadTargetedE2eStep).toContain('required=true');
+    expect(loadTargetedE2eStep).toContain('tee "${WORKDIR}/e2e-load.log"');
+    // Definitive artifact loss neutralizes the routing state so the issue
+    // self-recovers instead of failing closed on every future run; the
+    // neutralization step is the only one here carrying the bot PAT.
+    expect(loadTargetedE2eStep).not.toContain('--remove-label');
+    expect(neutralizeE2eRequirementStep).toContain(
+      "GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'",
+    );
+    expect(neutralizeE2eRequirementStep).toContain(
+      "failure() && steps.targeted-e2e.outcome == 'failure' && needs.route.outputs.dry_run != 'true'",
+    );
+    expect(neutralizeE2eRequirementStep).toContain(
+      'No (live|trusted) artifact with prefix',
+    );
+    expect(neutralizeE2eRequirementStep).toContain(
+      '--remove-label "${E2E_REQUIRED_LABEL}"',
+    );
+    expect(neutralizeE2eRequirementStep).toContain(
+      'leaving routing state untouched',
+    );
+    // The isolated wrappers force a fresh per-invocation npm cache, so the
+    // fresh verification jobs must not restore one they can never read.
+    expect(issueAutofixVerifyJob).not.toContain("cache: 'npm'");
+    expect(issueAutofixTargetedE2eJob).not.toContain("cache: 'npm'");
+    // Each new job reports its own failures to the run summary.
+    expect(issueAutofixVerifyJob).toContain(
+      "- name: 'Report verification failure'",
+    );
+    expect(issueAutofixVerifyJob).toContain(
+      'Autofix deterministic verification failed for issue #${ISSUE}',
+    );
+    expect(issueAutofixTargetedE2eJob).toContain(
+      "- name: 'Report targeted E2E failure'",
+    );
+    expect(issueAutofixTargetedE2eJob).toContain(
+      'No targeted E2E report was produced.',
+    );
+    expect(issueAutofixPublishJob).toContain(
+      "- name: 'Report publication failure'",
+    );
     expect(issueAutofixJob).not.toContain(
       'node "${RUNNER_TEMP}/run-autofix-targeted-e2e.mjs"',
     );
@@ -1913,13 +1959,28 @@ describe('qwen-autofix workflow', () => {
       expect(freshJob).toContain(
         "TRUSTED_BASE_OID: '${{ needs.issue-autofix.outputs.base_oid }}'",
       );
-      expect(freshJob).toMatch(
-        /"\$\{base_oid\}" [!=]= "\$\{TRUSTED_BASE_OID\}"/,
-      );
-      expect(freshJob).toMatch(
-        /"\$\(git rev-parse HEAD\^\{commit\}\)" [!=]= "\$\{TRUSTED_BASE_OID\}"/,
-      );
     }
+    // Pin each job's exact gate polarity: the restore gates abort on `!=`,
+    // the publish proof asserts `==` under set -e. A polarity-blind
+    // regex would let an inverted gate through.
+    expect(issueAutofixVerifyJob).toContain(
+      '"${base_oid}" != "${TRUSTED_BASE_OID}"',
+    );
+    expect(issueAutofixVerifyJob).toContain(
+      '"$(git rev-parse HEAD^{commit})" != "${TRUSTED_BASE_OID}"',
+    );
+    expect(issueAutofixTargetedE2eJob).toContain(
+      '"${base_oid}" != "${TRUSTED_BASE_OID}"',
+    );
+    expect(issueAutofixTargetedE2eJob).toContain(
+      '"$(git rev-parse HEAD^{commit})" != "${TRUSTED_BASE_OID}"',
+    );
+    expect(issueAutofixPublishJob).toContain(
+      '[[ "${base_oid}" == "${TRUSTED_BASE_OID}" ]]',
+    );
+    expect(issueAutofixPublishJob).toContain(
+      '[[ "$(git rev-parse HEAD^{commit})" == "${TRUSTED_BASE_OID}" ]]',
+    );
     expect(issueAutofixVerifyJob).toContain('"${candidate_dir}/base-oid"');
     expect(issueAutofixVerifyJob).toContain(
       'git merge-base --is-ancestor "${base_oid}" "${expected_oid}"',
@@ -2120,8 +2181,14 @@ describe('qwen-autofix workflow', () => {
     expect(publishPrStep).toContain('origin --delete "${BRANCH}"');
     expect(publishPrStep).not.toContain('origin --delete "${BRANCH}" || true');
     expect(publishPrStep).toContain('if ! remove_verified_branch; then');
+    // The post-push OID-mismatch branch can never satisfy an EXPECTED_OID
+    // lease, so it preserves the branch instead of attempting a deletion
+    // that is unsatisfiable by construction.
     expect(publishPrStep).toContain(
-      'The unexpected Autofix branch could not be removed; preserving it for recovery.',
+      'Autofix branch did not resolve to the verified candidate commit; preserving it for recovery.',
+    );
+    expect(publishPrStep).not.toContain(
+      'The unexpected Autofix branch could not be removed',
     );
     expect(publishPrStep).toContain(
       'The Autofix branch could not be removed after issue state changed; preserving it for recovery.',
@@ -2553,6 +2620,23 @@ printf '%s\\n' "\${status}"
     );
     expect(findCandidateIssuesStep).toContain(
       'prose does not match a bot-recorded approval; skipping.',
+    );
+    // Rollout grandfather: pre-marker approvals are backfilled from the
+    // approval label event time; post-cutover approvals keep the marker.
+    expect(issueAutofixJob).toContain(
+      "APPROVAL_MARKER_CUTOVER: '2026-08-02T00:00:00Z'",
+    );
+    expect(findCandidateIssuesStep).toContain(
+      'repos/${REPO}/issues/${candidate_issue}/timeline?per_page=100',
+    );
+    expect(findCandidateIssuesStep).toContain(
+      'select(.event == "labeled" and (.label.name // "") == $approved)',
+    );
+    expect(findCandidateIssuesStep).toContain(
+      '"${approval_labeled_at}" < "${APPROVAL_MARKER_CUTOVER}"',
+    );
+    expect(findCandidateIssuesStep).toContain(
+      'approval predates the marker rollout; recorded the marker',
     );
     expect(claimIssueStep).toContain(
       '--json state,title,body,labels,assignees,closedByPullRequestsReferences',
@@ -5454,9 +5538,14 @@ printf '%s\\n' "\${status}"
     expect(readDecisionStep).toContain(
       '[[ -n "${GO}" && "${DRY_RUN}" != "true" && "${EVENT_NAME}" != \'workflow_dispatch\' ]]',
     );
-    expect(readDecisionStep).toContain('($labels | index($ready))');
-    expect(readDecisionStep).toContain('($labels | index($approved))');
-    expect(readDecisionStep).toContain('(($labels | index($routing)) == null)');
+    // Pin the whole routing-stage gate as one conjoined expression on
+    // whitespace-normalized text: bare substring checks lose both the `and`
+    // binding and the polarity of the required-label checks. The binding
+    // form also matters: piping into `as` re-roots the input and breaks
+    // `.assignees`/`.closedByPullRequestsReferences` at runtime.
+    expect(readDecisionStep.replace(/\s+/g, ' ')).toContain(
+      '(.labels // [] | map(.name)) as $labels | (($labels | index($ready)) and ($labels | index($approved)) and (($labels | index($routing)) == null)) and ((.assignees // []) | all(.login == $bot)) and ((.closedByPullRequestsReferences // []) | length == 0)',
+    );
     expect(readDecisionStep).toContain(
       '::warning::Failed to re-validate live labels for issue #${GO}; skipping due to API error',
     );
@@ -5479,6 +5568,14 @@ printf '%s\\n' "\${status}"
     expect(withdrawClaimStep).toContain(
       'leaving the issue and claim ref untouched.',
     );
+    // A transient API failure reading the claim ref must fail loud and
+    // preserve the ref, not be lumped with a legitimate takeover.
+    expect(withdrawClaimStep).toContain(
+      'Could not confirm Autofix claim ownership; preserving the claim ref for recovery.',
+    );
+    expect(withdrawClaimStep).not.toContain(
+      'claim ownership changed or could not be confirmed',
+    );
     expect(withdrawClaimStep).toContain(
       '--force-with-lease="${claim_ref}:${CLAIM_OID}"',
     );
@@ -5499,8 +5596,14 @@ printf '%s\\n' "\${status}"
     );
     expect(withdrawClaimStep).toContain("--remove-label 'autofix/in-progress'");
     expect(withdrawClaimStep).toContain('--remove-assignee "${AUTOFIX_BOT}"');
+    // Attempt-independent rediscovery: after 'Re-run failed jobs' the
+    // attempt number no longer matches the original claim comment, so the
+    // withdraw must match on the run-scoped prefix only.
     expect(withdrawClaimStep).toContain(
-      '<!-- autofix-claim issue=${ISSUE} run=${GITHUB_RUN_ID} attempt=${GITHUB_RUN_ATTEMPT} -->',
+      'claim_comment_marker="<!-- autofix-claim issue=${ISSUE} run=${GITHUB_RUN_ID}"',
+    );
+    expect(withdrawClaimStep).not.toContain(
+      'claim_comment_marker="<!-- autofix-claim issue=${ISSUE} run=${GITHUB_RUN_ID} attempt=',
     );
     expect(withdrawClaimStep).toContain(
       'repos/${REPO}/issues/${ISSUE}/comments?per_page=100',
@@ -6291,18 +6394,13 @@ printf '%s\\n' "\${status}"
     }
     // The issue-fix verify gate runs the contracts script through the
     // credential-free isolated-UID wrapper; collapsing run_candidate to
-    // bare "$@" would bypass the isolation.
+    // bare "$@" would bypass the isolation. Pin the prefix to the contracts
+    // invocation itself: a lastIndexOf before the call is also satisfied by
+    // the settings-schema invocation's prefix.
     const issueVerifyGate = verificationGateBodies[0];
-    const contractsAt = issueVerifyGate.indexOf(
-      'bash "${RUNNER_TEMP}/check-autofix-contracts.sh"',
+    expect(issueVerifyGate.replace(/\s+/g, ' ')).toContain(
+      '| AUTOFIX_VERIFY_COMMAND="${verify_cmd}" \\ bash "${RUNNER_TEMP}/check-autofix-contracts.sh"',
     );
-    expect(contractsAt).toBeGreaterThan(-1);
-    expect(
-      issueVerifyGate.lastIndexOf(
-        'AUTOFIX_VERIFY_COMMAND="${verify_cmd}"',
-        contractsAt,
-      ),
-    ).toBeGreaterThan(-1);
     // Both jobs must stage the trusted copy before any branch switch.
     expect(
       workflow.match(
