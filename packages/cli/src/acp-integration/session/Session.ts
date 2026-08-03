@@ -8813,6 +8813,11 @@ export class Session implements SessionContext {
         throw new Error(unsupportedError);
       }
 
+      case 'goal_control':
+        throw new Error(
+          'Canonical Goal control is not available in ACP integration yet.',
+        );
+
       case 'no_command':
         // No command was found or executed, resolve the original prompt
         // through the standard path that handles all block types. promptLast
