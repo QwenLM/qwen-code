@@ -7423,58 +7423,79 @@ describe('GeminiChat', async () => {
       }
     });
 
-    it('does not retry when visible content followed the thinking chunks', async () => {
-      // The content flag must accumulate across the whole attempt: once a
-      // non-thought part has flowed — even after any amount of thinking —
-      // a replay would duplicate visible output and stays blocked.
-      const transportError = Object.assign(new TypeError('terminated'), {
-        cause: Object.assign(new Error('other side closed'), {
-          code: 'UND_ERR_SOCKET',
-        }),
-      });
+    it('continues instead of replaying when visible content followed the thinking chunks', async () => {
+      vi.useFakeTimers();
+      try {
+        // A from-zero replay would duplicate visible output, so that path
+        // stays blocked once a non-thought part has flowed; the continuation
+        // path resumes from the partial instead.
+        const transportError = Object.assign(new TypeError('terminated'), {
+          cause: Object.assign(new Error('other side closed'), {
+            code: 'UND_ERR_SOCKET',
+          }),
+        });
 
-      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
-        (async function* () {
-          yield {
-            candidates: [
-              {
-                content: {
-                  parts: [{ text: 'Reasoning first…', thought: true }],
-                },
-              },
-            ],
-          } as unknown as GenerateContentResponse;
-          yield {
-            candidates: [
-              {
-                content: {
-                  parts: [{ text: 'Visible answer begins' }],
-                },
-              },
-            ],
-          } as unknown as GenerateContentResponse;
-          throw transportError;
-        })(),
-      );
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                candidates: [
+                  {
+                    content: {
+                      parts: [{ text: 'Reasoning first…', thought: true }],
+                    },
+                  },
+                ],
+              } as unknown as GenerateContentResponse;
+              yield {
+                candidates: [
+                  {
+                    content: {
+                      parts: [{ text: 'Visible answer begins' }],
+                    },
+                  },
+                ],
+              } as unknown as GenerateContentResponse;
+              throw transportError;
+            })(),
+          )
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                candidates: [
+                  {
+                    content: { parts: [{ text: ' and ends.' }] },
+                    finishReason: 'STOP',
+                  },
+                ],
+              } as unknown as GenerateContentResponse;
+            })(),
+          );
 
-      const stream = await chat.sendMessageStream(
-        'test-model',
-        { message: 'test' },
-        'prompt-transport-no-retry-after-thinking-then-content',
-      );
-      const events: StreamEvent[] = [];
-      await expect(async () => {
-        for await (const event of stream) {
-          events.push(event);
-        }
-      }).rejects.toThrow('terminated');
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-transport-continue-after-thinking-then-content',
+        );
+        const events = await collectStreamWithFakeTimers(stream, 5_000);
 
-      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
-        1,
-      );
-      expect(
-        events.filter((event) => event.type === StreamEventType.RETRY),
-      ).toHaveLength(0);
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+        const retryEvents = events.filter(
+          (event) => event.type === StreamEventType.RETRY,
+        );
+        expect(retryEvents).toHaveLength(1);
+        expect(retryEvents[0]).toMatchObject({ isContinuation: true });
+
+        const history = chat.getHistory();
+        const modelTurns = history.filter((c) => c.role === 'model');
+        expect(
+          modelTurns[0]!.parts?.map((p) => p.text ?? '').join(''),
+        ).toContain('Visible answer begins and ends.');
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('retries a transport stream error after yielding only tool preparation metadata', async () => {
