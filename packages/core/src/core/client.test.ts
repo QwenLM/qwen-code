@@ -3307,6 +3307,9 @@ describe('Gemini Client (client.ts)', () => {
         expect.stringContaining('cleared 0 tool result(s)'),
       );
       expect(mockClientDebugLogger.info).toHaveBeenCalledWith(
+        expect.stringContaining('target 250000 (soft-exceeded)'),
+      );
+      expect(mockClientDebugLogger.info).toHaveBeenCalledWith(
         expect.stringContaining('history now 800000'),
       );
     });
