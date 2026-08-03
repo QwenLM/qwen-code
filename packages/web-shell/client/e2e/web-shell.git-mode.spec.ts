@@ -189,6 +189,67 @@ test('git mode chip checks out an existing branch', async ({
   expect(sessionCreateBody(daemon)).toBeUndefined();
 });
 
+test('existing branch groups collapse and stay pinned while scrolling', async ({
+  page,
+}, testInfo) => {
+  const scenario = createGitWorkspaceScenario({
+    gitBranches: {
+      v: 1,
+      workspaceCwd: WORKSPACE_CWD,
+      available: true,
+      local: [
+        { name: 'main', isHead: true },
+        ...Array.from({ length: 12 }, (_, index) => ({
+          name: `topic-${index + 1}`,
+          isHead: false,
+        })),
+      ],
+      remote: [{ name: 'origin/develop', isHead: false }],
+      tags: [],
+      recent: [],
+      head: 'main',
+      detached: false,
+    },
+  });
+  await installScenario(page, scenario, String(testInfo.project.use.baseURL));
+
+  await page.goto('/');
+  await page.locator('[data-testid="git-mode-chip"]').click();
+
+  const popover = page.locator('[data-slot="popover-content"]');
+  await popover.getByRole('radio', { name: /Existing branch/ }).click();
+
+  const list = popover.getByRole('listbox', { name: 'Existing branch' });
+  const localGroup = list.getByRole('button', { name: 'Local', exact: true });
+  await expect(localGroup).toHaveAttribute('aria-expanded', 'true');
+
+  await localGroup.click();
+  await expect(localGroup).toHaveAttribute('aria-expanded', 'false');
+  await expect(list.getByRole('option')).toHaveCount(1);
+
+  const search = popover.getByRole('textbox', { name: 'Search branches…' });
+  await search.fill('topic-1');
+  await expect(localGroup).toHaveAttribute('aria-expanded', 'true');
+  await expect(list.getByRole('option')).toHaveCount(4);
+  await search.fill('');
+  await expect(localGroup).toHaveAttribute('aria-expanded', 'false');
+
+  await localGroup.click();
+  await list.evaluate((element) => {
+    element.scrollTop = 60;
+  });
+  const listBounds = await list.boundingBox();
+  const groupBounds = await localGroup.boundingBox();
+  const listPaddingTop = await list.evaluate((element) =>
+    Number.parseFloat(getComputedStyle(element).paddingTop),
+  );
+  expect(listBounds).not.toBeNull();
+  expect(groupBounds).not.toBeNull();
+  expect(
+    Math.abs((groupBounds?.y ?? 0) - ((listBounds?.y ?? 0) + listPaddingTop)),
+  ).toBeLessThanOrEqual(1);
+});
+
 test('git mode chip worktree mode sends worktree intent', async ({
   page,
 }, testInfo) => {

@@ -221,6 +221,89 @@ describe('GitModePopover existing branches', () => {
     expect(document.body.querySelectorAll('[role="option"]')).toHaveLength(3);
   });
 
+  it('collapses groups and reveals matches while searching', async () => {
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GitModePopover
+            branch="main"
+            workspaceCwd="/repo"
+            intent={{ mode: 'current' }}
+            onIntentChange={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    act(() => {
+      (
+        document.body.querySelector(
+          '[data-testid="git-mode-chip"]',
+        ) as HTMLButtonElement
+      ).click();
+    });
+    clickButton('Existing branch');
+    await flush();
+
+    const localGroup = Array.from(
+      document.body.querySelectorAll('button'),
+    ).find((item) => item.textContent?.trim() === 'Local') as HTMLButtonElement;
+    expect(localGroup).toBeTruthy();
+    expect(localGroup.getAttribute('aria-expanded')).toBe('true');
+
+    act(() => localGroup.click());
+    expect(localGroup.getAttribute('aria-expanded')).toBe('false');
+    expect(
+      Array.from(document.body.querySelectorAll('[role="option"]')).map(
+        (item) => item.textContent?.trim(),
+      ),
+    ).toEqual(['origin/develop', 'upstream/release']);
+
+    const originGroup = Array.from(
+      document.body.querySelectorAll('button'),
+    ).find(
+      (item) => item.textContent?.trim() === 'Remote · origin',
+    ) as HTMLButtonElement;
+    act(() => originGroup.click());
+    expect(originGroup.getAttribute('aria-expanded')).toBe('false');
+    expect(
+      Array.from(document.body.querySelectorAll('[role="option"]')).map(
+        (item) => item.textContent?.trim(),
+      ),
+    ).toEqual(['upstream/release']);
+
+    const search = document.body.querySelector(
+      'input[aria-label="Search branches…"]',
+    ) as HTMLInputElement;
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )?.set;
+      setter?.call(search, 'topic');
+      search.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(localGroup.getAttribute('aria-expanded')).toBe('true');
+    expect(document.body.querySelector('[role="option"]')?.textContent).toBe(
+      'topic',
+    );
+
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )?.set;
+      setter?.call(search, '');
+      search.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(localGroup.getAttribute('aria-expanded')).toBe('false');
+    expect(
+      Array.from(document.body.querySelectorAll('[role="option"]')).map(
+        (item) => item.textContent?.trim(),
+      ),
+    ).toEqual(['upstream/release']);
+  });
+
   it('clears cached choices before loading another workspace', async () => {
     const render = (workspaceCwd: string) => {
       act(() => {

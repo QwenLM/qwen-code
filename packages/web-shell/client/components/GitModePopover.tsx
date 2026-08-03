@@ -8,6 +8,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
 import type { DaemonGitBranchesResult } from '@qwen-code/sdk/daemon';
 import {
+  ChevronDownIcon,
   CircleDotIcon,
   GitBranchIcon,
   GitForkIcon,
@@ -87,6 +88,9 @@ export function GitModePopover({
   const [existingBranches, setExistingBranches] =
     useState<DaemonGitBranchesResult | null>(null);
   const [existingSearch, setExistingSearch] = useState('');
+  const [collapsedExistingGroups, setCollapsedExistingGroups] = useState(
+    () => new Set<string>(),
+  );
   const [existingLoading, setExistingLoading] = useState(false);
   const [existingError, setExistingError] = useState<string | null>(null);
   const [checkoutRef, setCheckoutRef] = useState<string | null>(null);
@@ -173,6 +177,16 @@ export function GitModePopover({
     }
     return groups;
   }, [existingBranches, existingSearch, t]);
+  const existingSearchActive = existingSearch.trim().length > 0;
+
+  const toggleExistingGroup = useCallback((group: string) => {
+    setCollapsedExistingGroups((current) => {
+      const next = new Set(current);
+      if (next.has(group)) next.delete(group);
+      else next.add(group);
+      return next;
+    });
+  }, []);
 
   const handleCheckoutExisting = useCallback(
     async (ref: string) => {
@@ -345,28 +359,51 @@ export function GitModePopover({
                     {t('gitMode.existingEmpty')}
                   </div>
                 ) : (
-                  Array.from(existingGroups.entries()).map(([group, items]) => (
-                    <div key={group}>
-                      <div className={styles.existingGroup}>{group}</div>
-                      {items.map((item) => (
+                  Array.from(existingGroups.entries()).map(([group, items]) => {
+                    const expanded =
+                      existingSearchActive ||
+                      !collapsedExistingGroups.has(group);
+                    return (
+                      <div className={styles.existingSection} key={group}>
                         <button
-                          key={item.ref}
                           type="button"
-                          role="option"
-                          aria-selected={false}
-                          className={styles.existingItem}
-                          disabled={checkoutRef !== null}
-                          onClick={() => void handleCheckoutExisting(item.ref)}
+                          className={styles.existingGroup}
+                          aria-expanded={expanded}
+                          disabled={existingSearchActive}
+                          onClick={() => toggleExistingGroup(group)}
                         >
-                          <GitBranchIcon size={13} />
-                          <span>{item.name}</span>
-                          {checkoutRef === item.ref && (
-                            <Loader2Icon className={styles.spin} size={13} />
-                          )}
+                          <ChevronDownIcon
+                            className={`${styles.existingGroupChevron} ${expanded ? '' : styles.existingGroupChevronCollapsed}`}
+                            aria-hidden="true"
+                          />
+                          <span>{group}</span>
                         </button>
-                      ))}
-                    </div>
-                  ))
+                        {expanded &&
+                          items.map((item) => (
+                            <button
+                              key={item.ref}
+                              type="button"
+                              role="option"
+                              aria-selected={false}
+                              className={styles.existingItem}
+                              disabled={checkoutRef !== null}
+                              onClick={() =>
+                                void handleCheckoutExisting(item.ref)
+                              }
+                            >
+                              <GitBranchIcon size={13} />
+                              <span>{item.name}</span>
+                              {checkoutRef === item.ref && (
+                                <Loader2Icon
+                                  className={styles.spin}
+                                  size={13}
+                                />
+                              )}
+                            </button>
+                          ))}
+                      </div>
+                    );
+                  })
                 )}
               </div>
             </div>

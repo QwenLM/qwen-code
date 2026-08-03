@@ -324,13 +324,49 @@
   overscroll-behavior: contain;
 }
 
+.existingSection {
+  position: relative;
+}
+
 .existingGroup {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  width: 100%;
   padding: 5px 9px 2px;
+  border: 0;
+  background: var(--popover);
   color: var(--muted-foreground);
+  cursor: pointer;
+  font-family: inherit;
   font-size: 9.5px;
   font-weight: 600;
   letter-spacing: 0.08em;
+  text-align: left;
   text-transform: uppercase;
+}
+
+.existingGroup:hover:not(:disabled),
+.existingGroup:focus-visible {
+  background: var(--subtle-bg);
+}
+
+.existingGroup:disabled {
+  cursor: default;
+}
+
+.existingGroupChevron {
+  width: 10px;
+  height: 10px;
+  flex-shrink: 0;
+  transition: transform 0.15s;
+}
+
+.existingGroupChevronCollapsed {
+  transform: rotate(-90deg);
 }
 
 .existingItem {
