@@ -48,7 +48,7 @@ concurrency:
 jobs:
   test:
     name: '${{ matrix.os }} / Java ${{ matrix.java }}'
-    runs-on: '${{ (matrix.os == ''ubuntu-latest'' && github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name == ''push'' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(format(''["{0}"]'', matrix.os)) }}'
+    runs-on: '${{ (matrix.os == ''ubuntu-latest'' && github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name == ''push'' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || matrix.os }}'
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -80,7 +80,6 @@ jobs:
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: "${{ (runner.environment == 'self-hosted' && github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || github.ref }}"
-          fetch-depth: 1
 
       - name: 'Verify checkout includes expected head commit'
         if: "${{ runner.environment == 'self-hosted' && github.event_name == 'pull_request' }}"
@@ -117,7 +116,7 @@ jobs:
 
   daemon-e2e:
     name: 'Real daemon E2E / Java 11'
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name == ''push'' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name == ''push'' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || ''ubuntu-latest'' }}'
     timeout-minutes: 30
     steps:
       - name: 'Restore workspace ownership'
@@ -135,7 +134,6 @@ jobs:
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: "${{ (runner.environment == 'self-hosted' && github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || github.ref }}"
-          fetch-depth: 1
 
       - name: 'Verify checkout includes expected head commit'
         if: "${{ runner.environment == 'self-hosted' && github.event_name == 'pull_request' }}"
