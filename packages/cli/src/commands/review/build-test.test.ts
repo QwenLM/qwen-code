@@ -5,7 +5,14 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  rmSync,
+  realpathSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -1679,5 +1686,136 @@ describe('runBuildTest (Maven)', () => {
 
     expect(rep.toolchain).toBe('unsupported');
     expect(rep.note).toContain('No npm package here to scope');
+  });
+});
+
+describe('runBuildTest (workspace in a repo subdirectory)', () => {
+  // Monorepo developers open the workspace in a module subdir; the agent's
+  // cwd — and therefore the local review's `--worktree` — is that subdir,
+  // while capture-local's plan paths are repo-root-relative. The build must
+  // re-anchor to the repo root instead of false-greening "nothing to build".
+  let repo: string;
+  let home: string;
+  let planPath: string;
+  let savedEnv: NodeJS.ProcessEnv;
+
+  const git = (...args: string[]) =>
+    execFileSync('git', args, { cwd: repo, encoding: 'utf8' });
+
+  beforeEach(() => {
+    repo = mkdtempSync(join(tmpdir(), 'bt-sub-'));
+    home = mkdtempSync(join(tmpdir(), 'bt-sub-home-'));
+    writeFileSync(join(home, '.gitconfig'), '');
+    // Isolate from the developer's git environment (templates, hooks,
+    // gpgsign) — the same pattern as git.integration.test.ts.
+    savedEnv = { ...process.env };
+    process.env['GIT_CONFIG_NOSYSTEM'] = '1';
+    process.env['GIT_CONFIG_GLOBAL'] = join(home, '.gitconfig');
+    process.env['HOME'] = home;
+
+    git('init', '-q', '--template=', '.');
+    git('config', 'user.email', 'a@b');
+    git('config', 'user.name', 'a');
+    git('config', 'commit.gpgsign', 'false');
+    git('config', 'core.hooksPath', join(repo, '.no-such-hooks'));
+
+    // A nested Maven reactor.
+    writeFileSync(
+      join(repo, 'pom.xml'),
+      '<project><modules><module>common</module>' +
+        '<module>libs/dqc-all</module></modules></project>',
+    );
+    mkdirSync(join(repo, 'common', 'src'), { recursive: true });
+    mkdirSync(join(repo, 'libs', 'dqc-all', 'dqc-core', 'src'), {
+      recursive: true,
+    });
+    writeFileSync(join(repo, 'common', 'pom.xml'), '<project/>');
+    writeFileSync(
+      join(repo, 'libs', 'dqc-all', 'pom.xml'),
+      '<project><modules><module>dqc-core</module></modules></project>',
+    );
+    writeFileSync(
+      join(repo, 'libs', 'dqc-all', 'dqc-core', 'pom.xml'),
+      '<project/>',
+    );
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'init');
+
+    planPath = join(repo, 'plan.json');
+  });
+
+  afterEach(() => {
+    process.env = savedEnv;
+    rmSync(repo, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it('re-anchors to the repo root when the worktree is a module subdir', () => {
+    writeFileSync(
+      join(repo, 'libs', 'dqc-all', 'dqc-core', 'src', 'B.java'),
+      'class B {}',
+    );
+    writeFileSync(
+      planPath,
+      JSON.stringify({
+        files: [{ path: 'libs/dqc-all/dqc-core/src/B.java', kind: 'source' }],
+      }),
+    );
+
+    const cwds: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: join(repo, 'libs', 'dqc-all'),
+      timeout: 60,
+      install: false,
+      exec: (command, cwd) => {
+        cwds.push(cwd);
+        return {
+          command,
+          exitCode: 0,
+          seconds: 1,
+          timedOut: false,
+          output: '',
+        };
+      },
+    });
+
+    expect(rep.toolchain).toBe('maven');
+    expect(rep.affected).toEqual(['libs/dqc-all/dqc-core']);
+    expect(rep.build[0]?.command).toBe(
+      'mvn -B -pl libs/dqc-all/dqc-core -am compile',
+    );
+    // Commands ran in the repo root, not the subdirectory worktree.
+    // realpath: on macOS the /var/folders tmp path carries a /private prefix
+    // once resolved, and the re-anchor compares realpath'd paths.
+    const repoReal = realpathSync(repo);
+    expect(cwds.every((c) => c === repoReal)).toBe(true);
+  });
+
+  it('still scopes from the repo root when the worktree already IS the root', () => {
+    writeFileSync(join(repo, 'common', 'src', 'A.java'), 'class A {}');
+    writeFileSync(
+      planPath,
+      JSON.stringify({
+        files: [{ path: 'common/src/A.java', kind: 'source' }],
+      }),
+    );
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: repo,
+      timeout: 60,
+      install: false,
+      exec: (command) => ({
+        command,
+        exitCode: 0,
+        seconds: 1,
+        timedOut: false,
+        output: '',
+      }),
+    });
+
+    expect(rep.toolchain).toBe('maven');
+    expect(rep.affected).toEqual(['common']);
   });
 });

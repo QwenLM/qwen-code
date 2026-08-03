@@ -42,13 +42,15 @@ import { spawnSync } from 'node:child_process';
 import {
   existsSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statfsSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import { gitOpt } from './lib/git.js';
 import {
   affectedWorkspaces,
   buildSetFor,
@@ -345,8 +347,33 @@ function changedFilesFrom(planPath: string): string[] {
     .filter((p): p is string => typeof p === 'string' && p.length > 0);
 }
 
+/**
+ * The tree to actually build in. A local review's `--worktree` is the agent's
+ * cwd, and on monorepos the workspace is often a SUBDIRECTORY of the repo —
+ * while the plan's file paths are repo-root-relative (`capture-local` labels
+ * from the repo root). Scoping from the subdirectory matches nothing and
+ * reports a confident "nothing to build" for a diff that changes real modules
+ * — the false green this command exists to prevent. Re-anchor to the repo
+ * root when the tree sits strictly inside one. A PR worktree IS its own repo
+ * root (`rev-parse --show-toplevel` in a linked worktree returns the
+ * worktree), so this never moves a PR review; non-git trees stay as given.
+ */
+export function rebaseToRepoRoot(worktree: string): string {
+  const root = resolve(worktree);
+  const topLevel = gitOpt('-C', root, 'rev-parse', '--show-toplevel');
+  if (!topLevel) return root;
+  try {
+    const top = realpathSync(resolve(topLevel));
+    const here = realpathSync(root);
+    if (here !== top && here.startsWith(top + sep)) return top;
+  } catch {
+    // An unreadable path keeps the tree as given.
+  }
+  return root;
+}
+
 export function runBuildTest(args: BuildTestArgs): BuildTestReport {
-  const root = resolve(args.worktree);
+  const root = rebaseToRepoRoot(args.worktree);
   const perCommandMs = args.timeout * 1000;
   const exec = args.exec ?? run;
   const changed = changedFilesFrom(args.plan);

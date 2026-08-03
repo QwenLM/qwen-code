@@ -108,6 +108,16 @@ every npm monorepo is unchanged. The Maven branch:
 - No install step: Maven resolves dependencies itself during the build
   (user's `~/.m2` + `settings.xml`). The deadline, disk preflight,
   timeout-as-data, and failure-note semantics are reused unchanged.
+- The build tree re-anchors to the repo root (`rebaseToRepoRoot`): on
+  monorepos the workspace is often a module subdirectory, so a local
+  review's `--worktree` (the agent's cwd) can sit strictly inside the repo
+  while the plan's file paths are repo-root-relative (`capture-local`
+  labels from the root). Scoping from the subdirectory maps nothing — a
+  confident "nothing to build" false green — so `runBuildTest` re-anchors
+  to `git rev-parse --show-toplevel` when the tree sits strictly inside
+  one. A PR worktree IS its own repo root, so PR reviews never move;
+  non-git trees stay as given. The npm path benefits from the same
+  re-anchoring.
 - The report's `toolchain` gains the value `'maven'`; `affected`/`buildSet`
   carry the module dirs (buildSet = the `-pl` list, so the report names what
   ran), `widenedWith` stays empty (no compiler-driven widening — `-am` is
