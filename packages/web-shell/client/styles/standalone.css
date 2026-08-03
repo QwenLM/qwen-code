@@ -102,6 +102,18 @@ textarea,
 }
 
 /*
+ * Firefox does not paint the default selection highlight for text whose
+ * element chain passes through a `display: contents` element (the
+ * `data-user-selectable` wrapper on MessageItem). The logical selection
+ * (copy, selectionchange popup) works fine - only the visual highlight is
+ * missing. An explicit `::selection` background makes Firefox paint the
+ * highlight where the default painting fails. #8214.
+ */
+[data-user-selectable] ::selection {
+  background: hsl(var(--selection-bg, 210 100% 50% / 30%));
+}
+
+/*
  * iOS Safari auto-zooms any <input> / <textarea> / contenteditable whose
  * computed font-size is < 16px when focused. The composer editor sits at
  * 14px in the desktop theme (EditorView.theme at specificity 0,2,0 and
