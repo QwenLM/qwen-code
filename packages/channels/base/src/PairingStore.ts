@@ -64,7 +64,7 @@ export class PairingStore {
     );
     this.groupAllowlistPath = path.join(
       this.dir,
-      `${safeChannelName}-group-allowlist.json`,
+      `${safeChannelName}-groups.json`,
     );
     this.migratedSentinelPath = path.join(
       this.dir,

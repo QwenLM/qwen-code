@@ -2516,7 +2516,11 @@ const EN: Messages = {
     'People receive a pairing code and can chat after you approve them.',
   'channels.editor.pairing.title': 'Pending requests',
   'channels.editor.pairing.description':
-    'Match the code shared by the person before approving access. Approvals take effect immediately; Save and Cancel do not undo them.',
+    'Match the shared code before approving access. Approvals take effect immediately; Save and Cancel do not undo them.',
+  'channels.editor.pairing.subject.group': (v) =>
+    `Group: ${v?.name ?? 'Unknown'}`,
+  'channels.editor.pairing.requestedBy': (v) =>
+    `Requested by ${v?.sender ?? 'Unknown'}`,
   'channels.editor.pairing.refresh': 'Refresh pairing requests',
   'channels.editor.pairing.approve': 'Approve',
   'channels.editor.pairing.approveFor': (v) =>
@@ -2535,7 +2539,7 @@ const EN: Messages = {
     'Pending requests will appear here after this Channel is saved in pairing mode.',
   'channels.editor.pairing.approvals.title': 'Pairing approvals',
   'channels.editor.pairing.approvals.description':
-    'Sender IDs approved through pairing for this Channel.',
+    'User and group IDs approved through pairing for this Channel.',
   'channels.editor.pairing.approvals.refresh': 'Refresh pairing approvals',
   'channels.editor.pairing.approvals.revoke': 'Revoke',
   'channels.editor.pairing.approvals.revokeFor': (v) =>
@@ -2548,7 +2552,7 @@ const EN: Messages = {
     'Pairing approvals are temporarily unavailable. Try again.',
   'channels.editor.pairing.approvals.empty.title': 'No pairing approvals',
   'channels.editor.pairing.approvals.empty.description':
-    'Approved sender IDs will appear here.',
+    'Approved user and group IDs will appear here.',
   'channels.editor.pairing.approvals.confirm.title': (v) =>
     `Revoke pairing approval for ${v?.senderId || 'this sender'}?`,
   'channels.editor.pairing.approvals.confirm.description':
@@ -5034,7 +5038,11 @@ const ZH: Messages = {
     '用户会收到配对码，经您批准后才能开始对话。',
   'channels.editor.pairing.title': '待处理的配对请求',
   'channels.editor.pairing.description':
-    '批准前，请核对用户提供的配对码是否一致。批准会立即生效，保存或取消都不会撤销已批准的访问。',
+    '批准前，请核对收到的配对码是否一致。批准会立即生效，保存或取消都不会撤销已批准的访问。',
+  'channels.editor.pairing.subject.group': (v) =>
+    `群聊：${v?.name ?? '未知群聊'}`,
+  'channels.editor.pairing.requestedBy': (v) =>
+    `由 ${v?.sender ?? '未知用户'} 发起`,
   'channels.editor.pairing.refresh': '刷新配对请求',
   'channels.editor.pairing.approve': '批准',
   'channels.editor.pairing.approveFor': (v) =>
@@ -5050,21 +5058,21 @@ const ZH: Messages = {
   'channels.editor.pairing.saveFirst.title': '请先保存配对模式',
   'channels.editor.pairing.saveFirst.description':
     '频道以配对模式保存后，待处理请求会显示在这里。',
-  'channels.editor.pairing.approvals.title': '已配对用户',
+  'channels.editor.pairing.approvals.title': '已配对对象',
   'channels.editor.pairing.approvals.description':
-    '通过配对获得此频道访问权限的用户 ID。',
-  'channels.editor.pairing.approvals.refresh': '刷新已配对用户',
+    '通过配对获得此频道访问权限的用户和群聊 ID。',
+  'channels.editor.pairing.approvals.refresh': '刷新已配对对象',
   'channels.editor.pairing.approvals.revoke': '撤销',
   'channels.editor.pairing.approvals.revokeFor': (v) =>
     `撤销 ${v?.senderId ?? '该用户'} 的配对授权`,
   'channels.editor.pairing.approvals.revoked': (v) =>
     `已撤销 ${v?.senderId ?? '该用户'} 的配对授权。`,
-  'channels.editor.pairing.approvals.error': '未能更新已配对用户',
+  'channels.editor.pairing.approvals.error': '未能更新已配对对象',
   'channels.editor.pairing.approvals.unavailable':
-    '暂时无法获取已配对用户，请重试。',
-  'channels.editor.pairing.approvals.empty.title': '暂无已配对用户',
+    '暂时无法获取已配对对象，请重试。',
+  'channels.editor.pairing.approvals.empty.title': '暂无已配对对象',
   'channels.editor.pairing.approvals.empty.description':
-    '批准配对请求后，用户 ID 会显示在这里。',
+    '批准配对请求后，用户或群聊 ID 会显示在这里。',
   'channels.editor.pairing.approvals.confirm.title': (v) =>
     `撤销 ${v?.senderId || '该用户'} 的配对授权？`,
   'channels.editor.pairing.approvals.confirm.description':

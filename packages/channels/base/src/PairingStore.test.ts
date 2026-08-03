@@ -102,6 +102,24 @@ describe('PairingStore workspace scoping (#7017)', () => {
     expect(storeB.isGroupApproved('group-1')).toBe(true);
   });
 
+  it('keeps group approvals separate from similarly named channel user approvals', () => {
+    const groupStore = new PairingStore('support', workspaceA);
+    const userStore = new PairingStore('support-group', workspaceA);
+    const code = groupStore.createGroupRequest(
+      'shared-id',
+      'Release Team',
+      'sender-1',
+      'Alice',
+    );
+
+    groupStore.approve(code!);
+
+    expect(groupStore.isGroupApproved('shared-id')).toBe(true);
+    expect(userStore.isApproved('shared-id')).toBe(false);
+    expect(userStore.revoke('shared-id')).toBe(false);
+    expect(groupStore.isGroupApproved('shared-id')).toBe(true);
+  });
+
   it('revokes an approved sender only from the selected workspace', () => {
     const storeA = new PairingStore('support-bot', workspaceA);
     const storeB = new PairingStore('support-bot', workspaceB);

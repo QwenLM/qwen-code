@@ -43,6 +43,23 @@ const OPTIONAL_SECRET: DaemonChannelTypeDescriptor = {
   ),
 };
 
+const DINGTALK_WITH_GROUP_POLICY: DaemonChannelTypeDescriptor = {
+  ...DINGTALK,
+  fields: [
+    ...DINGTALK.fields,
+    {
+      key: 'groupPolicy',
+      label: 'Group Policy',
+      kind: 'enum',
+      required: true,
+      options: [
+        { value: 'pairing', label: 'Pairing' },
+        { value: 'open', label: 'Open' },
+      ],
+    },
+  ],
+};
+
 const INSTANCE: DaemonChannelInstanceSnapshot = {
   name: 'release-bot',
   config: {
@@ -265,5 +282,26 @@ describe('ChannelEditorDialog', () => {
 
     expect(document.body.textContent).toContain('Pairing approvals');
     expect(document.body.textContent).not.toContain('Configured allowlist');
+  });
+
+  it('shows pairing management when only group pairing is enabled', async () => {
+    const groupPairingInstance: DaemonChannelInstanceSnapshot = {
+      ...INSTANCE,
+      config: {
+        ...INSTANCE.config,
+        senderPolicy: 'open',
+        groupPolicy: 'pairing',
+      },
+    };
+    const listPairingRequests = vi.fn().mockResolvedValue({ requests: [] });
+
+    await renderDialog({
+      descriptor: DINGTALK_WITH_GROUP_POLICY,
+      instance: groupPairingInstance,
+      listPairingRequests,
+    });
+
+    expect(document.body.textContent).toContain('Pairing approvals');
+    expect(listPairingRequests).toHaveBeenCalledWith('release-bot');
   });
 });
