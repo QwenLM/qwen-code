@@ -8,6 +8,8 @@ import {
 } from 'react';
 import type { DaemonClient } from '@qwen-code/sdk/daemon';
 import type {
+  DaemonChannelsSnapshot,
+  DaemonChannelTypeCatalog,
   DaemonSessionGroup,
   DaemonSessionSummary,
   DaemonWorkspaceCapability,
@@ -24,6 +26,7 @@ import {
 } from './collapsedSessionSections';
 import { workspaceLabel } from '../../utils/workspace';
 import { SessionGroupSection } from './SessionGroupSection';
+import { groupSessionsByChannelType } from './channelSessionGroups';
 import styles from './WorkspaceSection.module.css';
 
 function cx(...classes: Array<string | false | undefined>): string {
@@ -69,6 +72,7 @@ interface WorkspaceSectionProps {
   loadErrorLabel: string;
   organizationEnabled: boolean;
   sourceType?: string;
+  channelGroupingEnabled?: boolean;
   ungroupedLabel: string;
   formatTime: (iso: string) => string;
   searchQuery?: string;
@@ -111,6 +115,7 @@ export function WorkspaceSection({
   loadErrorLabel,
   organizationEnabled,
   sourceType,
+  channelGroupingEnabled = false,
   ungroupedLabel,
   formatTime,
   searchQuery = '',
@@ -131,6 +136,10 @@ export function WorkspaceSection({
 }: WorkspaceSectionProps) {
   const [sessions, setSessions] = useState<DaemonSessionSummary[]>([]);
   const [groups, setGroups] = useState<DaemonSessionGroup[]>([]);
+  const [channelCatalog, setChannelCatalog] = useState<{
+    catalog: DaemonChannelTypeCatalog;
+    snapshot: DaemonChannelsSnapshot;
+  }>();
   const [loadError, setLoadError] = useState(false);
   const [internalExpanded, setInternalExpanded] = useState(false);
   const [collapsedGroupIds, setCollapsedGroupIds] = useState<Set<string>>(() =>
@@ -208,6 +217,38 @@ export function WorkspaceSection({
     organizationEnabled,
     reloadToken,
     renderSessions,
+    workspace.cwd,
+  ]);
+
+  useEffect(() => {
+    if (!renderSessions || disabled || !channelGroupingEnabled) {
+      setChannelCatalog(undefined);
+      return;
+    }
+    if (!expanded && !searchQuery.trim()) return;
+    let cancelled = false;
+    const workspaceClient = client.workspaceByCwd(workspace.cwd);
+    void Promise.all([
+      workspaceClient.workspaceChannelTypes(),
+      workspaceClient.workspaceChannels(),
+    ])
+      .then(([catalog, snapshot]) => {
+        if (!cancelled) setChannelCatalog({ catalog, snapshot });
+      })
+      .catch((err: unknown) => {
+        console.warn('[WorkspaceSection] channel catalog load failed:', err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    channelGroupingEnabled,
+    client,
+    disabled,
+    expanded,
+    reloadToken,
+    renderSessions,
+    searchQuery,
     workspace.cwd,
   ]);
 
@@ -315,6 +356,19 @@ export function WorkspaceSection({
     };
   }, [groups, organizationEnabled, visibleSessions]);
 
+  const channelSessionGroups = useMemo(
+    () =>
+      channelCatalog
+        ? groupSessionsByChannelType(
+            visibleSessions,
+            channelCatalog.catalog,
+            channelCatalog.snapshot.instances,
+            t('sidebar.channelType.other'),
+          )
+        : null,
+    [channelCatalog, t, visibleSessions],
+  );
+
   return (
     <div className={styles.section}>
       <div
@@ -395,6 +449,28 @@ export function WorkspaceSection({
               </div>
             ) : visibleSessions.length === 0 ? (
               <div className={styles.empty}>{noSessionsLabel}</div>
+            ) : channelSessionGroups ? (
+              <>
+                {channelSessionGroups.map((group) => (
+                  <SessionGroupSection
+                    id={group.id}
+                    key={group.id}
+                    label={group.label}
+                    count={group.sessions.length}
+                    expanded={!collapsedGroupIds.has(group.id)}
+                    onToggle={() => {
+                      setCollapsedGroupIds((current) => {
+                        const next = new Set(current);
+                        if (next.has(group.id)) next.delete(group.id);
+                        else next.add(group.id);
+                        return next;
+                      });
+                    }}
+                  >
+                    {group.sessions.map((session) => renderSession(session))}
+                  </SessionGroupSection>
+                ))}
+              </>
             ) : groupedSessions ? (
               <>
                 {groupedSessions.sections.map(({ group, sessions }) => (

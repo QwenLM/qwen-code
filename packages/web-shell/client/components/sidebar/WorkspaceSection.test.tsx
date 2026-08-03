@@ -146,6 +146,8 @@ function renderSection(
     client: DaemonClient;
     reloadToken: number;
     expanded: boolean;
+    sourceType: string;
+    channelGroupingEnabled: boolean;
   }> = {},
 ): void {
   act(() => {
@@ -162,6 +164,8 @@ function renderSection(
           noSessionsLabel="No sessions"
           loadErrorLabel="Load failed"
           organizationEnabled={false}
+          sourceType={overrides.sourceType}
+          channelGroupingEnabled={overrides.channelGroupingEnabled}
           ungroupedLabel="Ungrouped"
           formatTime={() => ''}
           renderSession={(session: DaemonSessionSummary): ReactNode => (
@@ -236,6 +240,78 @@ describe('WorkspaceSection label', () => {
     expect(
       container.querySelector('[title="A very long session name"]'),
     ).not.toBeNull();
+  });
+
+  it('groups a secondary workspace with its own channel catalog', async () => {
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessions: vi.fn().mockResolvedValue([
+          {
+            sessionId: 'ding-session',
+            displayName: 'DingTalk secondary',
+            sourceType: 'channel',
+            sourceId: 'secondary-ding',
+          },
+          {
+            sessionId: 'feishu-session',
+            displayName: 'Feishu secondary',
+            sourceType: 'channel',
+            sourceId: 'secondary-feishu',
+          },
+        ]),
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+        workspaceChannelTypes: vi.fn().mockResolvedValue([
+          {
+            type: 'dingtalk',
+            displayName: 'DingTalk',
+            manageable: true,
+            fields: [],
+          },
+          {
+            type: 'feishu',
+            displayName: 'Feishu',
+            manageable: true,
+            fields: [],
+          },
+        ]),
+        workspaceChannels: vi.fn().mockResolvedValue({
+          revision: '1',
+          instances: {
+            'secondary-ding': {
+              name: 'secondary-ding',
+              config: { type: 'dingtalk' },
+              secrets: {},
+              startsWithServe: false,
+              runtime: { state: 'connected' },
+            },
+            'secondary-feishu': {
+              name: 'secondary-feishu',
+              config: { type: 'feishu' },
+              secrets: {},
+              startsWithServe: false,
+              runtime: { state: 'connected' },
+            },
+          },
+        }),
+      })),
+    } as unknown as DaemonClient;
+
+    renderSection({
+      workspace: { ...trustedWorkspace, primary: false },
+      client,
+      expanded: true,
+      sourceType: 'channel',
+      channelGroupingEnabled: true,
+    });
+    await flush();
+
+    expect(
+      container.querySelector('section[aria-label="DingTalk"]')?.textContent,
+    ).toContain('DingTalk secondary');
+    expect(
+      container.querySelector('section[aria-label="Feishu"]')?.textContent,
+    ).toContain('Feishu secondary');
   });
 });
 

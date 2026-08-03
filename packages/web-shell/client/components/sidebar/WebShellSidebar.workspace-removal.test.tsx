@@ -24,6 +24,7 @@ const {
   exportSession,
   exportArchivedSession,
   sessionActions,
+  channelState,
 } = vi.hoisted(() => {
   const makeSessions = () => ({
     sessions: [] as DaemonSessionSummary[],
@@ -113,6 +114,26 @@ const {
     exportSession,
     exportArchivedSession,
     sessionActions,
+    channelState: {
+      data: undefined as
+        | {
+            catalog: Array<{
+              type: string;
+              displayName: string;
+              manageable: boolean;
+              fields: [];
+            }>;
+            snapshot: { revision: string; instances: Record<string, unknown> };
+          }
+        | undefined,
+      catalog: [] as Array<{
+        type: string;
+        displayName: string;
+        manageable: boolean;
+        fields: [];
+      }>,
+      channels: {} as Record<string, unknown>,
+    },
   };
 });
 
@@ -122,6 +143,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useWorkspace: () => workspace,
   useWorkspaceActions: () => workspaceActions,
   useSessions,
+  useChannels: () => channelState,
 }));
 
 const { I18nProvider } = await import('../../i18n');
@@ -487,6 +509,9 @@ beforeEach(() => {
   useSessions.mockClear();
   active.sessions.length = 0;
   archived.sessions.length = 0;
+  channelState.data = undefined;
+  channelState.catalog = [];
+  channelState.channels = {};
 });
 
 afterEach(() => {
@@ -2981,6 +3006,149 @@ describe('WebShellSidebar session source switch', () => {
     });
 
     expect(active.reload).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a flat channel list when channel metadata is unavailable', async () => {
+    active.sessions.push({
+      sessionId: 'legacy-channel-session',
+      displayName: 'Legacy channel',
+      workspaceCwd: '/tmp/project',
+      sourceType: 'channel',
+      sourceId: 'legacy-bot',
+    });
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+    const channelsTab = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    ).find((button) => button.textContent?.trim() === 'Channels');
+    await act(async () => {
+      channelsTab!.dispatchEvent(
+        new MouseEvent('mousedown', { bubbles: true, button: 0 }),
+      );
+      channelsTab!.click();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('Legacy channel');
+    expect(container.querySelector('section[aria-label]')).toBeNull();
+  });
+
+  it('groups channel sessions by platform type and toggles each group', async () => {
+    const channelCapabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'channel_management'],
+    };
+    connection.capabilities = channelCapabilities;
+    workspace.capabilities = channelCapabilities;
+    channelState.catalog = [
+      {
+        type: 'dingtalk',
+        displayName: 'DingTalk',
+        manageable: true,
+        fields: [],
+      },
+      {
+        type: 'feishu',
+        displayName: 'Feishu',
+        manageable: true,
+        fields: [],
+      },
+    ];
+    channelState.channels = {
+      'ding-one': {
+        name: 'ding-one',
+        config: { type: 'dingtalk' },
+        secrets: {},
+        startsWithServe: false,
+        runtime: { state: 'connected' },
+      },
+      'ding-two': {
+        name: 'ding-two',
+        config: { type: 'dingtalk' },
+        secrets: {},
+        startsWithServe: false,
+        runtime: { state: 'connected' },
+      },
+      feishu: {
+        name: 'feishu',
+        config: { type: 'feishu' },
+        secrets: {},
+        startsWithServe: false,
+        runtime: { state: 'connected' },
+      },
+    };
+    channelState.data = {
+      catalog: channelState.catalog,
+      snapshot: { revision: '1', instances: channelState.channels },
+    };
+    active.sessions.push(
+      {
+        sessionId: 'ding-one-session',
+        displayName: 'DingTalk one',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'channel',
+        sourceId: 'ding-one',
+      },
+      {
+        sessionId: 'feishu-session',
+        displayName: 'Feishu one',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'channel',
+        sourceId: 'feishu',
+      },
+      {
+        sessionId: 'ding-two-session',
+        displayName: 'DingTalk two',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'channel',
+        sourceId: 'ding-two',
+        isPinned: true,
+      },
+      {
+        sessionId: 'legacy-channel-session',
+        displayName: 'Legacy channel',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'channel',
+      },
+    );
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+    const channelsTab = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    ).find((button) => button.textContent?.trim() === 'Channels');
+    await act(async () => {
+      channelsTab!.dispatchEvent(
+        new MouseEvent('mousedown', { bubbles: true, button: 0 }),
+      );
+      channelsTab!.click();
+      await Promise.resolve();
+    });
+
+    const dingTalkGroup = container.querySelector<HTMLElement>(
+      'section[aria-label="DingTalk"]',
+    );
+    expect(dingTalkGroup).not.toBeNull();
+    expect(dingTalkGroup!.textContent).toContain('DingTalk one');
+    expect(dingTalkGroup?.textContent).toContain('DingTalk two');
+    expect(dingTalkGroup?.textContent).not.toContain('Feishu one');
+    expect(
+      container.querySelector('section[aria-label="Feishu"]')?.textContent,
+    ).toContain('Feishu one');
+    expect(
+      container.querySelector('section[aria-label="Other channels"]')
+        ?.textContent,
+    ).toContain('Legacy channel');
+
+    const toggle = dingTalkGroup?.querySelector<HTMLButtonElement>(
+      'button[aria-expanded="true"]',
+    );
+    await act(async () => click(toggle!));
+    expect(toggle?.getAttribute('aria-expanded')).toBe('false');
+    expect(dingTalkGroup?.textContent).not.toContain('DingTalk one');
+    await act(async () => click(toggle!));
+    expect(toggle?.getAttribute('aria-expanded')).toBe('true');
+    expect(dingTalkGroup?.textContent).toContain('DingTalk one');
   });
 });
 

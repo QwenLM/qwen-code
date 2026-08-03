@@ -12,6 +12,7 @@ import {
 } from 'react';
 import {
   useActions,
+  useChannels,
   useConnection,
   useSessions,
   useWorkspace,
@@ -84,6 +85,7 @@ import { DialogShell } from '../dialogs/DialogShell';
 import { WorkspaceSection } from './WorkspaceSection';
 import { SessionGroupSection } from './SessionGroupSection';
 import { SessionDetailsSubmenu } from './SessionDetailsSubmenu';
+import { groupSessionsByChannelType } from './channelSessionGroups';
 import { resolveSessionDetailsCollisionBoundary } from './sessionDetailsCollisionBoundary';
 import {
   isPrimaryCollapsedSectionId,
@@ -574,6 +576,18 @@ export function WebShellSidebar({
   const selectedSessionSource = sourceMetadataEnabled
     ? sessionSource
     : undefined;
+  const channelGroupingEnabled = Boolean(
+    selectedSessionSource === 'channel' &&
+      workspace.capabilities?.features.includes('channel_management'),
+  );
+  const {
+    data: channelCatalogData,
+    catalog: channelTypeCatalog,
+    channels: channelInstances,
+  } = useChannels({
+    autoLoad: channelGroupingEnabled,
+    enabled: channelGroupingEnabled,
+  });
   const sessionArchiveEnabled = Boolean(
     connection.capabilities?.features?.includes('session_archive'),
   );
@@ -2547,7 +2561,10 @@ export function WebShellSidebar({
 
   const filteredSessions = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
-    const unpinnedSessions = sessions.filter((session) => !session.isPinned);
+    const unpinnedSessions =
+      selectedSessionSource === 'channel'
+        ? sessions
+        : sessions.filter((session) => !session.isPinned);
     const nextSessions = query
       ? unpinnedSessions.filter((session) => {
           const label = getSessionLabel(session).toLowerCase();
@@ -2571,7 +2588,27 @@ export function WebShellSidebar({
         (createdTimeById.get(b.sessionId) ?? 0) -
         (createdTimeById.get(a.sessionId) ?? 0),
     );
-  }, [organizationEnabled, searchQuery, sessions]);
+  }, [organizationEnabled, searchQuery, selectedSessionSource, sessions]);
+
+  const channelSessionSections = useMemo(
+    () =>
+      selectedSessionSource === 'channel' && channelCatalogData
+        ? groupSessionsByChannelType(
+            filteredSessions,
+            channelTypeCatalog,
+            channelInstances,
+            t('sidebar.channelType.other'),
+          )
+        : null,
+    [
+      channelCatalogData,
+      channelInstances,
+      channelTypeCatalog,
+      filteredSessions,
+      selectedSessionSource,
+      t,
+    ],
+  );
 
   const sessionSections = useMemo<SessionSection[]>(() => {
     if (!organizationEnabled) return [];
@@ -3430,11 +3467,26 @@ export function WebShellSidebar({
     }
     if (
       filteredSessions.length === 0 &&
-      (searchQuery.trim() ||
+      (channelSessionSections !== null ||
+        searchQuery.trim() ||
         !organizationEnabled ||
         sessionSections.length === 0)
     ) {
       return <div className={styles.notice}>{t('sidebar.searchEmpty')}</div>;
+    }
+    if (channelSessionSections) {
+      return channelSessionSections.map((section) => (
+        <SessionGroupSection
+          key={section.id}
+          id={section.id}
+          label={section.label}
+          count={section.sessions.length}
+          expanded={!collapsedSessionSectionIds.has(section.id)}
+          onToggle={() => toggleSessionSection(section.id)}
+        >
+          {section.sessions.map((session) => renderSessionRow(session))}
+        </SessionGroupSection>
+      ));
     }
     if (!organizationEnabled) {
       return filteredSessions.map((session) => renderSessionRow(session));
@@ -3476,6 +3528,7 @@ export function WebShellSidebar({
   }, [
     collapsedSessionSectionIds,
     canOrganizeWorkspace,
+    channelSessionSections,
     error,
     filteredSessions,
     groupBusy,
@@ -4105,30 +4158,32 @@ export function WebShellSidebar({
                 </TabsList>
               </Tabs>
             )}
-            {!collapsed && pinnedSessions.length > 0 && (
-              <>
-                <div className={styles.projectsHeader}>
-                  <button
-                    className={styles.projectsHeaderToggle}
-                    type="button"
-                    aria-expanded={pinnedExpanded}
-                    onClick={() => setPinnedExpanded((expanded) => !expanded)}
-                  >
-                    <span>{t('sidebar.pinnedSessions')}</span>
-                    <IconChevron expanded={pinnedExpanded} />
-                  </button>
-                </div>
-                {pinnedExpanded && (
-                  <div className={styles.pinnedSessionList}>
-                    {pinnedSessions.map((session) =>
-                      renderSessionRow(session, {
-                        readOnly: isActiveSessionReadOnly(session),
-                      }),
-                    )}
+            {!collapsed &&
+              selectedSessionSource !== 'channel' &&
+              pinnedSessions.length > 0 && (
+                <>
+                  <div className={styles.projectsHeader}>
+                    <button
+                      className={styles.projectsHeaderToggle}
+                      type="button"
+                      aria-expanded={pinnedExpanded}
+                      onClick={() => setPinnedExpanded((expanded) => !expanded)}
+                    >
+                      <span>{t('sidebar.pinnedSessions')}</span>
+                      <IconChevron expanded={pinnedExpanded} />
+                    </button>
                   </div>
-                )}
-              </>
-            )}
+                  {pinnedExpanded && (
+                    <div className={styles.pinnedSessionList}>
+                      {pinnedSessions.map((session) =>
+                        renderSessionRow(session, {
+                          readOnly: isActiveSessionReadOnly(session),
+                        }),
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
             {!collapsed && !hideProjectHeader && (
               <div className={styles.projectsHeader}>
                 <button
@@ -4215,6 +4270,7 @@ export function WebShellSidebar({
                             loadErrorLabel={t('sidebar.loadFailed')}
                             organizationEnabled={organizationEnabled}
                             sourceType={selectedSessionSource}
+                            channelGroupingEnabled={channelGroupingEnabled}
                             ungroupedLabel={t('sidebar.groupUngrouped')}
                             onRenameGroup={
                               canOrganizeWorkspace(ws.cwd)
@@ -4229,7 +4285,7 @@ export function WebShellSidebar({
                             renameGroupLabel={t('sidebar.groupRename')}
                             deleteGroupLabel={t('sidebar.groupDelete')}
                             groupActionsDisabled={groupBusy}
-                            excludePinned
+                            excludePinned={selectedSessionSource !== 'channel'}
                             onOpenGitDiff={onOpenGitDiff}
                             onOpenCommit={onOpenCommit}
                             formatTime={(iso) => formatRelativeTime(iso, t)}

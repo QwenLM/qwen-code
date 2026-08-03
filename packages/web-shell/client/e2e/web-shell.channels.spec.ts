@@ -22,7 +22,48 @@ test('shows channel sessions in the sidebar channel catalog', async ({
         'session_permission_vote',
         'session_scope_override',
         'session_source_metadata',
+        'channel_management',
       ],
+    },
+    channelTypes: [
+      {
+        type: 'dingtalk',
+        displayName: 'DingTalk',
+        manageable: true,
+        fields: [],
+      },
+      {
+        type: 'feishu',
+        displayName: 'Feishu',
+        manageable: true,
+        fields: [],
+      },
+    ],
+    channels: {
+      revision: '1',
+      instances: {
+        'release-bot': {
+          name: 'release-bot',
+          config: { type: 'dingtalk' },
+          secrets: {},
+          startsWithServe: false,
+          runtime: { state: 'connected' },
+        },
+        'ops-bot': {
+          name: 'ops-bot',
+          config: { type: 'dingtalk' },
+          secrets: {},
+          startsWithServe: false,
+          runtime: { state: 'connected' },
+        },
+        'feishu-main': {
+          name: 'feishu-main',
+          config: { type: 'feishu' },
+          secrets: {},
+          startsWithServe: false,
+          runtime: { state: 'connected' },
+        },
+      },
     },
     sessions: [
       {
@@ -35,6 +76,24 @@ test('shows channel sessions in the sidebar channel catalog', async ({
         displayName: 'DingTalk conversation',
         sourceType: 'channel',
         sourceId: 'release-bot',
+      },
+      {
+        sessionId: 'dingtalk-ops-session',
+        displayName: 'DingTalk ops conversation',
+        sourceType: 'channel',
+        sourceId: 'ops-bot',
+        isPinned: true,
+      },
+      {
+        sessionId: 'feishu-session',
+        displayName: 'Feishu conversation',
+        sourceType: 'channel',
+        sourceId: 'feishu-main',
+      },
+      {
+        sessionId: 'legacy-channel-session',
+        displayName: 'Legacy channel conversation',
+        sourceType: 'channel',
       },
     ],
   });
@@ -57,6 +116,26 @@ test('shows channel sessions in the sidebar channel catalog', async ({
     page.getByText('DingTalk conversation', { exact: true }),
   ).toBeVisible();
   await expect(page.getByText('Web Shell task')).toHaveCount(0);
+  const dingTalkGroup = page.getByRole('region', { name: 'DingTalk' });
+  await expect(dingTalkGroup).toContainText('DingTalk conversation');
+  await expect(dingTalkGroup).toContainText('DingTalk ops conversation');
+  await expect(dingTalkGroup).not.toContainText('Feishu conversation');
+  await expect(page.getByRole('region', { name: 'Feishu' })).toContainText(
+    'Feishu conversation',
+  );
+  await expect(
+    page.getByRole('region', { name: 'Other channels' }),
+  ).toContainText('Legacy channel conversation');
+
+  const dingTalkToggle = dingTalkGroup.getByRole('button').first();
+  await expect(dingTalkToggle).toHaveAttribute('aria-expanded', 'true');
+  await dingTalkToggle.click();
+  await expect(dingTalkToggle).toHaveAttribute('aria-expanded', 'false');
+  await expect(
+    page.getByText('DingTalk conversation', { exact: true }),
+  ).toHaveCount(0);
+  await dingTalkToggle.click();
+  await expect(dingTalkToggle).toHaveAttribute('aria-expanded', 'true');
 
   scenario.sessions.push({
     sessionId: 'new-dingtalk-session',
@@ -67,6 +146,7 @@ test('shows channel sessions in the sidebar channel catalog', async ({
   await expect(
     page.getByText('New DingTalk conversation', { exact: true }),
   ).toBeVisible({ timeout: 5_000 });
+  await expect(dingTalkGroup).toContainText('New DingTalk conversation');
 });
 
 test('creates and deletes a typed Channel configuration', async ({
