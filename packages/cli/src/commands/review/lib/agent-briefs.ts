@@ -610,7 +610,7 @@ For anything that is not one of those two wires — the project's own HTTP servi
 "\${QWEN_CODE_CLI:-qwen}" review capture-tui \\
   --command "<the worktree's built entry, or the fixture that drives it>" \\
   --cols <the width the claim names> --until "<a pane marker that means 'settled'>" \\
-  --out <the plan report's directory>/qwen-review-capture-<finding-id>
+  --out <the plan report's directory>/qwen-review-capture-<finding-id>-<cols>
 \`\`\`
 
 It drives the command in a **private tmux server** (it cannot see, resize or kill the user's own sessions — the isolation is structural, and it reaps everything it started), writes \`<out>.ans\` (the pane bytes, always), renders \`<out>.png\` when \`freeze\` is available, and records which it managed in \`<out>.json\`. Three rules make the capture evidence:

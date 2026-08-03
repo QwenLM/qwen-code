@@ -36,6 +36,7 @@ describe('validGeometry', () => {
       [19, 24],
       [80, 4],
       [501, 24],
+      [80, 201],
       [80.5, 24],
       [Number.NaN, 24],
     ] as const) {
@@ -87,7 +88,8 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
   it('starts the command behind `--` so a dash-leading command is not getopt fodder', () => {
     const i = plan.start.indexOf('--');
     expect(i).toBeGreaterThan(-1);
-    expect(plan.start[i + 1]).toBe('node cli.js');
+    expect(plan.start[i + 1]).toContain('node cli.js');
+    expect(i + 2).toBe(plan.start.length);
   });
 
   it('starts detached at the requested geometry and cwd', () => {
@@ -104,7 +106,45 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
     expect(plan.start[y + 1]).toBe('24');
     const c = plan.start.indexOf('-c');
     expect(plan.start[c + 1]).toBe('/work');
-    expect(plan.start[plan.start.length - 1]).toBe('node cli.js');
+  });
+
+  it('holds the pane open past the command — one-shot commands stay capturable', () => {
+    // tmux's remain-on-exit off destroys the session the moment the command
+    // exits (measured: a render-and-exit fixture was uncapturable 0/10);
+    // the sh -c holder keeps the pane alive and kill-server reaps it.
+    expect(plan.start[plan.start.length - 1]).toBe(
+      "sh -c 'node cli.js; sleep 7200'",
+    );
+  });
+
+  it('quote-escapes the command inside the holder', () => {
+    const p = tmuxPlan({
+      server: 'srv',
+      session: 'cap',
+      cols: 80,
+      rows: 24,
+      command: `printf '%s' "it's"`,
+      cwd: '/work',
+    });
+    // A single quote in the command must not close the holder's quoting.
+    expect(p.start[p.start.length - 1]).toBe(
+      `sh -c 'printf '\\''%s'\\'' "it'\\''s"; sleep 7200'`,
+    );
+  });
+
+  it('matches --until on a joined, escape-free view while .ans stays physical', () => {
+    // -J joins wraps and no -e keeps escapes out: a marker spanning a wrap
+    // boundary or an SGR change can never match the physical frame
+    // (measured: both miss forever).
+    expect(plan.captureText).toEqual([
+      '-L',
+      'srv',
+      'capture-pane',
+      '-p',
+      '-J',
+      '-t',
+      'cap',
+    ]);
   });
 
   it('captures with escapes and trailing spaces, wraps NOT joined', () => {

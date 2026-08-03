@@ -32,6 +32,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { runInNewContext } from 'node:vm';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   DEFAULT_COLS,
@@ -73,7 +74,10 @@ function available(bin: string, versionFlag: string): boolean {
  * matters. Tests override a probe and restore it; production never does. */
 export const probes = {
   tmux: () => available('tmux', '-V'),
-  freeze: () => available('freeze', '--version'),
+  // `--help`, not `--version`: freeze ≤0.1.6 (the whole 2024 release line)
+  // has no --version flag and would be misdiagnosed as absent; --help exits
+  // 0 on both release lines (measured on v0.1.6 and v0.2.2).
+  freeze: () => available('freeze', '--help'),
 };
 
 function tmux(argv: string[]): string {
@@ -89,12 +93,29 @@ function tmux(argv: string[]): string {
   }) as string;
 }
 
-function sleepSync(ms: number): void {
-  const buf = new SharedArrayBuffer(4);
-  Atomics.wait(new Int32Array(buf), 0, 0, ms);
+/** Async on purpose: the waits dominate the capture's wall time, and an
+ * idle event loop is what lets the SIGINT/SIGTERM reap below actually run —
+ * a fully synchronous capture would queue the signal until after the work
+ * it was meant to interrupt. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
-export function runCaptureTui(args: CaptureTuiArgs): void {
+/** `re.test` with a time budget: a backtracking-prone --until pattern can
+ * spin one test() call past any deadline (the deadline is only checked
+ * BETWEEN calls). vm interrupts the match; a budget overrun counts as "no
+ * match yet", so the poll keeps making deadline progress. */
+function testWithBudget(re: RegExp, text: string): boolean {
+  try {
+    return runInNewContext('re.test(text)', { re, text }, {
+      timeout: 500,
+    }) as boolean;
+  } catch {
+    return false;
+  }
+}
+
+export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   const refuse = (reason: string): void => {
     writeStderrLine(`capture-tui: refused — ${reason}`);
     writeStdoutLine(JSON.stringify({ captured: false }));
@@ -118,10 +139,10 @@ export function runCaptureTui(args: CaptureTuiArgs): void {
     refuse('--command must not be empty.');
     return;
   }
-  // yargs coerces a non-numeric `--settle-ms abc` to NaN, and NaN is the
-  // worst possible value here: Atomics.wait treats a NaN timeout as
-  // INFINITY (a capture that never returns), and a NaN deadline makes the
-  // --until poll loop unexpirable. Refuse, don't hang.
+  // yargs coerces a non-numeric `--settle-ms abc` to NaN, and a NaN
+  // deadline makes the --until poll loop unexpirable (`now >= NaN` is
+  // always false). Refuse, don't hang — and refuse the out-of-bounds
+  // values too, so a day-long timeout cannot be requested by typo.
   for (const [name, v, max] of [
     ['--settle-ms', args.settleMs, 600_000],
     ['--timeout-ms', args.timeoutMs, 3_600_000],
@@ -173,53 +194,15 @@ export function runCaptureTui(args: CaptureTuiArgs): void {
     cwd: args.cwd ? resolve(args.cwd) : process.cwd(),
   });
 
-  let ansText = '';
-  let settledBy: CaptureManifest['settledBy'] = 'fixed-delay';
-  try {
-    tmux(plan.start);
-    for (const key of args.keys ?? []) {
-      tmux(plan.sendKeys(key));
-    }
-    if (untilRe) {
-      // Poll the pane for the settle marker; on timeout, capture anyway and
-      // SAY SO — a late frame is degraded evidence, not no evidence. The
-      // frame that MATCHED is the one written: a re-capture after the match
-      // could be a later, different frame, and then the manifest's
-      // `until-match` would describe evidence that no longer shows the match.
-      const deadline = Date.now() + args.timeoutMs;
-      settledBy = 'timeout';
-      for (;;) {
-        const text = tmux(plan.capture);
-        if (untilRe.test(text)) {
-          settledBy = 'until-match';
-          ansText = text;
-          break;
-        }
-        if (Date.now() >= deadline) {
-          ansText = text;
-          break;
-        }
-        sleepSync(250);
-      }
-    } else {
-      sleepSync(args.settleMs);
-      ansText = tmux(plan.capture);
-    }
-  } catch (e) {
-    // tmux failing mid-run (ancient tmux without a flag we use, a command
-    // tmux itself refuses, a server that died under us) is an environment
-    // that could not produce evidence — the refusal contract, not a stack
-    // trace. The finally below still reaps whatever did start.
-    const err = e as Error & { stderr?: string };
-    const detail =
-      (err.stderr ?? '').trim().split('\n').slice(-1)[0] ||
-      (err.message ?? String(e)).split('\n')[0];
-    refuse(`tmux failed mid-capture: ${detail}`);
-    return;
-  } finally {
-    // Always, even when start/capture threw: the private server holds every
-    // process this capture launched, and an orphaned TUI outliving the
-    // review is the mess this command exists to make impossible.
+  // The no-orphan guarantee cannot rest on `finally` alone: a SIGINT/SIGTERM
+  // (an operator's Ctrl+C on an un-settling capture, a harness reaping a
+  // stuck one) skips finally and would leave the server, its socket, and the
+  // captured TUI alive. The handler reaps first and then re-raises so the
+  // exit code stays the conventional one for the signal.
+  let reaped = false;
+  const reap = (): void => {
+    if (reaped) return;
+    reaped = true;
     try {
       tmux(plan.kill);
     } catch {
@@ -238,9 +221,82 @@ export function runCaptureTui(args: CaptureTuiArgs): void {
     } catch {
       // Litter is cosmetic; never let cleanup mask the capture's own result.
     }
+  };
+  const onSignal = (sig: NodeJS.Signals): void => {
+    reap();
+    process.removeListener('SIGINT', onSignal);
+    process.removeListener('SIGTERM', onSignal);
+    process.kill(process.pid, sig);
+  };
+  process.on('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
+
+  let ansText = '';
+  let settledBy: CaptureManifest['settledBy'] = 'fixed-delay';
+  try {
+    tmux(plan.start);
+    for (const key of args.keys ?? []) {
+      tmux(plan.sendKeys(key));
+    }
+    if (untilRe) {
+      // Poll for the settle marker on the LOGICAL view (wraps joined,
+      // escapes absent): on the physical frame, a marker spanning a wrap
+      // boundary or an SGR attribute change can never match (measured:
+      // both miss forever). On timeout, capture anyway and SAY SO — a late
+      // frame is degraded evidence, not no evidence. The physical frame is
+      // captured in the same poll iteration as its matching logical view,
+      // so the `.ans` is the frame the match ruled on, give or take the
+      // milliseconds between two capture-pane calls.
+      const deadline = Date.now() + args.timeoutMs;
+      settledBy = 'timeout';
+      for (;;) {
+        const logical = tmux(plan.captureText);
+        if (testWithBudget(untilRe, logical)) {
+          settledBy = 'until-match';
+          ansText = tmux(plan.capture);
+          break;
+        }
+        if (Date.now() >= deadline) {
+          ansText = tmux(plan.capture);
+          break;
+        }
+        await sleep(250);
+      }
+    } else {
+      await sleep(args.settleMs);
+      ansText = tmux(plan.capture);
+    }
+  } catch (e) {
+    // tmux failing mid-run (ancient tmux without a flag we use, a command
+    // tmux itself refuses, a server that died under us) is an environment
+    // that could not produce evidence — the refusal contract, not a stack
+    // trace. The finally below still reaps whatever did start.
+    const err = e as Error & { stderr?: string };
+    const detail =
+      (err.stderr ?? '').trim().split('\n').slice(-1)[0] ||
+      (err.message ?? String(e)).split('\n')[0];
+    refuse(`tmux failed mid-capture: ${detail}`);
+    return;
+  } finally {
+    // Always, even when start/capture threw: the private server holds every
+    // process this capture launched, and an orphaned TUI outliving the
+    // review is the mess this command exists to make impossible.
+    reap();
+    process.removeListener('SIGINT', onSignal);
+    process.removeListener('SIGTERM', onSignal);
   }
 
-  writeFileSync(ansPath, ansText, 'utf8');
+  try {
+    writeFileSync(ansPath, ansText, 'utf8');
+  } catch (e) {
+    // The disk can fill (or the target turn hostile) during a long capture
+    // window; the same principle as the mkdir guard — refusal contract, not
+    // a stack trace.
+    refuse(
+      `cannot write capture output: ${e instanceof Error ? e.message : String(e)}`,
+    );
+    return;
+  }
 
   // .ans FIRST, then render: freeze has hung mid-render on this repo's own
   // workflows, and the text evidence must already be on disk when it does.
@@ -310,7 +366,18 @@ export function runCaptureTui(args: CaptureTuiArgs): void {
     ...(degradedBecause ? { degradedBecause } : {}),
     settledBy,
   };
-  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+  try {
+    writeFileSync(
+      manifestPath,
+      `${JSON.stringify(manifest, null, 2)}\n`,
+      'utf8',
+    );
+  } catch (e) {
+    refuse(
+      `cannot write capture manifest: ${e instanceof Error ? e.message : String(e)}`,
+    );
+    return;
+  }
 
   writeStderrLine(
     `capture-tui: ${manifest.evidence} at ${args.cols}x${args.rows} ` +
@@ -377,7 +444,7 @@ export const captureTuiCommand: CommandModule = {
         default: 60_000,
         describe: 'Deadline for --until polling',
       }),
-  handler: (argv) => {
+  handler: (argv) =>
     runCaptureTui({
       command: argv['command'] as string,
       cwd: argv['cwd'] as string | undefined,
@@ -388,6 +455,5 @@ export const captureTuiCommand: CommandModule = {
       keys: argv['keys'] as string[] | undefined,
       out: argv['out'] as string,
       timeoutMs: argv['timeout-ms'] as number,
-    });
-  },
+    }),
 };

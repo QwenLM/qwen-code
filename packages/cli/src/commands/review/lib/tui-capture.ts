@@ -96,10 +96,19 @@ export function tmuxPlan(opts: {
 }): {
   start: string[];
   capture: string[];
+  captureText: string[];
   kill: string[];
   sendKeys: (key: string) => string[];
 } {
   const scope = ['-L', opts.server];
+  // The pane must outlive the command: tmux's default `remain-on-exit off`
+  // destroys pane → window → session the moment the command exits, so a
+  // one-shot command (render and exit — exactly what a verify fixture looks
+  // like) would be uncapturable (measured: 0/10 without the holder). The
+  // `sh -c` wrapper also survives exotic default-shells, and `kill-server`
+  // reaps the holder along with everything else. Two hours outlasts the
+  // longest legal capture (1h --until + settle + freeze) with slack.
+  const held = `sh -c '${opts.command.replaceAll("'", "'\\''")}; sleep 7200'`;
   return {
     start: [
       ...scope,
@@ -118,7 +127,7 @@ export function tmuxPlan(opts: {
       // send-keys silently ate `-l` as its literal flag — exit 0, nothing
       // typed — the worst kind of evidence corruption).
       '--',
-      opts.command,
+      held,
     ],
     // -p print, -e escapes, -N trailing spaces. Deliberately NOT -J: joining
     // wrapped lines re-flows the pane into logical lines, and for a layout
@@ -128,6 +137,11 @@ export function tmuxPlan(opts: {
     // very clipping it was capturing). -N keeps column claims honest — a
     // clipped right edge is trailing-space significant.
     capture: [...scope, 'capture-pane', '-p', '-e', '-N', '-t', opts.session],
+    // The MATCHING view for --until: `-J` joins wrapped lines and no `-e`
+    // keeps escapes out, so a marker that spans a wrap boundary or an SGR
+    // attribute change still matches (measured: both miss forever on the
+    // physical view). The physical frame above stays what `.ans` records.
+    captureText: [...scope, 'capture-pane', '-p', '-J', '-t', opts.session],
     // kill-server, not kill-session: the server is ours alone (private -L),
     // and killing it reaps every process the capture started — no orphaned
     // TUI keeps running after the review.
