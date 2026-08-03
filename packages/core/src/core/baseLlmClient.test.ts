@@ -685,6 +685,10 @@ describe('BaseLlmClient', () => {
     });
 
     it('forwards the prompt-cache-sharing marker to the provider request', async () => {
+      mockConfig.getContentGeneratorConfig.mockReturnValue({
+        model: 'test-model',
+        authType: AuthType.USE_OPENAI,
+      });
       mockGenerateContentStream.mockImplementation(async () =>
         mockTextStream(['summary']),
       );
@@ -702,6 +706,37 @@ describe('BaseLlmClient', () => {
         '',
       );
     });
+
+    it.each([
+      AuthType.QWEN_OAUTH,
+      AuthType.USE_ANTHROPIC,
+      AuthType.USE_GEMINI,
+      AuthType.USE_VERTEX_AI,
+    ])(
+      'does not forward the OpenAI cache-sharing marker through %s',
+      async (authType) => {
+        mockConfig.getContentGeneratorConfig.mockReturnValue({
+          model: 'test-model',
+          authType,
+        });
+        mockGenerateContentStream.mockImplementation(async () =>
+          mockTextStream(['summary']),
+        );
+
+        await client.generateText({
+          contents: [{ role: 'user', parts: [{ text: 'summarize' }] }],
+          model: 'test-model',
+          abortSignal: abortController.signal,
+          stream: true,
+          promptCacheSharing: true,
+        });
+
+        expect(mockGenerateContentStream).toHaveBeenCalledWith(
+          expect.not.objectContaining({ promptCacheSharing: true }),
+          '',
+        );
+      },
+    );
 
     it('drops thought parts and tolerates a stream that omits usage', async () => {
       async function* streamWithThought(): AsyncGenerator<GenerateContentResponse> {

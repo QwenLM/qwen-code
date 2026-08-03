@@ -109,7 +109,7 @@ export interface GenerateTextOptions {
    * deltas are collected into the same `{ text, usage }` result.
    */
   stream?: boolean;
-  /** Mark the unchanged history prefix for provider-specific cache reuse. */
+  /** Let the OpenAI adapter mark the unchanged history prefix for cache reuse. */
   promptCacheSharing?: boolean;
   /**
    * When true, throw instead of silently falling back to the main generator if
@@ -403,7 +403,10 @@ export class BaseLlmClient {
         model: requestModel,
         config: requestConfig,
         contents: requestContents,
-        ...(options.promptCacheSharing && { promptCacheSharing: true }),
+        ...(options.promptCacheSharing &&
+          contentGeneratorConfig.authType === AuthType.USE_OPENAI && {
+            promptCacheSharing: true,
+          }),
       } as GenerateContentParameters & { promptCacheSharing?: boolean };
 
       // Both branches resolve to the same `{ text, usage }` shape so a single
