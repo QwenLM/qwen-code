@@ -198,14 +198,9 @@ jobs:
       # ECS/squid, a wrong-tree pass would merge bad code.
       - name: 'Verify checkout includes expected head commit'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}"
-        env:
-          EXPECTED_SHA: "${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"
-        run: |-
-          if ! git merge-base --is-ancestor "${EXPECTED_SHA}" HEAD; then
-            echo "::error::Checked out ref does not contain expected head ${EXPECTED_SHA}."
-            git log --oneline --decorate -5
-            exit 1
-          fi
+        uses: './.github/actions/verify-checkout-head'
+        with:
+          expected_sha: "${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"
 
       - name: 'Classify CI profile'
         id: 'ci_profile'
@@ -508,14 +503,9 @@ jobs:
 
       - name: 'Verify checkout includes expected head commit'
         if: "${{ github.event_name == 'pull_request' }}"
-        env:
-          EXPECTED_SHA: '${{ github.event.pull_request.head.sha }}'
-        run: |-
-          if ! git merge-base --is-ancestor "${EXPECTED_SHA}" HEAD; then
-            echo "::error::Checked out ref does not contain expected head ${EXPECTED_SHA}."
-            git log --oneline --decorate -5
-            exit 1
-          fi
+        uses: './.github/actions/verify-checkout-head'
+        with:
+          expected_sha: '${{ github.event.pull_request.head.sha }}'
 
       # Self-hosted can't reach nodejs.org reliably; reuse the machine's Node.
       - name: 'Set up Node.js 22.x (hosted)'
@@ -689,14 +679,9 @@ jobs:
       # silently testing the wrong tree into a merge.
       - name: 'Verify checkout includes expected head commit'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
-        env:
-          EXPECTED_SHA: '${{ github.event.merge_group.head_sha }}'
-        run: |-
-          if ! git merge-base --is-ancestor "${EXPECTED_SHA}" HEAD; then
-            echo "::error::Checked out ref does not contain expected head ${EXPECTED_SHA}."
-            git log --oneline --decorate -5
-            exit 1
-          fi
+        uses: './.github/actions/verify-checkout-head'
+        with:
+          expected_sha: '${{ github.event.merge_group.head_sha }}'
 
       # Self-hosted can't reach nodejs.org reliably; reuse the machine's Node.
       - name: 'Set up Node.js 22.x (hosted)'
@@ -848,14 +833,9 @@ jobs:
       # via classify_pr, so fail loud if the checkout lacks the merge-queue head
       # rather than silently testing the wrong tree into a merge.
       - name: 'Verify checkout includes expected head commit'
-        env:
-          EXPECTED_SHA: '${{ github.event.merge_group.head_sha }}'
-        run: |-
-          if ! git merge-base --is-ancestor "${EXPECTED_SHA}" HEAD; then
-            echo "::error::Checked out ref does not contain expected head ${EXPECTED_SHA}."
-            git log --oneline --decorate -5
-            exit 1
-          fi
+        uses: './.github/actions/verify-checkout-head'
+        with:
+          expected_sha: '${{ github.event.merge_group.head_sha }}'
 
       # Hosted downloads Node; self-hosted ECS reuses its pre-installed Node 22
       # (it can't reach nodejs.org reliably). Mirrors the Ubuntu gate.

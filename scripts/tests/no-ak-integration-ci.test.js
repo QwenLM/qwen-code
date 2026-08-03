@@ -10,6 +10,7 @@ import { describe, expect, it } from 'vitest';
 
 const ROOT = path.resolve(import.meta.dirname, '../..');
 const NO_AK_SCRIPT = 'test:integration:no-ak:sandbox:none';
+const GUARD_ACTION_PATH = '.github/actions/verify-checkout-head/action.yml';
 
 function getWorkflowJob(workflow, jobName) {
   const marker = `  ${jobName}:`;
@@ -23,6 +24,14 @@ function getWorkflowJob(workflow, jobName) {
     start,
     nextJob ? start + marker.length + nextJob.index : undefined,
   );
+}
+
+function getGuardCall(job, jobName) {
+  const marker = "name: 'Verify checkout includes expected head commit'";
+  const start = job.indexOf(marker);
+  expect(start, `${jobName} lost its checkout guard`).toBeGreaterThanOrEqual(0);
+  const nextStep = job.indexOf('\n      - name:', start + marker.length);
+  return job.slice(start, nextStep > 0 ? nextStep : undefined);
 }
 
 describe('no-AK integration CI wiring', () => {
@@ -136,6 +145,7 @@ describe('no-AK integration CI wiring', () => {
     const webShellJob = getWorkflowJob(workflow, 'web_shell_e2e_smoke');
     const macosJob = getWorkflowJob(workflow, 'test_macos');
     const windowsJob = getWorkflowJob(workflow, 'test_windows');
+    const integrationJob = getWorkflowJob(workflow, 'integration_cli');
 
     // On PRs every gate checks out refs/pull/N/head, which is published the
     // instant the branch is pushed, instead of the merge ref that GitHub
@@ -159,17 +169,68 @@ describe('no-AK integration CI wiring', () => {
     );
 
     // The cheap sanity guard stays: fail loud if HEAD lacks the expected head
-    // (PR head, or the merge-queue head once this job also runs on merge_group).
-    expect(ubuntuJob).toContain(
-      "name: 'Verify checkout includes expected head commit'",
+    // (PR head, or the merge-queue head once a job also runs on merge_group).
+    // Its body lives in one composite action so the four gates cannot drift;
+    // each caller keeps its own run condition and expected-SHA expression.
+    const guardAction = readFileSync(
+      path.join(ROOT, GUARD_ACTION_PATH),
+      'utf8',
     );
-    expect(ubuntuJob).toContain('git merge-base --is-ancestor');
-    expect(ubuntuJob).toContain('github.event.pull_request.head.sha');
-    expect(webShellJob).toContain(
-      "name: 'Verify checkout includes expected head commit'",
+    expect(guardAction).toContain('git merge-base --is-ancestor');
+    expect(guardAction).toContain(
+      '::error::Checked out ref does not contain expected head',
     );
-    expect(webShellJob).toContain('git merge-base --is-ancestor');
-    expect(webShellJob).toContain('github.event.pull_request.head.sha');
+    expect(guardAction).toContain('exit 1');
+
+    const guardCalls = {
+      test: getGuardCall(ubuntuJob, 'test'),
+      web_shell_e2e_smoke: getGuardCall(webShellJob, 'web_shell_e2e_smoke'),
+      test_windows: getGuardCall(windowsJob, 'test_windows'),
+      integration_cli: getGuardCall(integrationJob, 'integration_cli'),
+    };
+    for (const [jobName, call] of Object.entries(guardCalls)) {
+      expect(call, `${jobName} guard must use the shared action`).toContain(
+        "uses: './.github/actions/verify-checkout-head'",
+      );
+    }
+    expect(guardCalls.test).toContain(
+      'expected_sha: "${{ github.event_name == \'merge_group\' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"',
+    );
+    expect(guardCalls.web_shell_e2e_smoke).toContain(
+      "expected_sha: '${{ github.event.pull_request.head.sha }}'",
+    );
+    expect(guardCalls.test_windows).toContain(
+      "expected_sha: '${{ github.event.merge_group.head_sha }}'",
+    );
+    expect(guardCalls.integration_cli).toContain(
+      "expected_sha: '${{ github.event.merge_group.head_sha }}'",
+    );
+  });
+
+  it('pins the Windows gate kill-switch routing and checkout guard', () => {
+    const workflow = readFileSync(
+      path.join(ROOT, '.github/workflows/ci.yml'),
+      'utf8',
+    );
+    const windowsJob = getWorkflowJob(workflow, 'test_windows');
+
+    // The runs-on expression is the Windows gate's escape hatch. Pin the
+    // whole line so a variable typo, a quoting regression in the nested
+    // ''true'' escapes, or an && / || regrouping fails here instead of
+    // surfacing only when the switch is flipped.
+    const windowsRunsOn = windowsJob
+      .split('\n')
+      .find((line) => line.startsWith('    runs-on:'));
+    expect(windowsRunsOn).toBe(
+      `    runs-on: '\${{ (vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event.pull_request.head.repo.full_name == github.repository || github.event_name == ''merge_group'')) && fromJSON(''["self-hosted", "Windows", "X64", "ecs-win"]'') || fromJSON(''["windows-2022"]'') }}'`,
+    );
+
+    // The guard must stay wired to the merge-queue head for this job.
+    const guard = getGuardCall(windowsJob, 'test_windows');
+    expect(guard).toContain("uses: './.github/actions/verify-checkout-head'");
+    expect(guard).toContain(
+      "expected_sha: '${{ github.event.merge_group.head_sha }}'",
+    );
   });
 
   it('keeps the lightweight coverage comment job on the hosted runner', () => {

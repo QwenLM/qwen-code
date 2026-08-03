@@ -20,7 +20,6 @@ export default defineConfig({
     exclude:
       process.platform === 'win32'
         ? [
-            'scripts/tests/lint.test.js',
             'scripts/tests/pr-self-report-label.test.js',
             'scripts/tests/qwen-autofix-workflow.test.js',
             'scripts/tests/qwen-fleet-shepherd-workflow.test.js',

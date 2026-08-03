@@ -21,4 +21,4 @@ The change is ready when formatting, lint configuration checks, targeted CLI and
 
 ## Operations
 
-An offline ecs-win runner makes the job queue rather than fail, which blocks the merge queue until a maintainer intervenes. Setting the `MAINTAINER_ECS_RUNNER_DISABLED` repository variable to `true` routes the Windows gate back to `windows-2022`.
+An offline ecs-win runner makes the job queue rather than fail, which blocks the merge queue until a maintainer intervenes. Setting the `MAINTAINER_ECS_RUNNER_DISABLED` repository variable to `true` routes the Windows gate back to `windows-2022`; runs already queued for the offline `ecs-win` label keep waiting (jobs do not re-evaluate `runs-on`, and `timeout-minutes` does not count queue time), so cancel or re-run those queued runs after flipping the switch.
