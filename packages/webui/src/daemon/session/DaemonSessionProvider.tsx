@@ -1329,6 +1329,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           // only fires once with the fully-populated state.
           const { compactedReplay, liveJournal } = activeSession.replaySnapshot;
           const replayEvents = [...compactedReplay, ...liveJournal];
+          const markerStillVisible =
+            repairingEpisode?.markerBlockId !== undefined &&
+            store
+              .getSnapshot()
+              .blocks.some(
+                (block) => block.id === repairingEpisode?.markerBlockId,
+              );
           // Prefer a recordId carried by an actual `session_update` in the
           // retained window; fall back to the `history_truncated` marker's
           // stamped anchor only when no session_update has one. The marker
@@ -1378,6 +1385,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               capacityReached: false,
               paginationError: false,
             });
+          } else if (
+            !markerStillVisible &&
+            firstPersistedRecordId !== undefined
+          ) {
+            transcriptHistoryRef.current.beforeRecordId =
+              firstPersistedRecordId;
+            transcriptHistoryRef.current.cursor = undefined;
           }
           const replayInjected =
             shouldInjectReplaySnapshot && replayEvents.length > 0;
@@ -1391,13 +1405,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ...eventOptionsRef.current,
               suppressOwnUserEcho: false,
             };
-            const markerStillVisible =
-              repairingEpisode?.markerBlockId !== undefined &&
-              store
-                .getSnapshot()
-                .blocks.some(
-                  (block) => block.id === repairingEpisode?.markerBlockId,
-                );
             const sourceEvents =
               repairingEpisode && repairSuffix && markerStillVisible
                 ? repairSuffix.events

@@ -4674,6 +4674,25 @@ describe('DaemonSessionProvider', () => {
   });
 
   it('uses a bounded full-snapshot fallback after the marker block is trimmed', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_transcript_pagination'],
+    });
+    sdkMocks.getSessionTranscriptPage
+      .mockResolvedValueOnce({
+        v: 1,
+        sessionId: 'session-live-trimmed-marker',
+        events: [],
+        nextCursor: 'stale-cursor',
+        hasMore: true,
+      })
+      .mockResolvedValueOnce({
+        v: 1,
+        sessionId: 'session-live-trimmed-marker',
+        events: [],
+        hasMore: false,
+      });
+    const toolGate = createDeferred<void>();
     const terminalGate = createDeferred<void>();
     const toolEvent: DaemonEvent = {
       id: 6,
@@ -4689,8 +4708,22 @@ describe('DaemonSessionProvider', () => {
         },
       },
     };
-    const terminalEvent: DaemonEvent = {
+    const secondToolEvent: DaemonEvent = {
       id: 7,
+      v: 1,
+      type: 'session_update',
+      promptId: 'prompt-live',
+      data: {
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'call-live-2',
+          title: 'another long tool',
+          status: 'running',
+        },
+      },
+    };
+    const terminalEvent: DaemonEvent = {
+      id: 8,
       v: 1,
       type: 'turn_complete',
       promptId: 'prompt-live',
@@ -4715,6 +4748,7 @@ describe('DaemonSessionProvider', () => {
               maxBytes: 512,
               maxEvents: 1,
               fullTranscriptAvailable: true,
+              recordId: 'record-stale-anchor',
             },
           },
           {
@@ -4734,7 +4768,10 @@ describe('DaemonSessionProvider', () => {
       events: async function* trimMarkerThenFinish(
         options: { signal?: AbortSignal } = {},
       ) {
+        await toolGate.promise;
+        if (options.signal?.aborted) return;
         yield toolEvent;
+        yield secondToolEvent;
         await terminalGate.promise;
         if (options.signal?.aborted) return;
         yield terminalEvent;
@@ -4747,7 +4784,7 @@ describe('DaemonSessionProvider', () => {
     });
     const repairedSession = createMockSession({
       sessionId: initialSession.sessionId,
-      lastEventId: 7,
+      lastEventId: 8,
       replaySnapshot: {
         compactedReplay: [
           {
@@ -4759,10 +4796,12 @@ describe('DaemonSessionProvider', () => {
               update: {
                 sessionUpdate: 'user_message_chunk',
                 content: { type: 'text', text: 'complete prompt' },
+                _meta: { 'qwen.session.recordId': 'record-fresh-anchor' },
               },
             },
           },
           toolEvent,
+          secondToolEvent,
           {
             id: 2,
             v: 1,
@@ -4782,15 +4821,33 @@ describe('DaemonSessionProvider', () => {
     });
     sdkMocks.sessions.push(initialSession, repairedSession);
     let blocks: readonly DaemonTranscriptBlock[] = [];
+    let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
 
     function Harness() {
       blocks = useDaemonTranscriptBlocks();
+      history = useDaemonTranscriptHistory();
       return null;
     }
 
     await renderWithProvider(<Harness />, {
       autoConnect: true,
-      maxBlocks: 2,
+      maxBlocks: 3,
+    });
+    await act(async () => {
+      await vi.waitFor(() => expect(history?.hasMore).toBe(true));
+      await history?.loadMore();
+    });
+    expect(sdkMocks.getSessionTranscriptPage).toHaveBeenNthCalledWith(
+      1,
+      initialSession.sessionId,
+      {
+        beforeRecordId: 'record-stale-anchor',
+        limit: 100,
+        clientId: initialSession.clientId,
+      },
+    );
+    await act(async () => {
+      toolGate.resolve();
     });
     await act(async () => {
       await vi.waitFor(() =>
@@ -4814,8 +4871,19 @@ describe('DaemonSessionProvider', () => {
       );
     });
 
-    expect(blocks.length).toBeLessThanOrEqual(2);
+    expect(blocks.length).toBeLessThanOrEqual(3);
     expect(JSON.stringify(blocks)).not.toContain('partial tail');
+    expect(history?.hasMore).toBe(true);
+    await act(async () => history?.loadMore());
+    expect(sdkMocks.getSessionTranscriptPage).toHaveBeenNthCalledWith(
+      2,
+      initialSession.sessionId,
+      {
+        beforeRecordId: 'record-fresh-anchor',
+        limit: 100,
+        clientId: initialSession.clientId,
+      },
+    );
   });
 
   it.each([
