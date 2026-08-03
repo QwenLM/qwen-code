@@ -38,4 +38,17 @@ describe('AdvisorMessage', () => {
     const output = lastFrame() ?? '';
     expect(output).toContain('review body');
   });
+
+  it('normalizes code fences emitted immediately after prose', () => {
+    const { lastFrame } = renderWithProviders(
+      <AdvisorMessage
+        text={'Intro```ts\nconst answer = 42;\n```'}
+        model="m"
+      />,
+    );
+
+    const output = lastFrame() ?? '';
+    expect(output).toContain('const answer = 42;');
+    expect(output).not.toContain('Intro```ts');
+  });
 });
