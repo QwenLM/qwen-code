@@ -1211,6 +1211,19 @@ describe('applyTurnCollapse', () => {
     expect(collapseOf(out, 'u1')?.collapsed).toBe(false);
   });
 
+  it('keeps a completed main turn expanded while one background agent is pending', () => {
+    const agent = makeBackgroundAgentToolGroup('a1');
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      agent,
+      makeAssistantMessage('a1'),
+    ]);
+    const out = collapseItems(items);
+
+    expect(rowIds(out)).toEqual(['u1', 'tc-u1', 'a1', 'a1']);
+    expect(collapseOf(out, 'u1')?.collapsed).toBe(false);
+  });
+
   it('still allows manually collapsing a turn with no final answer', () => {
     const items = groupParallelAgents([
       makeUserMessage('u1'),

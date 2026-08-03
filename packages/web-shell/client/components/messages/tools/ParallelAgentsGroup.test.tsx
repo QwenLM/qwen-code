@@ -154,16 +154,18 @@ describe('ParallelAgentsGroup timeline rendering', () => {
         agent({ callId: 'pending', status: 'pending', startTime: 2_000 }),
       ]);
 
-      expect(container.textContent).toMatch(/Parallel agents \d+s·1\/2 done/);
+      expect(container.textContent).toContain('Parallel agents 8s·1/2 done');
+      const pendingRow = computeAgentsTimeline(
+        [
+          agent({ callId: 'done', startTime: 1_000, endTime: 5_000 }),
+          agent({ callId: 'pending', status: 'pending', startTime: 2_000 }),
+        ],
+        10_000,
+      )?.rows.get('pending');
+      expect(pendingRow?.running).toBe(true);
       expect(
-        computeAgentsTimeline(
-          [
-            agent({ callId: 'done', startTime: 1_000, endTime: 5_000 }),
-            agent({ callId: 'pending', status: 'pending', startTime: 2_000 }),
-          ],
-          10_000,
-        )?.rows.get('pending')?.running,
-      ).toBe(true);
+        (pendingRow?.leftPct ?? 0) + (pendingRow?.widthPct ?? 0),
+      ).toBeCloseTo(100);
     } finally {
       vi.useRealTimers();
     }
