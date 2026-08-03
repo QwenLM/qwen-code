@@ -163,7 +163,7 @@ export interface DaemonWorkspaceService {
   /** Start the ACP child/channel without creating a user-visible session. */
   preheatAcpChild(
     ctx: WorkspaceRequestContext,
-    opts?: { timeoutMs?: number; keepAliveMs?: number },
+    opts?: { timeoutMs?: number },
   ): Promise<WorkspaceAcpPreheatResult>;
 
   /** Current ACP child/channel liveness for the bound workspace. */
@@ -501,7 +501,7 @@ export interface DaemonWorkspaceServiceDeps {
   ) => Promise<EnvReloadResult>;
 
   /** Eagerly start the ACP child/channel without creating a session. */
-  preheatAcpChild?: (options?: { keepAliveMs?: number }) => Promise<void>;
+  preheatAcpChild?: () => Promise<void>;
 
   /**
    * Query workspace status from the ACP child. The bridge owns the

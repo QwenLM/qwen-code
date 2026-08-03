@@ -1648,6 +1648,38 @@ describe('DELETE /workspaces/:workspace', () => {
     );
   });
 
+  it('cancels the runtime coordinator drain when persistence removal fails', async () => {
+    const runtime = makeRuntime(REAL_DIR);
+    Object.assign(runtime.bridge, {
+      preheat: vi.fn().mockResolvedValue(undefined),
+      getWorkspaceRuntimeLifecycleSnapshot: () => ({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 1,
+        activeWork: false,
+      }),
+    });
+    const runtimeRemoval = createRemovalController();
+    const { app } = createApp({
+      workspaceRegistry: createMockRegistry([runtime]),
+      runtimeRemoval,
+      workspaceRegistrationStore: {
+        removeByIds: vi.fn().mockRejectedValue(new Error('disk full')),
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const res = await request(app).delete(
+      `/workspaces/${encodeURIComponent(runtime.workspaceId)}`,
+    );
+
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe('workspace_persist_failed');
+    expect(runtime.runtimeCoordinator).toBeDefined();
+    await expect(runtime.runtimeCoordinator!.ensure()).resolves.toMatchObject({
+      runtimeLive: true,
+    });
+  });
+
   it('force-removes activity, aliases, runtime resources, and registry state', async () => {
     const runtime = makeRuntime(REAL_DIR, {
       registrationIds: ['raw-alias-a', 'raw-alias-b'],

@@ -197,6 +197,12 @@ describe('workspace runtime routes', () => {
     const primary = createRuntime('/primary');
     const secondary = createRuntime('/secondary');
     const registry = {
+      primaryEntry: {
+        state: 'active',
+        workspaceId: primary.workspaceId,
+        workspaceCwd: primary.workspaceCwd,
+        current: { runtime: primary },
+      },
       getEntryByWorkspaceId: vi.fn((workspaceId: string) =>
         workspaceId === secondary.workspaceId
           ? {

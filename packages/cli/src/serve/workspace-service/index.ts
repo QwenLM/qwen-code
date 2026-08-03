@@ -422,7 +422,7 @@ export function createDaemonWorkspaceService(
 
     async preheatAcpChild(
       _ctx: WorkspaceRequestContext,
-      opts?: { timeoutMs?: number; keepAliveMs?: number },
+      opts?: { timeoutMs?: number },
     ): Promise<WorkspaceAcpPreheatResult> {
       assertActiveGeneration();
       const startedAt = performance.now();
@@ -446,11 +446,7 @@ export function createDaemonWorkspaceService(
         });
       }
 
-      const preheat = Promise.resolve().then(() =>
-        opts?.keepAliveMs === undefined
-          ? preheatAcpChildOnBridge()
-          : preheatAcpChildOnBridge({ keepAliveMs: opts.keepAliveMs }),
-      );
+      const preheat = Promise.resolve().then(() => preheatAcpChildOnBridge());
       try {
         await withTimeout(preheat, opts?.timeoutMs ?? 5_000, 'ACP preheat');
       } catch (err) {

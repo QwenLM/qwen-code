@@ -178,6 +178,15 @@ describe('WorkspaceRuntimeCoordinator', () => {
     ).rejects.toBeInstanceOf(WorkspaceRuntimeInitializationError);
   });
 
+  it('rejects when preheat resolves without a live runtime', async () => {
+    const harness = makeRuntime();
+    harness.preheat.mockResolvedValue(undefined);
+
+    await expect(
+      getWorkspaceRuntimeCoordinator(harness.runtime).ensure(),
+    ).rejects.toBeInstanceOf(WorkspaceRuntimeInitializationError);
+  });
+
   it('stores one coordinator per supported runtime', () => {
     const harness = makeRuntime();
 

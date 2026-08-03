@@ -228,6 +228,7 @@ export function sendBridgeError(
   }
   if (sendGenerationClosedError(res, err)) return;
   if (err instanceof WorkspaceRuntimeStillStartingError) {
+    reportBridgeError(err, ctx, daemonLog);
     res.set('Retry-After', '5');
     res.status(503).json({
       error: err.message,

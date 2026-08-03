@@ -279,6 +279,7 @@ cold -> starting -> active -> idle
           └-> cold + lastError  启动失败
 
 active/idle -> stopping -> cold  workspace removal / daemon shutdown / explicit restart
+stopping -> starting/active      新 epoch（admission 开放时，旧 Channel 退出前）
 idle -> stopping -> cold         immediate or configured idle timeout
 active/idle -> cold              child crash
 ```

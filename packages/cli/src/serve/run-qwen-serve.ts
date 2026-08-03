@@ -3563,6 +3563,10 @@ async function runQwenServeImpl(
     // `mcp_register`). Inert unless `opts.clientMcpOverWs` is on.
     const clientMcpSenderRegistry = new ClientMcpSenderRegistry();
     const runtimeBridges: AcpSessionBridge[] = [];
+    // Epoch sources are deliberately never evicted: a removed workspace
+    // that is re-registered under the same cwd must continue from its
+    // last epoch, otherwise clients holding the old epoch would observe
+    // a regression.
     const runtimeEpochSources = new Map<
       string,
       { current(): number; allocate(): number }
@@ -3898,7 +3902,7 @@ async function runQwenServeImpl(
       persistDisabledSkills: persistDisabledSkillsFn,
       persistSetting: persistSettingFn,
       persistSettings: persistSettingsFn,
-      preheatAcpChild: (options) => bridge.preheat(options),
+      preheatAcpChild: () => bridge.preheat(),
       reloadDaemonEnv: (workspace, assertGenerationOpen) =>
         withSettingsLock(workspace, async () => {
           assertGenerationOpen?.();
@@ -4297,7 +4301,7 @@ async function runQwenServeImpl(
         voiceEnv: secondaryEnv.effectiveEnv,
         voiceSettingsScope: WORKSPACE_SETTING_SCOPE,
         isChannelLive: () => secondaryBridge.isChannelLive(),
-        preheatAcpChild: (options) => secondaryBridge.preheat(options),
+        preheatAcpChild: () => secondaryBridge.preheat(),
         persistDisabledTools: persistDisabledToolsFn,
         persistDisabledSkills: persistDisabledSkillsFn,
         persistSetting: persistSettingFn,
@@ -4808,7 +4812,7 @@ async function runQwenServeImpl(
             ? {}
             : { voiceSettingsScope: WORKSPACE_SETTING_SCOPE }),
           isChannelLive: () => wsBridge.isChannelLive(),
-          preheatAcpChild: (options) => wsBridge.preheat(options),
+          preheatAcpChild: () => wsBridge.preheat(),
           persistDisabledTools: persistDisabledToolsFn,
           persistDisabledSkills: persistDisabledSkillsFn,
           persistSetting: persistSettingFn,

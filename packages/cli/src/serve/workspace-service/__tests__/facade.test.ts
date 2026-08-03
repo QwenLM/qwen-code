@@ -2191,11 +2191,9 @@ describe('createDaemonWorkspaceService', () => {
 
       const first = svc.preheatAcpChild(makeCtx(), {
         timeoutMs: 1000,
-        keepAliveMs: 111,
       });
       const second = svc.preheatAcpChild(makeCtx(), {
         timeoutMs: 1000,
-        keepAliveMs: 222,
       });
       live = true;
       pending.resolve();
@@ -2205,12 +2203,8 @@ describe('createDaemonWorkspaceService', () => {
         expect.objectContaining({ ready: true, channelLive: true }),
       ]);
       expect(preheatAcpChild).toHaveBeenCalledTimes(2);
-      expect(preheatAcpChild).toHaveBeenNthCalledWith(1, {
-        keepAliveMs: 111,
-      });
-      expect(preheatAcpChild).toHaveBeenNthCalledWith(2, {
-        keepAliveMs: 222,
-      });
+      expect(preheatAcpChild).toHaveBeenNthCalledWith(1);
+      expect(preheatAcpChild).toHaveBeenNthCalledWith(2);
     });
 
     it('allows a new attempt after a timed-out observer', async () => {

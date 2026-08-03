@@ -25,12 +25,14 @@ type LifecycleAcpSessionBridge = AcpSessionBridge & {
 export class WorkspaceRuntimeStillStartingError extends Error {
   constructor() {
     super('Workspace runtime is still starting');
+    this.name = 'WorkspaceRuntimeStillStartingError';
   }
 }
 
 export class WorkspaceRuntimeInitializationError extends Error {
   constructor(cause: unknown) {
     super('Workspace runtime failed to initialize', { cause });
+    this.name = 'WorkspaceRuntimeInitializationError';
   }
 }
 

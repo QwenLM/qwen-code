@@ -393,8 +393,10 @@ interface ChannelInfo {
    * Live session ids multiplexed on this channel. Updated when
    * `doSpawn` registers a new session and when `killSession` /
    * `channel.exited` removes one. When the set drops to empty under
-   * `killSession`, the channel is marked `isDying = true` and its
-   * `channel.kill()` is awaited; `channelInfo` itself is left
+   * `killSession`, the workspace idle policy is scheduled via
+   * `startIdleTimer`; `killChannelWithLog` / `reapPendingEmptyChannel`
+   * are the actual `isDying = true` set-sites on that path, and
+   * `channel.kill()` is awaited there. `channelInfo` itself is left
    * pointing at the dying channel until `channel.exited` fires (see
    * BkUyD invariant on `isDying` below).
    */
@@ -455,8 +457,11 @@ interface ChannelInfo {
    *      during handshake).
    *   3. `doSpawn`: newSession-failure on an empty channel
    *      (sessionIds.size === 0).
-   *   4. `killSession`: last session leaving (sessionIds.size === 0
-   *      after the delete).
+   *   4. `killSession` last-session-leaving (sessionIds.size === 0
+   *      after the delete) — indirectly: it schedules the idle policy
+   *      via `startIdleTimer`, and `killChannelWithLog` (immediate at
+   *      a resolved timeout <= 0, or on timer expiry) /
+   *      `reapPendingEmptyChannel` perform the actual set.
    *   5. `shutdown`: bulk-mark every entry in `aliveChannels`.
    *
    * **BkUyD invariant (why we don't clear `channelInfo` here)**:
@@ -1566,9 +1571,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   // `channelInfo` is the SINGLE attach-available channel. Cleared
   // ONLY by the `channel.exited` handler (see below) when the OS
   // reaps the underlying child process. Teardown initiators
-  // (`killSession` last-session-leaving, `doSpawn`-newSession-failure
-  // on an empty channel, `ensureChannel` init-failure /
-  // late-shutdown, `shutdown`) set `isDying = true` but LEAVE
+  // (`killSession` last-session-leaving — via `startIdleTimer` ->
+  // `killChannelWithLog` / `reapPendingEmptyChannel`,
+  // `doSpawn`-newSession-failure on an empty channel, `ensureChannel`
+  // init-failure / late-shutdown, `shutdown`) set `isDying = true`
+  // but LEAVE
   // `channelInfo` pointing at the dying channel until OS reap — that
   // asymmetry IS the BkUyD invariant. It lets `killAllSync` reach a
   // mid-SIGTERM-grace channel through `aliveChannels` while a
@@ -2742,12 +2749,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         nextRuntimeEpoch <= previousRuntimeEpoch
       ) {
         info.isDying = true;
+        const epochError = new Error(
+          `Runtime epoch source must increase monotonically (local=${runtimeEpoch}, current=${previousRuntimeEpoch}, next=${nextRuntimeEpoch}).`,
+        );
+        startupAbort.abort(epochError);
         await terminateChannel(channel, 'invalid runtime epoch').catch(
           () => undefined,
         );
-        throw new Error(
-          `Runtime epoch source must increase monotonically (local=${runtimeEpoch}, current=${previousRuntimeEpoch}, next=${nextRuntimeEpoch}).`,
-        );
+        throw epochError;
       }
       runtimeEpoch = nextRuntimeEpoch;
       channelInfo = info;
@@ -2808,9 +2817,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       ensureChannel,
     );
     ci.sessionSpawnsInFlight++;
-    let sessionRegistered = false;
-    let sessionRemovedDuringInitialization = false;
-    let initializedSessionId: string | undefined;
     let newSessionResp: {
       sessionId: string;
       models?: { currentModelId?: unknown } | null;
@@ -2907,8 +2913,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         undefined,
         { parentSessionId, sourceType, sourceId, worktree, branch },
       );
-      initializedSessionId = entry.sessionId;
-      sessionRegistered = true;
       onSessionRegistered?.();
       seedSnapshotCaches(entry, newSessionResp);
       const clientId = registerClient(entry, requestedClientId);
@@ -3056,7 +3060,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             await closeSessionImpl(entry.sessionId, undefined, {
               reason: 'approval_mode_initialization_failed',
             });
-            sessionRemovedDuringInitialization = true;
           } catch {
             /* best-effort; preserve the approval-mode failure */
           }
@@ -3101,22 +3104,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       };
     } finally {
       ci.sessionSpawnsInFlight = Math.max(0, ci.sessionSpawnsInFlight - 1);
-      if (!sessionRegistered) {
-        await reapPendingEmptyChannel(ci);
-      } else if (sessionRemovedDuringInitialization && hasNoChannelWork(ci)) {
-        await reapPendingEmptyChannel(ci);
-        if (!ci.isDying) {
-          await startIdleTimer(
-            ci,
-            `approval-mode initialization failure "${initializedSessionId}"`,
-          );
-        }
-      } else if (sessionRegistered && hasNoChannelWork(ci) && !ci.isDying) {
-        await startIdleTimer(
-          ci,
-          `session orphaned during initialization "${initializedSessionId}"`,
-        );
-      }
+      // The spawn tracker stays in `inFlightSpawns` until
+      // `spawnOrAttach`'s finally, so `hasNoChannelWork` can never
+      // return true here; idle arming/reaping settles there after the
+      // tracker is deleted.
     }
   }
 
@@ -3653,7 +3644,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         } else if (Array.isArray(status.errors) && status.errors.length > 0) {
           info.workspaceMcpDiscoveryRequested = false;
         }
-        let authenticationCompleted = false;
         for (const serverName of info.workspaceMcpAuthenticationServerNames) {
           const server = rawServers.find(
             (candidate) => candidate.name === serverName,
@@ -3666,12 +3656,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             const timer = info.workspaceMcpAuthenticationTimers.get(serverName);
             if (timer) clearTimeout(timer);
             info.workspaceMcpAuthenticationTimers.delete(serverName);
-            authenticationCompleted = true;
-          }
-        }
-        if (authenticationCompleted) {
-          if (hasNoChannelWork(info)) {
-            await startIdleTimer(info, 'workspace MCP authentication complete');
           }
         }
         workspaceMcpStatusCache =
@@ -5670,7 +5654,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // poison every future coalescing-path call for this
         // workspace (single-scope) or grow unbounded (thread-scope).
         inFlightSpawns.delete(tracker);
-        await settleReleasedRuntimeWork('session spawn', false);
+        await settleReleasedRuntimeWork('session spawn');
       }
     },
 

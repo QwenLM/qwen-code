@@ -396,6 +396,7 @@ describe('qwen serve — capabilities envelope', () => {
       'persistent_workspace_registration',
       'workspace_display_name',
       'workspace_runtime_removal',
+      'workspace_runtime',
       'workspace_qualified_rest_core',
       'extension_management_v2',
       'workspace_persisted_transcript',

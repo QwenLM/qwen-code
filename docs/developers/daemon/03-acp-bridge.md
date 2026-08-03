@@ -177,7 +177,7 @@ sequenceDiagram
 ## State & Lifecycle
 
 - Bridge construction is synchronous. A caller may preheat the channel before the first session; otherwise the first `spawnOrAttach` cold-starts the ACP child. A failed preheat leaves first use free to retry.
-- `defaultEntry` is the reusable logical Session under `sessionScope: 'single'`. Session close removes only its Session lease. After all Session, restore, workspace-control, discovery, and authentication work drains, an omitted or zero `channelIdleTimeoutMs` reaps the child immediately; a positive value delays reaping.
+- `defaultEntry` is the reusable logical Session under `sessionScope: 'single'`. Session close removes only its Session lease. After all Session, restore, workspace-control, discovery, authentication, and runtime-operation work drains and no explicit-ensure keepalive window is pending, an omitted or zero `channelIdleTimeoutMs` reaps the child immediately; a positive value — or an active keepalive window — delays reaping.
 - `MAX_EVENT_RING_SIZE = 1_000_000` is a soft upper bound on `BridgeOptions.eventRingSize` to catch operator typos before ~500 MB per-session OOMs.
 - `DEFAULT_PERMISSION_TIMEOUT_MS = 5 * 60 * 1000` keeps a wedged permission request from blocking the per-session `promptQueue` forever.
 - `DEFAULT_MAX_PENDING_PER_SESSION = 64` mirrors `DEFAULT_MAX_SUBSCRIBERS`; excess `requestPermission` calls resolve as cancelled with a stderr warning.

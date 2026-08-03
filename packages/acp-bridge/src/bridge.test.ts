@@ -18366,6 +18366,114 @@ describe('preheat', () => {
     await bridge.shutdown();
   });
 
+  it('reaps an idle-timeout-zero channel whose session is removed mid-initialization', async () => {
+    const handle = makeChannel({
+      extMethodImpl: (method) => {
+        if (method === SERVE_CONTROL_EXT_METHODS.sessionApprovalMode) {
+          throw new Error('approval mode rejected');
+        }
+        return {};
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      channelIdleTimeoutMs: 0,
+    });
+
+    const err = await bridge
+      .spawnOrAttach({
+        workspaceCwd: WS_A,
+        approvalMode: ApprovalMode.YOLO,
+      })
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+    expect(err).not.toBeNull();
+    await vi.waitFor(() => expect(handle.killed).toBe(true));
+    await vi.waitFor(() =>
+      expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
+        state: 'cold',
+        runtimeLive: false,
+        activeWork: false,
+      }),
+    );
+
+    await bridge.shutdown();
+  });
+
+  it('aborts the startup signal when channel initialization fails', async () => {
+    let capturedSignal: AbortSignal | undefined;
+    const handle = makeChannel({
+      initializeThrows: new Error('handshake refused'),
+    });
+    const bridge = makeBridge({
+      channelFactory: async (_workspaceCwd, _childEnvOverrides, signal) => {
+        capturedSignal = signal;
+        return handle.channel;
+      },
+    });
+
+    const err = await bridge.preheat().then(
+      () => null,
+      (e: unknown) => e,
+    );
+
+    expect(err).not.toBeNull();
+    expect(capturedSignal?.aborted).toBe(true);
+    expect(handle.killed).toBe(true);
+    await bridge.shutdown();
+  });
+
+  it('aborts the startup signal when the runtime epoch regresses', async () => {
+    let capturedSignal: AbortSignal | undefined;
+    const handle = makeChannel();
+    const bridge = makeBridge({
+      channelFactory: async (_workspaceCwd, _childEnvOverrides, signal) => {
+        capturedSignal = signal;
+        return handle.channel;
+      },
+      runtimeEpochSource: {
+        current: () => 5,
+        allocate: () => 5,
+      },
+    });
+
+    await expect(bridge.preheat()).rejects.toThrow(/monotonically/);
+    expect(capturedSignal?.aborted).toBe(true);
+    expect(handle.killed).toBe(true);
+    await bridge.shutdown();
+  });
+
+  it('aborts the startup signal when the channel factory times out', async () => {
+    vi.useFakeTimers();
+    try {
+      let capturedSignal: AbortSignal | undefined;
+      const handle = makeChannel();
+      const factoryResult = deferred<typeof handle.channel>();
+      const bridge = makeBridge({
+        channelFactory: async (_workspaceCwd, _childEnvOverrides, signal) => {
+          capturedSignal = signal;
+          return await factoryResult.promise;
+        },
+        initializeTimeoutMs: 50,
+      });
+
+      const preheat = bridge.preheat();
+      void preheat.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(50);
+      await expect(preheat).rejects.toThrow(/channel factory timed out/);
+      expect(capturedSignal?.aborted).toBe(true);
+
+      factoryResult.resolve(handle.channel);
+      await vi.waitFor(() => expect(handle.killed).toBe(true));
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it.each([
     {
       label: 'MCP initialization',

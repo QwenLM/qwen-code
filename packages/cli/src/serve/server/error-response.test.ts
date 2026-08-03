@@ -112,10 +112,16 @@ describe('sendBridgeError session writer errors', () => {
 
   it('maps runtime still starting to 503 with Retry-After', () => {
     const { response, set, status, json } = responseMock();
+    const daemonLog = {
+      error: vi.fn(),
+    } as unknown as DaemonLogger;
 
-    sendBridgeError(response, new WorkspaceRuntimeStillStartingError(), {
-      route: 'POST /workspace/runtime/ensure',
-    });
+    sendBridgeError(
+      response,
+      new WorkspaceRuntimeStillStartingError(),
+      { route: 'POST /workspace/runtime/ensure' },
+      daemonLog,
+    );
 
     expect(set).toHaveBeenCalledWith('Retry-After', '5');
     expect(status).toHaveBeenCalledWith(503);
@@ -123,6 +129,11 @@ describe('sendBridgeError session writer errors', () => {
       error: 'Workspace runtime is still starting',
       code: 'runtime_still_starting',
     });
+    expect(daemonLog.error).toHaveBeenCalledWith(
+      'Workspace runtime is still starting',
+      expect.any(WorkspaceRuntimeStillStartingError),
+      { route: 'POST /workspace/runtime/ensure' },
+    );
   });
 
   it('logs the cause of runtime initialization failures', () => {
