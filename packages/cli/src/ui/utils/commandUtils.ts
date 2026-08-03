@@ -140,6 +140,19 @@ export const copyToClipboard = async (text: string): Promise<void> => {
     case 'darwin':
       return run('pbcopy', []);
     case 'linux':
+      if (
+        process.env['XDG_SESSION_TYPE']?.toLowerCase() === 'wayland' ||
+        Boolean(process.env['WAYLAND_DISPLAY'])
+      ) {
+        try {
+          // Prefer the native Wayland clipboard. X11 tools may be installed
+          // under XWayland but still be unable to access the active clipboard.
+          await run('wl-copy', [], linuxOptions);
+          return;
+        } catch {
+          // Fall through to the existing X11 and OSC 52 fallbacks.
+        }
+      }
       try {
         await run('xclip', ['-selection', 'clipboard'], linuxOptions);
       } catch (primaryError) {

@@ -5,7 +5,7 @@
  */
 
 import type { Mock } from 'vitest';
-import { vi, describe, it, expect, beforeEach } from 'vitest';
+import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import type { spawn, SpawnOptions } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import {
@@ -63,6 +63,10 @@ describe('commandUtils', () => {
     }) as MockChildProcess;
 
     mockSpawn.mockReturnValue(mockChild as unknown as ReturnType<typeof spawn>);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
   });
 
   describe('isAtCommand', () => {
@@ -214,6 +218,89 @@ describe('commandUtils', () => {
     describe('on Linux', () => {
       beforeEach(() => {
         mockProcess.platform = 'linux';
+        vi.stubEnv('XDG_SESSION_TYPE', 'x11');
+        vi.stubEnv('WAYLAND_DISPLAY', '');
+      });
+
+      it('should prefer wl-copy in a Wayland session', async () => {
+        const testText = 'Hello, Wayland!';
+        const linuxOptions: SpawnOptions = {
+          stdio: ['pipe', 'inherit', 'pipe'],
+        };
+        vi.stubEnv('XDG_SESSION_TYPE', 'wayland');
+
+        setTimeout(() => {
+          mockChild.emit('close', 0);
+        }, 0);
+
+        await copyToClipboard(testText);
+
+        expect(mockSpawn).toHaveBeenCalledTimes(1);
+        expect(mockSpawn).toHaveBeenCalledWith('wl-copy', [], linuxOptions);
+        expect(mockChild.stdin.write).toHaveBeenCalledWith(testText);
+        expect(mockChild.stdin.end).toHaveBeenCalled();
+      });
+
+      it('should detect Wayland from WAYLAND_DISPLAY', async () => {
+        const linuxOptions: SpawnOptions = {
+          stdio: ['pipe', 'inherit', 'pipe'],
+        };
+        vi.stubEnv('XDG_SESSION_TYPE', '');
+        vi.stubEnv('WAYLAND_DISPLAY', 'wayland-0');
+
+        setTimeout(() => {
+          mockChild.emit('close', 0);
+        }, 0);
+
+        await copyToClipboard('WSL Wayland');
+
+        expect(mockSpawn).toHaveBeenCalledTimes(1);
+        expect(mockSpawn).toHaveBeenCalledWith('wl-copy', [], linuxOptions);
+      });
+
+      it('should fall back to xclip when wl-copy is unavailable', async () => {
+        const linuxOptions: SpawnOptions = {
+          stdio: ['pipe', 'inherit', 'pipe'],
+        };
+        vi.stubEnv('XDG_SESSION_TYPE', 'wayland');
+        let callCount = 0;
+
+        mockSpawn.mockImplementation(() => {
+          const child = Object.assign(new EventEmitter(), {
+            stdin: Object.assign(new EventEmitter(), {
+              write: vi.fn(),
+              end: vi.fn(),
+            }),
+            stderr: new EventEmitter(),
+          }) as MockChildProcess;
+
+          setTimeout(() => {
+            if (callCount++ === 0) {
+              const error = new Error('spawn wl-copy ENOENT');
+              (error as NodeJS.ErrnoException).code = 'ENOENT';
+              child.emit('error', error);
+            } else {
+              child.emit('close', 0);
+            }
+          }, 0);
+
+          return child as unknown as ReturnType<typeof spawn>;
+        });
+
+        await copyToClipboard('fallback');
+
+        expect(mockSpawn).toHaveBeenNthCalledWith(
+          1,
+          'wl-copy',
+          [],
+          linuxOptions,
+        );
+        expect(mockSpawn).toHaveBeenNthCalledWith(
+          2,
+          'xclip',
+          ['-selection', 'clipboard'],
+          linuxOptions,
+        );
       });
 
       it('should successfully copy text to clipboard using xclip', async () => {
