@@ -59,6 +59,7 @@ interface CaptureTuiArgs {
   rows: number;
   settleMs: number;
   until: string | undefined;
+  ready: string | undefined;
   keys: string[] | undefined;
   out: string;
   timeoutMs: number;
@@ -148,6 +149,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     ['--command', args.command],
     ['--cwd', args.cwd],
     ['--until', args.until],
+    ['--ready', args.ready],
     ['--out', args.out],
   ] as const) {
     if (v !== undefined && typeof v !== 'string') {
@@ -223,6 +225,25 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   // Validate the regex BEFORE any process starts: an invalid pattern is a
   // caller mistake and gets the refusal contract, not a stack trace thrown
   // from inside a running capture.
+  // --ready: measured on this repo's own onboarding TUI, keys fired at start
+  // straddle the UI's mount — a Down was consumed and the Enter behind it
+  // lost — so key-driven captures of anything that takes a moment to render
+  // are unreliable without a gate. The gate is a marker, like --until.
+  let readyRe: RegExp | undefined;
+  if (args.ready !== undefined && args.ready.trim() === '') {
+    refuse('--ready must not be empty.');
+    return;
+  }
+  if (args.ready !== undefined) {
+    try {
+      readyRe = new RegExp(args.ready);
+    } catch (e) {
+      refuse(
+        `--ready is not a valid regex: ${e instanceof Error ? e.message : String(e)}`,
+      );
+      return;
+    }
+  }
   let untilRe: RegExp | undefined;
   if (args.until !== undefined && args.until.trim() === '') {
     // An empty pattern matches ANY pane text, including a blank one: the
@@ -335,12 +356,42 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
 
   let ansText = '';
   let settledBy: CaptureManifest['settledBy'] = 'fixed-delay';
+  let readyFailed = false;
+  let keysSent: boolean | undefined;
   try {
     tmux(plan.start);
-    for (const key of args.keys ?? []) {
-      tmux(plan.sendKeys(key));
+    // One deadline covers the ready gate AND the until poll: two separate
+    // clocks would let a capture run to 2× --timeout-ms.
+    const deadline = Date.now() + args.timeoutMs;
+    if (readyRe) {
+      readyFailed = true;
+      for (;;) {
+        const logical = tmux(plan.captureText);
+        if (testWithBudget(readyRe, logical)) {
+          readyFailed = false;
+          break;
+        }
+        if (Date.now() >= deadline) break;
+        await sleep(250);
+      }
     }
-    if (untilRe) {
+    if (args.keys !== undefined && args.keys.length > 0) {
+      if (readyFailed) {
+        // The UI never reached the state the keys were meant for: typing
+        // them anyway would drive an unknown screen. Withhold, and say so.
+        keysSent = false;
+      } else {
+        for (const key of args.keys) {
+          tmux(plan.sendKeys(key));
+        }
+        keysSent = true;
+      }
+    }
+    if (readyFailed) {
+      // The deadline is spent; a late frame is all there is.
+      if (untilRe) settledBy = 'timeout';
+      ansText = tmux(plan.capture);
+    } else if (untilRe) {
       // Poll for the settle marker on the LOGICAL view (wraps joined,
       // escapes absent): on the physical frame, a marker spanning a wrap
       // boundary or an SGR attribute change can never match (measured:
@@ -349,7 +400,6 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       // captured in the same poll iteration as its matching logical view,
       // so the `.ans` is the frame the match ruled on, give or take the
       // milliseconds between two capture-pane calls.
-      const deadline = Date.now() + args.timeoutMs;
       settledBy = 'timeout';
       for (;;) {
         const logical = tmux(plan.captureText);
@@ -407,7 +457,13 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   // contract is that a manifest reader learns WHY the ladder stopped where it
   // did, and a late frame and a failed render can both be true at once.
   const degradations: string[] = [];
-  if (settledBy === 'timeout') {
+  if (readyFailed) {
+    degradations.push(
+      `--ready never matched within ${args.timeoutMs}ms — ${
+        keysSent === false ? 'keys were NOT sent, ' : ''
+      }late frame captured`,
+    );
+  } else if (settledBy === 'timeout') {
     degradations.push(
       `--until never matched within ${args.timeoutMs}ms — late frame captured`,
     );
@@ -475,6 +531,8 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     cols: args.cols,
     rows: args.rows,
     ...(args.keys !== undefined ? { keys: args.keys } : {}),
+    ...(keysSent !== undefined ? { keysSent } : {}),
+    ...(args.ready !== undefined ? { ready: args.ready } : {}),
     ...(args.until !== undefined ? { until: args.until } : {}),
     ...(args.until === undefined ? { settleMs: args.settleMs } : {}),
     ...(args.until !== undefined ? { timeoutMs: args.timeoutMs } : {}),
@@ -545,11 +603,16 @@ export const captureTuiCommand: CommandModule = {
         describe:
           'Capture as soon as the pane text matches this regex; on timeout, capture anyway and record that the marker never appeared',
       })
+      .option('ready', {
+        type: 'string',
+        describe:
+          'Send --keys only after the pane matches this regex — keys fired at start straddle a slow-mounting UI and get partially eaten (measured); on timeout the keys are withheld and the manifest says so',
+      })
       .option('keys', {
         type: 'string',
         array: true,
         describe:
-          'tmux send-keys tokens sent after start, one per token (e.g. --keys "/review" Enter)',
+          'tmux send-keys tokens sent after start (or after --ready matches), one per token (e.g. --keys "/review" Enter)',
       })
       .option('out', {
         type: 'string',
@@ -570,6 +633,7 @@ export const captureTuiCommand: CommandModule = {
       rows: argv['rows'] as number,
       settleMs: argv['settle-ms'] as number,
       until: argv['until'] as string | undefined,
+      ready: argv['ready'] as string | undefined,
       keys: argv['keys'] as string[] | undefined,
       out: argv['out'] as string,
       timeoutMs: argv['timeout-ms'] as number,

@@ -408,6 +408,63 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(manifest.cwd).toBe(dir);
   });
 
+  it('sends --keys only after --ready matches — early keys get eaten', async () => {
+    // The fixture DRAINS its input before printing READY, the way a
+    // slow-mounting TUI eats keystrokes fired at start (measured on this
+    // repo's own onboarding dialog: a Down consumed, the Enter behind it
+    // lost). Keys sent at start land in the drain and never echo; keys
+    // gated on --ready land after it and do.
+    await runCaptureTui({
+      command: `bash -c 'sleep 0.7; IFS= read -rs -t 0.3 -n 10000 junk || true; printf "READY\\n"; cat'`,
+      cwd: dir,
+      cols: 80,
+      rows: 24,
+      settleMs: 0,
+      ready: 'READY',
+      until: 'gated-input',
+      keys: ['gated-input', 'Enter'],
+      out: join(dir, 'ready'),
+      timeoutMs: 10_000,
+    } as never);
+    expect(process.exitCode).toBeUndefined();
+    const manifest = JSON.parse(readFileSync(join(dir, 'ready.json'), 'utf8'));
+    expect(manifest.settledBy).toBe('until-match');
+    expect(manifest.keysSent).toBe(true);
+    expect(manifest.ready).toBe('READY');
+    expect(readFileSync(join(dir, 'ready.ans'), 'utf8')).toContain(
+      'gated-input',
+    );
+  });
+
+  it('withholds --keys when --ready never matches, and says so', async () => {
+    // Typing into a screen that never reached the expected state would
+    // drive an unknown UI; the keys are withheld and the manifest is honest
+    // about both the miss and the withholding.
+    await run({
+      ready: 'NEVER-READY',
+      keys: ['DANGER', 'Enter'],
+      until: undefined,
+      settleMs: 0,
+      timeoutMs: 1500,
+    });
+    expect(process.exitCode).toBeUndefined();
+    const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
+    expect(manifest.keysSent).toBe(false);
+    expect(manifest.degradedBecause).toContain('--ready never matched');
+    expect(manifest.degradedBecause).toContain('NOT sent');
+    // The pty would echo even unread keystrokes — absence proves withheld.
+    expect(readFileSync(join(dir, 'cap.ans'), 'utf8')).not.toContain('DANGER');
+  });
+
+  it('refuses an empty or invalid --ready like it refuses --until', async () => {
+    await run({ ready: '   ' });
+    expect(process.exitCode).toBe(3);
+    process.exitCode = undefined;
+    await run({ ready: '[' });
+    expect(process.exitCode).toBe(3);
+    expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
+  });
+
   it('sends --keys in fixed-delay mode too — keys are not an --until feature', async () => {
     await runCaptureTui({
       command: 'cat',

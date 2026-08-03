@@ -73,6 +73,10 @@ export interface CaptureManifest {
   cols: number;
   rows: number;
   keys?: string[];
+  /** Whether the keys were actually typed — false when --ready never
+   * matched and they were withheld rather than fired at an unknown screen. */
+  keysSent?: boolean;
+  ready?: string;
   until?: string;
   settleMs?: number;
   timeoutMs?: number;
