@@ -2021,12 +2021,26 @@ describe('Session', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      session.restoreTodoPlanRevisionFromReplay([
+        {
+          sessionUpdate: 'plan',
+          entries: [{ content: 'old', priority: 'medium', status: 'pending' }],
+          _meta: {
+            qwenTodoPlan: { id: 'old-plan' },
+            qwenTranscript: { planToolCallId: 'old-call' },
+          },
+        },
+      ]);
 
       const result = session.rewindToTurn(1);
 
       expect(result).toEqual({ targetTurnIndex: 1, apiTruncateIndex: 2 });
       expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
       expect(mockChat.stripThoughtsFromHistory).toHaveBeenCalled();
+      expect(
+        (session as unknown as { activeTodoPlanRevision?: unknown })
+          .activeTodoPlanRevision,
+      ).toBeUndefined();
       expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
         1,
         { truncatedCount: 2 },

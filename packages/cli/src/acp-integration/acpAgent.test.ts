@@ -14320,6 +14320,44 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     await agentPromise;
   });
 
+  it('does not restore replayed Todo plan revision while loading plan mode', async () => {
+    const messages = [{ role: 'user', parts: [{ text: 'hi' }] }];
+    const innerConfig = bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: { messages },
+    });
+    innerConfig.getApprovalMode.mockReturnValue('plan');
+    const replayUpdate = {
+      sessionUpdate: 'plan',
+      entries: [{ content: 'Old plan', priority: 'medium', status: 'done' }],
+      _meta: {
+        timestamp: 4242,
+        qwenTodoPlan: { id: 'old-plan' },
+        qwenTranscript: { planToolCallId: 'old-call' },
+      },
+    };
+    mockHistoryReplay.mockImplementation(async (context: unknown) => {
+      await (
+        context as { sendUpdate: (update: unknown) => Promise<void> }
+      ).sendUpdate(replayUpdate);
+    });
+    const { agent, agentPromise } = await spawnAgent();
+
+    await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+      _meta: { 'qwen.session.loadReplayMode': 'bulk' },
+    });
+
+    expect(
+      lastSessionMock?.restoreTodoPlanRevisionFromReplay,
+    ).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('loadSession limits bulk replay to complete recent turns', async () => {
     const makeMessage = (
       uuid: string,

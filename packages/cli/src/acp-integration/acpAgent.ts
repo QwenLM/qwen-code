@@ -4635,7 +4635,9 @@ class QwenAgent implements Agent {
                   replayError: replay.replayError,
                   ...(replayPage.hasMore ? { hasMore: true } : {}),
                 };
-              } else {
+              } else if (
+                createdSession.getConfig().getApprovalMode() !== 'plan'
+              ) {
                 createdSession.restoreTodoPlanRevisionFromReplay(replayUpdates);
               }
               replayEnvelope ??= {
