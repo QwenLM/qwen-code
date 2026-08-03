@@ -2531,4 +2531,34 @@ describe('the reverse-audit budget gate — the loop must end by reporting', () 
     expect(process.exitCode).toBeUndefined();
     expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(1);
   });
+
+  it('refuses an --all-chunks round too: exit 4, and none of the per-chunk records', () => {
+    // The loop's real Step 5 form is --role reverse-audit --all-chunks
+    // --findings …, and that path writes one record PER CHUNK — so "no
+    // record written" is at its strongest here: PLAN has three chunks, and
+    // none of the three may exist for a delivery check to expect agents for.
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 60);
+    const plan = call('reverse-audit', { 'all-chunks': true, round: 3 });
+
+    expect(process.exitCode).toBe(4);
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(0);
+    expect(readRecordedPrompts(plan).size).toBe(0);
+    expect(readBudgetStop(plan)?.entry).toBe(
+      'reverse audit — stopped before round 3 by the review time budget',
+    );
+    expect(readRoundStamps(plan)).toHaveLength(0);
+  });
+
+  it('throws the validation error first: a malformed call beats the budget refusal', () => {
+    // The ordering the gate's comment claims, pinned: an invalid --round gets
+    // the validation error even with the budget exhausted — exit 4 is for a
+    // well-formed round the time budget refuses, never a replacement error.
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 60);
+    expect(() => call('reverse-audit', { round: 0 })).toThrow(
+      /--round is a 1-based round number/,
+    );
+    expect(process.exitCode).toBeUndefined();
+    expect((writeStderrLine as unknown as Mock).mock.calls).toHaveLength(0);
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(0);
+  });
 });

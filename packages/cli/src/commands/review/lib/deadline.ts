@@ -174,6 +174,9 @@ export function reverseAuditBudgetExhausted(
   const reserveRaw = env[RESERVE_ENV];
   if (reserveRaw !== undefined && reserveRaw.trim() !== '') {
     const r = Number(reserveRaw);
+    // `r >= 0` (not `> 0`) is deliberate: 0 is the escape hatch that shrinks
+    // the requirement to the round estimate alone, keeping only the refusal
+    // of a round that cannot finish before the deadline itself.
     if (Number.isFinite(r) && r >= 0) reserve = r;
   }
 

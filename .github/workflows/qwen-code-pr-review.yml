@@ -829,7 +829,10 @@ jobs:
             # size: a quarter of the attempt, floored at 10 minutes (a tiny
             # explicit budget degrades to skipping the audit loop, correctly)
             # and capped at 60 (the verify+compose+post tail does not grow
-            # just because the budget did).
+            # just because the budget did). The 3600 cap mirrors
+            # DEFAULT_RESERVE_SECONDS in packages/cli/src/commands/review/
+            # lib/deadline.ts (the CLI's fallback when this var is absent) —
+            # keep the two in sync.
             QWEN_REVIEW_DEADLINE_RESERVE_SECONDS="$(( attempt_timeout / 4 ))"
             if [ "$QWEN_REVIEW_DEADLINE_RESERVE_SECONDS" -lt 600 ]; then
               QWEN_REVIEW_DEADLINE_RESERVE_SECONDS=600
