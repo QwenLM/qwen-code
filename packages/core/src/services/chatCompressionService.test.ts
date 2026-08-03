@@ -20,7 +20,7 @@ import type { GeminiChat } from '../core/geminiChat.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
 import type { BaseLlmClient } from '../core/baseLlmClient.js';
-import { AuthType, type InputModalities } from '../core/contentGenerator.js';
+import { AuthType } from '../core/contentGenerator.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
 import * as sideQueryModule from '../utils/sideQuery.js';
 import * as postCompactModule from './postCompactAttachments.js';
@@ -2197,7 +2197,6 @@ describe('ChatCompressionService.compress cache sharing', () => {
     baseUrl?: string;
     compactionModel?: string;
     enableCacheControl?: boolean;
-    modalities?: InputModalities;
   }): {
     chat: GeminiChat;
     config: Config;
@@ -2235,7 +2234,6 @@ describe('ChatCompressionService.compress cache sharing', () => {
         baseUrl: options?.baseUrl,
         contextWindowSize: 200_000,
         enableCacheControl: options?.enableCacheControl ?? true,
-        modalities: options?.modalities,
       }),
       getHookSystem: vi.fn().mockReturnValue({
         firePreCompactEvent: vi.fn().mockResolvedValue(undefined),
@@ -2326,12 +2324,9 @@ describe('ChatCompressionService.compress cache sharing', () => {
     expect(request.config?.tools).toBe(requestTools);
   });
 
-  it('attempts cache sharing with supported media still in the history', async () => {
+  it('attempts cache sharing with media still in the history', async () => {
     const history = makeMediaHistory();
-    const { chat, config, generateText } = makeFixture({
-      history,
-      modalities: { image: true, pdf: true },
-    });
+    const { chat, config, generateText } = makeFixture({ history });
     const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
 
     await new ChatCompressionService().compress(chat, {
@@ -2604,10 +2599,7 @@ describe('ChatCompressionService.compress cache sharing', () => {
 
   it('slims media only after the cache-sharing request fails', async () => {
     const history = makeMediaHistory();
-    const { chat, config, generateText } = makeFixture({
-      history,
-      modalities: { image: true, pdf: true },
-    });
+    const { chat, config, generateText } = makeFixture({ history });
     generateText.mockRejectedValue(new Error('provider failed'));
     const coldSpy = vi
       .spyOn(sideQueryModule, 'runSideQuery')
