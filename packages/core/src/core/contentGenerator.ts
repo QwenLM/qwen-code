@@ -91,7 +91,7 @@ export type ContentGeneratorConfig = {
   retryInitialDelayMs?: number; // Initial delay for stream rate-limit retries
   retryMaxDelayMs?: number; // Maximum delay for stream rate-limit retries
   retryErrorCodes?: number[]; // Additional error codes that trigger rate-limit retry
-  enableCacheControl?: boolean; // Enable cache control for DashScope providers
+  enableCacheControl?: boolean; // Enable provider prompt-cache controls
   // Force `scope: 'global'` on Anthropic cache_control entries even when the
   // base URL is not an Anthropic-native origin (e.g. proxy providers like
   // Routify, OpenRouter). Requires the proxy to forward `cache_control` fields

@@ -690,6 +690,7 @@ export class ChatCompressionService {
           promptId,
           stream: true,
           maxAttempts: 1,
+          promptCacheSharing: true,
         });
         if (!sharedResult.hadToolCall && hasStateSnapshot(sharedResult.text)) {
           summaryResult = sharedResult;

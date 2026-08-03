@@ -2250,6 +2250,7 @@ describe('ChatCompressionService.compress cache sharing', () => {
     const request = generateText.mock.calls[0]![0] as {
       contents: Content[];
       systemInstruction?: string;
+      promptCacheSharing?: boolean;
       config?: {
         tools?: unknown;
         thinkingConfig?: {
@@ -2260,6 +2261,7 @@ describe('ChatCompressionService.compress cache sharing', () => {
       };
     };
     expect(request.systemInstruction).toBe(mainSystemInstruction);
+    expect(request.promptCacheSharing).toBe(true);
     expect(request.config?.tools).toBe(tools);
     expect(request.config?.thinkingConfig?.includeThoughts).toBe(true);
     expect(request.config?.thinkingConfig?.thinkingBudget).toBe(
@@ -2310,6 +2312,32 @@ describe('ChatCompressionService.compress cache sharing', () => {
     'uses cache sharing for DashScope through %s',
     async (authType) => {
       const { chat, config, generateText } = makeFixture({ authType });
+      const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
+
+      await new ChatCompressionService().compress(chat, {
+        promptId: 'p',
+        force: true,
+        config,
+        consecutiveFailures: 0,
+        originalTokenCount: 180_000,
+      });
+
+      expect(generateText).toHaveBeenCalledTimes(1);
+      expect(coldSpy).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    'https://api.openai.com/v1',
+    'https://api.deepseek.com/v1',
+    'https://proxy.example/v1',
+  ])(
+    'uses cache sharing for OpenAI-compatible endpoint %s',
+    async (baseUrl) => {
+      const { chat, config, generateText } = makeFixture({
+        authType: AuthType.USE_OPENAI,
+        baseUrl,
+      });
       const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
 
       await new ChatCompressionService().compress(chat, {
@@ -2564,13 +2592,6 @@ describe('ChatCompressionService.compress cache sharing', () => {
     {
       name: 'a provider without explicit cache support',
       options: { authType: AuthType.USE_GEMINI },
-    },
-    {
-      name: 'a non-DashScope OpenAI-compatible provider',
-      options: {
-        authType: AuthType.USE_OPENAI,
-        baseUrl: 'https://api.openai.com/v1',
-      },
     },
     {
       name: 'disabled cache control',

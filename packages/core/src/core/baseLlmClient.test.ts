@@ -684,6 +684,25 @@ describe('BaseLlmClient', () => {
       expect(result.hadToolCall).toBe(true);
     });
 
+    it('forwards the prompt-cache-sharing marker to the provider request', async () => {
+      mockGenerateContentStream.mockImplementation(async () =>
+        mockTextStream(['summary']),
+      );
+
+      await client.generateText({
+        contents: [{ role: 'user', parts: [{ text: 'summarize' }] }],
+        model: 'test-model',
+        abortSignal: abortController.signal,
+        stream: true,
+        promptCacheSharing: true,
+      });
+
+      expect(mockGenerateContentStream).toHaveBeenCalledWith(
+        expect.objectContaining({ promptCacheSharing: true }),
+        '',
+      );
+    });
+
     it('drops thought parts and tolerates a stream that omits usage', async () => {
       async function* streamWithThought(): AsyncGenerator<GenerateContentResponse> {
         yield createMockTextResponse('answer');

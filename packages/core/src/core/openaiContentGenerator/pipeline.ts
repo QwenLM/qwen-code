@@ -12,6 +12,10 @@ import {
 import type { ContentGeneratorConfig } from '../contentGenerator.js';
 import { OpenAIContentConverter } from './converter.js';
 import { DashScopeOpenAICompatibleProvider } from './provider/dashscope.js';
+import {
+  applyOfficialOpenAIPromptCaching,
+  isOfficialOpenAIEndpoint,
+} from './prefix-caching.js';
 import { isDeepSeekHostname } from './provider/deepseek.js';
 import { openaiRequestCaptureContext } from './requestCaptureContext.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
@@ -833,10 +837,24 @@ export class ContentGenerationPipeline {
     }
 
     // Let provider enhance the request (e.g., add metadata, cache control)
-    const providerRequest = this.config.provider.buildRequest(
+    let providerRequest = this.config.provider.buildRequest(
       baseRequest,
       userPromptId,
     );
+    if (
+      this.contentGeneratorConfig.enableCacheControl !== false &&
+      isOfficialOpenAIEndpoint(this.contentGeneratorConfig)
+    ) {
+      providerRequest = applyOfficialOpenAIPromptCaching(
+        providerRequest,
+        this.config.cliConfig.getSessionId?.(),
+        (
+          request as GenerateContentParameters & {
+            promptCacheSharing?: boolean;
+          }
+        ).promptCacheSharing === true,
+      );
+    }
 
     // Reasoning is disabled when either:
     //   - the per-request opt-out is set (forked queries for suggestions),

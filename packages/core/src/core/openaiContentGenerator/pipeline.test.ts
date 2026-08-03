@@ -4206,6 +4206,130 @@ describe('ContentGenerationPipeline', () => {
       );
     });
 
+    it('adds an official OpenAI session cache key to regular requests', async () => {
+      mockContentGeneratorConfig.baseUrl = 'https://api.openai.com/v1';
+      mockContentGeneratorConfig.model = 'gpt-5.5';
+      mockCliConfig = {
+        getSessionId: vi.fn().mockReturnValue('session-123'),
+      } as unknown as Config;
+      mockConfig.cliConfig = mockCliConfig;
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      const messages = [
+        { role: 'user', content: 'Hello' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+        messages,
+      );
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'test',
+        choices: [{ message: { content: 'response' } }],
+      });
+
+      await pipeline.execute(
+        {
+          model: 'gpt-5.5',
+          contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+        },
+        'prompt-id',
+      );
+
+      expect(mockClient.chat.completions.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          prompt_cache_key: 'qwen-code:session-123',
+          messages,
+        }),
+        expect.anything(),
+      );
+    });
+
+    it('does not add official OpenAI cache fields when cache control is disabled', async () => {
+      mockContentGeneratorConfig.baseUrl = 'https://api.openai.com/v1';
+      mockContentGeneratorConfig.model = 'gpt-5.6';
+      mockContentGeneratorConfig.enableCacheControl = false;
+      mockCliConfig = {
+        getSessionId: vi.fn().mockReturnValue('session-123'),
+      } as unknown as Config;
+      mockConfig.cliConfig = mockCliConfig;
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Hello' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'test',
+        choices: [{ message: { content: 'response' } }],
+      });
+
+      await pipeline.execute(
+        {
+          model: 'gpt-5.6',
+          contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+          promptCacheSharing: true,
+        } as GenerateContentParameters & { promptCacheSharing: boolean },
+        'prompt-id',
+      );
+
+      const sent = (mockClient.chat.completions.create as Mock).mock
+        .calls[0]?.[0] as Record<string, unknown>;
+      expect(sent['prompt_cache_key']).toBeUndefined();
+      expect(sent['prompt_cache_options']).toBeUndefined();
+    });
+
+    it('marks the stable official OpenAI prefix for GPT-5.6 compression', async () => {
+      mockContentGeneratorConfig.baseUrl = 'https://api.openai.com/v1';
+      mockContentGeneratorConfig.model = 'gpt-5.6';
+      mockCliConfig = {
+        getSessionId: vi.fn().mockReturnValue('session-123'),
+      } as unknown as Config;
+      mockConfig.cliConfig = mockCliConfig;
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      const messages = [
+        { role: 'system', content: 'system' },
+        { role: 'user', content: 'main request' },
+        { role: 'assistant', content: 'main response' },
+        { role: 'user', content: 'compression directive' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+        messages,
+      );
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'test',
+        choices: [{ message: { content: 'response' } }],
+      });
+
+      await pipeline.execute(
+        {
+          model: 'gpt-5.6',
+          contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+          promptCacheSharing: true,
+        } as GenerateContentParameters & { promptCacheSharing: boolean },
+        'prompt-id',
+      );
+
+      const sent = (mockClient.chat.completions.create as Mock).mock
+        .calls[0]?.[0] as OpenAI.Chat.ChatCompletionCreateParams & {
+        prompt_cache_options?: { mode?: string };
+      };
+      expect(sent.prompt_cache_key).toBe('qwen-code:session-123');
+      expect(sent.prompt_cache_options).toEqual({ mode: 'explicit' });
+      expect(sent.messages[1]?.content).toEqual([
+        {
+          type: 'text',
+          text: 'main request',
+          prompt_cache_breakpoint: { mode: 'explicit' },
+        },
+      ]);
+      expect(sent.messages.at(-1)?.content).toBe('compression directive');
+    });
+
     it('should pass arbitrary samplingParams keys through verbatim when the window has room (e.g. max_completion_tokens for GPT-5)', async () => {
       // Arrange: user sets a GPT-5 / o-series shape in samplingParams.
       // None of these are typed fields; all must appear on the wire because

@@ -13,7 +13,8 @@ Compression first attempts a specialized single-turn request when all of the
 following are true:
 
 - the compression model is the current main model;
-- the active provider is Anthropic or DashScope and cache control is enabled;
+- the active provider is Anthropic or OpenAI-compatible and cache control is
+  enabled;
 - slimming found no media that would change the provider-facing history.
 
 The request uses the current turn's effective generation config, including
@@ -32,6 +33,14 @@ only a short history tail and can belong to another concurrent session.
 Histories containing media and sessions using a distinct compaction model stay
 on the existing path. This keeps the first version limited to requests whose
 cache identity can be established without changing media or provider routing.
+
+OpenAI-compatible endpoints use the same prefix-preserving request shape even
+when their cache controls are unknown, allowing server-side automatic prefix
+caches such as vLLM to match it. Qwen Code does not send provider-specific cache
+fields to these endpoints. For the official OpenAI API, requests share a stable
+session cache key. GPT-5.6 and later compression requests additionally mark the
+last reusable user/tool boundaries and select explicit-only cache mode, so the
+new compression directive does not move the effective cache breakpoint.
 
 ## Verification
 

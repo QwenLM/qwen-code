@@ -7,6 +7,7 @@
 import type {
   Content,
   GenerateContentConfig,
+  GenerateContentParameters,
   GenerateContentResponseUsageMetadata,
   Part,
   EmbedContentParameters,
@@ -108,6 +109,8 @@ export interface GenerateTextOptions {
    * deltas are collected into the same `{ text, usage }` result.
    */
   stream?: boolean;
+  /** Mark the unchanged history prefix for provider-specific cache reuse. */
+  promptCacheSharing?: boolean;
   /**
    * When true, throw instead of silently falling back to the main generator if
    * a distinct generator for `model` can't be created (model not registered, or
@@ -400,7 +403,8 @@ export class BaseLlmClient {
         model: requestModel,
         config: requestConfig,
         contents: requestContents,
-      };
+        ...(options.promptCacheSharing && { promptCacheSharing: true }),
+      } as GenerateContentParameters & { promptCacheSharing?: boolean };
 
       // Both branches resolve to the same `{ text, usage }` shape so a single
       // retryWithBackoff governs the whole request (a mid-stream failure retries
