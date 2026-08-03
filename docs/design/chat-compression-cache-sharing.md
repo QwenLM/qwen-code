@@ -13,7 +13,9 @@ Compression first attempts a specialized single-turn request when all of the
 following are true:
 
 - the compression model is the current main model;
-- the active provider is Anthropic or DashScope and cache control is enabled.
+- the active provider is Anthropic or DashScope and cache control is enabled;
+- the effective prompt token count plus the bounded compression output reserve
+  fits the model's context window.
 
 The request uses the current turn's effective generation config, including
 per-request tool overrides used by subagents, and the complete curated
@@ -40,6 +42,7 @@ main session's cache.
 
 Unit tests assert exact system, tools, full-history, and trailing-directive
 construction; provider/model gates; media preservation on the shared path;
-media slimming after fallback; tool-call and malformed-response fallback; and
-cancellation behavior. Provider testing should compare the serialized request
-prefix and cached-token usage for the main turn and compression request.
+window preflight; media slimming after fallback; tool-call and
+malformed-response fallback; and cancellation behavior. Provider testing
+should compare the serialized request prefix and cached-token usage for the
+main turn and compression request.

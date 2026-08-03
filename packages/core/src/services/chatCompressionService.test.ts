@@ -2197,6 +2197,7 @@ describe('ChatCompressionService.compress cache sharing', () => {
     baseUrl?: string;
     compactionModel?: string;
     enableCacheControl?: boolean;
+    contextWindowSize?: number;
   }): {
     chat: GeminiChat;
     config: Config;
@@ -2232,7 +2233,7 @@ describe('ChatCompressionService.compress cache sharing', () => {
         model: 'test-model',
         authType: options?.authType ?? AuthType.USE_ANTHROPIC,
         baseUrl: options?.baseUrl,
-        contextWindowSize: 200_000,
+        contextWindowSize: options?.contextWindowSize ?? 200_000,
         enableCacheControl: options?.enableCacheControl ?? true,
       }),
       getHookSystem: vi.fn().mockReturnValue({
@@ -2627,6 +2628,61 @@ describe('ChatCompressionService.compress cache sharing', () => {
       { text: '[document: application/pdf]' },
     ]);
   });
+
+  it.each([
+    {
+      name: 'provider prompt count',
+      originalTokenCount: 180_001,
+      precomputedEffectiveTokens: undefined,
+    },
+    {
+      name: 'hard-tier effective count',
+      originalTokenCount: 160_000,
+      precomputedEffectiveTokens: 180_001,
+    },
+  ])(
+    'skips a shared request when the $name cannot fit its output reserve',
+    async ({ originalTokenCount, precomputedEffectiveTokens }) => {
+      const history = makeMediaHistory();
+      const { chat, config, generateText } = makeFixture({
+        history,
+        contextWindowSize: 200_000,
+      });
+      const coldSpy = vi
+        .spyOn(sideQueryModule, 'runSideQuery')
+        .mockResolvedValue({
+          text: '<state_snapshot>cold summary</state_snapshot>',
+          usage: {
+            promptTokenCount: 170_000,
+            candidatesTokenCount: 500,
+            totalTokenCount: 170_500,
+          },
+        } as never);
+
+      await new ChatCompressionService().compress(chat, {
+        promptId: 'p',
+        force: true,
+        config,
+        consecutiveFailures: 0,
+        originalTokenCount,
+        precomputedEffectiveTokens,
+      });
+
+      expect(generateText).not.toHaveBeenCalled();
+      expect(coldSpy).toHaveBeenCalledTimes(1);
+      expect(coldSpy.mock.calls[0]![1].contents[0]?.parts).toEqual([
+        { text: '[image: image/png]' },
+        { text: '[document: application/pdf]' },
+      ]);
+      expect(logChatCompression).toHaveBeenLastCalledWith(
+        config,
+        expect.objectContaining({
+          cache_sharing_attempted: false,
+          cache_sharing_used: false,
+        }),
+      );
+    },
+  );
 
   it.each([
     {

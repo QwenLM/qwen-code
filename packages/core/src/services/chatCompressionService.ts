@@ -533,6 +533,10 @@ export class ChatCompressionService {
         )
       : 0;
 
+    // Lazy: the cold fallback input is slimmed on demand. The original
+    // history keeps its media: the shared request needs it for cache-prefix
+    // identity, and the post-compact image restoration block reads it
+    // afterwards.
     let coldInput: ReturnType<typeof slimCompactionInput> | undefined;
     const getColdInput = () => {
       coldInput ??= slimCompactionInput(sideQueryHistory);
@@ -642,9 +646,15 @@ export class ChatCompressionService {
 
     let summaryResult: GenerateTextResult | undefined;
     let usedCacheSharing = false;
+    const contextWindowSize =
+      config.getContentGeneratorConfig().contextWindowSize ??
+      DEFAULT_TOKEN_LIMIT;
+    const sharedPromptTokenCount =
+      opts.precomputedEffectiveTokens ?? originalTokenCount;
     const canShareCache =
       effectiveCompactionModel === config.getModel() &&
-      supportsCompressionCacheSharing(config);
+      supportsCompressionCacheSharing(config) &&
+      sharedPromptTokenCount + COMPACT_MAX_OUTPUT_TOKENS <= contextWindowSize;
     if (canShareCache) {
       try {
         const generationConfig = {
