@@ -45,7 +45,7 @@
 
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { basename, join, relative, sep } from 'node:path';
+import { basename, dirname, join, relative, sep } from 'node:path';
 
 /** Where the build stamps the digest of the sources it bundled. */
 export const DIGEST_FILE = 'review-sources.sha256';
@@ -217,7 +217,7 @@ export function bundleStalenessNotices(
   entryPath: string | undefined,
 ): string[] {
   if (!entryPath) return [];
-  const distDir = join(entryPath, '..');
+  const distDir = dirname(entryPath);
   // Only a `<root>/dist/cli.js` layout carries a stamp. A dev launcher runs
   // `node <root>/packages/cli`, where node sets argv[1] to the DIRECTORY —
   // measured — so the derivation would find sources under `<root>` and no
@@ -226,7 +226,7 @@ export function bundleStalenessNotices(
   // half-measured; it is not measured.
   if (basename(distDir) !== 'dist') return [];
 
-  const repoRoot = join(distDir, '..');
+  const repoRoot = dirname(distDir);
   let stamped: string | undefined;
   try {
     stamped = readFileSync(join(distDir, DIGEST_FILE), 'utf8').trim();
@@ -283,7 +283,7 @@ export function staleBundleWarning(s: BundleStaleness): string | undefined {
   return (
     `review: the bundle these commands run from was NOT built from the review sources in this tree. ` +
     `Every \`qwen review …\` step below runs the BUILT bundle, not the working tree, ` +
-    `so a review command changed since that build will not take effect and this run ` +
+    `so a review source changed since that build will not take effect and this run ` +
     `will measure the old behaviour without saying so. Rebuild with ` +
     `\`npm run build:packages && npm run bundle\` ` +
     `and start again, or read every result below as being about the older build.`

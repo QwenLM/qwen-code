@@ -96,7 +96,10 @@ describe('the staleness digest covers only what the bundle can contain', () => {
   // What production code imports — including `review.ts`, which sits outside
   // this directory and is where every subcommand is registered. Leaving it out
   // makes each command look test-only, which is what the first draft of this
-  // guard did.
+  // guard did. The importer set is closed over `review/` plus `review.ts`:
+  // the day a review lib is imported from outside that closure, files here
+  // read as unreachable and this test fails on a change that is correct —
+  // widen the closure before believing the finding.
   const importedByProduction = new Set<string>();
   for (const f of [
     ...production.filter((f) => !NOT_BUNDLED_FILE.has(basename(f))),
@@ -111,12 +114,11 @@ describe('the staleness digest covers only what the bundle can contain', () => {
     // fails here instead of in a review.
     // Every extension, not just `.ts`: a test-only `.tsx` or `.mts` helper is
     // the same defect with a different suffix.
-    const digested = digestedFiles;
     // No `importedBySomeTest` conjunct: a file nothing imports at all is just
     // as unreachable from the bundle as one only tests import, and requiring a
     // test importer let an orphan through.
     const entryPoints = new Set([join(reviewDir, '..', 'review.ts')]);
-    const unreachable = digested.filter(
+    const unreachable = digestedFiles.filter(
       (f) => !importedByProduction.has(f) && !entryPoints.has(f),
     );
     expect(unreachable.map((f) => relative(repoRoot, f))).toEqual([]);

@@ -10,7 +10,9 @@
 // place, and the two cannot share code — the build script runs before the
 // package it would import has been built. So this is the test that keeps them
 // equal, and it lives here because a package test is not allowed to reach into
-// `scripts/`.
+// `scripts/`. It runs under `npm run test:scripts` (part of `npm run
+// test:ci`), not `npm test` — a digest change verified only against the
+// package suite never reaches it.
 
 import { describe, expect, it } from 'vitest';
 import {
@@ -115,6 +117,11 @@ describe('the build stamp and the staleness check agree', () => {
       // ...and neither a test file, nor a spec, nor a fixture moves either.
       writeFileSync(join(cli, 'review', 'drive.test.ts'), 'a test');
       writeFileSync(join(cli, 'review', 'drive.spec.tsx'), 'a spec');
+      // The `[cm]?` group, pinned on both sides: the two files above would
+      // still agree if one side lost the `c` or the `m`, so a one-sided edit
+      // there used to pass both parity cases.
+      writeFileSync(join(cli, 'review', 'drive.test.mts'), 'an mts test');
+      writeFileSync(join(cli, 'review', 'drive.spec.cts'), 'a cts spec');
       // A NOT_BUNDLED_FILE entry and a snapshot dir, pinned on both sides:
       // neither exists in the repo tree, so only a synthetic one can catch a
       // one-sided edit to either list.
