@@ -62,11 +62,20 @@ export function validGeometry(
  */
 export type CaptureEvidence = 'png' | 'ans-only' | 'none';
 
-/** One capture's outcome, as the manifest records it. */
+/** One capture's outcome, as the manifest records it. The manifest is the
+ * capture's ONLY record (stdout carries just a pointer to it), so it names
+ * every rendering-affecting input: a capture driven by `--keys` shows a
+ * different screen than the bare command, and a reproducer that does not
+ * know that judges honest evidence unreproducible. */
 export interface CaptureManifest {
   command: string;
+  cwd: string;
   cols: number;
   rows: number;
+  keys?: string[];
+  until?: string;
+  settleMs?: number;
+  timeoutMs?: number;
   /** The raw pane text with escapes — always written when tmux ran. */
   ansPath: string | null;
   /** The rendered image — null when freeze is unavailable or failed. */
@@ -108,7 +117,14 @@ export function tmuxPlan(opts: {
   // `sh -c` wrapper also survives exotic default-shells, and `kill-server`
   // reaps the holder along with everything else. Two hours outlasts the
   // longest legal capture (1h --until + settle + freeze) with slack.
-  const held = `sh -c '${opts.command.replaceAll("'", "'\\''")}; sleep 7200'`;
+  //
+  // The hold sits on its OWN LINE: appended with `;` it is voided by the
+  // command's own tail — a trailing `;` makes `;;` (syntax error, pane dies
+  // instantly), a trailing `#` comment swallows it (the one-shot failure
+  // recurs), and both blame tmux for a valid command. A trailing `\` would
+  // still fold the next line into the command — the command layer refuses
+  // that shape up front.
+  const held = `sh -c '${opts.command.replaceAll("'", "'\\''")}\nsleep 7200'`;
   return {
     start: [
       ...scope,

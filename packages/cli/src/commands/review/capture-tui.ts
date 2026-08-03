@@ -30,7 +30,15 @@
 import type { CommandModule } from 'yargs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { runInNewContext } from 'node:vm';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -72,6 +80,14 @@ function available(bin: string, versionFlag: string): boolean {
  * exactly where `describe.skipIf(!hasTmux)` skips the real-tmux tests, so
  * without this seam that path is untestable in the one environment where it
  * matters. Tests override a probe and restore it; production never does. */
+/** The freeze render invocation, exported as a seam: the 30s belt against a
+ * wedged freeze (measured hangs on this repo's own workflows) is otherwise
+ * untestable — a test cannot wait out the real value to prove the belt
+ * exists — and `bin` lets a test point the render at a fake binary by
+ * absolute path (a PATH shim is skipped by execvp when non-executable).
+ * Tests override and restore; production never does. */
+export const freezeRender = { bin: 'freeze', timeoutMs: 30_000 };
+
 export const probes = {
   tmux: () => available('tmux', '-V'),
   // `--help`, not `--version`: freeze ≤0.1.6 (the whole 2024 release line)
@@ -122,6 +138,29 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     process.exitCode = 3;
   };
 
+  // Shape guard first: yargs parses a DUPLICATED string option into an array
+  // (`--command A --command B` → ['A','B']) and its default --no-X negation
+  // into a boolean (`--no-command` → false) — both sail through the `as`
+  // casts and either throw uncaught TypeErrors past the refusal contract or
+  // silently corrupt the capture (`--until A --until B` compiles /A,B/;
+  // `--no-keys` types the literal word "false" into the pane).
+  for (const [name, v] of [
+    ['--command', args.command],
+    ['--cwd', args.cwd],
+    ['--until', args.until],
+    ['--out', args.out],
+  ] as const) {
+    if (v !== undefined && typeof v !== 'string') {
+      refuse(`${name} must be given exactly once, as a string.`);
+      return;
+    }
+  }
+  if (args.keys !== undefined) {
+    if (!Array.isArray(args.keys) || args.keys.some((k) => typeof k !== 'string')) {
+      refuse('--keys must be strings.');
+      return;
+    }
+  }
   if (!probes.tmux()) {
     refuse(
       'tmux is not installed. Rendering claims stay argued from the code on ' +
@@ -138,6 +177,35 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   if (args.command.trim() === '') {
     refuse('--command must not be empty.');
     return;
+  }
+  if (args.command.trimEnd().endsWith('\\')) {
+    // A trailing backslash is a line continuation: it would fold the pane
+    // holder's own line into the command, silently changing what runs.
+    refuse('--command must not end with a trailing backslash.');
+    return;
+  }
+  if (args.out.trim() === '') {
+    // resolve('') is the cwd: artifacts would land as <cwd>.ans/.png/.json
+    // NEXT TO the working directory, silently clobbering whatever holds
+    // those names (the brief's template with an empty variable hits this).
+    refuse('--out must not be empty.');
+    return;
+  }
+  if (args.cwd !== undefined) {
+    // tmux new-session -c with a nonexistent directory exits 0 and silently
+    // runs the pane in the launching process's cwd — evidence from the
+    // wrong directory with nothing recording the swap. Every other caller
+    // mistake refuses; so does this one.
+    let isDir = false;
+    try {
+      isDir = statSync(resolve(args.cwd)).isDirectory();
+    } catch {
+      // fall through to the refusal below
+    }
+    if (!isDir) {
+      refuse(`--cwd is not a directory: ${args.cwd}`);
+      return;
+    }
   }
   // yargs coerces a non-numeric `--settle-ms abc` to NaN, and a NaN
   // deadline makes the --until poll loop unexpirable (`now >= NaN` is
@@ -156,6 +224,14 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   // caller mistake and gets the refusal contract, not a stack trace thrown
   // from inside a running capture.
   let untilRe: RegExp | undefined;
+  if (args.until !== undefined && args.until.trim() === '') {
+    // An empty pattern matches ANY pane text, including a blank one: the
+    // first poll would settle "until-match" before the TUI rendered
+    // anything — a false settle claim from a tool whose contract is an
+    // honest evidence ladder.
+    refuse('--until must not be empty.');
+    return;
+  }
   if (args.until !== undefined) {
     try {
       untilRe = new RegExp(args.until);
@@ -182,16 +258,31 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   const ansPath = `${outBase}.ans`;
   const pngPath = `${outBase}.png`;
   const manifestPath = `${outBase}.json`;
+  try {
+    // Probe the actual write target BEFORE any process starts: mkdirSync
+    // with `recursive` does no permission check on a directory that already
+    // exists, so an unwritable --out would otherwise run the full capture —
+    // up to the 1h ceiling — and lose the pane text at the very last write.
+    const fd = openSync(ansPath, 'w');
+    closeSync(fd);
+    rmSync(ansPath, { force: true });
+  } catch (e) {
+    refuse(
+      `--out is not writable: ${e instanceof Error ? e.message : String(e)}`,
+    );
+    return;
+  }
 
   const server = captureServerName(process.pid, randomBytes(4).toString('hex'));
   const session = 'cap';
+  const resolvedCwd = args.cwd ? resolve(args.cwd) : process.cwd();
   const plan = tmuxPlan({
     server,
     session,
     cols: args.cols,
     rows: args.rows,
     command: args.command,
-    cwd: args.cwd ? resolve(args.cwd) : process.cwd(),
+    cwd: resolvedCwd,
   });
 
   // The no-orphan guarantee cannot rest on `finally` alone: a SIGINT/SIGTERM
@@ -203,11 +294,22 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   const reap = (): void => {
     if (reaped) return;
     reaped = true;
+    // Unlink the socket ONLY when the server is known dead: kill can throw
+    // with the server alive (the tmux CLIENT failing to spawn — EMFILE, a
+    // wedged server outlasting the 15s timeout), and unlinking then makes
+    // the live server unreachable forever — nothing addressable by -L can
+    // ever kill it again, while it holds the pane holder for two hours.
+    let serverDead = false;
     try {
       tmux(plan.kill);
-    } catch {
+      serverDead = true;
+    } catch (e) {
       // A kill failing because the server already died is the goal state.
+      serverDead = /no server running/i.test(
+        String((e as { stderr?: unknown }).stderr ?? ''),
+      );
     }
+    if (!serverDead) return;
     // tmux does not always unlink the socket of a killed server; a review
     // that captures often would litter the socket dir with dead sockets.
     // tmux resolves that dir from TMUX_TMPDIR, falling back to /tmp — it
@@ -329,26 +431,37 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // machine in one evening — the historical "freeze hangs" incidents on
     // this repo's workflows are this exact shape. The timeout stays as the
     // second belt.
-    const r = spawnSync('freeze', freezePlan(ansPath, pngPath), {
+    const r = spawnSync(freezeRender.bin, freezePlan(ansPath, pngPath), {
       encoding: 'utf8',
-      timeout: 30_000,
+      timeout: freezeRender.timeoutMs,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-    if (r.status === 0) {
+    if (r.status === 0 && existsSync(pngPath)) {
+      // Exit code alone is not evidence: a freeze that exits 0 without
+      // writing the file would otherwise manifest a png rung pointing at
+      // nothing — and a verifier would publish a path with no pixels.
       png = pngPath;
     } else {
       // The stderr tail rides along: a bare exit code is undiagnosable from a
       // manifest, and the whole point of recording degradation is that a
-      // reader can tell WHY the ladder stopped.
+      // reader can tell WHY the ladder stopped. A spawn that never ran
+      // (EMFILE, a binary vanishing between probe and render) has neither
+      // status nor signal — its reason lives in r.error.
       const errTail = `${r.stderr ?? ''} ${r.stdout ?? ''}`
         .trim()
         .split('\n')
         .slice(-2)
         .join(' ');
+      const why =
+        r.status === 0
+          ? 'exited 0 but wrote no image'
+          : r.signal
+            ? `signal ${r.signal}`
+            : r.status !== null
+              ? `exit ${String(r.status)}`
+              : `spawn failed: ${r.error ? r.error.message : 'unknown error'}`;
       degradations.push(
-        `freeze failed (${
-          r.signal ? `signal ${r.signal}` : `exit ${String(r.status)}`
-        }${errTail ? `: ${errTail}` : ''}) — .ans text captured, no image rendered`,
+        `freeze failed (${why}${errTail ? `: ${errTail}` : ''}) — .ans text captured, no image rendered`,
       );
     }
   }
@@ -358,8 +471,13 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     : undefined;
   const manifest: CaptureManifest = {
     command: args.command,
+    cwd: resolvedCwd,
     cols: args.cols,
     rows: args.rows,
+    ...(args.keys !== undefined ? { keys: args.keys } : {}),
+    ...(args.until !== undefined ? { until: args.until } : {}),
+    ...(args.until === undefined ? { settleMs: args.settleMs } : {}),
+    ...(args.until !== undefined ? { timeoutMs: args.timeoutMs } : {}),
     ansPath,
     pngPath: png,
     evidence: png ? 'png' : 'ans-only',

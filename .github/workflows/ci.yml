@@ -392,6 +392,23 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: 'node --test ${{ env.HELPER_TESTS }}'
 
+      # capture-tui's real-tmux suite is describe.skipIf(!hasTmux)-gated: on a
+      # runner without tmux (the hosted ubuntu-latest image ships none) it
+      # silently skips every real-tmux behavior — holder survival, matching,
+      # server reaping, refusal contracts. Install tmux where apt exists so
+      # the Linux lane actually executes them (qwen-autofix.yml does the same).
+      - name: 'Install tmux'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.os == 'Linux' }}"
+        run: |-
+          if command -v tmux > /dev/null 2>&1; then
+            tmux -V
+          elif command -v sudo > /dev/null 2>&1 && command -v apt-get > /dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq tmux
+          else
+            echo 'tmux unavailable; real-tmux capture tests will be skipped.'
+          fi
+
       - name: 'Run tests and generate reports'
         id: 'unit_tests'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"

@@ -112,8 +112,11 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
     // tmux's remain-on-exit off destroys the session the moment the command
     // exits (measured: a render-and-exit fixture was uncapturable 0/10);
     // the sh -c holder keeps the pane alive and kill-server reaps it.
+    // The hold sits on its OWN LINE: appended with `;` it is voided by the
+    // command's own tail — a trailing `;` yields `;;` (syntax error), a
+    // trailing `#` comment swallows it.
     expect(plan.start[plan.start.length - 1]).toBe(
-      "sh -c 'node cli.js; sleep 7200'",
+      "sh -c 'node cli.js\nsleep 7200'",
     );
   });
 
@@ -128,7 +131,7 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
     });
     // A single quote in the command must not close the holder's quoting.
     expect(p.start[p.start.length - 1]).toBe(
-      `sh -c 'printf '\\''%s'\\'' "it'\\''s"; sleep 7200'`,
+      `sh -c 'printf '\\''%s'\\'' "it'\\''s"\nsleep 7200'`,
     );
   });
 
