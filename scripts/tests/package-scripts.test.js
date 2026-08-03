@@ -117,11 +117,11 @@ describe('package scripts', () => {
       if (process.platform === 'win32') {
         writeFileSync(
           path.join(binDir, 'husky.cmd'),
-          '@echo husky>>"%PREPARE_LOG_FILE%"\r\n',
+          '@echo(husky>>"%PREPARE_LOG_FILE%"\r\n',
         );
         writeFileSync(
           path.join(binDir, 'npm.cmd'),
-          '@echo npm %*>>"%PREPARE_LOG_FILE%"\r\n',
+          '@echo(npm %*>>"%PREPARE_LOG_FILE%"\r\n',
         );
       } else {
         writeFileSync(
@@ -271,12 +271,12 @@ describe('package scripts', () => {
       if (process.platform === 'win32') {
         writeFileSync(
           path.join(binDir, 'husky.cmd'),
-          '@echo husky>>"%PREPARE_LOG_FILE%"\r\n',
+          '@echo(husky>>"%PREPARE_LOG_FILE%"\r\n',
         );
         writeFileSync(
           path.join(binDir, 'npm.cmd'),
           [
-            '@echo npm %*>>"%PREPARE_LOG_FILE%"',
+            '@echo(npm %*>>"%PREPARE_LOG_FILE%"',
             '@if "%1 %2"=="run build" exit /b 7',
             '@exit /b 0',
             '',
