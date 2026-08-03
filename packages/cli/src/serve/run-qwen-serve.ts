@@ -4443,19 +4443,32 @@ async function runQwenServeImpl(
           primaryEntry.state === 'active'
             ? primaryEntry.current?.runtime.bridge
             : undefined;
+        // The ring's `childRssBytes` gauge stays the PRIMARY child's reading —
+        // its published meaning is "ACP child process RSS", singular. The
+        // aggregate across every workspace is reported separately, under
+        // `runtime.memory.children` in daemon status.
         const child = primaryRuntimeBridge?.getChildResourceSnapshot?.();
         // Only poll the child's resources when someone is watching: the
         // staleness guard already drops the reading to 0 when idle, so gating
         // avoids a 5s RPC round-trip (pipe + child CPU) for a chart nobody has
         // open.
         if (runtime.getActiveSseCount() > 0 || (acp?.wsStreams ?? 0) > 0) {
-          void primaryRuntimeBridge?.refreshChildResource?.().catch((err) => {
-            daemonLog.warn(
-              `ACP child resource refresh failed: ${
-                err instanceof Error ? err.message : String(err)
-              }`,
-            );
-          });
+          // Refresh EVERY managed workspace, not just the primary: the caches
+          // this warms are what `runtime.memory.children` sums, and a child
+          // nobody refreshed reads as unmeasured there. No `isChannelLive`
+          // filter is needed — `refreshChildResource` already no-ops without a
+          // live channel — and no concurrency limit is added, because the call
+          // is single-flight per bridge and the number of bridges is capped by
+          // MAX_DAEMON_WORKSPACES.
+          for (const managed of workspaceRegistry.listManaged()) {
+            void managed.bridge.refreshChildResource?.().catch((err) => {
+              daemonLog.warn(
+                `ACP child resource refresh failed: ${
+                  err instanceof Error ? err.message : String(err)
+                }`,
+              );
+            });
+          }
         }
         metricsRing.sample(nowMs, {
           cpuPercent,

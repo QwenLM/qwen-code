@@ -160,9 +160,10 @@ the OOM killer watches) and `heapRatio` (V8 heap used against this process's
 `unknown` means neither denominator was measurable, so `normal` there is the
 absence of a reading, not evidence of health.
 
-Two things this does **not** cover. It is the daemon **root** process only —
-`runtime.memory.childRssCoverage` reads `primary_only`, so a daemon whose
-`qwen --acp` children are the ones growing can report `normal` throughout.
+Two things this does **not** cover. It is the daemon **root** process only, so
+a daemon whose `qwen --acp` children are the ones growing can report `normal`
+throughout — read `runtime.memory.children` beside it, which sums the live
+children's own RSS (and says via `sampled` how many actually reported).
 And nothing remediates: leaving `normal` raises a `daemon_memory_pressure`
 warning and changes no behaviour.
 
