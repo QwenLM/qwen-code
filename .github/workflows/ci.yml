@@ -652,7 +652,8 @@ jobs:
   # Windows counterpart of test_macos (see that job's note). ECS is the default
   # with a windows-2022 kill-switch fallback; the check name stays unchanged so
   # it matches the required-status-check context. ECS-only tuning is gated on
-  # runner.environment so the hosted fallback stays the exact pre-ECS job.
+  # runner.environment so the hosted fallback stays the exact pre-ECS job apart
+  # from the job-level timeout-minutes.
   test_windows:
     name: 'Test (windows-latest, Node 22.x)'
     needs: 'classify_pr'
@@ -681,6 +682,20 @@ jobs:
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}"
+
+      # Same stale-checkout guard as the Ubuntu gate: this job now runs on ECS,
+      # so fail loud if the checkout lacks the merge-queue head rather than
+      # silently testing the wrong tree into a merge.
+      - name: 'Verify checkout includes expected head commit'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        env:
+          EXPECTED_SHA: '${{ github.event.merge_group.head_sha }}'
+        run: |-
+          if ! git merge-base --is-ancestor "${EXPECTED_SHA}" HEAD; then
+            echo "::error::Checked out ref does not contain expected head ${EXPECTED_SHA}."
+            git log --oneline --decorate -5
+            exit 1
+          fi
 
       # Self-hosted can't reach nodejs.org reliably; reuse the machine's Node.
       - name: 'Set up Node.js 22.x (hosted)'
