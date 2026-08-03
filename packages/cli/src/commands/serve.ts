@@ -128,6 +128,7 @@ interface ServeArgs {
   'http-bridge': boolean;
   'mcp-client-budget'?: number;
   'memory-budget-mb'?: number;
+  'memory-pressure-mode'?: 'off' | 'observe';
   'mcp-budget-mode'?: 'enforce' | 'warn' | 'off';
   'allow-origin'?: string[];
   'allow-private-auth-base-url': boolean;
@@ -332,6 +333,18 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'way. Currently observed and reported under `limits.memory` in daemon ' +
           'status; it does not yet size any child process. Must be an integer ' +
           'in [1024, 1048576].',
+      })
+      .option('memory-pressure-mode', {
+        choices: ['off', 'observe'] as const,
+        default: 'observe' as const,
+        description:
+          'Whether the daemon derives a memory-pressure level from its own ' +
+          'RSS and V8 heap. `observe` (default) reports the level in daemon ' +
+          'status and raises a status issue when it leaves normal. `off` ' +
+          'still reports the underlying figures but raises no issue, so the ' +
+          'overall status rollup is unchanged — use it while calibrating, or ' +
+          'if you alert on the top-level status. Nothing remediates in ' +
+          'either mode.',
       })
       .option('mcp-client-budget', {
         type: 'number',
@@ -645,6 +658,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         mcpClientBudget,
         mcpBudgetMode: resolvedMcpMode,
         ...(memoryBudgetMb !== undefined ? { memoryBudgetMb } : {}),
+        memoryPressureMode: argv['memory-pressure-mode'],
         ...(argv['allow-origin'] && argv['allow-origin'].length > 0
           ? { allowOrigins: argv['allow-origin'] }
           : {}),

@@ -2016,6 +2016,21 @@ describe('runQwenServe memory budget', () => {
               recommendedShareAtRegisteredMb: number;
               recommendedShareAtActiveMb: number | null;
             };
+            // Restated rather than imported on purpose: this shape is the
+            // wire contract, and casting to the internal type would make the
+            // assertions below accept whatever that type happens to say.
+            pressure: {
+              mode: string;
+              level: string;
+              source: string;
+              ratio: number;
+              rssBytes: number;
+              rssRatio: number;
+              availableBytes: number;
+              heapUsedBytes: number;
+              heapRatio: number;
+              heapLimitBytes: number;
+            };
           };
         };
       };
@@ -2049,6 +2064,23 @@ describe('runQwenServe memory budget', () => {
       expect(
         runtimeMemory?.modeled.recommendedShareAtRegisteredMb,
       ).toBeGreaterThan(0);
+
+      // Pressure, from a daemon that actually booted. Every other test for it
+      // calls the status builder directly, so nothing else would notice the
+      // reading failing to reach a live response.
+      const pressure = runtimeMemory?.pressure;
+      expect(pressure?.mode).toBe('observe');
+      // A real process against a real denominator: assert the invariants
+      // rather than a level, which depends on the host running the test.
+      expect(pressure?.rssBytes).toBeGreaterThan(0);
+      expect(pressure?.heapLimitBytes).toBeGreaterThan(0);
+      expect(pressure?.availableBytes).toBe(
+        (memory?.availableMemoryMb ?? 0) * 1024 * 1024,
+      );
+      expect(pressure?.ratio).toBe(
+        Math.max(pressure?.rssRatio ?? 0, pressure?.heapRatio ?? 0),
+      );
+      expect(pressure?.source).not.toBe('unknown');
     } finally {
       await handle.close();
     }

@@ -686,6 +686,7 @@ describe('serve fast path argument parsing', () => {
       ['open', ['--open']],
       ['http-bridge', ['--no-http-bridge']],
       ['memory-budget-mb', ['--memory-budget-mb', '8192']],
+      ['memory-pressure-mode', ['--memory-pressure-mode', 'observe']],
       ['mcp-client-budget', ['--mcp-client-budget', '10']],
       ['mcp-budget-mode', ['--mcp-budget-mode', 'warn']],
       ['allow-origin', ['--allow-origin', 'http://localhost:3000']],
@@ -747,6 +748,23 @@ describe('serve fast path argument parsing', () => {
     expect(fastPathParsed).not.toHaveProperty(
       'options.maxPendingPromptsPerSession',
     );
+  });
+
+  it('parses --memory-pressure-mode and falls back on an unknown value', () => {
+    for (const argv of [
+      ['serve', '--memory-pressure-mode', 'off'],
+      ['serve', '--memory-pressure-mode=off'],
+    ]) {
+      expect(parseServeFastPathArgs(argv)).toMatchObject({
+        kind: 'serve',
+        options: { memoryPressureMode: 'off' },
+      });
+    }
+    // An out-of-range choice defers to yargs rather than the fast path
+    // inventing a second wording for the same error.
+    expect(
+      parseServeFastPathArgs(['serve', '--memory-pressure-mode', 'enforce']),
+    ).toEqual({ kind: 'fallback' });
   });
 
   it('parses --memory-budget-mb on the fast path in both spellings', () => {

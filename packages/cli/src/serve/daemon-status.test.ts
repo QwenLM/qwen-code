@@ -186,6 +186,9 @@ describe('buildDaemonStatusResponse', () => {
         recommendedShareAtRegisteredMb: 15_360,
         recommendedShareAtActiveMb: 15_360,
       },
+      // Real process figures; asserted for shape here and for arithmetic in
+      // the dedicated pressure tests. `toEqual` still fails on an extra key.
+      pressure: expect.objectContaining({ mode: 'observe' }),
     });
   });
 
@@ -226,6 +229,7 @@ describe('buildDaemonStatusResponse', () => {
         recommendedShareAtRegisteredMb: null,
         recommendedShareAtActiveMb: null,
       },
+      pressure: expect.objectContaining({ mode: 'observe' }),
     });
   });
 
@@ -344,6 +348,76 @@ describe('buildDaemonStatusResponse', () => {
       registeredWorkspaces: 1,
       activeAcpChildren: 1,
     });
+  });
+
+  it('reports pressure figures in both modes, but only observe raises an issue', async () => {
+    // A 1 MiB denominator puts this test process far past `critical`, which is
+    // the only way to exercise the gate: at a realistic denominator the level
+    // is `normal` and no issue is raised in either mode, so the assertion
+    // below would hold even with the gate deleted.
+    const responses = await Promise.all(
+      (['off', 'observe'] as const).map((mode) => {
+        const options = makeOptions();
+        options.opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
+          availableMemoryMb: 1,
+        });
+        options.opts.memoryPressureMode = mode;
+        return buildDaemonStatusResponse('summary', options);
+      }),
+    );
+    const [offResponse, observeResponse] = responses;
+
+    // Both report the reading — that is the point of `off` still observing.
+    for (const response of responses) {
+      expect(response.runtime.memory?.pressure.level).toBe('critical');
+      expect(response.runtime.memory?.pressure.availableBytes).toBe(
+        1024 * 1024,
+      );
+    }
+    expect(offResponse.runtime.memory?.pressure.mode).toBe('off');
+    expect(observeResponse.runtime.memory?.pressure.mode).toBe('observe');
+
+    // Only `observe` turns it into a verdict.
+    const pressureIssues = (r: (typeof responses)[number]) =>
+      r.issues.filter((issue) => issue.code === 'daemon_memory_pressure');
+    expect(pressureIssues(offResponse)).toHaveLength(0);
+    expect(pressureIssues(observeResponse)).toHaveLength(1);
+    // Warning, not error, while the thresholds are uncalibrated.
+    expect(pressureIssues(observeResponse)[0].severity).toBe('warning');
+    // Both halves of the documented contract: the issue reaches the rollup in
+    // `observe` (a severity or list that bypassed it would leave this `ok`),
+    // and `off` leaves the rollup exactly where it was. Same input, so the
+    // only difference between these two is the mode.
+    expect(observeResponse.status).not.toBe('ok');
+    expect(offResponse.status).toBe('ok');
+  });
+
+  it('defaults to observe when no mode was configured', async () => {
+    const options = makeOptions();
+    options.opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
+      availableMemoryMb: 32_768,
+    });
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    expect(response.runtime.memory?.pressure.mode).toBe('observe');
+  });
+
+  it('converts the budget from megabytes when computing the ratio', async () => {
+    // The budget module speaks MB and the pressure module speaks bytes. A
+    // missing 1024x here still yields a plausible-looking ratio, so assert the
+    // denominator directly rather than trusting the level.
+    const options = makeOptions();
+    options.opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
+      availableMemoryMb: 4_096,
+    });
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    const pressure = response.runtime.memory!.pressure;
+    expect(pressure.availableBytes).toBe(4_096 * 1024 * 1024);
+    expect(pressure.rssRatio).toBeCloseTo(
+      pressure.rssBytes / (4_096 * 1024 * 1024),
+      10,
+    );
   });
 
   it('omits memory reporting when no budget was resolved', async () => {
