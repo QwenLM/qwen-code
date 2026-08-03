@@ -3588,6 +3588,7 @@ export const useGeminiStream = (
                     resultDisplay: response.resultDisplay,
                     error: response.error,
                     errorType: response.errorType,
+                    executionStatus: response.executionStatus,
                   },
                   goalContext
                     ? request.name === ToolNames.GET_GOAL ||
@@ -4239,6 +4240,7 @@ export const useGeminiStream = (
             resultDisplay: response.resultDisplay,
             error: response.error,
             errorType: response.errorType,
+            executionStatus: response.executionStatus,
           },
           goalContext
             ? request.name === ToolNames.GET_GOAL ||
