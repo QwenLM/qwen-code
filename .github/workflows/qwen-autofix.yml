@@ -1714,6 +1714,98 @@ jobs:
           }
           WORKDIR="$(mktemp -d)"
 
+          read_forced_pr_meta() {
+            local attempt meta
+            for attempt in 1 2 3; do
+              if meta="$(gh pr view "${FORCED_PR}" --repo "${REPO}" \
+                --json number,state,author,headRefName,isCrossRepository,baseRefName,labels,maintainerCanModify 2> /dev/null)" \
+                && jq -e 'type == "object"
+                  and (.number | type == "number")
+                  and (.state | type == "string")
+                  and (.author.login | type == "string")
+                  and (.headRefName | type == "string")
+                  and (.baseRefName | type == "string")
+                  and (.isCrossRepository | type == "boolean")
+                  and (.labels | type == "array")
+                  and (.maintainerCanModify | type == "boolean")' > /dev/null <<< "${meta}"; then
+                printf '%s' "${meta}"
+                return 0
+              fi
+              echo "::warning::Forced PR #${FORCED_PR} metadata lookup failed (attempt ${attempt}/3)" >&2
+              [[ "${attempt}" -lt 3 ]] && sleep "${attempt}"
+            done
+            return 1
+          }
+
+          read_live_permission() {
+            local login="$1" attempt permission
+            for attempt in 1 2 3; do
+              if permission="$(gh api "repos/${REPO}/collaborators/${login}/permission" --jq '.permission // ""' 2> /dev/null)" \
+                && [[ "${permission}" =~ ^(admin|maintain|write|triage|read)$ ]]; then
+                printf '%s' "${permission}"
+                return 0
+              fi
+              echo "::warning::Permission lookup failed for ${login} (attempt ${attempt}/3)" >&2
+              [[ "${attempt}" -lt 3 ]] && sleep "${attempt}"
+            done
+            return 1
+          }
+
+          forced_admission_reason() {
+            jq -r --arg ab "${AUTOFIX_BOT}" --arg take "${TAKEOVER_LABEL}" --arg skip "${SKIP_LABEL}" '
+              if (.state // "") != "OPEN" then "not_open"
+              elif (.baseRefName // "") != "main" then "wrong_base"
+              elif ([.labels[]?.name] | index($skip) != null) then "skip_label"
+              elif ((((.author.login // "") == $ab) or ([.labels[]?.name] | index($take) != null)) | not) then "unmanaged_author"
+              elif (.isCrossRepository == true) and (.maintainerCanModify != true) then "maintainer_edits_disabled"
+              elif (((.isCrossRepository == true) or (.isCrossRepository == false)) | not) then "cross_repo_state_missing"
+              else "eligible"
+              end'
+          }
+
+          report_forced_takeover_blocked() {
+            local reason="$1" actor status_ids status_id body attempt status_lookup_ok
+            [[ "${DRY_RUN}" == 'true' ]] && return 0
+            [[ "$(jq -r --arg take "${TAKEOVER_LABEL}" '[.labels[]?.name] | index($take) != null' <<< "${META}")" == 'true' ]] || return 0
+            case "${reason}" in
+              permission_lookup_failed|author_permission_*|maintainer_edits_disabled|cross_repo_state_missing) ;;
+              *) return 0 ;;
+            esac
+            actor="$(gh api user --jq '.login' 2> /dev/null || echo '')"
+            if [[ "${actor}" != "${AUTOFIX_BOT}" ]]; then
+              echo "::warning::Blocked takeover status skipped: PAT authenticates as '${actor:-unknown}'"
+              return 1
+            fi
+            body="$(printf '<!-- autofix-status -->\n\n⛔ **AutoFix blocked** — the latest review event was not addressed because takeover admission stopped at `%s`. [View run](https://github.com/%s/actions/runs/%s). A later scheduled scan will retry without advancing the feedback watermark.\n\n<details>\n<summary>中文说明</summary>\n\n⛔ **AutoFix 已阻塞** —— 最新评审事件未被处理，takeover 准入停在 `%s`。[查看运行](https://github.com/%s/actions/runs/%s)。后续定时扫描会重试，本次不会推进反馈水位。\n\n</details>' "${reason}" "${REPO}" "${GITHUB_RUN_ID}" "${reason}" "${REPO}" "${GITHUB_RUN_ID}")"
+            status_ids=''
+            status_lookup_ok=false
+            for attempt in 1 2 3; do
+              if status_ids="$(gh api "repos/${REPO}/issues/${FORCED_PR}/comments" --paginate \
+                --jq ".[] | select(.user.login == \"${AUTOFIX_BOT}\") | select(.body | contains(\"<!-- autofix-status -->\")) | .id" 2> /dev/null)"; then
+                status_lookup_ok=true
+                break
+              fi
+              echo "::warning::Takeover status lookup failed for #${FORCED_PR} (attempt ${attempt}/3)"
+              [[ "${attempt}" -lt 3 ]] && sleep "${attempt}"
+            done
+            if [[ "${status_lookup_ok}" != 'true' ]]; then
+              echo "::warning::Failed to read takeover status comments for #${FORCED_PR}"
+              return 1
+            fi
+            status_id="$(tail -1 <<< "${status_ids}")"
+            if [[ -n "${status_id}" ]]; then
+              if ! gh api --method PATCH "repos/${REPO}/issues/comments/${status_id}" -f body="${body}" > /dev/null; then
+                echo "::warning::Failed to update blocked takeover status for #${FORCED_PR}"
+                return 1
+              fi
+            else
+              if ! gh pr comment "${FORCED_PR}" --repo "${REPO}" --body "${body}" > /dev/null; then
+                echo "::warning::Failed to post blocked takeover status for #${FORCED_PR}"
+                return 1
+              fi
+            fi
+          }
+
           # Candidate PRs: open, same-repo, targeting main, and either
           # authored by the dev-bot or opted in via TAKEOVER_LABEL. A PR
           # carrying SKIP_LABEL is excluded everywhere — skip wins over
@@ -1723,8 +1815,12 @@ jobs:
           # jq's // treats false as empty, so that form is false for EVERY
           # input and silently green-no-op'd all forced dispatches.
           if [[ -n "${FORCED_PR}" ]]; then
-            META="$(gh pr view "${FORCED_PR}" --repo "${REPO}" \
-              --json number,state,author,headRefName,isCrossRepository,baseRefName,labels,maintainerCanModify 2> /dev/null || echo '{}')"
+            if ! META="$(read_forced_pr_meta)"; then
+              echo "::error::Forced PR #${FORCED_PR} admission blocked: metadata_fetch_failed"
+              echo "targets=[]" >> "${GITHUB_OUTPUT}"
+              echo "has_targets=false" >> "${GITHUB_OUTPUT}"
+              exit 1
+            fi
             # Same admission as the scheduled scan below. In-repo PRs fail
             # CLOSED on a missing isCrossRepository field (`.isCrossRepository
             # == false`, never a `// true | not` default — jq's // treats false
@@ -1734,34 +1830,40 @@ jobs:
             # gate runs in the shell case just below, mirroring the scan's
             # per-candidate permission call) so the real-time route's fork
             # pickup is not silently discarded here.
-            OK="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg take "${TAKEOVER_LABEL}" --arg skip "${SKIP_LABEL}" \
-              '(((.state // "") == "OPEN")
-                 and (((.author.login // "") == $ab) or ([.labels[]?.name] | index($take) != null))
-                 and ([.labels[]?.name] | index($skip) | not)
-                 and ((.baseRefName // "") == "main")
-                 and (if (.isCrossRepository == true)
-                        then (.maintainerCanModify == true)
-                        else (.isCrossRepository == false)
-                      end))' <<< "${META}")"
+            ADMISSION_REASON="$(forced_admission_reason <<< "${META}")"
             # Fork only: the author must hold write+ RIGHT NOW (the same
             # live-privilege rule the scan applies per candidate and
             # review-address re-checks before pushing). In-repo PRs are gated
             # by author/label alone.
-            if [[ "${OK}" == 'true' && "$(jq -r '.isCrossRepository == true' <<< "${META}")" == 'true' ]]; then
+            if [[ "${ADMISSION_REASON}" == 'eligible' && "$(jq -r '.isCrossRepository == true' <<< "${META}")" == 'true' ]]; then
               FORK_AUTHOR="$(jq -r '.author.login // ""' <<< "${META}")"
-              FPERM="$(gh api "repos/${REPO}/collaborators/${FORK_AUTHOR}/permission" --jq '.permission // ""' 2> /dev/null || echo '')"
+              if ! FPERM="$(read_live_permission "${FORK_AUTHOR}")"; then
+                ADMISSION_REASON='permission_lookup_failed'
+                report_forced_takeover_blocked "${ADMISSION_REASON}" \
+                  || echo "::error::Forced PR #${FORCED_PR} blocked status update failed"
+                echo "::error::Forced PR #${FORCED_PR} admission blocked: ${ADMISSION_REASON}"
+                echo "targets=[]" >> "${GITHUB_OUTPUT}"
+                echo "has_targets=false" >> "${GITHUB_OUTPUT}"
+                exit 1
+              fi
               case "${FPERM}" in
                 admin|maintain|write)
                   echo "🌿 forced fork PR #${FORCED_PR} admitted (author ${FORK_AUTHOR}=${FPERM})"
                   ;;
                 *)
-                  echo "🧭 forced fork PR #${FORCED_PR} rejected: author ${FORK_AUTHOR} permission='${FPERM:-none}' below write"
-                  OK='false'
+                  ADMISSION_REASON="author_permission_${FPERM:-none}"
+                  echo "🧭 forced fork PR #${FORCED_PR} rejected: ${ADMISSION_REASON}"
                   ;;
               esac
             fi
-            if [[ "${OK}" != "true" ]]; then
-              echo "❌ #${FORCED_PR} is not an open main-targeting PR owned by ${AUTOFIX_BOT} or labeled ${TAKEOVER_LABEL} (or it carries ${SKIP_LABEL}); a fork PR additionally needs maintainer edits allowed and a live write+ author"
+            if [[ "${ADMISSION_REASON}" != 'eligible' ]]; then
+              if ! report_forced_takeover_blocked "${ADMISSION_REASON}"; then
+                echo "::error::Forced PR #${FORCED_PR} blocked status update failed"
+                echo "targets=[]" >> "${GITHUB_OUTPUT}"
+                echo "has_targets=false" >> "${GITHUB_OUTPUT}"
+                exit 1
+              fi
+              echo "❌ Forced PR #${FORCED_PR} rejected: ${ADMISSION_REASON}"
               echo "targets=[]" >> "${GITHUB_OUTPUT}"
               echo "has_targets=false" >> "${GITHUB_OUTPUT}"
               exit 0
@@ -1807,7 +1909,11 @@ jobs:
             # candidates alone exhaust the inspection budget.
             while IFS=$'\t' read -r FPR FAUTHOR; do
               [[ -z "${FPR}" ]] && continue
-              FPERM="$(gh api "repos/${REPO}/collaborators/${FAUTHOR}/permission" --jq '.permission // ""' 2> /dev/null || echo '')"
+              if ! FPERM="$(read_live_permission "${FAUTHOR}")"; then
+                echo "::warning::Fork takeover candidate #${FPR} blocked: permission_lookup_failed"
+                fleet_row "${FPR}" 'blocked' 'permission_lookup_failed'
+                continue
+              fi
               case "${FPERM}" in
                 admin|maintain|write)
                   echo "🌿 fork takeover candidate #${FPR} admitted (author ${FAUTHOR}=${FPERM})"

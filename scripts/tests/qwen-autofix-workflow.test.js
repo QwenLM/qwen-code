@@ -289,7 +289,8 @@ describe('qwen-autofix workflow', () => {
     expect(authRounds).toBeLessThan(strictRounds);
     expect(workflow).toContain("MAX_OPEN_AUTOFIX_PRS: '5'");
     expect(reviewScanJob).toContain('isCrossRepository');
-    expect(reviewScanJob).toContain('not an open main-targeting PR');
+    expect(reviewScanJob).toContain('Forced PR #${FORCED_PR} rejected:');
+    expect(reviewScanJob).toContain('forced_admission_reason');
     // Candidates fail CLOSED on the fork field, matching the forced path
     // and the NOTE that documents the jq // false trap.
     expect(reviewScanJob).toContain('select(.isCrossRepository == false)');
@@ -3049,33 +3050,33 @@ describe('qwen-autofix workflow', () => {
   });
 
   it('behaviorally validates forced targets against author, takeover, and skip', () => {
-    // Extract the forced-PR OK predicate VERBATIM and replay it: the bot's
+    // Extract the forced-PR classifier VERBATIM and replay it: the bot's
     // own PRs pass; a human PR passes only with the takeover label; skip
     // vetoes even a takeover-labeled PR; closed PRs never pass. A fork PR
     // passes the structural predicate only with maintainer edits allowed — the
     // live write+ author gate is a shell step below (asserted separately),
     // mirroring the scheduled scan's per-candidate fork admission.
-    const okProgram = reviewScanJob.match(
-      /OK="\$\(jq -r --arg ab "\$\{AUTOFIX_BOT\}" --arg take "\$\{TAKEOVER_LABEL\}" --arg skip "\$\{SKIP_LABEL\}" \\\n\s+'([\s\S]*?)'/,
+    const classifier = reviewScanJob.match(
+      /(forced_admission_reason\(\) \{[\s\S]*?\n {10}\})/,
     )?.[1];
-    expect(okProgram).toBeTruthy();
-    const ok = (meta) =>
+    expect(classifier).toBeTruthy();
+    const reason = (meta) =>
       execFileSync(
-        'jq',
+        'bash',
         [
-          '-r',
-          '--arg',
-          'ab',
-          'qwen-code-dev-bot',
-          '--arg',
-          'take',
-          'autofix/takeover',
-          '--arg',
-          'skip',
-          'autofix/skip',
-          okProgram,
+          '-c',
+          `${classifier.replace(/\n {10}/g, '\n')}\nforced_admission_reason`,
         ],
-        { encoding: 'utf8', input: JSON.stringify(meta) },
+        {
+          encoding: 'utf8',
+          input: JSON.stringify(meta),
+          env: {
+            ...process.env,
+            AUTOFIX_BOT: 'qwen-code-dev-bot',
+            TAKEOVER_LABEL: 'autofix/takeover',
+            SKIP_LABEL: 'autofix/skip',
+          },
+        },
       ).trim();
     const meta = (author, labels = [], extra = {}) => ({
       state: 'OPEN',
@@ -3085,46 +3086,51 @@ describe('qwen-autofix workflow', () => {
       labels: labels.map((name) => ({ name })),
       ...extra,
     });
-    expect(ok(meta('qwen-code-dev-bot'))).toBe('true');
-    expect(ok(meta('human', ['autofix/takeover']))).toBe('true');
-    expect(ok(meta('human'))).toBe('false');
-    expect(ok(meta('human', ['autofix/takeover', 'autofix/skip']))).toBe(
-      'false',
+    expect(reason(meta('qwen-code-dev-bot'))).toBe('eligible');
+    expect(reason(meta('human', ['autofix/takeover']))).toBe('eligible');
+    expect(reason(meta('human'))).toBe('unmanaged_author');
+    expect(reason(meta('human', ['autofix/takeover', 'autofix/skip']))).toBe(
+      'skip_label',
     );
-    expect(ok(meta('qwen-code-dev-bot', ['autofix/skip']))).toBe('false');
-    expect(ok(meta('human', ['autofix/takeover'], { state: 'CLOSED' }))).toBe(
-      'false',
+    expect(reason(meta('qwen-code-dev-bot', ['autofix/skip']))).toBe(
+      'skip_label',
     );
+    expect(
+      reason(meta('human', ['autofix/takeover'], { state: 'CLOSED' })),
+    ).toBe('not_open');
+    expect(
+      reason(meta('human', ['autofix/takeover'], { baseRefName: 'next' })),
+    ).toBe('wrong_base');
     // Fork PRs: admitted structurally only when maintainer edits are allowed
     // (the bot's own fork or a takeover-labelled fork). The live write+ author
     // check is the shell gate asserted below; without allow-edits a fork still
     // fails closed here.
     expect(
-      ok(
+      reason(
         meta('human', ['autofix/takeover'], {
           isCrossRepository: true,
           maintainerCanModify: true,
         }),
       ),
-    ).toBe('true');
+    ).toBe('eligible');
     expect(
-      ok(
+      reason(
         meta('qwen-code-dev-bot', [], {
           isCrossRepository: true,
           maintainerCanModify: true,
         }),
       ),
-    ).toBe('true');
+    ).toBe('eligible');
     expect(
-      ok(meta('human', ['autofix/takeover'], { isCrossRepository: true })),
-    ).toBe('false');
+      reason(meta('human', ['autofix/takeover'], { isCrossRepository: true })),
+    ).toBe('maintainer_edits_disabled');
     // A missing isCrossRepository fails CLOSED. This case is why the
     // predicate reads `.isCrossRepository == false`: jq's // treats false as
     // empty, so the previous `(.isCrossRepository // true) | not` was false
     // for EVERY input and silently green-no-op'd all forced dispatches.
     const missing = meta('qwen-code-dev-bot');
     delete missing.isCrossRepository;
-    expect(ok(missing)).toBe('false');
+    expect(reason(missing)).toBe('cross_repo_state_missing');
     expect(reviewScanJob).toContain('.isCrossRepository == false');
     expect(reviewScanJob).not.toContain('(.isCrossRepository // true) | not');
     // The forced path queries maintainerCanModify and re-checks a fork author's
@@ -3135,8 +3141,222 @@ describe('qwen-autofix workflow', () => {
     );
     expect(reviewScanJob).toContain('forced fork PR #${FORCED_PR} admitted');
     expect(reviewScanJob).toContain(
-      'gh api "repos/${REPO}/collaborators/${FORK_AUTHOR}/permission"',
+      'gh api "repos/${REPO}/collaborators/${login}/permission"',
     );
+  });
+
+  it('recovers transient forced-target reads and reports terminal takeover blocks', () => {
+    const readMeta = reviewScanJob.match(
+      /(read_forced_pr_meta\(\) \{[\s\S]*?\n {10}\})/,
+    )?.[1];
+    const readPermission = reviewScanJob.match(
+      /(read_live_permission\(\) \{[\s\S]*?\n {10}\})/,
+    )?.[1];
+    const reportBlocked = reviewScanJob.match(
+      /(report_forced_takeover_blocked\(\) \{[\s\S]*?\n {10}\})/,
+    )?.[1];
+    expect(readMeta).toBeTruthy();
+    expect(readPermission).toBeTruthy();
+    expect(reportBlocked).toBeTruthy();
+
+    const runReader = (reader, command, successOutput) => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-admission-'));
+      try {
+        writeFileSync(
+          join(dir, 'gh'),
+          `#!/bin/bash\ncount_file='${dir}/count'\ncount=0\n[[ -f "$count_file" ]] && count="$(cat "$count_file")"\ncount=$((count + 1))\nprintf '%s' "$count" > "$count_file"\nif [[ "$count" -eq 1 ]]; then exit 1; fi\nprintf '%s' '${successOutput}'\n`,
+        );
+        chmodSync(join(dir, 'gh'), 0o755);
+        const result = spawnSync(
+          'bash',
+          [
+            '-c',
+            `sleep() { :; }\n${reader.replace(/\n {10}/g, '\n')}\n${command}`,
+          ],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              REPO: 'QwenLM/qwen-code',
+              FORCED_PR: '8320',
+            },
+            encoding: 'utf8',
+          },
+        );
+        return result;
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+
+    const meta = JSON.stringify({
+      number: 8320,
+      state: 'OPEN',
+      author: { login: 'qqqys' },
+      headRefName: 'topic',
+      baseRefName: 'main',
+      isCrossRepository: true,
+      labels: [{ name: 'autofix/takeover' }],
+      maintainerCanModify: true,
+    });
+    const metaResult = runReader(readMeta, 'read_forced_pr_meta', meta);
+    expect(metaResult.status).toBe(0);
+    expect(metaResult.stdout).toBe(meta);
+    const permissionResult = runReader(
+      readPermission,
+      'read_live_permission qqqys',
+      'write',
+    );
+    expect(permissionResult.status).toBe(0);
+    expect(permissionResult.stdout).toBe('write');
+
+    const failingDir = mkdtempSync(join(tmpdir(), 'autofix-admission-fail-'));
+    try {
+      writeFileSync(join(failingDir, 'gh'), '#!/bin/bash\nexit 1\n');
+      chmodSync(join(failingDir, 'gh'), 0o755);
+      const failedPermission = spawnSync(
+        'bash',
+        [
+          '-c',
+          `sleep() { :; }\n${readPermission.replace(/\n {10}/g, '\n')}\nread_live_permission qqqys`,
+        ],
+        {
+          env: {
+            ...process.env,
+            PATH: `${failingDir}:${process.env.PATH}`,
+            REPO: 'QwenLM/qwen-code',
+          },
+          encoding: 'utf8',
+        },
+      );
+      expect(failedPermission.status).toBe(1);
+      expect(failedPermission.stderr).toContain('(attempt 3/3)');
+
+      const failedMeta = spawnSync(
+        'bash',
+        [
+          '-c',
+          `sleep() { :; }\n${readMeta.replace(/\n {10}/g, '\n')}\nread_forced_pr_meta`,
+        ],
+        {
+          env: {
+            ...process.env,
+            PATH: `${failingDir}:${process.env.PATH}`,
+            REPO: 'QwenLM/qwen-code',
+            FORCED_PR: '8320',
+          },
+          encoding: 'utf8',
+        },
+      );
+      expect(failedMeta.status).toBe(1);
+      expect(failedMeta.stderr).toContain('(attempt 3/3)');
+    } finally {
+      rmSync(failingDir, { recursive: true, force: true });
+    }
+
+    const reporterDir = mkdtempSync(join(tmpdir(), 'autofix-reporter-'));
+    try {
+      const callsFile = join(reporterDir, 'calls');
+      writeFileSync(
+        join(reporterDir, 'gh'),
+        `#!/bin/bash
+printf '%q ' "$@" >> '${callsFile}'
+printf '\n' >> '${callsFile}'
+if [[ "$1 $2" == 'api user' ]]; then printf '%s' 'qwen-code-dev-bot'; exit 0; fi
+if [[ "$1 $2" == 'api repos/QwenLM/qwen-code/issues/8320/comments' ]]; then
+  [[ "\${FAIL_STATUS_LOOKUP:-false}" == 'true' ]] && exit 1
+  printf '%s' '123'
+  exit 0
+fi
+if [[ "$1 $2 $3" == 'api --method PATCH' ]]; then exit 0; fi
+exit 1
+`,
+      );
+      chmodSync(join(reporterDir, 'gh'), 0o755);
+      const reporter = spawnSync(
+        'bash',
+        [
+          '-c',
+          `sleep() { :; }\n${reportBlocked.replace(/\n {10}/g, '\n')}\nreport_forced_takeover_blocked permission_lookup_failed`,
+        ],
+        {
+          env: {
+            ...process.env,
+            PATH: `${reporterDir}:${process.env.PATH}`,
+            REPO: 'QwenLM/qwen-code',
+            FORCED_PR: '8320',
+            DRY_RUN: 'false',
+            AUTOFIX_BOT: 'qwen-code-dev-bot',
+            TAKEOVER_LABEL: 'autofix/takeover',
+            GITHUB_RUN_ID: '30778039590',
+            META: meta,
+          },
+          encoding: 'utf8',
+        },
+      );
+      expect({ status: reporter.status, stderr: reporter.stderr }).toEqual({
+        status: 0,
+        stderr: '',
+      });
+      const calls = readFileSync(callsFile, 'utf8');
+      expect(calls).toContain('repos/QwenLM/qwen-code/issues/comments/123');
+      expect(calls).toContain('autofix-status');
+      expect(calls).toContain('AutoFix blocked');
+      expect(calls).toContain('permission_lookup_failed');
+
+      const failedReporter = spawnSync(
+        'bash',
+        [
+          '-c',
+          `sleep() { :; }\n${reportBlocked.replace(/\n {10}/g, '\n')}\nreport_forced_takeover_blocked permission_lookup_failed`,
+        ],
+        {
+          env: {
+            ...process.env,
+            PATH: `${reporterDir}:${process.env.PATH}`,
+            REPO: 'QwenLM/qwen-code',
+            FORCED_PR: '8320',
+            DRY_RUN: 'false',
+            AUTOFIX_BOT: 'qwen-code-dev-bot',
+            TAKEOVER_LABEL: 'autofix/takeover',
+            GITHUB_RUN_ID: '30778039590',
+            META: meta,
+            FAIL_STATUS_LOOKUP: 'true',
+          },
+          encoding: 'utf8',
+        },
+      );
+      expect(failedReporter.status).toBe(1);
+      expect(failedReporter.stdout).toContain('(attempt 3/3)');
+      expect(failedReporter.stdout).toContain(
+        'Failed to read takeover status comments',
+      );
+    } finally {
+      rmSync(reporterDir, { recursive: true, force: true });
+    }
+
+    expect(
+      reviewScanJob.match(
+        /report_forced_takeover_blocked "\$\{ADMISSION_REASON\}"/g,
+      ),
+    ).toHaveLength(2);
+    expect(reviewScanJob).toContain('metadata_fetch_failed');
+    expect(reviewScanJob).toContain('permission_lookup_failed');
+    expect(reviewScanJob).toContain('report_forced_takeover_blocked');
+    expect(reviewScanJob).toContain('<!-- autofix-status -->');
+    expect(reviewScanJob).toContain('AutoFix blocked');
+    expect(reviewScanJob).toContain('exit 1');
+
+    const runBlock = reviewScanJob.match(/run: \|-\n([\s\S]*)$/)?.[1];
+    expect(runBlock).toBeTruthy();
+    const syntax = spawnSync('bash', ['-n'], {
+      encoding: 'utf8',
+      input: runBlock.replace(/^ {10}/gm, ''),
+    });
+    expect({ status: syntax.status, stderr: syntax.stderr }).toEqual({
+      status: 0,
+      stderr: '',
+    });
   });
 
   it('exposes exactly one comment command: label-toggle takeover sugar', () => {
@@ -3348,7 +3568,7 @@ describe('qwen-autofix workflow', () => {
         /- name: 'Scan for PRs with new feedback'[\s\S]*?(?=\n[ ]{6}- name: )/,
       )?.[0] ?? '';
     expect(reviewScanStep).toContain('isCrossRepository');
-    expect(reviewScanStep).toContain('(.baseRefName // "") == "main"');
+    expect(reviewScanStep).toContain('(.baseRefName // "") != "main"');
     expect(reviewScanStep).toContain('--base main');
     // review-address must check out trusted base, not PR merge ref.
     expect(workflow).toContain("'Checkout trusted base'");
