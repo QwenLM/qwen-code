@@ -30,7 +30,8 @@ export function useLiveVoiceSetup(supported: boolean): UseLiveVoiceSetupResult {
   const [status, setStatus] = useState<DaemonLiveSetupStatus>();
   const [loading, setLoading] = useState(false);
   const [mutating, setMutating] = useState(false);
-  const [error, setError] = useState<Error>();
+  const [refreshError, setRefreshError] = useState<Error>();
+  const [mutationError, setMutationError] = useState<Error>();
   const mountedRef = useRef(true);
   const generationRef = useRef(0);
   const contextRef = useRef({ client: workspace.client, supported });
@@ -59,11 +60,13 @@ export function useLiveVoiceSetup(supported: boolean): UseLiveVoiceSetupResult {
         const next = await workspace.client.liveSetupStatus();
         if (mountedRef.current && generationRef.current === generation) {
           setStatus(next);
-          setError(undefined);
+          setRefreshError(undefined);
         }
       } catch (cause) {
         if (mountedRef.current && generationRef.current === generation) {
-          setError(cause instanceof Error ? cause : new Error(String(cause)));
+          setRefreshError(
+            cause instanceof Error ? cause : new Error(String(cause)),
+          );
         }
       } finally {
         if (mountedRef.current && generationRef.current === generation) {
@@ -90,7 +93,8 @@ export function useLiveVoiceSetup(supported: boolean): UseLiveVoiceSetupResult {
     setStatus(undefined);
     setLoading(false);
     setMutating(false);
-    setError(undefined);
+    setRefreshError(undefined);
+    setMutationError(undefined);
     if (!supported) return undefined;
     void refresh();
     const timer = window.setInterval(() => {
@@ -117,7 +121,7 @@ export function useLiveVoiceSetup(supported: boolean): UseLiveVoiceSetupResult {
       mutationRef.current = mutationGeneration;
       setLoading(false);
       setMutating(true);
-      setError(undefined);
+      setMutationError(undefined);
       try {
         const next = await operation();
         if (
@@ -133,7 +137,7 @@ export function useLiveVoiceSetup(supported: boolean): UseLiveVoiceSetupResult {
           mountedRef.current &&
           generationRef.current === mutationGeneration
         ) {
-          setError(nextError);
+          setMutationError(nextError);
         }
         throw nextError;
       } finally {
@@ -165,7 +169,7 @@ export function useLiveVoiceSetup(supported: boolean): UseLiveVoiceSetupResult {
     status,
     loading,
     mutating,
-    error,
+    error: mutationError ?? refreshError,
     refresh,
     update,
     retryInstall,

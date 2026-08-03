@@ -86,6 +86,43 @@ describe('useLiveVoiceSetup', () => {
     act(() => root.unmount());
   });
 
+  it('keeps mutation errors across successful status refreshes', async () => {
+    mocks.client.liveSetupStatus.mockResolvedValue(status(false));
+    mocks.client.updateLiveSetup
+      .mockRejectedValueOnce(new Error('save failed'))
+      .mockResolvedValueOnce(status(true));
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    let setup: UseLiveVoiceSetupResult | undefined;
+
+    function Harness() {
+      setup = useLiveVoiceSetup(true);
+      return <span>{setup.error?.message ?? 'ok'}</span>;
+    }
+
+    await act(async () => {
+      root.render(<Harness />);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await setup?.update({ enabled: true }).catch(() => undefined);
+    });
+    expect(container.textContent).toBe('save failed');
+
+    await act(async () => {
+      await setup?.refresh();
+    });
+    expect(container.textContent).toBe('save failed');
+
+    await act(async () => {
+      await setup?.update({ enabled: true });
+    });
+    expect(container.textContent).toBe('ok');
+
+    act(() => root.unmount());
+  });
+
   it('does not contact setup routes when the daemon hides Live', async () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
