@@ -524,45 +524,61 @@ jobs:
           else
             echo 'tmux unavailable; rendering captures will refuse and claims stay argued in prose.'
           fi
-          # A prior no-sudo run cached freeze in ~/.local/bin — put it on PATH
-          # for this probe AND for the job's later steps, or a sudo-less
-          # runner re-downloads on every review forever.
-          if [ -d "$HOME/.local/bin" ]; then
-            PATH="$HOME/.local/bin:$PATH"
-            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          fi
+          # Step-owned tool dir: only THIS directory is promoted onto PATH
+          # (and into GITHUB_PATH for the job's later steps) — never the
+          # general-purpose ~/.local/bin, which a persistent runner lets any
+          # earlier job write to, and whose binaries would then resolve ahead
+          # of the system gh/git in the secret-bearing review step. $HOME
+          # persists across runs on the self-hosted runner, so the directory
+          # doubles as the freeze cache: the next review probes it and skips
+          # the download.
+          tools_bin="$HOME/.qwen-review-tools/bin"
+          mkdir -p "$tools_bin"
+          PATH="$tools_bin:$PATH"
+          echo "$tools_bin" >> "$GITHUB_PATH"
           # Probe the VERSION, not just the binary: a persistent self-hosted
           # runner keeps yesterday's freeze on PATH, and a bare `command -v`
           # gate would silently pin this workflow to whatever installed
-          # first, making the FREEZE_VERSION/FREEZE_SHA256 bump above a no-op.
+          # first, making the FREEZE_VERSION/FREEZE_SHA256 bump above a
+          # no-op. Digit-bounded match: a cached 0.2.20 CONTAINS a 0.2.2 pin
+          # as a substring, so a substring grep would silently void a
+          # downgrade.
+          version_re="(^|[^0-9])${FREEZE_VERSION//./\\.}([^0-9]|$)"
           have_freeze=false
-          if command -v freeze >/dev/null 2>&1 && freeze --version 2>/dev/null | grep -q "${FREEZE_VERSION}"; then
+          if command -v freeze >/dev/null 2>&1 && freeze --version 2>/dev/null | grep -qE "$version_re"; then
             have_freeze=true
           fi
           if [ "$have_freeze" = false ] && [ "$(uname -sm)" = 'Linux x86_64' ]; then
             tmp=$(mktemp -d) || tmp=''
             url="https://github.com/charmbracelet/freeze/releases/download/v${FREEZE_VERSION}/freeze_${FREEZE_VERSION}_Linux_x86_64.tar.gz"
             if [ -n "$tmp" ] \
-              && curl -fsSL --retry 3 -o "$tmp/freeze.tar.gz" "$url" \
-              && echo "${FREEZE_SHA256}  $tmp/freeze.tar.gz" | sha256sum -c - >/dev/null 2>&1 \
-              && tar -xzf "$tmp/freeze.tar.gz" -C "$tmp"; then
-              bin=$(find "$tmp" -type f -name freeze | head -1)
-              if [ -n "$bin" ]; then
-                if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
-                  sudo install -m 0755 "$bin" /usr/local/bin/freeze
-                else
-                  mkdir -p "$HOME/.local/bin" \
-                    && install -m 0755 "$bin" "$HOME/.local/bin/freeze" \
-                    && PATH="$HOME/.local/bin:$PATH" \
-                    && echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+              && curl -fsSL --retry 3 --connect-timeout 10 --max-time 120 -o "$tmp/freeze.tar.gz" "$url"; then
+              if ! echo "${FREEZE_SHA256}  $tmp/freeze.tar.gz" | sha256sum -c - >/dev/null 2>&1; then
+                echo "freeze checksum mismatch for v${FREEZE_VERSION}; captures degrade to ans-only."
+              elif ! tar -xzf "$tmp/freeze.tar.gz" -C "$tmp"; then
+                echo 'freeze tarball extraction failed; captures degrade to ans-only.'
+              else
+                bin=$(find "$tmp" -type f -name freeze | head -1)
+                if [ -z "$bin" ]; then
+                  echo 'verified tarball contains no freeze binary; captures degrade to ans-only.'
+                elif ! install -m 0755 "$bin" "$tools_bin/freeze"; then
+                  echo 'freeze install failed; captures degrade to ans-only.'
                 fi
               fi
             else
-              echo 'freeze download/verify failed; captures degrade to ans-only.'
+              echo 'freeze download failed; captures degrade to ans-only.'
             fi
             [ -n "$tmp" ] && rm -rf "$tmp"
           fi
-          command -v freeze >/dev/null 2>&1 && freeze --version
+          # Report what the job's later steps will actually resolve, and say
+          # so when it is not the pinned version: silent degradation is what
+          # this step exists to prevent.
+          if command -v freeze >/dev/null 2>&1; then
+            resolved_version=$(freeze --version 2>/dev/null)
+            echo "$resolved_version"
+            printf '%s\n' "$resolved_version" | grep -qE "$version_re" \
+              || echo "warning: resolved freeze is not the pinned v${FREEZE_VERSION}; captures may render with a stale renderer."
+          fi
           exit 0
 
       - name: 'Run review'

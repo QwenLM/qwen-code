@@ -12,6 +12,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -359,118 +360,140 @@ function captureToolsSource() {
   return { run: step.run, env: step.env };
 }
 
+// The download half of the happy path: a curl that satisfies `-o <out>` with
+// an empty body, and a tar that "extracts" a runnable freeze stub. Shared by
+// the scenarios that vary only the verify/install half.
+const okCurlStub = [
+  'out=""; prev=""',
+  'for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done',
+  '[ -n "$out" ] && : > "$out"',
+  'exit 0',
+].join('\n');
+const okTarStub = [
+  'dest=""; prev=""',
+  'for a in "$@"; do [ "$prev" = "-C" ] && dest="$a"; prev="$a"; done',
+  'mkdir -p "$dest/freeze_x"',
+  'printf \'#!/bin/bash\\necho "freeze ${FREEZE_VERSION}"\\n\' > "$dest/freeze_x/freeze"',
+  'chmod +x "$dest/freeze_x/freeze"',
+].join('\n');
+
 function runCaptureToolsStep({ stubs = {} } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'capture-tools-'));
-  const bin = join(dir, 'bin');
-  const homeDir = join(dir, 'home');
-  const ghPath = join(dir, 'github_path');
-  const calls = join(dir, 'calls');
-  execFileSync('mkdir', ['-p', bin, homeDir]);
-  writeFileSync(ghPath, '');
-  writeFileSync(calls, '');
-  const write = (name, body) => {
-    const p = join(bin, name);
-    writeFileSync(p, `#!/bin/bash\necho "${name} $*" >> "$CALLS"\n${body}\n`);
-    chmodSync(p, 0o755);
-  };
-  // Default stub world: Linux x86_64, sudo present but NOT passwordless
-  // (also keeps a developer's real sudo from ever installing to
-  // /usr/local/bin during tests), broken apt, dead network, rejecting
-  // checksum — the WORST runner. Tests override per scenario.
-  write('uname', 'echo "Linux x86_64"');
-  write('sudo', 'exit 1');
-  // Shadow any REAL freeze on the developer's PATH: a stub that fails the
-  // version probe forces the download path deterministically.
-  write('freeze', 'exit 1');
-  write('curl', 'exit 22');
-  write('sha256sum', 'exit 1');
-  write('apt-get', 'exit 100');
-  for (const [name, body] of Object.entries(stubs)) {
-    write(name, body);
-  }
-  const { run, env } = captureToolsSource();
-  const harness = [
-    `export HOME="${homeDir}"`,
-    `export GITHUB_PATH="${ghPath}"`,
-    `export CALLS="${calls}"`,
-    `export FREEZE_VERSION="${env.FREEZE_VERSION}"`,
-    `export FREEZE_SHA256="${env.FREEZE_SHA256}"`,
-    run,
-  ].join('\n');
-  let status = 0;
-  let stdout = '';
   try {
-    // `bash -e -o pipefail` mirrors the runner's default shell for `run:`
-    // blocks — the exact mode under which one unguarded failure kills a step.
-    stdout = execFileSync('bash', ['-e', '-o', 'pipefail', '-c', harness], {
-      encoding: 'utf8',
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
-    });
-  } catch (e) {
-    status = e.status ?? 1;
-    stdout = `${e.stdout ?? ''}${e.stderr ?? ''}`;
+    const bin = join(dir, 'bin');
+    const homeDir = join(dir, 'home');
+    const ghPath = join(dir, 'github_path');
+    const calls = join(dir, 'calls');
+    execFileSync('mkdir', ['-p', bin, homeDir]);
+    writeFileSync(ghPath, '');
+    writeFileSync(calls, '');
+    const write = (name, body) => {
+      const p = join(bin, name);
+      writeFileSync(p, `#!/bin/bash\necho "${name} $*" >> "$CALLS"\n${body}\n`);
+      chmodSync(p, 0o755);
+    };
+    // Default stub world: Linux x86_64, sudo present but NOT passwordless
+    // (also keeps a developer's real sudo from ever running during tests),
+    // broken apt, dead network, rejecting checksum — the WORST runner. Tests
+    // override per scenario.
+    write('uname', 'echo "Linux x86_64"');
+    write('sudo', 'exit 1');
+    // Shadow any REAL freeze on the developer's PATH: a stub that fails the
+    // version probe forces the download path deterministically.
+    write('freeze', 'exit 1');
+    write('curl', 'exit 22');
+    write('sha256sum', 'exit 1');
+    write('apt-get', 'exit 100');
+    for (const [name, body] of Object.entries(stubs)) {
+      write(name, body);
+    }
+    const { run, env } = captureToolsSource();
+    // Drop host directories that ship a tmux: whether the step's apt branch
+    // runs must depend on the scenario, not on the machine hosting the suite.
+    const hostPath = (process.env.PATH ?? '')
+      .split(':')
+      .filter((d) => d && !existsSync(join(d, 'tmux')))
+      .join(':');
+    const harness = [
+      `export HOME="${homeDir}"`,
+      `export GITHUB_PATH="${ghPath}"`,
+      `export CALLS="${calls}"`,
+      `export FREEZE_VERSION="${env.FREEZE_VERSION}"`,
+      `export FREEZE_SHA256="${env.FREEZE_SHA256}"`,
+      run,
+    ].join('\n');
+    let status = 0;
+    let stdout = '';
+    try {
+      // `bash -e -o pipefail` mirrors the runner's default shell for `run:`
+      // blocks — the exact mode under which one unguarded failure kills a step.
+      stdout = execFileSync('bash', ['-e', '-o', 'pipefail', '-c', harness], {
+        encoding: 'utf8',
+        env: { ...process.env, PATH: `${bin}:${hostPath}` },
+      });
+    } catch (e) {
+      status = e.status ?? 1;
+      stdout = `${e.stdout ?? ''}${e.stderr ?? ''}`;
+    }
+    const freezePath = join(homeDir, '.qwen-review-tools/bin/freeze');
+    return {
+      status,
+      stdout,
+      freezeVersion: env.FREEZE_VERSION,
+      ghPath: readFileSync(ghPath, 'utf8'),
+      calls: readFileSync(calls, 'utf8'),
+      installedFreeze: existsSync(freezePath),
+      // Existence is not usability: later steps execute mode bits, not files.
+      installedFreezeExecutable:
+        existsSync(freezePath) && (statSync(freezePath).mode & 0o111) !== 0,
+    };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
-  const result = {
-    status,
-    stdout,
-    ghPath: readFileSync(ghPath, 'utf8'),
-    calls: readFileSync(calls, 'utf8'),
-    installedFreeze: existsSync(join(homeDir, '.local/bin/freeze')),
-  };
-  rmSync(dir, { recursive: true, force: true });
-  return result;
 }
 
 describe('capture-tools install step (real bash, stubbed binaries)', () => {
   it('exits 0 on the worst runner — no passwordless sudo, broken apt, dead network', () => {
     const r = runCaptureToolsStep();
     expect(r.status).toBe(0);
-    expect(r.stdout).toContain('freeze download/verify failed');
+    expect(r.stdout).toContain('freeze download failed');
+    // Part of the never-stalls contract: a hung connection must abort at the
+    // cap, not run out the job budget.
+    expect(r.calls).toContain('--connect-timeout 10 --max-time 120');
     expect(r.installedFreeze).toBe(false);
   });
 
   it('exits 0 when the checksum rejects the download — and installs nothing', () => {
+    // tar is stubbed to SUCCEED so the rejection is attributable to the
+    // checksum alone: with tar unstubbed, deleting the sha256sum clause from
+    // the workflow failed at tar instead and shipped green.
     const r = runCaptureToolsStep({
-      stubs: {
-        curl: [
-          'out=""; prev=""',
-          'for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done',
-          '[ -n "$out" ] && : > "$out"',
-          'exit 0',
-        ].join('\n'),
-        sha256sum: 'exit 1',
-      },
+      stubs: { curl: okCurlStub, sha256sum: 'exit 1', tar: okTarStub },
     });
     expect(r.status).toBe(0);
-    expect(r.stdout).toContain('freeze download/verify failed');
+    expect(r.stdout).toContain('freeze checksum mismatch');
+    expect(r.calls).toContain('sha256sum ');
+    expect(r.calls).not.toContain('tar ');
     expect(r.installedFreeze).toBe(false);
-    expect(r.ghPath.trim()).toBe('');
   });
 
-  it('no-sudo happy path installs to ~/.local/bin and exposes it via GITHUB_PATH', () => {
+  it('happy path installs a USABLE pinned freeze into the step-owned dir', () => {
     const r = runCaptureToolsStep({
-      stubs: {
-        curl: [
-          'out=""; prev=""',
-          'for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done',
-          '[ -n "$out" ] && : > "$out"',
-          'exit 0',
-        ].join('\n'),
-        sha256sum: 'exit 0',
-        tar: [
-          'dest=""; prev=""',
-          'for a in "$@"; do [ "$prev" = "-C" ] && dest="$a"; prev="$a"; done',
-          'mkdir -p "$dest/freeze_x"',
-          'printf \'#!/bin/bash\\necho "freeze ${FREEZE_VERSION}"\\n\' > "$dest/freeze_x/freeze"',
-          'chmod +x "$dest/freeze_x/freeze"',
-        ].join('\n'),
-      },
+      stubs: { curl: okCurlStub, sha256sum: 'exit 0', tar: okTarStub },
     });
     expect(r.status).toBe(0);
     // The pairing later steps depend on: the binary AT the path GITHUB_PATH
     // names — one without the other and freeze is invisible or missing.
     expect(r.installedFreeze).toBe(true);
-    expect(r.ghPath).toContain('.local/bin');
+    expect(r.ghPath).toContain('.qwen-review-tools/bin');
+    // ~/.local/bin is a persistent runner's general-purpose dumping ground:
+    // promoting it would resolve arbitrary binaries ahead of the system
+    // gh/git in the secret-bearing review step.
+    expect(r.ghPath).not.toContain('.local/bin');
+    // Existence is not usability: an install -m 0644 regression ships a file
+    // that later steps cannot execute, silently degrading every capture.
+    expect(r.installedFreezeExecutable).toBe(true);
+    expect(r.stdout).toContain(r.freezeVersion);
   });
 
   it('re-downloads when the cached freeze is the WRONG version', () => {
@@ -483,11 +506,65 @@ describe('capture-tools install step (real bash, stubbed binaries)', () => {
     expect(r.calls).toContain('curl ');
   });
 
+  it('re-downloads when the cached version merely CONTAINS the pin', () => {
+    // A downgrade (0.2.20 -> 0.2.2) must re-download: the newer cached
+    // version contains the older pin as a substring, so an unanchored grep
+    // matched it and silently voided the pin.
+    const r = runCaptureToolsStep({
+      stubs: { freeze: 'echo "freeze version ${FREEZE_VERSION}0"' },
+    });
+    expect(r.status).toBe(0);
+    expect(r.calls).toContain('curl ');
+  });
+
   it('skips the download when the cached freeze already matches the pin', () => {
     const r = runCaptureToolsStep({
       stubs: { freeze: 'echo "freeze version ${FREEZE_VERSION}"' },
     });
     expect(r.status).toBe(0);
     expect(r.calls).not.toContain('curl ');
+  });
+
+  it('uses passwordless sudo for tmux only — freeze installs without sudo', () => {
+    // The hosted-runner shape: sudo works. The default stubs pin sudo to
+    // exit 1, so before this scenario no test ever executed the apt branch
+    // and a regression breaking it shipped green while tmux stayed missing.
+    const r = runCaptureToolsStep({
+      stubs: {
+        sudo: 'exit 0',
+        curl: okCurlStub,
+        sha256sum: 'exit 0',
+        tar: okTarStub,
+      },
+    });
+    expect(r.status).toBe(0);
+    expect(r.calls).toContain('sudo apt-get update -qq');
+    expect(r.calls).toContain('sudo apt-get install -y -qq tmux');
+    expect(r.calls).not.toContain('sudo install');
+    expect(r.installedFreeze).toBe(true);
+  });
+});
+
+describe('capture-tools step wiring', () => {
+  it('installs before the review step its PATH promotion exists for', () => {
+    // GITHUB_PATH entries and in-step PATH exports only reach LATER steps:
+    // moved below 'Run review', the installed freeze is invisible to the
+    // review while the install log still shows success.
+    const install = workflow.indexOf(
+      "- name: 'Install capture tools (tmux + freeze)'",
+    );
+    expect(install).toBeGreaterThan(-1);
+    expect(install).toBeLessThan(workflow.indexOf("- name: 'Run review'"));
+  });
+
+  it('passes the assets-repo variable into the review step', () => {
+    // The CLI reads QWEN_REVIEW_ASSETS_REPO from the environment; the run:
+    // script never names it, so only this assertion sees a dropped or
+    // misspelled wiring line.
+    const doc = parse(workflow);
+    expect(
+      doc.jobs['review-pr'].steps.find((s) => s.name === 'Run review').env
+        .QWEN_REVIEW_ASSETS_REPO,
+    ).toBe('${{ vars.QWEN_REVIEW_ASSETS_REPO }}');
   });
 });
