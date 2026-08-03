@@ -191,6 +191,21 @@ describe('ACP tool-result text projection', () => {
     );
   });
 
+  it('saturates the budget after smaller blocks reach their capacity', () => {
+    const content = [
+      textBlock('a'.repeat(10_000)),
+      textBlock('b'.repeat(50_000)),
+      textBlock('c'.repeat(200_000)),
+    ];
+    const projected = projectAcpToolResultUpdate(toolUpdate(content));
+    const texts = contentTexts(projected);
+
+    expect(texts[0]).toBe(content[0].content.text);
+    expect(texts[1]).toContain(ACP_TOOL_RESULT_TEXT_TRUNCATION_MARKER);
+    expect(texts[2]).toContain(ACP_TOOL_RESULT_TEXT_TRUNCATION_MARKER);
+    expect(jsonBytes(asRecord(projected)['content'])).toBe(65_536);
+  });
+
   it('collapses content when the empty structure cannot fit', () => {
     const content = Array.from({ length: 1_192 }, () => textBlock(''));
     const projected = projectAcpToolResultUpdate(toolUpdate(content));
@@ -304,6 +319,16 @@ describe('ACP tool-result text projection', () => {
     expect(projectAcpToolResultUpdate(update)).toBe(update);
   });
 
+  it('exempts A2UI updates identified only by serverId', () => {
+    const text = `[${' '.repeat(100_000)}]`;
+    const update = toolUpdate([textBlock(text)], text, {
+      toolName: 'present_quality_report',
+      serverId: 'dq-A2UI',
+    });
+
+    expect(projectAcpToolResultUpdate(update)).toBe(update);
+  });
+
   it('is immutable and idempotent', () => {
     const source = 'x'.repeat(100_000);
     const content = [textBlock(source)];
@@ -338,6 +363,16 @@ describe('ACP tool-result text projection', () => {
 
     expect(projectAcpToolResultUpdate(small)).toBe(small);
     expect(projectAcpToolResultUpdate(message)).toBe(message);
+  });
+
+  it('bounds active tool-call updates before completion', () => {
+    const update = toolUpdate([], 'x'.repeat(100_000));
+    asRecord(update)['status'] = 'in_progress';
+    const projected = projectAcpToolResultUpdate(update);
+
+    expect(jsonBytes(asRecord(projected)['rawOutput'])).toBeLessThanOrEqual(
+      65_536,
+    );
   });
 
   it.each([

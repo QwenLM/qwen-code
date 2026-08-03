@@ -81,71 +81,69 @@ function canonicalTextBlocks(
   return value as CanonicalTextContentBlock[];
 }
 
-function jsonPayloadBytesAt(
-  value: string,
-  index: number,
-): { bytes: number; width: number } {
+function jsonPayloadBytesAt(value: string, index: number): number {
   const code = value.charCodeAt(index);
-  if (code === 0x22 || code === 0x5c) return { bytes: 2, width: 1 };
+  if (code === 0x22 || code === 0x5c) return 2;
   if (code <= 0x1f) {
-    return {
-      bytes:
-        code === 0x08 ||
-        code === 0x09 ||
-        code === 0x0a ||
-        code === 0x0c ||
-        code === 0x0d
-          ? 2
-          : 6,
-      width: 1,
-    };
+    return code === 0x08 ||
+      code === 0x09 ||
+      code === 0x0a ||
+      code === 0x0c ||
+      code === 0x0d
+      ? 2
+      : 6;
   }
-  if (code <= 0x7f) return { bytes: 1, width: 1 };
-  if (code <= 0x7ff) return { bytes: 2, width: 1 };
+  if (code <= 0x7f) return 1;
+  if (code <= 0x7ff) return 2;
   if (code >= 0xd800 && code <= 0xdbff) {
     const next = value.charCodeAt(index + 1);
-    return next >= 0xdc00 && next <= 0xdfff
-      ? { bytes: 4, width: 2 }
-      : { bytes: 6, width: 1 };
+    return next >= 0xdc00 && next <= 0xdfff ? 4 : 6;
   }
-  if (code >= 0xdc00 && code <= 0xdfff) {
-    return { bytes: 6, width: 1 };
-  }
-  return { bytes: 3, width: 1 };
+  if (code >= 0xdc00 && code <= 0xdfff) return 6;
+  return 3;
 }
 
-export function jsonStringJsonByteLength(value: string): number {
-  let bytes = JSON_STRING_DELIMITER_BYTES;
+function jsonPayloadWidthAt(value: string, index: number): number {
+  const code = value.charCodeAt(index);
+  if (code < 0xd800 || code > 0xdbff) return 1;
+  const next = value.charCodeAt(index + 1);
+  return next >= 0xdc00 && next <= 0xdfff ? 2 : 1;
+}
+
+function jsonStringPayloadByteLength(
+  value: string,
+  stopAfterBytes = Number.POSITIVE_INFINITY,
+): number {
+  let bytes = 0;
   for (let index = 0; index < value.length; ) {
-    const part = jsonPayloadBytesAt(value, index);
-    bytes += part.bytes;
-    index += part.width;
+    bytes += jsonPayloadBytesAt(value, index);
+    if (bytes > stopAfterBytes) return bytes;
+    index += jsonPayloadWidthAt(value, index);
   }
   return bytes;
 }
 
-function jsonPayloadBytesBefore(
-  value: string,
-  end: number,
-): { bytes: number; width: number } {
+export function jsonStringJsonByteLength(value: string): number {
+  return JSON_STRING_DELIMITER_BYTES + jsonStringPayloadByteLength(value);
+}
+
+function jsonPayloadWidthBefore(value: string, end: number): number {
   const last = value.charCodeAt(end - 1);
   if (last >= 0xdc00 && last <= 0xdfff && end >= 2) {
     const previous = value.charCodeAt(end - 2);
-    if (previous >= 0xd800 && previous <= 0xdbff) {
-      return { bytes: 4, width: 2 };
-    }
+    if (previous >= 0xd800 && previous <= 0xdbff) return 2;
   }
-  return jsonPayloadBytesAt(value, end - 1);
+  return 1;
 }
 
 function selectPrefix(value: string, budget: number): number {
   let end = 0;
   let bytes = 0;
   while (end < value.length) {
-    const part = jsonPayloadBytesAt(value, end);
-    if (bytes + part.bytes > budget) break;
-    bytes += part.bytes;
-    end += part.width;
+    const partBytes = jsonPayloadBytesAt(value, end);
+    if (bytes + partBytes > budget) break;
+    bytes += partBytes;
+    end += jsonPayloadWidthAt(value, end);
   }
   return end;
 }
@@ -154,10 +152,11 @@ function selectSuffix(value: string, budget: number): number {
   let start = value.length;
   let bytes = 0;
   while (start > 0) {
-    const part = jsonPayloadBytesBefore(value, start);
-    if (bytes + part.bytes > budget) break;
-    bytes += part.bytes;
-    start -= part.width;
+    const partWidth = jsonPayloadWidthBefore(value, start);
+    const partBytes = jsonPayloadBytesAt(value, start - partWidth);
+    if (bytes + partBytes > budget) break;
+    bytes += partBytes;
+    start -= partWidth;
   }
   return start;
 }
@@ -173,7 +172,7 @@ function truncateStringPayload(
 ): string {
   if (originalPayloadBytes <= payloadBudget) return value;
   if (payloadBudget < TRUNCATION_MARKER_PAYLOAD_BYTES) {
-    return ACP_TOOL_RESULT_TEXT_TRUNCATION_MARKER;
+    return copyString(value.slice(0, selectPrefix(value, payloadBudget)));
   }
   const sourceBudget = payloadBudget - TRUNCATION_MARKER_PAYLOAD_BYTES;
   const headBudget = Math.floor(sourceBudget * 0.2);
@@ -269,22 +268,19 @@ function projectContent(
 ): CanonicalTextContentBlock[] {
   if (original.length > MAX_CANONICAL_TEXT_BLOCKS) return fallbackContent();
   const skeletonBytes = contentSkeletonBytes(original.length);
-  const payloadBytes = original.map(
-    (block) =>
-      jsonStringJsonByteLength(block.content.text) -
-      JSON_STRING_DELIMITER_BYTES,
+  const availablePayloadBytes =
+    ACP_TOOL_RESULT_TEXT_JSON_BYTE_BUDGET - skeletonBytes;
+  const payloadBytes = original.map((block) =>
+    jsonStringPayloadByteLength(block.content.text, availablePayloadBytes),
   );
   const totalPayloadBytes = payloadBytes.reduce((sum, bytes) => sum + bytes, 0);
-  if (
-    skeletonBytes + totalPayloadBytes <=
-    ACP_TOOL_RESULT_TEXT_JSON_BYTE_BUDGET
-  ) {
+  if (totalPayloadBytes <= availablePayloadBytes) {
     return original;
   }
 
   const allocations = allocatePayloadBudgets(
     payloadBytes,
-    ACP_TOOL_RESULT_TEXT_JSON_BYTE_BUDGET - skeletonBytes,
+    availablePayloadBytes,
   );
   if (!allocations) return fallbackContent();
 
@@ -304,13 +300,11 @@ function projectContent(
 }
 
 function projectRawOutput(value: string): string {
-  const jsonBytes = jsonStringJsonByteLength(value);
-  if (jsonBytes <= ACP_TOOL_RESULT_TEXT_JSON_BYTE_BUDGET) return value;
-  const projected = truncateStringPayload(
-    value,
-    jsonBytes - JSON_STRING_DELIMITER_BYTES,
-    ACP_TOOL_RESULT_TEXT_JSON_BYTE_BUDGET - JSON_STRING_DELIMITER_BYTES,
-  );
+  const payloadBudget =
+    ACP_TOOL_RESULT_TEXT_JSON_BYTE_BUDGET - JSON_STRING_DELIMITER_BYTES;
+  const payloadBytes = jsonStringPayloadByteLength(value, payloadBudget);
+  if (payloadBytes <= payloadBudget) return value;
+  const projected = truncateStringPayload(value, payloadBytes, payloadBudget);
   return jsonByteLength(projected) <= ACP_TOOL_RESULT_TEXT_JSON_BYTE_BUDGET
     ? projected
     : ACP_TOOL_RESULT_TEXT_TRUNCATION_MARKER;
