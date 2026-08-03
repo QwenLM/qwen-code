@@ -107,6 +107,7 @@ describe('executeToolCall', () => {
       callId: 'call1',
       error: undefined,
       errorType: undefined,
+      executionStatus: 'success',
       resultDisplay: 'Success!',
       contentLength:
         typeof toolResult.llmContent === 'string'
@@ -282,6 +283,7 @@ describe('executeToolCall', () => {
       callId: 'call2',
       error: new Error(expectedErrorMessage),
       errorType: ToolErrorType.TOOL_NOT_REGISTERED,
+      executionStatus: 'not_started',
       resultDisplay: expectedErrorMessage,
       contentLength: expectedErrorMessage.length,
       responseParts: [
@@ -320,6 +322,7 @@ describe('executeToolCall', () => {
       callId: 'call3',
       error: new Error('Invalid parameters'),
       errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+      executionStatus: 'not_started',
       responseParts: [
         {
           functionResponse: {
@@ -364,6 +367,7 @@ describe('executeToolCall', () => {
       callId: 'call4',
       error: new Error('Execution failed'),
       errorType: ToolErrorType.EXECUTION_FAILED,
+      executionStatus: 'error',
       responseParts: [
         {
           functionResponse: {
@@ -401,6 +405,7 @@ describe('executeToolCall', () => {
       callId: 'call5',
       error: new Error('Something went very wrong'),
       errorType: ToolErrorType.UNHANDLED_EXCEPTION,
+      executionStatus: 'error',
       resultDisplay: 'Something went very wrong',
       contentLength: 'Something went very wrong'.length,
       responseParts: [
@@ -443,6 +448,7 @@ describe('executeToolCall', () => {
       callId: 'call6',
       error: undefined,
       errorType: undefined,
+      executionStatus: 'success',
       resultDisplay: 'Image processed',
       contentLength: undefined,
       responseParts: [

@@ -2041,7 +2041,10 @@ describe('runNonInteractive', () => {
       },
     };
     const toolResponse: Part[] = [{ text: 'Tool response' }];
-    mockCoreExecuteToolCall.mockResolvedValue({ responseParts: toolResponse });
+    mockCoreExecuteToolCall.mockResolvedValue({
+      responseParts: toolResponse,
+      executionStatus: 'success',
+    });
 
     const firstCallEvents: ServerGeminiStreamEvent[] = [toolCallEvent];
     const secondCallEvents: ServerGeminiStreamEvent[] = [
@@ -2408,6 +2411,20 @@ describe('runNonInteractive', () => {
 
     it('isolates enter_plan_mode from headless siblings without charging skipped calls to the budget', async () => {
       setupMetricsMock();
+      const recordToolResult = vi.fn();
+      (
+        mockConfig as Config & {
+          getChatRecordingService: () => {
+            recordToolResult: typeof recordToolResult;
+            finalize: ReturnType<typeof vi.fn>;
+            flush: ReturnType<typeof vi.fn>;
+          };
+        }
+      ).getChatRecordingService = () => ({
+        recordToolResult,
+        finalize: vi.fn(),
+        flush: vi.fn().mockResolvedValue(undefined),
+      });
       vi.mocked(mockConfig.getMaxToolCalls).mockReturnValue(1);
       vi.mocked(mockToolRegistry.getTool).mockImplementation(
         (name: string) =>
@@ -2492,6 +2509,12 @@ describe('runNonInteractive', () => {
       expect(nextTurnParts[3].functionResponse?.response).toEqual({
         error: PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
       });
+      expect(
+        recordToolResult.mock.calls
+          .map((call) => call[1])
+          .filter((metadata) => metadata.callId !== 'enter-plan')
+          .map((metadata) => metadata.executionStatus),
+      ).toEqual(['not_started', 'not_started', 'not_started']);
     });
 
     it('runs a batch of concurrency-safe tool calls concurrently', async () => {
@@ -3351,6 +3374,7 @@ describe('runNonInteractive', () => {
           resultDisplay: 'Tool response',
           error: undefined,
           errorType: undefined,
+          executionStatus: 'success',
         };
         await options.onAllToolCallsComplete?.([
           { request, response, status: 'success' },
@@ -3398,6 +3422,9 @@ describe('runNonInteractive', () => {
       'success',
       'error',
     ]);
+    expect(
+      recordToolResult.mock.calls.map((call) => call[1].executionStatus),
+    ).toEqual(['success', 'not_started']);
     expect(processStdoutSpy).toHaveBeenCalledWith('Final answer\n');
   });
 
@@ -5627,6 +5654,8 @@ describe('runNonInteractive', () => {
     expect(toolResultBlock?.tool_use_id).toBe('tool-1');
     expect(toolResultBlock?.is_error).toBe(false);
     expect(toolResultBlock?.content).toBe('Tool executed successfully');
+    expect(writes.join('')).not.toContain('executionStatus');
+    expect(writes.join('')).not.toContain('execution_status');
   });
 
   it('should emit tool errors in tool_result blocks in stream-json format', async () => {
@@ -5657,6 +5686,7 @@ describe('runNonInteractive', () => {
     mockCoreExecuteToolCall.mockResolvedValue({
       error: new Error('Tool execution failed'),
       errorType: ToolErrorType.EXECUTION_FAILED,
+      executionStatus: 'error',
       responseParts: [
         {
           functionResponse: {
@@ -5721,6 +5751,8 @@ describe('runNonInteractive', () => {
     );
     expect(toolResultBlock?.tool_use_id).toBe('tool-error');
     expect(toolResultBlock?.is_error).toBe(true);
+    expect(writes.join('')).not.toContain('executionStatus');
+    expect(writes.join('')).not.toContain('execution_status');
   });
 
   it('should emit partial messages when includePartialMessages is true', async () => {

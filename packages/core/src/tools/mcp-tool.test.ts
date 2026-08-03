@@ -916,6 +916,41 @@ describe('DiscoveredMCPTool', () => {
         controller.abort();
         expect(controller.signal.aborted).toBe(true);
       });
+
+      it('forwards parent abort into the combined signal passed to the direct SDK client', async () => {
+        let capturedSignal: AbortSignal | undefined;
+        const mockDirectCallTool = vi.fn<McpDirectClient['callTool']>(
+          async (_params, _schema, options) => {
+            capturedSignal = options?.signal;
+            return new Promise(() => {});
+          },
+        );
+        const directClient: McpDirectClient = {
+          callTool: mockDirectCallTool,
+        };
+
+        const directTool = new DiscoveredMCPTool(
+          mockCallableToolInstance,
+          serverName,
+          serverToolName,
+          baseDescription,
+          inputSchema,
+          undefined,
+          undefined,
+          undefined,
+          directClient,
+        );
+        const controller = new AbortController();
+        const invocation = directTool.build({ param: 'test' });
+        const promise = invocation.execute(controller.signal);
+
+        await vi.waitFor(() => expect(mockDirectCallTool).toHaveBeenCalled());
+
+        controller.abort();
+
+        expect(capturedSignal?.aborted).toBe(true);
+        await expect(promise).rejects.toThrow('Tool call aborted');
+      });
     });
   });
 
@@ -1918,9 +1953,258 @@ describe('DiscoveredMCPTool', () => {
 
       expect(discoverToolsForServer).toHaveBeenCalled();
     });
+
+    it('reconnects instead of reporting a timeout when the server is known disconnected', async () => {
+      const params = { param: 'test' };
+      // -32001 with a dead transport means the connection died mid-request,
+      // not that the tool ran too long. Classifying it as EXECUTION_TIMEOUT
+      // would strand a call the reconnect path can still recover.
+      const requestTimeout = Object.assign(new Error('Request timed out'), {
+        code: -32001,
+      });
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValueOnce(requestTimeout),
+      };
+      const newMockMcpClient: McpDirectClient = {
+        callTool: vi
+          .fn()
+          .mockResolvedValueOnce({ content: [{ type: 'text', text: 'OK' }] }),
+      };
+      const newTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        undefined,
+        newMockMcpClient,
+      );
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool: vi.fn().mockResolvedValue(newTool),
+        }),
+        getTruncateToolOutputThreshold: () => 0,
+        getTruncateToolOutputLines: () => 0,
+      };
+
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+
+      const reconnectTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        mockConfig as any,
+        mockMcpClient,
+      );
+
+      await reconnectTool.build(params).execute(new AbortController().signal);
+
+      expect(discoverToolsForServer).toHaveBeenCalled();
+    });
+
+    it('still reports a timeout when the server is connected', async () => {
+      const requestTimeout = Object.assign(new Error('Request timed out'), {
+        code: -32001,
+      });
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValue(requestTimeout),
+      };
+      const mockConfig = {
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool: vi.fn(),
+        }),
+      };
+
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+
+      const tool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        mockConfig as any,
+        mockMcpClient,
+      );
+
+      await expect(
+        tool.build({ param: 'test' }).execute(new AbortController().signal),
+      ).rejects.toMatchObject({
+        errorType: ToolErrorType.EXECUTION_TIMEOUT,
+      });
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+    });
   });
 
   describe('MCP Tool Idle Timeout', () => {
+    it('classifies an MCP SDK request timeout without parsing its message', async () => {
+      const requestTimeout = Object.assign(
+        new Error('localized timeout message'),
+        { code: -32001 },
+      );
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValue(requestTimeout),
+      };
+      const tool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true,
+        undefined,
+        undefined,
+        mockMcpClient,
+      );
+
+      const executePromise = tool
+        .build({ param: 'test' })
+        .execute(new AbortController().signal);
+
+      await expect(executePromise).rejects.toMatchObject({
+        message: 'localized timeout message',
+        errorType: ToolErrorType.EXECUTION_TIMEOUT,
+      });
+    });
+
+    it('does not classify a parent abort wrapped by the MCP SDK as a timeout', async () => {
+      const requestCancelled = Object.assign(new Error('Request cancelled'), {
+        code: -32001,
+      });
+      const discoverToolsForServer = vi.fn();
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockImplementation(
+          (_params, _schema, options) =>
+            new Promise((_resolve, reject) => {
+              options?.signal?.addEventListener(
+                'abort',
+                () => reject(requestCancelled),
+                { once: true },
+              );
+            }),
+        ),
+      };
+      const mockConfig = {
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool: vi.fn(),
+        }),
+      };
+      const tool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true,
+        undefined,
+        mockConfig as any,
+        mockMcpClient,
+      );
+      const abortController = new AbortController();
+      const executePromise = tool
+        .build({ param: 'test' })
+        .execute(abortController.signal);
+
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+      abortController.abort();
+
+      const rejection = await executePromise.catch((error) => error);
+      expect(rejection).toMatchObject({ name: 'AbortError' });
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+      expect(rejection).not.toMatchObject({
+        errorType: ToolErrorType.EXECUTION_TIMEOUT,
+      });
+    });
+
+    it('does not classify a direct -32001 that races with a parent abort as a timeout', async () => {
+      // Once the caller has cancelled, a `-32001` is indistinguishable from
+      // the SDK's own abort rejection, so a timeout that settles the race
+      // first must not reclassify the cancellation — the abort side wins
+      // regardless of ordering (#8180 review).
+      const requestTimeout = Object.assign(new Error('raced timeout'), {
+        code: -32001,
+      });
+      let rejectRequest: ((reason?: unknown) => void) | undefined;
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockReturnValue(
+          new Promise((_resolve, reject) => {
+            rejectRequest = reject;
+          }),
+        ),
+      };
+      const tool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        true,
+        undefined,
+        undefined,
+        mockMcpClient,
+      );
+      const abortController = new AbortController();
+      const executePromise = tool
+        .build({ param: 'test' })
+        .execute(abortController.signal);
+
+      rejectRequest?.(requestTimeout);
+      abortController.abort();
+
+      await expect(executePromise).rejects.toBe(requestTimeout);
+    });
+
+    it('classifies an MCP SDK request timeout on the callable fallback', async () => {
+      mockCallTool.mockRejectedValueOnce(
+        Object.assign(new Error('fallback timeout'), { code: -32001 }),
+      );
+
+      const executePromise = tool
+        .build({ param: 'test' })
+        .execute(new AbortController().signal);
+
+      await expect(executePromise).rejects.toMatchObject({
+        message: 'fallback timeout',
+        errorType: ToolErrorType.EXECUTION_TIMEOUT,
+      });
+    });
+
+    it('does not classify a callable -32001 that races with a parent abort as a timeout', async () => {
+      const requestTimeout = Object.assign(
+        new Error('raced fallback timeout'),
+        { code: -32001 },
+      );
+      let rejectRequest: ((reason?: unknown) => void) | undefined;
+      mockCallTool.mockReturnValueOnce(
+        new Promise((_resolve, reject) => {
+          rejectRequest = reject;
+        }),
+      );
+      const abortController = new AbortController();
+      const executePromise = tool
+        .build({ param: 'test' })
+        .execute(abortController.signal);
+
+      rejectRequest?.(requestTimeout);
+      abortController.abort();
+
+      await expect(executePromise).rejects.toBe(requestTimeout);
+    });
+
     it('should abort when MCP server does not respond within idle timeout', async () => {
       vi.useFakeTimers();
 
@@ -1966,10 +2250,56 @@ describe('DiscoveredMCPTool', () => {
       await expect(executePromise).rejects.toThrow(
         /did not respond within.*idle timeout/,
       );
+      await expect(executePromise).rejects.toMatchObject({
+        errorType: ToolErrorType.EXECUTION_TIMEOUT,
+      });
       // The external abort signal should not have been triggered
       expect(abortController.signal.aborted).toBe(false);
 
       vi.useRealTimers();
+    });
+
+    it('keeps an idle timeout when the parent aborts before rejection settles', async () => {
+      vi.useFakeTimers();
+      try {
+        const idleTimeoutMs = 1000;
+        const mockMcpClient: McpDirectClient = {
+          callTool: vi.fn().mockImplementation(
+            (_params, _schema, options) =>
+              new Promise((_resolve, reject) => {
+                options?.signal?.addEventListener('abort', () => {
+                  queueMicrotask(() => reject(options.signal?.reason));
+                });
+              }),
+          ),
+        };
+        const tool = new DiscoveredMCPTool(
+          mockCallableToolInstance,
+          serverName,
+          serverToolName,
+          baseDescription,
+          inputSchema,
+          true,
+          undefined,
+          undefined,
+          mockMcpClient,
+          undefined,
+          idleTimeoutMs,
+        );
+        const abortController = new AbortController();
+        const executePromise = tool
+          .build({ param: 'test' })
+          .execute(abortController.signal);
+
+        vi.advanceTimersByTime(idleTimeoutMs);
+        abortController.abort();
+
+        await expect(executePromise).rejects.toMatchObject({
+          errorType: ToolErrorType.EXECUTION_TIMEOUT,
+        });
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('should reset idle timeout on progress updates', async () => {

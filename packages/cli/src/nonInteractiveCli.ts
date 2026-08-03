@@ -1909,6 +1909,7 @@ export async function runNonInteractive(
             resultDisplay: error.message,
             error,
             errorType: ToolErrorType.EXECUTION_DENIED,
+            executionStatus: 'not_started',
           });
           responseByRequest.set(requestInfo, {
             callId: requestInfo.callId,
@@ -1916,6 +1917,7 @@ export async function runNonInteractive(
             resultDisplay: error.message,
             error,
             errorType: ToolErrorType.EXECUTION_DENIED,
+            executionStatus: 'not_started',
           });
           executedRequests.add(requestInfo);
         };
@@ -2067,6 +2069,7 @@ export async function runNonInteractive(
               resultDisplay: skippedOutput,
               error: undefined,
               errorType: undefined,
+              executionStatus: 'not_started',
             };
             adapter.emitToolResult(call, toolResponse);
             responseByRequest.set(call, toolResponse);
@@ -2135,6 +2138,7 @@ export async function runNonInteractive(
             error: response.error,
             errorType: response.errorType,
             deferredToolPresentations: deliveredPresentations,
+            executionStatus: response.executionStatus,
           });
           if (!response.error && deliveredPresentations) {
             deferredToolPresentations.push(...deliveredPresentations);

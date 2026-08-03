@@ -499,6 +499,7 @@ describe('useReactToolScheduler', () => {
           error: expect.objectContaining({
             message: expect.stringContaining('tool was not executed'),
           }),
+          executionStatus: 'not_started',
         }),
       }),
     ]);
@@ -547,6 +548,7 @@ describe('useReactToolScheduler', () => {
           error: expect.objectContaining({
             message: expect.stringContaining('tool was not executed'),
           }),
+          executionStatus: 'not_started',
         }),
       }),
     ]);
@@ -1009,6 +1011,20 @@ describe('mapToDisplay', () => {
       expectedResultDisplay: 'Cancelled display',
       expectedName: baseTool.displayName,
       expectedDescription: baseInvocation.getDescription(),
+    },
+    {
+      name: 'cancelled before tool resolution',
+      status: 'cancelled',
+      extraProps: {
+        response: {
+          ...baseResponse,
+          resultDisplay: 'Cancelled before resolution',
+        },
+      },
+      expectedStatus: ToolCallStatus.Canceled,
+      expectedResultDisplay: 'Cancelled before resolution',
+      expectedName: baseRequest.name,
+      expectedDescription: JSON.stringify(baseRequest.args),
     },
   ];
 
