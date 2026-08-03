@@ -625,6 +625,41 @@ describe('SkillTool', () => {
 
       expect(registerSkillHooks).toHaveBeenCalledTimes(1);
     });
+
+    it('registers deferred hooks once the folder becomes trusted mid-session', async () => {
+      // The gate is "gated UNTIL the folder is trusted": a skill first
+      // invoked while untrusted must pick up its hooks on re-invocation
+      // after trust is granted, without waiting for /clear.
+      vi.mocked(config.isTrustedFolder).mockReturnValue(false);
+      const getSessionHooksManager = vi.fn().mockReturnValue({});
+      vi.mocked(config.getHookSystem).mockReturnValue({
+        getSessionHooksManager,
+      } as unknown as ReturnType<Config['getHookSystem']>);
+
+      const first = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'hooked' });
+      await first.execute();
+      expect(registerSkillHooks).not.toHaveBeenCalled();
+
+      vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+
+      const second = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'hooked' });
+      const result = await second.execute();
+
+      expect(registerSkillHooks).toHaveBeenCalledTimes(1);
+      // The body is not re-injected — only the side effects are applied.
+      expect(partToString(result.llmContent)).toContain('already loaded');
+
+      // Later invocations must not register the hooks a second time.
+      const third = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'hooked' });
+      await third.execute();
+      expect(registerSkillHooks).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('allowedTools trust gating', () => {
@@ -699,6 +734,31 @@ describe('SkillTool', () => {
       ).createInvocation({ skill: 'build' });
       await invocation.execute();
 
+      expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
+    });
+
+    it('grants deferred allowedTools once the folder becomes trusted mid-session', async () => {
+      vi.mocked(config.isTrustedFolder).mockReturnValue(false);
+
+      const first = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'build' });
+      await first.execute();
+      expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+
+      vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+
+      const second = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'build' });
+      await second.execute();
+      expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
+
+      // Later invocations must not grant the rules a second time.
+      const third = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'build' });
+      await third.execute();
       expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
     });
   });

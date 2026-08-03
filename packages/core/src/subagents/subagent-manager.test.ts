@@ -2682,6 +2682,36 @@ bad`);
         await result.dispose();
       });
 
+      it('registers hooks for a builtin-level subagent regardless of folder trust', async () => {
+        // Pins the 'builtin' arm of the allowlist (spelled 'bundled' in the
+        // sibling skill helper — a future edit dropping the clause must fail
+        // a test, not silently gate builtin agents' hooks on folder trust).
+        const addAgentHooksSpy = vi.fn().mockReturnValue(vi.fn());
+        vi.spyOn(mockConfig, 'getHookSystem').mockReturnValue({
+          getRegistry: () => ({ addAgentHooks: addAgentHooksSpy }),
+        } as unknown as ReturnType<Config['getHookSystem']>);
+        vi.spyOn(mockConfig, 'isTrustedFolder').mockReturnValue(false);
+
+        const result = await manager.createAgentHeadless(
+          {
+            ...baseConfig,
+            level: 'builtin',
+            hooks: {
+              PreToolUse: [
+                {
+                  matcher: 'Bash',
+                  hooks: [{ type: 'command', command: 'echo' }],
+                },
+              ],
+            },
+          },
+          mockConfig,
+        );
+
+        expect(addAgentHooksSpy).toHaveBeenCalledTimes(1);
+        await result.dispose();
+      });
+
       it('fails closed for non-allowlisted levels: session-level hooks need trust too', async () => {
         const addAgentHooksSpy = vi.fn().mockReturnValue(vi.fn());
         vi.spyOn(mockConfig, 'getHookSystem').mockReturnValue({
