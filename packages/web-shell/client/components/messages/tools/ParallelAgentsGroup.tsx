@@ -16,6 +16,7 @@ import {
   formatTokenCount,
   getAgentCancellationReason,
   getAgentDisplayStatus,
+  isActiveToolStatus,
   localizeAgentTypeName,
   toolContainsCallId,
 } from '../toolFormatting';
@@ -69,7 +70,7 @@ export function computeAgentsTimeline(
     starts.push(agent.startTime);
   }
   const ends = agents.map((agent, i) =>
-    agent.status === 'in_progress'
+    isActiveToolStatus(agent.status)
       ? Math.max(now, starts[i])
       : Math.max(agent.endTime ?? starts[i], starts[i]),
   );
@@ -86,7 +87,7 @@ export function computeAgentsTimeline(
     rows.set(agent.callId, {
       leftPct: left * 100,
       widthPct: width * 100,
-      running: agent.status === 'in_progress',
+      running: isActiveToolStatus(agent.status),
     });
   });
 
@@ -168,20 +169,20 @@ export function ParallelAgentsGroup({
   const [now, setNow] = useState(() => Date.now());
   const liveStartedAtRef = useRef(Date.now());
 
-  const hasRunning = agents.some((a) => a.status === 'in_progress');
+  const hasActive = agents.some((agent) => isActiveToolStatus(agent.status));
 
   useEffect(() => {
-    if (!hasRunning) return;
+    if (!hasActive) return;
     liveStartedAtRef.current = Date.now();
     setNow(Date.now());
-  }, [hasRunning]);
+  }, [hasActive]);
 
   useEffect(() => {
-    if (!hasRunning) return;
+    if (!hasActive) return;
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
-  }, [hasRunning]);
-  const runningDuration = hasRunning
+  }, [hasActive]);
+  const runningDuration = hasActive
     ? formatLiveElapsed(now - liveStartedAtRef.current)
     : '';
 
@@ -199,7 +200,7 @@ export function ParallelAgentsGroup({
     (a) => getAgentDisplayStatus(a) === 'failed',
   )
     ? 'failed'
-    : hasRunning
+    : hasActive
       ? 'in_progress'
       : 'completed';
 
@@ -223,7 +224,7 @@ export function ParallelAgentsGroup({
         )}
         <span
           className={
-            hasRunning
+            hasActive
               ? `${styles.summaryText} ${styles.summaryTextActive}`
               : styles.summaryText
           }

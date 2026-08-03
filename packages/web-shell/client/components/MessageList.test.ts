@@ -1188,6 +1188,29 @@ describe('applyTurnCollapse', () => {
     });
   });
 
+  it('keeps a completed main turn expanded while a background agent is pending', () => {
+    const firstAgent = makeBackgroundAgentToolGroup('a1');
+    const secondAgent = makeBackgroundAgentToolGroup('a2');
+    if (firstAgent.role !== 'tool_group' || secondAgent.role !== 'tool_group') {
+      throw new Error('Expected background agent tool groups');
+    }
+    firstAgent.tools[0] = {
+      ...firstAgent.tools[0],
+      status: 'completed',
+    };
+
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      firstAgent,
+      secondAgent,
+      makeAssistantMessage('a1'),
+    ]);
+    const out = collapseItems(items);
+
+    expect(rowIds(out)).toEqual(['u1', 'tc-u1', 'par-a1', 'a1']);
+    expect(collapseOf(out, 'u1')?.collapsed).toBe(false);
+  });
+
   it('still allows manually collapsing a turn with no final answer', () => {
     const items = groupParallelAgents([
       makeUserMessage('u1'),

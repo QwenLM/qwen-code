@@ -52,6 +52,7 @@ import {
   getToolSummaryDescription,
   getToolResultSummary,
   isAskUserQuestionToolName,
+  isActiveToolStatus,
   isSkillToolName,
   isShellToolName,
   localizeAgentTypeName,
@@ -67,6 +68,8 @@ import {
 } from '../../customization';
 import flashStyles from '../MessageLocateFlash.module.css';
 import styles from './tools/ToolChrome.module.css';
+
+export { isActiveToolStatus } from './toolFormatting';
 
 interface ToolGroupProps {
   tools: ACPToolCall[];
@@ -575,14 +578,6 @@ function isDescriptionExpandable(description: string): boolean {
   return (
     description.length > DESCRIPTION_EXPAND_THRESHOLD ||
     description.includes('\n')
-  );
-}
-
-export function isActiveToolStatus(
-  status: ACPToolCall['status'] | string,
-): boolean {
-  return (
-    status === 'in_progress' || status === 'pending' || status === 'running'
   );
 }
 

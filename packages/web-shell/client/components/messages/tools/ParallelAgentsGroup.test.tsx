@@ -145,6 +145,30 @@ describe('computeAgentsTimeline', () => {
 });
 
 describe('ParallelAgentsGroup timeline rendering', () => {
+  it('shows live progress while a background agent is pending', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000);
+    try {
+      const container = renderExpandedGroup([
+        agent({ callId: 'done', startTime: 1_000, endTime: 5_000 }),
+        agent({ callId: 'pending', status: 'pending', startTime: 2_000 }),
+      ]);
+
+      expect(container.textContent).toMatch(/Parallel agents \d+s·1\/2 done/);
+      expect(
+        computeAgentsTimeline(
+          [
+            agent({ callId: 'done', startTime: 1_000, endTime: 5_000 }),
+            agent({ callId: 'pending', status: 'pending', startTime: 2_000 }),
+          ],
+          10_000,
+        )?.rows.get('pending')?.running,
+      ).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps nested agents inspectable without a details provider', () => {
     const container = renderExpandedGroup([
       agent({ callId: 'nested', subContent: 'nested agent output' }),
