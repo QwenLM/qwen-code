@@ -38,6 +38,7 @@ import {
   applySkillAllowedTools,
   collectAvailableSkillEntries,
   clearCollectedSkillEntriesCache,
+  isTrustedSkillLevel,
 } from './skill-utils.js';
 
 /**
@@ -522,11 +523,12 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       // repo-supplied side effects are gated until the folder is trusted:
       // allowedTools become session-wide permission auto-approvals, and
       // hooks are code execution (the same gate Config.getProjectHooks()
-      // applies to settings-file hooks).
-      const untrustedProjectSkill =
-        skill.level === 'project' && !this.config.isTrustedFolder();
+      // applies to settings-file hooks). Fail closed: only levels that
+      // cannot originate from the repository skip the gate.
+      const sideEffectsGated =
+        !isTrustedSkillLevel(skill.level) && !this.config.isTrustedFolder();
 
-      if (untrustedProjectSkill) {
+      if (sideEffectsGated) {
         if (skill.allowedTools?.length) {
           debugLogger.warn(
             `Skill "${this.params.skill}" declares allowedTools but the folder is not trusted; ignoring skill allowedTools.`,
@@ -547,10 +549,12 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
         skillName: skill.name,
       });
       if (skill.hooks) {
-        if (untrustedProjectSkill) {
-          debugLogger.warn(
-            `Skill "${this.params.skill}" declares hooks but the folder is not trusted; ignoring skill hooks.`,
-          );
+        if (sideEffectsGated) {
+          if (Object.keys(skill.hooks).length > 0) {
+            debugLogger.warn(
+              `Skill "${this.params.skill}" declares hooks but the folder is not trusted; ignoring skill hooks.`,
+            );
+          }
         } else {
           const hookSystem = this.config.getHookSystem();
           const sessionId = this.config.getSessionId();

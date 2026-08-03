@@ -2655,6 +2655,35 @@ bad`);
         await result.dispose();
       });
 
+      it('fails closed for non-allowlisted levels: session-level hooks need trust too', async () => {
+        const addAgentHooksSpy = vi.fn().mockReturnValue(vi.fn());
+        vi.spyOn(mockConfig, 'getHookSystem').mockReturnValue({
+          getRegistry: () => ({ addAgentHooks: addAgentHooksSpy }),
+        } as unknown as ReturnType<Config['getHookSystem']>);
+        vi.spyOn(mockConfig, 'isTrustedFolder').mockReturnValue(false);
+
+        const result = await manager.createAgentHeadless(
+          {
+            ...baseConfig,
+            // baseConfig is 'session' level — not in the trusted allowlist
+            level: 'session',
+            hooks: {
+              PreToolUse: [
+                {
+                  matcher: 'Bash',
+                  hooks: [{ type: 'command', command: 'echo' }],
+                },
+              ],
+            },
+          },
+          mockConfig,
+        );
+
+        expect(addAgentHooksSpy).not.toHaveBeenCalled();
+        expect(result).toHaveProperty('subagent');
+        await result.dispose();
+      });
+
       it('dispose unregisters even when execute() never runs (early-exit leak fix)', async () => {
         // Caller pattern:
         //   const { subagent, dispose } = await createAgentHeadless(...);

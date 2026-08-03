@@ -10,6 +10,7 @@ import {
   appendToLastTextPart,
   buildSkillLlmContent,
   applySkillAllowedTools,
+  isTrustedSkillLevel,
   recordAutoSkillUsage,
 } from '@qwen-code/qwen-code-core';
 import { dirname } from 'node:path';
@@ -152,10 +153,14 @@ export class SkillCommandLoader implements ICommandLoader {
           },
           action: async (context, _args): Promise<SlashCommandActionReturn> => {
             // Auto-approve the skill's declared allowedTools before its body
-            // is submitted — never for project skills in an untrusted folder,
-            // where repo-supplied frontmatter would otherwise grant
-            // session-wide permission auto-approvals (same gate as SkillTool).
-            if (skill.level !== 'project' || this.config?.isTrustedFolder()) {
+            // is submitted — never for repo-supplied skills in an untrusted
+            // folder, where frontmatter would otherwise grant session-wide
+            // permission auto-approvals. Same fail-closed gate as SkillTool:
+            // only levels that cannot originate from the repository skip it.
+            if (
+              isTrustedSkillLevel(skill.level) ||
+              this.config?.isTrustedFolder()
+            ) {
               applySkillAllowedTools(
                 this.config?.getPermissionManager(),
                 skill.allowedTools,

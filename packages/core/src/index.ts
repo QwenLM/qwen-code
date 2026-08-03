@@ -142,6 +142,7 @@ export * from './tools/modifiable-tool.js';
 export {
   buildSkillLlmContent,
   applySkillAllowedTools,
+  isTrustedSkillLevel,
 } from './tools/skill-utils.js';
 export { atomicWriteFile } from './utils/atomicFileWrite.js';
 export { nextFireTime, parseCron } from './utils/cronParser.js';

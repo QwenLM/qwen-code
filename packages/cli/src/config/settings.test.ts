@@ -3356,9 +3356,14 @@ describe('Settings Loading and Merging', () => {
 
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
       const warnings = getSettingsWarnings(settings);
-      expect(
-        warnings.some((w) => w.includes('security.allowedHttpHookUrls')),
-      ).toBe(true);
+      const warning = warnings.find((w) =>
+        w.includes('security.allowedHttpHookUrls'),
+      );
+      expect(warning).toBeDefined();
+      // An empty whitelist means "allow all", so the warning must say the
+      // strip can widen the effective policy, not read as neutral.
+      expect(warning).toContain('now unrestricted');
+      expect(warning).toContain('user settings');
     });
 
     it('should not warn about stripped security fields when workspace settings do not define them', () => {

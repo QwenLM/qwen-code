@@ -519,6 +519,31 @@ describe('SkillCommandLoader', () => {
       expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
     });
 
+    it('still submits the skill body when allowedTools are gated', async () => {
+      (mockConfig.isTrustedFolder as ReturnType<typeof vi.fn>).mockReturnValue(
+        false,
+      );
+      const skill = makeSkill({
+        level: 'project',
+        allowedTools: ['Edit'],
+      });
+      mockSkillManager.listSkills.mockImplementation(
+        ({ level }: { level: string }) =>
+          Promise.resolve(level === 'project' ? [skill] : []),
+      );
+
+      const loader = new SkillCommandLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+      const result = await commands[0].action?.({} as CommandContext, '');
+
+      expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+      // Read-only use stays fine: only the permission grants are gated.
+      expect(result).toMatchObject({
+        type: 'submit_prompt',
+        content: [{ text: makeSkillPrompt('Skill body content.') }],
+      });
+    });
+
     it('grants allowedTools for a project skill in a trusted folder', async () => {
       (mockConfig.isTrustedFolder as ReturnType<typeof vi.fn>).mockReturnValue(
         true,

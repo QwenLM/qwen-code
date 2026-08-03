@@ -39,7 +39,9 @@ const INTERNAL_SECRET_ENV_VARS_UPPER = new Set(
 /**
  * Case-insensitive check for the internal-secret denylist. `process.env` is
  * case-insensitive on Windows, so a mixed-case reference like
- * `$qwen_server_token` must still be blocked.
+ * `$qwen_server_token` must still be blocked. On POSIX systems a genuinely
+ * distinct lowercase variable is caught too — deliberate, since these names
+ * have no legitimate use.
  */
 export const isInternalSecretEnvVar = (name: string): boolean =>
   INTERNAL_SECRET_ENV_VARS_UPPER.has(name.toUpperCase());
@@ -56,7 +58,8 @@ export function sanitizeChildEnv(
 ): NodeJS.ProcessEnv {
   const sanitized: NodeJS.ProcessEnv = { ...env };
   // Case variants must go too: on Windows env keys are case-insensitive,
-  // so an externally set `qwen_server_token` is just the canonical secret.
+  // so an externally set `qwen_server_token` is just the canonical secret;
+  // on POSIX the lowercase spelling is removed as well (deliberate).
   for (const key of Object.keys(sanitized)) {
     if (isInternalSecretEnvVar(key)) {
       delete sanitized[key];

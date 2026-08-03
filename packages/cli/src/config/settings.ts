@@ -373,8 +373,15 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
   if (workspaceFile.rawJson !== undefined) {
     for (const field of WORKSPACE_STRIPPED_SECURITY_FIELDS) {
       if (workspaceFile.originalSettings.security?.[field] !== undefined) {
+        // An empty whitelist means "allow all" to the hook URL validator,
+        // so stripping a workspace list that only narrowed destinations
+        // can widen the effective policy — say that explicitly.
+        const wideningNote =
+          field === 'allowedHttpHookUrls'
+            ? ' If it was your only whitelist, HTTP hook URLs are now unrestricted (SSRF protections still apply); move the list to your user settings to keep it in effect.'
+            : '';
         warningSet.add(
-          `Warning: security.${field} in workspace settings (${workspaceFile.path}) is ignored. This setting is only honored from User, System, or SystemDefaults scope settings.`,
+          `Warning: security.${field} in workspace settings (${workspaceFile.path}) is ignored. This setting is only honored from User, System, or SystemDefaults scope settings.${wideningNote}`,
         );
       }
     }

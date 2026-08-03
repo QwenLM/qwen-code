@@ -31,10 +31,14 @@ export function resolveEnvVars(
   if (value.startsWith('$')) {
     const envName = value.substring(1);
     // Qwen-internal secrets never resolve into channel config: resolved
-    // values are sent to repo-configured endpoints. Leave the placeholder
-    // unresolved, mirroring the core resolver.
+    // values are sent to repo-configured endpoints. The core resolver
+    // preserves placeholders, but channel config throws at config time
+    // like every other unresolvable reference — silently keeping the
+    // literal would turn a secret *name* into a public, guessable value.
     if (isInternalSecretEnvVar(envName)) {
-      return value;
+      throw new Error(
+        `Environment variable ${envName} is a Qwen-internal secret; internal secrets are never resolved into channel config (referenced as ${value})`,
+      );
     }
     const envValue = env[envName];
     if (envValue === undefined) {
@@ -84,7 +88,9 @@ function resolveConfigEnvVar(value: string, mode: EnvResolution): string {
   if (mode === 'available' && value.startsWith('$')) {
     const envName = value.substring(1);
     if (isInternalSecretEnvVar(envName)) {
-      return value;
+      throw new Error(
+        `Environment variable ${envName} is a Qwen-internal secret; internal secrets are never resolved into channel config (referenced as ${value})`,
+      );
     }
     const envValue = process.env[envName];
     if (envValue === undefined) {
@@ -301,7 +307,9 @@ function resolveWebhookSecretEnv(
     );
   }
   if (isInternalSecretEnvVar(envName)) {
-    return secretEnv;
+    throw new Error(
+      `Channel "${channelName}" field "${path}.secretEnv" references a Qwen-internal secret (${envName}); internal secrets are never resolved into channel config.`,
+    );
   }
   const envValue = env[envName];
   if (envValue === undefined) {

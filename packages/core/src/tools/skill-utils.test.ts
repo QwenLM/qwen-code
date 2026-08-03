@@ -7,11 +7,13 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   applySkillAllowedTools,
+  isTrustedSkillLevel,
   collectAvailableSkillEntries,
   clearCollectedSkillEntriesCache,
 } from './skill-utils.js';
 import type { PermissionManager } from '../permissions/permission-manager.js';
 import type { SkillManager } from '../skills/skill-manager.js';
+import type { SkillLevel } from '../skills/types.js';
 import type { Config } from '../config/config.js';
 
 function mockPermissionManager(): {
@@ -65,6 +67,22 @@ describe('applySkillAllowedTools', () => {
     expect(addSessionAllowRule).toHaveBeenCalledTimes(2);
     expect(addSessionAllowRule).toHaveBeenNthCalledWith(1, 'Bash(unbalanced');
     expect(addSessionAllowRule).toHaveBeenNthCalledWith(2, 'Read');
+  });
+});
+
+describe('isTrustedSkillLevel', () => {
+  it('accepts the levels that never originate from the repository', () => {
+    expect(isTrustedSkillLevel('user')).toBe(true);
+    expect(isTrustedSkillLevel('bundled')).toBe(true);
+    expect(isTrustedSkillLevel('extension')).toBe(true);
+  });
+
+  it('requires folder trust for repo-controlled and unknown levels', () => {
+    expect(isTrustedSkillLevel('project')).toBe(false);
+    // Fail closed: a missing or future level must never skip the gate.
+    expect(isTrustedSkillLevel(undefined)).toBe(false);
+    const futureLevel = 'session' as unknown as SkillLevel;
+    expect(isTrustedSkillLevel(futureLevel)).toBe(false);
   });
 });
 

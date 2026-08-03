@@ -603,6 +603,28 @@ describe('SkillTool', () => {
 
       expect(registerSkillHooks).toHaveBeenCalledTimes(1);
     });
+
+    it('registers hooks for an extension-level skill regardless of folder trust', async () => {
+      // Extensions load only from the user-scope extensions directory, so
+      // they are in the trusted allowlist and must not regress behind the
+      // fail-closed gate.
+      vi.mocked(config.isTrustedFolder).mockReturnValue(false);
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue({
+        ...hookedSkill,
+        level: 'extension',
+      });
+      const getSessionHooksManager = vi.fn().mockReturnValue({});
+      vi.mocked(config.getHookSystem).mockReturnValue({
+        getSessionHooksManager,
+      } as unknown as ReturnType<Config['getHookSystem']>);
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'hooked' });
+      await invocation.execute();
+
+      expect(registerSkillHooks).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('allowedTools trust gating', () => {

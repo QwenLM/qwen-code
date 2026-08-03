@@ -5,7 +5,11 @@
  */
 
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { interpolateHeaders, interpolateUrl } from './envInterpolator.js';
+import {
+  interpolateHeaders,
+  interpolateUrl,
+  sanitizeHeaderValue,
+} from './envInterpolator.js';
 import { UrlValidator } from './urlValidator.js';
 import { combineAbortSignals } from '../utils/abortController.js';
 import { isBlockedAddress, isMetadataAddress } from './ssrfGuard.js';
@@ -106,6 +110,7 @@ export class HttpHookRunner {
   private urlValidator: UrlValidator;
   private readonly allowPrivateNetworkHosts: boolean;
   private readonly executedOnceHooks: Set<string> = new Set();
+  private readonly redirectWarnedHooks: Set<string> = new Set();
   private statusMessageCallback?: StatusMessageCallback;
 
   constructor(
@@ -263,12 +268,35 @@ export class HttpHookRunner {
             // knows to repoint it, so name the target and the remedy.
             // debugLogger.warn alone is invisible in default runs, so also
             // surface it the way command-hook non-blocking errors do.
+            //
+            // The Location header is controlled by the (possibly
+            // compromised) endpoint: strip CR/LF/NUL and cap it like the
+            // other systemMessage producers before it can reach the
+            // conversation.
+            const location = this.truncateOutput(
+              sanitizeHeaderValue(
+                response.headers.get('location') ?? 'unknown',
+              ),
+            );
             const message =
               `HTTP hook ${hookId} returned a redirect (${response.status}) to ` +
-              `"${response.headers.get('location') ?? 'unknown'}"; redirects ` +
+              `"${location}"; redirects ` +
               `are never followed (SSRF protection). Point the hook at the ` +
               `final URL (non-blocking).`;
             debugLogger.warn(message);
+            // The remedy only needs saying once per hook; a PreToolUse hook
+            // behind a redirecting LB would otherwise emit the warning on
+            // every tool call for the whole session.
+            if (this.redirectWarnedHooks.has(hookId)) {
+              return {
+                hookConfig,
+                eventName,
+                success: true,
+                output: { continue: true },
+                duration,
+              };
+            }
+            this.redirectWarnedHooks.add(hookId);
             return {
               hookConfig,
               eventName,
