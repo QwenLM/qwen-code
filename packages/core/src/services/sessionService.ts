@@ -21,6 +21,7 @@ import type {
   FileHistorySnapshotRecordPayload,
   TitleSource,
   UiTelemetryRecordPayload,
+  UserPromptRecordPayload,
 } from './chatRecordingService.js';
 import type { FileHistorySnapshot } from './fileHistoryService.js';
 import {
@@ -843,8 +844,22 @@ export class SessionService {
   private extractFirstPromptFromRecords(records: ChatRecord[]): string {
     for (const record of records) {
       if (record.type !== 'user') continue;
+      const payload = record.systemPayload as
+        | UserPromptRecordPayload
+        | undefined;
+      if (payload?.displayText !== undefined) {
+        const displayText = payload.displayText;
+        if (displayText) {
+          return displayText.length > 200
+            ? `${displayText.slice(0, 200)}...`
+            : displayText;
+        }
+        continue;
+      }
       const prompt = this.extractPromptText(record.message);
-      if (prompt) return prompt;
+      if (prompt) {
+        return prompt.length > 200 ? `${prompt.slice(0, 200)}...` : prompt;
+      }
     }
     return '';
   }

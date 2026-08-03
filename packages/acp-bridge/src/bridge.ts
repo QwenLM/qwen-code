@@ -102,6 +102,7 @@ import {
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
+  DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   LOAD_REPLAY_BULK_MODE,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
   LOAD_REPLAY_META_KEY,
@@ -930,15 +931,25 @@ function echoPromptToSessionBus(
   // contract — cheaper than a thrown `TypeError` mid-echo.
   const prompt = req.prompt;
   if (!Array.isArray(prompt) || prompt.length === 0) return;
+  const displayText =
+    entry.sourceType === 'channel' &&
+    typeof req._meta?.[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY] === 'string'
+      ? req._meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY]
+      : undefined;
+  let displayTextPublished = false;
   const serverTimestamp = Date.now();
   const blockCount = Math.min(prompt.length, MAX_ECHO_CONTENT_BLOCKS);
   for (let i = 0; i < blockCount; i += 1) {
     const part = prompt[i];
     if (!part || typeof part !== 'object' || Array.isArray(part)) continue;
-    // Every `ContentBlock` variant (text, image, audio, resource) is
-    // published to the bus verbatim. The SDK's `normalizeDaemonEvent`
-    // accepts any `content` shape; rich rendering of non-text blocks is
-    // the consumer's responsibility.
+    let displayPart = part;
+    if (displayText !== undefined && part.type === 'text') {
+      if (displayTextPublished) continue;
+      displayTextPublished = true;
+      displayPart = { ...part, text: displayText };
+    }
+    // Non-text blocks are published verbatim. Channel text uses the display
+    // projection so hidden model context never reaches transcript consumers.
     try {
       entry.events.publish({
         type: 'session_update',
@@ -947,7 +958,7 @@ function echoPromptToSessionBus(
           sessionId: req.sessionId,
           update: {
             sessionUpdate: 'user_message_chunk',
-            content: part,
+            content: displayPart,
             // `_meta` lives inside the `update` object rather than at
             // envelope level. `_meta` is a standard JSON-RPC/MCP extension
             // field permitted alongside spec fields, the SDK normalizer
@@ -5655,6 +5666,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                     copy._meta && typeof copy._meta === 'object'
                       ? { ...copy._meta }
                       : {};
+                  const promptDisplayText =
+                    entry.sourceType === 'channel' &&
+                    typeof meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY] ===
+                      'string'
+                      ? meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY]
+                      : undefined;
                   delete meta[DAEMON_RETRY_META_KEY];
                   delete meta[INVOCATION_CONTEXT_META_KEY];
                   delete meta[PRIVATE_PARENT_CAPABILITY_META_KEY];
@@ -5663,6 +5680,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   // below) re-arms it after this strip.
                   delete meta[DAEMON_CONTINUE_META_KEY];
                   delete meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
+                  delete meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
                   if (isRetry) {
                     meta[DAEMON_RETRY_META_KEY] = true;
                   }
@@ -5672,6 +5690,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   if (context?.channelDelivery) {
                     meta[DAEMON_CHANNEL_DELIVERY_META_KEY] =
                       context.channelDelivery;
+                  }
+                  if (promptDisplayText !== undefined) {
+                    meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY] =
+                      promptDisplayText;
                   }
                   meta[INVOCATION_CONTEXT_META_KEY] = invocationContext;
                   if (Object.keys(meta).length > 0) {

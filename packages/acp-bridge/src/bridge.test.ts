@@ -5717,6 +5717,23 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('strips channel display metadata from non-channel sessions', async () => {
+      const handle = makeChannel();
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'model text' }],
+        _meta: { 'qwen.daemon.promptDisplayText': 'hidden transcript text' },
+      } as PromptRequest);
+
+      expect(
+        handle.agent.promptCalls[0]?._meta?.['qwen.daemon.promptDisplayText'],
+      ).toBeUndefined();
+      await bridge.shutdown();
+    });
+
     it('strips spoofed delivery metadata and injects only trusted context', async () => {
       const handle = makeChannel();
       const bridge = makeBridge({ channelFactory: async () => handle.channel });
@@ -6180,6 +6197,53 @@ describe('createAcpSessionBridge', () => {
 
       abortA.abort();
       abortB.abort();
+      await bridge.shutdown();
+    });
+
+    it('echoes only channel display text while forwarding full model context', async () => {
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sourceType: 'channel',
+      });
+      const abort = new AbortController();
+      const events = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      const userChunk = (async () => {
+        for await (const event of events) {
+          if (event.type !== 'session_update') continue;
+          const update = (
+            event.data as {
+              update?: { sessionUpdate?: string; content?: unknown };
+            }
+          ).update;
+          if (update?.sessionUpdate === 'user_message_chunk') return update;
+        }
+        throw new Error('no user_message_chunk observed');
+      })();
+
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [
+          { type: 'text', text: 'internal channel instructions\n\nhello' },
+        ],
+        _meta: { 'qwen.daemon.promptDisplayText': 'hello' },
+      } as PromptRequest);
+
+      await expect(userChunk).resolves.toMatchObject({
+        content: { type: 'text', text: 'hello' },
+      });
+      expect(handle.agent.promptCalls[0]).toMatchObject({
+        prompt: [
+          { type: 'text', text: 'internal channel instructions\n\nhello' },
+        ],
+        _meta: { 'qwen.daemon.promptDisplayText': 'hello' },
+      });
+      abort.abort();
       await bridge.shutdown();
     });
 

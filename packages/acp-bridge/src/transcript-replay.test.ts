@@ -282,6 +282,39 @@ describe('createTranscriptReplayMachine', () => {
       expect(projected).toHaveLength(2);
     });
 
+    it('does not replay hidden text when an image-only prompt has empty display text', () => {
+      const projected = updates(
+        createTranscriptReplayMachine(),
+        record('user-empty-display', 'user', {
+          message: {
+            role: 'user',
+            parts: [
+              {
+                inlineData: {
+                  data: 'abc',
+                  mimeType: 'image/png',
+                },
+              },
+              { text: 'internal channel instructions' },
+            ],
+          },
+          systemPayload: { displayText: '' },
+        }),
+      );
+
+      expect(projected).toMatchObject([
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: {
+            type: 'image',
+            data: 'abc',
+            mimeType: 'image/png',
+          },
+        },
+      ]);
+      expect(projected).toHaveLength(1);
+    });
+
     it('strips a trailing whole-part tagged block when displayText is absent', () => {
       const projected = updates(
         createTranscriptReplayMachine(),

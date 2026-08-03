@@ -5530,6 +5530,7 @@ export abstract class ChannelBase {
         const response = await promptBridge.prompt(sessionId, promptToSend, {
           imageBase64,
           imageMimeType,
+          displayText: promptText,
         });
 
         await this.settleCancelRequested(promptState);

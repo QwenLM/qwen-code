@@ -57,6 +57,16 @@ test('shows channel sessions in the sidebar channel catalog', async ({
     page.getByText('DingTalk conversation', { exact: true }),
   ).toBeVisible();
   await expect(page.getByText('Web Shell task')).toHaveCount(0);
+
+  scenario.sessions.push({
+    sessionId: 'new-dingtalk-session',
+    displayName: 'New DingTalk conversation',
+    sourceType: 'channel',
+    sourceId: 'release-bot',
+  });
+  await expect(
+    page.getByText('New DingTalk conversation', { exact: true }),
+  ).toBeVisible({ timeout: 5_000 });
 });
 
 test('creates and deletes a typed Channel configuration', async ({

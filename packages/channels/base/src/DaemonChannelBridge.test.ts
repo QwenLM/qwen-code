@@ -1865,6 +1865,39 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
+  it('forwards a distinct user-facing prompt text in daemon metadata', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    const promptPromise = bridge.prompt(
+      'session-1',
+      'internal context\n\nhello',
+      {
+        displayText: 'hello',
+      },
+    );
+    await waitFor(() => expect(session.prompt).toHaveBeenCalledOnce());
+    expect(session.prompt).toHaveBeenCalledWith(
+      {
+        prompt: [{ type: 'text', text: 'internal context\n\nhello' }],
+        _meta: { 'qwen.daemon.promptDisplayText': 'hello' },
+      },
+      expect.any(AbortSignal),
+    );
+
+    events.push(turnCompleteEvent());
+    await promptPromise;
+    events.close();
+    bridge.stop();
+  });
+
   it('aborts in-flight prompts when the bridge stops', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);

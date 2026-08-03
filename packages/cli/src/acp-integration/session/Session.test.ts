@@ -4377,6 +4377,26 @@ describe('Session', () => {
       );
     });
 
+    it('records daemon prompt display text separately from model context', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          { type: 'text', text: 'internal channel instructions\n\nhello' },
+        ],
+        _meta: { 'qwen.daemon.promptDisplayText': 'hello' },
+      });
+
+      expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+        'internal channel instructions\n\nhello',
+        undefined,
+        { displayText: 'hello' },
+      );
+    });
+
     it('degrades an oversized inline image to a text placeholder before sending to the model', async () => {
       const ENV_KEY = 'QWEN_CODE_MAX_INLINE_MEDIA_BYTES';
       const original = process.env[ENV_KEY];

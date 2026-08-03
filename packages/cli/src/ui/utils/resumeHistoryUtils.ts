@@ -50,7 +50,7 @@ function extractUserRecordDisplayText(
   record: ConversationRecord['messages'][number],
 ): string {
   const payload = record.systemPayload as UserPromptRecordPayload | undefined;
-  if (payload?.displayText) {
+  if (payload?.displayText !== undefined) {
     return payload.displayText;
   }
   const parts = (record.message?.parts as Part[] | undefined) ?? [];

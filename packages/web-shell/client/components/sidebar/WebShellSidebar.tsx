@@ -1412,7 +1412,7 @@ export function WebShellSidebar({
   useEffect(() => {
     if (!projectExpanded && !hasRunningSession) return;
     const pollInterval =
-      hasRunningSession && !error
+      (hasRunningSession || selectedSessionSource === 'channel') && !error
         ? ACTIVE_SESSION_POLL_INTERVAL_MS
         : IDLE_SESSION_POLL_INTERVAL_MS;
     const intervalId = window.setInterval(() => {
@@ -1423,7 +1423,13 @@ export function WebShellSidebar({
       });
     }, pollInterval);
     return () => window.clearInterval(intervalId);
-  }, [error, hasRunningSession, projectExpanded, reload]);
+  }, [
+    error,
+    hasRunningSession,
+    projectExpanded,
+    reload,
+    selectedSessionSource,
+  ]);
 
   const prevReloadTokenRef = useRef(sessionListReloadToken);
   useEffect(() => {

@@ -559,7 +559,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
           ? payload['displayText']
           : undefined;
       yield* this.projectMessageParts(
-        displayText
+        displayText !== undefined
           ? this.withUserPromptDisplayText(record, displayText)
           : this.withoutTrailingUserPromptSubmitContext(record),
         'user',

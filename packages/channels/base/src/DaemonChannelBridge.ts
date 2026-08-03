@@ -7,6 +7,7 @@ import type {
   AvailableCommand,
   BridgeSessionInfo,
   ChannelAgentBridge,
+  ChannelAgentBridgePromptOptions,
   ChannelAgentBridgeSessionOptions,
   ChannelLoopToolHandler,
   ToolCallEvent,
@@ -19,6 +20,7 @@ import {
 import type { SessionScope } from './types.js';
 
 const MAX_RESPONDED_PERMISSION_REQUESTS = 256;
+const DAEMON_PROMPT_DISPLAY_TEXT_META_KEY = 'qwen.daemon.promptDisplayText';
 
 export interface DaemonChannelEvent {
   id?: number;
@@ -35,6 +37,7 @@ export interface DaemonChannelSessionClient {
   prompt(
     req: {
       prompt: Array<Record<string, unknown>>;
+      _meta?: Record<string, unknown>;
     },
     signal?: AbortSignal,
   ): Promise<{ stopReason?: string; [key: string]: unknown }>;
@@ -346,7 +349,7 @@ export class DaemonChannelBridge
   async prompt(
     sessionId: string,
     text: string,
-    options?: { imageBase64?: string; imageMimeType?: string },
+    options?: ChannelAgentBridgePromptOptions,
   ): Promise<string> {
     const session = this.ensureSession(sessionId);
     if (this.activePrompts.has(sessionId)) {
@@ -404,7 +407,19 @@ export class DaemonChannelBridge
     prompt.push({ type: 'text', text });
 
     try {
-      const result = await session.prompt({ prompt }, controller.signal);
+      const result = await session.prompt(
+        {
+          prompt,
+          ...(options?.displayText !== undefined
+            ? {
+                _meta: {
+                  [DAEMON_PROMPT_DISPLAY_TEXT_META_KEY]: options.displayText,
+                },
+              }
+            : {}),
+        },
+        controller.signal,
+      );
       // Prefer turn_complete for deterministic chunk collection (SSE path).
       // Fall back to one event-loop tick for non-SSE prompt paths (blocking
       // HTTP, non-202 responses) where turn_complete never arrives.

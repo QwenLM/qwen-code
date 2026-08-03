@@ -7759,7 +7759,11 @@ describe('ChannelBase', () => {
 
       await ch.handleInbound(envelope({ text: '/schedule list' }));
 
-      expect(bridge.prompt).toHaveBeenCalledWith('s-1', '/schedule list', {});
+      expect(bridge.prompt).toHaveBeenCalledWith('s-1', '/schedule list', {
+        displayText: '/schedule list',
+        imageBase64: undefined,
+        imageMimeType: undefined,
+      });
       expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'agent response' }]);
     });
 
@@ -9939,6 +9943,19 @@ describe('ChannelBase', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const secondPrompt = (bridge.prompt as any).mock.calls[1][1] as string;
       expect(secondPrompt).not.toContain('Be concise.');
+    });
+
+    it('keeps channel context out of the user-facing prompt text', async () => {
+      const ch = createChannel({ instructions: 'Be concise.' });
+
+      await ch.handleInbound(envelope({ text: 'hello' }));
+
+      const [sessionId, modelText, options] = (
+        bridge.prompt as ReturnType<typeof vi.fn>
+      ).mock.calls[0]!;
+      expect(sessionId).toEqual(expect.any(String));
+      expect(modelText).toContain('Be concise.');
+      expect(options).toMatchObject({ displayText: 'hello' });
     });
 
     it('prepends channel boundary metadata after custom instructions once per session', async () => {
@@ -13390,6 +13407,7 @@ describe('ChannelBase', () => {
       await ch.handleInbound(envelope({ text: '!echo hello' }));
 
       expect(bridge.prompt).toHaveBeenCalledWith('s-1', '!echo hello', {
+        displayText: '!echo hello',
         imageBase64: undefined,
         imageMimeType: undefined,
       });

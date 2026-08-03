@@ -2950,6 +2950,38 @@ describe('WebShellSidebar session source switch', () => {
       ),
     ).toBe(true);
   });
+
+  it('polls channel sessions on the active-session interval', async () => {
+    const setIntervalSpy = vi.spyOn(window, 'setInterval');
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+    const channelsTab = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    ).find((button) => button.textContent?.trim() === 'Channels');
+
+    await act(async () => {
+      channelsTab!.dispatchEvent(
+        new MouseEvent('mousedown', { bubbles: true, button: 0 }),
+      );
+      channelsTab!.click();
+      await Promise.resolve();
+    });
+    expect(channelsTab?.getAttribute('data-state')).toBe('active');
+    const activePoll = setIntervalSpy.mock.calls.findLast(
+      ([, timeout]) => timeout === 2_000,
+    );
+    expect(activePoll).toBeDefined();
+    active.reload.mockClear();
+
+    await act(async () => {
+      const callback = activePoll![0];
+      expect(callback).toBeTypeOf('function');
+      if (typeof callback === 'function') callback();
+      await Promise.resolve();
+    });
+
+    expect(active.reload).toHaveBeenCalledOnce();
+  });
 });
 
 describe('WebShellSidebar archived session export', () => {

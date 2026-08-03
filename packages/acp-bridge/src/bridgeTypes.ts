@@ -564,6 +564,8 @@ export interface BridgeClientRequestContext {
 }
 
 export const DAEMON_CHANNEL_DELIVERY_META_KEY = 'qwen.daemon.channelDelivery';
+export const DAEMON_PROMPT_DISPLAY_TEXT_META_KEY =
+  'qwen.daemon.promptDisplayText';
 
 /**
  * Returned from `recordHeartbeat`. `lastSeenAt` is the server-side

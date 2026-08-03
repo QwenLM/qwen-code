@@ -90,6 +90,13 @@ export interface ChannelAgentBridgeSessionOptions {
   sourceId?: string;
 }
 
+export interface ChannelAgentBridgePromptOptions {
+  imageBase64?: string;
+  imageMimeType?: string;
+  /** User-authored text shown in transcripts when `text` includes hidden context. */
+  displayText?: string;
+}
+
 export interface ChannelAgentBridge {
   readonly availableCommands: AvailableCommand[];
   getAvailableCommands?(sessionId: string): AvailableCommand[];
@@ -115,7 +122,7 @@ export interface ChannelAgentBridge {
   prompt(
     sessionId: string,
     text: string,
-    options?: { imageBase64?: string; imageMimeType?: string },
+    options?: ChannelAgentBridgePromptOptions,
   ): Promise<string>;
   cancelSession(sessionId: string): Promise<void>;
   /** Release a bridge-owned session that will not be routed to a caller. */

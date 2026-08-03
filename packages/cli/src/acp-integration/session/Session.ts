@@ -172,6 +172,7 @@ import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/b
 // so a rename can't desync caller and answerer into a silent -32601 latch.
 import {
   DAEMON_CHANNEL_DELIVERY_META_KEY,
+  DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   MID_TURN_QUEUE_DRAIN_METHOD,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
 } from '@qwen-code/acp-bridge/bridgeTypes';
@@ -2820,6 +2821,11 @@ export class Session implements SessionContext {
               .filter((block) => block.type === 'text')
               .map((block) => (block.type === 'text' ? block.text : ''))
               .join(' ');
+            const promptDisplayText =
+              typeof promptMetadata?.[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY] ===
+              'string'
+                ? promptMetadata[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY]
+                : undefined;
 
             // Log user prompt
             logUserPrompt(
@@ -2904,9 +2910,14 @@ export class Session implements SessionContext {
               this.#getCurrentChat().stripOrphanedUserEntriesFromHistory();
             } else {
               // record user message for session management
-              this.config
-                .getChatRecordingService()
-                ?.recordUserMessage(promptText);
+              const recordingService = this.config.getChatRecordingService();
+              if (recordingService && promptDisplayText !== undefined) {
+                recordingService.recordUserMessage(promptText, undefined, {
+                  displayText: promptDisplayText,
+                });
+              } else {
+                recordingService?.recordUserMessage(promptText);
+              }
             }
 
             // Check if the input contains a slash command

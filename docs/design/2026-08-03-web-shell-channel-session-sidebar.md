@@ -22,6 +22,15 @@ and do not show a control they cannot support.
 The selected source is applied consistently to active, pinned, archived, and
 secondary-workspace session requests. Existing session rows, workspace
 sections, grouping, search, polling, and open-session actions are reused.
+Because channel sessions can be created by external messages without a Web
+Shell mutation event, the expanded Channels list uses the active-session poll
+interval instead of the 30-second idle interval.
+
+Channel adapters still prepend their model-facing instructions and contextual
+history. The daemon prompt carries the user-authored text separately as
+transcript display metadata, so live and replayed Web Shell messages do not
+expose that hidden context and channel session titles derive from the same
+visible text.
 
 ## Boundaries
 
@@ -36,5 +45,8 @@ sections, grouping, search, polling, and open-session actions are reused.
 - Assert Tasks is initially selected and requests `sourceType: "default"`.
 - Assert selecting Channels requests `sourceType: "channel"` for primary and
   workspace-qualified lists.
+- Assert the Channels list polls on the active-session interval.
+- Assert channel prompts preserve full model context while recording only the
+  user-authored text for transcript display.
 - Run the sidebar and workspace-section unit tests, Web Shell build, and
   TypeScript typecheck.
