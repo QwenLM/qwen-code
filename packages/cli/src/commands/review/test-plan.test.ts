@@ -400,6 +400,18 @@ describe('observedTestCounts', () => {
     ).toEqual([13]);
   });
 
+  it('reads rolled-up Maven module summaries too', () => {
+    // Clean reports roll up per project dir to keep the evidence block
+    // bounded; the count parser must read the rollup shape the same way.
+    expect(
+      observedTestCounts(
+        report([
+          '[maven-test-report] core (412 report(s)): tests=8931, failures=0, errors=0, skipped=12',
+        ]),
+      ),
+    ).toEqual([8919]);
+  });
+
   it('reads a summary interleaved with ANSI color codes', () => {
     // What a real color-enabled pipe delivers — the codes sit BETWEEN tokens,
     // so a token-level regex without the strip finds nothing. From a live
@@ -848,7 +860,7 @@ describe('runTestPlan', () => {
         test: [
           {
             command:
-              './mvnw --batch-mode --no-transfer-progress -pl core -am -amd test',
+              './mvnw --batch-mode --no-transfer-progress -pl core -am test',
             exitCode: 1,
             seconds: 3,
             timedOut: false,
@@ -860,6 +872,7 @@ describe('runTestPlan', () => {
       const claim = r.claims.find((c) => c.text === './mvnw test');
       expect(claim?.verdict).toBe('contradicted');
       expect(claim?.observed).toBe('exit 1');
+      expect(claim?.note).toContain('module-scoped');
     });
 
     it('reads the Maven lifecycle after a lifecycle-named module selector', () => {
@@ -868,7 +881,7 @@ describe('runTestPlan', () => {
         test: [
           {
             command:
-              './mvnw --batch-mode --no-transfer-progress -pl validate -am -amd test',
+              './mvnw --batch-mode --no-transfer-progress -pl validate -am test',
             exitCode: 1,
             seconds: 3,
             timedOut: false,
@@ -905,7 +918,7 @@ describe('runTestPlan', () => {
         test: [
           {
             command:
-              './mvnw --batch-mode --no-transfer-progress -pl core -am -amd test',
+              './mvnw --batch-mode --no-transfer-progress -pl core -am test',
             exitCode: 0,
             seconds: 3,
             timedOut: false,
@@ -921,6 +934,8 @@ describe('runTestPlan', () => {
       ]) {
         const r = run(`## Test Plan\n\nRan \`${command}\``, [], bt);
         expect(verdictOf(r.claims, command)).toBe('reproduces');
+        const claim = r.claims.find((c) => c.text === command);
+        expect(claim?.note).toContain('module-scoped');
       }
     });
 
@@ -930,7 +945,7 @@ describe('runTestPlan', () => {
         test: [
           {
             command:
-              './mvnw --batch-mode --no-transfer-progress -pl core -am -amd test',
+              './mvnw --batch-mode --no-transfer-progress -pl core -am test',
             exitCode: null,
             seconds: 120,
             timedOut: true,
@@ -958,7 +973,7 @@ describe('runTestPlan', () => {
         test: [
           {
             command:
-              './mvnw --batch-mode --no-transfer-progress -pl core -am -amd test',
+              './mvnw --batch-mode --no-transfer-progress -pl core -am test',
             exitCode: 0,
             seconds: 3,
             timedOut: false,

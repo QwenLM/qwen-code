@@ -59,7 +59,13 @@ import {
   worktreeCreateFailureDetail,
   type SweepResult,
 } from './lib/worktree.js';
-import { runBuildTest, type BuildTestReport } from './build-test.js';
+import {
+  runBuildTest,
+  toolchainAdapters,
+  type BuildTestReport,
+} from './build-test.js';
+import { mavenToolchainAdapter } from './lib/maven-toolchain.js';
+import { selectToolchainAdapter } from './lib/toolchain.js';
 
 export interface BaseTreeReport {
   /**
@@ -259,6 +265,25 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
       );
     }
 
+    // A/B attribution reruns the recorded npm test commands (test-delta); no
+    // other toolchain has a delta consumer in this release — Agent 7's brief
+    // says the same for Maven. A base build nothing can consume is pure cost
+    // on the most expensive tree in the review, so it does not run.
+    if (
+      selectToolchainAdapter(tree, toolchainAdapters) === mavenToolchainAdapter
+    ) {
+      return {
+        available: false,
+        path: tree,
+        baseSha,
+        build: null,
+        note:
+          `the merge base is a Maven project, and this release's A/B attribution only reruns npm test ` +
+          'commands — a base-side Maven build could not be consumed, so it was not run ' +
+          '(never a finding against the PR)',
+      };
+    }
+
     const build = args.build
       ? args.build(tree)
       : runBuildTest({
@@ -274,15 +299,11 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
 
     // `ok: true` is not enough: `runBuildTest` returns `ok: true` for a handoff
     // that built nothing — an `unsupported` toolchain (a changed dir the merge
-    // base maps to no package, e.g. a package this PR adds), or a supported scope
-    // with nothing to compile. Such a tree was never built, so it cannot be run
-    // against; stamping it `available` would let an A/B read the absence of a build
-    // as a behavioural difference.
-    if (
-      !build.ok ||
-      build.toolchain === 'unsupported' ||
-      build.build.length === 0
-    ) {
+    // base maps to no package, e.g. a package this PR adds), or an npm scope with
+    // nothing to compile. Such a tree was never built, so it cannot be run against;
+    // stamping it `available` would let an A/B read the absence of a build as a
+    // behavioural difference.
+    if (!build.ok || build.toolchain !== 'npm' || build.build.length === 0) {
       // Leave the tree standing. A base that does not build is a fact worth
       // looking at by hand, and deleting the evidence to save a directory is a
       // bad trade — `cleanup` sweeps it at the end of the review either way.
@@ -350,7 +371,9 @@ export const baseTreeCommand: CommandModule = {
       .option('install', {
         type: 'boolean',
         default: true,
-        describe: 'Run `npm ci` first when node_modules is absent',
+        describe:
+          'Run `npm ci` first when node_modules is absent (npm toolchain only; ' +
+          'Maven resolves dependencies inside its lifecycle command)',
       }),
   handler: (argv) => {
     const args = argv as unknown as BaseTreeArgs;

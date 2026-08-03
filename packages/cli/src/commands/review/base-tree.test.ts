@@ -224,7 +224,36 @@ describe('runBaseTree', () => {
     ).toBe(false);
   });
 
-  it('is available after a successful Maven build-only run', () => {
+  it('does NOT run a Maven merge-base build nothing could consume', () => {
+    // A/B attribution reruns npm test commands (test-delta); Agent 7's brief
+    // says the same for Maven in this release. Commit the pom so the base
+    // tree selects the Maven adapter, and pin that the build never runs.
+    writeFileSync(join(repo, 'pom.xml'), '<project/>');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-qam', 'maven base');
+    const mavenSha = git(repo, 'rev-parse', 'HEAD');
+
+    const plan = join(repo, 'plan.json');
+    writeFileSync(plan, JSON.stringify({ mergeBaseSha: mavenSha, files: [] }));
+    const builds: string[] = [];
+    const r = runBaseTree({
+      plan,
+      worktree,
+      timeout: 60,
+      install: false,
+      build: (w) => {
+        builds.push(w);
+        return okBuild;
+      },
+    });
+
+    expect(r.available).toBe(false);
+    expect(builds).toEqual([]);
+    expect(r.note).toContain('Maven');
+    expect(r.note).toContain('not run');
+  });
+
+  it('is NOT available for a Maven build report the delta machinery cannot consume', () => {
     const mavenBuild = {
       ok: true,
       toolchain: 'maven',
@@ -234,8 +263,10 @@ describe('runBaseTree', () => {
 
     const r = run({}, () => mavenBuild);
 
-    expect(r.available).toBe(true);
-    expect(r.build).toBe(mavenBuild);
+    expect(r.available).toBe(false);
+    expect(
+      existsSync(join(baseWorktreePath(worktree), '.qwen-review-base-ok')),
+    ).toBe(false);
   });
 
   it('is NOT available when npm scoped nothing to compile', () => {

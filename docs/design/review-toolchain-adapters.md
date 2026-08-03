@@ -196,15 +196,19 @@ when it produces useful deterministic evidence for those repository shapes.
 
 Fastjson2 and Druid establish these requirements:
 
-- Always run a checked-in `./mvnw` from the resolved reactor root. Druid's older
-  wrapper depends on the process cwd and fails when invoked by absolute path from
-  another repository.
+- Always run a checked-in wrapper from the resolved reactor root (`./mvnw`, or
+  `mvnw.cmd` on win32, where `./mvnw` is not runnable). Druid's older wrapper
+  depends on the process cwd and fails when invoked by absolute path from another
+  repository. When no wrapper exists, use the system `mvn`.
 - Module directory and artifactId are not interchangeable. Druid's `core`
   directory produces artifactId `druid`; report paths use module directories,
   while Maven remains responsible for resolving the selected reactor projects.
-- Core changes must exercise Maven's upstream and downstream reactor expansion.
-  The selected command therefore uses both `-am` and `-amd`; P1 does not claim
-  this is a recursively computed dependency-graph closure.
+- Core changes must exercise Maven's upstream reactor expansion. The selected
+  command uses `-am`; downstream (`-amd`) expansion selects the whole reactor on
+  exactly the repositories that motivated P1, and a run that spends its entire
+  deadline timing out proves nothing, so downstream coverage stays with the
+  project's CI matrix. P1 does not claim this is a recursively computed
+  dependency-graph closure.
 - Root `pom.xml`, `.mvn/**`, `mvnw`, and `mvnw.cmd` affect the whole reactor and
   disable module narrowing.
 - Profile modules must not be treated as unconditionally active. P1 discovers
@@ -245,7 +249,7 @@ It reads only the aggregation structure needed to map paths to module directorie
 
 This is not an effective-POM model. Parent inheritance, dependencies, optional
 edges, dependency management, and reactor ordering remain Maven's job through
-`-am -amd`. If aggregation cannot be read unambiguously, the adapter returns a
+`-am`. If aggregation cannot be read unambiguously, the adapter returns a
 structured unsupported handoff rather than an incomplete green result.
 
 ### Commands
@@ -253,8 +257,8 @@ structured unsupported handoff rather than an incomplete green result.
 P1 performs one lifecycle invocation per verification target to avoid paying for
 the reactor twice:
 
-- Normal verification: `./mvnw --batch-mode --no-transfer-progress [-pl <paths> -am -amd] test`.
-- Build-only base preparation: `./mvnw --batch-mode --no-transfer-progress [-pl <paths> -am -amd] test-compile`.
+- Normal verification: `./mvnw --batch-mode --no-transfer-progress [-pl <paths> -am] test`.
+- Build-only base preparation: `./mvnw --batch-mode --no-transfer-progress [-pl <paths> -am] test-compile`.
 - When no checked-in wrapper exists, use `mvn` with the same arguments.
 
 The command always runs with the reactor root as cwd. P1 does not inject project
@@ -269,7 +273,7 @@ Existing fields are generalized without changing their JSON shape:
 - `affected`: changed Maven module directories, or `.` for a reactor-wide
   change.
 - `buildSet`: selectors handed to Maven. It does not pretend to enumerate every
-  project Maven adds through `-am/-amd`.
+  project Maven adds through `-am`.
 - `widenedWith`: remains npm-specific and is empty for Maven.
 - `install`: remains null for Maven because dependency resolution occurs inside
   the lifecycle command.
@@ -294,13 +298,18 @@ runtime dependency to the CLI package.
 Normalized Maven evidence must retain module-relative identity so two modules
 with the same test class cannot be conflated. Fresh report summaries are appended
 to the bounded command output for Agent 7 and test-plan consumption; raw stale
-reports are ignored.
+reports are ignored. Surefire writes one XML per test class, so clean reports roll
+up per project dir and the failing-report and failing-case lines are capped; the
+block is appended after the command output is trimmed and carries its own bound.
 
 ### Downstream integration
 
 P1 updates the existing consumers that otherwise reject or misread Maven:
 
-- `base-tree` accepts a successful, non-empty Maven build-only result.
+- `base-tree` builds only npm merge bases in this release. Its A/B consumer
+  (`test-delta`) reruns npm test commands, and Agent 7's Maven branch discloses
+  that base-side Maven attribution is unavailable, so a Maven base build would be
+  cost without a consumer; lift this gate when Maven delta attribution exists.
 - Agent 7 has an explicit Maven branch, describes modules rather than npm
   workspaces, and treats wrapper/dependency acquisition failures as
   infrastructure.

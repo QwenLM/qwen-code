@@ -17,6 +17,7 @@ import { join } from 'node:path';
 import type { CommandResult } from '../build-test.js';
 import {
   detectMavenOwnership,
+  mavenExecutable,
   mavenToolchainAdapter,
   readMavenReactor,
 } from './maven-toolchain.js';
@@ -288,7 +289,7 @@ describe('maven toolchain adapter', () => {
 
     expect(calls).toEqual([
       [
-        './mvnw --batch-mode --no-transfer-progress -pl core,extension -am -amd test',
+        './mvnw --batch-mode --no-transfer-progress -pl core,extension -am test',
         root,
         17_000,
       ],
@@ -301,7 +302,7 @@ describe('maven toolchain adapter', () => {
       build: [],
       ok: true,
     });
-    expect(report.test[0]?.command).toContain('-am -amd test');
+    expect(report.test[0]?.command).toContain('-pl core,extension -am test');
   });
 
   it('uses mvn and test-compile for build-only mode', () => {
@@ -320,7 +321,7 @@ describe('maven toolchain adapter', () => {
 
     expect(report.test).toEqual([]);
     expect(report.build[0]?.command).toBe(
-      'mvn --batch-mode --no-transfer-progress -pl core -am -amd test-compile',
+      'mvn --batch-mode --no-transfer-progress -pl core -am test-compile',
     );
   });
 
@@ -556,9 +557,184 @@ describe('maven toolchain adapter', () => {
       '[maven-test-failure] core/target/surefire-reports/TEST-SameTest.xml: example.SameTest#coreFailure',
     );
     expect(output).toContain(
-      '[maven-test-report] extension/target/failsafe-reports/TEST-SameTest.xml: tests=3, failures=0, errors=0, skipped=1',
+      '[maven-test-report] extension (1 report(s)): tests=3, failures=0, errors=0, skipped=1',
+    );
+    expect(output).not.toContain(
+      'extension/target/failsafe-reports/TEST-SameTest.xml',
     );
     expect(report.note).toContain('module-qualified');
+  });
+
+  it('selects the wrapper a platform can execute', () => {
+    writeProject('.');
+    writeFileSync(join(root, 'mvnw'), '#!/bin/sh\n');
+    writeFileSync(join(root, 'mvnw.cmd'), '@echo off\n');
+
+    expect(mavenExecutable(root, 'linux')).toBe('./mvnw');
+    expect(mavenExecutable(root, 'darwin')).toBe('./mvnw');
+    expect(mavenExecutable(root, 'win32')).toBe('mvnw.cmd');
+
+    rmSync(join(root, 'mvnw'));
+    rmSync(join(root, 'mvnw.cmd'));
+    expect(mavenExecutable(root, 'linux')).toBe('mvn');
+    expect(mavenExecutable(root, 'win32')).toBe('mvn');
+  });
+
+  it('leaves repository metadata without Maven targets', () => {
+    writeReactor();
+    const parsed = readMavenReactor(root);
+    if (!parsed.reactor) throw new Error('expected reactor');
+
+    const metadata = [
+      '.github/workflows/ci.yml',
+      '.gitignore',
+      '.gitattributes',
+      'LICENSE',
+      'CODEOWNERS',
+      '.editorconfig',
+    ];
+    expect(detectMavenOwnership(root, metadata, parsed.reactor)).toEqual({
+      reactorWide: false,
+      modules: [],
+      unowned: metadata,
+      inactiveProjects: [],
+    });
+
+    const calls: string[] = [];
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['.github/workflows/ci.yml'],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        calls.push(command);
+        return result(command);
+      },
+    });
+    expect(report.toolchain).toBe('maven');
+    expect(report.ok).toBe(true);
+    expect(calls).toEqual([]);
+  });
+
+  it('rolls clean reports up per project dir and caps failing reports', () => {
+    writeReactor();
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        const coreDir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(coreDir, { recursive: true });
+        for (let i = 0; i < 150; i++) {
+          writeFileSync(
+            join(coreDir, `TEST-Clean${i}.xml`),
+            '<testsuite tests="2" failures="0" errors="0" skipped="0"/>',
+          );
+        }
+        for (let i = 0; i < 120; i++) {
+          writeFileSync(
+            join(coreDir, `TEST-Fail${i}.xml`),
+            '<testsuite tests="1" failures="1" errors="0" skipped="0"><testcase classname="example.FailTest" name="fails"><failure/></testcase></testsuite>',
+          );
+        }
+        return result(command, { exitCode: 1, output: '[ERROR] Tests failed' });
+      },
+    });
+
+    const output = report.test[0]?.output ?? '';
+    // 150 clean reports become ONE rollup line, keeping the count shape
+    // test-plan parses; 270 per-report lines would have bypassed the trim.
+    expect(output).toContain(
+      '[maven-test-report] core (150 report(s)): tests=300, failures=0, errors=0, skipped=0',
+    );
+    expect(output).not.toContain('TEST-Clean0.xml');
+    // Failing reports keep per-report identity, capped.
+    expect(output).toContain('TEST-Fail0.xml');
+    expect(output).toContain(
+      '[maven-test-report] 20 more failing report(s) omitted',
+    );
+  });
+
+  it('caps failing case lines', () => {
+    writeReactor();
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        const coreDir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(coreDir, { recursive: true });
+        const cases = Array.from(
+          { length: 250 },
+          (_, i) =>
+            `<testcase classname="example.BigTest" name="case${i}"><failure/></testcase>`,
+        ).join('');
+        writeFileSync(
+          join(coreDir, 'TEST-Big.xml'),
+          `<testsuite tests="250" failures="250" errors="0" skipped="0">${cases}</testsuite>`,
+        );
+        return result(command, { exitCode: 1, output: '[ERROR] Tests failed' });
+      },
+    });
+
+    const output = report.test[0]?.output ?? '';
+    expect(output).toContain(
+      '[maven-test-failure] 50 more failing case(s) omitted',
+    );
+    expect(output.match(/\[maven-test-failure\] core\//g)).toHaveLength(200);
+  });
+
+  it('treats unframed network words as source evidence, and Maven-framed ones as infrastructure', () => {
+    writeReactor();
+
+    const unframed = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) =>
+        result(command, {
+          exitCode: 1,
+          output: 'java.net.ConnectException: Connection refused',
+        }),
+    });
+    expect(unframed.note).toContain('Correlate compiler or test errors');
+    expect(unframed.note).not.toContain('infrastructure evidence');
+
+    const framed = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) =>
+        result(command, {
+          exitCode: 1,
+          output:
+            '[ERROR] Failed to execute goal on project core: Could not transfer artifact org.example:dep:jar:1: Connection refused',
+        }),
+    });
+    expect(framed.note).toContain('infrastructure evidence');
+  });
+
+  it('classifies a spawn-level death without an exit code as infrastructure', () => {
+    writeReactor();
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) => result(command, { exitCode: null, output: '' }),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.timedOut).toEqual([]);
+    expect(report.note).toContain('without an exit code');
+    expect(report.note).toContain('infrastructure evidence');
   });
 
   it('discloses successful tests without fresh XML', () => {

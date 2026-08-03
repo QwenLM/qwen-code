@@ -8,6 +8,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import type { Dirent } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { BuildTestReport, CommandResult } from '../build-test.js';
+import { shellQuotePath } from './shell-quote.js';
 import type { ReviewToolchainAdapter, ToolchainRunArgs } from './toolchain.js';
 
 export interface MavenReactor {
@@ -28,6 +29,15 @@ export type MavenReactorResult =
 
 const REACTOR_WIDE_FILES = new Set(['pom.xml', 'mvnw', 'mvnw.cmd']);
 const REPORT_DIRS = ['surefire-reports', 'failsafe-reports'];
+
+/**
+ * Surefire writes one XML per test class, so a green full-reactor run yields
+ * thousands of reports. Clean reports therefore roll up per project dir, and
+ * the per-report evidence lines are capped: this block is appended AFTER the
+ * command output was trimmed, so it carries its own bound.
+ */
+const MAX_FAILING_REPORT_LINES = 100;
+const MAX_FAILURE_CASE_LINES = 200;
 
 function toPosix(path: string): string {
   return path.split(sep).join('/');
@@ -167,6 +177,20 @@ function isDocumentationPath(path: string): boolean {
   );
 }
 
+/**
+ * Repository metadata that cannot change what Maven builds: VCS/CI config,
+ * licenses, editor rules. Anything NOT recognized here still runs the reactor
+ * — a root `checkstyle.xml` or build script affects the build, and failing
+ * closed costs time while failing open ships an unverified diff.
+ */
+function isRepoMetadataPath(path: string): boolean {
+  return (
+    /^(?:\.git(?:ignore|attributes|modules)|\.editorconfig|CODEOWNERS|LICENSE(?:\..*)?|NOTICE(?:\..*)?)$/.test(
+      path,
+    ) || path.startsWith('.github/')
+  );
+}
+
 function nearestMavenProject(root: string, path: string): string | null {
   let dir = dirname(join(root, path));
   while (isInside(root, dir)) {
@@ -214,7 +238,7 @@ export function detectMavenOwnership(
       }
       continue;
     }
-    if (isDocumentationPath(path)) {
+    if (isDocumentationPath(path) || isRepoMetadataPath(path)) {
       unowned.push(changedFile);
       continue;
     }
@@ -269,6 +293,10 @@ function reportPaths(root: string, reactor: MavenReactor): string[] {
 }
 
 function snapshotReports(root: string, reactor: MavenReactor): ReportSnapshot {
+  // Freshness is an mtime comparison, and some filesystems resolve mtimes at
+  // 1s granularity: a report rewritten inside the same tick reads as stale and
+  // is dropped. That degrades in the safe direction — absent test-count
+  // evidence, never a wrong verdict — so no sub-second workaround is worth it.
   const mtimes = new Map<string, number>();
   for (const path of reportPaths(root, reactor)) {
     try {
@@ -359,20 +387,71 @@ function freshTestSummaries(
   return summaries.sort((a, b) => a.report.localeCompare(b.report));
 }
 
+/** Report paths are always `<projectDir>/target/<report-dir>/<file>` (see reportPaths). */
+function projectDirOf(report: string): string {
+  return dirname(dirname(dirname(report)));
+}
+
 function appendTestSummaries(
   result: CommandResult,
   summaries: MavenTestSummary[],
 ): CommandResult {
   if (summaries.length === 0) return result;
-  const lines = summaries.flatMap((summary) => {
-    const line =
-      `[maven-test-report] ${summary.report}: tests=${summary.tests}, ` +
-      `failures=${summary.failures}, errors=${summary.errors}, skipped=${summary.skipped}`;
-    const failures = summary.failedCases.map(
-      (testcase) => `[maven-test-failure] ${summary.report}: ${testcase}`,
+
+  const clean = new Map<string, MavenTestSummary[]>();
+  const failing: MavenTestSummary[] = [];
+  for (const summary of summaries) {
+    if (summary.failures > 0 || summary.errors > 0) {
+      failing.push(summary);
+    } else {
+      const project = projectDirOf(summary.report);
+      clean.set(project, [...(clean.get(project) ?? []), summary]);
+    }
+  }
+
+  const lines: string[] = [];
+  for (const [project, group] of clean) {
+    const totals = group.reduce(
+      (sum, item) => ({
+        tests: sum.tests + item.tests,
+        skipped: sum.skipped + item.skipped,
+      }),
+      { tests: 0, skipped: 0 },
     );
-    return [line, ...failures];
-  });
+    lines.push(
+      `[maven-test-report] ${project} (${group.length} report(s)): ` +
+        `tests=${totals.tests}, failures=0, errors=0, skipped=${totals.skipped}`,
+    );
+  }
+
+  const reportLines = failing.map(
+    (summary) =>
+      `[maven-test-report] ${summary.report}: tests=${summary.tests}, ` +
+      `failures=${summary.failures}, errors=${summary.errors}, skipped=${summary.skipped}`,
+  );
+  if (reportLines.length > MAX_FAILING_REPORT_LINES) {
+    const omitted = reportLines.length - MAX_FAILING_REPORT_LINES;
+    reportLines.length = MAX_FAILING_REPORT_LINES;
+    reportLines.push(
+      `[maven-test-report] ${omitted} more failing report(s) omitted`,
+    );
+  }
+  lines.push(...reportLines);
+
+  const caseLines = failing.flatMap((summary) =>
+    summary.failedCases.map(
+      (testcase) => `[maven-test-failure] ${summary.report}: ${testcase}`,
+    ),
+  );
+  if (caseLines.length > MAX_FAILURE_CASE_LINES) {
+    const omitted = caseLines.length - MAX_FAILURE_CASE_LINES;
+    caseLines.length = MAX_FAILURE_CASE_LINES;
+    caseLines.push(
+      `[maven-test-failure] ${omitted} more failing case(s) omitted`,
+    );
+  }
+  lines.push(...caseLines);
+
   return { ...result, output: `${result.output}\n${lines.join('\n')}`.trim() };
 }
 
@@ -397,10 +476,27 @@ function mavenReport(
   return { toolchain: 'maven', ...fields };
 }
 
-function isInfrastructureFailure(output: string): boolean {
-  return /(?:Could not resolve dependencies|Failed to (?:collect|read artifact descriptor)|Could not transfer artifact|Non-resolvable parent POM|PluginResolutionException|DependencyResolutionException|No plugin found for prefix|Unknown host|Name or service not known|Temporary failure in name resolution|Connection (?:reset|refused|timed out)|PKIX path building failed|status code: (?:401|403|407|429|5\d\d)|(?:mvn|java): (?:command )?not found|No space left on device|JAVA_HOME.*(?:not defined|incorrectly)|Unable to locate a Java Runtime)/i.test(
+/** Shell- and JVM-level facts that need no Maven framing to be recognized. */
+function isLaunchFailure(output: string): boolean {
+  return /(?:mvn|java): (?:command )?not found|No space left on device|JAVA_HOME.*(?:not defined|incorrectly)|Unable to locate a Java Runtime/i.test(
     output,
   );
+}
+
+/**
+ * Dependency/network/plugin failures count only when Maven itself frames them:
+ * a test that fails printing `Connection refused` in its stdout is a source
+ * finding, not a network outage, and free-text matching cannot tell the two
+ * apart. Maven's own error lines carry the `[ERROR]`/`[FATAL]` prefix.
+ */
+function isDependencyFailure(output: string): boolean {
+  return /^\[(?:ERROR|FATAL)\][^\n]*(?:Could not resolve dependencies|Failed to (?:collect|read artifact descriptor)|Could not transfer artifact|Non-resolvable parent POM|PluginResolutionException|DependencyResolutionException|No plugin found for prefix|Unknown host|Name or service not known|Temporary failure in name resolution|Connection (?:reset|refused|timed out)|PKIX path building failed|status code: (?:401|403|407|429|5\d\d))/im.test(
+    output,
+  );
+}
+
+function isInfrastructureFailure(output: string): boolean {
+  return isLaunchFailure(output) || isDependencyFailure(output);
 }
 
 function hasFreshTestFailure(summaries: MavenTestSummary[]): boolean {
@@ -413,7 +509,23 @@ function shellSelector(modules: string[]): string {
   const selector = modules.join(',');
   return /^[A-Za-z0-9_./,-]+$/.test(selector)
     ? selector
-    : `'${selector.replace(/'/g, `'"'"'`)}'`;
+    : shellQuotePath(selector);
+}
+
+/**
+ * The wrapper a platform can actually execute. Every wrapper repo ships both
+ * `mvnw` and `mvnw.cmd`; `./mvnw` is not runnable under win32 `cmd.exe`, and
+ * an unexecutable wrapper must fall back to the system `mvn` rather than
+ * steering a launch failure at the PR.
+ */
+export function mavenExecutable(
+  root: string,
+  platform: string = process.platform,
+): string {
+  if (platform === 'win32') {
+    return existsSync(join(root, 'mvnw.cmd')) ? 'mvnw.cmd' : 'mvn';
+  }
+  return existsSync(join(root, 'mvnw')) ? './mvnw' : 'mvn';
 }
 
 function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
@@ -452,11 +564,16 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
 
   const affected = ownership.reactorWide ? ['.'] : ownership.modules;
   const buildSet = ownership.reactorWide ? ['.'] : ownership.modules;
-  const executable = existsSync(join(args.root, 'mvnw')) ? './mvnw' : 'mvn';
+  const executable = mavenExecutable(args.root);
   const lifecycle = args.buildOnly ? 'test-compile' : 'test';
+  // `-am` builds the changed modules plus their upstream closure. `-amd`
+  // (downstream) selects the whole reactor on exactly the repos this adapter
+  // was built for, and a run that spends its whole deadline proving nothing
+  // is the failure this command exists to avoid — downstream coverage stays
+  // the project's CI matrix, as with the npm adapter's scope.
   const narrowing = ownership.reactorWide
     ? ''
-    : ` -pl ${shellSelector(ownership.modules)} -am -amd`;
+    : ` -pl ${shellSelector(ownership.modules)} -am`;
   const command = `${executable} --batch-mode --no-transfer-progress${narrowing} ${lifecycle}`;
   const before = snapshotReports(args.root, parsed.reactor);
   const executed = args.exec(command, args.root, args.timeout * 1000);
@@ -482,6 +599,12 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     report.note =
       `\`${result.command}\` ran out of time (${args.timeout}s). This is an infrastructure result, ` +
       'not a defect in the diff — report it as informational.';
+  } else if (result.exitCode === null) {
+    // A spawn-level death (output past maxBuffer, an outside signal) leaves no
+    // exit code and nothing to correlate — infrastructure, like a timeout.
+    report.note =
+      `\`${result.command}\` ended without an exit code (a spawn failure or signal outside the deadline). ` +
+      'This is infrastructure evidence, not a source finding.';
   } else if (
     !ok &&
     !hasFreshTestFailure(summaries) &&
@@ -505,7 +628,8 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   } else if (summaries.length === 0) {
     report.note =
       `Maven tested ${ownership.reactorWide ? 'the full reactor' : ownership.modules.join(', ')} successfully, ` +
-      'but produced no fresh Surefire/Failsafe XML, so test-count evidence is unavailable.';
+      'but produced no fresh Surefire/Failsafe XML (reports written to a non-default directory are not seen here), ' +
+      'so test-count evidence is unavailable.';
   } else {
     const totals = summaries.reduce(
       (sum, item) => ({

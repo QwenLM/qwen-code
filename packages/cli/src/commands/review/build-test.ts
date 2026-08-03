@@ -44,7 +44,16 @@ import { resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { mavenToolchainAdapter } from './lib/maven-toolchain.js';
 import { npmToolchainAdapter } from './lib/npm-toolchain.js';
-import { selectToolchainAdapter } from './lib/toolchain.js';
+import {
+  selectToolchainAdapter,
+  type ReviewToolchainAdapter,
+} from './lib/toolchain.js';
+
+/** The root toolchains build-test can select, in precedence order. */
+export const toolchainAdapters: readonly ReviewToolchainAdapter[] = [
+  npmToolchainAdapter,
+  mavenToolchainAdapter,
+];
 
 /** A command this run actually executed, and what it did. */
 export interface CommandResult {
@@ -261,10 +270,11 @@ function changedFilesFrom(planPath: string): string[] {
 export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   const root = resolve(args.worktree);
   const changedFiles = changedFilesFrom(args.plan);
-  const adapters = [npmToolchainAdapter, mavenToolchainAdapter];
-  const adapter = selectToolchainAdapter(root, adapters);
+  const adapter = selectToolchainAdapter(root, toolchainAdapters);
   if (!adapter) {
-    const applicable = adapters.filter((candidate) => candidate.applies(root));
+    const applicable = toolchainAdapters.filter((candidate) =>
+      candidate.applies(root),
+    );
     return {
       toolchain: 'unsupported',
       affected: [],
@@ -332,7 +342,9 @@ export const buildTestCommand: CommandModule = {
       .option('install', {
         type: 'boolean',
         default: true,
-        describe: 'Run `npm ci` first when node_modules is absent',
+        describe:
+          'Run `npm ci` first when node_modules is absent (npm toolchain only; ' +
+          'Maven resolves dependencies inside its lifecycle command)',
       })
       .option('build-only', {
         type: 'boolean',

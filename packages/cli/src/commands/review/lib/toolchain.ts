@@ -10,6 +10,7 @@ export interface ToolchainRunArgs {
   root: string;
   changedFiles: string[];
   timeout: number;
+  /** npm only; Maven resolves dependencies inside its lifecycle command. */
   install: boolean;
   buildOnly?: boolean;
   exec: (command: string, cwd: string, timeoutMs: number) => CommandResult;

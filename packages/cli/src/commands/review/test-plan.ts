@@ -610,20 +610,26 @@ function ruleCommand(
 ): TestPlanClaim {
   // A command this review actually ran is settled by its exit code — the
   // strongest evidence available, and it needs no manifest lookup.
+  const claimed = text.trim();
+  // A workspace-scoped run (`npm run build --workspace=...`) still settles
+  // the plan's bare command. Maven scopes before the lifecycle
+  // (`./mvnw -pl core -am test`), so compare lifecycle phases there — but the
+  // settling is module-scoped, and the note must not read as if the full
+  // reactor were verified.
+  const settledByLifecycle = (command: string): boolean =>
+    command !== claimed &&
+    !(command.startsWith(claimed) && command[claimed.length] === ' ') &&
+    bareMavenLifecycle(claimed) !== null &&
+    mavenLifecycle(command) === bareMavenLifecycle(claimed);
   const matches = [
     ...(buildTest?.build ?? []),
     ...(buildTest?.test ?? []),
   ].filter((c) => {
     const command = c.command.trim();
-    const claimed = text.trim();
-    // A workspace-scoped run (`npm run build --workspace=...`) still settles
-    // the plan's bare command. Maven scopes before the lifecycle
-    // (`./mvnw -pl core -am -amd test`), so compare lifecycle phases there.
     return (
       command === claimed ||
       (command.startsWith(claimed) && command[claimed.length] === ' ') ||
-      (bareMavenLifecycle(claimed) !== null &&
-        mavenLifecycle(command) === bareMavenLifecycle(claimed))
+      settledByLifecycle(command)
     );
   });
   // build-test records one scoped command per package and does not stop on
@@ -635,20 +641,25 @@ function ruleCommand(
     matches.find((c) => !c.timedOut && c.exitCode !== 0) ??
     matches.find((c) => !c.timedOut);
   if (ran) {
+    const scoped = settledByLifecycle(ran.command.trim());
     return ran.exitCode === 0
       ? {
           kind: 'command',
           text,
           verdict: 'reproduces',
           observed: 'exit 0',
-          note: 'this review ran it',
+          note: scoped
+            ? 'this review ran a module-scoped form of it'
+            : 'this review ran it',
         }
       : {
           kind: 'command',
           text,
           verdict: 'contradicted',
           observed: `exit ${ran.exitCode}`,
-          note: 'this review ran it and it failed',
+          note: scoped
+            ? 'this review ran a module-scoped form of it, and that failed'
+            : 'this review ran it and it failed',
         };
   }
 
