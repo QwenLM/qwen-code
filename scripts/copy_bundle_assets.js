@@ -77,15 +77,19 @@ export function reviewSourceDigestForBuild(root) {
     }
   };
   for (const r of roots) walk(r);
-  if (files.length === 0) return { digest: undefined, count: 0 };
+  if (files.length === 0)
+    return { digest: undefined, count: 0, newest: undefined };
   const hash = createHash('sha256');
+  let newest;
   for (const file of files.sort()) {
+    const { mtimeMs } = fs.statSync(file);
+    if (!newest || mtimeMs > newest.mtimeMs) newest = { file, mtimeMs };
     hash.update(relative(root, file).split(sep).join('/'));
     hash.update('\0');
     hash.update(fs.readFileSync(file));
     hash.update('\0');
   }
-  return { digest: hash.digest('hex'), count: files.length };
+  return { digest: hash.digest('hex'), count: files.length, newest };
 }
 
 function stampReviewSourceDigest(root, distDir) {
@@ -93,9 +97,9 @@ function stampReviewSourceDigest(root, distDir) {
   // mid-walk would fail the bundle after every asset was already in place —
   // and a missing stamp is only `unmeasured`, which the runtime check already
   // treats as an acceptable answer.
-  let digest, count;
+  let digest, count, newest;
   try {
-    ({ digest, count } = reviewSourceDigestForBuild(root));
+    ({ digest, count, newest } = reviewSourceDigestForBuild(root));
   } catch (error) {
     console.log(
       `Could not read the review sources; skipped the source digest: ${
@@ -106,6 +110,29 @@ function stampReviewSourceDigest(root, distDir) {
   }
   if (!digest) {
     console.log('No review sources found; skipped the source digest.');
+    return;
+  }
+  // The digest describes the tree as the COPIER sees it, and the copier runs
+  // after esbuild — so a source edited in between, or this script run on its
+  // own, would certify a `cli.js` built from something else. That is the only
+  // direction where silence is affirmatively wrong instead of merely
+  // uninformative: every other gap here degrades to `unmeasured`. Timestamps
+  // are the wrong tool for judging staleness and the right one for judging
+  // whether this stamp can be honest at all, so refuse rather than certify.
+  const bundlePath = join(distDir, 'cli.js');
+  let builtAt;
+  try {
+    builtAt = fs.statSync(bundlePath).mtimeMs;
+  } catch {
+    console.log('No bundle to attest to; skipped the source digest.');
+    return;
+  }
+  const newestSource = newest.mtimeMs;
+  if (newestSource > builtAt) {
+    console.log(
+      `A review source is newer than ${bundlePath}; skipped the source digest ` +
+        `rather than certify a bundle it may not describe.`,
+    );
     return;
   }
   fs.writeFileSync(join(distDir, 'review-sources.sha256'), digest);

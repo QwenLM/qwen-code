@@ -44,8 +44,8 @@
 // tune, no clock to trust, and no answer but the true one.
 
 import { createHash } from 'node:crypto';
-import { readFileSync, readdirSync } from 'node:fs';
-import { join, relative, sep } from 'node:path';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { basename, join, relative, sep } from 'node:path';
 
 /** Where the build stamps the digest of the sources it bundled. */
 export const DIGEST_FILE = 'review-sources.sha256';
@@ -156,14 +156,15 @@ function* sourceFilesUnder(root: string): Generator<string> {
   let entries;
   try {
     entries = readdirSync(root, { withFileTypes: true });
-  } catch (err) {
-    // A file, not a directory: `readdir` reports ENOTDIR and the path itself
-    // is the source. Anything else — absent, unreadable — is nothing to walk.
-    if (
-      (err as NodeJS.ErrnoException).code === 'ENOTDIR' &&
-      !NOT_BUNDLED_RE.test(root)
-    ) {
-      yield root;
+  } catch {
+    // Not a directory. Asking whether it is a file states that directly, where
+    // inferring it from `ENOTDIR` assumed every platform's libuv maps the case
+    // the same way — and the one root that is a file is `review.ts`, which is
+    // exactly where "a new subcommand was registered" lives.
+    try {
+      if (statSync(root).isFile() && !NOT_BUNDLED_RE.test(root)) yield root;
+    } catch {
+      // Absent or unreadable: nothing to walk and nothing to say.
     }
     return;
   }
@@ -198,6 +199,62 @@ export function reviewSourceRoots(repoRoot: string): string[] {
     join(cli, 'review.ts'),
     join(repoRoot, 'packages', 'core', 'src', 'skills', 'bundled', 'review'),
   ];
+}
+
+/**
+ * The whole check, from an entry path to whatever needs saying.
+ *
+ * Lives here rather than in `parse-args`, which is about parsing arguments —
+ * and so that a second caller (an agent resuming a review mid-way never runs
+ * step 1, and `drive` is where the long work starts) is one line rather than a
+ * copy of fifty.
+ *
+ * Returns the lines to emit, in order, and an empty array when there is
+ * nothing to say. It reads the filesystem and decides nothing else; the caller
+ * owns how they reach a terminal.
+ */
+export function bundleStalenessNotices(
+  entryPath: string | undefined,
+): string[] {
+  if (!entryPath) return [];
+  const distDir = join(entryPath, '..');
+  // Only a `<root>/dist/cli.js` layout carries a stamp. A dev launcher runs
+  // `node <root>/packages/cli`, where node sets argv[1] to the DIRECTORY —
+  // measured — so the derivation would find sources under `<root>` and no
+  // stamp beside them, and say "could not check" on every review forever, with
+  // advice its reader can never act on. A layout with no stamp to grow is not
+  // half-measured; it is not measured.
+  if (basename(distDir) !== 'dist') return [];
+
+  const repoRoot = join(distDir, '..');
+  let stamped: string | undefined;
+  try {
+    stamped = readFileSync(join(distDir, DIGEST_FILE), 'utf8').trim();
+  } catch {
+    // No stamp: an installed package, or a bundle from before the build wrote
+    // one. Which of those it is depends on whether sources exist, below.
+  }
+  // Always hashed, even with no stamp to compare against: the branch below
+  // needs this value to tell a pre-stamp checkout apart from an installed
+  // package. Gating the walk on `stamped` would make that branch dead and
+  // silence the one unmeasured case worth saying out loud.
+  const current = reviewSourcesDigest(repoRoot, reviewSourceRoots(repoRoot));
+  const staleness = bundleStaleness(stamped, current);
+
+  const warning = staleBundleWarning(staleness);
+  if (warning) return [warning];
+  // A checkout whose `dist/` predates the stamp is genuinely stale and cannot
+  // be measured — the state of every existing tree until its next rebuild. An
+  // installed package has no sources either and gets nothing, so a user who
+  // could do nothing about it is not told anything.
+  if (!stamped && current) {
+    return [
+      `review: could not check whether the bundle is current — ${staleness.unmeasured}. ` +
+        `It predates the build that started recording one; rebuild with ` +
+        `\`npm run build:packages && npm run bundle\` to make this checkable.`,
+    ];
+  }
+  return [];
 }
 
 /**

@@ -682,7 +682,7 @@ describe('parse-args warns when the bundle is not built from these sources', () 
   });
 
   it('still parses the arguments', () => {
-    // The warning is a diagnostic; the command\'s job is unaffected by it.
+    // The warning is a diagnostic; the parse is unaffected by it.
     stamp('mismatched');
     run();
     expect(writeStdoutLine).toHaveBeenCalled();

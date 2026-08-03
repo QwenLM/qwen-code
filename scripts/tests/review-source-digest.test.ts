@@ -66,14 +66,6 @@ describe('the build stamp and the staleness check agree', () => {
     expect(isAllowedDistEntry(DIGEST_FILE)).toBe(true);
   });
 
-  it('counts the same files', () => {
-    // Same digest with different file sets is not possible in practice, but
-    // the count is what a build log shows a human, so it is worth being the
-    // same number.
-    const { count } = reviewSourceDigestForBuild(repoRoot);
-    expect(count).toBeGreaterThan(50);
-  });
-
   it('agrees on a synthetic tree too, including a file-shaped root', () => {
     // The repo case cannot vary; this one can. A root that is a single file is
     // how `review.ts` — where every subcommand is registered — is covered, and

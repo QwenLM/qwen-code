@@ -18,18 +18,12 @@
 
 import type { CommandModule } from 'yargs';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { dirname } from 'node:path';
 import {
   writeStdoutLine,
   writeStderrLineSafe,
 } from '../../utils/stdioHelpers.js';
-import {
-  DIGEST_FILE,
-  bundleStaleness,
-  reviewSourceRoots,
-  reviewSourcesDigest,
-  staleBundleWarning,
-} from './lib/stale-bundle.js';
+import { bundleStalenessNotices } from './lib/stale-bundle.js';
 
 export type ReviewEffort = 'low' | 'medium' | 'high';
 
@@ -486,51 +480,16 @@ export const parseArgsCommand: CommandModule = {
     // and the run measures the old behaviour without saying so. This is the
     // first command of every review, which makes it the only place the notice
     // reaches a reader before they act on a result.
-    const bundle = process.argv[1];
-    const distDir = bundle ? join(bundle, '..') : '';
-    // Only a `<root>/dist/cli.js` layout carries a stamp. A dev launcher runs
-    // `node <root>/packages/cli`, where node sets argv[1] to the DIRECTORY —
-    // measured — so the derivation would find sources under `<root>` and no
-    // stamp beside them, and print "could not check" on every review forever,
-    // with advice its reader can never act on. A layout with no stamp to grow
-    // is not half-measured; it is not measured.
-    if (bundle && basename(distDir) === 'dist') {
-      const repoRoot = join(distDir, '..');
-      let stamped: string | undefined;
-      try {
-        stamped = readFileSync(join(distDir, DIGEST_FILE), 'utf8').trim();
-      } catch {
-        // No stamp: an installed package, or a bundle from before the build
-        // wrote one. Nothing to compare against, and it self-heals on the
-        // next rebuild.
-      }
-      // Always hashed, even with no stamp to compare against: the
-      // `!stamped && current` branch below needs this value to tell a
-      // pre-stamp checkout apart from an installed package. Gating the walk on
-      // `stamped` would make that branch dead and silence the one unmeasured
-      // case worth saying out loud.
-      // A checkout whose `dist/` predates the stamp is genuinely stale and
-      // cannot be measured — the state right after this shipped, in every
-      // existing tree until its next rebuild. Sources present with no stamp is
-      // the one unmeasured case worth saying out loud; an installed package
-      // has no sources either and stays silent, so users get no noise.
-      const current = reviewSourcesDigest(
-        repoRoot,
-        reviewSourceRoots(repoRoot),
-      );
-      const staleness = bundleStaleness(stamped, current);
-      if (!stamped && current) {
-        writeStderrLineSafe(
-          `review: could not check whether the bundle is current — ${staleness.unmeasured}. ` +
-            `It predates the build that started recording one; rebuild with ` +
-            `\`npm run build:packages && npm run bundle\` to make this checkable.`,
-        );
-      }
-      const warning = staleBundleWarning(staleness);
+    // Before anything is parsed: every step after this one runs the BUILT
+    // bundle, so a review command edited since that build does not take effect
+    // and the run measures the old behaviour without saying so. This is the
+    // first command of every review, which makes it the only place the notice
+    // reaches a reader before they act on a result.
+    for (const line of bundleStalenessNotices(process.argv[1])) {
       // `…Safe`, the convention for diagnostics in this subsystem: stderr
       // piped to `head` raises EPIPE, and a warning that kills the review it
       // is warning about would be worse than the staleness it reports.
-      if (warning) writeStderrLineSafe(warning);
+      writeStderrLineSafe(line);
     }
 
     const parsed = parseReviewArgs(rawStr);
