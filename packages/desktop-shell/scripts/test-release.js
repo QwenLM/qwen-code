@@ -128,8 +128,8 @@ function testResolveLogRoot() {
   );
   assert.match(
     smoke,
-    /startupTruncationPending = false;\s*previousLog = contents;/,
-    'a truncation must rebase the slice baseline to the current contents',
+    /console\.warn\([\s\S]*?previousLog = contents;/,
+    'a rewritten log must warn and rebase the slice baseline',
   );
   assert.match(
     smoke,

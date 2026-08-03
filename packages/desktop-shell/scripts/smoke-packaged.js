@@ -38,13 +38,9 @@ let previousLog = fs.readFileSync(logPath, {
   encoding: 'utf8',
   flag: 'a+',
 });
-// The packaged app truncates its own log on startup, so the first truncation
-// after this snapshot is expected; only warn on a later one (a live concurrent
-// instance writing the same machine-global log). Detect later truncations
-// against the last full read so the slice baseline can rebase to the
-// truncated contents.
-let lastFullLog = previousLog;
-let startupTruncationPending = previousLog !== '';
+// The packaged app opens the log append-only and never rotates it, so every
+// read extends this pre-spawn snapshot. A broken prefix means a foreign
+// writer rewrote the file; readNewLog then warns and rebases the baseline.
 const child = spawn(executable, [], {
   detached: process.platform !== 'win32',
   env: {
@@ -126,14 +122,10 @@ function readNewLog() {
     flag: 'a+',
   });
   const result = sliceNewLog(contents, previousLog);
-  if (!contents.startsWith(lastFullLog)) {
-    if (!startupTruncationPending) {
-      console.warn(`smoke: log was truncated, resetting baseline: ${logPath}`);
-    }
-    startupTruncationPending = false;
+  if (!contents.startsWith(previousLog)) {
+    console.warn(`smoke: log was rewritten, resetting baseline: ${logPath}`);
     previousLog = contents;
   }
-  lastFullLog = contents;
   return result.text;
 }
 
