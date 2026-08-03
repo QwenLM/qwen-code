@@ -149,6 +149,8 @@ function createSendIndex(
  *
  *  - `GET /assets/*` — hashed, immutable build chunks (long-cache).
  *  - `GET /` — the HTML shell, always (so `curl /` shows the UI too).
+ *  - `GET /session/:id` document navigations — the HTML shell, so a browser
+ *    refresh can load before the front-end adds its bearer header.
  *
  * Caller must have already verified `webShellDir` exists.
  */
@@ -183,10 +185,14 @@ export function mountWebShellAssets(
     res.status(404).type('text/plain').send('Not found');
   });
   app.get('/', (_req: Request, res: Response) => sendIndex(res));
+  app.get('/session/:id', (req: Request, res: Response, next: NextFunction) => {
+    if (!isDocumentNavigation(req)) return next();
+    sendIndex(res);
+  });
 }
 
 /**
- * Mount the SPA deep-link fallback (for navigations like `/session/<id>`).
+ * Mount the SPA deep-link fallback for routes not explicitly mounted above.
  * Registered AFTER all API routes — just before the error handler — so real
  * routes, INCLUDING their `bearerAuth` 401s, always win and only genuine 404
  * misses fall through to the shell.

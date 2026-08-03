@@ -3030,6 +3030,36 @@ describe('createServeApp', () => {
       expect(res.text).toContain('<div id="root">');
     });
 
+    it('serves session document deep links before bearer auth without exposing APIs', async () => {
+      const app = createServeApp({ ...baseOpts, token: 'secret' }, undefined, {
+        webShellDir,
+      });
+      const shell = await request(app)
+        .get('/session/abc123')
+        .set('Host', host)
+        .set('Accept', 'text/html');
+      expect(shell.status).toBe(200);
+      expect(shell.text).toContain('<div id="root">');
+
+      const head = await request(app)
+        .head('/session/abc123')
+        .set('Host', host)
+        .set('Accept', 'text/html');
+      expect(head.status).toBe(200);
+
+      const nonNavigation = await request(app)
+        .get('/session/abc123')
+        .set('Host', host)
+        .set('Accept', 'application/json');
+      expect(nonNavigation.status).toBe(401);
+
+      const api = await request(app)
+        .get('/session/abc123/status')
+        .set('Host', host)
+        .set('Accept', 'text/html');
+      expect(api.status).toBe(401);
+    });
+
     it('leaves non-navigation API misses as JSON 404s', async () => {
       const app = createServeApp(baseOpts, undefined, { webShellDir });
       const res = await request(app)
