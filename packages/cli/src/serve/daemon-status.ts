@@ -23,6 +23,10 @@ import {
   recommendedChildShareMb,
   type DaemonMemoryBudget,
 } from '@qwen-code/acp-bridge/daemonMemoryBudget';
+import {
+  computeDaemonMemoryPressure,
+  type DaemonMemoryPressure,
+} from './daemon-memory-pressure.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import type { RateLimiterInstance, RateLimitTier } from './rate-limit.js';
 import type { ServeOptions } from './types.js';
@@ -88,7 +92,8 @@ export interface DaemonStatusIssue {
     | 'channel_worker_partial_connect'
     | 'daemon_runtime_starting'
     | 'daemon_runtime_failed'
-    | 'daemon_log_degraded';
+    | 'daemon_log_degraded'
+    | 'daemon_memory_pressure';
   severity: IssueSeverity;
   message: string;
   section?: string;
@@ -338,6 +343,26 @@ interface DaemonStatusRuntimeMemory {
     /** `null` when no ACP child is active — there is no share to divide. */
     recommendedShareAtActiveMb: number | null;
   };
+  /**
+   * The daemon root's own memory pressure. Reported in both modes; only
+   * `observe` also raises a status issue from it. Covers the root process
+   * alone — see `childRssCoverage` for why this is not tree pressure.
+   *
+   * The computed shape is referenced rather than restated so the two cannot
+   * drift: a field added or renamed in `daemon-memory-pressure.ts` would not
+   * be caught by a hand copy, since spreading an object with an extra property
+   * is not an excess-property error. `availableBytes` is the same figure as
+   * `limits.memory.availableMemoryMb`, repeated here in bytes so the ratio can
+   * be checked without cross-referencing.
+   *
+   * Nested here rather than at `runtime`, so it is absent whenever no budget
+   * resolved — even though the heap half of the signal needs no budget. That
+   * only reaches direct-embed callers: `runQwenServe` resolves the budget
+   * before the bootstrap app exists, so every daemon an operator runs reports
+   * it. Hoisting it out would restructure the block for a path that does not
+   * need the reading.
+   */
+  pressure: DaemonMemoryPressure & { mode: 'off' | 'observe' };
 }
 
 export interface DaemonPipeStatsSnapshot {
@@ -476,6 +501,16 @@ export async function buildDaemonStatusResponse(
     const registeredWorkspaceCount = input.workspaceRegistry
       ? input.workspaceRegistry.listEntries().length
       : workspaceSnapshots.length;
+    const pressureMode = input.opts.memoryPressureMode ?? 'observe';
+    // One reading for the two figures of a single ratio. Reading twice would
+    // divide an rss and a heapUsed sampled at different instants.
+    //
+    // Deliberately not shared with `runtime.process` further down: a
+    // `detail=full` request awaits the workspace sections between here and
+    // there, so reusing this snapshot would silently change which instant that
+    // pre-existing field reports. A second syscall is cheaper than a semantics
+    // change to a field this PR is not about.
+    const pressureMemory = process.memoryUsage();
     runtimeMemory = {
       registeredWorkspaces: registeredWorkspaceCount,
       activeAcpChildren: activeAcpChildCount,
@@ -489,6 +524,22 @@ export async function buildDaemonStatusResponse(
           activeAcpChildCount > 0
             ? recommendedChildShareMb(memoryBudget, activeAcpChildCount)
             : null,
+      },
+      pressure: {
+        ...computeDaemonMemoryPressure({
+          rssBytes: pressureMemory.rss,
+          heapUsedBytes: pressureMemory.heapUsed,
+          // `availableMemoryMb`, not `effectiveBudgetMb`: pressure asks how
+          // close this process is to being killed, and what kills it is the
+          // cgroup limit or host memory. An operator's budget is a policy
+          // number — exceeding it is not fatal, so classifying against it
+          // would report `critical` for a daemon in no danger.
+          // Note the unit change: the budget carries megabytes.
+          availableBytes: memoryBudget.availableMemoryMb * 1024 * 1024,
+        }),
+        // After the spread, so the flag stays authoritative if the computed
+        // shape ever grows a field of this name.
+        mode: pressureMode,
       },
     };
   }
@@ -559,6 +610,38 @@ export async function buildDaemonStatusResponse(
     totalAdmissionSnapshot,
     workspaceSnapshots,
   );
+  // Only `observe` turns the level into an issue. `off` still reported the
+  // figures above; what it withholds is the effect on `rollupStatus`, which
+  // any one issue flips from `ok` to `warning`. The thresholds are inherited
+  // from an interactive-CLI monitor and are not yet calibrated for a
+  // long-running daemon, so a deployment that alerts on the top-level status
+  // needs a way to take the reading without the verdict.
+  if (
+    runtimeMemory &&
+    runtimeMemory.pressure.mode === 'observe' &&
+    runtimeMemory.pressure.level !== 'normal'
+  ) {
+    const { level, ratio, source } = runtimeMemory.pressure;
+    issues.push({
+      code: 'daemon_memory_pressure',
+      // `warning` at every level, including `critical`. An `error` severity
+      // makes `rollupStatus` return `error` for the whole daemon, which is a
+      // strong claim to stake on thresholds borrowed from an interactive-CLI
+      // monitor and not yet calibrated here. The level itself is reported in
+      // `runtime.memory.pressure`, so nothing is lost by keeping the rollup
+      // at `warning` until the numbers have been checked against real
+      // deployments — which is what this phase is for.
+      severity: 'warning',
+      // Name the denominator, not the numerator: "% of the rss limit" would
+      // call the measured value a limit. `section` is omitted because every
+      // other use of it names a workspace status section, and this is a
+      // daemon-level concern — the same reason `daemon_log_degraded` omits it.
+      message:
+        `Daemon memory pressure is ${level} at ` +
+        `${(ratio * 100).toFixed(0)}% of ` +
+        `${source === 'heap' ? 'the V8 heap limit' : 'available memory'}.`,
+    });
+  }
   if (daemonLogStatus?.health === 'degraded') {
     issues.push({
       code: 'daemon_log_degraded',

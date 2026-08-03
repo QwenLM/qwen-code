@@ -145,6 +145,32 @@ New OTel metric names:
 - `qwen-code.daemon.prompt.queue_wait`, histogram in milliseconds.
 - `qwen-code.daemon.pipe.message_bytes`, histogram in bytes with `direction=inbound|outbound`.
 
+### 11. Is the daemon under memory pressure?
+
+```bash
+curl -s 'http://127.0.0.1:4170/daemon/status' | \
+  jq '.runtime.memory.pressure'
+```
+
+`level` is `normal` / `soft` / `hard` / `critical`, classified from `ratio` —
+the worse of `rssRatio` (RSS against detected cgroup/host memory, which is what
+the OOM killer watches) and `heapRatio` (V8 heap used against this process's
+`heap_size_limit` — the whole heap, not only the old space that
+`--max-old-space-size` names). `source` says which one produced it. Check `source` before acting:
+`unknown` means neither denominator was measurable, so `normal` there is the
+absence of a reading, not evidence of health.
+
+Two things this does **not** cover. It is the daemon **root** process only —
+`runtime.memory.childRssCoverage` reads `primary_only`, so a daemon whose
+`qwen --acp` children are the ones growing can report `normal` throughout.
+And nothing remediates: leaving `normal` raises a `daemon_memory_pressure`
+warning and changes no behaviour.
+
+Under `--memory-pressure-mode off` every figure above is still reported and the
+issue is not raised, so the top-level `status` stays whatever it would have
+been. Use `off` while calibrating thresholds against a real workload, or if you
+alert on `status` and do not want an uncalibrated signal moving it.
+
 ## Flow
 
 ### Typical triage flow

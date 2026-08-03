@@ -715,6 +715,30 @@ export interface DaemonStatusReport {
         /** `null` when no ACP child is active. */
         recommendedShareAtActiveMb: number | null;
       };
+      /**
+       * The daemon root's own memory pressure. Reported in both modes; only
+       * `observe` also raises a status issue from it, so `off` leaves the
+       * top-level `status` rollup unaffected. Root process only — see
+       * `childRssCoverage`.
+       *
+       * Optional because it is additive *within* an existing block: a daemon
+       * that shipped `runtime.memory` before this field exists and sends the
+       * block without it. Typing it as required would make this mirror lie
+       * about those daemons.
+       */
+      pressure?: {
+        mode: 'off' | 'observe';
+        level: 'normal' | 'soft' | 'hard' | 'critical';
+        /** `unknown` means neither denominator was usable, not that all is well. */
+        source: 'rss' | 'heap' | 'unknown';
+        ratio: number;
+        rssBytes: number;
+        rssRatio: number;
+        availableBytes: number;
+        heapUsedBytes: number;
+        heapRatio: number;
+        heapLimitBytes: number;
+      };
     };
     /** Optional daemon-process performance counters. */
     perf?: {

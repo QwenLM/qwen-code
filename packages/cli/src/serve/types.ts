@@ -232,6 +232,20 @@ export interface ServeOptions {
    */
   memoryBudgetMb?: number;
   /**
+   * Whether the daemon derives and acts on a memory-pressure level.
+   *
+   * `observe` (default) reports the level alongside the raw figures and raises
+   * a status issue when it leaves `normal`. `off` still reports the figures —
+   * the point of this phase is to gather data, including from deployments that
+   * do not want the signal acting on them yet — but raises no issue, so the
+   * daemon's overall `status` rollup is unchanged.
+   *
+   * There is deliberately no `enforce`: nothing here remediates, and a value a
+   * caller can pass but never use is a dead switch. It arrives with the
+   * enforcement.
+   */
+  memoryPressureMode?: 'off' | 'observe';
+  /**
    * Resolved at boot by `runQwenServe`. Not an operator input, and not
    * consumed by any spawn path — it is reported under `limits.memory` on
    * `GET /daemon/status` so the daemon's memory denominator is observable

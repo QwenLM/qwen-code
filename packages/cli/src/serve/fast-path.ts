@@ -405,6 +405,22 @@ export function parseServeFastPathArgs(
       continue;
     }
 
+    if (flag === 'memory-pressure-mode') {
+      const read = readOptionValue(argv, i, inlineValue);
+      if (!read) return { kind: 'fallback' };
+      i = read.nextIndex;
+      // Unlike mcp-budget-mode, which captures the raw value and validates it
+      // later, an out-of-range value here falls back to the full yargs path:
+      // its `choices` already owns the error message, and letting an unknown
+      // string through would put a value in `ServeOptions` that its own type
+      // says cannot exist.
+      if (read.value !== 'off' && read.value !== 'observe') {
+        return { kind: 'fallback' };
+      }
+      options.memoryPressureMode = read.value;
+      continue;
+    }
+
     if (flag === 'mcp-budget-mode') {
       const read = readOptionValue(argv, i, inlineValue);
       if (!read) return { kind: 'fallback' };
