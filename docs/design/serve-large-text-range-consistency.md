@@ -58,9 +58,12 @@ checked between reads. A future scan-cost policy needs a cursor or equivalent
 continuation contract instead of silently making valid deep offsets
 unreachable.
 
-Serve derives `lineEnding` from the returned content, matching its existing
-full-snapshot behavior. Core can continue reporting file-level metadata for its
-other consumers.
+Serve's full-snapshot reads derive `lineEnding` from the whole decoded file.
+The large-file window paths still derive it from the returned window, except
+that a byte-cursor page also counts the terminator it resumes after, so an
+unterminated tail page agrees with the page before it (unifying the paths is
+tracked as a follow-up). Core can continue reporting file-level metadata for
+its other consumers.
 
 Every large-file window keeps `truncated: true`, even when the scan happens to
 reach EOF. This boundary uses the flag to distinguish a window without a

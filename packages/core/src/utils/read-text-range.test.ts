@@ -939,6 +939,46 @@ describe('readTextCursorWindowFromHandle', () => {
     });
   });
 
+  it('seeds an unterminated tail page from the terminator it resumes after', async () => {
+    // The tail page of 'aa\r\nbb' holds only 'bb' — no terminator to test —
+    // so without the byte pair before the window it would report 'lf' while
+    // the first page reported 'crlf' for the same file.
+    await withHandle('crlf-no-final.log', 'aa\r\nbb', async (fh, size) => {
+      const first = await readTextCursorWindowFromHandle(fh, {
+        startOffset: 0,
+        fileSize: size,
+        limit: 1,
+        maxOutputBytes: 1_024,
+        maxSnapBytes: 1_024,
+      });
+      expect(first.content).toBe('aa\r');
+      expect(first.lineEnding).toBe('crlf');
+      expect(first.nextOffset).toBe(4);
+
+      const tail = await readTextCursorWindowFromHandle(fh, {
+        startOffset: first.nextOffset!,
+        fileSize: size,
+        maxOutputBytes: 1_024,
+        maxSnapBytes: 1_024,
+      });
+      expect(tail.content).toBe('bb');
+      expect(tail.nextOffset).toBeUndefined();
+      expect(tail.lineEnding).toBe('crlf');
+    });
+
+    // The LF counterpart stays 'lf': the peek only confirms a CRLF pair.
+    await withHandle('lf-no-final.log', 'aa\nbb', async (fh, size) => {
+      const tail = await readTextCursorWindowFromHandle(fh, {
+        startOffset: 3,
+        fileSize: size,
+        maxOutputBytes: 1_024,
+        maxSnapBytes: 1_024,
+      });
+      expect(tail.content).toBe('bb');
+      expect(tail.lineEnding).toBe('lf');
+    });
+  });
+
   it('does not let a budget-excluded CRLF line flip lineEnding', async () => {
     // "aaa" (3) + sep (1) + "bbb" (3) = 7 <= 8; "ccc\r" would need 7+1+4 = 12 > 8.
     await withHandle(

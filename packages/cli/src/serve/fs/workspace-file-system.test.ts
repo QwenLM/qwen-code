@@ -286,6 +286,23 @@ describe('WorkspaceFileSystem - readText', () => {
     expect(trunc.meta.lineEnding).toBe('crlf');
   });
 
+  it('keeps an unterminated CRLF tail page consistent with page one', async () => {
+    // The tail page holds only `bb` — no terminator to test — so detection
+    // must come from the CRLF pair the cursor resumed after, or the two pages
+    // of one file disagree, the exact symptom fixed above.
+    const target = path.join(h.workspace, 'crlf-no-final.txt');
+    await fsp.writeFile(target, 'aa\r\nbb');
+    const r = await h.fs.resolve('crlf-no-final.txt', 'read');
+
+    const first = await h.fs.readText(r, { limit: 1 });
+    expect(first.content).toBe('aa\r');
+    expect(first.meta.lineEnding).toBe('crlf');
+
+    const tail = await h.fs.readText(r, { cursor: first.meta.nextCursor! });
+    expect(tail.content).toBe('bb');
+    expect(tail.meta.lineEnding).toBe('crlf');
+  });
+
   it('pages a large log by cursor and reassembles it exactly', async () => {
     const target = path.join(h.workspace, 'cursor-page.log');
     const lines = Array.from(
