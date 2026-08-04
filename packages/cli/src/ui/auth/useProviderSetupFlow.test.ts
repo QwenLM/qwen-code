@@ -130,4 +130,98 @@ describe('useProviderSetupFlow', () => {
     expect(result.current.state.baseUrl).toBe(secondUrl);
     expect(result.current.state.apiKey).toBe('typed-key');
   });
+
+  it('restores unsaved API key drafts when returning to a credential domain', () => {
+    const firstUrl = 'https://first.example/v1';
+    const secondUrl = 'https://second.example/v1';
+    const provider: ProviderConfig = {
+      id: 'endpoint-provider',
+      label: 'Endpoint Provider',
+      description: 'Provider with endpoint-specific credentials',
+      protocol: AuthType.USE_OPENAI,
+      baseUrl: [
+        { id: 'first', label: 'First', url: firstUrl },
+        { id: 'second', label: 'Second', url: secondUrl },
+      ],
+      envKey: (_protocol, baseUrl) =>
+        baseUrl === firstUrl ? 'FIRST_API_KEY' : 'SECOND_API_KEY',
+      models: [{ id: 'endpoint-model' }],
+      modelsEditable: true,
+      modelNamePrefix: 'Endpoint',
+    };
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+
+    act(() => {
+      result.current.start(provider, undefined, {
+        FIRST_API_KEY: 'stored-first',
+        SECOND_API_KEY: 'stored-second',
+      });
+      result.current.changeApiKey('draft-first');
+    });
+    act(() => {
+      result.current.selectBaseUrl(secondUrl);
+    });
+    expect(result.current.state.apiKey).toBe('stored-second');
+
+    act(() => {
+      result.current.changeApiKey('draft-second');
+    });
+    act(() => {
+      result.current.selectBaseUrl(firstUrl);
+    });
+    expect(result.current.state.apiKey).toBe('draft-first');
+
+    act(() => {
+      result.current.selectBaseUrl(secondUrl);
+    });
+    expect(result.current.state.apiKey).toBe('draft-second');
+  });
+
+  it('starts from a previously installed endpoint', () => {
+    const firstUrl = 'https://first.example/v1';
+    const secondUrl = 'https://second.example/v1';
+    const provider: ProviderConfig = {
+      id: 'endpoint-provider',
+      label: 'Endpoint Provider',
+      description: 'Provider with endpoint-specific defaults',
+      protocol: AuthType.USE_OPENAI,
+      baseUrl: [
+        {
+          id: 'first',
+          label: 'First',
+          url: firstUrl,
+          models: [{ id: 'first-model' }],
+        },
+        {
+          id: 'second',
+          label: 'Second',
+          url: secondUrl,
+          models: [{ id: 'second-model' }],
+        },
+      ],
+      envKey: (_protocol, baseUrl) =>
+        baseUrl === firstUrl ? 'FIRST_API_KEY' : 'SECOND_API_KEY',
+      modelsEditable: true,
+      modelNamePrefix: 'Endpoint',
+    };
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+
+    act(() => {
+      result.current.start(
+        provider,
+        AuthType.USE_OPENAI,
+        {
+          FIRST_API_KEY: 'stored-first',
+          SECOND_API_KEY: 'stored-second',
+        },
+        ['custom-model'],
+        secondUrl,
+      );
+    });
+
+    expect(result.current.state.baseUrl).toBe(secondUrl);
+    expect(result.current.state.baseUrlOptionIndex).toBe(1);
+    expect(result.current.state.apiKey).toBe('stored-second');
+    expect(result.current.state.modelIds).toBe('second-model, custom-model');
+  });
 });

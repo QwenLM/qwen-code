@@ -12,6 +12,7 @@ import {
   normalizeModelIds,
   selectedBaseUrlEnvKey,
   selectedBaseUrlModelIds,
+  selectedBaseUrlOptionIndex,
   shouldResetApiKeyAfterBaseUrlChange,
 } from './auth-provider-state';
 
@@ -167,6 +168,17 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     (currentStep === 'baseUrl' && !Array.isArray(provider?.baseUrl));
 
   const [optionIndex, setOptionIndex] = useState(0);
+
+  useEffect(() => {
+    if (
+      view !== 'step' ||
+      currentStep !== 'baseUrl' ||
+      !Array.isArray(provider?.baseUrl)
+    ) {
+      return;
+    }
+    setOptionIndex(selectedBaseUrlOptionIndex(provider, baseUrl));
+  }, [baseUrl, currentStep, provider, view]);
 
   const startProvider = useCallback(
     (

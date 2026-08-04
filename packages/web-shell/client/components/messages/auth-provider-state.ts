@@ -52,6 +52,15 @@ export function selectedBaseUrlModelIds(
   return modelIds(provider);
 }
 
+export function selectedBaseUrlOptionIndex(
+  provider: DaemonAuthProviderDescriptor,
+  baseUrl: string,
+): number {
+  if (!Array.isArray(provider.baseUrl)) return 0;
+  const index = provider.baseUrl.findIndex((option) => option.url === baseUrl);
+  return index >= 0 ? index : 0;
+}
+
 export function selectedBaseUrlEnvKey(
   provider: DaemonAuthProviderDescriptor,
   baseUrl: string,

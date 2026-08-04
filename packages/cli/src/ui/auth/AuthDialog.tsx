@@ -155,6 +155,29 @@ export function getMaxItemsToShow(
   );
 }
 
+export function getExistingProviderSetup(
+  providerConfig: ProviderConfig,
+  modelProviders: Record<string, unknown> | undefined,
+): {
+  initialProtocol: ProviderConfig['protocol'] | undefined;
+  initialBaseUrl: string | undefined;
+  customModelIds: string[];
+} {
+  const saved = findExistingProviderModels(providerConfig, modelProviders);
+  const initialBaseUrl = saved?.models[0]?.baseUrl;
+  const builtinIds = new Set(
+    getDefaultModelIds(providerConfig, initialBaseUrl),
+  );
+  return {
+    initialProtocol: saved?.protocol,
+    initialBaseUrl,
+    customModelIds:
+      saved?.models
+        .map((model) => model.id)
+        .filter((id) => !builtinIds.has(id)) ?? [],
+  };
+}
+
 // ---------------------------------------------------------------------------
 // AuthDialog
 // ---------------------------------------------------------------------------
@@ -217,25 +240,20 @@ export function AuthDialog({
 
   const existingEnv = (settings.merged.env ?? {}) as Record<string, string>;
 
-  const getExistingModelIds = (providerConfig: ProviderConfig): string[] => {
-    const saved = findExistingProviderModels(
-      providerConfig,
-      settings.merged.modelProviders as Record<string, unknown> | undefined,
-    );
-    if (!saved) return [];
-    const builtinIds = new Set(getDefaultModelIds(providerConfig));
-    return saved.models.map((m) => m.id).filter((id) => !builtinIds.has(id));
-  };
-
   const handleProviderSelect = (providerId: string) => {
     clearErrors();
     const providerConfig = findProviderById(providerId);
     if (!providerConfig) return;
+    const existingSetup = getExistingProviderSetup(
+      providerConfig,
+      settings.merged.modelProviders as Record<string, unknown> | undefined,
+    );
     setupFlow.start(
       providerConfig,
-      undefined,
+      existingSetup.initialProtocol,
       existingEnv,
-      getExistingModelIds(providerConfig),
+      existingSetup.customModelIds,
+      existingSetup.initialBaseUrl,
     );
     pushView('provider-setup');
   };
@@ -299,15 +317,21 @@ export function AuthDialog({
       case 'THIRD_PARTY_PROVIDERS':
         pushView('thirdparty-select');
         break;
-      case 'CUSTOM_PROVIDER':
+      case 'CUSTOM_PROVIDER': {
+        const existingSetup = getExistingProviderSetup(
+          customProvider,
+          settings.merged.modelProviders as Record<string, unknown> | undefined,
+        );
         setupFlow.start(
           customProvider,
-          undefined,
+          existingSetup.initialProtocol,
           existingEnv,
-          getExistingModelIds(customProvider),
+          existingSetup.customModelIds,
+          existingSetup.initialBaseUrl,
         );
         pushView('provider-setup');
         break;
+      }
       default:
         break;
     }

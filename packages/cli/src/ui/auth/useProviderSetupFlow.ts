@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import {
   AuthType,
   shouldShowStep,
@@ -123,6 +123,7 @@ export function useProviderSetupFlow(
   const [existingProviderEnv, setExistingProviderEnv] = useState<
     Record<string, string>
   >({});
+  const apiKeyDraftsRef = useRef(new Map<string, string>());
   const [modelIds, setModelIds] = useState('');
   const [modelIdsError, setModelIdsError] = useState<string | null>(null);
   const [thinkingEnabled, setThinkingEnabled] = useState(false);
@@ -144,7 +145,9 @@ export function useProviderSetupFlow(
       initialProtocol?: AuthType,
       existingEnv?: Record<string, string>,
       existingModelIds?: string[],
+      initialBaseUrl?: string,
     ) => {
+      apiKeyDraftsRef.current.clear();
       setProvider(config);
       const steps = getVisibleSteps(config);
       setVisibleSteps(steps);
@@ -155,12 +158,15 @@ export function useProviderSetupFlow(
       // For presets the baseUrl is fixed (string) or selected from options;
       // for the custom provider it's empty and the placeholder hints at the
       // default endpoint for the chosen protocol.
-      const resolved = resolveBaseUrl(config);
+      const resolved = resolveBaseUrl(config, initialBaseUrl);
       setBaseUrl(resolved);
       setBaseUrlPlaceholder(
         resolved ? '' : getDefaultBaseUrlForProtocol(proto),
       );
-      setBaseUrlOptionIndex(0);
+      const initialOptionIndex = Array.isArray(config.baseUrl)
+        ? config.baseUrl.findIndex((option) => option.url === resolved)
+        : 0;
+      setBaseUrlOptionIndex(initialOptionIndex >= 0 ? initialOptionIndex : 0);
       setBaseUrlError(null);
 
       let prefillKey = '';
@@ -192,6 +198,7 @@ export function useProviderSetupFlow(
   );
 
   const reset = useCallback(() => {
+    apiKeyDraftsRef.current.clear();
     setProvider(null);
     setVisibleSteps([]);
     setStepIndex(0);
@@ -250,12 +257,25 @@ export function useProviderSetupFlow(
         const previousEnvKey = providerEnvKey(provider, protocol, baseUrl);
         const nextEnvKey = providerEnvKey(provider, protocol, selectedUrl);
         if (nextEnvKey !== previousEnvKey) {
-          setApiKey(existingProviderEnv[nextEnvKey] ?? '');
+          apiKeyDraftsRef.current.set(previousEnvKey, apiKey);
+          setApiKey(
+            apiKeyDraftsRef.current.get(nextEnvKey) ??
+              existingProviderEnv[nextEnvKey] ??
+              '',
+          );
         }
       }
       goNext();
     },
-    [baseUrl, existingProviderEnv, goNext, modelIds, protocol, provider],
+    [
+      apiKey,
+      baseUrl,
+      existingProviderEnv,
+      goNext,
+      modelIds,
+      protocol,
+      provider,
+    ],
   );
 
   const submitBaseUrl = useCallback((): boolean => {

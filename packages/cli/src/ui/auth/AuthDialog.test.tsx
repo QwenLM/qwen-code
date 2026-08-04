@@ -5,11 +5,15 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { AuthDialog, getMaxItemsToShow } from './AuthDialog.js';
+import {
+  AuthDialog,
+  getExistingProviderSetup,
+  getMaxItemsToShow,
+} from './AuthDialog.js';
 import { LoadedSettings } from '../../config/settings.js';
 import type { Settings } from '../../config/settingsSchema.js';
 import type { Config } from '@qwen-code/qwen-code-core';
-import { AuthType } from '@qwen-code/qwen-code-core';
+import { AuthType, findProviderById } from '@qwen-code/qwen-code-core';
 import { renderWithProviders } from '../../test-utils/render.js';
 import { UIStateContext } from '../contexts/UIStateContext.js';
 import { UIActionsContext } from '../contexts/UIActionsContext.js';
@@ -290,6 +294,28 @@ const isUnreliableTuiInputEnvironment =
 const itWhenTuiInputReliable = isUnreliableTuiInputEnvironment ? it.skip : it;
 
 describe('AuthDialog', { timeout: 15000 }, () => {
+  it('restores the installed Kimi endpoint instead of the first option', () => {
+    const kimi = findProviderById('kimi');
+    expect(kimi).toBeDefined();
+
+    const setup = getExistingProviderSetup(kimi!, {
+      [AuthType.USE_OPENAI]: [
+        {
+          id: 'kimi-k3',
+          name: '[Kimi API] kimi-k3',
+          baseUrl: 'https://api.moonshot.ai/v1',
+          envKey: 'MOONSHOT_API_KEY',
+        },
+      ],
+    });
+
+    expect(setup).toEqual({
+      initialProtocol: AuthType.USE_OPENAI,
+      initialBaseUrl: 'https://api.moonshot.ai/v1',
+      customModelIds: [],
+    });
+  });
+
   const wait = (ms = 50) => new Promise((resolve) => setTimeout(resolve, ms));
 
   let originalEnv: NodeJS.ProcessEnv;

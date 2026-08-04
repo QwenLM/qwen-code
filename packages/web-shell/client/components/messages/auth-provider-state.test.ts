@@ -4,6 +4,7 @@ import {
   baseUrlOptionModelIds,
   selectedBaseUrlEnvKey,
   selectedBaseUrlModelIds,
+  selectedBaseUrlOptionIndex,
   shouldResetApiKeyAfterBaseUrlChange,
 } from './auth-provider-state';
 
@@ -90,5 +91,14 @@ describe('auth provider endpoint state', () => {
         'openai',
       ),
     ).toBe(true);
+  });
+
+  it('restores the highlighted endpoint from the selected base URL', () => {
+    expect(selectedBaseUrlOptionIndex(kimi, 'https://api.moonshot.ai/v1')).toBe(
+      1,
+    );
+    expect(selectedBaseUrlOptionIndex(kimi, 'https://unknown.example/v1')).toBe(
+      0,
+    );
   });
 });
