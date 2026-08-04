@@ -1750,7 +1750,11 @@ describe('qwen-autofix workflow', () => {
 
   it('falls back to existing issue backlog only when review has no target', () => {
     expect(issueAutofixJob).toContain("needs: ['route', 'review-scan']");
-    expect(issueAutofixJob).toContain('always()');
+    // Anchor the job `if` opening: a bare toContain('always()') is also
+    // satisfied by step-level always()s elsewhere in the job.
+    expect(issueAutofixJob).toContain(
+      "if: |-\n      ${{\n        always() &&\n        needs.route.outputs.do_issue == 'true' &&",
+    );
     expect(issueAutofixJob).toContain("needs.review-scan.result == 'success'");
     expect(issueAutofixJob).toContain(
       "github.event_name != 'schedule' || (needs.review-scan.result == 'success' && needs.review-scan.outputs.has_targets != 'true')",
@@ -1917,6 +1921,23 @@ describe('qwen-autofix workflow', () => {
     )?.[1];
     expect(groupKeyedOn).toBeTruthy();
     expect(groupKeyedOn).toBe(forcedIssueSource);
+    // The runnability gate duplicated into the group expression must stay
+    // equal to the job `if` predicate minus `always() &&` (anchored where
+    // the job `if` opens): the gate clause now occurs on both sides, so the
+    // literal pins of it are satisfied by the group copy even if the
+    // `if:`-side occurrence drifts.
+    const normalize = (text) => text.replace(/\s+/g, ' ').trim();
+    const ifPredicate = normalize(
+      issueAutofixJob.match(/if: \|-\n\s*\$\{\{\n([\s\S]*?)\n\s*\}\}/)?.[1] ??
+        '',
+    ).replace(/^always\(\) && /, '');
+    const gatePredicate = normalize(
+      issueAutofixJob.match(
+        /group: >-\n\s*\$\{\{\s*(.+?)\s*&& format\('qwen-autofix-issue-\{0\}'/,
+      )?.[1] ?? '',
+    );
+    expect(ifPredicate).toBeTruthy();
+    expect(ifPredicate).toBe(gatePredicate);
     expect(workflow).toContain(
       '(.labels // []) | map(.name) as $labels | ($labels | index($ready))',
     );
