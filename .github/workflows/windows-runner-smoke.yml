@@ -70,8 +70,22 @@ jobs:
       - name: 'Use pre-installed Node.js'
         uses: './.github/actions/self-hosted-node'
 
+      - name: 'Configure persistent npm cache (self-hosted)'
+        shell: 'bash'
+        run: |-
+          cache_dir="${HOME}/.cache/qwen-code/npm"
+          # Coreutils like mkdir are not guaranteed on a Git-Bash-only PATH,
+          # so create the directory through the Node the preflight verified.
+          node -e "require('node:fs').mkdirSync(process.argv[1], { recursive: true })" "${cache_dir}"
+          echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
+          echo "Using persistent npm cache at ${cache_dir}"
+          du -sh "${cache_dir}" 2>/dev/null || true
+
+      # ci.yml's workflow-level defaults run the gate's steps under bash, so
+      # pin the same shell here: smoke evidence only transfers to the gate
+      # when both execute these commands the same way.
       - name: 'Configure npm for rate limiting'
-        shell: 'powershell'
+        shell: 'bash'
         run: |-
           npm config set fetch-retry-mintimeout 20000
           npm config set fetch-retry-maxtimeout 120000
@@ -79,11 +93,11 @@ jobs:
           npm config set fetch-timeout 300000
 
       - name: 'Install dependencies'
-        shell: 'powershell'
+        shell: 'bash'
         run: 'npm ci --prefer-offline --no-audit --progress=false'
 
       - name: 'Run tests and generate reports'
-        shell: 'powershell'
+        shell: 'bash'
         env:
           NO_COLOR: true
           HOME: '${{ runner.temp }}/qwen-ci-home'
@@ -93,7 +107,6 @@ jobs:
           QWEN_API_KEY: ''
           GEMINI_API_KEY: ''
           QWEN_DEFAULT_AUTH_TYPE: ''
-          NODE_OPTIONS: '--max-old-space-size=3072'
         run: |-
           node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
           npm run test:ci

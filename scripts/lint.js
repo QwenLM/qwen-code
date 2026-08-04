@@ -80,13 +80,11 @@ function getPlatformArch() {
  * }}
  */
 
-/**
- * @type {{[linterName: string]: Linter}}
- */
 let lintersCache;
 
 // Built lazily: getPlatformArch() throws on platforms where the POSIX-only
 // linters cannot run (e.g. Windows test hosts importing getLinterTempDir).
+/** @returns {{[linterName: string]: Linter}} */
 function getLinters() {
   if (!lintersCache) {
     const platformArch = getPlatformArch();

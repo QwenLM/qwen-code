@@ -228,7 +228,7 @@ describe('no-AK integration CI wiring', () => {
       .split('\n')
       .find((line) => line.startsWith('    runs-on:'));
     expect(windowsRunsOn).toBe(
-      `    runs-on: '\${{ (vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event.pull_request.head.repo.full_name == github.repository || github.event_name == ''merge_group'')) && fromJSON(''["self-hosted", "Windows", "X64", "ecs-win"]'') || fromJSON(''["windows-2022"]'') }}'`,
+      `    runs-on: '\${{ vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && fromJSON(''["self-hosted", "Windows", "X64", "ecs-win"]'') || fromJSON(''["windows-2022"]'') }}'`,
     );
     expect(windowsJob.split('\n')).toContain('    timeout-minutes: 60');
 
@@ -266,8 +266,9 @@ describe('no-AK integration CI wiring', () => {
 
     // Repository-local `./` actions resolve from the job workspace, so the
     // checkout must precede them or a fresh runner fails before checking out;
-    // autocrlf must be off before the checkout itself so a freshly
-    // provisioned machine checks out LF-only files.
+    // autocrlf is turned off before the checkout itself (belt-and-braces
+    // alongside .gitattributes' eol=lf) so even a freshly provisioned machine
+    // checks out LF-only files.
     const windowsCheckoutIndex = windowsJob.indexOf("name: 'Checkout'");
     const autocrlfIndex = windowsJob.indexOf(
       'git config --global core.autocrlf false',
@@ -334,6 +335,30 @@ describe('no-AK integration CI wiring', () => {
       "uses: './.github/actions/self-hosted-node'",
     );
     expect(smokeWorkflow).not.toContain('actions/setup-node');
+    // The gate's run steps inherit ci.yml's workflow-level bash default, so
+    // the smoke must execute these commands under the same shell; a
+    // powershell pin there would validate a shell the gate never runs.
+    const smokeJob = getWorkflowJob(smokeWorkflow, 'validate');
+    for (const stepName of [
+      'Configure npm for rate limiting',
+      'Install dependencies',
+      'Run tests and generate reports',
+    ]) {
+      expect(getWorkflowStep(smokeJob, stepName)).toContain("shell: 'bash'");
+    }
+    // Both workflows declare the persistent npm cache step; the gate's
+    // self-hosted path exports NPM_CONFIG_CACHE for every later npm command.
+    expect(
+      getWorkflowStep(smokeJob, 'Configure persistent npm cache (self-hosted)'),
+    ).toContain('NPM_CONFIG_CACHE=');
+    const gateNpmCache = getWorkflowStep(
+      windowsJob,
+      'Configure persistent npm cache (self-hosted)',
+    );
+    expect(gateNpmCache).toContain(
+      "if: \"${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' }}\"",
+    );
+    expect(gateNpmCache).toContain('NPM_CONFIG_CACHE=');
 
     // Node split: hosted runners download Node, self-hosted runners reuse
     // their pre-installed one and fail loud when it is missing or off-major.
@@ -342,7 +367,7 @@ describe('no-AK integration CI wiring', () => {
       'Set up Node.js 22.x (hosted)',
     );
     expect(hostedSetup).toContain(
-      "if: \"${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'github-hosted' }}\"",
+      "if: \"${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment != 'self-hosted' }}\"",
     );
     const selfHostedNode = getWorkflowStep(
       windowsJob,
