@@ -95,6 +95,16 @@ export const NOT_BUNDLED_DIR = new Set(['__fixtures__', '__snapshots__']);
  */
 export const NOT_BUNDLED_FILE = new Set(['test-utils.ts']);
 
+/**
+ * Skill-root files the copier deliberately does not ship.
+ *
+ * `DESIGN.md` is the skill's maintainer design narrative, kept out of the
+ * bundle by the copier (see `copy_bundle_assets.js`). An edit to it cannot
+ * change a byte of the bundle, so digesting it would fire the same
+ * nothing-changed warning a test file once did.
+ */
+export const NOT_BUNDLED_SKILL_FILE = new Set(['DESIGN.md']);
+
 /** Which half of the build carries a root into the bundle. */
 export type ReviewSourceKind = 'code' | 'skill';
 
@@ -125,13 +135,14 @@ export const DIGESTED_EXTENSIONS: Record<
 /**
  * Whether a file of this root kind belongs in the digest.
  *
- * The skill rule is the allowlist alone — its root holds no importable code,
- * only the documents the copier ships. The code roots additionally drop the
- * files and names the bundler cannot reach from the CLI entry.
+ * The skill rule is the allowlist minus the copier's deliberate skips — its
+ * root holds no importable code, only the documents the copier ships. The
+ * code roots additionally drop the files and names the bundler cannot reach
+ * from the CLI entry.
  */
 function isDigestedFile(kind: ReviewSourceKind, name: string): boolean {
   if (!DIGESTED_EXTENSIONS[kind].has(extname(name))) return false;
-  if (kind !== 'code') return true;
+  if (kind !== 'code') return !NOT_BUNDLED_SKILL_FILE.has(name);
   return !NOT_BUNDLED_RE.test(name) && !NOT_BUNDLED_FILE.has(name);
 }
 

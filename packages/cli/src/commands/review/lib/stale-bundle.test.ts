@@ -297,9 +297,10 @@ describe('reviewSourcesDigest', () => {
 
   it('digests a skill root by the documents the copier ships', () => {
     // The skill root is copied whole, not imported: its allowlist is the
-    // markdown it holds. Stray files are the same class the code roots'
-    // allowlist ends — a `SKILL.md.orig` from a rebase must not accuse a
-    // correct bundle.
+    // markdown the copier ships. Stray files are the same class the code
+    // roots' allowlist ends — a `SKILL.md.orig` from a rebase must not accuse
+    // a correct bundle. DESIGN.md is the copier's deliberate skip, so it
+    // stays out of the digest for the same reason a test file does.
     const skillDir = join(root, 'skill');
     mkdirSync(skillDir, { recursive: true });
     writeFileSync(join(skillDir, 'SKILL.md'), '# skill');
@@ -309,7 +310,7 @@ describe('reviewSourcesDigest', () => {
     writeFileSync(join(skillDir, 'scratch.txt'), 'x');
     expect(reviewSourcesDigest(root, [skill(skillDir)])).toBe(before);
     writeFileSync(join(skillDir, 'DESIGN.md'), '# design');
-    expect(reviewSourcesDigest(root, [skill(skillDir)])).not.toBe(before);
+    expect(reviewSourcesDigest(root, [skill(skillDir)])).toBe(before);
   });
 });
 

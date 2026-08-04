@@ -55,13 +55,16 @@ export const BUNDLED_SKILL_TEST_FILE_RE =
  * Tests and fixtures are excluded on both sides: esbuild follows imports from
  * the CLI entry, neither is reachable that way, and a warning fired by an edit
  * that cannot change a byte of the bundle is the false positive this check
- * exists not to produce.
+ * exists not to produce. DESIGN.md is excluded for the same reason: the
+ * copier below deliberately does not ship it.
  */
 // Mirrors NOT_BUNDLED_RE / NOT_BUNDLED_DIR / NOT_BUNDLED_FILE /
-// DIGESTED_EXTENSIONS in stale-bundle.ts; the parity test keeps them equal.
+// NOT_BUNDLED_SKILL_FILE / DIGESTED_EXTENSIONS in stale-bundle.ts; the
+// parity test keeps them equal.
 const NOT_BUNDLED_RE = /\.(?:test|spec)\.[cm]?[jt]sx?$/;
 const NOT_BUNDLED_DIR = new Set(['__fixtures__', '__snapshots__']);
 const NOT_BUNDLED_FILE = new Set(['test-utils.ts']);
+const NOT_BUNDLED_SKILL_FILE = new Set(['DESIGN.md']);
 const DIGESTED_EXTENSIONS = {
   code: new Set(['.ts', '.tsx', '.mts', '.cts', '.js', '.mjs', '.json']),
   skill: new Set(['.md']),
@@ -69,7 +72,7 @@ const DIGESTED_EXTENSIONS = {
 
 function isDigestedFile(kind, name) {
   if (!DIGESTED_EXTENSIONS[kind].has(extname(name))) return false;
-  if (kind !== 'code') return true;
+  if (kind !== 'code') return !NOT_BUNDLED_SKILL_FILE.has(name);
   return !NOT_BUNDLED_RE.test(name) && !NOT_BUNDLED_FILE.has(name);
 }
 
@@ -255,7 +258,11 @@ export function copyBundleAssets({ root = defaultRoot } = {}) {
     const destBundledDir = join(distDir, 'bundled');
     fs.rmSync(destBundledDir, { recursive: true, force: true });
     copyRecursiveSync(bundledSkillsDir, destBundledDir, {
-      skipEntry: isBundledSkillTestFile,
+      // DESIGN.md files are maintainer design narratives, not runtime inputs;
+      // shipping one would hand a review a ~125 KB read_file target that
+      // outweighs the context the slimmed skill saves.
+      skipEntry: (entry) =>
+        isBundledSkillTestFile(entry) || entry === 'DESIGN.md',
     });
     console.log('Copied bundled skills to dist/bundled/');
   } else {

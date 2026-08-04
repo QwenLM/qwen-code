@@ -118,12 +118,14 @@ describe('the build stamp and the staleness check agree', () => {
       writeFileSync(join(cli, 'review', 'drive.ts'), 'drives');
       writeFileSync(join(cli, 'review', 'lib', 'ledger.ts'), 'ledgers');
       writeFileSync(join(skillDir, 'SKILL.md'), '# skill');
+      // DESIGN.md is the copier's deliberate skip, so it must move neither
+      // side of the digest — pinned by the count below staying at 4.
       writeFileSync(join(skillDir, 'DESIGN.md'), '# design');
 
       expect(reviewSourceDigestForBuild(root).digest).toBe(
         reviewSourcesDigest(root, reviewSourceRoots(root)),
       );
-      expect(reviewSourceDigestForBuild(root).count).toBe(5);
+      expect(reviewSourceDigestForBuild(root).count).toBe(4);
 
       // ...and neither a test file, nor a spec, nor a fixture moves either.
       writeFileSync(join(cli, 'review', 'drive.test.ts'), 'a test');
@@ -158,7 +160,7 @@ describe('the build stamp and the staleness check agree', () => {
       expect(reviewSourceDigestForBuild(root).digest).toBe(
         reviewSourcesDigest(root, reviewSourceRoots(root)),
       );
-      expect(reviewSourceDigestForBuild(root).count).toBe(5);
+      expect(reviewSourceDigestForBuild(root).count).toBe(4);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -202,13 +204,13 @@ describe('the build stamp and the staleness check agree', () => {
   );
 
   it('the skill allowlist covers everything the copier would ship', () => {
-    // The copier copies all of a bundled skill but test files and `.DS_Store`;
-    // the digest's skill root admits its extension allowlist. A file the
-    // copier ships but the digest cannot see is a silent false negative — the
-    // direction this whole check exists not to produce. The skill is two
-    // markdown files today, so this holds; the day it grows a script the
-    // allowlist must grow with it, and the failure belongs here, not in a
-    // review that quietly stops noticing.
+    // The copier copies all of a bundled skill but test files, DESIGN.md and
+    // `.DS_Store`; the digest's skill root admits its extension allowlist. A
+    // file the copier ships but the digest cannot see is a silent false
+    // negative — the direction this whole check exists not to produce. The
+    // skill ships a single markdown file today, so this holds; the day it
+    // grows a script the allowlist must grow with it, and the failure belongs
+    // here, not in a review that quietly stops noticing.
     const skillDir = join(
       repoRoot,
       'packages',
@@ -226,6 +228,7 @@ describe('the build stamp and the staleness check agree', () => {
         else if (
           e.isFile() &&
           e.name !== '.DS_Store' &&
+          e.name !== 'DESIGN.md' &&
           !BUNDLED_SKILL_TEST_FILE_RE.test(e.name)
         )
           shipped.push(full);
