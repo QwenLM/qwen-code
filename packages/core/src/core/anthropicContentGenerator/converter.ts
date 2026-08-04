@@ -1687,18 +1687,23 @@ function cleanOrphanedToolCalls(
 
 /**
  * Drops any `thinking` block with empty text from a non-latest assistant
- * turn (dropping the whole message if that empties it out). An Anthropic
- * `thinking` block's signature is computed over its own text content; a
- * block with no text at all cannot represent valid signed reasoning
- * regardless of whether a signature is present. This arises when a
- * `redacted_thinking` block -- whose opaque `data` doesn't survive the
- * Gemini-`Part` round trip, see
+ * turn (dropping the whole message if that empties it out). This arises
+ * when a `redacted_thinking` block -- whose opaque `data` doesn't survive
+ * the Gemini-`Part` round trip, see
  * {@link AnthropicContentConverter.convertAnthropicResponseToGemini} --
  * is replayed back through history construction as an empty-text
  * `thinking` block.
  *
  * Scoped to non-latest assistant turns, matching Anthropic's contract that
- * the latest assistant turn's signatures must replay byte-exact.
+ * the latest assistant turn's signatures must replay byte-exact: a
+ * signed, empty-text `thinking` block is not inherently invalid (see
+ * geminiChat.ts's flushThoughtEpisode, which deliberately keeps this same
+ * shape as still potentially replayable when it belongs to the ACTIVE
+ * turn). This pass drops it only from earlier, non-latest turns, where
+ * Anthropic doesn't require prior thinking to survive verbatim -- do not
+ * broaden it to the latest turn on the theory that the shape itself is
+ * unreplayable; that would delete a legitimately signed episode from an
+ * active tool loop.
  *
  * This was originally one guard inside a larger `pruneUntrustworthyThinking`
  * pass that also tried to detect and downgrade a non-latest, thinking-only
