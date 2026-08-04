@@ -3395,7 +3395,7 @@ describe('the ledger marker reaches the POSTED body', () => {
       ],
     });
     const ledger = parseLedger(r.body)!;
-    expect(ledger.findings[0]?.title).toBe('whole-PR blocker');
+    expect(ledger.findings[0]?.title).toBe('**[Critical]** whole-PR blocker');
     expect(JSON.stringify(ledger)).not.toContain('forged');
   });
 
