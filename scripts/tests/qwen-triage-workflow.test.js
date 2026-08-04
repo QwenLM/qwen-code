@@ -628,6 +628,31 @@ describe('qwen-triage tmux workflow', () => {
         expect(foreign.body).toBe(null);
         expect(foreign.call).toBe(null);
 
+        // Both a prior run's terminal comment and this run's claim present:
+        // `last` must select the own claim, not classify the older foreign
+        // one and skip — a `first` mutant would otherwise survive the suite.
+        writeFileSync(
+          commentsFile,
+          JSON.stringify([
+            {
+              id: 42,
+              user: { login: 'qwen-code-ci-bot' },
+              body: '<!-- qwen-triage lifecycle -->\n\n✅ earlier verdict [finalize run](https://github.com/QwenLM/qwen-code/actions/runs/55)',
+            },
+            {
+              id: 43,
+              user: { login: 'qwen-code-ci-bot' },
+              body: `<!-- qwen-triage lifecycle -->\n\n🔄 running — [watch live progress](${RUN_URL})`,
+            },
+          ]),
+        );
+        const both = run({
+          TRIAGE_OUTCOME: 'failure',
+          JOB_STATUS: 'cancelled',
+        });
+        expect(both.call).toContain('--method PATCH');
+        expect(both.call).toContain('issues/comments/43');
+
         // The intended case: the claim carries this run's link, so the
         // timeout-cancel after the claim still flips it to terminal.
         writeFileSync(
