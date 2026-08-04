@@ -35,15 +35,18 @@ const DINGTALK: DaemonChannelTypeDescriptor = {
     },
     {
       key: 'sessionScope',
-      label: 'Session scope',
+      // Descriptor labels intentionally differ from the i18n values so a
+      // missing i18n key surfaces the untranslated fallback instead of
+      // passing the copy assertions below.
+      label: 'Session scope (descriptor)',
       kind: 'enum',
       required: true,
       default: 'user',
       options: [
-        { value: 'user', label: 'Per user and chat' },
-        { value: 'thread', label: 'Per thread' },
-        { value: 'chat_thread', label: 'Per chat and thread' },
-        { value: 'single', label: 'One shared session' },
+        { value: 'user', label: 'Descriptor per user' },
+        { value: 'thread', label: 'Descriptor per thread' },
+        { value: 'chat_thread', label: 'Descriptor per chat' },
+        { value: 'single', label: 'Descriptor shared' },
       ],
     },
   ],

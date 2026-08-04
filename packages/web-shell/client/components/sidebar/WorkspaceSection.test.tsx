@@ -302,6 +302,9 @@ describe('WorkspaceSection label', () => {
             displayName: 'Feishu secondary',
             sourceType: 'channel',
             sourceId: 'secondary-feishu',
+            // Channel mode must keep pinned rows inside their platform
+            // section (excludePinned is off for the channel source).
+            isPinned: true,
           },
         ]),
         listSessionGroups: vi.fn().mockResolvedValue({

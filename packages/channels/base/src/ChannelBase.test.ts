@@ -13479,10 +13479,18 @@ describe('ChannelBase', () => {
 
       // Send two more messages while first is busy — these should buffer
       const p2 = ch.handleInbound(
-        envelope({ text: 'second', messageId: 'msg-2' }),
+        envelope({
+          text: 'second',
+          messageId: 'msg-2',
+          metadata: 'hidden policy second',
+        }),
       );
       const p3 = ch.handleInbound(
-        envelope({ text: 'third', messageId: 'msg-3' }),
+        envelope({
+          text: 'third',
+          messageId: 'msg-3',
+          metadata: 'hidden policy third',
+        }),
       );
 
       // p2 and p3 should resolve immediately (buffered, not queued)
@@ -13519,6 +13527,13 @@ describe('ChannelBase', () => {
         .calls[1][1] as string;
       expect(secondCallText).toContain('second');
       expect(secondCallText).toContain('third');
+      // Metadata stays model-facing; the coalesced projection carries only
+      // the raw user-authored texts.
+      expect(secondCallText).toContain('hidden policy second');
+      expect(secondCallText).toContain('hidden policy third');
+      expect(
+        (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[1][2],
+      ).toMatchObject({ displayText: 'second\n\nthird' });
 
       // Both responses should have been sent
       expect(ch.sent).toEqual(

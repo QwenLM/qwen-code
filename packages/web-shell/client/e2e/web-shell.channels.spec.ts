@@ -111,6 +111,7 @@ test('shows channel sessions in the sidebar channel catalog', async ({
 
   await expect(page.getByText('Web Shell task', { exact: true })).toBeVisible();
   await expect(page.getByText('DingTalk conversation')).toHaveCount(0);
+  await expect(page.getByText('Legacy channel conversation')).toHaveCount(0);
   await page.getByRole('tab', { name: 'Channels' }).click();
   await expect(
     page.getByText('DingTalk conversation', { exact: true }),

@@ -5,6 +5,7 @@ export {
 } from './paths.js';
 export { PollingChannelBase } from './PollingChannelBase.js';
 export { ACP_EVENT_LOOP_STALL_RESTART_MS, AcpBridge } from './AcpBridge.js';
+export { CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY } from './ChannelAgentBridge.js';
 export type {
   AvailableCommand,
   BridgeSessionInfo,
