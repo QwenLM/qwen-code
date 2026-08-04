@@ -770,18 +770,18 @@ describe('serve fast path argument parsing', () => {
 
   it('parses --child-heap-mode and falls back on an unknown value', () => {
     for (const argv of [
-      ['serve', '--child-heap-mode', 'enforce'],
-      ['serve', '--child-heap-mode=enforce'],
+      ['serve', '--child-heap-mode', 'off'],
+      ['serve', '--child-heap-mode=off'],
     ]) {
       expect(parseServeFastPathArgs(argv)).toMatchObject({
         kind: 'serve',
-        options: { childHeapMode: 'enforce' },
+        options: { childHeapMode: 'off' },
       });
     }
-    // Unlike memory-pressure-mode, `enforce` is a real value here — so the
-    // rejected sample has to be something else entirely.
+    // `enforce` is deliberately not a value yet, so it is the sample worth
+    // pinning: the fast path must defer to yargs rather than smuggle it in.
     expect(
-      parseServeFastPathArgs(['serve', '--child-heap-mode', 'warn']),
+      parseServeFastPathArgs(['serve', '--child-heap-mode', 'enforce']),
     ).toEqual({ kind: 'fallback' });
   });
 

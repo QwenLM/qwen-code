@@ -131,34 +131,27 @@ describe('buildDaemonStatusResponse', () => {
     expect(response.limits.maxTotalSessions).toBe(50);
   });
 
-  it('reports enforced only when a spawn argument really derives from the budget', async () => {
-    // The tripwire field. #8245 made it a required literal `false` so a client
-    // could never mistake this section for enforcement that had not shipped;
-    // it is a boolean now, and the two branches must be checked separately or
-    // it degrades into "the feature exists".
+  it('reports the modeled partition without claiming it is applied', async () => {
     const budget = resolveDaemonMemoryBudget({ availableMemoryMb: 8_192 });
+    const options = makeOptions();
+    options.opts.daemonMemoryBudget = budget;
+    const policy = createChildHeapPolicy({ budget, mode: 'observe' });
+    policy.decide(10_000); // one would-be refusal, so the counter is not trivially 0
+    options.getChildHeapPolicySnapshot = () => policy.snapshot();
 
-    const observing = makeOptions();
-    observing.opts.daemonMemoryBudget = budget;
-    observing.getChildHeapPolicySnapshot = () =>
-      createChildHeapPolicy({ budget, mode: 'observe' }).snapshot();
-    const observed = await buildDaemonStatusResponse('summary', observing);
-    // Computes everything, applies nothing — so `false`, not `true`.
-    expect(observed.limits.memory).toMatchObject({
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    // The figures an operator needs to judge the partition for themselves —
+    // publishing them is the substitute for a refusal count that cannot say
+    // whether the ceiling would fit their workload.
+    expect(response.limits.memory).toMatchObject({
       enforced: false,
-      childHeap: { mode: 'observe', refusals: 0 },
-    });
-
-    const enforcing = makeOptions();
-    enforcing.opts.daemonMemoryBudget = budget;
-    const policy = createChildHeapPolicy({ budget, mode: 'enforce' });
-    // Drive one refusal through so the counter is not trivially zero here.
-    policy.decide(10_000);
-    enforcing.getChildHeapPolicySnapshot = () => policy.snapshot();
-    const enforced = await buildDaemonStatusResponse('summary', enforcing);
-    expect(enforced.limits.memory).toMatchObject({
-      enforced: true,
-      childHeap: { mode: 'enforce', refusals: 1 },
+      childHeap: {
+        mode: 'observe',
+        maxConcurrentChildren: 7,
+        perChildCeilingMb: 526,
+        refusals: 1,
+      },
     });
   });
 

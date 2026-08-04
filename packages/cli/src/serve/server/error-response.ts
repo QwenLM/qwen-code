@@ -49,7 +49,6 @@ import {
   WorkspaceMismatchError,
   WorkspaceDrainingError,
   TotalSessionLimitExceededError,
-  ChildHeapPoolExhaustedError,
 } from '../acp-session-bridge.js';
 import type { DaemonLogger } from '../daemon-logger.js';
 import {
@@ -494,26 +493,6 @@ export function sendBridgeError(
       code: 'session_limit_exceeded',
       limit: err.limit,
       scope: 'workspace',
-    });
-    return;
-  }
-  if (err instanceof ChildHeapPoolExhaustedError) {
-    daemonLog?.warn('child heap pool exhausted', {
-      ...(ctx?.route ? { route: ctx.route } : {}),
-      ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
-      childPoolMb: err.childPoolMb,
-      concurrentChildren: err.concurrentChildren,
-      minChildHeapMb: err.minChildHeapMb,
-    });
-    // Retryable in the same sense as the session limit above: the condition
-    // clears when any child exits, which needs no operator action.
-    res.set('Retry-After', '5');
-    res.status(503).json({
-      error: err.message,
-      code: 'child_heap_pool_exhausted',
-      childPoolMb: err.childPoolMb,
-      concurrentChildren: err.concurrentChildren,
-      minChildHeapMb: err.minChildHeapMb,
     });
     return;
   }

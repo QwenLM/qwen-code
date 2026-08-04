@@ -14,30 +14,9 @@ import { ndJsonStream, type NdJsonStreamHooks } from './ndJsonStream.js';
 import { MissingCliEntryError } from './status.js';
 import { ProcessRegistry } from './process-registry.js';
 import type { ChildHeapPolicy } from './child-heap-policy.js';
-import { ChildHeapPoolExhaustedError } from './bridgeErrors.js';
 
 let cachedMemoryArgs: string[] | undefined;
-/**
- * V8 flags for a spawned ACP child.
- *
- * With no argument this is the historical behaviour: half of cgroup/host
- * memory, capped at 16 GB, emitted only when it would *raise* the child above
- * the spawning process's own heap limit, and cached for the process lifetime.
- * Single-child callers — the interactive CLI, the IDE companion, direct-embed
- * bridges — want exactly that and are unchanged.
- *
- * `explicitMb` is the daemon's budget-derived share, and deliberately bypasses
- * **both** the cache and the raise-only guard. The cache, because the share
- * depends on how many children are live right now rather than on the host. The
- * guard, because a budget-derived share is normally *below* the daemon's own
- * heap limit — so passing it through `targetMB > currentLimitMB` would drop
- * the flag, silently restore the overcommit, and leave every test green. That
- * failure mode is the whole reason this parameter exists; see #8182.
- */
-export function getAcpMemoryArgs(explicitMb?: number): string[] {
-  if (explicitMb !== undefined) {
-    return [`--max-old-space-size=${explicitMb}`, '--expose-gc'];
-  }
+export function getAcpMemoryArgs(): string[] {
   if (cachedMemoryArgs) return cachedMemoryArgs;
   const constrainedMemory = (process as { constrainedMemory?: () => number })
     .constrainedMemory;
@@ -175,35 +154,11 @@ export function createSpawnChannelFactory(
     // visible to any other spawn racing it, so the count below includes this
     // child and two concurrent spawns cannot both be told they are alone.
     const reservation = processRegistry.reserve();
-    let memoryArgs: string[];
-    try {
-      const policy = options.childHeapPolicy;
-      // Read the count once, while this reservation is still held, so the
-      // figure decided on and the figure reported are the same number.
-      const concurrentChildren = processRegistry.committedProcessCount;
-      const decision = policy?.decide(concurrentChildren);
-      // One snapshot for the whole decision, so the mode that gates the
-      // refusal is the same mode that gates whether the share is applied.
-      const snapshot = policy?.snapshot();
-      const enforced = snapshot?.enforced ?? false;
-      if (snapshot && enforced && decision?.refuse) {
-        throw new ChildHeapPoolExhaustedError(
-          snapshot.childPoolMb,
-          concurrentChildren,
-          snapshot.minChildHeapMb,
-        );
-      }
-      // `observe` computed a share above and must not apply it: passing the
-      // flag changes the child's GC and OOM behaviour, which is not something
-      // a reporting mode may do. Only `enforce` reaches the child.
-      memoryArgs = getAcpMemoryArgs(enforced ? decision?.ceilingMb : undefined);
-    } catch (error) {
-      // Covers both the refusal above and anything the policy throws. Leaking
-      // the reservation would inflate the count for every later spawn until
-      // the daemon refused everything.
-      reservation.cancel();
-      throw error;
-    }
+    // Observation only: the policy is asked what it *would* decide so the
+    // refusal count is real, but nothing here acts on the answer — no derived
+    // ceiling reaches the child and no spawn is refused.
+    options.childHeapPolicy?.decide(processRegistry.committedProcessCount);
+    const memoryArgs = getAcpMemoryArgs();
     let child;
     try {
       child = spawn(

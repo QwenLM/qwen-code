@@ -11,46 +11,50 @@ import {
 import { MAX_DAEMON_WORKSPACES } from './channel-control-timeouts.js';
 
 /**
- * What the daemon does with the child-heap share it computes.
+ * Whether the daemon models a per-child heap partition.
  *
- * `off` — do not compute it. Children get the historical host-derived ceiling.
+ * `off` — do not model it.
  *
- * `observe` — compute the share and the admission decision, apply **neither**,
- * and count the refusals that would have happened. Deliberately the default:
- * the thresholds this policy divides by have never been checked against a real
- * multi-workspace deployment, and a non-zero refusal count is the evidence
- * that turning `enforce` on would have broken someone.
+ * `observe` — compute the partition and count the spawns it would have
+ * refused. Nothing is applied: no child receives a derived
+ * `--max-old-space-size`, and no spawn is refused.
  *
- * `enforce` — pass the share to the child and refuse the spawn when the pool
- * cannot cover another one.
+ * There is deliberately no `enforce` yet. Applying the partition needs a way
+ * to tell an operator beforehand whether their workload fits it, and that
+ * observation does not exist: `refusals` below counts admission pressure, not
+ * whether a child would have survived the ceiling. Enforcing on a signal that
+ * cannot answer the question it is being read for is how a healthy daemon gets
+ * switched into an OOM loop. The enforcing mode ships with the measurement
+ * that justifies it — peak old-space per child, compared against
+ * `perChildCeilingMb`.
  */
-export type ChildHeapMode = 'off' | 'observe' | 'enforce';
-
-export interface ChildHeapDecision {
-  /**
-   * The share this child should receive, or `undefined` when the mode does not
-   * produce one. `undefined` means "spawn as before", never "zero".
-   */
-  ceilingMb: number | undefined;
-  /** Whether the pool cannot cover this child. Only acted on under `enforce`. */
-  refuse: boolean;
-}
+export type ChildHeapMode = 'off' | 'observe';
 
 export interface ChildHeapPolicySnapshot {
   mode: ChildHeapMode;
-  /** True only under `enforce` — i.e. only when a spawn argument really derives from this. */
-  enforced: boolean;
   childPoolMb: number;
   minChildHeapMb: number;
-  /** Children admitted concurrently. `perChildCeilingMb * this <= childPoolMb`. */
-  maxConcurrentChildren: number;
-  /** The constant every admitted child receives. */
-  perChildCeilingMb: number;
   /**
-   * Spawns this policy refused, or would have refused under `enforce`. The
-   * calibration signal: non-zero under `observe` means enforcement would have
-   * failed a real spawn, including the channel-swap case where a replacement
-   * is counted alongside the process it replaces.
+   * Children the pool could host concurrently under the modeled partition.
+   * **0** when the pool cannot cover even one child at `minChildHeapMb` — a
+   * real state on a small host, and not the same as 1.
+   */
+  maxConcurrentChildren: number;
+  /**
+   * The ceiling every child would receive. `null` when no child is
+   * admissible, never 0: `--max-old-space-size=0` means *V8's default heap*,
+   * so emitting a zero here would authorise gigabytes against an empty pool.
+   */
+  perChildCeilingMb: number | null;
+  /**
+   * Spawns that would have been refused for exceeding
+   * `maxConcurrentChildren`.
+   *
+   * Read it as admission pressure and nothing more. In particular a count of
+   * 0 does **not** mean the partition is safe to apply: children currently
+   * run on the far larger host-derived ceiling, so a workload needing more
+   * old space than `perChildCeilingMb` is perfectly healthy here and would
+   * only fail once the partition were applied.
    */
   refusals: number;
 }
@@ -60,7 +64,7 @@ export interface ChildHeapPolicy {
    * @param concurrentChildren Children already committed *including this one*
    *   — `ProcessRegistry.committedProcessCount` taken after `reserve()`.
    */
-  decide(concurrentChildren: number): ChildHeapDecision;
+  decide(concurrentChildren: number): { refuse: boolean };
   snapshot(): ChildHeapPolicySnapshot;
 }
 
@@ -71,51 +75,40 @@ export function createChildHeapPolicy(options: {
   const { budget, mode } = options;
   let refusals = 0;
 
-  // A FIXED partition, not a share of the pool divided by the children live at
-  // this instant. The difference is the whole contract.
+  // A FIXED partition, not a share of the pool divided by the children live
+  // at this instant. A per-spawn share bounds the child *count* but not the
+  // memory: V8 cannot lower a running child's ceiling, so grants accumulate
+  // as P + P/2 + P/3 + ... = P x H(n) — 2.6x the pool at seven children on an
+  // 8 GB host. Holding the ceiling constant makes the total n * ceiling, and
+  // admitting at most `maxConcurrentChildren` keeps that inside the pool by
+  // construction, with no ledger and no dependence on arrival order.
   //
-  // A per-spawn share bounds the child *count* but not the memory: V8 cannot
-  // lower a running child's ceiling, so grants accumulate as
-  // P + P/2 + P/3 + ... = P x H(n) — 2.6x the pool at seven children on an
-  // 8 GB host, 4x at twenty-five on 32 GB. That authorises more old space than
-  // the host has, which is what this policy exists to stop.
-  //
-  // Holding the ceiling constant makes the sum n * ceiling, and admitting at
-  // most `maxConcurrentChildren` makes that <= childPoolMb by construction —
-  // no ledger of outstanding grants, and no dependence on the order children
-  // happened to arrive in.
-  //
-  // The cost is real and deliberate: a lone workspace on a 32 GB host gets
-  // 614 MB rather than the whole pool. Every admitted child is sized for a
-  // full house, because any child may still be running when the house fills.
-  const maxConcurrentChildren = Math.max(
-    1,
-    Math.min(
-      Math.floor(budget.childPoolMb / MIN_CHILD_HEAP_MB),
-      MAX_DAEMON_WORKSPACES,
-    ),
+  // Not clamped to a minimum of one. A pool below `MIN_CHILD_HEAP_MB` hosts
+  // no child at all, and saying "1" there produced a ceiling of 0 — which V8
+  // reads as its *default* heap, roughly 4 GB, against a pool of nothing.
+  const maxConcurrentChildren = Math.min(
+    Math.floor(budget.childPoolMb / MIN_CHILD_HEAP_MB),
+    MAX_DAEMON_WORKSPACES,
   );
-  const perChildCeilingMb = Math.min(
-    Math.floor(budget.childPoolMb / maxConcurrentChildren),
-    budget.legacyChildCeilingMb,
-  );
+  const perChildCeilingMb =
+    maxConcurrentChildren > 0
+      ? Math.min(
+          Math.floor(budget.childPoolMb / maxConcurrentChildren),
+          budget.legacyChildCeilingMb,
+        )
+      : null;
 
   return {
     decide(concurrentChildren) {
-      if (mode === 'off') return { ceilingMb: undefined, refuse: false };
-
-      // Refuse on the count, since the ceiling no longer varies with it. This
-      // is the only thing keeping the sum inside the pool.
+      if (mode === 'off') return { refuse: false };
       const refuse = concurrentChildren > maxConcurrentChildren;
       if (refuse) refusals += 1;
-
-      return { ceilingMb: perChildCeilingMb, refuse };
+      return { refuse };
     },
 
     snapshot() {
       return {
         mode,
-        enforced: mode === 'enforce',
         childPoolMb: budget.childPoolMb,
         minChildHeapMb: MIN_CHILD_HEAP_MB,
         maxConcurrentChildren,

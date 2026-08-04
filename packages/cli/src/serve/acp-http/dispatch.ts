@@ -747,19 +747,6 @@ export function toRpcError(err: unknown): {
           retryable: true,
         },
       };
-    case 'ChildHeapPoolExhaustedError':
-      return {
-        code: RPC.INTERNAL_ERROR,
-        message: errMsg(err),
-        data: {
-          errorKind: 'child_heap_pool_exhausted',
-          childPoolMb: (err as { childPoolMb?: unknown }).childPoolMb,
-          concurrentChildren: (err as { concurrentChildren?: unknown })
-            .concurrentChildren,
-          httpStatus: 503,
-          retryable: true,
-        },
-      };
     case 'TotalSessionLimitExceededError':
       return {
         code: RPC.INTERNAL_ERROR,

@@ -428,11 +428,7 @@ export function parseServeFastPathArgs(
       // Same reasoning as memory-pressure-mode: yargs `choices` already owns
       // the error message for a bad value, and letting an unknown string past
       // here would put a value in `ServeOptions` its own type forbids.
-      if (
-        read.value !== 'off' &&
-        read.value !== 'observe' &&
-        read.value !== 'enforce'
-      ) {
+      if (read.value !== 'off' && read.value !== 'observe') {
         return { kind: 'fallback' };
       }
       options.childHeapMode = read.value;

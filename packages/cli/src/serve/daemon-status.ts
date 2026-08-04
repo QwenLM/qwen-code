@@ -193,26 +193,26 @@ interface DaemonStatusLimits {
 
 export interface DaemonStatusMemoryLimits {
   /**
-   * Whether a spawn argument actually derives from these numbers — i.e. only
-   * under `--child-heap-mode enforce`.
-   *
-   * This was a required literal `false` while the whole section was a model of
-   * a policy that had not shipped. It is a boolean now because the policy has,
-   * and it stays narrow on purpose: `observe` computes every figure below and
-   * applies none of them, so it still reports `false`. A client must be able
-   * to read this as "children are being sized by this", never as "the feature
-   * exists".
+   * False, and required. Every figure in this section is resolved input or a
+   * model of a policy that does not exist yet; nothing here is applied to a
+   * process. The flag exists so a client can never mistake the `limits`
+   * namespace for enforcement that has not shipped.
    */
-  enforced: boolean;
-  /** How the derived per-child share is used. `null` when no policy was built. */
+  enforced: false;
+  /**
+   * The per-child heap partition the daemon models but does not apply.
+   * `null` when no policy was built.
+   */
   childHeap: {
-    mode: 'off' | 'observe' | 'enforce';
+    mode: 'off' | 'observe';
+    /** Children the pool could host at once. 0 when it cannot host one. */
+    maxConcurrentChildren: number;
+    /** What each would receive. `null` when none is admissible — never 0. */
+    perChildCeilingMb: number | null;
     /**
-     * Spawns refused, or — under `observe` — that would have been refused.
-     * The calibration signal for whether `enforce` is safe here: non-zero
-     * means enforcement would have failed a real spawn. Includes the
-     * channel-swap case, where a replacement child is counted alongside the
-     * process it is replacing.
+     * Spawns that would have exceeded `maxConcurrentChildren`. Admission
+     * pressure only: 0 does **not** mean the partition is safe to apply,
+     * because children still run on the much larger host-derived ceiling.
      */
     refusals: number;
   } | null;
@@ -250,11 +250,14 @@ export function toDaemonStatusMemoryLimits(
 ): DaemonStatusMemoryLimits | null {
   if (!budget) return null;
   return {
-    // Derived, never hardcoded: the whole point of the field is that a client
-    // can trust it to track what the daemon actually does.
-    enforced: childHeap?.enforced ?? false,
+    enforced: false,
     childHeap: childHeap
-      ? { mode: childHeap.mode, refusals: childHeap.refusals }
+      ? {
+          mode: childHeap.mode,
+          maxConcurrentChildren: childHeap.maxConcurrentChildren,
+          perChildCeilingMb: childHeap.perChildCeilingMb,
+          refusals: childHeap.refusals,
+        }
       : null,
     configuredBudgetMb: budget.configuredBudgetMb,
     effectiveBudgetMb: budget.effectiveBudgetMb,

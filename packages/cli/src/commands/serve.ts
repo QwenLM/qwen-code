@@ -129,7 +129,7 @@ interface ServeArgs {
   'mcp-client-budget'?: number;
   'memory-budget-mb'?: number;
   'memory-pressure-mode'?: 'off' | 'observe';
-  'child-heap-mode'?: 'off' | 'observe' | 'enforce';
+  'child-heap-mode'?: 'off' | 'observe';
   'mcp-budget-mode'?: 'enforce' | 'warn' | 'off';
   'allow-origin'?: string[];
   'allow-private-auth-base-url': boolean;
@@ -332,9 +332,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'derived as 50% of cgroup-constrained ' +
           'or host memory, and capped at the resolved available memory either ' +
           'way. Currently observed and reported under `limits.memory` in daemon ' +
-          'status. Under `--child-heap-mode enforce` it also sizes every ' +
-          '`qwen --acp` child and bounds how many run at once; under the ' +
-          'default `observe` it sizes nothing. Must be an integer ' +
+          'status, and modeled into a per-child partition reported under ' +
+          '`limits.memory.childHeap`. Nothing applies it: no child is sized ' +
+          'from this budget. Must be an integer ' +
           'in [1024, 1048576].',
       })
       .option('memory-pressure-mode', {
@@ -350,19 +350,19 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'either mode.',
       })
       .option('child-heap-mode', {
-        choices: ['off', 'observe', 'enforce'] as const,
+        choices: ['off', 'observe'] as const,
         default: 'observe' as const,
         description:
-          'What the daemon does with the per-child heap share it derives ' +
-          'from the memory budget. `observe` (default) computes the share ' +
-          'and the spawn-admission decision, applies neither, and reports ' +
-          'how many spawns would have been refused — use that count to ' +
-          'decide whether `enforce` is safe for your deployment. `enforce` ' +
-          'passes the share to each `qwen --acp` child and refuses a spawn ' +
-          'when the child pool cannot cover another at the minimum heap; ' +
-          'that refusal surfaces as a failure to open a new session in the ' +
-          'affected workspace, and clears when any child exits. `off` ' +
-          'computes nothing and leaves children on the host-derived ceiling.',
+          'Whether the daemon models a per-child heap partition of the ' +
+          'memory budget. `observe` (default) reports the partition it would ' +
+          'apply — `limits.memory.childHeap.perChildCeilingMb` and ' +
+          '`maxConcurrentChildren` — and counts spawns that would have ' +
+          'exceeded it. Nothing is applied: no child is sized from the ' +
+          'budget and no spawn is refused. `off` models nothing. Note a ' +
+          'refusal count of 0 does NOT mean the partition would be safe to ' +
+          'apply; children still run on the much larger host-derived ' +
+          'ceiling, so a workload needing more old space than the modeled ' +
+          'ceiling looks healthy here.',
       })
       .option('mcp-client-budget', {
         type: 'number',
