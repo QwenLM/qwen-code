@@ -153,6 +153,8 @@ describe('GitModePopover existing branches', () => {
       'origin/develop',
       'upstream/release',
     ]);
+    clickButton('Existing branch');
+    expect(document.body.querySelectorAll('[role="option"]')).toHaveLength(3);
 
     const list = document.body.querySelector(
       '[role="listbox"][aria-label="Existing branch"]',

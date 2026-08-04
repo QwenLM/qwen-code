@@ -183,16 +183,29 @@ describe('workspace Git diff routes', () => {
     });
 
     expect(
+      (await request(app).get('/workspace/git/diff?mode=staged')).status,
+    ).toBe(200);
+    expect(fetchGitDiffMock).toHaveBeenLastCalledWith('/work/main', {
+      mode: 'staged',
+    });
+    expect(
+      (await request(app).get('/workspace/git/diff?mode=unstaged')).status,
+    ).toBe(200);
+    expect(fetchGitDiffMock).toHaveBeenLastCalledWith('/work/main', {
+      mode: 'unstaged',
+    });
+
+    expect(
       (
         await request(app).get(
-          '/workspace/git/diff/file?path=a.ts&mode=commit&ref=abc1234',
+          '/workspace/git/diff/file?path=a.ts&oldPath=old-a.ts&mode=commit&ref=abc1234',
         )
       ).status,
     ).toBe(200);
     expect(fetchGitDiffHunksForFileMock).toHaveBeenCalledWith(
       '/work/main',
       'a.ts',
-      undefined,
+      'old-a.ts',
       { mode: 'commit', ref: 'abc1234' },
     );
   });
@@ -206,6 +219,13 @@ describe('workspace Git diff routes', () => {
 
     expect(
       (await request(app).get('/workspace/git/diff?mode=commit')).status,
+    ).toBe(400);
+    expect(
+      (await request(app).get('/workspace/git/diff?mode=commit&ref=%20'))
+        .status,
+    ).toBe(400);
+    expect(
+      (await request(app).get('/workspace/git/diff?ref=topic')).status,
     ).toBe(400);
     expect(
       (await request(app).get('/workspace/git/diff?mode=unknown')).status,

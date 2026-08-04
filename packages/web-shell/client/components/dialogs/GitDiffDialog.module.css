@@ -86,6 +86,10 @@
   color: var(--muted-foreground);
 }
 
+.refSearch:focus-within {
+  border-bottom-color: var(--primary);
+}
+
 .refSearchInput {
   min-width: 0;
   flex: 1 1 auto;
@@ -108,6 +112,13 @@
   padding: 4px 0;
   overflow-y: auto;
   overscroll-behavior: contain;
+}
+
+.refNote {
+  padding: 6px 10px;
+  border-top: 1px solid var(--border);
+  color: var(--muted-foreground);
+  font-size: 11px;
 }
 
 .refItem {

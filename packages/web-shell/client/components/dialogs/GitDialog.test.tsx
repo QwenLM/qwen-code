@@ -174,6 +174,69 @@ describe('GitDialog', () => {
     expect(workspaceGitLog).toHaveBeenCalledWith(50, 0, undefined);
   });
 
+  it('preserves the selected diff source across tab switches', async () => {
+    workspaceGitDiff.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      filesCount: 0,
+      linesAdded: 0,
+      linesRemoved: 0,
+      files: [],
+      hiddenCount: 0,
+    });
+    workspaceGitLog.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      entries: [
+        {
+          sha: 'abcdef1234567890',
+          shortSha: 'abcdef1',
+          subject: 'keep selected',
+          authorName: 'Author',
+          authorEmail: 'author@example.com',
+          authorDate: Math.floor(Date.now() / 1000) - 60,
+          parents: [],
+          refs: '',
+        },
+      ],
+      hasMore: false,
+    });
+    mount();
+    await flush();
+
+    const source = document.body.querySelector(
+      '#git-diff-source',
+    ) as HTMLSelectElement;
+    await act(async () => {
+      source.value = 'commit';
+      source.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await flush();
+    expect(source.value).toBe('commit');
+    expect(
+      document.body.querySelector('button[aria-label="Select commit"]')
+        ?.textContent,
+    ).toContain('keep selected');
+
+    await act(async () => {
+      document.getElementById('git-dialog-tab-log')?.click();
+    });
+    await flush();
+    await act(async () => {
+      document.getElementById('git-dialog-tab-diff')?.click();
+    });
+    await flush();
+
+    expect(source.value).toBe('commit');
+    expect(
+      document.body.querySelector('button[aria-label="Select commit"]')
+        ?.textContent,
+    ).toContain('keep selected');
+    expect(workspaceGitLog).toHaveBeenCalledTimes(2);
+  });
+
   it('supports arrow-key tab navigation', async () => {
     workspaceGitDiff.mockResolvedValue({
       v: 1,

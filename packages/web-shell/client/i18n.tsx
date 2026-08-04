@@ -94,6 +94,7 @@ const EN: Messages = {
   'gitDiff.source.searchCommit': 'Search commits…',
   'gitDiff.source.searchBranch': 'Search branches…',
   'gitDiff.source.noMatches': 'No matches',
+  'gitDiff.source.olderCommitsOmitted': 'Older commits are not shown',
   'gitDiff.summary': (v) =>
     `${v?.count ?? 0} files · +${v?.added ?? 0} −${v?.removed ?? 0}`,
   'gitDiff.loading': 'Loading changes…',
@@ -2759,6 +2760,7 @@ const ZH: Messages = {
   'gitDiff.source.searchCommit': '搜索提交…',
   'gitDiff.source.searchBranch': '搜索分支…',
   'gitDiff.source.noMatches': '无匹配',
+  'gitDiff.source.olderCommitsOmitted': '未显示更早的提交',
   'gitDiff.summary': (v) =>
     `${v?.count ?? 0} 个文件 · +${v?.added ?? 0} −${v?.removed ?? 0}`,
   'gitDiff.loading': '加载变更中…',

@@ -306,6 +306,10 @@
   color: var(--muted-foreground);
 }
 
+.existingSearch:focus-within {
+  border-bottom-color: var(--primary);
+}
+
 .existingSearch input {
   min-width: 0;
   flex: 1;
@@ -319,7 +323,7 @@
 
 .existingList {
   max-height: 160px;
-  padding: 4px 0;
+  padding: 0 0 4px;
   overflow-y: auto;
   overscroll-behavior: contain;
 }
@@ -351,7 +355,7 @@
 
 .existingGroup:hover:not(:disabled),
 .existingGroup:focus-visible {
-  background: var(--subtle-bg);
+  background: var(--accent);
 }
 
 .existingGroup:disabled {

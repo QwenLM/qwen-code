@@ -2165,6 +2165,7 @@ export const ChatEditor = memo(
                     gitBranch &&
                     (gitModeIntent && onGitModeIntentChange ? (
                       <GitModePopover
+                        key={gitWorkspaceCwd ?? selectedWorkspace?.cwd ?? ''}
                         branch={gitBranch}
                         workspaceCwd={
                           gitWorkspaceCwd ?? selectedWorkspace?.cwd ?? ''

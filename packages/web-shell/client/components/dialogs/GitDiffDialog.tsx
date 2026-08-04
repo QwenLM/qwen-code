@@ -381,6 +381,7 @@ function SearchableDiffRefSelect({
   label,
   searchPlaceholder,
   noMatches,
+  note,
   onChange,
 }: {
   value: string;
@@ -389,6 +390,7 @@ function SearchableDiffRefSelect({
   label: string;
   searchPlaceholder: string;
   noMatches: string;
+  note?: string;
   onChange: (value: string) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -479,6 +481,7 @@ function SearchableDiffRefSelect({
             <div className={styles.refEmpty}>{noMatches}</div>
           )}
         </div>
+        {note && <div className={styles.refNote}>{note}</div>}
       </PopoverContent>
     </Popover>
   );
@@ -502,12 +505,10 @@ export function GitDiffContent({
   const [commitRef, setCommitRef] = useState('');
   const [branchRef, setBranchRef] = useState('');
   const [commits, setCommits] = useState<DaemonGitLogEntry[] | null>(null);
+  const [commitsHasMore, setCommitsHasMore] = useState(false);
   const [branches, setBranches] = useState<DaemonGitBranchesResult | null>(
     null,
   );
-  const [sourceLoading, setSourceLoading] = useState<
-    'commit' | 'branch' | null
-  >(null);
   const [sourceError, setSourceError] = useState<'commit' | 'branch' | null>(
     null,
   );
@@ -517,15 +518,14 @@ export function GitDiffContent({
     setCommitRef('');
     setBranchRef('');
     setCommits(null);
+    setCommitsHasMore(false);
     setBranches(null);
-    setSourceLoading(null);
     setSourceError(null);
   }, [workspaceCwd, gitCwd]);
 
   useEffect(() => {
     if (mode !== 'commit' || commits !== null) return;
     let cancelled = false;
-    setSourceLoading('commit');
     setSourceError(null);
     client
       .workspaceByCwd(workspaceCwd)
@@ -533,13 +533,11 @@ export function GitDiffContent({
       .then((result) => {
         if (cancelled) return;
         setCommits(result.entries);
+        setCommitsHasMore(result.hasMore);
         setCommitRef(result.entries[0]?.sha ?? '');
       })
       .catch(() => {
         if (!cancelled) setSourceError('commit');
-      })
-      .finally(() => {
-        if (!cancelled) setSourceLoading(null);
       });
     return () => {
       cancelled = true;
@@ -549,7 +547,6 @@ export function GitDiffContent({
   useEffect(() => {
     if (mode !== 'branch' || branches !== null) return;
     let cancelled = false;
-    setSourceLoading('branch');
     setSourceError(null);
     client
       .workspaceByCwd(workspaceCwd)
@@ -565,9 +562,6 @@ export function GitDiffContent({
       })
       .catch(() => {
         if (!cancelled) setSourceError('branch');
-      })
-      .finally(() => {
-        if (!cancelled) setSourceLoading(null);
       });
     return () => {
       cancelled = true;
@@ -615,11 +609,14 @@ export function GitDiffContent({
   useEffect(() => {
     if (options === null) {
       setDiff(null);
-      setLoading(sourceLoading === mode);
+      const sourceReady =
+        mode === 'commit' ? commits !== null : branches !== null;
+      setLoading(!sourceReady && sourceError !== mode);
       setError(sourceError === mode);
       return;
     }
     let cancelled = false;
+    setDiff(null);
     setLoading(true);
     setError(false);
     const ws = client.workspaceByCwd(workspaceCwd);
@@ -639,7 +636,16 @@ export function GitDiffContent({
     return () => {
       cancelled = true;
     };
-  }, [client, workspaceCwd, gitCwd, mode, options, sourceLoading, sourceError]);
+  }, [
+    client,
+    workspaceCwd,
+    gitCwd,
+    mode,
+    options,
+    commits,
+    branches,
+    sourceError,
+  ]);
 
   const subtitle =
     diff && diff.available
@@ -705,7 +711,12 @@ export function GitDiffContent({
           id="git-diff-source"
           className={styles.sourceSelect}
           value={mode}
-          onChange={(event) => setMode(event.target.value as DaemonGitDiffMode)}
+          onChange={(event) => {
+            setDiff(null);
+            setLoading(true);
+            setError(false);
+            setMode(event.target.value as DaemonGitDiffMode);
+          }}
         >
           <option value="uncommitted">{t('gitDiff.source.uncommitted')}</option>
           <option value="unstaged">{t('gitDiff.source.unstaged')}</option>
@@ -720,7 +731,17 @@ export function GitDiffContent({
             label={t('gitDiff.source.selectCommit')}
             searchPlaceholder={t('gitDiff.source.searchCommit')}
             noMatches={t('gitDiff.source.noMatches')}
-            onChange={setCommitRef}
+            note={
+              commitsHasMore
+                ? t('gitDiff.source.olderCommitsOmitted')
+                : undefined
+            }
+            onChange={(ref) => {
+              setDiff(null);
+              setLoading(true);
+              setError(false);
+              setCommitRef(ref);
+            }}
           />
         )}
         {mode === 'branch' && branchItems.length > 0 && (
@@ -731,7 +752,12 @@ export function GitDiffContent({
             label={t('gitDiff.source.selectBranch')}
             searchPlaceholder={t('gitDiff.source.searchBranch')}
             noMatches={t('gitDiff.source.noMatches')}
-            onChange={setBranchRef}
+            onChange={(ref) => {
+              setDiff(null);
+              setLoading(true);
+              setError(false);
+              setBranchRef(ref);
+            }}
           />
         )}
       </div>
@@ -755,7 +781,7 @@ export function GitDiffDialog({
       allowFullscreen
       onClose={onClose}
     >
-      <GitDiffContent workspaceCwd={workspaceCwd} />
+      <GitDiffContent key={workspaceCwd} workspaceCwd={workspaceCwd} />
     </DialogShell>
   );
 }

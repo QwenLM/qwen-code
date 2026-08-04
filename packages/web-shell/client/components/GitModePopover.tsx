@@ -310,7 +310,13 @@ export function GitModePopover({
             role="radio"
             aria-checked={selectedMode === 'existing'}
             className={`${styles.option} ${selectedMode === 'existing' ? styles.optionSelected : ''}`}
-            onClick={() => setSelectedMode('existing')}
+            onClick={() => {
+              if (selectedMode === 'existing') return;
+              setExistingBranches(null);
+              setExistingLoading(true);
+              setExistingError(null);
+              setSelectedMode('existing');
+            }}
           >
             <span className={`${styles.optionIcon} ${styles.iconExisting}`}>
               <GitBranchIcon size={15} strokeWidth={1.5} />

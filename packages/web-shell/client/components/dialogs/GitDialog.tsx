@@ -70,6 +70,9 @@ export function GitDialog({
     ? TAB_VIEWS
     : TAB_VIEWS.filter((v) => v !== 'prs');
   const [view, setView] = useState(initialView);
+  const [diffVisited, setDiffVisited] = useState(
+    initialView === 'diff' || initialView === 'commit',
+  );
   const [subtitle, setSubtitle] = useState<string>();
   const [commitMsg, setCommitMsg] = useState('');
   const [commitBusy, setCommitBusy] = useState<'commit' | 'push' | null>(null);
@@ -218,9 +221,11 @@ export function GitDialog({
   )
     ? effectiveTab
     : 'diff';
+  const diffActive = clampedTab === 'diff' || isCommit;
 
   const selectView = useCallback((next: GitDialogView) => {
     setSubtitle(undefined);
+    if (next === 'diff' || next === 'commit') setDiffVisited(true);
     setView(next);
   }, []);
 
@@ -602,24 +607,28 @@ export function GitDialog({
           role="tabpanel"
           aria-labelledby={`git-dialog-tab-${isCommit ? 'commit' : clampedTab}`}
         >
-          {clampedTab === 'diff' || isCommit ? (
-            <GitDiffContent
-              workspaceCwd={workspaceCwd}
-              gitCwd={gitCwd}
-              onSubtitleChange={setSubtitle}
-            />
-          ) : clampedTab === 'log' ? (
+          {(diffVisited || diffActive) && (
+            <div hidden={!diffActive}>
+              <GitDiffContent
+                key={`${workspaceCwd}:${gitCwd ?? ''}`}
+                workspaceCwd={workspaceCwd}
+                gitCwd={gitCwd}
+                onSubtitleChange={diffActive ? setSubtitle : undefined}
+              />
+            </div>
+          )}
+          {!diffActive && clampedTab === 'log' ? (
             <GitLogContent
               workspaceCwd={workspaceCwd}
               gitCwd={gitCwd}
               onSubtitleChange={setSubtitle}
             />
-          ) : (
+          ) : !diffActive ? (
             <GitHubPrsContent
               workspaceCwd={workspaceCwd}
               onSubtitleChange={setSubtitle}
             />
-          )}
+          ) : null}
         </div>
         {isCommit && (
           <div className={styles.commitPanel}>

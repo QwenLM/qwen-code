@@ -183,6 +183,52 @@ describe('GitDiffDialog', () => {
     });
   });
 
+  it('clears the previous diff while a selected source is loading', async () => {
+    workspaceGitDiff.mockResolvedValue(diffPayload());
+    let resolveBranches: (value: {
+      head: string;
+      local: Array<{ name: string; isHead: boolean }>;
+      remote: never[];
+      tags: never[];
+    }) => void = () => {};
+    workspaceGitBranches.mockReturnValue(
+      new Promise((resolve) => {
+        resolveBranches = resolve;
+      }),
+    );
+    mount();
+    await flush();
+    expect(document.body.textContent).toContain('src/a.ts');
+
+    const source = document.body.querySelector(
+      '#git-diff-source',
+    ) as HTMLSelectElement;
+    act(() => {
+      source.value = 'branch';
+      source.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+
+    expect(document.body.textContent).not.toContain('src/a.ts');
+    expect(document.body.textContent).toContain('Loading changes');
+
+    await act(async () => {
+      resolveBranches({
+        head: 'main',
+        local: [
+          { name: 'main', isHead: true },
+          { name: 'topic', isHead: false },
+        ],
+        remote: [],
+        tags: [],
+      });
+    });
+    await flush();
+    expect(workspaceGitDiff).toHaveBeenLastCalledWith(undefined, {
+      mode: 'branch',
+      ref: 'topic',
+    });
+  });
+
   it('loads commit and branch choices and forwards the selected ref', async () => {
     workspaceGitDiff.mockResolvedValue(diffPayload());
     workspaceGitLog.mockResolvedValue({
@@ -199,7 +245,7 @@ describe('GitDiffDialog', () => {
           subject: 'search target',
         },
       ],
-      hasMore: false,
+      hasMore: true,
     });
     workspaceGitBranches.mockResolvedValue({
       head: 'current-branch',
@@ -240,6 +286,7 @@ describe('GitDiffDialog', () => {
     const commitSearch = document.body.querySelector(
       'input[aria-label="Search commits…"]',
     ) as HTMLInputElement;
+    expect(document.body.textContent).toContain('Older commits are not shown');
     const commitList = document.body.querySelector(
       '[role="listbox"][aria-label="Select commit"]',
     ) as HTMLDivElement;

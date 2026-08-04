@@ -8,6 +8,7 @@ import { execFile } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -444,6 +445,19 @@ describe('fetchGitDiff', () => {
     ).toBeNull();
   });
 
+  it('shows staged files before the first commit', async () => {
+    await fs.writeFile(path.join(repo, 'first.txt'), 'first\n');
+    await git(repo, 'add', 'first.txt');
+
+    const staged = await fetchGitDiff(repo, { mode: 'staged' });
+    expect(staged?.stats).toEqual({
+      filesCount: 1,
+      linesAdded: 1,
+      linesRemoved: 0,
+    });
+    expect([...staged!.perFileStats.keys()]).toEqual(['first.txt']);
+  });
+
   it('compares a selected commit with its parent, including a root commit', async () => {
     await fs.writeFile(path.join(repo, 'root.txt'), 'root\n');
     await git(repo, 'add', '.');
@@ -458,6 +472,7 @@ describe('fetchGitDiff', () => {
     const secondSha = (
       await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: repo })
     ).stdout.trim();
+    await fs.writeFile(path.join(repo, 'untracked.txt'), 'working tree only\n');
 
     const root = await fetchGitDiff(repo, { mode: 'commit', ref: rootSha });
     expect([...root!.perFileStats.keys()]).toEqual(['root.txt']);
@@ -466,12 +481,19 @@ describe('fetchGitDiff', () => {
       ref: secondSha,
     });
     expect([...second!.perFileStats.keys()]).toEqual(['second.txt']);
+    expect(second?.perFileStats.has('untracked.txt')).toBe(false);
     expect(
       await fetchGitDiffHunksForFile(repo, 'second.txt', undefined, {
         mode: 'commit',
         ref: secondSha,
       }),
     ).toMatchObject({ hunks: [{ lines: ['+second'] }] });
+    expect(
+      await fetchGitDiffHunksForFile(repo, 'untracked.txt', undefined, {
+        mode: 'commit',
+        ref: secondSha,
+      }),
+    ).toBeNull();
   });
 
   it('compares a selected branch tip with the current working tree', async () => {
@@ -496,6 +518,80 @@ describe('fetchGitDiff', () => {
     expect(
       await fetchGitDiff(repo, { mode: 'branch', ref: '--not-a-ref' }),
     ).toBeNull();
+  });
+
+  it('does not double-count an untracked path tracked by the baseline branch', async () => {
+    await fs.writeFile(path.join(repo, 'seed.txt'), 'seed\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'base');
+    await git(repo, 'switch', '-q', '-c', 'baseline');
+    await fs.writeFile(path.join(repo, 'collision.txt'), 'baseline\n');
+    await git(repo, 'add', 'collision.txt');
+    await git(repo, 'commit', '-q', '-m', 'baseline file');
+    await git(repo, 'switch', '-q', 'main');
+    await fs.writeFile(path.join(repo, 'collision.txt'), 'local untracked\n');
+
+    const result = await fetchGitDiff(repo, {
+      mode: 'branch',
+      ref: 'baseline',
+    });
+    expect(result?.stats).toEqual({
+      filesCount: 1,
+      linesAdded: 0,
+      linesRemoved: 1,
+    });
+    const collision = result?.perFileStats.get('collision.txt');
+    expect(collision?.isDeleted).toBe(true);
+    expect(collision?.isUntracked).toBeUndefined();
+    const hunks = await fetchGitDiffHunksForFile(
+      repo,
+      'collision.txt',
+      undefined,
+      { mode: 'branch', ref: 'baseline' },
+    );
+    expect(hunks?.hunks.flatMap((h) => h.lines)).toContain('-baseline');
+  });
+
+  it('does not treat a shallow boundary commit as a root commit', async () => {
+    await fs.writeFile(path.join(repo, 'first.txt'), 'first\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'first');
+    await fs.writeFile(path.join(repo, 'second.txt'), 'second\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'second');
+
+    const cloneRoot = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-gitdiff-shallow-'),
+    );
+    const shallow = path.join(cloneRoot, 'repo');
+    try {
+      await execFileAsync(
+        'git',
+        ['clone', '-q', '--depth=1', pathToFileURL(repo).href, shallow],
+        { cwd: cloneRoot },
+      );
+      expect(
+        await fetchGitDiff(shallow, { mode: 'commit', ref: 'HEAD' }),
+      ).toBeNull();
+    } finally {
+      await fs.rm(cloneRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('returns null instead of rejecting for NUL-bearing refs and paths', async () => {
+    await fs.writeFile(path.join(repo, 'seed.txt'), 'seed\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'base');
+
+    await expect(
+      fetchGitDiff(repo, { mode: 'commit', ref: '\0invalid' }),
+    ).resolves.toBeNull();
+    await expect(
+      fetchGitDiffHunksForFile(repo, 'bad\0path', undefined, {
+        mode: 'branch',
+        ref: 'HEAD',
+      }),
+    ).resolves.toBeNull();
   });
 
   it('compares a merge commit with its first parent', async () => {

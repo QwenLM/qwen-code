@@ -77,6 +77,7 @@ export interface GitDiffOptions {
 interface GitDiffComparison {
   args: string[];
   includeUntracked: boolean;
+  untrackedBaseRef?: string;
 }
 
 const GIT_TIMEOUT_MS = 5000;
@@ -170,7 +171,7 @@ export async function fetchGitDiff(
   // mechanism, but pinning both flags everywhere is defense-in-depth —
   // git's behavior around these drivers has shifted between versions
   // before.
-  const [shortstatOut, untrackedOut] = await Promise.all([
+  const [shortstatOut, untrackedOut, untrackedBaseOut] = await Promise.all([
     runGit(
       [
         '--no-optional-locks',
@@ -194,8 +195,32 @@ export async function fetchGitDiff(
           gitRoot,
         )
       : Promise.resolve(null),
+    comparison.untrackedBaseRef
+      ? runGit(
+          [
+            '--no-optional-locks',
+            'ls-tree',
+            '-r',
+            '--name-only',
+            '-z',
+            comparison.untrackedBaseRef,
+          ],
+          gitRoot,
+        )
+      : Promise.resolve(null),
   ]);
-  const untrackedCount = countNulDelimited(untrackedOut);
+  if (comparison.untrackedBaseRef && untrackedBaseOut == null) return null;
+  const untrackedBasePaths = untrackedBaseOut
+    ? new Set(splitNulDelimited(untrackedBaseOut))
+    : null;
+  const filteredUntrackedPaths = untrackedBasePaths
+    ? splitNulDelimited(untrackedOut).filter(
+        (filePath) => !untrackedBasePaths.has(filePath),
+      )
+    : null;
+  const untrackedCount = filteredUntrackedPaths
+    ? filteredUntrackedPaths.length
+    : countNulDelimited(untrackedOut);
 
   // Apply the >500-file fast path on tracked + untracked, treating "no
   // shortstat output" (no tracked changes) and "shortstat unparseable"
@@ -263,7 +288,8 @@ export async function fetchGitDiff(
     // already full. Otherwise `filesCount` under-reports whenever tracked
     // changes already fill the `MAX_FILES` slot.
     stats.filesCount += untrackedCount;
-    const untrackedPaths = splitNulDelimited(untrackedOut);
+    const untrackedPaths =
+      filteredUntrackedPaths ?? splitNulDelimited(untrackedOut);
     // Read line counts for *every* untracked path that survived the
     // `>MAX_FILES_FOR_DETAILS` fast-path filter (so up to ~500 files at the
     // outer cap, not just the first MAX_FILES). Otherwise a workspace with
@@ -406,6 +432,23 @@ export async function fetchGitDiffHunksForFile(
   // that drives the diff file list. A tracked-but-unchanged or ignored file
   // yields nothing here and returns null.
   if (!comparison.includeUntracked) return null;
+  if (comparison.untrackedBaseRef) {
+    const trackedAtBase = await runGit(
+      [
+        '--no-optional-locks',
+        'ls-tree',
+        '--name-only',
+        '-z',
+        comparison.untrackedBaseRef,
+        '--',
+        relPath,
+      ],
+      gitRoot,
+    );
+    if (trackedAtBase == null || countNulDelimited(trackedAtBase) > 0) {
+      return null;
+    }
+  }
   const untrackedOut = await runGit(
     [
       '--no-optional-locks',
@@ -430,7 +473,7 @@ async function resolveGitDiffComparison(
   const mode = options?.mode ?? 'uncommitted';
   if (mode === 'unstaged') return { args: [], includeUntracked: true };
   if (mode === 'staged') {
-    return { args: ['--cached', 'HEAD'], includeUntracked: false };
+    return { args: ['--cached'], includeUntracked: false };
   }
   if (mode === 'uncommitted') {
     return { args: ['HEAD'], includeUntracked: true };
@@ -439,10 +482,24 @@ async function resolveGitDiffComparison(
 
   const target = await resolveCommitRef(gitRoot, options.ref);
   if (!target) return null;
-  if (mode === 'branch') return { args: [target], includeUntracked: true };
+  if (mode === 'branch') {
+    return {
+      args: [target],
+      includeUntracked: true,
+      untrackedBaseRef: target,
+    };
+  }
 
   const parent = await resolveCommitRef(gitRoot, `${target}^1`);
   if (parent) return { args: [parent, target], includeUntracked: false };
+  const commitObject = await runGit(['cat-file', 'commit', target], gitRoot);
+  if (commitObject == null) return null;
+  const headerEnd = commitObject.indexOf('\n\n');
+  const headers = commitObject.slice(
+    0,
+    headerEnd === -1 ? commitObject.length : headerEnd,
+  );
+  if (/^parent [0-9a-f]{40,64}$/im.test(headers)) return null;
   const emptyTree = (
     await runGit(['hash-object', '-t', 'tree', '--stdin'], gitRoot, '')
   )?.trim();
@@ -1203,18 +1260,24 @@ async function runGit(
   // end up as literal keys in `perFileStats`.
   const fullArgs = ['-c', 'core.quotepath=false', ...args];
   return await new Promise((resolve) => {
-    const child = execFile(
-      'git',
-      fullArgs,
-      {
-        cwd,
-        timeout: GIT_TIMEOUT_MS,
-        maxBuffer: 64 * 1024 * 1024,
-        windowsHide: true,
-        encoding: 'utf8',
-      },
-      (error, stdout) => resolve(error ? null : stdout),
-    );
+    let child: ReturnType<typeof execFile>;
+    try {
+      child = execFile(
+        'git',
+        fullArgs,
+        {
+          cwd,
+          timeout: GIT_TIMEOUT_MS,
+          maxBuffer: 64 * 1024 * 1024,
+          windowsHide: true,
+          encoding: 'utf8',
+        },
+        (error, stdout) => resolve(error ? null : stdout),
+      );
+    } catch {
+      resolve(null);
+      return;
+    }
     if (input !== undefined) child.stdin?.end(input);
   });
 }
