@@ -253,6 +253,40 @@ describe('HttpHookRunner', () => {
       expect(mockFetch).toHaveBeenCalledTimes(1); // Still 1
     });
 
+    it('should not consume a once hook slot on an undelivered 3xx redirect', async () => {
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 302,
+        headers: new Headers({ location: 'https://api.example.com/moved' }),
+      });
+
+      const config = createMockConfig({ once: true });
+      const input = createMockInput();
+
+      const first = await httpRunner.execute(
+        config,
+        HookEventName.SessionStart,
+        input,
+      );
+      const second = await httpRunner.execute(
+        config,
+        HookEventName.SessionStart,
+        input,
+      );
+
+      // A redirect delivers no payload, so it cannot consume the one
+      // execution: both firings must fetch instead of skipping.
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      expect(first.output?.continue).toBe(true);
+      expect(first.output?.systemMessage).toContain(
+        'returned a redirect (302)',
+      );
+      // The redirect-warning slot is independent of the once slot: the
+      // remedy is still emitted only once.
+      expect(second.output?.systemMessage).toBeUndefined();
+      expect(second.output?.continue).toBe(true);
+    });
+
     it('should not follow redirects — 3xx is a non-blocking error and the target is never contacted', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: false,

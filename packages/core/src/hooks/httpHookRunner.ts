@@ -156,8 +156,8 @@ export class HttpHookRunner {
     }
 
     // Check once flag
+    const onceKey = `${hookConfig.url}:${eventName}`;
     if (hookConfig.once) {
-      const onceKey = `${hookConfig.url}:${eventName}`;
       if (this.executedOnceHooks.has(onceKey)) {
         debugLogger.debug(
           `Skipping once hook ${hookId} - already executed for ${eventName}`,
@@ -263,6 +263,12 @@ export class HttpHookRunner {
         // Execution continues, but we log a warning
         if (!response.ok) {
           if (response.status >= 300 && response.status < 400) {
+            // A redirect delivers no payload, so it must not consume a
+            // once hook's single execution: drop the slot added above so
+            // the hook fires again instead of silently no-op-ing forever.
+            if (hookConfig.once) {
+              this.executedOnceHooks.delete(onceKey);
+            }
             // With redirect: 'manual' a 3xx lands here; the endpoint is
             // behind a redirecting LB and silently no-ops unless the user
             // knows to repoint it, so name the target and the remedy.
