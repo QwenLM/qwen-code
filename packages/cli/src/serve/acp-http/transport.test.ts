@@ -53,6 +53,7 @@ import {
 } from '../../services/setup-github.js';
 import {
   MAX_READ_BYTES,
+  MAX_TEXT_CURSOR_CHARS,
   type ResolvedPath,
   type WorkspaceFileSystem,
   type WorkspaceFileSystemFactory,
@@ -151,6 +152,8 @@ function pushQueue(signal?: AbortSignal): PushIterable {
   };
 }
 
+const TEST_WORKSPACE = path.resolve('/ws');
+
 // A controllable fake bridge: tests register what `sendPrompt` should do.
 class FakeBridge {
   queues = new Map<string, PushIterable>();
@@ -173,6 +176,7 @@ class FakeBridge {
   gate: Promise<void> | undefined;
   /** `attached` value loadSession returns (false = spawned-from-disk). */
   loadAttached = true;
+  spawnSessionId = 'sess-1';
   spawnClientId: string | undefined = 'client-1';
   loadRequests: Array<{
     sessionId: string;
@@ -190,8 +194,8 @@ class FakeBridge {
     this.lastSpawnScope = req?.sessionScope;
     if (this.gate) await this.gate;
     return {
-      sessionId: 'sess-1',
-      workspaceCwd: '/ws',
+      sessionId: this.spawnSessionId,
+      workspaceCwd: TEST_WORKSPACE,
       attached: false,
       clientId: this.spawnClientId,
     };
@@ -215,7 +219,7 @@ class FakeBridge {
     if (this.gate) await this.gate;
     return {
       sessionId: req.sessionId,
-      workspaceCwd: '/ws',
+      workspaceCwd: TEST_WORKSPACE,
       attached: this.loadAttached,
       clientId: 'client-load',
       state: this.loadState,
@@ -231,7 +235,7 @@ class FakeBridge {
   async resumeSession(req: { sessionId: string }) {
     return {
       sessionId: req.sessionId,
-      workspaceCwd: '/ws',
+      workspaceCwd: TEST_WORKSPACE,
       attached: true,
       clientId: 'client-resume',
       state: { resumed: true },
@@ -314,7 +318,7 @@ class FakeBridge {
     return {
       v: 1,
       sessionId,
-      workspaceCwd: '/ws',
+      workspaceCwd: TEST_WORKSPACE,
       state: {
         configOptions: [
           {
@@ -352,7 +356,7 @@ class FakeBridge {
     );
     if (summary) return summary;
     if (sessionId === 'sess-1') {
-      return { sessionId, workspaceCwd: '/ws' };
+      return { sessionId, workspaceCwd: TEST_WORKSPACE };
     }
     throw new Error(`Session not found: ${sessionId}`);
   }
@@ -413,7 +417,7 @@ class FakeBridge {
     return {
       v: 1,
       sessionId,
-      workspaceCwd: '/ws',
+      workspaceCwd: TEST_WORKSPACE,
       enabled: true,
       configuredServers: 1,
       readyServers: 1,
@@ -561,7 +565,7 @@ async function writeJson(file: string, value: unknown): Promise<void> {
 // A minimal fake workspace service for dispatch tests.
 const fakeWorkspace = {
   async getWorkspaceMcpStatus() {
-    return { ok: true, v: 1, workspaceCwd: '/ws' };
+    return { ok: true, v: 1, workspaceCwd: TEST_WORKSPACE };
   },
   async getWorkspaceSkillsStatus() {
     return { ok: true };
@@ -578,7 +582,7 @@ const fakeWorkspace = {
   async getWorkspaceTrustStatus() {
     return {
       v: 1,
-      workspaceCwd: '/ws',
+      workspaceCwd: TEST_WORKSPACE,
       folderTrustEnabled: true,
       effective: { state: 'trusted', source: 'file' },
       explicitTrustLevel: 'TRUST_FOLDER',
@@ -627,7 +631,7 @@ const fakeWorkspace = {
   async getWorkspaceVoiceStatus() {
     return {
       v: 1,
-      workspaceCwd: '/ws',
+      workspaceCwd: TEST_WORKSPACE,
       enabled: false,
       mode: 'hold',
       language: '',
@@ -644,7 +648,7 @@ const fakeWorkspace = {
     };
     return {
       v: 1,
-      workspaceCwd: '/ws',
+      workspaceCwd: TEST_WORKSPACE,
       enabled: update.enabled === true,
       mode: update.mode ?? 'hold',
       language: update.language ?? '',
@@ -834,18 +838,24 @@ async function waitUntil(
 }
 
 describe('ACP Streamable HTTP transport (over the wire)', () => {
+  const boundWorkspace = TEST_WORKSPACE;
   let server: Server;
   let base: string;
   let bridge: FakeBridge;
   let acpHandle: AcpHttpHandle | undefined;
+  let previousRuntimeDir: string | undefined;
+  let runtimeDir: string;
 
   beforeEach(async () => {
+    previousRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+    runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-archive-'));
+    process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
     stdioMocks.writeStderrLine.mockClear();
     setupGithubMocks.setupGithub.mockReset();
     setupGithubMocks.setupGithub.mockResolvedValue({
       kind: 'github_setup',
-      workspaceCwd: '/ws',
-      gitRepoRoot: '/ws',
+      workspaceCwd: TEST_WORKSPACE,
+      gitRepoRoot: TEST_WORKSPACE,
       releaseTag: 'v1.2.3',
       readmeUrl: 'https://github.com/QwenLM/qwen-code-action',
       workflows: [],
@@ -884,7 +894,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       },
     });
     acpHandle = mountAcpHttp(app, bridge as unknown as HttpAcpBridge, {
-      boundWorkspace: '/ws',
+      boundWorkspace,
       workspace: fakeWorkspace,
       enabled: true,
       workspaceRememberLane,
@@ -901,6 +911,12 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     // `server.close()` doesn't hang on them.
     server.closeAllConnections?.();
     await new Promise<void>((r) => server.close(() => r()));
+    if (previousRuntimeDir === undefined) {
+      delete process.env['QWEN_RUNTIME_DIR'];
+    } else {
+      process.env['QWEN_RUNTIME_DIR'] = previousRuntimeDir;
+    }
+    await fs.rm(runtimeDir, { recursive: true, force: true });
   });
 
   async function restartServer(opts: {
@@ -915,13 +931,14 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     server.closeAllConnections?.();
     await new Promise<void>((r) => server.close(() => r()));
     bridge = opts.nextBridge ?? new FakeBridge();
-    const boundWorkspace = opts.boundWorkspace ?? '/ws';
+    const boundWorkspace = opts.boundWorkspace ?? TEST_WORKSPACE;
     const app = express();
     app.use(express.json());
     const workspaceRegistry = opts.generationGuard
       ? createSingleWorkspaceRegistry({
           workspaceId: 'primary',
           workspaceCwd: boundWorkspace,
+          sessionRuntimeBaseDir: Storage.getRuntimeBaseDir(),
           primary: true,
           trusted: opts.primaryTrusted ?? true,
           env: { mode: 'parent-process', overlayKeys: [] },
@@ -1018,21 +1035,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   async function withRuntimeDir<T>(
     fn: (runtimeDir: string) => Promise<T>,
   ): Promise<T> {
-    const previousRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
-    const runtimeDir = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-acp-archive-'),
-    );
-    process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
-    try {
-      return await fn(runtimeDir);
-    } finally {
-      if (previousRuntimeDir === undefined) {
-        delete process.env['QWEN_RUNTIME_DIR'];
-      } else {
-        process.env['QWEN_RUNTIME_DIR'] = previousRuntimeDir;
-      }
-      await fs.rm(runtimeDir, { recursive: true, force: true });
-    }
+    return fn(runtimeDir);
   }
 
   async function writeStoredSession(
@@ -1043,7 +1046,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     sourceId?: string,
   ): Promise<void> {
     const chatsDir = path.join(
-      new Storage('/ws').getProjectDir(),
+      new Storage(TEST_WORKSPACE).getProjectDir(),
       'chats',
       ...(state === 'archived' ? ['archive'] : []),
     );
@@ -1056,7 +1059,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         timestamp: '2026-06-30T00:00:00.000Z',
         type: 'user',
         message: { role: 'user', parts: [{ text: 'hello' }] },
-        cwd: '/ws',
+        cwd: TEST_WORKSPACE,
       }),
     ];
     if (parentSessionId !== undefined) {
@@ -1072,7 +1075,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           type: 'system',
           subtype: 'parent_session',
           systemPayload: { parentSessionId },
-          cwd: '/ws',
+          cwd: TEST_WORKSPACE,
         }),
       );
     }
@@ -1089,7 +1092,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
             sourceType,
             ...(sourceId !== undefined ? { sourceId } : {}),
           },
-          cwd: '/ws',
+          cwd: TEST_WORKSPACE,
         }),
       );
     }
@@ -1267,7 +1270,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       jsonrpc: '2.0',
       id: 2,
       method: 'session/new',
-      params: { cwd: '/ws' },
+      params: { cwd: TEST_WORKSPACE },
     });
     expect(ack.status).toBe(202);
     const [frame] = (await got) as Array<{
@@ -1290,7 +1293,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       jsonrpc: '2.0',
       id: 3,
       method: 'session/new',
-      params: { cwd: '/ws' },
+      params: { cwd: TEST_WORKSPACE },
     });
     expect(ack.status).toBe(202);
     const [frame] = (await got) as Array<{
@@ -1327,7 +1330,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       jsonrpc: '2.0',
       id: 3,
       method: 'session/new',
-      params: { cwd: '/ws' },
+      params: { cwd: TEST_WORKSPACE },
     });
     expect(ack.status).toBe(202);
     const [frame] = (await got) as Array<{
@@ -3119,7 +3122,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     bridge.workspaceSessions = [
       {
         sessionId: '11111111-bbbb-cccc-dddd-eeeeeeeeeeee',
-        workspaceCwd: '/ws',
+        workspaceCwd: TEST_WORKSPACE,
         createdAt: '2026-06-30T00:00:00.000Z',
         updatedAt: '2026-06-30T00:01:00.000Z',
         displayName: 'Listed Session',
@@ -3137,7 +3140,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       jsonrpc: '2.0',
       id: 13,
       method: 'session/list',
-      params: { workspaceCwd: '/ws' },
+      params: { workspaceCwd: TEST_WORKSPACE },
     });
 
     const [frame] = (await got) as Array<{
@@ -3147,8 +3150,8 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(frame.id).toBe(13);
     expect(frame.result.sessions[0]).toMatchObject({
       sessionId: '11111111-bbbb-cccc-dddd-eeeeeeeeeeee',
-      workspaceCwd: '/ws',
-      cwd: '/ws',
+      workspaceCwd: TEST_WORKSPACE,
+      cwd: TEST_WORKSPACE,
       createdAt: '2026-06-30T00:00:00.000Z',
       updatedAt: '2026-06-30T00:01:00.000Z',
       displayName: 'Listed Session',
@@ -3737,15 +3740,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   it.each(['session/load', 'session/resume'])(
     '%s rejects archived sessions',
     async (method) => {
-      const previousRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
-      const runtimeDir = await fs.mkdtemp(
-        path.join(os.tmpdir(), 'qwen-acp-archive-'),
-      );
-      process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
       const sessionId = '550e8400-e29b-41d4-a716-446655440123';
-      try {
+      await withRuntimeDir(async () => {
         const chatsDir = path.join(
-          new Storage('/ws').getProjectDir(),
+          new Storage(TEST_WORKSPACE).getProjectDir(),
           'chats',
           'archive',
         );
@@ -3759,7 +3757,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
             timestamp: '2026-06-30T00:00:00.000Z',
             type: 'user',
             message: { role: 'user', parts: [{ text: 'archived' }] },
-            cwd: '/ws',
+            cwd: TEST_WORKSPACE,
           })}\n`,
           'utf8',
         );
@@ -3782,14 +3780,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         expect(frame.id).toBe(211);
         expect(frame.error.code).toBe(-32603);
         expect(frame.error.data?.errorKind).toBe('session_archived');
-      } finally {
-        if (previousRuntimeDir === undefined) {
-          delete process.env['QWEN_RUNTIME_DIR'];
-        } else {
-          process.env['QWEN_RUNTIME_DIR'] = previousRuntimeDir;
-        }
-        await fs.rm(runtimeDir, { recursive: true, force: true });
-      }
+      });
     },
   );
 
@@ -3860,7 +3851,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
   });
 
-  it('session/load holds archive gate while restore is in flight', async () => {
+  it('session/load reports an archive conflict while restore is in flight', async () => {
     await withRuntimeDir(async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440124';
       await writeStoredSession(sessionId);
@@ -3877,7 +3868,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         await loadReleasedPromise;
         return {
           sessionId: req.sessionId,
-          workspaceCwd: '/ws',
+          workspaceCwd: TEST_WORKSPACE,
           attached: true,
           clientId: 'client-load',
           state: { replayed: true },
@@ -3903,9 +3894,14 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
       expect(await reader.next()).toMatchObject({
         id: 213,
-        error: {
-          code: -32603,
-          data: { errorKind: 'session_archiving', sessionId },
+        result: {
+          archived: [],
+          errors: [
+            {
+              sessionId,
+              error: expect.stringContaining('is being archived or unarchived'),
+            },
+          ],
         },
       });
 
@@ -3935,7 +3931,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           loadParent = (req as { parentSessionId?: string }).parentSessionId;
           return {
             sessionId: req.sessionId,
-            workspaceCwd: '/ws',
+            workspaceCwd: TEST_WORKSPACE,
             attached: true,
             clientId: 'client-load',
             state: { replayed: true },
@@ -3945,7 +3941,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           resumeParent = (req as { parentSessionId?: string }).parentSessionId;
           return {
             sessionId: req.sessionId,
-            workspaceCwd: '/ws',
+            workspaceCwd: TEST_WORKSPACE,
             attached: true,
             clientId: 'client-resume',
             state: { resumed: true },
@@ -3973,7 +3969,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     },
   );
 
-  it('session/prompt holds archive gate while prompt is in flight', async () => {
+  it('session/prompt reports an archive conflict while prompt is in flight', async () => {
     await withRuntimeDir(async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440127';
       await writeStoredSession(sessionId);
@@ -4023,9 +4019,14 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
       expect(await connReader.next()).toMatchObject({
         id: 219,
-        error: {
-          code: -32603,
-          data: { errorKind: 'session_archiving', sessionId },
+        result: {
+          archived: [],
+          errors: [
+            {
+              sessionId,
+              error: expect.stringContaining('is being archived or unarchived'),
+            },
+          ],
         },
       });
       expect(bridge.closedSessions).toEqual([]);
@@ -4798,7 +4799,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const app2 = express();
     app2.use(express.json());
     mountAcpHttp(app2, bridge as unknown as HttpAcpBridge, {
-      boundWorkspace: '/ws',
+      boundWorkspace: TEST_WORKSPACE,
       workspace: fakeWorkspace,
       enabled: true,
       maxConnections: 1,
@@ -4880,6 +4881,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   });
 
   it('session/new orphan: DELETE before spawn resolves removes the persisted session', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440126';
+    bridge.spawnSessionId = sessionId;
+    await writeStoredSession(sessionId);
     const removeSession = vi
       .spyOn(SessionService.prototype, 'removeSession')
       .mockResolvedValue(true);
@@ -4898,9 +4902,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       headers: { 'acp-connection-id': connId },
     });
     release(); // spawn resolves AFTER destroy
-    await new Promise((r) => setTimeout(r, 40));
-    expect(bridge.killed).toContain('sess-1');
-    expect(removeSession).toHaveBeenCalledWith('sess-1');
+    await vi.waitFor(() => {
+      expect(bridge.killed).toContain(sessionId);
+      expect(removeSession).toHaveBeenCalledWith(sessionId);
+    });
     removeSession.mockRestore();
   });
 
@@ -4921,8 +4926,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       headers: { 'acp-connection-id': connId },
     });
     release();
-    await new Promise((r) => setTimeout(r, 40));
-    expect(bridge.killed).toContain('sess-1');
+    await vi.waitFor(() => {
+      expect(bridge.killed).toContain('sess-1');
+    });
     expect(bridge.detached.some((d) => d.sessionId === 'sess-1')).toBe(false);
   });
 
@@ -5004,7 +5010,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       id: 213,
       result: {
         v: 1,
-        workspaceCwd: '/ws',
+        workspaceCwd: TEST_WORKSPACE,
         folderTrustEnabled: true,
       },
     });
@@ -5077,7 +5083,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       .spyOn(fakeWorkspace, 'getWorkspaceTrustStatus')
       .mockResolvedValueOnce({
         v: 1,
-        workspaceCwd: '/ws',
+        workspaceCwd: TEST_WORKSPACE,
         folderTrustEnabled: false,
         effective: { state: 'trusted', source: 'disabled' },
         explicitTrustLevel: null,
@@ -5308,7 +5314,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       id: 219,
       result: {
         v: 1,
-        workspaceCwd: '/ws',
+        workspaceCwd: TEST_WORKSPACE,
         enabled: false,
       },
     });
@@ -5508,14 +5514,14 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       id: 221,
       result: {
         kind: 'github_setup',
-        workspaceCwd: '/ws',
+        workspaceCwd: TEST_WORKSPACE,
         releaseTag: 'v1.2.3',
       },
     });
     expect(setupGithubMocks.setupGithub).toHaveBeenCalledWith(
       expect.objectContaining({
-        cwd: '/ws',
-        workspaceRoot: '/ws',
+        cwd: TEST_WORKSPACE,
+        workspaceRoot: TEST_WORKSPACE,
         proxy: 'http://runtime-proxy.example:8080',
         abortSignal: expect.any(AbortSignal),
         fileOps: expect.any(Object),
@@ -5583,8 +5589,8 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     await restartServer({ fsFactory: makeFileFsFactory({}) });
     const partial: SetupGithubResult = {
       kind: 'github_setup',
-      workspaceCwd: '/ws',
-      gitRepoRoot: '/ws',
+      workspaceCwd: TEST_WORKSPACE,
+      gitRepoRoot: TEST_WORKSPACE,
       releaseTag: 'v1.2.3',
       readmeUrl: 'https://github.com/QwenLM/qwen-code-action',
       workflows: [
@@ -5592,7 +5598,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           sourcePath: 'qwen-invoke.yml',
           path: '.github/workflows/qwen-invoke.yml',
           status: 'failed',
-          error: 'ENOSPC: open /ws/.github/workflows/qwen-invoke.yml',
+          error: `ENOSPC: open ${path.join(TEST_WORKSPACE, '.github', 'workflows', 'qwen-invoke.yml')}`,
         },
       ],
       gitignore: { path: '.gitignore', status: 'created' },
@@ -5627,7 +5633,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       workflows: [
         {
           ...partial.workflows[0],
-          error: 'ENOSPC: open <workspace>/.github/workflows/qwen-invoke.yml',
+          error: `ENOSPC: open <workspace>${path.sep}.github${path.sep}workflows${path.sep}qwen-invoke.yml`,
         },
       ],
     };
@@ -6606,7 +6612,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
     });
 
-    it('_qwen/session/artifacts/add holds the archive gate while mutating', async () => {
+    it('_qwen/session/artifacts/add reports an archive conflict while mutating', async () => {
       await withRuntimeDir(async () => {
         const sessionId = '550e8400-e29b-41d4-a716-446655440131';
         await writeStoredSession(sessionId);
@@ -6656,9 +6662,16 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         });
         expect(await reader.next()).toMatchObject({
           id: 61,
-          error: {
-            code: -32603,
-            data: { errorKind: 'session_archiving', sessionId },
+          result: {
+            archived: [],
+            errors: [
+              {
+                sessionId,
+                error: expect.stringContaining(
+                  'is being archived or unarchived',
+                ),
+              },
+            ],
           },
         });
 
@@ -6671,7 +6684,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
     });
 
-    it('_qwen/session/artifacts/remove holds the archive gate while mutating', async () => {
+    it('_qwen/session/artifacts/remove reports an archive conflict while mutating', async () => {
       await withRuntimeDir(async () => {
         const sessionId = '550e8400-e29b-41d4-a716-446655440132';
         await writeStoredSession(sessionId);
@@ -6729,9 +6742,16 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         });
         expect(await reader.next()).toMatchObject({
           id: 63,
-          error: {
-            code: -32603,
-            data: { errorKind: 'session_archiving', sessionId },
+          result: {
+            archived: [],
+            errors: [
+              {
+                sessionId,
+                error: expect.stringContaining(
+                  'is being archived or unarchived',
+                ),
+              },
+            ],
           },
         });
 
@@ -6824,15 +6844,15 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     it.each([
       [
         '_qwen/workspace/session_groups/create',
-        { workspaceCwd: '/ws', name: 'Blocked', color: 'blue' },
+        { workspaceCwd: TEST_WORKSPACE, name: 'Blocked', color: 'blue' },
       ],
       [
         '_qwen/workspace/session_groups/update',
-        { workspaceCwd: '/ws', groupId: 'blocked', name: 'Blocked' },
+        { workspaceCwd: TEST_WORKSPACE, groupId: 'blocked', name: 'Blocked' },
       ],
       [
         '_qwen/workspace/session_groups/delete',
-        { workspaceCwd: '/ws', groupId: 'blocked' },
+        { workspaceCwd: TEST_WORKSPACE, groupId: 'blocked' },
       ],
     ])(
       'rejects untrusted session group mutation %s',
@@ -6878,7 +6898,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           await readReleased;
           return {
             v: 1,
-            workspaceCwd: '/ws',
+            workspaceCwd: TEST_WORKSPACE,
             initialized: false,
             servers: [],
           };
@@ -6937,7 +6957,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           id: 593,
           method: '_qwen/workspace/session_groups/create',
           params: {
-            workspaceCwd: '/ws',
+            workspaceCwd: TEST_WORKSPACE,
             name: 'Stale',
             color: 'blue',
           },
@@ -6987,7 +7007,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           id: 70,
           method: '_qwen/workspace/session_groups/create',
           params: {
-            workspaceCwd: '/ws',
+            workspaceCwd: TEST_WORKSPACE,
             name: 'Frontend',
             color: '#12ABEF',
           },
@@ -7024,7 +7044,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           id: 72,
           method: 'session/list',
           params: {
-            workspaceCwd: '/ws',
+            workspaceCwd: TEST_WORKSPACE,
             view: 'organized',
             group: group.id,
             _meta: { size: 20 },
@@ -7046,7 +7066,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           jsonrpc: '2.0',
           id: 73,
           method: '_qwen/workspace/session_groups/delete',
-          params: { workspaceCwd: '/ws', groupId: group.id },
+          params: { workspaceCwd: TEST_WORKSPACE, groupId: group.id },
         });
         expect(await reader.next()).toMatchObject({
           result: { deleted: true },
@@ -7057,7 +7077,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           id: 74,
           method: 'session/list',
           params: {
-            workspaceCwd: '/ws',
+            workspaceCwd: TEST_WORKSPACE,
             view: 'organized',
             group: 'ungrouped',
             _meta: { size: 20 },
@@ -7102,7 +7122,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           id: 81,
           method: 'session/list',
           params: {
-            workspaceCwd: '/ws',
+            workspaceCwd: TEST_WORKSPACE,
             view: 'organized',
             group: 'all',
             _meta: { size: 20 },
@@ -7141,7 +7161,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           id: 87,
           method: 'session/list',
           params: {
-            workspaceCwd: '/ws',
+            workspaceCwd: TEST_WORKSPACE,
             view: 'organized',
             group: 'all',
             sourceType: 'default',
@@ -7189,7 +7209,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           id: 83,
           method: 'session/list',
           params: {
-            workspaceCwd: '/ws',
+            workspaceCwd: TEST_WORKSPACE,
             view: 'organized',
             group: 'ungrouped',
             _meta: { size: 20 },
@@ -7215,7 +7235,11 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           jsonrpc: '2.0',
           id: 84,
           method: '_qwen/workspace/session_groups/create',
-          params: { workspaceCwd: '/ws', name: 'Frontend', color: 'blue' },
+          params: {
+            workspaceCwd: TEST_WORKSPACE,
+            name: 'Frontend',
+            color: 'blue',
+          },
         });
         const createFrame = (await reader.next()) as {
           result: { group: { id: string } };
@@ -7240,7 +7264,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           id: 86,
           method: 'session/list',
           params: {
-            workspaceCwd: '/ws',
+            workspaceCwd: TEST_WORKSPACE,
             view: 'organized',
             group: groupId,
             _meta: { size: 20 },
@@ -7262,7 +7286,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         id: 75,
         method: 'session/list',
         params: {
-          workspaceCwd: '/ws',
+          workspaceCwd: TEST_WORKSPACE,
           group: 'pinned',
         },
       });
@@ -7285,7 +7309,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         id: 76,
         method: 'session/list',
         params: {
-          workspaceCwd: '/ws',
+          workspaceCwd: TEST_WORKSPACE,
           parentSessionId: '',
         },
       });
@@ -7308,7 +7332,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         id: 77,
         method: 'session/list',
         params: {
-          workspaceCwd: '/ws',
+          workspaceCwd: TEST_WORKSPACE,
           view: 'organized',
           parentSessionId: 'parent-1',
         },
@@ -7341,7 +7365,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           id: 78,
           method: 'session/list',
           params: {
-            workspaceCwd: '/ws',
+            workspaceCwd: TEST_WORKSPACE,
             parentSessionId: parentId,
             _meta: { size: 20 },
           },
@@ -7553,46 +7577,47 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     it('_qwen/sessions/delete sanitizes stderr remove errors', async () => {
       const lineSep = '\u2028';
       const bidiOverride = '\u202e';
-      const sessionId = `sess${lineSep}FAKE\r\x1b[31m`;
+      const sessionId = '550e8400-e29b-41d4-a716-446655440127';
       const removeError = `remove\nFAILED\r\x1b[31m${lineSep}${bidiOverride}`;
-      const removeSessionSpy = vi
-        .spyOn(SessionService.prototype, 'removeSession')
-        .mockRejectedValueOnce(new Error(removeError));
+      await withRuntimeDir(async () => {
+        await writeStoredSession(sessionId);
+        const removeSessionSpy = vi
+          .spyOn(SessionService.prototype, 'removeSession')
+          .mockRejectedValueOnce(new Error(removeError));
 
-      try {
-        const connId = await initialize();
-        const streamRes = openStream(connId);
-        await new Promise((r) => setTimeout(r, 30));
-        await post(connId, {
-          jsonrpc: '2.0',
-          id: 68,
-          method: '_qwen/sessions/delete',
-          params: { sessionIds: [sessionId] },
-        });
-        const frames = await takeFrames(await streamRes, 1);
-        expect(frames[0]).toMatchObject({
-          result: {
-            removed: [],
-            notFound: [],
-            errors: [{ sessionId, error: removeError }],
-          },
-        });
-        expect(removeSessionSpy).toHaveBeenCalledWith(sessionId);
+        try {
+          const connId = await initialize();
+          const streamRes = openStream(connId);
+          await new Promise((r) => setTimeout(r, 30));
+          await post(connId, {
+            jsonrpc: '2.0',
+            id: 68,
+            method: '_qwen/sessions/delete',
+            params: { sessionIds: [sessionId] },
+          });
+          const frames = await takeFrames(await streamRes, 1);
+          expect(frames[0]).toMatchObject({
+            result: {
+              removed: [],
+              notFound: [],
+              errors: [{ sessionId, error: removeError }],
+            },
+          });
+          expect(removeSessionSpy).toHaveBeenCalledWith(sessionId);
 
-        const deleteLog = stdioMocks.writeStderrLine.mock.calls
-          .map(([line]) => line)
-          .find((line) => line.includes('sessions/delete'));
-        expect(deleteLog).toContain(
-          'removeSession(sess FAK) failed: remove FAILED  [31m',
-        );
-        expect(deleteLog).not.toContain('\n');
-        expect(deleteLog).not.toContain('\r');
-        expect(deleteLog).not.toContain('\x1b');
-        expect(deleteLog).not.toContain(lineSep);
-        expect(deleteLog).not.toContain(bidiOverride);
-      } finally {
-        removeSessionSpy.mockRestore();
-      }
+          const deleteLog = stdioMocks.writeStderrLine.mock.calls
+            .map(([line]) => line)
+            .find((line) => line.includes('sessions/delete'));
+          expect(deleteLog).toContain('remove FAILED  [31m');
+          expect(deleteLog).not.toContain('\n');
+          expect(deleteLog).not.toContain('\r');
+          expect(deleteLog).not.toContain('\x1b');
+          expect(deleteLog).not.toContain(lineSep);
+          expect(deleteLog).not.toContain(bidiOverride);
+        } finally {
+          removeSessionSpy.mockRestore();
+        }
+      });
     });
 
     it('_qwen/sessions/delete deletes available ids when another id is loading', async () => {
@@ -7616,7 +7641,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           }
           return {
             sessionId: req.sessionId,
-            workspaceCwd: '/ws',
+            workspaceCwd: TEST_WORKSPACE,
             attached: true,
             clientId: 'client-load',
             state: { replayed: true },
@@ -7659,7 +7684,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
     });
 
-    it('_qwen/sessions/delete does not make missing archive ids wait on live close', async () => {
+    it('_qwen/sessions/archive returns session_archiving while delete owns the gate', async () => {
       const sessionId = 'delete-archive-race';
       let firstCloseStarted!: () => void;
       let releaseFirstClose!: () => void;
@@ -7720,7 +7745,12 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
             }),
             expect.objectContaining({
               id: 70,
-              result: expect.objectContaining({ notFound: [sessionId] }),
+              error: expect.objectContaining({
+                data: {
+                  errorKind: 'session_archiving',
+                  sessionId,
+                },
+              }),
             }),
           ]),
         );
@@ -8141,6 +8171,41 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         maxBytes: undefined,
         line: undefined,
         limit: undefined,
+        cursor: undefined,
+      });
+    });
+
+    it('_qwen/file/read forwards a valid cursor and returns paged content', async () => {
+      const readText = vi.fn(async () => ({
+        content: 'page-two',
+        meta: { truncated: true, nextCursor: 'cursor-2' },
+      }));
+      await restartServer({
+        fsFactory: makeFileFsFactory({ readText }),
+      });
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 93,
+        method: '_qwen/file/read',
+        params: { path: 'test.txt', cursor: 'cursor-1' },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({
+        result: {
+          path: 'test.txt',
+          content: 'page-two',
+          truncated: true,
+          nextCursor: 'cursor-2',
+        },
+      });
+      expect(readText).toHaveBeenCalledWith(resolvedPath('/ws/test.txt'), {
+        maxBytes: undefined,
+        line: undefined,
+        limit: undefined,
+        cursor: 'cursor-1',
       });
     });
 
@@ -8160,6 +8225,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       { limit: 1.5 },
       { limit: '1' },
       { limit: null },
+      { cursor: '' },
+      { cursor: 123 },
+      { cursor: 'x'.repeat(MAX_TEXT_CURSOR_CHARS + 1) },
     ])('_qwen/file/read rejects invalid window params (%j)', async (params) => {
       const readText = vi.fn(async () => ({
         content: 'hello',
@@ -8485,7 +8553,7 @@ describe('ACP WebSocket transport security', () => {
       const app = express();
       app.use(express.json());
       const handle = mountAcpHttp(app, bridge as unknown as HttpAcpBridge, {
-        boundWorkspace: '/ws',
+        boundWorkspace: TEST_WORKSPACE,
         workspace: fakeWorkspace,
         enabled: true,
         daemonEnv: opts.daemonEnv,

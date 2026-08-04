@@ -177,7 +177,7 @@ export interface BridgeOptions {
    * Cap on concurrent live sessions. `spawnOrAttach` calls that would
    * cross this throw `SessionLimitExceededError`; attaches to an
    * existing session (same workspace under `single` scope) are not
-   * counted. `0` / `Infinity` disable the cap. Defaults to 20 — see
+   * counted. `0` / `Infinity` disable the cap. Defaults to 32 — see
    * `ServeOptions.maxSessions` for the rationale.
    */
   maxSessions?: number;
@@ -477,9 +477,15 @@ export interface BridgeOptions {
  * package free of an MCP-SDK dependency; the serve layer passes a
  * `JSONRPCMessage`.
  */
+export interface ClientMcpMessageContext {
+  sessionId?: string;
+}
+
 export type ClientMcpMessageSender = (
   serverName: string,
-) => ((payload: unknown) => Promise<unknown>) | undefined;
+) =>
+  | ((payload: unknown, context?: ClientMcpMessageContext) => Promise<unknown>)
+  | undefined;
 
 /** Ceiling on a sub-session prompt arriving over `extMethod`. The child is a
  * separate process, so this is a trust boundary — mirrors the scheduled-task

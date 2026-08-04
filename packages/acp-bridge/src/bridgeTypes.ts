@@ -98,6 +98,14 @@ export interface BridgeSpawnRequest {
   worktree?: { slug: string; path: string; branch: string };
   /** Branch metadata, set by the daemon route before spawn. */
   branch?: { name: string; baseBranch: string };
+  /**
+   * Optional caller-supplied session id. When provided, the agent uses this
+   * id instead of generating a random UUID. Must be validated at the route
+   * boundary since the core Config constructor uses it verbatim. Passed
+   * through ACP `_meta` since the protocol's NewSessionRequest has no native
+   * sessionId field.
+   */
+  sessionId?: string;
 }
 
 export interface BridgeSession {
@@ -147,6 +155,8 @@ export interface BridgeRestoreSessionRequest {
   historyReplay?: 'stream' | 'response';
   /** Optional newest persisted-record page requested for response replay. */
   historyPageSize?: number;
+  /** Keep inherited fork records as model context without replaying them. */
+  hideInheritedHistory?: boolean;
   approvalMode?: ApprovalMode;
   /**
    * Persisted parent lineage recovered from the transcript by the caller (the
@@ -165,12 +175,17 @@ export interface BridgeRestoreSessionRequest {
 export const LOAD_REPLAY_MODE_META_KEY = 'qwen.session.loadReplayMode';
 export const LOAD_REPLAY_META_KEY = 'qwen.session.loadReplay';
 export const LOAD_REPLAY_PAGE_SIZE_META_KEY = 'qwen.session.loadReplayPageSize';
+export const LOAD_REPLAY_HIDE_INHERITED_META_KEY =
+  'qwen.session.loadReplayHideInherited';
 export const LOAD_REPLAY_BULK_MODE = 'bulk';
 export const LOAD_REPLAY_VERSION = 1 as const;
+
+export const REQUESTED_SESSION_ID_META_KEY = 'qwen-code/sessionId';
 
 export const CHANNEL_STARTUP_PROFILE_META_KEY =
   'qwen.daemon.channelStartupProfile';
 export const CHANNEL_STARTUP_PROFILE_VERSION = 1 as const;
+export const WORKTREE_MCP_DEFER_META_KEY = 'qwen.session.deferMcpDiscovery';
 
 export interface ChannelStartupProfileV1 {
   v: typeof CHANNEL_STARTUP_PROFILE_VERSION;
@@ -234,6 +249,16 @@ export interface BridgeRestoredSession extends BridgeSession {
   liveJournal?: BridgeEvent[];
   /** True when persisted records exist before the returned replay page. */
   historyHasMore?: boolean;
+  /**
+   * Fallback pagination anchor: the oldest recordId in the last
+   * persisted transcript page, read when the replay snapshot's
+   * `history_truncated` marker carries none (live session whose
+   * in-flight turn capped the journal
+   * before any turn boundary). Clients use it as `beforeRecordId` when
+   * no recordId is available in the retained window. Absent when no
+   * anchor was needed or none could be read.
+   */
+  historyAnchorRecordId?: string;
   /** High-water mark event ID — client uses this as initial SSE cursor. */
   lastEventId?: number;
   /**
@@ -274,11 +299,23 @@ export interface BridgeSessionTranscriptPage {
 
 export interface BridgeBranchSessionRequest {
   name?: string;
+  sourceType?: string;
+  sourceId?: string;
+  replayInheritedHistory?: boolean;
 }
 
 export interface BridgeBranchedSession extends BridgeRestoredSession {
   displayName: string;
   forkedFrom: { sessionId: string; displayName: string };
+}
+
+export interface BridgeSideTaskSessionRequest {
+  name?: string;
+}
+
+export interface BridgeSideTaskSession extends BridgeRestoredSession {
+  displayName: string;
+  parentSessionId: string;
 }
 
 export interface BridgeForkAgentResult {
@@ -568,6 +605,24 @@ export interface BridgeHeartbeatState {
 export const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
 
 /**
+ * Child-to-parent request that atomically assigns the next Todo Stop Guard
+ * model send to the current daemon FIFO owner. `promptId`, when present, is
+ * the trusted bridge invocation id rather than the provider-facing prompt id.
+ */
+export const TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD =
+  'craft/claimTodoStopGuardContinuation';
+
+export interface TodoStopGuardContinuationClaimRequest {
+  sessionId: string;
+  promptId?: string;
+}
+
+export interface TodoStopGuardContinuationClaimResponse {
+  claimed: boolean;
+  hasQueuedPrompt: boolean;
+}
+
+/**
  * Parent-to-agent request reporting that the daemon FIFO no longer contains the
  * complete prompt an active Todo Stop Guard yielded to. The child clears the
  * old guard instead of letting background work revive it or leaving unrelated
@@ -575,6 +630,11 @@ export const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
  */
 export const TODO_STOP_GUARD_QUEUE_RELEASE_METHOD =
   'craft/todoStopGuardQueueReleased';
+
+export interface TodoStopGuardQueueReleasedRequest {
+  sessionId: string;
+  promptId: string;
+}
 
 /** Parent-to-agent request that acknowledges prompt cancellation handling. */
 export const PROMPT_CANCEL_METHOD = 'craft/cancelPendingPrompt';
@@ -611,6 +671,7 @@ export type ClientMcpOverWsRuntimeConfig = Record<string, unknown> & {
  * same session must not dedupe a message it did not queue.
  */
 export interface MidTurnQueueEntry {
+  messageId: string;
   text: string;
   originatorClientId?: string;
 }
@@ -782,6 +843,30 @@ export type BridgeWorkspaceGenerationNotificationEvent = Exclude<
   { type: 'done' }
 >;
 
+export type RuntimeMcpServerAddResult =
+  | {
+      name: string;
+      transport: string;
+      replaced: boolean;
+      shadowedSettings: boolean;
+      toolCount: number;
+      originatorClientId: string;
+    }
+  | {
+      name: string;
+      skipped: true;
+      reason: 'budget_warning_only' | 'runtime_name_conflict';
+    };
+
+export type RuntimeMcpServerRemoveResult =
+  | {
+      name: string;
+      removed: true;
+      wasShadowingSettings: boolean;
+      originatorClientId: string;
+    }
+  | { name: string; skipped: true; reason: 'not_present' };
+
 export interface AcpSessionBridge {
   /** Read-only daemon diagnostics for status endpoints. */
   getDaemonStatusSnapshot(): BridgeDaemonStatusSnapshot;
@@ -817,6 +902,13 @@ export interface AcpSessionBridge {
     req: BridgeBranchSessionRequest,
     context?: BridgeClientRequestContext,
   ): Promise<BridgeBranchedSession>;
+
+  /** Create a persisted side task with a snapshot of the parent's context. */
+  createSideTaskSession(
+    sessionId: string,
+    req: BridgeSideTaskSessionRequest,
+    context?: BridgeClientRequestContext,
+  ): Promise<BridgeSideTaskSession>;
 
   /**
    * Change the working directory of a live session. The session must be
@@ -1347,7 +1439,14 @@ export interface AcpSessionBridge {
     sessionId: string,
     message: string,
     context?: BridgeClientRequestContext,
-  ): { accepted: boolean };
+  ): { accepted: boolean; messageId?: string };
+
+  /** Remove a message that has not yet been drained into the running turn. */
+  removeMidTurnMessage(
+    sessionId: string,
+    messageId: string,
+    context?: BridgeClientRequestContext,
+  ): { removed: boolean };
 
   /**
    * Execute a shell command directly on the daemon (no LLM involvement).
@@ -1400,21 +1499,7 @@ export interface AcpSessionBridge {
     name: string,
     config: Record<string, unknown>,
     originatorClientId?: string,
-  ): Promise<
-    | {
-        name: string;
-        transport: string;
-        replaced: boolean;
-        shadowedSettings: boolean;
-        toolCount: number;
-        originatorClientId: string;
-      }
-    | {
-        name: string;
-        skipped: true;
-        reason: 'budget_warning_only' | 'runtime_name_conflict';
-      }
-  >;
+  ): Promise<RuntimeMcpServerAddResult>;
 
   /**
    * Remove a runtime MCP server through the ACP child's
@@ -1427,15 +1512,26 @@ export interface AcpSessionBridge {
   removeRuntimeMcpServer(
     name: string,
     originatorClientId?: string,
-  ): Promise<
-    | {
-        name: string;
-        removed: true;
-        wasShadowingSettings: boolean;
-        originatorClientId: string;
-      }
-    | { name: string; skipped: true; reason: 'not_present' }
-  >;
+  ): Promise<RuntimeMcpServerRemoveResult>;
+
+  /**
+   * Add a runtime MCP server to one live session only. This does not mutate
+   * workspace bootstrap state, affect sibling sessions, or emit a workspace
+   * event.
+   */
+  addSessionRuntimeMcpServer(
+    sessionId: string,
+    name: string,
+    config: Record<string, unknown>,
+    originatorClientId?: string,
+  ): Promise<RuntimeMcpServerAddResult>;
+
+  /** Remove a runtime MCP server from one live session only. */
+  removeSessionRuntimeMcpServer(
+    sessionId: string,
+    name: string,
+    originatorClientId?: string,
+  ): Promise<RuntimeMcpServerRemoveResult>;
 
   manageMcpServer(
     serverName: string,

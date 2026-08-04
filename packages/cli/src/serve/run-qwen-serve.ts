@@ -42,6 +42,10 @@ import {
 } from './workspace-inputs.js';
 import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
+  formatMemoryBudgetStderr,
+  resolveDaemonMemoryBudget,
+} from '@qwen-code/acp-bridge/daemonMemoryBudget';
+import {
   canonicalizeWorkspace,
   translateAndCheckAbsoluteWorkspacePath,
 } from '@qwen-code/acp-bridge/workspacePaths';
@@ -51,6 +55,7 @@ import type {
   TelemetryRuntimeConfig,
   TelemetrySettings,
 } from '@qwen-code/qwen-code-core';
+import { MEMORY_PROJECT_SCOPES } from '@qwen-code/qwen-code-core/memoryScopes';
 import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 // Dynamic-imported below (not at module scope) so the serve fast-path bundle
 // closure check doesn't trace create-sub-session's transitive deps through
@@ -126,12 +131,14 @@ import {
   listenerMaxConnections,
   parseDaemonStatusDetail,
   positiveFiniteOrNull,
+  toDaemonStatusMemoryLimits,
   type DaemonStatusIssue,
   type DaemonPerfSnapshot,
   type DaemonStartupSnapshot,
   type DaemonStatusResponse,
 } from './daemon-status.js';
-import { DaemonMetricsRing, computeCpuPercent } from './daemon-metrics-ring.js';
+import { DaemonMetricsRing } from './daemon-metrics-ring.js';
+import { computeCpuPercent } from '../runtime/cpu-percent.js';
 import { createLargePipeFrameObserver } from './large-pipe-frame-observer.js';
 import type {
   ChannelWorkerSupervisor,
@@ -143,7 +150,7 @@ import { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
 import {
   ChannelDeliveryError,
   isChannelDeliveryError,
-} from './channel-delivery-ipc.js';
+} from '../runtime/channel-delivery-ipc.js';
 import { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorization.js';
 import {
   normalizeWorkerDiagnostic,
@@ -359,7 +366,7 @@ const FAST_PATH_RUNTIME_START_AFTER_HEALTH_MS = 50;
 const FAST_PATH_RUNTIME_START_FALLBACK_MS = 1_000;
 const RUNTIME_STARTUP_TIMEOUT_ENV = 'QWEN_SERVE_RUNTIME_STARTUP_TIMEOUT_MS';
 const MAX_EVENT_RING_SIZE = 1_000_000;
-const DEFAULT_MAX_SESSIONS = 20;
+const DEFAULT_MAX_SESSIONS = 32;
 const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
 const DEFAULT_EVENT_RING_SIZE = 8000;
 const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 30 * 60_000;
@@ -681,6 +688,51 @@ function sessionArtifactsPersistenceAvailableFromSettings(
 }
 
 /**
+ * Reads the optional `serve.maxConcurrentSubSessions*` overrides. Only
+ * positive integers are honored; anything else falls back to the launcher's
+ * built-in defaults. A present-but-invalid value is reported through
+ * `onWarning` (matching the other settings-load fallback sites in this file)
+ * so an operator who mistypes a cap sees the fallback instead of silently
+ * running on the default. Caps are a daemon-resource control, so an untrusted
+ * workspace's settings (skipped at load time) must not raise them — the
+ * caller passes the already trust-filtered merged settings.
+ */
+export function subSessionConcurrencyCapsFromSettings(
+  serve: {
+    maxConcurrentSubSessionsPerCaller?: unknown;
+    maxConcurrentSubSessionsTotal?: unknown;
+  },
+  onWarning: (message: string) => void = writeStderrLine,
+): {
+  maxConcurrentPerCaller?: number;
+  maxConcurrentTotal?: number;
+} {
+  const asCap = (key: string, value: unknown): number | undefined => {
+    if (value === undefined) return undefined;
+    if (typeof value === 'number' && Number.isInteger(value) && value >= 1) {
+      return value;
+    }
+    onWarning(
+      `qwen serve: ignoring invalid ${key} (${JSON.stringify(value)}); ` +
+        `expected a positive integer, falling back to the built-in default.`,
+    );
+    return undefined;
+  };
+  const maxConcurrentPerCaller = asCap(
+    'maxConcurrentSubSessionsPerCaller',
+    serve.maxConcurrentSubSessionsPerCaller,
+  );
+  const maxConcurrentTotal = asCap(
+    'maxConcurrentSubSessionsTotal',
+    serve.maxConcurrentSubSessionsTotal,
+  );
+  return {
+    ...(maxConcurrentPerCaller !== undefined ? { maxConcurrentPerCaller } : {}),
+    ...(maxConcurrentTotal !== undefined ? { maxConcurrentTotal } : {}),
+  };
+}
+
+/**
  * Per-workspace promise chain that serializes settings read-modify-write
  * cycles inside this process.
  *
@@ -728,6 +780,8 @@ export interface RunHandle {
   /** Resolves when the listener has fully closed and the bridge is drained. */
   close(): Promise<void>;
 }
+
+const retryableChannelWorkerShutdownErrors = new WeakSet<Error>();
 
 type CoreRuntime = typeof import('./core-runtime.js');
 type ProviderConfig = NonNullable<ReturnType<CoreRuntime['findProviderById']>>;
@@ -1048,6 +1102,7 @@ async function loadServeRuntimeModules() {
     serverModule,
     bridgeModule,
     spawnChannelModule,
+    processRegistryModule,
     workspaceModule,
     workspaceTypesModule,
     daemonStatusProviderModule,
@@ -1059,6 +1114,7 @@ async function loadServeRuntimeModules() {
     import('./server.js'),
     import('@qwen-code/acp-bridge/bridge'),
     import('@qwen-code/acp-bridge/spawnChannel'),
+    import('@qwen-code/acp-bridge/processRegistry'),
     import('./workspace-service/index.js'),
     import('./workspace-service/types.js'),
     import('./daemon-status-provider.js'),
@@ -1075,6 +1131,7 @@ async function loadServeRuntimeModules() {
     resolveBridgeFsFactory: serverModule.resolveBridgeFsFactory,
     createAcpSessionBridge: bridgeModule.createAcpSessionBridge,
     createSpawnChannelFactory: spawnChannelModule.createSpawnChannelFactory,
+    ProcessRegistry: processRegistryModule.ProcessRegistry,
     createDaemonWorkspaceService: workspaceModule.createDaemonWorkspaceService,
     WorkspaceSettingsPartialPersistError:
       workspaceTypesModule.WorkspaceSettingsPartialPersistError,
@@ -1545,6 +1602,7 @@ function createBootstrapServeApp(input: {
         channelIdleTimeoutMs: channelIdleTimeoutMs(opts.channelIdleTimeoutMs),
         sessionIdleTimeoutMs: sessionIdleTimeoutMs(opts.sessionIdleTimeoutMs),
         acpConnectionCap: null,
+        memory: toDaemonStatusMemoryLimits(opts.daemonMemoryBudget),
       },
       capabilities: {
         protocolVersions: getServeProtocolVersions(),
@@ -1952,9 +2010,27 @@ async function runQwenServeImpl(
           : 'not_scheduled',
     },
   };
+  // Validate before freezing the value into the immutable daemon base env so a
+  // bad scope can never be baked into a runtime, even transiently.
+  if (
+    optsIn.memoryProjectScope !== undefined &&
+    !(MEMORY_PROJECT_SCOPES as readonly string[]).includes(
+      optsIn.memoryProjectScope,
+    )
+  ) {
+    throw new TypeError(
+      `Invalid memoryProjectScope: ${String(optsIn.memoryProjectScope)}. ` +
+        'Must be "git-root" or "workspace".',
+    );
+  }
   preResolveServeFastPathHomeEnvOverrides();
   const daemonRuntimeBaseEnv: Readonly<NodeJS.ProcessEnv> = Object.freeze({
     ...process.env,
+    ...(optsIn.memoryProjectScope !== undefined
+      ? {
+          QWEN_CODE_MEMORY_PROJECT_SCOPE: optsIn.memoryProjectScope,
+        }
+      : {}),
   });
 
   // Trim both sources. Common gotcha: `export QWEN_SERVER_TOKEN=$(cat
@@ -2004,6 +2080,8 @@ async function runQwenServeImpl(
   );
   const rawWorkspaces = resolveWorkspaceInputs(optsIn.workspace);
   const rawWorkspace = rawWorkspaces[0]!;
+  // daemonMemoryBudget is assigned after construction, once the budget is
+  // resolved below.
   const opts: ServeOptions = {
     ...optsIn,
     token,
@@ -2322,6 +2400,20 @@ async function runQwenServeImpl(
     throw new Error(
       `At most ${MAX_REGISTERED_WORKSPACES} --workspace values may be registered.`,
     );
+  }
+  // Resolve the daemon's memory figures once, for reporting only. Nothing
+  // downstream consumes them to size a child: dividing a pool by a workspace
+  // count is unsound while registration does not spawn a child, and bounding
+  // the aggregate needs admission at spawn time keyed on live children. This
+  // establishes the denominator that work will be designed against.
+  opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
+    budgetMb: opts.memoryBudgetMb,
+  });
+  if (
+    opts.daemonMemoryBudget.budgetSource === 'flag' ||
+    opts.daemonMemoryBudget.insufficientMemory
+  ) {
+    writeStderrLine(formatMemoryBudgetStderr(opts.daemonMemoryBudget));
   }
   let workspaceRegistrationStore = deps.workspaceRegistrationStore;
   if (
@@ -2678,6 +2770,12 @@ async function runQwenServeImpl(
   let runtimeApp: Application | undefined;
   let runtimeAppForCleanup: Application | undefined;
   let bridgeRef: AcpSessionBridge | undefined = deps.bridge;
+  let managedProcessRegistry:
+    | {
+        shutdown(): Promise<void>;
+        killAllSync(): void;
+      }
+    | undefined;
   const internalRuntimeBridgesForCleanup: AcpSessionBridge[] = [];
   let daemonEventLoopMonitor:
     | ReturnType<CoreRuntime['startEventLoopLagMonitor']>
@@ -3097,6 +3195,47 @@ async function runQwenServeImpl(
           envFileReadFailed: false,
           envFileReadFailures: Object.freeze([]),
         };
+    const resolveSessionRuntimeBaseDir = (
+      workspace: string,
+      settings: ReturnType<SettingsRuntime['loadSettings']> | undefined,
+      effectiveEnv: Readonly<NodeJS.ProcessEnv>,
+    ): string => {
+      const resolveConfiguredPath = (
+        configuredPath: string,
+        relativeTo: string,
+      ): string => {
+        const expanded =
+          configuredPath === '~'
+            ? os.homedir()
+            : configuredPath.startsWith('~/') ||
+                configuredPath.startsWith('~\\')
+              ? path.join(
+                  os.homedir(),
+                  ...configuredPath
+                    .slice(2)
+                    .split(/[/\\]+/)
+                    .filter(Boolean),
+                )
+              : configuredPath;
+        return path.resolve(relativeTo, expanded);
+      };
+      const runtimeDir = effectiveEnv['QWEN_RUNTIME_DIR'];
+      if (runtimeDir) {
+        return resolveConfiguredPath(runtimeDir, process.cwd());
+      }
+      const settingsDir = settings?.merged.advanced?.runtimeOutputDir;
+      if (settingsDir) {
+        return resolveConfiguredPath(settingsDir, workspace);
+      }
+      const qwenHome = effectiveEnv['QWEN_HOME'];
+      if (qwenHome) {
+        return resolveConfiguredPath(qwenHome, process.cwd());
+      }
+      const homeDir = os.homedir();
+      return homeDir
+        ? path.join(homeDir, '.qwen')
+        : path.join(os.tmpdir(), '.qwen');
+    };
     const logRuntimeEnvFileReadFailures = (
       workspace: string,
       snapshot: {
@@ -3115,8 +3254,14 @@ async function runQwenServeImpl(
       });
     };
     logRuntimeEnvFileReadFailures(boundWorkspace, runtimeEnvSnapshot);
+    const primarySessionRuntimeBaseDir = resolveSessionRuntimeBaseDir(
+      boundWorkspace,
+      runtimeBootSettings,
+      runtimeEnvSnapshot.effectiveEnv,
+    );
     const runtimeEffectiveEnv: NodeJS.ProcessEnv = {
       ...runtimeEnvSnapshot.effectiveEnv,
+      QWEN_RUNTIME_DIR: primarySessionRuntimeBaseDir,
     };
     const replaceRuntimeEffectiveEnv = (
       nextEnv: Readonly<NodeJS.ProcessEnv>,
@@ -3125,6 +3270,7 @@ async function runQwenServeImpl(
         delete runtimeEffectiveEnv[key];
       }
       Object.assign(runtimeEffectiveEnv, nextEnv);
+      runtimeEffectiveEnv['QWEN_RUNTIME_DIR'] = primarySessionRuntimeBaseDir;
     };
     const primaryRuntimeEnv: {
       mode: 'runtime-overlay';
@@ -3336,6 +3482,8 @@ async function runQwenServeImpl(
     const workspaceTrustOperationGate = new PathMutexRegistry();
     const runWorkspaceTrustOperation = <T>(operation: () => Promise<T>) =>
       workspaceTrustOperationGate.runExclusive('runtime-topology', operation);
+    const processRegistry = new runtime.ProcessRegistry();
+    managedProcessRegistry = processRegistry;
     const fsFactory = runtime.resolveBridgeFsFactory({
       // Secondary roots share a write-capable factory only after their own
       // folder trust check passes; untrusted secondary roots stay outside.
@@ -3358,6 +3506,7 @@ async function runQwenServeImpl(
       ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),
     });
     const channelFactory = runtime.createSpawnChannelFactory({
+      processRegistry,
       sourceEnv: runtimeEffectiveEnv,
       onDiagnosticLine: diagnosticSink,
       pipeHooks: {
@@ -3600,6 +3749,9 @@ async function runQwenServeImpl(
     const subSessionLauncher = createSubSessionLauncher({
       getBridge: () => bridgeRef,
       boundWorkspace,
+      ...subSessionConcurrencyCapsFromSettings(
+        runtimeBootSettings?.merged.serve ?? {},
+      ),
     });
     const bridge =
       deps.bridge ??
@@ -3800,6 +3952,7 @@ async function runQwenServeImpl(
       {
         workspaceId: daemonWorkspaceHash,
         workspaceCwd: boundWorkspace,
+        sessionRuntimeBaseDir: primarySessionRuntimeBaseDir,
         ...(workspaceInputs[0]?.displayName
           ? { displayName: workspaceInputs[0].displayName }
           : {}),
@@ -3832,6 +3985,7 @@ async function runQwenServeImpl(
         fallbackReason?: string;
       };
       effectiveEnv: NodeJS.ProcessEnv;
+      sessionRuntimeBaseDir: string;
       replace: (nextEnv: Readonly<NodeJS.ProcessEnv>) => void;
     } => {
       const snapshot = settings
@@ -3849,7 +4003,15 @@ async function runQwenServeImpl(
             envFileReadFailures: Object.freeze([]),
           };
       logRuntimeEnvFileReadFailures(workspace, snapshot);
-      const effectiveEnv: NodeJS.ProcessEnv = { ...snapshot.effectiveEnv };
+      const sessionRuntimeBaseDir = resolveSessionRuntimeBaseDir(
+        workspace,
+        settings,
+        snapshot.effectiveEnv,
+      );
+      const effectiveEnv: NodeJS.ProcessEnv = {
+        ...snapshot.effectiveEnv,
+        QWEN_RUNTIME_DIR: sessionRuntimeBaseDir,
+      };
       const metadata: {
         mode: 'runtime-overlay';
         overlayKeys: string[];
@@ -3869,11 +4031,13 @@ async function runQwenServeImpl(
       return {
         metadata,
         effectiveEnv,
+        sessionRuntimeBaseDir,
         replace(nextEnv) {
           for (const key of Object.keys(effectiveEnv)) {
             delete effectiveEnv[key];
           }
           Object.assign(effectiveEnv, nextEnv);
+          effectiveEnv['QWEN_RUNTIME_DIR'] = sessionRuntimeBaseDir;
         },
       };
     };
@@ -3955,6 +4119,7 @@ async function runQwenServeImpl(
           : {}),
       });
       const secondaryChannelFactory = runtime.createSpawnChannelFactory({
+        processRegistry,
         sourceEnv: secondaryEnv.effectiveEnv,
         onDiagnosticLine: diagnosticSink,
         pipeHooks: {
@@ -3982,6 +4147,9 @@ async function runQwenServeImpl(
       const secondarySubSessionLauncher = createSubSessionLauncher({
         getBridge: () => secondaryBridgeRef,
         boundWorkspace: workspaceInput.cwd,
+        ...subSessionConcurrencyCapsFromSettings(
+          secondarySettings?.merged.serve ?? {},
+        ),
       });
       const secondaryBridge = runtime.createAcpSessionBridge({
         clientMcpSender: secondaryClientMcpSenderRegistry.lookup,
@@ -4162,6 +4330,7 @@ async function runQwenServeImpl(
       const secondaryRuntime: WorkspaceRuntime = {
         workspaceId: secondaryWorkspaceHash,
         workspaceCwd: workspaceInput.cwd,
+        sessionRuntimeBaseDir: secondaryEnv.sessionRuntimeBaseDir,
         ...(workspaceInput.displayName
           ? { displayName: workspaceInput.displayName }
           : {}),
@@ -4454,6 +4623,7 @@ async function runQwenServeImpl(
             })
           : wsFsFactory;
       const wsChannelFactory = runtime.createSpawnChannelFactory({
+        processRegistry,
         sourceEnv: wsEnv.effectiveEnv,
         onDiagnosticLine: diagnosticSink,
         pipeHooks: {
@@ -4478,6 +4648,9 @@ async function runQwenServeImpl(
       const wsSubSessionLauncher = createSubSessionLauncher({
         getBridge: () => wsBridgeRef,
         boundWorkspace: cwd,
+        ...subSessionConcurrencyCapsFromSettings(
+          wsSettings?.merged.serve ?? {},
+        ),
       });
       let wsBridge: ReturnType<typeof runtime.createAcpSessionBridge>;
       try {
@@ -4695,6 +4868,7 @@ async function runQwenServeImpl(
       const wsRuntime: WorkspaceRuntime = {
         workspaceId: wsHash,
         workspaceCwd: cwd,
+        sessionRuntimeBaseDir: wsEnv.sessionRuntimeBaseDir,
         ...(buildOptions?.displayName !== undefined
           ? { displayName: buildOptions.displayName }
           : {}),
@@ -6255,6 +6429,7 @@ async function runQwenServeImpl(
           // `qwen` processes in the operator's `ps` output.
           daemonLog.warn(`received ${signal} during drain — forcing exit`);
           try {
+            managedProcessRegistry?.killAllSync();
             channelWorkerManager?.killAllSync();
             for (const runtimeBridge of getRuntimeBridgesForCleanup()) {
               runtimeBridge.killAllSync();
@@ -6282,7 +6457,10 @@ async function runQwenServeImpl(
           process.exit(runtimeStartupError === undefined ? 0 : 1);
         } catch (err) {
           daemonLog.error('shutdown error', err instanceof Error ? err : null);
-          if (channelWorkerManager?.state().enabled) {
+          if (
+            err instanceof Error &&
+            retryableChannelWorkerShutdownErrors.has(err)
+          ) {
             daemonLog.error(
               'refusing to exit while a channel worker or service lease remains; signal again to retry after the child exits (another signal during that retry forces exit)',
             );
@@ -6325,11 +6503,28 @@ async function runQwenServeImpl(
             const initiallyMountedManagement = initiallyMountedApp?.locals?.[
               'workspaceManagementHandle'
             ] as { sealAndWait?: () => Promise<void> } | undefined;
+            const initiallyMountedSessionMaintenance = initiallyMountedApp
+              ?.locals?.['sessionArchiveCoordinator'] as
+              | { sealMaintenanceAndWait?: () => Promise<void> }
+              | undefined;
             // Calling an async function runs through its first await
             // synchronously. Seal an already-mounted runtime before close()
             // yields so no management request can enter the shutdown window.
             const initialManagementWait =
               initiallyMountedManagement?.sealAndWait?.();
+            const initialSessionMaintenanceWait =
+              initiallyMountedSessionMaintenance?.sealMaintenanceAndWait?.();
+            let processRegistryShutdown: Promise<Error | undefined> | undefined;
+            const startProcessRegistryShutdown = () => {
+              processRegistryShutdown ??= managedProcessRegistry
+                ?.shutdown()
+                .then(
+                  () => undefined,
+                  (error: unknown) =>
+                    error instanceof Error ? error : new Error(String(error)),
+                );
+            };
+            startProcessRegistryShutdown();
             clearRuntimeStartAfterHealthTimer();
             clearRuntimeStartFallbackTimer();
             cancelDeferredRuntimeStartup();
@@ -6340,10 +6535,10 @@ async function runQwenServeImpl(
             // AFTER drain completes (`finish` below).
 
             // Two-phase shutdown:
-            //   1. `bridge.shutdown()` — tears down agent children with
-            //      its own internal `KILL_HARD_DEADLINE_MS` (10s) so
-            //      a wedged child can't block forever. We wait
-            //      unconditionally; the bridge bounds itself.
+            //   1. The shared process registry starts every agent child's
+            //      5s TERM/KILL and 10s raw-exit timeline before slower worker
+            //      or bridge cleanup. `bridge.shutdown()` then drains its
+            //      in-flight state against those same terminal promises.
             //   2. `server.close()` — drains in-flight HTTP connections
             //      (long-lived SSE subscribers especially). This is
             //      what `SHUTDOWN_FORCE_CLOSE_MS` actually protects:
@@ -6356,8 +6551,7 @@ async function runQwenServeImpl(
             // timer; if the bridge took 5–10s to kill its children
             // (e.g. SIGTERM grace period), the timer fired first,
             // resolved this promise, and `process.exit(0)` ran while
-            // the bridge was still tearing children down — orphaning
-            // any that hadn't yet hit `KILL_HARD_DEADLINE_MS`.
+            // the bridge was still tearing children down.
             let settled = false;
             // Track bridge.shutdown failures so close()
             // doesn't silently report success when the bridge
@@ -6411,6 +6605,7 @@ async function runQwenServeImpl(
                     channelWorkerShutdownError !== undefined &&
                     channelWorkerManager?.state().enabled === true;
                   if (retryableChannelClose) {
+                    const retryableError = channelWorkerShutdownError!;
                     await flushDaemonLogBounded(
                       daemonLog,
                       DAEMON_LOG_FORCED_FLUSH_BUDGET_MS,
@@ -6418,13 +6613,18 @@ async function runQwenServeImpl(
                     closePromise = undefined;
                     shuttingDown = false;
                     channelControlDraining = false;
-                    rej(finalErr);
+                    retryableChannelWorkerShutdownErrors.add(retryableError);
+                    rej(retryableError);
                     return;
                   }
                   if (loggerPublished || loggerSignalOwned) {
-                    writeDaemonLifecycleBestEffort(() =>
-                      daemonLog.info('daemon stopped'),
-                    );
+                    writeDaemonLifecycleBestEffort(() => {
+                      if (finalErr) {
+                        daemonLog.error('daemon shutdown incomplete', finalErr);
+                      } else {
+                        daemonLog.info('daemon stopped');
+                      }
+                    });
                     await daemonLog.close();
                   }
                   if (finalErr) rej(finalErr);
@@ -6456,9 +6656,18 @@ async function runQwenServeImpl(
                 const workspaceManagementHandle = appForCleanup?.locals?.[
                   'workspaceManagementHandle'
                 ] as { sealAndWait?: () => Promise<void> } | undefined;
+                const sessionMaintenance = appForCleanup?.locals?.[
+                  'sessionArchiveCoordinator'
+                ] as
+                  | { sealMaintenanceAndWait?: () => Promise<void> }
+                  | undefined;
                 await initialManagementWait;
                 if (workspaceManagementHandle !== initiallyMountedManagement) {
                   await workspaceManagementHandle?.sealAndWait?.();
+                }
+                await initialSessionMaintenanceWait;
+                if (sessionMaintenance !== initiallyMountedSessionMaintenance) {
+                  await sessionMaintenance?.sealMaintenanceAndWait?.();
                 }
                 stopTrustPolicyMonitor(appForCleanup);
                 const waitForTrustPolicyIdle = appForCleanup?.locals?.[
@@ -6470,10 +6679,11 @@ async function runQwenServeImpl(
                     err instanceof Error ? err : null,
                   );
                 });
+                startProcessRegistryShutdown();
                 disposeRuntimeAppResources(appForCleanup);
                 disposeDaemonEventLoopMonitor();
-                // The worker owns daemon-backed sessions; disconnect it before
-                // tearing down the ACP bridge it is attached to.
+                // Writer terminals are already in flight. Stop the worker
+                // before tearing down the bridge state it is attached to.
                 if (channelWorkerManager) {
                   await channelWorkerManager.shutdown().catch((err) => {
                     daemonLog.error(
@@ -6531,6 +6741,14 @@ async function runQwenServeImpl(
                     bridgeShutdownError =
                       err instanceof Error ? err : new Error(String(err));
                   });
+                }
+                const processRegistryError = await processRegistryShutdown;
+                if (processRegistryError) {
+                  daemonLog.error(
+                    'ACP process registry shutdown error',
+                    processRegistryError,
+                  );
+                  bridgeShutdownError ??= processRegistryError;
                 }
               })
               .finally(() => {
@@ -6647,7 +6865,10 @@ async function runQwenServeImpl(
                     closeErr instanceof Error ? closeErr : null,
                   ),
                 );
-                if (channelWorkerManager?.state().enabled) {
+                if (
+                  closeErr instanceof Error &&
+                  retryableChannelWorkerShutdownErrors.has(closeErr)
+                ) {
                   writeDaemonLifecycleBestEffort(() =>
                     daemonLog.error(
                       'runtime startup failed, but qwen serve remains alive to retain the channel service lease until worker exit is confirmed',

@@ -13,6 +13,7 @@ import fs from 'node:fs';
 import { EOL } from 'node:os';
 import * as pty from '@lydell/node-pty';
 import stripAnsi from 'strip-ansi';
+import type { FakeOpenAIServerOptions } from './fake-openai-server.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -120,6 +121,44 @@ export async function type(ptyProcess: pty.IPty, text: string) {
     ptyProcess.write(char);
     await new Promise((resolve) => setTimeout(resolve, delay));
   }
+}
+
+const SANDBOX_MODE = process.env['QWEN_SANDBOX']?.toLowerCase().trim();
+
+export const IS_CONTAINER_SANDBOX =
+  SANDBOX_MODE === 'docker' || SANDBOX_MODE === 'podman';
+
+export const CONTAINER_SANDBOX_NO_PROXY =
+  '127.0.0.1,localhost,host.docker.internal';
+
+export function fakeServerHostOptions(): FakeOpenAIServerOptions | undefined {
+  return IS_CONTAINER_SANDBOX
+    ? { listenHost: '0.0.0.0', baseUrlHost: 'host.docker.internal' }
+    : undefined;
+}
+
+// Sets NO_PROXY so a containerized CLI reaches the host-side fake server, and
+// returns a restorer for the previous values. No-op outside a container sandbox.
+export function applyContainerSandboxNoProxy(): () => void {
+  if (!IS_CONTAINER_SANDBOX) {
+    return () => {};
+  }
+  const savedNoProxy = process.env['NO_PROXY'];
+  const savedNoProxyLower = process.env['no_proxy'];
+  process.env['NO_PROXY'] = CONTAINER_SANDBOX_NO_PROXY;
+  process.env['no_proxy'] = CONTAINER_SANDBOX_NO_PROXY;
+  return () => {
+    if (savedNoProxy === undefined) {
+      delete process.env['NO_PROXY'];
+    } else {
+      process.env['NO_PROXY'] = savedNoProxy;
+    }
+    if (savedNoProxyLower === undefined) {
+      delete process.env['no_proxy'];
+    } else {
+      process.env['no_proxy'] = savedNoProxyLower;
+    }
+  };
 }
 
 interface ParsedLog {

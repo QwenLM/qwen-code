@@ -15,7 +15,9 @@ import type {
   DaemonCapabilities,
   DaemonChannelMutationResult,
   DaemonChannelPairingApprovalResult,
+  DaemonChannelPairingApprovalsSnapshot,
   DaemonChannelPairingRequestsSnapshot,
+  DaemonChannelPairingRevocationResult,
   DaemonChannelsSnapshot,
   DaemonChannelStartupRequest,
   DaemonChannelTypeCatalog,
@@ -201,6 +203,11 @@ export interface DaemonChannelPairingActions {
     name: string,
     code: string,
   ): Promise<DaemonChannelPairingApprovalResult>;
+  approvals(name: string): Promise<DaemonChannelPairingApprovalsSnapshot>;
+  revoke(
+    name: string,
+    senderId: string,
+  ): Promise<DaemonChannelPairingRevocationResult>;
 }
 
 // ── Scheduled Tasks (durable cron, server-only) ─────────────────────
@@ -332,6 +339,17 @@ export interface DaemonWorkspacePathSuggestions {
   suggestions: DaemonWorkspacePathSuggestion[];
   truncated: boolean;
 }
+
+export type DaemonWorkspaceDirectoryPickerResult =
+  | {
+      kind: 'workspace-directory-picker';
+      selected: true;
+      path: string;
+    }
+  | {
+      kind: 'workspace-directory-picker';
+      selected: false;
+    };
 
 export interface DaemonWorkspaceActions {
   // Sessions
@@ -603,6 +621,7 @@ export interface DaemonWorkspaceActions {
   suggestWorkspacePaths(
     prefix: string,
   ): Promise<DaemonWorkspacePathSuggestions>;
+  pickWorkspaceDirectory(): Promise<DaemonWorkspaceDirectoryPickerResult>;
   updateWorkspace(
     workspaceSelector: string,
     update: DaemonWorkspaceUpdate,

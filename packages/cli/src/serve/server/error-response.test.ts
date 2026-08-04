@@ -13,6 +13,7 @@ import {
   SessionWriterUnavailableError,
 } from '@qwen-code/qwen-code-core';
 import { sendBridgeError } from './error-response.js';
+import { DaemonDrainingError } from './session-archive.js';
 
 function responseMock(): {
   response: Response;
@@ -28,6 +29,20 @@ function responseMock(): {
 }
 
 describe('sendBridgeError session writer errors', () => {
+  it('maps sealed session maintenance to daemon_draining', () => {
+    const { response, status, json } = responseMock();
+
+    sendBridgeError(response, new DaemonDrainingError());
+
+    expect(status).toHaveBeenCalledWith(503);
+    expect(json).toHaveBeenCalledWith({
+      error:
+        'The daemon is draining and no longer accepts session maintenance.',
+      code: 'daemon_draining',
+      errorKind: 'daemon_draining',
+    });
+  });
+
   it.each([
     {
       error: new SessionWriterConflictError(),

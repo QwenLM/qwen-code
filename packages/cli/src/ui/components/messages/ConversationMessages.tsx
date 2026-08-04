@@ -5,7 +5,6 @@
  */
 
 import type React from 'react';
-import { useRef } from 'react';
 import { Box, Text } from 'ink';
 import stringWidth from 'string-width';
 import {
@@ -18,15 +17,18 @@ import {
   SCREEN_READER_USER_PREFIX,
 } from '../../textConstants.js';
 import { t } from '../../../i18n/index.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { ErrorBoundary } from '../shared/ErrorBoundary.js';
 import { ICON } from '../../constants.js';
-import { wrapToVisualLines } from '../../utils/textUtils.js';
+import { sanitizeTerminalText } from '../../utils/textUtils.js';
 import { formatDuration } from '../../utils/displayUtils.js';
+
+const debugLogger = createDebugLogger('THINK_RENDER');
 
 export const THINKING_ICON = `${ICON.THEREFORE} `;
 export const THINKING_ICON_PENDING = `${ICON.BECAUSE} `;
 
-export const toggleKeyHint =
-  process.platform === 'darwin' ? 'option+t' : 'alt+t';
+export const toggleKeyHint = 'ctrl+o';
 
 interface UserMessageProps {
   text: string;
@@ -270,25 +272,7 @@ export const AssistantMessageContent: React.FC<
   />
 );
 
-const MAX_STREAMING_THINKING_VISUAL_LINES = 4;
 const BRIEF_THOUGHT_THRESHOLD_MS = 1_000;
-
-function tailVisualLines(
-  text: string,
-  width: number,
-  maxLines: number,
-): string[] {
-  const charBudget = maxLines * width * 2;
-  let sliceStart = Math.max(0, text.length - charBudget);
-  if (sliceStart > 0) {
-    const nl = text.indexOf('\n', sliceStart);
-    if (nl !== -1 && nl < text.length - 1) {
-      sliceStart = nl + 1;
-    }
-  }
-  const lines = wrapToVisualLines(text.slice(sliceStart), width);
-  return lines.slice(-maxLines);
-}
 
 const ThinkBody: React.FC<{
   text: string;
@@ -297,57 +281,30 @@ const ThinkBody: React.FC<{
   availableTerminalHeight?: number;
   contentWidth: number;
 }> = ({ text, isPending, expanded, availableTerminalHeight, contentWidth }) => {
-  // Grow-only height tracker for the streaming window: the rendered block never
-  // shrinks below the tallest it has already reached for this thought, so a
-  // blank paragraph separator (`\n\n`) transiently entering/leaving the tail
-  // window can't make the block jump 2→3→5 rows and flicker. Reset when the
-  // block stops streaming or when the buffer shrinks (a new thought replaced it).
-  const maxSeenLinesRef = useRef(0);
-  const prevTextLenRef = useRef(0);
-  if (!isPending || text.length < prevTextLenRef.current) {
-    maxSeenLinesRef.current = 0;
-  }
-  prevTextLenRef.current = text.length;
-
-  if (!isPending && !expanded) return null;
-
-  if (isPending && !expanded) {
-    const innerWidth = Math.max(contentWidth - 2, 20);
-    // Use a constant window height rather than deriving it from
-    // availableTerminalHeight. While a thought streams the terminal keeps
-    // constrainHeight on, so availableTerminalHeight (and therefore a derived
-    // maxLines) drifts up and down as sibling pending content grows — which
-    // reintroduced the very height flicker this block is meant to remove. The
-    // window is at most a few lines, so a fixed cap can't meaningfully overflow
-    // (VP scrolls anyway), and it keeps the height stable.
-    const maxLines = MAX_STREAMING_THINKING_VISUAL_LINES;
-    const lines = tailVisualLines(text, innerWidth, maxLines);
-    const target = Math.max(lines.length, maxSeenLinesRef.current);
-    maxSeenLinesRef.current = target;
-    // Pad at the top so the newest line stays pinned to the bottom.
-    const padded =
-      lines.length < target
-        ? [...new Array(target - lines.length).fill(''), ...lines]
-        : lines;
-    const display = padded.join('\n');
-    return (
-      <Box paddingLeft={2}>
-        <Text dimColor wrap="truncate">
-          {display}
-        </Text>
-      </Box>
-    );
-  }
+  if (!expanded) return null;
 
   return (
     <Box paddingLeft={2} flexDirection="column">
-      <MarkdownDisplay
-        text={text}
-        isPending={isPending}
-        availableTerminalHeight={availableTerminalHeight}
-        contentWidth={contentWidth - 2}
-        textColor={theme.text.secondary}
-      />
+      <ErrorBoundary
+        fallback={(err) => (
+          <Text color={theme.text.secondary} dimColor>
+            {sanitizeTerminalText(err.message)}
+          </Text>
+        )}
+        onError={(error, info) => {
+          debugLogger.error(
+            `[THINK_RENDER_ERROR] ${error.message}\n${info.componentStack ?? ''}\n${error.stack ?? ''}`,
+          );
+        }}
+      >
+        <MarkdownDisplay
+          text={text}
+          isPending={isPending}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={contentWidth - 2}
+          textColor={theme.text.secondary}
+        />
+      </ErrorBoundary>
     </Box>
   );
 };

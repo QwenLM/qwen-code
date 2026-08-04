@@ -43,6 +43,7 @@ import {
 
 export const GOAL_RUNTIME_DISPOSED_MESSAGE = 'Goal runtime has been disposed';
 export const STALE_GOAL_TURN_MESSAGE = 'Goal turn permit is no longer valid';
+export const MAX_GOAL_CONTINUATION_TURNS = 50;
 
 export interface GoalJournal {
   getTranscriptCursor(): TranscriptCursor;
@@ -61,6 +62,16 @@ export interface CreateGoalRuntimeOptions {
 export interface GoalEvidenceSource {
   flush(): Promise<void>;
   readActiveTranscriptChain(): Promise<readonly GoalEvidenceRecord[]>;
+}
+
+export class GoalPersistenceUnavailableError extends Error {
+  constructor(
+    message = 'Goal persistence is unavailable for this session',
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = 'GoalPersistenceUnavailableError';
+  }
 }
 
 export interface GoalTurnHost {
@@ -291,6 +302,39 @@ export function createGoalRuntime(
       pendingProposal ||
       verificationAttempt
     ) {
+      return;
+    }
+    if (snapshot.goal.turnCount >= MAX_GOAL_CONTINUATION_TURNS) {
+      const budgetGoalId = snapshot.goal.goalId;
+      const budgetRevision = snapshot.goal.revision;
+      void enqueue(async () => {
+        if (
+          snapshot.goal?.status !== 'active' ||
+          snapshot.goal.goalId !== budgetGoalId ||
+          snapshot.goal.revision !== budgetRevision
+        )
+          return;
+        const now = Date.now();
+        const reason = `Goal exceeded the ${MAX_GOAL_CONTINUATION_TURNS}-turn continuation budget`;
+        const limitedSnapshot: GoalSnapshotV2 = {
+          v: GOAL_STATE_VERSION,
+          goal: {
+            ...snapshot.goal,
+            status: 'usage_limited',
+            activeTimeMs: elapsedActiveTime(snapshot.goal, now),
+            updatedAt: now,
+            lastReason: reason,
+          },
+          activity: 'idle',
+        };
+        await options.journal.recordGoalState(randomUUID(), {
+          v: GOAL_STATE_VERSION,
+          cause: 'usage_limited',
+          snapshot: limitedSnapshot,
+        });
+        snapshot = structuredClone(limitedSnapshot);
+        broadcast('usage_limited');
+      });
       return;
     }
     continuationQueued = true;
@@ -539,10 +583,13 @@ export function createGoalRuntime(
     } catch (error) {
       if (attempt.controller.signal.aborted) return;
       if (error instanceof InvalidGoalEvidenceReferenceError) {
-        outcome = {
-          kind: 'decision',
-          result: { decision: 'reject', reason: error.message },
-        };
+        outcome =
+          error.code === 'catalog_truncated'
+            ? { kind: 'usage_limited', reason: error.message }
+            : {
+                kind: 'decision',
+                result: { decision: 'reject', reason: error.message },
+              };
       } else {
         const reason =
           error instanceof EvidenceSourceUnavailableError
@@ -571,7 +618,7 @@ export function createGoalRuntime(
         if (restored) return;
         const recovery = recoverGoalFromRecords(records);
         if (recovery.kind === 'unsupported') {
-          recoveryError = new Error(recovery.reason);
+          recoveryError = new GoalPersistenceUnavailableError(recovery.reason);
           throw recoveryError;
         }
         try {
@@ -594,7 +641,14 @@ export function createGoalRuntime(
               recordUuid,
               now: Date.now(),
             });
-            await options.journal.recordGoalState(recordUuid, payload);
+            try {
+              await options.journal.recordGoalState(recordUuid, payload);
+            } catch (error) {
+              throw new GoalPersistenceUnavailableError(
+                error instanceof Error ? error.message : String(error),
+                { cause: error },
+              );
+            }
             assertAvailable();
             recoveredSnapshot = structuredClone(payload.snapshot);
             recoveredCause = payload.cause;

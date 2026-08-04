@@ -18,6 +18,7 @@ import { renderWithProviders } from '../../test-utils/render.js';
 import { LoadedSettings } from '../../config/settings.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
 import { ThoughtExpandedProvider } from '../contexts/ThoughtExpandedContext.js';
+import { VirtualViewportContext } from '../contexts/VirtualViewportContext.js';
 import type { MouseEvent } from '../utils/mouse.js';
 import {
   layoutRowForEvent,
@@ -121,6 +122,39 @@ describe('<HistoryItemDisplay />', () => {
     const output = lastFrame() ?? '';
     expect(output).toContain('◎');
     expect(output).toContain('Converted 1 image(s) to text via vm.');
+  });
+
+  it('renders v2 goal_state history items through the lifecycle card', () => {
+    const item: HistoryItem = {
+      id: 1,
+      type: MessageType.GOAL_STATE,
+      snapshot: {
+        v: 2,
+        activity: 'idle',
+        goal: {
+          goalId: 'goal-1',
+          revision: 1,
+          objective: 'ship the release',
+          status: 'blocked',
+          evidenceCursor: { recordId: 'record-1' },
+          turnCount: 2,
+          activeTimeMs: 4_000,
+          createdAt: 1_000,
+          updatedAt: 5_000,
+          lastReason: 'waiting for approval',
+        },
+      },
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <HistoryItemDisplay item={item} terminalWidth={80} isPending={false} />,
+    );
+
+    const output = lastFrame();
+    expect(output).toContain('Goal blocked');
+    expect(output).toContain('Goal: ship the release');
+    expect(output).toContain('2 turns');
+    expect(output).toContain('Reason: waiting for approval');
   });
 
   it('renders StatsDisplay for "stats" type', () => {
@@ -586,6 +620,20 @@ describe('<HistoryItemDisplay />', () => {
       durationMs: 1200,
     };
 
+    const settingsWithVp = (enabled: boolean) =>
+      new LoadedSettings(
+        { path: '', settings: {}, originalSettings: {} },
+        { path: '', settings: {}, originalSettings: {} },
+        {
+          path: '',
+          settings: { ui: { useTerminalBuffer: enabled } },
+          originalSettings: {},
+        },
+        { path: '', settings: {}, originalSettings: {} },
+        true,
+        new Set(),
+      );
+
     const mouseEvent = (name: MouseEvent['name'], col: number): MouseEvent => ({
       name,
       col,
@@ -639,6 +687,35 @@ describe('<HistoryItemDisplay />', () => {
       expect(opts?.bypassVpGate ?? false).toBe(false);
     });
 
+    it('shows the click hint when raw settings are unset but startup VP is enabled', () => {
+      const { lastFrame } = renderWithProviders(
+        <VirtualViewportContext.Provider value={true}>
+          <HistoryItemDisplay
+            item={thoughtItem}
+            terminalWidth={100}
+            isPending={false}
+          />
+        </VirtualViewportContext.Provider>,
+      );
+
+      expect(lastFrame()).toContain(`click or ${toggleKeyHint} to expand`);
+    });
+
+    it('hides the click hint when startup VP overrides an enabled setting', () => {
+      const { lastFrame } = renderWithProviders(
+        <VirtualViewportContext.Provider value={false}>
+          <HistoryItemDisplay
+            item={thoughtItem}
+            terminalWidth={100}
+            isPending={false}
+          />
+        </VirtualViewportContext.Provider>,
+        { settings: settingsWithVp(true) },
+      );
+
+      expect(lastFrame()).not.toContain(`click or ${toggleKeyHint} to expand`);
+    });
+
     it('toggles on a complete click', () => {
       const toggle = vi.fn();
       const handler = renderThoughtWithToggle(toggle);
@@ -658,6 +735,31 @@ describe('<HistoryItemDisplay />', () => {
       handler?.(mouseEvent('left-release', 20));
 
       expect(toggle).not.toHaveBeenCalled();
+    });
+
+    it('hides the click hint when ui.mouseTracking is false despite VP being on', () => {
+      const settingsNoMouse = new LoadedSettings(
+        { path: '', settings: {}, originalSettings: {} },
+        { path: '', settings: {}, originalSettings: {} },
+        {
+          path: '',
+          settings: { ui: { useTerminalBuffer: true, mouseTracking: false } },
+          originalSettings: {},
+        },
+        { path: '', settings: {}, originalSettings: {} },
+        true,
+        new Set(),
+      );
+      const { lastFrame } = renderWithProviders(
+        <HistoryItemDisplay
+          item={thoughtItem}
+          terminalWidth={100}
+          isPending={false}
+        />,
+        { settings: settingsNoMouse },
+      );
+
+      expect(lastFrame()).not.toContain(`click or ${toggleKeyHint} to expand`);
     });
   });
 });

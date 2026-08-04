@@ -177,6 +177,35 @@ Do not report anything that matches these. Silence is better than noise — but 
 - Minor refactors that address no real problem; missing documentation unless the logic is genuinely confusing; "best practice" citations that point to no concrete bug or risk.
 - Issues already discussed in the pull request's existing comments.`;
 
+/**
+ * The counterweight to the Exclusion Criteria, aimed at the one failure they
+ * cannot see: a finder that had the defect and did not file it.
+ *
+ * The exclusions above are a filter on *what kind of thing* is a finding. Read as
+ * a confidence threshold — which is how a finder under instruction to prefer
+ * silence reads them — they become a licence to drop anything half-believed, and
+ * that drop is invisible: no later stage sees a candidate that was never filed,
+ * so a suppressed defect is indistinguishable from a clean diff for the rest of
+ * the run. Every downstream stage this skill has (dedup, Step 4 verification,
+ * the reverse audit, the confidence split that keeps low-confidence findings out
+ * of the pull request) exists to remove wrong findings. None of them can add a
+ * missing one.
+ *
+ * So the split is stated explicitly here rather than left to be inferred: the
+ * scenario gate stays (no nameable trigger and no nameable cost is still not a
+ * finding), and uncertainty about whether a *nameable* defect is worth raising
+ * stops being grounds to drop it.
+ */
+const RECALL = `## Do not silently drop a candidate
+
+The exclusions above say what **kind of thing** is not a finding. They are not a confidence bar, and you must not read them as one.
+
+- **File every candidate whose failure scenario you can name.** If you can state the trigger and the wrong outcome, report it — at \`Confidence: low\` if you are unsure it is real. A finder that quietly withholds half-believed candidates is the single largest source of missed defects in this pipeline, and the loss is unrecoverable: every stage after you can *remove* a wrong finding, and none of them can *add* one you never filed.
+- **Do not suppress on another agent's account.** Other lenses are walking this diff too. You do not know what they filed, "someone else will probably catch it" is not a reason to stay silent, and two agents flagging the same line for **different** reasons is signal, not duplication — deduplication happens downstream, and it merges on the defect, not on the line.
+- **Do not let one thing you concluded silence the next.** Deciding a hunk is fine on one axis says nothing about the others. Finish the walk your dimension defines.
+
+What this does **not** license: a finding with no nameable trigger and no nameable cost is still not a finding, and padding a thin review with restatements of what the diff does is still noise. This rule adds candidates you can justify; it does not lower what justifies one.`;
+
 /** Validate the plan and pull out the one chunk this agent owns. */
 function chunkFrom(
   report: PlanReport,
@@ -565,10 +594,14 @@ function tail(
   // severity ladder — its output shape is the verdict, defined in its own brief. It
   // does get the Exclusion Criteria, because a finding that matches one is a
   // rejection. Every other role produces findings and gets the full tail.
+  // `RECALL` is a finder rule and goes only to the roles that file findings. The
+  // verifier must not get it: it rules on findings it was handed, and telling the
+  // stage whose job is removing wrong findings to keep every candidate it cannot
+  // rule out would disable the precision half of the pipeline.
   const parts =
     output === 'verdicts'
       ? ['', EXCLUSIONS]
-      : ['', FINDING_FORMAT, '', SEVERITY, '', EXCLUSIONS];
+      : ['', FINDING_FORMAT, '', SEVERITY, '', EXCLUSIONS, '', RECALL];
   if (rules && rules.trim()) {
     parts.push('', '## Project rules', '', rules.trim());
   }
@@ -860,7 +893,10 @@ export function buildRoleBrief(
         '',
         '**Then run the test-efficacy probe.** A green suite says the tests pass. It does ' +
           'not say they would have failed had the change been wrong, and those are ' +
-          'different claims:',
+          'different claims. Give this call `timeout: 600000` too — besides the revert ' +
+          'probe it runs up to 8 single-statement deletion mutants and up to 6 per-hunk ' +
+          'reverse-apply probes, each a suite run, and it budgets itself to finish inside ' +
+          'that ceiling:',
         '',
         '```bash',
         `"\${QWEN_CODE_CLI:-qwen}" review test-efficacy ${resolve(opts.planPath)} \\`,
@@ -872,11 +908,27 @@ export function buildRoleBrief(
         'Read its `findings[]`. `kind: "unreachable"` is a test the project\'s test command ' +
           'never collects — it did not run here and it does not run in CI. `kind: "inert"` is ' +
           'a test that **still passed with the change reverted**: it is green whether or not ' +
-          'the feature exists, so it cannot catch a regression in it. Report each as a ' +
-          '**Suggestion** with `Source: [test]`, saying plainly which behaviour ships ' +
-          'unprotected. **`inconclusive` is not a finding** — reverting the source often ' +
-          "breaks the test's own compile, and that is not the test catching anything. Note it " +
-          'and move on.',
+          'the feature exists, so it cannot catch a regression in it. `kind: "mutant-survived"` ' +
+          'is a single safety statement the diff added (a `.clear()`, an `.abort(…)`, a ' +
+          'reset-to-empty) that was **deleted and every affected test stayed green** — no ' +
+          'test in the diff fails when it is removed, which the whole-file ' +
+          "revert cannot see when the file's other, tested behaviours mask it. " +
+          '`kind: "hunk-survived"` is one HUNK reverted on its own with every affected ' +
+          'test still green — that specific change ships with nothing gating it. Report each ' +
+          'of the four as a ' +
+          '**Suggestion** with `Source: [test]`, saying plainly which behaviour has no ' +
+          'test in this diff that would catch its removal. `harnessValidated` has THREE ' +
+          'values and they are not two: `false` means the positive control failed and every ' +
+          'would-be survivor was re-classed — say the harness could not be validated instead ' +
+          'of implying clean coverage; `null` means the control never ran, so the run is ' +
+          'neither validated nor refuted and any survivor below is unconfirmed by a control; ' +
+          'only `true` licenses reading a survivor as a coverage gap. ' +
+          '**`inconclusive` is not a finding** — for probes, mutants and hunks alike, ' +
+          "reverting or mutating the source often breaks the test's own compile, and that is " +
+          'not the test catching anything. Entries counted in `mutants.skipped*` or ' +
+          '`hunks.skipped*` never ran — not findings either, and `skippedForControl` in ' +
+          'particular means the control stopped the run, NOT that the window ran out. ' +
+          '`mutants.note`, when present, explains why no mutants ran at all. Note them and move on.',
       );
     }
   }

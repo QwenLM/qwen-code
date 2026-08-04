@@ -22,7 +22,7 @@ import {
 } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 vi.mock('../../utils/stdioHelpers.js', () => ({ writeStdoutLine: vi.fn() }));
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
@@ -982,7 +982,9 @@ describe('--roster — every prompt the plan requires, in one call', () => {
         '1a',
         '1b',
         '2',
-        '3',
+        '3a',
+        '3b',
+        '3c',
         '4',
         '5',
         '6a',
@@ -992,7 +994,7 @@ describe('--roster — every prompt the plan requires, in one call', () => {
 
       const printed = (writeStdoutLine as unknown as Mock).mock
         .calls[0][0] as string;
-      expect(printed).toContain('9 agents required');
+      expect(printed).toContain('11 agents required');
       // Every recorded prompt appears in the output byte-for-byte: what the
       // orchestrator copies is what the delivery check will look for.
       for (const [, prompt] of recorded) {
@@ -1000,7 +1002,7 @@ describe('--roster — every prompt the plan requires, in one call', () => {
       }
       // Labelled for the reader, so a Task launch can be named after its block.
       expect(printed).toMatch(
-        /───── agent \d+ of 9 — Agent 1a: Line-by-line correctness ─────/,
+        /───── agent \d+ of 11 — Agent 1a: Line-by-line correctness ─────/,
       );
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -1027,13 +1029,15 @@ describe('--roster — every prompt the plan requires, in one call', () => {
         '1a',
         '1b',
         '2',
-        '3',
+        '3a',
+        '3b',
+        '3c',
         '4',
         '5',
       ]);
       const printed = (writeStdoutLine as unknown as Mock).mock
         .calls[0][0] as string;
-      expect(printed).toContain('6 agents required');
+      expect(printed).toContain('8 agents required');
       expect(printed).not.toMatch(/Agent 6[abc]:/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -1763,13 +1767,16 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     worktreePath: '.qwen/tmp/review-pr-6766',
     mergeBaseSha: 'abc123',
   };
+  const absTmp = resolve('/abs/tmp');
 
   it.each([
     '1a',
     '1b',
     '1c',
     '2',
-    '3',
+    '3a',
+    '3b',
+    '3c',
     '4',
     '5',
     '6a',
@@ -1858,12 +1865,27 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
   });
 
   it('pins Agent 7 to the PR worktree and hands it the test-efficacy probe', () => {
-    const p = buildRoleBrief(PR_PLAN, '7', { planPath: '/tmp/plan.json' });
+    const planPath = resolve('/tmp/plan.json');
+    const p = buildRoleBrief(PR_PLAN, '7', { planPath });
     expect(p).toContain('.qwen/tmp/review-pr-6766');
     expect(p).toContain(
-      '"${QWEN_CODE_CLI:-qwen}" review test-efficacy /tmp/plan.json',
+      `"\${QWEN_CODE_CLI:-qwen}" review test-efficacy ${planPath}`,
     );
     expect(p).toContain('--base abc123');
+    // All three finding kinds are named, or the agent meets a `mutant-survived`
+    // it was never told how to file — and the skipped/inconclusive mutants must
+    // be fenced off from findings the same way the probes' inconclusive is.
+    expect(p).toContain('`kind: "mutant-survived"`');
+    expect(p).toContain('`mutants.skipped*`');
+    expect(p).toContain('`hunks.skipped*`');
+    expect(p).toContain('hunk-survived');
+    expect(p).toContain('harnessValidated');
+    // All THREE values, not two: `null` read as `false` would report "the
+    // harness could not be validated" for a run that simply never spent a
+    // control, and read as `true` would license the survivor claim outright.
+    expect(p).toContain('skippedForControl');
+    expect(p).toContain('neither validated nor refuted');
+    expect(p).toContain('mutants.note');
     // No bare executable `qwen` anywhere in this brief. Agent 7 is the one
     // SUBAGENT that shells out to the review CLI — the one call site neither the
     // SKILL.md sweep nor check-coverage's stderr hints can reach — and its shell
@@ -1881,22 +1903,28 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     // which does not exist. Watched live: Agent 7 of a real 29-agent run spent its
     // time running `find … -name "*6457*fetch*"`, hunting for a plan it had been
     // handed a path to that could not resolve from where it was standing.
-    const p = buildRoleBrief(PR_PLAN, '7', { planPath: '/abs/tmp/plan.json' });
+    const planPath = join(absTmp, 'plan.json');
+    const p = buildRoleBrief(PR_PLAN, '7', { planPath });
     expect(p).toContain(
-      '"${QWEN_CODE_CLI:-qwen}" review test-efficacy /abs/tmp/plan.json',
+      `"\${QWEN_CODE_CLI:-qwen}" review test-efficacy ${planPath}`,
     );
-    expect(p).toMatch(/--worktree \/[^\s]*review-pr-6766/);
+    expect(p).toContain(`--worktree ${resolve(PR_PLAN.worktreePath)}`);
     expect(p).not.toMatch(/--worktree \.qwen/);
-    expect(p).toContain('--out /abs/tmp/qwen-review-pr-6766-efficacy.json');
+    expect(p).toContain(
+      `--out ${join(absTmp, 'qwen-review-pr-6766-efficacy.json')}`,
+    );
   });
 
   it('hands Agent 7 the build-test command with absolute --plan/--worktree/--out', () => {
-    const p = buildRoleBrief(PR_PLAN, '7', { planPath: '/abs/tmp/plan.json' });
+    const planPath = join(absTmp, 'plan.json');
+    const p = buildRoleBrief(PR_PLAN, '7', { planPath });
     expect(p).toContain('"${QWEN_CODE_CLI:-qwen}" review build-test');
-    expect(p).toContain('--plan /abs/tmp/plan.json');
-    expect(p).toMatch(/--worktree \/[^\s]*review-pr-6766/);
+    expect(p).toContain(`--plan ${planPath}`);
+    expect(p).toContain(`--worktree ${resolve(PR_PLAN.worktreePath)}`);
     expect(p).not.toMatch(/--plan \.qwen/);
-    expect(p).toContain('--out /abs/tmp/qwen-review-pr-6766-build-test.json');
+    expect(p).toContain(
+      `--out ${join(absTmp, 'qwen-review-pr-6766-build-test.json')}`,
+    );
   });
 
   it('never emits a literal "undefined" in the build-test --out filename', () => {
@@ -1907,9 +1935,11 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     // name — never an interpolated `undefined`.
     const noPr = { ...PR_PLAN };
     delete (noPr as { prNumber?: unknown }).prNumber;
-    const p = buildRoleBrief(noPr, '7', { planPath: '/abs/tmp/plan.json' });
+    const p = buildRoleBrief(noPr, '7', {
+      planPath: join(absTmp, 'plan.json'),
+    });
     expect(p).not.toContain('undefined');
-    expect(p).toContain('--out /abs/tmp/qwen-review-build-test.json');
+    expect(p).toContain(`--out ${join(absTmp, 'qwen-review-build-test.json')}`);
   });
 
   it('emits a build-test block for a LOCAL review (no worktree, no PR number)', () => {
@@ -1917,12 +1947,11 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     // opens with "run build-test, below" and forbids `npm run build` by hand, so the
     // block must still be there — scoped to the project root the agent stands in.
     const local = { ...PLAN }; // PLAN has no prNumber / worktreePath
-    const p = buildRoleBrief(local, '7', {
-      planPath: '/abs/tmp/local-plan.json',
-    });
+    const planPath = join(absTmp, 'local-plan.json');
+    const p = buildRoleBrief(local, '7', { planPath });
     expect(p).toContain('"${QWEN_CODE_CLI:-qwen}" review build-test');
-    expect(p).toContain('--plan /abs/tmp/local-plan.json');
-    expect(p).toContain('--worktree /'); // absolute (the resolved cwd), not `.`
+    expect(p).toContain(`--plan ${planPath}`);
+    expect(p).toContain(`--worktree ${resolve('.')}`);
     expect(p).not.toContain('undefined');
   });
 
@@ -1945,12 +1974,11 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
   });
 
   it('welds the PR into Agent 0 — a bare `gh pr view` judges the wrong issue', () => {
-    const p = buildRoleBrief(PR_PLAN, '0', {
-      planPath: '/x/qwen-review-pr-6766-fetch.json',
-    });
+    const planPath = join(resolve('/x'), 'qwen-review-pr-6766-fetch.json');
+    const p = buildRoleBrief(PR_PLAN, '0', { planPath });
     expect(p).toContain('#6766');
     expect(p).toContain('QwenLM/qwen-code');
-    expect(p).toContain('/x/qwen-review-pr-6766-context.md');
+    expect(p).toContain(join(resolve('/x'), 'qwen-review-pr-6766-context.md'));
     // The empty scope is a complete answer, and it needs evidence to be one.
     expect(p).toContain('scope empty');
     expect(p).toContain('motivating evidence');
@@ -2174,12 +2202,21 @@ describe('path rules — they arrive where they belong, and nowhere else', () =>
     );
   });
 
-  it.each(['1a', '1b', '2', '3', '4', '5', '6a', '6b', '6c'] as const)(
-    'reaches the code-reviewing dimension %s',
-    (role) => {
-      expect(buildRoleBrief(WF_PLAN, role)).toContain('pull_request_target');
-    },
-  );
+  it.each([
+    '1a',
+    '1b',
+    '2',
+    '3a',
+    '3b',
+    '3c',
+    '4',
+    '5',
+    '6a',
+    '6b',
+    '6c',
+  ] as const)('reaches the code-reviewing dimension %s', (role) => {
+    expect(buildRoleBrief(WF_PLAN, role)).toContain('pull_request_target');
+  });
 
   it.each(['0', '7', 'test-matrix'] as const)(
     'does not reach %s — it is not sitting that exam',
@@ -2334,6 +2371,11 @@ describe('verify and reverse-audit briefs — the Step 4/5 methodology, in code'
     expect(p).toMatch(/documentation does not make a harm safe/);
     // Agent 0 findings are not disproved by a green test.
     expect(p).toMatch(/do not reject an issue-fidelity/i);
+    // The falsify-not-verify asymmetry: "could not verify" and "its evidence is
+    // somewhere I did not look" are not rejection grounds — the rule a future edit
+    // could silently drop.
+    expect(p).toContain('falsify, not to fail-to-verify');
+    expect(p).toContain('go read the claimed source first');
   });
 
   it('the verify brief is a verdict role: Exclusion Criteria yes, finding format no', () => {

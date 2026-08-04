@@ -66,6 +66,16 @@ describe('WorkspaceChannelSettingsStore', () => {
             ],
           },
           { key: 'literalOnly', label: 'Literal only', kind: 'string' },
+          { key: 'tags', label: 'Tags', kind: 'string-list' },
+          {
+            key: 'templates',
+            label: 'Templates',
+            kind: 'record',
+            options: [
+              { value: 'greeting', label: 'Greeting' },
+              { value: 'farewell', label: 'Farewell' },
+            ],
+          },
         ],
       },
       createChannel() {
@@ -356,6 +366,39 @@ describe('WorkspaceChannelSettingsStore', () => {
         clientSecret: { operation: 'replace', value: 'secret' } as const,
       },
     },
+    {
+      label: 'string-list with non-string items',
+      config: {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+        tags: [1, 2],
+      },
+      secrets: {
+        clientSecret: { operation: 'replace', value: 'secret' } as const,
+      },
+    },
+    {
+      label: 'string-list not an array',
+      config: {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+        tags: 'single',
+      },
+      secrets: {
+        clientSecret: { operation: 'replace', value: 'secret' } as const,
+      },
+    },
+    {
+      label: 'record with non-string value',
+      config: {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+        templates: { greeting: 123 },
+      },
+      secrets: {
+        clientSecret: { operation: 'replace', value: 'secret' } as const,
+      },
+    },
   ])('rejects $label without writing', async ({ config, secrets }) => {
     const store = new WorkspaceChannelSettingsStore(workspace);
     const before = fs.readFileSync(settingsPath, 'utf8');
@@ -407,6 +450,38 @@ describe('WorkspaceChannelSettingsStore', () => {
       groupHistoryLimit: 25,
       blockStreaming: 'on',
       identity: { id: 'ops', displayName: 'Ops' },
+    });
+  });
+
+  it('accepts string-list and record descriptor fields', async () => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    const next = await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+        tags: ['alpha', 'beta'],
+        templates: {
+          greeting: 'hi %user%',
+          farewell: 'bye',
+          // record options are UI hints, not a closed set: undeclared keys
+          // must be accepted (GitLab action_name set drifts server-side)
+          attention_requested: 'ping',
+        },
+      },
+      secrets: {
+        clientSecret: { operation: 'replace', value: 'secret' },
+      },
+    });
+
+    expect(next.channels['bot']).toMatchObject({
+      tags: ['alpha', 'beta'],
+      templates: {
+        greeting: 'hi %user%',
+        farewell: 'bye',
+        attention_requested: 'ping',
+      },
     });
   });
 

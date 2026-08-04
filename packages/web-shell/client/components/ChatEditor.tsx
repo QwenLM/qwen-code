@@ -22,6 +22,8 @@ import type { CommandDisplayCategoryOrder } from '../utils/commandDisplay';
 import type { SkillInfo } from '../completions/slashCompletion';
 import { useI18n } from '../i18n';
 import { useWebShellPortalRoot } from '../portalRoot';
+import { usePrefersReducedMotion } from '../hooks/usePrefersReducedMotion';
+import { SpecularComposerEffect } from './SpecularComposerEffect';
 import {
   useWebShellCustomization,
   type WebShellComposerInput,
@@ -50,8 +52,17 @@ import { ModeIcon } from './ModeIcon';
 import { planSlashSectionRows } from '../utils/slashSectionPlan';
 import { getModelDisplayName } from '../utils/modelDisplay';
 import { VoiceButton } from '../voice/VoiceButton';
-import { GitBranchChipContent, GitBranchIndicator } from './GitBranchIndicator';
+import type {
+  VoiceStatusRevision,
+  VoiceWorkspaceTarget,
+} from '../voice/voice-workspace-target';
+import {
+  GitBranchChipContent,
+  GitBranchIndicator,
+  gitBranchAriaLabel,
+} from './GitBranchIndicator';
 import { GitModePopover, type SessionGitIntent } from './GitModePopover';
+import { BranchPickerPopover } from './BranchPickerPopover';
 import { WorkspaceIndicator } from './WorkspaceIndicator';
 import { ChevronDownIcon, FolderClosedIcon } from 'lucide-react';
 import { WorkspaceSelector } from './WorkspaceSelector';
@@ -107,6 +118,7 @@ interface ChatEditorProps {
     metadata?: ComposerSubmitMetadata,
   ) => boolean | void;
   onInputTextChange?: (text: string) => void;
+  onAttachmentsChange?: (hasAttachments: boolean) => void;
   onCycleMode?: () => void;
   onToggleShortcuts?: () => void;
   onCancel?: () => void;
@@ -116,6 +128,7 @@ interface ChatEditorProps {
   cancelArmed?: boolean;
   disabled?: boolean;
   placeholderText?: string;
+  animatePlaceholder?: boolean;
   commands: CommandInfo[];
   skills?: SkillInfo[];
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
@@ -123,10 +136,13 @@ interface ChatEditorProps {
   onPopQueuedMessages?: () => boolean;
   onClearQueuedMessages?: () => boolean;
   currentMode?: string;
+  sessionWorkflowEnabled?: boolean;
   currentModel?: string;
   gitBranch?: string;
   /** Whether the session is in a worktree (styles the git chip purple). */
   gitWorktree?: boolean;
+  /** Git working directory for worktree sessions; targets git operations. */
+  gitCwd?: string;
   /** Git mode intent for the empty-state composer chip (branch/worktree selection). */
   gitModeIntent?: SessionGitIntent;
   /** Callback when the user changes the git mode intent via the composer chip popover. */
@@ -135,6 +151,8 @@ interface ChatEditorProps {
   gitStatus?: DaemonWorkspaceGitStatus;
   /** Opens the working-tree Changes dialog; makes the git chip clickable. */
   onOpenGitDiff?: () => void;
+  /** Opens the commit dialog. */
+  onOpenCommit?: () => void;
   /** Workspace name shown in the pane composer's `workspace` toolbar chip. */
   workspaceName?: string;
   /** Full workspace cwd, used as the chip's tooltip. */
@@ -173,12 +191,15 @@ interface ChatEditorProps {
   followupState?: UseDaemonFollowupSuggestionReturn['followupState'];
   onAcceptFollowup?: UseDaemonFollowupSuggestionReturn['onAcceptFollowup'];
   onDismissFollowup?: UseDaemonFollowupSuggestionReturn['onDismissFollowup'];
+  sessionId?: string;
   sessionName?: string;
   composerInput?: WebShellComposerInput;
   composerInputVersion?: number;
   builtinAtProviders?: WebShellBuiltinAtProvidersConfig;
   atProviders?: readonly WebShellAtProvider[];
   composerTagIcons?: WebShellComposerTagIconMap;
+  voiceTarget?: VoiceWorkspaceTarget;
+  voiceStatusRevision?: VoiceStatusRevision;
 }
 
 const CHAT_EDITOR_THEME = {
@@ -389,89 +410,63 @@ function QuickActionsIcon() {
   );
 }
 
-function attachComposerGlow(glowRootEl: HTMLElement, inputEl: HTMLElement) {
-  let glowRaf: number | undefined;
-  let pulseRaf: number | undefined;
-  let pulseDecayTimer: number | undefined;
-  let typingTimer: number | undefined;
-  let glowCurrent = 0;
-  let pulseCurrent = 0;
+function TypewriterPlaceholder({ text }: { text: string }) {
+  const totalRuns = 2;
+  const replayDelay = 3000;
+  const reducedMotion = usePrefersReducedMotion();
+  const [visibleText, setVisibleText] = useState(reducedMotion ? text : '');
+  const [finished, setFinished] = useState(false);
 
-  const apply = (on: number, pulse: number) => {
-    glowRootEl.style.setProperty('--dac-glow-on', on.toFixed(4));
-    glowRootEl.style.setProperty('--dac-glow-pulse', pulse.toFixed(4));
-  };
-
-  const animateGlow = (target: number) => {
-    if (glowRaf !== undefined) window.cancelAnimationFrame(glowRaf);
-    const start = glowCurrent;
-    const diff = target - start;
-    if (Math.abs(diff) < 0.001) {
-      glowCurrent = target;
-      apply(target, pulseCurrent);
-      return;
+  useEffect(() => {
+    if (reducedMotion) {
+      setVisibleText(text);
+      setFinished(false);
+      return undefined;
     }
-    const t0 = performance.now();
-    const tick = (now: number) => {
-      const t = Math.min((now - t0) / 220, 1);
-      glowCurrent = start + diff * (1 - (1 - t) ** 2);
-      apply(glowCurrent, pulseCurrent);
-      glowRaf = t < 1 ? window.requestAnimationFrame(tick) : undefined;
+
+    let run = 0;
+    let timer = 0;
+    const startRun = () => {
+      let index = 0;
+      setVisibleText('');
+      setFinished(false);
+      const typeNextCharacter = () => {
+        index += 1;
+        setVisibleText(text.slice(0, index));
+        if (index === text.length) {
+          run += 1;
+          setFinished(true);
+          if (run < totalRuns) {
+            timer = window.setTimeout(startRun, replayDelay);
+          }
+          return;
+        }
+        timer = window.setTimeout(typeNextCharacter, 45);
+      };
+      timer = window.setTimeout(typeNextCharacter, 45);
     };
-    glowRaf = window.requestAnimationFrame(tick);
-  };
+    startRun();
+    return () => window.clearTimeout(timer);
+  }, [reducedMotion, text]);
 
-  const animatePulseDecay = () => {
-    if (pulseRaf !== undefined) window.cancelAnimationFrame(pulseRaf);
-    const start = pulseCurrent;
-    const t0 = performance.now();
-    const tick = (now: number) => {
-      const t = Math.min((now - t0) / 300, 1);
-      pulseCurrent = start * (1 - t);
-      apply(glowCurrent, pulseCurrent);
-      pulseRaf = t < 1 ? window.requestAnimationFrame(tick) : undefined;
-    };
-    pulseRaf = window.requestAnimationFrame(tick);
-  };
-
-  const setTyping = (on: boolean) => {
-    if (on) glowRootEl.setAttribute('data-dac-typing', '');
-    else glowRootEl.removeAttribute('data-dac-typing');
-  };
-
-  const onFocus = () => animateGlow(1);
-  const onBlur = () => {
-    animateGlow(0);
-    setTyping(false);
-    if (typingTimer !== undefined) window.clearTimeout(typingTimer);
-  };
-  const onKeydown = () => {
-    if (pulseRaf !== undefined) window.cancelAnimationFrame(pulseRaf);
-    if (pulseDecayTimer !== undefined) window.clearTimeout(pulseDecayTimer);
-    pulseCurrent = 1;
-    apply(glowCurrent, 1);
-    pulseDecayTimer = window.setTimeout(animatePulseDecay, 100);
-    setTyping(true);
-    if (typingTimer !== undefined) window.clearTimeout(typingTimer);
-    typingTimer = window.setTimeout(() => setTyping(false), 650);
-  };
-
-  inputEl.addEventListener('focus', onFocus);
-  inputEl.addEventListener('blur', onBlur);
-  inputEl.addEventListener('keydown', onKeydown);
-  if (document.activeElement === inputEl) animateGlow(1);
-
-  return () => {
-    if (glowRaf !== undefined) window.cancelAnimationFrame(glowRaf);
-    if (pulseRaf !== undefined) window.cancelAnimationFrame(pulseRaf);
-    if (pulseDecayTimer !== undefined) window.clearTimeout(pulseDecayTimer);
-    if (typingTimer !== undefined) window.clearTimeout(typingTimer);
-    inputEl.removeEventListener('focus', onFocus);
-    inputEl.removeEventListener('blur', onBlur);
-    inputEl.removeEventListener('keydown', onKeydown);
-    apply(0, 0);
-    setTyping(false);
-  };
+  return (
+    <span
+      className={styles.typewriterPlaceholder}
+      data-web-shell-composer-typewriter
+      aria-hidden="true"
+    >
+      {visibleText}
+      {!reducedMotion && (
+        <span
+          className={`${styles.typewriterCaret} ${
+            finished ? styles.typewriterCaretFinished : ''
+          }`}
+        >
+          _
+        </span>
+      )}
+    </span>
+  );
 }
 
 function WidthModeIcon({ mode }: { mode: '1000' | 'wide' }) {
@@ -779,6 +774,7 @@ function ToolbarPopover({
               className={`${styles.dropdownItem} ${
                 item.id === activeId ? styles.dropdownItemActive : ''
               }`}
+              title={item.label}
               onClick={() => {
                 selectionRef.current = true;
                 onSelect(item.id);
@@ -1145,6 +1141,7 @@ export const ChatEditor = memo(
     const {
       onSubmit,
       onInputTextChange,
+      onAttachmentsChange,
       onCycleMode,
       onToggleShortcuts,
       onCancel,
@@ -1153,19 +1150,23 @@ export const ChatEditor = memo(
       cancelArmed = false,
       disabled = false,
       placeholderText = 'Type a message...',
+      animatePlaceholder = true,
       commands,
       skills = [],
       slashCommandCategoryOrder,
       queuedMessages = [],
       onPopQueuedMessages,
       currentMode = 'default',
+      sessionWorkflowEnabled = false,
       currentModel = '',
       gitBranch,
       gitWorktree,
+      gitCwd,
       gitModeIntent,
       onGitModeIntentChange,
       gitStatus,
       onOpenGitDiff,
+      onOpenCommit,
       workspaceName,
       workspaceTitle,
       workspaceColor,
@@ -1192,12 +1193,15 @@ export const ChatEditor = memo(
       followupState,
       onAcceptFollowup,
       onDismissFollowup,
+      sessionId,
       sessionName,
       composerInput,
       composerInputVersion,
       builtinAtProviders,
       atProviders,
       composerTagIcons,
+      voiceTarget,
+      voiceStatusRevision,
     } = props;
 
     const {
@@ -1228,6 +1232,7 @@ export const ChatEditor = memo(
       followupState,
       onAcceptFollowup,
       onDismissFollowup,
+      sessionId,
       sessionName,
       composerInput,
       composerInputVersion,
@@ -1246,10 +1251,16 @@ export const ChatEditor = memo(
 
     useImperativeHandle(ref, () => core.handle, [core.handle]);
 
+    useEffect(() => {
+      onAttachmentsChange?.(core.hasAttachments);
+    }, [core.hasAttachments, onAttachmentsChange]);
+
     const [modeDropdownOpen, setModeDropdownOpen] = useState(false);
     const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
     const [quickActionsOpen, setQuickActionsOpen] = useState(false);
+    const [branchPickerOpen, setBranchPickerOpen] = useState(false);
     const [showQuickActions, setShowQuickActions] = useState(isTouchLikeDevice);
+    const [typewriterSuppressed, setTypewriterSuppressed] = useState(false);
     const containerRef = useRef<HTMLDivElement>(null);
     const slashPanelRef = useRef<HTMLDivElement>(null);
     const slashDetailRef = useRef<HTMLDivElement>(null);
@@ -1277,7 +1288,14 @@ export const ChatEditor = memo(
     const closeAtMenu = core.closeAtMenu;
     const hasSlashMenu = Boolean(slashMenu);
     const hasAtMenu = Boolean(atMenu);
-    const editorViewRef = core.viewRef;
+    const showTypewriterPlaceholder =
+      animatePlaceholder &&
+      !disabled &&
+      Boolean(placeholderText) &&
+      !core.hasInput() &&
+      !typewriterSuppressed &&
+      !core.shellMode &&
+      !followupState?.isVisible;
 
     useEffect(() => {
       if (typeof window === 'undefined' || !window.matchMedia) return;
@@ -1318,13 +1336,6 @@ export const ChatEditor = memo(
     }, [hasAtMenu, hasSlashMenu, closeAtMenu, closeSlashMenu]);
 
     useEffect(() => {
-      const glowRoot = containerRef.current;
-      const inputEl = editorViewRef.current?.contentDOM;
-      if (!glowRoot || !inputEl) return undefined;
-      return attachComposerGlow(glowRoot, inputEl);
-    }, [editorViewRef]);
-
-    useEffect(() => {
       const container = containerRef.current;
       const minWidth = chatWidthToggleMin;
       if (!container || minWidth === undefined) {
@@ -1348,11 +1359,18 @@ export const ChatEditor = memo(
       () =>
         DAEMON_APPROVAL_MODES.map((id) => ({
           id,
-          label: getModeListLabel(id, t),
-          description: t(`mode.desc.${id}`),
+          label:
+            id === 'plan' && sessionWorkflowEnabled
+              ? t('mode.listLabel.planReview')
+              : getModeListLabel(id, t),
+          description: t(
+            id === 'plan' && sessionWorkflowEnabled
+              ? 'mode.desc.planReview'
+              : `mode.desc.${id}`,
+          ),
           icon: <ModeIcon mode={id} />,
         })),
-      [t],
+      [sessionWorkflowEnabled, t],
     );
     const visibleActionSet = useMemo(() => {
       if (!visibleToolbarActions) return null;
@@ -1624,7 +1642,10 @@ export const ChatEditor = memo(
     };
 
     // Mode display label
-    const modeLabel = getModeLabel(currentMode, t);
+    const modeLabel =
+      currentMode === 'plan' && sessionWorkflowEnabled
+        ? t('mode.label.planReview')
+        : getModeLabel(currentMode, t);
 
     const currentModelLabel = currentModel
       ? (availableModels.find((model) => model.id === currentModel)?.label ??
@@ -1858,7 +1879,7 @@ export const ChatEditor = memo(
           ref={containerRef}
           className={styles.container}
           data-web-shell-composer-surface
-          data-dac-glow
+          data-typewriter-visible={showTypewriterPlaceholder || undefined}
           onClick={() => {
             setModeDropdownOpen(false);
             setModelDropdownOpen(false);
@@ -1866,8 +1887,7 @@ export const ChatEditor = memo(
             core.focus();
           }}
         >
-          <div className={styles.dacAura} aria-hidden="true" />
-          <div className={styles.dacHalo} aria-hidden="true" />
+          <SpecularComposerEffect targetRef={containerRef} />
           {searchMode && (
             <div
               ref={searchUiRef}
@@ -2035,7 +2055,19 @@ export const ChatEditor = memo(
                 onSelectTab={core.selectAtTab}
               />
             )}
-            <div className={styles.editorArea}>
+            <div
+              className={styles.editorArea}
+              onPointerDownCapture={() => setTypewriterSuppressed(true)}
+              onKeyDownCapture={() => setTypewriterSuppressed(true)}
+              onBlurCapture={(event) => {
+                if (!event.currentTarget.contains(event.relatedTarget)) {
+                  setTypewriterSuppressed(false);
+                }
+              }}
+            >
+              {showTypewriterPlaceholder && (
+                <TypewriterPlaceholder text={placeholderText} />
+              )}
               {core.shellMode && (
                 <span className={styles.shellPrefix} aria-hidden="true">
                   !
@@ -2051,6 +2083,7 @@ export const ChatEditor = memo(
                   className={styles.mobileTextarea}
                   value={core.mobileComposer.value}
                   onChange={core.mobileComposer.onChange}
+                  onBlur={core.mobileComposer.onBlur}
                   onPaste={core.mobileComposer.onPaste}
                   placeholder={core.mobileComposer.placeholder}
                   disabled={core.disabled}
@@ -2132,13 +2165,31 @@ export const ChatEditor = memo(
                         onIntentChange={onGitModeIntentChange}
                       />
                     ) : (
-                      <GitBranchIndicator
-                        branch={gitBranch}
-                        status={gitStatus}
-                        compact={!showGitBranchLabel}
+                      <BranchPickerPopover
+                        open={branchPickerOpen}
+                        onOpenChange={setBranchPickerOpen}
+                        workspaceCwd={selectedWorkspace?.cwd ?? ''}
+                        gitCwd={gitCwd}
                         onOpenDiff={onOpenGitDiff}
-                        worktree={gitWorktree}
-                      />
+                        onOpenCommit={onOpenCommit}
+                      >
+                        <button
+                          type="button"
+                          className={styles.gitBranchChipButton}
+                          aria-label={gitBranchAriaLabel(
+                            gitBranch,
+                            gitStatus,
+                            t,
+                          )}
+                        >
+                          <GitBranchIndicator
+                            branch={gitBranch}
+                            status={gitStatus}
+                            compact={!showGitBranchLabel}
+                            worktree={gitWorktree}
+                          />
+                        </button>
+                      </BranchPickerPopover>
                     ))}
                   {showModeAction && (
                     <div
@@ -2222,7 +2273,8 @@ export const ChatEditor = memo(
                               core.closeAtMenu();
                               setQuickActionsOpen(false);
                             }}
-                            aria-label={t('model.select')}
+                            aria-label={`${t('model.select')}: ${modelLabel}`}
+                            title={modelLabel}
                           >
                             <span className={styles.toolBtnModelIcon}>
                               <ModelIcon />
@@ -2329,6 +2381,8 @@ export const ChatEditor = memo(
                   <VoiceButton
                     disabled={disabled}
                     onActiveChange={setVoiceActive}
+                    target={voiceTarget}
+                    statusRevision={voiceStatusRevision}
                     onInsert={(text) => {
                       const existing = core.getText();
                       const sep = existing && !/\s$/.test(existing) ? ' ' : '';

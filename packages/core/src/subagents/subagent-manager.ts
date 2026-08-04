@@ -62,7 +62,7 @@ import {
   parseMaxTurns,
   claudePermissionModeToApprovalMode,
 } from './agent-frontmatter-schema.js';
-import { ToolDisplayNamesMigration } from '../tools/tool-names.js';
+import { ToolDisplayNamesMigration, ToolNames } from '../tools/tool-names.js';
 import { QWEN_DIR, Storage } from '../config/storage.js';
 import {
   hasRebuiltToolRegistry,
@@ -881,8 +881,24 @@ export class SubagentManager {
         ...runtimeConfig.runConfig,
         ...options?.runConfigOverrides,
       };
-      const toolConfig =
+      const configuredToolConfig =
         options?.toolConfigOverride ?? runtimeConfig.toolConfig;
+      const toolConfig: ToolConfig = {
+        tools: configuredToolConfig?.tools ?? ['*'],
+        ...(configuredToolConfig?.executionAllowedTools !== undefined
+          ? {
+              executionAllowedTools: [
+                ...configuredToolConfig.executionAllowedTools,
+              ],
+            }
+          : {}),
+        disallowedTools: Array.from(
+          new Set([
+            ...(configuredToolConfig?.disallowedTools ?? []),
+            ToolNames.ASK_USER_QUESTION,
+          ]),
+        ),
+      };
 
       // When the model selector specifies a different provider, build a
       // dedicated ContentGenerator + view so the subagent talks to the

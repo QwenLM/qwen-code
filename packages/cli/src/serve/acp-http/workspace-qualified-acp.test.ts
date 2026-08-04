@@ -78,6 +78,7 @@ function makeRuntime(input: {
   return {
     workspaceId: input.id,
     workspaceCwd: input.cwd,
+    sessionRuntimeBaseDir: Storage.getRuntimeBaseDir(),
     primary: input.primary,
     trusted: input.trusted,
     env: input.env ?? PARENT_ENV,
@@ -115,24 +116,6 @@ async function writeStoredSession(sessionId: string, cwd: string) {
   );
 }
 
-async function withRuntimeDir<T>(fn: () => Promise<T>): Promise<T> {
-  const previousRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
-  const runtimeDir = await fsp.mkdtemp(
-    path.join(os.tmpdir(), 'qwen-workspace-qualified-acp-'),
-  );
-  process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
-  try {
-    return await fn();
-  } finally {
-    if (previousRuntimeDir === undefined) {
-      delete process.env['QWEN_RUNTIME_DIR'];
-    } else {
-      process.env['QWEN_RUNTIME_DIR'] = previousRuntimeDir;
-    }
-    await fsp.rm(runtimeDir, { recursive: true, force: true });
-  }
-}
-
 describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
   let server: Server;
   let base: string;
@@ -146,8 +129,15 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
   let workspaceRegistry: ReturnType<typeof createWorkspaceRegistry>;
   let secondaryRuntime: WorkspaceRuntime;
   let workspaceVoiceConnection: ReturnType<typeof vi.fn>;
+  let runtimeDir: string;
+  let previousRuntimeDir: string | undefined;
 
   beforeEach(async () => {
+    previousRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+    runtimeDir = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-workspace-qualified-acp-'),
+    );
+    process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
     setupGithubMock.mockReset();
     setupGithubMock.mockImplementation(async ({ cwd }: { cwd: string }) => ({
       kind: 'github_setup',
@@ -247,6 +237,12 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     deviceFlowRegistry?.dispose();
     server.closeAllConnections?.();
     await new Promise<void>((r) => server.close(() => r()));
+    if (previousRuntimeDir === undefined) {
+      delete process.env['QWEN_RUNTIME_DIR'];
+    } else {
+      process.env['QWEN_RUNTIME_DIR'] = previousRuntimeDir;
+    }
+    await fsp.rm(runtimeDir, { recursive: true, force: true });
   });
 
   async function postInitialize(pathname: string): Promise<Response> {
@@ -571,45 +567,43 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
   });
 
   it('updates persisted organization in the selected workspace only', async () => {
-    await withRuntimeDir(async () => {
-      const sessionId = '550e8400-e29b-41d4-a716-446655440180';
-      await writeStoredSession(sessionId, '/ws-b');
+    const sessionId = '550e8400-e29b-41d4-a716-446655440180';
+    await writeStoredSession(sessionId, '/ws-b');
 
-      const response = await sendWsRequest('/workspaces/secondary-id/acp', {
-        jsonrpc: '2.0',
-        id: 2,
-        method: '_qwen/session/update_organization',
-        params: { sessionId, isPinned: true },
-      });
-
-      expect(response['result']).toMatchObject({ sessionId, isPinned: true });
-      const listed = await sendWsRequest('/workspaces/secondary-id/acp', {
-        jsonrpc: '2.0',
-        id: 3,
-        method: 'session/list',
-        params: { view: 'organized', group: 'pinned' },
-      });
-      expect(listed['result']).toMatchObject({
-        sessions: [expect.objectContaining({ sessionId, isPinned: true })],
-      });
-
-      const legacy = await sendWsRequest('/acp', {
-        jsonrpc: '2.0',
-        id: 4,
-        method: '_qwen/session/update_organization',
-        params: { sessionId, isPinned: false },
-      });
-      expect(legacy['error']).toMatchObject({ code: -32602 });
-
-      const secondarySnapshot =
-        await createSessionOrganizationService('/ws-b').readSnapshot();
-      const primarySnapshot =
-        await createSessionOrganizationService('/ws').readSnapshot();
-      expect(secondarySnapshot.sessions.get(sessionId)).toMatchObject({
-        isPinned: true,
-      });
-      expect(primarySnapshot.sessions.has(sessionId)).toBe(false);
+    const response = await sendWsRequest('/workspaces/secondary-id/acp', {
+      jsonrpc: '2.0',
+      id: 2,
+      method: '_qwen/session/update_organization',
+      params: { sessionId, isPinned: true },
     });
+
+    expect(response['result']).toMatchObject({ sessionId, isPinned: true });
+    const listed = await sendWsRequest('/workspaces/secondary-id/acp', {
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'session/list',
+      params: { view: 'organized', group: 'pinned' },
+    });
+    expect(listed['result']).toMatchObject({
+      sessions: [expect.objectContaining({ sessionId, isPinned: true })],
+    });
+
+    const legacy = await sendWsRequest('/acp', {
+      jsonrpc: '2.0',
+      id: 4,
+      method: '_qwen/session/update_organization',
+      params: { sessionId, isPinned: false },
+    });
+    expect(legacy['error']).toMatchObject({ code: -32602 });
+
+    const secondarySnapshot =
+      await createSessionOrganizationService('/ws-b').readSnapshot();
+    const primarySnapshot =
+      await createSessionOrganizationService('/ws').readSnapshot();
+    expect(secondarySnapshot.sessions.get(sessionId)).toMatchObject({
+      isPinned: true,
+    });
+    expect(primarySnapshot.sessions.has(sessionId)).toBe(false);
   });
 
   it('rejects an untrusted workspace with 403 untrusted_workspace', async () => {
@@ -871,6 +865,39 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     expect(res.status).toBe(503);
     const body = (await res.json()) as { code?: string };
     expect(body.code).toBe('server_disposed');
+  });
+
+  it('creates a remember lane on demand but never after dispose()', () => {
+    // A trusted secondary registered after mount has no lane until one is
+    // created on demand.
+    workspaceRegistry.add(
+      makeRuntime({
+        id: 'late-id',
+        cwd: '/ws-late',
+        primary: false,
+        trusted: true,
+        bridge: makeBridge(),
+      }),
+    );
+    expect(handle?.getWorkspaceRememberLane('late-id')).toBeUndefined();
+    expect(handle?.ensureWorkspaceRememberLane('late-id')).toBeDefined();
+    expect(handle?.getWorkspaceRememberLane('late-id')).toBeDefined();
+
+    handle?.dispose();
+    workspaceRegistry.add(
+      makeRuntime({
+        id: 'late-2',
+        cwd: '/ws-late-2',
+        primary: false,
+        trusted: true,
+        bridge: makeBridge(),
+      }),
+    );
+    // The create-after-dispose path must stay closed (the resolver's 503 is the
+    // right answer); without the guard this would allocate a
+    // dispatcher/registry/lane that nothing will ever tear down.
+    expect(handle?.ensureWorkspaceRememberLane('late-2')).toBeUndefined();
+    expect(handle?.getWorkspaceRememberLane('late-2')).toBeUndefined();
   });
 
   it('closes a WS upgraded before dispose without allowing initialize', async () => {

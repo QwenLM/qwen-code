@@ -310,10 +310,46 @@ const SETTINGS_SCHEMA = {
     label: 'Serve',
     category: 'Advanced',
     requiresRestart: true,
-    default: {} as { channels?: string[] },
+    default: {},
     description: 'Persistent qwen serve settings.',
     showInDialog: false,
     mergeStrategy: MergeStrategy.SHALLOW_MERGE,
+    properties: {
+      channels: {
+        type: 'array',
+        label: 'Startup Channels',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: [] as string[],
+        description:
+          'Messaging channels to start automatically when the daemon boots.',
+        showInDialog: false,
+        items: { type: 'string' },
+      },
+      maxConcurrentSubSessionsPerCaller: {
+        type: 'integer',
+        label: 'Max Concurrent Sub-Sessions Per Caller',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: 16,
+        minimum: 1,
+        description:
+          'Per-session ceiling on concurrent in-flight sub-sessions spawned via the create_sub_session tool.',
+        showInDialog: false,
+      },
+      maxConcurrentSubSessionsTotal: {
+        type: 'integer',
+        label: 'Max Concurrent Sub-Sessions Total',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: 24,
+        minimum: 1,
+        maximum: 1024,
+        description:
+          'Workspace-wide ceiling on concurrent in-flight sub-sessions across all callers.',
+        showInDialog: false,
+      },
+    },
   },
 
   // Model providers configuration grouped by authType
@@ -1043,10 +1079,10 @@ const SETTINGS_SCHEMA = {
         type: 'boolean',
         label: 'Virtualized History (reduces flicker on long sessions)',
         category: 'UI',
-        requiresRestart: false,
-        default: false,
+        requiresRestart: true,
+        default: true,
         description:
-          'Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Recommended if you see flicker, scroll-storm, or interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Also enables mouse interactions: click an option in a menu/dialog to select it, hover to highlight it, and click in the prompt to position the cursor. Does NOT use the host terminal scrollback while enabled. Drag to select text in the viewport (double/triple click selects a word/line), copied on release. To use the terminal’s own selection instead, hold Shift (or Option on macOS) while dragging.',
+          'Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Enabled by default in compatible interactive terminals to avoid flicker, scroll-storm, and interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Screen reader mode and non-interactive output such as piped stdout or CI use append-only terminal output instead. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Also enables mouse interactions: click an option in a menu/dialog to select it, hover to highlight it, and click in the prompt to position the cursor. Does NOT use the host terminal scrollback while enabled. Drag to select text in the viewport (double/triple click selects a word/line), copied on release. To use the terminal’s own selection instead, hold Shift (or Option on macOS) while dragging. These mouse interactions are controlled by ui.mouseTracking; disable that setting to restore native right-click and OSC 8 hyperlink clicks.',
         showInDialog: true,
       },
       showScrollbar: {
@@ -1057,6 +1093,16 @@ const SETTINGS_SCHEMA = {
         default: true,
         description:
           'Show the auto-hiding scrollbar in the in-app scrollable viewport (Virtualized History). The bar appears while scrolling and fades out when idle. Disable to hide it entirely.',
+        showInDialog: true,
+      },
+      mouseTracking: {
+        type: 'boolean',
+        label: 'Mouse Tracking',
+        category: 'UI',
+        requiresRestart: true,
+        default: true,
+        description:
+          'Enable in-app SGR mouse tracking. While enabled, Qwen Code captures mouse events for text selection, click-to-position in text inputs, row hover, history-item toggling, and viewport scrolling. Because the terminal forwards all mouse events to the app, it cannot show native right-click context menus or open OSC 8 hyperlink clicks. Disable to restore native right-click and clickable URL links; this turns off all in-app mouse interaction, and in Virtualized History the wheel no longer scrolls the transcript — use Shift+↑/↓, PgUp/PgDn, or Ctrl+Home/End instead (pair with ui.useTerminalBuffer: false to restore native terminal scrollback).',
         showInDialog: true,
       },
       shellOutputMaxLines: {
@@ -1225,6 +1271,11 @@ const SETTINGS_SCHEMA = {
     jsonSchemaOverride: {
       type: 'object',
       properties: {
+        userId: {
+          description:
+            'Stable end-user identifier written to GenAI spans as gen_ai.user.id for ARMS session analysis. This value is linkable personal data: prefer a pseudonymous ID, and configure it only when one process represents one user.',
+          type: 'string',
+        },
         includeSensitiveSpanAttributes: {
           description:
             'When enabled, user prompts, system prompts, tool inputs/outputs, and model responses are written to native OTel span attributes in addition to the log-to-span bridge. Warning: this may expose sensitive data (file contents, shell commands, conversation history) to your OTLP backend.',
@@ -1307,6 +1358,17 @@ const SETTINGS_SCHEMA = {
     description:
       'Image-capable model used as the vision bridge: when a text-only main model receives an image, it is transcribed by this model first. Set with /model --vision. Leave empty to auto-pick a same-provider vision model.',
     showInDialog: true,
+  },
+
+  compactionModel: {
+    type: 'string',
+    label: 'Compaction Model',
+    category: 'Model',
+    requiresRestart: false,
+    default: '',
+    description:
+      'Model used for chat compression (auto-compaction). Set with /model --compaction. Leave empty to fall back to the main model. A smaller/faster model reduces compression latency and cost.',
+    showInDialog: false,
   },
 
   imageModel: {
@@ -1601,6 +1663,45 @@ const SETTINGS_SCHEMA = {
               "Force scope:'global' on Anthropic cache_control entries even when the base URL is not an Anthropic-native origin (e.g. proxy providers like Routify, OpenRouter). Requires the proxy to forward cache_control fields and the prompt-caching-scope-2026-01-05 beta.",
             parentKey: 'generationConfig',
             showInDialog: false,
+          },
+          cacheRetention: {
+            type: 'enum',
+            label: 'Anthropic Cache Retention',
+            category: 'Generation Configuration',
+            requiresRestart: false,
+            default: undefined as 'ephemeral' | '1h' | undefined,
+            description:
+              "Default Anthropic cache_control retention. 'ephemeral' uses the spec 5-minute default (no ttl on the wire). '1h' requests the extended cache tier (ttl: '1h') -- note the 1h tier writes at 2x base input token cost (vs 1.25x for the 5-minute default; cached reads stay 0.1x for both), so it only pays off when a prefix survives long enough between requests to outlast several 5-minute windows.",
+            parentKey: 'generationConfig',
+            showInDialog: false,
+            options: [
+              { value: 'ephemeral', label: 'Ephemeral (5m, Default)' },
+              { value: '1h', label: 'Extended (1h)' },
+            ],
+          },
+          cacheRetentionByBlock: {
+            type: 'object',
+            label: 'Anthropic Cache Retention By Block',
+            category: 'Generation Configuration',
+            requiresRestart: false,
+            default: undefined as
+              | Partial<
+                  Record<'system' | 'tool' | 'user.last', 'ephemeral' | '1h'>
+                >
+              | undefined,
+            description:
+              "Optional per-anchor override for Anthropic cache retention. Keys (system, tool, user.last) override generationConfig.cacheRetention when present. Resolution is normalized so retention is monotonically non-increasing in wire order (tool -> system -> user.last, per Anthropic's 'longer TTL must precede shorter TTL' rule): setting one anchor to '1h' promotes every anchor before it on the wire to '1h' as well, so any combination here is valid.",
+            parentKey: 'generationConfig',
+            showInDialog: false,
+            jsonSchemaOverride: {
+              type: 'object',
+              properties: {
+                system: { type: 'string', enum: ['ephemeral', '1h'] },
+                tool: { type: 'string', enum: ['ephemeral', '1h'] },
+                'user.last': { type: 'string', enum: ['ephemeral', '1h'] },
+              },
+              additionalProperties: false,
+            },
           },
           splitToolMedia: {
             type: 'boolean',
@@ -1920,6 +2021,17 @@ const SETTINGS_SCHEMA = {
           "Max runtime in minutes for background memory agents (extraction, dream, remember, skill review). Unset uses each agent's built-in default (2–5 minutes); 0 disables the time limit. Useful for slow local models that need longer than the defaults.",
         showInDialog: false,
       },
+      agentMaxTurns: {
+        type: 'number',
+        label: 'Memory Agent Max Turns',
+        category: 'Memory',
+        requiresRestart: true,
+        default: undefined as number | undefined,
+        minimum: 0,
+        description:
+          "Max turns for background memory agents (extraction, dream, remember, skill review). Unset uses each agent's built-in default (5–8); 0 disables the turn limit.",
+        showInDialog: false,
+      },
       enableTeamMemory: {
         type: 'boolean',
         label: 'Enable Team Memory',
@@ -1984,6 +2096,23 @@ const SETTINGS_SCHEMA = {
       'the model.',
     showInDialog: false,
     properties: {
+      disabledLevels: {
+        type: 'array',
+        label: 'Disabled Skill Levels',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: undefined as string[] | undefined,
+        description:
+          'Skill discovery levels to skip entirely. Supported levels are ' +
+          'project, user, extension, and bundled. UNION-merged across settings ' +
+          'scopes.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.UNION,
+        items: {
+          type: 'string',
+          enum: ['project', 'user', 'extension', 'bundled'],
+        },
+      },
       disabled: {
         type: 'array',
         label: 'Disabled Skills',
@@ -2354,6 +2483,26 @@ const SETTINGS_SCHEMA = {
             description:
               'When enabled, MCP tools are loaded on-demand via ToolSearch to reduce prompt size. Disable this for models that rely on prefix-based KV caching (e.g. DeepSeek) to keep the prompt prefix stable and maximize cache hit rates.',
             showInDialog: true,
+          },
+          threshold: {
+            type: 'number',
+            label: 'Deferred Tool Preload Threshold (%)',
+            category: 'Tools',
+            requiresRestart: true,
+            default: 10,
+            description:
+              'Context-window percentage used as the session-start budget for preloading deferred tools (bundled built-ins and MCP alike). When every deferred tool schema fits within the budget, all are declared upfront instead of loaded on demand, keeping the prompt prefix stable for KV caching. Set 0 to always load deferred tools on demand.',
+            showInDialog: true,
+            // A percentage of the context window: values above 100 would set a
+            // budget larger than the window and unconditionally preload every
+            // deferred tool, defeating the point of the threshold. Bound it the
+            // way autoCompactThreshold bounds its fraction.
+            jsonSchemaOverride: {
+              type: 'number',
+              minimum: 0,
+              maximum: 100,
+              default: 10,
+            },
           },
         },
       },
@@ -2849,6 +2998,16 @@ const SETTINGS_SCHEMA = {
           description: 'URL pattern (supports * wildcard)',
         },
       },
+      allowPrivateNetworkHooks: {
+        type: 'boolean',
+        label: 'Allow Private Network Hooks',
+        category: 'Security',
+        requiresRestart: false,
+        default: false,
+        description:
+          'When true, HTTP hooks may target private/link-local IP ranges (the SSRF IP-range checks are skipped). Cloud metadata hostnames (e.g. 169.254.169.254, metadata.google.internal) remain blocked. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored so a cloned repository cannot self-grant this bypass. Enable only in trusted, managed environments, and pair with security.allowedHttpHookUrls.',
+        showInDialog: false,
+      },
     },
   },
 
@@ -3272,6 +3431,18 @@ const SETTINGS_SCHEMA = {
         mergeStrategy: MergeStrategy.CONCAT,
         items: HOOK_DEFINITION_ITEMS,
       },
+      SessionDelete: {
+        type: 'array',
+        label: 'Session Delete Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description:
+          'Hooks that execute after an explicitly selected session is deleted.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
       PreCompact: {
         type: 'array',
         label: 'Pre Compact Hooks',
@@ -3331,6 +3502,16 @@ const SETTINGS_SCHEMA = {
     description: 'Settings to enable experimental features.',
     showInDialog: false,
     properties: {
+      sessionWorkflow: {
+        type: 'boolean',
+        label: 'Session Workflow Plan & Review',
+        category: 'Experimental',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Enable the daemon Web Shell Session Workflow DAG and present Plan mode as Plan & Review. Disabled by default and does not change ordinary Todo or execution behavior.',
+        showInDialog: true,
+      },
       cron: {
         type: 'boolean',
         label: 'Enable Cron/Loop Tools',
@@ -3350,6 +3531,16 @@ const SETTINGS_SCHEMA = {
         description:
           'Allow daemon and ACP sessions to continue an unfinished top-level Todo list for at most two consecutive primary-model calls without new user input. Mid-turn user input starts a fresh two-attempt stage. Disabled in safe, bare, and Approval plan modes.',
         showInDialog: false,
+      },
+      sessionWriterLease: {
+        type: 'boolean',
+        label: 'Enable ACP Session Writer Lease',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Enable cross-process write fencing for persisted ACP and daemon sessions. The effective value is frozen when the ACP or daemon process starts. Every concurrent ACP or daemon writer must enable the setting; interactive and headless writers remain outside the protocol.',
+        showInDialog: true,
       },
       cronRecurringMaxAgeDays: {
         type: 'number',

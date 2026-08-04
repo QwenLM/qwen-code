@@ -131,6 +131,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionClose: 'qwen/control/session/close',
   sessionApprovalMode: 'qwen/control/session/approval_mode',
   sessionBranch: 'qwen/control/session/branch',
+  sessionSideTask: 'qwen/control/session/side_task',
   sessionForkAgent: 'qwen/control/session/fork_agent',
   sessionRecap: 'qwen/control/session/recap',
   sessionGenerationStart: 'qwen/control/session/generation/start',
@@ -166,6 +167,8 @@ export const SERVE_CONTROL_EXT_METHODS = {
    * `{ sessionId }`; result: `{ active: ActiveGoalView | null }`.
    */
   sessionGoalGet: 'qwen/control/session/goal/get',
+  sessionMcpRuntimeAdd: 'qwen/control/session/mcp/runtime-add',
+  sessionMcpRuntimeRemove: 'qwen/control/session/mcp/runtime-remove',
   workspaceMcpRuntimeAdd: 'qwen/control/workspace/mcp/runtime-add',
   workspaceMcpRuntimeRemove: 'qwen/control/workspace/mcp/runtime-remove',
   workspaceReload: 'qwen/control/workspace/reload',
@@ -447,7 +450,12 @@ export interface ServeWorkspaceSkillStatus extends ServeStatusCell {
 export interface ServeWorkspaceSkillsRefreshResult {
   sessionsRefreshed: number;
   sessionsFailed: number;
+  configsRefreshed?: number;
+  configsFailed?: number;
+  reason?: ServeWorkspaceSkillsRefreshReason;
 }
+
+export type ServeWorkspaceSkillsRefreshReason = 'settings' | 'content' | 'all';
 
 export interface ServeWorkspaceSkillsStatus {
   v: typeof STATUS_SCHEMA_VERSION;
@@ -1008,6 +1016,9 @@ export const IDLE_HOOK_EVENTS: Record<HookEventName, ServeHookEventMeta> = {
   SessionEnd: {
     description: 'When a session is ending',
     matcherKind: 'sessionTrigger',
+  },
+  SessionDelete: {
+    description: 'After an explicitly selected session is deleted',
   },
   PermissionRequest: {
     description: 'When a permission dialog is displayed',

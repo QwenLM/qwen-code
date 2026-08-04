@@ -38,6 +38,7 @@ import {
   getStableClientId,
   persistStableClientId,
 } from './clientLifecycle.js';
+import { extractHttpStatus, isRecord } from './httpErrors.js';
 import { useOptionalDaemonWorkspace } from '../workspace/DaemonWorkspaceProvider.js';
 import {
   getCurrentMode,
@@ -120,7 +121,7 @@ export interface DaemonTranscriptHistory {
   loading: boolean;
   capacityReached: boolean;
   paginationError: boolean;
-  loadMore(): Promise<void>;
+  loadMore(options?: { force?: boolean }): Promise<void>;
 }
 
 const SESSION_TRANSCRIPT_PAGINATION_FEATURE = 'session_transcript_pagination';
@@ -141,6 +142,20 @@ function assistantDoneFromTurnEvent(
 }
 
 function getPersistedReplayRecordId(event: DaemonEvent): string | undefined {
+  // A `history_truncated` marker may carry a `recordId` anchor stamped by
+  // the daemon's compaction engine — the last recordId it saw before the
+  // truncation point. This is the fallback used when the retained window
+  // lost every turn-boundary `session_update` (e.g. live-journal cap hit
+  // during a single long in-flight turn) and the client would otherwise
+  // have no `beforeRecordId` for transcript pagination.
+  if (event.type === 'history_truncated') {
+    try {
+      if (!isRecord(event.data)) return undefined;
+      return getString(event.data, 'recordId');
+    } catch {
+      return undefined;
+    }
+  }
   if (event.type !== 'session_update') {
     return undefined;
   }
@@ -170,12 +185,33 @@ function prependTranscriptHistory(
   maxBlocks: number,
 ): boolean {
   const current = store.getSnapshot();
+  // Drop fetched events whose source records are already displayed.
+  // `beforeRecordId` pagination is exclusive of the anchor but the anchor
+  // can sit inside the retained window (e.g. the daemon's transcript
+  // backfill for a live-journal overflow returns the latest recordId), so
+  // a page may include records the client already shows. Prepend has no
+  // other dedup, so without this filter those records would render twice.
+  const displayedRecordIds = new Set<string>();
+  for (const block of current.blocks) {
+    for (const recordId of block.sourceRecordIds ?? []) {
+      displayedRecordIds.add(recordId);
+    }
+  }
+  const freshEvents =
+    displayedRecordIds.size === 0
+      ? events
+      : events.filter(
+          (event) =>
+            !event.sourceRecordIds?.some((recordId) =>
+              displayedRecordIds.has(recordId),
+            ),
+        );
   const historyStore = createDaemonTranscriptStore({
     maxBlocks: Number.MAX_SAFE_INTEGER,
     nextOrdinal: current.nextOrdinal,
     retainSubagentBlocks: current.retainSubagentBlocks,
   });
-  historyStore.dispatch(events);
+  historyStore.dispatch(freshEvents);
   const history = historyStore.getSnapshot();
   if (history.blocks.length + current.blocks.length > maxBlocks) {
     return false;
@@ -220,7 +256,10 @@ function projectSubagentToolUpdate(
   const subagentType = boundedString(rawInput?.['subagent_type'], 120);
   const prompt = boundedString(rawInput?.['prompt'], 240);
   const description = boundedString(rawInput?.['description'], 240);
+  const todoId =
+    typeof rawInput?.['todo_id'] === 'string' ? rawInput['todo_id'] : undefined;
   const subagentName = boundedString(rawOutput?.['subagentName'], 120);
+  const subagentColor = boundedString(rawOutput?.['subagentColor'], 80);
   const taskDescription = boundedString(rawOutput?.['taskDescription'], 240);
   const status = boundedString(rawOutput?.['status'], 80);
   const terminateReason = boundedString(rawOutput?.['terminateReason'], 240);
@@ -229,6 +268,7 @@ function projectSubagentToolUpdate(
         ...(subagentType ? { subagent_type: subagentType } : {}),
         ...(prompt ? { prompt } : {}),
         ...(description ? { description } : {}),
+        ...(todoId ? { todo_id: todoId } : {}),
         ...(rawInput['run_in_background'] === true
           ? { run_in_background: true }
           : {}),
@@ -240,6 +280,7 @@ function projectSubagentToolUpdate(
           ? { type: 'task_execution' }
           : {}),
         ...(subagentName ? { subagentName } : {}),
+        ...(subagentColor ? { subagentColor } : {}),
         ...(taskDescription ? { taskDescription } : {}),
         ...(status ? { status } : {}),
         ...(terminateReason ? { terminateReason } : {}),
@@ -1137,9 +1178,27 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           // only fires once with the fully-populated state.
           const { compactedReplay, liveJournal } = activeSession.replaySnapshot;
           const replayEvents = [...compactedReplay, ...liveJournal];
-          const firstPersistedRecordId = replayEvents
-            .map(getPersistedReplayRecordId)
-            .find((recordId): recordId is string => recordId !== undefined);
+          // Prefer a recordId carried by an actual `session_update` in the
+          // retained window; fall back to the `history_truncated` marker's
+          // stamped anchor only when no session_update has one. The marker
+          // sits at position 0, so a single `.find()` would let its (more
+          // recent) anchor win over earlier session_update recordIds still
+          // in the window, causing `beforeRecordId` to re-fetch records
+          // the client already displays. Last resort: the daemon's
+          // `historyAnchorRecordId` — the latest recordId it read from the
+          // persisted transcript — which covers live sessions whose
+          // in-flight turn capped the journal before any turn boundary
+          // (no recordId anywhere in the retained window or marker).
+          const firstPersistedRecordId =
+            replayEvents
+              .filter((e) => e.type === 'session_update')
+              .map(getPersistedReplayRecordId)
+              .find((recordId): recordId is string => recordId !== undefined) ??
+            replayEvents
+              .filter((e) => e.type === 'history_truncated')
+              .map(getPersistedReplayRecordId)
+              .find((recordId): recordId is string => recordId !== undefined) ??
+            activeSession.historyAnchorRecordId;
           const replayHistoryWasTruncated = replayEvents.some(
             hasFullTranscriptBeforeReplay,
           );
@@ -2350,159 +2409,177 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       store,
     ],
   );
-  const loadMoreTranscript = useCallback(async () => {
-    const history = transcriptHistoryRef.current;
-    const activeSession = sessionRef.current;
-    if (
-      !history.hasMore ||
-      history.loading ||
-      history.paginationError ||
-      !activeSession ||
-      activeSession.sessionId !== history.sessionId
-    ) {
-      return;
-    }
-
-    history.loading = true;
-    setTranscriptHistoryState({
-      hasMore: true,
-      loading: true,
-      capacityReached: false,
-      paginationError: false,
-    });
-    let terminalFailure = false;
-    try {
-      const page = await activeSession.client.getSessionTranscriptPage(
-        activeSession.sessionId,
-        {
-          ...(history.cursor !== undefined
-            ? { cursor: history.cursor }
-            : history.beforeRecordId !== undefined
-              ? { beforeRecordId: history.beforeRecordId }
-              : {}),
-          limit: historyPageSizeRef.current ?? 100,
-          clientId: activeSession.clientId,
-        },
-      );
+  const loadMoreTranscript = useCallback(
+    async (options?: { force?: boolean }) => {
+      const history = transcriptHistoryRef.current;
+      const activeSession = sessionRef.current;
       if (
-        sessionRef.current !== activeSession ||
-        transcriptHistoryRef.current !== history
+        history.loading ||
+        !activeSession ||
+        activeSession.sessionId !== history.sessionId
       ) {
         return;
       }
-      if (page.partial || page.replayError) {
-        terminalFailure = true;
-        throw new Error(
-          page.replayError ?? 'Earlier session history was only partially read',
-        );
-      }
-
-      const replayOpts = {
-        ...eventOptionsRef.current,
-        suppressOwnUserEcho: false,
-      };
-      const uiEvents: DaemonUiEvent[] = [];
-      for (const replayEvent of page.events) {
-        try {
-          const transcriptEvents = filterDaemonUiEventsForTranscript(
-            replayEvent,
-            normalizeAndFilterEvent(
-              replayEvent,
-              activeSession.clientId,
-              replayOpts,
-              setConnection,
-              { updateConnection: false },
-            ),
-            addNotice,
-            dismissNotice,
-          );
-          uiEvents.push(
-            ...(subagentTranscriptModeRef.current === 'summary'
-              ? projectMainTranscriptEvents(transcriptEvents)
-              : transcriptEvents),
-          );
-        } catch (error) {
-          const message =
-            error instanceof Error ? error.message : String(error);
-          addNotice({
-            severity: 'warning',
-            category: 'protocol',
-            operation: 'normalize_event',
-            code: 'daemon.replay_event_malformed',
-            message: 'Skipped malformed history event',
-            debugMessage: message,
-            recoverable: true,
-          });
-          console.warn(
-            '[DaemonSessionProvider] skipped malformed history event:',
-            error,
-          );
+      if (history.paginationError) {
+        if (options?.force !== true) {
+          return;
         }
-      }
-      if (
-        uiEvents.length > 0 &&
-        !prependTranscriptHistory(store, uiEvents, maxBlocks)
-      ) {
-        history.hasMore = false;
-        history.loading = false;
-        history.capacityReached = true;
-        setTranscriptHistoryState({
-          hasMore: false,
-          loading: false,
-          capacityReached: true,
-          paginationError: false,
-        });
+        // The failed page's cursor was never advanced, so clearing the
+        // latched error retries that exact page.
+        history.paginationError = false;
+        history.hasMore = true;
+      } else if (!history.hasMore) {
         return;
       }
-      const hasCapacity = store.getSnapshot().blocks.length < maxBlocks;
-      history.capacityReached = page.hasMore && !hasCapacity;
-      history.cursor = page.nextCursor;
-      history.beforeRecordId = undefined;
-      history.hasMore = page.hasMore && hasCapacity;
-      history.loading = false;
+
+      history.loading = true;
       setTranscriptHistoryState({
-        hasMore: history.hasMore,
-        loading: false,
-        capacityReached: history.capacityReached,
+        hasMore: true,
+        loading: true,
+        capacityReached: false,
         paginationError: false,
       });
-    } catch (error) {
-      if (
-        sessionRef.current !== activeSession ||
-        transcriptHistoryRef.current !== history
-      ) {
-        return;
-      }
-      const retryable =
-        !terminalFailure &&
-        (!(error instanceof DaemonHttpError) ||
-          error.status >= 500 ||
-          error.status === 408 ||
-          error.status === 429);
-      history.hasMore = retryable;
-      history.loading = false;
-      history.capacityReached = false;
-      history.paginationError = !retryable;
-      setTranscriptHistoryState({
-        hasMore: retryable,
-        loading: false,
-        capacityReached: false,
-        paginationError: !retryable,
-      });
-      if (retryable) {
-        addNotice({
-          severity: 'warning',
-          category: 'user_action',
-          operation: 'load_session',
-          code: 'daemon.transcript_history.failed',
-          message: 'Failed to load earlier session history',
-          debugMessage: error instanceof Error ? error.message : String(error),
-          recoverable: retryable,
+      let terminalFailure = false;
+      try {
+        const page = await activeSession.client.getSessionTranscriptPage(
+          activeSession.sessionId,
+          {
+            ...(history.cursor !== undefined
+              ? { cursor: history.cursor }
+              : history.beforeRecordId !== undefined
+                ? { beforeRecordId: history.beforeRecordId }
+                : {}),
+            limit: historyPageSizeRef.current ?? 100,
+            clientId: activeSession.clientId,
+          },
+        );
+        if (
+          sessionRef.current !== activeSession ||
+          transcriptHistoryRef.current !== history
+        ) {
+          return;
+        }
+        if (page.partial || page.replayError) {
+          terminalFailure = true;
+          throw new Error(
+            page.replayError ??
+              'Earlier session history was only partially read',
+          );
+        }
+
+        const replayOpts = {
+          ...eventOptionsRef.current,
+          suppressOwnUserEcho: false,
+        };
+        const nextBeforeRecordId = page.events
+          .map(getPersistedReplayRecordId)
+          .find((recordId): recordId is string => recordId !== undefined);
+        const uiEvents: DaemonUiEvent[] = [];
+        for (const replayEvent of page.events) {
+          try {
+            const transcriptEvents = filterDaemonUiEventsForTranscript(
+              replayEvent,
+              normalizeAndFilterEvent(
+                replayEvent,
+                activeSession.clientId,
+                replayOpts,
+                setConnection,
+                { updateConnection: false },
+              ),
+              addNotice,
+              dismissNotice,
+            );
+            uiEvents.push(
+              ...(subagentTranscriptModeRef.current === 'summary'
+                ? projectMainTranscriptEvents(transcriptEvents)
+                : transcriptEvents),
+            );
+          } catch (error) {
+            const message =
+              error instanceof Error ? error.message : String(error);
+            addNotice({
+              severity: 'warning',
+              category: 'protocol',
+              operation: 'normalize_event',
+              code: 'daemon.replay_event_malformed',
+              message: 'Skipped malformed history event',
+              debugMessage: message,
+              recoverable: true,
+            });
+            console.warn(
+              '[DaemonSessionProvider] skipped malformed history event:',
+              error,
+            );
+          }
+        }
+        if (
+          uiEvents.length > 0 &&
+          !prependTranscriptHistory(store, uiEvents, maxBlocks)
+        ) {
+          history.hasMore = false;
+          history.loading = false;
+          history.capacityReached = true;
+          setTranscriptHistoryState({
+            hasMore: false,
+            loading: false,
+            capacityReached: true,
+            paginationError: false,
+          });
+          return;
+        }
+        const hasCapacity = store.getSnapshot().blocks.length < maxBlocks;
+        history.capacityReached = page.hasMore && !hasCapacity;
+        history.cursor =
+          nextBeforeRecordId === undefined ? page.nextCursor : undefined;
+        history.beforeRecordId = nextBeforeRecordId;
+        history.hasMore = page.hasMore && hasCapacity;
+        history.loading = false;
+        setTranscriptHistoryState({
+          hasMore: history.hasMore,
+          loading: false,
+          capacityReached: history.capacityReached,
+          paginationError: false,
         });
+      } catch (error) {
+        if (
+          sessionRef.current !== activeSession ||
+          transcriptHistoryRef.current !== history
+        ) {
+          return;
+        }
+        const retryable =
+          !terminalFailure &&
+          (!(error instanceof DaemonHttpError) ||
+            error.status >= 500 ||
+            error.status === 408 ||
+            error.status === 429);
+        history.hasMore = retryable;
+        history.loading = false;
+        history.capacityReached = false;
+        history.paginationError = !retryable;
+        setTranscriptHistoryState({
+          hasMore: retryable,
+          loading: false,
+          capacityReached: false,
+          paginationError: !retryable,
+        });
+        if (retryable) {
+          addNotice({
+            severity: 'warning',
+            category: 'user_action',
+            operation: 'load_session',
+            code: 'daemon.transcript_history.failed',
+            message: 'Failed to load earlier session history',
+            debugMessage:
+              error instanceof Error ? error.message : String(error),
+            recoverable: retryable,
+          });
+        }
+        throw error;
       }
-      throw error;
-    }
-  }, [addNotice, dismissNotice, maxBlocks, store]);
+    },
+    [addNotice, dismissNotice, maxBlocks, store],
+  );
   const transcriptHistoryValue = useMemo<DaemonTranscriptHistory>(() => {
     const active =
       connection.sessionId === transcriptHistoryRef.current.sessionId &&
@@ -2879,12 +2956,16 @@ export function useDaemonActiveTodoList() {
 }
 
 export function useDaemonStreamingState() {
-  const blocks = useDaemonTranscriptBlocks();
+  const store = useDaemonTranscriptStore();
   const promptStatus = useDaemonPromptStatus();
-
-  return useMemo(
-    () => selectDaemonStreamingState(blocks, promptStatus),
-    [blocks, promptStatus],
+  const getStreamingState = useCallback(
+    () => selectDaemonStreamingState(store.getSnapshot().blocks, promptStatus),
+    [promptStatus, store],
+  );
+  return useSyncExternalStore(
+    store.subscribe,
+    getStreamingState,
+    getStreamingState,
   );
 }
 
@@ -3174,16 +3255,4 @@ function isTerminalSessionHttpError(error: unknown): boolean {
 function isAuthFailureHttpError(error: unknown): boolean {
   const status = extractHttpStatus(error);
   return status !== undefined && AUTH_FAILURE_HTTP_STATUSES.has(status);
-}
-
-function extractHttpStatus(error: unknown): number | undefined {
-  if (error instanceof DaemonHttpError) return error.status;
-  if (isRecord(error) && typeof error['status'] === 'number') {
-    return error['status'];
-  }
-  return undefined;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

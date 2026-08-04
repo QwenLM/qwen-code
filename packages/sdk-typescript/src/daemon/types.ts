@@ -217,6 +217,63 @@ export interface DaemonGitCommitDetail {
   hiddenCount?: number;
 }
 
+/** A single branch entry in the branch listing. */
+export interface DaemonGitBranchInfo {
+  name: string;
+  isHead: boolean;
+  upstream?: string;
+  ahead: number;
+  behind: number;
+  /** Unix epoch seconds of the branch tip commit. */
+  commitDate: number;
+  commitSubject: string;
+}
+
+/** A single tag entry in the branch listing. */
+export interface DaemonGitTagInfo {
+  name: string;
+  /** Unix epoch seconds. */
+  date: number;
+  subject: string;
+}
+
+/** Response from `GET /workspaces/:workspace/git/branches`. */
+export interface DaemonGitBranchesResult {
+  v: 1;
+  workspaceCwd: string;
+  available: boolean;
+  local: DaemonGitBranchInfo[];
+  remote: DaemonGitBranchInfo[];
+  tags: DaemonGitTagInfo[];
+  recent: string[];
+  head: string;
+  detached: boolean;
+}
+
+/** Response from `POST /workspaces/:workspace/git/checkout`. */
+export interface DaemonGitCheckoutResult {
+  branch: string;
+  detached: boolean;
+}
+
+/** Response from `POST /workspaces/:workspace/git/push`. */
+export interface DaemonGitPushResult {
+  success: boolean;
+  output: string;
+}
+
+/** Response from `POST /workspaces/:workspace/git/pull`. */
+export interface DaemonGitPullResult {
+  success: boolean;
+  output: string;
+}
+
+/** Response from `POST /workspaces/:workspace/git/commit`. */
+export interface DaemonGitCommitResult {
+  sha: string;
+  subject: string;
+}
+
 /** Review decision for an open pull request, lowercased from GitHub's enum. */
 export type DaemonGitHubPullRequestReviewDecision =
   | 'approved'
@@ -252,6 +309,12 @@ export interface DaemonGitHubPullRequestList {
   /** `false` when the workspace is not a git repository. */
   available: boolean;
   pullRequests: DaemonGitHubPullRequest[];
+}
+
+/** Response from `POST /workspaces/:workspace/github/prs/create`. */
+export interface DaemonGitHubPullRequestCreateResult {
+  url: string;
+  number: number | null;
 }
 
 /** Capabilities envelope returned from `GET /capabilities`. */
@@ -558,6 +621,29 @@ export interface DaemonStatusReport {
     compactedReplayMaxBytes: number;
     maxJournalEvents: number;
     maxJournalBytes: number;
+    /**
+     * The daemon's resolved memory figures, observed and reported only.
+     * Additive — older daemons omit it, and it is `null` on paths that resolve
+     * none.
+     */
+    memory?: {
+      /** Always false: nothing in this section is applied to a process. */
+      enforced: false;
+      configuredBudgetMb: number;
+      effectiveBudgetMb: number;
+      budgetSource: 'flag' | 'derived';
+      availableMemoryMb: number;
+      availableMemorySource: 'constrained' | 'host';
+      insufficientMemory: boolean;
+      /** Derived figures for a capacity policy that has not shipped. */
+      modeled: {
+        rootReserveMb: number;
+        childPoolMb: number;
+        minChildHeapMb: number;
+        maxChildHeapMb: number;
+        legacyChildCeilingMb: number;
+      };
+    } | null;
   };
   capabilities: {
     protocolVersions: DaemonProtocolVersions;
@@ -593,6 +679,40 @@ export interface DaemonStatusReport {
     rateLimit: {
       enabled: boolean;
       rejectedSinceStart: Record<string, number>;
+    };
+    /**
+     * Live counts against the resolved memory budget, with advisory per-child
+     * shares. Additive and observation-only; absent when no budget resolved.
+     * Each share is capped at the legacy child ceiling, and floored at the
+     * minimum child heap only when the ceiling allows — on a small host the
+     * ceiling sits below the floor, so share x count can exceed the child
+     * pool. Read a share as advisory, not a partition of the pool.
+     */
+    memory?: {
+      /**
+       * Registration count: non-removed workspace entries, including draining,
+       * transitioning, or blocked ones. Not a live-child count.
+       */
+      registeredWorkspaces: number;
+      /**
+       * Daemon-managed ACP children with a live (non-dying) channel, including
+       * transitioning or blocked entries. Excludes a workspace whose kill has
+       * started even if the child has not exited. Not a process-tree count.
+       */
+      activeAcpChildren: number;
+      /**
+       * Which children the daemon's RSS sampling covers. Only the primary ACP
+       * child is sampled, and only while an SSE/WS watcher is active; when no
+       * client is observing, childRssBytes reads 0. After the last watcher
+       * detaches, the last sampled value persists until it ages out (~30s).
+       */
+      childRssCoverage: 'primary_only';
+      modeled: {
+        /** `null` when no workspace is registered. */
+        recommendedShareAtRegisteredMb: number | null;
+        /** `null` when no ACP child is active. */
+        recommendedShareAtActiveMb: number | null;
+      };
     };
     /** Optional daemon-process performance counters. */
     perf?: {
@@ -735,6 +855,18 @@ export interface DaemonRestoredSession extends DaemonSession {
   liveJournal?: DaemonEvent[];
   /** True when older persisted records precede this load replay page. */
   historyHasMore?: boolean;
+  /**
+   * Fallback pagination anchor: the oldest `qwen.session.recordId` in
+   * the last persisted transcript page the daemon could read when the replay
+   * snapshot's `history_truncated` marker carries none. Live sessions
+   * whose in-flight turn pushed the journal past its cap before any
+   * turn boundary fired have no recordId-bearing `session_update` in
+   * the retained window, so the marker ships without an anchor; the
+   * daemon backfills this field from the transcript so clients can
+   * still page backward via `beforeRecordId`. Absent when no anchor
+   * was needed or none could be read.
+   */
+  historyAnchorRecordId?: string;
   /** Event bus watermark — used as initial SSE cursor. */
   lastEventId?: number;
   /**
@@ -761,6 +893,15 @@ export interface BranchSessionRequest {
 export interface DaemonBranchedSession extends DaemonRestoredSession {
   displayName: string;
   forkedFrom: { sessionId: string; displayName: string };
+}
+
+export interface SideTaskSessionRequest {
+  name?: string;
+}
+
+export interface DaemonSideTaskSession extends DaemonRestoredSession {
+  displayName: string;
+  parentSessionId: string;
 }
 
 export interface ForkSessionRequest {
@@ -1669,6 +1810,14 @@ export interface DaemonWorkspaceFile {
   hash?: DaemonContentHash;
   matchedIgnore: 'file' | 'directory' | null;
   originalLineCount: number | null;
+  /**
+   * Resume token for the next page, or `null` at the end. Optional in the type
+   * because a daemon older than `workspace_file_read_cursor` sends neither
+   * this nor `hasMore` — same reason `hash` is optional.
+   */
+  nextCursor?: string | null;
+  /** Whether content remains beyond what was returned. */
+  hasMore?: boolean;
 }
 
 export interface DaemonWorkspaceFileBytes {
@@ -2654,6 +2803,11 @@ export interface DaemonSessionBtwResult {
  */
 export interface DaemonMidTurnMessageResult {
   accepted: boolean;
+  messageId?: string;
+}
+
+export interface DaemonRemoveMidTurnMessageResult {
+  removed: boolean;
 }
 
 /**
@@ -2832,7 +2986,9 @@ export type DaemonChannelConfigFieldKind =
   | 'secret'
   | 'boolean'
   | 'number'
-  | 'enum';
+  | 'enum'
+  | 'string-list'
+  | 'record';
 
 export interface DaemonChannelConfigFieldDescriptor {
   key: string;
@@ -2841,6 +2997,7 @@ export interface DaemonChannelConfigFieldDescriptor {
   required?: boolean;
   envResolvable?: boolean;
   options?: ReadonlyArray<{ value: string; label: string }>;
+  default?: string;
   description?: string;
 }
 
@@ -2917,6 +3074,19 @@ export interface DaemonChannelPairingApprovalRequest {
 export interface DaemonChannelPairingApprovalResult
   extends DaemonChannelPairingRequestsSnapshot {
   approved: DaemonChannelPairingRequest;
+}
+
+export interface DaemonChannelPairingApprovalsSnapshot {
+  senderIds: string[];
+}
+
+export interface DaemonChannelPairingRevocationRequest {
+  senderId: string;
+}
+
+export interface DaemonChannelPairingRevocationResult
+  extends DaemonChannelPairingApprovalsSnapshot {
+  revoked: string;
 }
 
 export interface DaemonChannelManagementOptions {

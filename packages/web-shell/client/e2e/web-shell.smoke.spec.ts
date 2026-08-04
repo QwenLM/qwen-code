@@ -40,6 +40,30 @@ test('loads replayed transcript and connects to fake daemon @smoke', async ({
   await expect(page.locator('[data-web-shell-message-list]')).toContainText(
     'Hello from fake daemon',
   );
+
+  // #8214: pin the explicit ::selection rule on message content. This
+  // asserts the rule is present and matches every [data-user-selectable]
+  // wrapper row (user and assistant alike), not just the first one; it
+  // does not verify the Firefox paint effect itself (this repo's Playwright
+  // projects are chromium-only).
+  const selectionBackgrounds = await page.evaluate(() => {
+    // Match the wrapper rows themselves, not their descendants - a single
+    // row renders many descendant elements, so counting descendants does
+    // not enforce the "both roles present" invariant.
+    const rows = document.querySelectorAll('[data-user-selectable]');
+    return Array.from(rows, (row) => {
+      // ::selection applies to the element's text content; sample the first
+      // text-bearing descendant (or the row itself if it has none).
+      const target = row.querySelector('*') ?? row;
+      return getComputedStyle(target, '::selection').backgroundColor;
+    });
+  });
+  // The fixture renders both a user and an assistant message, so there must
+  // be at least two selectable rows and every one must carry the rule.
+  expect(selectionBackgrounds.length).toBeGreaterThanOrEqual(2);
+  for (const bg of selectionBackgrounds) {
+    expect(bg).toBe('rgba(0, 128, 255, 0.3)');
+  }
 });
 
 test('submits a prompt and renders a streamed assistant response @smoke', async ({
@@ -378,6 +402,61 @@ test('gates voice dictation on the workspace voice setting @smoke', async ({
   await page.reload();
   await completeReplay(page, daemon);
   await expect(voiceButton).toBeVisible();
+});
+
+test('loads Voice status from the active secondary workspace @smoke', async ({
+  page,
+}, testInfo) => {
+  const secondaryCwd = '/work/secondary';
+  const scenario = createWebShellDaemonScenario({
+    workspaceCwd: secondaryCwd,
+    capabilities: {
+      workspaceCwd: '/work/primary',
+      features: [
+        'session_events',
+        'workspace_qualified_voice',
+        'workspace_qualified_rest_core',
+        'workspace_settings',
+      ],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/work/primary',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: secondaryCwd,
+          primary: false,
+          trusted: true,
+        },
+      ],
+    },
+    voice: { enabled: true, workspaceCwd: secondaryCwd },
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+
+  await gotoSession(page, scenario, daemon);
+  await expect(
+    page.getByRole('button', { name: 'Start voice dictation' }),
+  ).toBeVisible();
+  await expect
+    .poll(
+      () =>
+        daemon.requests.filter(
+          (request) =>
+            request.method === 'GET' &&
+            request.path === '/workspaces/secondary/voice',
+        ).length,
+    )
+    .toBeGreaterThan(0);
+  expect(
+    daemon.requests.some(
+      (request) =>
+        request.method === 'GET' && request.path === '/workspace/voice',
+    ),
+  ).toBe(false);
 });
 
 for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {

@@ -295,6 +295,7 @@ describe('QwenAgent slash command history', () => {
       }),
     ).resolves.toEqual({
       messages: ['please also inspect tests'],
+      hasQueuedPrompt: false,
     });
     expect(onMidTurnMessagesDrained).toHaveBeenCalledWith(['queued-1']);
 
@@ -309,13 +310,39 @@ describe('QwenAgent slash command history', () => {
       }),
     ).resolves.toEqual({
       messages: ['and summarize findings'],
+      hasQueuedPrompt: false,
     });
     expect(onMidTurnMessagesDrained).toHaveBeenLastCalledWith(['queued-2']);
     await expect(
       internals.handleExtMethod('craft/drainMidTurnQueue', {
         sessionId: 'sdk-session-qwen',
       }),
-    ).resolves.toEqual({ messages: [] });
+    ).resolves.toEqual({ messages: [], hasQueuedPrompt: false });
+
+    agent.destroy();
+  });
+
+  it('claims Todo Stop Guard continuations only for the current session owner', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(cwd);
+
+    const agent = createAgent(cwd);
+    const internals = agent as unknown as QwenAvailableCommandsInternals;
+    internals.qwenSessionId = 'sdk-session-qwen';
+
+    await expect(
+      internals.handleExtMethod('craft/claimTodoStopGuardContinuation', {
+        sessionId: 'sdk-session-qwen',
+      }),
+    ).resolves.toEqual({
+      claimed: true,
+      hasQueuedPrompt: false,
+    });
+    await expect(
+      internals.handleExtMethod('craft/claimTodoStopGuardContinuation', {
+        sessionId: 'other-session',
+      }),
+    ).resolves.toEqual({});
 
     agent.destroy();
   });
@@ -338,6 +365,7 @@ describe('QwenAgent slash command history', () => {
       }),
     ).resolves.toEqual({
       messages: ['legacy queued message'],
+      hasQueuedPrompt: false,
     });
     expect(onMidTurnMessagesDrained).toHaveBeenCalledWith([
       'legacy queued message',
@@ -394,6 +422,7 @@ describe('QwenAgent slash command history', () => {
           displayText: '[User message with attachments]',
         },
       ],
+      hasQueuedPrompt: false,
     });
     expect(onMidTurnMessagesDrained).toHaveBeenCalledWith(['', '']);
 
@@ -456,6 +485,7 @@ describe('QwenAgent slash command history', () => {
           displayText: 'please inspect this image',
         },
       ],
+      hasQueuedPrompt: false,
     });
     expect(onMidTurnMessagesDrained).toHaveBeenCalledWith(['queued-image']);
 
@@ -518,6 +548,7 @@ describe('QwenAgent slash command history', () => {
           displayText: 'good image',
         },
       ],
+      hasQueuedPrompt: false,
     });
     expect(onMidTurnMessagesDrained).toHaveBeenCalledWith(['good-image']);
 
@@ -525,7 +556,7 @@ describe('QwenAgent slash command history', () => {
       internals.handleExtMethod('craft/drainMidTurnQueue', {
         sessionId: 'sdk-session-qwen',
       }),
-    ).resolves.toEqual({ items: [] });
+    ).resolves.toEqual({ items: [], hasQueuedPrompt: false });
     expect(onMidTurnMessagesDrained).toHaveBeenCalledTimes(1);
 
     await expect(
@@ -545,6 +576,7 @@ describe('QwenAgent slash command history', () => {
           displayText: 'bad image',
         },
       ],
+      hasQueuedPrompt: false,
     });
     expect(onMidTurnMessagesDrained).toHaveBeenLastCalledWith(['bad-image']);
     expect(onMidTurnMessagesDrained).toHaveBeenCalledTimes(2);
@@ -593,6 +625,7 @@ describe('QwenAgent slash command history', () => {
           displayText: '[User message with attachments]',
         },
       ],
+      hasQueuedPrompt: false,
     });
     expect(onMidTurnMessagesDrained).toHaveBeenCalledWith(['optimistic-image']);
 
@@ -650,6 +683,7 @@ describe('QwenAgent slash command history', () => {
           displayText: 'then inspect image',
         },
       ],
+      hasQueuedPrompt: false,
     });
     expect(onMidTurnMessagesDrained).toHaveBeenCalledWith([
       'queued-text',
@@ -2078,6 +2112,74 @@ describe('QwenAgent slash command history', () => {
       role: 'info',
       content: 'Response interrupted',
     });
+  });
+
+  it('restores cancelled Qwen transcript tool telemetry as interrupted', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    const runtimeRoot = mkdtempSync(join(tmpdir(), 'qwen-runtime-'));
+    tempRoots.push(cwd, runtimeRoot);
+    process.env.QWEN_RUNTIME_DIR = runtimeRoot;
+
+    const sessionId = 'qwen-session';
+    const commandArgs = { command: 'sleep 10' };
+    writeQwenTranscript(runtimeRoot, cwd, sessionId, [
+      {
+        uuid: 'assistant-1',
+        sessionId,
+        timestamp: '2026-05-31T02:15:02.868Z',
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-sleep',
+                name: 'run_shell_command',
+                args: commandArgs,
+              },
+            },
+          ],
+        },
+      },
+      {
+        uuid: 'tool-telemetry-1',
+        sessionId,
+        timestamp: '2026-05-31T02:15:06.203Z',
+        type: 'system',
+        subtype: 'ui_telemetry',
+        systemPayload: {
+          uiEvent: {
+            'event.name': 'qwen-code.tool_call',
+            function_name: 'run_shell_command',
+            function_args: commandArgs,
+            status: 'cancelled',
+            success: false,
+          },
+        },
+      },
+    ]);
+
+    const agent = createAgent(cwd);
+    const internals = agent as unknown as QwenAvailableCommandsInternals;
+    internals.ensureProcess = async () => {};
+    internals.callAcp = async (_method, execute) =>
+      execute({
+        extMethod: async () => ({ updates: [] }),
+        loadSession: async () => ({ models: {}, modes: {} }),
+      });
+
+    const result = await agent.loadSessionMessages(sessionId, { cwd });
+    agent.destroy();
+
+    expect(result.messages.filter((message) => message.role === 'tool')).toEqual([
+      expect.objectContaining({
+        toolUseId: 'call-sleep',
+        toolName: 'Bash',
+        toolStatus: 'error',
+        toolResult: 'Interrupted',
+        isError: true,
+      }),
+    ]);
   });
 
   it('closes dangling Qwen transcript tool calls as terminal errors', async () => {

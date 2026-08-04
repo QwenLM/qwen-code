@@ -46,9 +46,23 @@ export interface DaemonDeleteSessionsResult {
 
 export type DaemonDeleteErrorPhase = 'close' | 'remove' | 'delete';
 
+export class DaemonDrainingError extends Error {
+  override readonly name = 'DaemonDrainingError';
+  readonly code = 'daemon_draining';
+
+  constructor() {
+    super('The daemon is draining and no longer accepts session maintenance.');
+  }
+}
+
 export class SessionArchiveCoordinator {
   private readonly exclusive = new Set<string>();
   private readonly shared = new Map<string, number>();
+  private maintenanceSealed = false;
+  private activeMaintenance = 0;
+  private maintenanceDrain:
+    | { promise: Promise<void>; resolve: () => void }
+    | undefined;
 
   assertNotTransitioning(sessionId: string): void {
     if (this.exclusive.has(sessionId)) {
@@ -60,6 +74,9 @@ export class SessionArchiveCoordinator {
     sessionIds: string[],
     fn: () => Promise<T>,
   ): Promise<T> {
+    if (this.maintenanceSealed) {
+      throw new DaemonDrainingError();
+    }
     const uniqueSessionIds = [...new Set(sessionIds)];
     for (const sessionId of uniqueSessionIds) {
       this.assertNotTransitioning(sessionId);
@@ -70,13 +87,34 @@ export class SessionArchiveCoordinator {
     for (const sessionId of uniqueSessionIds) {
       this.exclusive.add(sessionId);
     }
+    this.activeMaintenance++;
     try {
       return await fn();
     } finally {
       for (const sessionId of uniqueSessionIds) {
         this.exclusive.delete(sessionId);
       }
+      this.activeMaintenance--;
+      if (this.activeMaintenance === 0) {
+        this.maintenanceDrain?.resolve();
+        this.maintenanceDrain = undefined;
+      }
     }
+  }
+
+  sealMaintenanceAndWait(): Promise<void> {
+    this.maintenanceSealed = true;
+    if (this.activeMaintenance === 0) {
+      return Promise.resolve();
+    }
+    if (!this.maintenanceDrain) {
+      let resolve!: () => void;
+      const promise = new Promise<void>((done) => {
+        resolve = done;
+      });
+      this.maintenanceDrain = { promise, resolve };
+    }
+    return this.maintenanceDrain.promise;
   }
 
   async runSharedMany<T>(
@@ -105,6 +143,225 @@ export class SessionArchiveCoordinator {
   }
 }
 
+type DaemonMaintenanceAction = 'delete' | 'archive' | 'unarchive';
+
+interface LeaseMutationResult<T> {
+  value?: T;
+  mutationApplied: boolean;
+  error?: unknown;
+  maintenanceError?: unknown;
+}
+
+async function runWithDaemonWriterLease<T>(params: {
+  action: DaemonMaintenanceAction;
+  sessionId: string;
+  service: SessionService;
+  mutate: (
+    assertOwnedAndUnchanged: () => Promise<void>,
+  ) => Promise<{ value: T; mutationApplied: boolean }>;
+  mutationAppliedAfterError: () => Promise<boolean>;
+  afterMutationApplied: () => Promise<void>;
+}): Promise<LeaseMutationResult<T>> {
+  const {
+    action,
+    sessionId,
+    service,
+    mutate,
+    mutationAppliedAfterError,
+    afterMutationApplied,
+  } = params;
+  let lease;
+  try {
+    lease = await service.acquireSessionWriterLease(sessionId, {
+      processKind: 'daemon',
+      reclaimPolicy: 'never',
+    });
+  } catch (error) {
+    return { mutationApplied: false, error };
+  }
+
+  let value: T | undefined;
+  let mutationApplied = false;
+  let mutationError: unknown;
+  try {
+    const mutation = await mutate(() => lease.assertOwnedAndUnchanged());
+    value = mutation.value;
+    mutationApplied = mutation.mutationApplied;
+  } catch (error) {
+    mutationError = error;
+    try {
+      mutationApplied = await mutationAppliedAfterError();
+    } catch {
+      mutationApplied = false;
+    }
+  }
+
+  let maintenanceError: unknown;
+  if (mutationApplied) {
+    try {
+      await afterMutationApplied();
+    } catch (error) {
+      maintenanceError = error;
+      logSessionArchiveWarning(
+        `scheduled task lifecycle update failed action=${action} workspace=${safeLogValue(
+          service.getProjectRoot(),
+        )} session=${safeLogValue(sessionId)} error=${safeLogValue(
+          errorMessage(error),
+        )}`,
+      );
+    }
+  }
+
+  let releaseError: unknown;
+  try {
+    await lease.release();
+  } catch (error) {
+    releaseError = error;
+  }
+
+  if (releaseError !== undefined) {
+    logMaintenanceLeaseReleaseFailure({
+      action,
+      workspace: service.getProjectRoot(),
+      sessionId,
+      error: releaseError,
+      mutationApplied,
+    });
+    if (mutationError !== undefined) {
+      logSessionArchiveWarning(
+        `session maintenance mutation also failed action=${action} workspace=${safeLogValue(
+          service.getProjectRoot(),
+        )} session=${safeLogValue(sessionId)} error=${safeLogValue(
+          errorMessage(mutationError),
+        )}`,
+      );
+    }
+    return { mutationApplied, error: releaseError, maintenanceError };
+  }
+  if (mutationError !== undefined) {
+    return { mutationApplied, error: mutationError, maintenanceError };
+  }
+  return { value, mutationApplied, maintenanceError };
+}
+
+function logMaintenanceLeaseReleaseFailure(params: {
+  action: DaemonMaintenanceAction;
+  workspace: string;
+  sessionId: string;
+  error: unknown;
+  mutationApplied: boolean;
+}): void {
+  const errorKind =
+    typeof params.error === 'object' &&
+    params.error !== null &&
+    typeof (params.error as { errorKind?: unknown }).errorKind === 'string'
+      ? (params.error as { errorKind: string }).errorKind
+      : 'unknown';
+  logSessionArchiveWarning(
+    `session maintenance lease release failed action=${params.action} workspace=${safeLogValue(
+      params.workspace,
+    )} session=${safeLogValue(params.sessionId)} errorKind=${safeLogValue(
+      errorKind,
+    )} mutationApplied=${params.mutationApplied}`,
+  );
+}
+
+async function classifySessionLocation(
+  service: SessionService,
+  sessionId: string,
+): Promise<SessionLocation> {
+  return service.getSessionLocation(sessionId);
+}
+
+function sessionLocationError(sessionId: string): Error {
+  return new Error(`Session archive conflict: ${sessionId}`);
+}
+
+function updateScheduledTaskForMaintenance(
+  service: SessionService,
+  sessionId: string,
+  action: DaemonMaintenanceAction,
+): Promise<void> {
+  if (action === 'archive') {
+    return disableTasksForSessions(service.getProjectRoot(), [sessionId]);
+  }
+  if (action === 'unarchive') {
+    return enableTasksForSessions(service.getProjectRoot(), [sessionId]);
+  }
+  return removeTasksForSessions(service.getProjectRoot(), [sessionId]);
+}
+
+type DeleteOneResult =
+  | {
+      kind: 'removed';
+      mutationApplied: boolean;
+    }
+  | {
+      kind: 'notFound';
+      mutationApplied: boolean;
+    }
+  | {
+      kind: 'error';
+      error: unknown;
+      mutationApplied: boolean;
+    };
+
+async function deletePersistedSessionWithLease(
+  service: SessionService,
+  sessionId: string,
+): Promise<DeleteOneResult> {
+  const initialLocation = await classifySessionLocation(service, sessionId);
+  if (initialLocation === undefined) {
+    return { kind: 'notFound', mutationApplied: false };
+  }
+  if (initialLocation === 'conflict') {
+    return {
+      kind: 'error',
+      error: sessionLocationError(sessionId),
+      mutationApplied: false,
+    };
+  }
+
+  const mutation = await runWithDaemonWriterLease({
+    action: 'delete',
+    sessionId,
+    service,
+    mutate: async (assertOwnedAndUnchanged) => {
+      const lockedLocation = await classifySessionLocation(service, sessionId);
+      if (lockedLocation === undefined) {
+        return {
+          value: 'notFound' as const,
+          mutationApplied: false,
+        };
+      }
+      if (lockedLocation === 'conflict') {
+        throw sessionLocationError(sessionId);
+      }
+      await assertOwnedAndUnchanged();
+      const removed = await service.removeSession(sessionId);
+      return {
+        value: removed ? ('removed' as const) : ('notFound' as const),
+        mutationApplied: removed,
+      };
+    },
+    mutationAppliedAfterError: async () =>
+      (await classifySessionLocation(service, sessionId)) === undefined,
+    afterMutationApplied: () =>
+      updateScheduledTaskForMaintenance(service, sessionId, 'delete'),
+  });
+  if (mutation.error !== undefined) {
+    return {
+      kind: 'error',
+      error: mutation.error,
+      mutationApplied: mutation.mutationApplied,
+    };
+  }
+  return {
+    kind: mutation.value ?? 'notFound',
+    mutationApplied: mutation.mutationApplied,
+  };
+}
+
 export async function deleteDaemonSessions(params: {
   sessionIds: string[];
   service: SessionService;
@@ -118,98 +375,131 @@ export async function deleteDaemonSessions(params: {
 }): Promise<DaemonDeleteSessionsResult> {
   const { sessionIds, service, bridge, coordinator, onError } = params;
   const uniqueSessionIds = [...new Set(sessionIds)];
-  const closeErrors: Array<{ sessionId: string; error: string }> = [];
-  const removed: string[] = [];
-  const notFound: string[] = [];
-  const removeErrors: Array<{ sessionId: string; error: string }> = [];
-
   for (const sessionId of uniqueSessionIds) {
     coordinator.assertNotTransitioning(sessionId);
   }
-
-  await Promise.all(
+  const results = await Promise.all(
     uniqueSessionIds.map(async (sessionId) => {
       try {
-        // Keep close+remove under one gate so load/resume cannot recreate the
-        // same live session between bridge close and transcript deletion.
-        await coordinator.runExclusiveMany([sessionId], async () => {
-          let shouldRemove = false;
+        return await coordinator.runExclusiveMany([sessionId], async () => {
           try {
-            // Intentional: batch delete bypasses per-tab ownership.
             await bridge.closeSession(sessionId);
-            shouldRemove = true;
-          } catch (closeErr) {
-            if (
-              closeErr instanceof SessionNotFoundError ||
-              (closeErr instanceof Error &&
-                closeErr.name === 'SessionNotFoundError')
-            ) {
-              shouldRemove = true;
-            } else {
-              const message =
-                closeErr instanceof Error ? closeErr.message : String(closeErr);
-              onError?.({ phase: 'close', sessionId, error: message });
-              closeErrors.push({ sessionId, error: message });
+          } catch (error) {
+            if (isSessionNotFoundError(error)) {
+              const result = await deletePersistedSessionWithLease(
+                service,
+                sessionId,
+              );
+              if (result.kind === 'error') {
+                onError?.({
+                  phase: 'remove',
+                  sessionId,
+                  error: errorMessage(result.error),
+                });
+              }
+              return result;
             }
+            onError?.({
+              phase: 'close',
+              sessionId,
+              error: errorMessage(error),
+            });
+            return {
+              kind: 'error' as const,
+              error,
+              mutationApplied: false,
+            };
           }
 
-          if (!shouldRemove) return;
-
-          try {
-            if (await service.removeSession(sessionId)) {
-              removed.push(sessionId);
-            } else {
-              notFound.push(sessionId);
-            }
-          } catch (removeErr) {
-            const message =
-              removeErr instanceof Error
-                ? removeErr.message
-                : String(removeErr);
-            onError?.({ phase: 'remove', sessionId, error: message });
-            removeErrors.push({ sessionId, error: message });
+          const result = await deletePersistedSessionWithLease(
+            service,
+            sessionId,
+          );
+          if (result.kind === 'error') {
+            onError?.({
+              phase: 'remove',
+              sessionId,
+              error: errorMessage(result.error),
+            });
           }
+          return result;
         });
-      } catch (err) {
-        if (
-          err instanceof SessionArchivingError &&
-          err.lockKind === 'exclusive'
-        ) {
-          throw err;
+      } catch (error) {
+        if (error instanceof DaemonDrainingError) {
+          throw error;
         }
-        const message = err instanceof Error ? err.message : String(err);
-        onError?.({ phase: 'delete', sessionId, error: message });
-        closeErrors.push({ sessionId, error: message });
+        onError?.({
+          phase: 'delete',
+          sessionId,
+          error: errorMessage(error),
+        });
+        return {
+          kind: 'error' as const,
+          error,
+          mutationApplied: false,
+        };
       }
     }),
   );
 
-  // Deleting a session permanently removes any scheduled task bound to it —
-  // the task existed only to run in that session. Best-effort: a failure here
-  // must not turn a successful session delete into an error, but LOG it (like
-  // the archive/unarchive paths) — the session is already gone, so a swallowed
-  // write failure leaves the still-enabled bound task a permanent ghost the
-  // keepalive retries a doomed revive on every tick.
-  await removeTasksForSessions(service.getProjectRoot(), removed).catch(
-    (err: unknown) => {
-      logSessionArchiveWarning(
-        `removeTasksForSessions failed for [${removed.join(', ')}]: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-    },
-  );
+  const removed: string[] = [];
+  const notFound: string[] = [];
+  const errors: Array<{ sessionId: string; error: unknown }> = [];
+  for (let i = 0; i < results.length; i++) {
+    const sessionId = uniqueSessionIds[i]!;
+    const result = results[i]!;
+    if (result.kind === 'removed') {
+      removed.push(sessionId);
+    } else if (result.kind === 'notFound') {
+      notFound.push(sessionId);
+    } else {
+      errors.push({ sessionId, error: errorMessage(result.error) });
+    }
+  }
 
-  return { removed, notFound, errors: [...closeErrors, ...removeErrors] };
+  return { removed, notFound, errors };
+}
+
+export async function deleteDaemonSessionIfOrphan(params: {
+  sessionId: string;
+  service: SessionService;
+  bridge: Pick<AcpSessionBridge, 'killSession'>;
+  coordinator: SessionArchiveCoordinator;
+}): Promise<boolean> {
+  const { sessionId, service, bridge, coordinator } = params;
+  coordinator.assertNotTransitioning(sessionId);
+  const result = await coordinator.runExclusiveMany([sessionId], async () => {
+    let killed = false;
+    try {
+      killed = await bridge.killSession(sessionId, {
+        requireZeroAttaches: true,
+      });
+    } catch (error) {
+      if (!isSessionNotFoundError(error)) throw error;
+      killed = true;
+    }
+    if (!killed) {
+      return undefined;
+    }
+    return deletePersistedSessionWithLease(service, sessionId);
+  });
+  if (result === undefined) {
+    return false;
+  }
+  if (result.kind === 'error') {
+    throw result.error;
+  }
+  return true;
 }
 
 export async function assertSessionLoadable(
   workspaceCwd: string,
   sessionId: string,
+  runtimeBaseDir?: string,
 ): Promise<SessionLocation> {
-  const location = await new SessionService(workspaceCwd).getSessionLocation(
-    sessionId,
-  );
+  const location = await new SessionService(workspaceCwd, {
+    runtimeBaseDir,
+  }).getSessionLocation(sessionId);
   if (location === 'archived') {
     throw new SessionArchivedError(sessionId);
   }
@@ -222,10 +512,11 @@ export async function assertSessionLoadable(
 export async function assertSessionArchived(
   workspaceCwd: string,
   sessionId: string,
+  runtimeBaseDir?: string,
 ): Promise<void> {
-  const location = await new SessionService(workspaceCwd).getSessionLocation(
-    sessionId,
-  );
+  const location = await new SessionService(workspaceCwd, {
+    runtimeBaseDir,
+  }).getSessionLocation(sessionId);
   if (location === 'active') {
     throw new SessionNotArchivedError(sessionId);
   }
@@ -242,53 +533,6 @@ function isSessionNotFoundError(err: unknown): boolean {
     err instanceof SessionNotFoundError ||
     (err instanceof Error && err.name === 'SessionNotFoundError')
   );
-}
-
-interface SessionLocationBuckets {
-  active: string[];
-  archived: string[];
-  notFound: string[];
-  errors: Array<{ sessionId: string; error: unknown }>;
-}
-
-async function classifySessionLocations(
-  service: SessionService,
-  sessionIds: string[],
-): Promise<SessionLocationBuckets> {
-  const result: SessionLocationBuckets = {
-    active: [],
-    archived: [],
-    notFound: [],
-    errors: [],
-  };
-  const locationResults = await Promise.allSettled(
-    sessionIds.map(async (sessionId) => ({
-      sessionId,
-      location: await service.getSessionLocation(sessionId),
-    })),
-  );
-  for (let i = 0; i < locationResults.length; i++) {
-    const sessionId = sessionIds[i]!;
-    const locationResult = locationResults[i]!;
-    if (locationResult.status === 'rejected') {
-      result.errors.push({ sessionId, error: locationResult.reason });
-      continue;
-    }
-    const location = locationResult.value.location;
-    if (location === undefined) {
-      result.notFound.push(sessionId);
-    } else if (location === 'archived') {
-      result.archived.push(sessionId);
-    } else if (location === 'conflict') {
-      result.errors.push({
-        sessionId,
-        error: new Error(`Session archive conflict: ${sessionId}`),
-      });
-    } else {
-      result.active.push(sessionId);
-    }
-  }
-  return result;
 }
 
 function logSessionArchiveResult(
@@ -355,66 +599,135 @@ export async function archiveDaemonSessions(params: {
 }): Promise<DaemonArchiveSessionsResult> {
   const { sessionIds, service, bridge, coordinator } = params;
   const uniqueSessionIds = [...new Set(sessionIds)];
-  const archived: string[] = [];
-  const alreadyArchived: string[] = [];
-  const notFound: string[] = [];
-  const errors: Array<{ sessionId: string; error: unknown }> = [];
-
-  const initial = await classifySessionLocations(service, uniqueSessionIds);
-  const activeIds = initial.active;
-  alreadyArchived.push(...initial.archived);
-  notFound.push(...initial.notFound);
-  errors.push(...initial.errors);
-
-  if (activeIds.length > 0) {
-    await coordinator.runExclusiveMany(activeIds, async () => {
-      const locked = await classifySessionLocations(service, activeIds);
-      const closableIds = locked.active;
-      alreadyArchived.push(...locked.archived);
-      notFound.push(...locked.notFound);
-      errors.push(...locked.errors);
-
-      // Close+flush before moving JSONL: live writers keep the active path.
-      // If the later move fails, the active JSONL remains and a retry treats
-      // SessionNotFound as the recoverable "already closed" state.
-      const closeResults = await Promise.allSettled(
-        closableIds.map(async (sessionId) => {
+  for (const sessionId of uniqueSessionIds) {
+    coordinator.assertNotTransitioning(sessionId);
+  }
+  const results = await Promise.all(
+    uniqueSessionIds.map(async (sessionId) => {
+      try {
+        return await coordinator.runExclusiveMany([sessionId], async () => {
           try {
             await bridge.closeSession(sessionId, undefined, {
               requireAgentClose: true,
             });
-          } catch (err) {
-            if (!isSessionNotFoundError(err)) {
-              throw err;
+          } catch (error) {
+            if (!isSessionNotFoundError(error)) {
+              return {
+                kind: 'error' as const,
+                error,
+                mutationApplied: false,
+              };
             }
           }
-        }),
-      );
-      const archiveIds: string[] = [];
-      for (let i = 0; i < closeResults.length; i++) {
-        const sessionId = closableIds[i]!;
-        const result = closeResults[i]!;
-        if (result.status === 'fulfilled') {
-          archiveIds.push(sessionId);
-        } else {
-          errors.push({ sessionId, error: result.reason });
-        }
-      }
 
-      try {
-        const archiveResult = await service.archiveSessions(archiveIds, {
-          knownLocation: 'active',
+          const initialLocation = await classifySessionLocation(
+            service,
+            sessionId,
+          );
+          if (initialLocation === undefined) {
+            return { kind: 'notFound' as const, mutationApplied: false };
+          }
+          if (initialLocation === 'archived') {
+            return {
+              kind: 'alreadyArchived' as const,
+              mutationApplied: false,
+            };
+          }
+          if (initialLocation === 'conflict') {
+            return {
+              kind: 'error' as const,
+              error: sessionLocationError(sessionId),
+              mutationApplied: false,
+            };
+          }
+
+          const mutation = await runWithDaemonWriterLease({
+            action: 'archive',
+            sessionId,
+            service,
+            mutate: async (assertOwnedAndUnchanged) => {
+              const lockedLocation = await classifySessionLocation(
+                service,
+                sessionId,
+              );
+              if (lockedLocation === undefined) {
+                return {
+                  value: 'notFound' as const,
+                  mutationApplied: false,
+                };
+              }
+              if (lockedLocation === 'archived') {
+                return {
+                  value: 'alreadyArchived' as const,
+                  mutationApplied: false,
+                };
+              }
+              if (lockedLocation === 'conflict') {
+                throw sessionLocationError(sessionId);
+              }
+              await assertOwnedAndUnchanged();
+              const result = await service.archiveSessions([sessionId], {
+                knownLocation: 'active',
+              });
+              if (result.errors[0]) throw result.errors[0].error;
+              if (result.archived.length > 0) {
+                return {
+                  value: 'archived' as const,
+                  mutationApplied: true,
+                };
+              }
+              return {
+                value:
+                  result.alreadyArchived.length > 0
+                    ? ('alreadyArchived' as const)
+                    : ('notFound' as const),
+                mutationApplied: false,
+              };
+            },
+            mutationAppliedAfterError: async () =>
+              (await classifySessionLocation(service, sessionId)) ===
+              'archived',
+            afterMutationApplied: () =>
+              updateScheduledTaskForMaintenance(service, sessionId, 'archive'),
+          });
+          if (mutation.error !== undefined) {
+            return {
+              kind: 'error' as const,
+              error: mutation.error,
+              mutationApplied: mutation.mutationApplied,
+            };
+          }
+          return {
+            kind: mutation.value ?? 'notFound',
+            mutationApplied: mutation.mutationApplied,
+          };
         });
-        archived.push(...archiveResult.archived);
-        alreadyArchived.push(...archiveResult.alreadyArchived);
-        notFound.push(...archiveResult.notFound);
-        errors.push(...archiveResult.errors);
-      } catch (err) {
-        for (const sessionId of archiveIds) {
-          errors.push({ sessionId, error: err });
+      } catch (error) {
+        if (error instanceof DaemonDrainingError) {
+          throw error;
         }
+        return {
+          kind: 'error' as const,
+          error,
+          mutationApplied: false,
+          maintenanceError: undefined,
+        };
       }
-    });
+    }),
+  );
+
+  const archived: string[] = [];
+  const alreadyArchived: string[] = [];
+  const notFound: string[] = [];
+  const errors: Array<{ sessionId: string; error: unknown }> = [];
+  for (let i = 0; i < results.length; i++) {
+    const sessionId = uniqueSessionIds[i]!;
+    const result = results[i]!;
+    if (result.kind === 'archived') archived.push(sessionId);
+    else if (result.kind === 'alreadyArchived') {
+      alreadyArchived.push(sessionId);
+    } else if (result.kind === 'notFound') notFound.push(sessionId);
+    else errors.push({ sessionId, error: result.error });
   }
 
   logSessionArchiveResult('archive', {
@@ -424,22 +737,6 @@ export async function archiveDaemonSessions(params: {
     notFound,
     errors,
   });
-
-  // Archiving a session pauses any scheduled task bound to it (kept on disk,
-  // recoverable on unarchive). Best-effort — never fail the archive over it, but
-  // LOG a write failure: if the task's `enabled` flag isn't flipped, the
-  // keepalive still sees it enabled + bound and will revive the just-archived
-  // session so the task keeps firing. Logging makes that broken coupling
-  // diagnosable rather than silent.
-  await disableTasksForSessions(service.getProjectRoot(), archived).catch(
-    (err: unknown) => {
-      logSessionArchiveWarning(
-        `disableTasksForSessions failed for [${archived.join(', ')}]: ${
-          err instanceof Error ? err.message : String(err)
-        } — bound tasks may keep firing until reconciled`,
-      );
-    },
-  );
 
   return { archived, alreadyArchived, notFound, errors };
 }
@@ -451,43 +748,145 @@ export async function unarchiveDaemonSessions(params: {
 }): Promise<DaemonUnarchiveSessionsResult> {
   const { sessionIds, service, coordinator } = params;
   const uniqueSessionIds = [...new Set(sessionIds)];
+  for (const sessionId of uniqueSessionIds) {
+    coordinator.assertNotTransitioning(sessionId);
+  }
+  const results = await Promise.all(
+    uniqueSessionIds.map(async (sessionId) => {
+      try {
+        return await coordinator.runExclusiveMany([sessionId], async () => {
+          const initialLocation = await classifySessionLocation(
+            service,
+            sessionId,
+          );
+          if (initialLocation === undefined) {
+            return { kind: 'notFound' as const, mutationApplied: false };
+          }
+          if (initialLocation === 'active') {
+            let maintenanceError: unknown;
+            try {
+              await updateScheduledTaskForMaintenance(
+                service,
+                sessionId,
+                'unarchive',
+              );
+            } catch (error) {
+              maintenanceError = error;
+              logSessionArchiveWarning(
+                `scheduled task lifecycle update failed action=unarchive workspace=${safeLogValue(
+                  service.getProjectRoot(),
+                )} session=${safeLogValue(sessionId)} error=${safeLogValue(
+                  errorMessage(error),
+                )}`,
+              );
+            }
+            return {
+              kind: 'alreadyActive' as const,
+              mutationApplied: false,
+              maintenanceError,
+            };
+          }
+          if (initialLocation === 'conflict') {
+            return {
+              kind: 'error' as const,
+              error: sessionLocationError(sessionId),
+              mutationApplied: false,
+            };
+          }
+
+          const mutation = await runWithDaemonWriterLease({
+            action: 'unarchive',
+            sessionId,
+            service,
+            mutate: async (assertOwnedAndUnchanged) => {
+              const lockedLocation = await classifySessionLocation(
+                service,
+                sessionId,
+              );
+              if (lockedLocation === undefined) {
+                return {
+                  value: 'notFound' as const,
+                  mutationApplied: false,
+                };
+              }
+              if (lockedLocation === 'active') {
+                return {
+                  value: 'alreadyActive' as const,
+                  mutationApplied: false,
+                };
+              }
+              if (lockedLocation === 'conflict') {
+                throw sessionLocationError(sessionId);
+              }
+              await assertOwnedAndUnchanged();
+              const result = await service.unarchiveSessions([sessionId], {
+                knownLocation: 'archived',
+              });
+              if (result.errors[0]) throw result.errors[0].error;
+              if (result.unarchived.length > 0) {
+                return {
+                  value: 'unarchived' as const,
+                  mutationApplied: true,
+                };
+              }
+              return {
+                value:
+                  result.alreadyActive.length > 0
+                    ? ('alreadyActive' as const)
+                    : ('notFound' as const),
+                mutationApplied: false,
+              };
+            },
+            mutationAppliedAfterError: async () =>
+              (await classifySessionLocation(service, sessionId)) === 'active',
+            afterMutationApplied: () =>
+              updateScheduledTaskForMaintenance(
+                service,
+                sessionId,
+                'unarchive',
+              ),
+          });
+          if (mutation.error !== undefined) {
+            return {
+              kind: 'error' as const,
+              error: mutation.error,
+              mutationApplied: mutation.mutationApplied,
+            };
+          }
+          return {
+            kind: mutation.value ?? 'notFound',
+            mutationApplied: mutation.mutationApplied,
+            maintenanceError: mutation.maintenanceError,
+          };
+        });
+      } catch (error) {
+        if (error instanceof DaemonDrainingError) {
+          throw error;
+        }
+        return {
+          kind: 'error' as const,
+          error,
+          mutationApplied: false,
+          maintenanceError: undefined,
+        };
+      }
+    }),
+  );
+
   const unarchived: string[] = [];
   const alreadyActive: string[] = [];
   const notFound: string[] = [];
   const errors: Array<{ sessionId: string; error: unknown }> = [];
-
-  const initial = await classifySessionLocations(service, uniqueSessionIds);
-  const archivedIds = initial.archived;
-  alreadyActive.push(...initial.active);
-  notFound.push(...initial.notFound);
-  errors.push(...initial.errors);
-
-  if (archivedIds.length > 0) {
-    await coordinator.runExclusiveMany(archivedIds, async () => {
-      const locked = await classifySessionLocations(service, archivedIds);
-      const unarchiveIds = locked.archived;
-      alreadyActive.push(...locked.active);
-      notFound.push(...locked.notFound);
-      errors.push(...locked.errors);
-
-      if (unarchiveIds.length > 0) {
-        try {
-          const result = await service.unarchiveSessions(unarchiveIds, {
-            knownLocation: 'archived',
-          });
-          unarchived.push(...result.unarchived);
-          alreadyActive.push(...result.alreadyActive);
-          notFound.push(...result.notFound);
-          errors.push(...result.errors);
-        } catch (err) {
-          // The service reports normal per-session failures in `result.errors`.
-          // Reaching this catch means the batch could not produce a result at all.
-          for (const sessionId of unarchiveIds) {
-            errors.push({ sessionId, error: err });
-          }
-        }
-      }
-    });
+  for (let i = 0; i < results.length; i++) {
+    const sessionId = uniqueSessionIds[i]!;
+    const result = results[i]!;
+    if (result.kind === 'unarchived') unarchived.push(sessionId);
+    else if (result.kind === 'alreadyActive') alreadyActive.push(sessionId);
+    else if (result.kind === 'notFound') notFound.push(sessionId);
+    else errors.push({ sessionId, error: result.error });
+    if (result.maintenanceError !== undefined) {
+      errors.push({ sessionId, error: result.maintenanceError });
+    }
   }
 
   logSessionArchiveResult('unarchive', {
@@ -497,30 +896,6 @@ export async function unarchiveDaemonSessions(params: {
     notFound,
     errors,
   });
-
-  // Unarchiving a session resumes any scheduled task bound to it (re-enabled,
-  // anchor reset to now). Also run it for sessions that were ALREADY active:
-  // enableTasksForSessions is idempotent (it only re-enables archive-disabled
-  // tasks), so re-unarchiving a session whose task was stranded
-  // (`disabledByArchive: true`) by a PRIOR failed enable recovers it — otherwise
-  // that task is unrecoverable (PATCH-enable 409s on the stale flag, keepalive
-  // skips it). Surface a write failure in `errors` (and log it) instead of
-  // swallowing, so a stranded task isn't left silent.
-  const resumeSessionIds = [...new Set([...unarchived, ...alreadyActive])];
-  try {
-    await enableTasksForSessions(service.getProjectRoot(), resumeSessionIds);
-  } catch (err) {
-    logSessionArchiveWarning(
-      `enableTasksForSessions failed for [${resumeSessionIds.join(', ')}]: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    );
-    // Report against the full resume set: a failed already-active recovery must
-    // surface too, or its stranded task stays silently unrecoverable.
-    for (const sessionId of resumeSessionIds) {
-      errors.push({ sessionId, error: err });
-    }
-  }
 
   return { unarchived, alreadyActive, notFound, errors };
 }

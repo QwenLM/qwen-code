@@ -59,6 +59,7 @@ import type {
   MidTurnQueueEntry,
   PendingPromptEntry,
 } from './bridgeTypes.js';
+import { TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD } from './bridgeTypes.js';
 import type { ClientMcpMessageSender } from './bridgeOptions.js';
 import { CancelSentinelCollisionError } from './bridgeErrors.js';
 import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
@@ -2505,8 +2506,10 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
           pendingPromptList?: PendingPromptEntry[];
           events: { publish: ReturnType<typeof vi.fn> };
           activePromptId?: string;
+          promptActive?: boolean;
         }
       | undefined,
+    ownsSession?: (sessionId: string) => boolean,
   ): BridgeClient {
     const resolvedEntry = entry
       ? { ...entry, pendingPromptList: entry.pendingPromptList ?? [] }
@@ -2518,6 +2521,11 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       { request: thrower } as never,
       0,
       Infinity,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      ownsSession as never,
     );
   }
 
@@ -2526,7 +2534,10 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     const entry = {
       sessionId: 'sess:drain',
       activePromptId: 'prompt-drain',
-      midTurnMessageQueue: [{ text: 'first' }, { text: 'second' }],
+      midTurnMessageQueue: [
+        { messageId: 'mid-1', text: 'first' },
+        { messageId: 'mid-2', text: 'second' },
+      ],
       events: { publish },
     };
     const client = makeClientWithEntry('sess:drain', entry);
@@ -2546,7 +2557,11 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     expect(publish.mock.calls[0][0]).toMatchObject({
       type: 'mid_turn_message_injected',
       promptId: 'prompt-drain',
-      data: { sessionId: 'sess:drain', messages: ['first', 'second'] },
+      data: {
+        sessionId: 'sess:drain',
+        messages: ['first', 'second'],
+        messageIds: ['mid-1', 'mid-2'],
+      },
     });
     // Anonymous queue entries (no originator) ⇒ no `originatorClientId` on the
     // frame, so every consumer reconciles it.
@@ -2562,9 +2577,9 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       sessionId: 'sess:multi',
       activePromptId: 'prompt-multi',
       midTurnMessageQueue: [
-        { text: 'a', originatorClientId: 'client-1' },
-        { text: 'b', originatorClientId: 'client-2' },
-        { text: 'c', originatorClientId: 'client-1' },
+        { messageId: 'mid-a', text: 'a', originatorClientId: 'client-1' },
+        { messageId: 'mid-b', text: 'b', originatorClientId: 'client-2' },
+        { messageId: 'mid-c', text: 'c', originatorClientId: 'client-1' },
       ],
       events: { publish },
     };
@@ -2588,13 +2603,21 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     expect(c1).toMatchObject({
       type: 'mid_turn_message_injected',
       promptId: 'prompt-multi',
-      data: { sessionId: 'sess:multi', messages: ['a', 'c'] },
+      data: {
+        sessionId: 'sess:multi',
+        messages: ['a', 'c'],
+        messageIds: ['mid-a', 'mid-c'],
+      },
       originatorClientId: 'client-1',
     });
     expect(c2).toMatchObject({
       type: 'mid_turn_message_injected',
       promptId: 'prompt-multi',
-      data: { sessionId: 'sess:multi', messages: ['b'] },
+      data: {
+        sessionId: 'sess:multi',
+        messages: ['b'],
+        messageIds: ['mid-b'],
+      },
       originatorClientId: 'client-2',
     });
   });
@@ -2611,7 +2634,9 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     try {
       const entry = {
         sessionId: 'sess:closed',
-        midTurnMessageQueue: [{ text: 'still-delivered' }],
+        midTurnMessageQueue: [
+          { messageId: 'mid-delivered', text: 'still-delivered' },
+        ],
         events: { publish },
       };
       const client = makeClientWithEntry('sess:closed', entry);
@@ -2715,6 +2740,140 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
         sessionId: 'sess:queued',
       }),
     ).resolves.toEqual({ messages: [], hasQueuedPrompt: false });
+  });
+
+  it('claims only for the live running owner and reports queued competition', async () => {
+    const running = {
+      promptId: 'running',
+      queuedAt: Date.now(),
+      text: 'current',
+      state: 'running' as const,
+      abortController: new AbortController(),
+    };
+    const queued = {
+      promptId: 'queued',
+      queuedAt: Date.now(),
+      text: 'next',
+      state: 'queued' as const,
+      abortController: new AbortController(),
+    };
+    const entry = {
+      sessionId: 'sess:claim',
+      activePromptId: 'running',
+      promptActive: true,
+      midTurnMessageQueue: [],
+      pendingPromptList: [running, queued],
+      events: { publish: vi.fn() },
+      todoStopGuardAwaitingQueuedPromptOwnerPromptId: undefined as
+        | string
+        | undefined,
+    };
+    const client = new BridgeClient(
+      ((sessionId: string) =>
+        sessionId === 'sess:claim' ? entry : undefined) as never,
+      thrower as never,
+      { request: thrower } as never,
+      0,
+      Infinity,
+    );
+
+    await expect(
+      client.extMethod(TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD, {
+        sessionId: 'sess:claim',
+        promptId: 'wrong-owner',
+      }),
+    ).resolves.toEqual({ claimed: false, hasQueuedPrompt: false });
+    await expect(
+      client.extMethod(TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD, {
+        sessionId: 'sess:claim',
+        promptId: 'running',
+      }),
+    ).resolves.toEqual({ claimed: false, hasQueuedPrompt: true });
+
+    queued.abortController.abort();
+    const competing = {
+      promptId: 'competing',
+      queuedAt: Date.now(),
+      text: 'competing',
+      state: 'running' as const,
+      abortController: new AbortController(),
+    };
+    entry.pendingPromptList.push(competing);
+    await expect(
+      client.extMethod(TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD, {
+        sessionId: 'sess:claim',
+        promptId: 'running',
+      }),
+    ).resolves.toEqual({ claimed: false, hasQueuedPrompt: false });
+    expect(entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId).toBe(
+      'running',
+    );
+
+    competing.abortController.abort();
+    await expect(
+      client.extMethod(TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD, {
+        sessionId: 'sess:claim',
+        promptId: 'running',
+      }),
+    ).resolves.toEqual({ claimed: true, hasQueuedPrompt: false });
+  });
+
+  it('allows ownerless automatic claims only while no bridge prompt is live', async () => {
+    const running = {
+      promptId: 'running',
+      queuedAt: Date.now(),
+      text: 'current',
+      state: 'running' as const,
+      abortController: new AbortController(),
+    };
+    const activeClient = makeClientWithEntry('sess:active', {
+      sessionId: 'sess:active',
+      activePromptId: 'running',
+      promptActive: true,
+      midTurnMessageQueue: [],
+      pendingPromptList: [running],
+      events: { publish: vi.fn() },
+    });
+    const idleClient = makeClientWithEntry('sess:idle', {
+      sessionId: 'sess:idle',
+      promptActive: false,
+      midTurnMessageQueue: [],
+      pendingPromptList: [],
+      events: { publish: vi.fn() },
+    });
+
+    await expect(
+      activeClient.extMethod(TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD, {
+        sessionId: 'sess:active',
+      }),
+    ).resolves.toEqual({ claimed: false, hasQueuedPrompt: false });
+    await expect(
+      idleClient.extMethod(TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD, {
+        sessionId: 'sess:idle',
+      }),
+    ).resolves.toEqual({ claimed: true, hasQueuedPrompt: false });
+    await expect(
+      idleClient.extMethod(TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD, {
+        sessionId: 'missing',
+      }),
+    ).resolves.toEqual({ claimed: false, hasQueuedPrompt: false });
+  });
+
+  it('rejects claims for sessions not owned by this ACP channel', async () => {
+    const entry = {
+      sessionId: 'sess:not-owned',
+      promptActive: false,
+      midTurnMessageQueue: [],
+      pendingPromptList: [],
+      events: { publish: vi.fn() },
+    };
+    const client = makeClientWithEntry('sess:not-owned', entry, () => false);
+
+    await expect(
+      client.extMethod(TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD, {
+        sessionId: 'sess:not-owned',
+      }),
+    ).resolves.toEqual({ claimed: false, hasQueuedPrompt: false });
   });
 
   it('rejects an unknown ext-method with JSON-RPC methodNotFound (-32601)', async () => {
@@ -2832,6 +2991,144 @@ describe('BridgeClient — reverse tool channel (qwen/control/client_mcp/message
     });
     expect(outbound).toHaveLength(1);
     expect((result as { payload?: unknown }).payload).toBeDefined();
+  });
+
+  it('forwards the originating session id to the client MCP sender', async () => {
+    const contexts: unknown[] = [];
+    const sender: ClientMcpMessageSender = () => async (_payload, context) => {
+      contexts.push(context);
+      return { jsonrpc: '2.0', id: 1, result: {} };
+    };
+    const client = new BridgeClient(
+      (() => undefined) as never,
+      (() => undefined) as never,
+      { request: thrower } as never,
+      0,
+      Infinity,
+      undefined,
+      undefined,
+      undefined,
+      sender,
+    );
+
+    await client.extMethod('qwen/control/client_mcp/message', {
+      server: 'channel-loop',
+      sessionId: 'session-channel-1',
+      payload: { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+    });
+
+    expect(contexts).toEqual([{ sessionId: 'session-channel-1' }]);
+  });
+
+  it('rejects a malformed optional session id', async () => {
+    const sender: ClientMcpMessageSender = () => async () => ({
+      jsonrpc: '2.0',
+      id: 1,
+      result: {},
+    });
+    const client = new BridgeClient(
+      (() => undefined) as never,
+      (() => undefined) as never,
+      { request: thrower } as never,
+      0,
+      Infinity,
+      undefined,
+      undefined,
+      undefined,
+      sender,
+    );
+
+    await expect(
+      client.extMethod('qwen/control/client_mcp/message', {
+        server: 'channel-loop',
+        sessionId: '',
+        payload: { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+      }),
+    ).rejects.toMatchObject({ code: -32602 });
+  });
+
+  it('forwards a pre-registration session frame without trusted context', async () => {
+    const contexts: unknown[] = [];
+    const send = vi.fn().mockImplementation(async (_payload, context) => {
+      contexts.push(context);
+      return {
+        jsonrpc: '2.0',
+        id: 1,
+        result: {},
+      };
+    });
+    const sender: ClientMcpMessageSender = () => send;
+    const client = new BridgeClient(
+      (() => undefined) as never,
+      (() => undefined) as never,
+      { request: thrower } as never,
+      0,
+      Infinity,
+      undefined,
+      undefined,
+      undefined,
+      sender,
+      () => false,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => true,
+    );
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+
+    try {
+      await expect(
+        client.extMethod('qwen/control/client_mcp/message', {
+          server: 'channel-loop',
+          sessionId: 'unowned-session',
+          payload: { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+        }),
+      ).resolves.toEqual({
+        payload: { jsonrpc: '2.0', id: 1, result: {} },
+      });
+      expect(contexts).toEqual([undefined]);
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'type=client_mcp_message action=forwarded_without_session',
+        ),
+      );
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('rejects a session id owned by another ACP channel', async () => {
+    const send = vi.fn().mockResolvedValue({
+      jsonrpc: '2.0',
+      id: 1,
+      result: {},
+    });
+    const sender: ClientMcpMessageSender = () => send;
+    const client = new BridgeClient(
+      (() => undefined) as never,
+      (() => undefined) as never,
+      { request: thrower } as never,
+      0,
+      Infinity,
+      undefined,
+      undefined,
+      undefined,
+      sender,
+      () => false,
+    );
+
+    await expect(
+      client.extMethod('qwen/control/client_mcp/message', {
+        server: 'channel-loop',
+        sessionId: 'foreign-session',
+        payload: { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+      }),
+    ).rejects.toMatchObject({ code: -32602 });
+    expect(send).not.toHaveBeenCalled();
   });
 
   it('rejects (invalidParams) when the named server is not connected', async () => {
