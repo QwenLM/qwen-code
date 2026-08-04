@@ -4976,6 +4976,15 @@ class QwenAgent implements Agent {
           );
         }
         session.getConfig().setReasoningEffort(effort);
+        if (
+          effort !== undefined &&
+          session.getConfig().getReasoningEffort() !== effort
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Reasoning effort cannot be applied while thinking is disabled',
+          );
+        }
         break;
       }
       default:
@@ -11439,6 +11448,8 @@ class QwenAgent implements Agent {
         ...REASONING_EFFORT_TIERS.map((effort) => ({
           value: effort,
           name: ACP_REASONING_EFFORT_NAMES[effort],
+          description:
+            'Providers map or clamp the requested tier for the active model',
         })),
       ],
     };

@@ -329,6 +329,14 @@ class FakeBridge {
             currentValue: 'qwen-max',
             options: [],
           },
+          {
+            id: 'reasoning_effort',
+            name: 'Reasoning effort',
+            category: 'thought_level',
+            type: 'select',
+            currentValue: 'default',
+            options: [],
+          },
         ],
       },
     };
@@ -1275,10 +1283,16 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(ack.status).toBe(202);
     const [frame] = (await got) as Array<{
       id: number;
-      result: { sessionId: string };
+      result: {
+        sessionId: string;
+        configOptions: Array<{ id: string }>;
+      };
     }>;
     expect(frame.id).toBe(2);
     expect(frame.result.sessionId).toBe('sess-1');
+    expect(frame.result.configOptions.map((option) => option.id)).toEqual([
+      'model',
+    ]);
   });
 
   it('maps workspace session admission failures to retryable RPC error data', async () => {

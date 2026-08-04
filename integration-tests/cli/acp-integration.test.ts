@@ -644,6 +644,19 @@ function setupAcpTest(
           (opt) => opt.id === 'reasoning_effort',
         )?.currentValue,
       ).toBe('default');
+
+      await expect(
+        sendRequest('session/set_config_option', {
+          sessionId: newSession.sessionId,
+          configId: 'reasoning_effort',
+          value: 'ultra',
+        }),
+      ).rejects.toMatchObject({
+        response: {
+          code: -32602,
+          message: 'Invalid params: Unknown reasoning effort: ultra',
+        },
+      });
     } catch (e) {
       if (stderr.length) {
         console.error('Agent stderr:', stderr.join(''));

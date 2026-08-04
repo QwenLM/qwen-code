@@ -5779,7 +5779,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           id: string;
           category?: string;
           currentValue: string;
-          options: Array<{ value: string; name: string }>;
+          options: Array<{
+            value: string;
+            name: string;
+            description: string;
+          }>;
         }>;
       };
 
@@ -5792,11 +5796,15 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         currentValue: 'default',
         options: [
           { value: 'default', name: 'Default' },
-          { value: 'low', name: 'Low' },
-          { value: 'medium', name: 'Medium' },
-          { value: 'high', name: 'High' },
-          { value: 'xhigh', name: 'Extra high' },
-          { value: 'max', name: 'Max' },
+          { value: 'low', name: 'Low', description: expect.any(String) },
+          { value: 'medium', name: 'Medium', description: expect.any(String) },
+          { value: 'high', name: 'High', description: expect.any(String) },
+          {
+            value: 'xhigh',
+            name: 'Extra high',
+            description: expect.any(String),
+          },
+          { value: 'max', name: 'Max', description: expect.any(String) },
         ],
       });
 
@@ -5833,6 +5841,18 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         }),
       ).rejects.toThrow('Unknown reasoning effort: ultra');
       expect(innerConfig.setReasoningEffort).toHaveBeenCalledTimes(2);
+
+      innerConfig.setReasoningEffort.mockImplementation(() => {});
+      await expect(
+        agent.setSessionConfigOption({
+          sessionId,
+          configId: 'reasoning_effort',
+          value: 'xhigh',
+        }),
+      ).rejects.toThrow(
+        'Reasoning effort cannot be applied while thinking is disabled',
+      );
+      expect(innerConfig.setReasoningEffort).toHaveBeenCalledTimes(3);
     } finally {
       mockConnectionState.resolve();
       await agentPromise;
