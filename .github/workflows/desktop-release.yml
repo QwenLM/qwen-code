@@ -382,7 +382,13 @@ jobs:
         run: |
           $installer = Get-ChildItem packages/desktop-shell/src-tauri/target/${{ matrix.rust_target }}/release/bundle/nsis/*.exe | Select-Object -First 1
           $signature = Get-AuthenticodeSignature $installer.FullName
-          if ($signature.Status -ne 'Valid') { throw "Invalid Authenticode signature: $($signature.Status)" }
+          if ($signature.Status -eq 'Valid') {
+            Write-Output "Windows installer is Authenticode-signed."
+          } elseif ($signature.Status -eq 'NotSigned') {
+            Write-Output "::warning::Windows installer is unsigned (no code signing certificate configured). SmartScreen will warn users on first install."
+          } else {
+            throw "Invalid Authenticode signature: $($signature.Status)"
+          }
 
       - name: 'Create Electron bridge archive'
         if: "runner.os == 'macOS' && inputs.electron_bridge"
