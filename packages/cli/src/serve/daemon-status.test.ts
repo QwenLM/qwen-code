@@ -25,6 +25,7 @@ import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
 import type { RateLimiterInstance, RateLimitTier } from './rate-limit.js';
 import type { DaemonWorkspaceService } from './workspace-service/index.js';
 import type { DaemonLogger } from './daemon-logger.js';
+import { createChildHeapPolicy } from '@qwen-code/acp-bridge/childHeapPolicy';
 import { resolveDaemonMemoryBudget } from '@qwen-code/acp-bridge/daemonMemoryBudget';
 
 const BASE_WORKSPACE = '/work/status';
@@ -128,6 +129,52 @@ describe('buildDaemonStatusResponse', () => {
     const response = await buildDaemonStatusResponse('summary', options);
 
     expect(response.limits.maxTotalSessions).toBe(50);
+  });
+
+  it('reports enforced only when a spawn argument really derives from the budget', async () => {
+    // The tripwire field. #8245 made it a required literal `false` so a client
+    // could never mistake this section for enforcement that had not shipped;
+    // it is a boolean now, and the two branches must be checked separately or
+    // it degrades into "the feature exists".
+    const budget = resolveDaemonMemoryBudget({ availableMemoryMb: 8_192 });
+
+    const observing = makeOptions();
+    observing.opts.daemonMemoryBudget = budget;
+    observing.getChildHeapPolicySnapshot = () =>
+      createChildHeapPolicy({ budget, mode: 'observe' }).snapshot();
+    const observed = await buildDaemonStatusResponse('summary', observing);
+    // Computes everything, applies nothing — so `false`, not `true`.
+    expect(observed.limits.memory).toMatchObject({
+      enforced: false,
+      childHeap: { mode: 'observe', refusals: 0 },
+    });
+
+    const enforcing = makeOptions();
+    enforcing.opts.daemonMemoryBudget = budget;
+    const policy = createChildHeapPolicy({ budget, mode: 'enforce' });
+    // Drive one refusal through so the counter is not trivially zero here.
+    policy.decide(10_000);
+    enforcing.getChildHeapPolicySnapshot = () => policy.snapshot();
+    const enforced = await buildDaemonStatusResponse('summary', enforcing);
+    expect(enforced.limits.memory).toMatchObject({
+      enforced: true,
+      childHeap: { mode: 'enforce', refusals: 1 },
+    });
+  });
+
+  it('reports no child-heap policy as null rather than as a disabled one', async () => {
+    // Direct-embed and the bootstrap window build no policy. `null` says
+    // "there is no policy", which a client must not read as "mode off".
+    const options = makeOptions();
+    options.opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
+      availableMemoryMb: 8_192,
+    });
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    expect(response.limits.memory).toMatchObject({
+      enforced: false,
+      childHeap: null,
+    });
   });
 
   it('reports the resolved memory budget in daemon status limits', () => {
