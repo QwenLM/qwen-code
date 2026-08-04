@@ -30,7 +30,7 @@
 
 import type { CommandModule } from 'yargs';
 import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { parseLineTolerant } from '@qwen-code/qwen-code-core';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
@@ -74,9 +74,25 @@ interface UsageEvent {
   thoughts: number;
 }
 
+/** Text out of a record's message parts — the shape the harness writes. */
+function textOfRecord(rec: Record<string, unknown>): string {
+  const msg = rec['message'] as { parts?: unknown } | undefined;
+  const parts = Array.isArray(msg?.parts) ? msg.parts : [];
+  return parts
+    .map((p) => (p as { text?: unknown }).text)
+    .filter((t): t is string => typeof t === 'string')
+    .join('');
+}
+
 /**
  * One read of a transcript: its usage-bearing assistant events, floor-filtered,
- * plus the head of the raw text the launch-prompt label comes from.
+ * plus the launch prompt the label comes from.
+ *
+ * The launch prompt is the first `user` record's text — the same anchor
+ * `parseTranscript` in lib/transcripts.ts uses — never a raw byte slice of the
+ * file: a fork agent's transcript opens with an `agent_bootstrap` system
+ * record carrying the entire inherited conversation, which can quote other
+ * agents' identity lines and outgrow any fixed head window.
  *
  * Read failures throw; the caller decides what they mean — for the chat file,
  * "the ledger cannot be computed"; for one agent file, "that agent is lost".
@@ -84,9 +100,10 @@ interface UsageEvent {
 function readUsage(
   file: string,
   floorMs: number,
-): { events: UsageEvent[]; head: string } {
+): { events: UsageEvent[]; launch: string } {
   const raw = readFileSync(file, 'utf8');
   const events: UsageEvent[] = [];
+  let launch = '';
   for (const line of raw.split('\n')) {
     if (line.trim() === '') continue;
     // parseLineTolerant recovers the `}{`-glued records an interrupted append
@@ -94,6 +111,9 @@ function readUsage(
     // flushed files — and drops non-object lines, which a bare JSON.parse
     // parses happily (`null`, `42`) only to trip the property reads below.
     for (const rec of parseLineTolerant<Record<string, unknown>>(line, file)) {
+      if (launch === '' && rec['type'] === 'user') {
+        launch = textOfRecord(rec);
+      }
       if (rec['type'] !== 'assistant') continue;
       const usage = rec['usageMetadata'];
       if (usage === null || typeof usage !== 'object') continue;
@@ -107,9 +127,13 @@ function readUsage(
       // conversation to the review. The plan's own mtime marks the review start
       // — the same floor `check-coverage` applies to transcripts.
       if (!Number.isFinite(tsMs) || tsMs < floorMs) continue;
+      // ≥ 0, not merely finite: the main loop coerces broken-proxy usage
+      // (negative or NaN counts) before recording, but the agent path records
+      // raw provider usage — a negative count here would render >100% cached
+      // shares and negative rows in the archived block.
       const n = (k: string): number => {
         const v = u[k];
-        return typeof v === 'number' && Number.isFinite(v) ? v : 0;
+        return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 0;
       };
       const prompt = n('promptTokenCount');
       const total = n('totalTokenCount');
@@ -129,25 +153,31 @@ function readUsage(
       });
     }
   }
-  // The launch prompt is the first record; 64KB is far past any of them.
-  return { events, head: raw.slice(0, 65536) };
+  return { events, launch };
 }
 
-/** A role label out of the launch prompt's head, else the fallback. */
-function labelOf(head: string, fallback: string): string {
+/** A role label out of the launch prompt, else the fallback. */
+function labelOf(launch: string, fallback: string): string {
   // The identity line `agent-prompt` emits, with the role in backticks. A
   // chunk agent's role is `chunk N of M`; prefixing it with "agent" would
   // read as a malformed role, so resolve it through the same regex coverage
   // uses. The round suffix lands outside the backticks, so a repair-round
   // relaunch keeps its role and folds into one (×N) row.
-  const role = /You are review agent `([^`]+)`/.exec(head);
+  const role = /You are review agent `([^`]+)`/.exec(launch);
   if (role) {
     const chunk = CHUNK_RE.exec(role[1]);
-    return chunk ? `chunk ${chunk[1]}` : `agent ${role[1]}`;
+    if (chunk) return `chunk ${chunk[1]}`;
+    // An invariant role launches once PER heavy file. The role alone would
+    // fold those parallel runs into one (×N) row — the marker reserved for
+    // relaunches — and lose the per-file breakdown. The launch prompt names
+    // the owned file right after the identity; that is the distinguisher.
+    const file = /Your file: `([^`]+)`/.exec(launch);
+    if (file) return `agent ${role[1]} (${basename(file[1])})`;
+    return `agent ${role[1]}`;
   }
   // No identity line (an older harness): the chunk the prompt text names,
   // else the file's own id.
-  const chunk = CHUNK_RE.exec(head);
+  const chunk = CHUNK_RE.exec(launch);
   if (chunk) return `chunk ${chunk[1]}`;
   return fallback;
 }
@@ -203,11 +233,14 @@ const plural = (n: number, word: string): string =>
   `${n} ${word}${n === 1 ? '' : 's'}`;
 
 /**
- * The plan's mtime is the billing floor. Validate the file IS the Step 1 plan
- * before trusting that mtime: a wrong-but-existing file (the findings JSON,
- * the report written minutes earlier) would move the floor silently in either
- * direction — the same two fields `check-coverage`'s reader of this same
- * argument requires.
+ * The plan's mtime is the billing floor. Validate the file IS a Step 1 plan
+ * report before trusting that mtime: a wrong-but-existing file (the findings
+ * JSON, the report written minutes earlier) would move the floor silently in
+ * either direction. The shape checked is the pair every Step 1 report carries
+ * — `diffLines` and `chunks` — not `check-coverage`'s stricter contract: a
+ * degraded capture (unresolvable merge base, the tiling fallback) writes
+ * `diffPathAbsolute: null` with `chunks: []`, and that report's mtime is
+ * still exactly the floor this ledger needs.
  */
 function planFloorMs(planPath: string): number {
   let raw: string;
@@ -230,11 +263,9 @@ function planFloorMs(planPath: string): number {
     parsed !== null && typeof parsed === 'object'
       ? (parsed as Record<string, unknown>)
       : undefined;
-  const chunks = plan?.['chunks'];
   if (
-    typeof plan?.['diffPathAbsolute'] !== 'string' ||
-    !Array.isArray(chunks) ||
-    chunks.length === 0
+    typeof plan?.['diffLines'] !== 'number' ||
+    !Array.isArray(plan?.['chunks'])
   ) {
     throw new Error(`not a review plan report: ${planPath}`);
   }
@@ -298,7 +329,7 @@ export function computeLedger(
     // write predates it cannot hold an above-floor record — the same
     // membership test `readTranscripts` applies. Skip it without opening.
     if (mtimeMs < floorMs) continue;
-    let read: { events: UsageEvent[]; head: string };
+    let read: { events: UsageEvent[]; launch: string };
     try {
       read = readUsage(full, floorMs);
     } catch {
@@ -306,10 +337,23 @@ export function computeLedger(
     }
     if (read.events.length === 0) continue;
     const id = f.replace(/^agent-/, '').replace(/\.jsonl$/, '');
-    agents.push(foldEvents(id, labelOf(read.head, id), read.events));
+    agents.push(foldEvents(id, labelOf(read.launch, id), read.events));
     agentEvents.push(...read.events);
   }
   agents.sort((a, b) => b.inputTokens - a.inputTokens);
+
+  // A present-but-empty chat file is not a lighter version of a missing one.
+  // The recorder pre-creates the file and degrades permanently if its first
+  // append fails, so "exists, yet no above-floor records while agents ran" is
+  // the same infrastructure fact as "unreadable" — and rendering agents-only
+  // totals under the `Cost ledger:` headline is exactly what the catch above
+  // refuses to do.
+  if (mainEvents.length === 0 && agentEvents.length > 0) {
+    throw new Error(
+      `could not read the chat transcript ${chatFile}: no main-loop usage ` +
+        'records at or after the plan, while agents ran',
+    );
+  }
 
   // The same events the per-stream rows fold, folded once more — one
   // accumulator, so a new usage counter cannot land in the rows and miss the

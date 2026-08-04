@@ -42,8 +42,11 @@ function event(
       cachedContentTokenCount: usage.cached ?? 0,
       candidatesTokenCount: usage.output ?? 0,
       thoughtsTokenCount: usage.thoughts ?? 0,
-      // The records' own contract: total = prompt + candidates. Thinking is a
-      // subset of candidates, not a sibling — never add it here.
+      // This helper models ONE usage convention: total = prompt + candidates,
+      // with thinking a subset of candidates. The disjoint convention
+      // (thoughts a sibling of candidates, total = prompt + candidates +
+      // thoughts) is real too — the both-conventions derivation test writes
+      // those records raw, where the two formulas actually diverge.
       totalTokenCount: (usage.input ?? 0) + (usage.output ?? 0),
     },
     ...extra,
@@ -83,6 +86,7 @@ describe('cost-ledger — the spend, from the records already on disk', () => {
       plan,
       JSON.stringify({
         diffPathAbsolute: join(project, 'diff.txt'),
+        diffLines: 10,
         chunks: [{ id: 1, startLine: 1, endLine: 10 }],
       }),
     );
@@ -101,6 +105,18 @@ describe('cost-ledger — the spend, from the records already on disk', () => {
 
   function chatFile(project: string): string {
     return join(project, 'chats', `${SESSION}.jsonl`);
+  }
+
+  /**
+   * One real main-loop call. Agents-only records with no above-floor
+   * main-loop call are refused as an unreadable chat transcript, so every
+   * agent-focused fixture writes the main call its agents' launch implies.
+   */
+  function writeMainCall(project: string): void {
+    writeFileSync(
+      chatFile(project),
+      event('2026-08-03T10:01:00Z', { input: 500, output: 50 }),
+    );
   }
 
   it('aggregates the main loop and each agent, newest records only', () => {
@@ -126,6 +142,18 @@ describe('cost-ledger — the spend, from the records already on disk', () => {
         JSON.stringify({
           type: 'assistant',
           timestamp: '2026-08-03T10:03:00Z',
+        }),
+        // Nor is a non-assistant record CARRYING usage — a `}{`-glued
+        // corruption fragment can leave a stray usageMetadata attached to
+        // the wrong half. The type filter, not the usage check, excludes it.
+        JSON.stringify({
+          type: 'user',
+          timestamp: '2026-08-03T10:04:00Z',
+          usageMetadata: {
+            promptTokenCount: 7_777,
+            candidatesTokenCount: 7,
+            totalTokenCount: 7_784,
+          },
         }),
       ].join('\n'),
     );
@@ -164,10 +192,80 @@ describe('cost-ledger — the spend, from the records already on disk', () => {
     expect(ledger.agents[0].inputTokens).toBe(73_000);
 
     // The block is archived verbatim, so pin the per-stream values too — not
-    // just the totals line.
+    // just the totals line — and the seconds→minutes wall conversion, whose
+    // only other non-zero fixture asserts the raw field.
     const text = renderLedger(ledger);
+    expect(text).toContain('7 min wall');
     expect(text).toContain('main loop: 2 calls · 210k in · 3k out');
     expect(text).toContain('agent 2: 2 calls · 73k in · 1k out');
+  });
+
+  it('derives output as total − prompt under both usage conventions', () => {
+    const { plan, env, project } = fixture();
+    writeFileSync(
+      chatFile(project),
+      [
+        // The disjoint convention: thoughts a sibling of candidates, so
+        // total = prompt + candidates + thoughts. Output must be
+        // total − prompt = 500 — bare candidates would drop the thinking.
+        JSON.stringify({
+          type: 'assistant',
+          timestamp: '2026-08-03T10:01:00Z',
+          usageMetadata: {
+            promptTokenCount: 1_000,
+            candidatesTokenCount: 400,
+            thoughtsTokenCount: 100,
+            totalTokenCount: 1_500,
+          },
+        }),
+        // No total reported at all: candidates is the only number there is,
+        // and the subset convention keeps it correct.
+        JSON.stringify({
+          type: 'assistant',
+          timestamp: '2026-08-03T10:02:00Z',
+          usageMetadata: {
+            promptTokenCount: 1_000,
+            candidatesTokenCount: 400,
+          },
+        }),
+      ].join('\n'),
+    );
+    const ledger = computeLedger(plan, env);
+    // 500 (total − prompt) + 400 (candidates fallback).
+    expect(ledger.main?.outputTokens).toBe(900);
+    expect(ledger.main?.thoughtsTokens).toBe(100);
+  });
+
+  it('coerces negative provider counts to zero instead of corrupting totals', () => {
+    const { plan, env, project } = fixture();
+    writeFileSync(
+      chatFile(project),
+      [
+        event('2026-08-03T10:01:00Z', {
+          input: 1_000,
+          cached: 500,
+          output: 100,
+        }),
+        // A broken OpenAI-compat proxy: the agent path records provider
+        // usage uncoerced, so negative counts reach the ledger. Summed, they
+        // would render >100% cached shares and negative rows in the archive.
+        JSON.stringify({
+          type: 'assistant',
+          timestamp: '2026-08-03T10:02:00Z',
+          usageMetadata: {
+            promptTokenCount: -5_000,
+            cachedContentTokenCount: -4_000,
+            candidatesTokenCount: -1_000,
+            totalTokenCount: -6_000,
+          },
+        }),
+      ].join('\n'),
+    );
+    const ledger = computeLedger(plan, env);
+    expect(ledger.totals.calls).toBe(2);
+    expect(ledger.totals.inputTokens).toBe(1_000);
+    expect(ledger.totals.cachedTokens).toBe(500);
+    expect(ledger.totals.outputTokens).toBe(100);
   });
 
   it('renders a one-line summary a reader can act on', () => {
@@ -228,6 +326,30 @@ describe('cost-ledger — the spend, from the records already on disk', () => {
     expect(() => computeLedger(notPlan, env)).toThrow(
       /not a review plan report/,
     );
+    // Each validated field independently: a fixture per condition, each
+    // satisfying the other, so relaxing either one alone turns a test red.
+    writeFileSync(notPlan, JSON.stringify({ chunks: [{ id: 1 }] }));
+    expect(() => computeLedger(notPlan, env)).toThrow(
+      /not a review plan report/,
+    );
+    writeFileSync(notPlan, JSON.stringify({ diffLines: 42 }));
+    expect(() => computeLedger(notPlan, env)).toThrow(
+      /not a review plan report/,
+    );
+  });
+
+  it('accepts a degraded diff-less plan — its mtime is still the floor', () => {
+    const { plan, env } = fixture();
+    // fetch-pr writes diffPathAbsolute: null with chunks: [] on two real
+    // paths (unresolvable merge base, the tiling fallback). That file IS the
+    // Step 1 plan report, and the ledger needs only its mtime.
+    writeFileSync(
+      plan,
+      JSON.stringify({ diffPathAbsolute: null, diffLines: 0, chunks: [] }),
+    );
+    const start = new Date('2026-08-03T10:00:00Z');
+    utimesSync(plan, start, start);
+    expect(computeLedger(plan, env).totals.calls).toBe(0);
   });
 
   it('refuses to render agents-only totals when the chat transcript is missing', () => {
@@ -247,6 +369,52 @@ describe('cost-ledger — the spend, from the records already on disk', () => {
     expect(() => computeLedger(plan, env)).toThrow(
       /could not read the chat transcript/,
     );
+  });
+
+  it('refuses agents-only totals when the chat file exists but is empty', () => {
+    const { plan, env, project } = fixture();
+    // The recorder pre-creates the chat file; a failed first append degrades
+    // it permanently, leaving the file present with zero records while
+    // agents run. That must not slip past the missing-file refusal and
+    // present agents-only totals as the review's whole cost.
+    writeFileSync(
+      join(project, 'subagents', SESSION, 'agent-role-1.jsonl'),
+      [
+        userRecord('You are review agent `1` — dimension 1.'),
+        event('2026-08-03T10:06:30Z', { input: 1_000, output: 100 }),
+      ].join('\n'),
+    );
+    expect(() => computeLedger(plan, env)).toThrow(
+      /could not read the chat transcript/,
+    );
+    // Same refusal when every main-loop record predates the plan: an
+    // above-floor agent with no above-floor main call is the same state.
+    writeFileSync(
+      chatFile(project),
+      event('2026-08-03T09:00:00Z', { input: 1_000, output: 100 }),
+    );
+    expect(() => computeLedger(plan, env)).toThrow(
+      /no main-loop usage records at or after the plan, while agents ran/,
+    );
+  });
+
+  it('loses only the unreadable agent transcript, not the whole ledger', () => {
+    const { plan, env, project } = fixture();
+    writeMainCall(project);
+    // EISDIR on read: a listed transcript that cannot be opened. One corrupt
+    // agent record must cost that agent's row, never the ledger.
+    mkdirSync(join(project, 'subagents', SESSION, 'agent-bad.jsonl'));
+    writeFileSync(
+      join(project, 'subagents', SESSION, 'agent-role-ok.jsonl'),
+      [
+        userRecord('You are review agent `ok` — dimension.'),
+        event('2026-08-03T10:06:30Z', { input: 1_000, output: 100 }),
+      ].join('\n'),
+    );
+    const ledger = computeLedger(plan, env);
+    expect(ledger.agents).toHaveLength(1);
+    expect(ledger.agents[0].label).toBe('agent ok');
+    expect(ledger.agents[0].inputTokens).toBe(1_000);
   });
 
   it('surfaces a fault reading the chat file, not a zero ledger', () => {
@@ -309,6 +477,23 @@ describe('cost-ledger — the spend, from the records already on disk', () => {
     expect(renderLedger(computeLedger(plan, env))).toContain('1.5B input');
   });
 
+  it('rounds fractional tiers to the nearest unit, not down', () => {
+    const { plan, env, project } = fixture();
+    writeFileSync(
+      chatFile(project),
+      event('2026-08-03T10:01:00Z', {
+        input: 45_600,
+        cached: 5_700,
+        output: 100,
+      }),
+    );
+    // 45_600 → "46k" (the docstring's own example, not "45k"), and
+    // 5_700 / 45_600 = 12.5% → "13% cached".
+    expect(renderLedger(computeLedger(plan, env))).toContain(
+      '46k input (13% cached)',
+    );
+  });
+
   it('recovers usage records glued onto one line by an interrupted append', () => {
     const { plan, env, project } = fixture();
     const a = event('2026-08-03T10:01:00Z', { input: 1_000, output: 100 });
@@ -334,6 +519,13 @@ describe('cost-ledger — the spend, from the records already on disk', () => {
           timestamp: '2026-08-03T10:01:00Z',
           usageMetadata: null,
         }),
+        // Arrays are objects to typeof: without its own guard this would
+        // count as a phantom zero-token call.
+        JSON.stringify({
+          type: 'assistant',
+          timestamp: '2026-08-03T10:01:30Z',
+          usageMetadata: [],
+        }),
         event('2026-08-03T10:02:00Z', { input: 1_000, output: 100 }),
       ].join('\n'),
     );
@@ -344,6 +536,7 @@ describe('cost-ledger — the spend, from the records already on disk', () => {
 
   it('labels a chunk agent from its identity line, not as "agent chunk …"', () => {
     const { plan, env, project } = fixture();
+    writeMainCall(project);
     writeFileSync(
       join(project, 'subagents', SESSION, 'agent-chunk-c3.jsonl'),
       [
@@ -360,6 +553,7 @@ describe('cost-ledger — the spend, from the records already on disk', () => {
 
   it('falls back to the chunk label when the prompt names no role', () => {
     const { plan, env, project } = fixture();
+    writeMainCall(project);
     writeFileSync(
       join(project, 'subagents', SESSION, 'agent-general-purpose-b7.jsonl'),
       [
@@ -373,6 +567,7 @@ describe('cost-ledger — the spend, from the records already on disk', () => {
 
   it('falls back to the file id when the prompt names neither role nor chunk', () => {
     const { plan, env, project } = fixture();
+    writeMainCall(project);
     writeFileSync(
       join(project, 'subagents', SESSION, 'agent-general-purpose-z0.jsonl'),
       [
@@ -384,18 +579,81 @@ describe('cost-ledger — the spend, from the records already on disk', () => {
     expect(ledger.agents[0].label).toBe('general-purpose-z0');
   });
 
+  it('distinguishes parallel invariant agents by file, not as a phantom relaunch', () => {
+    const { plan, env, project } = fixture();
+    writeMainCall(project);
+    // Step 3B launches invariant-a once PER heavy file. Folding those runs by
+    // bare role would render one (×2) row — the marker reserved for
+    // relaunches — and lose the per-file cost breakdown.
+    for (const [file, owned] of [
+      ['agent-invariant-x1.jsonl', 'packages/cli/src/commands/a.ts'],
+      ['agent-invariant-x2.jsonl', 'packages/cli/src/commands/b.ts'],
+    ] as const) {
+      writeFileSync(
+        join(project, 'subagents', SESSION, file),
+        [
+          userRecord(
+            'You are review agent `invariant-a` — the hot-path audit.' +
+              ` Your file: \`${owned}\`.`,
+          ),
+          event('2026-08-03T10:06:30Z', { input: 1_000, output: 100 }),
+        ].join('\n'),
+      );
+    }
+    const text = renderLedger(computeLedger(plan, env));
+    expect(text).toContain('agent invariant-a (a.ts):');
+    expect(text).toContain('agent invariant-a (b.ts):');
+    expect(text).not.toContain('(×2)');
+  });
+
+  it('labels a fork agent from its launch prompt, not the bootstrap before it', () => {
+    const { plan, env, project } = fixture();
+    writeMainCall(project);
+    writeFileSync(
+      join(project, 'subagents', SESSION, 'agent-fork-f1.jsonl'),
+      [
+        // A fork's first record is the inherited conversation — an
+        // agent_bootstrap system record that quotes another agent's identity
+        // line and can outgrow any fixed head slice. The launch prompt is the
+        // first USER record, after it.
+        JSON.stringify({
+          type: 'system',
+          subtype: 'agent_bootstrap',
+          timestamp: '2026-08-03T10:05:00Z',
+          systemPayload: {
+            kind: 'fork',
+            history: [
+              {
+                text:
+                  'Earlier turn: You are review agent `chunk 1 of 5` — ' +
+                  `the territory agent. ${'x'.repeat(70_000)}`,
+              },
+            ],
+          },
+        }),
+        userRecord('You are review agent `verify` — the reverse audit.'),
+        event('2026-08-03T10:06:30Z', { input: 1_000, output: 100 }),
+      ].join('\n'),
+    );
+    const ledger = computeLedger(plan, env);
+    expect(ledger.agents[0].label).toBe('agent verify');
+  });
+
   it('orders agents by input, biggest first, regardless of file order', () => {
     const { plan, env, project } = fixture();
-    // Small written first: the order must come from the sort, not readdir.
+    writeMainCall(project);
+    // The small agent gets the lexically EARLIER name and is written FIRST:
+    // a write-order filesystem and a lexical readdir both list [small, big],
+    // so only the sort can produce [big, small].
     writeFileSync(
-      join(project, 'subagents', SESSION, 'agent-role-small.jsonl'),
+      join(project, 'subagents', SESSION, 'agent-role-a.jsonl'),
       [
         userRecord('You are review agent `small` — dimension.'),
         event('2026-08-03T10:06:30Z', { input: 1_000, output: 100 }),
       ].join('\n'),
     );
     writeFileSync(
-      join(project, 'subagents', SESSION, 'agent-role-big.jsonl'),
+      join(project, 'subagents', SESSION, 'agent-role-z.jsonl'),
       [
         userRecord('You are review agent `big` — dimension.'),
         event('2026-08-03T10:06:30Z', { input: 900_000, output: 100 }),
@@ -408,8 +666,80 @@ describe('cost-ledger — the spend, from the records already on disk', () => {
     ]);
   });
 
+  it('skips agent files whose mtime predates the plan without opening them', () => {
+    const { plan, env, project } = fixture();
+    writeMainCall(project);
+    // An earlier review in the same session: the dir is session-scoped and
+    // never pruned, so its files are still listed — the mtime pre-filter is
+    // what keeps them out.
+    const stale = join(project, 'subagents', SESSION, 'agent-role-old.jsonl');
+    writeFileSync(
+      stale,
+      [
+        userRecord('You are review agent `old` — an earlier review.'),
+        event('2026-08-03T10:06:30Z', { input: 9_000, output: 900 }),
+      ].join('\n'),
+    );
+    const before = new Date('2026-08-03T09:30:00Z');
+    utimesSync(stale, before, before);
+    const ledger = computeLedger(plan, env);
+    expect(ledger.agents).toEqual([]);
+    expect(ledger.totals.inputTokens).toBe(500);
+  });
+
+  it('floors agent events by timestamp even when the file itself is fresh', () => {
+    const { plan, env, project } = fixture();
+    writeMainCall(project);
+    // A first-review agent still appending when the second review's plan
+    // lands: the file's mtime crosses the new floor (the pre-filter keeps
+    // it), so the event-level floor is the only thing keeping the earlier
+    // review's spend out of this ledger.
+    const straddling = join(
+      project,
+      'subagents',
+      SESSION,
+      'agent-role-first.jsonl',
+    );
+    writeFileSync(
+      straddling,
+      [
+        userRecord('You are review agent `first` — the earlier review.'),
+        event('2026-08-03T09:00:00Z', { input: 9_000, output: 900 }),
+      ].join('\n'),
+    );
+    const after = new Date('2026-08-03T10:30:00Z');
+    utimesSync(straddling, after, after);
+    const ledger = computeLedger(plan, env);
+    expect(ledger.agents).toEqual([]);
+    expect(ledger.totals.inputTokens).toBe(500);
+  });
+
+  it('skips an agent killed before its first response, with no phantom row', () => {
+    const { plan, env, project } = fixture();
+    writeMainCall(project);
+    // Only the launch prompt, no usage event: the harness wrote the record,
+    // the agent never got a model response.
+    writeFileSync(
+      join(project, 'subagents', SESSION, 'agent-role-dead.jsonl'),
+      userRecord('You are review agent `dead` — killed at launch.'),
+    );
+    writeFileSync(
+      join(project, 'subagents', SESSION, 'agent-role-live.jsonl'),
+      [
+        userRecord('You are review agent `live` — dimension.'),
+        event('2026-08-03T10:06:30Z', { input: 1_000, output: 100 }),
+      ].join('\n'),
+    );
+    const ledger = computeLedger(plan, env);
+    expect(ledger.agents).toHaveLength(1);
+    expect(ledger.agents[0].label).toBe('agent live');
+    // The phantom must not inflate the run count the fold math feeds on.
+    expect(renderLedger(ledger)).toContain('agent runs: 1');
+  });
+
   it('folds a relaunched agent into one (×N) row', () => {
     const { plan, env, project } = fixture();
+    writeMainCall(project);
     for (const [file, input] of [
       ['agent-general-purpose-a1.jsonl', 10_000],
       ['agent-general-purpose-d9.jsonl', 12_000],
@@ -431,6 +761,7 @@ describe('cost-ledger — the spend, from the records already on disk', () => {
 
   it('ranks a folded (×N) row by its combined total, not its first member', () => {
     const { plan, env, project } = fixture();
+    writeMainCall(project);
     // Two relaunches at 5.0M each must outrank a solo 6.0M agent once
     // folded, or the doubled run this ledger exists to surface is truncated
     // away by the half that sorted lower.
@@ -457,8 +788,9 @@ describe('cost-ledger — the spend, from the records already on disk', () => {
     );
   });
 
-  it('truncates the agent block past eight rows', () => {
+  it('truncates the agent block past eight rows, keeping the biggest', () => {
     const { plan, env, project } = fixture();
+    writeMainCall(project);
     for (let i = 1; i <= 9; i++) {
       writeFileSync(
         join(project, 'subagents', SESSION, `agent-role-${i}.jsonl`),
@@ -470,7 +802,61 @@ describe('cost-ledger — the spend, from the records already on disk', () => {
     }
     const text = renderLedger(computeLedger(plan, env));
     expect(text).toContain('agent runs: 9');
-    expect(text).toContain('…and 1 more agent');
+    // Membership, not just the footnote: the cut keeps the top spenders and
+    // truncates the smallest — never the other way around.
+    expect(text).toContain('agent 9:');
+    expect(text).not.toContain('agent 1:');
+    expect(text).toContain('…and 1 more agent · 10k in combined');
+  });
+
+  it('renders exactly eight agent rows with no truncation footnote', () => {
+    const { plan, env, project } = fixture();
+    writeMainCall(project);
+    // The common full-roster shape (5 chunk + 3 dimension agents) lands
+    // exactly on the cut: no "…and 0 more agents" nonsense line.
+    for (let i = 1; i <= 8; i++) {
+      writeFileSync(
+        join(project, 'subagents', SESSION, `agent-role-${i}.jsonl`),
+        [
+          userRecord(`You are review agent \`${i}\` — dimension ${i}.`),
+          event('2026-08-03T10:06:30Z', { input: 10_000 + i, output: 100 }),
+        ].join('\n'),
+      );
+    }
+    const text = renderLedger(computeLedger(plan, env));
+    expect(text).toContain('agent runs: 8');
+    expect(text).toContain('agent 8:');
+    expect(text).not.toContain('…and');
+  });
+
+  it('counts folded runs below the cut as agents, not rows', () => {
+    const { plan, env, project } = fixture();
+    writeMainCall(project);
+    // Eight solo rows big enough to keep the folded pair below the cut: the
+    // footnote must count its RUNS (2), not its rows (1) — a repair-round
+    // doubling hidden under the cut is exactly what the ledger exists to
+    // surface.
+    for (let i = 1; i <= 8; i++) {
+      writeFileSync(
+        join(project, 'subagents', SESSION, `agent-role-${i}.jsonl`),
+        [
+          userRecord(`You are review agent \`${i}\` — dimension ${i}.`),
+          event('2026-08-03T10:06:30Z', { input: 100_000 + i, output: 100 }),
+        ].join('\n'),
+      );
+    }
+    for (const file of ['agent-role-d1.jsonl', 'agent-role-d2.jsonl']) {
+      writeFileSync(
+        join(project, 'subagents', SESSION, file),
+        [
+          userRecord('You are review agent `dup` — relaunched dimension.'),
+          event('2026-08-03T10:06:30Z', { input: 1_000, output: 100 }),
+        ].join('\n'),
+      );
+    }
+    const text = renderLedger(computeLedger(plan, env));
+    expect(text).toContain('agent runs: 10');
+    expect(text).toContain('…and 2 more agents · 2k in combined');
   });
 });
 
@@ -487,6 +873,7 @@ describe('cost-ledger command boundary — informational, never a failure', () =
   }
 
   afterEach(() => {
+    process.exitCode = undefined;
     for (const [k, v] of Object.entries(savedEnv)) {
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
@@ -504,6 +891,7 @@ describe('cost-ledger command boundary — informational, never a failure', () =
       plan,
       JSON.stringify({
         diffPathAbsolute: join(project, 'diff.txt'),
+        diffLines: 10,
         chunks: [{ id: 1, startLine: 1, endLine: 10 }],
       }),
     );
@@ -535,6 +923,10 @@ describe('cost-ledger command boundary — informational, never a failure', () =
       outSpy.mockRestore();
       errSpy.mockRestore();
     }
+    // The describe's whole contract, asserted on every path: the ledger is
+    // informational, and a review must never fail on its own accounting —
+    // "exits 0" in each title is this line, not a hope.
+    expect(process.exitCode ?? 0).toBe(0);
     return { stdout: stdout.join(''), stderr: stderr.join('') };
   }
 
@@ -553,7 +945,12 @@ describe('cost-ledger command boundary — informational, never a failure', () =
     } as NodeJS.ProcessEnv);
     const { stderr } = run({ plan: '/nonexistent/plan.json' });
     expect(stderr).toContain('cost-ledger unavailable');
-    expect(stderr).toContain('could not read the plan report');
+    // The path, contiguous with OUR message: the relayed line is all a
+    // maintainer gets in headless CI, and the errno text happening to carry
+    // the path must not stand in for the message naming it.
+    expect(stderr).toContain(
+      'could not read the plan report /nonexistent/plan.json',
+    );
   });
 
   it('exits 0 and names a missing chat transcript instead of printing agents-only totals', () => {
@@ -565,12 +962,56 @@ describe('cost-ledger command boundary — informational, never a failure', () =
     } as NodeJS.ProcessEnv);
     const { stdout, stderr } = run({ plan });
     expect(stderr).toContain('cost-ledger unavailable');
-    expect(stderr).toContain('could not read the chat transcript');
+    // Contiguous, so the errno text carrying the path cannot mask a message
+    // that stopped naming it.
+    expect(stderr).toContain(
+      `could not read the chat transcript ${join(project, 'chats', `${SESSION}.jsonl`)}`,
+    );
     expect(stdout).not.toContain('Cost ledger:');
   });
 
-  it('writes --out into a directory it creates', () => {
+  it('writes --out into a directory it creates, with every stream kept', () => {
     const { plan, project } = fixture();
+    // A real spend, so the archive contract is observable: SKILL.md promises
+    // the --out JSON keeps every stream — totals alone cannot answer the
+    // "which agent doubled" question the archive exists for.
+    const start = new Date('2026-08-03T10:00:00Z');
+    utimesSync(plan, start, start);
+    writeFileSync(
+      join(project, 'chats', `${SESSION}.jsonl`),
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: '2026-08-03T10:01:00Z',
+        usageMetadata: {
+          promptTokenCount: 1_000,
+          candidatesTokenCount: 100,
+          totalTokenCount: 1_100,
+        },
+      }),
+    );
+    mkdirSync(join(project, 'subagents', SESSION), { recursive: true });
+    writeFileSync(
+      join(project, 'subagents', SESSION, 'agent-role-1.jsonl'),
+      [
+        JSON.stringify({
+          type: 'user',
+          timestamp: '2026-08-03T10:06:00Z',
+          message: {
+            role: 'user',
+            parts: [{ text: 'You are review agent `1` — dimension 1.' }],
+          },
+        }),
+        JSON.stringify({
+          type: 'assistant',
+          timestamp: '2026-08-03T10:06:30Z',
+          usageMetadata: {
+            promptTokenCount: 2_000,
+            candidatesTokenCount: 200,
+            totalTokenCount: 2_200,
+          },
+        }),
+      ].join('\n'),
+    );
     setEnv({
       QWEN_CODE_PROJECT_DIR: project,
       QWEN_CODE_SESSION_ID: SESSION,
@@ -580,8 +1021,17 @@ describe('cost-ledger command boundary — informational, never a failure', () =
     expect(stdout).toContain('Cost ledger:');
     const written = JSON.parse(readFileSync(out, 'utf8')) as {
       totals: { calls: number };
+      main: { id: string } | null;
+      agents: Array<{ id: string; label: string; inputTokens: number }>;
     };
-    expect(written.totals.calls).toBe(0);
+    expect(written.totals.calls).toBe(2);
+    expect(written.main?.id).toBe('main');
+    expect(written.agents).toHaveLength(1);
+    expect(written.agents[0]).toMatchObject({
+      id: 'role-1',
+      label: 'agent 1',
+      inputTokens: 2_000,
+    });
   });
 
   it('degrades a failed --out write to a warning and still exits 0', () => {
