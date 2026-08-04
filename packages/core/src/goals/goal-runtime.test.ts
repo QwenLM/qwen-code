@@ -467,6 +467,49 @@ describe('goal runtime', () => {
     expect(host.started).toHaveLength(2);
   });
 
+  it('does not accept catalog exhaustion as an external blocker', async () => {
+    const journal = fakeGoalJournal();
+    let records: readonly RuntimeRecord[] = [];
+    const evidenceSource = fakeEvidenceSource(() => records);
+    const verifier: GoalVerifier = vi.fn(async () => ({
+      decision: 'accept' as const,
+      reason: 'External blocker accepted',
+    }));
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({ journal, evidenceSource, verifier });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+    const permit = host.started[0]!;
+    const cursorId = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
+    records = [
+      ...verifierEvidenceWindow(permit, cursorId, 100),
+      verifierUserEvidenceRecords(permit, cursorId, 'blocker-evidence')[1]!,
+    ];
+    runtime.recordTerminalProposal(permit, {
+      status: 'blocked',
+      blockerKind: 'external',
+      reason: 'The evidence catalog is truncated',
+      evidenceRefs: ['blocker-evidence'],
+    });
+
+    await runtime.finishTurn(permit);
+
+    expect(verifier).not.toHaveBeenCalled();
+    expect(runtime.getSnapshot()).toMatchObject({
+      activity: 'idle',
+      goal: {
+        status: 'usage_limited',
+        lastReason: expect.stringContaining('bounded evidence catalog'),
+      },
+    });
+    expect(journal.appended.map((payload) => payload.cause)).toEqual([
+      'create',
+      'turn_finished',
+      'usage_limited',
+    ]);
+    expect(host.started).toHaveLength(1);
+  });
+
   it('checkpoints long-running evidence before starting the next turn', async () => {
     const journal = fakeGoalJournal();
     let records: readonly RuntimeRecord[] = [];

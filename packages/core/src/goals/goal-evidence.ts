@@ -223,7 +223,7 @@ export function validateGoalEvidenceReferences(
   const citedRecords = references.map((reference) =>
     validateReference(reference, input, analysis),
   );
-  if (input.proposal.status === 'complete' && analysis.catalogTruncated) {
+  if (analysis.catalogTruncated) {
     throw new InvalidGoalEvidenceReferenceError(
       'catalog_truncated',
       GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
