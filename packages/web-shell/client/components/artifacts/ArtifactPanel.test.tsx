@@ -520,6 +520,47 @@ describe('ArtifactPanel code review artifacts', () => {
     expect(container.textContent).not.toContain('PRIMARY_WORKSPACE_SECRET');
   });
 
+  it('fails closed when a file tab has no workspace owner', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'file:missing-owner',
+                kind: 'file',
+                title: 'Missing owner',
+                workspacePath: 'secret.txt',
+                workspaceCwd: '/unknown',
+                workspaceId: 'missing-id',
+              },
+            ]}
+            activeTabId="file:missing-owner"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      ),
+    );
+    await flush();
+
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      'This workspace may have been removed',
+    );
+    expect(mockWorkspaceActions.readFileBytes).not.toHaveBeenCalled();
+    expect(mockWorkspaceActions.stat).not.toHaveBeenCalled();
+  });
+
   it('dispatches an available workspace artifact to the dedicated renderer', async () => {
     mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
       content: validCodeReviewDocument,
