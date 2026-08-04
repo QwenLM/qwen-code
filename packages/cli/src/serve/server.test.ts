@@ -3020,7 +3020,7 @@ describe('createServeApp', () => {
       expect(res.text).not.toContain('<div id="root">');
     });
 
-    it('falls back to the shell for SPA deep-link navigations', async () => {
+    it('serves the shell for /session/:id document navigations (pre-auth route)', async () => {
       const app = createServeApp(baseOpts, undefined, { webShellDir });
       const res = await request(app)
         .get('/session/abc123')
@@ -3106,7 +3106,7 @@ describe('createServeApp', () => {
     it('falls back to the shell on a sec-fetch navigation signal', async () => {
       const app = createServeApp(baseOpts, undefined, { webShellDir });
       const res = await request(app)
-        .get('/session/deep')
+        .get('/deep/link')
         .set('Host', host)
         .set('Accept', '*/*')
         .set('Sec-Fetch-Mode', 'navigate');
@@ -3116,7 +3116,7 @@ describe('createServeApp', () => {
 
     it('falls back to the shell for non-session SPA deep-link navigations', async () => {
       // The pre-auth `/session/:id` route claims the session deep-link shapes
-      // above, so this non-session navigation is the only direct coverage of
+      // above, so these non-session navigations are the direct coverage of
       // mountWebShellSpaFallback's shell branch.
       const app = createServeApp(baseOpts, undefined, { webShellDir });
       const res = await request(app)
