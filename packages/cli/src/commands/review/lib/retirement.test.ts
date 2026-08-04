@@ -95,13 +95,15 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
 
   /**
    * Write a transcript the way the harness writes one: launch prompt first,
-   * then `calls` successful reads of the diff, then the final text.
-   * `calls: 0` is the whiff shape — prose and nothing else.
+   * then `calls` successful reads of `filePath` (the diff unless told
+   * otherwise), then the final text. `calls: 0` is the whiff shape — prose
+   * and nothing else.
    */
   function transcript(
     launchPrompt: string,
     finalText: string,
     calls = 1,
+    filePath: string = diff,
   ): void {
     const id = `aud-${++seq}`;
     const base = {
@@ -127,7 +129,7 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
               {
                 functionCall: {
                   name: 'read_file',
-                  args: { file_path: diff, offset: 0, limit: 100 },
+                  args: { file_path: filePath, offset: 0, limit: 100 },
                 },
               },
             ],
@@ -225,6 +227,25 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     transcript(record(2, 13, 'chunk 13 round 2 territory walk'), DRY, 0);
 
     expect(schedule(3, [13]).due).toEqual([13]);
+  });
+
+  it('successful calls that never touched the diff are not dry — the two guards are independent', () => {
+    // Every other transcript here reads the diff, so `successfulToolCalls`
+    // and `diffToolCalls` move in lockstep and the classifier's two guards
+    // are exercised only together. An auditor that reads only its own brief
+    // clears the first guard but not the second: the receipt must still
+    // read `unknown`, so the chunk stays under audit.
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), DRY);
+    transcript(
+      record(2, 13, 'chunk 13 round 2 territory walk'),
+      DRY,
+      1,
+      join(dir, 'brief.md'),
+    );
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.skipped).toEqual([]);
   });
 
   it('a finding outranks a dry receipt — yielded history keeps the chunk hot', () => {
