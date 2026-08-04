@@ -7,7 +7,6 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import lockfile from 'proper-lockfile';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   createTask,
@@ -26,6 +25,7 @@ import {
   TaskOwnershipError,
   RECIPROCAL_CALLER,
 } from './tasks.js';
+import { mockCompromisedLock } from '../../test-utils/mock-compromised-lock.js';
 
 vi.mock('../../config/storage.js', async (importOriginal) => {
   const original =
@@ -155,35 +155,17 @@ describe('tasks', () => {
     });
 
     it('still updates the task when the lock is compromised', async () => {
-      // After a compromise, proper-lockfile marks the lock released
-      // before invoking onCompromised, so release() later rejects with
-      // ERELEASED. Without the release guard, that rejection from the
-      // finally block would replace the successful update's result.
       const task = await createTask('team', {
         subject: 'Test',
         description: 'Desc',
       });
-
-      let onCompromised: ((error: Error) => void) | undefined;
-      const releaseError = Object.assign(
-        new Error('Lock is already released'),
-        { code: 'ERELEASED' },
-      );
-      const lockSpy = vi
-        .spyOn(lockfile, 'lock')
-        .mockImplementationOnce(async (_file, options) => {
-          onCompromised = options?.onCompromised;
-          onCompromised?.(
-            Object.assign(new Error('lock lost'), { code: 'ECOMPROMISED' }),
-          );
-          return () => Promise.reject(releaseError);
-        });
+      const { lockSpy, getOnCompromised } = mockCompromisedLock();
 
       try {
         await expect(
           updateTask('team', task.id, { status: 'in_progress' }),
         ).resolves.toMatchObject({ id: task.id, status: 'in_progress' });
-        expect(onCompromised).toBeTypeOf('function');
+        expect(getOnCompromised()).toBeTypeOf('function');
       } finally {
         lockSpy.mockRestore();
       }

@@ -17,7 +17,7 @@ import {
 import { EventEmitter } from 'node:events';
 import type { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import lockfile from 'proper-lockfile';
+import { mockCompromisedLock } from '../test-utils/mock-compromised-lock.js';
 
 const temporaryDirectories: string[] = [];
 
@@ -141,25 +141,13 @@ describe('managed npm update', () => {
     );
     writeInstallation(update.stagingDir, '2.0.0');
 
-    let onCompromised: ((error: Error) => void) | undefined;
-    const releaseError = Object.assign(new Error('Lock is already released'), {
-      code: 'ERELEASED',
-    });
-    const lockSpy = vi
-      .spyOn(lockfile, 'lock')
-      .mockImplementationOnce(async (_file, options) => {
-        onCompromised = options?.onCompromised;
-        onCompromised?.(
-          Object.assign(new Error('lock lost'), { code: 'ECOMPROMISED' }),
-        );
-        return () => Promise.reject(releaseError);
-      });
+    const { lockSpy, getOnCompromised } = mockCompromisedLock();
 
     try {
       await expect(
         activateManagedNpmUpdate(update, '2.0.0', bootstrap),
       ).resolves.toBeUndefined();
-      expect(onCompromised).toBeTypeOf('function');
+      expect(getOnCompromised()).toBeTypeOf('function');
       expect(
         JSON.parse(
           fs.readFileSync(

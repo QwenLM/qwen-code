@@ -7,8 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import lockfile from 'proper-lockfile';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   AUTO_SKILL_ARCHIVE_AFTER_MS,
   getAutoSkillCuratorStatus,
@@ -18,6 +17,7 @@ import {
   runAutoSkillCurator,
   setAutoSkillPinned,
 } from './skill-curator.js';
+import { mockCompromisedLock } from '../test-utils/mock-compromised-lock.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -94,28 +94,16 @@ describe('auto-skill curator', () => {
 
   it('registers a lock-compromised handler and completes when the curator lock is compromised', async () => {
     const now = new Date('2026-07-27T00:00:00.000Z');
-    let onCompromised: ((error: Error) => void) | undefined;
-    const releaseError = Object.assign(new Error('Lock is already released'), {
-      code: 'ERELEASED',
-    });
-    const lockSpy = vi
-      .spyOn(lockfile, 'lock')
-      .mockImplementationOnce(async (file, options) => {
-        expect(file).toBe(
-          path.join(projectRoot, '.qwen', 'skill-curator.lock'),
-        );
-        onCompromised = options?.onCompromised;
-        onCompromised?.(
-          Object.assign(new Error('lock lost'), { code: 'ECOMPROMISED' }),
-        );
-        return () => Promise.reject(releaseError);
-      });
+    const { lockSpy, getLockedFile, getOnCompromised } = mockCompromisedLock();
 
     try {
       await expect(
         runAutoSkillCurator(projectRoot, { now }),
       ).resolves.toMatchObject({ dryRun: false });
-      expect(onCompromised).toBeTypeOf('function');
+      expect(getOnCompromised()).toBeTypeOf('function');
+      expect(getLockedFile()).toBe(
+        path.join(projectRoot, '.qwen', 'skill-curator.lock'),
+      );
     } finally {
       lockSpy.mockRestore();
     }
