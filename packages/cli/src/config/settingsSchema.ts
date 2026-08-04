@@ -2991,7 +2991,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: [] as string[],
         description:
-          'Whitelist of URL patterns for HTTP hooks. Supports * wildcard. If empty, all URLs are allowed (subject to SSRF protection). Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored so a cloned repository cannot widen the whitelist.',
+          'Whitelist of URL patterns for HTTP hooks. Supports * wildcard. If empty, all URLs are allowed (subject to SSRF protection). Only honored from User, System, and SystemDefaults settings scopes; a value set in Workspace settings can only narrow a higher-scope whitelist (entries not covered by it are dropped, and it is ignored entirely when no higher-scope whitelist is set), so a cloned repository cannot widen where hook payloads may be sent.',
         showInDialog: false,
         items: {
           type: 'string',

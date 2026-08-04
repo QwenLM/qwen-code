@@ -5,7 +5,11 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { UrlValidator, createUrlValidator } from './urlValidator.js';
+import {
+  UrlValidator,
+  createUrlValidator,
+  hookUrlPatternCovers,
+} from './urlValidator.js';
 
 describe('UrlValidator', () => {
   describe('isBlocked', () => {
@@ -196,5 +200,78 @@ describe('UrlValidator', () => {
       const validator = createUrlValidator(undefined);
       expect(validator.isAllowed('https://any.com/hook')).toBe(true);
     });
+  });
+});
+
+describe('hookUrlPatternCovers', () => {
+  it('treats identical patterns as covering', () => {
+    expect(
+      hookUrlPatternCovers('https://corp.com/*', 'https://corp.com/*'),
+    ).toBe(true);
+  });
+
+  it('lets a wildcard-suffix entry narrow its parent pattern', () => {
+    expect(
+      hookUrlPatternCovers('https://corp.com/*', 'https://corp.com/hooks/*'),
+    ).toBe(true);
+  });
+
+  it('lets an exact URL narrow a wildcard pattern', () => {
+    expect(
+      hookUrlPatternCovers('https://corp.com/*', 'https://corp.com/ci'),
+    ).toBe(true);
+  });
+
+  it('rejects entries outside the higher-scope pattern', () => {
+    expect(
+      hookUrlPatternCovers('https://corp.com/*', 'https://evil.com/*'),
+    ).toBe(false);
+  });
+
+  it('rejects a lookalike host that extends a literal chunk', () => {
+    expect(
+      hookUrlPatternCovers('https://corp.com/*', 'https://corp.com.evil.com/*'),
+    ).toBe(false);
+  });
+
+  it('rejects the catch-all "*" against a bounded pattern', () => {
+    expect(hookUrlPatternCovers('https://corp.com/*', '*')).toBe(false);
+  });
+
+  it('lets the catch-all "*" cover any entry', () => {
+    expect(hookUrlPatternCovers('*', 'https://corp.com/hooks/*')).toBe(true);
+  });
+
+  it('matches case-insensitively like the URL validator', () => {
+    expect(
+      hookUrlPatternCovers('https://CORP.com/*', 'https://corp.com/hooks/*'),
+    ).toBe(true);
+  });
+
+  it('treats pre-escaped and unescaped spellings as equivalent', () => {
+    expect(
+      hookUrlPatternCovers(
+        'https://api\\.example\\.com/*',
+        'https://api.example.com/hooks/*',
+      ),
+    ).toBe(true);
+    expect(
+      hookUrlPatternCovers(
+        'https://api.example.com/*',
+        'https://api\\.example\\.com/hooks/*',
+      ),
+    ).toBe(true);
+  });
+
+  it('rejects entries that add a wildcard outside the higher-scope literals', () => {
+    expect(
+      hookUrlPatternCovers('https://corp.com/*', 'https://*/corp.com/*'),
+    ).toBe(false);
+  });
+
+  it('does not let escapes other than \\. widen coverage (fails closed)', () => {
+    // `\*` is not the documented `\.` escape; normalizing it into a
+    // catch-all would widen the higher-scope policy.
+    expect(hookUrlPatternCovers('\\*', 'https://corp.com/*')).toBe(false);
   });
 });

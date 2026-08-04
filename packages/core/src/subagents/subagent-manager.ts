@@ -925,16 +925,19 @@ export class SubagentManager {
       const hookRegistry = hookSystem?.getRegistry();
       if (config.hooks && Object.keys(config.hooks).length > 0) {
         // Fail closed: only levels that cannot originate from the
-        // repository ('user', 'builtin', 'extension') skip the folder-trust
-        // gate. 'project' agents load from <repo>/.qwen/agents/ regardless
-        // of trust (read-only use is fine), but their hooks are repo-
-        // supplied code execution — the same gate Config.getProjectHooks()
-        // applies to settings-file hooks — and any future or unset level
-        // requires trust too.
+        // repository skip the folder-trust gate. 'project' agents load
+        // from <repo>/.qwen/agents/ regardless of trust (read-only use is
+        // fine), but their hooks are repo-supplied code execution — the
+        // same gate Config.getProjectHooks() applies to settings-file
+        // hooks — and any future or unset level requires trust too.
+        // 'session' agents are supplied by the embedding host (SDK
+        // `agents` option or the control protocol), never loaded from
+        // repository files, so they sit on the same footing as 'user'.
         const trustedAgentLevel =
           config.level === 'user' ||
           config.level === 'builtin' ||
-          config.level === 'extension';
+          config.level === 'extension' ||
+          config.level === 'session';
         if (!trustedAgentLevel && !runtimeContext.isTrustedFolder()) {
           debugLogger.warn(
             `Subagent "${config.name}" declares hooks but the folder is not trusted; ignoring per-agent hooks.`,

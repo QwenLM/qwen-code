@@ -185,3 +185,31 @@ export function createUrlValidator(
 ): UrlValidator {
   return new UrlValidator(allowedUrls || [], allowPrivateNetworkHosts);
 }
+
+/**
+ * Returns true when every URL matched by the `inner` hook URL pattern is
+ * also matched by the `outer` pattern (both support `*` wildcards, like
+ * `security.allowedHttpHookUrls` entries). Used to intersect a
+ * workspace-scope whitelist with the higher-scope one: a workspace entry
+ * may only survive the merge when it merely narrows what a higher scope
+ * already allows.
+ *
+ * The check matches `inner` (its `*` read as literal characters) against
+ * `outer` compiled as a wildcard pattern; if `outer`'s literal chunks
+ * appear in `inner` in order, any concrete URL expanding `inner`'s
+ * wildcards keeps those chunks in order and therefore matches `outer`.
+ * The `\.` escape — the only one the validator's pre-escaped spelling
+ * uses — is normalized first so both spellings of the same pattern cover
+ * each other; anything the check cannot prove covered fails closed
+ * (returns false).
+ */
+export function hookUrlPatternCovers(
+  outerPattern: string,
+  innerPattern: string,
+): boolean {
+  const unescape = (pattern: string) => pattern.replace(/\\\./g, '.');
+  const escaped = unescape(outerPattern)
+    .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*/g, '.*');
+  return new RegExp(`^${escaped}$`, 'i').test(unescape(innerPattern));
+}

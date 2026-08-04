@@ -14,6 +14,7 @@ import {
   Storage,
   createDebugLogger,
   stripRuntimeSnapshotPrefix,
+  hookUrlPatternCovers,
 } from '@qwen-code/qwen-code-core';
 import type {
   MCPServerConfig,
@@ -320,9 +321,10 @@ function getModelProvidersOverrideWarnings(
   ];
 }
 
-// Security settings that must never be honored from Workspace scope; they
-// are stripped during the merge (see stripWorkspaceHookSecurityOverrides)
-// and getSettingsWarnings reports them.
+// Hook security settings a Workspace scope may never widen. The boolean
+// SSRF bypass is stripped outright; the URL whitelist is intersected with
+// the higher-scope list so a workspace can only narrow it (see
+// narrowWorkspaceHookSecurityOverrides). getSettingsWarnings reports both.
 const WORKSPACE_STRIPPED_SECURITY_FIELDS = [
   'allowPrivateNetworkHooks',
   'allowedHttpHookUrls',
@@ -366,24 +368,21 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
     warningSet.add(warning);
   }
 
-  // WORKSPACE_STRIPPED_SECURITY_FIELDS are stripped from Workspace scope
-  // during the merge; warn so the user knows their workspace setting has no
-  // effect.
+  // WORKSPACE_STRIPPED_SECURITY_FIELDS may not widen hook security from
+  // Workspace scope (see narrowWorkspaceHookSecurityOverrides); warn so the
+  // user knows how their workspace setting is treated.
   const workspaceFile = loadedSettings.forScope(SettingScope.Workspace);
   if (workspaceFile.rawJson !== undefined) {
-    for (const field of WORKSPACE_STRIPPED_SECURITY_FIELDS) {
-      if (workspaceFile.originalSettings.security?.[field] !== undefined) {
-        // An empty whitelist means "allow all" to the hook URL validator,
-        // so stripping a workspace list that only narrowed destinations
-        // can widen the effective policy — say that explicitly.
-        const wideningNote =
-          field === 'allowedHttpHookUrls'
-            ? ' If it was your only whitelist, HTTP hook URLs are now unrestricted (SSRF protections still apply); move the list to your user settings to keep it in effect.'
-            : '';
-        warningSet.add(
-          `Warning: security.${field} in workspace settings (${workspaceFile.path}) is ignored. This setting is only honored from User, System, or SystemDefaults scope settings.${wideningNote}`,
-        );
-      }
+    const workspaceSecurity = workspaceFile.originalSettings.security;
+    if (workspaceSecurity?.allowPrivateNetworkHooks !== undefined) {
+      warningSet.add(
+        `Warning: security.allowPrivateNetworkHooks in workspace settings (${workspaceFile.path}) is ignored. This setting is only honored from User, System, or SystemDefaults scope settings.`,
+      );
+    }
+    if (workspaceSecurity?.allowedHttpHookUrls !== undefined) {
+      warningSet.add(
+        `Warning: security.allowedHttpHookUrls in workspace settings (${workspaceFile.path}) can only narrow the whitelist from User, System, or SystemDefaults scope settings: entries not covered by a higher-scope whitelist are dropped, and the workspace value is ignored entirely when no higher-scope whitelist is set (HTTP hooks then remain unrestricted apart from SSRF protection).`,
+      );
     }
   }
 
@@ -416,29 +415,64 @@ function tagMcpServerScope(
 
 /**
  * `security.allowPrivateNetworkHooks` relaxes SSRF protection for HTTP hooks,
- * and `security.allowedHttpHookUrls` replaces the user's whitelist of where
- * HTTP hooks may POST agent data. Neither may be honored from Workspace
- * scope — otherwise a malicious repository could self-grant the bypass
- * (point hooks at link-local or private infrastructure) or widen the
- * whitelist to exfiltrate hook payloads past the user's configured
- * boundary. Strip them all from workspace settings before merging.
+ * and `security.allowedHttpHookUrls` controls where HTTP hooks may POST
+ * agent data. A Workspace scope may widen neither — otherwise a malicious
+ * repository could self-grant the bypass (point hooks at link-local or
+ * private infrastructure) or widen the whitelist to exfiltrate hook
+ * payloads past the user's configured boundary:
+ *
+ * - the boolean bypass is stripped outright;
+ * - the whitelist is intersected with the effective User/System/
+ *   SystemDefaults whitelist, so a trusted workspace can only NARROW the
+ *   destinations the user already allowed. Entries no higher-scope entry
+ *   covers are dropped; when no higher-scope whitelist exists, or nothing
+ *   survives the intersection, the workspace list is ignored entirely —
+ *   an empty whitelist means "allow all" to the hook URL validator, so
+ *   discarding a narrowing list must fall back to the higher-scope policy,
+ *   never to unrestricted.
+ *
  * Returns a shallow copy — never mutates input.
  */
-function stripWorkspaceHookSecurityOverrides(settings: Settings): Settings {
-  const security = settings.security;
+function narrowWorkspaceHookSecurityOverrides(
+  workspace: Settings,
+  system: Settings,
+  user: Settings,
+  systemDefaults: Settings,
+): Settings {
+  const security = workspace.security;
   if (
     !security ||
     WORKSPACE_STRIPPED_SECURITY_FIELDS.every(
       (field) => security[field] === undefined,
     )
   ) {
-    return settings;
+    return workspace;
   }
   const restSecurity = { ...security };
-  for (const field of WORKSPACE_STRIPPED_SECURITY_FIELDS) {
-    delete restSecurity[field];
+  delete restSecurity.allowPrivateNetworkHooks;
+
+  const workspaceUrls = security.allowedHttpHookUrls;
+  if (workspaceUrls !== undefined) {
+    const higherUrls =
+      system.security?.allowedHttpHookUrls ??
+      user.security?.allowedHttpHookUrls ??
+      systemDefaults.security?.allowedHttpHookUrls;
+    const narrowed =
+      higherUrls === undefined
+        ? []
+        : workspaceUrls.filter((entry) =>
+            higherUrls.some((higher) => hookUrlPatternCovers(higher, entry)),
+          );
+    // A non-empty intersection replaces the higher-scope list (it is a
+    // subset of what that list allows); otherwise the higher-scope policy
+    // stands unchanged.
+    if (narrowed.length > 0) {
+      restSecurity.allowedHttpHookUrls = narrowed;
+    } else {
+      delete restSecurity.allowedHttpHookUrls;
+    }
   }
-  return { ...settings, security: restSecurity };
+  return { ...workspace, security: restSecurity };
 }
 
 function mergeSettings(
@@ -450,7 +484,12 @@ function mergeSettings(
 ): Settings {
   const safeWorkspace = isTrusted
     ? tagMcpServerScope(
-        stripWorkspaceHookSecurityOverrides(workspace),
+        narrowWorkspaceHookSecurityOverrides(
+          workspace,
+          system,
+          user,
+          systemDefaults,
+        ),
         'workspace',
       )
     : ({} as Settings);

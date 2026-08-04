@@ -2712,7 +2712,10 @@ bad`);
         await result.dispose();
       });
 
-      it('fails closed for non-allowlisted levels: session-level hooks need trust too', async () => {
+      it('registers hooks for a session-level (host-supplied) subagent regardless of folder trust', async () => {
+        // Session agents arrive via the embedding host (SDK `agents` option
+        // or the control protocol), never from repository files, so the
+        // allowlist treats them like user-level agents.
         const addAgentHooksSpy = vi.fn().mockReturnValue(vi.fn());
         vi.spyOn(mockConfig, 'getHookSystem').mockReturnValue({
           getRegistry: () => ({ addAgentHooks: addAgentHooksSpy }),
@@ -2722,8 +2725,37 @@ bad`);
         const result = await manager.createAgentHeadless(
           {
             ...baseConfig,
-            // baseConfig is 'session' level — not in the trusted allowlist
             level: 'session',
+            hooks: {
+              PreToolUse: [
+                {
+                  matcher: 'Bash',
+                  hooks: [{ type: 'command', command: 'echo' }],
+                },
+              ],
+            },
+          },
+          mockConfig,
+        );
+
+        expect(addAgentHooksSpy).toHaveBeenCalledTimes(1);
+        expect(result).toHaveProperty('subagent');
+        await result.dispose();
+      });
+
+      it('fails closed for levels outside the allowlist (unknown or future levels)', async () => {
+        const addAgentHooksSpy = vi.fn().mockReturnValue(vi.fn());
+        vi.spyOn(mockConfig, 'getHookSystem').mockReturnValue({
+          getRegistry: () => ({ addAgentHooks: addAgentHooksSpy }),
+        } as unknown as ReturnType<Config['getHookSystem']>);
+        vi.spyOn(mockConfig, 'isTrustedFolder').mockReturnValue(false);
+
+        const result = await manager.createAgentHeadless(
+          {
+            ...baseConfig,
+            // Any level not in the trusted allowlist requires folder
+            // trust — pin the fail-closed direction for future values.
+            level: 'future-level' as unknown as SubagentConfig['level'],
             hooks: {
               PreToolUse: [
                 {

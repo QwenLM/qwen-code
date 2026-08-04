@@ -625,6 +625,7 @@ export {
   HookRegistry,
   createInstructionsLoadedCallback,
   hookEventSupportsMatcher,
+  hookUrlPatternCovers,
 } from './hooks/index.js';
 export type { HookRegistryEntry, SessionHookEntry } from './hooks/index.js';
 export {
