@@ -102,6 +102,23 @@ export function workspaceDirFor(
 }
 
 /**
+ * True when a positive glob claims `filePath` but a negation excludes it.
+ *
+ * Such a file belongs to a workspace the npm graph does not contain — this
+ * repo's `!packages/desktop` is a separate bun workspace with its own
+ * lockfile — so no included workspace's tests can feel a change to it, and it
+ * must not earn the incomplete-scope caveat a genuinely outside file does.
+ */
+export function isNegationExcluded(
+  filePath: string,
+  workspaceGlobs: string[],
+): boolean {
+  if (workspaceDirFor(filePath, workspaceGlobs) !== null) return false;
+  const positives = workspaceGlobs.filter((g) => !g.startsWith('!'));
+  return workspaceDirFor(filePath, positives) !== null;
+}
+
+/**
  * Does the workspace list use a glob shape `workspaceDirFor` does not model?
  *
  * The walker handles exactly two shapes: a literal path, and a single trailing
@@ -142,16 +159,20 @@ export function readWorkspaceGlobs(root: string): string[] {
 }
 
 /**
- * The root package itself, when there are no workspaces — a single-package repo.
+ * The root package itself, when it defines a build/test script.
  *
- * The most common npm repo shape has no `workspaces` field at all. Treating it as
- * one root package (dir `.`) keeps the install, the scoped deadline, and the
- * timeout-as-data semantics for that case, instead of dropping it to a fallback
- * that no longer installs. Returns null when the root has no build/test script to
- * run — there is nothing to scope, and the brief's precedence list takes over.
+ * For a repo with no `workspaces` field — the most common npm shape — this is
+ * the whole scope: treating the root as one package (dir `.`) keeps the
+ * install, the scoped deadline, and the timeout-as-data semantics, instead of
+ * dropping to a fallback that no longer installs. In a workspace monorepo the
+ * root is still a package the TEST graph must see: its `test` script is a
+ * suite like any other, and its declared dependencies are reverse edges the
+ * closure cannot do without. Returns null when the root has no build/test
+ * script to run — there is nothing to scope, and the brief's precedence list
+ * takes over.
  */
 export function readRootPackage(root: string): WorkspacePackage | null {
-  let pkg: { name?: unknown; scripts?: Record<string, unknown> };
+  let pkg: ManifestLike;
   try {
     pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
   } catch {
@@ -163,18 +184,42 @@ export function readRootPackage(root: string): WorkspacePackage | null {
     dir: '.',
     name: typeof pkg.name === 'string' && pkg.name ? pkg.name : 'root',
     scripts,
-    deps: [],
+    deps: declaredDeps(pkg),
   };
+}
+
+/** The manifest fields this module reads. */
+interface ManifestLike {
+  name?: unknown;
+  scripts?: Record<string, unknown>;
+  dependencies?: Record<string, unknown>;
+  devDependencies?: Record<string, unknown>;
+  peerDependencies?: Record<string, unknown>;
+  optionalDependencies?: Record<string, unknown>;
+}
+
+/**
+ * Declared dependency names — every field npm links workspace members from.
+ * `optionalDependencies` included: npm links a workspace member listed there
+ * exactly like the other fields (the common shape is a platform-conditional
+ * sibling package), so an optional-dependent is a dependent the closure must
+ * see.
+ */
+function declaredDeps(pkg: ManifestLike): string[] {
+  return [
+    ...Object.keys(pkg.dependencies ?? {}),
+    ...Object.keys(pkg.devDependencies ?? {}),
+    ...Object.keys(pkg.peerDependencies ?? {}),
+    ...Object.keys(pkg.optionalDependencies ?? {}),
+  ];
 }
 
 /**
  * Every directory the positive globs claim, expanded against the tree.
  *
- * Shared between `readWorkspacePackages` (which then parses each manifest) and
- * the test-scope trust check in `workspace-scope.ts` (which needs the dirs whose
- * manifests do NOT parse — the ones `readWorkspacePackages` silently drops). Two
- * separate expansions would drift, and a dir only one of them saw is exactly a
- * package the dependency graph is missing.
+ * The single expansion `readWorkspacePackages` walks: the dirs it returns a
+ * package for and the dirs it reports as skipped both come from this list, so
+ * a dir one of them saw and the other did not cannot exist.
  */
 export function workspaceDirCandidates(
   root: string,
@@ -188,8 +233,17 @@ export function workspaceDirCandidates(
       const base = g.slice(0, -2);
       let entries: string[];
       try {
+        // Follow symlinks: Dirent.isDirectory() is false for one, but npm
+        // links a symlinked member as a workspace all the same — dropping it
+        // here would be a package the dependency graph cannot see. The
+        // package.json probe keeps a broken link from becoming a candidate.
         entries = readdirSync(join(root, base), { withFileTypes: true })
-          .filter((e) => e.isDirectory())
+          .filter(
+            (e) =>
+              e.isDirectory() ||
+              (e.isSymbolicLink() &&
+                existsSync(join(root, base, e.name, 'package.json'))),
+          )
           .map((e) => e.name);
       } catch {
         continue;
@@ -202,11 +256,25 @@ export function workspaceDirCandidates(
   return [...dirs].sort();
 }
 
+/** The workspace graph a tree expands to, and the dirs it could not read. */
+export interface WorkspaceGraph {
+  packages: WorkspacePackage[];
+  /**
+   * Dirs npm treats as workspaces but the graph cannot see: the manifest
+   * exists yet does not parse, or parses to no usable `name` (missing, empty,
+   * or not a string). npm links both shapes all the same, so each is a
+   * dependent the closure may miss — the test scope treats a non-empty list
+   * as "the graph cannot be trusted".
+   */
+  skipped: string[];
+}
+
 /** Expand the globs against the tree: every workspace package that exists. */
-export function readWorkspacePackages(root: string): WorkspacePackage[] {
+export function readWorkspacePackages(root: string): WorkspaceGraph {
   const globs = readWorkspaceGlobs(root);
 
-  const pkgs: WorkspacePackage[] = [];
+  const packages: WorkspacePackage[] = [];
+  const skipped: string[] = [];
   for (const dir of workspaceDirCandidates(root, globs)) {
     // A directory a negation excludes is not a workspace, and its own
     // `package.json` says nothing about that — `packages/desktop` is a separate
@@ -214,31 +282,27 @@ export function readWorkspacePackages(root: string): WorkspacePackage[] {
     if (workspaceDirFor(`${dir}/package.json`, globs) !== dir) continue;
     const manifest = join(root, dir, 'package.json');
     if (!existsSync(manifest)) continue;
-    let pkg: {
-      name?: unknown;
-      scripts?: Record<string, unknown>;
-      dependencies?: Record<string, unknown>;
-      devDependencies?: Record<string, unknown>;
-      peerDependencies?: Record<string, unknown>;
-    };
+    let pkg: ManifestLike;
     try {
       pkg = JSON.parse(readFileSync(manifest, 'utf8'));
     } catch {
+      skipped.push(dir);
       continue;
     }
-    if (typeof pkg.name !== 'string' || !pkg.name) continue;
-    pkgs.push({
+    if (typeof pkg.name !== 'string' || !pkg.name) {
+      skipped.push(dir);
+      continue;
+    }
+    packages.push({
       dir,
       name: pkg.name,
       scripts: Object.keys(pkg.scripts ?? {}),
-      deps: [
-        ...Object.keys(pkg.dependencies ?? {}),
-        ...Object.keys(pkg.devDependencies ?? {}),
-        ...Object.keys(pkg.peerDependencies ?? {}),
-      ],
+      deps: declaredDeps(pkg),
     });
   }
-  return pkgs.sort((a, b) => a.dir.localeCompare(b.dir));
+  packages.sort((a, b) => a.dir.localeCompare(b.dir));
+  skipped.sort();
+  return { packages, skipped };
 }
 
 /** The workspace dirs a change set touches, in stable order. */

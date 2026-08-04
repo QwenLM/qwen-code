@@ -5,17 +5,25 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  rmSync,
+  symlinkSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   workspaceDirFor,
   isWorkspaceMember,
+  isNegationExcluded,
   affectedWorkspaces,
   buildSetFor,
   hasUnmodeledWorkspaceGlob,
   readWorkspaceGlobs,
   readRootPackage,
+  readWorkspacePackages,
   type WorkspacePackage,
 } from './workspaces.js';
 
@@ -141,6 +149,156 @@ describe('readRootPackage', () => {
     const root = mkdtempSync(join(tmpdir(), 'ws-'));
     expect(readRootPackage(root)).toBeNull();
     rmSync(root, { recursive: true, force: true });
+  });
+
+  it('reads the declared dependencies — a root suite can depend on a workspace', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ws-'));
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'r',
+        scripts: { test: 'vitest' },
+        dependencies: { '@x/core': '*' },
+        devDependencies: { '@x/tool': '*' },
+      }),
+    );
+    expect(readRootPackage(root)?.deps).toEqual(['@x/core', '@x/tool']);
+    rmSync(root, { recursive: true, force: true });
+  });
+});
+
+describe('isNegationExcluded', () => {
+  it('is true when a positive glob claims the file but a negation excludes it', () => {
+    expect(isNegationExcluded('packages/desktop/src/main.rs', GLOBS)).toBe(
+      true,
+    );
+  });
+
+  it('is false for a file inside an included workspace', () => {
+    expect(isNegationExcluded('packages/cli/src/a.ts', GLOBS)).toBe(false);
+  });
+
+  it('is false for a file no positive glob claims — genuinely outside', () => {
+    expect(isNegationExcluded('scripts/build.js', GLOBS)).toBe(false);
+    expect(isNegationExcluded('README.md', GLOBS)).toBe(false);
+  });
+
+  it('is false when a later glob re-includes what the negation excluded', () => {
+    const globs = ['packages/*', '!packages/desktop', 'packages/desktop'];
+    expect(isNegationExcluded('packages/desktop/src/a.ts', globs)).toBe(false);
+  });
+});
+
+describe('readWorkspacePackages', () => {
+  let root: string;
+
+  const setup = (globs: string[]): void => {
+    root = mkdtempSync(join(tmpdir(), 'ws-read-'));
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: globs }),
+    );
+  };
+  const teardown = (): void => {
+    rmSync(root, { recursive: true, force: true });
+  };
+  const write = (dir: string, body: object | string): void => {
+    mkdirSync(join(root, dir), { recursive: true });
+    writeFileSync(
+      join(root, dir, 'package.json'),
+      typeof body === 'string' ? body : JSON.stringify(body),
+    );
+  };
+
+  it('returns the packages and reports a manifest that does not parse as skipped', () => {
+    setup(['packages/*']);
+    write('packages/good', { name: '@x/good' });
+    write('packages/bad', '{ not json');
+    const { packages, skipped } = readWorkspacePackages(root);
+    expect(packages.map((p) => p.dir)).toEqual(['packages/good']);
+    expect(skipped).toEqual(['packages/bad']);
+    teardown();
+  });
+
+  it('reports a manifest with no usable `name` as skipped — npm links it all the same', () => {
+    // A nameless member is invisible to the dependency graph but NOT to npm:
+    // its dependencies link, so its reverse edges must not be silently lost.
+    setup(['packages/*']);
+    write('packages/core', { name: '@x/core' });
+    write('packages/nameless', { dependencies: { '@x/core': '*' } });
+    write('packages/numbered', { name: 42 });
+    write('packages/array', '[1, 2]');
+    const { packages, skipped } = readWorkspacePackages(root);
+    expect(packages.map((p) => p.dir)).toEqual(['packages/core']);
+    expect(skipped).toEqual([
+      'packages/array',
+      'packages/nameless',
+      'packages/numbered',
+    ]);
+    teardown();
+  });
+
+  it('collects optionalDependencies — npm links a workspace member listed there', () => {
+    setup(['packages/*']);
+    write('packages/core', { name: '@x/core' });
+    write('packages/cond', {
+      name: '@x/cond',
+      optionalDependencies: { '@x/core': '*' },
+    });
+    const { packages } = readWorkspacePackages(root);
+    expect(packages.find((p) => p.dir === 'packages/cond')?.deps).toEqual([
+      '@x/core',
+    ]);
+    teardown();
+  });
+
+  it('ignores a dir with no manifest — npm does not treat it as a workspace', () => {
+    setup(['packages/*']);
+    write('packages/good', { name: '@x/good' });
+    mkdirSync(join(root, 'packages', 'assets'), { recursive: true });
+    const { skipped } = readWorkspacePackages(root);
+    expect(skipped).toEqual([]);
+    teardown();
+  });
+
+  it('ignores a broken manifest in a NEGATED dir — not a workspace, not our graph', () => {
+    setup(['packages/*', '!packages/desktop']);
+    write('packages/good', { name: '@x/good' });
+    write('packages/desktop', '{ not json');
+    const { packages, skipped } = readWorkspacePackages(root);
+    expect(packages.map((p) => p.dir)).toEqual(['packages/good']);
+    expect(skipped).toEqual([]);
+    teardown();
+  });
+
+  it('checks literally-listed workspace dirs too, not only starred bases', () => {
+    setup(['packages/*', 'integrations/ctx']);
+    write('integrations/ctx', '{ not json');
+    const { skipped } = readWorkspacePackages(root);
+    expect(skipped).toEqual(['integrations/ctx']);
+    teardown();
+  });
+
+  it('includes a SYMLINKED member — npm links it as a workspace all the same', () => {
+    // Dirent.isDirectory() is false for a symlink, but npm records the member
+    // ({resolved, link: true}) and links its dependencies — dropping it would
+    // be a dependent the graph cannot see.
+    setup(['packages/*']);
+    write('packages/core', { name: '@x/core' });
+    mkdirSync(join(root, 'shared', 'linked-pkg'), { recursive: true });
+    write('shared/linked-pkg', {
+      name: '@x/linked',
+      dependencies: { '@x/core': '*' },
+    });
+    symlinkSync(
+      join(root, 'shared', 'linked-pkg'),
+      join(root, 'packages', 'linked'),
+    );
+    const { packages } = readWorkspacePackages(root);
+    const linked = packages.find((p) => p.dir === 'packages/linked');
+    expect(linked?.name).toBe('@x/linked');
+    expect(linked?.deps).toEqual(['@x/core']);
+    teardown();
   });
 });
 

@@ -644,7 +644,7 @@ function ruleCommand(
     // No readable root manifest; workspace packages may still define scripts.
   }
   const defined = new Set<string>(rootScripts);
-  for (const pkg of readWorkspacePackages(worktree)) {
+  for (const pkg of readWorkspacePackages(worktree).packages) {
     for (const s of pkg.scripts) defined.add(s);
   }
   // No manifest could be read at all (a tree this command cannot inspect):
