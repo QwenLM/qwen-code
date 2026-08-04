@@ -44,8 +44,9 @@ function endpointSnip(model: AvailableModel): string | undefined {
   try {
     const url = new URL(endpoint);
     const segments = url.pathname.split('/').filter(Boolean);
-    if (segments.length > 0) {
-      return segments[segments.length - 1];
+    const last = segments[segments.length - 1];
+    if (last && !/^v\d+$/i.test(last)) {
+      return last;
     }
     return url.hostname || undefined;
   } catch {
