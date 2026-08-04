@@ -2242,17 +2242,18 @@ export function App({
       return;
     }
     const artifactIds = new Set(artifacts.map((artifact) => artifact.id));
-    const paneArtifactIds = new Set(
+    // Extras referenced by open artifact tabs must survive the reconcile:
+    // they keep those tabs renderable through transient gaps in the live
+    // list, and stay inert while the live list (merged first) covers them.
+    const openArtifactIds = new Set(
       artifactPanelTabs
-        .filter(
-          (tab) => tab.kind === 'artifact' && tab.sourceSessionId !== undefined,
-        )
+        .filter((tab) => tab.kind === 'artifact')
         .map((tab) => (tab.kind === 'artifact' ? tab.artifactId : '')),
     );
     setArtifactPanelExtraArtifacts((previous) => {
       const next = previous.filter(
         (artifact) =>
-          !artifactIds.has(artifact.id) || paneArtifactIds.has(artifact.id),
+          !artifactIds.has(artifact.id) || openArtifactIds.has(artifact.id),
       );
       return next.length === previous.length ? previous : next;
     });
@@ -2272,9 +2273,11 @@ export function App({
       return artifacts;
     }
     const merged = [...artifacts];
+    // Pane snapshots outrank open-time extras so a retained extra never
+    // shadows a fresher pane report for the same artifact id.
     for (const artifact of [
-      ...artifactPanelExtraArtifacts,
       ...paneArtifactExtras,
+      ...artifactPanelExtraArtifacts,
     ]) {
       const index = merged.findIndex((item) => item.id === artifact.id);
       if (index < 0) {
@@ -2292,9 +2295,18 @@ export function App({
         const paneArtifactIds = new Set(
           paneArtifacts.map((artifact) => artifact.id),
         );
+        // Keep extras whose artifact tab is still open: once the pane closes
+        // and its snapshot is dropped, the extra is the tab's only copy.
+        const openArtifactIds = new Set(
+          artifactPanelTabsRef.current
+            .filter((tab) => tab.kind === 'artifact')
+            .map((tab) => (tab.kind === 'artifact' ? tab.artifactId : '')),
+        );
         setArtifactPanelExtraArtifacts((current) => {
           const next = current.filter(
-            (artifact) => !paneArtifactIds.has(artifact.id),
+            (artifact) =>
+              !paneArtifactIds.has(artifact.id) ||
+              openArtifactIds.has(artifact.id),
           );
           return next.length === current.length ? current : next;
         });
@@ -3030,17 +3042,19 @@ export function App({
         );
         return;
       }
-      if (request.sourceSessionId) {
-        setArtifactPanelExtraArtifacts((current) => {
-          const index = current.findIndex(
-            (artifact) => artifact.id === request.artifact.id,
-          );
-          if (index < 0) return [...current, request.artifact];
-          const next = [...current];
-          next[index] = request.artifact;
-          return next;
-        });
-      }
+      // Cache the opened row so the tab keeps rendering through transient
+      // gaps in the live artifact lists (an SSE reconnect, or the source
+      // pane closing); the snapshot/live-list reconciles drop the copy once
+      // a fresher source covers the artifact again.
+      setArtifactPanelExtraArtifacts((current) => {
+        const index = current.findIndex(
+          (artifact) => artifact.id === request.artifact.id,
+        );
+        if (index < 0) return [...current, request.artifact];
+        const next = [...current];
+        next[index] = request.artifact;
+        return next;
+      });
       const tab: ArtifactPanelTab = {
         id: request.sourceSessionId
           ? `${request.sourceSessionId}:${request.id}`

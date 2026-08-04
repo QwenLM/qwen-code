@@ -695,7 +695,7 @@ export function ArtifactPanel({
           <ScheduledTaskDetail
             key={activeTab.id}
             task={activeTab.task}
-            actions={activeWorkspaceActions!}
+            actions={activeWorkspaceActions}
           />
         )}
       </div>
@@ -869,7 +869,7 @@ function ScheduledTaskDetail({
   actions,
 }: {
   task: TurnOutputScheduledTask;
-  actions: ArtifactWorkspaceActions;
+  actions: ArtifactWorkspaceActions | undefined;
 }) {
   const { t } = useI18n();
   const [loadedTask, setLoadedTask] = useState<DaemonScheduledTask | null>(
@@ -951,7 +951,7 @@ function ScheduledTaskDetail({
     const loadRequest = ++loadRequestRef.current;
     const taskId = task.id;
     const workspaceId = task.workspaceId;
-    if (!task.durable) {
+    if (!task.durable || !actions) {
       setLoadedTask(null);
       setName('');
       setPrompt(task.prompt);
@@ -1028,7 +1028,7 @@ function ScheduledTaskDetail({
   }, [loadedTask]);
 
   const handleSave = useCallback(async () => {
-    if (!loadedTask) return;
+    if (!loadedTask || !actions) return;
     const cron = buildCron(builder);
     if (!cron) {
       setFormError(t('scheduledTasks.error.invalidSchedule'));
@@ -1081,7 +1081,7 @@ function ScheduledTaskDetail({
   ]);
 
   const handleToggle = useCallback(async () => {
-    if (!loadedTask) return;
+    if (!loadedTask || !actions) return;
     const request = ++requestRef.current;
     const taskId = task.id;
     const workspaceId = task.workspaceId;
@@ -1109,7 +1109,7 @@ function ScheduledTaskDetail({
   }, [actions, isCurrentRequest, loadedTask, task.id, task.workspaceId]);
 
   const handleDelete = useCallback(async () => {
-    if (!loadedTask) return;
+    if (!loadedTask || !actions) return;
     const request = ++requestRef.current;
     const taskId = task.id;
     const workspaceId = task.workspaceId;

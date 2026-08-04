@@ -239,6 +239,9 @@ const {
       addScratchWorkspace: vi.fn(),
       suggestWorkspacePaths: vi.fn(),
       pickWorkspaceDirectory: vi.fn(),
+      listScheduledTasks: vi.fn(),
+      updateScheduledTask: vi.fn(),
+      deleteScheduledTask: vi.fn(),
     },
     mockMcp: {
       initialize: vi.fn().mockResolvedValue({ accepted: true }),
@@ -942,6 +945,35 @@ vi.doMock('./components/SplitView', async () => {
         ...updatedArtifact,
         status: 'changed',
       };
+      const mainArtifact = {
+        id: 'main-artifact',
+        kind: 'report',
+        storage: 'memory',
+        source: 'tool',
+        status: 'available',
+        title: 'Main artifact',
+        updatedAt: '2026-07-10T00:00:00Z',
+        sizeBytes: 10,
+      };
+      const paneScheduledTask = {
+        id: 'pane-cron',
+        toolCallId: 'pane-cron-call',
+        title: 'Pane task',
+        cron: '0 9 * * *',
+        prompt: 'pane task prompt',
+        recurring: true,
+        durable: true,
+        workspaceId: 'pane-ws',
+      };
+      const paneReviewChanges = [
+        {
+          path: 'notes.md',
+          status: 'modified',
+          toolCallId: 'tool-notes',
+          isArtifact: false,
+          diffs: [],
+        },
+      ];
       return React.createElement(
         'div',
         { 'data-testid': 'split-view-mock' },
@@ -1027,6 +1059,63 @@ vi.doMock('./components/SplitView', async () => {
               }),
           },
           'open artifact',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'split-open-main-artifact',
+            type: 'button',
+            onClick: () =>
+              props.onRightPanelOpen?.({
+                id: 'artifact:main-artifact',
+                kind: 'artifact',
+                title: mainArtifact.title,
+                turnId: 'turn-1',
+                artifactId: mainArtifact.id,
+                artifact: mainArtifact,
+                workspaceCwd: '/tmp/project',
+                workspaceId: 'primary',
+              }),
+          },
+          'open main artifact',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'split-open-scheduled-task',
+            type: 'button',
+            onClick: () =>
+              props.onRightPanelOpen?.({
+                id: 'scheduled-task:pane-cron-call',
+                kind: 'scheduled_task',
+                title: 'Scheduled Tasks',
+                turnId: 'turn-1',
+                task: paneScheduledTask,
+                workspaceCwd: '/tmp/pane',
+                workspaceId: 'pane-ws',
+                sourceSessionId: 'pane-session',
+              }),
+          },
+          'open scheduled task',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'split-open-review',
+            type: 'button',
+            onClick: () =>
+              props.onRightPanelOpen?.({
+                id: 'review',
+                kind: 'review',
+                title: 'Review',
+                turnId: 'turn-1',
+                changes: paneReviewChanges,
+                workspaceCwd: '/tmp/pane',
+                workspaceId: 'pane-ws',
+                sourceSessionId: 'pane-session',
+              }),
+          },
+          'open review',
         ),
         React.createElement(
           'button',
@@ -2334,6 +2423,9 @@ beforeEach(() => {
   mockWorkspaceActions.addScratchWorkspace.mockReset();
   mockWorkspaceActions.suggestWorkspacePaths.mockReset();
   mockWorkspaceActions.pickWorkspaceDirectory.mockReset();
+  mockWorkspaceActions.listScheduledTasks.mockReset();
+  mockWorkspaceActions.updateScheduledTask.mockReset();
+  mockWorkspaceActions.deleteScheduledTask.mockReset();
   mockMcp.initialize.mockClear();
   mockMcp.initialize.mockResolvedValue({ accepted: true });
   mockMcp.reloadConfig.mockClear();
@@ -9890,7 +9982,7 @@ describe('App session callbacks', () => {
     ).toBe('s1,s2,s3');
   });
 
-  it('replaces an extra artifact with its split pane snapshot', async () => {
+  it('updates an open artifact tab from pane snapshots and keeps it after the pane clears', async () => {
     mockWorkspace.capabilities = {
       workspaceCwd: '/tmp/project',
       workspaces: [
@@ -9960,7 +10052,232 @@ describe('App session callbacks', () => {
       await Promise.resolve();
     });
 
-    expect(document.body.textContent).toContain('Artifact not found.');
+    // The pane snapshot is gone, but the extra pushed on open keeps the
+    // still-open tab renderable instead of orphaning it.
+    expect(document.body.textContent).toContain('Pane artifact');
+    expect(document.body.textContent).toContain('10 B');
+    expect(document.body.textContent).not.toContain('Artifact not found.');
+  });
+
+  it('routes a split pane scheduled task through its stamped workspace identity', async () => {
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'pane-ws',
+          cwd: '/tmp/pane',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([
+      {
+        id: 'pane-cron',
+        name: 'Pane task',
+        cron: '0 9 * * *',
+        prompt: 'pane task prompt',
+        recurring: true,
+        enabled: true,
+        createdAt: 1_700_000_000_000,
+        lastFiredAt: null,
+        nextRunAt: null,
+        sessionId: null,
+        runs: [],
+      },
+    ]);
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="split-open-scheduled-task"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(mockWorkspaceActions.listScheduledTasks).toHaveBeenCalledWith(
+      'pane-ws',
+    );
+    expect(document.body.textContent).toContain('Pane task');
+    expect(document.body.textContent).not.toContain(
+      'This workspace may have been removed',
+    );
+  });
+
+  it('routes a split pane review download through its stamped workspace identity', async () => {
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'pane-ws',
+          cwd: '/tmp/pane',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const paneFileStat = vi.fn().mockResolvedValue({
+      sizeBytes: 5,
+      modifiedMs: 1,
+    });
+    const paneReadBytes = vi.fn().mockResolvedValue({
+      contentBase64: btoa('notes'),
+      offset: 0,
+      returnedBytes: 5,
+      sizeBytes: 5,
+    });
+    const paneWorkspaceClient = {
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+      workspaceGitHubPullRequests: vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/tmp/pane',
+        available: true,
+        pullRequests: [],
+      }),
+      fileStat: paneFileStat,
+      readWorkspaceFileBytes: paneReadBytes,
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(
+      () => paneWorkspaceClient,
+    );
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: vi.fn(() => 'blob:pane-review'),
+    });
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: vi.fn(),
+    });
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="split-open-review"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    const download = Array.from(document.body.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Download',
+    );
+    expect(download).toBeDefined();
+    await act(async () => {
+      download?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mockWorkspace.client.workspaceByCwd).toHaveBeenCalledWith(
+      '/tmp/pane',
+    );
+    expect(paneFileStat).toHaveBeenCalledWith('notes.md');
+    expect(paneReadBytes).toHaveBeenCalledWith(
+      'notes.md',
+      expect.objectContaining({ offset: 0 }),
+    );
+  });
+
+  it('keeps a main-session artifact tab renderable across a live-list gap', async () => {
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    const mainArtifactRow = {
+      id: 'main-artifact',
+      kind: 'report',
+      storage: 'memory',
+      source: 'tool',
+      status: 'available',
+      title: 'Main artifact',
+      updatedAt: '2026-07-10T00:00:00Z',
+      sizeBytes: 10,
+    };
+    mockSessionActions.loadArtifacts.mockResolvedValue({
+      artifacts: [mainArtifactRow],
+    });
+    const { container, rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="split-open-main-artifact"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(document.body.textContent).toContain('Main artifact');
+    expect(document.body.textContent).toContain('10 B');
+
+    // A transient disconnect empties the live artifact list; the cached
+    // open-time row keeps the tab renderable through the gap.
+    mockConnection.status = 'disconnected';
+    await act(async () => {
+      rerender();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(document.body.textContent).toContain('Main artifact');
+    expect(document.body.textContent).not.toContain('Artifact not found.');
+
+    // Reconnecting restores the live list and reconciles the cached copy.
+    mockConnection.status = 'connected';
+    await act(async () => {
+      rerender();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(document.body.textContent).toContain('Main artifact');
+    mockSessionActions.loadArtifacts.mockResolvedValue({ artifacts: [] });
   });
 
   it('opens a split pane monitor in the right panel', async () => {

@@ -948,6 +948,11 @@ describe('ArtifactPanel scheduled-task ownership', () => {
           save?.click();
           await Promise.resolve();
         });
+        expect(mockWorkspaceActions.updateScheduledTask).toHaveBeenCalledWith(
+          'cron-secondary',
+          expect.objectContaining({ prompt: expect.any(String) }),
+          'secondary-id',
+        );
       } else if (mutation === 'toggle') {
         const disable = Array.from(container.querySelectorAll('button')).find(
           (button) => button.textContent?.trim() === 'Disable',
