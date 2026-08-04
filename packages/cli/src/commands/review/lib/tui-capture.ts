@@ -149,9 +149,10 @@ export function tmuxPlan(opts: {
   // The hold sits on its OWN LINE: appended with `;` it is voided by the
   // command's own tail — a trailing `;` makes `;;` (syntax error, pane dies
   // instantly), a trailing `#` comment swallows it (the one-shot failure
-  // recurs), and both blame tmux for a valid command. A trailing `\` would
-  // still fold the next line into the command — the command layer refuses
-  // that shape up front.
+  // recurs), and both blame tmux for a valid command. Trailing backslashes
+  // cannot fold the hold line either: the command sits single-quoted at
+  // every layer, so no shell parses its text adjacent to the hold
+  // (probe-verified with odd-run shapes on this exact plan).
   const inner = `sh -c '${esc(opts.command)}'`;
   const held = `sh -c '${esc(`${inner}\nsleep 7200`)}'`;
   return {

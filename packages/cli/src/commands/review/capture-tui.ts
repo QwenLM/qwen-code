@@ -94,7 +94,7 @@ export const freezeRender = { bin: 'freeze', timeoutMs: 30_000 };
  * without this seam that path is untestable in the one environment where it
  * matters. Tests override a probe and restore it; production never does. */
 export const probes = {
-  // The VERSION LINE, not a boolean: capture-pane -N needs tmux 3.0a, and a
+  // The VERSION LINE, not a boolean: capture-pane -N needs tmux 3.1, and a
   // host with an older tmux must be told so up front — the real cause named,
   // no server started — instead of dying mid-capture on the unknown flag.
   tmux: (): string | undefined => probeOutput('tmux', '-V'),
@@ -128,8 +128,11 @@ function sleep(ms: number): Promise<void> {
 /** One marker match's time budget: a backtracking-prone --until/--ready
  * pattern can spin a single test() call past any deadline (the deadline is
  * only checked BETWEEN calls). vm interrupts the match; an overrun is
- * reported as such — it is "the match was cut off", NOT "no match". */
-const MATCH_BUDGET_MS = 500;
+ * reported as such — it is "the match was cut off", NOT "no match".
+ * Exported so the declaration test can pin the VALUE — the wall-clock test
+ * alone tolerates anything up to ~7s, silently inflating every poll
+ * iteration past the shared deadline. */
+export const MATCH_BUDGET_MS = 500;
 
 function testWithBudget(
   re: RegExp,
@@ -162,42 +165,16 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     process.exitCode = 3;
   };
 
-  // Shape guard first: yargs parses a DUPLICATED string option into an array
-  // (`--command A --command B` → ['A','B']) and its default --no-X negation
-  // into a boolean (`--no-command` → false) — both sail through the `as`
-  // casts and either throw uncaught TypeErrors past the refusal contract or
-  // silently corrupt the capture (`--until A --until B` compiles /A,B/;
-  // `--no-keys` types the literal word "false" into the pane). The two
-  // REQUIRED options also refuse undefined: demandOption covers the CLI
-  // path, but runCaptureTui is exported, and an undefined command/out would
-  // throw on .trim() past the refusal contract.
-  for (const [name, v] of [
-    ['--command', args.command],
-    ['--out', args.out],
-  ] as const) {
-    if (typeof v !== 'string') {
-      refuse(`${name} must be given exactly once, as a string.`);
-      return;
-    }
-  }
-  for (const [name, v] of [
-    ['--cwd', args.cwd],
-    ['--until', args.until],
-    ['--ready', args.ready],
-  ] as const) {
-    if (v !== undefined && typeof v !== 'string') {
-      refuse(`${name} must be given exactly once, as a string.`);
-      return;
-    }
-  }
-  if (args.keys !== undefined) {
-    if (
-      !Array.isArray(args.keys) ||
-      args.keys.some((k) => typeof k !== 'string')
-    ) {
-      refuse('--keys must be strings.');
-      return;
-    }
+  // --out's shape FIRST, then the stale-artifact clear, then every other
+  // gate: any refusal that fires with a valid --out and stale artifacts
+  // still in place hands a consumer the PREVIOUS run's manifest next to
+  // this run's refusal JSON (measured: a duplicated --command flag against
+  // a reused --out left all three prior artifacts, manifest still claiming
+  // "evidence":"png"). Only an --out we cannot even name is allowed to
+  // refuse without clearing — there is nowhere to clear.
+  if (typeof args.out !== 'string') {
+    refuse('--out must be given exactly once, as a string.');
+    return;
   }
   if (args.out.trim() === '') {
     // resolve('') is the cwd: artifacts would land as <cwd>.ans/.png/.json
@@ -239,6 +216,37 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     );
     return;
   }
+  // Remaining shape guards: yargs parses a DUPLICATED string option into an
+  // array (`--command A --command B` → ['A','B']) and its default --no-X
+  // negation into a boolean (`--no-command` → false) — both sail through
+  // the `as` casts and either throw uncaught TypeErrors past the refusal
+  // contract or silently corrupt the capture (`--until A --until B`
+  // compiles /A,B/; `--no-keys` types the literal word "false" into the
+  // pane). --command also refuses undefined: demandOption covers the CLI
+  // path, but runCaptureTui is exported.
+  if (typeof args.command !== 'string') {
+    refuse('--command must be given exactly once, as a string.');
+    return;
+  }
+  for (const [name, v] of [
+    ['--cwd', args.cwd],
+    ['--until', args.until],
+    ['--ready', args.ready],
+  ] as const) {
+    if (v !== undefined && typeof v !== 'string') {
+      refuse(`${name} must be given exactly once, as a string.`);
+      return;
+    }
+  }
+  if (args.keys !== undefined) {
+    if (
+      !Array.isArray(args.keys) ||
+      args.keys.some((k) => typeof k !== 'string')
+    ) {
+      refuse('--keys must be strings.');
+      return;
+    }
+  }
   const tmuxVersion = probes.tmux();
   if (tmuxVersion === undefined) {
     refuse(
@@ -263,17 +271,12 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     refuse('--command must not be empty.');
     return;
   }
-  {
-    // A trailing backslash is a line continuation: it would fold the pane
-    // holder's own line into the command, silently changing what runs. Only
-    // an ODD run of trailing backslashes is a continuation — an even run is
-    // escaped literals (measured: `echo \\` runs fine in the holder).
-    const tail = /\\+$/.exec(args.command.trimEnd());
-    if (tail && tail[0].length % 2 === 1) {
-      refuse('--command must not end with a trailing backslash.');
-      return;
-    }
-  }
+  // No trailing-backslash gate: the two-shell holder single-quotes the
+  // command at every layer (esc balances every quote), so no shell ever
+  // parses the command text adjacent to the hold line — probe-verified with
+  // four odd-run shapes on the production plan, all executed correctly with
+  // the holder alive. The old gate protected the earlier single-shell
+  // holder and over-refused valid commands.
   if (args.cwd !== undefined) {
     // tmux new-session -c with an unusable directory exits 0 and silently
     // runs the pane in the launching process's cwd — evidence from the
@@ -395,17 +398,30 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // wedged server outlasting the 15s timeout), and unlinking then makes
     // the live server unreachable forever — nothing addressable by -L can
     // ever kill it again, while it holds the pane holder for two hours.
+    // One retry before giving up: a transient client-spawn failure is the
+    // named shape, and a second attempt reaps it (measured).
     let serverDead = false;
-    try {
-      tmux(plan.kill);
-      serverDead = true;
-    } catch (e) {
-      // A kill failing because the server already died is the goal state.
-      serverDead = /no server running/i.test(
-        String((e as { stderr?: unknown }).stderr ?? ''),
-      );
+    for (let attempt = 0; attempt < 2 && !serverDead; attempt++) {
+      try {
+        tmux(plan.kill);
+        serverDead = true;
+      } catch (e) {
+        // A kill failing because the server already died is the goal state.
+        serverDead = /no server running/i.test(
+          String((e as { stderr?: unknown }).stderr ?? ''),
+        );
+      }
     }
-    if (!serverDead) return;
+    if (!serverDead) {
+      // A presumed-alive private server is never a silent outcome: the
+      // holder keeps it up for two hours, and the briefs encourage many
+      // captures per review — orphans would accumulate invisibly.
+      writeStderrLine(
+        `capture-tui: WARNING — kill-server failed twice; the private tmux ` +
+          `server ${server} may still be running (tmux -L ${server} kill-server to reap it by hand).`,
+      );
+      return;
+    }
     // tmux does not always unlink the socket of a killed server; a review
     // that captures often would litter the socket dir with dead sockets.
     // tmux resolves that dir from TMUX_TMPDIR, falling back to /tmp — it
@@ -420,24 +436,27 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       // Litter is cosmetic; never let cleanup mask the capture's own result.
     }
   };
-  const onSignal = (sig: NodeJS.Signals): void => {
-    reap();
-    process.removeListener('SIGINT', onSignal);
-    process.removeListener('SIGTERM', onSignal);
-    process.kill(process.pid, sig);
-  };
-  process.on('SIGINT', onSignal);
-  process.on('SIGTERM', onSignal);
+  // SIGHUP and SIGQUIT too: their default actions terminate identically —
+  // a closed terminal window HUPs the foreground process group (measured:
+  // exit 129 with server, socket and holder all surviving), and the capture
+  // window legally runs up to an hour.
+  const REAP_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT'] as const;
   const releaseSignals = (): void => {
-    process.removeListener('SIGINT', onSignal);
-    process.removeListener('SIGTERM', onSignal);
+    for (const s of REAP_SIGNALS) process.removeListener(s, onSignal);
   };
+  function onSignal(sig: NodeJS.Signals): void {
+    reap();
+    releaseSignals();
+    process.kill(process.pid, sig);
+  }
+  for (const s of REAP_SIGNALS) process.on(s, onSignal);
 
   let ansText = '';
   let settledBy: CaptureManifest['settledBy'] = 'fixed-delay';
   let readyFailed = false;
   let keysSent: boolean | undefined;
   let matchOverruns = 0;
+  let captureFailed = false;
   try {
     tmux(plan.start);
     // One deadline covers the ready gate AND the until poll: two separate
@@ -513,19 +532,20 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     const detail =
       (err.stderr ?? '').trim().split('\n').slice(-1)[0] ||
       (err.message ?? String(e)).split('\n')[0];
-    releaseSignals();
+    captureFailed = true;
     refuse(`tmux failed mid-capture: ${detail}`);
     return;
   } finally {
     // Always, even when start/capture threw: the private server holds every
     // process this capture launched, and an orphaned TUI outliving the
-    // review is the mess this command exists to make impossible. The signal
-    // listeners stay INSTALLED past this point: the freeze render below can
-    // block up to its belt, and a signal in that window must still reap
-    // (idempotent — the server is already gone) and re-raise, not die with
-    // an orphaned render child (measured: a SIGTERM 2ms into the
-    // listener-less window left the spawned child alive).
+    // review is the mess this command exists to make impossible. The reap
+    // runs FIRST — it can block up to the 15s tmux timeout against a wedged
+    // server, and a signal in that window must still be caught (measured:
+    // releasing before the reap left a 25ms-to-death window with no
+    // listener). On the success path the listeners stay installed through
+    // the freeze render below, which can block up to its belt.
     reap();
+    if (captureFailed) releaseSignals();
   }
 
   try {
@@ -533,7 +553,14 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   } catch (e) {
     // The disk can fill (or the target turn hostile) during a long capture
     // window; the same principle as the mkdir guard — refusal contract, not
-    // a stack trace.
+    // a stack trace. "THIS run's artifacts or nothing": a partial or 0-byte
+    // .ans from an interrupted write (measured with a real ENOSPC) must not
+    // persist undescribed.
+    try {
+      rmSync(ansPath, { force: true });
+    } catch {
+      // The refusal reason below is the primary signal either way.
+    }
     releaseSignals();
     refuse(
       `cannot write capture output: ${e instanceof Error ? e.message : String(e)}`,
