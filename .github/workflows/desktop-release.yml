@@ -286,17 +286,19 @@ jobs:
         run: |
           # Prefer the Tauri-style WINDOWS_CERTIFICATE pair; fall back to the
           # legacy electron-builder WIN_CSC_LINK pair if only that exists.
+          $pfx = $null
+          $pfxPassword = $null
           if ($env:WINDOWS_CERTIFICATE -and $env:WINDOWS_CERTIFICATE_PASSWORD) {
-            $path = Join-Path $env:RUNNER_TEMP 'qwen-code-desktop.pfx'
-            [IO.File]::WriteAllBytes($path, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
-            $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
-            $certificate = Import-PfxCertificate -FilePath $path -CertStoreLocation Cert:\CurrentUser\My -Password $password
-            $windowsConfig = @{ bundle = @{ windows = @{ certificateThumbprint = $certificate.Thumbprint } } } | ConvertTo-Json -Compress -Depth 3
-            "WINDOWS_CONFIG=$windowsConfig" | Out-File -FilePath $env:GITHUB_ENV -Append
+            $pfx = $env:WINDOWS_CERTIFICATE
+            $pfxPassword = $env:WINDOWS_CERTIFICATE_PASSWORD
           } elseif ($env:LEGACY_WIN_CSC_LINK -and $env:LEGACY_WIN_CSC_KEY_PASSWORD) {
+            $pfx = $env:LEGACY_WIN_CSC_LINK
+            $pfxPassword = $env:LEGACY_WIN_CSC_KEY_PASSWORD
+          }
+          if ($pfx) {
             $path = Join-Path $env:RUNNER_TEMP 'qwen-code-desktop.pfx'
-            [IO.File]::WriteAllBytes($path, [Convert]::FromBase64String($env:LEGACY_WIN_CSC_LINK))
-            $password = ConvertTo-SecureString $env:LEGACY_WIN_CSC_KEY_PASSWORD -AsPlainText -Force
+            [IO.File]::WriteAllBytes($path, [Convert]::FromBase64String($pfx))
+            $password = ConvertTo-SecureString $pfxPassword -AsPlainText -Force
             $certificate = Import-PfxCertificate -FilePath $path -CertStoreLocation Cert:\CurrentUser\My -Password $password
             $windowsConfig = @{ bundle = @{ windows = @{ certificateThumbprint = $certificate.Thumbprint } } } | ConvertTo-Json -Compress -Depth 3
             "WINDOWS_CONFIG=$windowsConfig" | Out-File -FilePath $env:GITHUB_ENV -Append
@@ -336,7 +338,7 @@ jobs:
           # ripgrep vendor binaries
           rg_dir="$runtime_dir/lib/vendor/ripgrep"
           if [ -d "$rg_dir" ]; then
-            find "$rg_dir" -type f -name 'rg' -exec \
+            find "$rg_dir" -type f -name 'rg' -path '*-darwin/*' -exec \
               codesign --force --sign "$APPLE_SIGNING_IDENTITY" \
               --options runtime --timestamp \
               --entitlements src-tauri/Entitlements.plist {} \;
