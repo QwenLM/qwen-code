@@ -1251,14 +1251,22 @@ export function verificationGaps(
   );
   const reverse = bestDelivery(reverseKeys);
   // A budget-stop marker means the round builder itself refused the reverse
-  // audit on the run's time budget. Like medium, the absence is then by
-  // design, and the gap's FIX (rebuild the round) would be refused by the
-  // very gate that stopped it — exit 4, deterministically, time only moves
-  // forward. compose-review synthesizes the marker's own disclosure instead:
-  // it names the stop honestly and caps the verdict.
+  // audit on the run's time budget. Exactly ONE gap shape is then by design:
+  // `not-built` — the refusal writes no record, so an audit with no records
+  // is the audit the gate stopped, and the gap's FIX (rebuild the round)
+  // would be refused by the very gate that stopped it — exit 4,
+  // deterministically, time only moves forward. compose-review synthesizes
+  // the marker's own disclosure instead: it names the stop honestly and caps
+  // the verdict. Every OTHER shape describes a round that predates the
+  // refusal — a built round nobody launched, a launch the orchestrator
+  // rewrote, a brief never opened — and those disclosures are still owed: a
+  // hand-written round-1 launch is exactly as undelivered when round 3 later
+  // hits the budget, and suppressing it would let "stopped before round 3"
+  // imply the rounds that did run were faithful.
   const budgetStopped = readBudgetStop(planPath) !== null;
+  const reverseByDesign = budgetStopped && reverse === 'not-built';
   // A repairable reverse-audit gap only at high: medium is complete without it.
-  const reverseGap = !balancedMedium && !budgetStopped && reverse !== 'ok';
+  const reverseGap = !balancedMedium && !reverseByDesign && reverse !== 'ok';
   if (reverseGap) {
     // The fix template carries `--plan <plan>`; a literal `<plan>` pasted into a
     // POSIX shell parses as input redirection, so the one repair round Step 6

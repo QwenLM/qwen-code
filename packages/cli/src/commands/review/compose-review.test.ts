@@ -566,6 +566,52 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     );
   });
 
+  it('a budget stop does not launder a rewritten pre-stop round', () => {
+    // Round 1 RAN — with a hand-written launch that opened its brief but
+    // never got the built prompt — and round 2 was then refused on the
+    // budget. The marker explains the audit that never ran; it says nothing
+    // about the one that did, and the rewritten disclosure is still owed:
+    // without it, "stopped before round 2" implies round 1 was faithful.
+    const plan = coveredPlan(['verify']);
+    const d = promptRecordDir(plan);
+    const brief = briefPath(plan, 'reverse-audit');
+    writeFileSync(brief, 'The reverse-audit brief.');
+    const built =
+      'You are review agent `reverse-audit`.\n' +
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${DIFF}")`;
+    writeFileSync(join(d, 'reverse-audit.txt'), built);
+    transcript(
+      'v-ra-rewritten',
+      `Audit the diff for gaps. Your brief: ${brief}. Diff: ${DIFF}.`,
+      { toolCalls: 2, opens: [brief] },
+    );
+    writeBudgetStop(
+      plan,
+      {
+        remainingSeconds: 900,
+        reserveSeconds: 3600,
+        expectedRoundSeconds: 1800,
+      },
+      2,
+    );
+
+    // Not base(): its planPath default runs coveredPlan() again on the same
+    // path and would lay a verbatim reverse-audit pair over this fixture.
+    const r = composeReview({ planPath: plan, env: ENV, modelId: MODEL });
+    expect(r.event).toBe('COMMENT');
+    // The marker still discloses and caps…
+    expect(r.body).toContain(
+      'stopped before round 2 by the review time budget',
+    );
+    // …and the rewritten round is NOT laundered: the operator channel carries
+    // its exact repair. (The posted body collapses same-subject disclosures —
+    // both say "reverse audit" — so the author sees the stop; the rewritten
+    // repair rides stderr, which is where repairs are acted on.)
+    expect(r.remediation.join(' ')).toContain('reverse audit:');
+    expect(r.remediation.join(' ')).toContain('EXACTLY what it prints');
+  });
+
   it('an uncoverable chunk caps APPROVE at COMMENT and names the chunk', () => {
     const r = composeReview(
       base({ uncoverableChunks: ['chunk 5 (src/big.min.js)'] }),
