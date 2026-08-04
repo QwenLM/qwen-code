@@ -274,7 +274,7 @@ export async function resolveAtCommandQuery({
     // this branch it would fall through to filesystem resolution where the
     // ENOENT skip silently drops it. Only intercepted when omni delivery
     // is active; otherwise preserve the legacy text fall-through.
-    if (/^https?:\/\//i.test(pathName)) {
+    if (/^https?:\/\//i.test(pathName) && config.isOmniEnabled?.()) {
       const omni = await import('@qwen-code/qwen-code-core/omni');
       if (omni.isOmniDeliveryActive(config) && omni.parseHttpUrlRef(pathName)) {
         if (!urlMediaRefs.some((r) => r.url === pathName)) {

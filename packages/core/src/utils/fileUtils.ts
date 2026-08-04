@@ -1272,9 +1272,13 @@ export async function processSingleFileContent(
     // (bridge only activates when modalities.image is false).
     let omniModule: typeof import('../omni/index.js') | undefined;
     if (
-      (fileType === 'video' && modalities.video) ||
-      (fileType === 'audio' && modalities.audio) ||
-      (fileType === 'image' && modalities.image)
+      ((fileType === 'video' && modalities.video) ||
+        (fileType === 'audio' && modalities.audio) ||
+        (fileType === 'image' && modalities.image)) &&
+      // Cheap gate BEFORE the dynamic import: the import itself touches
+      // the filesystem (vitest SSR transforms), which breaks mock-fs
+      // suites and wastes a module load for every non-omni user.
+      config.isOmniEnabled?.()
     ) {
       const omni = await import('../omni/index.js');
       if (omni.isOmniDeliveryActive(config)) {
