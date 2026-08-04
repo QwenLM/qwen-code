@@ -638,14 +638,19 @@ jobs:
     permissions:
       contents: 'read'
     steps:
-      # Self-hosted-only tuning, shared verbatim with windows-runner-smoke.yml
-      # via the configure-windows-runner action so the runner-validation smoke
-      # exercises exactly what this gate uses. C.UTF-8 keeps deterministic C
-      # collation with UTF-8 output for non-ASCII assertions, and Git Bash goes
-      # on PATH so the remaining steps can run under the default bash shell.
-      - name: 'Configure self-hosted Windows test environment'
+      # autocrlf must be off before the checkout so a freshly provisioned
+      # runner checks out LF-only files. Repository-local `./` actions resolve
+      # from the job workspace, so the checkout must precede them; the rest
+      # of the self-hosted tuning runs after the checkout via the
+      # configure-windows-runner action, shared verbatim with
+      # windows-runner-smoke.yml so the runner-validation smoke exercises
+      # exactly what this gate uses. C.UTF-8 keeps deterministic C collation
+      # with UTF-8 output for non-ASCII assertions, and Git Bash goes on PATH
+      # so the remaining steps can run under the default bash shell.
+      - name: 'Disable Git CRLF conversion (self-hosted)'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' }}"
-        uses: './.github/actions/configure-windows-runner'
+        shell: 'powershell'
+        run: 'git config --global core.autocrlf false'
 
       - name: 'Checkout'
         id: 'checkout'
@@ -662,6 +667,10 @@ jobs:
         uses: './.github/actions/verify-checkout-head'
         with:
           expected_sha: '${{ github.event.merge_group.head_sha }}'
+
+      - name: 'Configure self-hosted Windows test environment'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' }}"
+        uses: './.github/actions/configure-windows-runner'
 
       # Self-hosted can't reach nodejs.org reliably; reuse the machine's Node.
       - name: 'Set up Node.js 22.x (hosted)'

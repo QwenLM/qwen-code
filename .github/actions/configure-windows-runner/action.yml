@@ -1,5 +1,5 @@
 name: 'Configure Windows self-hosted runner'
-description: 'Tunes a self-hosted Windows runner for the test gates: deterministic C.UTF-8 collation for non-ASCII assertions, TEMP/TMP redirected to RUNNER_TEMP, autocrlf off, and Git Bash on PATH for bash-shell steps. Shared by the Windows merge-queue gate and the runner smoke workflow so both always run an identical configuration.'
+description: 'Tunes a self-hosted Windows runner for the test gates: deterministic C.UTF-8 collation for non-ASCII assertions, TEMP/TMP redirected to RUNNER_TEMP, and Git Bash on PATH for bash-shell steps. Runs after actions/checkout because repository-local actions resolve from the workspace; callers turn off autocrlf before the checkout itself. Shared by the Windows merge-queue gate and the runner smoke workflow so both always run an identical configuration.'
 
 runs:
   using: 'composite'
@@ -10,7 +10,6 @@ runs:
       shell: 'powershell'
       run: |-
         $ErrorActionPreference = 'Stop'
-        git config --global core.autocrlf false
         "TEMP=$env:RUNNER_TEMP" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
         "TMP=$env:RUNNER_TEMP" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
         "LC_ALL=C.UTF-8" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append

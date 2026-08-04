@@ -226,7 +226,7 @@ describe('no-AK integration CI wiring', () => {
     expect(windowsRunsOn).toBe(
       `    runs-on: '\${{ (vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event.pull_request.head.repo.full_name == github.repository || github.event_name == ''merge_group'')) && fromJSON(''["self-hosted", "Windows", "X64", "ecs-win"]'') || fromJSON(''["windows-2022"]'') }}'`,
     );
-    expect(windowsJob).toContain('timeout-minutes: 60');
+    expect(windowsJob.split('\n')).toContain('    timeout-minutes: 60');
 
     // The guard must stay wired to the merge-queue head for this job.
     const guard = getWorkflowStep(windowsJob, GUARD_STEP);
@@ -252,9 +252,32 @@ describe('no-AK integration CI wiring', () => {
       'utf8',
     );
     expect(configureAction).toContain("shell: 'powershell'");
-    expect(configureAction).toContain(
+    const autocrlfStep = getWorkflowStep(
+      windowsJob,
+      'Disable Git CRLF conversion (self-hosted)',
+    );
+    expect(autocrlfStep).toContain(
+      "if: \"${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' }}\"",
+    );
+
+    // Repository-local `./` actions resolve from the job workspace, so the
+    // checkout must precede them or a fresh runner fails before checking out;
+    // autocrlf must be off before the checkout itself so a freshly
+    // provisioned machine checks out LF-only files.
+    const windowsCheckoutIndex = windowsJob.indexOf("name: 'Checkout'");
+    const autocrlfIndex = windowsJob.indexOf(
       'git config --global core.autocrlf false',
     );
+    const configureUseIndex = windowsJob.indexOf(
+      "uses: './.github/actions/configure-windows-runner'",
+    );
+    expect(windowsCheckoutIndex).toBeGreaterThanOrEqual(0);
+    expect(autocrlfIndex).toBeGreaterThanOrEqual(0);
+    expect(autocrlfIndex).toBeLessThan(windowsCheckoutIndex);
+    expect(configureUseIndex).toBeGreaterThan(windowsCheckoutIndex);
+    expect(
+      windowsJob.indexOf("uses: './.github/actions/verify-checkout-head'"),
+    ).toBeGreaterThan(windowsCheckoutIndex);
     for (const line of [
       '"TEMP=$env:RUNNER_TEMP"',
       '"TMP=$env:RUNNER_TEMP"',
@@ -276,6 +299,27 @@ describe('no-AK integration CI wiring', () => {
     expect(smokeWorkflow).toContain(
       "uses: './.github/actions/configure-windows-runner'",
     );
+    // Same ordering as the gate: autocrlf off before the checkout, the `./`
+    // configure action after it.
+    const smokeCheckoutIndex = smokeWorkflow.indexOf("name: 'Checkout'");
+    const smokeAutocrlfIndex = smokeWorkflow.indexOf(
+      'git config --global core.autocrlf false',
+    );
+    expect(smokeCheckoutIndex).toBeGreaterThanOrEqual(0);
+    expect(smokeAutocrlfIndex).toBeGreaterThanOrEqual(0);
+    expect(smokeAutocrlfIndex).toBeLessThan(smokeCheckoutIndex);
+    expect(
+      smokeWorkflow.indexOf(
+        "uses: './.github/actions/configure-windows-runner'",
+      ),
+    ).toBeGreaterThan(smokeCheckoutIndex);
+    // The smoke is self-hosted-only, so it must take the same Node path as
+    // the gate's self-hosted side: the pre-installed Node, never a nodejs.org
+    // download the ECS egress proxy cannot reach.
+    expect(smokeWorkflow).toContain(
+      "uses: './.github/actions/self-hosted-node'",
+    );
+    expect(smokeWorkflow).not.toContain('actions/setup-node');
 
     // Node split: hosted runners download Node, self-hosted runners reuse
     // their pre-installed one and fail loud when it is missing or off-major.
