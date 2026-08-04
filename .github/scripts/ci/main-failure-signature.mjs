@@ -134,6 +134,9 @@ export function buildTargetedE2eAnalysis(workflowName, jobs) {
   const cases = [];
   const environments = [];
   const reasons = [];
+  if (jobs.length === 0) {
+    reasons.push('no failed jobs were available for analysis');
+  }
   for (const job of jobs) {
     const environment = parseE2eJobName(job.name);
     if (!environment) {

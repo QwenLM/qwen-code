@@ -965,13 +965,33 @@ test('caps targeted E2E cases at five and marks the set incomplete', () => {
   assert.equal(isAutofixEligible(analysis), false);
 });
 
+test('marks an empty failed-job set incomplete instead of complete', () => {
+  // The workflow falls back to an empty job list when the jobs API call
+  // fails; that analysis saw nothing, so it must not report complete.
+  const analysis = analyzeLogs('E2E Tests', []);
+  assert.equal(analysis.targetedE2e.eligible, false);
+  assert.equal(analysis.targetedE2e.complete, false);
+  assert.equal(analysis.targetedE2e.totalCases, 0);
+  assert.deepEqual(analysis.targetedE2e.cases, []);
+  assert.ok(
+    analysis.targetedE2e.reasons.some((reason) =>
+      reason.includes('no failed jobs were available for analysis'),
+    ),
+  );
+  assert.equal(isAutofixEligible(analysis), false);
+});
+
 test('rebuilds the eligible failing-tests section on recurrence', () => {
-  const analysis = analyzeLogs('E2E Tests', [TRUSTED_VITEST_LOG], [
-    {
-      name: 'E2E Test (Linux) - sandbox:none - shard 1/3',
-      log: TRUSTED_VITEST_LOG,
-    },
-  ]);
+  const analysis = analyzeLogs(
+    'E2E Tests',
+    [TRUSTED_VITEST_LOG],
+    [
+      {
+        name: 'E2E Test (Linux) - sandbox:none - shard 1/3',
+        log: TRUSTED_VITEST_LOG,
+      },
+    ],
+  );
   // publicIssueAnalysis redacts log-sourced names to case keys before the
   // eligible body is rendered; publicMachineMarkers then strips a recurrence
   // down to the signature, markers and occurrence lines.
@@ -997,8 +1017,6 @@ test('rebuilds the eligible failing-tests section on recurrence', () => {
     autofixEligible: true,
   });
   assert.ok(merged.includes('## Failing tests'));
-  assert.ok(
-    merged.includes(`- \`case ${analysis.tests[0].key}\``),
-  );
+  assert.ok(merged.includes(`- \`case ${analysis.tests[0].key}\``));
   assert.ok(!merged.includes('## Also failing'));
 });

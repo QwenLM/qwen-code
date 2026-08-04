@@ -33,12 +33,25 @@ sudo install -d -o root -g "${user}" -m 0770 \
   "${runtime_dir}" "${runtime_dir}/cli" "${runtime_dir}/sdk"
 
 cleanup_workers() {
+  if ! sudo pgrep -u "${uid}" > /dev/null; then
+    return
+  fi
+  # Graceful TERM first so tool children (esbuild, tsc, npm) can shut down
+  # on their own; escalate to KILL only after the grace window.
+  sudo pkill -TERM -u "${uid}" || true
+  for _ in {1..40}; do
+    if ! sudo pgrep -u "${uid}" > /dev/null; then
+      return
+    fi
+    sleep 0.25
+  done
+  sudo pkill -KILL -u "${uid}" || true
   for _ in {1..20}; do
     if ! sudo pgrep -u "${uid}" > /dev/null; then
       return
     fi
     sudo pkill -KILL -u "${uid}" || true
-    sleep 0.05
+    sleep 0.25
   done
   echo "targeted Vitest left processes running as uid ${uid}" >&2
   return 1
@@ -67,6 +80,10 @@ trap 'terminate 1' EXIT
 trap 'terminate 130' INT
 trap 'terminate 143' TERM
 
+# setsid must not fork here: a backgrounded job in a non-interactive
+# shell shares the shell's process group, so setsid is not a group leader
+# and execs in place; the new session's process-group ID thus equals
+# command_pid and cleanup_coordinator can kill -coordinator_pid.
 setsid sudo -- \
   setpriv --no-new-privs \
     --bounding-set=-dac_override,-dac_read_search \

@@ -804,8 +804,16 @@ jobs:
           qwen --version
 
       - name: 'Record approved issue prose'
+        # Fires on EVERY issues event that routes to the issue phase, not
+        # only the autofix/approved labeled event: do_issue only turns true
+        # once the issue carries both required labels (and the sender is
+        # trusted), which is often reached by the SECOND label event, the
+        # bot-assignment event, or a late non-trigger label — none of which
+        # carries label.name == 'autofix/approved'. Keying on the approval
+        # label alone left those approvals unrecorded and the issue
+        # permanently un-autofixable.
         if: |-
-          ${{ github.event_name == 'issues' && github.event.action == 'labeled' && github.event.label.name == 'autofix/approved' && needs.route.outputs.do_issue == 'true' }}
+          ${{ github.event_name == 'issues' && needs.route.outputs.do_issue == 'true' }}
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           ISSUE: '${{ needs.route.outputs.issue_number || github.event.issue.number }}'
@@ -814,6 +822,18 @@ jobs:
             "${GITHUB_EVENT_PATH}")"
           approval_digest="$(printf '%s\n' "${approved_prose}" | sha256sum | cut -d ' ' -f 1)"
           [[ "${approval_digest}" =~ ^[0-9a-f]{64}$ ]]
+          approval_marker="<!-- autofix-approved-prose-sha256:${approval_digest} -->"
+          # Follow-up trigger events for the same approval (the second
+          # label, the bot assignment, a late non-trigger label) re-enter
+          # this step; skip re-recording an already-present marker.
+          if approval_comments="$(gh api --paginate \
+            "repos/${REPO}/issues/${ISSUE}/comments?per_page=100" --slurp)" &&
+            jq -e --arg bot "${AUTOFIX_BOT}" --arg marker "${approval_marker}" \
+              'any(.[].[]; .user.login == $bot and (.body // "") == $marker)' \
+              <<< "${approval_comments}" > /dev/null; then
+            echo "Issue #${ISSUE} already carries its approval marker; nothing to record."
+            exit 0
+          fi
           issue_json="$(gh issue view "${ISSUE}" --repo "${REPO}" \
             --json state,title,body,labels)"
           if ! jq -e --arg ready "${READY_FOR_AGENT_LABEL}" --arg approved "${AUTOFIX_APPROVED_LABEL}" \
@@ -827,7 +847,7 @@ jobs:
             exit 1
           fi
           gh issue comment "${ISSUE}" --repo "${REPO}" \
-            --body "<!-- autofix-approved-prose-sha256:${approval_digest} -->"
+            --body "${approval_marker}"
 
       - name: 'Find candidate issues'
         id: 'scan'
@@ -954,6 +974,7 @@ jobs:
                 echo "🕰️ Issue #${candidate_issue} approval predates the marker rollout; recorded the marker and continuing."
                 printf '%s\n' "${candidate}" >> "${approved_candidates}"
               else
+                echo "::notice::Issue #${candidate_issue} was dropped because its prose does not match a bot-recorded approval; re-apply ${AUTOFIX_APPROVED_LABEL} to record a fresh approval."
                 echo "⏭️ Issue #${candidate_issue} prose does not match a bot-recorded approval; skipping."
               fi
             done < <(jq -c '.[]' "${WORKDIR}/candidates.json")
@@ -1220,8 +1241,21 @@ jobs:
             echo '::error::Failed to remove the expired targeted E2E requirement label.'
             exit 1
           fi
+          # Removing only the requirement label would silently degrade this
+          # issue to deterministic-gate-only publication — the pre-PR gate —
+          # although it may be one the bot auto-approved without human
+          # review. Consume the approval too so a maintainer must re-apply
+          # it (re-recording the approval marker) before autofix proceeds.
+          if jq -e --arg label "${AUTOFIX_APPROVED_LABEL}" \
+            '(.labels // []) | map(.name) | index($label) != null' \
+            <<< "${live_issue_json}" > /dev/null &&
+            ! gh issue edit "${ISSUE}" --repo "${REPO}" \
+              --remove-label "${AUTOFIX_APPROVED_LABEL}"; then
+            echo '::error::Failed to consume the approval for the expired targeted E2E requirement.'
+            exit 1
+          fi
           gh issue comment "${ISSUE}" --repo "${REPO}" \
-            --body "🤖 The targeted E2E metadata artifact for this issue expired or no longer exists, so the \`autofix/e2e-verification-required\` label was removed to keep the issue from failing closed forever. The issue can now proceed through the standard deterministic gates; a future authenticated main E2E failure will re-route it with fresh metadata." \
+            --body "🤖 The targeted E2E metadata artifact for this issue expired or no longer exists, so the \`autofix/e2e-verification-required\` label was removed to keep the issue from failing closed forever. Because publication without targeted E2E verification falls back to the deterministic gates alone, the \`autofix/approved\` label was also consumed: re-apply it after reviewing the issue again to let autofix proceed. A future authenticated main E2E failure will re-route the issue with fresh metadata." \
             || echo '::warning::Failed to post the targeted E2E neutralization comment.'
 
       - name: 'Claim issue'
@@ -1415,7 +1449,7 @@ jobs:
             {
               echo 'agent_declined=true'
               echo "agent_detail<<${delim}"
-              head -c 1500 "${WORKDIR}/failure.md"
+              head -c 1500 "${WORKDIR}/failure.md" | iconv -f utf-8 -t utf-8 -c
               echo
               echo "${delim}"
             } >> "${GITHUB_OUTPUT}"

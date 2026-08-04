@@ -181,17 +181,11 @@ test('fails closed on unsafe --base values before they reach git diff', () => {
     assert.match(dashValue.stderr, /--base requires a Git revision/);
     const garbage = run('--base', 'not-a-sha');
     assert.notEqual(garbage.status, 0);
-    assert.match(
-      garbage.stderr,
-      /--base must be a 40-hexadecimal commit SHA/,
-    );
+    assert.match(garbage.stderr, /--base must be a 40-hexadecimal commit SHA/);
     // The inline form used to miss the guard and run the wrong check.
     const inline = run(`--base=${base}`);
     assert.notEqual(inline.status, 0);
-    assert.match(
-      inline.stderr,
-      /--base must be passed as a separate argument/,
-    );
+    assert.match(inline.stderr, /--base must be passed as a separate argument/);
   });
 });
 

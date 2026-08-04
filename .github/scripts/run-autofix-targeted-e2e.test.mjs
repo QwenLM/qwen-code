@@ -20,7 +20,7 @@ import {
 } from './ci/main-failure-signature.mjs';
 import {
   MAX_CASES,
-  TRUSTED_EXTERNAL_PROCESS_TESTS,
+  TRUSTED_EXTERNAL_PROCESS_E2E_TESTS as CONSUMER_TRUSTED_E2E_TESTS,
   VERIFICATION_REPORT_ROOT,
   escapeRegex,
   expectedFullName,
@@ -296,7 +296,7 @@ test('shares one protected-path allowlist with the output validator', () => {
 test('keeps producer and consumer targeted E2E limits in sync', () => {
   assert.equal(MAX_CASES, MAX_TARGETED_E2E_CASES);
   assert.deepEqual(
-    [...TRUSTED_EXTERNAL_PROCESS_TESTS].sort(),
+    [...CONSUMER_TRUSTED_E2E_TESTS].sort(),
     [...TRUSTED_EXTERNAL_PROCESS_E2E_TESTS].sort(),
   );
 });
@@ -561,24 +561,21 @@ test('runs targeted E2E cases through the trusted wrappers end to end', () => {
       // The candidate build commands run with verificationEnv()'s scrubbed
       // environment; the wrapper logs a marker if the sentinel survives.
       assert.ok(!calls.includes('leaked-secret'));
-      assert.deepEqual(
-        calls.split('\n').filter(Boolean),
-        [
-          `command ${workspace} npm ci --ignore-scripts --prefer-offline --no-audit --progress=false`,
-          `command ${workspace} npx --no-install patch-package`,
-          `worktree ${workspace} dependencies`,
-          `command ${workspace} npm run generate`,
-          `command ${workspace} npm run build`,
-          `command ${workspace} npm run bundle`,
-          'validator',
-          `worktree ${workspace} finalize`,
-          `worktree ${workspace} report case-0`,
-          `vitest ${workspace} case-0 ${testCase.file} ^${escapeRegex(expectedFullName(testCase))}$ ${join(mocks.reportRoot, 'case-0', 'report.json')}`,
-          `worktree ${workspace} remove-report case-0`,
-          `worktree ${workspace} cleanup`,
-          'validator',
-        ],
-      );
+      assert.deepEqual(calls.split('\n').filter(Boolean), [
+        `command ${workspace} npm ci --ignore-scripts --prefer-offline --no-audit --progress=false`,
+        `command ${workspace} npx --no-install patch-package`,
+        `worktree ${workspace} dependencies`,
+        `command ${workspace} npm run generate`,
+        `command ${workspace} npm run build`,
+        `command ${workspace} npm run bundle`,
+        'validator',
+        `worktree ${workspace} finalize`,
+        `worktree ${workspace} report case-0`,
+        `vitest ${workspace} case-0 ${testCase.file} ^${escapeRegex(expectedFullName(testCase))}$ ${join(mocks.reportRoot, 'case-0', 'report.json')}`,
+        `worktree ${workspace} remove-report case-0`,
+        `worktree ${workspace} cleanup`,
+        'validator',
+      ]);
       assert.equal(existsSync(join(mocks.reportRoot, 'case-0')), false);
     });
   });

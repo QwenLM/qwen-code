@@ -1835,7 +1835,11 @@ describe('qwen-autofix workflow', () => {
     expect(run).toContain('--no-new-privs');
     expect(run).toContain('env -i');
     expect(run).toContain('sudo pgrep -u "${uid}"');
+    expect(run).toContain('sudo pkill -TERM -u "${uid}"');
     expect(run).toContain('sudo pkill -KILL -u "${uid}"');
+    expect(run.indexOf('sudo pkill -TERM -u "${uid}"')).toBeLessThan(
+      run.indexOf('sudo pkill -KILL -u "${uid}"'),
+    );
     expect(run).toContain('run_home="$(sudo mktemp -d');
     expect(run).toContain('HOME="${run_home}"');
     expect(run).toContain('QWEN_HOME="${run_home}"');
@@ -1895,6 +1899,14 @@ describe('qwen-autofix workflow', () => {
     expect(neutralizeE2eRequirementStep).toContain(
       '--remove-label "${E2E_REQUIRED_LABEL}"',
     );
+    // Removing only the requirement label would silently degrade the issue
+    // to deterministic-gate-only publication although it may be one the
+    // bot auto-approved without human review; the approval is consumed too
+    // so a maintainer must re-apply it before autofix proceeds.
+    expect(neutralizeE2eRequirementStep).toContain(
+      '--remove-label "${AUTOFIX_APPROVED_LABEL}"',
+    );
+    expect(neutralizeE2eRequirementStep).toContain('label was also consumed');
     expect(neutralizeE2eRequirementStep).toContain(
       'leaving routing state untouched',
     );
@@ -2667,17 +2679,22 @@ printf '%s\\n' "\${status}"
       'is missing ${AUTOFIX_APPROVED_LABEL}; skipping.',
     );
     expect(workflow).toContain('"${issue_is_approved}" == \'true\'');
+    // The marker must be recorded on EVERY issues event that routes to the
+    // issue phase: do_issue only turns true once both required labels are
+    // present, which the autofix/approved labeled event alone often does
+    // not reach (approve-then-ready ordering, the bot assignment, a late
+    // non-trigger label). Keying on the approval label left those
+    // approvals unrecorded and the issue permanently un-autofixable.
     expect(recordApprovedIssueProseStep).toContain(
-      "github.event.action == 'labeled'",
-    );
-    expect(recordApprovedIssueProseStep).toContain(
-      "github.event.label.name == 'autofix/approved'",
+      "github.event_name == 'issues' && needs.route.outputs.do_issue == 'true'",
     );
     expect(recordApprovedIssueProseStep).not.toContain(
-      "github.event.label.name == 'status/ready-for-agent'",
+      'github.event.label.name',
     );
-    expect(recordApprovedIssueProseStep).not.toContain(
-      "github.event.action == 'assigned'",
+    expect(recordApprovedIssueProseStep).not.toContain('github.event.action');
+    // Follow-up trigger events for the same approval must not duplicate it.
+    expect(recordApprovedIssueProseStep).toContain(
+      'already carries its approval marker; nothing to record.',
     );
     expect(recordApprovedIssueProseStep).toContain(
       '--json state,title,body,labels',
@@ -2693,6 +2710,10 @@ printf '%s\\n' "\${status}"
     );
     expect(findCandidateIssuesStep).toContain(
       'prose does not match a bot-recorded approval; skipping.',
+    );
+    // The drop must be diagnosable from run annotations, not only job logs.
+    expect(findCandidateIssuesStep).toContain(
+      '::notice::Issue #${candidate_issue} was dropped because its prose does not match a bot-recorded approval',
     );
     // Rollout grandfather: pre-marker approvals are backfilled from the
     // approval label event time; post-cutover approvals keep the marker.
@@ -5751,7 +5772,11 @@ printf '%s\\n' "\${status}"
     // retryable instead of permanently skipping the issue.
     expect(issueAutofixJob).toContain('! -f "${WORKDIR}/agent-timeout"');
     expect(issueAutofixJob).toContain('! -f "${WORKDIR}/agent-api-error"');
-    expect(issueAutofixJob).toContain('head -c 1500 "${WORKDIR}/failure.md"');
+    // Byte-truncation can split a multi-byte UTF-8 sequence; the tail must
+    // be dropped rather than emitting invalid UTF-8 into the issue comment.
+    expect(issueAutofixJob).toContain(
+      'head -c 1500 "${WORKDIR}/failure.md" | iconv -f utf-8 -t utf-8 -c',
+    );
     expect(issueAutofixPublishJob).toContain(
       "AGENT_DECLINED: '${{ needs.issue-autofix.outputs.agent_declined }}'",
     );

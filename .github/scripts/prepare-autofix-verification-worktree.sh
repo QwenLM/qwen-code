@@ -11,7 +11,9 @@ case "${phase}" in
   prepare)
     id -u "${user}" > /dev/null 2>&1 ||
       sudo useradd --create-home --home-dir "${home}" --shell /bin/bash "${user}"
-    sudo chown root:root "${home}"
+    # Recursive: useradd --create-home copies /etc/skel files owned by the
+    # new user; the whole home must be root-owned before the downgrade.
+    sudo chown -R root:root "${home}"
     git config --global --add safe.directory "${workspace}"
     sudo chown -R root:root "${workspace}"
     sudo find "${workspace}" -xdev -type f -exec chmod a-w -- {} +

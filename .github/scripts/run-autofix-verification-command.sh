@@ -46,12 +46,25 @@ env_args=(
 )
 
 cleanup_processes() {
+  if ! sudo pgrep -u "${uid}" > /dev/null; then
+    return
+  fi
+  # Graceful TERM first so tool children (esbuild, tsc, npm) can shut down
+  # on their own; escalate to KILL only after the grace window.
+  sudo pkill -TERM -u "${uid}" || true
+  for _ in {1..40}; do
+    if ! sudo pgrep -u "${uid}" > /dev/null; then
+      return
+    fi
+    sleep 0.25
+  done
+  sudo pkill -KILL -u "${uid}" || true
   for _ in {1..20}; do
     if ! sudo pgrep -u "${uid}" > /dev/null; then
       return
     fi
     sudo pkill -KILL -u "${uid}" || true
-    sleep 0.05
+    sleep 0.25
   done
   echo "verification command left processes running as uid ${uid}" >&2
   return 1

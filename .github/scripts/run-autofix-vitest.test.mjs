@@ -57,9 +57,11 @@ test('keeps candidate code outside the trusted Vitest worker', () => {
 });
 
 test('keeps the JSON proof root-owned and kills all candidate processes', () => {
-  assert.match(worktree, /sudo chown root:root "\$\{home\}"/);
+  // Recursive: useradd --create-home leaves /etc/skel copies owned by the
+  // verify user; the whole home must be root-owned before the downgrade.
+  assert.match(worktree, /sudo chown -R root:root "\$\{home\}"/);
   assert.ok(
-    worktree.indexOf('sudo chown root:root "${home}"') <
+    worktree.indexOf('sudo chown -R root:root "${home}"') <
       worktree.indexOf('sudo install -d -o root -g root -m 0711'),
   );
   assert.match(worktree, /install -d -o root -g root -m 0700/);
@@ -90,7 +92,12 @@ test('keeps the JSON proof root-owned and kills all candidate processes', () => 
   assert.doesNotMatch(wrapper, /coordinator\.pid/);
   assert.match(wrapper, /AUTOFIX_VERIFY_UID="\$\{uid\}"/);
   assert.match(wrapper, /sudo pgrep -u "\$\{uid\}"/);
+  assert.match(wrapper, /sudo pkill -TERM -u "\$\{uid\}"/);
   assert.match(wrapper, /sudo pkill -KILL -u "\$\{uid\}"/);
+  assert.ok(
+    wrapper.indexOf('sudo pkill -TERM -u "${uid}"') <
+      wrapper.indexOf('sudo pkill -KILL -u "${uid}"'),
+  );
   assert.match(wrapper, /sudo chown root:root "\$\{report\}"/);
   assert.match(wrapper, /sudo chmod 0444 "\$\{report\}"/);
   // The proof check must run privileged BEFORE the downgrade: the report

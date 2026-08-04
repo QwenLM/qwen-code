@@ -35,6 +35,12 @@ function ghJson(endpoint) {
 // instead of slurping the repository's entire artifact listing (a
 // repo-wide --paginate --slurp grows unbounded and exhausts maxBuffer).
 const PRODUCER_WORKFLOW_FILE = 'main-ci-failure-issue.yml';
+// The producer uploads artifacts with retention-days: 30, while workflow
+// runs stay listable for ~90 days. Runs older than the retention window
+// (plus margin) cannot hold live artifacts, so enumeration stops there
+// instead of issuing one artifacts API call per stale run.
+const PRODUCER_ARTIFACT_RETENTION_DAYS = 30;
+const PRODUCER_RUN_LOOKBACK_DAYS = PRODUCER_ARTIFACT_RETENTION_DAYS + 5;
 
 export function validateMetadata(metadata, { issue, repository }) {
   if (metadata?.schemaVersion !== 1) fail('Unsupported E2E metadata schema');
@@ -124,12 +130,21 @@ function readArtifactMetadata({ artifact, issue, repository, directory }) {
 
 function listProducerArtifacts({ repository, artifactPrefix }) {
   const artifacts = [];
+  const cutoff = Date.now() - PRODUCER_RUN_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
   for (let page = 1; ; page += 1) {
     const runs = ghJson(
       `repos/${repository}/actions/workflows/${PRODUCER_WORKFLOW_FILE}/runs?per_page=100&page=${page}`,
     );
     const workflowRuns = runs?.workflow_runs ?? [];
+    let reachedCutoff = false;
     for (const run of workflowRuns) {
+      const createdAt = Date.parse(run?.created_at ?? '');
+      // Runs arrive newest-first; once one is older than the retention
+      // window, every later run on this and following pages is too.
+      if (Number.isFinite(createdAt) && createdAt < cutoff) {
+        reachedCutoff = true;
+        break;
+      }
       const runId = positiveInteger(run?.id, 'producer run ID');
       const listing = ghJson(
         `repos/${repository}/actions/runs/${runId}/artifacts?per_page=100`,
@@ -138,6 +153,12 @@ function listProducerArtifacts({ repository, artifactPrefix }) {
         if (artifact.name?.startsWith(artifactPrefix) && !artifact.expired)
           artifacts.push(artifact);
       }
+    }
+    if (reachedCutoff) {
+      process.stderr.write(
+        `Stopped enumerating producer runs older than ${PRODUCER_RUN_LOOKBACK_DAYS} days (artifact retention is ${PRODUCER_ARTIFACT_RETENTION_DAYS} days).\n`,
+      );
+      break;
     }
     if (workflowRuns.length < 100) break;
   }

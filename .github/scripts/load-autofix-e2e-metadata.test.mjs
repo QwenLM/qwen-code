@@ -273,6 +273,72 @@ test('uses immutable producer identity to break equal-source ties', () => {
   }
 });
 
+test('stops enumerating producer runs older than the artifact retention window', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'load-e2e-cutoff-test-'));
+  const bin = join(directory, 'bin');
+  const output = join(directory, 'metadata.json');
+  const calls = join(directory, 'calls.log');
+  const originalPath = process.env['PATH'];
+  const recentIso = new Date(
+    Date.now() - 2 * 24 * 60 * 60 * 1000,
+  ).toISOString();
+  const staleIso = new Date(
+    Date.now() - 60 * 24 * 60 * 60 * 1000,
+  ).toISOString();
+  const encoded = Buffer.from(JSON.stringify(metadata)).toString('base64');
+  try {
+    mkdirSync(bin);
+    writeFileSync(
+      join(bin, 'gh'),
+      [
+        '#!/usr/bin/env bash',
+        `printf '%s\\n' "$*" >> ${JSON.stringify(calls)}`,
+        'case "$*" in',
+        `  *"actions/workflows/main-ci-failure-issue.yml/runs"*) printf '%s' '{"workflow_runs":[{"id":701,"created_at":"${recentIso}"},{"id":700,"created_at":"${staleIso}"}]}';;`,
+        '  *"actions/runs/701/artifacts"*) printf \'%s\' \'{"artifacts":[{"id":10,"name":"autofix-e2e-failure-123-456-2-701-1","expired":false,"workflow_run":{"id":701}}]}\';;',
+        // A leak past the retention cutoff must fail the test loudly.
+        '  *"actions/runs/700"*) exit 1;;',
+        '  *"actions/runs/701"*) printf \'%s\' \'{"path":".github/workflows/main-ci-failure-issue.yml","event":"workflow_run"}\';;',
+        '  *"actions/artifacts/10/zip"*) printf \'trusted-zip\';;',
+        '  *"actions/runs/456"*) printf \'%s\' \'{"name":"E2E Tests","run_attempt":2,"event":"push","head_branch":"main","conclusion":"failure","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\';;',
+        '  *) exit 1;;',
+        'esac',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(bin, 'unzip'),
+      [
+        '#!/usr/bin/env bash',
+        'if [[ "$1" == "-Z1" ]]; then',
+        "  printf 'metadata.json\\n'",
+        'else',
+        `  printf '%s' '${encoded}' | base64 --decode`,
+        'fi',
+        '',
+      ].join('\n'),
+    );
+    chmodSync(join(bin, 'gh'), 0o755);
+    chmodSync(join(bin, 'unzip'), 0o755);
+    process.env['PATH'] = `${bin}:${originalPath}`;
+
+    assert.deepEqual(
+      loadMetadata({
+        issue: 123,
+        repository: 'QwenLM/qwen-code',
+        output,
+      }),
+      metadata,
+    );
+    const invocationLog = readFileSync(calls, 'utf8');
+    assert.match(invocationLog, /actions\/runs\/701\/artifacts/);
+    assert.doesNotMatch(invocationLog, /actions\/runs\/700/);
+  } finally {
+    process.env['PATH'] = originalPath;
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('rejects malformed artifact and producer run identifiers', () => {
   const directory = mkdtempSync(join(tmpdir(), 'load-e2e-id-test-'));
   const bin = join(directory, 'bin');

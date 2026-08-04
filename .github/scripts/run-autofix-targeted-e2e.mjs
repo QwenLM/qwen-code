@@ -21,7 +21,7 @@ export { isProtectedVerificationPath };
 export const MAX_CASES = 5;
 export const VERIFICATION_REPORT_ROOT = '/tmp/qwen-autofix-verify-home/reports';
 const CASE_TIMEOUT_MS = 20 * 60 * 1000;
-export const TRUSTED_EXTERNAL_PROCESS_TESTS = new Set([
+export const TRUSTED_EXTERNAL_PROCESS_E2E_TESTS = new Set([
   'cli/qwen-serve-client-mcp.test.ts',
 ]);
 const SAFE_ENV_NAMES = [
@@ -79,7 +79,7 @@ export function validateTestPath(file, workspace = process.cwd()) {
     fail('E2E test path escapes integration-tests');
   if (!/\.test\.[cm]?[jt]sx?$/.test(normalized))
     fail('E2E target is not a test file');
-  if (!TRUSTED_EXTERNAL_PROCESS_TESTS.has(normalized))
+  if (!TRUSTED_EXTERNAL_PROCESS_E2E_TESTS.has(normalized))
     fail(
       `E2E target is not in the trusted external-process allowlist: ${file}`,
     );
