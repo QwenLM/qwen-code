@@ -2900,6 +2900,25 @@ describe('ShellTool', () => {
       });
     });
 
+    it('keeps a successful PTY exit code successful when signal metadata is present', async () => {
+      const invocation = shellTool.build({
+        command: 'pty-cleanup-command',
+        is_background: false,
+      });
+      const promise = invocation.execute(mockAbortSignal);
+      resolveShellExecution({
+        output: 'completed',
+        exitCode: 0,
+        signal: 15,
+        aborted: false,
+      });
+
+      const result = await promise;
+
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('Output: completed');
+    });
+
     it.each([
       'grep pattern file',
       'rg pattern file',
