@@ -94,8 +94,12 @@ function resolveGhAuthToken(
             message = `GitHub CLI authentication lookup for ${hostname} timed out after ${GH_AUTH_TIMEOUT_MS / 1000} seconds.`;
           } else if (typeof code === 'number') {
             message = `No GitHub CLI authentication is available for ${hostname}. Run \`gh auth login --hostname ${hostname}\` on the daemon host. gh config dir: ${
-              env['GH_CONFIG_DIR'] ??
-              (env['HOME'] ? `${env['HOME']}/.config/gh` : 'unknown')
+              env['GH_CONFIG_DIR'] ||
+              (env['XDG_CONFIG_HOME']
+                ? `${env['XDG_CONFIG_HOME']}/gh`
+                : env['HOME']
+                  ? `${env['HOME']}/.config/gh`
+                  : 'unknown')
             }`;
           } else {
             message = `GitHub CLI authentication lookup for ${hostname} failed to execute.`;

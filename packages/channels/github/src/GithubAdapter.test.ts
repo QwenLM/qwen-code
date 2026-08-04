@@ -699,6 +699,9 @@ describe('GithubChannel', () => {
     });
 
     it('reports when the selected gh host is not authenticated', async () => {
+      vi.stubEnv('GH_CONFIG_DIR', '');
+      vi.stubEnv('XDG_CONFIG_HOME', '');
+      vi.stubEnv('HOME', '/home/test-user');
       mockExecFile.mockImplementation(
         (
           _file: string,
@@ -716,6 +719,9 @@ describe('GithubChannel', () => {
 
       await expect(channel.connect()).rejects.toThrow(
         'gh auth login --hostname github.com',
+      );
+      await expect(channel.connect()).rejects.toThrow(
+        'gh config dir: /home/test-user/.config/gh',
       );
       await expect(channel.connect()).rejects.not.toThrow('secret stderr');
     });
@@ -739,6 +745,49 @@ describe('GithubChannel', () => {
       await expect(channel.connect()).rejects.toThrow(
         'gh config dir: /tmp/test-gh-config',
       );
+    });
+
+    it('prefers XDG_CONFIG_HOME over HOME in the gh config dir hint', async () => {
+      vi.stubEnv('GH_CONFIG_DIR', '');
+      vi.stubEnv('XDG_CONFIG_HOME', '/tmp/test-xdg-config');
+      mockExecFile.mockImplementation(
+        (
+          _file: string,
+          _args: string[],
+          _options: unknown,
+          callback: (error: Error & { code: number }, stdout: string) => void,
+        ) => callback(Object.assign(new Error('exit 1'), { code: 1 }), ''),
+      );
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ token: '', useLocalGh: true }),
+        makeBridge(),
+      );
+
+      await expect(channel.connect()).rejects.toThrow(
+        'gh config dir: /tmp/test-xdg-config/gh',
+      );
+    });
+
+    it('reports an unknown gh config dir when no config source is available', async () => {
+      vi.stubEnv('GH_CONFIG_DIR', '');
+      vi.stubEnv('XDG_CONFIG_HOME', '');
+      vi.stubEnv('HOME', '');
+      mockExecFile.mockImplementation(
+        (
+          _file: string,
+          _args: string[],
+          _options: unknown,
+          callback: (error: Error & { code: number }, stdout: string) => void,
+        ) => callback(Object.assign(new Error('exit 1'), { code: 1 }), ''),
+      );
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ token: '', useLocalGh: true }),
+        makeBridge(),
+      );
+
+      await expect(channel.connect()).rejects.toThrow('gh config dir: unknown');
     });
 
     it('surfaces bounded gh stderr in the authentication failure', async () => {
