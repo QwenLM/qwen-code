@@ -403,7 +403,8 @@ jobs:
           "${GIT_SAFE[@]}" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
             | while read -r stale_ref; do
                 if [ -n "$stale_ref" ]; then
-                  "${GIT_SAFE[@]}" branch -D "$stale_ref" || true
+                  "${GIT_SAFE[@]}" branch -D "$stale_ref" ||
+                    echo "::warning::could not remove review branch: $stale_ref"
                 fi
               done || true
           "${GIT_SAFE[@]}" worktree prune -v || true
@@ -1011,6 +1012,21 @@ jobs:
             | awk '$1 == "worktree" && index($0, "/.qwen/tmp/review-pr-") > 0 { sub(/^worktree /, ""); print }' \
             | while read -r worktree; do
                 [ -n "$worktree" ] || continue
+                # Registered paths come from leftover git metadata and are
+                # untrusted: the awk filter above matched by substring, so reject
+                # `..` traversal and re-anchor to the review prefix before the
+                # destructive remove.
+                case "$worktree" in
+                  */../*|../*|*/..)
+                    echo "::warning::skipping suspicious review worktree path: $worktree"
+                    continue
+                    ;;
+                  "$GITHUB_WORKSPACE/.qwen/tmp/review-pr-"*) : ;;
+                  *)
+                    echo "::warning::skipping unexpected review worktree path: $worktree"
+                    continue
+                    ;;
+                esac
                 "${GIT_SAFE[@]}" worktree remove --force "$worktree" ||
                   echo "::warning::could not remove review worktree: $worktree"
               done || true

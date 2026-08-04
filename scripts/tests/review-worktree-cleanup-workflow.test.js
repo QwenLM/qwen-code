@@ -37,30 +37,58 @@ const branchFamily = toPosix(reviewBranch(probePr)).slice(
 
 const ciYaml = parse(readFileSync('.github/workflows/ci.yml', 'utf8'));
 // Every ci.yml job that checks out on the shared self-hosted pool inherits a
-// possibly dirty workspace. Enumerate by pool + checkout instead of job name
-// so the next such job fails here instead of on the runners.
+// possibly dirty workspace. Match the pool itself, not just the output
+// reference that usually names it: jobs can also hard-code the shared label
+// array, and a checkout on either form inherits the same leftovers.
+// Enumerate by pool + checkout instead of job name so the next such job
+// fails here instead of on the runners.
 const ciCleanSteps = Object.entries(ciYaml.jobs)
   .filter(
     ([, job]) =>
-      JSON.stringify(job['runs-on'] ?? '').includes('ubuntu_runner') &&
+      /ubuntu_runner|ecs-qwen/.test(JSON.stringify(job['runs-on'] ?? '')) &&
       (job.steps ?? []).some((s) =>
         String(s.uses ?? '').includes('actions/checkout'),
       ),
   )
   .map(([id, job]) => ({
     id,
+    steps: job.steps,
     run: job.steps.find((s) => s.name === 'Clean stale .qwen before checkout')
       ?.run,
   }));
 const reviewYaml = parse(
   readFileSync('.github/workflows/qwen-code-pr-review.yml', 'utf8'),
 );
-const reviewCleanStep = reviewYaml.jobs['review-pr'].steps.find(
+const reviewCleanSteps = reviewYaml.jobs['review-pr'].steps;
+const reviewCleanIndex = reviewCleanSteps.findIndex(
   (s) => s.name === 'Clean review worktrees',
-).run;
-const agentStateCleanStep = reviewYaml.jobs['review-pr'].steps.find(
+);
+const reviewCleanStep = reviewCleanSteps[reviewCleanIndex].run;
+const agentStateCleanStep = reviewCleanSteps.find(
   (s) => s.name === 'Clean stale agent state',
 ).run;
+
+// Comments may name the recipe pieces out of order when explaining them, so
+// the order and isolation assertions below cover the commands only.
+const stripComments = (run) =>
+  run
+    .split('\n')
+    .filter((line) => !line.trim().startsWith('#'))
+    .join('\n');
+
+// The steps run under `bash -e` + pipefail, and a failing for-each-ref or
+// worktree-list head is exactly the corrupt-leftover state they exist to
+// tolerate: every piped sweep loop must degrade to a warning via its
+// trailing `|| true`, never fail the job.
+function expectPipedLoopsIsolated(code, minLoops) {
+  const loops =
+    code.match(/\|\s*while read -r \w+; do[\s\S]*?\n\s*done(?: \|\| true)?/g) ??
+    [];
+  expect(loops.length).toBeGreaterThanOrEqual(minLoops);
+  for (const loop of loops) {
+    expect(loop.endsWith('done || true')).toBe(true);
+  }
+}
 
 // prune (sync registrations) -> force-remove -> prune (drop now-stale
 // entries) -> delete branches: a branch checked out in a live worktree
@@ -69,27 +97,29 @@ function expectCleanupRecipe(run) {
   expect(run).toContain(`index($0, "/${worktreePrefix}")`);
   expect(run).toContain('worktree remove --force');
   expect(run).toContain(`refs/heads/${branchFamily}*`);
-  // Order assertions below cover the commands only: comments may name the
-  // recipe pieces out of order when explaining them.
-  const code = run
-    .split('\n')
-    .filter((line) => !line.trim().startsWith('#'))
-    .join('\n');
+  // The awk filter matches registered paths by substring, but those paths
+  // come from leftover git metadata and are untrusted: the removal loop
+  // must reject `..` traversal and re-anchor to the review prefix first.
+  expect(run).toContain('skipping suspicious review worktree path');
+  expect(run).toContain(`"$GITHUB_WORKSPACE/${worktreePrefix}"*) : ;;`);
+  const code = stripComments(run);
   const remove = code.indexOf('worktree remove --force');
   const firstPrune = code.indexOf('worktree prune');
   expect(firstPrune).toBeGreaterThan(-1);
   expect(firstPrune).toBeLessThan(remove);
   expect(code.indexOf('worktree prune', remove)).toBeGreaterThan(remove);
   expect(code.indexOf(`refs/heads/${branchFamily}*`)).toBeGreaterThan(remove);
+  expectPipedLoopsIsolated(code, 2);
 }
 
 function expectHardenedGit(run) {
   expect(run).toContain(
     'GIT_SAFE=(git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$GITHUB_WORKSPACE")',
   );
-  expect(run).not.toMatch(
-    /^\s+git(?:\s+-C\s+"\$GITHUB_WORKSPACE")?\s+(?:worktree|for-each-ref|branch)\b/m,
-  );
+  // Any column, any verb: the review-workflow copies are unindented after
+  // YAML block-scalar stripping, and a bare `git` call would run un-hardened
+  // against leftover untrusted .git config.
+  expect(run).not.toMatch(/^\s*git\s/m);
 }
 
 const awkAvailable = spawnSync('awk', ['BEGIN { exit 0 }']).status === 0;
@@ -103,11 +133,25 @@ describe('review worktree cleanup steps', () => {
         'integration_cli',
       ]),
     );
-    for (const { id, run } of ciCleanSteps) {
+    for (const { id, steps, run } of ciCleanSteps) {
       expect(
         run,
         `job "${id}" checks out on the shared pool and must clean stale .qwen state first`,
       ).toBeDefined();
+      // Position is load-bearing: the sweep must run after the ownership
+      // restore (git refuses root-owned leftovers) and before checkout
+      // (after checkout it no-ops on the fresh tree).
+      const cleanIdx = steps.findIndex(
+        (s) => s.name === 'Clean stale .qwen before checkout',
+      );
+      const checkoutIdx = steps.findIndex((s) =>
+        String(s.uses ?? '').includes('actions/checkout'),
+      );
+      const restoreIdx = steps.findIndex(
+        (s) => s.name === 'Restore workspace ownership',
+      );
+      expect(cleanIdx, id).toBeGreaterThan(restoreIdx);
+      expect(cleanIdx, id).toBeLessThan(checkoutIdx);
       expectCleanupRecipe(run);
       expectHardenedGit(run);
     }
@@ -123,6 +167,11 @@ describe('review worktree cleanup steps', () => {
   });
 
   it('keeps the review-job cleanup sweep pinned to paths.ts', () => {
+    // `always()` and the end-of-job position are what make the step fire on
+    // the failure/cancellation paths it exists for: Actions' default
+    // success() condition would skip it once any earlier step fails.
+    expect(reviewCleanSteps[reviewCleanIndex].if).toBe('always()');
+    expect(reviewCleanIndex).toBe(reviewCleanSteps.length - 1);
     expectCleanupRecipe(reviewCleanStep);
     expectHardenedGit(reviewCleanStep);
     // Fallback for worktree directories Git no longer knows about.
@@ -139,6 +188,7 @@ describe('review worktree cleanup steps', () => {
     expect(agentStateCleanStep).toContain(`rm -rf ${worktreePrefix}*`);
     expect(agentStateCleanStep).toContain(`refs/heads/${branchFamily}*`);
     expectHardenedGit(agentStateCleanStep);
+    expectPipedLoopsIsolated(stripComments(agentStateCleanStep), 1);
   });
 
   it('uses one identical worktree filter at every list-driven sweep', () => {
