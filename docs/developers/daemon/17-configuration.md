@@ -63,9 +63,9 @@ This page collects every setting that affects the `qwen serve` daemon and its ad
 
 ### Read by the `qwen serve` CLI wrapper
 
-| Env                                   | Effect                                                                                                                                                                                                                                                                                                                      |
-| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN` | Non-blank bearer token of at most 8192 UTF-16 code units without control characters, copied into `ServeOptions.externalToolGuard` only in required mode. The CLI then deletes the ambient value before runtime environments are frozen; ACP children, channel workers, and executor environments also scrub it defensively. |
+| Env                                   | Effect                                                                                                                                                                                                                                                                                                                |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN` | Non-blank bearer token of at most 8192 printable ASCII characters (0x21–0x7E), copied into `ServeOptions.externalToolGuard` only in required mode. The CLI then deletes the ambient value before runtime environments are frozen; ACP children, channel workers, and executor environments also scrub it defensively. |
 
 ### Forwarded to the ACP child through `BridgeOptions.childEnvOverrides`
 

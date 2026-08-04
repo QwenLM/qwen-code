@@ -112,7 +112,7 @@ Rules:
 
 - `--external-tool-guard-mode` accepts `off|required` and defaults to `off`.
 - `required` requires an origin-only loopback HTTP(S) endpoint and a non-blank
-  token of at most 8192 UTF-16 code units without control characters from
+  token of at most 8192 printable ASCII characters (0x21–0x7E) from
   `QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN`.
 - Endpoint userinfo, query, fragment, and non-root paths are rejected.
 - `localhost` is pinned by the client to `127.0.0.1` (with `localhost` SNI for

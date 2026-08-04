@@ -465,18 +465,22 @@ describe('RequiredExternalToolGuard', () => {
     ).toThrow('loopback');
   });
 
-  it.each(['', 'secret\r\nforged', 'secret\u2028forged'])(
-    'rejects an unsafe provider token',
-    (token) => {
-      expect(
-        () =>
-          new RequiredExternalToolGuard({
-            endpoint: 'http://127.0.0.1:8787',
-            token,
-          }),
-      ).toThrow(/non-blank token without control characters/);
-    },
-  );
+  it.each([
+    '',
+    'secret\r\nforged',
+    'secret\u2028forged',
+    '密钥',
+    'café-secret',
+    'my secret',
+  ])('rejects an unsafe provider token', (token) => {
+    expect(
+      () =>
+        new RequiredExternalToolGuard({
+          endpoint: 'http://127.0.0.1:8787',
+          token,
+        }),
+    ).toThrow(/printable ASCII/);
+  });
 
   it('rejects non-string provider inputs deterministically', () => {
     expect(

@@ -13,7 +13,6 @@ import type {
   ExternalToolGuardPrepareResult,
 } from '@qwen-code/acp-bridge/bridgeOptions';
 import {
-  containsUnsafeExternalToolGuardControlCharacter,
   EXTERNAL_TOOL_GUARD_TOKEN_ENV,
   isValidExternalToolGuardDenialReason,
 } from '@qwen-code/acp-bridge/externalToolGuard';
@@ -83,19 +82,24 @@ function normalizeEndpoint(raw: unknown): URL {
   return endpoint;
 }
 
-function normalizeToken(raw: unknown): string {
-  if (
-    typeof raw !== 'string' ||
-    containsUnsafeExternalToolGuardControlCharacter(raw)
-  ) {
-    throw new TypeError(
-      `Invalid ${EXTERNAL_TOOL_GUARD_TOKEN_ENV}: expected a non-blank token without control characters.`,
-    );
+function isPrintableAscii(value: string): boolean {
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code < 0x21 || code > 0x7e) {
+      return false;
+    }
   }
-  const token = raw.trim();
-  if (token.length === 0 || token.length > 8192) {
+  return true;
+}
+
+function normalizeToken(raw: unknown): string {
+  // Stricter than Node's Latin-1 header limit: a token Node cannot encode in
+  // `Authorization` only fails at handshake time (ERR_INVALID_CHAR), which in
+  // required mode blocks daemon startup with an unexplained error.
+  const token = typeof raw === 'string' ? raw.trim() : '';
+  if (token.length === 0 || token.length > 8192 || !isPrintableAscii(token)) {
     throw new TypeError(
-      `Invalid ${EXTERNAL_TOOL_GUARD_TOKEN_ENV}: expected a non-blank token without control characters.`,
+      `Invalid ${EXTERNAL_TOOL_GUARD_TOKEN_ENV}: expected a non-blank token of at most 8192 printable ASCII characters.`,
     );
   }
   return token;

@@ -448,9 +448,10 @@ qwen serve \
 The provider must expose `POST /v1/handshake` and `POST /v1/prepare`, require
 `Authorization: Bearer <token>`, return JSON, echo the supplied nonce or
 request ID, and use protocol version `1`. The token must be non-blank, at most
-8192 UTF-16 code units, and contain no control characters. Requests are limited
-to 1 MiB, responses to 64 KiB, and optional denial reasons to 500 UTF-16 code
-units without control characters. A successful prepare response is:
+8192 characters, and contain only printable ASCII (0x21–0x7E). Requests are
+limited to 1 MiB, responses to 64 KiB, and optional denial reasons to 500
+UTF-16 code units without control characters. A successful prepare response
+is:
 
 ```json
 { "protocolVersion": 1, "requestId": "<echo>", "allowed": true }
