@@ -86,10 +86,23 @@ only in those records, and land with the redacted follow-up.
 | Recall margin (fan-out ÷ naive) | ~8.5×                    | ~7×                                  |
 | Named per-agent tokens          | 1c 6.8M, 5 6.4M, 3a 6.2M | 1c 16M (~35% of the arm)             |
 
-Re-deriving from the table: solving the two-rate decomposition from the
-two fan-out totals against their subject and test line counts yields
-~2.6M per 1,000 subject lines and ~1.5M per 1,000 test lines (an exact
-fit, n=2); the 60M cap is ~1.3× the larger measured arm (~46M).
+Re-deriving from the table: solving the two-rate decomposition from the two
+fan-out totals against their subject and test line counts yields ~2.61M per
+1,000 subject lines and ~1.46M per 1,000 test lines (an exact fit, n=2 — quoted
+to the precision the fit requires, because rounding to ~2.6/~1.5 prices the
+hooks module over its measured cost, as Budget ceiling notes); the 60M cap is
+~1.3× the larger measured arm (~46M). The fit is ill-conditioned, and the
+fragility matters more than "n=2" conveys: the two modules' subject counts sit
+within ~11% of each other (7,638 vs 8,516), so the system is near-singular in
+the subject dimension — moving Round 1's author-reported, undated total from
+~32.5M to 28M (a 14% change) shifts the subject rate from ~2.61M to ~1.17M
+(-55%) and the test rate from ~1.46M to ~2.21M (+51%). The fit still prices
+each calibration module at its own total by construction, so the fragility is
+invisible where it is measured; it bites off-ratio — exactly the unmeasured
+regime — where a 9,000-subject / 2,000-test module prices at ~26M under the
+published rates and ~15M under the perturbed ones, ~1.8× apart on the number
+the consent gate confirms against. That is why the Verification section's
+Records item is a ship criterion for the constants as well as the spec.
 
 **Provenance.** The two records above are untracked files on the author's
 machine, and this document says what that stamping can and cannot support:
@@ -104,8 +117,11 @@ from this document, so a summary would cost nothing — is an unpaid debt
 of this design's argument, and this PR ships without paying it: the
 untracked originals exist only on the author's machine, so the records
 land as a follow-up from that machine, named in Verification as a ship
-criterion for implementation — the spec must not be built before its
-evidence is checkable.
+criterion for implementation and for the constants — the spec must not be
+built, and its rates and caps must not be coded, before the records are
+checkable and the constants are re-derived from the committed totals: the fit's
+conditioning (Measurement inputs) makes the author-reported numbers a first
+cut, not a source.
 
 ## Scope and non-goals
 
@@ -153,8 +169,7 @@ section; the benefit is that neither document lies about its flow.
 - The cross-round findings ledger does not lift into v1 (Open
   questions).
 
-What is reused is the **TypeScript layer**, in two grades. **Lifts
-as-is:** the findings schema and the budget machinery's shape (a
+**Lifts as-is:** the findings schema and the budget machinery's shape (a
 plan-derived size→work mapping; `plan-files` supplies the line counts).
 Both land in `packages/core/src/utils/` — the shared home the Output
 section's check-ignore consolidation also lands in, and for the same
@@ -231,17 +246,14 @@ gate), `check-coverage`/`lib/coverage.ts` (which recomputes
 `resolve-anchors.ts` — all on `/review`'s certifying path. `/audit`'s
 tier semantics are explicitly unmeasured first cuts, and in-place
 parameterization would land every later audit calibration edit in code
-`/review`'s coverage gate recomputes on every `/review` run — a
-regression exposure `/review`'s tests do not cover, one sentence after
-this section draws its own reuse boundary. The trade still holds —
-re-expressing against the target kind is cheaper than forking the
-document — and it lands on that boundary: the shared layer is the schema
-and the budget shape, not the printing or the gates — the brief blocks
-read the diff file through windows the chunk plan computes, so they key
-on it as hard as the gates key on diff metrics — and `/review`'s
-certifying path stays untouched, so an `/audit` calibration edit cannot
-move `/review`'s coverage gate. The cross-round findings ledger does not
-lift into v1 — see Open questions.
+`/review`'s coverage gate recomputes on every `/review` run — riding
+recalibration churn into the certifying path while audit's semantics are still
+first cuts, one sentence after this section draws its own reuse boundary. The
+trade still holds — re-expressing against the target kind is cheaper than
+forking the document — and it lands on that boundary for the briefs as well as
+the gates: the brief blocks read the diff file through windows the chunk plan
+computes, so they key on it as hard as the gates key on diff metrics. The
+cross-round findings ledger does not lift into v1 — see Open questions.
 
 ### Target resolution and planning
 
@@ -253,10 +265,12 @@ lift into v1 — see Open questions.
 - Classification is `plan-diff`'s four file-kind rules, with
   `GENERATED_RE`'s directory clause split rather than adopted: `vendor/`
   stays a subject; the build-output / dependency-install / tooling class
-  — `dist/`, `build/`, `node_modules/`, and their same-shape peers
-  `.git/`, `target/`, `.venv/`, `__pycache__/`, `coverage/`, `.next/`,
-  `vendor/bundle/` — is excluded from enumeration outright and is never
-  an audit subject. `test` is the only kind that routes out of the
+  — `dist/`, `build/`, `node_modules/`, and their same-shape peers `.git/`,
+  `target/`, `.venv/`, `__pycache__/`, `coverage/`, `.next/`, `out/`,
+  `.gradle/`, `obj/`, `Pods/`, `.tox/`, `vendor/bundle/` — is excluded from
+  enumeration outright, by directory name anywhere under the audited path
+  (including the path root), and is never an audit subject. `test` is the only
+  kind that routes out of the
   subject set (to Agent 5); other `generated` files and `docs` files
   stay subjects and count toward the gate.
 - The topology gate is a hard bound in v1: subject lines ≤ 9,000, and —
@@ -289,17 +303,25 @@ subcommand, `qwen audit plan-files <path>`, which plays the role
   dimension agents' read of a vendored subtree. `dist/`, `build/`, and
   `node_modules/` are the opposite — the audited checkout's own build
   outputs and dependency installs, not code a path choice plausibly
-  points at — and the same class runs past the JS tree: `.git/`,
-  `target/`, `.venv/`, `__pycache__/`, `coverage/`, `.next/`, and
-  `vendor/bundle/` (the one exclusion inside a subject tree — `vendor/`
-  stays a subject; only its Bundler install subtree drops out). All of
-  them are excluded from enumeration outright: never audit subjects,
+  points at — and the same class runs past the JS tree: `.git/`, `target/`,
+  `.venv/`, `__pycache__/`, `coverage/`, `.next/`, `out/`, `.gradle/`, `obj/`,
+  `Pods/`, `.tox/`, and `vendor/bundle/` (the one exclusion inside a subject
+  tree — `vendor/` stays a subject; only its Bundler install subtree drops
+  out). All of them are excluded from enumeration outright — by directory name
+  anywhere under the audited path, including the path root itself: never audit
+  subjects,
   never counted toward either gate arm, because a filesystem walk of
   any built package root enumerates `dist/` (and a package-local
   `node_modules/`) that would otherwise count toward the 9,000-line
-  gate and be handed to whole-file walkers — `/audit packages/core`
-  would refuse at the gate on build output while
-  `/audit packages/core/src/permissions` stays fine. `.git/` is the
+  gate and be handed to whole-file walkers — `/audit packages/core` would
+  refuse at the gate on build output while
+  `/audit packages/core/src/permissions` stays fine. The root case follows the
+  same rule: `/audit packages/core/dist` enumerates zero subjects and refuses
+  with the empty-subject-set refusal — visible, not silent, and deliberately
+  not rescued by the path-choice principle: that principle keeps `vendor/` a
+  subject because vendored source is code a path choice plausibly names, while
+  a directory named `dist` is build output in every position, root included.
+  `.git/` is the
   sharp case: the walk deliberately ignores `.gitignore`, every
   checkout with history carries one, and its text files
   (`COMMIT_EDITMSG`, `config`, `hooks/*.sample`, `packed-refs`) match
@@ -417,18 +439,19 @@ read, or a read-only verification as an executed one.
   confirms on the size gate alone (Effort tiers). Both consents need an
   interactive terminal: `/audit` refuses non-interactive starts rather
   than treating absence as consent.
-- Medium is capped at 60M tokens and 40 agents, enforced at plan time
-  against the priced part of the plan; the caps are advisory for the
-  unpriced rest. Of the two, only the token cap can bind in v1 — the
-  countable roster tops out at 11 — so the agent cap is the forward
-  bound of the deferred above-gate branch (What the constants leave).
-- Verification shards are not counted against the agent cap — the finding
-  count is unknowable at plan time. High-tier round auditors are not
-  counted either: the cap is a roster bound, and their plan-time bound —
+- Medium is capped at 60M tokens, enforced at plan time against the priced part
+  of the plan; the cap is advisory for the unpriced rest. The 40-agent bound is
+  not a v1 check — the countable roster tops out at 11, so it cannot fire — and
+  is documented as the forward bound of the deferred above-gate branch (What
+  the constants leave).
+- Verification shards are not counted against the agent bound — the finding
+  count is unknowable at plan time. High-tier round auditors are not counted
+  either: the bound is a roster bound, and their plan-time bound —
   roster + file-group count × the 5-round cap, computed from `plan-files`
   output — is disclosed at the confirmation instead, with the header
   recording the actual agent count.
-- An over-cap plan refuses and asks for a narrower path or a lower tier;
+- A plan over the token cap refuses and asks for a narrower path or a lower
+  tier;
   overshoot is made visible in the report header, not prevented.
 
 The default tier is the expensive one by construction — fan-out recall is
@@ -446,18 +469,23 @@ the product — so it ships with a stated bound, not an open tab:
   whole-file topology that is now the only topology — but that is an
   attribution number, not a per-line rate: it already absorbs the cost of
   reading the tests, so pricing test lines at it too double-counts them.
-  Decomposing the same two totals into per-class rates — an exact fit,
-  n=2, flagged as such — yields ~2.6M per 1,000 subject lines and ~1.5M
-  per 1,000 test lines; the estimate quotes those rates as its floor and
-  the same 1.3× headroom the cap below applies as its top (~3.4M /
-  ~1.9M). The estimate therefore brackets both calibration modules
+  Decomposing the same two totals into per-class rates — an exact fit, n=2,
+  flagged as such — yields ~2.61M per 1,000 subject lines and ~1.46M per 1,000
+  test lines; the estimate quotes those rates as its floor and the same 1.3×
+  headroom the cap below applies as its top (~3.39M / ~1.90M). The rates are
+  quoted to the precision the fit requires: rounded to ~2.6/~1.5 they price the
+  hooks module's floor at ~46.6M — over its measured ~46M — and the cap check
+  would refuse the replication this design rests on at plan time. The estimate
+  therefore brackets both calibration modules
   instead of refusing them: the permissions module prices at 32.5–42.3M
   against its measured ~32.5M, and the hooks module at 46M–~60M against
   its measured ~46M — the top lands at the 60M cap's edge because the
   cap is derived from that module (1.3× its measured cost). The flat
-  subject-rate pricing an earlier draft carried quoted the hooks module
-  at 99–149M and refused both modules the design's evidence rests on at
-  plan time. Medium adds work no measurement covers (6a, verification),
+  subject-rate pricing an earlier draft carried applied the attribution rate to
+  subject-plus-test lines — the double-count the decomposition exists to remove
+  — and priced the hooks module at ~107–134M (24,851 lines × 4.3–5.4M),
+  refusing both modules the design's evidence rests on at plan time. Medium
+  adds work no measurement covers (6a, verification),
   so the confirmation names that delta as unmeasured rather than pricing
   it into the range. The run starts only on user confirmation, the same
   confirmation that carries the execution consent above — and only on
@@ -472,35 +500,38 @@ the product — so it ships with a stated bound, not an open tab:
   unattended demand emerges; it is deferred, not v1, because the
   failure mode it opens is third-party code executing unattended,
   not a number wrong.
-- **Ceiling.** Medium is capped at 60M tokens and 40 agents, both enforced at
-  plan time — the agent count against the deterministic roster, the token
-  cap against the estimate range's top. That top is not the run's
+- **Ceiling.** Medium is capped at 60M tokens, enforced at plan time against
+  the estimate range's top. That top is not the run's
   conservative cost: the estimate prices only the measured 8-dimension core,
   while medium's added work — 6a, verification — is named as unmeasured at
   the confirmation and stays unpriced, so the cap guards the priced part of
   the plan and is advisory for the rest; with no runtime accounting, nothing
-  enforces it mid-flight. The agent cap carries the same carve-out, naming
-  both classes it does not count: verification shards, which scale with the
-  finding count, unknowable at plan time; and high-tier round auditors,
-  which are plan-time-predictable — the bound is roster + file-group count
-  × the 5-round cap, computed from `plan-files` output — and disclosed as
-  such at the confirmation. So 40 is a roster bound, not a run bound: a
-  run that finds much exceeds it, and a high run near the gate reaches
+  enforces it mid-flight. The 40-agent bound is not a v1 check — the countable
+  roster tops out at 11, so no plan-time count can fire — and is documented as
+  the forward bound of the deferred above-gate branch. It is a roster bound,
+  not a run bound, naming both classes it does not count: verification shards,
+  which scale with the finding count, unknowable at plan time; and high-tier
+  round auditors, which are plan-time-predictable — the bound is roster +
+  file-group count × the 5-round cap, computed from `plan-files` output — and
+  disclosed as such at the confirmation. A run that finds much exceeds it, and
+  a high run near the gate reaches
   3–4× of it (a ~9,000-subject module tiles into ~23 groups at the
   400-line group constant — ~11 roster + up to 5 rounds × ~23 auditors +
   shards). The overshoot is made visible rather than prevented — the
   report header records the run's actual token consumption against the
   estimate, split between the priced core and the unpriced additions (6a,
   verification, high-tier rounds) so the delta can feed the per-line rate
-  uncontaminated, and the actual agent count against the 40 cap — and a
-  plan whose priced part is over either cap refuses and asks for a
-  narrower path or a lower tier. Both constants are unmeasured first cuts
+  uncontaminated, and the actual agent count against the 40 bound — and a plan
+  whose priced part is over the token cap refuses and asks for a narrower path
+  or a lower tier. Both constants are unmeasured first cuts
   — 60M is ~1.3× the larger measured arm — and they ride into the report
   header with the other unexercised-machinery flags. The token cap
   carries no independent information beyond that measured arm, and that
   is deliberate: the estimate's top applies the same 1.3× headroom the
-  cap applies, so the two factors cancel and the check reduces to "the
-  plan's priced cost is at most the largest cost we measured". Stated
+  cap applies, so the two factors cancel and the check reduces to "the plan's
+  priced cost is at most the largest cost we measured" — exactly, at the
+  precision the rates are quoted; rounding to two significant figures breaks
+  the cancellation (the estimate names the corner). Stated
   here because two identical 1.3×s would otherwise read as two
   independent choices, and the dead-zone analysis below inherits
   the reduction. High is extrapolation: its estimate is the medium
@@ -517,17 +548,17 @@ stays the marginal-yield decision above.
 admitted by construction: the hooks module — the larger calibration arm,
 and the replication this document's argument cites — prices at ~60M top
 against the 60M cap, and permissions at ~42M; a cap check that refused
-either module would refuse the evidence the design rests on. The agent
-cap is even further from binding: it cannot fire in v1 at all. The
+either module would refuse the evidence the design rests on. The agent bound is
+even further from binding: v1 does not enforce it at all. The
 countable roster is 9 at medium and 11 at high;
-verification shards and high-tier round auditors are carved out of the
-cap by the decision above; and the only machinery that could grow the
+verification shards and high-tier round auditors are carved out of the bound by
+the decision above; and the only machinery that could grow the
 priced roster — chunk agents, the invariant-checklist triple — arrives
 only with the deferred above-gate branch, and v1 refuses above the
-gate. No v1 plan presents a countable roster above 11, so the plan-time
-agent check is a no-op: 40 is stated the way the token cap's corner
-case is stated below — a named forward bound for the deferred branch,
-not a check that enforces anything in v1. The token cap binds only at
+gate. No v1 plan presents a countable roster above 11, so 40 ships as
+documentation, not a check — the way the token cap's corner case is stated
+below, a named forward bound for the deferred branch rather than live machinery
+nobody exercises. The token cap binds only at
 the corner neither experiment measured: the full below-gate worst case —
 9,000 subject lines at the 18,000 test cap — prices at ~65M top, over the
 60M cap, so a module at both arms' extreme corner (subject at the gate,
@@ -621,7 +652,7 @@ preamble on the strength of it has misread the defense.
 **Tier arithmetic:** medium launches the table's nine dimension agents (rows
 1a through 6a) plus verification shards; high adds the 6b/6c row. The
 invariant triple is deferred with the above-gate branch (Open questions),
-and the 40-agent cap counts the roster only — the ceiling's carve-out
+and the 40-agent bound counts the roster only — the ceiling's carve-out
 names both classes it does not count (verification shards, high-tier
 round auditors), and the round-auditor bound is disclosed at the
 confirmation.
@@ -750,8 +781,11 @@ user files the cluster.
 **Independent discovery is evidence, not noise:** a root cause hit by
 several agents from different dimensions is a high-confidence signal, and
 the cluster's report entry should say "found independently by N agents" —
-Round 2's most-confirmed findings (a redirect SSRF and a permission-merge
-flaw, 3-4 independent discoveries each) were also its most severe.
+Round 2's most-confirmed findings (a redirect SSRF and a permission-merge flaw,
+3-4 independent discoveries each) were also its most severe. The
+permission-merge flaw is the hooks module's own — its aggregator merges
+PermissionRequest hook outputs, permission decisions included — not a
+carry-over from Round 1's permissions subject.
 
 Verification keeps the `/review` shape — sharded batches ruling on each
 finding's failure scenario against the real code, minus the one clause
@@ -775,13 +809,21 @@ the class 1c produces, and the headline "found the two Criticals nobody
 else could" findings that required assembling a three-file chain — is
 unreachable by this mechanism, and cross-file findings therefore cap at
 the unit-probe evidence tier: the end-to-end tier is reserved for what a
-scratch copy can actually exercise. Two smaller edges ride with the
-mechanism: a sibling `.ts` file lands in the package's tsconfig include
+scratch copy can actually exercise. Four smaller edges ride with the mechanism:
+a sibling `.ts` file lands in the package's tsconfig include
 set, so a concurrent `npm run typecheck` compiles the scratch copy —
 probes are short-lived (created for the probe, deleted when it lands or
-errors), so the window is named here rather than solved — and the
-reserved scratch prefix must be chosen so the project's own test globs
-cannot match it, or a concurrent test run picks the sibling up.
+errors), so the window is named here rather than solved; the reserved scratch
+prefix must be chosen so the project's own test globs
+cannot match it, or a concurrent test run picks the sibling up; the sibling is
+untracked in a tracked directory for the probe's lifetime, so a concurrent
+`git add -A` or a pre-commit hook in another terminal can pick it up — the same
+short-lived window, bounded the same way, with the reserved prefix making the
+pickup legible when it happens; and the audited path may not be writable at all
+(a read-only vendored mount), in which case scratch creation fails and
+verification degrades to the same path as a declined probe opt-in (Open
+questions) — findings adjudicated from code reads only, every evidence tier
+capped accordingly, the reason recorded in the header.
 
 ### Output
 
@@ -853,8 +895,8 @@ cannot match it, or a concurrent test run picks the sibling up.
   the estimate — split between the priced 8-dimension core and
   the unpriced additions (6a, verification, high-tier rounds), so the
   calibration loop can isolate the per-line rate uncontaminated by
-  unpriced work — and the actual agent count against the 40 cap, so the
-  delta lands in the record and feeds the next calibration.
+  unpriced work — and the actual agent count against the 40 bound, so the delta
+  lands in the record and feeds the next calibration.
 - **Drift protection:** re-checks the audited path, not the
   repository, before each high-tier round, before verification, and
   at write time — before anchor resolution, alongside the write-time
@@ -924,19 +966,27 @@ cannot match it, or a concurrent test run picks the sibling up.
   `/audit` has no verdict for them to cap.
 - **Local-only, verified not assumed:** the report must never land in version
   control — a real security property, since an audit of a security module will
-  quote exploitable code. The property holds only when the project ignores
+  quote exploitable code. The property covers every path the run writes
+  module-derived content to, not only the report: the plan file and the
+  per-agent prompt records the reused plan machinery produces — `/review` lands
+  that class under `.qwen/tmp/` (`prompt-record.ts` derives the record
+  directory from the plan path), and agent returns quote the module verbatim,
+  so the class carries the same exploitable content as the report. The
+  agent-output cache (`.qwen/review-cache/`) is the same class where it exists;
+  v1 writes none, because the incremental cache keys on re-audit, an open
+  question. The property holds only when the project ignores
   `.qwen/*` and nothing re-includes or force-adds the audits path: this repo's
   own `.gitignore` re-includes four `.qwen/` subtrees and tracks force-added
   files under `.qwen/`, and `/audit` runs in arbitrary repositories where
   `.qwen/` may not be ignored at all. So `plan-files` checks at plan time,
-  alongside the other plan-time refusals, with two probes:
-  `git check-ignore` on the audits path, checking a representative file
-  path rather than the directory for the same re-include reason; and an
-  index probe — `git ls-files -- .qwen/audits/` — because `check-ignore`
-  evaluates ignore rules against a pathname, and the representative
-  report path is always a fresh timestamped file never in the index, so
-  a repository with an established force-add history under the audits
-  path passes the pattern check while the risk it names is live. The
+  alongside the other plan-time refusals, with two probes, run for the audits
+  directory and every intermediate directory named above: `git check-ignore` on
+  the directory, checking a representative file path rather than the directory
+  itself for the same re-include reason; and an index probe —
+  `git ls-files -- <dir>/` — because `check-ignore` evaluates ignore rules
+  against a pathname and cannot see what is already tracked, so a repository
+  with an established force-add history under the directory passes the pattern
+  check while the risk it names is live. The
   check-ignore probe is a consolidation, not a third copy — and it
   lands in `packages/core/src/utils/`, not in the review family: the
   two existing probes are module-private copies in different packages,
@@ -960,14 +1010,15 @@ cannot match it, or a concurrent test run picks the sibling up.
   files beneath it passes a single-file probe. The audit caller
   applies that rule its own way — the representative report path for
   the ignore rules, paired with the index probe above for the
-  force-add history. The refusal is not a dead end, and the
-  remedy branches on the reason, because `.git/info/exclude` is not
+  force-add history. The refusal is not a dead end, and the remedy branches on
+  the reason — per module-derived directory, the audits directory and each
+  intermediate directory alike — because `.git/info/exclude` is not
   equally effective everywhere — tracked `.gitignore` patterns outrank
   it, so a tracked re-include negation (`.qwen/*` then `!.qwen/audits/`
   — the pattern shape this repo itself uses) beats an exclude entry and
-  the report stays committable: (a) where nothing ignores the audits
-  path, the plan offers to add the ignore rule for `.qwen/audits/` to
-  `.git/info/exclude` rather than the tracked `.gitignore`, so the
+  the report stays committable: (a) where nothing ignores a module-derived
+  directory, the plan offers to add its ignore rule to `.git/info/exclude`
+  rather than the tracked `.gitignore`, so the
   remedy does not dirty the checkout with its own edit and stamp the
   run's header dirty on a repo the user had clean (with the user's
   confirmation) — and in a fresh repository that has never used
@@ -985,8 +1036,12 @@ cannot match it, or a concurrent test run picks the sibling up.
   re-runs immediately before the report is written, because the ignore
   state can move during a hours-long run — a rule edit, a branch switch,
   an upstream merge — and a flipped answer relocates the report to the
-  outside-repo fallback; the plan-time check keeps its rationale, and
-  the write-time re-check keeps the property. The outside-repo fallback
+  outside-repo fallback; the plan-time check keeps its rationale, and the
+  write-time re-check keeps the property. The intermediates are run-scoped and
+  deleted when the run ends — the report is the only durable artifact — so a
+  flip that relocates the report deletes them with it rather than leaving
+  module-derived content in a repository whose ignore state no longer covers
+  them. The outside-repo fallback
   root resolves through the `Storage` hub — a new state-dir helper
   honoring the `QWEN_HOME` / `QWEN_RUNTIME_DIR` overrides the hub
   already applies to sensitive per-user artifacts, and carrying the
@@ -998,7 +1053,11 @@ cannot match it, or a concurrent test run picks the sibling up.
   exist, so the check passes vacuously there.
 - **The terminal:** a short summary — counts by severity and theme, plus
   the top clusters — not the full list. The report is for acting on; the
-  terminal is for deciding whether to.
+  terminal is for deciding whether to. The summary quotes cluster titles, so it
+  lands in terminal scrollback and any session transcript the user's terminal
+  keeps — accepted: that exposure stays with the same user who ran the audit,
+  and `/audit` writes the summary to no shared or versioned location, which is
+  the property this section guards.
 - **No verdict.** There is nothing to approve. The run ends at the
   report; suggested follow-ups (file issues, fix a cluster, re-audit
   after) are listed, not performed.
@@ -1100,7 +1159,7 @@ The tiers, in detail:
   confirmed results merge into the cumulative list before the next round
   begins. The confirmation quotes the plan-time agent bound — roster +
   file-group count × the 5-round cap — alongside the estimate range, and
-  the header records the actual agent count against the cap (Budget
+  the header records the actual agent count against the forward bound (Budget
   ceiling). Unmeasured; flagged as extrapolation in the report header
   until replicated — alongside any twice-whiffed scopes, since `/audit`
   has no verdict for that disclosure to cap.
@@ -1116,6 +1175,26 @@ capped, sold as triage — as above.)
 - **A mode inside `/review`.** Branches every step of that 1,000-plus-line
   document, whose flow correctness is enforced by subcommands keyed to the
   diff assumptions. See above.
+- **A shared-predicate module in `packages/core`.** The middle path between
+  in-place branching and re-expression: extract the roster and coverage
+  predicates — `hasDeletions()`'s true-on-empty fail-safe, `reviewMode()`'s
+  resolution, the topology gate, the effort clause — into a core module
+  parameterized by target kind, consumed by both skills, with `/review`'s
+  existing tests pinning the diff behavior. This is not the in-place branching
+  the section above objects to — no skill's files gain a branch — and the tests
+  do pin the diff side (`roster.test.ts` covers the mode resolution, the
+  topology gate, the effort clause, and the invariant-gating corner). Rejected
+  for v1 on timing, not location: every predicate in the set takes different
+  inputs and returns different answers per target kind — the misfire analysis
+  above is that list — so the module's substance would be the target-kind
+  switch itself, and `/audit`'s branches are unmeasured first cuts; a shared
+  home would route every early calibration edit through code `/review` imports.
+  Re-expression prices the divergence honestly: the edge cases are named in the
+  re-expression spec above precisely so v1 does not rediscover them blind, and
+  the cost — nothing keeps the two copies in sync as `/review`'s predicates
+  evolve — is paid during the period when `/audit`'s semantics are unmeasured
+  and volatile. Once its constants are measured and its branches stabilize, the
+  extraction becomes a pure refactor and is the natural follow-up.
 - **Whole-repo scans.** Cost scales linearly with size while actionability
   collapses; no measured demand. Module scope is the demonstrated use
   case.
@@ -1180,10 +1259,10 @@ capped, sold as triage — as above.)
   filesystem-walk enumeration source (a gitignored vendored fixture is
   enumerated, where `git ls-files` returns zero), the `GENERATED_RE`
   directory-clause split (the build-output / dependency-install /
-  tooling class — `dist/`, `build/`, `node_modules/`, `.git/`,
-  `target/`, `.venv/`, `__pycache__/`, `coverage/`, `.next/`,
-  `vendor/bundle/` — excluded from enumeration; `vendor/` stays a
-  subject), the vendor override
+  tooling class — `dist/`, `build/`, `node_modules/`, `.git/`, `target/`,
+  `.venv/`, `__pycache__/`, `coverage/`, `.next/`, `out/`, `.gradle/`, `obj/`,
+  `Pods/`, `.tox/`, `vendor/bundle/` — excluded from enumeration by name
+  anywhere under the path; `vendor/` stays a subject), the vendor override
   (test-shaped paths under `vendor/` classify as `test`), and the
   uncoverable-subject exclusion (over-cap lines, non-text files); the
   topology gates (the subject arm at every tier, the test arm at the
@@ -1231,8 +1310,10 @@ capped, sold as triage — as above.)
   so a `/review` user does not carry the wrong expectation across.
 - Records: the redacted Round 1 and Round 2 experiment records under
   `docs/design/assets/` (Provenance section) — landed from the author's
-  machine, the only place the untracked originals exist. A ship criterion
-  for implementing this spec, not for this design document.
+  machine, the only place the untracked originals exist. A ship criterion for
+  implementing this spec, not for this design document — and for the constants:
+  the rates and the cap must be re-derived from the committed totals before
+  they are coded (Measurement inputs).
 - Dogfood: audit a module whose maintainers can confirm or reject the
   Criticals — the external check the self-adjudicated precision record
   rests on — as PR #6457's confirmed-defect set calibrated `/review`.
