@@ -47,6 +47,7 @@ import {
   type GenAiAttemptHandle,
 } from '../../telemetry/gen-ai-request.js';
 import { getCurrentAgentId } from '../../agents/runtime/agent-context.js';
+import { isInForkExecution } from '../../tools/agent/fork-subagent.js';
 
 const debugLogger = createDebugLogger('OPENAI_PIPELINE');
 
@@ -321,7 +322,7 @@ export class ContentGenerationPipeline {
   }
 
   async execute(
-    request: GenerateContentParameters,
+    request: PromptCacheSharingParameters,
     userPromptId: string,
   ): Promise<GenerateContentResponse> {
     return this.executeWithErrorHandling(
@@ -361,7 +362,7 @@ export class ContentGenerationPipeline {
   }
 
   async executeStream(
-    request: GenerateContentParameters,
+    request: PromptCacheSharingParameters,
     userPromptId: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     return this.executeWithErrorHandling(
@@ -853,7 +854,7 @@ export class ContentGenerationPipeline {
         providerRequest,
         this.config.cliConfig.getSessionId?.(),
         request.promptCacheSharing === true,
-        getCurrentAgentId() ?? undefined,
+        isInForkExecution() ? undefined : (getCurrentAgentId() ?? undefined),
       );
     }
 
@@ -1131,7 +1132,7 @@ export class ContentGenerationPipeline {
    * Common error handling wrapper for execute methods
    */
   private async executeWithErrorHandling<T>(
-    request: GenerateContentParameters,
+    request: PromptCacheSharingParameters,
     userPromptId: string,
     isStreaming: boolean,
     executor: (

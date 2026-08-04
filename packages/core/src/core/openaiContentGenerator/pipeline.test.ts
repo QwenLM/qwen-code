@@ -25,11 +25,7 @@ import { OpenAIContentConverter } from './converter.js';
 import { openaiRequestCaptureContext } from './requestCaptureContext.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import type { Config } from '../../config/config.js';
-import {
-  AuthType,
-  type ContentGeneratorConfig,
-  type PromptCacheSharingParameters,
-} from '../contentGenerator.js';
+import { AuthType, type ContentGeneratorConfig } from '../contentGenerator.js';
 import type { OpenAICompatibleProvider } from './provider/index.js';
 import { DefaultOpenAICompatibleProvider } from './provider/default.js';
 import {
@@ -44,6 +40,7 @@ import {
 } from '../../telemetry/gen-ai-usage.js';
 import { setToolCallPreparations } from '../tool-call-preparation.js';
 import { runWithAgentContext } from '../../agents/runtime/agent-context.js';
+import { runInForkContext } from '../../tools/agent/fork-subagent.js';
 
 // Mock dependencies
 const mockReportOpenAiRequest = vi.hoisted(() => vi.fn());
@@ -4289,6 +4286,47 @@ describe('ContentGenerationPipeline', () => {
       );
     });
 
+    it('preserves the session cache key for forked agents', async () => {
+      mockContentGeneratorConfig.baseUrl = 'https://api.openai.com/v1';
+      mockContentGeneratorConfig.model = 'gpt-5.6';
+      mockCliConfig = {
+        getSessionId: vi.fn().mockReturnValue('session-123'),
+      } as unknown as Config;
+      mockConfig.cliConfig = mockCliConfig;
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Hello from a fork' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'test',
+        choices: [{ message: { content: 'response' } }],
+      });
+
+      await runInForkContext(() =>
+        runWithAgentContext('fork-a1b2c3d4', () =>
+          pipeline.execute(
+            {
+              model: 'gpt-5.6',
+              contents: [
+                { role: 'user', parts: [{ text: 'Hello from a fork' }] },
+              ],
+            },
+            'prompt-id',
+          ),
+        ),
+      );
+
+      expect(mockClient.chat.completions.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          prompt_cache_key: 'qwen-code:session-123',
+        }),
+        expect.anything(),
+      );
+    });
+
     it('does not add explicit cache fields to regular GPT-5.6 requests', async () => {
       mockContentGeneratorConfig.baseUrl = 'https://api.openai.com/v1';
       mockContentGeneratorConfig.model = 'gpt-5.6';
@@ -4298,7 +4336,10 @@ describe('ContentGenerationPipeline', () => {
       mockConfig.cliConfig = mockCliConfig;
       pipeline = new ContentGenerationPipeline(mockConfig);
       const messages = [
-        { role: 'user', content: 'Hello' },
+        { role: 'system', content: 'You are helpful.' },
+        { role: 'user', content: 'First question' },
+        { role: 'assistant', content: 'First answer' },
+        { role: 'user', content: 'Follow-up question' },
       ] as OpenAI.Chat.ChatCompletionMessageParam[];
       (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
         messages,
@@ -4353,7 +4394,7 @@ describe('ContentGenerationPipeline', () => {
           model: 'gpt-5.6',
           contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
           promptCacheSharing: true,
-        } as PromptCacheSharingParameters,
+        },
         'prompt-id',
       );
 
@@ -4393,7 +4434,7 @@ describe('ContentGenerationPipeline', () => {
           model: 'gpt-5.6',
           contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
           promptCacheSharing: true,
-        } as PromptCacheSharingParameters,
+        },
         'prompt-id',
       );
 
@@ -4436,7 +4477,7 @@ describe('ContentGenerationPipeline', () => {
           model: 'gpt-5.6',
           contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
           promptCacheSharing: true,
-        } as PromptCacheSharingParameters,
+        },
         'prompt-id',
       );
 
@@ -4483,7 +4524,7 @@ describe('ContentGenerationPipeline', () => {
           model: 'gpt-5.6',
           contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
           promptCacheSharing: true,
-        } as PromptCacheSharingParameters,
+        },
         'prompt-id',
       );
 
