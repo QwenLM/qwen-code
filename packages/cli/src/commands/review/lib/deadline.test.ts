@@ -5,7 +5,13 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -29,6 +35,16 @@ import {
 const NOW_MS = 1_754_000_000_000;
 const NOW_S = NOW_MS / 1000;
 const REQUIRED = DEFAULT_RESERVE_SECONDS + DEFAULT_ROUND_SECONDS;
+
+/** This test run's plan-capture instant: stamps and markers are fenced by
+ * the plan's mtime (a rerun rewrites the plan), and the fixture clock here
+ * is `NOW_MS`, not the wall clock — so the plan must be dated before the
+ * records the tests write against it. */
+const PLAN_CAPTURED_MS = NOW_MS - 10_000_000;
+
+function backdatePlan(p: string, atMs: number = PLAN_CAPTURED_MS): void {
+  utimesSync(p, atMs / 1000, atMs / 1000);
+}
 
 describe('reverseAuditBudgetExhausted — the round must fit, and its tail', () => {
   it('stays silent when no deadline is set — every local run', () => {
@@ -93,6 +109,27 @@ describe('reverseAuditBudgetExhausted — the round must fit, and its tail', () 
     ).not.toBeNull();
   });
 
+  it('honours the reserve-0 escape hatch — only the round itself must fit', () => {
+    // `r >= 0` (not `> 0`) is the documented escape hatch: reserve 0 keeps
+    // only the refusal of a round that cannot finish before the deadline.
+    // An edit to `> 0` would silently fall back to the 3600s default and
+    // refuse the next round a full hour before the operator's deadline.
+    const env = {
+      [DEADLINE_ENV]: String(NOW_S + DEFAULT_ROUND_SECONDS + 60),
+      [RESERVE_ENV]: '0',
+    };
+    expect(
+      reverseAuditBudgetExhausted(env, DEFAULT_ROUND_SECONDS, NOW_MS),
+    ).toBeNull();
+    env[DEADLINE_ENV] = String(NOW_S + DEFAULT_ROUND_SECONDS - 60);
+    const spent = reverseAuditBudgetExhausted(
+      env,
+      DEFAULT_ROUND_SECONDS,
+      NOW_MS,
+    );
+    expect(spent?.reserveSeconds).toBe(0);
+  });
+
   it('fails OPEN on a malformed deadline — the outer kill still bounds the run', () => {
     for (const bad of ['soon', 'NaN', '-5', '0']) {
       expect(
@@ -139,6 +176,7 @@ describe('the round-cost estimate — measured when it can be', () => {
     dirs.push(dir);
     const p = join(dir, 'plan.json');
     writeFileSync(p, '{}');
+    backdatePlan(p);
     return p;
   }
 
@@ -176,11 +214,34 @@ describe('the round-cost estimate — measured when it can be', () => {
     expect(expectedRoundSeconds(p, 2, NOW_MS)).toBe(600);
   });
 
-  it('stamps once per round, whatever the rebuild count', () => {
+  it('stamps once per round, and the FIRST admission is the one that survives', () => {
+    // First-wins is the load-bearing half: "refresh the stamp on rebuild"
+    // (last-wins) also leaves one stamp, but a chunk rebuild late in a round
+    // would then collapse the next round's estimate to the 600s floor and
+    // the gate would admit a terminal round on headroom it does not have.
     const p = plan();
     stampRound(p, 1, NOW_MS - 100);
     stampRound(p, 1, NOW_MS);
-    expect(readRoundStamps(p)).toHaveLength(1);
+    expect(readRoundStamps(p)).toEqual([{ round: 1, atMs: NOW_MS - 100 }]);
+  });
+
+  it('ignores stamps older than the plan — a previous run of the same PR', () => {
+    // The stamps key on the per-PR-stable plan path, and a run killed by the
+    // outer deadline never reaches cleanup — but every run rewrites the plan
+    // at its Step 1 capture, so the plan's mtime fences the runs apart.
+    // Without the fence, an hours-old stamp reads as an hours-long round and
+    // refuses round 1 of a fresh budget.
+    const p = plan();
+    stampRound(p, 1, PLAN_CAPTURED_MS - 28_800_000); // 8h before this capture
+    stampRound(p, 2, PLAN_CAPTURED_MS - 27_000_000);
+    expect(readRoundStamps(p)).toEqual([]);
+    expect(expectedRoundSeconds(p, 1, NOW_MS)).toBe(DEFAULT_ROUND_SECONDS);
+    // A stamp from THIS run still measures, with the stale ones alongside.
+    stampRound(p, 1, NOW_MS - 2_400_000);
+    expect(readRoundStamps(p)).toEqual([
+      { round: 1, atMs: NOW_MS - 2_400_000 },
+    ]);
+    expect(expectedRoundSeconds(p, 2, NOW_MS)).toBe(2400);
   });
 
   it('persists a round-less stamp as null, outside the one-per-round guard', () => {
@@ -203,11 +264,17 @@ describe('the budget-stop marker — the deterministic half of the disclosure', 
     for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
   });
 
-  it('round-trips, entry text and all', () => {
+  function stopPlan(): string {
     const dir = mkdtempSync(join(tmpdir(), 'deadline-stop-'));
     dirs.push(dir);
     const p = join(dir, 'plan.json');
     writeFileSync(p, '{}');
+    backdatePlan(p);
+    return p;
+  }
+
+  it('round-trips, entry text and all', () => {
+    const p = stopPlan();
     writeBudgetStop(
       p,
       {
@@ -224,7 +291,38 @@ describe('the budget-stop marker — the deterministic half of the disclosure', 
     );
     expect(stop?.entryZh).toBe('反向审计——评审时间预算不足，未能开始第 4 轮');
     expect(stop?.round).toBe(4);
-    expect(readBudgetStop(join(dir, 'other.json'))).toBeNull();
+    expect(readBudgetStop(join(dirname(p), 'other.json'))).toBeNull();
+  });
+
+  it('a marker from before the plan capture is a previous run — read as none', () => {
+    // Run 1 refuses a round, writes the marker, and is killed before Step 9
+    // cleanup; run 2 rewrites the plan, admits every round, and never trips
+    // the gate. Its verdict must not be capped by a stop that did not happen
+    // in it.
+    const p = stopPlan();
+    writeBudgetStop(
+      p,
+      {
+        remainingSeconds: 900,
+        reserveSeconds: 3600,
+        expectedRoundSeconds: 1800,
+      },
+      3,
+      PLAN_CAPTURED_MS - 28_800_000, // 8h before this run's capture
+    );
+    expect(readBudgetStop(p)).toBeNull();
+    // A marker written by THIS run replaces it and reads back.
+    writeBudgetStop(
+      p,
+      {
+        remainingSeconds: 900,
+        reserveSeconds: 3600,
+        expectedRoundSeconds: 1800,
+      },
+      3,
+      NOW_MS,
+    );
+    expect(readBudgetStop(p)?.round).toBe(3);
   });
 
   it('the dedup phrase travels with the entry it identifies', () => {
@@ -265,8 +363,25 @@ describe('the CI wiring contract', () => {
       ),
       'utf8',
     );
-    expect(workflow).toContain(`export ${DEADLINE_ENV}`);
-    expect(workflow).toContain(`export ${RESERVE_ENV}`);
+    // Whole line, not substring: `toContain('export QWEN_REVIEW_DEADLINE_EPOCH')`
+    // stayed green when the variable was renamed to any superstring
+    // (`..._EPOCH_SECONDS` is the natural drift beside `..._RESERVE_SECONDS`)
+    // and when the export was commented out — both leave the CLI deadline-less
+    // and the gate failing open on every round.
+    expect(workflow).toMatch(new RegExp(`^\\s*export ${DEADLINE_ENV}$`, 'm'));
+    expect(workflow).toMatch(new RegExp(`^\\s*export ${RESERVE_ENV}$`, 'm'));
+    // The units are part of the contract: a milliseconds deadline admits every
+    // round forever (remaining ≈ 1.7e12); minutes instead of seconds refuses
+    // round 1 on every budgeted run. Pin the arithmetic that fixes both to
+    // whole seconds of epoch / of reserve.
+    expect(workflow).toContain(
+      `${DEADLINE_ENV}="$(( $(date +%s) + attempt_timeout ))"`,
+    );
+    expect(workflow).toContain(`${RESERVE_ENV}="$(( attempt_timeout / 4 ))"`);
+    // The workflow's reserve cap documents itself as mirroring
+    // DEFAULT_RESERVE_SECONDS ("keep the two in sync") — enforce the mirror,
+    // so a one-sided bump diverges a test instead of the CI tail.
+    expect(workflow).toContain(`-gt ${DEFAULT_RESERVE_SECONDS}`);
   });
 });
 

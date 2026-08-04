@@ -38,7 +38,7 @@
 // still bounds the run, and a broken environment variable must degrade to
 // today's behaviour, not wedge every budgeted review at round 1.
 
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { promptRecordDir } from './prompt-record.js';
 
@@ -51,7 +51,22 @@ export const RESERVE_ENV = 'QWEN_REVIEW_DEADLINE_RESERVE_SECONDS';
 /**
  * What must still fit after the last reverse-audit round completes: the
  * verification of that round's findings, compose-review, anchor resolution
- * and the submission itself. This is only the fallback: the budget itself is
+ * and the submission itself.
+ *
+ * The measured round estimate ALSO contains one verification pass — a round
+ * is admitted only after the previous round's findings were verified and
+ * merged (SKILL.md Step 5), so an admission-to-admission span includes the
+ * verification between them — which means the gate holds back roughly one
+ * verification more than the terminal round strictly needs. That overlap is
+ * deliberate margin, not double-entry bookkeeping that slipped: round costs
+ * trend UP (each round re-reads the diff against a longer findings list, and
+ * repair relaunches land mid-loop), so the previous round's measurement
+ * under-predicts the next in exactly the runs that end near the boundary —
+ * and the two error directions are not symmetric. Over-reserving ends the
+ * loop at most one round early, disclosed as a budget stop; under-reserving
+ * is #8368 — killed mid-verification, holding every confirmed finding.
+ *
+ * This is only the fallback: the budget itself is
  * chosen outside the CLI (a repository variable, a workflow input, a
  * `/review --timeout=N` comment), so the review workflow passes a reserve
  * scaled to the budget it resolved rather than trusting this constant to fit
@@ -79,7 +94,42 @@ interface RoundStamp {
 const STAMPS_FILE = 'budget-rounds.json';
 const STOP_FILE = 'budget-stop.json';
 
-/** The admission stamps written so far, oldest first. Unreadable → empty. */
+/**
+ * Slack for the run-epoch fence below: absorbs the sub-millisecond skew
+ * between a file mtime (fractional) and `Date.now()` (integral) when a
+ * record is written moments after the plan. Real cross-run gaps are minutes
+ * to hours; two seconds is noise against them.
+ */
+const RUN_EPOCH_SLACK_MS = 2000;
+
+/**
+ * The run's epoch: records older than this predate the run and are ignored.
+ *
+ * The stamps and the stop marker key on the plan path, which is stable per
+ * PR — but every run rewrites the plan at its Step 1 capture (`fetch-pr` /
+ * `plan-diff` / `capture-local`), so the plan's own mtime dates the run. A
+ * budgeted run killed by the outer deadline leaves its records behind (the
+ * Step 9 cleanup never ran, and the workflow's start-of-run sweep removes
+ * worktrees, not these files); without the fence the next review of the
+ * same PR would price its rounds off the previous run's stamps (an
+ * hours-old stamp reads as an hours-long round and refuses round 1 of a
+ * fresh budget) and cap its verdict on a stop that did not happen in this
+ * run. An unstatable plan disables the fence — fail open, like every other
+ * malformed input this module reads.
+ */
+function runEpochMs(planPath: string): number {
+  try {
+    return statSync(planPath).mtimeMs - RUN_EPOCH_SLACK_MS;
+  } catch {
+    return Number.NEGATIVE_INFINITY;
+  }
+}
+
+/**
+ * The admission stamps written so far THIS RUN, oldest first. Unreadable →
+ * empty; a stamp older than the plan's own capture belonged to a previous
+ * run of the same PR and is dropped (see `runEpochMs`).
+ */
 export function readRoundStamps(planPath: string): RoundStamp[] {
   try {
     const raw = readFileSync(
@@ -88,11 +138,13 @@ export function readRoundStamps(planPath: string): RoundStamp[] {
     );
     const parsed = JSON.parse(raw) as unknown;
     if (!Array.isArray(parsed)) return [];
+    const epoch = runEpochMs(planPath);
     return parsed.filter(
       (e): e is RoundStamp =>
         typeof e === 'object' &&
         e !== null &&
-        typeof (e as RoundStamp).atMs === 'number',
+        typeof (e as RoundStamp).atMs === 'number' &&
+        (e as RoundStamp).atMs >= epoch,
     );
   } catch {
     return [];
@@ -126,9 +178,11 @@ export function stampRound(
  * What the round about to be admitted is expected to cost, in seconds: the
  * observed cost of the previous round (admission-to-admission — its agents,
  * their verification, the orchestration between) when a stamp exists, else
- * the conservative constant. A stamp of the SAME round is ignored — that is
- * a rebuild, and measuring it would report a round as cheap because its
- * prompts were built twice quickly.
+ * the conservative constant. The span deliberately overlaps the tail
+ * reserve by one verification pass — see `DEFAULT_RESERVE_SECONDS` for why
+ * that margin is kept rather than netted out. A stamp of the SAME round is
+ * ignored — that is a rebuild, and measuring it would report a round as
+ * cheap because its prompts were built twice quickly.
  */
 export function expectedRoundSeconds(
   planPath: string,
@@ -272,7 +326,14 @@ export function writeBudgetStop(
   }
 }
 
-/** The budget-stop marker, if this review wrote one. Unreadable → null. */
+/**
+ * The budget-stop marker, if THIS RUN wrote one. Unreadable → null; so is a
+ * marker older than the plan's own capture — a previous run's refusal, left
+ * behind by a kill before cleanup, must not cap a verdict on a stop that
+ * did not happen in this run (see `runEpochMs`). A marker without a numeric
+ * `atMs` cannot prove which run it belongs to and is treated the same way —
+ * only this module writes markers, and it always dates them.
+ */
 export function readBudgetStop(planPath: string): BudgetStop | null {
   try {
     const raw = readFileSync(
@@ -283,7 +344,9 @@ export function readBudgetStop(planPath: string): BudgetStop | null {
     if (
       typeof parsed !== 'object' ||
       parsed === null ||
-      typeof (parsed as BudgetStop).entry !== 'string'
+      typeof (parsed as BudgetStop).entry !== 'string' ||
+      typeof (parsed as BudgetStop).atMs !== 'number' ||
+      (parsed as BudgetStop).atMs < runEpochMs(planPath)
     ) {
       return null;
     }

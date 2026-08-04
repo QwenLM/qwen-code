@@ -512,6 +512,53 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
       }),
     );
     expect(r2.body.split('review time budget').length - 1).toBe(1);
+
+    // Still once when the relay was RESHAPED — an orchestrator prefix ahead
+    // of the subject. The coverage prefix filter cannot see this one (it no
+    // longer starts with `reverse audit — `); only the marker-phrase splice
+    // dedups it, so this is the assertion that fails when the splice goes.
+    const r3 = composeReview(
+      base({
+        planPath: plan,
+        unreviewedDimensions: [
+          'step 5 — reverse audit — stopped before round 4 by the review time budget',
+        ],
+      }),
+    );
+    expect(r3.body.split('review time budget').length - 1).toBe(1);
+  });
+
+  it('the marker does not shadow other reverse-audit scopes the caller disclosed', () => {
+    // The budget entry claims the subject `reverse audit`; the caller-echo
+    // prefix filter must not let it swallow a DIFFERENT reverse-audit scope
+    // reported with its own reason — a whiffed chunk from the rounds that
+    // DID run is exactly what a partially-run audit still owes the author.
+    const plan = coveredPlan();
+    writeBudgetStop(
+      plan,
+      {
+        remainingSeconds: 900,
+        reserveSeconds: 3600,
+        expectedRoundSeconds: 1800,
+      },
+      3,
+    );
+    const r = composeReview(
+      base({
+        planPath: plan,
+        unreviewedDimensions: [
+          "reverse audit — chunk 2's auditor returned nothing substantive twice",
+        ],
+      }),
+    );
+    expect(r.body).toContain(
+      'Not reviewed: reverse audit — stopped before round 3 by the review time budget.',
+    );
+    expect(r.body).toContain(
+      "Not reviewed: reverse audit — chunk 2's auditor returned nothing substantive twice.",
+    );
+    // The marker's own disclosure still renders exactly once.
+    expect(r.body.split('review time budget').length - 1).toBe(1);
   });
 
   it('a round-1 budget stop stands alone — no rogue-audit gap, no rebuild FIX', () => {

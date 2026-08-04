@@ -20,7 +20,14 @@ import {
   afterEach,
   type Mock,
 } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+  readFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
@@ -2512,8 +2519,13 @@ describe('the reverse-audit budget gate — the loop must end by reporting', () 
     const plan = call('reverse-audit', { round: 1 });
     expect(process.exitCode).toBeUndefined();
     expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(1);
-    // The admission is stamped, so the next round's gate can measure this one.
-    expect(readRoundStamps(plan)).toHaveLength(1);
+    // The admission is stamped WITH its round label, so the next round's gate
+    // can measure this one: both stamp consumers key on `round` — an
+    // unlabeled `{round: null}` stamp would slip the one-per-round guard and
+    // price a same-round rebuild at the 600s floor.
+    expect(readRoundStamps(plan)).toEqual([
+      { round: 1, atMs: expect.any(Number) },
+    ]);
 
     (writeStdoutLine as unknown as Mock).mockClear();
     delete process.env[DEADLINE_ENV];
@@ -2538,6 +2550,10 @@ describe('the reverse-audit budget gate — the loop must end by reporting', () 
     expect(process.exitCode).toBeUndefined();
     expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(1);
     expect((writeStderrLine as unknown as Mock).mock.calls).toHaveLength(0);
+    // And it leaves no admission stamp: the stamps are the reverse-audit
+    // loop's clock, and a verifier build hoisted into the stamping path
+    // would corrupt the round measurements without ever being gated.
+    expect(readRoundStamps(plan)).toHaveLength(0);
   });
 
   it('honours a shorter reserve override', () => {
@@ -2633,6 +2649,92 @@ describe('the reverse-audit budget gate — the loop must end by reporting', () 
     expect(readRoundStamps(plan)).toHaveLength(0);
   });
 
+  it('a build that throws after admission leaves no stamp', () => {
+    // The stamp is written after the build succeeds, not at admission: a
+    // stamp is the next round's cost measurement, and one left by a build
+    // that produced nothing would be floored to 600s — widening the next
+    // admission by 1200s in exactly the unsafe direction (a terminal round
+    // admitted on headroom it does not have).
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 7200);
+    const dir = mkdtempSync(join(tmpdir(), 'ap-budget-throw-'));
+    dirs.push(dir);
+    const plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(PLAN));
+    const findings = join(dir, 'findings.md');
+    writeFileSync(findings, '');
+    expect(() =>
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        role: 'reverse-audit',
+        findings,
+        round: 2,
+        chunk: 99, // passes validation and both reads; the BUILD throws
+      }),
+    ).toThrow(/no chunk 99/);
+    expect(readRoundStamps(plan)).toHaveLength(0);
+  });
+
+  it('a structurally unbuildable plan gets its own error, never a budget stop', () => {
+    // Parses, but no round could ever be built from it. Near the deadline
+    // the gate must not speak first: refusing "on the budget" would write a
+    // marker over a corrupt plan, say "proceed to Step 6", and preempt the
+    // actionable repair (re-run the Step 1 capture) — and the same
+    // diagnosis must not flip with the clock.
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 60);
+    const dir = mkdtempSync(join(tmpdir(), 'ap-budget-nochunks-'));
+    dirs.push(dir);
+    const plan = join(dir, 'plan.json');
+    writeFileSync(
+      plan,
+      JSON.stringify({ diffPathAbsolute: PLAN.diffPathAbsolute }),
+    );
+    const findings = join(dir, 'findings.md');
+    writeFileSync(findings, '');
+    expect(() =>
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        role: 'reverse-audit',
+        findings,
+        round: 2,
+        'all-chunks': true,
+      }),
+    ).toThrow(/has no `chunks\[\]`/);
+    expect(process.exitCode).toBeUndefined();
+    expect(readBudgetStop(plan)).toBeNull();
+    expect((writeStderrLine as unknown as Mock).mock.calls).toHaveLength(0);
+  });
+
+  it("ignores a previous run's stamps — the plan rewrite fences them off", () => {
+    // A run killed by the outer deadline leaves budget-rounds.json behind
+    // (Step 9 cleanup never ran). The next review of the same PR rewrites
+    // the plan at capture, so those stamps predate the plan and must not
+    // price this run's rounds: an 8h-old stamp would read as an ~8h round
+    // and refuse round 1 of a fresh budget.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-budget-stale-'));
+    dirs.push(dir);
+    const plan = join(dir, 'plan.json');
+    const recordDir = promptRecordDir(plan);
+    mkdirSync(recordDir, { recursive: true });
+    writeFileSync(
+      join(recordDir, 'budget-rounds.json'),
+      JSON.stringify([{ round: 4, atMs: Date.now() - 28_800_000 }]),
+    );
+    writeFileSync(plan, JSON.stringify(PLAN)); // this run's capture, after
+    const findings = join(dir, 'findings.md');
+    writeFileSync(findings, '');
+    // 5500s remaining fits reserve + the 1800s CONSTANT (5400) — admitted —
+    // while the stale ~28800s measurement would refuse.
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 5500);
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'reverse-audit',
+      findings,
+      round: 1,
+    });
+    expect(process.exitCode).toBeUndefined();
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(1);
+  });
+
   it("measures the previous round's cost at the gate, not the constant", () => {
     // Round 1 admitted with a far deadline (it stamps); backdate the stamp
     // 3000s. The second deadline leaves room for reserve + the CONSTANT
@@ -2648,6 +2750,10 @@ describe('the reverse-audit budget gate — the loop must end by reporting', () 
       join(promptRecordDir(plan), 'budget-rounds.json'),
       JSON.stringify([{ round: 1, atMs: Date.now() - 3_000_000 }]),
     );
+    // Date the plan capture before the backdated stamp: the stamp belongs to
+    // THIS run, and the previous-run fence keys on the plan's mtime.
+    const captured = (Date.now() - 4_000_000) / 1000;
+    utimesSync(plan, captured, captured);
     process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 5500);
     (agentPromptCommand.handler as (a: unknown) => void)({
       plan,

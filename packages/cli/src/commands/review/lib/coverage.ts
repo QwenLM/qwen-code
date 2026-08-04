@@ -939,7 +939,13 @@ type GapText = Record<Exclude<Delivery, 'ok'>, GapEntry>;
 const rebuildFix = (role: 'verify' | 'reverse-audit', noun: string): string =>
   `build the prompt with \`"\${QWEN_CODE_CLI:-qwen}" review agent-prompt ` +
   `--plan <plan> --role ${role} --findings <file> [--rules <rules file>] ` +
-  `[--round <k>]\` ` +
+  // --round is MANDATORY for a reverse-audit build (`agent-prompt` refuses a
+  // round-less call — the label keys the record and the budget gate's
+  // accounting), so the paste-and-run repair must not bracket it as optional:
+  // an orchestrator honouring the bracket convention would have its first
+  // repair attempt rejected. Verify genuinely takes it or not (only a repeat
+  // verification round passes one), so its brackets stay.
+  (role === 'reverse-audit' ? `--round <k>\` ` : `[--round <k>]\` `) +
   (role === 'reverse-audit'
     ? `(an early round with nothing confirmed passes an empty file; `
     : `(pass the shard's findings, never an empty file — a verifier that sees ` +
