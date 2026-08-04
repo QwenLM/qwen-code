@@ -441,6 +441,12 @@ describe('qwen resolve workflow', () => {
     expect(belowMaxArm).toContain(
       '@qwen-code /review --timeout=${MAX_TIMEOUT_MINUTES}',
     );
+    // The branch CONDITION, not just both branch bodies: with both bodies
+    // pinned as substrings, any comparison flip (-ge/-gt/-le) keeps both
+    // strings present and ships the wrong recovery advice on every timeout.
+    expect(fallbackStep).toContain(
+      'if [ "$TIMEOUT_MINUTES" -lt "$MAX_TIMEOUT_MINUTES" ]; then',
+    );
     expect(fallbackStep).toContain(
       'This run already used the maximum ${MAX_TIMEOUT_MINUTES} minute timeout.',
     );
