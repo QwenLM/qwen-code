@@ -182,13 +182,15 @@ export function createSpawnChannelFactory(
       // figure decided on and the figure reported are the same number.
       const concurrentChildren = processRegistry.committedProcessCount;
       const decision = policy?.decide(concurrentChildren);
-      const enforced = policy?.snapshot().enforced ?? false;
-      if (decision?.refuse && enforced) {
-        const { childPoolMb, minChildHeapMb } = policy!.snapshot();
+      // One snapshot for the whole decision, so the mode that gates the
+      // refusal is the same mode that gates whether the share is applied.
+      const snapshot = policy?.snapshot();
+      const enforced = snapshot?.enforced ?? false;
+      if (snapshot && enforced && decision?.refuse) {
         throw new ChildHeapPoolExhaustedError(
-          childPoolMb,
+          snapshot.childPoolMb,
           concurrentChildren,
-          minChildHeapMb,
+          snapshot.minChildHeapMb,
         );
       }
       // `observe` computed a share above and must not apply it: passing the

@@ -113,6 +113,10 @@ The real control is admission at spawn time keyed on concurrently live children,
 - **It must never raise a ceiling.** Clamping to `legacyChildCeilingMb` is what makes the policy safe to apply unconditionally; without it the minimum-budget constant and an over-large explicit flag both inflate the share.
 - **The spawn path has a trap.** `getAcpMemoryArgs()` emits `--max-old-space-size` only when its computed target exceeds the _spawning daemon's own_ `heap_size_limit` (`spawnChannel.ts:27-34`). A budget-derived share is normally below that, so a naive change is silently dropped and the overcommit returns. The regression test must assert the flag survives a value below the test process's own limit.
 
+**Shipped as `--child-heap-mode`.** The share is keyed on children _concurrently committed_ at spawn time — read from the shared `ProcessRegistry` after `reserve()`, so racing spawns see each other — never on registrations, which allocate nothing. The trap above is handled by an explicit-value parameter that bypasses both the module cache and the raise-only guard, with a regression test asserting a 614 MB share survives against a multi-GB runner.
+
+The compatibility point is why the default is `observe`: it computes the share and the admission decision, applies neither, and counts the refusals that would have happened. Enforcement is a deliberate operator action taken once that count shows it is safe — notably for channel swaps, where the dying child is counted alongside its replacement and a saturated pool could otherwise refuse a restart. `enforce` also supplies the aggregate bound a per-child ceiling alone cannot: refusing once the pool cannot cover another child at the floor caps concurrent children at `childPoolMb / 512`.
+
 ### Part 2 — Observe, with a denominator, before enforcing
 
 This part splits by what each piece measures, because the denominators are independent and the cheap one is worth landing first.
