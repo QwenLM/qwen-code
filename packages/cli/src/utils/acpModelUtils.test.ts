@@ -249,23 +249,46 @@ describe('acpModelUtils', () => {
     ['https://user:p?x@api.example/v1', 'https://api.example/v1'],
     ['https://user:p#x@api.example/v1', 'https://api.example/v1'],
     ['https://user:secret@api.example', 'https://api.example'],
-    ['https://user:secret@api.example', 'https://api.example'],
-    // Pathless URL + prose email: WHATWG misparses as userinfo; the veto
-    // (all-digit port before the first space) protects the with-port shape.
+    // #8136: pathless URL + prose email shapes. WHATWG misparses these as
+    // userinfo; the veto (all-digit port before first whitespace) protects the
+    // with-port shape, and the pathless-prose guard protects the no-colon shape.
     [
       'https://api.example:8443 - contact admin@example.com',
       'https://api.example:8443 - contact admin@example.com',
     ],
-    // Space-in-password: the last '@' within the wide authority is the real
+    [
+      'https://api.example - contact admin@example.com',
+      'https://api.example - contact admin@example.com',
+    ],
+    [
+      'https://ollama.local - contact admin@example.com',
+      'https://ollama.local - contact admin@example.com',
+    ],
+    // Credentials + pathless + email: strip the credential, keep host + prose.
+    [
+      'https://user:pass@host.example:8443 - contact admin@example.com',
+      'https://host.example:8443 - contact admin@example.com',
+    ],
+    // Space-in-password: the last '@' within the bounded authority is the real
     // userinfo terminator (the password's '@' precedes it). #8136 R1-1/R1-3.
     [
       'https://user:sec ret@host.example/v1 - contact admin@example.com',
       'https://host.example/v1 - contact admin@example.com',
     ],
     ['https://user:p@ss word@host.example/v1', 'https://host.example/v1'],
-    // Known residual: digit-prefix + space password is vetoed like a portless
-    // URL and leaks. Documented tradeoff (#8136 R1-2).
+    // KNOWN RESIDUAL: digit-prefix + space password is vetoed like a pathless
+    // port URL and leaks. Documented tradeoff (#8136 R1-2).
     ['https://user:1234 secret@host', 'https://user:1234 secret@host'],
+    // URL-throwing shapes (invalid %, space in host) + prose email: do not
+    // strip the prose '@'. #8136 R2-2.
+    [
+      'https://api.example%/v1, contact admin@example.com',
+      'https://api.example%/v1, contact admin@example.com',
+    ],
+    [
+      'https://my service/v1 - contact admin@example.com',
+      'https://my service/v1 - contact admin@example.com',
+    ],
   ])('sanitizes provider base URL credentials for %s', (input, expected) => {
     expect(sanitizeProviderBaseUrl(input)).toBe(expected);
   });

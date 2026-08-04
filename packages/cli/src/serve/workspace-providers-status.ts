@@ -260,17 +260,7 @@ function sanitizeProviderWarning(warning: string): string {
 
     const segmentEnd = findUrlSegmentEnd(warning, next.index, next.marker);
     const segment = warning.slice(next.index, segmentEnd);
-    // Delegate credential stripping to sanitizeProviderBaseUrl, which uses
-    // authority-scoped lastIndexOf('@') and port detection instead of the
-    // naive indexOf that misidentifies ports and passwords containing '@'.
-    // #8136.
-    //
-    // The URL_LIKE_PATTERN stops at whitespace, but credentials may contain
-    // spaces (e.g. "user:sec ret@host"). The old sanitizeProviderWarningSegment
-    // handled this by searching the full segment for '@'; we preserve that
-    // behavior by first trying to strip credentials from the whole segment,
-    // then sanitizing any URL-like substrings in the remainder.
-    result += sanitizeSegmentCredentials(segment);
+    result += sanitizeProviderWarningSegment(segment, next.marker.length);
 
     index = segmentEnd;
     next = findNextUrlStart(warning, index);
@@ -305,25 +295,20 @@ function findUrlSegmentEnd(
   return Math.min(lineEnd, nextUrl?.index ?? value.length);
 }
 
-/**
- * Strip credentials from a URL-containing segment, handling passwords with
- * spaces (which URL_LIKE_PATTERN cannot match) by searching the full segment
- * for the last '@' within the URL authority, then delegating any remaining
- * URL-like substrings to sanitizeProviderBaseUrl for authority-scoped
- * credential stripping. #8136.
- */
-function sanitizeSegmentCredentials(segment: string): string {
-  // First, try the full segment as a URL through sanitizeProviderBaseUrl.
-  // If the segment contains a space in the userinfo (e.g. "user:sec ret@host"),
-  // new URL() will throw and the fallback uses lastIndexOf('@') within the
-  // authority scope.
+function sanitizeProviderWarningSegment(
+  segment: string,
+  _markerLength: number,
+): string {
+  // When the whole segment is a URL that sanitizeProviderBaseUrl confirms
+  // carries real userinfo (it changes the segment), use its result directly.
+  // This handles space-containing-credential URLs that URL_LIKE_PATTERN cannot
+  // match past the whitespace, and the '@'-in-password shape (last '@' wins).
+  // The veto in sanitizeProviderBaseUrl leaves pathless-URL + prose-email
+  // shapes unchanged, so a prose email's '@' is never stripped. #8136.
   const sanitized = sanitizeProviderBaseUrl(segment);
   if (sanitized !== segment) {
     return sanitized;
   }
-
-  // Fall back to per-URL-fragment sanitization for segments that contain
-  // multiple URLs or non-URL text.
   return segment.replace(URL_LIKE_PATTERN, (url) =>
     sanitizeProviderBaseUrl(url),
   );
