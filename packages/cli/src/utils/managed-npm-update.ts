@@ -369,7 +369,11 @@ export async function activateManagedNpmUpdate(
       await fsPromises.rm(temporaryActivePath, { force: true });
     }
   } finally {
-    await release();
+    try {
+      await release();
+    } catch (error) {
+      debugLogger.warn('Failed to release managed npm update lock:', error);
+    }
   }
 }
 

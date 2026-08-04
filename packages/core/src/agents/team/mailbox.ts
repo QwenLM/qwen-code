@@ -83,7 +83,7 @@ const LOCK_OPTIONS: lockfile.LockOptions = {
   // Stale locks from crashed processes are expected in multi-agent
   // scenarios; log at debug level for traceability without noise.
   onCompromised: (err) => {
-    debug.debug('mailbox lock compromised:', err?.message ?? err);
+    debug.debug('mailbox lock compromised:', err);
   },
 };
 

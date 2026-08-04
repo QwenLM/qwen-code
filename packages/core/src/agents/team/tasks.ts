@@ -79,7 +79,7 @@ const LOCK_OPTIONS: lockfile.LockOptions = {
   },
   stale: 5000,
   onCompromised: (err) => {
-    debug.warn('task lock compromised:', err?.message ?? err);
+    debug.warn('task lock compromised:', err);
   },
 };
 

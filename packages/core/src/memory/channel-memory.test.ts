@@ -55,6 +55,7 @@ const fsFailure = vi.hoisted(() => ({
 const lockObservation = vi.hoisted(() => ({
   path: undefined as string | undefined,
   attempted: undefined as (() => void) | undefined,
+  options: undefined as lockfile.LockOptions | undefined,
 }));
 
 vi.mock('proper-lockfile', async (importOriginal) => {
@@ -65,6 +66,7 @@ vi.mock('proper-lockfile', async (importOriginal) => {
       ...actual,
       async lock(...args: Parameters<typeof actual.lock>) {
         if (String(args[0]) === lockObservation.path) {
+          lockObservation.options = args[1];
           lockObservation.attempted?.();
         }
         return actual.lock(...args);
@@ -164,6 +166,7 @@ describe('channel memory', () => {
     fsFailure.legacyAppendAfterRename = undefined;
     lockObservation.path = undefined;
     lockObservation.attempted = undefined;
+    lockObservation.options = undefined;
     vi.restoreAllMocks();
     if (originalQwenHome === undefined) {
       delete process.env['QWEN_HOME'];
@@ -435,6 +438,24 @@ describe('channel memory', () => {
     } finally {
       await releaseOldWorker();
     }
+  });
+
+  it('completes mutations when the channel memory lock is compromised', async () => {
+    writeJson(serializeChannelMemoryDocument({ version: 1, entries: [] }));
+    lockObservation.path = path.join(
+      path.dirname(getChannelMemoryFilePath(target)),
+      '.channel-memory.lock',
+    );
+    lockObservation.attempted = () => {
+      lockObservation.options?.onCompromised?.(new Error('lock lost'));
+    };
+
+    await expect(
+      addChannelMemoryEntries(target, ['Run tests']),
+    ).resolves.toMatchObject({ changed: true });
+
+    expect(lockObservation.options?.onCompromised).toBeTypeOf('function');
+    await expect(readChannelMemory(target)).resolves.toBe('Run tests\n');
   });
 
   it('does not delete legacy bytes changed after canonical commit', async () => {
