@@ -118,6 +118,7 @@ function sessionWorkflowSetting(): DaemonSettingDescriptor {
 }
 
 const {
+  mockCollectSystemInfo,
   mockConnection,
   mockSessionActions,
   mockWorkspace,
@@ -185,7 +186,9 @@ const {
     listWorkspaceSessions: vi.fn(() => Promise.resolve([])),
   };
   const settingsSetValue = vi.fn().mockResolvedValue(undefined);
+  const mockCollectSystemInfo = vi.fn();
   return {
+    mockCollectSystemInfo,
     mockConnection: connection,
     mockSessionActions: {
       sendPrompt: vi.fn().mockResolvedValue(undefined),
@@ -441,6 +444,10 @@ vi.mock('./hooks/useQueuedPrompts', () => ({
     editLastQueuedPrompt,
     clearQueuedPrompts,
   }),
+}));
+
+vi.mock('./utils/systemInfo', () => ({
+  collectSystemInfo: mockCollectSystemInfo,
 }));
 
 vi.mock('./components/ChatEditor', async () => {
@@ -2347,6 +2354,16 @@ beforeEach(() => {
   mockWorkspaceActions.loadProviders.mockResolvedValue({ current: null });
   mockWorkspaceActions.loadPreflight.mockResolvedValue(null);
   mockWorkspaceActions.loadEnv.mockResolvedValue(null);
+  mockCollectSystemInfo.mockImplementation(() => ({
+    nodeVersion: '',
+    npmVersion: '',
+    authSource: '',
+    platform: '',
+    arch: '',
+    sandbox: '',
+    proxy: '',
+    memoryUsage: '',
+  }));
   mockWorkspaceActions.loadMcpStatus.mockResolvedValue({ servers: [] });
   mockWorkspaceActions.loadMcpTools.mockResolvedValue([]);
   mockWorkspaceActions.loadMcpResources.mockResolvedValue([]);
@@ -3957,6 +3974,31 @@ describe('App read-only local commands mid-turn', () => {
         expect(consoleError).toHaveBeenCalledWith(
           '[web-shell]',
           expect.stringContaining('stats unavailable'),
+          expect.anything(),
+        );
+      });
+    });
+
+    consoleError.mockRestore();
+  });
+
+  it('reports /about load failures instead of swallowing them', async () => {
+    renderApp({});
+    await flush();
+
+    mockCollectSystemInfo.mockImplementationOnce(() => {
+      throw new Error('status unavailable');
+    });
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/about');
+      await vi.waitFor(() => {
+        expect(consoleError).toHaveBeenCalledWith(
+          '[web-shell]',
+          expect.stringContaining('status unavailable'),
           expect.anything(),
         );
       });

@@ -5010,8 +5010,6 @@ export function App({
   // commands (/stats, /about, /context) render their result as a status
   // block, which does not split the active turn, so they run immediately
   // mid-turn with only the echo skipped (see appendLocalUserEchoIfIdle).
-  // Their result dispatch must pass `clearActiveText: false`, otherwise the
-  // status block would finalize the in-flight assistant block mid-stream.
   const echoLocalCommandIfIdle = useCallback(
     (text: string): void => {
       appendLocalUserEchoIfIdle(streamingStateRef.current !== 'idle', text, {
@@ -5019,6 +5017,18 @@ export function App({
       });
     },
     [store],
+  );
+
+  // Shared result dispatch for those read-only commands: `clearActiveText:
+  // false` keeps the status block from finalizing the in-flight assistant
+  // block mid-stream, which would split the streaming answer and orphan its
+  // usage frames.
+  const dispatchReadOnlyStatus = useCallback(
+    (text: string) => {
+      store.dispatch([{ type: 'status', text, clearActiveText: false }]);
+      resumeChatBottomFollow('smooth');
+    },
+    [store, resumeChatBottomFollow],
   );
 
   const blockLocalCommandDuringTurn = useCallback((): false => {
@@ -5891,15 +5901,7 @@ export function App({
       sessionActions
         .getContextUsage({ detail })
         .then((result) => {
-          store.dispatch([
-            {
-              type: 'status',
-              text: serializeContextUsageMessage(result),
-              // Mid-turn runs must not finalize the streaming block.
-              clearActiveText: false,
-            },
-          ]);
-          resumeChatBottomFollow('smooth');
+          dispatchReadOnlyStatus(serializeContextUsageMessage(result));
         })
         .catch((error: unknown) => {
           reportError(error, 'Failed to load context usage');
@@ -5907,11 +5909,10 @@ export function App({
     },
     [
       echoLocalCommandIfIdle,
-      store,
+      dispatchReadOnlyStatus,
       requireActiveSessionForLocalCommand,
       sessionActions,
       reportError,
-      resumeChatBottomFollow,
     ],
   );
 
@@ -7586,15 +7587,9 @@ export function App({
             sessionActions
               .getStats()
               .then((result) => {
-                store.dispatch([
-                  {
-                    type: 'status',
-                    text: serializeStatsMessage(result, statsView),
-                    // Mid-turn runs must not finalize the streaming block.
-                    clearActiveText: false,
-                  },
-                ]);
-                resumeChatBottomFollow('smooth');
+                dispatchReadOnlyStatus(
+                  serializeStatsMessage(result, statsView),
+                );
               })
               .catch((error: unknown) => {
                 reportError(error, 'Failed to load stats');
@@ -7661,15 +7656,7 @@ export function App({
                   memoryUsage: sys.memoryUsage,
                 };
 
-                store.dispatch([
-                  {
-                    type: 'status',
-                    text: serializeStatusMessage(info),
-                    // Mid-turn runs must not finalize the streaming block.
-                    clearActiveText: false,
-                  },
-                ]);
-                resumeChatBottomFollow('smooth');
+                dispatchReadOnlyStatus(serializeStatusMessage(info));
               })
               .catch((error: unknown) => {
                 reportError(error, 'Failed to load status info');
@@ -7816,6 +7803,7 @@ export function App({
       enqueuePrompt,
       echoOrDeferLocalCommand,
       echoLocalCommandIfIdle,
+      dispatchReadOnlyStatus,
       branchCurrentSession,
       closeMobileDrawer,
       closePanel,
