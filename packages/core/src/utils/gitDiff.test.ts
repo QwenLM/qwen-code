@@ -631,6 +631,36 @@ describe('fetchGitDiff', () => {
     );
     expect(await fetchGitDiff(repo)).toBeNull();
     expect((await fetchGitDiffHunks(repo)).size).toBe(0);
+    // Branch mode reads the worktree, so it stays gated too.
+    expect(
+      await fetchGitDiff(repo, { mode: 'branch', ref: 'main' }),
+    ).toBeNull();
+  });
+
+  it('keeps commit comparisons available during a transient merge state', async () => {
+    await fs.writeFile(path.join(repo, 'a.txt'), 'hello\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'init');
+    await fs.writeFile(path.join(repo, 'b.txt'), 'world\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'second');
+    const sha = (
+      await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: repo })
+    ).stdout.trim();
+    // Fake a merge in progress; commit mode compares two immutable commits,
+    // so it must stay available — inspecting what a commit brought in is most
+    // useful exactly while resolving the incoming changes.
+    await fs.writeFile(
+      path.join(repo, '.git', 'MERGE_HEAD'),
+      '0000000000000000000000000000000000000000\n',
+    );
+    const result = await fetchGitDiff(repo, { mode: 'commit', ref: sha });
+    expect([...result!.perFileStats.keys()]).toEqual(['b.txt']);
+    const hunks = await fetchGitDiffHunksForFile(repo, 'b.txt', undefined, {
+      mode: 'commit',
+      ref: sha,
+    });
+    expect(hunks?.hunks.flatMap((h) => h.lines)).toContain('+world');
   });
 });
 

@@ -8,25 +8,39 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { SessionGitIntent } from './GitModePopover';
+
+const popoverHarness = vi.hoisted(() => ({
+  open: false,
+  onOpenChange: undefined as ((open: boolean) => void) | undefined,
+}));
 
 vi.mock('./ui/popover', async () => {
   const { createElement } = await import('react');
-  let onOpenChange: ((open: boolean) => void) | undefined;
   return {
     Popover: ({
       children,
-      onOpenChange: nextOnOpenChange,
+      open,
+      onOpenChange,
     }: {
       children?: unknown;
+      open?: boolean;
       onOpenChange?: (open: boolean) => void;
     }) => {
-      onOpenChange = nextOnOpenChange;
+      popoverHarness.open = open ?? false;
+      popoverHarness.onOpenChange = onOpenChange;
       return createElement('div', null, children);
     },
     PopoverTrigger: ({ children }: { children?: unknown }) =>
-      createElement('div', { onClick: () => onOpenChange?.(true) }, children),
+      createElement(
+        'div',
+        { onClick: () => popoverHarness.onOpenChange?.(true) },
+        children,
+      ),
+    // Render content only while `open`, like Radix, so keep-open-on-failure /
+    // close-on-success are asserted against the real open state.
     PopoverContent: ({ children }: { children?: unknown }) =>
-      createElement('div', null, children),
+      popoverHarness.open ? createElement('div', null, children) : null,
   };
 });
 
@@ -80,6 +94,53 @@ function clickButton(name: string): void {
   );
   expect(button).toBeTruthy();
   act(() => button?.click());
+}
+
+function openChip(): void {
+  act(() => {
+    (
+      document.body.querySelector(
+        '[data-testid="git-mode-chip"]',
+      ) as HTMLButtonElement
+    ).click();
+  });
+}
+
+function renderPopover(
+  props: {
+    workspaceCwd?: string;
+    onIntentChange?: (intent: SessionGitIntent) => void;
+  } = {},
+): void {
+  act(() => {
+    root.render(
+      <I18nProvider language="en">
+        <GitModePopover
+          branch="main"
+          workspaceCwd={props.workspaceCwd ?? '/repo'}
+          intent={{ mode: 'current' }}
+          onIntentChange={props.onIntentChange ?? vi.fn()}
+        />
+      </I18nProvider>,
+    );
+  });
+}
+
+function optionButtons(): HTMLButtonElement[] {
+  return Array.from(
+    document.body.querySelectorAll('[role="option"]'),
+  ) as HTMLButtonElement[];
+}
+
+function setSearchValue(input: HTMLInputElement, value: string): void {
+  act(() => {
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )?.set;
+    setter?.call(input, value);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
 }
 
 beforeEach(() => {
@@ -341,5 +402,160 @@ describe('GitModePopover existing branches', () => {
     expect(workspaceByCwd).toHaveBeenLastCalledWith('/other');
     expect(document.body.textContent).toContain('Other repo failed');
     expect(document.body.querySelectorAll('[role="option"]')).toHaveLength(0);
+  });
+
+  it('blocks a second checkout until the first settles, then closes on success', async () => {
+    let resolveCheckout!: (value: {
+      branch: string;
+      detached: boolean;
+    }) => void;
+    workspaceGitCheckout.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveCheckout = resolve;
+        }),
+    );
+    const onIntentChange = vi.fn();
+    renderPopover({ onIntentChange });
+    openChip();
+    clickButton('Existing branch');
+    await flush();
+
+    clickButton('topic');
+    const inFlight = optionButtons();
+    expect(inFlight).toHaveLength(3);
+    expect(inFlight.every((option) => option.disabled)).toBe(true);
+    act(() => inFlight[1]?.click());
+    expect(workspaceGitCheckout).toHaveBeenCalledTimes(1);
+    expect(workspaceGitCheckout).toHaveBeenCalledWith('topic');
+
+    await act(async () => {
+      resolveCheckout({ branch: 'topic', detached: false });
+    });
+    await flush();
+    expect(onIntentChange).toHaveBeenCalledWith({ mode: 'current' });
+    expect(popoverHarness.open).toBe(false);
+    expect(optionButtons()).toHaveLength(0);
+  });
+
+  it('re-enables the choices after a failed checkout so a retry can proceed', async () => {
+    workspaceGitCheckout
+      .mockRejectedValueOnce(new Error('index locked'))
+      .mockResolvedValueOnce({ branch: 'topic', detached: false });
+    renderPopover();
+    openChip();
+    clickButton('Existing branch');
+    await flush();
+
+    clickButton('topic');
+    await flush();
+    expect(document.body.textContent).toContain('index locked');
+    expect(optionButtons().every((option) => !option.disabled)).toBe(true);
+
+    clickButton('topic');
+    await flush();
+    expect(workspaceGitCheckout).toHaveBeenCalledTimes(2);
+    expect(popoverHarness.open).toBe(false);
+    expect(optionButtons()).toHaveLength(0);
+  });
+
+  it('drops a stale branch list that lands after switching workspaces', async () => {
+    let resolveStale!: (value: unknown) => void;
+    workspaceGitBranches.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveStale = resolve;
+        }),
+    );
+    renderPopover({ workspaceCwd: '/repo' });
+    openChip();
+    clickButton('Existing branch');
+
+    // Switch workspaces while the first fetch is still in flight.
+    renderPopover({ workspaceCwd: '/other' });
+    await flush();
+    expect(workspaceByCwd).toHaveBeenLastCalledWith('/other');
+    expect(optionButtons()).toHaveLength(3);
+
+    await act(async () => {
+      resolveStale({
+        v: 1,
+        workspaceCwd: '/repo',
+        available: true,
+        local: [{ name: 'stale-branch', isHead: false }],
+        remote: [],
+        tags: [],
+        recent: [],
+        head: 'main',
+        detached: false,
+      });
+    });
+    await flush();
+
+    expect(document.body.textContent).not.toContain('stale-branch');
+    expect(optionButtons()).toHaveLength(3);
+  });
+
+  it('clears a stale error when another workspace loads its branches', async () => {
+    workspaceGitBranches.mockRejectedValueOnce(new Error('repo failed'));
+    renderPopover({ workspaceCwd: '/repo' });
+    openChip();
+    clickButton('Existing branch');
+    await flush();
+    expect(document.body.textContent).toContain('repo failed');
+
+    renderPopover({ workspaceCwd: '/other' });
+    await flush();
+
+    expect(document.body.textContent).not.toContain('repo failed');
+    expect(optionButtons()).toHaveLength(3);
+  });
+
+  it('resets the search query on reopen and filters case-insensitively', async () => {
+    renderPopover();
+    openChip();
+    clickButton('Existing branch');
+    await flush();
+
+    const search = document.body.querySelector(
+      'input[aria-label="Search branches\u2026"]',
+    ) as HTMLInputElement;
+    setSearchValue(search, ' TOPIC ');
+    expect(optionButtons().map((option) => option.textContent?.trim())).toEqual(
+      ['topic'],
+    );
+
+    setSearchValue(search, 'no-such-branch');
+    expect(document.body.textContent).toContain('No matching branches');
+    expect(optionButtons()).toHaveLength(0);
+
+    act(() => popoverHarness.onOpenChange?.(false));
+    expect(optionButtons()).toHaveLength(0);
+
+    openChip();
+    clickButton('Existing branch');
+    await flush();
+    const reopened = document.body.querySelector(
+      'input[aria-label="Search branches\u2026"]',
+    ) as HTMLInputElement;
+    expect(reopened.value).toBe('');
+    expect(optionButtons()).toHaveLength(3);
+  });
+
+  it('clears a fetch error when the popover reopens', async () => {
+    workspaceGitBranches.mockRejectedValueOnce(new Error('boom'));
+    renderPopover();
+    openChip();
+    clickButton('Existing branch');
+    await flush();
+    expect(document.body.textContent).toContain('boom');
+
+    act(() => popoverHarness.onOpenChange?.(false));
+    openChip();
+    clickButton('Existing branch');
+    await flush();
+
+    expect(document.body.textContent).not.toContain('boom');
+    expect(optionButtons()).toHaveLength(3);
   });
 });

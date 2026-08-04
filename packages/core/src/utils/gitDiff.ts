@@ -78,6 +78,11 @@ interface GitDiffComparison {
   args: string[];
   includeUntracked: boolean;
   untrackedBaseRef?: string;
+  /** True when the comparison reads the worktree or index, which transient
+   *  states (merge, rebase, cherry-pick, revert) fill with changes the user
+   *  didn't intentionally make. Commit-vs-commit comparisons read immutable
+   *  objects only and stay available through those states. */
+  transientSensitive: boolean;
 }
 
 const GIT_TIMEOUT_MS = 5000;
@@ -132,9 +137,10 @@ function getUntrackedOpenFlags(): number {
  * `fetchGitDiffHunks`.
  *
  * Returns `null` when not inside a git repo, when git itself fails, or when
- * the working tree is in a transient state (merge, rebase, cherry-pick,
- * revert) — those states carry incoming changes that weren't intentionally
- * made by the user.
+ * a worktree/index-targeting comparison runs while the working tree is in a
+ * transient state (merge, rebase, cherry-pick, revert) — those states carry
+ * incoming changes that weren't intentionally made by the user. Commit mode
+ * compares two immutable commits and stays available through those states.
  */
 export async function fetchGitDiff(
   cwd: string,
@@ -150,9 +156,10 @@ export async function fetchGitDiff(
   // invoked from a subdirectory of the worktree.
   const gitRoot = findGitRoot(cwd);
   if (!gitRoot) return null;
-  if (await isInTransientGitState(gitRoot)) return null;
   const comparison = await resolveGitDiffComparison(gitRoot, options);
   if (!comparison) return null;
+  if (comparison.transientSensitive && (await isInTransientGitState(gitRoot)))
+    return null;
 
   // Shortstat probe + untracked scan run in parallel — both are needed
   // regardless of which path we take, and shortstat is O(1) memory so it can
@@ -384,8 +391,9 @@ export async function fetchGitDiffHunks(
  * single all-added hunk, so the viewer can show new files like any other
  * addition. `truncated` is set whenever the per-file caps cut content on either
  * path (parser cap for tracked diffs, byte/line caps for synthesized untracked
- * ones). Returns `null` for non-repos, transient states, paths outside the repo,
- * binary or unreadable untracked files, and tracked files with no changes.
+ * ones). Returns `null` for non-repos, worktree/index comparisons during
+ * transient states, paths outside the repo, binary or unreadable untracked
+ * files, and tracked files with no changes.
  */
 export async function fetchGitDiffHunksForFile(
   cwd: string,
@@ -397,9 +405,10 @@ export async function fetchGitDiffHunksForFile(
   if (!gitRoot) return null;
   const relPath = toRepoRelativePath(gitRoot, filePath);
   if (relPath === null) return null;
-  if (await isInTransientGitState(gitRoot)) return null;
   const comparison = await resolveGitDiffComparison(gitRoot, options);
   if (!comparison) return null;
+  if (comparison.transientSensitive && (await isInTransientGitState(gitRoot)))
+    return null;
 
   // For a rename, include the pre-rename path with rename detection so git
   // diffs old→new content instead of reporting the new path as fully added
@@ -471,12 +480,17 @@ async function resolveGitDiffComparison(
   options?: GitDiffOptions,
 ): Promise<GitDiffComparison | null> {
   const mode = options?.mode ?? 'uncommitted';
-  if (mode === 'unstaged') return { args: [], includeUntracked: true };
+  if (mode === 'unstaged')
+    return { args: [], includeUntracked: true, transientSensitive: true };
   if (mode === 'staged') {
-    return { args: ['--cached'], includeUntracked: false };
+    return {
+      args: ['--cached'],
+      includeUntracked: false,
+      transientSensitive: true,
+    };
   }
   if (mode === 'uncommitted') {
-    return { args: ['HEAD'], includeUntracked: true };
+    return { args: ['HEAD'], includeUntracked: true, transientSensitive: true };
   }
   if (!options?.ref) return null;
 
@@ -487,11 +501,17 @@ async function resolveGitDiffComparison(
       args: [target],
       includeUntracked: true,
       untrackedBaseRef: target,
+      transientSensitive: true,
     };
   }
 
   const parent = await resolveCommitRef(gitRoot, `${target}^1`);
-  if (parent) return { args: [parent, target], includeUntracked: false };
+  if (parent)
+    return {
+      args: [parent, target],
+      includeUntracked: false,
+      transientSensitive: false,
+    };
   const commitObject = await runGit(['cat-file', 'commit', target], gitRoot);
   if (commitObject == null) return null;
   const headerEnd = commitObject.indexOf('\n\n');
@@ -504,7 +524,11 @@ async function resolveGitDiffComparison(
     await runGit(['hash-object', '-t', 'tree', '--stdin'], gitRoot, '')
   )?.trim();
   return emptyTree && /^[0-9a-f]{40,64}$/i.test(emptyTree)
-    ? { args: [emptyTree, target], includeUntracked: false }
+    ? {
+        args: [emptyTree, target],
+        includeUntracked: false,
+        transientSensitive: false,
+      }
     : null;
 }
 

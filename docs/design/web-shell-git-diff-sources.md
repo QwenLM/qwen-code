@@ -50,8 +50,10 @@ the hidden-file count instead of reporting that there are no changes.
 - A mode outside the supported enum, or a commit/branch mode without `ref`, is
   rejected as a parse error by the daemon.
 - An unresolved ref returns `available: false` without falling back to `HEAD`.
-- Non-repositories and transient Git states retain their current unavailable
-  behavior.
+- Non-repositories retain their current unavailable behavior. Transient Git
+  states (merge, rebase, cherry-pick, revert) keep worktree- and
+  index-targeting comparisons unavailable; commit comparisons read immutable
+  objects and stay available.
 - Older daemons continue to support the default uncommitted request; new source
   selection requires the updated daemon.
 
