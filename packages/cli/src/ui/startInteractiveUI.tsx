@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { existsSync } from 'node:fs';
+import * as fs from 'node:fs';
 import { basename, join } from 'node:path';
 import { render } from 'ink';
 import React from 'react';
@@ -343,7 +343,7 @@ export async function startInteractiveUI(
           'chats',
           `${sessionId}.jsonl`,
         );
-        if (existsSync(sessionFile)) {
+        if (fs.existsSync(sessionFile)) {
           process.stdout.write(
             `\n${t('To continue this session, run')}\nqwen --resume ${sanitizeTerminalText(sessionId)}\n`,
           );

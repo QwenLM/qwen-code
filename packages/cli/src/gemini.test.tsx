@@ -14,6 +14,7 @@ import {
   type MockInstance,
 } from 'vitest';
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -2261,6 +2262,14 @@ describe('startInteractiveUI', () => {
   const mockStartupWarnings = ['warning1'];
   const mockWorkspaceRoot = '/root';
 
+  vi.mock('node:fs', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('node:fs')>();
+    return {
+      ...actual,
+      existsSync: vi.fn(actual.existsSync),
+    };
+  });
+
   vi.mock('./utils/version.js', () => ({
     getCliVersion: vi.fn(() => Promise.resolve('1.0.0')),
   }));
@@ -2822,6 +2831,58 @@ describe('startInteractiveUI', () => {
 
     it('sanitizes the echoed session ID', async () => {
       const sessionId = 'evil\u001B]52;c;pwned\u0007session';
+      // Win32 forbids control bytes in file names, so stub the existence
+      // gate instead of creating a real session file.
+      const existsMock = vi.mocked(existsSync).mockReturnValue(true);
+
+      const writeSpy = vi
+        .spyOn(process.stdout, 'write')
+        .mockImplementation(() => true);
+      try {
+        await runCleanup(makeRecordingConfig(sessionId, '/project'));
+
+        const echoed = writeSpy.mock.calls
+          .map(([chunk]) => String(chunk))
+          .find((chunk) => chunk.includes('qwen --resume'));
+        expect(echoed).toBeDefined();
+        expect(echoed).not.toContain('\u001B');
+        expect(echoed).toContain('qwen --resume evil');
+      } finally {
+        existsMock.mockReset();
+        writeSpy.mockRestore();
+      }
+    });
+
+    it('does not echo when chat recording is disabled', async () => {
+      const sessionId = 'disabled-recording-session';
+      const projectDir = mkdtempSync(join(tmpdir(), 'resume-echo-'));
+      mkdirSync(join(projectDir, 'chats'), { recursive: true });
+      writeFileSync(join(projectDir, 'chats', `${sessionId}.jsonl`), '');
+
+      const writeSpy = vi
+        .spyOn(process.stdout, 'write')
+        .mockImplementation(() => true);
+      try {
+        await runCleanup({
+          ...makeRecordingConfig(sessionId, projectDir),
+          getChatRecordingService: () => undefined,
+        } as unknown as Config);
+
+        for (const [chunk] of writeSpy.mock.calls) {
+          expect(String(chunk)).not.toContain('qwen --resume');
+        }
+      } finally {
+        writeSpy.mockRestore();
+        rmSync(projectDir, { recursive: true, force: true });
+      }
+    });
+
+    it('does not echo when stdout is not a TTY', async () => {
+      Object.defineProperty(process.stdout, 'isTTY', {
+        value: false,
+        configurable: true,
+      });
+      const sessionId = 'non-tty-session';
       const projectDir = mkdtempSync(join(tmpdir(), 'resume-echo-'));
       mkdirSync(join(projectDir, 'chats'), { recursive: true });
       writeFileSync(join(projectDir, 'chats', `${sessionId}.jsonl`), '');
@@ -2832,30 +2893,12 @@ describe('startInteractiveUI', () => {
       try {
         await runCleanup(makeRecordingConfig(sessionId, projectDir));
 
-        const echoed = writeSpy.mock.calls
-          .map(([chunk]) => String(chunk))
-          .find((chunk) => chunk.includes('qwen --resume'));
-        expect(echoed).toBeDefined();
-        expect(echoed).not.toContain('\u001B');
-        expect(echoed).toContain('qwen --resume evil');
-      } finally {
-        writeSpy.mockRestore();
-        rmSync(projectDir, { recursive: true, force: true });
-      }
-    });
-
-    it('does not echo when chat recording is disabled', async () => {
-      const writeSpy = vi
-        .spyOn(process.stdout, 'write')
-        .mockImplementation(() => true);
-      try {
-        await runCleanup(mockConfig);
-
         for (const [chunk] of writeSpy.mock.calls) {
           expect(String(chunk)).not.toContain('qwen --resume');
         }
       } finally {
         writeSpy.mockRestore();
+        rmSync(projectDir, { recursive: true, force: true });
       }
     });
   });
