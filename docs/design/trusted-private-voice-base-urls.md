@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed for [#8286](https://github.com/QwenLM/qwen-code/issues/8286).
+Implemented for [#8286](https://github.com/QwenLM/qwen-code/issues/8286).
 
 ## Problem
 
@@ -22,7 +22,9 @@ The exact-match result travels with the resolved voice configuration so every eg
 
 An exact match permits cleartext transport and private RFC 1918, CGNAT, or IPv6 unique-local addresses. Loopback aliases, unspecified addresses, link-local ranges, and known cloud metadata addresses remain blocked. Explicit localhost behavior remains unchanged.
 
-Desktop voice merges SystemDefaults, User, and System settings with the same trusted-scope precedence as the CLI; `modelProviders` deep-merges per provider-group key exactly like the CLI (the higher scope's array wins for the same key; disjoint keys all survive). It never reads Workspace settings for this exception. It resolves the selected voice model before credentials; same-ID provider entries are ambiguous unless they are exact `(id, baseUrl)` duplicates, where the first registered entry wins like the CLI model registry, preventing an unrelated model or region from supplying the endpoint and API key. Public HTTPS providers do not require an insecure allowlist entry; cleartext or private-network providers still require an exact match.
+Streaming transports derive their WebSocket URL from the resolved base URL (`deriveWebSocketBase` drops a trailing `/v1` or `/compatible-mode/v1` and appends `/api-ws/v1/inference` or `/api-ws/v1/realtime`), so the wire path intentionally differs from the allowlisted path. The exact-match guarantee therefore covers the provider endpoint; the batch request path uses it verbatim, while the streaming wire path is derived from it rather than matched against the allowlist.
+
+Desktop voice merges SystemDefaults, User, and System settings with the same trusted-scope precedence as the CLI; `modelProviders` deep-merges per provider-group key exactly like the CLI (the higher scope's array wins for the same key; disjoint keys all survive). It never reads Workspace settings for this exception. It resolves the selected voice model before credentials; same-ID provider entries are ambiguous unless they are exact `(id, baseUrl)` duplicates, where the first registered entry wins like the CLI model registry (`envKey` is not part of the composite key, so a differing `envKey` also keeps the first registration), preventing an unrelated model or region from supplying the endpoint and API key. Public HTTPS providers do not require an insecure allowlist entry; cleartext or private-network providers still require an exact match.
 
 ## Configuration ownership
 
@@ -32,7 +34,7 @@ The operator that provisions a regional gateway owns the allowlist entry. Manage
 
 Malformed entries and non-matches fail closed. Removing the entry immediately restores the existing HTTPS/public-network requirement after settings reload or process restart.
 
-Desktop now treats a provider whose ID exactly matches the selected voice model as authoritative, resolving it before OAuth credentials so a managed gateway wins for OAuth-signed-in users. Duplicate providers, a provider without a complete explicit base URL, an incomplete provider, or an unresolved provider key fail instead of silently falling back to environment credentials. Operators with such an existing entry must either complete it or remove it so the legacy DashScope/environment fallback can apply. This fail-closed behavior prevents an accidental fallback to a different provider or region. A scheme-less `baseUrl` such as `dashscope.aliyuncs.com/compatible-mode/v1` previously received an inferred `https://` prefix on Desktop; as an exact model provider it now fails with `has an invalid baseUrl` and must be written with an explicit scheme.
+Desktop treats a provider whose ID exactly matches the selected voice model as authoritative only when the entry needs a network-policy decision — its base URL is allowlisted, cleartext HTTP, a private-network address, or loopback. Those entries resolve before OAuth credentials so a managed gateway wins for OAuth-signed-in users, and they fail closed on duplicate matches, unsupported schemes, always-blocked addresses, a missing allowlist match, or an unresolved `envKey`, preventing an accidental fallback to a different provider or region. Public HTTPS entries keep the legacy fall-through (OAuth, then the shared DashScope provider, then environment credentials), preserving the pre-allowlist credential precedence for existing installs; entries too incomplete to classify (a missing or unparseable base URL) fall through the same way. An entry without `envKey` resolves without an API key, matching the CLI for keyless local or private gateways.
 
 Hostnames whose DNS records resolve to loopback addresses (for example `asr.localtest.me` or `/etc/hosts` aliases for a local ASR server) are always blocked, with or without an allowlist entry; the CLI previously allowed such DNS results. To reach a local endpoint, configure an explicit loopback baseUrl such as `http://localhost`, `http://127.0.0.1`, or `http://[::1]`, which remains allowed.
 

@@ -12,7 +12,9 @@ import {
 const future = 4_102_444_800_000
 
 describe('resolveDesktopVoiceConfig', () => {
-  it('prefers an exact model provider over OAuth credentials', async () => {
+  it('keeps OAuth credentials ahead of a public HTTPS exact model provider', async () => {
+    // A public HTTPS entry needs no allowlist decision, so it must not preempt
+    // OAuth credentials — the pre-allowlist credential precedence is kept.
     const baseUrl = 'https://voice.example.com/openai/v1'
     const config = await resolveDesktopVoiceConfig({
       getVoiceModel: () => 'qwen3-asr-flash',
@@ -48,8 +50,8 @@ describe('resolveDesktopVoiceConfig', () => {
 
     expect(config).toEqual({
       model: 'qwen3-asr-flash',
-      baseUrl,
-      apiKey: 'provider-key',
+      baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      apiKey: 'oauth-token',
     })
   })
 
@@ -195,7 +197,7 @@ describe('resolveDesktopVoiceConfig', () => {
     expect(config.baseUrl).toBe('https://dashscope-proxy.example.com/asr/v1')
   })
 
-  it('requires an exact model provider to use a complete URL', async () => {
+  it('falls through when an exact model provider baseUrl is incomplete', async () => {
     await expect(
       resolveDesktopVoiceConfig({
         getVoiceModel: () => 'qwen3-asr-flash',
@@ -218,11 +220,11 @@ describe('resolveDesktopVoiceConfig', () => {
         readSystemJson: async () => undefined,
         readHomeEnvFile: async () => undefined,
       }),
-    ).rejects.toThrow("Voice model 'qwen3-asr-flash' has an invalid baseUrl")
+    ).rejects.toThrow('Voice dictation needs Qwen credentials')
   })
 
   it('does not infer missing path segments for an exact model provider', async () => {
-    const baseUrl = 'https://voice.example.com/compatible-mode'
+    const baseUrl = 'http://voice.region-a.internal.example/compatible-mode'
     const config = await resolveDesktopVoiceConfig({
       getVoiceModel: () => 'qwen3-asr-flash',
       env: {},
@@ -230,6 +232,7 @@ describe('resolveDesktopVoiceConfig', () => {
         (file === 'settings.json'
           ? {
               env: { PRIVATE_ASR_KEY: 'settings-key' },
+              security: { allowedInsecureVoiceBaseUrls: [baseUrl] },
               modelProviders: {
                 openai: [
                   {
@@ -248,7 +251,7 @@ describe('resolveDesktopVoiceConfig', () => {
     expect(config.baseUrl).toBe(baseUrl)
   })
 
-  it('preserves /v1 inference for an exact official DashScope provider', async () => {
+  it('preserves /v1 inference for a DashScope provider through the legacy fallback', async () => {
     const config = await resolveDesktopVoiceConfig({
       getVoiceModel: () => 'qwen3-asr-flash',
       env: {},
@@ -346,34 +349,57 @@ describe('resolveDesktopVoiceConfig', () => {
     }
   })
 
-  it('uses a public HTTPS custom provider without an insecure allowlist entry', async () => {
+  it('defers an unlisted public HTTPS exact provider to the legacy chain', async () => {
     const baseUrl = 'https://voice.example.com/openai/v1'
-    const config = await resolveDesktopVoiceConfig({
+    const settingsWithEntry = (allowlisted: boolean) => ({
+      env: { CUSTOM_ASR_KEY: 'settings-key' },
+      security: allowlisted
+        ? { allowedInsecureVoiceBaseUrls: [baseUrl] }
+        : undefined,
+      modelProviders: {
+        openai: [
+          {
+            id: 'qwen3-asr-flash',
+            baseUrl,
+            envKey: 'CUSTOM_ASR_KEY',
+          },
+        ],
+      },
+    })
+    const readSettings = (allowlisted: boolean) =>
+      (async <T,>(file: string) =>
+        (file === 'settings.json'
+          ? settingsWithEntry(allowlisted)
+          : undefined) as T | undefined)
+
+    // Without OAuth the legacy chain finds nothing: an unlisted public entry
+    // needs no allowlist decision, so it neither resolves nor fails on its
+    // own.
+    await expect(
+      resolveDesktopVoiceConfig({
+        getVoiceModel: () => 'qwen3-asr-flash',
+        env: {},
+        readQwenJson: readSettings(false),
+        readSystemJson: async () => undefined,
+        readHomeEnvFile: async () => undefined,
+      }),
+    ).rejects.toThrow('Voice dictation needs Qwen credentials')
+
+    // An explicit allowlist entry makes even a public HTTPS entry
+    // authoritative, matching the CLI where the configured model always wins.
+    const allowlisted = await resolveDesktopVoiceConfig({
       getVoiceModel: () => 'qwen3-asr-flash',
       env: {},
-      readQwenJson: async <T,>(file: string) =>
-        (file === 'settings.json'
-          ? {
-              env: { CUSTOM_ASR_KEY: 'settings-key' },
-              modelProviders: {
-                openai: [
-                  {
-                    id: 'qwen3-asr-flash',
-                    baseUrl,
-                    envKey: 'CUSTOM_ASR_KEY',
-                  },
-                ],
-              },
-            }
-          : undefined) as T | undefined,
+      readQwenJson: readSettings(true),
       readSystemJson: async () => undefined,
       readHomeEnvFile: async () => undefined,
     })
 
-    expect(config).toEqual({
+    expect(allowlisted).toEqual({
       model: 'qwen3-asr-flash',
       baseUrl,
       apiKey: 'settings-key',
+      allowInsecureBaseUrl: true,
     })
   })
 
@@ -680,7 +706,7 @@ describe('resolveDesktopVoiceConfig', () => {
     )
   })
 
-  it('reports an exact model provider without a baseUrl', async () => {
+  it('falls through when an exact model provider has no baseUrl', async () => {
     await expect(
       resolveDesktopVoiceConfig({
         getVoiceModel: () => 'qwen3-asr-flash',
@@ -701,9 +727,7 @@ describe('resolveDesktopVoiceConfig', () => {
         readSystemJson: async () => undefined,
         readHomeEnvFile: async () => undefined,
       }),
-    ).rejects.toThrow(
-      "Voice model 'qwen3-asr-flash' does not define a baseUrl",
-    )
+    ).rejects.toThrow('Voice dictation needs Qwen credentials')
   })
 
   it('reports embedded credentials in an exact model provider baseUrl', async () => {
@@ -734,7 +758,37 @@ describe('resolveDesktopVoiceConfig', () => {
     )
   })
 
-  it('reports an exact model provider without an envKey', async () => {
+  it('resolves a keyless exact provider like the CLI', async () => {
+    // CLI parity: an entry without envKey resolves without an API key (a
+    // keyless local gateway) instead of failing.
+    const baseUrl = 'http://localhost:8000/v1'
+    const config = await resolveDesktopVoiceConfig({
+      getVoiceModel: () => 'qwen3-asr-flash',
+      env: {},
+      readQwenJson: async <T,>(file: string) =>
+        (file === 'settings.json'
+          ? {
+              modelProviders: {
+                openai: [
+                  {
+                    id: 'qwen3-asr-flash',
+                    baseUrl,
+                  },
+                ],
+              },
+            }
+          : undefined) as T | undefined,
+      readSystemJson: async () => undefined,
+      readHomeEnvFile: async () => undefined,
+    })
+
+    expect(config).toEqual({
+      model: 'qwen3-asr-flash',
+      baseUrl,
+    })
+  })
+
+  it('falls through when a public exact provider defines no envKey', async () => {
     await expect(
       resolveDesktopVoiceConfig({
         getVoiceModel: () => 'qwen3-asr-flash',
@@ -756,9 +810,7 @@ describe('resolveDesktopVoiceConfig', () => {
         readSystemJson: async () => undefined,
         readHomeEnvFile: async () => undefined,
       }),
-    ).rejects.toThrow(
-      "Voice model 'qwen3-asr-flash' does not define an envKey",
-    )
+    ).rejects.toThrow('Voice dictation needs Qwen credentials')
   })
 
   it('merges trusted settings scopes with system override precedence', async () => {
@@ -1210,8 +1262,42 @@ describe('resolveDesktopVoiceConfig', () => {
     )
   })
 
+  it('interpolates baseUrl placeholders with empty env values like the CLI', async () => {
+    // Settings interpolation mirrors the CLI's getHomeEnvFallbackVars: the
+    // process env wins even when empty, so an empty VOICE_GW must not be
+    // re-filled from the home .env (credential lookup keeps that fill).
+    const baseUrl = 'http://voice.region-a.internal.example/v1'
+    const readHomeEnvFile = async (file: string) =>
+      file === join(getQwenConfigDir(), '.env')
+        ? 'VOICE_GW=http://voice.region-a.internal.example\nVOICE_KEY=home-env-key\n'
+        : undefined
+    await expect(
+      resolveDesktopVoiceConfig({
+        getVoiceModel: () => 'qwen3-asr-flash',
+        env: { VOICE_GW: '' },
+        readQwenJson: async <T,>(file: string) =>
+          (file === 'settings.json'
+            ? {
+                security: { allowedInsecureVoiceBaseUrls: [baseUrl] },
+                modelProviders: {
+                  openai: [
+                    {
+                      id: 'qwen3-asr-flash',
+                      baseUrl: '$VOICE_GW/v1',
+                      envKey: 'VOICE_KEY',
+                    },
+                  ],
+                },
+              }
+            : undefined) as T | undefined,
+        readSystemJson: async () => undefined,
+        readHomeEnvFile,
+      }),
+    ).rejects.toThrow('Voice dictation needs Qwen credentials')
+  })
+
   it('unwraps legacy v5 modelProviders wrappers like the CLI migration', async () => {
-    const baseUrl = 'https://voice.example.com/v1'
+    const baseUrl = 'http://voice.internal.example/v1'
     const config = await resolveDesktopVoiceConfig({
       getVoiceModel: () => 'qwen3-asr-flash',
       env: {},
@@ -1219,6 +1305,7 @@ describe('resolveDesktopVoiceConfig', () => {
         (file === 'settings.json'
           ? ({
               env: { VOICE_KEY: 'wrapped-key' },
+              security: { allowedInsecureVoiceBaseUrls: [baseUrl] },
               modelProviders: {
                 openai: {
                   protocol: 'openai',
@@ -1241,6 +1328,7 @@ describe('resolveDesktopVoiceConfig', () => {
       model: 'qwen3-asr-flash',
       baseUrl,
       apiKey: 'wrapped-key',
+      allowInsecureBaseUrl: true,
     })
   })
 

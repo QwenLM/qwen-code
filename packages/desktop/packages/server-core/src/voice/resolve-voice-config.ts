@@ -5,8 +5,12 @@
  * own — the real credentials live in Qwen's trusted configuration. We resolve
  * them from, in order:
  *   1. Exact model provider — the trusted-settings provider whose `id` matches
- *                           the selected voice model (authoritative; an
- *                           incomplete entry fails instead of falling through)
+ *                           the selected voice model; authoritative (resolved
+ *                           before OAuth, failing closed when incomplete) only
+ *                           when its baseUrl needs a network-policy decision —
+ *                           allowlisted, cleartext, private-network, or
+ *                           loopback. Public HTTPS entries fall through to keep
+ *                           the legacy credential precedence.
  *   2. OAuth login        — `~/.qwen/oauth_creds.json` (access_token + resource_url)
  *   3. Legacy DashScope provider — a shared DashScope compatible-mode provider
  *                           in trusted settings
@@ -37,7 +41,7 @@ const voiceConfigLogger = createScopedLogger(CONSOLE_LOGGER, 'VOICE_CONFIG');
 
 interface ResolvedCredentials {
   baseUrl: string;
-  apiKey: string;
+  apiKey?: string;
 }
 
 interface ResolveDesktopVoiceConfigDeps {
@@ -171,17 +175,19 @@ export function parseEnvFileContent(content: string): Record<string, string> {
   return result;
 }
 
-// Mirrors the CLI's getHomeEnvFallbackVars: <qwen dir>/.env first, ~/.env only
-// when QWEN_HOME is unset, the first definition of a key wins, and the process
-// env takes precedence over file values — except an empty-string env var, which
-// the CLI's loadEnvironment treats as "effectively unset" and fills from .env.
+// Mirrors the CLI's home-.env fill (loadEnvironment): <qwen dir>/.env first,
+// ~/.env only when QWEN_HOME is unset, the first definition of a key wins, and
+// the process env wins over file values — except an empty-string env var,
+// which the CLI treats as "effectively unset" and fills from .env. Settings
+// interpolation applies the stricter getHomeEnvFallbackVars precedence on top
+// of this (see resolveSettingsEnvVars).
 async function getHomeEnvFallback(
   env: NodeJS.ProcessEnv,
   readHomeEnvFile: (file: string) => Promise<string | undefined>,
 ): Promise<Record<string, string>> {
   const qwenDir = getQwenConfigDir();
   const candidates = [join(qwenDir, '.env')];
-  if (!process.env.QWEN_HOME) {
+  if (!env.QWEN_HOME) {
     candidates.push(join(dirname(qwenDir), '.env'));
   }
   const result: Record<string, string> = {};
@@ -255,7 +261,9 @@ async function fromOAuth(
   }
   return {
     apiKey,
-    baseUrl: normalizeBaseUrl(creds?.resource_url?.trim() || DEFAULT_DASHSCOPE_BASE_URL),
+    baseUrl: normalizeBaseUrl(
+      creds?.resource_url?.trim() || DEFAULT_DASHSCOPE_BASE_URL,
+    ),
   };
 }
 
@@ -275,16 +283,31 @@ interface QwenSettings {
   };
 }
 
-function resolveSettingsEnvVars<T>(value: T, env: NodeJS.ProcessEnv): T {
+// Mirrors the CLI's resolveEnvVarsInObject ladder (settings interpolation via
+// getHomeEnvFallbackVars): the process env wins even when its value is an
+// empty string, the home .env fallback only fills keys the env does not
+// define at all, and anything else keeps its placeholder.
+function resolveSettingsEnvVars<T>(
+  value: T,
+  env: NodeJS.ProcessEnv,
+  homeEnvFallback: Record<string, string>,
+): T {
   const resolveValue = (input: unknown): unknown => {
     if (typeof input === 'string') {
       return input.replace(
         /\$(?:(\w+)|{([^}]+)})/g,
-        (placeholder, plainName: string | undefined, bracedName: string | undefined) => {
+        (
+          placeholder: string,
+          plainName: string | undefined,
+          bracedName: string | undefined,
+        ) => {
           const name = plainName ?? bracedName;
-          return name && typeof env[name] === 'string'
-            ? env[name]
-            : placeholder;
+          if (!name) return placeholder;
+          const envValue = env[name];
+          if (typeof envValue === 'string') return envValue;
+          const fallbackValue = homeEnvFallback[name];
+          if (typeof fallbackValue === 'string') return fallbackValue;
+          return placeholder;
         },
       );
     }
@@ -293,7 +316,10 @@ function resolveSettingsEnvVars<T>(value: T, env: NodeJS.ProcessEnv): T {
     }
     if (input && typeof input === 'object') {
       return Object.fromEntries(
-        Object.entries(input).map(([key, nested]) => [key, resolveValue(nested)]),
+        Object.entries(input).map(([key, nested]) => [
+          key,
+          resolveValue(nested),
+        ]),
       );
     }
     return input;
@@ -327,7 +353,9 @@ function unwrapWrappedProviderConfigs(
 // recurse — so the CLI deep-merges modelProviders per provider-group key: the
 // same key takes the highest scope's array, and disjoint keys all survive.
 // Mirror that so a managed System scope overrides user entries per key instead
-// of discarding the user's whole provider set.
+// of discarding the user's whole provider set. settingsSchema declares
+// mergeStrategy REPLACE for modelProviders; if customDeepMerge ever implements
+// it, this mirror must change in lockstep.
 function mergeModelProviders(
   ...scopes: Array<Record<string, QwenProvider[]> | undefined>
 ): Record<string, QwenProvider[]> | undefined {
@@ -412,9 +440,7 @@ function readProviderApiKey(
   const envKey = provider.envKey?.trim();
   if (!envKey) return undefined;
   return (
-    envSource[envKey]?.trim() ||
-    settings?.env?.[envKey]?.trim() ||
-    undefined
+    envSource[envKey]?.trim() || settings?.env?.[envKey]?.trim() || undefined
   );
 }
 
@@ -422,9 +448,15 @@ const PROVIDER_ENTRY_REMEDY =
   'Remove or complete this provider entry to fall back to your Qwen sign-in.';
 
 /**
- * 1) The provider whose `id` matches the selected voice model. Authoritative:
- * resolves before OAuth so a managed gateway wins for OAuth-signed-in users,
- * and an incomplete entry fails instead of silently falling through.
+ * 1) The provider whose `id` matches the selected voice model.
+ *
+ * Authoritative only when the entry needs a network-policy decision — an
+ * allowlisted, cleartext, private-network, or loopback baseUrl. Those resolve
+ * before OAuth so a managed gateway wins for OAuth-signed-in users, and fail
+ * closed when incomplete or unlisted instead of silently falling back to a
+ * different endpoint or region. Public HTTPS entries keep the legacy
+ * fall-through (OAuth → DashScope provider → environment), preserving the
+ * pre-allowlist credential precedence for existing installs.
  */
 function fromExactModelProvider(
   settings: QwenSettings | undefined,
@@ -435,8 +467,10 @@ function fromExactModelProvider(
   const providers = Object.values(settings.modelProviders ?? {}).flat();
   const matches = providers.filter((provider) => provider.id === voiceModel);
   // The CLI registry keys models by (id, baseUrl) and keeps the first
-  // registration of an exact duplicate; only differing baseUrls conflict.
-  // (An empty baseUrl folds into the bare-id key, as in modelRegistryKey.)
+  // registration of a duplicate — even when envKey differs, matching the
+  // registry's warn-and-skip (envKey is not part of the composite key); only
+  // differing baseUrls conflict. (An empty baseUrl folds into the bare-id
+  // key, as in modelRegistryKey.)
   const distinct: QwenProvider[] = [];
   for (const match of matches) {
     const matchKey = match.baseUrl || '';
@@ -451,18 +485,16 @@ function fromExactModelProvider(
   }
   const provider = distinct[0];
   if (!provider) return undefined;
-  if (!provider.baseUrl?.trim()) {
-    throw new Error(
-      `Voice model '${voiceModel}' does not define a baseUrl. ${PROVIDER_ENTRY_REMEDY}`,
-    );
+  const rawBaseUrl = provider.baseUrl?.trim();
+  if (!rawBaseUrl) {
+    // Too incomplete to classify; keep the legacy fall-through.
+    return undefined;
   }
   let parsedBaseUrl: URL;
   try {
-    parsedBaseUrl = new URL(provider.baseUrl.trim());
+    parsedBaseUrl = new URL(rawBaseUrl);
   } catch {
-    throw new Error(
-      `Voice model '${voiceModel}' has an invalid baseUrl. ${PROVIDER_ENTRY_REMEDY}`,
-    );
+    return undefined;
   }
   if (parsedBaseUrl.username || parsedBaseUrl.password) {
     throw new Error(
@@ -470,6 +502,52 @@ function fromExactModelProvider(
     );
   }
   const normalizedBaseUrl = parsedBaseUrl.toString().replace(/\/+$/, '');
+  const allowInsecureBaseUrl = isInsecureVoiceBaseUrlAllowed(
+    settings,
+    normalizedBaseUrl,
+  );
+  const isLoopback = isLoopbackHost(parsedBaseUrl.hostname);
+  const isPublicHttps =
+    parsedBaseUrl.protocol === 'https:' &&
+    !isLoopback &&
+    !isAlwaysBlockedVoiceAddress(parsedBaseUrl.hostname) &&
+    !isPrivateNetworkIp(parsedBaseUrl.hostname);
+  // A public HTTPS entry needs no policy decision; leave it to the legacy
+  // chain unless the operator explicitly allowlisted its exact URL.
+  if (isPublicHttps && !allowInsecureBaseUrl) {
+    return undefined;
+  }
+  if (
+    parsedBaseUrl.protocol !== 'http:' &&
+    parsedBaseUrl.protocol !== 'https:'
+  ) {
+    throw new Error(
+      `Voice model '${voiceModel}' must use an http or https baseUrl. ${PROVIDER_ENTRY_REMEDY}`,
+    );
+  }
+  if (!isLoopback && isAlwaysBlockedVoiceAddress(parsedBaseUrl.hostname)) {
+    throw new Error(
+      `Voice model '${voiceModel}' must not use a private-network baseUrl. ${PROVIDER_ENTRY_REMEDY}`,
+    );
+  }
+  if (
+    parsedBaseUrl.protocol === 'http:' &&
+    !isLoopback &&
+    !allowInsecureBaseUrl
+  ) {
+    throw new Error(
+      `Voice model '${voiceModel}' must use an https baseUrl. Voice audio must not be transmitted in cleartext. To trust this managed endpoint, add its exact complete normalized URL (${normalizedBaseUrl}) to security.allowedInsecureVoiceBaseUrls. ${PROVIDER_ENTRY_REMEDY}`,
+    );
+  }
+  if (
+    !isLoopback &&
+    !allowInsecureBaseUrl &&
+    isPrivateNetworkIp(parsedBaseUrl.hostname)
+  ) {
+    throw new Error(
+      `Voice model '${voiceModel}' must not use a private-network baseUrl. To trust this managed endpoint, add its exact complete normalized URL (${normalizedBaseUrl}) to security.allowedInsecureVoiceBaseUrls. ${PROVIDER_ENTRY_REMEDY}`,
+    );
+  }
   // Preserve the legacy /v1 inference only for the official DashScope
   // compatible-mode endpoint. Custom and regional gateway paths remain
   // authoritative and are never rewritten.
@@ -478,9 +556,9 @@ function fromExactModelProvider(
     : normalizedBaseUrl;
   const envKey = provider.envKey?.trim();
   if (!envKey) {
-    throw new Error(
-      `Voice model '${voiceModel}' does not define an envKey. ${PROVIDER_ENTRY_REMEDY}`,
-    );
+    // CLI parity: an entry without envKey resolves keyless (for example a
+    // local gateway that injects its own credentials) instead of failing.
+    return { baseUrl };
   }
   const apiKey = readProviderApiKey(provider, settings, envSource);
   if (!apiKey) {
@@ -566,35 +644,49 @@ export async function resolveDesktopVoiceConfig(
     );
   const [rawSystemDefaults, rawUserSettings, rawSystemSettings] =
     await Promise.all([
-    resolvedDeps.readSystemJson<QwenSettings>(systemDefaultsPath),
-    resolvedDeps.readQwenJson<QwenSettings>('settings.json'),
-    resolvedDeps.readSystemJson<QwenSettings>(systemSettingsPath),
+      resolvedDeps.readSystemJson<QwenSettings>(systemDefaultsPath),
+      resolvedDeps.readQwenJson<QwenSettings>('settings.json'),
+      resolvedDeps.readSystemJson<QwenSettings>(systemSettingsPath),
     ]);
   const homeEnvFallback = await getHomeEnvFallback(
     resolvedDeps.env,
     resolvedDeps.readHomeEnvFile,
   );
-  // Same precedence as the CLI: the process env wins, except an empty-string
-  // env var is "effectively unset" and must not re-shadow a filled fallback.
-  const effectiveEnv: NodeJS.ProcessEnv = { ...homeEnvFallback };
+  // Credential lookup mirrors the CLI's loadEnvironment: the process env wins,
+  // except an empty-string env var is "effectively unset" and filled from the
+  // home .env fallback. (Settings interpolation above applies the stricter
+  // getHomeEnvFallbackVars precedence, where an empty env value wins.)
+  const lookupEnv: NodeJS.ProcessEnv = { ...homeEnvFallback };
   for (const [key, value] of Object.entries(resolvedDeps.env)) {
     if (value !== '' || !Object.hasOwn(homeEnvFallback, key)) {
-      effectiveEnv[key] = value;
+      lookupEnv[key] = value;
     }
   }
-  const systemDefaults = resolveSettingsEnvVars(rawSystemDefaults, effectiveEnv);
-  const userSettings = resolveSettingsEnvVars(rawUserSettings, effectiveEnv);
-  const systemSettings = resolveSettingsEnvVars(rawSystemSettings, effectiveEnv);
+  const systemDefaults = resolveSettingsEnvVars(
+    rawSystemDefaults,
+    resolvedDeps.env,
+    homeEnvFallback,
+  );
+  const userSettings = resolveSettingsEnvVars(
+    rawUserSettings,
+    resolvedDeps.env,
+    homeEnvFallback,
+  );
+  const systemSettings = resolveSettingsEnvVars(
+    rawSystemSettings,
+    resolvedDeps.env,
+    homeEnvFallback,
+  );
   const qwenSettings = mergeTrustedQwenSettings(
     systemDefaults,
     userSettings,
     systemSettings,
   );
   const creds =
-    fromExactModelProvider(qwenSettings, effectiveEnv, voiceModel) ??
+    fromExactModelProvider(qwenSettings, lookupEnv, voiceModel) ??
     (await fromOAuth(resolvedDeps)) ??
-    fromLegacyDashscopeProvider(qwenSettings, effectiveEnv) ??
-    fromEnv(effectiveEnv);
+    fromLegacyDashscopeProvider(qwenSettings, lookupEnv) ??
+    fromEnv(lookupEnv);
   if (!creds) {
     throw new Error(NO_CREDENTIALS_ERROR);
   }
@@ -633,7 +725,7 @@ export async function resolveDesktopVoiceConfig(
   return {
     model: voiceModel,
     baseUrl: creds.baseUrl,
-    apiKey: creds.apiKey,
+    ...(creds.apiKey ? { apiKey: creds.apiKey } : {}),
     ...(allowInsecureBaseUrl ? { allowInsecureBaseUrl: true } : {}),
   };
 }
