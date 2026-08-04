@@ -36,6 +36,7 @@ import type {
   PendingPromptEntry,
 } from './bridgeTypes.js';
 import { SERVE_CONTROL_EXT_METHODS } from './status.js';
+import { isValidExternalToolGuardDenialReason } from './externalToolGuard.js';
 import type {
   ChannelDeliveryErrorCode,
   ChannelDeliveryHandler,
@@ -43,6 +44,7 @@ import type {
   ChannelDeliveryInfo,
   ClientMcpMessageSender,
   CreateSubSessionHandler,
+  ExternalToolGuardHandler,
   LiveScreenContextCaptureHandler,
   LiveSpeakToUserHandler,
   LiveTaskToolRequestHandler,
@@ -112,6 +114,30 @@ function isFsErrorShape(err: unknown): err is FsErrorShape {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function normalizeExternalToolGuardResult(
+  value: unknown,
+): Record<string, unknown> {
+  if (!isRecord(value)) {
+    throw new Error('External tool guard handler returned an invalid result.');
+  }
+  const keys = Object.keys(value);
+  if (value['allowed'] === true && keys.length === 1 && keys[0] === 'allowed') {
+    return { allowed: true };
+  }
+  if (
+    value['allowed'] !== false ||
+    keys.some((key) => key !== 'allowed' && key !== 'reason')
+  ) {
+    throw new Error('External tool guard handler returned an invalid result.');
+  }
+  if (!Object.hasOwn(value, 'reason')) return { allowed: false };
+  const reason = value['reason'];
+  if (!isValidExternalToolGuardDenialReason(reason)) {
+    throw new Error('External tool guard handler returned an invalid result.');
+  }
+  return { allowed: false, reason };
 }
 
 function isBoundedChannelDeliveryString(value: unknown): value is string {
@@ -702,6 +728,11 @@ export class BridgeClient implements Client {
     private readonly getLiveSpeakToUserHandler: () =>
       | LiveSpeakToUserHandler
       | undefined = () => undefined,
+    /**
+     * Managed tool guard hosted by the daemon. Kept after the Live handlers so
+     * existing direct BridgeClient constructors remain source-compatible.
+     */
+    private readonly externalToolGuard?: ExternalToolGuardHandler,
   ) {}
 
   async requestPermission(
@@ -1100,6 +1131,9 @@ export class BridgeClient implements Client {
     if (method === SERVE_CONTROL_EXT_METHODS.channelDelivery) {
       return this.handleChannelDelivery(params);
     }
+    if (method === SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare) {
+      return this.handleExternalToolGuardPrepare(params);
+    }
     if (method === TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD) {
       return this.handleTodoStopGuardContinuationClaim(params);
     }
@@ -1161,6 +1195,70 @@ export class BridgeClient implements Client {
       }
     }
     return { messages, hasQueuedPrompt };
+  }
+
+  private async handleExternalToolGuardPrepare(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    if (!this.externalToolGuard) {
+      throw RequestError.methodNotFound(
+        SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare,
+      );
+    }
+    const sessionId = params['sessionId'];
+    const promptId = params['promptId'];
+    const toolCallId = params['toolCallId'];
+    const toolName = params['toolName'];
+    const args = params['arguments'];
+    if (
+      typeof sessionId !== 'string' ||
+      sessionId.length === 0 ||
+      typeof promptId !== 'string' ||
+      promptId.length === 0 ||
+      typeof toolCallId !== 'string' ||
+      toolCallId.length === 0 ||
+      typeof toolName !== 'string' ||
+      toolName.length === 0 ||
+      !isRecord(args)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Invalid external tool guard request',
+      );
+    }
+    if (!this.ownsSession(sessionId)) {
+      throw RequestError.invalidParams(
+        undefined,
+        'External tool guard session is not owned by this connection',
+      );
+    }
+    const entry = this.resolveEntry(sessionId);
+    if (!entry || !entry.promptActive || entry.activePromptId !== promptId) {
+      throw RequestError.invalidParams(
+        undefined,
+        'External tool guard prompt is not the active prompt',
+      );
+    }
+    const decision: unknown = await this.externalToolGuard({
+      sessionId: entry.sessionId,
+      promptId: entry.activePromptId,
+      toolCallId,
+      toolName,
+      arguments: args,
+    });
+    const currentEntry = this.resolveEntry(sessionId);
+    if (
+      !this.ownsSession(sessionId) ||
+      currentEntry !== entry ||
+      !currentEntry.promptActive ||
+      currentEntry.activePromptId !== promptId
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'External tool guard prompt is no longer active',
+      );
+    }
+    return normalizeExternalToolGuardResult(decision);
   }
 
   private handleTodoStopGuardContinuationClaim(

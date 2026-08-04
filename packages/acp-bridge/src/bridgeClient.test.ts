@@ -53,6 +53,7 @@ import {
   type LiveSpeakToUserHandler,
   MAX_SUB_SESSION_NAME_CHARS,
   MAX_SUB_SESSION_PROMPT_CHARS,
+  type ExternalToolGuardHandler,
 } from './bridgeOptions.js';
 import { SERVE_CONTROL_EXT_METHODS } from './status.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
@@ -78,7 +79,14 @@ import { SessionArtifactStore } from './sessionArtifacts.js';
  * a thrower-Mediator that fails any unexpected `request()` /
  * `vote()` / `forgetSession()` call.
  */
-function makeClient(fileSystem?: BridgeFileSystem): BridgeClient {
+function makeClient(
+  fileSystem?: BridgeFileSystem,
+  managedGuard?: {
+    resolveEntry: (sessionId?: string) => unknown;
+    ownsSession?: (sessionId: string) => boolean;
+    handler: ExternalToolGuardHandler;
+  },
+): BridgeClient {
   const noPermissionFlow = () => {
     throw new Error('test: permission flow should not run in fs-path tests');
   };
@@ -89,12 +97,26 @@ function makeClient(fileSystem?: BridgeFileSystem): BridgeClient {
   // required (policy/vote/forgetSession/peekSessionFor/pendingCount).
   const throwerMediator = { request: noPermissionFlow } as never;
   return new BridgeClient(
-    noPermissionFlow as never, // resolveEntry
+    (managedGuard?.resolveEntry ?? noPermissionFlow) as never, // resolveEntry
     noPermissionFlow as never, // resolvePendingRestoreEvents
     throwerMediator, // mediator (F3 Commit 3)
     0, // permissionTimeoutMs (disabled)
     Infinity, // maxPendingPerSession (disabled)
     fileSystem,
+    undefined,
+    undefined,
+    undefined,
+    managedGuard?.ownsSession ?? (() => true),
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    () => false,
+    undefined,
+    undefined,
+    undefined,
+    managedGuard?.handler,
   );
 }
 
@@ -215,6 +237,196 @@ describe('BridgeClient — background notification turn boundary', () => {
     });
 
     expect(publish).not.toHaveBeenCalled();
+  });
+});
+
+describe('BridgeClient — managed external tool guard', () => {
+  it('uses runtime-owned session/prompt identity before calling the host', async () => {
+    const handler = vi.fn<ExternalToolGuardHandler>().mockResolvedValue({
+      allowed: true,
+    });
+    const entry: {
+      sessionId: string;
+      promptActive: boolean;
+      activePromptId?: string;
+    } = {
+      sessionId: 'session-1',
+      promptActive: true,
+      activePromptId: 'prompt-1',
+    };
+    const client = makeClient(undefined, {
+      resolveEntry: (sessionId) =>
+        sessionId === entry.sessionId ? entry : undefined,
+      handler,
+    });
+
+    await expect(
+      client.extMethod(SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare, {
+        sessionId: 'session-1',
+        promptId: 'prompt-1',
+        toolCallId: 'call-1',
+        toolName: 'write_file',
+        arguments: { path: 'README.md' },
+      }),
+    ).resolves.toEqual({ allowed: true });
+    expect(handler).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      promptId: 'prompt-1',
+      toolCallId: 'call-1',
+      toolName: 'write_file',
+      arguments: { path: 'README.md' },
+    });
+  });
+
+  it('rejects a stale prompt without contacting the host', async () => {
+    const handler = vi.fn<ExternalToolGuardHandler>().mockResolvedValue({
+      allowed: true,
+    });
+    const client = makeClient(undefined, {
+      resolveEntry: () => ({
+        sessionId: 'session-1',
+        promptActive: true,
+        activePromptId: 'prompt-current',
+      }),
+      handler,
+    });
+
+    await expect(
+      client.extMethod(SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare, {
+        sessionId: 'session-1',
+        promptId: 'prompt-stale',
+        toolCallId: 'call-1',
+        toolName: 'write_file',
+        arguments: {},
+      }),
+    ).rejects.toThrow('not the active prompt');
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('discards an allow when the prompt stops while the provider is pending', async () => {
+    let release!: () => void;
+    const providerPending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const handler = vi.fn<ExternalToolGuardHandler>(async () => {
+      await providerPending;
+      return { allowed: true };
+    });
+    const entry: {
+      sessionId: string;
+      promptActive: boolean;
+      activePromptId?: string;
+    } = {
+      sessionId: 'session-1',
+      promptActive: true,
+      activePromptId: 'prompt-1',
+    };
+    const client = makeClient(undefined, {
+      resolveEntry: (sessionId) =>
+        sessionId === entry.sessionId ? entry : undefined,
+      handler,
+    });
+
+    const pending = client.extMethod(
+      SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare,
+      {
+        sessionId: 'session-1',
+        promptId: 'prompt-1',
+        toolCallId: 'call-1',
+        toolName: 'write_file',
+        arguments: {},
+      },
+    );
+    await vi.waitFor(() => expect(handler).toHaveBeenCalledOnce());
+    entry.promptActive = false;
+    delete entry.activePromptId;
+    release();
+
+    await expect(pending).rejects.toThrow('no longer active');
+  });
+
+  it('does not route unrelated extension methods through the tool guard handler', async () => {
+    const handler = vi.fn<ExternalToolGuardHandler>().mockResolvedValue({
+      allowed: true,
+    });
+    const client = makeClient(undefined, {
+      resolveEntry: () => ({
+        sessionId: 'session-1',
+        promptActive: true,
+        activePromptId: 'prompt-1',
+      }),
+      handler,
+    });
+
+    const err = await client
+      .extMethod('qwen/control/unrelated-method', {
+        sessionId: 'session-1',
+        promptId: 'prompt-1',
+        toolCallId: 'call-1',
+        toolName: 'write_file',
+        arguments: {},
+      })
+      .catch((caught: unknown) => caught);
+    expect(err).toBeInstanceOf(RequestError);
+    expect((err as RequestError).code).toBe(-32601);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('rejects a session not owned by this channel', async () => {
+    const handler = vi.fn<ExternalToolGuardHandler>().mockResolvedValue({
+      allowed: true,
+    });
+    const client = makeClient(undefined, {
+      resolveEntry: () => ({
+        sessionId: 'session-foreign',
+        promptActive: true,
+        activePromptId: 'prompt-1',
+      }),
+      ownsSession: () => false,
+      handler,
+    });
+
+    await expect(
+      client.extMethod(SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare, {
+        sessionId: 'session-foreign',
+        promptId: 'prompt-1',
+        toolCallId: 'call-1',
+        toolName: 'write_file',
+        arguments: {},
+      }),
+    ).rejects.toThrow('not owned');
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { allowed: 'yes' },
+    { allowed: true, reason: 'not valid for allow' },
+    { allowed: false, reason: 'line one\nline two' },
+    { allowed: false, reason: 'line one\u2028line two' },
+    { allowed: false, extra: true },
+  ])('fails closed for malformed host result %#', async (result) => {
+    const handler = vi
+      .fn<ExternalToolGuardHandler>()
+      .mockResolvedValue(result as never);
+    const entry = {
+      sessionId: 'session-1',
+      promptActive: true,
+      activePromptId: 'prompt-1',
+    };
+    const client = makeClient(undefined, {
+      resolveEntry: () => entry,
+      handler,
+    });
+
+    await expect(
+      client.extMethod(SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare, {
+        sessionId: 'session-1',
+        promptId: 'prompt-1',
+        toolCallId: 'call-1',
+        toolName: 'write_file',
+        arguments: {},
+      }),
+    ).rejects.toThrow('invalid result');
   });
 });
 

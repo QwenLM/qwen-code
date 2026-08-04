@@ -508,11 +508,15 @@ const EXPECTED_REGISTERED_FEATURES = [
   // All four conditional tags filtered from the stage1 baseline so
   // they appear here in their registry-declaration order, not the
   // stage1 order.
-  ...EXPECTED_STAGE1_FEATURES.flatMap((feature) =>
-    feature === 'session_artifacts'
-      ? [feature, 'session_artifacts_persistence']
-      : [feature],
-  ).filter(
+  ...EXPECTED_STAGE1_FEATURES.flatMap((feature) => {
+    if (feature === 'session_artifacts') {
+      return [feature, 'session_artifacts_persistence'];
+    }
+    if (feature === 'mcp_guardrail_events') {
+      return [feature, 'external_tool_guard'];
+    }
+    return [feature];
+  }).filter(
     (f) =>
       f !== 'workspace_init' &&
       f !== 'workspace_github_setup' &&
@@ -2456,6 +2460,20 @@ describe('createServeApp', () => {
           expect(predicate({})).toBe(false);
           expect(
             getAdvertisedServeFeatures(undefined, { mcpPoolActive: true }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'external_tool_guard') {
+          expect(predicate({ externalToolGuardActive: true })).toBe(true);
+          expect(predicate({ externalToolGuardActive: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              externalToolGuardActive: true,
+            }),
           ).toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
             feature,

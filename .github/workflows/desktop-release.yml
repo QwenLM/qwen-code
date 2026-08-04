@@ -282,16 +282,35 @@ jobs:
         env:
           WINDOWS_CERTIFICATE: '${{ secrets.WINDOWS_CERTIFICATE }}'
           WINDOWS_CERTIFICATE_PASSWORD: '${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}'
+          LEGACY_WIN_CSC_LINK: '${{ secrets.WIN_CSC_LINK }}'
+          LEGACY_WIN_CSC_KEY_PASSWORD: '${{ secrets.WIN_CSC_KEY_PASSWORD }}'
         run: |
-          if (-not $env:WINDOWS_CERTIFICATE -or -not $env:WINDOWS_CERTIFICATE_PASSWORD) {
-            throw 'WINDOWS_CERTIFICATE and WINDOWS_CERTIFICATE_PASSWORD are required for published Windows releases.'
+          # Prefer the Tauri-style WINDOWS_CERTIFICATE pair; fall back to the
+          # legacy electron-builder WIN_CSC_LINK pair if only that exists.
+          $pfx = $null
+          $pfxPassword = $null
+          $primaryIncomplete = ([bool]$env:WINDOWS_CERTIFICATE) -ne ([bool]$env:WINDOWS_CERTIFICATE_PASSWORD)
+          $legacyIncomplete = ([bool]$env:LEGACY_WIN_CSC_LINK) -ne ([bool]$env:LEGACY_WIN_CSC_KEY_PASSWORD)
+          if ($primaryIncomplete -or $legacyIncomplete) {
+            throw 'Incomplete Windows signing configuration: provide a complete WINDOWS_CERTIFICATE/WINDOWS_CERTIFICATE_PASSWORD pair or WIN_CSC_LINK/WIN_CSC_KEY_PASSWORD pair.'
           }
-          $path = Join-Path $env:RUNNER_TEMP 'qwen-code-desktop.pfx'
-          [IO.File]::WriteAllBytes($path, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
-          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
-          $certificate = Import-PfxCertificate -FilePath $path -CertStoreLocation Cert:\CurrentUser\My -Password $password
-          $windowsConfig = @{ bundle = @{ windows = @{ certificateThumbprint = $certificate.Thumbprint } } } | ConvertTo-Json -Compress -Depth 3
-          "WINDOWS_CONFIG=$windowsConfig" | Out-File -FilePath $env:GITHUB_ENV -Append
+          if ($env:WINDOWS_CERTIFICATE -and $env:WINDOWS_CERTIFICATE_PASSWORD) {
+            $pfx = $env:WINDOWS_CERTIFICATE
+            $pfxPassword = $env:WINDOWS_CERTIFICATE_PASSWORD
+          } elseif ($env:LEGACY_WIN_CSC_LINK -and $env:LEGACY_WIN_CSC_KEY_PASSWORD) {
+            $pfx = $env:LEGACY_WIN_CSC_LINK
+            $pfxPassword = $env:LEGACY_WIN_CSC_KEY_PASSWORD
+          }
+          if ($pfx) {
+            $path = Join-Path $env:RUNNER_TEMP 'qwen-code-desktop.pfx'
+            [IO.File]::WriteAllBytes($path, [Convert]::FromBase64String($pfx))
+            $password = ConvertTo-SecureString $pfxPassword -AsPlainText -Force
+            $certificate = Import-PfxCertificate -FilePath $path -CertStoreLocation Cert:\CurrentUser\My -Password $password
+            $windowsConfig = @{ bundle = @{ windows = @{ certificateThumbprint = $certificate.Thumbprint } } } | ConvertTo-Json -Compress -Depth 3
+            "WINDOWS_CONFIG=$windowsConfig" | Out-File -FilePath $env:GITHUB_ENV -Append
+          } else {
+            Write-Output "::warning::Windows signing certificate is not configured. Windows artifacts will be unsigned and may trigger SmartScreen warnings."
+          }
 
       - name: 'Prepare bundled runtime'
         working-directory: 'packages/desktop-shell'
@@ -309,6 +328,39 @@ jobs:
         working-directory: 'packages/desktop-shell'
         run: 'npm run test:release'
 
+      - name: 'Sign bundled vendor binaries (macOS)'
+        if: "runner.os == 'macOS' && inputs.dry_run == false"
+        working-directory: 'packages/desktop-shell'
+        shell: 'bash'
+        env:
+          APPLE_SIGNING_IDENTITY: '${{ env.APPLE_SIGNING_IDENTITY }}'
+        run: |
+          set -euo pipefail
+          # Sign all native macOS executables in the bundled runtime so
+          # notarization does not reject them. Tauri only signs the main
+          # app binary; resources like ripgrep and the Node.js runtime are
+          # embedded verbatim and must be signed beforehand.
+          runtime_dir="runtime/qwen-code"
+          # ripgrep vendor binaries
+          rg_dir="$runtime_dir/lib/vendor/ripgrep"
+          if [ -d "$rg_dir" ]; then
+            find "$rg_dir" -type f -name 'rg' -path '*-darwin/*' -exec \
+              codesign --force --sign "$APPLE_SIGNING_IDENTITY" \
+              --options runtime --timestamp \
+              --entitlements src-tauri/Entitlements.plist {} +
+          else
+            echo "::warning::Ripgrep vendor directory not found at $rg_dir; no ripgrep binaries signed."
+          fi
+          # Node.js runtime binary
+          node_bin="$runtime_dir/node/bin/node"
+          if [ -f "$node_bin" ]; then
+            codesign --force --sign "$APPLE_SIGNING_IDENTITY" \
+              --options runtime --timestamp \
+              --entitlements src-tauri/Entitlements.plist "$node_bin"
+          else
+            echo "::warning::Node.js runtime binary not found at $node_bin; no Node.js binary signed."
+          fi
+
       - name: 'Build desktop installers'
         working-directory: 'packages/desktop-shell'
         shell: 'bash'
@@ -322,7 +374,7 @@ jobs:
           args=( ${{ matrix.tauri_args }} )
           if [ "$DRY_RUN" = 'true' ]; then
             args+=(--no-sign)
-          elif [ "$RUNNER_OS" = 'Windows' ]; then
+          elif [ "$RUNNER_OS" = 'Windows' ] && [ -n "$WINDOWS_CONFIG" ]; then
             args+=(--config "$WINDOWS_CONFIG")
           fi
           npm run tauri -- build "${args[@]}"
@@ -339,10 +391,18 @@ jobs:
       - name: 'Verify Windows signature'
         if: "runner.os == 'Windows' && inputs.dry_run == false"
         shell: 'pwsh'
+        env:
+          WINDOWS_CONFIG: '${{ env.WINDOWS_CONFIG }}'
         run: |
           $installer = Get-ChildItem packages/desktop-shell/src-tauri/target/${{ matrix.rust_target }}/release/bundle/nsis/*.exe | Select-Object -First 1
           $signature = Get-AuthenticodeSignature $installer.FullName
-          if ($signature.Status -ne 'Valid') { throw "Invalid Authenticode signature: $($signature.Status)" }
+          if ($signature.Status -eq 'Valid') {
+            Write-Output "Windows installer is Authenticode-signed."
+          } elseif ($signature.Status -eq 'NotSigned' -and -not $env:WINDOWS_CONFIG) {
+            Write-Output "::warning::Windows installer is unsigned (no code signing certificate configured). SmartScreen will warn users on first install."
+          } else {
+            throw "Invalid Authenticode signature: $($signature.Status)"
+          }
 
       - name: 'Create Electron bridge archive'
         if: "runner.os == 'macOS' && inputs.electron_bridge"

@@ -148,6 +148,7 @@ const allowedProcessEnvAccesses = normalizeAllowances([
       reason:
         'The serve entry point owns daemon bootstrap, feature flags, and child-process defaults.',
       accesses: {
+        'computed:EXTERNAL_TOOL_GUARD_TOKEN_ENV': 1,
         'computed:QWEN_SERVER_TOKEN_ENV': 1,
         'computed:QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV': 1,
         'computed:QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV': 1,

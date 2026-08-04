@@ -261,6 +261,7 @@ function renderChatEditor(props: {
   currentMode?: string;
   currentModel?: string;
   availableModels?: Array<{ id: string; label?: string }>;
+  sessionWorkflowEnabled?: boolean;
   onSelectMode?: (mode: string) => void;
   onSelectModel?: (model: string) => void;
   onAttachmentsChange?: (hasAttachments: boolean) => void;
@@ -793,6 +794,53 @@ describe('ChatEditor top composer tag tooltip', () => {
       accessibleTooltip?.id,
     );
     expect(tag?.hasAttribute('aria-describedby')).toBe(false);
+  });
+});
+
+describe('ChatEditor Session Workflow mode rename', () => {
+  it('renames only the plan entry in the mode dropdown while enabled', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['approvalMode'],
+      sessionWorkflowEnabled: true,
+    });
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')
+        ?.click();
+    });
+
+    const popover = document.querySelector('[data-web-shell-toolbar-popover]');
+    expect(popover).not.toBeNull();
+    const labels = Array.from(popover?.querySelectorAll('button') ?? []).map(
+      (button) => button.textContent ?? '',
+    );
+    expect(labels.some((label) => label.includes('Plan & Review (plan)'))).toBe(
+      true,
+    );
+    expect(
+      labels.some((label) => label.includes('Ask Approval (default)')),
+    ).toBe(true);
+    expect(labels.some((label) => label.includes('Plan (plan)'))).toBe(false);
+  });
+
+  it('renames the active plan mode chip while enabled', () => {
+    const withWorkflow = renderChatEditor({
+      currentMode: 'plan',
+      sessionWorkflowEnabled: true,
+    });
+    expect(
+      withWorkflow
+        .querySelector('[data-toolbar-measure="mode:expanded"]')
+        ?.textContent?.includes('Plan & Review'),
+    ).toBe(true);
+
+    const withoutWorkflow = renderChatEditor({ currentMode: 'plan' });
+    expect(
+      withoutWorkflow
+        .querySelector('[data-toolbar-measure="mode:expanded"]')
+        ?.textContent?.includes('Plan & Review'),
+    ).toBe(false);
   });
 });
 
