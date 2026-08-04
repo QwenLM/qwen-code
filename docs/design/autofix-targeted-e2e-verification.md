@@ -21,6 +21,7 @@ Issue prose cannot safely provide executable verification inputs. The failure is
 - Recreating shard-wide load, ordering, or timing conditions.
 - Automatically repairing infrastructure, dependency-installation, or runner failures that produced no exact test result.
 - Adding `E2E Tests` as a required merge-queue check.
+- Retrying proof runs: the isolated Vitest config pins `retry: 0` because a pass that only appears on retry is not evidence; a genuinely flaky allowlisted case therefore cannot be closed out through Autofix and stays a human investigation.
 
 ## Trusted metadata producer
 

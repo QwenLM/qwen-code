@@ -2718,7 +2718,7 @@ printf '%s\\n' "\${status}"
     // Rollout grandfather: pre-marker approvals are backfilled from the
     // approval label event time; post-cutover approvals keep the marker.
     expect(issueAutofixJob).toContain(
-      "APPROVAL_MARKER_CUTOVER: '2026-08-02T00:00:00Z'",
+      "APPROVAL_MARKER_CUTOVER: '2026-08-18T00:00:00Z'",
     );
     expect(findCandidateIssuesStep).toContain(
       'repos/${REPO}/issues/${candidate_issue}/timeline?per_page=100',

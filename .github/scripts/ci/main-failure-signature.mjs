@@ -528,14 +528,14 @@ function escapeRegExp(value) {
 function publicMachineMarkers(body, repository) {
   const text = String(body ?? '');
   const testMarkerPattern = new RegExp(
-    `<!-- ${TEST_MARKER_PREFIX}([0-9a-f]{12}) -->`,
+    `<!-- ${escapeRegExp(TEST_MARKER_PREFIX)}([0-9a-f]{12}) -->`,
     'g',
   );
   const markers = [
     ...new Set([...text.matchAll(testMarkerPattern)].map((match) => match[0])),
   ];
   const signaturePattern = new RegExp(
-    `^<!-- ${SIGNATURE_MARKER_PREFIX}[0-9a-f]{12} -->$`,
+    `^<!-- ${escapeRegExp(SIGNATURE_MARKER_PREFIX)}[0-9a-f]{12} -->$`,
   );
   const signatureLine = text
     .split('\n')

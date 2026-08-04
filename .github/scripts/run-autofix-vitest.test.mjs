@@ -23,11 +23,19 @@ test('keeps candidate code outside the trusted Vitest worker', () => {
   assert.match(config, /pool: 'forks'/);
   assert.match(config, /singleFork: true/);
   assert.doesNotMatch(config, /execArgv|globalSetup|@qwen-code\/sdk/);
+  // Without this Vitest's 5 s default applies, which would fail any future
+  // allowlisted case that does not declare its own timeout.
+  assert.match(config, /testTimeout: 5 \* 60 \* 1000/);
   assert.match(wrapper, /TEST_CLI_PATH="\$\{launcher\}"/);
   assert.ok(
     wrapper.includes(
       `[[ "\${test_file}" != /* && "\${test_file}" != *$'\\n'* && "\${test_file}" != *'..'* ]]`,
     ),
+  );
+  assert.match(wrapper, /^cd "\$\{workspace\}"$/m);
+  assert.ok(
+    wrapper.indexOf('cd "${workspace}"') <
+      wrapper.indexOf('npx --no-install vitest run'),
   );
   assert.match(
     wrapper,
@@ -87,6 +95,7 @@ test('keeps the JSON proof root-owned and kills all candidate processes', () => 
   assert.match(wrapper, /setsid sudo --/);
   assert.match(wrapper, /setpriv --no-new-privs/);
   assert.match(wrapper, /--bounding-set=-dac_override,-dac_read_search/);
+  assert.match(wrapper, /Do not "fix" this by adding --reuid/);
   assert.match(wrapper, /coordinator_pid="\$\{command_pid\}"/);
   assert.match(wrapper, /sudo kill -KILL -- "-\$\{coordinator_pid\}"/);
   assert.doesNotMatch(wrapper, /coordinator\.pid/);

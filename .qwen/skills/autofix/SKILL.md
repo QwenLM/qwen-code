@@ -257,7 +257,9 @@ Implement the selected issue in the checked-out repository:
    must be production source only: scratch tests for local verification are
    fine but must stay uncommitted, and a fix that requires committed changes
    to any protected verification input must write `<workdir>/failure.md` and
-   stop instead.
+   stop instead. The published PR therefore carries production source only,
+   with no committed regression coverage: state in `<workdir>/e2e-report.md`
+   that adding any regression test is a human follow-up.
 5. For TypeScript changes, read the relevant type definitions and preserve
    strict nullability; do not assume optional fields are present.
 6. Run `npm run build`, `npm run typecheck`, `npm run lint`, focused Vitest

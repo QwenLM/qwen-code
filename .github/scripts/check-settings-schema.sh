@@ -23,15 +23,18 @@ fail() {
   exit 1
 }
 
-# Autofix rejects changes to the committed schema and every source that can
-# affect it before this gate runs. Executing the candidate's schema module graph
-# here would let module initialization short-circuit the trusted comparison.
-# TODO(#8318): run-autofix-review-verification.sh still executes the generator
+# Autofix rejects changes to the committed schema and to a best-effort
+# snapshot of the sources that feed it (the protected-path allowlist in
+# validate-autofix-verification-outputs.mjs) before this gate runs; the
+# snapshot is hand-curated, and the normal schema gate still runs on the
+# published PR. Executing the candidate's schema module graph here would let
+# module initialization short-circuit the trusted comparison.
+# TODO: run-autofix-review-verification.sh still executes the generator
 # on candidate code without this wrapper or the protected-path allowlist; the
 # review-address chain was scoped out of the targeted E2E redesign and needs
 # the same isolation before its schema gate is trusted the same way.
 if [[ -n "${AUTOFIX_VERIFY_COMMAND:-}" ]]; then
-  echo 'Skipping settings-schema freshness check: Autofix rejects changes to the committed schema and its sources before this gate runs.'
+  echo 'Skipping settings-schema freshness check: Autofix rejects changes to the committed schema and its protected sources before this gate runs.'
   exit 0
 else
   # Guard the generator itself: if it CRASHES (e.g. a type error introduced in

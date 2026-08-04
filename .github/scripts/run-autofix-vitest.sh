@@ -23,6 +23,7 @@ if [[ "${report}" != "${expected_report}" ]]; then
   echo "vitest report path disagreement: wrapper writes ${report} but the caller expects ${expected_report}" >&2
   exit 1
 fi
+cd "${workspace}"
 run_home="$(sudo mktemp -d "${home}/runs/vitest.XXXXXX")"
 sudo chown "root:${user}" "${run_home}"
 sudo chmod 0770 "${run_home}"
@@ -84,6 +85,10 @@ trap 'terminate 143' TERM
 # shell shares the shell's process group, so setsid is not a group leader
 # and execs in place; the new session's process-group ID thus equals
 # command_pid and cleanup_coordinator can kill -coordinator_pid.
+# The coordinator stays uid 0 across the execve on purpose: report sealing
+# below needs root. The bounding-set drop still applies — the kernel
+# recomputes the permitted set against it at exec — so the root child
+# genuinely cannot override DAC. Do not "fix" this by adding --reuid.
 setsid sudo -- \
   setpriv --no-new-privs \
     --bounding-set=-dac_override,-dac_read_search \
