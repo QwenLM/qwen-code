@@ -62,6 +62,10 @@ export enum AuthType {
 }
 
 export type PromptCacheSharingParameters = GenerateContentParameters & {
+  /**
+   * Marks reusable history before a non-reusable trailing directive. The
+   * final message is deliberately excluded from cache breakpoints.
+   */
   promptCacheSharing?: boolean;
 };
 

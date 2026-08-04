@@ -54,3 +54,19 @@ construction; provider/model/media gates; tool-call and malformed-response
 fallback; and cancellation behavior. Provider testing should compare the
 serialized request prefix and cached-token usage for the main turn and
 compression request.
+
+The reported live-provider cache figures are one-off validation evidence, not
+a checked-in benchmark. To reproduce them, route one interactive CLI process
+through a transparent OpenAI-compatible proxy, send a nonce-bearing main turn,
+then run `/compress` and a follow-up that recalls the nonce. Record only message
+roles, lengths and hashes, tool hashes, cache-field presence, and provider usage
+(never prompts or authorization). Verify that the main and compression requests
+share the same system, initial user, and tool hashes, and compute each hit rate
+as `cached_tokens / prompt_tokens`. The validation used DashScope `qwen3.7-max`:
+the main turn reported 18,944 / 19,627 cached tokens (96.52%), and compression
+reported 18,944 / 20,409 (92.82%). A deterministic exact-prefix mock comparison
+matched the longest byte-identical serialized prefix: clean `main` took the cold
+summarizer path with zero cached tokens, while this design matched 28,032 /
+29,034 prompt tokens (96.55%). Credentials, captured prompts, and the private
+proxy harness are intentionally not committed; the unit tests are the durable
+request-shape verification.

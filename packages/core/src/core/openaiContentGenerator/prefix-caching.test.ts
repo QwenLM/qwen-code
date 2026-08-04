@@ -54,6 +54,7 @@ describe('supportsOpenAIPrefixCaching', () => {
 
 describe('official OpenAI prompt caching', () => {
   it('recognizes only the official OpenAI API origin', () => {
+    expect(isOfficialOpenAIEndpoint(config(AuthType.USE_OPENAI))).toBe(true);
     expect(
       isOfficialOpenAIEndpoint(
         config(AuthType.USE_OPENAI, 'https://api.openai.com/v1'),
@@ -129,6 +130,28 @@ describe('official OpenAI prompt caching', () => {
       messages: [
         { role: 'user', content: 'main request' },
         { role: 'assistant', content: 'main response' },
+        { role: 'user', content: 'compression directive' },
+      ],
+    } as OpenAI.Chat.ChatCompletionCreateParams;
+
+    const result = applyOfficialOpenAIPromptCaching(
+      request,
+      'session-123',
+      true,
+    ) as OpenAI.Chat.ChatCompletionCreateParams & {
+      prompt_cache_options?: unknown;
+    };
+
+    expect(result.prompt_cache_key).toBe('qwen-code:session-123');
+    expect(result.prompt_cache_options).toBeUndefined();
+    expect(result.messages).toEqual(request.messages);
+  });
+
+  it('does not enable explicit mode without a reusable boundary', () => {
+    const request = {
+      model: 'gpt-5.6',
+      messages: [
+        { role: 'system', content: 'system' },
         { role: 'user', content: 'compression directive' },
       ],
     } as OpenAI.Chat.ChatCompletionCreateParams;

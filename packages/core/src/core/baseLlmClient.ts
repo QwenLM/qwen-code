@@ -109,7 +109,11 @@ export interface GenerateTextOptions {
    * deltas are collected into the same `{ text, usage }` result.
    */
   stream?: boolean;
-  /** Let the OpenAI adapter mark the unchanged history prefix for cache reuse. */
+  /**
+   * Let the OpenAI adapter mark the unchanged history prefix for cache reuse.
+   * This is only for requests ending in a non-reusable trailing directive;
+   * the adapter deliberately excludes the final message from cache marking.
+   */
   promptCacheSharing?: boolean;
   /**
    * When true, throw instead of silently falling back to the main generator if

@@ -4456,6 +4456,51 @@ describe('ContentGenerationPipeline', () => {
       expect(sent.messages.at(-1)?.content).toBe('compression directive');
     });
 
+    it('uses the official OpenAI SDK default endpoint when baseUrl is unset', async () => {
+      mockContentGeneratorConfig.baseUrl = undefined;
+      mockContentGeneratorConfig.model = 'gpt-5.6';
+      mockCliConfig = {
+        getSessionId: vi.fn().mockReturnValue('session-123'),
+      } as unknown as Config;
+      mockConfig.cliConfig = mockCliConfig;
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'system', content: 'system' },
+        { role: 'user', content: 'main request' },
+        { role: 'assistant', content: 'main response' },
+        { role: 'user', content: 'compression directive' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'test',
+        choices: [{ message: { content: 'response' } }],
+      });
+
+      await pipeline.execute(
+        {
+          model: 'gpt-5.6',
+          contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+          promptCacheSharing: true,
+        } as PromptCacheSharingParameters,
+        'prompt-id',
+      );
+
+      const sent = (mockClient.chat.completions.create as Mock).mock
+        .calls[0]?.[0] as OpenAI.Chat.ChatCompletionCreateParams & {
+        prompt_cache_options?: { mode?: string };
+      };
+      expect(sent.prompt_cache_key).toBe('qwen-code:session-123');
+      expect(sent.prompt_cache_options).toEqual({ mode: 'explicit' });
+      expect(sent.messages[1]?.content).toEqual([
+        expect.objectContaining({
+          text: 'main request',
+          prompt_cache_breakpoint: { mode: 'explicit' },
+        }),
+      ]);
+    });
+
     it('should pass arbitrary samplingParams keys through verbatim when the window has room (e.g. max_completion_tokens for GPT-5)', async () => {
       // Arrange: user sets a GPT-5 / o-series shape in samplingParams.
       // None of these are typed fields; all must appear on the wire because
