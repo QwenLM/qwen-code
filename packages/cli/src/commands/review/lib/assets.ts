@@ -21,7 +21,9 @@
 
 /** The container format each allowed extension claims to carry — and the
  * allowlist's single source of truth: `ASSET_EXTENSIONS` derives from these
- * keys, so admitting a format is a one-place change both gates agree on.
+ * keys — but admitting a format is a two-place change: add the key here AND
+ * the matching `sniffImageFormat` branch below, or the content gate refuses
+ * every real file of the new format while CI stays green.
  * An allowlist, not a denylist: SVG is deliberately absent (it is a script
  * container), and anything non-image is refused rather than hosted — this
  * command publishes review evidence, not arbitrary files. */

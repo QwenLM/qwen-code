@@ -307,6 +307,28 @@ describe('publish-assets', () => {
     );
   });
 
+  it('refuses the whole batch when one file fails the CONTENT ruling', () => {
+    // The extension gate has its two-file twin above; the content gate needs
+    // the same shape, or a future edit that ruled content for only the first
+    // prepared file would publish an impostor riding behind a good file.
+    happyGh();
+    const good = join(dir, 'a.png');
+    writeFileSync(
+      good,
+      Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    );
+    const impostor = join(dir, 'impostor.png');
+    writeFileSync(impostor, '#!/bin/sh\n');
+    run({ files: [good, impostor] });
+    expect(process.exitCode).toBe(3);
+    const why = (stderrSpy.mock.calls.map((c) => c[0]) as string[]).join(' ');
+    expect(why).toContain('impostor.png');
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+    expect(stdoutSpy).toHaveBeenCalledWith(
+      JSON.stringify({ published: false }),
+    );
+  });
+
   it('publishes a webp whose bytes match — the slice covers the WEBP marker', () => {
     // The content ruling sniffs a 16-byte slice, and WEBP's marker sits at
     // bytes 8-11: a slice shorter than 12 would false-refuse every real WEBP

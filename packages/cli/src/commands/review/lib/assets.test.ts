@@ -6,6 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  ASSET_EXTENSIONS,
   MAX_ASSET_BYTES,
   MAX_TOTAL_ASSET_BYTES,
   assetsBranch,
@@ -242,6 +243,43 @@ describe('sniffImageFormat / validateAssetContent', () => {
         Uint8Array.from([...'GIF89b'].map((c) => c.charCodeAt(0))),
       ),
     ).toBeNull();
+    // The same one-compare-short refusal INSIDE the multi-byte ascii() runs:
+    // each row corrupts exactly one byte of a real signature, and every byte
+    // of every run appears — GIF in BOTH variants, because a shared-prefix
+    // corruption in one variant is refused by the other's intact checks only
+    // through the byte where the variants differ, which a byte-4 edit could
+    // move. Without both forms, one run's dropped comparison survives green.
+    const oneByteOff: number[][] = [
+      // PNG bytes 2-3 (bytes 0-1 and 4-7 are pinned above)
+      [0x89, 0x50, 0x58, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
+      [0x89, 0x50, 0x4e, 0x58, 0x0d, 0x0a, 0x1a, 0x0a],
+      // GIF bytes 0-3 and 5 in each variant form; byte 4 once — the same
+      // corrupted byte covers both variants' checks at that position
+      ...[
+        'XIF87a',
+        'GXF87a',
+        'GIX87a',
+        'GIFX7a',
+        'GIF87X',
+        'XIF89a',
+        'GXF89a',
+        'GIX89a',
+        'GIFX9a',
+        'GIF8Xa',
+        // RIFF container bytes 0-3 and WEBP marker bytes 8-10 (byte 11 is
+        // pinned above)
+        'XIFF\u0000\u0000\u0000\u0000WEBP',
+        'RXFF\u0000\u0000\u0000\u0000WEBP',
+        'RIXF\u0000\u0000\u0000\u0000WEBP',
+        'RIFX\u0000\u0000\u0000\u0000WEBP',
+        'RIFF\u0000\u0000\u0000\u0000XEBP',
+        'RIFF\u0000\u0000\u0000\u0000WXBP',
+        'RIFF\u0000\u0000\u0000\u0000WEXP',
+      ].map((s) => [...s].map((c) => c.charCodeAt(0))),
+    ];
+    for (const header of oneByteOff) {
+      expect(sniffImageFormat(Uint8Array.from(header))).toBeNull();
+    }
   });
 
   it('admits content that matches the extension claim', () => {
@@ -284,5 +322,28 @@ describe('sniffImageFormat / validateAssetContent', () => {
     const proto = validateAssetContent('x.__proto__', PNG);
     expect(proto.ok).toBe(false);
     if (!proto.ok) expect(proto.reason).toContain('is not an allowed');
+  });
+
+  it('admits every allowed extension by content — the two gates agree', () => {
+    // Admitting a format is a TWO-place change: the allowlist key and the
+    // matching sniffImageFormat branch. This pin binds them — a format
+    // admitted by name whose signature the sniffer does not recognize would
+    // refuse every real file of it while CI stayed green. Naming the
+    // extension in the assertion itself says WHICH admission is dead.
+    const canonical: Record<string, Uint8Array> = {
+      png: PNG,
+      jpg: JPEG,
+      jpeg: JPEG,
+      gif: GIF,
+      webp: WEBP,
+    };
+    for (const ext of ASSET_EXTENSIONS) {
+      const bytes = canonical[ext];
+      expect({
+        ext,
+        admittedByContent:
+          bytes !== undefined && validateAssetContent(`probe.${ext}`, bytes).ok,
+      }).toEqual({ ext, admittedByContent: true });
+    }
   });
 });
