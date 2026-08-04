@@ -673,16 +673,18 @@ jobs:
     # rescans from scratch.
     #
     # GitHub evaluates concurrency before the job `if`, but after `needs`, so
-    # the group is gated on the same runnability predicate as the `if` above:
-    # runs whose issue phase will not execute (do_issue=false takeover,
-    # review, and command events; label events failing the decide gates;
-    # scheduled ticks whose review-scan still has targets) get a run-unique
-    # group instead — a never-running job entering a target-keyed group would
-    # replace the single pending run there and silently cancel it. Same
-    # precedent as qwen-triage.yml's triage/tmux jobs.
+    # the group is gated on the same runnability predicate as the `if` above,
+    # plus a dry-run exclusion: runs whose issue phase will not execute
+    # (do_issue=false takeover, review, and command events; label events
+    # failing the decide gates; scheduled ticks whose review-scan still has
+    # targets) and dry runs (if-runnable, but their Claim/Publish steps are
+    # gated off) get a run-unique group instead — a run that never claims
+    # entering a target-keyed group would replace the single pending run
+    # there and silently cancel it. Same precedent as qwen-triage.yml's
+    # triage/tmux jobs.
     concurrency:
       group: >-
-        ${{ needs.route.outputs.do_issue == 'true' && (github.event_name != 'schedule' || (needs.review-scan.result == 'success' && needs.review-scan.outputs.has_targets != 'true')) && format('qwen-autofix-issue-{0}', needs.route.outputs.issue_number || github.event.issue.number || 'scheduled') || format('qwen-autofix-issue-run-{0}', github.run_id) }}
+        ${{ needs.route.outputs.do_issue == 'true' && needs.route.outputs.dry_run != 'true' && (github.event_name != 'schedule' || (needs.review-scan.result == 'success' && needs.review-scan.outputs.has_targets != 'true')) && format('qwen-autofix-issue-{0}', needs.route.outputs.issue_number || github.event.issue.number || 'scheduled') || format('qwen-autofix-issue-run-{0}', github.run_id) }}
       cancel-in-progress: false
     permissions:
       contents: 'read'

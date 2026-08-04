@@ -1897,14 +1897,16 @@ describe('qwen-autofix workflow', () => {
     // after assess and only narrows the race to the short gap between the
     // recheck and the claim's label write; it does not close it. GitHub
     // evaluates concurrency before the job `if`, but after `needs`, so the
-    // group is gated on the same runnability predicate as the job `if`:
-    // never-runnable runs get a run-unique group and cannot supersede a
-    // pending target-keyed run. The right edge is anchored to
+    // group is gated on the job `if`'s runnability predicate plus a dry-run
+    // exclusion: keyed-group occupants must CLAIM, and dry runs are
+    // if-runnable yet skip Claim/Publish, so they get a run-unique group
+    // just like never-runnable runs and cannot supersede a pending
+    // target-keyed run. The right edge is anchored to
     // cancel-in-progress because the value is a folded block scalar — a
     // run-unique suffix appended as a continuation line would also become
     // part of the group value while a trailing-newline anchor stayed green.
     expect(issueAutofixJob).toContain(
-      "group: >-\n        ${{ needs.route.outputs.do_issue == 'true' && (github.event_name != 'schedule' || (needs.review-scan.result == 'success' && needs.review-scan.outputs.has_targets != 'true')) && format('qwen-autofix-issue-{0}', needs.route.outputs.issue_number || github.event.issue.number || 'scheduled') || format('qwen-autofix-issue-run-{0}', github.run_id) }}\n      cancel-in-progress: false",
+      "group: >-\n        ${{ needs.route.outputs.do_issue == 'true' && needs.route.outputs.dry_run != 'true' && (github.event_name != 'schedule' || (needs.review-scan.result == 'success' && needs.review-scan.outputs.has_targets != 'true')) && format('qwen-autofix-issue-{0}', needs.route.outputs.issue_number || github.event.issue.number || 'scheduled') || format('qwen-autofix-issue-run-{0}', github.run_id) }}\n      cancel-in-progress: false",
     );
     expect(issueAutofixJob).not.toContain('|| github.run_id }}');
     // The group identity and the scan step's FORCED_ISSUE env are
@@ -1921,11 +1923,12 @@ describe('qwen-autofix workflow', () => {
     )?.[1];
     expect(groupKeyedOn).toBeTruthy();
     expect(groupKeyedOn).toBe(forcedIssueSource);
-    // The runnability gate duplicated into the group expression must stay
-    // equal to the job `if` predicate minus `always() &&` (anchored where
-    // the job `if` opens): the gate clause now occurs on both sides, so the
-    // literal pins of it are satisfied by the group copy even if the
-    // `if:`-side occurrence drifts.
+    // The gate duplicated into the group expression must stay equal to the
+    // job `if` predicate minus `always() &&` (anchored where the job `if`
+    // opens), plus the dry-run exclusion the `if` does not need — dry runs
+    // execute but never claim, so they must not enter a keyed group: the
+    // gate clause now occurs on both sides, so the literal pins of it are
+    // satisfied by the group copy even if the `if:`-side occurrence drifts.
     const normalize = (text) => text.replace(/\s+/g, ' ').trim();
     const ifPredicate = normalize(
       issueAutofixJob.match(/if: \|-\n\s*\$\{\{\n([\s\S]*?)\n\s*\}\}/)?.[1] ??
@@ -1937,7 +1940,12 @@ describe('qwen-autofix workflow', () => {
       )?.[1] ?? '',
     );
     expect(ifPredicate).toBeTruthy();
-    expect(ifPredicate).toBe(gatePredicate);
+    expect(gatePredicate).toBe(
+      ifPredicate.replace(
+        "needs.route.outputs.do_issue == 'true' && ",
+        "needs.route.outputs.do_issue == 'true' && needs.route.outputs.dry_run != 'true' && ",
+      ),
+    );
     expect(workflow).toContain(
       '(.labels // []) | map(.name) as $labels | ($labels | index($ready))',
     );
