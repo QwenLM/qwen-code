@@ -55,8 +55,9 @@ arm was much stronger this time (3 confirmed Criticals, including a
 redirect-based SSRF bypass) — and the fan-out still covered all three
 while adding 19 more (22 total, zero self-adjudicated false positives on
 both arms, ~7× recall margin, pre-declared success criterion was 3×;
-cost ratio ~24×, dominated by the cross-file tracer — see the budget
-rule below). Two replication findings
+cost ratio ~24× — the ~46M fan-out arm against a ~1.9M naive arm,
+the ~46M derived in Budget ceiling below — dominated by the cross-file
+tracer — see the budget rule below). Two replication findings
 changed this document: the cross-file tracer's event-coverage walk ("does
 every firing path fire?") produced two Criticals unique in the field — both
 adjacent-class siblings of a historical fix; and the security agent,
@@ -66,6 +67,29 @@ workspace-writable HTTP-hook whitelist, env-resolution paths defeating a
 prior secrets-stripping fix). Full record:
 `.qwen/investigations/legacy-review-ab-2/REPORT.md` (untracked working file;
 key results summarized above).
+
+**Measurement inputs, consolidated.** The cost model below derives from
+the two rounds' totals; gathered in one place here so the two-rate
+decomposition and the 60M cap can be re-checked without the untracked
+records. Per-agent token counts beyond the ones this section names live
+only in those records, and land with the redacted follow-up.
+
+|                                 | Round 1 — permissions    | Round 2 — hooks                      |
+| ------------------------------- | ------------------------ | ------------------------------------ |
+| Date                            | unrecorded               | 2026-08-03                           |
+| Subject lines (files)           | 7,638 (12 files)         | 8,516 (23 files)                     |
+| Test lines (ratio to subject)   | 8,640 (1.13×)            | 16,335 (1.92×)                       |
+| Naive arm — findings            | 2 Criticals              | 3 Criticals                          |
+| Naive arm — tokens              | ~2.3M                    | ~1.9M (the ~46M arm ÷ the 24× ratio) |
+| Fan-out arm — findings          | 17 Criticals             | 22 Criticals                         |
+| Fan-out arm — tokens            | ~32.5M                   | ~46M                                 |
+| Recall margin (fan-out ÷ naive) | ~8.5×                    | ~7×                                  |
+| Named per-agent tokens          | 1c 6.8M, 5 6.4M, 3a 6.2M | 1c 16M (~35% of the arm)             |
+
+Re-deriving from the table: solving the two-rate decomposition from the
+two fan-out totals against their subject and test line counts yields
+~2.6M per 1,000 subject lines and ~1.5M per 1,000 test lines (an exact
+fit, n=2); the 60M cap is ~1.3× the larger measured arm (~46M).
 
 **Provenance.** The two records above are untracked files on the author's
 machine, and this document says what that stamping can and cannot support:
@@ -135,8 +159,16 @@ plan-derived size→work mapping; `plan-files` supplies the line counts).
 Both land in `packages/core/src/utils/` — the shared home the Output
 section's check-ignore consolidation also lands in, and for the same
 dependency reason: one consumer lives in `packages/core`, which cannot
-import from `packages/cli`. `/audit` does not import across command
-groups from `commands/review/lib/`, where these pieces live today, and
+import from `packages/cli`. The schema lift carries one bound from the
+file's own in-code contract: `findings.ts`'s four exported const lists
+have a second consumer — the Web Shell review renderer keeps its own
+copy and fails closed on any value it does not know, so a value added
+to them breaks rendering of every saved review artifact that carries
+one. The lift therefore keeps those lists frozen, and `/audit`'s extra
+fields — the evidence tier, the independent-discovery count, the
+unverified label — live outside them. `/audit` does not import across
+command groups from `commands/review/` — where these pieces live today,
+`budget.ts` under `lib/` and `findings.ts` at the command root — and
 `/review`'s certifying files import the lifted pieces from their new
 home.
 **Re-expressed against the target kind, in `/audit`-owned code**, every
@@ -160,9 +192,16 @@ machinery that keys on the diff:
   `requiredAgents()` drops both 7 and 1c, so the roster comes back
   missing the 1c this design keeps as mandatory. The `effort` field's
   `'medium'` drops all three personas in `/review` while `/audit`'s
-  medium requires 6a and its high adds 6b/6c — an audit plan passing
-  through it either loses the mandatory 6a or demands personas the
-  tier did not order. And the topology gate itself: with the line
+  medium requires 6a and its high adds 6b/6c — though above the
+  500-source-line floor the topology gate below gets there first,
+  routing those plans to 3B, where no effort clause runs and the
+  personas drop unconditionally at every tier. On the sub-floor plans
+  that reach the
+  clause, an audit plan passing through at medium loses the mandatory
+  6a; the other arm — demanding personas the tier did not order — has
+  no v1 plan shape that reaches it (low builds no roster, and high
+  orders all three personas the clause adds). And the topology gate
+  itself: with the line
   counts `plan-files` supplies, `isTerritoryFanOut()` is true for
   every audited module over its 500-source-line floor, routing the
   plan into the Step 3B branch (no `chunks[]`, so zero chunk agents,
@@ -213,11 +252,13 @@ lift into v1 — see Open questions.
   `git ls-files` enumerates zero files on exactly that target.
 - Classification is `plan-diff`'s four file-kind rules, with
   `GENERATED_RE`'s directory clause split rather than adopted: `vendor/`
-  stays a subject; `dist/`, `build/`, and `node_modules/` are excluded
-  from enumeration outright and are never audit subjects. `test` is the
-  only kind that routes out of the subject set (to Agent 5); other
-  `generated` files and `docs` files stay subjects and count toward the
-  gate.
+  stays a subject; the build-output / dependency-install / tooling class
+  — `dist/`, `build/`, `node_modules/`, and their same-shape peers
+  `.git/`, `target/`, `.venv/`, `__pycache__/`, `coverage/`, `.next/`,
+  `vendor/bundle/` — is excluded from enumeration outright and is never
+  an audit subject. `test` is the only kind that routes out of the
+  subject set (to Agent 5); other `generated` files and `docs` files
+  stay subjects and count toward the gate.
 - The topology gate is a hard bound in v1: subject lines ≤ 9,000, and —
   on the tiers that run Agent 5 — test lines ≤ 18,000; over either arm
   refuses at plan time. An empty subject set refuses at every tier.
@@ -248,14 +289,27 @@ subcommand, `qwen audit plan-files <path>`, which plays the role
   dimension agents' read of a vendored subtree. `dist/`, `build/`, and
   `node_modules/` are the opposite — the audited checkout's own build
   outputs and dependency installs, not code a path choice plausibly
-  points at — and are excluded from enumeration outright: never audit
-  subjects, never counted toward either gate arm, because a filesystem
-  walk of any built package root enumerates `dist/` (and a
-  package-local `node_modules/`) that would otherwise count toward the
-  9,000-line gate and be handed to whole-file walkers —
-  `/audit packages/core` would refuse at the gate on build output
-  while `/audit packages/core/src/permissions` stays fine. The
-  remaining `GENERATED_RE` clauses — lockfiles, `.snap`,
+  points at — and the same class runs past the JS tree: `.git/`,
+  `target/`, `.venv/`, `__pycache__/`, `coverage/`, `.next/`, and
+  `vendor/bundle/` (the one exclusion inside a subject tree — `vendor/`
+  stays a subject; only its Bundler install subtree drops out). All of
+  them are excluded from enumeration outright: never audit subjects,
+  never counted toward either gate arm, because a filesystem walk of
+  any built package root enumerates `dist/` (and a package-local
+  `node_modules/`) that would otherwise count toward the 9,000-line
+  gate and be handed to whole-file walkers — `/audit packages/core`
+  would refuse at the gate on build output while
+  `/audit packages/core/src/permissions` stays fine. `.git/` is the
+  sharp case: the walk deliberately ignores `.gitignore`, every
+  checkout with history carries one, and its text files
+  (`COMMIT_EDITMSG`, `config`, `hooks/*.sample`, `packed-refs`) match
+  no kind rule and classify as `source` — line-counted into the subject
+  arm and handed to whole-file walkers, so on any repository with
+  history `/audit .` refuses at the gate on git internals, the same
+  failure the `dist/` example names, on a directory every repository
+  has (its binary objects land
+  in the uncoverable-subject class below; the text files are what reach
+  the gate). The remaining `GENERATED_RE` clauses — lockfiles, `.snap`,
   `.min.js|css` — stay classified `generated` and stay subjects
   under the same path-choice rule. The one routing rule is unchanged:
   only `test` routes out of the subject set, into Agent 5's corpus;
@@ -365,7 +419,9 @@ read, or a read-only verification as an executed one.
   than treating absence as consent.
 - Medium is capped at 60M tokens and 40 agents, enforced at plan time
   against the priced part of the plan; the caps are advisory for the
-  unpriced rest.
+  unpriced rest. Of the two, only the token cap can bind in v1 — the
+  countable roster tops out at 11 — so the agent cap is the forward
+  bound of the deferred above-gate branch (What the constants leave).
 - Verification shards are not counted against the agent cap — the finding
   count is unknowable at plan time. High-tier round auditors are not
   counted either: the cap is a roster bound, and their plan-time bound —
@@ -461,9 +517,18 @@ stays the marginal-yield decision above.
 admitted by construction: the hooks module — the larger calibration arm,
 and the replication this document's argument cites — prices at ~60M top
 against the 60M cap, and permissions at ~42M; a cap check that refused
-either module would refuse the evidence the design rests on. The 9-agent
-roster sits similarly below the 40-agent cap. The cap binds only at the
-corner neither experiment measured: the full below-gate worst case —
+either module would refuse the evidence the design rests on. The agent
+cap is even further from binding: it cannot fire in v1 at all. The
+countable roster is 9 at medium and 11 at high;
+verification shards and high-tier round auditors are carved out of the
+cap by the decision above; and the only machinery that could grow the
+priced roster — chunk agents, the invariant-checklist triple — arrives
+only with the deferred above-gate branch, and v1 refuses above the
+gate. No v1 plan presents a countable roster above 11, so the plan-time
+agent check is a no-op: 40 is stated the way the token cap's corner
+case is stated below — a named forward bound for the deferred branch,
+not a check that enforces anything in v1. The token cap binds only at
+the corner neither experiment measured: the full below-gate worst case —
 9,000 subject lines at the 18,000 test cap — prices at ~65M top, over the
 60M cap, so a module at both arms' extreme corner (subject at the gate,
 test ratio 2.0×, beyond the measured 1.92×) can pass both gate arms and
@@ -739,8 +804,11 @@ cannot match it, or a concurrent test run picks the sibling up.
 
 - **The artifact:** a markdown report at
   `.qwen/audits/<YYYY-MM-DD>-<HHMMSS>-<path-slug>.md` — the `/review` report
-  convention adapted: plural directory, date-first, HHMMSS so a same-day
-  re-audit does not overwrite the earlier report — findings clustered by
+  convention inherited, not adapted: `/review` already writes
+  `.qwen/reviews/<YYYY-MM-DD>-<HHMMSS>-<slug>.md`, so the plural
+  directory, the date-first stamp, and the HHMMSS same-day-overwrite
+  guard are carried over unchanged; only the directory name and the
+  slug source change — findings clustered by
   theme/root cause, each with severity, locations, failure scenario, evidence
   tier (end-to-end probe / unit probe / code read), independent-discovery
   count ("found independently by N agents"), and the verification's confidence
@@ -1111,8 +1179,11 @@ capped, sold as triage — as above.)
 - Unit: `plan-files` enumeration and classification — the
   filesystem-walk enumeration source (a gitignored vendored fixture is
   enumerated, where `git ls-files` returns zero), the `GENERATED_RE`
-  directory-clause split (`dist/`, `build/`, `node_modules/` excluded
-  from enumeration; `vendor/` stays a subject), the vendor override
+  directory-clause split (the build-output / dependency-install /
+  tooling class — `dist/`, `build/`, `node_modules/`, `.git/`,
+  `target/`, `.venv/`, `__pycache__/`, `coverage/`, `.next/`,
+  `vendor/bundle/` — excluded from enumeration; `vendor/` stays a
+  subject), the vendor override
   (test-shaped paths under `vendor/` classify as `test`), and the
   uncoverable-subject exclusion (over-cap lines, non-text files); the
   topology gates (the subject arm at every tier, the test arm at the
