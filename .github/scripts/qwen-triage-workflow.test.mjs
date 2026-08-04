@@ -200,8 +200,14 @@ describe('qwen-triage: agent tool/permission settings', () => {
 describe('qwen-triage: fork-PR runner routing', () => {
   const runsOn = String(triageJob['runs-on']);
 
-  it('gates the persistent ECS pool on same-repo (fork code never persists)', () => {
+  it('gates the persistent ECS pool on same-repo or write-access authors', () => {
     assert.match(runsOn, /head\.repo\.full_name == github\.repository/);
+    // A write-access author (OWNER/MEMBER/COLLABORATOR association) is as
+    // trusted as an in-repo branch, so their fork PRs use ECS too.
+    assert.match(
+      runsOn,
+      /contains\(fromJSON\('\["OWNER", "MEMBER", "COLLABORATOR"\]'\), github\.event\.pull_request\.author_association\)/,
+    );
     assert.match(runsOn, /ecs-qwen/);
   });
 

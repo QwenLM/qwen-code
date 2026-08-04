@@ -144,7 +144,9 @@ jobs:
   file_issue:
     name: 'Create autofix issue'
     needs: 'analyze'
-    runs-on: 'ubuntu-latest'
+    # Checks out nothing (workflow_run events use base-repo YAML), so the
+    # persistent ECS pool is safe. Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     permissions:
       issues: 'write'

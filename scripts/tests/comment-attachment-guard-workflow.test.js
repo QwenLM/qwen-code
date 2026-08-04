@@ -109,7 +109,7 @@ describe('comment attachment guard workflow', () => {
   describe('job-level gate', () => {
     const gate = workflow.slice(
       workflow.indexOf('  remove-suspicious-attachments:'),
-      workflow.indexOf("runs-on: 'ubuntu-latest'"),
+      workflow.indexOf('runs-on:'),
     );
 
     it('gates on association and sender before a runner is allocated', () => {

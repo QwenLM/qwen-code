@@ -56,11 +56,12 @@ jobs:
   classify_pr:
     name: 'Classify PR'
     if: "${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' }}"
-    # Gate runs on ECS for in-repo PRs and for the merge queue (which runs in the
-    # base-repo context), else a busy hosted pool delays it and blocks the
-    # ECS-bound jobs. The kill-switch is read here, so flipping it reverts
-    # everything to hosted.
-    runs-on: '${{ (vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event.pull_request.head.repo.full_name == github.repository || github.event_name == ''merge_group'')) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # Gate runs on ECS for in-repo PRs, fork PRs whose author has write access
+    # (OWNER/MEMBER/COLLABORATOR association — a write-access author is as
+    # trusted as an in-repo branch), and the merge queue (base-repo context),
+    # else a busy hosted pool delays it and blocks the ECS-bound jobs. The
+    # kill-switch is read here, so flipping it reverts everything to hosted.
+    runs-on: '${{ (vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER", "MEMBER", "COLLABORATOR"]''), github.event.pull_request.author_association) || github.event_name == ''merge_group'')) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     continue-on-error: true
     outputs:
       skip_ci: '${{ steps.release_sync.outputs.skip_ci }}'
@@ -102,23 +103,29 @@ jobs:
           echo "skip_ci=${skip_ci}" >> "${GITHUB_OUTPUT}"
           echo "skip_ci=${skip_ci}"
 
-      # In-repo PR (head branch in this repo => author has write access) and the
-      # merge queue (base-repo context) run the Linux jobs on ECS; fork PRs stay
+      # In-repo PRs, fork PRs whose author has write access
+      # (OWNER/MEMBER/COLLABORATOR association), and the merge queue
+      # (base-repo context) run the Linux jobs on ECS; other fork PRs stay
       # hosted. Disable via repo var MAINTAINER_ECS_RUNNER_DISABLED=true.
       - name: 'Select Linux runner'
         id: 'pick_runner'
         env:
           SAME_REPO: '${{ github.event.pull_request.head.repo.full_name == github.repository }}'
+          AUTHOR_ASSOCIATION: '${{ github.event.pull_request.author_association }}'
           ECS_DISABLED: '${{ vars.MAINTAINER_ECS_RUNNER_DISABLED }}'
           EVENT_NAME: '${{ github.event_name }}'
           DISPATCH_LINUX_RUNNER: '${{ github.event.inputs.linux_runner }}'
         run: |-
           ubuntu_runner='["ubuntu-latest"]'
+          trusted_author=false
+          case "${AUTHOR_ASSOCIATION}" in
+            OWNER|MEMBER|COLLABORATOR) trusted_author=true ;;
+          esac
           if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
             if [[ "${ECS_DISABLED}" != "true" && "${DISPATCH_LINUX_RUNNER}" == "self-hosted" ]]; then
               ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
             fi
-          elif [[ "${ECS_DISABLED}" != "true" && ( "${SAME_REPO}" == "true" || "${EVENT_NAME}" == "merge_group" ) ]]; then
+          elif [[ "${ECS_DISABLED}" != "true" && ( "${SAME_REPO}" == "true" || "${trusted_author}" == "true" || "${EVENT_NAME}" == "merge_group" ) ]]; then
             ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
           fi
           echo "ubuntu_runner=${ubuntu_runner}" >> "${GITHUB_OUTPUT}"

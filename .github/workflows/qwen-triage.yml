@@ -74,10 +74,12 @@ jobs:
          startsWith(github.event.comment.body, '@qwen-code /verify '))) ||
        (github.event_name == 'workflow_dispatch' &&
         github.event.inputs.tmux_pr != ''))
-    # Canonical same-repo guard: this job loads CI_BOT_PAT, so fork-triggered
-    # runs stay on hosted (ephemeral); only in-repo PR events on QwenLM/qwen-code
-    # use the persistent ECS runner.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # Canonical trusted-author guard: this job loads CI_BOT_PAT, so runs
+    # triggered by untrusted fork PRs stay on hosted (ephemeral); in-repo PR
+    # events and fork PRs whose author has write access (OWNER/MEMBER/
+    # COLLABORATOR association) on QwenLM/qwen-code use the persistent ECS
+    # runner.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && github.event.pull_request && (github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER", "MEMBER", "COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     permissions:
       contents: 'read'
@@ -387,13 +389,15 @@ jobs:
     # (.qwen/skills/triage/SKILL.md Rules), the `settings` deny rules block the
     # direct interpreter/build/network invocations, and the routing below keeps
     # foreign code off the persistent pool.
-    # Runner routing: the persistent ECS pool is reserved for events whose
-    # payload carries no foreign code — issue triage and same-repo PR events.
-    # Fork PRs, and comment/dispatch-triggered reruns (which may target fork
-    # PRs), go to ephemeral hosted runners so a steered agent cannot persist
-    # anything across runs. Forks of this repo fall back to ubuntu-latest as
-    # before.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name == ''issues'' || (github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # Runner routing: the persistent ECS pool serves events whose payload
+    # carries no foreign code — issue triage and same-repo PR events — plus
+    # fork PRs whose author has write access (OWNER/MEMBER/COLLABORATOR
+    # association: a write-access author is as trusted as an in-repo branch,
+    # and the pool is network-isolated). PRs by other fork authors, and
+    # comment/dispatch-triggered reruns (which may target fork PRs), go to
+    # ephemeral hosted runners so a steered agent cannot persist anything
+    # across runs. Forks of this repo fall back to ubuntu-latest as before.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name == ''issues'' || (github.event.pull_request && (github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER", "MEMBER", "COLLABORATOR"]''), github.event.pull_request.author_association))))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     # startsWith (not contains) prevents false triggers from comments that
     # mention the phrase in quoted text or mid-sentence descriptions.
     # always() so the job still evaluates when the upstream `authorize` job is
@@ -1739,10 +1743,24 @@ jobs:
     # inherit the 360-minute default and a hung gh call could hold a hosted
     # runner for six hours. Same bound as publish-verify.
     timeout-minutes: 10
-    runs-on: 'ubuntu-latest'
+    # Checks out nothing and runs no repository code (base-repo YAML events),
+    # so the persistent ECS pool is safe.
+    # Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions:
       pull-requests: 'write'
     steps:
+      - name: 'Restore workspace ownership'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; artifact download may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; artifact download may fail on leftover read-only files"
+
       - name: 'Download tmux results'
         uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v5.0.0
         with:
@@ -3400,10 +3418,24 @@ jobs:
     # inherit the 360-minute default and a hung gh call could hold a hosted
     # runner for six hours.
     timeout-minutes: 10
-    runs-on: 'ubuntu-latest'
+    # Checks out nothing and runs no repository code (base-repo YAML events),
+    # so the persistent ECS pool is safe.
+    # Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions:
       pull-requests: 'write'
     steps:
+      - name: 'Restore workspace ownership'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; artifact download may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; artifact download may fail on leftover read-only files"
+
       - name: 'Download verify results'
         id: 'download'
         uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v5.0.0
