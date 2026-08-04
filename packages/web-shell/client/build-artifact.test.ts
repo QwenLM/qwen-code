@@ -225,7 +225,14 @@ describe('build artifact — package boundary', () => {
     // present and scoped under the WebShell root pins the lib-bundle fix.
     let matched: Rule | undefined;
     postcss.parse(readInjectedCss()).walkRules((rule) => {
-      if (rule.selector.includes('data-user-selectable] ::selection')) {
+      // Match the effect (selectable rows get a ::selection rule scoped to
+      // the WebShell root), not the exact notation - a maintainer changing
+      // `background` to `background-color` (the CSS Pseudo-Elements-4 name)
+      // should not break this pin while the e2e one stays green.
+      if (
+        rule.selector.includes('[data-user-selectable]') &&
+        rule.selector.includes('::selection')
+      ) {
         matched = rule;
       }
     });
@@ -235,7 +242,11 @@ describe('build artifact — package boundary', () => {
     ).toBeDefined();
     expect(matched?.selector).toContain('[data-web-shell-root]');
     expect(
-      matched?.nodes.some((n) => n.type === 'decl' && n.prop === 'background'),
+      matched?.nodes.some(
+        (n) =>
+          n.type === 'decl' &&
+          (n.prop === 'background' || n.prop === 'background-color'),
+      ),
     ).toBe(true);
   });
 });
