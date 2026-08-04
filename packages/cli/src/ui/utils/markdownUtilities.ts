@@ -39,6 +39,8 @@ so rendered history chunks do not break fenced code blocks unnecessarily.
       render item.
 */
 
+import { CODE_FENCE_RE } from './pending-rendered-height.js';
+
 /**
  * Finds the next fenced-code delimiter (a run of 3+ ``` or ~~~) at or after
  * `from`, returning its index, fence character and the FULL run length. Both
@@ -272,21 +274,38 @@ const MATH_FENCE_LINE_RE = /^ *\$\$ *$/;
  * inside an already-open block are code content and are left alone, except a
  * closing fence glued to the last code line with only whitespace after it —
  * that one is split off so the parser's line-anchored fence can close the
- * block. A run outside any fence that does not already start a line gets a
- * newline inserted.
+ * block. Runs in the remainder of a line already consumed as a fence line are
+ * part of that line (the parser reads it whole), never independent fences. A
+ * run outside any fence that does not already start a line gets a newline
+ * inserted — unless the same-line prefix is itself a fence line, which the
+ * split would hand to the parser as a second, tracker-undecided fence.
+ *
+ * `options.mathFences` must mirror the renderer's `renderVisualBlocks`:
+ * MarkdownDisplay only honors $$ fences in render mode, so the tracker may
+ * only treat $$ lines as math fences when the renderer does.
  */
-export function normalizeCodeFences(text: string): string {
+export function normalizeCodeFences(
+  text: string,
+  options?: { mathFences?: boolean },
+): string {
+  const trackMathFences = options?.mathFences ?? true;
   let result = '';
   let lastIndex = 0;
   let openFence: { char: string; length: number } | null = null;
   let inMathBlock = false;
-  // Whole lines before this position were already scanned for $$ math fences.
-  // It only advances while outside code fences, where $$ lines are math
-  // fences rather than code content.
+  // First position not yet scanned for $$ math fences. Advances past every
+  // line that holds a delimiter run; the scan itself only runs outside code
+  // fences, so `$$` lines inside code blocks are never counted as math fences
+  // and are never re-scanned after the block closes.
   let mathScanPos = 0;
+  // Runs starting before this offset sit in the remainder of a line already
+  // consumed as a fence line (opening or closing): the parser reads such a
+  // line whole, remainder included, so they are never independent fences.
+  let consumedLineEnd = 0;
 
   for (const match of text.matchAll(/(`{3,}|~{3,})/g)) {
     const runStart = match.index ?? 0;
+    if (runStart < consumedLineEnd) continue;
     const run = match[0];
     const lineStart = text.lastIndexOf('\n', runStart - 1) + 1;
     const nextNewline = text.indexOf('\n', runStart);
@@ -296,7 +315,7 @@ export function normalizeCodeFences(text: string): string {
       .slice(runStart + run.length, lineEnd)
       .includes('`');
 
-    if (openFence === null) {
+    if (trackMathFences && openFence === null) {
       for (const line of text.slice(mathScanPos, lineStart).split(/\r?\n/)) {
         if (MATH_FENCE_LINE_RE.test(line)) inMathBlock = !inMathBlock;
       }
@@ -306,6 +325,16 @@ export function normalizeCodeFences(text: string): string {
     if (inMathBlock) continue;
 
     result += text.slice(lastIndex, runStart);
+    // Inserting a newline before a mid-line run promotes the same-line prefix
+    // to its own line. When that prefix is itself a fence line, the split
+    // would hand the parser a fence the tracker never decided on, so leave
+    // the line untouched.
+    const prefix = text.slice(lineStart, runStart);
+    const prefixBecomesFenceLine =
+      !startsLine &&
+      (CODE_FENCE_RE.test(prefix) ||
+        (trackMathFences && MATH_FENCE_LINE_RE.test(prefix)));
+
     if (openFence !== null) {
       const closesAtLineStart =
         startsLine &&
@@ -315,19 +344,23 @@ export function normalizeCodeFences(text: string): string {
       // A closing fence glued to the last code line can never match the
       // parser's line-anchored CODE_FENCE_RE, so split it off. Deliberately
       // narrower than the old /btw repair: trailing prose after the run is
-      // left alone.
+      // left alone. Tabs and a CRLF line ending count as no visible content —
+      // the parser splits lines on \r?\n and its remainder class accepts both.
       const closesGlued =
+        !prefixBecomesFenceLine &&
         !startsLine &&
         run[0] === openFence.char &&
         run.length >= openFence.length &&
-        /^ *$/.test(text.slice(runStart + run.length, lineEnd));
+        /^[ \t]*\r?$/.test(text.slice(runStart + run.length, lineEnd));
       if (closesAtLineStart || closesGlued) {
         if (closesGlued) result += '\n';
         openFence = null;
+        consumedLineEnd = lineEnd;
       }
-    } else if (restBacktickFree) {
+    } else if (restBacktickFree && !prefixBecomesFenceLine) {
       if (!startsLine) result += '\n';
       openFence = { char: run[0], length: run.length };
+      consumedLineEnd = lineEnd;
     }
     result += run;
     lastIndex = runStart + run.length;

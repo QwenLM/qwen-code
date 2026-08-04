@@ -11,6 +11,7 @@ import { Colors } from '../../colors.js';
 import { t } from '../../../i18n/index.js';
 import { MarkdownDisplay } from '../../utils/MarkdownDisplay.js';
 import { normalizeCodeFences } from '../../utils/markdownUtilities.js';
+import { useRenderMode } from '../../contexts/RenderModeContext.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 
 export interface BtwDisplayProps {
@@ -27,6 +28,7 @@ const BtwMessageInternal: React.FC<BtwDisplayProps> = ({
   btw,
   containerWidth,
 }) => {
+  const { renderMode } = useRenderMode();
   const { columns: terminalWidth } = useTerminalSize();
   const baseWidth = containerWidth ?? terminalWidth;
   const contentWidth = Math.max(2, baseWidth - BTW_SELF_CHROME);
@@ -62,7 +64,9 @@ const BtwMessageInternal: React.FC<BtwDisplayProps> = ({
       ) : (
         <Box flexDirection="column" marginTop={1}>
           <MarkdownDisplay
-            text={normalizeCodeFences(btw.answer)}
+            text={normalizeCodeFences(btw.answer, {
+              mathFences: renderMode === 'render',
+            })}
             isPending={false}
             contentWidth={contentWidth}
           />

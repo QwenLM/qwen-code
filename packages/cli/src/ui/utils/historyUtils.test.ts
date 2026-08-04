@@ -99,6 +99,24 @@ describe('isSyntheticHistoryItem', () => {
       ),
     ).toBe(false);
   });
+
+  it('treats btw and advisor results as meaningful', () => {
+    // Both are user-asked-for slash-command outputs; rewinding past them on
+    // ESC would silently wipe rendered content from history.
+    expect(
+      isSyntheticHistoryItem(
+        mk({
+          type: 'btw',
+          btw: { question: 'q', answer: 'a', isPending: false },
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      isSyntheticHistoryItem(
+        mk({ type: 'advisor', text: 'review', model: 'm' }),
+      ),
+    ).toBe(false);
+  });
 });
 
 describe('itemsAfterAreOnlySynthetic', () => {

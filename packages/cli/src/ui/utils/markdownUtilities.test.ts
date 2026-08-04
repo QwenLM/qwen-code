@@ -375,5 +375,76 @@ describe('markdownUtilities', () => {
       const text = '```python\ncode\n~~~\nThen```js\nx\n```';
       expect(normalizeCodeFences(text)).toBe(text);
     });
+
+    it('repairs fences inside $$ blocks when mathFences is false', () => {
+      // Raw render mode never opens math blocks (MarkdownDisplay gates $$
+      // fences on renderVisualBlocks), so the tracker must not skip the runs
+      // a raw-mode parser reads as real fences.
+      expect(
+        normalizeCodeFences('$$\nA```ts\ncode\n```\n$$\nAfter.', {
+          mathFences: false,
+        }),
+      ).toBe('$$\nA\n```ts\ncode\n```\n$$\nAfter.');
+    });
+
+    it('keeps $$ lines math fences by default', () => {
+      // Same input as above with the default (render-mode) tracking: the
+      // runs sit inside a math block and must pass through untouched.
+      const text = '$$\nA```ts\ncode\n```\n$$\nAfter.';
+      expect(normalizeCodeFences(text)).toBe(text);
+    });
+
+    it('does not process runs inside a consumed fence line remainder', () => {
+      // The parser reads a fence line whole (CODE_FENCE_RE includes the
+      // remainder), so the second run of a closer like `~~~foo~~~` is closer
+      // content — splitting it off would manufacture a phantom unterminated
+      // fence that swallows everything after the block.
+      const text = '~~~\ncode\n~~~foo~~~\nAfter';
+      expect(normalizeCodeFences(text)).toBe(text);
+    });
+
+    it('does not split a glued closer whose same-line prefix is a fence line', () => {
+      // Splitting would promote ```foo to a closing fence line and the
+      // split-off run to a phantom opener; the unsplit line is code content
+      // to the parser (backticks in the remainder fail CODE_FENCE_RE), so
+      // the tracker must leave it alone and keep the block open.
+      const text = '```\ncode\n```foo```\nAfter';
+      expect(normalizeCodeFences(text)).toBe(text);
+    });
+
+    it('splits a glued closing fence whose only trailing content is CRLF or tabs', () => {
+      // The parser splits lines on \r?\n and CODE_FENCE_RE's remainder class
+      // accepts tabs, so whitespace-only trailing content must not block the
+      // repair on CRLF or tab-padded text.
+      expect(normalizeCodeFences('```py\r\nprint(1)```\r\nAfter')).toBe(
+        '```py\r\nprint(1)\n```\r\nAfter',
+      );
+      expect(normalizeCodeFences('```py\nprint(1)```\t\nAfter')).toBe(
+        '```py\nprint(1)\n```\t\nAfter',
+      );
+    });
+
+    it('does not split a mid-line run whose prefix is itself a fence line', () => {
+      // The split would hand the parser two fence lines (```a and ```b)
+      // where the tracker decided one; the unsplit line stays prose
+      // (backticks in the remainder fail CODE_FENCE_RE), so the genuine
+      // fence further on still gets its newline.
+      expect(normalizeCodeFences('```a ```b\nThen```ts\ncode\n```')).toBe(
+        '```a ```b\nThen\n```ts\ncode\n```',
+      );
+    });
+
+    it('is idempotent on two-runs-on-one-line shapes', () => {
+      const once = normalizeCodeFences('```a ```b\nThen```ts\ncode\n```');
+      expect(normalizeCodeFences(once)).toBe(once);
+    });
+
+    it('does not split a mid-line run whose prefix is a $$ math fence line', () => {
+      // Splitting would turn the $$ prefix into a math fence line that
+      // swallows the code block in render mode; the unsplit line is prose to
+      // the parser, so it must stay prose for the tracker too.
+      const text = '$$ ```ts\ncode\n```\nAfter';
+      expect(normalizeCodeFences(text)).toBe(text);
+    });
   });
 });
