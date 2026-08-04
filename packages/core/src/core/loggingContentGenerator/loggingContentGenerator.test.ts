@@ -823,6 +823,107 @@ describe('LoggingContentGenerator', () => {
     expect(logApiError).toHaveBeenCalledTimes(1);
   });
 
+  it('still emits an api_error event for an abort-shaped error the user did not cause', async () => {
+    // Half of the gate's truth table: an abort-shaped error can also come from
+    // the network rather than the user. With the caller's signal never fired
+    // that is a genuine failure and must still be reported, so the gate cannot
+    // key on the error shape alone.
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockRejectedValue(
+          new APIUserAbortError({ message: 'Request was aborted.' }),
+        ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const controller = new AbortController();
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+      config: { abortSignal: controller.signal },
+    } as unknown as GenerateContentParameters;
+
+    await expect(
+      generator.generateContent(request, 'prompt-network-abort'),
+    ).rejects.toBeInstanceOf(APIUserAbortError);
+
+    expect(logApiError).toHaveBeenCalledTimes(1);
+  });
+
+  it('still emits an api_error event for a real failure that races a cancel', async () => {
+    // The other half: a genuine upstream failure landing just as the user
+    // cancels is still a real error, so the gate cannot key on the aborted
+    // signal alone.
+    const wrapped = createWrappedGenerator(
+      vi.fn().mockRejectedValue(new Error('rate limited')),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const controller = new AbortController();
+    controller.abort();
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+      config: { abortSignal: controller.signal },
+    } as unknown as GenerateContentParameters;
+
+    await expect(
+      generator.generateContent(request, 'prompt-race'),
+    ).rejects.toThrow('rate limited');
+
+    expect(logApiError).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not emit an api_error event when the user cancels mid-stream', async () => {
+    // Cancelling during a streaming response is the common cancel path, and it
+    // surfaces inside the `for await` — a different call site from the
+    // non-stream case above. Without coverage here the gate could be dropped at
+    // that site and the cancellation noise would return for stream cancels.
+    const controller = new AbortController();
+    const streamFn = vi.fn().mockResolvedValue(
+      (async function* () {
+        yield createResponse('resp-1', 'test-model', [{ text: 'partial' }]);
+        controller.abort();
+        throw new APIUserAbortError({ message: 'Request was aborted.' });
+      })(),
+    );
+    const wrapped = createWrappedGenerator(vi.fn(), streamFn);
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+      config: { abortSignal: controller.signal },
+    } as unknown as GenerateContentParameters;
+
+    const stream = await generator.generateContentStream(
+      request,
+      'prompt-stream-cancel',
+    );
+
+    await expect(
+      (async () => {
+        for await (const _ of stream) {
+          // consume until the cancel surfaces
+        }
+      })(),
+    ).rejects.toBeInstanceOf(APIUserAbortError);
+
+    expect(logApiError).not.toHaveBeenCalled();
+  });
+
   it('forwards usage attached to the final response after it was yielded', async () => {
     const response = createResponse('r1', 'test-model', [{ text: 'a' }]);
     const streamFn = vi.fn().mockResolvedValue(
