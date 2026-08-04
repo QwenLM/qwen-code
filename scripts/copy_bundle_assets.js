@@ -70,7 +70,11 @@ export function copyBundleAssets({ root = defaultRoot } = {}) {
     const destBundledDir = join(distDir, 'bundled');
     fs.rmSync(destBundledDir, { recursive: true, force: true });
     copyRecursiveSync(bundledSkillsDir, destBundledDir, {
-      skipEntry: isBundledSkillTestFile,
+      // DESIGN.md files are maintainer design narratives, not runtime inputs;
+      // shipping one would hand a review a ~125 KB read_file target that
+      // outweighs the context the slimmed skill saves.
+      skipEntry: (entry) =>
+        isBundledSkillTestFile(entry) || entry === 'DESIGN.md',
     });
     console.log('Copied bundled skills to dist/bundled/');
   } else {

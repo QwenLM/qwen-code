@@ -149,6 +149,10 @@ const prepareBranchAndFeedbackStep =
   workflow.match(
     /- name: 'Prepare branch and feedback'[\s\S]*?(?=\n[ ]{6}- name: 'Post autofix status comment')/,
   )?.[0] ?? '';
+// Whitespace-tolerant shape of a normalized ic.json fetch: re-indenting or
+// re-wrapping the block must not break the presence/order pins using it.
+const normalizedIcFetch =
+  /issues\/\$\{PR\}\/comments" --paginate\s*\\?\s*\|\s*jq -s 'add \/\/ \[\]' > "\$\{WORKDIR\}\/ic\.json"/;
 const postStatusCommentStep =
   workflow.match(
     /- name: 'Post autofix status comment'[\s\S]*?(?=\n[ ]{6}- name: 'Triage and address')/,
@@ -3114,6 +3118,56 @@ printf '%s\\n' "\${status}"
     // under the fresh key.
     expect(reviewScanJob).toContain('takeover-ack engaged');
     expect(reviewScanJob).toContain('ic re-fetch after engage ack failed');
+    // The re-fetch must stay ATOMIC — write ic.next.json, then mv it onto
+    // ic.json only when the whole pipeline succeeded: ic.json already holds
+    // a successful full fetch, and a direct redirect truncates it BEFORE the
+    // pipeline runs, so a mid-stream jq failure would leave 0 bytes —
+    // MARKERS on empty input exits 0 with '' and the round cap silently
+    // resets. The other pins (--paginate count, normalizer count,
+    // not.toContain('--paginate > ')) all survive a 'simplification' to
+    // '> ic.json' under the if-guard, so pin the temp-file + swap shape.
+    expect(reviewScanJob).toMatch(
+      /issues\/\$\{PR\}\/comments" --paginate\s*\\?\s*\|\s*jq -s 'add \/\/ \[\]' > "\$\{WORKDIR\}\/ic\.next\.json"; then\s+mv "\$\{WORKDIR\}\/ic\.next\.json" "\$\{WORKDIR\}\/ic\.json"/,
+    );
+    // Behavioral, against real bash + jq: the truncation race the atomic
+    // pattern defends against. A direct redirect destroys the prior good
+    // fetch when the stream is truncated mid-page; the temp-file pattern
+    // keeps it on failure and still swaps in a fresh copy on success.
+    const priorFetch = JSON.stringify([
+      { user: { login: 'bot' }, body: 'prior fetch', id: 1 },
+    ]);
+    const truncatedStream = '[{"id":2'; // network cut mid-page
+    const atomicRefetch =
+      "if jq -s 'add // []' > ic.next.json; then mv ic.next.json ic.json; fi";
+    const atomicDir = mkdtempSync(join(tmpdir(), 'autofix-ic-atomic-'));
+    try {
+      writeFileSync(join(atomicDir, 'ic.json'), priorFetch);
+      // jq fails on the truncated stream…
+      expect(() =>
+        execFileSync('bash', ['-c', "jq -s 'add // []' > ic.json"], {
+          cwd: atomicDir,
+          input: truncatedStream,
+        }),
+      ).toThrow();
+      // …but only after the redirect already zeroed the good fetch.
+      expect(readFileSync(join(atomicDir, 'ic.json'), 'utf8')).toBe('');
+      writeFileSync(join(atomicDir, 'ic.json'), priorFetch);
+      execFileSync('bash', ['-c', atomicRefetch], {
+        cwd: atomicDir,
+        input: truncatedStream,
+      });
+      expect(readFileSync(join(atomicDir, 'ic.json'), 'utf8')).toBe(priorFetch);
+      const freshFetch = JSON.stringify([{ id: 3 }]);
+      execFileSync('bash', ['-c', atomicRefetch], {
+        cwd: atomicDir,
+        input: freshFetch,
+      });
+      expect(
+        JSON.parse(readFileSync(join(atomicDir, 'ic.json'), 'utf8')),
+      ).toEqual([{ id: 3 }]);
+    } finally {
+      rmSync(atomicDir, { recursive: true, force: true });
+    }
     // Ack dedup is author-filtered (a forged human marker must not suppress
     // the real ack) and re-armable: a takeover-label application newer than
     // the latest bot ack posts a fresh ack, resetting the round window.
@@ -3204,9 +3258,7 @@ printf '%s\\n' "\${status}"
     // ic.json fetch BEFORE the first ack-timestamp read (reading a previous
     // candidate's file mis-dedups; a missing file kills the scan step under
     // -eo pipefail). Same textual-order technique as the hooks-severed pins.
-    const icFetchAt = reviewScanJob.indexOf(
-      'gh api "repos/${REPO}/issues/${PR}/comments" --paginate > "${WORKDIR}/ic.json"',
-    );
+    const icFetchAt = reviewScanJob.search(normalizedIcFetch);
     const ackReadAt = reviewScanJob.indexOf('LAST_ENGAGE_ACK_TS=');
     expect(icFetchAt).toBeGreaterThan(-1);
     expect(ackReadAt).toBeGreaterThan(icFetchAt);
@@ -3302,6 +3354,194 @@ printf '%s\\n' "\${status}"
     expect(workflow.split('test("^\\\\s*@qwen-code /") | not').length - 1).toBe(
       5,
     );
+  });
+
+  it('normalizes every paginated WORKDIR fetch to one flat array (>100-item PRs)', () => {
+    // gh >= v2.31.0 merges all pages of a REST array endpoint into ONE flat
+    // JSON array (cli/cli#7190), so on every hosted runner the WORKDIR files
+    // are already single arrays; the jq -s 'add // []' pipes are retained as
+    // cheap defense-in-depth. Every fetch that lands in a WORKDIR json file
+    // must still pipe through the normalizer: plain-jq consumers
+    // (MARKERS/REARM_KEY/ROUND, CAP_NOTICED, BASE_UPDATE_RECENT,
+    // LAST_REJECTION, PRIOR_TIMEOUTS, the milestone census) would
+    // mis-aggregate on a multi-doc file — ROUND becomes a multi-line string
+    // and the cap arithmetic dies silently — while NEWEST/LIVE_NEW
+    // additionally bind rv/rc/ic/checks POSITIONALLY, so one multi-page file
+    // shifts every later slot. Slurp-style readers (jq -rs add, --slurpfile
+    // + add) are unaffected: add is idempotent over a single flat array.
+    // The two-page fixtures below are synthetic (the per-page shape gh <
+    // v2.31.0 emitted): they exercise the jq mechanics of the normalizer and
+    // its consumers, not the wire format current gh produces.
+    expect(workflow).not.toContain('--paginate > "');
+    // Pin the total --paginate code-site count so ANY new paginated site
+    // forces a deliberate test update, however it is spaced or line-wrapped:
+    // bump this count AND pipe the new site through the normalizer (bumping
+    // the count below too) — bumping this pin alone leaves toBe(9) green.
+    expect(workflow.split('--paginate').length - 1).toBe(13);
+    // scan ic + pr-events + ic re-fetch + scan rv/rc + prepare rv/rc/ic +
+    // report COMMENTS_JSON fallback = nine normalized fetch sites.
+    expect(workflow.split("jq -s 'add // []'").length - 1).toBe(9);
+    // Empty-input semantics: a total gh failure feeds the fallback an EMPTY
+    // stream, where the normalizer filter must yield '[]' and not 'null' —
+    // the PRIOR_HEADS consumer below iterates the result with .[], which
+    // dies on null ("Cannot iterate over null"). Every existing behavioral
+    // fixture is non-empty, where 'add // []' and bare 'add' are
+    // indistinguishable, so run the fallback's ACTUAL filter against empty
+    // stdin and pin the empty case explicitly.
+    const fallbackFilter = reviewAddressReportStep.match(
+      /COMMENTS_JSON="\$\(gh api "repos\/\$\{REPO\}\/issues\/\$\{PR\}\/comments" --paginate 2> \/dev\/null \| jq -s '([\s\S]*?)' \|\| true\)"/,
+    )?.[1];
+    expect(fallbackFilter).toBeTruthy();
+    expect(
+      execFileSync('jq', ['-s', fallbackFilter], {
+        encoding: 'utf8',
+        input: '',
+      }).trim(),
+    ).toBe('[]');
+    expect(
+      execFileSync('jq', ['-s', 'add'], {
+        encoding: 'utf8',
+        input: '',
+      }).trim(),
+    ).toBe('null'); // what dropping '// []' would silently produce
+    const priorHeadsProgram = reviewAddressReportStep
+      .match(
+        /PRIOR_HEADS="\$\(jq -r --arg ab "\$\{AUTOFIX_BOT\}" --arg win "\$\{WINDOW:-none\}" '([\s\S]*?)' <<< "\$\{COMMENTS_JSON\}"/,
+      )?.[1]
+      ?.replace(/\n {16}/g, '\n');
+    expect(priorHeadsProgram).toBeTruthy();
+    expect(() =>
+      execFileSync(
+        'jq',
+        ['-r', '--arg', 'ab', 'bot', '--arg', 'win', 'none', priorHeadsProgram],
+        { encoding: 'utf8', input: 'null' },
+      ),
+    ).toThrow(); // Cannot iterate over null
+    expect(
+      execFileSync(
+        'jq',
+        ['-r', '--arg', 'ab', 'bot', '--arg', 'win', 'none', priorHeadsProgram],
+        { encoding: 'utf8', input: '[]' },
+      ),
+    ).toBe(''); // cleanly empty — duplicate-report suppression stays intact
+
+    // Behavioral, against real jq: markers split across two pages. The raw
+    // page stream BREAKS the plain consumer (two outputs — the negative
+    // control), the normalized stream aggregates across the page boundary.
+    const markersProgram = reviewScanJob.match(
+      /MARKERS="\$\(jq -c --arg ab "\$\{AUTOFIX_BOT\}" '([\s\S]*?)' "\$\{WORKDIR\}\/ic\.json"\)"/,
+    )?.[1];
+    expect(markersProgram).toBeTruthy();
+    const roundProgram = reviewScanJob.match(
+      /ROUND="\$\(jq -r --arg key "\$\{REARM_KEY\}" '([\s\S]*?)' <<< "\$\{MARKERS\}"\)"/,
+    )?.[1];
+    expect(roundProgram).toBeTruthy();
+    const pageOne = JSON.stringify([
+      {
+        user: { login: 'bot' },
+        body: 'r3 <!-- autofix-eval ts=2026-07-01T00:00:00Z acted=true round=3 -->',
+        created_at: '2026-07-01T00:00:00Z',
+      },
+    ]);
+    const pageTwo = JSON.stringify([
+      {
+        user: { login: 'bot' },
+        body: 'r7 <!-- autofix-eval ts=2026-07-06T00:00:00Z acted=true round=7 -->',
+        created_at: '2026-07-06T00:00:00Z',
+      },
+    ]);
+    const rawMarkers = execFileSync(
+      'jq',
+      ['-c', '--arg', 'ab', 'bot', markersProgram],
+      { encoding: 'utf8', input: pageOne + pageTwo },
+    ).trim();
+    expect(rawMarkers.split('\n')).toHaveLength(2); // the pre-fix corruption
+    const flat = execFileSync('jq', ['-cs', 'add // []'], {
+      encoding: 'utf8',
+      input: pageOne + pageTwo,
+    });
+    const markers = execFileSync(
+      'jq',
+      ['-c', '--arg', 'ab', 'bot', markersProgram],
+      { encoding: 'utf8', input: flat },
+    ).trim();
+    expect(markers.split('\n')).toHaveLength(1);
+    const round = execFileSync(
+      'jq',
+      ['-r', '--arg', 'key', 'none', roundProgram],
+      { encoding: 'utf8', input: markers },
+    ).trim();
+    expect(round).toBe('7'); // max round crosses the page boundary
+
+    // Positional binding: NEWEST reads rv/rc/ic/checks as .[0]..[3]. With a
+    // normalized rv.json the page-2 review is found; feeding the RAW
+    // two-page rv.json instead shifts rc/ic into the wrong slots and the
+    // page-2 review timestamp is silently lost (negative control).
+    const newestProgram = workflow.match(
+      /NEWEST="\$\(jq -rs \\\n[\s\S]*?--argjson trust "\$\{TRUSTED_ASSOC\}" '([\s\S]*?)' "\$\{WORKDIR\}\/rv\.json"/,
+    )?.[1];
+    expect(newestProgram).toBeTruthy();
+    const rvPages =
+      JSON.stringify([
+        {
+          submitted_at: '2026-07-01T00:00:00Z',
+          user: { login: 'maint' },
+          author_association: 'MEMBER',
+          state: 'COMMENTED',
+        },
+      ]) +
+      JSON.stringify([
+        {
+          submitted_at: '2026-07-09T00:00:00Z',
+          user: { login: 'maint' },
+          author_association: 'MEMBER',
+          state: 'CHANGES_REQUESTED',
+        },
+      ]);
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-paginate-'));
+    try {
+      const newestArgs = (rv) => [
+        '-rs',
+        '--arg',
+        'wm',
+        '',
+        '--arg',
+        'rb',
+        'qwen-code-ci-bot',
+        '--arg',
+        'ab',
+        'bot',
+        '--argjson',
+        'trust',
+        '["OWNER", "MEMBER", "COLLABORATOR"]',
+        newestProgram,
+        rv,
+        join(dir, 'rc.json'),
+        join(dir, 'ic.json'),
+        join(dir, 'checks.json'),
+      ];
+      writeFileSync(
+        join(dir, 'rv.json'),
+        execFileSync('jq', ['-cs', 'add // []'], {
+          encoding: 'utf8',
+          input: rvPages,
+        }),
+      );
+      writeFileSync(join(dir, 'rv-raw.json'), rvPages);
+      writeFileSync(join(dir, 'rc.json'), '[]');
+      writeFileSync(join(dir, 'ic.json'), '[]');
+      writeFileSync(join(dir, 'checks.json'), '[]');
+      const newest = execFileSync('jq', newestArgs(join(dir, 'rv.json')), {
+        encoding: 'utf8',
+      }).trim();
+      expect(newest).toBe('2026-07-09T00:00:00Z');
+      const shifted = execFileSync('jq', newestArgs(join(dir, 'rv-raw.json')), {
+        encoding: 'utf8',
+      }).trim();
+      expect(shifted).toBe('2026-07-01T00:00:00Z'); // page 2 lost pre-fix
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('raises the round cap to TAKEOVER_MAX_ROUNDS while the label is present', () => {
@@ -5519,9 +5759,7 @@ printf '%s\\n' "\${status}"
     // The "nothing new" gate must check all three feedback sources.
     expect(reviewScanStep).toContain('"${N_ISSUE_COMMENTS}" -eq 0');
     // review-address must also fetch ic.json and render issue-level comments.
-    expect(workflow).toContain(
-      'repos/${REPO}/issues/${PR}/comments" --paginate > "${WORKDIR}/ic.json"',
-    );
+    expect(prepareBranchAndFeedbackStep).toMatch(normalizedIcFetch);
     expect(prepareBranchAndFeedbackStep).toContain(
       '2> /dev/null || echo \'[]\' > "${WORKDIR}/checks.json"',
     );
