@@ -323,6 +323,9 @@ describe('publish-assets', () => {
     expect(process.exitCode).toBe(3);
     const why = (stderrSpy.mock.calls.map((c) => c[0]) as string[]).join(' ');
     expect(why).toContain('impostor.png');
+    // The full path is named too: two same-named files from different
+    // directories must be tellable apart in the refusal.
+    expect(why).toContain(JSON.stringify(impostor));
     expect(ghWithInputMock).not.toHaveBeenCalled();
     expect(stdoutSpy).toHaveBeenCalledWith(
       JSON.stringify({ published: false }),

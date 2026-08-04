@@ -7,16 +7,17 @@
 import { describe, expect, it } from 'vitest';
 import {
   ASSET_EXTENSIONS,
+  ASSET_HEADER_BYTES,
   MAX_ASSET_BYTES,
   MAX_TOTAL_ASSET_BYTES,
   assetsBranch,
   parseAssetsRepo,
   rawAssetUrl,
   remoteAssetPath,
-  validateAssetBatch,
-  validateAssetFile,
   sniffImageFormat,
+  validateAssetBatch,
   validateAssetContent,
+  validateAssetFile,
 } from './assets.js';
 
 describe('assetsBranch', () => {
@@ -193,46 +194,8 @@ describe('sniffImageFormat / validateAssetContent', () => {
         Uint8Array.from([...'RIFF0000AVI '].map((c) => c.charCodeAt(0))),
       ),
     ).toBeNull();
-    // Depth pins: each signature component is checked to its full length, so
-    // bytes one compare short of a real signature — in ANY position — are not
-    // admitted. A WEBP marker without the RIFF container prefix is not WEBP
-    // either.
-    expect(sniffImageFormat(Uint8Array.from([0xff, 0xd8, 0x00]))).toBeNull();
-    expect(sniffImageFormat(Uint8Array.from([0x00, 0xd8, 0xff]))).toBeNull();
-    expect(sniffImageFormat(Uint8Array.from([0xff, 0x00, 0xff]))).toBeNull();
-    expect(
-      sniffImageFormat(
-        Uint8Array.from([0x00, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-      ),
-    ).toBeNull();
-    expect(
-      sniffImageFormat(
-        Uint8Array.from([0x89, 0x58, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-      ),
-    ).toBeNull();
-    expect(
-      sniffImageFormat(
-        Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x0a, 0x1a, 0x0a]),
-      ),
-    ).toBeNull();
-    expect(
-      sniffImageFormat(
-        Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x00, 0x1a, 0x0a]),
-      ),
-    ).toBeNull();
-    expect(
-      sniffImageFormat(
-        Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x00, 0x0a]),
-      ),
-    ).toBeNull();
-    const pngByte7Off = Uint8Array.from(PNG);
-    pngByte7Off[7] = 0x0b;
-    expect(sniffImageFormat(pngByte7Off)).toBeNull();
-    expect(
-      sniffImageFormat(
-        Uint8Array.from([...'RIFF0000WEB '].map((c) => c.charCodeAt(0))),
-      ),
-    ).toBeNull();
+    // A WEBP marker without the RIFF container prefix is not WEBP either,
+    // and an unknown GIF version is not admitted.
     expect(
       sniffImageFormat(
         Uint8Array.from([...'XXXX0000WEBP'].map((c) => c.charCodeAt(0))),
@@ -243,44 +206,56 @@ describe('sniffImageFormat / validateAssetContent', () => {
         Uint8Array.from([...'GIF89b'].map((c) => c.charCodeAt(0))),
       ),
     ).toBeNull();
-    // The same one-compare-short refusal INSIDE the multi-byte ascii() runs:
-    // each row corrupts exactly one byte of a real signature, and every byte
-    // of every run appears — GIF in BOTH variants, because a shared-prefix
-    // corruption in one variant is refused by the other's intact checks only
-    // through the byte where the variants differ, which a byte-4 edit could
-    // move. Without both forms, one run's dropped comparison survives green.
-    const oneByteOff: number[][] = [
-      // PNG bytes 2-3 (bytes 0-1 and 4-7 are pinned above)
-      [0x89, 0x50, 0x58, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
-      [0x89, 0x50, 0x4e, 0x58, 0x0d, 0x0a, 0x1a, 0x0a],
-      // GIF bytes 0-3 and 5 in each variant form; byte 4 once — the same
-      // corrupted byte covers both variants' checks at that position
-      ...[
-        'XIF87a',
-        'GXF87a',
-        'GIX87a',
-        'GIFX7a',
-        'GIF87X',
-        'XIF89a',
-        'GXF89a',
-        'GIX89a',
-        'GIFX9a',
-        'GIF8Xa',
-        // RIFF container bytes 0-3 and WEBP marker bytes 8-10 (byte 11 is
-        // pinned above)
-        'XIFF\u0000\u0000\u0000\u0000WEBP',
-        'RXFF\u0000\u0000\u0000\u0000WEBP',
-        'RIXF\u0000\u0000\u0000\u0000WEBP',
-        'RIFX\u0000\u0000\u0000\u0000WEBP',
-        'RIFF\u0000\u0000\u0000\u0000XEBP',
-        'RIFF\u0000\u0000\u0000\u0000WXBP',
-        'RIFF\u0000\u0000\u0000\u0000WEXP',
-      ].map((s) => [...s].map((c) => c.charCodeAt(0))),
-    ];
-    for (const header of oneByteOff) {
-      expect(sniffImageFormat(Uint8Array.from(header))).toBeNull();
-    }
   });
+
+  // Every checked byte of every admitted signature, corrupted one byte at a
+  // time, refuses — GIF in both variants so a dropped compare in either
+  // branch is caught, WEBP across both the RIFF and the WEBP runs.
+  const sig = (s: string): number[] => [...s].map((c) => c.charCodeAt(0));
+  const corruptedPng = (i: number, b: number): number[] => {
+    const h = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+    h[i] = b;
+    return h;
+  };
+  const ONE_BYTE_OFF: Array<[string, number[]]> = [
+    ['PNG byte 0', corruptedPng(0, 0x00)],
+    ['PNG byte 1', corruptedPng(1, 0x58)],
+    ['PNG byte 2', corruptedPng(2, 0x58)],
+    ['PNG byte 3', corruptedPng(3, 0x58)],
+    ['PNG byte 4', corruptedPng(4, 0x00)],
+    ['PNG byte 5', corruptedPng(5, 0x00)],
+    ['PNG byte 6', corruptedPng(6, 0x00)],
+    ['PNG byte 7', corruptedPng(7, 0x0b)],
+    ['JPEG byte 0', [0x00, 0xd8, 0xff]],
+    ['JPEG byte 1', [0xff, 0x00, 0xff]],
+    ['JPEG byte 2', [0xff, 0xd8, 0x00]],
+    ['GIF87a byte 0', sig('XIF87a')],
+    ['GIF87a byte 1', sig('GXF87a')],
+    ['GIF87a byte 2', sig('GIX87a')],
+    ['GIF87a byte 3', sig('GIFX7a')],
+    ['GIF byte 4 (both variants)', sig('GIF8Xa')],
+    ['GIF87a byte 5', sig('GIF87X')],
+    ['GIF89a byte 0', sig('XIF89a')],
+    ['GIF89a byte 1', sig('GXF89a')],
+    ['GIF89a byte 2', sig('GIX89a')],
+    ['GIF89a byte 3', sig('GIFX9a')],
+    ['GIF89a byte 5', sig('GIF89X')],
+    ['WEBP RIFF byte 0', sig('XIFF\u0000\u0000\u0000\u0000WEBP')],
+    ['WEBP RIFF byte 1', sig('RXFF\u0000\u0000\u0000\u0000WEBP')],
+    ['WEBP RIFF byte 2', sig('RIXF\u0000\u0000\u0000\u0000WEBP')],
+    ['WEBP RIFF byte 3', sig('RIFX\u0000\u0000\u0000\u0000WEBP')],
+    ['WEBP marker byte 8', sig('RIFF\u0000\u0000\u0000\u0000XEBP')],
+    ['WEBP marker byte 9', sig('RIFF\u0000\u0000\u0000\u0000WXBP')],
+    ['WEBP marker byte 10', sig('RIFF\u0000\u0000\u0000\u0000WEXP')],
+    ['WEBP marker byte 11', sig('RIFF\u0000\u0000\u0000\u0000WEB ')],
+  ];
+
+  it.each(ONE_BYTE_OFF)(
+    'refuses %s — one byte off a real signature',
+    (_label, header) => {
+      expect(sniffImageFormat(Uint8Array.from(header))).toBeNull();
+    },
+  );
 
   it('admits content that matches the extension claim', () => {
     expect(validateAssetContent('a.png', PNG).ok).toBe(true);
@@ -329,7 +304,9 @@ describe('sniffImageFormat / validateAssetContent', () => {
     // matching sniffImageFormat branch. This pin binds them — a format
     // admitted by name whose signature the sniffer does not recognize
     // refuses every real file of it, and this assertion fails CI naming
-    // WHICH admission is dead.
+    // WHICH admission is dead. Slicing to ASSET_HEADER_BYTES binds the
+    // publish-time sniff depth too: a signature that runs past the constant
+    // refuses here until the constant covers it.
     const canonical: Record<string, Uint8Array> = {
       png: PNG,
       jpg: JPEG,
@@ -342,7 +319,11 @@ describe('sniffImageFormat / validateAssetContent', () => {
       expect({
         ext,
         admittedByContent:
-          bytes !== undefined && validateAssetContent(`probe.${ext}`, bytes).ok,
+          bytes !== undefined &&
+          validateAssetContent(
+            `probe.${ext}`,
+            bytes.subarray(0, ASSET_HEADER_BYTES),
+          ).ok,
       }).toEqual({ ext, admittedByContent: true });
     }
   });

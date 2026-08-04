@@ -19,6 +19,10 @@
 // Everything here is pure so the naming and validation rules are unit-testable
 // without a GitHub, a filesystem, or a mock. The command layer owns I/O.
 
+/** The four admitted image formats — the values `EXTENSION_FORMAT` maps to
+ * and `sniffImageFormat` returns. */
+type ImageFormat = 'png' | 'jpeg' | 'gif' | 'webp';
+
 /** The container format each allowed extension claims to carry — and the
  * allowlist's single source of truth: `ASSET_EXTENSIONS` derives from these
  * keys — but admitting a format is a two-place change: add the key here AND
@@ -28,7 +32,7 @@
  * An allowlist, not a denylist: SVG is deliberately absent (it is a script
  * container), and anything non-image is refused rather than hosted — this
  * command publishes review evidence, not arbitrary files. */
-const EXTENSION_FORMAT: Record<string, 'png' | 'jpeg' | 'gif' | 'webp'> = {
+const EXTENSION_FORMAT: Record<string, ImageFormat> = {
   png: 'png',
   jpg: 'jpeg',
   jpeg: 'jpeg',
@@ -46,14 +50,23 @@ function claimedExtension(basename: string): string {
     : '';
 }
 
+/** How many leading bytes `sniffImageFormat` needs to rule — the longest
+ * admitted signature (WEBP's marker ends at byte 11) fits inside. Admitting a
+ * format with a longer signature means raising this, or every real file of it
+ * false-refuses at publish time while full-header unit tests stay green. */
+export const ASSET_HEADER_BYTES = 16;
+
 /**
  * Detect the image format from a file's first bytes.
  *
  * The allowlist above is extension-based, and an extension is a claim anyone
- * can make: without content sniffing, whatever can name a file `*.png` can
- * host up to the size cap of arbitrary bytes at a `github.com` URL through a
- * review's evidence push. Magic bytes bind the claim to the content — the
- * four admitted formats all carry unambiguous fixed signatures.
+ * can make: without content sniffing, a shell script renamed `evidence.png`
+ * publishes through a review's evidence push. This check binds the CLAIMED
+ * type to the leading bytes — it does not stop a prefixed payload (arbitrary
+ * bytes riding behind a genuine signature still pass; closing that needs
+ * decode-and-reencode, out of scope here). The signatures vary in strength:
+ * WEBP is checked across 12 bytes, PNG across 8, GIF across 6, and JPEG
+ * across only 3.
  *
  * A sibling signature table lives in core: `sniffFileKind` in
  * `packages/core/src/utils/binary-content.ts` (best-effort kind detection for
@@ -61,9 +74,7 @@ function claimedExtension(basename: string): string {
  * `packages/core/src/utils/request-tokenizer/imageTokenizer.ts`. Admitting or
  * correcting a format here means checking those sites too.
  */
-export function sniffImageFormat(
-  header: Uint8Array,
-): 'png' | 'jpeg' | 'gif' | 'webp' | null {
+export function sniffImageFormat(header: Uint8Array): ImageFormat | null {
   const at = (i: number): number => header[i] ?? -1;
   const ascii = (i: number, s: string): boolean =>
     [...s].every((ch, k) => at(i + k) === ch.charCodeAt(0));
@@ -89,6 +100,20 @@ export function sniffImageFormat(
   return null;
 }
 
+/** The allowlist refusal, built in one place so `validateAssetFile` and
+ * `validateAssetContent` cannot drift. */
+function refusedExtension(
+  basename: string,
+  ext: string,
+): { ok: false; reason: string } {
+  return {
+    ok: false,
+    reason:
+      `${basename}: extension ${JSON.stringify(ext)} is not an allowed ` +
+      `evidence image type (${[...ASSET_EXTENSIONS].join(', ')})`,
+  };
+}
+
 /**
  * Rule on a file's CONTENT against the format its extension claims. Pure —
  * the caller hands over the first bytes — and fail-closed: an unrecognized
@@ -105,12 +130,7 @@ export function validateAssetContent(
     ? EXTENSION_FORMAT[ext]
     : undefined;
   if (claimed === undefined) {
-    return {
-      ok: false,
-      reason:
-        `${basename}: extension ${JSON.stringify(ext)} is not an allowed ` +
-        `evidence image type (${[...ASSET_EXTENSIONS].join(', ')})`,
-    };
+    return refusedExtension(basename, ext);
   }
   const actual = sniffImageFormat(header);
   if (actual !== claimed) {
@@ -218,12 +238,7 @@ export function validateAssetFile(
 ): { ok: true } | { ok: false; reason: string } {
   const ext = claimedExtension(basename);
   if (!ASSET_EXTENSIONS.has(ext)) {
-    return {
-      ok: false,
-      reason:
-        `${basename}: extension ${JSON.stringify(ext)} is not an allowed ` +
-        `evidence image type (${[...ASSET_EXTENSIONS].join(', ')})`,
-    };
+    return refusedExtension(basename, ext);
   }
   if (bytes <= 0) {
     return { ok: false, reason: `${basename}: empty file` };
