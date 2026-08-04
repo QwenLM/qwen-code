@@ -858,7 +858,7 @@ export class SessionService {
       }
       const prompt = this.extractPromptText(record.message);
       if (prompt) {
-        return prompt.length > 200 ? `${prompt.slice(0, 200)}...` : prompt;
+        return prompt;
       }
     }
     return '';

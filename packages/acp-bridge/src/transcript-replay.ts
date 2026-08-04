@@ -599,7 +599,11 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
   /**
    * Rebuilds a plain user record for display: strip trailing tagged hook
    * context, then replace every text part with a single `displayText` part at
-   * the first text position so images keep their relative order.
+   * the first text position so images keep their relative order. An empty
+   * `displayText` means "no user-visible text" (e.g. an image-only channel
+   * prompt): the text parts are dropped WITHOUT synthesizing a `{text:''}`
+   * part, which projectMessageParts would flag as an unknown part and flip
+   * the replay to `complete:false` even though nothing was lost.
    */
   private withUserPromptDisplayText(
     record: TranscriptRecordInput,
@@ -612,7 +616,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         ...stripped,
         message: {
           ...stripped.message,
-          parts: [{ text: displayText }],
+          parts: displayText === '' ? [] : [{ text: displayText }],
         },
       };
     }
@@ -621,14 +625,16 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     for (const part of parts) {
       if (isObjectRecord(part) && typeof part['text'] === 'string') {
         if (!replaced) {
-          nextParts.push({ text: displayText });
           replaced = true;
+          if (displayText !== '') {
+            nextParts.push({ text: displayText });
+          }
         }
         continue;
       }
       nextParts.push(part);
     }
-    if (!replaced) {
+    if (!replaced && displayText !== '') {
       nextParts.push({ text: displayText });
     }
     return {

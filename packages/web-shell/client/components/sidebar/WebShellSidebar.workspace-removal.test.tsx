@@ -2960,6 +2960,52 @@ describe('WebShellSidebar session source switch', () => {
     expect(container.textContent).toContain('Channel session');
   });
 
+  it('applies the source switch to the archived list', async () => {
+    archived.sessions.push(
+      {
+        sessionId: 'archived-task-session',
+        displayName: 'Archived task session',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'default',
+        isArchived: true,
+      },
+      {
+        sessionId: 'archived-channel-session',
+        displayName: 'Archived channel session',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'channel',
+        isArchived: true,
+      },
+    );
+    renderSidebar();
+    await expandArchived();
+
+    expect(container.textContent).toContain('Archived task session');
+    expect(container.textContent).not.toContain('Archived channel session');
+
+    const channelsTab = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    ).find((button) => button.textContent?.trim() === 'Channels');
+    await act(async () => {
+      channelsTab!.dispatchEvent(
+        new MouseEvent('mousedown', { bubbles: true, button: 0 }),
+      );
+      channelsTab!.click();
+      await Promise.resolve();
+    });
+
+    // Both halves of the archived application: the request carries the
+    // channel sourceType, and the client-side dedupe filter keeps archived
+    // task sessions out of the Channels tab.
+    expect(
+      useSessions.mock.calls.findLast(
+        ([options]) => options?.archiveState === 'archived',
+      )?.[0]?.sourceType,
+    ).toBe('channel');
+    expect(container.textContent).toContain('Archived channel session');
+    expect(container.textContent).not.toContain('Archived task session');
+  });
+
   it('switches primary and workspace-qualified lists from tasks to channels', async () => {
     renderSidebar();
 

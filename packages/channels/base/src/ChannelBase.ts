@@ -61,6 +61,7 @@ import type {
 import type { ChannelLoop, ChannelLoopInput } from './ChannelLoopStore.js';
 import { ChannelLoopSkippedError } from './ChannelLoopScheduler.js';
 import {
+  buildChannelWebhookDisplayText,
   buildChannelWebhookPrompt,
   resolveChannelWebhookTarget,
 } from './ChannelWebhookTask.js';
@@ -1813,9 +1814,7 @@ export abstract class ChannelBase {
       },
     );
     const promptText = buildChannelWebhookPrompt(task, target);
-    const displayText = [task.title, task.summary]
-      .filter((part): part is string => Boolean(part))
-      .join('\n\n');
+    const displayText = buildChannelWebhookDisplayText(task);
     const taskId = `webhook:${task.source}:${task.eventType}`;
     const safeTaskId = sanitizeLogText(taskId, 64);
     const safeChannel = sanitizeLogText(this.name, 64);

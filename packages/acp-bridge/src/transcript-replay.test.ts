@@ -283,8 +283,9 @@ describe('createTranscriptReplayMachine', () => {
     });
 
     it('does not replay hidden text when an image-only prompt has empty display text', () => {
+      const onDiagnostic = vi.fn();
       const projected = updates(
-        createTranscriptReplayMachine(),
+        createTranscriptReplayMachine({ onDiagnostic }),
         record('user-empty-display', 'user', {
           message: {
             role: 'user',
@@ -313,6 +314,58 @@ describe('createTranscriptReplayMachine', () => {
         },
       ]);
       expect(projected).toHaveLength(1);
+      // An empty displayText is a first-class "no visible text" state; it
+      // must not synthesize a {text:''} part that the projector would flag
+      // as unknown and flip the replay to complete:false.
+      expect(onDiagnostic).not.toHaveBeenCalled();
+    });
+
+    it('emits nothing (and no diagnostic) for an empty display text without parts', () => {
+      const onDiagnostic = vi.fn();
+      const projected = updates(
+        createTranscriptReplayMachine({ onDiagnostic }),
+        record('user-empty-display-no-parts', 'user', {
+          message: { role: 'user', parts: [] },
+          systemPayload: { displayText: '' },
+        }),
+      );
+
+      expect(projected).toEqual([]);
+      expect(onDiagnostic).not.toHaveBeenCalled();
+    });
+
+    it('appends no text part for an empty display text on an image-only record', () => {
+      const onDiagnostic = vi.fn();
+      const projected = updates(
+        createTranscriptReplayMachine({ onDiagnostic }),
+        record('user-empty-display-image-only', 'user', {
+          message: {
+            role: 'user',
+            parts: [
+              {
+                inlineData: {
+                  data: 'abc',
+                  mimeType: 'image/png',
+                },
+              },
+            ],
+          },
+          systemPayload: { displayText: '' },
+        }),
+      );
+
+      expect(projected).toMatchObject([
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: {
+            type: 'image',
+            data: 'abc',
+            mimeType: 'image/png',
+          },
+        },
+      ]);
+      expect(projected).toHaveLength(1);
+      expect(onDiagnostic).not.toHaveBeenCalled();
     });
 
     it('strips a trailing whole-part tagged block when displayText is absent', () => {

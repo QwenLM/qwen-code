@@ -231,37 +231,38 @@ export function WorkspaceSection({
     workspace.cwd,
   ]);
 
+  const loadChannelCatalog = useCallback(async () => {
+    if (disabled || readOnly || !channelGroupingEnabled) return;
+    try {
+      const workspaceClient = client.workspaceByCwd(workspace.cwd);
+      const [catalog, snapshot] = await Promise.all([
+        workspaceClient.workspaceChannelTypes(),
+        workspaceClient.workspaceChannels(),
+      ]);
+      setChannelCatalog({ catalog, snapshot });
+    } catch (err) {
+      // Keep the last known catalog across a transient failure; the next
+      // poll tick retries.
+      console.warn('[WorkspaceSection] channel catalog load failed:', err);
+    }
+  }, [channelGroupingEnabled, client, disabled, readOnly, workspace.cwd]);
+
   useEffect(() => {
     if (!renderSessions || disabled || readOnly || !channelGroupingEnabled) {
       setChannelCatalog(undefined);
       return;
     }
     if (!expanded && !searchActive) return;
-    let cancelled = false;
-    const workspaceClient = client.workspaceByCwd(workspace.cwd);
-    void Promise.all([
-      workspaceClient.workspaceChannelTypes(),
-      workspaceClient.workspaceChannels(),
-    ])
-      .then(([catalog, snapshot]) => {
-        if (!cancelled) setChannelCatalog({ catalog, snapshot });
-      })
-      .catch((err: unknown) => {
-        console.warn('[WorkspaceSection] channel catalog load failed:', err);
-      });
-    return () => {
-      cancelled = true;
-    };
+    void loadChannelCatalog();
   }, [
     channelGroupingEnabled,
-    client,
     disabled,
     expanded,
+    loadChannelCatalog,
     readOnly,
     reloadToken,
     renderSessions,
     searchActive,
-    workspace.cwd,
   ]);
 
   useEffect(() => {
@@ -269,10 +270,16 @@ export function WorkspaceSection({
     if (!expanded && !searchActive) return;
     void loadSessions();
     if (readOnly) return;
-    const timer = setInterval(() => void loadSessions(), 10_000);
+    // The catalog rides the session tick so instances added or removed while
+    // a section is expanded reach the grouping logic without a collapse cycle.
+    const timer = setInterval(() => {
+      void loadSessions();
+      void loadChannelCatalog();
+    }, 10_000);
     return () => clearInterval(timer);
   }, [
     expanded,
+    loadChannelCatalog,
     loadSessions,
     readOnly,
     reloadToken,
@@ -371,7 +378,7 @@ export function WorkspaceSection({
 
   const channelSessionGroups = useMemo(
     () =>
-      channelCatalog
+      channelGroupingEnabled && channelCatalog
         ? groupSessionsByChannelType(
             visibleSessions,
             channelCatalog.catalog,
@@ -379,7 +386,7 @@ export function WorkspaceSection({
             t('sidebar.channelType.other'),
           )
         : null,
-    [channelCatalog, t, visibleSessions],
+    [channelCatalog, channelGroupingEnabled, t, visibleSessions],
   );
 
   return (
@@ -484,7 +491,7 @@ export function WorkspaceSection({
                   </SessionGroupSection>
                 ))}
               </>
-            ) : groupedSessions ? (
+            ) : groupedSessions && !channelGroupingEnabled ? (
               <>
                 {groupedSessions.sections.map(({ group, sessions }) => (
                   <SessionGroupSection

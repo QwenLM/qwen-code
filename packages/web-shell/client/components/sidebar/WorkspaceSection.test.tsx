@@ -248,16 +248,16 @@ describe('WorkspaceSection label', () => {
     const channelSessions = new Promise<DaemonSessionSummary[]>((resolve) => {
       resolveChannel = resolve;
     });
+    // Every default-source request gets its OWN pending promise so the
+    // pre-switch request can settle late, after the switch.
+    const defaultResolvers: Array<(sessions: DaemonSessionSummary[]) => void> =
+      [];
     const listWorkspaceSessions = vi.fn((options?: { sourceType?: string }) =>
       options?.sourceType === 'channel'
         ? channelSessions
-        : Promise.resolve([
-            {
-              sessionId: 'task-session',
-              displayName: 'Task session',
-              sourceType: 'default',
-            },
-          ]),
+        : new Promise<DaemonSessionSummary[]>((resolve) => {
+            defaultResolvers.push(resolve);
+          }),
     );
     const client = {
       workspaceByCwd: vi.fn(() => ({
@@ -268,10 +268,31 @@ describe('WorkspaceSection label', () => {
     } as unknown as DaemonClient;
 
     renderSection({ client, expanded: true, sourceType: 'default' });
+    defaultResolvers[0]!([
+      {
+        sessionId: 'task-session',
+        displayName: 'Task session',
+        sourceType: 'default',
+      },
+    ]);
     await flush();
     expect(container.textContent).toContain('Task session');
 
-    renderSection({ client, expanded: true, sourceType: 'channel' });
+    // A poll tick still on the default source issues a second request that
+    // stays pending across the source switch below.
+    renderSection({
+      client,
+      expanded: true,
+      sourceType: 'default',
+      reloadToken: 1,
+    });
+
+    renderSection({
+      client,
+      expanded: true,
+      sourceType: 'channel',
+      reloadToken: 1,
+    });
     expect(container.textContent).not.toContain('Task session');
 
     resolveChannel([
@@ -283,6 +304,22 @@ describe('WorkspaceSection label', () => {
     ]);
     await flush();
     expect(container.textContent).toContain('Channel session');
+
+    // The pending pre-switch default response settles AFTER the switch; the
+    // requestId ordering guard must drop it — without it the stale write
+    // clobbers the new-source list and the section renders the empty
+    // placeholder until the next poll (indefinitely for read-only
+    // workspaces, which have no polling interval).
+    defaultResolvers[1]!([
+      {
+        sessionId: 'stale-task-session',
+        displayName: 'Stale task session',
+        sourceType: 'default',
+      },
+    ]);
+    await flush();
+    expect(container.textContent).toContain('Channel session');
+    expect(container.textContent).not.toContain('Stale task session');
   });
 
   it('groups a secondary workspace with its own channel catalog', async () => {
@@ -374,6 +411,105 @@ describe('WorkspaceSection label', () => {
     expect(
       container.querySelector('section[aria-label="Organization group"]'),
     ).toBeNull();
+  });
+
+  it('renders channel sessions flat while the channel catalog failed to load', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessions: vi.fn().mockResolvedValue([
+          {
+            sessionId: 'ding-session',
+            displayName: 'DingTalk session',
+            sourceType: 'channel',
+            sourceId: 'ding-one',
+            groupId: 'organization-group',
+          },
+        ]),
+        listSessionGroups: vi.fn().mockResolvedValue({
+          groups: [
+            {
+              id: 'organization-group',
+              name: 'Organization group',
+              color: 'blue',
+              order: 0,
+              createdAt: '2026-01-01T00:00:00.000Z',
+              updatedAt: '2026-01-01T00:00:00.000Z',
+            },
+          ],
+        }),
+        workspaceChannelTypes: vi.fn().mockRejectedValue(new Error('boom')),
+        workspaceChannels: vi.fn().mockRejectedValue(new Error('boom')),
+      })),
+    } as unknown as DaemonClient;
+
+    renderSection({
+      client,
+      expanded: true,
+      sourceType: 'channel',
+      channelGroupingEnabled: true,
+      organizationEnabled: true,
+    });
+    await flush();
+
+    // Without a catalog the channel list is not groupable yet; it must stay
+    // flat instead of falling through to organization groups, which would
+    // invert the "channel grouping overrides user groups" precedence.
+    expect(container.textContent).toContain('DingTalk session');
+    expect(
+      container.querySelector('section[aria-label="Organization group"]'),
+    ).toBeNull();
+    warn.mockRestore();
+  });
+
+  it('refreshes the channel catalog on the session poll tick', async () => {
+    const workspaceChannelTypes = vi.fn().mockResolvedValue([
+      {
+        type: 'dingtalk',
+        displayName: 'DingTalk',
+        manageable: true,
+        fields: [],
+      },
+    ]);
+    const workspaceChannels = vi.fn().mockResolvedValue({
+      revision: '1',
+      instances: {},
+    });
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessions: vi.fn().mockResolvedValue([]),
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+        workspaceChannelTypes,
+        workspaceChannels,
+      })),
+    } as unknown as DaemonClient;
+    const setIntervalSpy = vi.spyOn(window, 'setInterval');
+
+    renderSection({
+      client,
+      expanded: true,
+      sourceType: 'channel',
+      channelGroupingEnabled: true,
+    });
+    await flush();
+    expect(workspaceChannelTypes).toHaveBeenCalledTimes(1);
+
+    const poll = setIntervalSpy.mock.calls.findLast(
+      ([, timeout]) => timeout === 10_000,
+    );
+    expect(poll).toBeDefined();
+    await act(async () => {
+      const callback = poll![0];
+      expect(callback).toBeTypeOf('function');
+      if (typeof callback === 'function') callback();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(workspaceChannelTypes).toHaveBeenCalledTimes(2);
+    setIntervalSpy.mockRestore();
   });
 });
 

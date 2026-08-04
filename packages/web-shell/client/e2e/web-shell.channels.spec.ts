@@ -14,7 +14,12 @@ import {
 test('shows channel sessions in the sidebar channel catalog', async ({
   page,
 }, testInfo) => {
+  const workspaceCwd = '/tmp/qwen-web-shell-e2e';
+  // DaemonSessionSummary requires workspaceCwd; keep a shared base so every
+  // fixture matches the shape the real daemon returns.
+  const baseSession = { workspaceCwd };
   const scenario = createWebShellDaemonScenario({
+    workspaceCwd,
     capabilities: {
       features: [
         'session_events',
@@ -67,17 +72,20 @@ test('shows channel sessions in the sidebar channel catalog', async ({
     },
     sessions: [
       {
+        ...baseSession,
         sessionId: 'task-session',
         displayName: 'Web Shell task',
         sourceType: 'default',
       },
       {
+        ...baseSession,
         sessionId: 'dingtalk-session',
         displayName: 'DingTalk conversation',
         sourceType: 'channel',
         sourceId: 'release-bot',
       },
       {
+        ...baseSession,
         sessionId: 'dingtalk-ops-session',
         displayName: 'DingTalk ops conversation',
         sourceType: 'channel',
@@ -85,12 +93,14 @@ test('shows channel sessions in the sidebar channel catalog', async ({
         isPinned: true,
       },
       {
+        ...baseSession,
         sessionId: 'feishu-session',
         displayName: 'Feishu conversation',
         sourceType: 'channel',
         sourceId: 'feishu-main',
       },
       {
+        ...baseSession,
         sessionId: 'legacy-channel-session',
         displayName: 'Legacy channel conversation',
         sourceType: 'channel',
@@ -139,6 +149,7 @@ test('shows channel sessions in the sidebar channel catalog', async ({
   await expect(dingTalkToggle).toHaveAttribute('aria-expanded', 'true');
 
   scenario.sessions.push({
+    ...baseSession,
     sessionId: 'new-dingtalk-session',
     displayName: 'New DingTalk conversation',
     sourceType: 'channel',

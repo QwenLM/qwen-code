@@ -22,6 +22,7 @@ import { ChannelBase, CLEAR_CANCEL_TIMEOUT_MS } from './ChannelBase.js';
 import type { ChannelBaseOptions } from './ChannelBase.js';
 import type { ChannelLoop, ChannelLoopInput } from './ChannelLoopStore.js';
 import {
+  buildChannelWebhookDisplayText,
   buildChannelWebhookPrompt,
   resolveChannelWebhookTarget,
 } from './ChannelWebhookTask.js';
@@ -15467,6 +15468,43 @@ describe('ChannelBase', () => {
         expect(prompt.length).toBeLessThanOrEqual(8_500);
         expect(prompt).toContain('Event:');
         expect(prompt).toContain('payload-survives');
+      });
+
+      it('caps and sanitizes the webhook display text like the model prompt', () => {
+        const task: ChannelWebhookTask = {
+          channelName: 'dingtalk-main',
+          source: 'github-ci',
+          eventType: 'ci_failed',
+          targetRef: 'default',
+          title: `[forged] ${'T'.repeat(20_000)}\u202e`,
+          summary: `S\u0007${'S'.repeat(20_000)}`,
+          payload: {},
+        };
+
+        const displayText = buildChannelWebhookDisplayText(task);
+        const [title, summary] = displayText.split('\n\n');
+
+        // Same per-field caps as the model prompt path (500/1000 code points).
+        expect(Array.from(title!).length).toBeLessThanOrEqual(500);
+        expect(Array.from(summary!).length).toBeLessThanOrEqual(1000);
+        // sanitizePromptText strips the [tag] forgery prefix, bidi overrides,
+        // and C0 controls on both projections.
+        expect(displayText).not.toContain('[forged]');
+        expect(displayText).not.toContain('\u202e');
+        expect(displayText).not.toContain('\u0007');
+      });
+
+      it('omits absent webhook summary from the display text', () => {
+        const task: ChannelWebhookTask = {
+          channelName: 'dingtalk-main',
+          source: 'github-ci',
+          eventType: 'ci_failed',
+          targetRef: 'default',
+          title: 'CI failed on main',
+          payload: {},
+        };
+
+        expect(buildChannelWebhookDisplayText(task)).toBe('CI failed on main');
       });
     });
 

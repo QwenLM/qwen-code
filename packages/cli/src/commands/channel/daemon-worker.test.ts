@@ -761,6 +761,84 @@ describe('runChannelDaemonWorker', () => {
     await handle.close();
   });
 
+  it('treats an already-deleted classifier session as deletion success', async () => {
+    const sdk = createSdk();
+    sdk.deleteSessionsData.mockResolvedValue({
+      removed: [],
+      notFound: ['classifier-session'],
+      errors: [],
+    });
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+    const options = mockDaemonChannelBridge.mock.calls.at(-1)?.[0] as {
+      deleteSessionData?: (
+        sessionId: string,
+        workspaceCwd: string,
+      ) => Promise<void>;
+    };
+
+    await expect(
+      options.deleteSessionData?.('classifier-session', '/workspace'),
+    ).resolves.toBeUndefined();
+    await handle.close();
+  });
+
+  it('propagates per-session daemon deletion errors as a rejection', async () => {
+    const sdk = createSdk();
+    sdk.deleteSessionsData.mockResolvedValue({
+      removed: [],
+      notFound: [],
+      errors: [{ sessionId: 'classifier-session', error: 'storage locked' }],
+    });
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+    const options = mockDaemonChannelBridge.mock.calls.at(-1)?.[0] as {
+      deleteSessionData?: (
+        sessionId: string,
+        workspaceCwd: string,
+      ) => Promise<void>;
+    };
+
+    await expect(
+      options.deleteSessionData?.('classifier-session', '/workspace'),
+    ).rejects.toThrow('storage locked');
+    await handle.close();
+  });
+
+  it('rejects when the deletion result omits the session entirely', async () => {
+    const sdk = createSdk();
+    sdk.deleteSessionsData.mockResolvedValue({
+      removed: [],
+      notFound: [],
+      errors: [],
+    });
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+    const options = mockDaemonChannelBridge.mock.calls.at(-1)?.[0] as {
+      deleteSessionData?: (
+        sessionId: string,
+        workspaceCwd: string,
+      ) => Promise<void>;
+    };
+
+    await expect(
+      options.deleteSessionData?.('classifier-session', '/workspace'),
+    ).rejects.toThrow('Session classifier-session was not deleted.');
+    await handle.close();
+  });
+
   it('forwards router discard through the daemon bridge facade', async () => {
     const sdk = createSdk();
     const handle = await runChannelDaemonWorker({

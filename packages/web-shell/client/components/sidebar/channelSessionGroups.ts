@@ -22,9 +22,14 @@ export function groupSessionsByChannelType(
   const groups = new Map<string, ChannelSessionGroup>();
 
   for (const session of sessions) {
-    const configuredType = session.sourceId
-      ? instances[session.sourceId]?.config['type']
-      : undefined;
+    // Object.hasOwn: a sourceId like 'constructor' resolves through
+    // Object.prototype on a plain record, so a bare index read would
+    // dereference `.config` on the Object function and throw.
+    const instance =
+      session.sourceId && Object.hasOwn(instances, session.sourceId)
+        ? instances[session.sourceId]
+        : undefined;
+    const configuredType = instance?.config['type'];
     const type =
       typeof configuredType === 'string'
         ? configuredType.trim() || undefined

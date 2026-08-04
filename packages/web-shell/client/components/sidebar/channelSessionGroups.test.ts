@@ -67,6 +67,42 @@ describe('groupSessionsByChannelType', () => {
     ]);
   });
 
+  it('treats prototype-member sourceIds as missing instances instead of crashing', () => {
+    // Instance names are portable path components, so a deleted instance can
+    // leave orphaned sessions whose sourceId is 'constructor'/'__proto__'.
+    // A bare index read would resolve through Object.prototype and throw
+    // inside the sidebar render path; they must land in the fallback group.
+    const groups = groupSessionsByChannelType(
+      [
+        session('orphan-constructor', 'constructor'),
+        session('orphan-proto', '__proto__'),
+        session('d1', 'ding-one'),
+      ],
+      catalog,
+      { 'ding-one': instance('ding-one', 'dingtalk') },
+      'Other channels',
+    );
+
+    expect(
+      groups.map(({ id, label, sessions }) => ({
+        id,
+        label,
+        sessions: sessions.map((item) => item.sessionId),
+      })),
+    ).toEqual([
+      {
+        id: 'channel-type-fallback',
+        label: 'Other channels',
+        sessions: ['orphan-constructor', 'orphan-proto'],
+      },
+      {
+        id: 'channel-type:dingtalk',
+        label: 'DingTalk',
+        sessions: ['d1'],
+      },
+    ]);
+  });
+
   it('uses the raw type or fallback group when catalog metadata is incomplete', () => {
     const groups = groupSessionsByChannelType(
       [

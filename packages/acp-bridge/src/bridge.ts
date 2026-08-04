@@ -235,6 +235,23 @@ function sessionSourceRequestMeta(
     : {};
 }
 
+/**
+ * The daemon's channel adapter carries the user-facing display projection in
+ * prompt meta; only channel sessions may use it — every other source echoes
+ * its prompt content verbatim. Single source of truth for the echo, the
+ * pending-entry text, and the re-arm strip so their `''`/missing-meta
+ * semantics cannot drift apart.
+ */
+function getChannelPromptDisplayText(
+  entry: Pick<SessionEntry, 'sourceType'>,
+  meta: Record<string, unknown> | null | undefined,
+): string | undefined {
+  const displayText = meta?.[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
+  return entry.sourceType === 'channel' && typeof displayText === 'string'
+    ? displayText
+    : undefined;
+}
+
 function isDefinitiveAcpRequestError(error: unknown): boolean {
   if (error instanceof RequestError) return true;
   if (!isRecord(error)) return false;
@@ -931,11 +948,7 @@ function echoPromptToSessionBus(
   // contract — cheaper than a thrown `TypeError` mid-echo.
   const prompt = req.prompt;
   if (!Array.isArray(prompt) || prompt.length === 0) return;
-  const displayText =
-    entry.sourceType === 'channel' &&
-    typeof req._meta?.[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY] === 'string'
-      ? req._meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY]
-      : undefined;
+  const displayText = getChannelPromptDisplayText(entry, req._meta);
   let displayTextPublished = false;
   const serverTimestamp = Date.now();
   const blockCount = Math.min(prompt.length, MAX_ECHO_CONTENT_BLOCKS);
@@ -5483,10 +5496,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         queuedAt,
         ...(originatorClientId !== undefined ? { originatorClientId } : {}),
         text:
-          entry.sourceType === 'channel' &&
-          typeof req._meta?.[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY] === 'string'
-            ? req._meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY]
-            : extractPromptText(req.prompt),
+          getChannelPromptDisplayText(entry, req._meta) ??
+          extractPromptText(req.prompt),
         abortController: pendingAbort,
         state: isQueued ? 'queued' : 'running',
       };
@@ -5670,12 +5681,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                     copy._meta && typeof copy._meta === 'object'
                       ? { ...copy._meta }
                       : {};
-                  const promptDisplayText =
-                    entry.sourceType === 'channel' &&
-                    typeof meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY] ===
-                      'string'
-                      ? meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY]
-                      : undefined;
+                  const promptDisplayText = getChannelPromptDisplayText(
+                    entry,
+                    meta,
+                  );
                   delete meta[DAEMON_RETRY_META_KEY];
                   delete meta[INVOCATION_CONTEXT_META_KEY];
                   delete meta[PRIVATE_PARENT_CAPABILITY_META_KEY];
