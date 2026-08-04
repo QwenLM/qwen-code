@@ -96,7 +96,16 @@ export function workspaceDirFor(
     }
 
     if (dir === null) continue;
-    owner = negated ? null : dir;
+    if (!negated) {
+      owner = dir;
+    } else if (dir === owner) {
+      // A negation only excludes the file when it excludes the member that
+      // currently owns it. `!packages/desktop/*` matches a deeper pseudo-dir
+      // than `packages/*` does, and npm keeps the member itself in the graph
+      // (a glob with a subpath cannot match a dir with no subpath), so the
+      // member's suite can still feel a change there.
+      owner = null;
+    }
   }
   return owner;
 }
@@ -178,6 +187,9 @@ export function readRootPackage(root: string): WorkspacePackage | null {
   } catch {
     return null;
   }
+  // The JSON literal `null` parses to a value with no scripts or name; the
+  // reads below would otherwise throw past the try/catch.
+  if (pkg === null) return null;
   const scripts = Object.keys(pkg.scripts ?? {});
   if (!scripts.includes('build') && !scripts.includes('test')) return null;
   return {
@@ -262,9 +274,14 @@ export interface WorkspaceGraph {
   /**
    * Dirs npm treats as workspaces but the graph cannot see: the manifest
    * exists yet does not parse, or parses to no usable `name` (missing, empty,
-   * or not a string). npm links both shapes all the same, so each is a
-   * dependent the closure may miss — the test scope treats a non-empty list
-   * as "the graph cannot be trusted".
+   * not a string, or the JSON literal `null`). The two shapes fail
+   * differently, but both leave a dependent the closure may miss. A manifest
+   * that parses to no usable `name` is still linked by npm — under its
+   * directory name — so its reverse edges are real edges the graph cannot
+   * see. A manifest that does not parse fails `npm install` outright
+   * (EJSONPARSE) on a cold tree, but on a pre-installed tree the install is
+   * skipped and the graph is still blind to it. Either way the test scope
+   * treats a non-empty list as "the graph cannot be trusted".
    */
   skipped: string[];
 }
@@ -289,7 +306,9 @@ export function readWorkspacePackages(root: string): WorkspaceGraph {
       skipped.push(dir);
       continue;
     }
-    if (typeof pkg.name !== 'string' || !pkg.name) {
+    // The JSON literal `null` parses fine but has no usable `name`; the
+    // property read would otherwise throw past the try/catch.
+    if (pkg === null || typeof pkg.name !== 'string' || !pkg.name) {
       skipped.push(dir);
       continue;
     }

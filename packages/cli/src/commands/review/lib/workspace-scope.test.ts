@@ -331,6 +331,92 @@ describe('resolveTestScope', () => {
       'packages/mid',
       'packages/top',
     ]);
+    // 4 of the 8 testable suites is exactly half, and the cap is strictly MORE
+    // than half — pinning the root-counted arithmetic on the clean side too.
+    expect(scope.caveat).toBeUndefined();
+  });
+
+  it('counts a RUNNING root suite on both sides of the half cap', () => {
+    // The root declares a dependency on the changed workspace, so it joins the
+    // closure and runs. Workspace-only arithmetic sees 2 of 4 testable (at
+    // half, no caveat) while the executed set is really 3 of the 5 testable
+    // suites — strictly past half, so the report must say so.
+    const small: WorkspacePackage[] = [
+      p('packages/core', '@x/core'),
+      p('packages/a', '@x/a', ['@x/core']),
+      p('packages/i1', '@x/i1'),
+      p('packages/i2', '@x/i2'),
+    ];
+    const scope = resolveTestScope({
+      changed: ['packages/core/src/a.ts'],
+      globs: GLOBS,
+      packages: small,
+      skipped: [],
+      rootPackage: p('.', 'root', ['@x/core'], ['test']),
+    });
+    expect(scope.workspaces).toEqual(['.', 'packages/a', 'packages/core']);
+    expect(scope.caveat).toContain(
+      '3 of 5 testable suites (including the root)',
+    );
+    expect(scope.caveat).toContain('more than half');
+  });
+
+  it('keeps the broken-graph caveat ahead of the half-cap one — trust order', () => {
+    // The same input that trips the half cap also carries a skipped manifest;
+    // "the graph could not be computed" is the stronger disclosure and must
+    // win, not be replaced by the narrower half-cap sentence.
+    const hub: WorkspacePackage[] = [
+      p('packages/core', '@x/core'),
+      p('packages/a', '@x/a', ['@x/core']),
+      p('packages/b', '@x/b', ['@x/core']),
+      p('packages/island', '@x/island'),
+    ];
+    const scope = resolveTestScope({
+      changed: ['packages/core/src/a.ts'],
+      globs: GLOBS,
+      packages: hub,
+      skipped: ['packages/broken'],
+    });
+    expect(scope.caveat).toContain('does not parse');
+    expect(scope.caveat).toContain('packages/broken');
+    expect(scope.caveat).not.toContain('more than half');
+  });
+
+  it('discloses an affected dir the globs claim but no manifest populates', () => {
+    // packages/sdk-python matches packages/* but has no package.json, so it is
+    // no graph member; an empty scoped set there must not read as a complete
+    // answer (the root can still define a script such a diff can fail).
+    const scope = resolveTestScope({
+      changed: ['packages/sdk-python/src/x.py'],
+      globs: GLOBS,
+      packages: PKGS,
+      skipped: [],
+    });
+    expect(scope.workspaces).toEqual([]);
+    expect(scope.caveat).toContain('packages/sdk-python');
+    expect(scope.caveat).toContain('no readable');
+  });
+
+  it('decides the half cap on the TESTABLE count, not the member count', () => {
+    // core plus one dependent is 2 of the 2 testable suites but only 2 of the
+    // 5 members (three build-only islands). The cap must fire on the testable
+    // denominator — a comparison against packages.length would let a run that
+    // narrows nothing pass undisclosed.
+    const mixed: WorkspacePackage[] = [
+      p('packages/core', '@x/core'),
+      p('packages/a', '@x/a', ['@x/core']),
+      p('packages/b1', '@x/b1', [], ['build']),
+      p('packages/b2', '@x/b2', [], ['build']),
+      p('packages/b3', '@x/b3', [], ['build']),
+    ];
+    const scope = resolveTestScope({
+      changed: ['packages/core/src/a.ts'],
+      globs: GLOBS,
+      packages: mixed,
+      skipped: [],
+    });
+    expect(scope.workspaces).toEqual(['packages/a', 'packages/core']);
+    expect(scope.caveat).toContain('2 of 2 testable workspaces');
   });
 
   it('returns an empty scoped set for an empty diff', () => {

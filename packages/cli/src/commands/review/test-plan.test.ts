@@ -745,6 +745,21 @@ describe('runTestPlan', () => {
       expect(claim?.observed).toBe('no package defines this script');
     });
 
+    it('rules unchecked — not contradicted — when only an unreadable manifest could define the script', () => {
+      // A nameless member lands in `skipped`; if it is the only definer of the
+      // claimed script, the ruling must not assert a positive absence from a
+      // graph it was told may be incomplete.
+      mkdirSync(join(dir, 'packages/nameless'), { recursive: true });
+      writeFileSync(
+        join(dir, 'packages/nameless/package.json'),
+        JSON.stringify({ scripts: { 'test:ghost': 'vitest' } }),
+      );
+      const r = run('## Test Plan\n\nRan `npm run test:ghost`');
+      const claim = r.claims.find((c) => c.text === 'npm run test:ghost');
+      expect(claim?.verdict).toBe('unchecked');
+      expect(claim?.note).toContain('packages/nameless');
+    });
+
     it("prefers this review's own exit code over the manifest lookup", () => {
       const bt = {
         build: [

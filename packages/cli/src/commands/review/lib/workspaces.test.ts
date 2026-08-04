@@ -151,6 +151,13 @@ describe('readRootPackage', () => {
     rmSync(root, { recursive: true, force: true });
   });
 
+  it('returns null (never throws) when the root manifest body is `null`', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ws-'));
+    writeFileSync(join(root, 'package.json'), 'null');
+    expect(readRootPackage(root)).toBeNull();
+    rmSync(root, { recursive: true, force: true });
+  });
+
   it('reads the declared dependencies — a root suite can depend on a workspace', () => {
     const root = mkdtempSync(join(tmpdir(), 'ws-'));
     writeFileSync(
@@ -186,6 +193,19 @@ describe('isNegationExcluded', () => {
   it('is false when a later glob re-includes what the negation excluded', () => {
     const globs = ['packages/*', '!packages/desktop', 'packages/desktop'];
     expect(isNegationExcluded('packages/desktop/src/a.ts', globs)).toBe(false);
+  });
+
+  it('keeps a member owned under a partial negation (`!packages/desktop/*`)', () => {
+    // npm keeps packages/desktop itself a member — a glob with a subpath
+    // cannot match the dir itself — so a file under it is still owned and its
+    // suite can feel a change there; it is NOT negation-excluded.
+    const globs = ['packages/*', '!packages/desktop/*'];
+    expect(workspaceDirFor('packages/desktop/src/main.ts', globs)).toBe(
+      'packages/desktop',
+    );
+    expect(isNegationExcluded('packages/desktop/src/main.ts', globs)).toBe(
+      false,
+    );
   });
 });
 
@@ -238,6 +258,19 @@ describe('readWorkspacePackages', () => {
     teardown();
   });
 
+  it('reports a manifest whose body is the JSON literal `null` as skipped', () => {
+    // `null` parses successfully, so it never reaches the parse-catch; the
+    // name check must classify it instead of throwing past the try/catch and
+    // crashing the whole build-test run.
+    setup(['packages/*']);
+    write('packages/core', { name: '@x/core' });
+    write('packages/nullish', 'null');
+    const { packages, skipped } = readWorkspacePackages(root);
+    expect(packages.map((p) => p.dir)).toEqual(['packages/core']);
+    expect(skipped).toEqual(['packages/nullish']);
+    teardown();
+  });
+
   it('collects optionalDependencies — npm links a workspace member listed there', () => {
     setup(['packages/*']);
     write('packages/core', { name: '@x/core' });
@@ -247,6 +280,20 @@ describe('readWorkspacePackages', () => {
     });
     const { packages } = readWorkspacePackages(root);
     expect(packages.find((p) => p.dir === 'packages/cond')?.deps).toEqual([
+      '@x/core',
+    ]);
+    teardown();
+  });
+
+  it('collects peerDependencies — npm links a workspace member listed there', () => {
+    setup(['packages/*']);
+    write('packages/core', { name: '@x/core' });
+    write('packages/peer', {
+      name: '@x/peer',
+      peerDependencies: { '@x/core': '*' },
+    });
+    const { packages } = readWorkspacePackages(root);
+    expect(packages.find((p) => p.dir === 'packages/peer')?.deps).toEqual([
       '@x/core',
     ]);
     teardown();

@@ -388,7 +388,6 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   const unmodeled = globs.length > 0 && hasUnmodeledWorkspaceGlob(globs);
   if (!unmodeled && globs.length === 0 && rootPkg) {
     packages = [rootPkg];
-    skipped = [];
     singleRoot = true;
   }
 
@@ -428,6 +427,12 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   // is its full suite, and its report must not change shape — and for a
   // build-only call: the merge-base probe runs no tests, and a testScope it
   // never executed would claim a decision the run did not make.
+  // The root joins the test graph when it defines a test suite: a root that
+  // declares a dependency on a changed workspace is a dependent the closure
+  // must see. The build set below is computed over the SAME graph, so a member
+  // that depends on the root's name is built as well as tested — one
+  // definition, so the built set and the tested set cannot drift apart.
+  const rootPackage = rootPkg?.scripts.includes('test') ? rootPkg : null;
   const testScope =
     singleRoot || args.buildOnly
       ? undefined
@@ -436,8 +441,12 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
           globs,
           packages,
           skipped,
-          rootPackage: rootPkg?.scripts.includes('test') ? rootPkg : null,
+          rootPackage,
         });
+  const scopeGraph =
+    !singleRoot && !args.buildOnly && rootPackage
+      ? [...packages, rootPackage]
+      : packages;
 
   // With no affected workspace there is nothing to run at all. Three diffs land
   // here: an empty one; a build-only call (the merge-base probe), which measures
@@ -492,6 +501,9 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     );
   }
 
+  // No `testScope` in the initializer: every return that fires before the
+  // test loop runs zero suites, and a scope on it would read as "the suites
+  // ran" in the agent's brief. It is attached only once the scope executes.
   const results: BuildTestReport = {
     toolchain: 'npm',
     affected,
@@ -500,7 +512,6 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     install: null,
     build: [],
     test: [],
-    ...(testScope ? { testScope } : {}),
     ok: true,
     timedOut: [],
     note: '',
@@ -639,7 +650,7 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   }
 
   const alsoBuild: string[] = [];
-  let set = buildSetFor(affected, packages);
+  let set = buildSetFor(affected, scopeGraph);
   const built = new Set<string>();
   const widened = new Set<string>();
 
@@ -697,7 +708,7 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
         : `\`${failure.command}\` failed. Correlate the errors below with the diff: a ` +
           'compile error in a file the PR changed is a Critical; one in a file it did not ' +
           'touch is a pre-existing failure, and belongs in the terminal, not on the PR.';
-      results.buildSet = set;
+      results.buildSet = set.filter((d) => byDir.has(d));
       results.widenedWith = [...widened];
       return results;
     }
@@ -719,10 +730,10 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     // As `alsoBuild`, never as `affected`. The compiler asked for this package
     // because something compiles *against* it; the PR did not change it, so its
     // consumers cannot have been broken by the PR and must not be built.
-    set = buildSetFor(affected, packages, alsoBuild);
+    set = buildSetFor(affected, scopeGraph, alsoBuild);
   }
 
-  results.buildSet = set;
+  results.buildSet = set.filter((d) => byDir.has(d));
   results.widenedWith = [...widened];
 
   // Test what the diff can break: the changed workspaces plus their
@@ -741,7 +752,10 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   // repo's suite took 31 minutes in CI against a 300-second deadline, and a
   // third of recent diffs would have hit the fallback), so the fallback would
   // only ever report a timeout — zero signal framed as a failure. The scoped
-  // set is the run that can finish; the caveat is the honesty.
+  // set is the run that covers the diff — each command keeps its own deadline,
+  // and whether a large closure's deadlines sum past the caller's ceiling is
+  // the separate, acknowledged follow-up named on the `timeout` option. The
+  // caveat is the honesty.
   const rootHasTest = !!rootPkg?.scripts.includes('test');
   const testDirs = args.buildOnly
     ? []
@@ -758,6 +772,10 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     if (r.exitCode !== 0) results.ok = false;
   }
 
+  // The scope was executed — only now may the report carry it. Every return
+  // above ran zero test commands and must not claim a scoping decision.
+  if (testScope) results.testScope = testScope;
+
   if (!results.note) {
     const failed = [...results.build, ...results.test].filter(
       (r) => r.exitCode !== 0,
@@ -772,23 +790,26 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     if (results.ok) {
       // The tests sentence names the scope, because it is the agent's report
       // that has to be able to say what was and was not run: a scoped run
-      // names its suites, and a caveat says what the scope may miss. The
-      // single-root wording is unchanged from before scoping existed — that
-      // repo shape has exactly one suite either way.
+      // names its suites, and a caveat says what the scope may miss.
       let testsClause: string;
       if (args.buildOnly) {
         testsClause = '. Tests were not run (build-only).';
       } else if (!testScope) {
         testsClause =
-          ' and ran the tests of the changed ones. Everything passed.';
+          results.test.length === 0
+            ? ', but the package defines no test script, so no tests ran.'
+            : ' and ran the tests of the changed ones. Everything passed.';
       } else if (testScope.workspaces.length === 0) {
         testsClause =
           ', but no workspace in scope defines a test script, so no tests ran.';
       } else {
+        // The scoped list is filtered to dependents WITH a test script; a
+        // build-only dependent is built but never tested, so the note must
+        // not claim every declared dependent was covered.
         testsClause =
           ` and ran the tests scoped to ${testScope.workspaces.join(', ')} — ` +
           'the changed workspaces and every workspace declared to depend on ' +
-          'them. Everything passed.';
+          'them that defines a test script. Everything passed.';
       }
       if (testScope?.caveat) testsClause += ` Caveat: ${testScope.caveat}.`;
       results.note =

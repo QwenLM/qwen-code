@@ -272,6 +272,8 @@ describe('runBuildTest', () => {
     expect(rep.testScope?.workspaces).toEqual([]);
     expect(rep.testScope?.caveat).toContain('README.md');
     expect(rep.note).toContain('caveat');
+    // The note embeds the caveat's substance, not just the word "caveat".
+    expect(rep.note).toContain('README.md');
     expect(rep.note).not.toContain('complete answer');
   });
 
@@ -336,6 +338,8 @@ describe('runBuildTest', () => {
       'npm test --workspace="packages/a"',
     ]);
     expect(rep.note).toContain('Caveat:');
+    // The note embeds the caveat's substance, not just the "Caveat:" label.
+    expect(rep.note).toContain('README.md');
     expect(rep.ok).toBe(true);
   });
 
@@ -402,6 +406,29 @@ describe('runBuildTest', () => {
     expect(calls).toContain('npm test');
     expect(calls.some((c) => c.includes('--workspace'))).toBe(false);
     expect(rep.ok).toBe(true);
+  });
+
+  it('says no tests ran for a single-package repo whose root defines only a build script', () => {
+    // The root's build runs, but with no test script nothing is executed —
+    // the note must not claim the tests of the changed package ran and passed.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'solo', scripts: { build: 'exit 0' } }),
+    );
+    writePlan(['src/index.ts']);
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec,
+    });
+    expect(rep.toolchain).toBe('npm');
+    expect(rep.ok).toBe(true);
+    expect(rep.test).toEqual([]);
+    expect(rep.testScope).toBeUndefined();
+    expect(rep.note).toContain('no tests ran');
+    expect(rep.note).not.toContain('Everything passed');
   });
 
   it('is `unsupported` for a single-package repo with no build/test script', () => {
@@ -869,6 +896,11 @@ describe('runBuildTest', () => {
     expect(rep.test.map((t) => t.command)).toEqual([
       'npm test --workspace="packages/core"',
     ]);
+    // The note names what ran and must not claim the build-only dependent was
+    // tested — naming it would assert a coverage that cannot exist.
+    expect(rep.note).toContain('packages/core');
+    expect(rep.note).toContain('defines a test script');
+    expect(rep.note).not.toContain('packages/leaf');
   });
 
   it('runs the root suite as a dependent when the root package.json declares a workspace dependency', () => {
@@ -904,6 +936,102 @@ describe('runBuildTest', () => {
     expect(rep.test.map((t) => t.command)).toEqual([
       'npm test',
       'npm test --workspace="packages/core"',
+    ]);
+    expect(rep.ok).toBe(true);
+  });
+
+  it('keeps a build-only root out of the test scope and the half-cap count', () => {
+    // The root declares a dependency on the changed member but defines NO test
+    // script: it joins the closure only as '.', the script filter drops it, and
+    // — because it is not a testable suite — it must not inflate the half-cap
+    // denominator either. The gate passing `rootPackage` only for a root with a
+    // test is what guarantees both; this pins the resulting scope.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'r',
+        workspaces: ['packages/*'],
+        scripts: { build: 'exit 0' },
+        dependencies: { '@x/core': '*' },
+      }),
+    );
+    pkg('packages/core', {
+      name: '@x/core',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/a', {
+      name: '@x/a',
+      dependencies: { '@x/core': '*' },
+      scripts: { test: 'exit 0' },
+    });
+    pkg('packages/island', { name: '@x/island', scripts: { test: 'exit 0' } });
+    writePlan(['packages/core/src/a.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec,
+    });
+    // 2 of the 3 testable workspaces is past half, so the caveat fires — the
+    // build-only root is NOT counted as a fourth testable suite.
+    expect(rep.testScope?.workspaces).toEqual(['packages/a', 'packages/core']);
+    expect(rep.testScope?.caveat).toContain('2 of 3 testable workspaces');
+    expect(rep.test.map((t) => t.command)).toEqual([
+      'npm test --workspace="packages/a"',
+      'npm test --workspace="packages/core"',
+    ]);
+  });
+
+  it('builds a workspace whose only edge is a dependency on the root package', () => {
+    // docs depends on the root's NAME and the root depends on core, so docs is
+    // in the test closure through the root. The build set is computed over the
+    // same root-inclusive graph, so docs is built before it is tested — a
+    // suite must never run against artifacts that were never compiled.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'r',
+        workspaces: ['packages/*'],
+        scripts: { build: 'exit 0', test: 'exit 0' },
+        dependencies: { '@x/core': '*' },
+      }),
+    );
+    pkg('packages/core', {
+      name: '@x/core',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/docs', {
+      name: '@x/docs',
+      dependencies: { r: '*' },
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    for (const island of ['i1', 'i2', 'i3']) {
+      pkg(`packages/${island}`, {
+        name: `@x/${island}`,
+        scripts: { test: 'exit 0' },
+      });
+    }
+    writePlan(['packages/core/src/a.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec,
+    });
+    expect(rep.testScope?.workspaces).toContain('packages/docs');
+    // docs is built (the drift R2-23 fixed); the root itself is not a
+    // buildable workspace and stays out of the reported set.
+    expect(rep.buildSet).toContain('packages/docs');
+    expect(rep.buildSet).toContain('packages/core');
+    expect(rep.buildSet).not.toContain('.');
+    expect(rep.test.map((t) => t.command)).toEqual([
+      'npm test',
+      'npm test --workspace="packages/core"',
+      'npm test --workspace="packages/docs"',
     ]);
     expect(rep.ok).toBe(true);
   });
@@ -978,11 +1106,12 @@ describe('runBuildTest', () => {
   });
 
   it('records a caveat — and still runs the closure — when it covers more than half the workspaces', () => {
-    // With core feeding both dependents, the closure is 3 of 4 testable
-    // workspaces — past half, so the report says the scoped set is not a
-    // meaningful narrowing. The closure still runs: the root's full suite
-    // cannot finish inside a command deadline on a large monorepo, so a
-    // full-suite fallback would only ever report a timeout.
+    // With core feeding both dependents, the closure is 3 of the 5 testable
+    // suites (the root defines a test too, and it counts in the total) — past
+    // half, so the report says the scoped set is not a meaningful narrowing.
+    // The closure still runs: the root's full suite cannot finish inside a
+    // command deadline on a large monorepo, so a full-suite fallback would
+    // only ever report a timeout.
     writeFileSync(
       join(root, 'package.json'),
       JSON.stringify({
@@ -1015,7 +1144,9 @@ describe('runBuildTest', () => {
       install: false,
       exec: okExec,
     });
-    expect(rep.testScope?.caveat).toContain('3 of 4 testable workspaces');
+    expect(rep.testScope?.caveat).toContain(
+      '3 of 5 testable suites (including the root)',
+    );
     expect(rep.testScope?.caveat).toContain('more than half');
     // The closure runs, suite by suite — never the root's full-suite command.
     expect(rep.test.map((t) => t.command)).toEqual([
@@ -1251,6 +1382,9 @@ describe('runBuildTest', () => {
     expect(rep.build.at(-1)?.exitCode).toBe(1);
     expect(rep.build.at(-1)?.output).toContain('TS2345');
     expect(rep.note).toContain('Correlate');
+    // The run never reached its test phase, so it must not carry a scope that
+    // would read as "the suites ran" in the agent's brief.
+    expect(rep.testScope).toBeUndefined();
   });
 
   it('widens on a compiler-named workspace package, and leaves no false failure behind', () => {

@@ -110,6 +110,10 @@ export function resolveTestScope(input: {
 }): TestScope {
   const { changed, globs, packages, skipped } = input;
 
+  const affected = affectedWorkspaces(changed, globs);
+  const graph = input.rootPackage ? [...packages, input.rootPackage] : packages;
+  const scriptsOf = new Map(graph.map((p) => [p.dir, p.scripts]));
+
   let caveat: string | undefined;
   if (skipped.length > 0) {
     caveat =
@@ -118,6 +122,12 @@ export function resolveTestScope(input: {
       'parse or has no usable `name`, so a reverse dependency may be missing ' +
       'from the scoped set';
   } else {
+    // A dir a positive glob claims but no manifest populates hosts no suite
+    // the scoped set can run, and its reverse edges are invisible to the
+    // closure — an empty scoped set there must not read as a complete answer.
+    // (build-test's unmapped guard reaches the same conclusion; the scope
+    // discloses it itself so the invariant does not rest on one call site.)
+    const unmapped = affected.filter((d) => d !== '.' && !scriptsOf.has(d));
     // Files a negation excludes (!packages/desktop — a separate toolchain with
     // its own lockfile) cannot affect any included workspace's tests, so they
     // earn no caveat either.
@@ -125,7 +135,12 @@ export function resolveTestScope(input: {
     const influential = outside.filter(
       (f) => !isInertLicense(f) && !isNegationExcluded(f, globs),
     );
-    if (influential.length > 0) {
+    if (unmapped.length > 0) {
+      caveat =
+        `the workspace globs claim ${unmapped.join(', ')}, but no readable ` +
+        'package.json there makes a graph member — no suite covers a change ' +
+        'inside, and a dependent of the diff may be missing from the scoped set';
+    } else if (influential.length > 0) {
       caveat =
         `${influential.length} changed file(s) sit outside every workspace and ` +
         `are not inert (e.g. ${influential.slice(0, 3).join(', ')}); a root ` +
@@ -134,24 +149,27 @@ export function resolveTestScope(input: {
     }
   }
 
-  const affected = affectedWorkspaces(changed, globs);
-  const graph = input.rootPackage ? [...packages, input.rootPackage] : packages;
   const closure = reverseDependencyClosure(affected, graph);
   // Exactly the suites the run executes: the closure, minus members that
   // define no test script — naming those would claim coverage nothing can run.
-  const scriptsOf = new Map(graph.map((p) => [p.dir, p.scripts]));
   const workspaces = closure.filter((d) => scriptsOf.get(d)?.includes('test'));
 
   // Testable-to-testable: a closure past half the suites that CAN run is not a
   // meaningful narrowing, and counting script-less members would overstate it.
+  // The root suite counts on BOTH sides when it participates — with a running
+  // root the executed set is larger than workspace-only arithmetic models.
   if (!caveat) {
-    const testable = packages.filter((p) => p.scripts.includes('test')).length;
-    const scoped = workspaces.filter((d) => d !== '.').length;
+    const rootRuns = input.rootPackage ? 1 : 0;
+    const testable =
+      packages.filter((p) => p.scripts.includes('test')).length + rootRuns;
+    const scoped = workspaces.length;
     if (scoped * 2 > testable) {
       caveat =
         `the diff's reverse-dependency closure covers ${scoped} of ` +
-        `${testable} testable workspaces — more than half, so the scoped set ` +
-        'is not a meaningful narrowing of the suite';
+        `${testable} testable ${
+          rootRuns ? 'suites (including the root)' : 'workspaces'
+        } — more than half, so the scoped set is not a meaningful narrowing ` +
+        'of the suite';
     }
   }
 

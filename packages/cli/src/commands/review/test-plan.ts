@@ -644,7 +644,8 @@ function ruleCommand(
     // No readable root manifest; workspace packages may still define scripts.
   }
   const defined = new Set<string>(rootScripts);
-  for (const pkg of readWorkspacePackages(worktree).packages) {
+  const { packages, skipped } = readWorkspacePackages(worktree);
+  for (const pkg of packages) {
     for (const s of pkg.scripts) defined.add(s);
   }
   // No manifest could be read at all (a tree this command cannot inspect):
@@ -657,20 +658,34 @@ function ruleCommand(
       note: 'no package manifest could be read',
     };
   }
-  return defined.has(script)
-    ? {
-        kind: 'command',
-        text,
-        verdict: 'reproduces',
-        note: `\`${script}\` is a defined script`,
-      }
-    : {
-        kind: 'command',
-        text,
-        verdict: 'contradicted',
-        observed: 'no package defines this script',
-        note: 'the Test Plan tells the reviewer to run a script that does not exist at the reviewed commit',
-      };
+  if (defined.has(script)) {
+    return {
+      kind: 'command',
+      text,
+      verdict: 'reproduces',
+      note: `\`${script}\` is a defined script`,
+    };
+  }
+  // A member the graph could not read may still define it — the same rule as
+  // the total absence above: absent evidence, not evidence of absence.
+  if (skipped.length > 0) {
+    return {
+      kind: 'command',
+      text,
+      verdict: 'unchecked',
+      note:
+        `${skipped.join(', ')} ${skipped.length === 1 ? 'has' : 'have'} a ` +
+        'package.json this check could not read, so the script table may be ' +
+        'incomplete',
+    };
+  }
+  return {
+    kind: 'command',
+    text,
+    verdict: 'contradicted',
+    observed: 'no package defines this script',
+    note: 'the Test Plan tells the reviewer to run a script that does not exist at the reviewed commit',
+  };
 }
 
 function ruleCount(text: string, observed: number[]): TestPlanClaim {
