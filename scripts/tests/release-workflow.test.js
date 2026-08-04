@@ -12,6 +12,10 @@ const desktopReleaseWorkflow = readFileSync(
   '.github/workflows/desktop-release.yml',
   'utf8',
 );
+const liveHostReleaseWorkflow = readFileSync(
+  '.github/workflows/live-host-release.yml',
+  'utf8',
+);
 const liveHostCiWorkflow = readFileSync(
   '.github/workflows/live-host.yml',
   'utf8',
@@ -53,19 +57,24 @@ describe('release workflow', () => {
   });
 });
 
-describe('desktop release workflow', () => {
+describe('Live Host release workflow', () => {
   it('publishes the tested and notarized Live Host installer contract', () => {
-    expect(desktopReleaseWorkflow).toContain(
+    expect(desktopReleaseWorkflow).not.toContain('live-host:');
+    expect(liveHostReleaseWorkflow).toContain('tag=live-host-v$version');
+    expect(liveHostReleaseWorkflow).toContain(
+      "LIVE_HOST_FEED_TAG: 'live-host-latest'",
+    );
+    expect(liveHostReleaseWorkflow).toContain(
       "run: 'bun run live-host:typecheck && bun run live-host:test'",
     );
-    expect(desktopReleaseWorkflow).toContain(
+    expect(liveHostReleaseWorkflow).toContain(
       "run: 'bun run live-host:dist:mac:no-publish'",
     );
-    expect(desktopReleaseWorkflow).toContain(
+    expect(liveHostReleaseWorkflow).toContain(
       'codesign --verify --deep --strict',
     );
-    expect(desktopReleaseWorkflow).toContain('xcrun stapler validate');
-    expect(desktopReleaseWorkflow).toContain(
+    expect(liveHostReleaseWorkflow).toContain('xcrun stapler validate');
+    expect(liveHostReleaseWorkflow).toContain(
       'packages/desktop/apps/live-host/release/*.dmg',
     );
 
@@ -74,11 +83,11 @@ describe('desktop release workflow', () => {
       'Qwen-Live-Host-arm64.zip',
       'Qwen-Live-Host-x64.zip',
     ]) {
-      expect(desktopReleaseWorkflow).toContain(`release-assets/${asset}`);
+      expect(liveHostReleaseWorkflow).toContain(`release-assets/${asset}`);
       expect(liveHostInstaller).toContain(asset);
     }
     expect(liveHostInstaller).toContain(
-      'https://github.com/QwenLM/qwen-code/releases/download/desktop-latest',
+      'https://github.com/QwenLM/qwen-code/releases/download/live-host-latest',
     );
   });
 });
