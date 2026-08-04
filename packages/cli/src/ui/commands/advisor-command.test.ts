@@ -181,6 +181,23 @@ describe('advisorCommand', () => {
           userMessage: '<advisor-framing>\ncheck the error handling',
         }),
       );
+      // The forked chat is built from exactly this object, so a gutted or
+      // substituted copy would make the advisor review nothing.
+      expect(mockRunForkedAgent.mock.calls[0][0].cacheSafeParams).toBe(
+        mockBuildBtwCacheSafeParams.mock.results.at(-1)?.value,
+      );
+    });
+
+    it('should trim padding around the focus before building the prompt', async () => {
+      mockRunForkedAgent.mockResolvedValue({
+        text: 'review',
+        model: 'test-model',
+        usage: { inputTokens: 1, outputTokens: 1, cacheHitTokens: 0 },
+      });
+
+      await advisorCommand.action!(mockContext, ' check the padding ');
+
+      expect(mockBuildAdvisorPrompt).toHaveBeenCalledWith('check the padding');
     });
 
     it('should not pass model override when advisorModel is unset', async () => {
@@ -526,6 +543,40 @@ describe('advisorCommand', () => {
         messageType: 'error',
         content: 'Advisor review failed: Model error',
       });
+    });
+
+    it('should return error when config is not loaded', async () => {
+      const acpContext = createMockCommandContext({
+        executionMode: 'acp',
+        services: { config: null },
+      });
+
+      const result = await advisorCommand.action!(acpContext, '');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content: 'Config not loaded.',
+      });
+      expect(mockRunForkedAgent).not.toHaveBeenCalled();
+    });
+
+    it('should return error when no model is configured', async () => {
+      const acpContext = createMockCommandContext({
+        executionMode: 'acp',
+        services: {
+          config: createConfig({ getModel: () => null }),
+        },
+      });
+
+      const result = await advisorCommand.action!(acpContext, '');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content: 'No model configured.',
+      });
+      expect(mockRunForkedAgent).not.toHaveBeenCalled();
     });
   });
 });

@@ -320,5 +320,60 @@ describe('markdownUtilities', () => {
       const text = '````\n```\ninner\n```\n````';
       expect(normalizeCodeFences(text)).toBe(text);
     });
+
+    it('keeps the block open on a closing fence line with a backticked tail', () => {
+      // CODE_FENCE_RE rejects a fence line whose remainder holds backticks, so
+      // MarkdownDisplay keeps the block open; the tracker must agree instead of
+      // closing early and inserting a newline inside the still-open block.
+      const text = '```ts\ncode\n``` `note`\nAfter```js\nx\n```';
+      expect(normalizeCodeFences(text)).toBe(text);
+    });
+
+    it('does not open a fence on a run whose line holds other backticks', () => {
+      // An inline code quote is not a fence line to the parser, so it must not
+      // open the tracker either; the genuine mid-line fence further on still
+      // gets its newline.
+      expect(
+        normalizeCodeFences(
+          'See ```a``` for details. Then run```py\nprint(1)\n```',
+        ),
+      ).toBe('See ```a``` for details. Then run\n```py\nprint(1)\n```');
+    });
+
+    it('skips fence runs inside $$ math blocks', () => {
+      // The parser pushes fence lines inside a math block into the math
+      // content and never opens a code block there; a phantom fence would
+      // swallow the later genuine opener.
+      expect(
+        normalizeCodeFences(
+          '$$\n```\n$$\nLater```ts\nconst answer = 42;\n```\n',
+        ),
+      ).toBe('$$\n```\n$$\nLater\n```ts\nconst answer = 42;\n```\n');
+    });
+
+    it('splits a closing fence glued to the last code line', () => {
+      // The parser's line-anchored CODE_FENCE_RE can never close on a mid-line
+      // run, so the repair splits the closer off when only whitespace follows.
+      expect(normalizeCodeFences('```py\nprint(1)```\nAfter')).toBe(
+        '```py\nprint(1)\n```\nAfter',
+      );
+    });
+
+    it('closes a block with an equal-length fence before a mid-line opener', () => {
+      expect(normalizeCodeFences('```ts\ncode\n```\nMid```js\nx\n```')).toBe(
+        '```ts\ncode\n```\nMid\n```js\nx\n```',
+      );
+    });
+
+    it('does not close a block on a quoted mid-line run', () => {
+      expect(
+        normalizeCodeFences('```py\nx = "```"\n```\nMore```ts\ncode\n```'),
+      ).toBe('```py\nx = "```"\n```\nMore\n```ts\ncode\n```');
+    });
+
+    it('does not close a backtick fence with a tilde run', () => {
+      const text = '```python\ncode\n~~~\nThen```js\nx\n```';
+      expect(normalizeCodeFences(text)).toBe(text);
+    });
   });
 });

@@ -30,13 +30,36 @@ describe('AdvisorMessage', () => {
     expect(output).toContain('The approach is sound.');
   });
 
-  it('accepts containerWidth prop for content width calculation', () => {
-    const { lastFrame } = renderWithProviders(
-      <AdvisorMessage text="review body" model="m" containerWidth={60} />,
-    );
+  it('lays out content at containerWidth, not terminal width', () => {
+    const original = Object.getOwnPropertyDescriptor(process.stdout, 'columns');
+    Object.defineProperty(process.stdout, 'columns', {
+      value: 80,
+      configurable: true,
+    });
+    try {
+      const { lastFrame } = renderWithProviders(
+        <AdvisorMessage
+          text={'```\n' + 'x'.repeat(80) + '\n```'}
+          model="m"
+          containerWidth={30}
+        />,
+      );
 
-    const output = lastFrame() ?? '';
-    expect(output).toContain('review body');
+      const output = lastFrame() ?? '';
+      // contentWidth derives from containerWidth (30 - 4 chrome = 26), so the
+      // 80-char code line wraps near 26 chars. Ignoring the prop would lay it
+      // out at the 80-column terminal width (76 chars) instead.
+      expect(output).toContain('x'.repeat(20));
+      expect(output).not.toContain('x'.repeat(40));
+    } finally {
+      if (original) {
+        Object.defineProperty(process.stdout, 'columns', original);
+      } else {
+        delete (process.stdout as unknown as Record<string, unknown>)[
+          'columns'
+        ];
+      }
+    }
   });
 
   it('falls back to terminal width when containerWidth is omitted', () => {

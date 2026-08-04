@@ -252,39 +252,80 @@ const countHeadContentLines = (
 };
 
 /**
+ * A line holding nothing but a `$$` math fence delimiter (optional surrounding
+ * spaces), as recognized by MarkdownDisplay's main loop.
+ */
+const MATH_FENCE_LINE_RE = /^ *\$\$ *$/;
+
+/**
  * Ensures code fences (``` or ~~~) start on their own line so that
  * MarkdownDisplay's line-based parser can detect them. Models sometimes emit
  * the opening fence right after prose without a preceding newline. Shared by
  * the boxed single-turn renderers (/btw, /advisor) so fence edge cases only
  * need one fix.
  *
- * Fence-aware: delimiter runs inside an already-open block are code content
- * and are left alone, so a review quoting a mid-line fence cannot close the
- * outer block early. Only a run outside any fence that does not already
- * start a line gets a newline inserted. Fence tracking mirrors
- * MarkdownDisplay's parser: leading spaces are allowed, and a run closes the
- * open fence only when its delimiter matches and is at least as long.
+ * Fence tracking mirrors MarkdownDisplay's parser so the two never disagree:
+ * a run only counts as a fence line when the rest of its line is backtick-free
+ * (CODE_FENCE_RE), a run closes the open fence only when its delimiter
+ * character matches and is at least as long, leading spaces are allowed, and
+ * runs inside $$ math blocks are math content, never fences. Delimiter runs
+ * inside an already-open block are code content and are left alone, except a
+ * closing fence glued to the last code line with only whitespace after it —
+ * that one is split off so the parser's line-anchored fence can close the
+ * block. A run outside any fence that does not already start a line gets a
+ * newline inserted.
  */
 export function normalizeCodeFences(text: string): string {
   let result = '';
   let lastIndex = 0;
   let openFence: { char: string; length: number } | null = null;
+  let inMathBlock = false;
+  // Whole lines before this position were already scanned for $$ math fences.
+  // It only advances while outside code fences, where $$ lines are math
+  // fences rather than code content.
+  let mathScanPos = 0;
 
   for (const match of text.matchAll(/(`{3,}|~{3,})/g)) {
     const runStart = match.index ?? 0;
     const run = match[0];
     const lineStart = text.lastIndexOf('\n', runStart - 1) + 1;
+    const nextNewline = text.indexOf('\n', runStart);
+    const lineEnd = nextNewline === -1 ? text.length : nextNewline;
     const startsLine = /^ *$/.test(text.slice(lineStart, runStart));
-    const closesOpenFence =
-      openFence !== null &&
-      startsLine &&
-      run[0] === openFence.char &&
-      run.length >= openFence.length;
+    const restBacktickFree = !text
+      .slice(runStart + run.length, lineEnd)
+      .includes('`');
+
+    if (openFence === null) {
+      for (const line of text.slice(mathScanPos, lineStart).split(/\r?\n/)) {
+        if (MATH_FENCE_LINE_RE.test(line)) inMathBlock = !inMathBlock;
+      }
+    }
+    mathScanPos = lineEnd === text.length ? text.length : lineEnd + 1;
+
+    if (inMathBlock) continue;
 
     result += text.slice(lastIndex, runStart);
-    if (closesOpenFence) {
-      openFence = null;
-    } else if (openFence === null) {
+    if (openFence !== null) {
+      const closesAtLineStart =
+        startsLine &&
+        restBacktickFree &&
+        run[0] === openFence.char &&
+        run.length >= openFence.length;
+      // A closing fence glued to the last code line can never match the
+      // parser's line-anchored CODE_FENCE_RE, so split it off. Deliberately
+      // narrower than the old /btw repair: trailing prose after the run is
+      // left alone.
+      const closesGlued =
+        !startsLine &&
+        run[0] === openFence.char &&
+        run.length >= openFence.length &&
+        /^ *$/.test(text.slice(runStart + run.length, lineEnd));
+      if (closesAtLineStart || closesGlued) {
+        if (closesGlued) result += '\n';
+        openFence = null;
+      }
+    } else if (restBacktickFree) {
       if (!startsLine) result += '\n';
       openFence = { char: run[0], length: run.length };
     }
