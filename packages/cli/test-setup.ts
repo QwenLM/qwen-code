@@ -9,6 +9,9 @@ if (process.env['NO_COLOR'] !== undefined) {
   delete process.env['NO_COLOR'];
 }
 
+// Ignore ambient runtime routing so tests control their own output paths.
+delete process.env['QWEN_RUNTIME_DIR'];
+
 // Avoid writing per-session debug log files during CLI tests.
 // Individual tests can still opt in by overriding this env var explicitly.
 if (process.env['QWEN_DEBUG_LOG_FILE'] === undefined) {

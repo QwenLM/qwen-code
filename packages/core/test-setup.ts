@@ -9,6 +9,9 @@ if (process.env['NO_COLOR'] !== undefined) {
   delete process.env['NO_COLOR'];
 }
 
+// Ignore ambient runtime routing so tests control their own output paths.
+delete process.env['QWEN_RUNTIME_DIR'];
+
 import { setSimulate429 } from './src/utils/testUtils.js';
 
 // Avoid writing per-session debug log files during tests.
