@@ -7,7 +7,10 @@ import {
 } from '@qwen-code/webui/daemon-react-sdk';
 import { transcriptBlocksToDaemonMessages } from '../adapters/transcriptToMessages';
 import type { Message } from '../adapters/types';
-import { isBackgroundSubAgentToolCall } from '../adapters/toolClassification';
+import {
+  isActiveToolStatus,
+  isBackgroundSubAgentToolCall,
+} from '../adapters/toolClassification';
 
 type Translator = (
   key: string,
@@ -31,12 +34,6 @@ export function transcriptBlocksToLocalizedMessages(
       modelStreamInterrupted: t('error.modelStreamInterrupted'),
     },
   });
-}
-
-function isActiveStatus(status: string): boolean {
-  return (
-    status === 'pending' || status === 'in_progress' || status === 'running'
-  );
 }
 
 function isTerminalBackgroundAgentStatus(status: string): boolean {
@@ -82,7 +79,10 @@ export function getPendingBackgroundAgentKey(
   for (const message of messages) {
     if (message.role !== 'tool_group') continue;
     for (const tool of message.tools) {
-      if (isActiveStatus(tool.status) && isBackgroundSubAgentToolCall(tool)) {
+      if (
+        isActiveToolStatus(tool.status) &&
+        isBackgroundSubAgentToolCall(tool)
+      ) {
         callIds.push(tool.callId);
       }
     }
@@ -105,7 +105,7 @@ export function reconcileBackgroundAgentResolutions(
       if (
         !resolution ||
         !isTerminalBackgroundAgentStatus(resolution.status) ||
-        !isActiveStatus(tool.status) ||
+        !isActiveToolStatus(tool.status) ||
         !isBackgroundSubAgentToolCall(tool)
       ) {
         return tool;

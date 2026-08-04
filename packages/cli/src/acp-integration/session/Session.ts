@@ -1349,6 +1349,10 @@ export class Session implements SessionContext {
   private resolveCloseGate: (() => void) | null = null;
   private unsubscribeChatRecordingFailure?: () => void;
   private readonly workflowApprovalAbortController = new AbortController();
+  private activeTodoPlanRevision?: {
+    planId: string;
+    sourceCallId: string;
+  };
 
   // Modular components
   private readonly historyReplayer: HistoryReplayer;
@@ -1659,6 +1663,10 @@ export class Session implements SessionContext {
 
   clearTodoStopGuardTrust(): void {
     this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
+  }
+
+  clearActiveTodoPlanRevision(): void {
+    this.activeTodoPlanRevision = undefined;
   }
 
   hardSuspendTodoStopGuard(): void {
@@ -2219,7 +2227,15 @@ export class Session implements SessionContext {
     gaps?: HistoryGap[],
   ): Promise<void> {
     this.primeTurnFromHistory(records);
-    await this.historyReplayer.replay(records, gaps);
+    try {
+      await this.historyReplayer.replay(records, gaps);
+    } finally {
+      // Replayed plan updates re-stamp the revision via sendUpdate, but they
+      // belong to finished cycles; only live updates may bind the next
+      // exit_plan_mode approval, so a replayed session starts text-only —
+      // even when the replay fails part-way.
+      this.activeTodoPlanRevision = undefined;
+    }
   }
 
   rewindToTurn(
@@ -2260,6 +2276,7 @@ export class Session implements SessionContext {
 
     geminiClient.truncateHistory(apiTruncateIndex);
     chat.stripThoughtsFromHistory();
+    this.activeTodoPlanRevision = undefined;
     const preserveQueuedPromptPriority = this.todoStopGuardQueuedPromptPriority;
     const shouldDrainAutomaticQueues =
       (this.todoStopGuard.blocksUnrelatedAutomaticTurns ||
@@ -2322,6 +2339,7 @@ export class Session implements SessionContext {
     }
 
     this.config.getGeminiClient()!.setHistory(structuredClone(history));
+    this.activeTodoPlanRevision = undefined;
     this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
   }
 
@@ -4468,7 +4486,36 @@ export class Session implements SessionContext {
       update,
     };
 
+    if (update.sessionUpdate === 'plan') {
+      // Clear before delivery: a plan update the client never receives
+      // must not stay bound to the next exit_plan_mode approval. The
+      // capture below re-stamps only after delivery succeeds.
+      this.activeTodoPlanRevision = undefined;
+    }
     await this.client.sessionUpdate(params);
+    if (update.sessionUpdate === 'plan') {
+      this.#captureTodoPlanRevision(update);
+    }
+  }
+
+  #captureTodoPlanRevision(
+    update: Extract<SessionUpdate, { sessionUpdate: 'plan' }>,
+  ): void {
+    const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
+    const plan = isRecord(meta?.['qwenTodoPlan'])
+      ? meta['qwenTodoPlan']
+      : undefined;
+    const transcript = isRecord(meta?.['qwenTranscript'])
+      ? meta['qwenTranscript']
+      : undefined;
+    const planId = plan?.['id'];
+    const sourceCallId = transcript?.['planToolCallId'];
+    this.activeTodoPlanRevision =
+      typeof planId === 'string' &&
+      typeof sourceCallId === 'string' &&
+      update.entries.length > 0
+        ? { planId, sourceCallId }
+        : undefined;
   }
 
   #scheduleChannelDelivery(params: Record<string, unknown>): void {
@@ -6514,8 +6561,14 @@ export class Session implements SessionContext {
         `Unknown approval mode: ${params.modeId}`,
       );
     }
+    const previousApprovalMode = this.config.getApprovalMode();
     this.config.setApprovalMode(approvalMode);
     if (approvalMode === ApprovalMode.PLAN) {
+      if (previousApprovalMode !== ApprovalMode.PLAN) {
+        // A redundant plan re-select keeps the revision captured by the
+        // live cycle; only a fresh entry starts a new approval cycle.
+        this.activeTodoPlanRevision = undefined;
+      }
       this.clearTodoStopGuardTrust();
     }
 
@@ -8391,6 +8444,11 @@ export class Session implements SessionContext {
                   _meta: {
                     toolName,
                     ...interactionMetaFields(confirmationDetails),
+                    ...(isExitPlanModeTool && this.activeTodoPlanRevision
+                      ? {
+                          qwenTodoApproval: this.activeTodoPlanRevision,
+                        }
+                      : {}),
                   },
                 },
               };
@@ -8679,6 +8737,7 @@ export class Session implements SessionContext {
 
           const toolInvocationGuard = this.config.getToolInvocationGuard?.();
           if (toolInvocationGuard) {
+            const invocationContext = getInvocationContext();
             const guardDecision = await evaluateToolInvocationGuard(
               toolInvocationGuard,
               {
@@ -8686,6 +8745,7 @@ export class Session implements SessionContext {
                 toolName: policyToolName,
                 args: invocation.params as Record<string, unknown>,
                 signal: activeToolAbortSignal,
+                ...(invocationContext ? { invocationContext } : {}),
               },
             );
             if (activeToolAbortSignal.aborted) {
@@ -8911,6 +8971,7 @@ export class Session implements SessionContext {
           ) {
             await this.sendCurrentModeUpdateNotification();
             if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
+              this.activeTodoPlanRevision = undefined;
               this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
             }
           }

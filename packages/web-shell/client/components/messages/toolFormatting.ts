@@ -1,5 +1,7 @@
 import type { ACPToolCall } from '../../adapters/types';
 
+export { isActiveToolStatus } from '../../adapters/toolClassification';
+
 /**
  * Internal-tool-name → display-name lookup. This is a standalone copy of
  * core's `ToolDisplayNames` (mapped to wire names, as the CLI's shared
