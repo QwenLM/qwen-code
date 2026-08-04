@@ -20,11 +20,17 @@ import {
   DEFAULT_MAX_JOURNAL_EVENTS,
 } from '@qwen-code/acp-bridge/replayWindowLimits';
 import {
+  isValidMemoryBudgetMb,
+  memoryBudgetRangeError,
+} from '@qwen-code/acp-bridge/daemonMemoryBudget';
+import {
   ApprovalMode,
   MCP_BUDGET_WARN_FRACTION,
+  MEMORY_PROJECT_SCOPES,
   openBrowserSecurely,
   parsePositiveIntegerEnv,
   shouldLaunchBrowser,
+  type MemoryProjectScope,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../config/settings.js';
 import { HEADLESS_YOLO_NO_SANDBOX_WARNING } from '../utils/headlessSafetyWarnings.js';
@@ -109,6 +115,7 @@ interface ServeArgs {
   'max-journal-events': number;
   'max-journal-bytes': number;
   workspace?: string | string[];
+  'memory-project-scope'?: MemoryProjectScope;
   'require-auth': boolean;
   'enable-session-shell': boolean;
   'tls-cert'?: string;
@@ -120,6 +127,7 @@ interface ServeArgs {
   // handler reads `argv['http-bridge']` directly.
   'http-bridge': boolean;
   'mcp-client-budget'?: number;
+  'memory-budget-mb'?: number;
   'mcp-budget-mode'?: 'enforce' | 'warn' | 'off';
   'allow-origin'?: string[];
   'allow-private-auth-base-url': boolean;
@@ -170,7 +178,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       })
       .option('max-sessions', {
         type: 'number',
-        default: 20,
+        default: 32,
         description:
           'Cap on concurrent live sessions. New spawn requests beyond this return 503; ' +
           'attach to existing sessions still works. Set to 0 to disable.',
@@ -197,6 +205,14 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'POST /session requests with a mismatched cwd return 400 workspace_mismatch. ' +
           'Defaults to process.cwd() when omitted. ' +
           'Repeat to register isolated workspace runtimes; the first is primary.',
+      })
+      .option('memory-project-scope', {
+        type: 'string',
+        choices: MEMORY_PROJECT_SCOPES,
+        description:
+          'Choose how project memory is partitioned. ' +
+          '"git-root" preserves the legacy shared scope; "workspace" keeps each daemon workspace isolated. ' +
+          'Overrides QWEN_CODE_MEMORY_PROJECT_SCOPE when provided.',
       })
       .option('max-connections', {
         type: 'number',
@@ -306,6 +322,16 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'HTTP bridge mode: attempt to preheat one primary `qwen --acp` child; trusted ' +
           'secondaries start one on demand. Stage 2 native in-process mode is ' +
           'not yet implemented; this flag will become opt-in then.',
+      })
+      .option('memory-budget-mb', {
+        type: 'number',
+        description:
+          'Total memory budget in MB for the daemon process tree. When unset, ' +
+          'derived as 50% of cgroup-constrained ' +
+          'or host memory, and capped at the resolved available memory either ' +
+          'way. Currently observed and reported under `limits.memory` in daemon ' +
+          'status; it does not yet size any child process. Must be an integer ' +
+          'in [1024, 1048576].',
       })
       .option('mcp-client-budget', {
         type: 'number',
@@ -466,6 +492,14 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
     }
     const resolvedMcpMode: 'enforce' | 'warn' | 'off' =
       mcpBudgetMode ?? (mcpClientBudget !== undefined ? 'warn' : 'off');
+    const memoryBudgetMb = argv['memory-budget-mb'];
+    if (
+      memoryBudgetMb !== undefined &&
+      !isValidMemoryBudgetMb(memoryBudgetMb)
+    ) {
+      writeStderrLine(memoryBudgetRangeError());
+      process.exit(1);
+    }
     const maxPendingPromptsPerSession = argv['max-pending-prompts-per-session'];
     if (
       maxPendingPromptsPerSession !== Number.POSITIVE_INFINITY &&
@@ -597,6 +631,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         maxJournalEvents: argv['max-journal-events'],
         maxJournalBytes: argv['max-journal-bytes'],
         workspace: argv.workspace,
+        ...(argv['memory-project-scope'] !== undefined
+          ? { memoryProjectScope: argv['memory-project-scope'] }
+          : {}),
         requireAuth: argv['require-auth'],
         enableSessionShell: argv['enable-session-shell'],
         serveWebShell: argv.web,
@@ -607,6 +644,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         allowPrivateAuthBaseUrl: argv['allow-private-auth-base-url'],
         mcpClientBudget,
         mcpBudgetMode: resolvedMcpMode,
+        ...(memoryBudgetMb !== undefined ? { memoryBudgetMb } : {}),
         ...(argv['allow-origin'] && argv['allow-origin'].length > 0
           ? { allowOrigins: argv['allow-origin'] }
           : {}),

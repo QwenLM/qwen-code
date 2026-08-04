@@ -9,7 +9,7 @@ import { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
 import {
   ChannelDeliveryError,
   type ChannelDeliveryRequest,
-} from './channel-delivery-ipc.js';
+} from '../runtime/channel-delivery-ipc.js';
 import type {
   ChannelWorkerGroup,
   ChannelWorkerGroupSnapshot,

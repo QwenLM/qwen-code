@@ -76,13 +76,22 @@ jobs:
         github.event.inputs.tmux_pr != ''))
     # Canonical same-repo guard: this job loads CI_BOT_PAT, so fork-triggered
     # runs stay on hosted (ephemeral); only in-repo PR events on QwenLM/qwen-code
-    # use the persistent ECS runner.
-    runs-on: "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
+    # use the persistent ECS runner. The job IS the write-permission check, so
+    # it cannot route on its own output; downstream jobs (triage, tmux, verify)
+    # route on what it finds instead.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     permissions:
       contents: 'read'
     outputs:
       should_run: '${{ steps.perm.outputs.should_run }}'
+      # Real write-permission check on the PR AUTHOR (collaborator-permission
+      # API, not the coarse author_association), computed only on
+      # pull_request_target events; empty on every other event. Consumed by
+      # the triage job's runner routing so a maintainer's fork PR uses the
+      # ECS pool while a read-only collaborator's or org member's fork PR
+      # stays on ephemeral hosted runners.
+      author_can_write: '${{ steps.perm.outputs.author_can_write }}'
       # /verify trust level: 'trusted' when the PR author has write,
       # 'external' when they do not. Both run on the persistent ECS pool
       # (maintainer decision, 2026-07-29: the pool is network-isolated and
@@ -91,6 +100,14 @@ jobs:
       # gets a pinned head OID, a pre-execution risk screen, and a full
       # workspace wipe. Empty for every non-verify event.
       verify_trust: '${{ steps.perm.outputs.verify_trust }}'
+      # Whether the verify LANE should run at all. `/verify` sets it, and so
+      # does a `/triage` comment on a PR — triage reads, verify runs, and a
+      # maintainer asking for a review usually wants both. Kept separate from
+      # should_run because the two fail differently: an unreadable author
+      # permission denies an explicit `/verify` outright (it is the input to
+      # the control selection), but must NOT take the triage down with it, so
+      # the piggybacked lane just turns itself off and triage proceeds.
+      verify_lane: '${{ steps.perm.outputs.verify_lane }}'
       # Head OID snapped AT SPONSORSHIP TIME for an external run: the
       # maintainer's /verify comment approves the code that exists now, not
       # whatever the author pushes while the job queues.
@@ -112,12 +129,40 @@ jobs:
           PR_NUMBER: '${{ github.event.pull_request.number }}'
           ISSUE_NUMBER: '${{ github.event.issue.number }}'
           TMUX_PR: '${{ github.event.inputs.tmux_pr }}'
+          # `github.event.issue.pull_request` is an object on PRs and null on
+          # issues; compare against null rather than truthiness so the shell
+          # receives a plain true/false.
+          IS_PR: '${{ github.event.issue.pull_request != null }}'
+          PR_AUTHOR: '${{ github.event.pull_request.user.login }}'
         run: |-
           set -euo pipefail
           IS_VERIFY=false
+          # VERIFY_LANE is "run the verify job"; IS_VERIFY is "the commenter
+          # typed /verify". They differ only for the piggybacked lane, where
+          # a classification failure must skip verify without denying triage.
+          VERIFY_LANE=false
           if [ "$EVENT_NAME" = "pull_request_target" ]; then
+            # Automatic per-PR triage deliberately does NOT pull the verify
+            # lane with it. Runner capacity is not the reason — the ECS pool
+            # is maintainer-provided and expandable, and cheaper than the
+            # tokens. The reason is the AGENT budget: a verify run is up to
+            # 110 minutes of model time, and every `synchronize` would spend
+            # one, including the ones that fix a typo. Commenting is what
+            # says the PR is ready to be worth that.
             echo "Automatic PR triage allowed for PR #${PR_NUMBER} after same-repo/precheck gate." >> "$GITHUB_STEP_SUMMARY"
             echo "should_run=true" >> "$GITHUB_OUTPUT"
+            # Runner-routing input for the triage job: the REAL author write
+            # check (author_association admits org members and read-only
+            # collaborators). Fail OPEN on purpose — unlike the deny gates
+            # below, this selects a runner pool, not a decision: an API
+            # hiccup merely routes the triage to a hosted runner, it must
+            # never skip or fail the triage itself.
+            if [ -n "$PR_AUTHOR" ] &&
+               author_perm="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${PR_AUTHOR}/permission" --jq '.permission' 2>/dev/null)"; then
+              case "$author_perm" in
+                admin|maintain|write) echo "author_can_write=true" >> "$GITHUB_OUTPUT" ;;
+              esac
+            fi
             exit 0
           fi
           case "$EVENT_NAME" in
@@ -147,9 +192,21 @@ jobs:
               case "$body_lc" in
                 '@qwen-code /verify'|'@qwen-code /verify '*)
                   IS_VERIFY=true
+                  VERIFY_LANE=true
                   principals="$COMMENT_USER"
                   ;;
                 '@qwen-code /tmux'|'@qwen-code /tmux '*) principals="$ISSUE_AUTHOR" ;;
+                '@qwen-code /triage'*)
+                  # /triage on a PR also starts verify, in parallel — the
+                  # two answer different questions and neither waits on the
+                  # other. On a plain ISSUE there is nothing to build, so
+                  # the lane stays off and no author lookup is spent.
+                  # `principals` is unchanged: both lanes already gate on
+                  # the commenter, so this adds a control selection, not a
+                  # new gate.
+                  [ "$IS_PR" = 'true' ] && VERIFY_LANE=true
+                  principals="$COMMENT_USER"
+                  ;;
                 *) principals="$COMMENT_USER" ;;
               esac
               ;;
@@ -220,12 +277,27 @@ jobs:
           # Fail closed on every lookup: an unreadable author permission or
           # an unresolvable head OID denies the run outright — classifying
           # a request we cannot read would silently pick a trust level.
-          if [ "$IS_VERIFY" = true ]; then
+          # For the lane piggybacked on /triage, "fail closed" means the
+          # LANE closes, not the whole run: the commenter asked for a
+          # review, and taking that away because an unrelated API call
+          # flaked would be a worse answer than shipping triage alone.
+          # Either way no code executes unclassified, which is the property
+          # the four external-only controls (head-OID pin, risk screen,
+          # pre- and post-run workspace wipes) depend on.
+          if [ "$VERIFY_LANE" = true ]; then
+            deny_verify() {
+              echo "$1" >> "$GITHUB_STEP_SUMMARY"
+              if [ "$IS_VERIFY" = true ]; then
+                echo "should_run=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              echo "verify_lane=false" >> "$GITHUB_OUTPUT"
+              echo "should_run=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            }
             if [ -z "$ISSUE_AUTHOR" ] ||
                ! author_perm="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${ISSUE_AUTHOR}/permission" --jq '.permission' 2>/dev/null)"; then
-              echo "Could not resolve the PR author's permission for /verify; denying." >> "$GITHUB_STEP_SUMMARY"
-              echo "should_run=false" >> "$GITHUB_OUTPUT"
-              exit 0
+              deny_verify "Could not resolve the PR author's permission for the verify lane; skipping it."
             fi
             case "$author_perm" in
               admin|maintain|write)
@@ -234,15 +306,14 @@ jobs:
               *)
                 if ! sponsor_oid="$(gh pr view "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq '.headRefOid' 2>/dev/null)" ||
                    [ -z "$sponsor_oid" ]; then
-                  echo "Could not snapshot the PR head for a sponsored /verify; denying." >> "$GITHUB_STEP_SUMMARY"
-                  echo "should_run=false" >> "$GITHUB_OUTPUT"
-                  exit 0
+                  deny_verify "Could not snapshot the PR head for a sponsored verify lane; skipping it."
                 fi
                 echo "verify_trust=external" >> "$GITHUB_OUTPUT"
                 echo "verify_head_oid=${sponsor_oid}" >> "$GITHUB_OUTPUT"
-                echo "Sponsored /verify for external author ${ISSUE_AUTHOR} at ${sponsor_oid} (sponsored by ${COMMENT_USER}): head pinned, risk screen and workspace wipe enabled." >> "$GITHUB_STEP_SUMMARY"
+                echo "Sponsored verify lane for external author ${ISSUE_AUTHOR} at ${sponsor_oid} (sponsored by ${COMMENT_USER}): head pinned, risk screen and workspace wipe enabled." >> "$GITHUB_STEP_SUMMARY"
                 ;;
             esac
+            echo "verify_lane=true" >> "$GITHUB_OUTPUT"
           fi
           echo "should_run=true" >> "$GITHUB_OUTPUT"
 
@@ -338,13 +409,19 @@ jobs:
     # (.qwen/skills/triage/SKILL.md Rules), the `settings` deny rules block the
     # direct interpreter/build/network invocations, and the routing below keeps
     # foreign code off the persistent pool.
-    # Runner routing: the persistent ECS pool is reserved for events whose
-    # payload carries no foreign code — issue triage and same-repo PR events.
-    # Fork PRs, and comment/dispatch-triggered reruns (which may target fork
-    # PRs), go to ephemeral hosted runners so a steered agent cannot persist
-    # anything across runs. Forks of this repo fall back to ubuntu-latest as
-    # before.
-    runs-on: "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && (github.event_name == 'issues' || (github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository))) && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
+    # Runner routing: the persistent ECS pool serves events whose payload
+    # carries no foreign code — issue triage and same-repo PR events — plus
+    # fork PRs whose author REALLY has write access, per the collaborator-
+    # permission lookup the authorize job already performs (the coarse
+    # author_association would admit org members and read-only collaborators
+    # to this secret-bearing agent; the pool is network-isolated, but a
+    # write-access author is the trust bar for reusing it). authorize is
+    # skipped on the issues/dispatch paths, so the explicit `issues` clause
+    # must stay; there its output is ''. PRs by other fork authors, and
+    # comment/dispatch-triggered reruns (which may target fork PRs), go to
+    # ephemeral hosted runners so a steered agent cannot persist anything
+    # across runs. Forks of this repo fall back to ubuntu-latest as before.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name == ''issues'' || (github.event.pull_request && (github.event.pull_request.head.repo.full_name == github.repository || needs.authorize.outputs.author_can_write == ''true'')))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     # startsWith (not contains) prevents false triggers from comments that
     # mention the phrase in quoted text or mid-sentence descriptions.
     # always() so the job still evaluates when the upstream `authorize` job is
@@ -376,6 +453,19 @@ jobs:
             "repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}/reactions" \
             -f content='eyes' > /dev/null ||
             echo "Failed to add triage acknowledgement reaction; continuing." >&2
+
+      # Self-hosted runners reuse the workspace; a prior containerised job can
+      # leave root-owned, read-only files anywhere in it. Restore ownership and
+      # write permission unconditionally before checkout.
+      - name: 'Restore workspace ownership'
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
 
       # Self-hosted ECS runners reuse $HOME, /tmp and the workspace between runs,
       # so a prior run can bleed into this one: its agent session/memory (under
@@ -432,7 +522,7 @@ jobs:
           echo "stale agent state cleaned"
 
       - name: 'Checkout repo'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           token: '${{ secrets.GITHUB_TOKEN }}'
 
@@ -512,9 +602,21 @@ jobs:
           ESCAPED=$(printf '%s' "$OPENAI_MODEL" | sed -e 's/[&/\]/\\&/g')
           sed -i "s/qwen3\.7-max/${ESCAPED}/g" "$TARGET"
 
+      - name: 'Ensure qwen CLI'
+        id: 'ensure_qwen'
+        run: |-
+          set -euo pipefail
+          if command -v qwen >/dev/null 2>&1; then
+            echo "qwen already installed:"
+          else
+            npm install -g --loglevel=error --no-audit @qwen-code/qwen-code@latest
+          fi
+          qwen --version
+          echo "version=$(qwen --version)" >> "${GITHUB_OUTPUT}"
+
       - name: 'Run Qwen Triage'
         id: 'triage'
-        uses: 'QwenLM/qwen-code-action@6d08e91aa807257b9c8af60edb5bb6bb2d7d951f'
+        uses: 'QwenLM/qwen-code-action@05f81718976f3b7da657422e6e8e4d372b8621d7'
         env:
           GITHUB_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
           GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
@@ -527,6 +629,12 @@ jobs:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_TRIAGE_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
+          # Pin the action's unconditional global reinstall to the version
+          # this job already runs. Left at `latest`, the action installs with
+          # --prefer-offline and resolves the dist-tag from the runner's
+          # persistent npm cache, which lags npm publishes and has downgraded
+          # the shared ECS box back to a stale release.
+          qwen_cli_version: '${{ steps.ensure_qwen.outputs.version }}'
           # The input name is `settings` — this action version has no
           # `settings_json` input. The old `settings_json:` block was silently
           # dropped ("Unexpected input(s) 'settings_json'" in the run log), so
@@ -777,14 +885,23 @@ jobs:
             if HEAD_SHA="$(
                  gh api "repos/$GITHUB_REPOSITORY/pulls/$NUMBER" --jq '.head.sha'
                )" && [ -n "$HEAD_SHA" ]; then
+              # Three outcomes, not two. `deferred` is the one that was
+              # missing: the skill's confidence table sends 3/5 down a defer
+              # path that posts a COMMENTED review and deliberately does not
+              # vote — a fork `refactor` hitting the approval guardrail, or a
+              # core change escalated for maintainer awareness. That is a
+              # correct terminal state, and folding it into `none` reported
+              # the routine outcome and the broken one with the same warning.
               STANDING="$(
                 printf '%s' "$REVIEWS" |
                   jq -rs \
                     --arg bot "$BOT_LOGIN" \
                     --arg sha "$HEAD_SHA" \
-                    '[.[][] | select(.user.login == $bot and .commit_id == $sha)
-                            | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED")]
-                     | if length > 0 then "own" else "none" end'
+                    '[.[][] | select(.user.login == $bot and .commit_id == $sha)]
+                     | if any(.[]; .state == "APPROVED" or .state == "CHANGES_REQUESTED")
+                       then "own"
+                       elif any(.[]; .state == "COMMENTED") then "deferred"
+                       else "none" end'
               )" || STANDING=unknown
             fi
           else
@@ -794,23 +911,39 @@ jobs:
             echo "Triage re-run posted a review; no summary comment needed."
             exit 0
           fi
+          # Say what was measured, in both languages. The old note claimed the
+          # bot had "no review of its own" whenever it had not VOTED — but a
+          # deferring run leaves a visible COMMENTED review, so a reader who
+          # could see it on the page was told it did not exist. State the
+          # review that is there, and say what the missing vote costs (`main`
+          # takes two approvals, so a maintainer's is only the first).
           case "$STANDING" in
             own)
-              NOTE="The bot already has a review of its own on \`$HEAD_SHA\`, which still stands."
+              NOTE_EN="The bot already has a review of its own on \`$HEAD_SHA\`, which still stands."
+              NOTE_ZH="机器人在 \`$HEAD_SHA\` 上已有自己的评审，且仍然有效。"
+              ;;
+            deferred)
+              NOTE_EN="⚠️ The bot's only review on \`$HEAD_SHA\` is a \`COMMENTED\` one, which **carries no vote** — so it has no verdict of its own on this commit, and \`main\` needs two approving reviews: an approval left by another account is a separate vote and does not count as the bot's own. Two different things look like this, and the stage-3 comment above says which: the triage skill **deferring on purpose** at 3/5 — a fork \`refactor\` hitting the approval guardrail, or a core change escalated for maintainer awareness, both normal outcomes — or an earlier approval that a push **dismissed**, leaving only the comment behind, which needs a fresh review."
+              NOTE_ZH="⚠️ 机器人在 \`$HEAD_SHA\` 上唯一的评审是 \`COMMENTED\`，**不带票** —— 因此它在该 commit 上没有自己的裁决，而 \`main\` 需要两个批准（其他账号的批准是另一张票）。有两种情况长这样，上方的 stage-3 评论会说明是哪一种：triage skill 在 3/5 时**有意 defer**（fork \`refactor\` 命中审批护栏，或核心改动被升级交由维护者把关，两者都是正常结果）；或者更早的批准被一次推送**作废**、只剩下这条评论，此时需要重新评审。"
+              echo "::warning title=Triage re-run left no bot review::The bot has only a COMMENTED review on $HEAD_SHA (no vote) and this re-run added none."
               ;;
             none)
-              NOTE="⚠️ The bot has **no review of its own** on \`$HEAD_SHA\`. If this re-run was meant to approve, it did not — an approval left by another account is a separate vote and does not count as the bot's own."
-              echo "::warning title=Triage re-run left no bot review::The bot has no APPROVED or CHANGES_REQUESTED review on $HEAD_SHA and this re-run added none."
+              NOTE_EN="⚠️ The bot has **neither a verdict nor a deferral** on \`$HEAD_SHA\` — no \`APPROVED\`, \`CHANGES_REQUESTED\`, or \`COMMENTED\` review of its own. A \`DISMISSED\` one does not count: \`dismiss_stale_reviews\` voids the bot's approval on every push, which is exactly when a fresh one is needed. If this re-run was meant to review or approve, it did not, and an approval left by another account is a separate vote that does not count as the bot's own."
+              NOTE_ZH="⚠️ 机器人在 \`$HEAD_SHA\` 上**既没有裁决也没有 defer** —— 没有属于它自己的 \`APPROVED\`、\`CHANGES_REQUESTED\` 或 \`COMMENTED\` 评审。\`DISMISSED\` 不算：\`dismiss_stale_reviews\` 会在每次推送时作废机器人的批准，而那恰恰是需要一次新批准的时刻。如果这次重跑本应评审或批准，那么它没有做到；而其他账号留下的批准是另一张票，不能算作机器人自己的。"
+              echo "::warning title=Triage re-run left no bot review::The bot has no APPROVED, CHANGES_REQUESTED or COMMENTED review on $HEAD_SHA and this re-run added none."
               ;;
             *)
-              NOTE="The bot's review state on the head commit could not be read."
+              NOTE_EN="The bot's review state on the head commit could not be read."
+              NOTE_ZH="无法读取机器人在 head commit 上的评审状态。"
               ;;
           esac
-          printf -v BODY '%s\n\n%s\n\n%s\n\n%s' \
+          printf -v BODY '%s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s' \
             '<!-- qwen-triage stage=rerun-summary -->' \
             'Triage re-run completed without a new review.' \
-            "$NOTE" \
-            "The stage comments above were updated with the latest result. [View workflow run]($RUN_URL)."
+            "$NOTE_EN" \
+            "$NOTE_ZH" \
+            "The stage comments above were updated with the latest result. [View workflow run]($RUN_URL)." \
+            "上方各阶段评论已更新为最新结果。[查看工作流运行]($RUN_URL)。"
           gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
             -f body="$BODY" >/dev/null
 
@@ -1030,12 +1163,30 @@ jobs:
 
       - name: 'Checkout PR merge ref'
         if: "steps.pr.outputs.decision == 'run'"
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           # Untrusted PR code — keep the token out of .git/config.
           persist-credentials: false
           ref: 'refs/pull/${{ steps.pr.outputs.pr_number }}/merge'
           fetch-depth: 1
+
+      - name: 'Clear stale npm cache'
+        if: "steps.pr.outputs.decision == 'run'"
+        run: 'rm -rf "$RUNNER_TEMP/npm-cache"'
+
+      - name: 'Restore npm cache'
+        id: 'npm-cache'
+        if: "steps.pr.outputs.decision == 'run'"
+        # restore-only: no post-save, so PR code cannot write to the shared cache
+        uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
+        with:
+          path: '${{ runner.temp }}/npm-cache'
+          key: 'npm-ci-${{ hashFiles(''package-lock.json'') }}'
+          restore-keys: 'npm-ci-'
+
+      - name: 'Report npm cache hit'
+        if: "steps.pr.outputs.decision == 'run'"
+        run: 'echo "npm cache: hit=${{ steps.npm-cache.outputs.cache-hit }} key=${{ steps.npm-cache.outputs.cache-matched-key }}" >> "$GITHUB_STEP_SUMMARY"'
 
       - name: 'Install and build PR app'
         id: 'prepare'
@@ -1048,6 +1199,12 @@ jobs:
           unset ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_CACHE_URL
           mkdir -p "$RUNNER_TEMP/tmux-results"
           chown -R node:node "$GITHUB_WORKSPACE"
+          # Make the npm cache readable+writable by the build user so
+          # `npm ci --prefer-offline --cache …` can use it without
+          # touching the Actions cache API (whose credentials were
+          # stripped above).
+          mkdir -p "$RUNNER_TEMP/npm-cache"
+          chown -R node:node "$RUNNER_TEMP/npm-cache"
           prepare_log="$RUNNER_TEMP/tmux-results/prepare.log"
 
           set +e
@@ -1060,9 +1217,10 @@ jobs:
             # build stays single-shot: compile errors are deterministic.
             install_attempt=1
             while :; do
-              printf '%s\n' '$ npm ci --prefer-offline --no-audit --progress=false'
+              printf '%s\n' '$ npm ci --prefer-offline --no-audit --progress=false --cache "$RUNNER_TEMP/npm-cache"'
               runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
-                npm ci --prefer-offline --no-audit --progress=false
+                npm ci --prefer-offline --no-audit --progress=false \
+                --cache "$RUNNER_TEMP/npm-cache"
               install_status=$?
               if [ "$install_status" -eq 0 ] || [ "$install_attempt" -ge 2 ]; then
                 break
@@ -1559,14 +1717,23 @@ jobs:
             find tmp -maxdepth 2 -type d -name '*-tmux-*' -exec rm -rf {} + 2>/dev/null || true
           fi
           git worktree prune -v || true
-          # Restore workspace ownership to the runner user so the next job's
-          # checkout step can clean the tree without EACCES. The prepare step
-          # chowned everything to node:node; without this, node_modules and
-          # .qwen/ remain node-owned and the next checkout's rm -rf fails.
+
+      # Restore workspace ownership unconditionally (even on cancel/failure)
+      # while the container still runs as root, so the next job on this
+      # runner can checkout without EACCES.  The prepare step chowned
+      # everything to node:node; without this, node_modules and .qwen/
+      # remain node-owned and the next checkout's rm -rf fails.
+      - name: 'Restore workspace ownership'
+        if: 'always()'
+        run: |-
+          set -uo pipefail
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || echo "::warning::could not restore workspace write permissions"
           RUNNER_UID="$(stat -c '%u' "$RUNNER_TEMP" 2>/dev/null || stat -f '%u' "$RUNNER_TEMP" 2>/dev/null || echo 0)"
           RUNNER_GID="$(stat -c '%g' "$RUNNER_TEMP" 2>/dev/null || stat -f '%g' "$RUNNER_TEMP" 2>/dev/null || echo 0)"
           if [ "$RUNNER_UID" != "0" ]; then
-            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || true
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || echo "::warning::could not restore workspace ownership"
+          else
+            echo "::warning::could not determine runner UID; skipping ownership restore"
           fi
 
   # Post the tmux verdict back to the PR. Runs on a clean GitHub-hosted runner
@@ -1600,10 +1767,24 @@ jobs:
     # inherit the 360-minute default and a hung gh call could hold a hosted
     # runner for six hours. Same bound as publish-verify.
     timeout-minutes: 10
-    runs-on: 'ubuntu-latest'
+    # Checks out nothing and runs no repository code (base-repo YAML events),
+    # so the persistent ECS pool is safe.
+    # Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions:
       pull-requests: 'write'
     steps:
+      - name: 'Restore workspace ownership'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; artifact download may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; artifact download may fail on leftover read-only files"
+
       - name: 'Download tmux results'
         uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v5.0.0
         with:
@@ -1828,22 +2009,25 @@ jobs:
       github.event_name == 'issue_comment' &&
       github.event.issue.pull_request &&
       github.event.issue.state == 'open' &&
-      (github.event.comment.body == '@qwen-code /verify' ||
-       startsWith(github.event.comment.body, '@qwen-code /verify ')) &&
+      needs.authorize.outputs.verify_lane == 'true' &&
       needs.authorize.outputs.should_run == 'true' &&
       vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'
     # One verification per PR at a time, mirroring the tmux job: concurrent
     # runs would share the same self-hosted workspace and clobber each other.
     # GitHub evaluates concurrency before the job `if`, but after `needs`, so
     # keep non-runnable triggers out of the shared per-PR group.
+    #
+    # `verify_lane` is the single source of truth for "does this trigger
+    # start verify" — authorize decides it, and the command strings are
+    # matched in exactly one place. Enumerating them here too is what let
+    # the trust classification and the lane trigger drift apart.
     concurrency:
       group: >-
         ${{
           (github.event_name == 'issue_comment' &&
            github.event.issue.pull_request &&
            github.event.issue.state == 'open' &&
-           (github.event.comment.body == '@qwen-code /verify' ||
-            startsWith(github.event.comment.body, '@qwen-code /verify ')) &&
+           needs.authorize.outputs.verify_lane == 'true' &&
            needs.authorize.outputs.should_run == 'true' &&
            vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true') &&
           format('{0}-verify-{1}', github.workflow, github.event.issue.number) ||
@@ -2401,7 +2585,7 @@ jobs:
 
       - name: 'Checkout PR merge ref'
         if: "steps.pr.outputs.decision == 'run'"
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           # Untrusted PR code — keep the token out of .git/config.
           persist-credentials: false
@@ -2452,6 +2636,24 @@ jobs:
           fi
           echo "agent inputs pinned from base $(git rev-parse --short 'HEAD^1'); head ${ACTUAL_HEAD} matches the authorized head"
 
+      - name: 'Clear stale npm cache'
+        if: "steps.pr.outputs.decision == 'run'"
+        run: 'rm -rf "$RUNNER_TEMP/npm-cache"'
+
+      - name: 'Restore npm cache'
+        id: 'npm-cache'
+        if: "steps.pr.outputs.decision == 'run'"
+        # restore-only: no post-save, so PR code cannot write to the shared cache
+        uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
+        with:
+          path: '${{ runner.temp }}/npm-cache'
+          key: 'npm-ci-${{ hashFiles(''package-lock.json'') }}'
+          restore-keys: 'npm-ci-'
+
+      - name: 'Report npm cache hit'
+        if: "steps.pr.outputs.decision == 'run'"
+        run: 'echo "npm cache: hit=${{ steps.npm-cache.outputs.cache-hit }} key=${{ steps.npm-cache.outputs.cache-matched-key }}" >> "$GITHUB_STEP_SUMMARY"'
+
       - name: 'Install and build PR app'
         id: 'prepare'
         if: "steps.pr.outputs.decision == 'run'"
@@ -2470,6 +2672,12 @@ jobs:
           rm -f "$RUNNER_TEMP/verify-chromium-path"
           mkdir -p "$RUNNER_TEMP/verify-results"
           chown -R node:node "$GITHUB_WORKSPACE"
+          # Make the npm cache readable+writable by the build user so
+          # `npm ci --prefer-offline --cache …` can use it without
+          # touching the Actions cache API (whose credentials were
+          # stripped above).
+          mkdir -p "$RUNNER_TEMP/npm-cache"
+          chown -R node:node "$RUNNER_TEMP/npm-cache"
           prepare_log="$RUNNER_TEMP/verify-results/prepare.log"
 
           set +e
@@ -2493,9 +2701,10 @@ jobs:
             # would only double the cost of an honest failure.
             install_attempt=1
             while :; do
-              printf '%s\n' '$ npm ci --prefer-offline --no-audit --progress=false'
+              printf '%s\n' '$ npm ci --prefer-offline --no-audit --progress=false --cache "$RUNNER_TEMP/npm-cache"'
               runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
-                npm ci --prefer-offline --no-audit --progress=false
+                npm ci --prefer-offline --no-audit --progress=false \
+                --cache "$RUNNER_TEMP/npm-cache"
               install_status=$?
               if [ "$install_status" -eq 0 ] || [ "$install_attempt" -ge 2 ]; then
                 break
@@ -3173,17 +3382,23 @@ jobs:
             esac
           done
           git worktree prune -v || true
-          # The verifier was deliberately made root-owned and read-only before
-          # the node-owned agent ran. Restore its owner write bits while this
-          # container still has root, then return the whole workspace to the
-          # runner user so every later checkout can clean it.
-          if [ -d "$GITHUB_WORKSPACE/.qwen" ] && [ ! -L "$GITHUB_WORKSPACE/.qwen" ]; then
-            chmod -R u+rwX "$GITHUB_WORKSPACE/.qwen"
-          fi
+
+      # The verify step deliberately makes .qwen root-owned and read-only.
+      # Restore ownership unconditionally (even on cancel/failure) while the
+      # container still runs as root, so the next job on this runner can
+      # checkout without hitting EACCES.  Separate from the workspace cleanup
+      # above because that step is gated on decision == 'run'.
+      - name: 'Restore workspace ownership'
+        if: 'always()'
+        run: |-
+          set -uo pipefail
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || echo "::warning::could not restore workspace write permissions"
           RUNNER_UID="$(stat -c '%u' "$RUNNER_TEMP" 2>/dev/null || stat -f '%u' "$RUNNER_TEMP" 2>/dev/null || echo 0)"
           RUNNER_GID="$(stat -c '%g' "$RUNNER_TEMP" 2>/dev/null || stat -f '%g' "$RUNNER_TEMP" 2>/dev/null || echo 0)"
           if [ "$RUNNER_UID" != "0" ]; then
-            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || true
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || echo "::warning::could not restore workspace ownership"
+          else
+            echo "::warning::could not determine runner UID; skipping ownership restore"
           fi
 
       - name: 'Wipe workspace after external code'
@@ -3227,10 +3442,24 @@ jobs:
     # inherit the 360-minute default and a hung gh call could hold a hosted
     # runner for six hours.
     timeout-minutes: 10
-    runs-on: 'ubuntu-latest'
+    # Checks out nothing and runs no repository code (base-repo YAML events),
+    # so the persistent ECS pool is safe.
+    # Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions:
       pull-requests: 'write'
     steps:
+      - name: 'Restore workspace ownership'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; artifact download may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; artifact download may fail on leftover read-only files"
+
       - name: 'Download verify results'
         id: 'download'
         uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v5.0.0
@@ -3324,6 +3553,240 @@ jobs:
             printf '<details>\n<summary>%s</summary>\n\n<pre><code>\n' "$summary_html"
             printf '%s%s\n' "$esc" "$truncated"
             printf '</code></pre>\n\n</details>\n\n'
+          }
+          # Render report.md as MARKDOWN instead of an escaped <pre> dump.
+          # The report is a curated bilingual document (tables, nested
+          # <details>, headings); the pre/code embedding displayed it as a
+          # wall of raw source (#8140's comment was the exhibit). The section
+          # is wrapped in a collapsed <details> so it still costs one line in
+          # the conversation but renders as real markdown when opened.
+          #
+          # A node sanitizer (not sed) does the escaping so it can tell code
+          # regions apart from prose. CommonMark does NOT decode entities in
+          # code spans or fenced blocks — they render literally there — so
+          # escaping & < > @ unconditionally showed the reader &amp;&amp;,
+          # &lt;T&gt;, &#64;pkg inside the very commands, generic types, and
+          # scoped-package paths a verification report is read to copy (the
+          # #8140 symptom, relocated into code). The security floor now rests
+          # on four line-independent guarantees:
+          #   1. in PROSE every < is escaped, then only the structural tags
+          #      the report uses as raw HTML (details/summary) are un-escaped
+          #      back to live tags — no other tag can form in ordinary
+          #      prose, so <img>/<script>/onerror never render there. A
+          #      line-level inHtml flag tracks raw-HTML blocks opened by
+          #      details/summary (at any indent, so list-nested folds
+          #      enter the state too): inside one, neither fence lines
+          #      NOR code spans are code — CommonMark/GitHub reads both
+          #      as literal text in a raw-HTML block — so the sanitizer
+          #      prose-escapes the whole line instead of splitting it
+          #      through proseLine, closing the divergence where GitHub
+          #      saw live HTML the sanitizer treated as inert code.
+          #      & and > are left alone in prose (a decoded entity
+          #      yields text, never markup, and an unescaped > cannot
+          #      open a tag once < is escaped), which keeps &&, ->, and
+          #      blockquotes readable. Code-span parity is a paragraph
+          #      property in CommonMark but a line property here, so a prose
+          #      line carrying an unmatched backtick run makes the rest of the
+          #      paragraph's code/prose split unknowable; the scanner fails
+          #      closed and prose-escapes every line until the next blank line
+          #      (over-escaping is the safe direction — a multi-line code span
+          #      shows its entities literally, inert not live). Outside HTML
+          #      blocks, inside code spans/fences < & @ are left alone: <img>
+          #      and @mentions are inert under a code/pre ancestor, and
+          #      escaping them there only mangles the rendered text;
+          #   2. the comment-open token is broken EVERYWHERE, prose and code
+          #      alike (<!-- becomes an escaped no-op, the autofix-proven
+          #      neutralizer). The break must stay global: the upsert greps
+          #      the RAW body for the running marker and a fence prints
+          #      verbatim, so a forged marker inside a fence must not survive;
+          #   3. in prose @ gains a zero-width space (@&#8203;) — renders
+          #      identically, never fires a mention (GitHub decodes &#64;
+          #      back to @ before the mention filter runs, so the entity
+          #      alone was inert; the ZWSP breaks the mention token). A
+          #      mention cannot fire under a code/pre ancestor, so code
+          #      keeps a literal @;
+          #   4. <details> folds are balanced over PROSE only — a </details>
+          #      quoted in a code span/fence is inert text and is no longer
+          #      counted — surplus closers are dropped (they would otherwise
+          #      close the wrapping fold early) and unclosed opens are closed
+          #      at the end, so a malformed report can neither swallow the
+          #      footer nor escape its wrapper. The flat scanner diverges
+          #      from GitHub's container-aware parser whenever a fence it
+          #      holds open cannot exist in GitHub's view, so two signals
+          #      exit non-zero (emit_report then degrades to the escaped
+          #      fallback rather than guessing): a fence still open at EOF
+          #      (GitHub closes a list-nested fence at the container's end,
+          #      not at EOF), and a non-blank line that dedents below the
+          #      fence opener's indent while it is open — the container
+          #      boundary moved, so GitHub already closed the fence and a
+          #      balancing closer later in the file would otherwise let the
+          #      scanner pass unescaped prose through escCode.
+          # Accepted tradeoff (named, not accidental): rendering promotes the
+          # report from inert text to parsed markdown, so [links](…) and
+          # ![images](…) now render live where emit_block showed them literal.
+          # report.md is agent output from a sandbox that ran PR code; images
+          # are camo-proxied (mostly noise) and a phishing link under the bot
+          # identity is the residual surface. That surface exists only while
+          # the four guarantees hold, so the fail-closed bails above are what
+          # keep deferring link defusing defensible; defusing link targets is
+          # a deliberate follow-up, not done here. Two safe-but-ugly display
+          # costs are named, not bugs: a code span that opens on one line and
+          # closes on the next is prose-escaped (the reader sees &lt;T&gt;
+          # inside it — the #8140 symptom relocated but inert), and escCode
+          # breaks <!-- to &lt;!\-\- which renders LITERALLY in a fence
+          # (entities do not decode there), so a fenced comment example shows
+          # as &lt;!\-\-.
+          # An OVERSIZED report falls back to emit_block wholesale (cut
+          # markdown dangles fences/folds), as does any sanitizer failure.
+          emit_report() {
+            local file="$1" max="$2"
+            [ -n "$file" ] && [ -f "$file" ] || return 0
+            if [ "$(wc -c < "$file")" -gt "$max" ]; then
+              echo "::warning::emit_report fell back to escaped embedding (report exceeds size cap) for $file" >&2
+              emit_block 'Verification report (report.md, truncated)' "$file" "$max"
+              return 0
+            fi
+            local san_file
+            san_file="$(mktemp)"
+            # Node is present on every runner that runs this job (emit_block
+            # already shells out to it for the UTF-8-safe cut). The script
+            # rides inside a single-quoted shell string, so it uses double
+            # quotes throughout and carries no single quotes of its own.
+            local node_status=0
+            node -e '
+              const fs = require("node:fs");
+              const text = fs.readFileSync(process.argv[1], "utf8").replace(/[\u0000\u0001]/g, "");
+              function escProse(s) {
+                // Allowlisted tags are stashed behind a \u0001 sentinel (stripped
+                // from input) BEFORE the < pass and restored from it, so a literal
+                // &lt;details> the author typed stays escaped text instead of being
+                // promoted back to a live tag by the un-escape step.
+                return s
+                  .replace(/<(\/?)(details|summary)>/g, "\u0001$1$2>")
+                  .replace(/</g, "&lt;")
+                  .replace(/\u0001(\/?)(details|summary)>/g, "<$1$2>")
+                  .replace(/&lt;!--/g, "&lt;!\\-\\-")
+                  .replace(/@/g, "@&#8203;");
+              }
+              function escCode(s) {
+                return s.replace(/<!--/g, "&lt;!\\-\\-");
+              }
+              let depth = 0;
+              function balance(s) {
+                return s.replace(/<\/?details>/g, function (t) {
+                  if (t === "<details>") { depth += 1; return t; }
+                  if (depth > 0) { depth -= 1; return t; }
+                  return "";
+                });
+              }
+              function proseLine(line) {
+                let out = "";
+                let buf = "";
+                let i = 0;
+                const flush = function () {
+                  if (buf) { out += balance(escProse(buf)); buf = ""; }
+                };
+                while (i < line.length) {
+                  if (line[i] !== "`") { buf += line[i]; i += 1; continue; }
+                  // A backslash-escaped backtick does not OPEN a code span (the
+                  // CommonMark escape rule consumes it first) but still CLOSES one
+                  // — an asymmetry a line-scoped scanner cannot model. Fail closed
+                  // like an unmatched run so the whole line is prose-escaped.
+                  let bs = 0, b = i - 1;
+                  while (b >= 0 && line[b] === "\\") { bs += 1; b -= 1; }
+                  if (bs % 2 === 1) { unmatched = true; buf += line[i]; i += 1; continue; }
+                  let j = i;
+                  while (j < line.length && line[j] === "`") j += 1;
+                  const run = j - i;
+                  let k = j, cs = -1, ce = -1;
+                  while (k < line.length) {
+                    if (line[k] === "`") {
+                      let m = k;
+                      while (m < line.length && line[m] === "`") m += 1;
+                      if (m - k === run) { cs = k; ce = m; break; }
+                      k = m;
+                    } else k += 1;
+                  }
+                  if (cs === -1) { unmatched = true; buf += line.slice(i, j); i = j; }
+                  else { flush(); out += escCode(line.slice(i, ce)); i = ce; }
+                }
+                flush();
+                return out;
+              }
+              const lines = text.split("\n");
+              const out = [];
+              let inFence = false, fc = "", fl = 0, fi = 0, inHtml = false;
+              let spanUnknown = false, unmatched = false;
+              for (const line of lines) {
+                if (!inFence) {
+                  const blank = /^\s*$/.test(line);
+                  if (inHtml && blank) inHtml = false;
+                  if (blank) spanUnknown = false;
+                  const m = inHtml ? null : line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+                  if (m && !(m[1][0] === "`" && m[2].indexOf("`") !== -1)) {
+                    inFence = true; fc = m[1][0]; fl = m[1].length; fi = line.match(/^ */)[0].length;
+                    out.push(escCode(line));
+                    continue;
+                  }
+                  let rendered;
+                  if (inHtml || spanUnknown) {
+                    rendered = balance(escProse(line));
+                  } else {
+                    unmatched = false;
+                    rendered = proseLine(line);
+                    if (unmatched) { spanUnknown = true; rendered = balance(escProse(line)); }
+                  }
+                  if (/^\s*<\/?(details|summary)\b/.test(rendered)) inHtml = true;
+                  out.push(rendered);
+                } else {
+                  if (/\S/.test(line) && line.match(/^ */)[0].length < fi) process.exit(3);
+                  const cm = line.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
+                  if (cm && cm[1][0] === fc && cm[1].length >= fl) inFence = false;
+                  out.push(escCode(line));
+                }
+              }
+              if (inFence) process.exit(3);
+              let result = out.join("\n");
+              if (depth > 0) {
+                if (result && !result.endsWith("\n")) result += "\n";
+                result += "</details>\n".repeat(depth);
+              }
+              process.stdout.write(result);
+            ' "$file" > "$san_file" || node_status=$?
+            if [ "$node_status" -ne 0 ]; then
+              if [ "$node_status" -eq 3 ]; then
+                echo "::warning::emit_report fell back to escaped embedding (report ended inside an open code fence) for $file" >&2
+              else
+                echo "::warning::emit_report fell back to escaped embedding (sanitize failed) for $file" >&2
+              fi
+              rm -f "$san_file"
+              emit_block 'Verification report (report.md, escaped fallback)' "$file" "$max"
+              return 0
+            fi
+            # Wrap in a collapsed <details> (one-line footprint, markdown when
+            # opened) and bound the WHOLE emitted section — wrapper, balanced
+            # report, appended closers — so the cap is a true bound on what
+            # lands in the comment. The old normal path skipped the header
+            # bytes the deficit branch did budget; folding the wrapper into
+            # the measured output removes that asymmetry and the separate
+            # fold-closer gate (closers now land in san_file before this gate).
+            local out_file
+            out_file="$(mktemp)"
+            {
+              printf '<details>\n<summary>Verification report</summary>\n\n'
+              cat "$san_file"
+              printf '\n</details>\n'
+            } > "$out_file"
+            rm -f "$san_file"
+            if [ "$(wc -c < "$out_file")" -gt "$max" ]; then
+              echo "::warning::emit_report fell back to escaped embedding (sanitized output exceeds size cap) for $file" >&2
+              rm -f "$out_file"
+              emit_block 'Verification report (report.md, truncated)' "$file" "$max"
+              return 0
+            fi
+            cat "$out_file"
+            rm -f "$out_file"
+            printf '\n'
           }
 
           # Host the agent's evidence images (if any) on a per-PR branch
@@ -3695,7 +4158,7 @@ jobs:
               if [ -n "${MISSING_REPORT_NOTE:-}" ]; then
                 printf '%s\n\n' "$MISSING_REPORT_NOTE"
               fi
-              emit_block 'Verification report (report.md)' "$REPORT" 45000
+              emit_report "$REPORT" 45000
               if [ -n "$EVIDENCE_SECTION" ]; then
                 printf '%s' "$EVIDENCE_SECTION"
               fi

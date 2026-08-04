@@ -5,17 +5,24 @@
  */
 
 import type {
+  ChatRecord,
   Config,
   CronJob,
+  GoalJournal,
+  GoalRuntime,
+  GoalStateRecordPayloadV2,
+  GoalTurnPermit,
   ToolCallRequestInfo,
   ToolCallResponseInfo,
   ToolRegistry,
   ServerGeminiStreamEvent,
   SessionMetrics,
+  WorkflowApprovalRequestCallback,
 } from '@qwen-code/qwen-code-core';
 import type { CLIUserMessage } from './nonInteractive/types.js';
 import {
   executeToolCall,
+  isTelemetrySdkInitialized,
   ToolErrorType,
   shutdownTelemetry,
   GeminiEventType,
@@ -36,6 +43,7 @@ import {
   ToolConfirmationOutcome,
   ToolNames,
   PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
+  createGoalRuntime,
 } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
 import { EventEmitter } from 'node:events';
@@ -49,7 +57,9 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { LoadedSettings } from './config/settings.js';
 import { StreamJsonOutputAdapter } from './nonInteractive/io/StreamJsonOutputAdapter.js';
+import type { ControlService } from './nonInteractive/control/ControlService.js';
 import { CommandKind, type ExecutionMode } from './ui/commands/types.js';
+import { goalCommand } from './ui/commands/goalCommand.js';
 import { filterCommandsForMode } from './services/commandUtils.js';
 import { _resetCleanupFunctionsForTest } from './utils/cleanup.js';
 import {
@@ -58,6 +68,7 @@ import {
 } from './utils/errors.js';
 
 // Mock core modules
+const runVisionBridgeSpy = vi.hoisted(() => vi.fn());
 vi.mock('./ui/hooks/atCommandProcessor.js');
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const original =
@@ -73,6 +84,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   return {
     ...original,
     executeToolCall: vi.fn(),
+    runVisionBridge: runVisionBridgeSpy,
     shutdownTelemetry: vi.fn(),
     isTelemetrySdkInitialized: vi.fn().mockReturnValue(true),
     ChatRecordingService: MockChatRecordingService,
@@ -91,6 +103,29 @@ vi.mock('./services/CommandService.js', () => ({
     create: mockCommandServiceCreate,
   },
 }));
+
+function createGoalJournal(): GoalJournal {
+  return {
+    getTranscriptCursor: () => ({ recordId: null }),
+    async recordGoalState(
+      recordUuid: string,
+      payload: GoalStateRecordPayloadV2,
+    ): Promise<ChatRecord> {
+      return {
+        uuid: recordUuid,
+        parentUuid: null,
+        sessionId: 'test-session-id',
+        timestamp: new Date(0).toISOString(),
+        type: 'system',
+        subtype: 'goal_state',
+        provenance: 'goal_control',
+        cwd: '/test/project',
+        version: 'test',
+        systemPayload: structuredClone(payload),
+      };
+    },
+  };
+}
 
 describe('skipHeadlessLoopSentinel', () => {
   it('deletes a recurring session loop.md sentinel job so sessionSize reaches 0', () => {
@@ -210,8 +245,10 @@ describe('runNonInteractive', () => {
     getHistoryFunctionResponseIds: Mock;
     consumePendingMemoryTaskPromises: Mock;
     recordCompletedToolCall: Mock;
+    addHistory: Mock;
   };
   let mockGetDebugResponses: Mock;
+  let goalRuntime: GoalRuntime;
 
   beforeEach(async () => {
     // Reset module-level state from any prior test in this file. Without
@@ -221,8 +258,11 @@ describe('runNonInteractive', () => {
     _resetExitLatchForTest();
 
     mockCoreExecuteToolCall = vi.mocked(executeToolCall);
+    runVisionBridgeSpy.mockReset();
     mockShutdownTelemetry = vi.mocked(shutdownTelemetry);
+    vi.mocked(isTelemetrySdkInitialized).mockReturnValue(true);
     mockGetDebugResponses = vi.fn().mockReturnValue([]);
+    goalRuntime = createGoalRuntime({ journal: createGoalJournal() });
     mockGetCommandsForMode.mockImplementation((mode: ExecutionMode) =>
       filterCommandsForMode(mockGetCommands(), mode),
     );
@@ -267,6 +307,7 @@ describe('runNonInteractive', () => {
       sendMessageStream: vi.fn(),
       consumePendingMemoryTaskPromises: vi.fn().mockReturnValue([]),
       recordCompletedToolCall: vi.fn(),
+      addHistory: vi.fn(),
       stripOrphanedUserEntriesFromHistory: vi.fn(),
       getChatRecordingService: vi.fn(() => ({
         initialize: vi.fn(),
@@ -284,6 +325,10 @@ describe('runNonInteractive', () => {
       initialize: vi.fn().mockResolvedValue(undefined),
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getGeminiClient: vi.fn().mockReturnValue(mockGeminiClient),
+      getChatRecordingService: vi.fn().mockReturnValue({
+        flush: vi.fn().mockResolvedValue(undefined),
+        finalize: vi.fn().mockResolvedValue(undefined),
+      }),
       getToolRegistry: vi.fn().mockReturnValue(mockToolRegistry),
       getMaxSessionTurns: vi.fn().mockReturnValue(10),
       getMaxWallTimeSeconds: vi.fn().mockReturnValue(-1),
@@ -303,6 +348,7 @@ describe('runNonInteractive', () => {
       getJsonSchema: vi.fn().mockReturnValue(undefined),
       getFolderTrustFeature: vi.fn().mockReturnValue(false),
       getFolderTrust: vi.fn().mockReturnValue(false),
+      isTrustedFolder: vi.fn().mockReturnValue(true),
       getIncludePartialMessages: vi.fn().mockReturnValue(false),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getModel: vi.fn(() => currentModel),
@@ -320,6 +366,9 @@ describe('runNonInteractive', () => {
       setModelInvocableCommandsExecutor: vi.fn(),
       getAutoSkillEnabled: vi.fn().mockReturnValue(false),
       getDisabledSlashCommands: vi.fn().mockReturnValue([]),
+      getGoalRuntime: vi.fn(() => goalRuntime),
+      getGoalRuntimeReady: vi.fn(async () => goalRuntime),
+      bindGoalTurnHost: vi.fn((host) => goalRuntime.bindHost(host)),
       getBackgroundTaskRegistry: vi
         .fn()
         .mockReturnValue(mockBackgroundTaskRegistry),
@@ -427,6 +476,712 @@ describe('runNonInteractive', () => {
     }
   }
 
+  type GoalControlCase = {
+    name: string;
+    input: string;
+    prepare: 'none' | 'active' | 'paused';
+    expectedStatus: 'active' | 'paused' | null;
+    expectedObjective?: string;
+    expectedWorkers: number;
+    expectedText: string;
+  };
+
+  const goalControlCases: GoalControlCase[] = [
+    {
+      name: 'status',
+      input: '/goal',
+      prepare: 'active',
+      expectedStatus: 'active',
+      expectedObjective: 'existing goal',
+      expectedWorkers: 0,
+      expectedText: 'Goal active: existing goal',
+    },
+    {
+      name: 'create',
+      input: '/goal ship it',
+      prepare: 'none',
+      expectedStatus: 'active',
+      expectedObjective: 'ship it',
+      expectedWorkers: 1,
+      expectedText: 'Goal active: ship it',
+    },
+    {
+      name: 'replace',
+      input: '/goal set replacement',
+      prepare: 'active',
+      expectedStatus: 'active',
+      expectedObjective: 'replacement',
+      expectedWorkers: 1,
+      expectedText: 'Goal active: replacement',
+    },
+    {
+      name: 'edit',
+      input: '/goal edit revised goal',
+      prepare: 'active',
+      expectedStatus: 'active',
+      expectedObjective: 'revised goal',
+      expectedWorkers: 1,
+      expectedText: 'Goal active: revised goal',
+    },
+    {
+      name: 'pause',
+      input: '/goal pause',
+      prepare: 'active',
+      expectedStatus: 'paused',
+      expectedObjective: 'existing goal',
+      expectedWorkers: 0,
+      expectedText: 'Goal paused: existing goal',
+    },
+    {
+      name: 'resume',
+      input: '/goal resume',
+      prepare: 'paused',
+      expectedStatus: 'active',
+      expectedObjective: 'existing goal',
+      expectedWorkers: 1,
+      expectedText: 'Goal active: existing goal',
+    },
+    {
+      name: 'clear',
+      input: '/goal clear',
+      prepare: 'active',
+      expectedStatus: null,
+      expectedWorkers: 0,
+      expectedText: 'Goal cleared.',
+    },
+  ];
+
+  async function prepareGoalState(
+    preparation: GoalControlCase['prepare'],
+  ): Promise<void> {
+    if (preparation === 'none') return;
+    const created = await goalRuntime.dispatch({
+      action: 'create',
+      objective: 'existing goal',
+    });
+    if (preparation === 'paused') {
+      await goalRuntime.dispatch({
+        action: 'pause',
+        expectedGoalId: created.snapshot.goal!.goalId,
+        expectedRevision: created.snapshot.goal!.revision,
+      });
+    }
+  }
+
+  function mockFinishedGoalWorker(): void {
+    vi.spyOn(goalRuntime, 'finishTurn').mockResolvedValue(undefined);
+    mockGeminiClient.sendMessageStream.mockImplementation(() =>
+      createStreamFromEvents([
+        {
+          type: GeminiEventType.Finished,
+          value: {
+            reason: undefined,
+            usageMetadata: { totalTokenCount: 0 },
+          },
+        },
+      ]),
+    );
+  }
+
+  it.each(goalControlCases)(
+    'handles plain Goal $name before ordinary model input',
+    async (testCase) => {
+      setupMetricsMock();
+      mockGetCommands.mockReturnValue([goalCommand]);
+      await prepareGoalState(testCase.prepare);
+      mockFinishedGoalWorker();
+
+      const exitCode = await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        testCase.input,
+        `goal-plain-${testCase.name}`,
+      );
+
+      expect(exitCode).toBe(0);
+      expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(
+        testCase.expectedWorkers,
+      );
+      expect(processStdoutSpy).toHaveBeenCalledWith(
+        `${testCase.expectedText}\n`,
+      );
+      expect(goalRuntime.getSnapshot()).toMatchObject({
+        goal:
+          testCase.expectedStatus === null
+            ? null
+            : {
+                status: testCase.expectedStatus,
+                objective: testCase.expectedObjective,
+              },
+      });
+    },
+  );
+
+  it('runs resume with the exact permit scheduled by Core', async () => {
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    mockFinishedGoalWorker();
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-resume-exact',
+    );
+
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledOnce();
+    const [parts, , , options] =
+      mockGeminiClient.sendMessageStream.mock.calls[0]!;
+    expect(parts[0]?.text).toContain('Continue working on the active Goal.');
+    expect(options).toMatchObject({
+      type: SendMessageType.Goal,
+      goalOrigin: 'runtime',
+      goalTurnKey: expect.stringMatching(/^goal-runtime:/),
+      goalPermit: {
+        goalId: expect.any(String),
+        revision: expect.any(Number),
+        turnId: expect.any(String),
+      },
+    });
+    expect(options.goalTurnKey).toBe(
+      `goal-runtime:${options.goalPermit.turnId}`,
+    );
+    expect(options.goalSignal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('keeps the exact Goal permit through a ToolResult continuation', async () => {
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    vi.spyOn(goalRuntime, 'finishTurn').mockResolvedValue(undefined);
+    mockCoreExecuteToolCall.mockResolvedValue({
+      responseParts: [{ text: 'tool response' }],
+    });
+    let requestCount = 0;
+    mockGeminiClient.sendMessageStream.mockImplementation(
+      (
+        _parts: Part[],
+        _signal: AbortSignal,
+        _promptId: string,
+        sendOptions: { goalPermit?: GoalTurnPermit },
+      ) => {
+        requestCount += 1;
+        if (requestCount === 1) {
+          return createStreamFromEvents([
+            {
+              type: GeminiEventType.ToolCallRequest,
+              value: {
+                callId: 'goal-tool-1',
+                name: 'testTool',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'goal-resume-tool-result',
+                goalContext: sendOptions.goalPermit,
+              },
+            },
+          ]);
+        }
+        return createStreamFromEvents([
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 0 },
+            },
+          },
+        ]);
+      },
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-resume-tool-result',
+    );
+
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
+    const firstOptions = mockGeminiClient.sendMessageStream.mock.calls[0]![3];
+    const secondOptions = mockGeminiClient.sendMessageStream.mock.calls[1]![3];
+    expect(secondOptions).toMatchObject({
+      type: SendMessageType.ToolResult,
+      goalPermit: firstOptions.goalPermit,
+      goalTurnKey: firstOptions.goalTurnKey,
+      goalOrigin: 'runtime',
+    });
+    expect(secondOptions.goalSignal).toBe(firstOptions.goalSignal);
+  });
+
+  it('ends a Goal turn without another model call after update_goal', async () => {
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    const finishTurn = vi
+      .spyOn(goalRuntime, 'finishTurn')
+      .mockResolvedValue(undefined);
+    mockCoreExecuteToolCall.mockResolvedValue({
+      callId: 'update-goal-terminal',
+      responseParts: [{ text: 'proposal recorded' }],
+      resultDisplay: 'proposal recorded',
+      error: undefined,
+      errorType: undefined,
+      terminateTurn: true,
+    });
+    mockGeminiClient.sendMessageStream.mockImplementation(
+      (
+        _parts: Part[],
+        _signal: AbortSignal,
+        _promptId: string,
+        sendOptions: { goalPermit?: GoalTurnPermit },
+      ) =>
+        createStreamFromEvents([
+          {
+            type: GeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'update-goal-terminal',
+              name: 'update_goal',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'goal-terminal-tool-result',
+              goalContext: sendOptions.goalPermit,
+            },
+          },
+        ]),
+    );
+
+    const exitCode = await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-terminal-tool-result',
+    );
+
+    expect(exitCode).toBe(0);
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledOnce();
+    expect(mockGeminiClient.addHistory).toHaveBeenCalledWith({
+      role: 'user',
+      parts: [{ text: 'proposal recorded' }],
+    });
+    expect(finishTurn).toHaveBeenCalledOnce();
+  });
+
+  it('streams Goal state changes that happen while a headless turn settles', async () => {
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    vi.spyOn(goalRuntime, 'finishTurn').mockImplementation(async (permit) => {
+      await goalRuntime.dispatch({
+        action: 'pause',
+        expectedGoalId: permit.goalId,
+        expectedRevision: permit.revision,
+      });
+    });
+    mockCoreExecuteToolCall.mockResolvedValue({
+      responseParts: [{ text: 'proposal recorded' }],
+      terminateTurn: true,
+    });
+    mockGeminiClient.sendMessageStream.mockImplementation(
+      (
+        _parts: Part[],
+        _signal: AbortSignal,
+        _promptId: string,
+        sendOptions: { goalPermit?: GoalTurnPermit },
+      ) =>
+        createStreamFromEvents([
+          {
+            type: GeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'update-goal-state-stream',
+              name: 'update_goal',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'goal-state-stream',
+              goalContext: sendOptions.goalPermit,
+            },
+          },
+        ]),
+    );
+
+    const exitCode = await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-state-stream',
+    );
+
+    expect(exitCode).toBe(0);
+    const statuses = processStdoutSpy.mock.calls
+      .map(
+        ([chunk]) =>
+          JSON.parse(String(chunk)) as {
+            event?: {
+              type?: string;
+              goal_state?: { goal?: { status?: string } };
+            };
+          },
+      )
+      .filter(({ event }) => event?.type === 'goal_state')
+      .map(({ event }) => event?.goal_state?.goal?.status);
+    expect(statuses).toContain('active');
+    expect(statuses).toContain('paused');
+  });
+
+  it('flushes a plain-text Goal turn before releasing its permit', async () => {
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    const finishTurn = vi
+      .spyOn(goalRuntime, 'finishTurn')
+      .mockResolvedValue(undefined);
+    const flush = vi.fn().mockResolvedValue(undefined);
+    Object.assign(mockConfig, {
+      getChatRecordingService: vi.fn(() => ({
+        flush,
+        finalize: vi.fn().mockResolvedValue(undefined),
+      })),
+    });
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        { type: GeminiEventType.Content, value: 'still working' },
+        {
+          type: GeminiEventType.Finished,
+          value: {
+            reason: undefined,
+            usageMetadata: { totalTokenCount: 0 },
+          },
+        },
+      ]),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-plain-text',
+    );
+
+    expect(flush).toHaveBeenCalled();
+    expect(finishTurn).toHaveBeenCalledOnce();
+    expect(flush.mock.invocationCallOrder[0]).toBeLessThan(
+      finishTurn.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it('does not charge runtime Goal segments to the generic session turn cap', async () => {
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    vi.spyOn(goalRuntime, 'finishTurn').mockResolvedValue(undefined);
+    vi.mocked(mockConfig.getMaxSessionTurns).mockReturnValue(0);
+    mockCoreExecuteToolCall.mockResolvedValue({
+      responseParts: [{ text: 'tool response' }],
+    });
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          {
+            type: GeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'goal-unlimited-turns-tool',
+              name: 'testTool',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'goal-unlimited-turns',
+            },
+          },
+        ]),
+      )
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 0 },
+            },
+          },
+        ]),
+      );
+
+    const exitCode = await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-unlimited-turns',
+    );
+
+    expect(exitCode).toBe(0);
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
+    expect(mockCoreExecuteToolCall).toHaveBeenCalledOnce();
+  });
+
+  it('still applies the generic turn cap to real user input during a Goal', async () => {
+    setupMetricsMock();
+    await prepareGoalState('active');
+    vi.mocked(mockConfig.getMaxSessionTurns).mockReturnValue(0);
+    let goalStatusAtExit: string | undefined;
+    vi.mocked(process.exit).mockImplementation((code) => {
+      goalStatusAtExit = goalRuntime.getSnapshot().goal?.status;
+      throw new Error(`process.exit(${code}) called`);
+    });
+
+    await expect(
+      runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'A real user update',
+        'goal-user-turn-cap',
+      ),
+    ).rejects.toThrow('process.exit(53) called');
+
+    expect(mockGeminiClient.sendMessageStream).not.toHaveBeenCalled();
+    expect(goalStatusAtExit).toBe('paused');
+  });
+
+  it('keeps explicit tool-call budgets on runtime Goal work', async () => {
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    vi.mocked(mockConfig.getMaxSessionTurns).mockReturnValue(0);
+    vi.mocked(mockConfig.getMaxToolCalls).mockReturnValue(0);
+    mockGeminiClient.sendMessageStream.mockReturnValueOnce(
+      createStreamFromEvents([
+        {
+          type: GeminiEventType.ToolCallRequest,
+          value: {
+            callId: 'goal-explicit-budget-tool',
+            name: 'testTool',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'goal-explicit-budget',
+          },
+        },
+      ]),
+    );
+
+    const run = runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-explicit-budget',
+    ).catch(() => undefined);
+
+    await vi.waitFor(() =>
+      expect(processStderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'Run aborted: tool-call budget of 0 exceeded (--max-tool-calls)',
+        ),
+      ),
+    );
+
+    expect(mockCoreExecuteToolCall).not.toHaveBeenCalled();
+    expect(goalRuntime.getSnapshot()).toMatchObject({
+      activity: 'idle',
+      goal: { status: 'paused' },
+    });
+
+    void run;
+  });
+
+  it('interrupts Goal settlement when the explicit wall-clock budget expires', async () => {
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    vi.mocked(mockConfig.getMaxWallTimeSeconds).mockReturnValue(0.01);
+    const runAbortController = new AbortController();
+    vi.spyOn(goalRuntime, 'finishTurn').mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          runAbortController.signal.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+        }),
+    );
+    mockCoreExecuteToolCall.mockResolvedValue({
+      responseParts: [{ text: 'proposal recorded' }],
+      terminateTurn: true,
+    });
+    mockGeminiClient.sendMessageStream.mockReturnValueOnce(
+      createStreamFromEvents([
+        {
+          type: GeminiEventType.ToolCallRequest,
+          value: {
+            callId: 'goal-wall-budget',
+            name: 'update_goal',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'goal-wall-budget',
+          },
+        },
+      ]),
+    );
+
+    const run = runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-wall-budget',
+      { abortController: runAbortController },
+    ).catch(() => undefined);
+
+    await vi.waitFor(() =>
+      expect(processStderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'Run aborted: wall-clock budget of 0.01s exceeded (--max-wall-time)',
+        ),
+      ),
+    );
+    expect(goalRuntime.getSnapshot()).toMatchObject({
+      activity: 'idle',
+      goal: { status: 'paused' },
+    });
+
+    void run;
+  });
+
+  it('claims an active Goal for real user input before binding the host', async () => {
+    setupMetricsMock();
+    await prepareGoalState('active');
+    mockFinishedGoalWorker();
+    const beginTurn = vi.spyOn(goalRuntime, 'beginTurn');
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'A real user update',
+      'goal-real-user',
+    );
+
+    expect(beginTurn).toHaveBeenCalledWith('goal-real-user');
+    expect(beginTurn.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(mockConfig.bindGoalTurnHost).mock.invocationCallOrder[0]!,
+    );
+    expect(mockGeminiClient.sendMessageStream.mock.calls[0]![3]).toMatchObject({
+      type: SendMessageType.UserQuery,
+      goalOrigin: 'user',
+      goalTurnKey: 'goal-real-user',
+      goalPermit: {
+        goalId: expect.any(String),
+        revision: expect.any(Number),
+        turnId: expect.any(String),
+      },
+    });
+  });
+
+  it('waits for an active Goal turn before admitting real user input', async () => {
+    setupMetricsMock();
+    await prepareGoalState('active');
+    const occupyingPermit = goalRuntime.beginTurn('occupying-turn');
+    expect(occupyingPermit).toBeDefined();
+    const finishOccupyingTurn = goalRuntime.finishTurn.bind(goalRuntime);
+    mockFinishedGoalWorker();
+    const beginTurn = vi.spyOn(goalRuntime, 'beginTurn');
+
+    const run = runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'A queued user update',
+      'goal-queued-user',
+    );
+
+    await vi.waitFor(() =>
+      expect(beginTurn).toHaveBeenCalledWith('goal-queued-user'),
+    );
+    expect(mockGeminiClient.sendMessageStream).not.toHaveBeenCalled();
+
+    await finishOccupyingTurn(occupyingPermit!);
+    await run;
+
+    const sendOptions = mockGeminiClient.sendMessageStream.mock.calls[0]![3];
+    expect(sendOptions).toMatchObject({
+      type: SendMessageType.UserQuery,
+      goalOrigin: 'user',
+      goalTurnKey: 'goal-queued-user',
+      goalPermit: {
+        goalId: occupyingPermit!.goalId,
+        revision: occupyingPermit!.revision,
+        turnId: expect.any(String),
+      },
+    });
+    expect(sendOptions.goalPermit.turnId).not.toBe(occupyingPermit!.turnId);
+  });
+
+  it('emits direct Goal v2 state before the legacy partial projection', async () => {
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('active');
+    vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    vi.mocked(mockConfig.getIncludePartialMessages).mockReturnValue(true);
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal',
+      'goal-direct-order',
+    );
+
+    const goalEventTypes = processStdoutSpy.mock.calls
+      .map(
+        ([chunk]) => JSON.parse(String(chunk)) as { event?: { type?: string } },
+      )
+      .map(({ event }) => event?.type)
+      .filter((type) => type === 'goal_state' || type === 'active_goal');
+    expect(goalEventTypes).toEqual(['goal_state', 'active_goal']);
+    expect(mockGeminiClient.sendMessageStream).not.toHaveBeenCalled();
+  });
+
+  const headlessImageParts: Part[] = [
+    { text: 'inspect this image' },
+    { inlineData: { mimeType: 'image/png', data: 'AAAA' } },
+  ];
+  const finishedEvents: ServerGeminiStreamEvent[] = [
+    {
+      type: GeminiEventType.Finished,
+      value: {
+        reason: undefined,
+        usageMetadata: { totalTokenCount: 1 },
+      },
+    },
+  ];
+
+  async function mockHeadlessImageInput(): Promise<void> {
+    const { handleAtCommand } = await import(
+      './ui/hooks/atCommandProcessor.js'
+    );
+    vi.mocked(handleAtCommand).mockResolvedValue({
+      processedQuery: headlessImageParts,
+      shouldProceed: true,
+    });
+  }
+
+  function configureHeadlessVisionModel(model: {
+    id: string;
+    baseUrl?: string;
+    agentCapable?: boolean;
+  }) {
+    const runtimeView = {
+      contentGenerator: {},
+      contentGeneratorConfig: {
+        model: model.id,
+        authType: 'openai',
+      },
+    };
+    const resolveForModel = vi.fn().mockResolvedValue(runtimeView);
+    mockConfig = {
+      ...mockConfig,
+      getEffectiveInputModalities: vi.fn().mockReturnValue({}),
+      getDefaultVisionBridgeModel: vi.fn().mockReturnValue(model),
+      getBaseLlmClient: vi.fn().mockReturnValue({ resolveForModel }),
+    } as unknown as Config;
+    return { resolveForModel, runtimeView };
+  }
+
   it('should process input and write text output', async () => {
     setupMetricsMock();
     const events: ServerGeminiStreamEvent[] = [
@@ -456,6 +1211,78 @@ describe('runNonInteractive', () => {
     );
     expect(processStdoutSpy).toHaveBeenCalledWith('Hello World\n');
     expect(mockShutdownTelemetry).toHaveBeenCalled();
+  });
+
+  it('registers and clears the stream-json workflow approval channel', async () => {
+    setupMetricsMock();
+    const setApprovalRequestCallback = vi.fn();
+    mockConfig.getWorkflowRunRegistry = vi.fn().mockReturnValue({
+      setApprovalRequestCallback,
+    });
+    const handleWorkflowApproval = vi.fn().mockResolvedValue(undefined);
+    const controlService = {
+      permission: { handleWorkflowApproval },
+    } as unknown as ControlService;
+    const approvalSignal = new AbortController().signal;
+    mockGeminiClient.sendMessageStream.mockImplementation(
+      async function* (): AsyncGenerator<ServerGeminiStreamEvent> {
+        const callback = setApprovalRequestCallback.mock.calls[0]?.[0] as
+          | WorkflowApprovalRequestCallback
+          | undefined;
+        expect(callback).toBeTypeOf('function');
+        await callback?.(
+          { runId: 'wf_stream' } as never,
+          {
+            approvalId: 'wfap_stream',
+            name: 'run_shell_command',
+          } as never,
+          { command: 'echo safe' },
+          approvalSignal,
+        );
+        yield {
+          type: GeminiEventType.Finished,
+          value: {
+            reason: undefined,
+            usageMetadata: { totalTokenCount: 0 },
+          },
+        };
+      },
+    );
+
+    await runNonInteractive(mockConfig, mockSettings, 'test', 'p-workflow', {
+      controlService,
+    });
+
+    expect(handleWorkflowApproval).toHaveBeenCalledWith(
+      'wf_stream',
+      expect.objectContaining({ approvalId: 'wfap_stream' }),
+      { command: 'echo safe' },
+      approvalSignal,
+    );
+    expect(setApprovalRequestCallback).toHaveBeenLastCalledWith(undefined);
+  });
+
+  it('does not register a workflow approval channel in plain headless mode', async () => {
+    setupMetricsMock();
+    const setApprovalRequestCallback = vi.fn();
+    mockConfig.getWorkflowRunRegistry = vi.fn().mockReturnValue({
+      setApprovalRequestCallback,
+    });
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        {
+          type: GeminiEventType.Finished,
+          value: {
+            reason: undefined,
+            usageMetadata: { totalTokenCount: 0 },
+          },
+        },
+      ]),
+    );
+
+    await runNonInteractive(mockConfig, mockSettings, 'test', 'p-headless');
+
+    expect(setApprovalRequestCallback).not.toHaveBeenCalled();
   });
 
   it('prepends the recovered background agents notice on a resumed headless prompt', async () => {
@@ -1213,7 +2040,10 @@ describe('runNonInteractive', () => {
       },
     };
     const toolResponse: Part[] = [{ text: 'Tool response' }];
-    mockCoreExecuteToolCall.mockResolvedValue({ responseParts: toolResponse });
+    mockCoreExecuteToolCall.mockResolvedValue({
+      responseParts: toolResponse,
+      executionStatus: 'success',
+    });
 
     const firstCallEvents: ServerGeminiStreamEvent[] = [toolCallEvent];
     const secondCallEvents: ServerGeminiStreamEvent[] = [
@@ -1580,6 +2410,20 @@ describe('runNonInteractive', () => {
 
     it('isolates enter_plan_mode from headless siblings without charging skipped calls to the budget', async () => {
       setupMetricsMock();
+      const recordToolResult = vi.fn();
+      (
+        mockConfig as Config & {
+          getChatRecordingService: () => {
+            recordToolResult: typeof recordToolResult;
+            finalize: ReturnType<typeof vi.fn>;
+            flush: ReturnType<typeof vi.fn>;
+          };
+        }
+      ).getChatRecordingService = () => ({
+        recordToolResult,
+        finalize: vi.fn(),
+        flush: vi.fn().mockResolvedValue(undefined),
+      });
       vi.mocked(mockConfig.getMaxToolCalls).mockReturnValue(1);
       vi.mocked(mockToolRegistry.getTool).mockImplementation(
         (name: string) =>
@@ -1664,6 +2508,12 @@ describe('runNonInteractive', () => {
       expect(nextTurnParts[3].functionResponse?.response).toEqual({
         error: PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
       });
+      expect(
+        recordToolResult.mock.calls
+          .map((call) => call[1])
+          .filter((metadata) => metadata.callId !== 'enter-plan')
+          .map((metadata) => metadata.executionStatus),
+      ).toEqual(['not_started', 'not_started', 'not_started']);
     });
 
     it('runs a batch of concurrency-safe tool calls concurrently', async () => {
@@ -2405,6 +3255,7 @@ describe('runNonInteractive', () => {
           resultDisplay: 'Tool response',
           error: undefined,
           errorType: undefined,
+          executionStatus: 'success',
         };
         await options.onAllToolCallsComplete?.([
           { request, response, status: 'success' },
@@ -2452,6 +3303,9 @@ describe('runNonInteractive', () => {
       'success',
       'error',
     ]);
+    expect(
+      recordToolResult.mock.calls.map((call) => call[1].executionStatus),
+    ).toEqual(['success', 'not_started']);
     expect(processStdoutSpy).toHaveBeenCalledWith('Final answer\n');
   });
 
@@ -2648,6 +3502,369 @@ describe('runNonInteractive', () => {
 
     // 6. Assert the final output is correct
     expect(processStdoutSpy).toHaveBeenCalledWith('Summary complete.\n');
+  });
+
+  it('keeps an agent-capable image route for the full headless tool chain', async () => {
+    setupMetricsMock();
+    await mockHeadlessImageInput();
+    const { resolveForModel, runtimeView } = configureHeadlessVisionModel({
+      id: 'vision-agent',
+      baseUrl: 'https://vision.example/v1',
+      agentCapable: true,
+    });
+    const selector = 'vision-agent\0https://vision.example/v1\0';
+    let acceptedSameSelector = false;
+    let rejectedDifferentSelector = false;
+    const toolCallEvent: ServerGeminiStreamEvent = {
+      type: GeminiEventType.ToolCallRequest,
+      value: {
+        callId: 'vision-tool-1',
+        name: 'testTool',
+        args: {},
+        isClientInitiated: false,
+        prompt_id: 'prompt-vision-route',
+      },
+    };
+    mockCoreExecuteToolCall.mockImplementation(
+      async (_config, _request, _signal, options) => {
+        acceptedSameSelector =
+          options.onToolResultFullTurnModel?.(selector) ?? false;
+        rejectedDifferentSelector =
+          options.onToolResultFullTurnModel?.(
+            'different-model\0https://vision.example/v1\0',
+          ) === false;
+        return {
+          responseParts: [{ text: 'tool response' }],
+          modelOverride: 'other-model',
+        };
+      },
+    );
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(createStreamFromEvents([toolCallEvent]))
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'done' },
+          ...finishedEvents,
+        ]),
+      );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'inspect @image.png',
+      'prompt-vision-route',
+    );
+
+    expect(resolveForModel).toHaveBeenCalledWith(selector.slice(0, -1), {
+      failClosed: true,
+    });
+    expect(acceptedSameSelector).toBe(true);
+    expect(rejectedDifferentSelector).toBe(true);
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+      1,
+      headlessImageParts,
+      expect.any(AbortSignal),
+      'prompt-vision-route',
+      { type: SendMessageType.UserQuery, modelOverride: selector },
+    );
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+      2,
+      [{ text: 'tool response' }],
+      expect.any(AbortSignal),
+      'prompt-vision-route',
+      { type: SendMessageType.ToolResult, modelOverride: selector },
+    );
+    expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
+      mockConfig,
+      expect.objectContaining({ callId: 'vision-tool-1' }),
+      expect.any(AbortSignal),
+      expect.objectContaining({ runtimeView }),
+    );
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Routing this image turn to vision-agent'),
+    );
+  });
+
+  it('does not leak a headless image route into a notification drain', async () => {
+    setupMetricsMock();
+    await mockHeadlessImageInput();
+    configureHeadlessVisionModel({
+      id: 'vision-agent',
+      agentCapable: true,
+    });
+    mockBackgroundTaskRegistry.setNotificationCallback.mockImplementation(
+      (callback) => {
+        callback?.('Task finished', 'task result', {
+          agentId: 'agent-1',
+          toolUseId: 'agent-tool-1',
+          status: 'completed',
+        });
+      },
+    );
+    const drainToolCall: ServerGeminiStreamEvent = {
+      type: GeminiEventType.ToolCallRequest,
+      value: {
+        callId: 'drain-tool-1',
+        name: 'testTool',
+        args: {},
+        isClientInitiated: false,
+        prompt_id: 'prompt-drain-isolation',
+      },
+    };
+    mockCoreExecuteToolCall.mockResolvedValue({
+      responseParts: [{ text: 'drain tool response' }],
+    });
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(createStreamFromEvents(finishedEvents))
+      .mockReturnValueOnce(createStreamFromEvents([drainToolCall]))
+      .mockReturnValueOnce(createStreamFromEvents(finishedEvents));
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'inspect @image.png',
+      'prompt-drain-isolation',
+    );
+
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+      2,
+      [{ text: 'task result' }],
+      expect.any(AbortSignal),
+      'prompt-drain-isolation/automatic/2',
+      expect.objectContaining({
+        type: SendMessageType.Notification,
+        modelOverride: undefined,
+      }),
+    );
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+      3,
+      [{ text: 'drain tool response' }],
+      expect.any(AbortSignal),
+      'prompt-drain-isolation/automatic/2',
+      { type: SendMessageType.ToolResult, modelOverride: undefined },
+    );
+    expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
+      mockConfig,
+      expect.objectContaining({ callId: 'drain-tool-1' }),
+      expect.any(AbortSignal),
+      expect.objectContaining({ runtimeView: undefined }),
+    );
+  });
+
+  it('converts headless images through a non-agent vision bridge', async () => {
+    setupMetricsMock();
+    await mockHeadlessImageInput();
+    configureHeadlessVisionModel({ id: 'vision-bridge' });
+    runVisionBridgeSpy.mockResolvedValue({
+      applied: true,
+      status: 'ok',
+      parts: [{ text: 'machine transcription' }],
+      transcript: 'machine transcription',
+      convertedCount: 1,
+      omittedCount: 0,
+      modelId: 'vision-bridge',
+      egressOccurred: true,
+    });
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'inspect @image.png',
+      'prompt-vision-bridge',
+    );
+
+    expect(runVisionBridgeSpy).toHaveBeenCalledWith({
+      config: mockConfig,
+      parts: headlessImageParts,
+      signal: expect.any(AbortSignal),
+    });
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledWith(
+      [{ text: 'machine transcription' }],
+      expect.any(AbortSignal),
+      'prompt-vision-bridge',
+      { type: SendMessageType.UserQuery },
+    );
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Converted 1 image(s)'),
+    );
+  });
+
+  it('emits a stream-json system message for headless vision bridge notices', async () => {
+    setupMetricsMock();
+    await mockHeadlessImageInput();
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    configureHeadlessVisionModel({ id: 'vision-bridge' });
+    runVisionBridgeSpy.mockResolvedValue({
+      applied: true,
+      status: 'ok',
+      parts: [{ text: 'machine transcription' }],
+      transcript: 'machine transcription',
+      convertedCount: 1,
+      omittedCount: 0,
+      modelId: 'vision-bridge',
+      egressOccurred: true,
+    });
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+    const writes: string[] = [];
+    processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(
+        typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'),
+      );
+      return true;
+    });
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'inspect @image.png',
+      'prompt-vision-bridge-json',
+    );
+
+    const systemMessage = writes
+      .join('')
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line))
+      .find(
+        (message) =>
+          message.type === 'system' && message.subtype === 'vision_bridge',
+      );
+    expect(systemMessage).toMatchObject({
+      subtype: 'vision_bridge',
+      data: { notice: expect.stringContaining('Converted 1 image(s)') },
+    });
+  });
+
+  it('emits a notice when a non-agent vision bridge fails', async () => {
+    setupMetricsMock();
+    await mockHeadlessImageInput();
+    configureHeadlessVisionModel({ id: 'vision-bridge' });
+    runVisionBridgeSpy.mockRejectedValue(new Error('bridge unavailable'));
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'inspect @image.png',
+      'prompt-vision-bridge-failed',
+    );
+
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledWith(
+      [{ text: 'inspect this image' }],
+      expect.any(AbortSignal),
+      'prompt-vision-bridge-failed',
+      { type: SendMessageType.UserQuery },
+    );
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      'Vision bridge failed; proceeding without the image(s).\n',
+    );
+  });
+
+  it('strips headless images when a non-agent vision bridge is skipped', async () => {
+    setupMetricsMock();
+    await mockHeadlessImageInput();
+    configureHeadlessVisionModel({ id: 'vision-bridge' });
+    runVisionBridgeSpy.mockResolvedValue({
+      applied: false,
+      status: 'skipped',
+      convertedCount: 0,
+      omittedCount: 0,
+      modelId: 'vision-bridge',
+      egressOccurred: true,
+    });
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'inspect @image.png',
+      'prompt-vision-bridge-skipped',
+    );
+
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledWith(
+      [{ text: 'inspect this image' }],
+      expect.any(AbortSignal),
+      'prompt-vision-bridge-skipped',
+      { type: SendMessageType.UserQuery },
+    );
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Vision bridge cancelled.'),
+    );
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('were sent to vision-bridge'),
+    );
+  });
+
+  it('does not select a headless image route after clamping removes the image', async () => {
+    vi.stubEnv('QWEN_CODE_MAX_INLINE_MEDIA_BYTES', '1');
+    setupMetricsMock();
+    await mockHeadlessImageInput();
+    const { resolveForModel } = configureHeadlessVisionModel({
+      id: 'vision-agent',
+      agentCapable: true,
+    });
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+
+    try {
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'inspect @image.png',
+        'prompt-oversized-image',
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+
+    expect(resolveForModel).not.toHaveBeenCalled();
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledWith(
+      [
+        { text: 'inspect this image' },
+        expect.objectContaining({
+          text: expect.stringContaining('Media omitted'),
+        }),
+      ],
+      expect.any(AbortSignal),
+      'prompt-oversized-image',
+      { type: SendMessageType.UserQuery },
+    );
+  });
+
+  it('fails closed when the headless image route cannot be resolved', async () => {
+    setupMetricsMock();
+    await mockHeadlessImageInput();
+    const { resolveForModel } = configureHeadlessVisionModel({
+      id: 'vision-agent',
+      agentCapable: true,
+    });
+    resolveForModel.mockRejectedValue(new Error('route unavailable'));
+
+    await expect(
+      runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'inspect @image.png',
+        'prompt-route-failure',
+      ),
+    ).rejects.toThrow('route unavailable');
+
+    expect(resolveForModel).toHaveBeenCalledWith('vision-agent', {
+      failClosed: true,
+    });
+    expect(mockGeminiClient.sendMessageStream).not.toHaveBeenCalled();
   });
 
   it('should process input and write JSON output with stats', async () => {
@@ -4318,6 +5535,8 @@ describe('runNonInteractive', () => {
     expect(toolResultBlock?.tool_use_id).toBe('tool-1');
     expect(toolResultBlock?.is_error).toBe(false);
     expect(toolResultBlock?.content).toBe('Tool executed successfully');
+    expect(writes.join('')).not.toContain('executionStatus');
+    expect(writes.join('')).not.toContain('execution_status');
   });
 
   it('should emit tool errors in tool_result blocks in stream-json format', async () => {
@@ -4348,6 +5567,7 @@ describe('runNonInteractive', () => {
     mockCoreExecuteToolCall.mockResolvedValue({
       error: new Error('Tool execution failed'),
       errorType: ToolErrorType.EXECUTION_FAILED,
+      executionStatus: 'error',
       responseParts: [
         {
           functionResponse: {
@@ -4412,6 +5632,8 @@ describe('runNonInteractive', () => {
     );
     expect(toolResultBlock?.tool_use_id).toBe('tool-error');
     expect(toolResultBlock?.is_error).toBe(true);
+    expect(writes.join('')).not.toContain('executionStatus');
+    expect(writes.join('')).not.toContain('execution_status');
   });
 
   it('should emit partial messages when includePartialMessages is true', async () => {

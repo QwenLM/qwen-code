@@ -12,6 +12,7 @@ import { AgentCore } from '../runtime/agent-core.js';
 import { getTeammateContext } from '../team/identity.js';
 import { createContentGenerator } from '../../core/contentGenerator.js';
 import { ApprovalMode, Config } from '../../config/config.js';
+import { join } from 'node:path';
 
 const DEFAULT_MODE = 'default' as ApprovalMode;
 const PLAN_MODE = 'plan' as ApprovalMode;
@@ -754,7 +755,7 @@ describe('InProcessBackend', () => {
     };
     parentConfig.getPlanFilePath = vi
       .fn()
-      .mockReturnValue('/tmp/plans/test-session.md');
+      .mockReturnValue(join('/tmp/plans', 'test-session.md'));
     const backendWithParentMode = new InProcessBackend(parentConfig as never);
     await backendWithParentMode.init();
 
@@ -769,7 +770,7 @@ describe('InProcessBackend', () => {
       getPlanFilePath: () => string;
     };
     expect(agentContext.getPlanFilePath()).toBe(
-      '/tmp/plans/test-session-agent-1.md',
+      join('/tmp/plans', 'test-session-agent-1.md'),
     );
     expect(agentContext.getPlanFilePath()).not.toBe(
       parentConfig.getPlanFilePath(),

@@ -389,6 +389,9 @@ const EN: Messages = {
   'timeline.kind.status': 'status update',
   'timeline.kind.none': 'turn',
   'common.copy': 'Copy',
+  'common.download': 'Download',
+  'common.downloading': 'Downloading…',
+  'common.downloadFailed': (v) => `Download failed: ${v?.message ?? ''}`,
   'common.open': 'Open',
   'common.na': 'N/A',
   'common.server': 'Server',
@@ -424,6 +427,7 @@ const EN: Messages = {
   'approval.option.allowOnce': 'Yes, allow once',
   'approval.option.allowOnceAndSwitchToDefault':
     'Allow once and switch to Default mode',
+  'approval.option.restorePrevious': 'Yes, restore previous mode',
   'approval.option.rejectOnce': 'Reject',
   'approval.option.allowAllEdits': 'Allow All Edits',
   'approval.option.allowAlwaysProject': 'Always allow in this project',
@@ -889,6 +893,7 @@ const EN: Messages = {
   'history.capacityReached':
     'History display limit reached. Earlier messages remain saved.',
   'history.paginationError': 'Earlier history could not be loaded.',
+  'history.retry': 'Retry',
   'editor.shellPlaceholder': 'Enter terminal command',
   'editor.send': 'Send message',
   'editor.connectionDisconnected':
@@ -1042,8 +1047,43 @@ const EN: Messages = {
   'scheduledTasks.condition.cardPrefix': 'If:',
   'turnOutputs.filesEdited': (v) => `Edited ${v?.count ?? 0} files`,
   'turnOutputs.viewChanges': 'View changes',
-  'turnOutputs.review': 'Review',
+  // Key keeps its historical `review` name; the label moved to "Changes" when
+  // the code-review result view (`codeReview.*`) took over the word.
+  'turnOutputs.review': 'Changes',
   'turnOutputs.reviewLatest': 'View recent file changes',
+  'codeReview.authoritativeVerdict': 'Authoritative verdict',
+  'codeReview.targetEffort': (v) =>
+    `Target: ${v?.target ?? ''} · Effort: ${v?.effort ?? ''}`,
+  'codeReview.openReport': 'Open Markdown report',
+  'codeReview.loadingReport': 'Loading Markdown report...',
+  'codeReview.back': 'Back to review',
+  'codeReview.reviewCounts': 'Review counts',
+  'codeReview.total': 'Total',
+  'codeReview.confidence': (v) => `${v?.value ?? ''} confidence`,
+  'codeReview.held': 'Held',
+  'codeReview.heldByMeasurement': 'Held back from Critical by measurement',
+  'codeReview.caps': 'Caps',
+  'codeReview.none': 'None',
+  'codeReview.severity': 'Severity',
+  'codeReview.confidenceLabel': 'Confidence',
+  'codeReview.all': 'All',
+  'codeReview.noMatches': 'No findings match these filters.',
+  'codeReview.source': (v) => `Source: ${v?.value ?? ''}`,
+  'codeReview.failureScenario': 'Failure scenario',
+  'codeReview.suggestedFix': 'Suggested fix',
+  'codeReview.outcome': 'Outcome',
+  'codeReview.locations': 'Locations',
+  'codeReview.evidence': 'Evidence',
+  'codeReview.notLinked': 'not linked',
+  'codeReview.loadErrorTitle': 'Unable to display code review',
+  'codeReview.loading': 'Loading code review...',
+  'codeReview.artifactTruncated':
+    'Code review artifact is truncated and cannot be validated.',
+  'codeReview.reportTruncated': 'Markdown report is truncated.',
+  'codeReview.unavailable': (v) =>
+    `This code review is no longer authoritative because its artifact status is ${v?.status ?? 'unknown'}. Regenerate the review to view it.`,
+  'codeReview.workspaceRequired':
+    'Code review artifacts must be readable workspace files.',
   'sideTask.title': 'Side task',
   'sideTask.description': 'View or create side tasks',
   'sideTask.new': 'New',
@@ -1217,16 +1257,11 @@ const EN: Messages = {
     'Unsupported theme. Use /theme light or /theme dark.',
   'queue.delete': 'Delete',
   'queue.edit': 'Edit',
-  'queue.insert': 'Insert',
   'queue.cleared': 'Queue cleared.',
   'queue.deleteTip': 'Remove from queue',
   'queue.editTip': 'Remove from queue and edit again',
-  'queue.insertTip':
-    'Insert this message into the current session; it takes effect on the next model call.',
-  'queue.inserted': 'Inserted. It takes effect on the next model call.',
-  'queue.insertCommandDisabled':
-    "Commands can't be inserted into the running turn; they run after it finishes.",
   'queue.submitting': 'Submitting...',
+  'queue.midTurnQueued': 'Queued...',
   'queue.serverQueued': 'Queued on server...',
   'queue.editing': 'Editing...',
   'queue.removing': 'Updating...',
@@ -1242,7 +1277,6 @@ const EN: Messages = {
       : `${count} queued shell commands will not run.`;
   },
   'queue.queueFailed': 'Failed to queue message',
-  'queue.insertFailed': 'Failed to insert queued message',
   'queue.deleteFailed': 'Failed to move message out of queue',
   'queue.editFailed': 'Failed to edit queued message',
   'queue.footer':
@@ -1370,7 +1404,7 @@ const EN: Messages = {
   'skilldesc.agentReproduceFeature':
     'Reproduce an existing Codex/Claude Code feature',
   'skilldesc.autofix':
-    'Implement approved issues or address PR review feedback',
+    'Review and fix local changes or run repository Autofix workflows',
   'skilldesc.bugfix': 'Fix a bug from a GitHub issue, reproduce-first',
   'skilldesc.codegraph': 'Analyze the codebase via graph and vector index',
   'skilldesc.createIssue': 'Draft and submit a GitHub issue from an idea',
@@ -1902,16 +1936,20 @@ const EN: Messages = {
   'mode.name.auto': 'auto',
   'mode.name.yolo': 'yolo',
   'mode.label.plan': 'Plan',
+  'mode.label.planReview': 'Plan & Review',
   'mode.label.default': 'Ask Approval',
   'mode.label.auto-edit': 'Auto Edit',
   'mode.label.auto': 'Classifier Approval',
   'mode.label.yolo': 'Full Access',
   'mode.listLabel.plan': 'Plan (plan)',
+  'mode.listLabel.planReview': 'Plan & Review (plan)',
   'mode.listLabel.default': 'Ask Approval (default)',
   'mode.listLabel.auto-edit': 'Auto Edit (auto-edit)',
   'mode.listLabel.auto': 'Classifier Approval (auto)',
   'mode.listLabel.yolo': 'Full Access (yolo)',
   'mode.desc.plan': 'Analyze only, do not modify files or execute commands',
+  'mode.desc.planReview':
+    'Use Plan mode and review its workflow when one is available',
   'mode.desc.default':
     'Ask before running commands, editing files, or accessing external resources',
   'mode.desc.auto-edit':
@@ -2154,6 +2192,21 @@ const EN: Messages = {
   'todo.stepProgress': (v) => `Step ${v?.current ?? 0} / ${v?.total ?? 0}`,
   'todo.stepFraction': (v) => `${v?.current ?? 0} / ${v?.total ?? 0}`,
   'todo.title': 'Current tasks',
+  'planExecution.dialogTitle': 'Plan & tasks',
+  'planExecution.title': 'Plan execution',
+  'planExecution.stepDetails': 'Step details',
+  'planExecution.subagents': 'Subagents',
+  'planExecution.openDetails': 'Open subagent details',
+  'planExecution.view': 'View plan execution',
+  'planExecution.dependsOn': 'Depends on:',
+  'planExecution.unassigned': 'Unassigned executions',
+  'planExecution.attention': 'Needs attention',
+  'planExecution.status.running': 'Running',
+  'planExecution.status.paused': 'Paused',
+  'planExecution.status.completed': 'Completed',
+  'planExecution.status.blocked': 'Blocked',
+  'planExecution.status.in_progress': 'In progress',
+  'planExecution.status.ready': 'Ready',
   'chat.scrollToBottom': 'Scroll to bottom',
   'chatHeader.toggleEnvironment': 'Toggle environment information',
   'chatHeader.toggleRightPanel': 'Toggle right panel',
@@ -2393,7 +2446,7 @@ const EN: Messages = {
   'channels.loadError.title': 'Channels could not be loaded',
   'channels.empty.title': 'No supported channels configured',
   'channels.empty.description':
-    'Configure DingTalk, WeCom, or Feishu to receive messages in this workspace.',
+    'Configure DingTalk, WeCom, Feishu, GitHub, or GitLab to receive messages in this workspace.',
   'channels.runtimeError': 'Channel runtime error',
   'channels.action.back': 'Back',
   'channels.action.start': 'Start',
@@ -2429,6 +2482,62 @@ const EN: Messages = {
   'channels.editor.field.wecom.wsUrl': 'WebSocket URL',
   'channels.editor.field.feishu.clientId': 'App ID',
   'channels.editor.field.feishu.clientSecret': 'App Secret',
+  'channels.editor.field.github.token': 'Personal Access Token',
+  'channels.editor.field.github.token.description':
+    'Classic PAT with "notifications" scope',
+  'channels.editor.field.github.baseUrl': 'API Base URL',
+  'channels.editor.field.github.baseUrl.description':
+    'GitHub Enterprise API root (e.g. https://ghe.example.com/api/v3). Leave empty for github.com',
+  'channels.editor.field.github.groupPolicy': 'Group Policy',
+  'channels.editor.field.github.groupPolicy.description':
+    'Must be "Open" for notifications to flow',
+  'channels.editor.field.github.senderPolicy': 'Sender Policy',
+  'channels.editor.field.github.senderPolicy.description':
+    'Use "Allowlist" with allowed users on public repos',
+  'channels.editor.field.github.allowedUsers':
+    'Allowed Users (comma-separated)',
+  'channels.editor.field.github.allowedUsers.description':
+    'GitHub usernames, used by Allowlist and Pairing policies',
+  'channels.editor.field.github.reasonFilter': 'Reason Filter',
+  'channels.editor.field.github.reasonFilter.description':
+    'Optional. Comma-separated notification reasons to process. Valid values: mention, review_requested, assign, author, comment, ci_activity, manual, state_change, subscribed, team_mention, security_alert, approval_requested, invitation, member_feature_requested, security_advisory_credit. Leave empty to process all.',
+  'channels.editor.field.gitlab.token': 'Personal Access Token',
+  'channels.editor.field.gitlab.token.description':
+    'PAT with "read_api" + "api" scopes',
+  'channels.editor.field.gitlab.baseUrl': 'Instance URL',
+  'channels.editor.field.gitlab.baseUrl.description':
+    'Self-hosted instance URL (e.g. https://gitlab.example.com). Leave empty for gitlab.com',
+  'channels.editor.field.gitlab.groupPolicy': 'Group Policy',
+  'channels.editor.field.gitlab.groupPolicy.description':
+    'Must be "Open" or "Allowlist" for todos to be processed',
+  'channels.editor.field.gitlab.senderPolicy': 'Sender Policy',
+  'channels.editor.field.gitlab.senderPolicy.description':
+    'Use "Allowlist" with allowed users on public projects',
+  'channels.editor.field.gitlab.allowedUsers':
+    'Allowed Users (comma-separated)',
+  'channels.editor.field.gitlab.allowedUsers.description':
+    'GitLab usernames, used by Allowlist and Pairing policies',
+  'channels.editor.field.gitlab.action_prompt_template': 'Action Templates',
+  'channels.editor.field.gitlab.action_prompt_template.description':
+    'Only actions with a template are processed; others are skipped. Template variables: %project%, %project_url%, %author%, %target_type%, %iid%, %title%, %description%, %todo_id%. Use %% for a literal %. Example for "mentioned": Project: %project% | Author: %author% | Title: %title%',
+  'channels.editor.field.gitlab.action_prompt_template.option.mentioned':
+    'Mentioned — @bot in a comment or description',
+  'channels.editor.field.gitlab.action_prompt_template.option.directly_addressed':
+    'Directly Addressed — comment starts with @bot',
+  'channels.editor.field.gitlab.action_prompt_template.option.assigned':
+    'Assigned — bot assigned to an issue or MR',
+  'channels.editor.field.gitlab.action_prompt_template.option.review_requested':
+    'Review Requested — bot requested as MR reviewer',
+  'channels.editor.field.gitlab.action_prompt_template.option.approval_required':
+    'Approval Required — MR needs bot approval',
+  'channels.editor.field.gitlab.action_prompt_template.option.marked':
+    "Marked — someone stars bot's comment/issue/MR",
+  'channels.editor.field.gitlab.action_prompt_template.option.build_failed':
+    'Build Failed — CI/CD pipeline fails on bot branch/MR',
+  'channels.editor.field.gitlab.action_prompt_template.option.unmergeable':
+    'Unmergeable — MR becomes unmergeable (conflicts)',
+  'channels.editor.field.gitlab.action_prompt_template.option.merge_train_removed':
+    'Merge Train Removed — MR removed from merge train',
   'channels.editor.secret.environment': 'Stored in environment',
   'channels.editor.secret.stored': 'Stored securely',
   'channels.editor.secret.preserve': 'Keep',
@@ -2491,6 +2600,8 @@ const EN: Messages = {
   'channels.editor.validation.duplicate':
     'A Channel with this name already exists.',
   'channels.editor.validation.invalidName': 'Choose a different instance name.',
+  'channels.editor.validation.invalidOption':
+    "Remove values that aren't in the allowed list.",
   'channels.editor.validation.number': 'Enter a valid number.',
   'channels.editor.validation.policy': 'Choose an access policy.',
   'channels.editor.saveError': 'Changes were not saved',
@@ -2729,6 +2840,7 @@ const ZH: Messages = {
   'toolName.artifact': '制品',
   'toolName.record_artifact': '记录制品',
   'toolName.image_gen': '生成图片',
+  'toolName.display_image': '显示图片',
   // web-shell-only wire aliases (see TOOL_DISPLAY_NAMES in toolFormatting.ts)
   'toolName.bash': '运行命令',
   'toolName.shell': 'Shell 命令',
@@ -2972,6 +3084,9 @@ const ZH: Messages = {
   'timeline.kind.status': '状态更新',
   'timeline.kind.none': '轮次',
   'common.copy': '复制',
+  'common.download': '下载',
+  'common.downloading': '正在下载…',
+  'common.downloadFailed': (v) => `下载失败：${v?.message ?? ''}`,
   'common.open': '打开',
   'common.na': '不适用',
   'common.server': '服务器',
@@ -3006,6 +3121,7 @@ const ZH: Messages = {
   'approval.launchAgentQuestion': '启动这个 agent？',
   'approval.option.allowOnce': '是，允许一次',
   'approval.option.allowOnceAndSwitchToDefault': '允许一次并切换到默认模式',
+  'approval.option.restorePrevious': '是，恢复之前的模式',
   'approval.option.rejectOnce': '拒绝',
   'approval.option.allowAllEdits': '允许所有编辑',
   'approval.option.allowAlwaysProject': '项目内始终允许',
@@ -3442,6 +3558,7 @@ const ZH: Messages = {
   'history.loadingEarlier': '正在加载更早消息…',
   'history.capacityReached': '已达到历史显示上限，更早消息仍保存在会话中。',
   'history.paginationError': '无法加载更早的历史记录。',
+  'history.retry': '重试',
   'editor.shellPlaceholder': '请输入终端命令',
   'editor.send': '发送消息',
   'editor.connectionDisconnected': '连接已中断，请在恢复后重试。',
@@ -3587,8 +3704,41 @@ const ZH: Messages = {
   'scheduledTasks.condition.cardPrefix': '若：',
   'turnOutputs.filesEdited': (v) => `已编辑 ${v?.count ?? 0} 个文件`,
   'turnOutputs.viewChanges': '查看更改',
-  'turnOutputs.review': '审核',
+  // 与英文键同理：键名保留历史 `review`，标签改为“文件更改”，
+  // 代码审查结果视图使用 `codeReview.*`，请勿“修正”此不一致。
+  'turnOutputs.review': '文件更改',
   'turnOutputs.reviewLatest': '查看最近文件修改',
+  'codeReview.authoritativeVerdict': '权威裁决',
+  'codeReview.targetEffort': (v) =>
+    `目标：${v?.target ?? ''} · 强度：${v?.effort ?? ''}`,
+  'codeReview.openReport': '打开 Markdown 报告',
+  'codeReview.loadingReport': '正在加载 Markdown 报告…',
+  'codeReview.back': '返回审查结果',
+  'codeReview.reviewCounts': '审查计数',
+  'codeReview.total': '总计',
+  'codeReview.confidence': (v) => `${v?.value ?? ''} 置信度`,
+  'codeReview.held': '暂缓',
+  'codeReview.heldByMeasurement': '经基线测量暂缓，未保留 Critical',
+  'codeReview.caps': '裁决上限',
+  'codeReview.none': '无',
+  'codeReview.severity': '严重级别',
+  'codeReview.confidenceLabel': '置信度',
+  'codeReview.all': '全部',
+  'codeReview.noMatches': '没有符合当前筛选条件的发现。',
+  'codeReview.source': (v) => `来源：${v?.value ?? ''}`,
+  'codeReview.failureScenario': '失败场景',
+  'codeReview.suggestedFix': '建议修复',
+  'codeReview.outcome': '处理结果',
+  'codeReview.locations': '位置',
+  'codeReview.evidence': '证据',
+  'codeReview.notLinked': '未链接',
+  'codeReview.loadErrorTitle': '无法显示代码审查结果',
+  'codeReview.loading': '正在加载代码审查结果…',
+  'codeReview.artifactTruncated': '代码审查制品已截断，无法验证。',
+  'codeReview.reportTruncated': 'Markdown 报告已截断。',
+  'codeReview.unavailable': (v) =>
+    `此代码审查已不再具备权威性，制品状态为 ${v?.status ?? 'unknown'}。请重新生成审查结果。`,
+  'codeReview.workspaceRequired': '代码审查制品必须是可读取的工作区文件。',
   'sideTask.title': '侧边任务',
   'sideTask.description': '查看或新增侧边任务',
   'sideTask.new': '新增',
@@ -3755,14 +3905,11 @@ const ZH: Messages = {
     '不支持该主题。请使用 /theme light 或 /theme dark。',
   'queue.delete': '删除',
   'queue.edit': '编辑',
-  'queue.insert': '插入',
   'queue.cleared': '队列已清空。',
   'queue.deleteTip': '移出队列',
   'queue.editTip': '移出队列并将内容放回输入框',
-  'queue.insertTip': '将信息插入当前会话，下次模型调用生效。',
-  'queue.inserted': '已插入，下次模型调用生效。',
-  'queue.insertCommandDisabled': '命令无法插入当前回合。',
   'queue.submitting': '提交中...',
+  'queue.midTurnQueued': '排队中...',
   'queue.serverQueued': '服务器排队中...',
   'queue.editing': '编辑中...',
   'queue.removing': '处理中...',
@@ -3772,7 +3919,6 @@ const ZH: Messages = {
   'queue.shellDropped': (v) =>
     `${v?.count ?? 0} 条排队的 Shell 命令将不会执行。`,
   'queue.queueFailed': '排队消息失败',
-  'queue.insertFailed': '插入排队消息失败',
   'queue.deleteFailed': '移出队列失败',
   'queue.editFailed': '编辑排队消息失败',
   'queue.footer': '按 ↑ 编辑最后一条排队消息 · Esc 清空队列',
@@ -3890,7 +4036,7 @@ const ZH: Messages = {
   'skilldesc.agentReproduceAlign':
     '将已移植的 Codex/Claude Code 功能与原版对齐',
   'skilldesc.agentReproduceFeature': '复现 Codex/Claude Code 的现有功能',
-  'skilldesc.autofix': '实现已批准的 issue 或处理 PR 审查反馈',
+  'skilldesc.autofix': '审查并修复本地改动，或运行仓库 Autofix 工作流',
   'skilldesc.bugfix': '按先复现流程修复 GitHub issue 中的 bug',
   'skilldesc.codegraph': '通过图数据库和向量索引分析代码库',
   'skilldesc.createIssue': '根据想法或 bug 描述起草并提交 GitHub issue',
@@ -4379,16 +4525,19 @@ const ZH: Messages = {
   'mode.name.auto': 'auto',
   'mode.name.yolo': 'yolo',
   'mode.label.plan': '计划',
+  'mode.label.planReview': '计划并审阅',
   'mode.label.default': '请求批准',
   'mode.label.auto-edit': '自动编辑',
   'mode.label.auto': '智能审批',
   'mode.label.yolo': '完全访问权限',
   'mode.listLabel.plan': '计划（plan）',
+  'mode.listLabel.planReview': '计划并审阅（plan）',
   'mode.listLabel.default': '请求批准（default）',
   'mode.listLabel.auto-edit': '自动编辑（auto-edit）',
   'mode.listLabel.auto': '智能审批（auto）',
   'mode.listLabel.yolo': '完全访问权限（yolo）',
   'mode.desc.plan': '仅分析，不修改文件或执行命令',
+  'mode.desc.planReview': '使用 Plan 模式，并在 Workflow 可用时进行审阅',
   'mode.desc.default': '执行命令、编辑文件或访问外部资源前请求确认',
   'mode.desc.auto-edit': '自动批准文件编辑，命令执行等敏感操作仍会询问',
   'mode.desc.auto': '自动评估工具风险，安全操作直接执行，风险操作再确认',
@@ -4617,6 +4766,21 @@ const ZH: Messages = {
   'todo.stepProgress': (v) => `第 ${v?.current ?? 0} / ${v?.total ?? 0} 步`,
   'todo.stepFraction': (v) => `${v?.current ?? 0} / ${v?.total ?? 0}`,
   'todo.title': '当前任务',
+  'planExecution.dialogTitle': '计划与任务',
+  'planExecution.title': '计划执行',
+  'planExecution.stepDetails': '步骤详情',
+  'planExecution.subagents': '子智能体',
+  'planExecution.openDetails': '打开子智能体详情',
+  'planExecution.view': '查看计划执行',
+  'planExecution.dependsOn': '依赖：',
+  'planExecution.unassigned': '未关联的执行',
+  'planExecution.attention': '需要关注',
+  'planExecution.status.running': '运行中',
+  'planExecution.status.paused': '已暂停',
+  'planExecution.status.completed': '已完成',
+  'planExecution.status.blocked': '被阻塞',
+  'planExecution.status.in_progress': '进行中',
+  'planExecution.status.ready': '就绪',
   'chat.scrollToBottom': '回到底部',
   'chatHeader.toggleEnvironment': '切换环境信息',
   'chatHeader.toggleRightPanel': '切换右侧扩展区',
@@ -4837,7 +5001,7 @@ const ZH: Messages = {
   'channels.loadError.title': '无法加载频道',
   'channels.empty.title': '尚未配置支持的频道',
   'channels.empty.description':
-    '配置钉钉、企业微信或飞书，让当前工作区接收消息。',
+    '配置钉钉、企业微信、飞书、GitHub 或 GitLab，让当前工作区接收消息。',
   'channels.runtimeError': '频道运行时错误',
   'channels.action.back': '返回',
   'channels.action.start': '启动',
@@ -4872,6 +5036,60 @@ const ZH: Messages = {
   'channels.editor.field.wecom.wsUrl': 'WebSocket URL',
   'channels.editor.field.feishu.clientId': 'App ID',
   'channels.editor.field.feishu.clientSecret': 'App Secret',
+  'channels.editor.field.github.token': '个人访问令牌',
+  'channels.editor.field.github.token.description':
+    '需要 "notifications" 权限的经典 PAT',
+  'channels.editor.field.github.baseUrl': 'API 基础 URL',
+  'channels.editor.field.github.baseUrl.description':
+    'GitHub Enterprise API 根地址（如 https://ghe.example.com/api/v3），github.com 留空',
+  'channels.editor.field.github.groupPolicy': '群组策略',
+  'channels.editor.field.github.groupPolicy.description':
+    '必须设为 "Open" 才能接收通知',
+  'channels.editor.field.github.senderPolicy': '发送者策略',
+  'channels.editor.field.github.senderPolicy.description':
+    '公开仓库建议使用 "Allowlist" 并指定允许的用户',
+  'channels.editor.field.github.allowedUsers': '允许的用户（逗号分隔）',
+  'channels.editor.field.github.allowedUsers.description':
+    'GitHub 用户名，用于 Allowlist 和 Pairing 策略',
+  'channels.editor.field.github.reasonFilter': '通知原因过滤',
+  'channels.editor.field.github.reasonFilter.description':
+    '可选。逗号分隔的通知原因。有效值：mention、review_requested、assign、author、comment、ci_activity、manual、state_change、subscribed、team_mention、security_alert、approval_requested、invitation、member_feature_requested、security_advisory_credit。留空则处理全部。',
+  'channels.editor.field.gitlab.token': '个人访问令牌',
+  'channels.editor.field.gitlab.token.description':
+    '需要 "read_api" + "api" 权限的 PAT',
+  'channels.editor.field.gitlab.baseUrl': '实例 URL',
+  'channels.editor.field.gitlab.baseUrl.description':
+    '自托管实例地址（如 https://gitlab.example.com），gitlab.com 留空',
+  'channels.editor.field.gitlab.groupPolicy': '群组策略',
+  'channels.editor.field.gitlab.groupPolicy.description':
+    '必须设为 "Open" 或 "Allowlist" 才能处理 Todo',
+  'channels.editor.field.gitlab.senderPolicy': '发送者策略',
+  'channels.editor.field.gitlab.senderPolicy.description':
+    '公开项目建议使用 "Allowlist" 并指定允许的用户',
+  'channels.editor.field.gitlab.allowedUsers': '允许的用户（逗号分隔）',
+  'channels.editor.field.gitlab.allowedUsers.description':
+    'GitLab 用户名，用于 Allowlist 和 Pairing 策略',
+  'channels.editor.field.gitlab.action_prompt_template': '动作模板',
+  'channels.editor.field.gitlab.action_prompt_template.description':
+    '仅配置了模板的动作会被处理，其余跳过。模板变量：%project%、%project_url%、%author%、%target_type%、%iid%、%title%、%description%、%todo_id%。用 %% 表示字面 %。示例（mentioned）：Project: %project% | Author: %author% | Title: %title%',
+  'channels.editor.field.gitlab.action_prompt_template.option.mentioned':
+    '被提及 — 评论或描述中 @bot',
+  'channels.editor.field.gitlab.action_prompt_template.option.directly_addressed':
+    '直接对话 — 评论以 @bot 开头',
+  'channels.editor.field.gitlab.action_prompt_template.option.assigned':
+    '被指派 — bot 被指派到 issue 或 MR',
+  'channels.editor.field.gitlab.action_prompt_template.option.review_requested':
+    '请求审查 — bot 被请求为 MR 审查者',
+  'channels.editor.field.gitlab.action_prompt_template.option.approval_required':
+    '需要批准 — MR 需要 bot 批准',
+  'channels.editor.field.gitlab.action_prompt_template.option.marked':
+    '被标记 — 有人星标 bot 的评论/issue/MR',
+  'channels.editor.field.gitlab.action_prompt_template.option.build_failed':
+    '构建失败 — CI/CD 流水线在 bot 分支/MR 上失败',
+  'channels.editor.field.gitlab.action_prompt_template.option.unmergeable':
+    '不可合并 — MR 变为不可合并（冲突）',
+  'channels.editor.field.gitlab.action_prompt_template.option.merge_train_removed':
+    '合并队列移除 — MR 从合并队列中移除',
   'channels.editor.secret.environment': '已保存在环境变量中',
   'channels.editor.secret.stored': '已安全保存',
   'channels.editor.secret.preserve': '保留',
@@ -4930,6 +5148,7 @@ const ZH: Messages = {
     `${v?.label ?? '此字段'}为必填项。`,
   'channels.editor.validation.duplicate': '已存在同名频道。',
   'channels.editor.validation.invalidName': '请使用其他实例名称。',
+  'channels.editor.validation.invalidOption': '请移除不在允许列表中的值。',
   'channels.editor.validation.number': '请输入有效数字。',
   'channels.editor.validation.policy': '请选择准入策略。',
   'channels.editor.saveError': '未能保存更改',
@@ -5072,6 +5291,9 @@ const ZH: Messages = {
   'settings.label.experimental.enableCronTools': '启用 Cron/Loop 工具',
   'settings.description.experimental.enableCronTools':
     '启用会话内 cron/loop 工具（实验性）。启用后，模型可以用 cron_create、cron_list 和 cron_delete 创建周期性提示。也可通过 QWEN_CODE_ENABLE_CRON=1 环境变量启用。',
+  'settings.label.experimental.sessionWorkflow': 'Session Workflow 计划并审阅',
+  'settings.description.experimental.sessionWorkflow':
+    '显示 Session Workflow DAG，并将 Plan 模式展示为计划并审阅。',
   'settings.label.experimental.emitToolUseSummaries': '工具使用摘要',
   'settings.description.experimental.emitToolUseSummaries':
     '每个工具批次完成后生成一个简短的 LLM 标签。紧凑模式下会替代通用的 Tool × N 标题；完整模式下显示为工具组下方的弱化 ● <label> 行。需要配置快速模型。',

@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.21.2",
+  "version": "0.21.5",
   "engines": {
     "node": ">=22.0.0"
   },
@@ -18,14 +18,15 @@
     "packages/channels/gitlab",
     "packages/channels/plugin-example",
     "integrations/external-context",
-    "!packages/desktop"
+    "!packages/desktop",
+    "!packages/desktop-shell"
   ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/QwenLM/qwen-code.git"
   },
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.21.2"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.21.5"
   },
   "scripts": {
     "start": "node scripts/start.js",
@@ -46,11 +47,13 @@
     "test:release": "cross-env NODE_OPTIONS=\"--max-old-space-size=3072\" npm run test:ci --workspaces --if-present --parallel -- --coverage.enabled=false && npm run test:scripts",
     "test:scripts": "vitest run --config ./scripts/tests/vitest.config.ts",
     "test:e2e": "cross-env VERBOSE=true KEEP_OUTPUT=true npm run test:integration:sandbox:none",
+    "test:chrome-extension:e2e": "npm -w packages/chrome-extension run test:e2e:chrome",
+    "test:chrome-extension:release": "npm run build && cross-env DEV=true npm run bundle && npm -w packages/chrome-extension run test:release",
     "test:integration:all": "npm run test:integration:sandbox:none && npm run test:integration:sandbox:docker && npm run test:integration:sandbox:podman",
     "test:integration:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests",
     "test:integration:sandbox:docker": "cross-env QWEN_SANDBOX=docker npm run build:sandbox && QWEN_SANDBOX=docker vitest run --root ./integration-tests",
     "test:integration:sandbox:podman": "cross-env QWEN_SANDBOX=podman vitest run --root ./integration-tests",
-    "test:integration:no-ak:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests ./fake-openai-server.test.ts ./cli/qwen-serve-routes.test.ts ./cli/qwen-serve-streaming.test.ts ./cli/daemon-invocation-context.test.ts",
+    "test:integration:no-ak:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --maxWorkers 2 ./fake-openai-server.test.ts ./cli/daemon-invocation-context.test.ts ./cli/list_directory.test.ts ./cli/qwen-serve-routes.test.ts ./cli/qwen-serve-streaming.test.ts ./sdk-typescript/abort-and-lifecycle.test.ts ./sdk-typescript/permission-control.test.ts ./sdk-typescript/sdk-mcp-server.test.ts ./sdk-typescript/subagents.test.ts ./sdk-typescript/system-control.test.ts ./sdk-typescript/tool-control.test.ts",
     "test:integration:sdk:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --poolOptions.threads.maxThreads 2 sdk-typescript",
     "test:integration:sdk:sandbox:docker": "cross-env QWEN_SANDBOX=docker npm run build:sandbox && QWEN_SANDBOX=docker vitest run --root ./integration-tests --poolOptions.threads.maxThreads 2 sdk-typescript",
     "test:sdk:python": "python3 -m pytest -c packages/sdk-python/pyproject.toml packages/sdk-python/tests -q",

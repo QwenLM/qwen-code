@@ -58,6 +58,7 @@ import {
   GripVerticalIcon,
   MinusIcon,
   PlusIcon,
+  Rows3Icon,
   XIcon,
 } from 'lucide-react';
 import {
@@ -1342,11 +1343,14 @@ function CustomColumnsPopover({
         <Button
           variant="ghost"
           size="sm"
-          className={styles.toolbarControl}
+          className={`${styles.toolbarControl} ${styles.compactToolbarControl}`}
+          aria-label={t('markdownTable.customColumns')}
           type="button"
         >
           <BoltIcon />
-          {t('markdownTable.customColumns')}
+          <span className={styles.compactToolbarLabel}>
+            {t('markdownTable.customColumns')}
+          </span>
         </Button>
       </PopoverTrigger>
       <PopoverContent
@@ -1923,7 +1927,7 @@ export function EnhancedTable({
     return () => {
       const focusReturn = cellDialogFocusReturnRef.current;
       cellDialogFocusReturnRef.current = null;
-      if (focusReturn?.isConnected) focusReturn.focus();
+      if (focusReturn?.isConnected) focusReturn.focus({ preventScroll: true });
     };
   }, [cellDialog]);
 
@@ -2623,10 +2627,13 @@ export function EnhancedTable({
               className={styles.densityTrigger}
               aria-label={t('markdownTable.densityLabel')}
             >
+              <Rows3Icon className="size-4" />
               <SelectValue>
-                {t('markdownTable.densityCurrent', {
-                  density: t(`markdownTable.density.${density}`),
-                })}
+                <span className={styles.compactToolbarLabel}>
+                  {t('markdownTable.densityCurrent', {
+                    density: t(`markdownTable.density.${density}`),
+                  })}
+                </span>
               </SelectValue>
             </SelectTrigger>
             <SelectContent className={styles.densityMenu}>

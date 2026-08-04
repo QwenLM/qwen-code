@@ -28,7 +28,7 @@ never consumed for eviction purposes (the field comment references a future
 | Scenario                                                                        | Symptom                                                                         |
 | ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
 | User opens multiple browser tabs, closes them without calling `DELETE /session` | Sessions accumulate in `byId`, each holding an EventBus ring (~2-4 MB)          |
-| 20 sessions (default `maxSessions`) accumulate                                  | `SessionLimitExceededError` on new `spawnOrAttach` — user locked out            |
+| 32 sessions (default `maxSessions`) accumulate                                  | `SessionLimitExceededError` on new `spawnOrAttach` — user locked out            |
 | Long-lived daemon with tab churn                                                | Unbounded memory growth in the EventBus replay rings and ACP-side session state |
 | IDE extension restarts / crashes                                                | Orphaned sessions never cleaned up                                              |
 

@@ -42,6 +42,10 @@ import {
 } from './workspace-inputs.js';
 import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
+  formatMemoryBudgetStderr,
+  resolveDaemonMemoryBudget,
+} from '@qwen-code/acp-bridge/daemonMemoryBudget';
+import {
   canonicalizeWorkspace,
   translateAndCheckAbsoluteWorkspacePath,
 } from '@qwen-code/acp-bridge/workspacePaths';
@@ -51,6 +55,7 @@ import type {
   TelemetryRuntimeConfig,
   TelemetrySettings,
 } from '@qwen-code/qwen-code-core';
+import { MEMORY_PROJECT_SCOPES } from '@qwen-code/qwen-code-core/memoryScopes';
 import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 // Dynamic-imported below (not at module scope) so the serve fast-path bundle
 // closure check doesn't trace create-sub-session's transitive deps through
@@ -126,12 +131,14 @@ import {
   listenerMaxConnections,
   parseDaemonStatusDetail,
   positiveFiniteOrNull,
+  toDaemonStatusMemoryLimits,
   type DaemonStatusIssue,
   type DaemonPerfSnapshot,
   type DaemonStartupSnapshot,
   type DaemonStatusResponse,
 } from './daemon-status.js';
-import { DaemonMetricsRing, computeCpuPercent } from './daemon-metrics-ring.js';
+import { DaemonMetricsRing } from './daemon-metrics-ring.js';
+import { computeCpuPercent } from '../runtime/cpu-percent.js';
 import { createLargePipeFrameObserver } from './large-pipe-frame-observer.js';
 import type {
   ChannelWorkerSupervisor,
@@ -143,7 +150,7 @@ import { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
 import {
   ChannelDeliveryError,
   isChannelDeliveryError,
-} from './channel-delivery-ipc.js';
+} from '../runtime/channel-delivery-ipc.js';
 import { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorization.js';
 import {
   normalizeWorkerDiagnostic,
@@ -359,7 +366,7 @@ const FAST_PATH_RUNTIME_START_AFTER_HEALTH_MS = 50;
 const FAST_PATH_RUNTIME_START_FALLBACK_MS = 1_000;
 const RUNTIME_STARTUP_TIMEOUT_ENV = 'QWEN_SERVE_RUNTIME_STARTUP_TIMEOUT_MS';
 const MAX_EVENT_RING_SIZE = 1_000_000;
-const DEFAULT_MAX_SESSIONS = 20;
+const DEFAULT_MAX_SESSIONS = 32;
 const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
 const DEFAULT_EVENT_RING_SIZE = 8000;
 const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 30 * 60_000;
@@ -678,6 +685,51 @@ function sessionArtifactsPersistenceAvailableFromSettings(
   settings: { general?: { chatRecording?: unknown } } | undefined,
 ): boolean {
   return settings?.general?.chatRecording !== false;
+}
+
+/**
+ * Reads the optional `serve.maxConcurrentSubSessions*` overrides. Only
+ * positive integers are honored; anything else falls back to the launcher's
+ * built-in defaults. A present-but-invalid value is reported through
+ * `onWarning` (matching the other settings-load fallback sites in this file)
+ * so an operator who mistypes a cap sees the fallback instead of silently
+ * running on the default. Caps are a daemon-resource control, so an untrusted
+ * workspace's settings (skipped at load time) must not raise them — the
+ * caller passes the already trust-filtered merged settings.
+ */
+export function subSessionConcurrencyCapsFromSettings(
+  serve: {
+    maxConcurrentSubSessionsPerCaller?: unknown;
+    maxConcurrentSubSessionsTotal?: unknown;
+  },
+  onWarning: (message: string) => void = writeStderrLine,
+): {
+  maxConcurrentPerCaller?: number;
+  maxConcurrentTotal?: number;
+} {
+  const asCap = (key: string, value: unknown): number | undefined => {
+    if (value === undefined) return undefined;
+    if (typeof value === 'number' && Number.isInteger(value) && value >= 1) {
+      return value;
+    }
+    onWarning(
+      `qwen serve: ignoring invalid ${key} (${JSON.stringify(value)}); ` +
+        `expected a positive integer, falling back to the built-in default.`,
+    );
+    return undefined;
+  };
+  const maxConcurrentPerCaller = asCap(
+    'maxConcurrentSubSessionsPerCaller',
+    serve.maxConcurrentSubSessionsPerCaller,
+  );
+  const maxConcurrentTotal = asCap(
+    'maxConcurrentSubSessionsTotal',
+    serve.maxConcurrentSubSessionsTotal,
+  );
+  return {
+    ...(maxConcurrentPerCaller !== undefined ? { maxConcurrentPerCaller } : {}),
+    ...(maxConcurrentTotal !== undefined ? { maxConcurrentTotal } : {}),
+  };
 }
 
 /**
@@ -1550,6 +1602,7 @@ function createBootstrapServeApp(input: {
         channelIdleTimeoutMs: channelIdleTimeoutMs(opts.channelIdleTimeoutMs),
         sessionIdleTimeoutMs: sessionIdleTimeoutMs(opts.sessionIdleTimeoutMs),
         acpConnectionCap: null,
+        memory: toDaemonStatusMemoryLimits(opts.daemonMemoryBudget),
       },
       capabilities: {
         protocolVersions: getServeProtocolVersions(),
@@ -1957,9 +2010,27 @@ async function runQwenServeImpl(
           : 'not_scheduled',
     },
   };
+  // Validate before freezing the value into the immutable daemon base env so a
+  // bad scope can never be baked into a runtime, even transiently.
+  if (
+    optsIn.memoryProjectScope !== undefined &&
+    !(MEMORY_PROJECT_SCOPES as readonly string[]).includes(
+      optsIn.memoryProjectScope,
+    )
+  ) {
+    throw new TypeError(
+      `Invalid memoryProjectScope: ${String(optsIn.memoryProjectScope)}. ` +
+        'Must be "git-root" or "workspace".',
+    );
+  }
   preResolveServeFastPathHomeEnvOverrides();
   const daemonRuntimeBaseEnv: Readonly<NodeJS.ProcessEnv> = Object.freeze({
     ...process.env,
+    ...(optsIn.memoryProjectScope !== undefined
+      ? {
+          QWEN_CODE_MEMORY_PROJECT_SCOPE: optsIn.memoryProjectScope,
+        }
+      : {}),
   });
 
   // Trim both sources. Common gotcha: `export QWEN_SERVER_TOKEN=$(cat
@@ -2009,6 +2080,8 @@ async function runQwenServeImpl(
   );
   const rawWorkspaces = resolveWorkspaceInputs(optsIn.workspace);
   const rawWorkspace = rawWorkspaces[0]!;
+  // daemonMemoryBudget is assigned after construction, once the budget is
+  // resolved below.
   const opts: ServeOptions = {
     ...optsIn,
     token,
@@ -2327,6 +2400,20 @@ async function runQwenServeImpl(
     throw new Error(
       `At most ${MAX_REGISTERED_WORKSPACES} --workspace values may be registered.`,
     );
+  }
+  // Resolve the daemon's memory figures once, for reporting only. Nothing
+  // downstream consumes them to size a child: dividing a pool by a workspace
+  // count is unsound while registration does not spawn a child, and bounding
+  // the aggregate needs admission at spawn time keyed on live children. This
+  // establishes the denominator that work will be designed against.
+  opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
+    budgetMb: opts.memoryBudgetMb,
+  });
+  if (
+    opts.daemonMemoryBudget.budgetSource === 'flag' ||
+    opts.daemonMemoryBudget.insufficientMemory
+  ) {
+    writeStderrLine(formatMemoryBudgetStderr(opts.daemonMemoryBudget));
   }
   let workspaceRegistrationStore = deps.workspaceRegistrationStore;
   if (
@@ -3662,6 +3749,9 @@ async function runQwenServeImpl(
     const subSessionLauncher = createSubSessionLauncher({
       getBridge: () => bridgeRef,
       boundWorkspace,
+      ...subSessionConcurrencyCapsFromSettings(
+        runtimeBootSettings?.merged.serve ?? {},
+      ),
     });
     const bridge =
       deps.bridge ??
@@ -4057,6 +4147,9 @@ async function runQwenServeImpl(
       const secondarySubSessionLauncher = createSubSessionLauncher({
         getBridge: () => secondaryBridgeRef,
         boundWorkspace: workspaceInput.cwd,
+        ...subSessionConcurrencyCapsFromSettings(
+          secondarySettings?.merged.serve ?? {},
+        ),
       });
       const secondaryBridge = runtime.createAcpSessionBridge({
         clientMcpSender: secondaryClientMcpSenderRegistry.lookup,
@@ -4555,6 +4648,9 @@ async function runQwenServeImpl(
       const wsSubSessionLauncher = createSubSessionLauncher({
         getBridge: () => wsBridgeRef,
         boundWorkspace: cwd,
+        ...subSessionConcurrencyCapsFromSettings(
+          wsSettings?.merged.serve ?? {},
+        ),
       });
       let wsBridge: ReturnType<typeof runtime.createAcpSessionBridge>;
       try {

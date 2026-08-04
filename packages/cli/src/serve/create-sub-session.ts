@@ -46,15 +46,16 @@ import { writeStderrLine } from '../utils/stdioHelpers.js';
 
 const log = createDebugLogger('SUB_SESSION');
 
-/** Per-caller ceiling on concurrent in-flight sub-sessions. A `first-turn`
- * request holds a slot until its turn finishes; parallel tool calls from one
- * caller must not spawn unbounded sub-sessions. Over the cap the request is
- * rejected (surfaced as the tool's error), never silently dropped. */
-export const MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER = 5;
+/** Default per-caller ceiling on concurrent in-flight sub-sessions. A
+ * `first-turn` request holds a slot until its turn finishes; parallel tool
+ * calls from one caller must not spawn unbounded sub-sessions. Over the cap
+ * the request is rejected (surfaced as the tool's error), never silently
+ * dropped. Overridable via `serve.maxConcurrentSubSessionsPerCaller`. */
+export const MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER = 16;
 
 /**
- * Ceiling on concurrent in-flight sub-sessions across ALL callers of this
- * workspace's launcher.
+ * Default ceiling on concurrent in-flight sub-sessions across ALL callers of
+ * this workspace's launcher.
  *
  * The per-caller cap is keyed on `callerSessionId`, and the daemon can only
  * authenticate that id as "a session on this channel" — every session of a
@@ -62,9 +63,15 @@ export const MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER = 5;
  * *which* of them issued the call. A child running attacker code could rotate
  * ids to open a fresh bucket per launch, or charge them to a sibling. This
  * bound does not depend on the id being honest: it holds whichever bucket the
- * launch is charged to.
+ * launch is charged to. Overridable via
+ * `serve.maxConcurrentSubSessionsTotal`.
+ *
+ * The default is kept below the bridge's default `maxSessions` (32): a finished sub-session
+ * stays registered (idle) for up to `sessionIdleTimeoutMs`, so a total cap at
+ * the session-table limit would make the next fan-out wave fail at bridge
+ * admission instead of this cap, and starve interactive sessions of slots.
  */
-export const MAX_CONCURRENT_SUB_SESSIONS_TOTAL = 20;
+export const MAX_CONCURRENT_SUB_SESSIONS_TOTAL = 24;
 
 /** Wall-clock ceiling for `first-turn`: a hung sub-session turn must not block
  * the caller forever. On timeout we return whatever text accumulated so far. */
@@ -84,9 +91,9 @@ const MAX_RESULT_CHARS = 32_000;
 const MAX_NAME_LENGTH = 60;
 
 /** How many spawned sub-session ids the depth-1 gate remembers. Far above any
- * plausible live sub-session count (`maxSessions` defaults to 20), so eviction
+ * plausible live sub-session count (`maxSessions` defaults to 32), so eviction
  * only ever discards long-reaped sessions. */
-const MAX_TRACKED_SPAWNED_SESSIONS = 1024;
+export const MAX_TRACKED_SPAWNED_SESSIONS = 1024;
 
 export interface SubSessionLauncher {
   /** The `onCreateSubSession` callback wired into the bridge. Returns a Promise
@@ -105,6 +112,12 @@ export interface CreateSubSessionLauncherOptions {
   /** Sent-mode background-drain ceiling; defaults to
    * {@link SENT_MODE_DRAIN_TIMEOUT_MS}. Exposed for tests. */
   sentModeDrainTimeoutMs?: number;
+  /** Per-caller concurrency cap; defaults to
+   * {@link MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER}. */
+  maxConcurrentPerCaller?: number;
+  /** Workspace-wide concurrency cap; defaults to
+   * {@link MAX_CONCURRENT_SUB_SESSIONS_TOTAL}. */
+  maxConcurrentTotal?: number;
 }
 
 /** A readable, control-char-free session name (the bridge's title guard rejects
@@ -250,6 +263,17 @@ export function createSubSessionLauncher(
   const firstTurnTimeoutMs = opts.firstTurnTimeoutMs ?? FIRST_TURN_TIMEOUT_MS;
   const sentModeDrainTimeoutMs =
     opts.sentModeDrainTimeoutMs ?? SENT_MODE_DRAIN_TIMEOUT_MS;
+  const maxConcurrentPerCaller =
+    opts.maxConcurrentPerCaller ?? MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER;
+  // Clamped to the tracked-id set size so the in-flight population can never
+  // exceed it. This bounds concurrency, not the depth-1 gate: ids leave
+  // `spawnedSessionIds` only by FIFO eviction past that cap (finished ids are
+  // never removed), so once cumulative spawns pass it a still-alive id can
+  // still be evicted and the gate degrades to best-effort.
+  const maxConcurrentTotal = Math.min(
+    opts.maxConcurrentTotal ?? MAX_CONCURRENT_SUB_SESSIONS_TOTAL,
+    MAX_TRACKED_SPAWNED_SESSIONS,
+  );
   const inflight = new Map<string, number>();
   // Ids of the sub-sessions this launcher spawned — the depth-1 gate reads it.
   // Insertion-ordered and evicted FIFO past the cap so a long-lived daemon
@@ -295,9 +319,9 @@ export function createSubSessionLauncher(
     }
 
     // Depth-1 gate. Every daemon session wires a spawner, sub-sessions included,
-    // and each gets its own 5-slot bucket — so without this a sub-session can
-    // spawn 5 more, each of which spawns 5 more (5ⁿ), exhausting `maxSessions`
-    // from one prompt. `callerSessionId` is required and authenticated at the
+    // and each gets its own bucket — so without this a sub-session can spawn
+    // more, each of which spawns more (capⁿ), exhausting `maxSessions` from
+    // one prompt. `callerSessionId` is required and authenticated at the
     // bridge (`ownsSession`), so it can neither be forged nor omitted to
     // sidestep this gate or the per-caller cap below.
     if (spawnedSessionIds.has(info.callerSessionId)) {
@@ -312,18 +336,18 @@ export function createSubSessionLauncher(
     // own bucket, which is the same as having no cap at all.
     const key = info.callerSessionId;
     const current = inflight.get(key) ?? 0;
-    if (current >= MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER) {
+    if (current >= maxConcurrentPerCaller) {
       throw new Error(
         `Too many concurrent sub-sessions for this session ` +
-          `(cap ${MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER}); wait for one to finish.`,
+          `(cap ${maxConcurrentPerCaller}); wait for one to finish.`,
       );
     }
     // Forge-proof backstop: the per-caller cap above trusts `callerSessionId`,
     // this one does not. See MAX_CONCURRENT_SUB_SESSIONS_TOTAL.
-    if (inflightTotal >= MAX_CONCURRENT_SUB_SESSIONS_TOTAL) {
+    if (inflightTotal >= maxConcurrentTotal) {
       throw new Error(
         `Too many concurrent sub-sessions in this workspace ` +
-          `(cap ${MAX_CONCURRENT_SUB_SESSIONS_TOTAL}); wait for one to finish.`,
+          `(cap ${maxConcurrentTotal}); wait for one to finish.`,
       );
     }
     inflight.set(key, current + 1);

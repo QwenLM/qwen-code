@@ -21,6 +21,13 @@ const workflowPath = join(
   'qwen-triage.yml',
 );
 const doc = parse(readFileSync(workflowPath, 'utf8'));
+const cacheProducerPath = join(
+  dirname(fileURLToPath(import.meta.url)),
+  '..',
+  'workflows',
+  'npm-cache.yml',
+);
+const cacheProducerDoc = parse(readFileSync(cacheProducerPath, 'utf8'));
 const prWorkflowPath = join(
   dirname(fileURLToPath(import.meta.url)),
   '..',
@@ -36,10 +43,93 @@ const triageJob = doc.jobs.triage;
 const steps = triageJob.steps;
 const triageStep = steps.find((s) => s.id === 'triage');
 const cleanStep = steps.find((s) => s.name === 'Clean stale agent state');
-const verifyJob = doc.jobs.verify;
-const verifyCleanupStep = verifyJob.steps.find(
-  (s) => s.name === 'Clean up runner workspace',
+const triageOwnershipStep = steps.find(
+  (s) => s.name === 'Restore workspace ownership',
 );
+const verifyJob = doc.jobs.verify;
+const verifyOwnershipStep = verifyJob.steps.find(
+  (s) => s.name === 'Restore workspace ownership',
+);
+const tmuxJob = doc.jobs['tmux-testing'];
+const tmuxOwnershipStep = tmuxJob.steps.find(
+  (s) => s.name === 'Restore workspace ownership',
+);
+
+const ciWorkflowPath = join(
+  dirname(fileURLToPath(import.meta.url)),
+  '..',
+  'workflows',
+  'ci.yml',
+);
+const ciDoc = parse(readFileSync(ciWorkflowPath, 'utf8'));
+const ciTestJob = ciDoc.jobs.test;
+const ciOwnershipStep = ciTestJob.steps.find(
+  (s) => s.name === 'Restore workspace ownership',
+);
+const ciCleanStep = ciTestJob.steps.find(
+  (s) => s.name === 'Clean stale .qwen before checkout',
+);
+
+const prReviewWorkflowPath = join(
+  dirname(fileURLToPath(import.meta.url)),
+  '..',
+  'workflows',
+  'qwen-code-pr-review.yml',
+);
+const prReviewDoc = parse(readFileSync(prReviewWorkflowPath, 'utf8'));
+const prReviewJob = prReviewDoc.jobs['review-pr'];
+const prReviewOwnershipStep = prReviewJob.steps.find(
+  (s) => s.name === 'Restore workspace ownership',
+);
+const ciWebShellJob = ciDoc.jobs.web_shell_e2e_smoke;
+const ciWebShellOwnershipStep = ciWebShellJob.steps.find(
+  (s) => s.name === 'Restore workspace ownership',
+);
+const ciIntegrationJob = ciDoc.jobs.integration_cli;
+const ciIntegrationOwnershipStep = ciIntegrationJob.steps.find(
+  (s) => s.name === 'Restore workspace ownership',
+);
+
+// A probe that only checks .qwen/.git reports "healthy" on workspace-wide
+// poisoning (root-owned node_modules/dist, no .qwen/.git) and skips the
+// chown that main did unconditionally — checkout then fails with EACCES.
+// Recovery must stay unconditional and run before checkout; these tests
+// guard against re-adding the probe gating, the inert rename-aside
+// fallback, or moving the restore below the checkout step.
+const assertUnconditional = (jobSteps, step, label) => {
+  assert.ok(step, `${label} must have a "Restore workspace ownership" step`);
+  assert.match(
+    step.run,
+    /chown -R "\$RUNNER_UID:\$RUNNER_GID" "\$GITHUB_WORKSPACE"/,
+    `${label} must restore ownership of the whole workspace`,
+  );
+  assert.match(
+    step.run,
+    /sudo -n chown -R "\$RUNNER_UID:\$RUNNER_GID" "\$GITHUB_WORKSPACE"/,
+    `${label} must keep the sudo fallback that recovers root-owned files on a non-root runner`,
+  );
+  assert.match(
+    step.run,
+    /chmod -R u\+rwX "\$GITHUB_WORKSPACE"/,
+    `${label} must restore write permission of the whole workspace`,
+  );
+  assert.doesNotMatch(
+    step.run,
+    /recovery_needed|\.probe\./,
+    `${label} must not gate recovery behind a .qwen/.git probe — poisoning is workspace-wide`,
+  );
+  assert.doesNotMatch(
+    step.run,
+    /\.stale\./,
+    `${label} must not rename dirs aside — the rename-aside fallback never unblocks checkout`,
+  );
+  const restoreIdx = jobSteps.indexOf(step);
+  const checkoutIdx = jobSteps.findIndex((s) => /^Checkout/.test(s.name));
+  assert.ok(
+    restoreIdx !== -1 && checkoutIdx !== -1 && restoreIdx < checkoutIdx,
+    `${label} ownership restore must run before checkout`,
+  );
+};
 
 describe('qwen-triage: agent tool/permission settings', () => {
   it('passes `settings:` (not the silently-dropped `settings_json:`)', () => {
@@ -109,10 +199,47 @@ describe('qwen-triage: agent tool/permission settings', () => {
 
 describe('qwen-triage: fork-PR runner routing', () => {
   const runsOn = String(triageJob['runs-on']);
+  const authorizeJob = doc.jobs.authorize;
+  const authorizeRunsOn = String(authorizeJob['runs-on']);
 
-  it('gates the persistent ECS pool on same-repo (fork code never persists)', () => {
+  it('routes the ECS pool on same-repo or a REAL write-permission check', () => {
     assert.match(runsOn, /head\.repo\.full_name == github\.repository/);
+    // The boundary is the collaborator-permission lookup authorize computes,
+    // NOT the coarse author_association: MEMBER admits any org member and
+    // COLLABORATOR admits read-only invitees — neither implies write access
+    // on this repo, and this job's agent loads bot PATs and a model key.
+    assert.match(
+      runsOn,
+      /needs\.authorize\.outputs\.author_can_write == 'true'/,
+    );
+    assert.doesNotMatch(runsOn, /author_association/);
     assert.match(runsOn, /ecs-qwen/);
+  });
+
+  it('keeps the authorize gate itself on the same-repo guard', () => {
+    // authorize IS the permission check (and loads CI_BOT_PAT); it cannot
+    // route on its own output and must not widen to association-based trust.
+    assert.match(authorizeRunsOn, /head\.repo\.full_name == github\.repository/);
+    assert.doesNotMatch(authorizeRunsOn, /author_association/);
+    assert.doesNotMatch(authorizeRunsOn, /needs\./);
+  });
+
+  it('computes author_can_write from the collaborator-permission API', () => {
+    assert.equal(
+      authorizeJob.outputs.author_can_write,
+      '${{ steps.perm.outputs.author_can_write }}',
+    );
+    const perm = authorizeJob.steps.find((s) => s.id === 'perm');
+    assert.ok(
+      String(perm.env.PR_AUTHOR).includes(
+        'github.event.pull_request.user.login',
+      ),
+    );
+    assert.match(perm.run, /collaborators\/\$\{PR_AUTHOR\}\/permission/);
+    assert.match(
+      perm.run,
+      /admin\|maintain\|write\) echo "author_can_write=true"/,
+    );
   });
 
   it('falls back to an ephemeral hosted runner', () => {
@@ -282,24 +409,161 @@ describe('qwen-triage: git exec-vector cleanup', () => {
   });
 });
 
-describe('qwen-triage: verify workspace cleanup', () => {
-  it('restores write permission before returning the workspace to the runner', () => {
-    assert.ok(verifyCleanupStep, 'verify cleanup step must exist');
+describe('qwen-triage: workspace ownership restore', () => {
+  it('verify: restores write permission before returning the workspace to the runner', () => {
+    assert.ok(verifyOwnershipStep, 'verify ownership-restore step must exist');
+    assert.equal(
+      verifyOwnershipStep.if,
+      'always()',
+      'ownership restore must run unconditionally — without always(), a failed/cancelled verify leaves root-owned files that break the next checkout',
+    );
     assert.match(
-      verifyCleanupStep.run,
-      /chmod -R u\+rwX "\$GITHUB_WORKSPACE\/\.qwen"/,
-      'verify makes .qwen read-only before the agent runs, so cleanup must restore its owner write bits',
+      verifyOwnershipStep.run,
+      /chmod -R u\+rwX "\$GITHUB_WORKSPACE"/,
+      'verify hardens the workspace before the agent runs, so cleanup must restore owner write bits across the whole workspace, not just .qwen',
     );
 
-    const chmodIndex = verifyCleanupStep.run.indexOf(
-      'chmod -R u+rwX "$GITHUB_WORKSPACE/.qwen"',
+    const chmodIndex = verifyOwnershipStep.run.indexOf(
+      'chmod -R u+rwX "$GITHUB_WORKSPACE"',
     );
-    const chownIndex = verifyCleanupStep.run.indexOf(
+    const chownIndex = verifyOwnershipStep.run.indexOf(
       'chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE"',
     );
     assert.ok(
       chmodIndex < chownIndex,
       'the root-owned read-only tree must be made writable before ownership is returned',
+    );
+    assert.match(
+      verifyOwnershipStep.run,
+      /stat -c '%u' "\$RUNNER_TEMP"/,
+      'verify runs as root in a container; RUNNER_UID must come from stat on RUNNER_TEMP, not id -u (which returns 0 and skips the chown)',
+    );
+  });
+
+  it('tmux-testing: returns ownership to the runner unconditionally', () => {
+    assert.ok(
+      tmuxOwnershipStep,
+      'tmux-testing ownership-restore step must exist',
+    );
+    assert.equal(
+      tmuxOwnershipStep.if,
+      'always()',
+      'ownership restore must run unconditionally — the prepare step chowns to node:node; without always(), a failed/cancelled run leaves node-owned files that break the next checkout',
+    );
+    assert.match(
+      tmuxOwnershipStep.run,
+      /chown -R "\$RUNNER_UID:\$RUNNER_GID" "\$GITHUB_WORKSPACE"/,
+      'tmux-testing must return workspace ownership to the runner',
+    );
+    assert.match(
+      tmuxOwnershipStep.run,
+      /stat -c '%u' "\$RUNNER_TEMP"/,
+      'tmux-testing runs as root in a container; RUNNER_UID must come from stat on RUNNER_TEMP, not id -u (which returns 0 and skips the chown)',
+    );
+  });
+
+  it('verify: a chmod failure is visible, not silent', () => {
+    assert.match(
+      verifyOwnershipStep.run,
+      /::warning::could not restore workspace write permissions/,
+      'chmod failure must emit a ::warning::, not be swallowed by || true',
+    );
+  });
+
+  it('verify: a chown failure is visible, not silent', () => {
+    assert.match(
+      verifyOwnershipStep.run,
+      /::warning::could not restore workspace ownership/,
+      'chown failure must emit a ::warning::, not be swallowed by || true',
+    );
+    assert.match(
+      verifyOwnershipStep.run,
+      /::warning::could not determine runner UID/,
+      'a stat failure (UID=0 fallback) must emit a ::warning::, not silently skip the restore',
+    );
+  });
+
+  it('tmux-testing: restores write permission as well as ownership', () => {
+    assert.match(
+      tmuxOwnershipStep.run,
+      /chmod -R u\+rwX "\$GITHUB_WORKSPACE"/,
+      'tmux-testing must chmod the workspace so a read-only tree does not survive the restore',
+    );
+  });
+
+  it('tmux-testing: a chown failure is visible, not silent', () => {
+    assert.match(
+      tmuxOwnershipStep.run,
+      /::warning::could not restore workspace ownership/,
+      'chown failure must emit a ::warning::, not be swallowed by || true',
+    );
+    assert.match(
+      tmuxOwnershipStep.run,
+      /::warning::could not determine runner UID/,
+      'a stat failure (UID=0 fallback) must emit a ::warning::, not silently skip the restore',
+    );
+  });
+
+  it('triage: restores ownership before checkout on the ECS pool', () => {
+    assertUnconditional(steps, triageOwnershipStep, 'qwen-triage triage');
+  });
+});
+
+describe('ci.yml: self-hosted checkout jobs restore ownership unconditionally', () => {
+  it('test job restores ownership unconditionally', () => {
+    assertUnconditional(ciTestJob.steps, ciOwnershipStep, 'ci.yml test');
+  });
+
+  it('web_shell_e2e_smoke restores ownership unconditionally', () => {
+    assertUnconditional(
+      ciWebShellJob.steps,
+      ciWebShellOwnershipStep,
+      'ci.yml web_shell_e2e_smoke',
+    );
+  });
+
+  it('integration_cli restores ownership unconditionally', () => {
+    assertUnconditional(
+      ciIntegrationJob.steps,
+      ciIntegrationOwnershipStep,
+      'ci.yml integration_cli',
+    );
+  });
+
+  it('cleanup step removes .qwen but no longer any .stale.* dirs', () => {
+    assert.ok(
+      ciCleanStep,
+      'ci.yml test job must keep its "Clean stale .qwen before checkout" step',
+    );
+    assert.match(
+      ciCleanStep.run,
+      /\$GITHUB_WORKSPACE\/\.qwen/,
+      'cleanup must remove .qwen by absolute path',
+    );
+    assert.match(
+      ciCleanStep.run,
+      /sudo -n rm -rf/,
+      'cleanup must fall back to sudo for root-owned dirs',
+    );
+    assert.match(
+      ciCleanStep.run,
+      /\[ ! -L "\$GITHUB_WORKSPACE\/\.qwen" \]/,
+      'cleanup must not follow a symlinked .qwen: chmod -R dereferences a symlinked argument and would widen an outside tree',
+    );
+    assert.doesNotMatch(
+      ciCleanStep.run,
+      /\.stale\./,
+      'cleanup must not reference .stale.* dirs once rename-aside is gone',
+    );
+  });
+});
+
+describe('qwen-code-pr-review.yml: ownership recovery is unconditional', () => {
+  it('restores ownership without probe gating or rename-aside', () => {
+    assertUnconditional(
+      prReviewJob.steps,
+      prReviewOwnershipStep,
+      'qwen-code-pr-review.yml review-pr',
     );
   });
 });
@@ -329,5 +593,185 @@ describe('qwen-triage: Stage 1e revert-pattern signals', () => {
 
   it('includes Risk field in the Stage 1 comment template', () => {
     assert.ok(prSkill.includes('Risk: <if Stage 1e matched'));
+  });
+});
+
+describe('qwen-triage: npm cache restore-only invariant', () => {
+  for (const [jobName, jobDef] of [
+    ['verify', verifyJob],
+    ['tmux-testing', tmuxJob],
+  ]) {
+    it(`${jobName}: uses actions/cache/restore with no save path`, () => {
+      const cacheStep = jobDef.steps.find(
+        (s) => s.name === 'Restore npm cache',
+      );
+      assert.ok(cacheStep, `'Restore npm cache' step must exist in ${jobName}`);
+      assert.match(
+        cacheStep.uses,
+        /^actions\/cache\/restore@/,
+        'must use the restore-only variant (no post-save hook)',
+      );
+      for (const s of jobDef.steps) {
+        if (s.uses) {
+          assert.doesNotMatch(
+            s.uses,
+            /actions\/cache(\/save)?@/,
+            `${jobName} must not have a cache save or full cache action`,
+          );
+        }
+      }
+    });
+
+    it(`${jobName}: npm ci --cache matches the restored directory`, () => {
+      const cacheStep = jobDef.steps.find(
+        (s) => s.name === 'Restore npm cache',
+      );
+      const prepareStep = jobDef.steps.find(
+        (s) => s.name === 'Install and build PR app',
+      );
+      assert.ok(
+        prepareStep,
+        `'Install and build PR app' step must exist in ${jobName}`,
+      );
+      const dir = cacheStep.with.path.replace(
+        /^\$\{\{\s*runner\.temp\s*\}\}\//,
+        '',
+      );
+      assert.ok(dir, 'cache path must resolve to a directory name');
+      assert.ok(
+        prepareStep.run.includes(`--cache "$RUNNER_TEMP/${dir}"`),
+        `npm ci must use --cache "$RUNNER_TEMP/${dir}"`,
+      );
+    });
+
+    it(`${jobName}: clears stale npm cache before restore`, () => {
+      const clearIdx = jobDef.steps.findIndex(
+        (s) => s.name === 'Clear stale npm cache',
+      );
+      const restoreIdx = jobDef.steps.findIndex(
+        (s) => s.name === 'Restore npm cache',
+      );
+      assert.ok(clearIdx !== -1, `'Clear stale npm cache' step must exist in ${jobName}`);
+      assert.ok(restoreIdx !== -1, `'Restore npm cache' step must exist in ${jobName}`);
+      assert.ok(
+        clearIdx < restoreIdx,
+        'clear step must come before restore step',
+      );
+      assert.match(
+        jobDef.steps[clearIdx].run,
+        /rm -rf/,
+        'clear step must rm -rf the cache directory',
+      );
+      const cacheStep = jobDef.steps.find(
+        (s) => s.name === 'Restore npm cache',
+      );
+      const dir = cacheStep.with.path.replace(
+        /^\$\{\{\s*runner\.temp\s*\}\}\//,
+        '',
+      );
+      assert.ok(
+        jobDef.steps[clearIdx].run.includes(`/${dir}"`),
+        `clear step must remove the restored cache directory (${dir})`,
+      );
+    });
+
+    it(`${jobName}: reports the cache hit so a permanent miss is visible`, () => {
+      const cacheStep = jobDef.steps.find(
+        (s) => s.name === 'Restore npm cache',
+      );
+      assert.equal(
+        cacheStep.id,
+        'npm-cache',
+        'restore step needs an id so its cache-hit output is readable',
+      );
+      const reportStep = jobDef.steps.find(
+        (s) => s.name === 'Report npm cache hit',
+      );
+      assert.ok(reportStep, "'Report npm cache hit' step must exist");
+      assert.match(
+        reportStep.run,
+        /steps\.npm-cache\.outputs\.cache-hit/,
+        'report step must surface the cache-hit output',
+      );
+    });
+  }
+});
+
+describe('qwen-triage: npm cache producer workflow', () => {
+  const saveJob = cacheProducerDoc.jobs.save;
+
+  it('triggers on push to main only', () => {
+    const push = cacheProducerDoc.on.push ?? cacheProducerDoc[true]?.push;
+    assert.ok(push, 'must have a push trigger');
+    assert.deepEqual(push.branches, ['main']);
+    assert.deepEqual(push.paths, ['package-lock.json']);
+  });
+
+  it('saves with the same key and path the triage lanes restore', () => {
+    const saveStep = saveJob.steps.find(
+      (s) => s.uses?.startsWith('actions/cache/save@'),
+    );
+    assert.ok(saveStep, 'must have an actions/cache/save step');
+    for (const [jobName, jobDef] of [
+      ['verify', verifyJob],
+      ['tmux-testing', tmuxJob],
+    ]) {
+      const restoreStep = jobDef.steps.find(
+        (s) => s.name === 'Restore npm cache',
+      );
+      assert.equal(
+        saveStep.with.path,
+        restoreStep.with.path,
+        `cache path must match ${jobName} restore path`,
+      );
+      assert.equal(
+        saveStep.with.key,
+        restoreStep.with.key,
+        `cache key must match ${jobName} restore key`,
+      );
+    }
+  });
+
+  it('populates the cache directory it saves', () => {
+    const saveStep = saveJob.steps.find(
+      (s) => s.uses?.startsWith('actions/cache/save@'),
+    );
+    assert.ok(saveStep, 'must have an actions/cache/save step');
+    const dir = saveStep.with.path.replace(
+      /^\$\{\{\s*runner\.temp\s*\}\}\//,
+      '',
+    );
+    assert.ok(dir, 'save path must resolve to a directory name');
+    const populateStep = saveJob.steps.find(
+      (s) => s.name === 'Populate npm cache',
+    );
+    assert.ok(populateStep, "'Populate npm cache' step must exist");
+    assert.ok(
+      populateStep.run.includes(`--cache "$RUNNER_TEMP/${dir}"`),
+      `populate step must fill the saved cache directory (--cache "$RUNNER_TEMP/${dir}")`,
+    );
+  });
+
+  it('runs on the same target as the consumers so the cache version matches', () => {
+    // actions/cache scopes an entry by a hash of the literal cache path plus
+    // the compression method. A producer on a different runner or outside the
+    // container computes a different version, so every restore misses even
+    // when the key and path strings match — pin runs-on + container to the
+    // consumers' so both match by construction.
+    for (const [jobName, jobDef] of [
+      ['verify', verifyJob],
+      ['tmux-testing', tmuxJob],
+    ]) {
+      assert.deepEqual(
+        saveJob['runs-on'],
+        jobDef['runs-on'],
+        `producer runs-on must match ${jobName}`,
+      );
+      assert.deepEqual(
+        saveJob.container,
+        jobDef.container,
+        `producer container must match ${jobName}`,
+      );
+    }
   });
 });

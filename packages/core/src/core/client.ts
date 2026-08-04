@@ -83,7 +83,6 @@ import { CommitAttributionService } from '../services/commitAttribution.js';
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
 import { AUTO_SKILL_THRESHOLD } from '../memory/manager.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
-import { DEFAULT_AUTO_SKILL_MAX_TURNS } from '../memory/skillReviewAgentPlanner.js';
 import { isProjectSkillPath } from '../skills/skill-paths.js';
 import { ToolNames } from '../tools/tool-names.js';
 
@@ -1825,7 +1824,6 @@ export class GeminiClient {
           skillsModified: this.skillsModifiedInSession,
           enabled: autoSkillEnabled,
           threshold: AUTO_SKILL_THRESHOLD,
-          maxTurns: DEFAULT_AUTO_SKILL_MAX_TURNS,
           confirmBeforePersist: this.config.getAutoSkillConfirmEnabled(),
         });
         if (skillReviewResult.status === 'scheduled') {
@@ -3945,12 +3943,10 @@ export class GeminiClient {
     signal?: AbortSignal,
     customInstructions?: string,
   ): Promise<ChatCompressionInfo> {
-    const model = this.config.getModel();
     const previousSessionStartContext = this.lastSessionStartContext;
     const previousSessionStartSource = this.lastSessionStartSource;
     const info = await this.getChat().tryCompress(
       prompt_id,
-      model,
       force,
       signal,
       customInstructions ? { customInstructions } : undefined,

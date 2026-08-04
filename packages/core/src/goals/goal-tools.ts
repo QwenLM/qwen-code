@@ -40,9 +40,7 @@ export interface UpdateGoalToolParams {
   blockerKind?: 'authority' | 'external' | 'repeated';
 }
 
-export interface GoalToolResult extends ToolResult {
-  terminateTurn?: boolean;
-}
+export type GoalToolResult = ToolResult;
 
 type GetGoalRuntime = Pick<GoalRuntime, 'getGoalForWorker'> & {
   getSnapshotForPermit?: GoalRuntime['getSnapshotForPermit'];
@@ -185,12 +183,6 @@ class UpdateGoalInvocation extends BaseToolInvocation<
         };
       }
       const citedEvidenceRefs = new Set(normalizedEvidenceRefs);
-      if (
-        this.params.status === 'complete' &&
-        view.evidenceCatalog?.truncated
-      ) {
-        return truncatedCatalogResult();
-      }
       const uncitedCurrentDeliveredOutput = evidenceEntries
         .filter(
           (entry) =>
@@ -381,21 +373,6 @@ async function workerViewForPermit(
   } finally {
     if (onAbort) signal.removeEventListener('abort', onAbort);
   }
-}
-
-function truncatedCatalogResult(): GoalToolResult {
-  const error =
-    'The bounded evidence catalog is truncated, so current-turn output is not provably exhaustive. Continue in a new Goal turn with a smaller evidence set.';
-  return {
-    llmContent: JSON.stringify({
-      proposalRecorded: false,
-      readyForVerification: false,
-      goalLifecycleChanged: false,
-      error,
-    }),
-    returnDisplay:
-      'Goal proposal was not recorded because its evidence catalog is truncated.',
-  };
 }
 
 function recordTerminalProposalForPermit(
