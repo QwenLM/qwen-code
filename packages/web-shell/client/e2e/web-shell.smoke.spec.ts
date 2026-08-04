@@ -42,17 +42,23 @@ test('loads replayed transcript and connects to fake daemon @smoke', async ({
   );
 
   // #8214: pin the explicit ::selection rule on message content. This
-  // asserts the rule is present and matches the [data-user-selectable]
-  // wrapper; it does not verify the Firefox paint effect itself (this
-  // repo's Playwright projects are chromium-only).
-  const selectionBackground = await page.evaluate(() => {
-    const content = document.querySelector(
-      '[data-user-selectable] *',
-    ) as Element | null;
-    if (!content) return null;
-    return getComputedStyle(content, '::selection').backgroundColor;
+  // asserts the rule is present and matches every [data-user-selectable]
+  // row (user and assistant alike), not just the first one; it does not
+  // verify the Firefox paint effect itself (this repo's Playwright
+  // projects are chromium-only).
+  const selectionBackgrounds = await page.evaluate(() => {
+    const nodes = document.querySelectorAll('[data-user-selectable] *');
+    return Array.from(
+      nodes,
+      (content) => getComputedStyle(content, '::selection').backgroundColor,
+    );
   });
-  expect(selectionBackground).toBe('rgba(0, 128, 255, 0.3)');
+  // The fixture renders both a user and an assistant message, so there must
+  // be at least two selectable rows and every one must carry the rule.
+  expect(selectionBackgrounds.length).toBeGreaterThanOrEqual(2);
+  for (const bg of selectionBackgrounds) {
+    expect(bg).toBe('rgba(0, 128, 255, 0.3)');
+  }
 });
 
 test('submits a prompt and renders a streamed assistant response @smoke', async ({

@@ -217,4 +217,25 @@ describe('build artifact — package boundary', () => {
     });
     expect(unscoped).toEqual([]);
   });
+
+  it('ships the ::selection highlight for message content in the lib bundle (#8214)', () => {
+    // The defensive ::selection rule must reach embedded deployments -
+    // i.e. it must be in the component-scoped CSS injected into dist/index.js,
+    // not only the standalone app's standalone.css. Asserting the rule is
+    // present and scoped under the WebShell root pins the lib-bundle fix.
+    let matched: Rule | undefined;
+    postcss.parse(readInjectedCss()).walkRules((rule) => {
+      if (rule.selector.includes('data-user-selectable] ::selection')) {
+        matched = rule;
+      }
+    });
+    expect(
+      matched,
+      '::selection rule for [data-user-selectable] missing from lib bundle',
+    ).toBeDefined();
+    expect(matched?.selector).toContain('[data-web-shell-root]');
+    expect(
+      matched?.nodes.some((n) => n.type === 'decl' && n.prop === 'background'),
+    ).toBe(true);
+  });
 });
