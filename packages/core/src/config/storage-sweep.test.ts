@@ -109,6 +109,62 @@ describe('sweepStaleWorktreeProjects', () => {
     expect(fs.existsSync(normal)).toBe(true);
   });
 
+  it('removes a bucket keyed by a gone ephemeral launch cwd', async () => {
+    // #7906's main class: enter_worktree from a throwaway cwd T inside the
+    // OS temp dir lands the sidecar in bucket sanitizeCwd(T), and the gate
+    // keyed by the worktree path can never match that shape.
+    const launchCwd = path.join(base, 'gone-launch-cwd');
+    const entry = sanitizeCwd(launchCwd);
+    const gone = makeProjectSnapshot(base, entry, {
+      worktreePath: path.join(launchCwd, '.qwen', 'worktrees', 'slug'),
+      originalCwd: launchCwd,
+    });
+
+    const removed = await sweepStaleWorktreeProjects(base);
+
+    expect(removed).toEqual([entry]);
+    expect(fs.existsSync(gone)).toBe(false);
+  });
+
+  it('keeps the bucket when the ephemeral launch cwd still exists', async () => {
+    const launchCwd = path.join(base, 'still-here');
+    fs.mkdirSync(launchCwd, { recursive: true });
+    const kept = makeProjectSnapshot(base, sanitizeCwd(launchCwd), {
+      worktreePath: path.join(launchCwd, '.qwen', 'worktrees', 'slug'),
+      originalCwd: launchCwd,
+    });
+
+    const removed = await sweepStaleWorktreeProjects(base);
+
+    expect(removed).toEqual([]);
+    expect(fs.existsSync(kept)).toBe(true);
+  });
+
+  it('keeps a bucket whose launch cwd is outside the temp dir and gone', async () => {
+    // An absent repo dir can mean an unplugged drive, not garbage.
+    const launchCwd = path.join(base, 'outside-tmp');
+    const kept = makeProjectSnapshot(base, sanitizeCwd('/gone/repo'), {
+      worktreePath: path.join(launchCwd, 'worktrees', 'slug'),
+      originalCwd: '/gone/repo',
+    });
+
+    const removed = await sweepStaleWorktreeProjects(base);
+
+    expect(removed).toEqual([]);
+    expect(fs.existsSync(kept)).toBe(true);
+  });
+
+  it('keeps a gate-mismatched bucket whose sidecar has no originalCwd', async () => {
+    const kept = makeProjectSnapshot(base, sanitizeCwd('/some/where'), {
+      worktreePath: path.join(base, 'removed-worktree'),
+    });
+
+    const removed = await sweepStaleWorktreeProjects(base);
+
+    expect(removed).toEqual([]);
+    expect(fs.existsSync(kept)).toBe(true);
+  });
+
   it('keeps project dirs whose worktree still exists', async () => {
     const alive = path.join(base, 'wt-alive');
     fs.mkdirSync(alive, { recursive: true });
