@@ -877,14 +877,9 @@ export class ContentGenerationPipeline {
       // what actually ships: a qwen config with a non-qwen request model
       // would leak the field, and a non-qwen config with a qwen request
       // model would miss the disable signal (the regression).
-      //
-      // `coder-model` is the QWEN_OAUTH default (DEFAULT_QWEN_MODEL in
-      // config/models.ts, aliased to Qwen 3.6 Plus hybrid) — it doesn't
-      // start with `qwen` but is the most common hybrid-thinking model
-      // for first-time users, so it must be covered.
       if (
         !thinkingMandatory &&
-        (model.startsWith('qwen') || model === 'coder-model')
+        DashScopeOpenAICompatibleProvider.isQwenFamilyWireModel(model)
       ) {
         if (isDashScope) {
           typed['enable_thinking'] = false;
@@ -969,7 +964,7 @@ export class ContentGenerationPipeline {
       typed['tool_choice'] === 'required' &&
       (thinkingMandatory ||
         typed['enable_thinking'] === true ||
-        ((model.startsWith('qwen') || model === 'coder-model') &&
+        (DashScopeOpenAICompatibleProvider.isQwenFamilyWireModel(model) &&
           typeof reasoningEffort === 'string' &&
           reasoningEffort !== 'none'))
     ) {

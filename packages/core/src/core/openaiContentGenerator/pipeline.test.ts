@@ -28,6 +28,7 @@ import type { Config } from '../../config/config.js';
 import { AuthType, type ContentGeneratorConfig } from '../contentGenerator.js';
 import type { OpenAICompatibleProvider } from './provider/index.js';
 import { DefaultOpenAICompatibleProvider } from './provider/default.js';
+import { DashScopeOpenAICompatibleProvider } from './provider/dashscope.js';
 import {
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   MAX_STREAM_IDLE_TIMEOUT_MS,
@@ -925,6 +926,80 @@ describe('ContentGenerationPipeline', () => {
         .calls[0][0];
       expect(apiCall.enable_thinking).toBe(testCase.expectedThinking);
       expect(apiCall.tool_choice).toBe(testCase.expectedToolChoice);
+    });
+
+    it('feeds the real provider knob drop into the pipeline gate for a non-qwen preset shape', async () => {
+      // The table above mocks buildRequest as a plain extra_body merge, so
+      // the real provider drop never executes there. Run the actual
+      // DashScope provider instead: its family-gated drop must keep the glm
+      // preset's enable_thinking, which then trips the pipeline's
+      // enable_thinking === true clause and strips tool_choice.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl:
+          'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+        model: 'glm-5.2',
+        authType: AuthType.QWEN_OAUTH,
+        extra_body: { enable_thinking: true, reasoning_effort: 'high' },
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const realProvider = new DashScopeOpenAICompatibleProvider(
+        mockContentGeneratorConfig,
+        {
+          getContentGeneratorConfig: () => ({ enableCacheControl: false }),
+        } as unknown as Config,
+      );
+      (mockProvider.buildRequest as Mock).mockImplementation((req) =>
+        realProvider.buildRequest(req, 'side-query:combined-shape'),
+      );
+
+      const request: GenerateContentParameters = {
+        model: 'glm-5.2',
+        contents: [{ parts: [{ text: 'Summarize' }], role: 'user' }],
+        config: {
+          thinkingConfig: { includeThoughts: true },
+          tools: [
+            {
+              functionDeclarations: [
+                {
+                  name: 'respond_in_schema',
+                  parameters: { type: Type.OBJECT, properties: {} },
+                },
+              ],
+            },
+          ],
+          toolConfig: {
+            functionCallingConfig: { mode: FunctionCallingConfigMode.ANY },
+          },
+        },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Summarize' },
+      ]);
+      (mockConverter.convertGeminiToolsToOpenAI as Mock).mockResolvedValue([
+        { type: 'function', function: { name: 'respond_in_schema' } },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'side-query:combined-shape');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.enable_thinking).toBe(true);
+      expect(apiCall.reasoning_effort).toBe('high');
+      expect(apiCall.tool_choice).toBeUndefined();
     });
 
     it('learns required thinking from a provider error and retries once', async () => {
