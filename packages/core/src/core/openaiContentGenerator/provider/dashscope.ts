@@ -243,17 +243,27 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     const hasQwenEffortConfig = Object.keys(qwenEffortConfig).length > 0;
     // qwen3.8 rejects reasoning_effort with thinking_budget. Resolve conflicts
     // across precedence layers, but leave explicit same-layer pairs untouched.
-    const hasTieredQwenEffort = 'reasoning_effort' in qwenEffortConfig;
+    const wireModel = (request.model ?? '').toLowerCase();
+    const isTieredQwenModel =
+      wireModel === 'qwen3.8-max' || wireModel === 'qwen3.8-max-preview';
     const extraBodyHasEffort = extraBody?.['reasoning_effort'] !== undefined;
     const extraBodyHasBudget = extraBody?.['thinking_budget'] !== undefined;
     const requestHasEffort = requestParams['reasoning_effort'] !== undefined;
     const requestHasBudget = requestParams['thinking_budget'] !== undefined;
     const thinkingBudgetWins =
-      hasTieredQwenEffort &&
-      !extraBodyHasEffort &&
-      (extraBodyHasBudget || (!requestHasEffort && requestHasBudget));
-    const extraBodyEffortWins =
-      hasTieredQwenEffort && extraBodyHasEffort && !extraBodyHasBudget;
+      isTieredQwenModel &&
+      ((extraBodyHasBudget && !extraBodyHasEffort) ||
+        (!extraBodyHasBudget &&
+          !extraBodyHasEffort &&
+          requestHasBudget &&
+          !requestHasEffort));
+    const reasoningEffortWins =
+      isTieredQwenModel &&
+      ((extraBodyHasEffort && !extraBodyHasBudget) ||
+        (!extraBodyHasBudget &&
+          !extraBodyHasEffort &&
+          requestHasEffort &&
+          !requestHasBudget));
     if (thinkingBudgetWins) {
       delete qwenEffortConfig['reasoning_effort'];
     }
@@ -284,7 +294,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       if (thinkingBudgetWins) {
         delete visionResult['reasoning_effort'];
       }
-      if (extraBodyEffortWins) {
+      if (reasoningEffortWins) {
         delete visionResult['thinking_budget'];
       }
       return {
@@ -315,7 +325,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     if (thinkingBudgetWins) {
       delete result['reasoning_effort'];
     }
-    if (extraBodyEffortWins) {
+    if (reasoningEffortWins) {
       delete result['thinking_budget'];
     }
     return {

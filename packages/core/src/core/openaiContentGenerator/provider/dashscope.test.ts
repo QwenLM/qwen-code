@@ -702,6 +702,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         name: 'extra_body thinking_budget over request-level effort',
         extraBody: { enable_thinking: true, thinking_budget: 4096 },
         requestFields: { reasoning_effort: 'max' },
+        configuredReasoning: false,
         expectedEffort: undefined,
         expectedBudget: 4096,
         expectedThinking: true,
@@ -710,6 +711,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         name: 'request-level thinking_budget over configured effort',
         extraBody: undefined,
         requestFields: { thinking_budget: 2048 },
+        configuredReasoning: true,
         expectedEffort: undefined,
         expectedBudget: 2048,
         expectedThinking: undefined,
@@ -718,6 +720,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         name: 'extra_body effort over request-level thinking_budget',
         extraBody: { reasoning_effort: 'max' },
         requestFields: { thinking_budget: 2048 },
+        configuredReasoning: false,
         expectedEffort: 'max',
         expectedBudget: undefined,
         expectedThinking: undefined,
@@ -727,7 +730,9 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         {
           ...mockContentGeneratorConfig,
           model: 'qwen3.8-max-preview',
-          reasoning: { effort: 'low' },
+          ...(testCase.configuredReasoning
+            ? { reasoning: { effort: 'low' as const } }
+            : {}),
           extra_body: testCase.extraBody,
         } as ContentGeneratorConfig,
         mockCliConfig,
@@ -737,7 +742,9 @@ describe('DashScopeOpenAICompatibleProvider', () => {
           ...baseRequest,
           model: 'qwen3.8-max-preview',
           ...testCase.requestFields,
-          reasoning: { effort: 'low' },
+          ...(testCase.configuredReasoning
+            ? { reasoning: { effort: 'low' as const } }
+            : {}),
         } as unknown as Parameters<typeof generator.buildRequest>[0],
         'test-prompt-id',
       ) as unknown as Record<string, unknown>;
