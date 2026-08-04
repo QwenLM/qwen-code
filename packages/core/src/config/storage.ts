@@ -88,15 +88,18 @@ export async function sweepStaleWorktreeProjects(
       // Bucket keyed by a gone ephemeral launch cwd, #7906's main class:
       // enter_worktree from a throwaway T lands the sidecar here with
       // worktreePath = T/.qwen/worktrees/<slug>, which the arm above can
-      // never match. Sweep only when every parseable sidecar places its
-      // launch cwd inside the OS temp dir and that cwd is gone too. A real
-      // repo path (or a missing originalCwd) always keeps the bucket: an
-      // absent repo dir can mean an unplugged drive, not garbage.
+      // never match. Sweep only when the bucket is actually keyed by that
+      // launch cwd (a repo bucket that merely holds such sidecars after a
+      // /cd relocation keeps its history), every sidecar places its launch
+      // cwd inside the OS temp dir, and that cwd is gone too. A real repo
+      // path (or a missing originalCwd) always keeps the bucket: an absent
+      // repo dir can mean an unplugged drive, not garbage.
       stale =
         allWorktreesGone &&
         sidecars.every(
           (sidecar) =>
             sidecar.originalCwd !== undefined &&
+            entry === sanitizeCwd(sidecar.originalCwd) &&
             isResolvedPathWithinDirectory(sidecar.originalCwd, os.tmpdir()) &&
             !isDirectorySync(sidecar.originalCwd),
         );
