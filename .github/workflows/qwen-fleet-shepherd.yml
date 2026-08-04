@@ -65,6 +65,12 @@ jobs:
   shepherd:
     if: |-
       ${{ github.repository == 'QwenLM/qwen-code' && vars.FLEET_SHEPHERD_DISABLED != 'true' }}
+    # Deliberately hosted, NOT the ECS pool: the shepherd is the watchdog FOR
+    # that pool. When the pool is wedged, drained, or offline — exactly when
+    # the shepherd is needed — a pool-routed shepherd would queue behind the
+    # failure it exists to fix, and recovery would need the manual kill-switch
+    # flip the shepherd exists to avoid. One 15-minute hosted job per tick is
+    # a negligible queue cost for that independence.
     runs-on: 'ubuntu-latest'
     timeout-minutes: 15
     steps:
