@@ -379,7 +379,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
     if (sideEffectsGated) {
       if (skill.allowedTools?.length) {
         debugLogger.warn(
-          `Skill "${this.params.skill}" declares allowedTools but the folder is not trusted; ignoring skill allowedTools.`,
+          `Skill "${this.params.skill}" declares allowedTools but the folder is not trusted; deferring skill allowedTools until the folder is trusted.`,
         );
       }
     } else {
@@ -400,7 +400,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       if (sideEffectsGated) {
         if (Object.keys(skill.hooks).length > 0) {
           debugLogger.warn(
-            `Skill "${this.params.skill}" declares hooks but the folder is not trusted; ignoring skill hooks.`,
+            `Skill "${this.params.skill}" declares hooks but the folder is not trusted; deferring skill hooks until the folder is trusted.`,
           );
         }
       } else {
@@ -593,13 +593,17 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
         void this.recordAutoSkillUsageBestEffort(skill);
         // Side effects skipped by the trust gate on first load are applied
         // on re-invocation once the folder becomes trusted (the gate is
-        // live), without re-injecting the skill body into context.
+        // live), without re-injecting the skill body into context. Drop the
+        // entry only once the side effects were actually applied, so
+        // still-untrusted re-invocations keep the deferral alive.
         if (
           this.deferredSideEffectSkillNames.has(this.params.skill) &&
-          this.config.isTrustedFolder()
+          !this.applySkillSideEffects(skill)
         ) {
-          this.applySkillSideEffects(skill);
           this.deferredSideEffectSkillNames.delete(this.params.skill);
+          debugLogger.info(
+            `Applied deferred side effects for skill "${this.params.skill}" (folder is now trusted).`,
+          );
         }
         const msg = `Skill "${this.params.skill}" is already loaded in context.`;
         return {
