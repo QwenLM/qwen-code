@@ -774,6 +774,43 @@ describe('handleGroup', () => {
     stderrSpy.mockRestore();
   });
 
+  it('caps malformed-sender warning keys at 64 Unicode code points', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const sharedPrefix = '😀'.repeat(64);
+
+    pvt['handleGroup'](
+      makeGroupEvent({
+        id: 'unicode-warning-key-1',
+        author: { member_openid: `${sharedPrefix}A`, username: 'Bob' },
+      }),
+    );
+    pvt['handleGroup'](
+      makeGroupEvent({
+        id: 'unicode-warning-key-2',
+        author: { member_openid: `${sharedPrefix}B`, username: 'Alice' },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+
+    const warningKeys = pvt['warnedSenderOpenIds'] as unknown as Set<string>;
+    expect(warningKeys).toHaveLength(1);
+    const [warningKey] = [...warningKeys];
+    const senderComponent = warningKey.slice('group-openid-1:'.length);
+    expect(Array.from(senderComponent)).toHaveLength(64);
+    expect(senderComponent).toBe(sharedPrefix);
+
+    const warnCalls = stderrSpy.mock.calls
+      .map((call) => String(call[0]))
+      .filter((line) => line.includes('Unexpected senderOpenId format'));
+    expect(warnCalls).toHaveLength(1);
+
+    stderrSpy.mockRestore();
+  });
+
   it('warnedSenderOpenIds 超过 500 条后重置，此前告警过的键重新告警', async () => {
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
@@ -940,6 +977,63 @@ describe('handleGroup', () => {
     expect(env['text']).toBe(
       '[atMention=true] [Eve(0123456789ABCDEF0123456789ABCDEF)(legacy-u…)]: hello',
     );
+  });
+
+  it('uses a legacy-only author id as identity without an OPENID warning', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    pvt['handleGroup'](
+      makeGroupEvent({
+        id: 'legacy-only-author',
+        content: 'hello',
+        author: { id: 'legacy-user-id' },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['senderId']).toBe('legacy-user-id');
+    expect(env['senderName']).toBe('QQ User');
+    expect(env['text']).toBe('[atMention=true] [QQ User(legacy-u…)]: hello');
+    expect(
+      stderrSpy.mock.calls.some(([message]) =>
+        String(message).includes('Unexpected senderOpenId format'),
+      ),
+    ).toBe(false);
+
+    stderrSpy.mockRestore();
+  });
+
+  it('does not treat a hex-shaped legacy author id as a mentionable OPENID', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    pvt['handleGroup'](
+      makeGroupEvent({
+        id: 'hex-shaped-legacy-author',
+        content: 'hello',
+        author: { id: 'ABCDEF0123456789ABCDEF0123456789' },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['senderName']).toBe('QQ User');
+    expect(env['text']).toBe('[atMention=true] [QQ User(ABCDEF01…)]: hello');
+    expect(
+      stderrSpy.mock.calls.some(([message]) =>
+        String(message).includes('Unexpected senderOpenId format'),
+      ),
+    ).toBe(false);
+
+    stderrSpy.mockRestore();
   });
 });
 
