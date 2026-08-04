@@ -398,8 +398,12 @@ jobs:
           # else removes them, and RUNNER_TEMP survives across jobs on the
           # shared pool (see the EACCES incident note in 'Run review'). Runs
           # before that step creates this run's dirs, so only stale dirs are
-          # touched.
-          rm -rf "${RUNNER_TEMP:-/tmp}"/qwen-review-tools.* 2>/dev/null || true
+          # touched; the QWEN_HOME line above already aborts on an unset
+          # RUNNER_TEMP, so no :-fallback is needed here. Unconditional
+          # sweeping is safe because jobs on one runner are sequential — if
+          # two runners ever share one RUNNER_TEMP, age-gate it (find ...
+          # -mmin +240) so a live job's dirs are spared.
+          rm -rf "$RUNNER_TEMP"/qwen-review-tools.* 2>/dev/null || true
           # `.git` is a directory in a normal checkout but a gitlink file in a
           # worktree; -e covers both, and a missing .git (first run) too.
           if [ ! -e .git ]; then
@@ -598,10 +602,14 @@ jobs:
             # is this dir's only removal.
             tmp=$(mktemp -d "${RUNNER_TEMP:-/tmp}/qwen-review-tools.dl.XXXXXX") || tmp=''
             url="https://github.com/charmbracelet/freeze/releases/download/v${FREEZE_VERSION}/freeze_${FREEZE_VERSION}_Linux_x86_64.tar.gz"
-            # Worst-case retry budget must stay under timeout-minutes:
-            # (2 retries + 1) x 90s + backoff ~ 273s < 300s, so a stalled
-            # transfer finishes failing inside the step and the degradation
-            # branch + scratch cleanup below stay reachable.
+            # Worst-case curl retry budget: (2 retries + 1) x 90s + backoff
+            # ~ 273s < 300s, so when the apt half above stays short (tmux is
+            # preinstalled on both runner classes, so it rarely runs at all)
+            # a stalled transfer finishes failing inside the step and the
+            # degradation branch + scratch cleanup below stay reachable. If a
+            # stalled apt mirror burns the headroom first, the cap fires
+            # mid-curl instead and leaks at most the scratch dir — to the
+            # next run's sweep, the exact leak that sweep exists for.
             if [ -n "$tmp" ] \
               && curl -fsSL --retry 2 --connect-timeout 10 --max-time 90 -o "$tmp/freeze.tar.gz" "$url"; then
               if ! echo "${FREEZE_SHA256}  $tmp/freeze.tar.gz" | sha256sum -c - >/dev/null 2>&1; then
@@ -612,6 +620,11 @@ jobs:
                 bin=$(find "$tmp" -type f -name freeze | head -1)
                 if [ -z "$bin" ]; then
                   echo 'verified tarball contains no freeze binary; captures degrade to ans-only.'
+                # Pin-pair self-check: the stub-based harness keys on these
+                # same values and structurally cannot catch a transposed pair,
+                # so the first run must.
+                elif ! echo "${FREEZE_BIN_SHA256}  $bin" | sha256sum -c - >/dev/null 2>&1; then
+                  echo 'extracted freeze does not match FREEZE_BIN_SHA256; the two pins disagree. Captures degrade to ans-only.'
                 elif [ -z "$tools_bin" ] || ! install -m 0755 "$bin" "$tools_bin/freeze"; then
                   echo 'freeze install failed; captures degrade to ans-only.'
                 else
