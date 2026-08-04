@@ -97,4 +97,37 @@ describe('useProviderSetupFlow', () => {
     expect(result.current.state.apiKey).toBe('typed-key');
     expect(result.current.state.modelIds).toBe('first-model, typed-model');
   });
+
+  it('preserves a typed API key when switching endpoints in the same key domain', () => {
+    const firstUrl = 'https://cn.example/v1';
+    const secondUrl = 'https://global.example/v1';
+    const provider: ProviderConfig = {
+      id: 'regional-provider',
+      label: 'Regional Provider',
+      description: 'Provider with a shared regional credential',
+      protocol: AuthType.USE_OPENAI,
+      baseUrl: [
+        { id: 'cn', label: 'China', url: firstUrl },
+        { id: 'global', label: 'Global', url: secondUrl },
+      ],
+      envKey: () => 'SHARED_API_KEY',
+      models: [{ id: 'regional-model' }],
+      modelsEditable: true,
+      modelNamePrefix: 'Regional',
+    };
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+
+    act(() => {
+      result.current.start(provider, undefined, {
+        SHARED_API_KEY: 'stale-key',
+      });
+      result.current.changeApiKey('typed-key');
+    });
+    act(() => {
+      result.current.selectBaseUrl(secondUrl);
+    });
+
+    expect(result.current.state.baseUrl).toBe(secondUrl);
+    expect(result.current.state.apiKey).toBe('typed-key');
+  });
 });

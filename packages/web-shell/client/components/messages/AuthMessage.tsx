@@ -12,6 +12,7 @@ import {
   normalizeModelIds,
   selectedBaseUrlEnvKey,
   selectedBaseUrlModelIds,
+  shouldResetApiKeyAfterBaseUrlChange,
 } from './auth-provider-state';
 
 type AuthView = 'groups' | 'providers' | 'step' | 'review';
@@ -423,7 +424,16 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       if (selected) {
         setBaseUrl(selected.url);
         if (selected.url !== baseUrl) {
-          setApiKey('');
+          if (
+            shouldResetApiKeyAfterBaseUrlChange(
+              provider,
+              baseUrl,
+              selected.url,
+              protocol,
+            )
+          ) {
+            setApiKey('');
+          }
           setModels(baseUrlOptionModelIds(selected, provider, models));
         }
       }
@@ -443,6 +453,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     groups,
     models,
     optionIndex,
+    protocol,
     provider,
     providerIndex,
     providers,
@@ -502,7 +513,16 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
         if (selected) {
           setBaseUrl(selected.url);
           if (selected.url !== baseUrl) {
-            setApiKey('');
+            if (
+              shouldResetApiKeyAfterBaseUrlChange(
+                provider,
+                baseUrl,
+                selected.url,
+                protocol,
+              )
+            ) {
+              setApiKey('');
+            }
             setModels(baseUrlOptionModelIds(selected, provider, models));
           }
         }
@@ -519,6 +539,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       goNext,
       groups,
       models,
+      protocol,
       activateAdvancedOption,
       advancedOptionValues,
       baseUrl,

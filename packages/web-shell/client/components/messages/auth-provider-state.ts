@@ -63,3 +63,15 @@ export function selectedBaseUrlEnvKey(
   }
   return provider.envKey ?? `${protocol.toUpperCase()}_API_KEY`;
 }
+
+export function shouldResetApiKeyAfterBaseUrlChange(
+  provider: DaemonAuthProviderDescriptor,
+  currentBaseUrl: string,
+  nextBaseUrl: string,
+  protocol: string,
+): boolean {
+  return (
+    selectedBaseUrlEnvKey(provider, currentBaseUrl, protocol) !==
+    selectedBaseUrlEnvKey(provider, nextBaseUrl, protocol)
+  );
+}

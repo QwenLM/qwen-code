@@ -35,6 +35,7 @@ import {
   initialModelIds,
   modelIdsAfterBaseUrlChange,
   parseModelIds,
+  shouldResetApiKeyAfterBaseUrlChange,
 } from './provider-state';
 
 type ProviderGroup = 'alibaba' | 'third-party' | 'custom';
@@ -423,7 +424,15 @@ export function ProviderConnectForm({
                 onValueChange={(value) => {
                   setBaseUrl(value);
                   if (value !== baseUrl) {
-                    setApiKey('');
+                    if (
+                      shouldResetApiKeyAfterBaseUrlChange(
+                        selectedProvider,
+                        baseUrl,
+                        value,
+                      )
+                    ) {
+                      setApiKey('');
+                    }
                     setModelIdsText(
                       modelIdsAfterBaseUrlChange(
                         selectedProvider,

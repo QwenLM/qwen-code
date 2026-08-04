@@ -10371,7 +10371,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
             models: [{ id: 'kimi-k3' }],
           },
         ],
-        envKey: 'KIMI_CODE_API_KEY',
+        envKey: (_protocol: string, baseUrl: string) =>
+          baseUrl === 'https://api.kimi.com/coding/v1'
+            ? 'KIMI_CODE_API_KEY'
+            : 'MOONSHOT_API_KEY',
         models: [{ id: 'kimi-fallback' }],
         modelsEditable: true,
         modelNamePrefix: 'Kimi',
@@ -10395,10 +10398,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
               baseUrl: [
                 expect.objectContaining({
                   id: 'coding-plan',
+                  envKey: 'KIMI_CODE_API_KEY',
                   models: [{ id: 'k3-256k' }],
                 }),
                 expect.objectContaining({
                   id: 'api-international',
+                  envKey: 'MOONSHOT_API_KEY',
                   models: [{ id: 'kimi-k3' }],
                 }),
               ],

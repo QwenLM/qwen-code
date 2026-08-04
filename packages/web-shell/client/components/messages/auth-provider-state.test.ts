@@ -4,6 +4,7 @@ import {
   baseUrlOptionModelIds,
   selectedBaseUrlEnvKey,
   selectedBaseUrlModelIds,
+  shouldResetApiKeyAfterBaseUrlChange,
 } from './auth-provider-state';
 
 const kimi: DaemonAuthProviderDescriptor = {
@@ -51,5 +52,43 @@ describe('auth provider endpoint state', () => {
     expect(baseUrlOptionModelIds(api!, kimi, 'k3-256k, custom-model')).toBe(
       'kimi-k3, custom-model',
     );
+  });
+
+  it('resets API keys only when the endpoint key domain changes', () => {
+    const regionalKimi = {
+      ...kimi,
+      baseUrl: [
+        {
+          id: 'api-cn',
+          label: 'API China',
+          url: 'https://api.moonshot.cn/v1',
+          envKey: 'MOONSHOT_API_KEY',
+        },
+        {
+          id: 'api-global',
+          label: 'API Global',
+          url: 'https://api.moonshot.ai/v1',
+          envKey: 'MOONSHOT_API_KEY',
+        },
+        ...(Array.isArray(kimi.baseUrl) ? kimi.baseUrl.slice(0, 1) : []),
+      ],
+    } satisfies DaemonAuthProviderDescriptor;
+
+    expect(
+      shouldResetApiKeyAfterBaseUrlChange(
+        regionalKimi,
+        'https://api.moonshot.cn/v1',
+        'https://api.moonshot.ai/v1',
+        'openai',
+      ),
+    ).toBe(false);
+    expect(
+      shouldResetApiKeyAfterBaseUrlChange(
+        regionalKimi,
+        'https://api.moonshot.ai/v1',
+        'https://api.kimi.com/coding/v1',
+        'openai',
+      ),
+    ).toBe(true);
   });
 });

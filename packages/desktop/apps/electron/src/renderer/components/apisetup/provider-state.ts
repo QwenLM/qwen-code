@@ -56,3 +56,21 @@ export function modelIdsAfterBaseUrlChange(
   );
   return [...defaultModelIds(provider, baseUrl), ...customIds];
 }
+
+export function selectedBaseUrlEnvKey(
+  provider: QwenProviderSummary,
+  baseUrl: string,
+): string | undefined {
+  if (!Array.isArray(provider.baseUrl)) return undefined;
+  return provider.baseUrl.find((option) => option.url === baseUrl)?.envKey;
+}
+
+export function shouldResetApiKeyAfterBaseUrlChange(
+  provider: QwenProviderSummary,
+  currentBaseUrl: string,
+  nextBaseUrl: string,
+): boolean {
+  const currentEnvKey = selectedBaseUrlEnvKey(provider, currentBaseUrl);
+  const nextEnvKey = selectedBaseUrlEnvKey(provider, nextBaseUrl);
+  return !currentEnvKey || !nextEnvKey || currentEnvKey !== nextEnvKey;
+}

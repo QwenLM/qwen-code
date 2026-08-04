@@ -48,6 +48,16 @@ function getVisibleSteps(config: ProviderConfig): SetupStep[] {
   });
 }
 
+function providerEnvKey(
+  config: ProviderConfig,
+  protocol: AuthType,
+  baseUrl: string,
+): string {
+  return typeof config.envKey === 'function'
+    ? config.envKey(protocol, baseUrl)
+    : config.envKey;
+}
+
 // ---------------------------------------------------------------------------
 // State type
 // ---------------------------------------------------------------------------
@@ -155,10 +165,7 @@ export function useProviderSetupFlow(
 
       let prefillKey = '';
       if (existingEnv) {
-        const envKeyName =
-          typeof config.envKey === 'function'
-            ? config.envKey(proto, resolved)
-            : config.envKey;
+        const envKeyName = providerEnvKey(config, proto, resolved);
         prefillKey = existingEnv[envKeyName] ?? '';
       }
       setApiKey(prefillKey);
@@ -240,11 +247,11 @@ export function useProviderSetupFlow(
             ', ',
           ),
         );
-        const envKeyName =
-          typeof provider.envKey === 'function'
-            ? provider.envKey(protocol, selectedUrl)
-            : provider.envKey;
-        setApiKey(existingProviderEnv[envKeyName] ?? '');
+        const previousEnvKey = providerEnvKey(provider, protocol, baseUrl);
+        const nextEnvKey = providerEnvKey(provider, protocol, selectedUrl);
+        if (nextEnvKey !== previousEnvKey) {
+          setApiKey(existingProviderEnv[nextEnvKey] ?? '');
+        }
       }
       goNext();
     },
@@ -441,10 +448,7 @@ export function useProviderSetupFlow(
 
   const getPreviewJson = useCallback((): string => {
     if (!provider) return '';
-    const envKey =
-      typeof provider.envKey === 'function'
-        ? provider.envKey(protocol, baseUrl.trim())
-        : provider.envKey;
+    const envKey = providerEnvKey(provider, protocol, baseUrl.trim());
     const normalizedIds = normalizeModelIds(modelIds);
     const masked = maskApiKey(apiKey);
 

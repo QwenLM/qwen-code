@@ -2005,6 +2005,12 @@ function serializeProviderConfig(
       ? getDefaultBaseUrlForProtocol(defaultProtocol)
       : resolveBaseUrl(config);
   const existingConfig = readExistingProviderConfig(config, settings);
+  const serializedBaseUrl = Array.isArray(config.baseUrl)
+    ? config.baseUrl.map((option) => ({
+        ...option,
+        envKey: resolveProviderEnvKey(config, defaultProtocol, option.url),
+      }))
+    : config.baseUrl;
 
   return {
     id: config.id,
@@ -2012,7 +2018,7 @@ function serializeProviderConfig(
     description: config.description,
     protocol: config.protocol,
     protocolOptions: config.protocolOptions ?? [],
-    baseUrl: config.baseUrl,
+    baseUrl: serializedBaseUrl,
     baseUrlPlaceholder:
       config.baseUrl === undefined ? defaultBaseUrl : undefined,
     defaultModelIds: getDefaultModelIds(config, defaultBaseUrl),

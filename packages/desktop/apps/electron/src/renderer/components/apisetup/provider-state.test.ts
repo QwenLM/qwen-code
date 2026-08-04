@@ -4,6 +4,7 @@ import {
   defaultModelIds,
   initialModelIds,
   modelIdsAfterBaseUrlChange,
+  shouldResetApiKeyAfterBaseUrlChange,
 } from './provider-state';
 
 const kimi: QwenProviderSummary = {
@@ -22,12 +23,14 @@ const kimi: QwenProviderSummary = {
       id: 'coding-plan',
       label: 'Coding Plan',
       url: 'https://api.kimi.com/coding/v1',
+      envKey: 'KIMI_CODE_API_KEY',
       models: [{ id: 'k3-256k' }],
     },
     {
       id: 'api',
       label: 'API',
       url: 'https://api.moonshot.ai/v1',
+      envKey: 'MOONSHOT_API_KEY',
       models: [{ id: 'kimi-k3' }],
     },
   ],
@@ -51,5 +54,41 @@ describe('provider endpoint state', () => {
         'k3-256k, custom-model',
       ),
     ).toEqual(['kimi-k3', 'custom-model']);
+  });
+
+  it('resets API keys only when the endpoint key domain changes', () => {
+    const regionalKimi: QwenProviderSummary = {
+      ...kimi,
+      baseUrl: [
+        {
+          id: 'api-cn',
+          label: 'API China',
+          url: 'https://api.moonshot.cn/v1',
+          envKey: 'MOONSHOT_API_KEY',
+        },
+        {
+          id: 'api-global',
+          label: 'API Global',
+          url: 'https://api.moonshot.ai/v1',
+          envKey: 'MOONSHOT_API_KEY',
+        },
+        ...(Array.isArray(kimi.baseUrl) ? kimi.baseUrl.slice(0, 1) : []),
+      ],
+    };
+
+    expect(
+      shouldResetApiKeyAfterBaseUrlChange(
+        regionalKimi,
+        'https://api.moonshot.cn/v1',
+        'https://api.moonshot.ai/v1',
+      ),
+    ).toBe(false);
+    expect(
+      shouldResetApiKeyAfterBaseUrlChange(
+        regionalKimi,
+        'https://api.moonshot.ai/v1',
+        'https://api.kimi.com/coding/v1',
+      ),
+    ).toBe(true);
   });
 });
