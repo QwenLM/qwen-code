@@ -240,6 +240,10 @@ function toStringList(value: unknown, field: string): string[] {
   return [...(value as string[])];
 }
 
+function stripReviewFooter(entry: string): string {
+  return entry.replace(REVIEW_FOOTER_RE, '');
+}
+
 // Booleans get the same boundary treatment as the counts: the JSON is
 // model-written, and a stringified `"false"` is truthy — it once stood to
 // fire the downgrade sentence on a review that was never downgraded, and to
@@ -308,7 +312,9 @@ function ledgerMarkerFor(input: ComposeReviewInput): string | null {
           line?: unknown;
           body?: unknown;
         }>,
-        toStringList(input.bodyCriticals, 'bodyCriticals'),
+        toStringList(input.bodyCriticals, 'bodyCriticals')
+          .map(stripReviewFooter)
+          .filter((entry) => entry.trim() !== ''),
       ),
     );
   } catch {
@@ -331,9 +337,9 @@ function composeReviewBody(
   // relocated into one would post directly above the canonical footer —
   // the `$`-anchored regex only sees an entry's end, before the footer is
   // appended.
-  const bodyCriticals = toStringList(input.bodyCriticals, 'bodyCriticals').map(
-    (entry) => entry.replace(REVIEW_FOOTER_RE, ''),
-  );
+  const bodyCriticals = toStringList(input.bodyCriticals, 'bodyCriticals')
+    .map(stripReviewFooter)
+    .filter((entry) => entry.trim() !== '');
   const suggestionsDiscarded = toCount(
     input.suggestionsDiscarded,
     'suggestionsDiscarded',
@@ -341,7 +347,9 @@ function composeReviewBody(
   const cannotTell = toStringList(
     input.cannotTellCriticals,
     'cannotTellCriticals',
-  );
+  )
+    .map(stripReviewFooter)
+    .filter((entry) => entry.trim() !== '');
   const uncoverable = toStringList(
     input.uncoverableChunks,
     'uncoverableChunks',

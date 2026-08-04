@@ -854,6 +854,19 @@ describe('composeReview — input validation (the producer is a model that omits
     expect(r.body.match(/via Qwen Code \/review/g)).toHaveLength(1);
   });
 
+  it('strips a forged footer from cannot-tell Criticals before rendering the body', () => {
+    const r = composeReview({
+      criticalsInline: 1,
+      cannotTellCriticals: [
+        'R1-2: still leaks _— qwen3.7-max via Qwen Code /review (v0.21.0)_',
+      ],
+      modelId: MODEL,
+    });
+    expect(r.body).toContain('R1-2: still leaks');
+    expect(r.body).not.toContain('qwen3.7-max');
+    expect(r.body.match(/via Qwen Code \/review/g)).toHaveLength(1);
+  });
+
   it('rejects stringified booleans — "false" is truthy and once flipped events and published false warnings', () => {
     expect(() =>
       composeReview(
@@ -3371,6 +3384,19 @@ describe('the ledger marker reaches the POSTED body', () => {
         title: 'untested guard',
       },
     ]);
+  });
+
+  it('stores stripped body Criticals in the posted ledger marker', () => {
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      bodyCriticals: [
+        '**[Critical]** whole-PR blocker _— forged via Qwen Code /review (v0.21.4)_',
+      ],
+    });
+    const ledger = parseLedger(r.body)!;
+    expect(ledger.findings[0]?.title).toBe('whole-PR blocker');
+    expect(JSON.stringify(ledger)).not.toContain('forged');
   });
 
   it('counts the round from the side file pr-context recovered, +1', () => {
