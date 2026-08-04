@@ -74,17 +74,24 @@ jobs:
          startsWith(github.event.comment.body, '@qwen-code /verify '))) ||
        (github.event_name == 'workflow_dispatch' &&
         github.event.inputs.tmux_pr != ''))
-    # Canonical trusted-author guard: this job loads CI_BOT_PAT, so runs
-    # triggered by untrusted fork PRs stay on hosted (ephemeral); in-repo PR
-    # events and fork PRs whose author has write access (OWNER/MEMBER/
-    # COLLABORATOR association) on QwenLM/qwen-code use the persistent ECS
-    # runner.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && github.event.pull_request && (github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER", "MEMBER", "COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # Canonical same-repo guard: this job loads CI_BOT_PAT, so fork-triggered
+    # runs stay on hosted (ephemeral); only in-repo PR events on QwenLM/qwen-code
+    # use the persistent ECS runner. The job IS the write-permission check, so
+    # it cannot route on its own output; downstream jobs (triage, tmux, verify)
+    # route on what it finds instead.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     permissions:
       contents: 'read'
     outputs:
       should_run: '${{ steps.perm.outputs.should_run }}'
+      # Real write-permission check on the PR AUTHOR (collaborator-permission
+      # API, not the coarse author_association), computed only on
+      # pull_request_target events; empty on every other event. Consumed by
+      # the triage job's runner routing so a maintainer's fork PR uses the
+      # ECS pool while a read-only collaborator's or org member's fork PR
+      # stays on ephemeral hosted runners.
+      author_can_write: '${{ steps.perm.outputs.author_can_write }}'
       # /verify trust level: 'trusted' when the PR author has write,
       # 'external' when they do not. Both run on the persistent ECS pool
       # (maintainer decision, 2026-07-29: the pool is network-isolated and
@@ -126,6 +133,7 @@ jobs:
           # issues; compare against null rather than truthiness so the shell
           # receives a plain true/false.
           IS_PR: '${{ github.event.issue.pull_request != null }}'
+          PR_AUTHOR: '${{ github.event.pull_request.user.login }}'
         run: |-
           set -euo pipefail
           IS_VERIFY=false
@@ -143,6 +151,18 @@ jobs:
             # says the PR is ready to be worth that.
             echo "Automatic PR triage allowed for PR #${PR_NUMBER} after same-repo/precheck gate." >> "$GITHUB_STEP_SUMMARY"
             echo "should_run=true" >> "$GITHUB_OUTPUT"
+            # Runner-routing input for the triage job: the REAL author write
+            # check (author_association admits org members and read-only
+            # collaborators). Fail OPEN on purpose — unlike the deny gates
+            # below, this selects a runner pool, not a decision: an API
+            # hiccup merely routes the triage to a hosted runner, it must
+            # never skip or fail the triage itself.
+            if [ -n "$PR_AUTHOR" ] &&
+               author_perm="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${PR_AUTHOR}/permission" --jq '.permission' 2>/dev/null)"; then
+              case "$author_perm" in
+                admin|maintain|write) echo "author_can_write=true" >> "$GITHUB_OUTPUT" ;;
+              esac
+            fi
             exit 0
           fi
           case "$EVENT_NAME" in
@@ -391,13 +411,17 @@ jobs:
     # foreign code off the persistent pool.
     # Runner routing: the persistent ECS pool serves events whose payload
     # carries no foreign code — issue triage and same-repo PR events — plus
-    # fork PRs whose author has write access (OWNER/MEMBER/COLLABORATOR
-    # association: a write-access author is as trusted as an in-repo branch,
-    # and the pool is network-isolated). PRs by other fork authors, and
+    # fork PRs whose author REALLY has write access, per the collaborator-
+    # permission lookup the authorize job already performs (the coarse
+    # author_association would admit org members and read-only collaborators
+    # to this secret-bearing agent; the pool is network-isolated, but a
+    # write-access author is the trust bar for reusing it). authorize is
+    # skipped on the issues/dispatch paths, so the explicit `issues` clause
+    # must stay; there its output is ''. PRs by other fork authors, and
     # comment/dispatch-triggered reruns (which may target fork PRs), go to
     # ephemeral hosted runners so a steered agent cannot persist anything
     # across runs. Forks of this repo fall back to ubuntu-latest as before.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name == ''issues'' || (github.event.pull_request && (github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER", "MEMBER", "COLLABORATOR"]''), github.event.pull_request.author_association))))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name == ''issues'' || (github.event.pull_request && (github.event.pull_request.head.repo.full_name == github.repository || needs.authorize.outputs.author_can_write == ''true'')))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     # startsWith (not contains) prevents false triggers from comments that
     # mention the phrase in quoted text or mid-sentence descriptions.
     # always() so the job still evaluates when the upstream `authorize` job is
