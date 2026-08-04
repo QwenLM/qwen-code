@@ -858,6 +858,92 @@ describe('cost-ledger — the spend, from the records already on disk', () => {
     expect(text).toContain('agent runs: 10');
     expect(text).toContain('…and 2 more agents · 2k in combined');
   });
+  it('keeps a reverse-audit chunk auditor apart from the territory finder', () => {
+    const { plan, env, project } = fixture();
+    writeMainCall(project);
+    writeFileSync(
+      join(project, 'subagents', SESSION, 'agent-t3.jsonl'),
+      [
+        userRecord(
+          'You are review agent `chunk 3 of 5` — the territory agent.\n' +
+            'read_file(file_path="/abs/diff.txt", offset=100, limit=50)',
+        ),
+        event('2026-08-03T10:07:00Z', { input: 40_000, output: 500 }),
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(project, 'subagents', SESSION, 'agent-ra3.jsonl'),
+      [
+        userRecord(
+          'You are review agent `chunk 3 of 5` — the territory agent.\n' +
+            'read_file(file_path="/p/plan-prompts/reverse-audit--chunk-3--round-2--ab12cd.brief.md")',
+        ),
+        event('2026-08-03T10:08:00Z', { input: 30_000, output: 400 }),
+      ].join('\n'),
+    );
+
+    const text = renderLedger(computeLedger(plan, env));
+    expect(text).toContain('chunk 3:');
+    expect(text).toContain('audit chunk 3 (round 2):');
+    expect(text).not.toContain('(×2)');
+  });
+
+  it('separates rounds by label while shards of one round still fold', () => {
+    const { plan, env, project } = fixture();
+    writeMainCall(project);
+    const put = (file, identity, input) =>
+      writeFileSync(
+        join(project, 'subagents', SESSION, file),
+        [
+          userRecord(identity),
+          event('2026-08-03T10:07:00Z', { input, output: 100 }),
+        ].join('\n'),
+      );
+    put(
+      'agent-ra1.jsonl',
+      'You are review agent `reverse-audit` — Reverse audit (round 1).',
+      20_000,
+    );
+    put(
+      'agent-ra2.jsonl',
+      'You are review agent `reverse-audit` — Reverse audit (round 2).',
+      21_000,
+    );
+    put(
+      'agent-v1.jsonl',
+      'You are review agent `verify` — Verification (round 2).',
+      9_000,
+    );
+    put(
+      'agent-v2.jsonl',
+      'You are review agent `verify` — Verification (round 2).',
+      8_000,
+    );
+
+    const text = renderLedger(computeLedger(plan, env));
+    expect(text).toContain('agent reverse-audit (round 1):');
+    expect(text).toContain('agent reverse-audit (round 2):');
+    expect(text).toContain('agent verify (round 2) (×2):');
+  });
+
+  it('reads the round from the identity line, never from folded findings', () => {
+    const { plan, env, project } = fixture();
+    writeMainCall(project);
+    writeFileSync(
+      join(project, 'subagents', SESSION, 'agent-v0.jsonl'),
+      [
+        userRecord(
+          'You are review agent `verify` — Verification.\n' +
+            '- reverse audit — stopped before round 4 by the review time budget\n',
+        ),
+        event('2026-08-03T10:07:00Z', { input: 7_000, output: 80 }),
+      ].join('\n'),
+    );
+
+    const text = renderLedger(computeLedger(plan, env));
+    expect(text).toContain('agent verify:');
+    expect(text).not.toContain('agent verify (round 4)');
+  });
 });
 
 describe('cost-ledger command boundary — informational, never a failure', () => {

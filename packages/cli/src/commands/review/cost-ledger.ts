@@ -161,12 +161,33 @@ function labelOf(launch: string, fallback: string): string {
   // The identity line `agent-prompt` emits, with the role in backticks. A
   // chunk agent's role is `chunk N of M`; prefixing it with "agent" would
   // read as a malformed role, so resolve it through the same regex coverage
-  // uses. The round suffix lands outside the backticks, so a repair-round
-  // relaunch keeps its role and folds into one (×N) row.
+  // uses. Distinguishers OUTSIDE the backticks matter too: a reverse-audit
+  // chunk auditor is launched with the same `chunk N of M` identity as the
+  // Step 3B territory finder, and only its brief path carries the stage and
+  // the round — without it, five audit rounds fold into the finder's row and
+  // the ledger reports one agent where six pipeline stages ran. A role
+  // launch's round label sits after the backticks for the same reason.
+  const auditChunk = /reverse-audit--chunk-(\d+)--round-(\d+)--[0-9a-f]/.exec(
+    launch,
+  );
+  if (auditChunk) {
+    return `audit chunk ${auditChunk[1]} (round ${auditChunk[2]})`;
+  }
   const role = /You are review agent `([^`]+)`/.exec(launch);
   if (role) {
+    // The round is read from the identity LINE, not the whole launch: the
+    // folded findings below it can quote a budget disclosure's own
+    // "(round N)" and mislabel an unrelated round.
+    const nl = launch.indexOf('\n');
+    const identity = nl === -1 ? launch : launch.slice(0, nl);
+    const round = /\(round (\d+)\)/.exec(identity);
     const chunk = CHUNK_RE.exec(role[1]);
     if (chunk) return `chunk ${chunk[1]}`;
+    if (round) {
+      // Shards of one verify round carry the same label and fold; distinct
+      // rounds — verify and reverse-audit alike — are distinct rows.
+      return `agent ${role[1]} (round ${round[1]})`;
+    }
     // An invariant role launches once PER heavy file. The role alone would
     // fold those parallel runs into one (×N) row — the marker reserved for
     // relaunches — and lose the per-file breakdown. The launch prompt names
@@ -396,9 +417,12 @@ export function renderLedger(ledger: Ledger): string {
     );
   }
   if (ledger.agents.length > 0) {
-    // A relaunched agent keeps its role label, so a doubled run is two rows
-    // named alike. Fold equal labels into one row marked (×N) — the repair
-    // round this ledger exists to surface becomes visible, not merely present.
+    // Equal labels fold into one row marked (×N): a relaunched agent keeps
+    // its label, and verify shards deliberately share one — the marker reads
+    // "N runs under this label", and the repair round this ledger exists to
+    // surface becomes visible, not merely present. Rounds and audit chunks
+    // do NOT share labels (labelOf carries their stage and round), so a
+    // five-round audit is five rows, not a phantom ×5 relaunch.
     const rows: Array<{
       label: string;
       calls: number;
