@@ -21,14 +21,14 @@
 
 /** The four admitted image formats — the values `EXTENSION_FORMAT` maps to
  * and `sniffImageFormat` returns. */
-type ImageFormat = 'png' | 'jpeg' | 'gif' | 'webp';
+export type ImageFormat = 'png' | 'jpeg' | 'gif' | 'webp';
 
 /** The container format each allowed extension claims to carry — and the
  * allowlist's single source of truth: `ASSET_EXTENSIONS` derives from these
- * keys — but admitting a format is a two-place change: add the key here AND
- * the matching `sniffImageFormat` branch below, or the content gate refuses
- * every real file of the new format — the "two gates agree" pin in
- * `assets.test.ts` fails CI and names which admission is dead.
+ * keys. Admitting a format is a two-place change: add the key here AND the
+ * matching `sniffImageFormat` branch below, or the content gate refuses
+ * every real file of the new format (the "two gates agree" pin in
+ * `assets.test.ts` fails CI and names which admission is dead).
  * An allowlist, not a denylist: SVG is deliberately absent (it is a script
  * container), and anything non-image is refused rather than hosted — this
  * command publishes review evidence, not arbitrary files. */
@@ -51,7 +51,7 @@ function claimedExtension(basename: string): string {
 }
 
 /** How many leading bytes `sniffImageFormat` needs to rule — the longest
- * admitted signature (WEBP's marker ends at byte 11) fits inside. Admitting a
+ * admitted signature (WEBP's fourcc ends at byte 15) fits inside. Admitting a
  * format with a longer signature means raising this, or every real file of it
  * false-refuses at publish time while full-header unit tests stay green. */
 export const ASSET_HEADER_BYTES = 16;
@@ -65,7 +65,7 @@ export const ASSET_HEADER_BYTES = 16;
  * type to the leading bytes — it does not stop a prefixed payload (arbitrary
  * bytes riding behind a genuine signature still pass; closing that needs
  * decode-and-reencode, out of scope here). The signatures vary in strength:
- * WEBP is checked across 12 bytes, PNG across 8, GIF across 6, and JPEG
+ * WEBP is checked across 16 bytes, PNG across 8, GIF across 6, and JPEG
  * across only 3.
  *
  * A sibling signature table lives in core: `sniffFileKind` in
@@ -94,7 +94,15 @@ export function sniffImageFormat(header: Uint8Array): ImageFormat | null {
   if (ascii(0, 'GIF87a') || ascii(0, 'GIF89a')) {
     return 'gif';
   }
-  if (ascii(0, 'RIFF') && ascii(8, 'WEBP')) {
+  if (
+    ascii(0, 'RIFF') &&
+    ascii(8, 'WEBP') &&
+    // The container claim is not the image: a RIFF box carrying WEBP at
+    // offset 8 could still hold anything. Every spec-conformant WebP's
+    // first chunk is VP8, VP8L or VP8X at byte 12, and the 16-byte read
+    // this gate sniffs always covers it.
+    (ascii(12, 'VP8 ') || ascii(12, 'VP8L') || ascii(12, 'VP8X'))
+  ) {
     return 'webp';
   }
   return null;
@@ -134,11 +142,14 @@ export function validateAssetContent(
   }
   const actual = sniffImageFormat(header);
   if (actual !== claimed) {
+    // No basename prefix, unlike the shared extension refusal: the publish
+    // loop refuses with the full quoted path once, and a second name reads
+    // as a stutter to the operator.
     return {
       ok: false,
       reason:
-        `${basename}: content is ${actual ?? 'not a recognized image'} but ` +
-        `the extension claims ${claimed} — evidence is admitted by content, ` +
+        `content is ${actual ?? 'not a recognized image'} but the ` +
+        `extension claims ${claimed} — evidence is admitted by content, ` +
         `not by name`,
     };
   }

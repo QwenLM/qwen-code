@@ -172,7 +172,7 @@ describe('sniffImageFormat / validateAssetContent', () => {
   const GIF = Uint8Array.from([...'GIF89a'].map((c) => c.charCodeAt(0)));
   const GIF87 = Uint8Array.from([...'GIF87a'].map((c) => c.charCodeAt(0)));
   const WEBP = Uint8Array.from(
-    [...'RIFF\u0000\u0000\u0000\u0000WEBP'].map((c) => c.charCodeAt(0)),
+    [...'RIFF\u0000\u0000\u0000\u0000WEBPVP8 '].map((c) => c.charCodeAt(0)),
   );
 
   it('recognizes the four admitted signatures', () => {
@@ -181,6 +181,18 @@ describe('sniffImageFormat / validateAssetContent', () => {
     expect(sniffImageFormat(GIF)).toBe('gif');
     expect(sniffImageFormat(GIF87)).toBe('gif');
     expect(sniffImageFormat(WEBP)).toBe('webp');
+    // VP8L and VP8X are the other two first chunks a conformant WebP carries.
+    for (const fourcc of ['VP8L', 'VP8X']) {
+      expect(
+        sniffImageFormat(
+          Uint8Array.from(
+            [...`RIFF\u0000\u0000\u0000\u0000WEBP${fourcc}`].map((c) =>
+              c.charCodeAt(0),
+            ),
+          ),
+        ),
+      ).toBe('webp');
+    }
   });
 
   it('returns null for non-images, truncated or near-miss headers, and empty input', () => {
@@ -195,6 +207,17 @@ describe('sniffImageFormat / validateAssetContent', () => {
     expect(
       sniffImageFormat(
         Uint8Array.from([...'RIFF0000AVI '].map((c) => c.charCodeAt(0))),
+      ),
+    ).toBeNull();
+    // A RIFF container claiming WEBP but holding no WebP bitstream chunk
+    // (VP8/VP8L/VP8X) at byte 12 is not admitted either.
+    expect(
+      sniffImageFormat(
+        Uint8Array.from(
+          [...'RIFF\u0000\u0000\u0000\u0000WEBPALPH'].map((c) =>
+            c.charCodeAt(0),
+          ),
+        ),
       ),
     ).toBeNull();
     // A WEBP marker without the RIFF container prefix is not WEBP either,
@@ -251,6 +274,10 @@ describe('sniffImageFormat / validateAssetContent', () => {
     ['WEBP marker byte 9', sig('RIFF\u0000\u0000\u0000\u0000WXBP')],
     ['WEBP marker byte 10', sig('RIFF\u0000\u0000\u0000\u0000WEXP')],
     ['WEBP marker byte 11', sig('RIFF\u0000\u0000\u0000\u0000WEB ')],
+    ['WEBP fourcc byte 12', sig('RIFF\u0000\u0000\u0000\u0000WEBPXP8 ')],
+    ['WEBP fourcc byte 13', sig('RIFF\u0000\u0000\u0000\u0000WEBPVX8 ')],
+    ['WEBP fourcc byte 14', sig('RIFF\u0000\u0000\u0000\u0000WEBPVPX ')],
+    ['WEBP fourcc byte 15', sig('RIFF\u0000\u0000\u0000\u0000WEBPVP8\u0000')],
   ];
 
   it.each(ONE_BYTE_OFF)(

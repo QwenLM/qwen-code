@@ -322,26 +322,28 @@ describe('publish-assets', () => {
     run({ files: [good, impostor] });
     expect(process.exitCode).toBe(3);
     const why = (stderrSpy.mock.calls.map((c) => c[0]) as string[]).join(' ');
-    expect(why).toContain('impostor.png');
-    // The full path is named too: two same-named files from different
-    // directories must be tellable apart in the refusal.
-    expect(why).toContain(JSON.stringify(impostor));
+    // The full path names the file exactly once — the validator's reason
+    // carries no basename of its own, so there is no stuttered duplicate,
+    // and two same-named files from different directories stay tellable
+    // apart.
+    expect(why).toContain(`${JSON.stringify(impostor)}: content is`);
     expect(ghWithInputMock).not.toHaveBeenCalled();
     expect(stdoutSpy).toHaveBeenCalledWith(
       JSON.stringify({ published: false }),
     );
   });
 
-  it('publishes a webp whose bytes match — the slice covers the WEBP marker', () => {
-    // The content ruling sniffs a 16-byte slice, and WEBP's marker sits at
-    // bytes 8-11: a slice shorter than 12 would false-refuse every real WEBP
-    // at publish time while the unit tests (full headers) stayed green.
+  it('publishes a webp whose bytes match — the slice covers the WEBP signature', () => {
+    // The content ruling sniffs a 16-byte slice, and WEBP's signature runs
+    // to its fourcc at bytes 12-15: a slice shorter than 16 would
+    // false-refuse every real WEBP at publish time while the unit tests
+    // (full headers) stayed green.
     happyGh();
     const shot = join(dir, 'shot.webp');
     writeFileSync(
       shot,
       Uint8Array.from(
-        [...'RIFF\u0000\u0000\u0000\u0000WEBP'].map((c) => c.charCodeAt(0)),
+        [...'RIFF\u0000\u0000\u0000\u0000WEBPVP8 '].map((c) => c.charCodeAt(0)),
       ),
     );
     run({ files: [shot] });
