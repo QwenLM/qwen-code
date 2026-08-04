@@ -2761,7 +2761,7 @@ describe('DiscoveredMCPTool', () => {
       });
       await server.connect(serverTransport);
 
-      const realClient: McpDirectClient = new Client({
+      const realClient = new Client({
         name: 'real-sdk-client',
         version: '0.0.0',
       });
