@@ -3,6 +3,8 @@ import type {
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
 
+export const CHANNEL_PROMPT_META_KEY = 'qwen.channel.prompt';
+
 export interface AvailableCommand {
   name: string;
   description: string;

@@ -397,7 +397,6 @@ describe('loggers', () => {
         batch_count_bucket: '2',
         terminal_status: 'error',
         execution_status: 'error',
-        execution_error_type: ToolErrorType.EXECUTION_TIMEOUT,
         tool_type: 'mcp',
       });
       const serialized = JSON.stringify(mockLogger.emit.mock.calls.at(-1));

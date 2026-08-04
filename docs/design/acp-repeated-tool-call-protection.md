@@ -2,15 +2,15 @@
 
 Date: 2026-07-31
 Status: Implemented, pending shadow rollout; revised for PR #8176 and PR #8180
-Area: ACP foreground prompt loop
+Area: Interactive ACP foreground prompt loop
 
 ## Summary
 
 ACP should stop an automatic model loop when the same resolved tool repeatedly
 reaches the same trusted execution failure. The protection is conservative:
 it observes only finalized, fully settled tool batches; gives the model one
-fixed corrective reminder; and stops only if the next batch repeats the same
-failure.
+fixed corrective reminder per candidate streak; and stops only if the next
+batch repeats the same failure.
 
 The first version is an in-memory, per-prompt semantic guard. It does not
 replace the existing protections for duplicate provider call IDs, invalid
@@ -71,8 +71,8 @@ were recorded as errors are a concrete example.
 - Inferring retryability from free-form error text.
 - Persisting the guard across a daemon restart, rewind, branch, or fork.
 - Applying the guard to TUI, Stop-hook/Todo automatic continuations, cron,
-  notifications, subagent-internal loops, or third-party producers in the
-  first release.
+  notifications, channel-driven prompts, subagent-internal loops, or
+  third-party producers in the first release.
 - Automatically retrying a tool or suppressing an admitted call.
 
 Those are separate problems with different trust and durability boundaries.
@@ -119,7 +119,7 @@ An eligible failure has:
 - a non-empty structured `executionErrorType` other than
   `ToolErrorType.UNKNOWN`;
 - a resolved built-in or MCP tool identity from the tool registry; and
-- a final result produced by a fully settled ACP foreground batch.
+- a final result produced by a fully settled interactive ACP foreground batch.
 
 The failure key is:
 
@@ -142,7 +142,7 @@ with incomplete outcome fields are not eligible.
 
 ## State machine
 
-The Session owns one guard per foreground ACP prompt:
+The Session owns one guard per interactive foreground ACP prompt:
 
 ```ts
 type RepeatedToolFailureState =
@@ -202,6 +202,9 @@ The state transition and control action are separate:
 
 Once latched, the guard emits no further decisions for that prompt. This avoids
 repeated reminders and telemetry amplification in shadow and warn modes.
+Resetting a candidate and later tracking a different failure key may produce a
+new reminder; the one-reminder guarantee is per candidate streak, not per
+top-level prompt.
 
 The reminder is:
 
@@ -277,9 +280,12 @@ under the existing Session lifecycle.
 
 ## Scope and enforcement modes
 
-The first release applies only to the selected live Session owner processing a
-foreground ACP prompt. It is not process-global and must not fall back to a
-legacy or primary runtime when workspace ownership is unknown.
+The first release applies only to the selected live Session owner processing an
+interactive foreground ACP prompt. Both channel bridge implementations mark
+their prompts explicitly, and Session forces those marked prompts to `off`
+even when the process is configured for enforcement. It is not process-global
+and must not fall back to a legacy or primary runtime when workspace ownership
+is unknown.
 
 Modes:
 
@@ -297,9 +303,20 @@ routes remain `off` in the first release.
 The mode is an operator-controlled deployment policy, not a user-facing
 setting. `QWEN_CODE_ACP_REPEATED_TOOL_FAILURE_GUARD` selects `off`, `shadow`,
 `warn`, or `enforce` when the Session starts; missing or invalid values resolve
-to `shadow`. The deployment control plane must set it only on the assigned
-version-pinned cohort. This feature does not introduce a second rollout or
-owner-assignment service.
+to `shadow`, and a non-empty invalid value records an operator diagnostic.
+Project `.env`, project `.qwen/.env`, and workspace `settings.env` sources are
+not allowed to set this policy; an exported process value or a user-level
+environment file remains valid. The deployment control plane must set it only
+on the assigned version-pinned cohort. This feature does not introduce a
+second rollout or owner-assignment service.
+
+The guard depends on the ACP host implementing `craft/drainMidTurnQueue` with a
+boolean `hasQueuedPrompt` when the guard is enabled. Older or third-party hosts
+that reject, time out, or return an incomplete drain response produce one
+`unreliable_input` reset diagnostic, disable enforcement for that prompt, and
+remain unable to accumulate a candidate until the input boundary is reliable.
+This fail-open behavior is compatibility-safe but must be segmented from a
+supported-host shadow baseline.
 
 ## Telemetry and privacy
 
@@ -308,26 +325,29 @@ log per reducer transition:
 
 - deployment environment and service version from the existing OpenTelemetry
   resource rather than new guard labels;
-- route: ACP foreground or other;
+- route: interactive ACP foreground;
 - mode;
 - phase before and after;
 - decision: reset, tracked, would_warn, warned, would_stop, or stopped;
-- candidate terminal status, execution status, frozen execution error type,
-  and tool type when the batch has one eligible key;
+- candidate terminal status, execution status, and tool type when the batch
+  has one eligible key; the frozen execution error type is retained only in
+  the structured diagnostic log, not as a metric label;
 - otherwise only a low-cardinality reset reason such as `success`,
   `cancelled`, `not_started`, `unknown`, `mixed`, `incomplete`,
   `external_input`, or `contract_violation`;
 - failure count bucket: `0`, `1-2`, `3-4`, `5-7`, or `8+`;
 - batch count bucket: `0`, `1`, `2`, or `3+`;
-- the existing prompt ID in the diagnostic log only, for checking transition
-  order; and
+- a prompt-local guard correlation ID in the diagnostic log only, for checking
+  transition order; it is a one-way SHA-256 digest of the ACP prompt ID, so an
+  authorized investigation can hash a known trace prompt ID while the central
+  event does not disclose the prompt or session ID; and
 - a prompt-local candidate ordinal in the diagnostic log only. The reducer
   reuses the ordinal while the same private key is active and allocates a new
   one when the key changes.
 
-Prompt ID and candidate ordinal are never metric labels. The ordinal cannot
-correlate a tool across prompts and does not reveal its identity. An
-`idle`-to-`idle` observation emits nothing.
+The guard correlation ID and candidate ordinal are never metric labels. The
+ordinal cannot correlate a tool across prompts and does not reveal its
+identity. An `idle`-to-`idle` observation emits nothing.
 
 The terminal `repeated_tool_execution_failure` loop event uses the same
 privacy-restricted OpenTelemetry path and bypasses session-scoped RUM. Other
@@ -375,6 +395,11 @@ Shadow mode advances a virtual warned state without injecting the reminder, so
 `would_warn` and `would_stop` estimate volume only. They cannot establish how a
 model behaves after seeing the reminder.
 
+The default shadow mode adds `todoStopGuardWatchQueuedPrompt: true` to the
+existing mid-turn drain request so the reducer can prove that no full prompt is
+queued. Hosts without that response contract are counted through
+`unreliable_input` and excluded from supported-host shadow conclusions.
+
 Required invariants:
 
 - zero cancelled calls counted as eligible failures;
@@ -394,7 +419,7 @@ enforcement.
 
 ### Phase 2: warn
 
-Enable `warn` for internal ACP foreground prompts. Hold for seven days and
+Enable `warn` for internal interactive ACP foreground prompts. Hold for seven days and
 confirm that reminder injection does not increase cancellation, reconnect,
 latency, token, or round-count regressions. Public cloud remains in shadow.
 Only warn-mode prompts show whether the model repeats the failure after the
@@ -403,11 +428,12 @@ enforcement.
 
 ### Phase 3: limited enforcement
 
-Enable enforcement for at most 5% of stable, version-pinned internal ACP
-foreground owners. Assignment is deterministic by owner so one prompt cannot
-switch treatment mid-run. The remaining 95% stays in `warn`, so both treatment
-and control receive the same corrective reminder and differ only in whether the
-post-reminder matching batch stops. Hold each wave for seven days.
+Enable enforcement for at most 5% of stable, version-pinned internal
+interactive ACP foreground owners. Assignment is deterministic by owner so one
+prompt cannot switch treatment mid-run. The remaining 95% stays in `warn`, so
+both treatment and control receive the same corrective reminder and differ only
+in whether the post-reminder matching batch stops. Hold each wave for seven
+days.
 
 Promote only if:
 
@@ -444,6 +470,8 @@ Keep the change small:
   receipt, drain external input, and apply the returned action;
 - add the new loop type and telemetry event fields through the existing
   low-cardinality logging path; and
+- mark channel prompts at both bridge boundaries and keep the rollout variable
+  out of project-controlled environment sources; and
 - avoid changing tool implementations or adding another execution scheduler.
 
 Because the change touches Core telemetry types and ACP Session orchestration,
@@ -460,10 +488,9 @@ Suggested delivery sequence:
 
 ## Verification
 
-Unit tests for the pure reducer cover:
+Automated unit tests for the pure reducer cover:
 
 - the full terminal/execution decision table;
-- terminal `errorType` cannot overwrite the frozen execution failure key;
 - eight failures in one batch do not warn;
 - eight failures across two batches warn;
 - the next matching batch stops only after it settles;
@@ -475,31 +502,31 @@ Unit tests for the pure reducer cover:
 - warning and stop text are fixed and contain no tool data; and
 - unsupported outcome combinations never enforce.
 
-ACP Session tests cover:
+Automated ACP Session and channel tests cover:
 
-- sequential and concurrent batches;
-- preservation of all current-batch results before stop;
-- no extra model stream after stop;
-- Todo Stop Guard suspension;
-- mid-turn and queued user-input precedence;
-- duplicate call-ID, invalid-parameter, repeated-execution, and total-cap
-  ordering;
-- Session reset, retry, cancellation, disconnect, history replay, and model
-  switch behavior; and
-- shadow, warn, enforce, and downgrade-to-warn routes.
+- the internal receipt preserves frozen execution failure type instead of a
+  later terminal error type;
+- off keeps the legacy drain request shape;
+- shadow observes without changing the turn;
+- warn injects exactly one reminder for the candidate;
+- enforce preserves the settled post-reminder result in history and opens no
+  extra model stream;
+- queued input and cancellation take precedence over enforcement;
+- unsupported hosts downgrade through `unreliable_input`; and
+- both channel bridge paths mark their prompts and Session forces them off.
 
 Telemetry tests cover:
 
-- normalization inherited from PR #8176 and PR #8180;
-- cancellation exclusion;
-- version-scoped baseline queries;
 - low-cardinality attributes; and
-- redaction of arguments, results, paths, raw messages, and stable identity.
+- exclusion of session-scoped common attributes and sensitive tool fields from
+  the guard and terminal loop events.
 
-The behavioral change also needs an E2E plan under `.qwen/e2e-tests/` covering
-one typed failing tool, permission cancellation, a successful recovery after
-the reminder, a repeated failure that stops, concurrent siblings, reconnect,
-and both internal and public-cloud policy modes.
+The behavioral change also has an E2E plan under `.qwen/e2e-tests/`. Its manual
+ACP fixture run remains required before promotion out of Draft. It covers one
+typed failing tool, permission cancellation, successful recovery after the
+reminder, a repeated failure that stops, concurrent siblings, unsupported
+hosts, channel exclusion, reconnect and restart behavior, history replay, a
+fresh prompt after stop, and both internal and public-cloud policy modes.
 
 Before delivery, run targeted Core and CLI Vitest files from their package
 directories, then `npm run build`, `npm run typecheck`, and `npm run lint`.
@@ -508,8 +535,9 @@ directories, then `npm run build`, `npm run typecheck`, and `npm run lint`.
 
 - Telemetry emission failure never changes the tool or model control flow.
 - Missing or malformed outcome data resets and downgrades enforcement.
-- Reminder injection failure resets the guard; it must not stop without having
-  delivered the reminder.
+- If the model request carrying the reminder fails, that prompt exits before a
+  later stop decision; the guard never stops without first constructing and
+  sending the reminder turn.
 - Stop-history persistence failure returns the existing ACP internal error and
   does not pretend the stop was durably recorded.
 - A process restart loses the semantic streak by design. Existing history-based

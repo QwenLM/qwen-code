@@ -16,7 +16,6 @@ import type {
   MemoryRecallDiscardReason,
 } from './types.js';
 import type { ToolExecutionStatus } from '../core/turn.js';
-import type { ToolErrorType } from '../tools/tool-error.js';
 
 const TOOL_CALL_COUNT = `${SERVICE_NAME}.tool.call.count`;
 const TOOL_EXECUTION_COUNT = `${SERVICE_NAME}.tool.execution.count`;
@@ -142,7 +141,6 @@ const COUNTER_DEFINITIONS = {
         | 'contract_violation';
       terminal_status?: 'error';
       execution_status?: 'error';
-      execution_error_type?: ToolErrorType;
       tool_type?: 'native' | 'mcp';
     },
   },

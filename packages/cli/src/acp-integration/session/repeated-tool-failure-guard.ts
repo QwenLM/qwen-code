@@ -113,18 +113,25 @@ export function createRepeatedToolFailureGuardState(): RepeatedToolFailureGuardS
   };
 }
 
-export function resolveRepeatedToolFailureGuardMode(
+export function parseRepeatedToolFailureGuardMode(
   value: string | undefined,
-): RepeatedToolFailureGuardMode {
-  switch (value?.trim().toLowerCase()) {
+): RepeatedToolFailureGuardMode | undefined {
+  const normalized = value?.trim().toLowerCase();
+  switch (normalized) {
     case 'off':
     case 'shadow':
     case 'warn':
     case 'enforce':
-      return value.trim().toLowerCase() as RepeatedToolFailureGuardMode;
+      return normalized;
     default:
-      return 'shadow';
+      return undefined;
   }
+}
+
+export function resolveRepeatedToolFailureGuardMode(
+  value: string | undefined,
+): RepeatedToolFailureGuardMode {
+  return parseRepeatedToolFailureGuardMode(value) ?? 'shadow';
 }
 
 function resetState(

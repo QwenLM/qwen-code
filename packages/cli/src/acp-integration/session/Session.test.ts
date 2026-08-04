@@ -6,6 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
+import { createHash } from 'node:crypto';
 import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
@@ -60,6 +61,7 @@ const startToolSpanSpy = vi.hoisted(() => vi.fn());
 const addToolArgumentsAttributesSpy = vi.hoisted(() => vi.fn());
 const addToolCallResultAttributesSpy = vi.hoisted(() => vi.fn());
 const logLoopDetectedSpy = vi.hoisted(() => vi.fn());
+const logRepeatedToolFailureGuardSpy = vi.hoisted(() => vi.fn());
 const TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD =
   'craft/claimTodoStopGuardContinuation';
 // Records every LoopTickResolver construction's deps so a test can assert what
@@ -101,6 +103,12 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     logLoopDetected: (...args: Parameters<typeof actual.logLoopDetected>) => {
       logLoopDetectedSpy(...args);
       return actual.logLoopDetected(...args);
+    },
+    logRepeatedToolFailureGuard: (
+      ...args: Parameters<typeof actual.logRepeatedToolFailureGuard>
+    ) => {
+      logRepeatedToolFailureGuardSpy(...args);
+      return actual.logRepeatedToolFailureGuard(...args);
     },
     // Transparent recording wrapper: records the constructor deps, then behaves
     // exactly like the real resolver (subclass → instanceof + methods preserved).
@@ -504,6 +512,7 @@ describe('Session', () => {
     addToolArgumentsAttributesSpy.mockClear();
     addToolCallResultAttributesSpy.mockClear();
     logLoopDetectedSpy.mockReset();
+    logRepeatedToolFailureGuardSpy.mockReset();
     runVisionBridgeSpy.mockReset();
     bridgeToolResultImagesSpy.mockReset();
     bridgeToolResultImagesSpy.mockImplementation(
@@ -6197,7 +6206,9 @@ describe('Session', () => {
       const guardModeEnv = 'QWEN_CODE_ACP_REPEATED_TOOL_FAILURE_GUARD';
       let originalGuardMode: string | undefined;
 
-      const recreateSessionWithGuardMode = (mode: 'warn' | 'enforce') => {
+      const recreateSessionWithGuardMode = (
+        mode: 'off' | 'shadow' | 'warn' | 'enforce',
+      ) => {
         originalGuardMode = process.env[guardModeEnv];
         process.env[guardModeEnv] = mode;
         session = new Session(
@@ -6260,16 +6271,214 @@ describe('Session', () => {
         return execute;
       };
 
+      const sentText = () =>
+        vi
+          .mocked(mockChat.sendMessageStream)
+          .mock.calls.flatMap(([, request]) =>
+            (request as { message: Part[] }).message
+              .map((part) => part.text)
+              .filter((text): text is string => text !== undefined),
+          );
+
+      const queueMatchingFailureStreak = () => {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(streamForBatch(1, 4))
+          .mockResolvedValueOnce(streamForBatch(2, 4))
+          .mockResolvedValueOnce(streamForBatch(3, 1))
+          .mockResolvedValueOnce(createEmptyStream());
+      };
+
+      it('defaults an invalid operator mode to shadow and records a warning', () => {
+        debugLoggerWarnSpy.mockClear();
+        const previous = process.env[guardModeEnv];
+        process.env[guardModeEnv] = 'invalid-mode';
+        try {
+          session = new Session(
+            'test-session-id',
+            mockConfig,
+            mockClient,
+            mockSettings,
+          );
+
+          expect(
+            (
+              session as unknown as {
+                repeatedToolFailureGuardMode: string;
+              }
+            ).repeatedToolFailureGuardMode,
+          ).toBe('shadow');
+          expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+            expect.stringContaining('has an invalid value'),
+          );
+        } finally {
+          if (previous === undefined) delete process.env[guardModeEnv];
+          else process.env[guardModeEnv] = previous;
+        }
+      });
+
+      it('observes would-stop behavior in shadow mode without changing the turn', async () => {
+        recreateSessionWithGuardMode('shadow');
+        try {
+          const execute = installFailingTool();
+          queueMatchingFailureStreak();
+
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'run the failing tool' }],
+            }),
+          ).resolves.toEqual({ stopReason: 'end_turn' });
+
+          expect(execute).toHaveBeenCalledTimes(9);
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(4);
+          expect(
+            sentText().filter((text) =>
+              text.includes('Do not repeat the same approach'),
+            ),
+          ).toHaveLength(0);
+          expect(logLoopDetectedSpy).not.toHaveBeenCalledWith(
+            mockConfig,
+            expect.objectContaining({
+              loop_type: core.LoopType.REPEATED_TOOL_EXECUTION_FAILURE,
+            }),
+          );
+        } finally {
+          restoreGuardMode();
+        }
+      });
+
+      it('keeps the pre-guard drain payload when the mode is off', async () => {
+        recreateSessionWithGuardMode('off');
+        try {
+          installFailingTool();
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(streamForBatch(1, 1))
+            .mockResolvedValueOnce(createEmptyStream());
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'run once' }],
+          });
+
+          expect(mockClient.extMethod).toHaveBeenCalledWith(
+            'craft/drainMidTurnQueue',
+            { sessionId: 'test-session-id' },
+          );
+        } finally {
+          restoreGuardMode();
+        }
+      });
+
+      it('forces channel-routed prompts off even when enforcement is configured', async () => {
+        recreateSessionWithGuardMode('enforce');
+        try {
+          const execute = installFailingTool();
+          queueMatchingFailureStreak();
+
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'channel task' }],
+              _meta: { 'qwen.channel.prompt': true },
+            }),
+          ).resolves.toEqual({ stopReason: 'end_turn' });
+
+          expect(execute).toHaveBeenCalledTimes(9);
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(4);
+          expect(sentText()).not.toContainEqual(
+            expect.stringContaining('Do not repeat the same approach'),
+          );
+          const drainCalls = vi
+            .mocked(mockClient.extMethod)
+            .mock.calls.filter(
+              ([method]) => method === 'craft/drainMidTurnQueue',
+            );
+          expect(drainCalls).not.toContainEqual([
+            'craft/drainMidTurnQueue',
+            expect.objectContaining({ todoStopGuardWatchQueuedPrompt: true }),
+          ]);
+          expect(logRepeatedToolFailureGuardSpy).not.toHaveBeenCalled();
+        } finally {
+          restoreGuardMode();
+        }
+      });
+
+      it('fails open when the ACP host cannot provide reliable input state', async () => {
+        recreateSessionWithGuardMode('enforce');
+        try {
+          const execute = installFailingTool();
+          mockClient.extMethod = vi.fn().mockRejectedValue({
+            code: -32601,
+            message: 'Method not found',
+          });
+          queueMatchingFailureStreak();
+
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'run the failing tool' }],
+            }),
+          ).resolves.toEqual({ stopReason: 'end_turn' });
+
+          expect(execute).toHaveBeenCalledTimes(9);
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(4);
+          expect(mockClient.extMethod).toHaveBeenCalledTimes(1);
+          expect(
+            logRepeatedToolFailureGuardSpy.mock.calls.some(
+              ([, event]) => event.reset_reason === 'unreliable_input',
+            ),
+          ).toBe(true);
+          expect(logLoopDetectedSpy).not.toHaveBeenCalledWith(
+            mockConfig,
+            expect.objectContaining({
+              loop_type: core.LoopType.REPEATED_TOOL_EXECUTION_FAILURE,
+            }),
+          );
+        } finally {
+          restoreGuardMode();
+        }
+      });
+
+      it('resets the streak when the host reports a queued prompt', async () => {
+        recreateSessionWithGuardMode('enforce');
+        try {
+          const execute = installFailingTool();
+          let drainCount = 0;
+          mockClient.extMethod = vi.fn().mockImplementation(async () => ({
+            messages: [],
+            hasQueuedPrompt: ++drainCount === 2,
+          }));
+          queueMatchingFailureStreak();
+
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'run the failing tool' }],
+            }),
+          ).resolves.toEqual({ stopReason: 'end_turn' });
+
+          expect(execute).toHaveBeenCalledTimes(9);
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(4);
+          expect(
+            logRepeatedToolFailureGuardSpy.mock.calls.some(
+              ([, event]) => event.reset_reason === 'queued_prompt',
+            ),
+          ).toBe(true);
+          expect(sentText()).not.toContainEqual(
+            expect.stringContaining('Do not repeat the same approach'),
+          );
+        } finally {
+          restoreGuardMode();
+        }
+      });
+
       it('injects one corrective reminder in warn mode and keeps running', async () => {
         recreateSessionWithGuardMode('warn');
         try {
           const execute = installFailingTool();
-          mockChat.sendMessageStream = vi
-            .fn()
-            .mockResolvedValueOnce(streamForBatch(1, 4))
-            .mockResolvedValueOnce(streamForBatch(2, 4))
-            .mockResolvedValueOnce(streamForBatch(3, 1))
-            .mockResolvedValueOnce(createEmptyStream());
+          queueMatchingFailureStreak();
 
           await expect(
             session.prompt({
@@ -6287,15 +6496,8 @@ describe('Session', () => {
               text: expect.stringContaining('Do not repeat the same approach'),
             }),
           );
-          const allSentText = vi
-            .mocked(mockChat.sendMessageStream)
-            .mock.calls.flatMap(([, request]) =>
-              (request as { message: Part[] }).message
-                .map((part) => part.text)
-                .filter((text): text is string => text !== undefined),
-            );
           expect(
-            allSentText.filter((text) =>
+            sentText().filter((text) =>
               text.includes('Do not repeat the same approach'),
             ),
           ).toHaveLength(1);
@@ -6314,12 +6516,7 @@ describe('Session', () => {
         recreateSessionWithGuardMode('enforce');
         try {
           const execute = installFailingTool();
-          mockChat.sendMessageStream = vi
-            .fn()
-            .mockResolvedValueOnce(streamForBatch(1, 4))
-            .mockResolvedValueOnce(streamForBatch(2, 4))
-            .mockResolvedValueOnce(streamForBatch(3, 1))
-            .mockResolvedValueOnce(createEmptyStream());
+          queueMatchingFailureStreak();
 
           await expect(
             session.prompt({
@@ -6335,6 +6532,20 @@ describe('Session', () => {
             expect.objectContaining({
               loop_type: core.LoopType.REPEATED_TOOL_EXECUTION_FAILURE,
             }),
+          );
+          const telemetryPromptIds =
+            logRepeatedToolFailureGuardSpy.mock.calls.map(
+              ([, event]) => event.prompt_id,
+            );
+          expect(new Set(telemetryPromptIds).size).toBe(1);
+          expect(telemetryPromptIds[0]).toBe(
+            createHash('sha256')
+              .update('test-session-id########1')
+              .digest('hex'),
+          );
+          expect(logLoopDetectedSpy).toHaveBeenCalledWith(
+            mockConfig,
+            expect.objectContaining({ prompt_id: telemetryPromptIds[0] }),
           );
           expect(mockChat.addHistory).toHaveBeenCalledWith({
             role: 'user',
@@ -6380,12 +6591,7 @@ describe('Session', () => {
             }
             return { messages: [], hasQueuedPrompt: false };
           });
-          mockChat.sendMessageStream = vi
-            .fn()
-            .mockResolvedValueOnce(streamForBatch(1, 4))
-            .mockResolvedValueOnce(streamForBatch(2, 4))
-            .mockResolvedValueOnce(streamForBatch(3, 1))
-            .mockResolvedValueOnce(createEmptyStream());
+          queueMatchingFailureStreak();
 
           await expect(
             session.prompt({
@@ -6402,6 +6608,36 @@ describe('Session', () => {
               loop_type: core.LoopType.REPEATED_TOOL_EXECUTION_FAILURE,
             }),
           );
+        } finally {
+          restoreGuardMode();
+        }
+      });
+
+      it('returns cancelled when cancellation arrives while the stop message is emitted', async () => {
+        recreateSessionWithGuardMode('enforce');
+        try {
+          installFailingTool();
+          vi.mocked(mockClient.sessionUpdate).mockImplementation(
+            async ({ update }) => {
+              if (
+                update.sessionUpdate === 'agent_message_chunk' &&
+                update.content.type === 'text' &&
+                update.content.text.includes('Automatic continuation stopped')
+              ) {
+                await session.cancelPendingPrompt();
+              }
+            },
+          );
+          queueMatchingFailureStreak();
+
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'run the failing tool' }],
+            }),
+          ).resolves.toEqual({ stopReason: 'cancelled' });
+
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
         } finally {
           restoreGuardMode();
         }

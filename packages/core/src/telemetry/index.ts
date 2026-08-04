@@ -96,6 +96,7 @@ export {
   MemoryDreamEvent,
   MemoryRecallEvent,
   MemoryRecallDeliveryEvent,
+  RepeatedToolFailureGuardEvent,
 } from './types.js';
 export { makeSlashCommandEvent, makeChatCompressionEvent } from './types.js';
 export type {
@@ -152,7 +153,6 @@ export {
   ApiRequestPhase,
   FileOperation,
 } from './metrics.js';
-export { RepeatedToolFailureGuardEvent } from './types.js';
 export { QwenLogger } from './qwen-logger/qwen-logger.js';
 export { sanitizeHookName } from './sanitize.js';
 export {

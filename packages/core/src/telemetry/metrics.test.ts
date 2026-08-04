@@ -20,7 +20,6 @@ import {
   ApiRequestPhase,
 } from './metrics.js';
 import { makeFakeConfig } from '../test-utils/config.js';
-import { ToolErrorType } from '../tools/tool-error.js';
 
 const mockCounterAddFn: Mock<
   (value: number, attributes?: Attributes, context?: Context) => void
@@ -359,7 +358,6 @@ describe('Telemetry Metrics', () => {
         batch_count_bucket: '3+',
         terminal_status: 'error',
         execution_status: 'error',
-        execution_error_type: ToolErrorType.EXECUTION_TIMEOUT,
         tool_type: 'mcp',
       });
 
@@ -377,7 +375,6 @@ describe('Telemetry Metrics', () => {
         batch_count_bucket: '3+',
         terminal_status: 'error',
         execution_status: 'error',
-        execution_error_type: ToolErrorType.EXECUTION_TIMEOUT,
         tool_type: 'mcp',
       });
     });

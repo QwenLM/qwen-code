@@ -642,6 +642,8 @@ export function logLoopDetected(
 ): void {
   const privacyRestricted =
     event.loop_type === LoopType.REPEATED_TOOL_EXECUTION_FAILURE;
+  // This loop type uses its guard-generated opaque prompt correlation ID and
+  // intentionally omits the session-scoped RUM and common session attribute.
   if (!privacyRestricted) {
     QwenLogger.getInstance(config)?.logLoopDetectedEvent(event);
   }
@@ -664,12 +666,8 @@ export function logRepeatedToolFailureGuard(
   _config: Config,
   event: RepeatedToolFailureGuardEvent,
 ): void {
-  let sdkInitialized = false;
   runToolTelemetrySink(() => {
-    sdkInitialized = isTelemetrySdkInitialized();
-  });
-  if (sdkInitialized) {
-    runToolTelemetrySink(() => {
+    if (isTelemetrySdkInitialized()) {
       const logger = logs.getLogger(SERVICE_NAME);
       logger.emit({
         body: `Repeated tool failure guard decision: ${event.decision}.`,
@@ -678,8 +676,8 @@ export function logRepeatedToolFailureGuard(
           'event.name': EVENT_REPEATED_TOOL_FAILURE_GUARD,
         },
       });
-    });
-  }
+    }
+  });
   runToolTelemetrySink(() => {
     recordRepeatedToolFailureGuardMetrics({
       route: event.route,
@@ -697,9 +695,6 @@ export function logRepeatedToolFailureGuard(
         : {}),
       ...(event.execution_status !== undefined
         ? { execution_status: event.execution_status }
-        : {}),
-      ...(event.execution_error_type !== undefined
-        ? { execution_error_type: event.execution_error_type }
         : {}),
       ...(event.tool_type !== undefined ? { tool_type: event.tool_type } : {}),
     });

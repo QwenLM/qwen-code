@@ -9,6 +9,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildRuntimeEnvironment, loadEnvironment } from './environment.js';
+import { ENV_ACP_REPEATED_TOOL_FAILURE_GUARD } from './shared-env-keys.js';
 import type { Settings } from './settingsSchema.js';
 
 const TRACKED_ENV = [
@@ -25,6 +26,7 @@ const TRACKED_ENV = [
   'NODE_COMPILE_CACHE',
   'NODE_DISABLE_COMPILE_CACHE',
   'QWEN_HOME',
+  ENV_ACP_REPEATED_TOOL_FAILURE_GUARD,
   'QWEN_CODE_PENDING_COMPILE_CACHE',
   'QWEN_RUNTIME_DIR',
   'QWEN_SERVER_TOKEN',
@@ -82,6 +84,7 @@ describe('buildRuntimeEnvironment', () => {
         'NODE_OPTIONS=--require ./bad.js',
         'QWEN_SERVER_TOKEN=dotenv-token',
         'QWEN_HOME=/tmp/ignored-qwen-home',
+        `${ENV_ACP_REPEATED_TOOL_FAILURE_GUARD}=enforce`,
         '',
       ].join('\n'),
     );
@@ -101,6 +104,7 @@ describe('buildRuntimeEnvironment', () => {
           RUNTIME_SETTINGS_EXCLUDED: 'settings-excluded',
           BASH_ENV: '/tmp/bad-profile',
           QWEN_RUNTIME_DIR: '/tmp/ignored-runtime-dir',
+          [ENV_ACP_REPEATED_TOOL_FAILURE_GUARD]: 'warn',
         },
       }),
       workspace,
@@ -121,6 +125,9 @@ describe('buildRuntimeEnvironment', () => {
     expect(snapshot.effectiveEnv['QWEN_SERVER_TOKEN']).toBeUndefined();
     expect(snapshot.effectiveEnv['QWEN_HOME']).toBeUndefined();
     expect(snapshot.effectiveEnv['QWEN_RUNTIME_DIR']).toBeUndefined();
+    expect(
+      snapshot.effectiveEnv[ENV_ACP_REPEATED_TOOL_FAILURE_GUARD],
+    ).toBeUndefined();
     expect(snapshot.overlayKeys).toEqual([
       'RUNTIME_DOTENV',
       'RUNTIME_EMPTY',
@@ -226,6 +233,7 @@ describe('loadEnvironment', () => {
           BASH_ENV: '/tmp/bad-profile',
           NODE_OPTIONS: '--require ./bad.js',
           QWEN_SERVER_TOKEN: 'bad-token',
+          [ENV_ACP_REPEATED_TOOL_FAILURE_GUARD]: 'enforce',
         },
       }),
       workspace,
@@ -235,5 +243,6 @@ describe('loadEnvironment', () => {
     expect(process.env['BASH_ENV']).toBeUndefined();
     expect(process.env['NODE_OPTIONS']).toBeUndefined();
     expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+    expect(process.env[ENV_ACP_REPEATED_TOOL_FAILURE_GUARD]).toBeUndefined();
   });
 });

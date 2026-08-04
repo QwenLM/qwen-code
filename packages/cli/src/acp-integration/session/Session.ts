@@ -5,7 +5,7 @@
  */
 
 import { Buffer } from 'node:buffer';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { realpathSync, statSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -170,6 +170,7 @@ import {
   runWithInvocationContext,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
+import { ENV_ACP_REPEATED_TOOL_FAILURE_GUARD } from '../../config/shared-env-keys.js';
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
 // so a rename can't desync caller and answerer into a silent -32601 latch.
 import {
@@ -288,7 +289,7 @@ import {
   reduceRepeatedToolFailureGuard,
   REPEATED_TOOL_FAILURE_REMINDER,
   REPEATED_TOOL_FAILURE_STOP_MESSAGE,
-  resolveRepeatedToolFailureGuardMode,
+  parseRepeatedToolFailureGuardMode,
   type RepeatedToolFailureBatch,
   type RepeatedToolFailureGuardMode,
   type RepeatedToolFailureGuardDecision,
@@ -304,8 +305,7 @@ const USER_CANCEL_ABORT_REASON = 'qwen:user-cancel';
 const SESSION_DISPOSE_ABORT_REASON = 'qwen:session-dispose';
 const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
 const DAEMON_CONTINUE_META_KEY = 'qwen.daemon.continueLastTurn';
-const REPEATED_TOOL_FAILURE_GUARD_MODE_ENV =
-  'QWEN_CODE_ACP_REPEATED_TOOL_FAILURE_GUARD';
+const CHANNEL_PROMPT_META_KEY = 'qwen.channel.prompt';
 const TODO_STOP_GUARD_PROMPT_PREFIX = '[Todo Stop Guard] ';
 const TODO_STOP_GUARD_PROMPT_BODY_SUFFIX =
   ' todo item(s) are still pending or in progress. Continue executing the current task now. Do not ask the user whether to continue. If progress requires user input, use the structured question or permission flow. If progress depends on external state, report the blocker explicitly.';
@@ -460,6 +460,7 @@ type DaemonToolLoopState = {
   loopDetected: boolean;
   repeatedToolFailureMode: RepeatedToolFailureGuardMode;
   repeatedToolFailureState: RepeatedToolFailureGuardState;
+  repeatedToolFailureTelemetryId?: string;
 };
 
 const DAEMON_INVALID_TOOL_PARAMS_THRESHOLD = 3;
@@ -476,6 +477,7 @@ const TOOL_POST_EXECUTION_CANCELLED_MESSAGE =
 
 function createDaemonToolLoopState(
   repeatedToolFailureMode: RepeatedToolFailureGuardMode = 'off',
+  telemetrySourceId?: string,
 ): DaemonToolLoopState {
   return {
     totalToolCalls: 0,
@@ -483,6 +485,13 @@ function createDaemonToolLoopState(
     loopDetected: false,
     repeatedToolFailureMode,
     repeatedToolFailureState: createRepeatedToolFailureGuardState(),
+    ...(repeatedToolFailureMode === 'off' || telemetrySourceId === undefined
+      ? {}
+      : {
+          repeatedToolFailureTelemetryId: createHash('sha256')
+            .update(telemetrySourceId)
+            .digest('hex'),
+        }),
   };
 }
 
@@ -505,13 +514,19 @@ function repeatedToolFailureBatchBucket(count: number): '0' | '1' | '2' | '3+' {
 
 function recordRepeatedToolFailureDecision(
   config: Config,
-  promptId: string,
+  telemetryPromptId: string | undefined,
   mode: RepeatedToolFailureGuardMode,
   previousState: RepeatedToolFailureGuardState,
   decision: RepeatedToolFailureGuardDecision,
   batch: RepeatedToolFailureBatch,
 ): void {
-  if (mode === 'off' || decision.kind === 'none') return;
+  if (
+    mode === 'off' ||
+    decision.kind === 'none' ||
+    telemetryPromptId === undefined
+  ) {
+    return;
+  }
 
   const countState = decision.kind === 'reset' ? previousState : decision.state;
   const telemetryDecision =
@@ -541,7 +556,7 @@ function recordRepeatedToolFailureDecision(
     logRepeatedToolFailureGuard(
       config,
       new RepeatedToolFailureGuardEvent({
-        prompt_id: promptId,
+        prompt_id: telemetryPromptId,
         route: 'acp_foreground',
         mode,
         phase_before: previousState.phase,
@@ -1490,9 +1505,16 @@ export class Session implements SessionContext {
       !this.config.getBareMode() &&
       !this.config.isSafeMode();
     this.todoStopGuard = new DaemonTodoStopGuard(todoStopGuardEnabled);
-    this.repeatedToolFailureGuardMode = resolveRepeatedToolFailureGuardMode(
-      process.env[REPEATED_TOOL_FAILURE_GUARD_MODE_ENV],
-    );
+    const configuredGuardMode =
+      process.env[ENV_ACP_REPEATED_TOOL_FAILURE_GUARD];
+    const parsedGuardMode =
+      parseRepeatedToolFailureGuardMode(configuredGuardMode);
+    this.repeatedToolFailureGuardMode = parsedGuardMode ?? 'shadow';
+    if (configuredGuardMode?.trim() && parsedGuardMode === undefined) {
+      debugLogger.warn(
+        `${ENV_ACP_REPEATED_TOOL_FAILURE_GUARD} has an invalid value; defaulting to shadow. Expected off, shadow, warn, or enforce.`,
+      );
+    }
     this.todoStopGuardBackgroundBaseline =
       this.#captureTodoStopGuardBackgroundBaseline();
 
@@ -3240,7 +3262,10 @@ export class Session implements SessionContext {
             let nextMessage: Content | null = { role: 'user', parts };
             let turnCount = 0;
             const toolLoopState = createDaemonToolLoopState(
-              this.repeatedToolFailureGuardMode,
+              promptMetadata?.[CHANNEL_PROMPT_META_KEY] === true
+                ? 'off'
+                : this.repeatedToolFailureGuardMode,
+              promptId,
             );
 
             // conversation_finished must fire on every terminal path of the
@@ -3508,7 +3533,11 @@ export class Session implements SessionContext {
                     );
                   nextMessage = nextAfterTools.message;
                   if (nextAfterTools.stoppedByRepeatedToolFailure) {
-                    return { stopReason: 'end_turn' };
+                    return {
+                      stopReason: getAbortAwareEndTurnStopReason(
+                        pendingSend.signal,
+                      ),
+                    };
                   }
                   if (toolRun.loopDetected) {
                     this.todoStopGuard.suspend();
@@ -4924,7 +4953,7 @@ export class Session implements SessionContext {
     );
     recordRepeatedToolFailureDecision(
       this.config,
-      promptId,
+      toolLoopState.repeatedToolFailureTelemetryId,
       toolLoopState.repeatedToolFailureMode,
       previousRepeatedToolFailureState,
       repeatedToolFailureDecision,
@@ -4961,7 +4990,7 @@ export class Session implements SessionContext {
       await this.messageRewriter?.waitForPendingRewrites();
       recordDaemonLoopDetected(
         this.config,
-        promptId,
+        toolLoopState.repeatedToolFailureTelemetryId ?? promptId,
         LoopType.REPEATED_TOOL_EXECUTION_FAILURE,
         REPEATED_TOOL_FAILURE_STOP_MESSAGE,
         toolLoopState,

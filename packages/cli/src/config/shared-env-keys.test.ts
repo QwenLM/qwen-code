@@ -5,7 +5,10 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { PROJECT_ENV_HARDCODED_EXCLUSIONS } from './shared-env-keys.js';
+import {
+  ENV_ACP_REPEATED_TOOL_FAILURE_GUARD,
+  PROJECT_ENV_HARDCODED_EXCLUSIONS,
+} from './shared-env-keys.js';
 
 describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
   // Security guard: a project `.env` must never be able to disable TLS
@@ -21,6 +24,12 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
   it('excludes NODE_TLS_REJECT_UNAUTHORIZED so a project .env cannot disable TLS', () => {
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
       'NODE_TLS_REJECT_UNAUTHORIZED',
+    );
+  });
+
+  it('keeps ACP repeated-tool-failure rollout policy operator-owned', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
+      ENV_ACP_REPEATED_TOOL_FAILURE_GUARD,
     );
   });
 });
