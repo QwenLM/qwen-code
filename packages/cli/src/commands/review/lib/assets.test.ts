@@ -299,6 +299,24 @@ describe('sniffImageFormat / validateAssetContent', () => {
     if (!proto.ok) expect(proto.reason).toContain('is not an allowed');
   });
 
+  // The allowlist refusal is built once (`refusedExtension`) and both gates
+  // must emit it byte-identically, so one expectation per input covers both
+  // call sites: a gate that parses extensions (case, trailing dot) or
+  // formats the refusal on its own again fails here instead of drifting
+  // silently. Even real PNG bytes cannot save a disallowed extension.
+  it.each([
+    ['evil.svg', 'svg'],
+    ['evil.SVG', 'svg'],
+    ['archive.', ''],
+    ['noext', ''],
+  ])('refuses %s with the one shared refusal in both gates', (name, ext) => {
+    const reason =
+      `${name}: extension "${ext}" is not an allowed ` +
+      `evidence image type (${[...ASSET_EXTENSIONS].join(', ')})`;
+    expect(validateAssetFile(name, 100)).toEqual({ ok: false, reason });
+    expect(validateAssetContent(name, PNG)).toEqual({ ok: false, reason });
+  });
+
   it('admits every allowed extension by content — the two gates agree', () => {
     // Admitting a format is a TWO-place change: the allowlist key and the
     // matching sniffImageFormat branch. This pin binds them — a format
