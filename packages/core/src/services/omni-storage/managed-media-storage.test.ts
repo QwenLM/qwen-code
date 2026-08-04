@@ -70,6 +70,45 @@ describe('ManagedMediaStorage', () => {
       expect(stat.isDirectory()).toBe(true);
     });
 
+    it('initializes a fresh instance over an existing store (restart case)', async () => {
+      const second = new ManagedMediaStorage(
+        path.join(tmpDir, 'omni'),
+        testConfig(),
+      );
+      await expect(second.initialize()).resolves.toBeUndefined();
+      const stat = await fs.promises.stat(path.join(tmpDir, 'omni', 'objects'));
+      expect(stat.isDirectory()).toBe(true);
+      const gitignore = await fs.promises.readFile(
+        path.join(tmpDir, 'omni', '.gitignore'),
+        'utf8',
+      );
+      expect(gitignore).toBe('*\n');
+    });
+
+    it('enforces 0700 dirs and 0600 files', async () => {
+      const root = path.join(tmpDir, 'omni');
+      for (const sub of ['objects', 'downloads', 'staging', 'quarantine']) {
+        const stat = await fs.promises.stat(path.join(root, sub));
+        expect(stat.mode & 0o777).toBe(0o700);
+      }
+      const result = await storage.commitBuffer(Buffer.from('perms'), '.bin');
+      const fileStat = await fs.promises.stat(result.objectPath);
+      expect(fileStat.mode & 0o777).toBe(0o600);
+    });
+
+    it('does not clobber a pre-existing .gitignore', async () => {
+      const root = path.join(tmpDir, 'omni2');
+      await fs.promises.mkdir(root, { recursive: true });
+      await fs.promises.writeFile(path.join(root, '.gitignore'), 'custom\n');
+      const second = new ManagedMediaStorage(root, testConfig());
+      await second.initialize();
+      const content = await fs.promises.readFile(
+        path.join(root, '.gitignore'),
+        'utf8',
+      );
+      expect(content).toBe('custom\n');
+    });
+
     it('rejects symlinked root', async () => {
       const realDir = path.join(tmpDir, 'real');
       const linkDir = path.join(tmpDir, 'link');
@@ -77,6 +116,28 @@ describe('ManagedMediaStorage', () => {
       await fs.promises.symlink(realDir, linkDir);
       const linkStorage = new ManagedMediaStorage(linkDir, testConfig());
       await expect(linkStorage.initialize()).rejects.toThrow('symlink');
+    });
+
+    it('rejects a symlinked ancestor of the storage root', async () => {
+      const realParent = path.join(tmpDir, 'real-parent');
+      const linkParent = path.join(tmpDir, 'link-parent');
+      await fs.promises.mkdir(realParent);
+      await fs.promises.symlink(realParent, linkParent);
+      const nested = new ManagedMediaStorage(
+        path.join(linkParent, 'omni'),
+        testConfig(),
+      );
+      await expect(nested.initialize()).rejects.toThrow('symlink');
+    });
+
+    it('rejects a pre-symlinked region directory', async () => {
+      const root = path.join(tmpDir, 'omni3');
+      const outside = path.join(tmpDir, 'outside');
+      await fs.promises.mkdir(outside);
+      await fs.promises.mkdir(root, { recursive: true });
+      await fs.promises.symlink(outside, path.join(root, 'objects'));
+      const regionStorage = new ManagedMediaStorage(root, testConfig());
+      await expect(regionStorage.initialize()).rejects.toThrow('symlink');
     });
   });
 
@@ -113,6 +174,8 @@ describe('ManagedMediaStorage', () => {
       // Same hash → same managedId, but first commit wins the extension
       expect(asTxt.sha256).toBe(asMp4.sha256);
       expect(asMp4.deduplicated).toBe(true);
+      expect(asMp4.objectPath).toBe(asTxt.objectPath);
+      await expect(fs.promises.stat(asMp4.objectPath)).resolves.toBeDefined();
     });
 
     it('sanitizes .tmp extension to .bin', async () => {
@@ -559,6 +622,11 @@ describe('startup recovery', () => {
     const past = new Date(Date.now() - 72 * 3_600_000);
     await fs.promises.utimes(partPath, past, past);
 
+    // Create a FRESH .part file (in-progress download inside the
+    // partRetentionHours resume window — must survive recovery)
+    const freshPart = path.join(root, 'downloads', 'fresh.part');
+    await fs.promises.writeFile(freshPart, 'in progress');
+
     // Create .tmp in objects prefix dir
     await fs.promises.mkdir(path.join(root, 'objects', 'ab'), {
       recursive: true,
@@ -578,6 +646,9 @@ describe('startup recovery', () => {
     expect(result.stagingDirsRemoved).toBe(1);
     expect(result.partFilesRemoved).toBe(1);
     expect(result.tmpFilesRemoved).toBeGreaterThanOrEqual(2);
+
+    // Fresh .part must survive (download-resume window)
+    await expect(fs.promises.stat(freshPart)).resolves.toBeDefined();
 
     // Verify cleaned
     const stagingEntries = await fs.promises.readdir(
@@ -603,6 +674,9 @@ describe('startup recovery', () => {
 
     const result = await storage.runStartupRecovery();
     expect(result.hashMismatches).toContain(hash);
+    // The corrupt object must be removed, not left servable
+    expect(await storage.objectExists(hashToManagedId(hash))).toBe(false);
+    expect(await storage.findObjectPath(hashToManagedId(hash))).toBeUndefined();
   });
 
   it('cleans quarantine by retention', async () => {
@@ -682,6 +756,64 @@ describe('OmniUploadCache', () => {
 
     const retrieved = cache.get('abc123', 'model-a');
     expect(retrieved?.ossUrl).toBe('oss://bucket/obj1');
+    // model is part of the key (design §8: switching models re-uploads)
+    expect(cache.get('abc123', 'model-b')).toBeUndefined();
+  });
+
+  it('survives a transient non-ENOENT read failure without data loss', () => {
+    // A directory at the cache path makes readFileSync throw EISDIR —
+    // load must propagate instead of resetting to an empty map.
+    fs.mkdirSync(cachePath);
+    const cache = new OmniUploadCache(cachePath);
+    expect(() => cache.get('h', 'm')).toThrow();
+    // The failure must not be memoized as an empty cache either
+    expect(() => cache.get('h', 'm')).toThrow();
+  });
+
+  it('merges foreign entries instead of clobbering another session', () => {
+    const entry = (url: string) => ({
+      ossUrl: url,
+      uploadedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+    });
+    const sessionA = new OmniUploadCache(cachePath);
+    sessionA.set('hash-a', 'm', entry('oss://b/a'));
+    const sessionB = new OmniUploadCache(cachePath);
+    expect(sessionB.get('hash-a', 'm')).toBeDefined();
+    sessionB.set('hash-b', 'm', entry('oss://b/b'));
+    // session A still holds its stale memoized map; its save must merge
+    sessionA.set('hash-c', 'm', entry('oss://b/c'));
+
+    const check = new OmniUploadCache(cachePath);
+    expect(check.get('hash-a', 'm')).toBeDefined();
+    expect(check.get('hash-b', 'm')).toBeDefined();
+    expect(check.get('hash-c', 'm')).toBeDefined();
+  });
+
+  it('removes the temp file when persistence fails', () => {
+    if (typeof process.getuid === 'function' && process.getuid() === 0) {
+      return; // root ignores permission bits
+    }
+    const cache = new OmniUploadCache(cachePath);
+    cache.set('h', 'm', {
+      ossUrl: 'oss://b/o',
+      uploadedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+    });
+    fs.chmodSync(tmpDir, 0o500);
+    try {
+      cache.set('h2', 'm', {
+        ossUrl: 'oss://b/o2',
+        uploadedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+      });
+      const leftovers = fs
+        .readdirSync(tmpDir)
+        .filter((f) => f.startsWith('.upload-cache-'));
+      expect(leftovers).toHaveLength(0);
+    } finally {
+      fs.chmodSync(tmpDir, 0o700);
+    }
   });
 
   it('returns undefined for expired entries', () => {

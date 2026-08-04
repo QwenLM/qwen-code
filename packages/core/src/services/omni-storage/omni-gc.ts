@@ -354,13 +354,18 @@ export async function runStartupRecovery(
     // best effort
   }
 
-  // 5. Sample-verify object hashes
+  // 5. Sample-verify object hashes (random sample per design §6.1 — a fixed
+  // stride would never reach a corrupted object at an off-stride index)
   const objects = await listObjects(paths.objectsDir);
   const sampleSize = Math.min(objects.length, HASH_SAMPLE_SIZE);
   if (sampleSize > 0) {
-    const step = Math.max(1, Math.floor(objects.length / sampleSize));
-    for (let i = 0; i < objects.length; i += step) {
-      const obj = objects[i]!;
+    const indices = objects.map((_, i) => i);
+    for (let i = 0; i < sampleSize; i++) {
+      const j = i + Math.floor(Math.random() * (indices.length - i));
+      [indices[i], indices[j]] = [indices[j]!, indices[i]!];
+    }
+    for (let i = 0; i < sampleSize; i++) {
+      const obj = objects[indices[i]!]!;
       try {
         const hash = createHash('sha256');
         await pipeline(fs.createReadStream(obj.filePath), hash);

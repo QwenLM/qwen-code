@@ -24,37 +24,97 @@ function cacheKey(sha256: string, model: string): string {
  */
 export class OmniUploadCache {
   private cache: CacheMap | undefined;
+  private loadedAtMtimeMs: number | undefined;
+  private loadedAtIno: number | undefined;
 
   constructor(private readonly filePath: string) {}
 
   private load(): CacheMap {
     if (this.cache !== undefined) return this.cache;
+    let raw: string | undefined;
     try {
-      const raw = fs.readFileSync(this.filePath, 'utf8');
-      const parsed: unknown = JSON.parse(raw);
+      raw = fs.readFileSync(this.filePath, 'utf8');
+    } catch (err) {
+      // Only a missing file starts empty; a transient read failure must
+      // not wipe the persisted cache (a later save would persist the loss).
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+    if (raw === undefined) {
+      this.cache = {};
+    } else {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        parsed = {};
+      }
       this.cache =
         parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
           ? (parsed as CacheMap)
           : {};
-    } catch {
-      this.cache = {};
     }
+    this.recordLoadedStats();
     return this.cache;
   }
 
-  private save(): void {
+  private recordLoadedStats(): void {
     try {
-      const dir = path.dirname(this.filePath);
-      const tmpPath = path.join(
-        dir,
-        `.upload-cache-${randomBytes(4).toString('hex')}.tmp`,
-      );
-      fs.writeFileSync(tmpPath, JSON.stringify(this.cache ?? {}, null, 2), {
+      const stat = fs.statSync(this.filePath);
+      this.loadedAtMtimeMs = stat.mtimeMs;
+      this.loadedAtIno = stat.ino;
+    } catch {
+      this.loadedAtMtimeMs = undefined;
+      this.loadedAtIno = undefined;
+    }
+  }
+
+  private save(): void {
+    const merged = this.mergeWithDisk();
+    const dir = path.dirname(this.filePath);
+    const tmpPath = path.join(
+      dir,
+      `.upload-cache-${randomBytes(4).toString('hex')}.tmp`,
+    );
+    try {
+      fs.writeFileSync(tmpPath, JSON.stringify(merged, null, 2), {
         mode: 0o600,
       });
       fs.renameSync(tmpPath, this.filePath);
+      this.cache = merged;
+      this.recordLoadedStats();
     } catch (err) {
+      fs.rmSync(tmpPath, { force: true });
       debugLogger.warn('Failed to persist upload cache:', err);
+    }
+  }
+
+  // Another session may rewrite the file after load(); keep its entries
+  // instead of clobbering them with our stale map. Our own keys win on
+  // conflicts; concurrent deletes can still race — full serialization is
+  // the lock strategy the design defers.
+  private mergeWithDisk(): CacheMap {
+    const ours = this.cache ?? {};
+    try {
+      const stat = fs.statSync(this.filePath);
+      if (
+        stat.mtimeMs === this.loadedAtMtimeMs &&
+        stat.ino === this.loadedAtIno
+      ) {
+        return ours;
+      }
+      const parsed: unknown = JSON.parse(
+        fs.readFileSync(this.filePath, 'utf8'),
+      );
+      if (
+        parsed === null ||
+        typeof parsed !== 'object' ||
+        Array.isArray(parsed)
+      ) {
+        return ours;
+      }
+      return { ...(parsed as CacheMap), ...ours };
+    } catch {
+      return ours;
     }
   }
 

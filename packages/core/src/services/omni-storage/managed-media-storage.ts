@@ -100,11 +100,25 @@ export class ManagedMediaStorage {
       await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
     }
 
+    // mkdir does not disturb a pre-existing symlinked region, so re-check
+    // each one after creation.
+    for (const dir of [
+      this.paths.objectsDir,
+      this.paths.downloadsDir,
+      this.paths.stagingDir,
+      this.paths.quarantineDir,
+    ]) {
+      await this.assertNoSymlink(dir);
+    }
+
     const gitignorePath = path.join(this.rootDir, '.gitignore');
     try {
-      await fs.promises.writeFile(gitignorePath, '*\n', { mode: 0o600 });
-    } catch {
-      // already exists — fine
+      await fs.promises.writeFile(gitignorePath, '*\n', {
+        flag: 'wx',
+        mode: 0o600,
+      });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
     }
 
     this.initialized = true;
@@ -156,6 +170,7 @@ export class ManagedMediaStorage {
    */
   async commitBuffer(data: Buffer, extension: string): Promise<CommitResult> {
     const sha256 = createHash('sha256').update(data).digest('hex');
+    await this.assertNoSymlink(this.objectPathFor(sha256, extension));
     const existing = await this.findByHash(sha256);
 
     if (existing) {
@@ -420,6 +435,7 @@ export class ManagedMediaStorage {
     extension: string,
     sizeBytes: number,
   ): Promise<CommitResult> {
+    await this.assertNoSymlink(this.objectPathFor(sha256, extension));
     const existing = await this.findByHash(sha256);
 
     if (existing) {
@@ -461,16 +477,28 @@ export class ManagedMediaStorage {
   }
 
   private async assertNoSymlink(targetPath: string): Promise<void> {
-    let stat: fs.Stats;
-    try {
-      stat = await fs.promises.lstat(targetPath);
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
-      throw err;
+    const resolved = path.resolve(targetPath);
+    // Find the deepest existing ancestor (the target itself may not exist
+    // yet); walk up through ENOENTs.
+    let existing = resolved;
+    for (;;) {
+      try {
+        await fs.promises.lstat(existing);
+        break;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+        const parent = path.dirname(existing);
+        if (parent === existing) return;
+        existing = parent;
+      }
     }
-    if (stat.isSymbolicLink()) {
+    // realpath resolves elsewhere when any component of the existing
+    // prefix is a symlink — including the final component itself.
+    const real = await fs.promises.realpath(existing);
+    if (real !== existing) {
       throw new Error(
-        `Symlink detected at ${targetPath}. Omni storage refuses symlinks.`,
+        `Symlink detected in path ${targetPath} (at "${existing}"). ` +
+          'Omni storage refuses symlinks.',
       );
     }
   }
