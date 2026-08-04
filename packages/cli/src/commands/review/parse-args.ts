@@ -478,8 +478,8 @@ export const parseArgsCommand: CommandModule = {
     // Before anything is parsed: every step after this one runs the BUILT
     // bundle, so a review command edited since that build does not take effect
     // and the run measures the old behaviour without saying so. This is the
-    // first command of a fresh review; `drive` repeats the check, because a
-    // resumed review can start there.
+    // first command of a fresh review; `drive` repeats the check, because
+    // the verifier brief sends agents there without a step 1.
     for (const line of bundleStalenessNotices(process.argv[1])) {
       // `…Safe`, the convention for diagnostics in this subsystem: stderr
       // piped to `head` raises EPIPE, and a warning that kills the review it

@@ -17,6 +17,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  chmodSync,
   mkdtempSync,
   mkdirSync,
   readdirSync,
@@ -162,6 +163,43 @@ describe('the build stamp and the staleness check agree', () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  // chmod is the only lever this case has: on Windows it is a no-op, and a
+  // root user reads through it, so the branch under test is unreachable there
+  // and the case skips instead of passing on the other branch.
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'neither side measures a tree whose subdirectory cannot be listed',
+    () => {
+      // The unreadable-DIRECTORY case, on both sides of the boundary at once:
+      // the build refuses and the runtime check reports unmeasured, so neither
+      // accuses a bundle that is merely unreadable. The tree holds two files,
+      // because with exactly one, hashing the survivors and measuring nothing
+      // are the same answer and a one-sided fix would keep both sides equal.
+      const root = mkdtempSync(join(tmpdir(), 'digest-unreadable-'));
+      try {
+        const cli = join(root, 'packages', 'cli', 'src', 'commands');
+        const lib = join(cli, 'review', 'lib');
+        mkdirSync(lib, { recursive: true });
+        mkdirSync(
+          join(root, 'packages', 'core', 'src', 'skills', 'bundled', 'review'),
+          { recursive: true },
+        );
+        writeFileSync(join(cli, 'review', 'drive.ts'), 'drives');
+        writeFileSync(join(lib, 'ledger.ts'), 'ledgers');
+        chmodSync(lib, 0o000);
+        try {
+          expect(() => reviewSourceDigestForBuild(root)).toThrow();
+          expect(
+            reviewSourcesDigest(root, reviewSourceRoots(root)),
+          ).toBeUndefined();
+        } finally {
+          chmodSync(lib, 0o755);
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('the skill allowlist covers everything the copier would ship', () => {
     // The copier copies all of a bundled skill but test files and `.DS_Store`;

@@ -634,8 +634,13 @@ describe('parse-args warns when the bundle is not built from these sources', () 
   it('warns when the stamp does not match the sources', () => {
     stamp('a digest from some other tree');
     run();
+    // The full paragraph: this is the first command of the review, and the
+    // one-line form belongs to `drive`, which repeats the check.
     expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
       'NOT built from the review sources',
+    );
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+      'runs the BUILT bundle, not the working tree',
     );
   });
 
@@ -690,6 +695,27 @@ describe('parse-args warns when the bundle is not built from these sources', () 
       }
     },
   );
+
+  it('names the cause when the roots hold nothing the digest admits', () => {
+    // A root that exists but holds only test files measures zero digested
+    // files. That is "nothing found", not "something unreadable", and the
+    // docstring promises each unmeasurable case names itself.
+    stamp('some digest');
+    const reviewDir = join(
+      repo,
+      'packages',
+      'cli',
+      'src',
+      'commands',
+      'review',
+    );
+    fsReal.rmSync(join(reviewDir, 'drive.ts'));
+    fsReal.writeFileSync(join(reviewDir, 'only.test.ts'), 'a test');
+    run();
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+      'no review sources were found to compare',
+    );
+  });
 
   it('stays silent for a layout that has nowhere to keep a stamp', () => {
     // `npm start` runs `node <root>/packages/cli`, and node sets argv[1] to

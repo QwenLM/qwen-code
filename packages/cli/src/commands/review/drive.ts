@@ -473,15 +473,18 @@ export const driveCommand: CommandModule = {
         describe: 'Write the JSON report here',
       }),
   handler: (argv) => {
-    // A resumed review never runs step 1, so this may be the first command of
-    // the run — and it is where the long work starts, which makes a stale
-    // bundle costliest here. Same notice, same never-fatal path.
-    for (const line of bundleStalenessNotices(process.argv[1])) {
-      writeStderrLineSafe(line);
-    }
-    // Caught like `base-tree` and `test-plan`: the messages above are written
-    // for the caller, and a stack trace re-frames every one of them as a crash.
+    // Caught like `base-tree` and `test-plan`: the messages this handler
+    // writes are for the caller, and a stack trace re-frames every one of
+    // them as a crash.
     try {
+      // The verifier brief sends agents straight here, so this can run without
+      // `parse-args` ever running first — and it is where the long work
+      // starts, which makes a stale bundle costliest here. The one-line form:
+      // a fresh review already heard the full paragraph at `parse-args`, and
+      // a repeated paragraph becomes wallpaper.
+      for (const line of bundleStalenessNotices(process.argv[1], true)) {
+        writeStderrLineSafe(line);
+      }
       const args = argv as unknown as DriveArgs & { readyTimeout: number };
       const report = runDrive(args);
       if (args.out) {

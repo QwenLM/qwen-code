@@ -44,6 +44,9 @@ export const BUNDLED_SKILL_TEST_FILE_RE =
 /**
  * The digest of every review source this bundle was built from.
  *
+ * A staleness hint, not an integrity control: an unsigned file beside the
+ * bundle, which anyone who can write `dist/` can write.
+ *
  * Kept in step with `stale-bundle.ts`, which re-derives it the same way — and
  * duplicated rather than shared, because this script runs before the package
  * it would import has been built. `scripts/tests/review-source-digest.test.ts`
@@ -89,35 +92,53 @@ export function reviewSourceDigestForBuild(root) {
     },
   ];
   const files = [];
-  const walk = (dir, kind) => {
+  // `listed` is true when the parent walk saw this path as a directory a
+  // moment ago: if it cannot be listed now, the tree changed underneath the
+  // walk and the measurement is incomplete, where a root that was never there
+  // has simply nothing to say.
+  const walk = (dir, kind, listed) => {
     let entries;
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
     } catch {
-      // `statSync(...).isFile()`, matching stale-bundle.ts: inferring "this is
-      // a file" from `ENOTDIR` assumes every platform's libuv maps the case
-      // the same way, and a one-sided divergence would drop `review.ts` from
-      // one digest and not the other — a bundle that is byte-for-byte correct
-      // warning on every review, forever, on that platform alone.
+      // `readdirSync` failing says only "this path did not list" — the reason
+      // decides everything, and `statSync` states it directly, where inferring
+      // "this is a file" from `ENOTDIR` assumes every platform's libuv maps
+      // the case the same way, and a one-sided divergence would drop
+      // `review.ts` from one digest and not the other — a bundle that is
+      // byte-for-byte correct warning on every review, forever, on that
+      // platform alone. A directory that could not be listed (EACCES, or
+      // vanished after the parent listed it) throws instead of being skipped:
+      // a digest over the survivors would be stamped as the truth, and every
+      // review from then on would report stale against it.
+      let stats;
       try {
-        if (fs.statSync(dir).isFile() && isDigestedFile(kind, basename(dir))) {
-          files.push(dir);
-        }
+        stats = fs.statSync(dir);
       } catch {
-        // Absent or unreadable: nothing to walk and nothing to say.
+        if (listed) {
+          throw new Error(`${dir} vanished while being walked`);
+        }
+        return;
+      }
+      if (stats.isDirectory()) {
+        throw new Error(`${dir} could not be listed`);
+      }
+      if (stats.isFile() && isDigestedFile(kind, basename(dir))) {
+        files.push(dir);
       }
       return;
     }
     for (const e of entries) {
       const full = join(dir, e.name);
       if (e.isDirectory()) {
-        if (kind !== 'code' || !NOT_BUNDLED_DIR.has(e.name)) walk(full, kind);
+        if (kind !== 'code' || !NOT_BUNDLED_DIR.has(e.name))
+          walk(full, kind, true);
       } else if (e.isFile() && isDigestedFile(kind, e.name)) {
         files.push(full);
       }
     }
   };
-  for (const r of roots) walk(r.path, r.kind);
+  for (const r of roots) walk(r.path, r.kind, false);
   if (files.length === 0)
     return { digest: undefined, count: 0, newest: undefined };
   const hash = createHash('sha256');
@@ -136,7 +157,7 @@ export function reviewSourceDigestForBuild(root) {
 function stampReviewSourceDigest(root, distDir) {
   const stampPath = join(distDir, 'review-sources.sha256');
   // Every refusal below removes an existing stamp first. Leaving an older
-  // attestation beside a newer bundle is a weaker form of the certifying the
+  // stamp beside a newer bundle is a weaker form of the misdescription the
   // refusal exists to avoid, and `unmeasured` is the state each refusal means.
   const refuse = (why) => {
     fs.rmSync(stampPath, { force: true });
@@ -166,24 +187,25 @@ function stampReviewSourceDigest(root, distDir) {
   }
   // The digest describes the tree as the COPIER sees it, and the copier runs
   // after esbuild — so a source edited in between, or this script run on its
-  // own, would certify a `cli.js` built from something else. That is the only
+  // own, would stamp a `cli.js` built from something else. That is the only
   // direction where silence is affirmatively wrong instead of merely
   // uninformative: every other gap here degrades to `unmeasured`. Timestamps
   // are the wrong tool for judging staleness and the right one for judging
-  // whether this stamp can be honest at all, so refuse rather than certify.
+  // whether this stamp can be honest at all, so refuse rather than stamp.
   const bundlePath = join(distDir, 'cli.js');
   let builtAt;
   try {
     builtAt = fs.statSync(bundlePath).mtimeMs;
   } catch {
-    refuse('No bundle to attest to; skipped the source digest.');
+    refuse('No bundle found to stamp; skipped the source digest.');
     return;
   }
   const newestSource = newest.mtimeMs;
   if (newestSource > builtAt) {
     refuse(
       `A review source is newer than ${bundlePath}; skipped the source digest ` +
-        `rather than certify a bundle it may not describe.`,
+        `rather than stamp a bundle it may not describe. Run \`npm run bundle\` ` +
+        `to rebuild the bundle and the stamp together.`,
     );
     return;
   }

@@ -44,7 +44,13 @@
 // tune, no clock to trust, and no answer but the true one.
 
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import {
+  existsSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  type Stats,
+} from 'node:fs';
 import {
   basename,
   dirname,
@@ -148,9 +154,33 @@ export function reviewSourcesDigest(
   repoRoot: string,
   roots: readonly ReviewSourceRoot[],
 ): string | undefined {
+  return measureReviewSources(repoRoot, roots).digest;
+}
+
+/** What one walk over the roots found out. */
+interface SourceMeasurement {
+  /** The digest, or `undefined` when nothing was measured. */
+  digest: string | undefined;
+  /** A file could not be read, or a directory could not be listed. */
+  incomplete: boolean;
+}
+
+/**
+ * The walk and the hash together, keeping the two reasons a measurement comes
+ * up empty apart: `incomplete` says a source could not be read, where a zero
+ * count says there was nothing to read. `bundleStalenessNotices` needs the
+ * difference to name the case it reports; the digest alone cannot carry it.
+ */
+function measureReviewSources(
+  repoRoot: string,
+  roots: readonly ReviewSourceRoot[],
+): SourceMeasurement {
+  const state = { incomplete: false };
   const files: string[] = [];
-  for (const root of roots) files.push(...sourceFilesUnder(root));
-  if (files.length === 0) return undefined;
+  for (const root of roots) files.push(...sourceFilesUnder(root, state, false));
+  if (state.incomplete || files.length === 0) {
+    return { digest: undefined, incomplete: state.incomplete };
+  }
 
   const hash = createHash('sha256');
   for (const file of files.sort()) {
@@ -160,14 +190,14 @@ export function reviewSourcesDigest(
     } catch {
       // Vanished between listing and reading. Nothing can be said about a tree
       // that is changing underneath the check.
-      return undefined;
+      return { digest: undefined, incomplete: true };
     }
     hash.update(relative(repoRoot, file).split(sep).join('/'));
     hash.update('\0');
     hash.update(content);
     hash.update('\0');
   }
-  return hash.digest('hex');
+  return { digest: hash.digest('hex'), incomplete: false };
 }
 
 /**
@@ -200,26 +230,43 @@ export function bundleStaleness(
  * `isDirectory()` are both false for one: a link out of the tree is not this
  * tree's source, and a directory cycle would hang the one check that must
  * never cost the run anything.
+ *
+ * `listed` is true when the parent walk saw this path as a directory a moment
+ * ago: if it cannot be listed now, the tree changed underneath the check and
+ * the measurement is incomplete, where a root that was never there (an
+ * installed package) has simply nothing to say.
  */
-function* sourceFilesUnder(root: ReviewSourceRoot): Generator<string> {
+function* sourceFilesUnder(
+  root: ReviewSourceRoot,
+  state: { incomplete: boolean },
+  listed: boolean,
+): Generator<string> {
   const { kind } = root;
   let entries;
   try {
     entries = readdirSync(root.path, { withFileTypes: true });
   } catch {
+    let stats: Stats | undefined;
+    try {
+      stats = statSync(root.path);
+    } catch {
+      if (listed) state.incomplete = true;
+      return;
+    }
+    if (stats.isDirectory()) {
+      // Exists, but could not be listed — `EACCES` where `ENOTDIR` was
+      // expected. Hashing the survivors would differ from the stamp and accuse
+      // a bundle that is merely unreadable: the exact false positive the
+      // file-level read avoids by measuring nothing.
+      state.incomplete = true;
+      return;
+    }
     // Not a directory. Asking whether it is a file states that directly, where
     // inferring it from `ENOTDIR` assumed every platform's libuv maps the case
     // the same way — and the one root that is a file is `review.ts`, which is
     // exactly where "a new subcommand was registered" lives.
-    try {
-      if (
-        statSync(root.path).isFile() &&
-        isDigestedFile(kind, basename(root.path))
-      )
-        yield root.path;
-    } catch {
-      // Absent or unreadable: nothing to walk and nothing to say.
-    }
+    if (stats.isFile() && isDigestedFile(kind, basename(root.path)))
+      yield root.path;
     return;
   }
   for (const e of entries) {
@@ -229,7 +276,7 @@ function* sourceFilesUnder(root: ReviewSourceRoot): Generator<string> {
       // but are loaded by tests at runtime. Nothing under the skill root is
       // reachable by import in the first place; the allowlist already decides.
       if (kind !== 'code' || !NOT_BUNDLED_DIR.has(e.name))
-        yield* sourceFilesUnder({ path: full, kind });
+        yield* sourceFilesUnder({ path: full, kind }, state, true);
     } else if (e.isFile() && isDigestedFile(kind, e.name)) {
       yield full;
     }
@@ -270,71 +317,90 @@ export function reviewSourceRoots(repoRoot: string): ReviewSourceRoot[] {
  * The whole check, from an entry path to whatever needs saying.
  *
  * Lives here rather than in `parse-args`, which is about parsing arguments —
- * and so that a second caller (an agent resuming a review mid-way never runs
- * step 1, and `drive` is where the long work starts) is one line rather than a
+ * and so that a second caller (the verifier brief sends agents straight to
+ * `drive`, and that is where the long work starts) is one line rather than a
  * copy of fifty.
  *
  * Returns the lines to emit, in order, and an empty array when there is
  * nothing to say. It reads the filesystem and decides nothing else; the caller
  * owns how they reach a terminal.
+ *
+ * `brief` selects the one-line forms: `drive` repeats a check `parse-args`
+ * already printed in full at the start of the review, and a repeated
+ * paragraph becomes wallpaper the reader learns to skip.
  */
 export function bundleStalenessNotices(
   entryPath: string | undefined,
+  brief?: boolean,
 ): string[] {
-  if (!entryPath) return [];
-  // `resolve`, because `argv[1]` can be relative (`node dist/cli.js`), and a
-  // `repoRoot` derived from it must stay printable and absolute.
-  const distDir = dirname(resolve(entryPath));
-  // Only a `<root>/dist/cli.js` layout carries a stamp. A dev launcher runs
-  // `node <root>/packages/cli`, where node sets argv[1] to the DIRECTORY —
-  // measured — so the derivation would find sources under `<root>` and no
-  // stamp beside them, and say "could not check" on every review forever, with
-  // advice its reader can never act on. A layout with no stamp to grow is not
-  // half-measured; it is not measured.
-  if (basename(distDir) !== 'dist') return [];
-
-  const repoRoot = dirname(distDir);
-  let stamped: string | undefined;
+  // Caught here rather than at each call site: the contract is the one check
+  // that must never cost the run anything, and a guard inside the function is
+  // a property of the module, where a call-site `try` belongs to its two call
+  // sites.
   try {
-    stamped = readFileSync(join(distDir, DIGEST_FILE), 'utf8').trim();
+    if (!entryPath) return [];
+    // `resolve`, because `argv[1]` can be relative (`node dist/cli.js`), and a
+    // `repoRoot` derived from it must stay printable and absolute.
+    const distDir = dirname(resolve(entryPath));
+    // Only a `<root>/dist/cli.js` layout carries a stamp. A dev launcher runs
+    // `node <root>/packages/cli`, where node sets argv[1] to the DIRECTORY —
+    // measured — so the derivation would find sources under `<root>` and no
+    // stamp beside them, and say "could not check" on every review forever, with
+    // advice its reader can never act on. A layout with no stamp to grow is not
+    // half-measured; it is not measured.
+    if (basename(distDir) !== 'dist') return [];
+
+    const repoRoot = dirname(distDir);
+    let stamped: string | undefined;
+    try {
+      stamped = readFileSync(join(distDir, DIGEST_FILE), 'utf8').trim();
+    } catch {
+      // No stamp: an installed package, or a bundle from before the build wrote
+      // one. Which of those it is depends on whether sources exist, below.
+    }
+    // Always hashed, even with no stamp to compare against: the branch below
+    // needs this value to tell a pre-stamp checkout apart from an installed
+    // package. Gating the walk on `stamped` would make that branch dead and
+    // silence the one unmeasured case worth saying out loud.
+    const roots = reviewSourceRoots(repoRoot);
+    const measured = measureReviewSources(repoRoot, roots);
+    const current = measured.digest;
+    const staleness = bundleStaleness(stamped, current);
+
+    const warning = staleBundleWarning(staleness, brief);
+    if (warning) return [warning];
+
+    // No digest, but the sources are on disk. The two reasons a measurement
+    // comes up empty each name themselves: a file or directory that could not
+    // be read is a tree mid-change, where a root holding nothing the digest
+    // admits (tests only, say) is a tree with nothing to compare.
+    if (stamped && !current && roots.some((r) => existsSync(r.path))) {
+      const reason = measured.incomplete
+        ? 'a review source could not be read, so nothing was compared' +
+          (brief ? '.' : '. Re-run once the tree is settled.')
+        : 'no review sources were found to compare.';
+      return [
+        `review: could not check whether the bundle is current — ${reason}`,
+      ];
+    }
+    // A checkout whose `dist/` predates the stamp is genuinely stale and cannot
+    // be measured — the state of every existing tree until its next rebuild. An
+    // installed package has no sources either and gets nothing, so a user who
+    // could do nothing about it is not told anything.
+    if (!stamped && current) {
+      return [
+        `review: could not check whether the bundle is current — ${staleness.unmeasured}. ` +
+          (brief
+            ? 'Rebuild with `npm run bundle` to record one.'
+            : 'Either it was built before this check existed, or the build declined to ' +
+              'record one; rebuild with `npm run bundle` and, if the line persists, ' +
+              "read that build's output for why it refused."),
+      ];
+    }
+    return [];
   } catch {
-    // No stamp: an installed package, or a bundle from before the build wrote
-    // one. Which of those it is depends on whether sources exist, below.
+    return [];
   }
-  // Always hashed, even with no stamp to compare against: the branch below
-  // needs this value to tell a pre-stamp checkout apart from an installed
-  // package. Gating the walk on `stamped` would make that branch dead and
-  // silence the one unmeasured case worth saying out loud.
-  const roots = reviewSourceRoots(repoRoot);
-  const current = reviewSourcesDigest(repoRoot, roots);
-  const staleness = bundleStaleness(stamped, current);
-
-  const warning = staleBundleWarning(staleness);
-  if (warning) return [warning];
-
-  // No digest, but the sources are on disk: one of them could not be read, and
-  // the check has switched itself off for someone about to read a verdict. An
-  // installed package reaches the same branch with no roots at all, and gets
-  // nothing, because there is nothing it could do.
-  if (stamped && !current && roots.some((r) => existsSync(r.path))) {
-    return [
-      `review: could not check whether the bundle is current — a review source could not be read, ` +
-        `so nothing was compared. Re-run once the tree is settled.`,
-    ];
-  }
-  // A checkout whose `dist/` predates the stamp is genuinely stale and cannot
-  // be measured — the state of every existing tree until its next rebuild. An
-  // installed package has no sources either and gets nothing, so a user who
-  // could do nothing about it is not told anything.
-  if (!stamped && current) {
-    return [
-      `review: could not check whether the bundle is current — ${staleness.unmeasured}. ` +
-        `Either it was built before this check existed, or the build declined to ` +
-        `record one; rebuild with \`npm run build:packages && npm run bundle\` and, ` +
-        `if the line persists, read that build's output for why it refused.`,
-    ];
-  }
-  return [];
 }
 
 /**
@@ -345,14 +411,24 @@ export function bundleStalenessNotices(
  * the line is that the run they are about to trust may not be running their
  * code — so it says what runs from the bundle and what to do about it.
  */
-export function staleBundleWarning(s: BundleStaleness): string | undefined {
+export function staleBundleWarning(
+  s: BundleStaleness,
+  brief?: boolean,
+): string | undefined {
   if (!s.stale) return undefined;
+  if (brief) {
+    return (
+      `review: the bundle these commands run from was NOT built from the review sources in this tree — ` +
+      `rebuild with \`npm run bundle\` and start again, or read every result ` +
+      `below as being about the older build.`
+    );
+  }
   return (
     `review: the bundle these commands run from was NOT built from the review sources in this tree. ` +
     `Every \`qwen review …\` step below runs the BUILT bundle, not the working tree, ` +
     `so a review source changed since that build will not take effect and this run ` +
     `will measure the old behaviour without saying so. Rebuild with ` +
-    `\`npm run build:packages && npm run bundle\` ` +
+    `\`npm run bundle\` ` +
     `and start again, or read every result below as being about the older build.`
   );
 }

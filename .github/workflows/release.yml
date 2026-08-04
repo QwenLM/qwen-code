@@ -425,6 +425,10 @@ jobs:
         run: |-
           npm run build
           npm run bundle
+          # The review staleness check degrades to "could not check" without
+          # this stamp; fail here instead of shipping a release that silently
+          # lost it.
+          test -f dist/review-sources.sha256
           npm run prepare:package
 
       - name: 'Build Standalone Archives'

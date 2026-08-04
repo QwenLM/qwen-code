@@ -79,14 +79,31 @@ function localImports(f: string): string[] {
   // edges, and a helper reached only that way would be invisible here.
   for (const m of src.matchAll(/(?:from\s+|import\s*\(\s*)'(\.[^']+)'/g)) {
     const spec = m[1].replace(/\.js$/, '');
-    for (const ext of ['.ts', '.tsx', '.mts', '/index.ts']) {
-      const candidate = resolve(dirname(f), spec + ext);
+    // The literal specifier first — `'./data.json'` keeps its extension —
+    // then every extension the digest admits. These two lists must agree: a
+    // production module in an extension this closure cannot resolve is
+    // digested but never lands in `importedByProduction`, and a correct
+    // change reddens this test with a wrong diagnosis.
+    const candidates = [
+      resolve(dirname(f), m[1]),
+      ...[
+        '.ts',
+        '.tsx',
+        '.mts',
+        '.cts',
+        '.js',
+        '.mjs',
+        '.json',
+        '/index.ts',
+      ].map((ext) => resolve(dirname(f), spec + ext)),
+    ];
+    for (const candidate of candidates) {
       try {
         readFileSync(candidate);
         out.push(candidate);
         break;
       } catch {
-        // try the next extension
+        // try the next candidate
       }
     }
   }
@@ -130,7 +147,10 @@ describe('the staleness digest covers only what the bundle can contain', () => {
     const unreachable = digestedFiles.filter(
       (f) => !importedByProduction.has(f) && !entryPoints.has(f),
     );
-    expect(unreachable.map((f) => relative(repoRoot, f))).toEqual([]);
+    expect(
+      unreachable.map((f) => relative(repoRoot, f)),
+      'an unimported file here is either test-only support or a scratch file — production code reaches the bundle only through an import',
+    ).toEqual([]);
   });
 
   it('leaves out nothing production imports', () => {

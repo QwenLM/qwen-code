@@ -589,6 +589,18 @@ describe('drive warns when the bundle is not built from these sources', () => {
     expect(writeStderrLineSafe).not.toHaveBeenCalled();
   });
 
+  it('prints the one-line form — the full paragraph belongs to parse-args', () => {
+    // One review can invoke `drive` many times, and each invocation prints
+    // into an agent's tool output; the repeat keeps the trigger and the
+    // remedy and drops the explanation.
+    stamp('a digest from some other tree');
+    run();
+    const line = vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0] as string;
+    expect(line).toContain('NOT built from the review sources');
+    expect(line).toContain('npm run bundle');
+    expect(line).not.toContain('runs the BUILT bundle, not the working tree');
+  });
+
   it('still drives — the notice is a diagnostic, not a gate', () => {
     stamp('mismatched');
     run();

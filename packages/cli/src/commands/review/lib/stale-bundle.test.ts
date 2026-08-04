@@ -15,20 +15,50 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-// One listed file can be made unreadable, to reach the branch where the tree
-// changes underneath the walk. Everything else passes through to the real fs.
-const unreadable = vi.hoisted(() => ({ path: '' }));
+// One listed file can be made unreadable, and one listed directory
+// unlistable, to reach the branches where the tree changes underneath the
+// walk. Everything else passes through to the real fs.
+const unreadable = vi.hoisted(() => ({
+  path: '',
+  dir: '',
+  dirCode: 'EACCES',
+}));
 vi.mock('node:fs', async (importOriginal) => {
   const real = (await importOriginal()) as typeof import('node:fs');
+  const fault = (code: string, what: string): never => {
+    throw Object.assign(new Error(`${code}: ${what}`), { code });
+  };
   const readFileSync = ((p: unknown, ...rest: unknown[]) => {
     if (unreadable.path && String(p) === unreadable.path) {
-      throw Object.assign(new Error('ENOENT: vanished mid-walk'), {
-        code: 'ENOENT',
-      });
+      fault('ENOENT', 'vanished mid-walk');
     }
     return (real.readFileSync as (...a: unknown[]) => unknown)(p, ...rest);
   }) as typeof real.readFileSync;
-  return { ...real, readFileSync, default: { ...real, readFileSync } };
+  const readdirSync = ((p: unknown, ...rest: unknown[]) => {
+    if (unreadable.dir && String(p) === unreadable.dir) {
+      fault(unreadable.dirCode, 'cannot list directory');
+    }
+    return (real.readdirSync as (...a: unknown[]) => unknown)(p, ...rest);
+  }) as typeof real.readdirSync;
+  const statSync = ((p: unknown, ...rest: unknown[]) => {
+    // A directory that vanished mid-walk fails the stat too; an unreadable
+    // one still stats, which is exactly the difference the walk rules on.
+    if (
+      unreadable.dir &&
+      unreadable.dirCode === 'ENOENT' &&
+      String(p) === unreadable.dir
+    ) {
+      fault('ENOENT', 'vanished mid-walk');
+    }
+    return (real.statSync as (...a: unknown[]) => unknown)(p, ...rest);
+  }) as typeof real.statSync;
+  return {
+    ...real,
+    readFileSync,
+    readdirSync,
+    statSync,
+    default: { ...real, readFileSync, readdirSync, statSync },
+  };
 });
 
 import {
@@ -206,6 +236,43 @@ describe('reviewSourcesDigest', () => {
     }
   });
 
+  it('measures nothing when a subdirectory cannot be listed', () => {
+    // EACCES one level down: hashing the survivors would differ from the
+    // stamp and accuse a bundle that is byte-for-byte correct, the exact
+    // false positive the file-level read avoids. The honest answer is that
+    // nothing was measured — and a tree with one more file than the
+    // unreadable-file case above, so survivors-only and nothing-measured are
+    // different answers here.
+    writeFileSync(join(dir, 'a.ts'), 'x');
+    const sub = join(dir, 'lib');
+    mkdirSync(sub, { recursive: true });
+    writeFileSync(join(sub, 'b.ts'), 'y');
+    unreadable.dir = sub;
+    try {
+      expect(reviewSourcesDigest(root, [code(dir)])).toBeUndefined();
+    } finally {
+      unreadable.dir = '';
+    }
+  });
+
+  it('measures nothing when a listed subdirectory vanishes mid-walk', () => {
+    // The same race the file-level catch was written for, one level up: the
+    // parent listed this as a directory a moment ago, and now both the
+    // listing and the stat fail.
+    writeFileSync(join(dir, 'a.ts'), 'x');
+    const sub = join(dir, 'lib');
+    mkdirSync(sub, { recursive: true });
+    writeFileSync(join(sub, 'b.ts'), 'y');
+    unreadable.dir = sub;
+    unreadable.dirCode = 'ENOENT';
+    try {
+      expect(reviewSourcesDigest(root, [code(dir)])).toBeUndefined();
+    } finally {
+      unreadable.dir = '';
+      unreadable.dirCode = 'EACCES';
+    }
+  });
+
   it('yields nothing when there are no sources to hash', () => {
     expect(
       reviewSourcesDigest(root, [code(join(root, 'nope'))]),
@@ -292,7 +359,21 @@ describe('staleBundleWarning', () => {
     const w = staleBundleWarning({ stale: true })!;
     expect(w).toContain('NOT built from the review sources in this tree');
     expect(w).toContain('runs the BUILT bundle, not the working tree');
-    expect(w).toContain('npm run build:packages && npm run bundle');
+    expect(w).toContain('npm run bundle');
+    // esbuild's entry is `packages/cli/src/cli.ts`, so the bundle step alone
+    // picks a review source change up — the shortest correct command is the
+    // one a reader will actually run.
+    expect(w).not.toContain('build:packages');
+  });
+
+  it('has a one-line form for the repeated notice', () => {
+    // `drive` repeats the check `parse-args` printed in full at the start of
+    // the review; the repeat keeps the trigger and the remedy and drops the
+    // explanation, so the signal does not become wallpaper.
+    const w = staleBundleWarning({ stale: true }, true)!;
+    expect(w).toContain('NOT built from the review sources in this tree');
+    expect(w).toContain('npm run bundle');
+    expect(w).not.toContain('runs the BUILT bundle, not the working tree');
   });
 
   it('says nothing when nothing is wrong', () => {

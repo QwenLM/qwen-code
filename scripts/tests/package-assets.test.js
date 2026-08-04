@@ -21,6 +21,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 
 const realReadFileSync = fs.readFileSync;
+const realReaddirSync = fs.readdirSync;
 import {
   copyBundleAssets,
   reviewSourceDigestForBuild,
@@ -138,6 +139,39 @@ describe('package asset scripts', () => {
         });
       }
       return realReadFileSync(target, ...rest);
+    });
+
+    expect(() => copyBundleAssets({ root: rootDir })).not.toThrow();
+    expect(
+      existsSync(path.join(rootDir, 'dist', 'review-sources.sha256')),
+    ).toBe(false);
+  });
+
+  it('does not fail the bundle when a source directory cannot be listed', () => {
+    // The directory-level twin of the case above: the walk throws instead of
+    // silently hashing the survivors, and the refusal must stay a refusal —
+    // never a failed bundle with every asset already in place.
+    const rootDir = createFixtureRoot();
+    writeFile(rootDir, 'dist/cli.js', 'the bundle\n');
+    writeFile(
+      rootDir,
+      'packages/cli/src/commands/review/drive.ts',
+      'export const drive = 1;\n',
+    );
+    writeFile(
+      rootDir,
+      'packages/cli/src/commands/review/lib/ledger.ts',
+      'export const ledger = 1;\n',
+    );
+    stubConsole();
+    const libDir = path.join(rootDir, 'packages/cli/src/commands/review/lib');
+    vi.spyOn(fs, 'readdirSync').mockImplementation((target, ...rest) => {
+      if (String(target) === libDir) {
+        throw Object.assign(new Error('EACCES: permission denied'), {
+          code: 'EACCES',
+        });
+      }
+      return realReaddirSync(target, ...rest);
     });
 
     expect(() => copyBundleAssets({ root: rootDir })).not.toThrow();
