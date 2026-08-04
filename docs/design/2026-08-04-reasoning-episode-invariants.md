@@ -140,9 +140,9 @@ call, gated on that stream's own `hasToolCall`. Deliberately **trailing-only,
 not whole-array**: a stream's own truncation can only ever leave the dangling
 episode as the trailing element, so restricting to "trailing" is what
 distinguishes "truncated mid-episode" from DeepSeek's legitimate
-unsigned-thinking-before-tool_use shape. This same array reference is what
+unsigned-thinking-before-tool*use shape. This same array reference is what
 [`recordAssistantTurn`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/geminiChat.ts#L4963)
-persists to JSONL, so the strip happens _before_ the write for this
+persists to JSONL, so the strip happens \_before* the write for this
 particular record shape. **Invariant holds.**
 
 **Known, documented, accepted residual risk**: a non-compliant proxy that
@@ -156,10 +156,10 @@ trade-off, stated in the code's own comments, not an oversight.
 This is the site PR #8260's final commit closed for the **live** path — and
 the site whose on-disk counterpart is this doc's most significant finding.
 
-The MAX_TOKENS recovery loop only proceeds when the truncated turn has **no**
+The MAX*TOKENS recovery loop only proceeds when the truncated turn has **no**
 `functionCall` of its own — exactly the precondition under which Site 1's
 `hasToolCall` was `false` and never fired for that specific record. If the
-recovery _continuation_ then calls a tool, [`coalesceRecoveryPairs`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/geminiChat.ts#L5097-L5140)
+recovery \_continuation* then calls a tool, [`coalesceRecoveryPairs`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/geminiChat.ts#L5097-L5140)
 re-runs the same trailing-only check on the truncated turn's parts
 **immediately before** merging in the continuation:
 
@@ -301,11 +301,11 @@ invariant being handled two different ways nine days apart, in two different
 code paths, with no cross-reference between them:
 
 - [`2f1b52d3d`](https://github.com/QwenLM/qwen-code/commit/2f1b52d3d32827b78c0341491fd07c7c6ac2c8c0)
-  (2026-04-30, "preserve reasoning_content in rewind, compression, and merge
+  (2026-04-30, "preserve reasoning*content in rewind, compression, and merge
   paths") **removed** the strip-thoughts-on-rewind call from the interactive
-  double-ESC `/rewind` handler, with an explicit comment: _"Do NOT strip
-  thought parts — reasoning models (e.g. DeepSeek) require reasoning_content
-  continuity across all turns."_
+  double-ESC `/rewind` handler, with an explicit comment: *"Do NOT strip
+  thought parts — reasoning models (e.g. DeepSeek) require reasoning*content
+  continuity across all turns."*
 - Nine days later, [`825502742`](https://github.com/QwenLM/qwen-code/commit/8255027426e0b84a4038de6bb1d2d2dd730dc938)
   (2026-05-09, "add message edit/rewind... UI") added a **second,
   independent** rewind implementation for the ACP/VSCode path
@@ -353,6 +353,123 @@ intent. qwen-code's multi-provider work on top of it is a genuine retrofit
 that has not yet converged on a single, consistent policy** — this doc's
 mutation-site inventory is evidence of that same unsettled state at the
 code level, not a claim made in the abstract.
+
+## Prior art: how `opencode` handles the same problem
+
+`opencode` ([`anomalyco/opencode`](https://github.com/anomalyco/opencode),
+formerly `sst/opencode`) is a comparable multi-provider coding-agent project
+facing the identical structural question — one shared internal message
+representation across Gemini, Anthropic, OpenAI, and others, each with
+incompatible reasoning-replay contracts. Its newer native `@opencode-ai/llm`
+package (an Effect-TS rewrite, still gated behind an experimental flag and
+coexisting with a legacy Vercel-AI-SDK-direct path) makes a **narrower, more
+deliberate version of the same one-shape choice** qwen-code made, with one
+structural difference worth naming precisely.
+
+**It does have one closed, shared union type across every provider** —
+[`ContentPart`](https://github.com/anomalyco/opencode/blob/aefaf140c19e25494da27739ae979f31b8cfe474/packages/llm/src/schema/messages.ts#L177-L180)
+(`TextPart | MediaPart | ToolCallPart | ToolResultPart | ReasoningPart`) —
+the same species of design as `Content[]`/`Part[]`, not a fundamentally
+different architecture. **But no provider-specific replay token is ever a
+field on that shared union.** Every part carries an optional
+[`providerMetadata: Record<providerNamespace, Record<string, unknown>>`](https://github.com/anomalyco/opencode/blob/aefaf140c19e25494da27739ae979f31b8cfe474/packages/schema/src/llm.ts#L6-L8)
+bag, and each protocol adapter reads and writes only its own namespaced key
+at the point of wire encoding — never a shared boolean+string pair:
+
+- Anthropic's signature:
+  [`providerMetadata.anthropic.signature`](https://github.com/anomalyco/opencode/blob/aefaf140c19e25494da27739ae979f31b8cfe474/packages/llm/src/protocols/anthropic-messages.ts#L255-L258)
+- Gemini's `thoughtSignature`: `providerMetadata.google.thoughtSignature`
+  (`packages/llm/src/protocols/gemini.ts:193-197,239`)
+- OpenAI's reasoning item id and encrypted content:
+  `providerMetadata.openai.{itemId, reasoningEncryptedContent}`
+  (`packages/llm/src/protocols/openai-responses.ts:283-297`)
+
+This is a direct application of the Vercel AI SDK's own
+`providerOptions`/`providerMetadata` convention (confirmed present, under
+the same namespacing pattern, even on opencode's legacy AI-SDK-direct
+path — `packages/opencode/src/provider/transform.ts:183`), and the design
+choice is stated explicitly, not just observable from the types
+([`packages/llm/DESIGN.md:806-822`](https://github.com/anomalyco/opencode/blob/aefaf140c19e25494da27739ae979f31b8cfe474/packages/llm/DESIGN.md#L806-L822)):
+
+> "Normalized message/content/event unions remain closed and exhaustive.
+> Unknown or provider-required round-trip data lives in caller-writable
+> `providerMetadata`... Protocols validate metadata they consume. The field
+> is an escape hatch, not a portable semantic guarantee."
+
+**This does not mean opencode is immune to this bug class — it is direct
+evidence the bug class is inherent to the problem, not to any one
+representation.** Three pieces of evidence, all independently verified:
+
+1. **The exact same failure mode, fixed on an unmerged branch as recently as
+   2026-07-16.** [`origin/reasoning-replay@b6208a8c50`](https://github.com/anomalyco/opencode/commit/b6208a8c508d8c28b918c34d3a8fc7ebdcb914dd)
+   ("fix(core): preserve compatible reasoning replay") fixes exactly
+   qwen-code's shape of bug: before the fix, an unsigned reasoning part was
+   still unconditionally lowered into an Anthropic
+   `{ type: "thinking", signature: undefined }` block; after, every affected
+   protocol (`anthropic-messages.ts`, `bedrock-converse.ts`, `gemini.ts`,
+   `openai-responses.ts`) checks for a real signature first and downgrades
+   to a plain text block if none is found — diffed directly:
+   ```diff
+   if (part.type === "reasoning") {
+   +  const signature = part.encrypted ?? signatureFromMetadata(part.providerMetadata)
+   +  if (!signature) {
+   +    content.push({ type: "text", text: part.text })
+   +    continue
+   +  }
+      content.push({
+        type: "thinking",
+        thinking: part.text,
+   -    signature: part.encrypted ?? signatureFromMetadata(part.providerMetadata),
+   +    signature,
+      })
+     continue
+   }
+   ```
+   The same commit **moved the compatibility decision out of a single
+   centralized `sameModel` gate** in session-history-to-request projection
+   (`packages/core/src/session/runner/to-llm-message.ts`) and pushed it down
+   into each protocol's own lowering step — the previous design decided
+   "keep as reasoning vs. downgrade to text" once, centrally, based on
+   whether the model changed; the new design always emits a reasoning part
+   and lets the protocol that actually knows its own replay contract decide
+   at the last possible moment. The repo's own architecture-invariants file
+   was updated in the same commit to match
+   ([`CONTEXT.md`](https://github.com/anomalyco/opencode/commit/b6208a8c508d8c28b918c34d3a8fc7ebdcb914dd) diff):
+   from _"non-empty visible reasoning lowers to ordinary assistant text
+   after a model switch"_ to _"protocols that require signed native
+   reasoning lower unsigned reasoning to ordinary assistant text"_ — the
+   same "push the decision to the point where the contract is actually
+   known" lesson this document's mutation-site inventory argues for.
+2. **A same-minute patch/revert/delete sequence** on 2026-06-02: a narrow
+   fix, [`42173bca4b`](https://github.com/anomalyco/opencode/commit/42173bca4ba2f2c5e7faba827e1ade8a2a1b4b0a)
+   (23:33:48, "preserve signed thinking during anthropic reorder"), was
+   reverted 17 seconds later
+   ([`a763a14d44`](https://github.com/anomalyco/opencode/commit/a763a14d44d894c54c6199bb171ca711d1e0ca24),
+   23:34:05), followed 31 seconds after that by deleting the entire
+   tool-reorder mechanism the patch had been trying to fix around
+   ([`5940304098`](https://github.com/anomalyco/opencode/commit/59403040987137a367f259884766efc363725c39),
+   23:34:36) — a real "we tried patching X, then decided the underlying
+   hack shouldn't exist" transition, the same category of decision this
+   document declines to make lightly for qwen-code's own mutation sites.
+3. **A field-name migration that silently dropped signatures until
+   patched** ([`61390dbb49`](https://github.com/anomalyco/opencode/commit/61390dbb49), #28678) — `native-request.ts` read only the
+   legacy `providerOptions` field and silently ignored data already
+   migrated to the new `providerMetadata` field name, until patched to
+   check both. Confirms that even a namespaced-bag design is not immune to
+   silent data loss across a refactor — it relocates the risk, it doesn't
+   eliminate it.
+
+**Reading for #8533's discussion questions**: opencode's `providerMetadata`
+pattern is a concrete example of the "incremental, additive layer" solution
+direction sketched in #8533 — a typed side-channel attached to existing
+parts, validated per-protocol at the point of use, rather than a structural
+change to the shared message type. It is evidence _for_ that direction being
+viable (a real, shipping — if still experimental — codebase uses it), while
+also being evidence that adopting it would not make this problem
+disappear, only relocate where it has to be gotten right, and that even a
+well-namespaced escape hatch still requires the same discipline
+(per-protocol validation, careful handling across refactors) qwen-code's own
+mutation-site inventory argues for.
 
 ## Cross-reference: issue #8533
 
