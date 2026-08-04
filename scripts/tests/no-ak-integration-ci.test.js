@@ -271,13 +271,15 @@ describe('no-AK integration CI wiring', () => {
     const configureUseIndex = windowsJob.indexOf(
       "uses: './.github/actions/configure-windows-runner'",
     );
+    const guardUseIndex = windowsJob.indexOf(
+      "uses: './.github/actions/verify-checkout-head'",
+    );
     expect(windowsCheckoutIndex).toBeGreaterThanOrEqual(0);
     expect(autocrlfIndex).toBeGreaterThanOrEqual(0);
     expect(autocrlfIndex).toBeLessThan(windowsCheckoutIndex);
     expect(configureUseIndex).toBeGreaterThan(windowsCheckoutIndex);
-    expect(
-      windowsJob.indexOf("uses: './.github/actions/verify-checkout-head'"),
-    ).toBeGreaterThan(windowsCheckoutIndex);
+    expect(guardUseIndex).toBeGreaterThan(windowsCheckoutIndex);
+    expect(configureUseIndex).toBeLessThan(guardUseIndex);
     for (const line of [
       '"TEMP=$env:RUNNER_TEMP"',
       '"TMP=$env:RUNNER_TEMP"',

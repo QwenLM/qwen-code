@@ -682,6 +682,10 @@ jobs:
         with:
           ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}"
 
+      - name: 'Configure self-hosted Windows test environment'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' }}"
+        uses: './.github/actions/configure-windows-runner'
+
       # Same stale-checkout guard as the Ubuntu gate: this job now runs on ECS,
       # so fail loud if the checkout lacks the merge-queue head rather than
       # silently testing the wrong tree into a merge.
@@ -690,10 +694,6 @@ jobs:
         uses: './.github/actions/verify-checkout-head'
         with:
           expected_sha: '${{ github.event.merge_group.head_sha }}'
-
-      - name: 'Configure self-hosted Windows test environment'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' }}"
-        uses: './.github/actions/configure-windows-runner'
 
       # Self-hosted can't reach nodejs.org reliably; reuse the machine's Node.
       - name: 'Set up Node.js 22.x (hosted)'
