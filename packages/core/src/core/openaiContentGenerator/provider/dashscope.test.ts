@@ -697,6 +697,57 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result['reasoning']).toBeUndefined();
     });
 
+    it.each([
+      {
+        name: 'extra_body thinking_budget over request-level effort',
+        extraBody: { enable_thinking: true, thinking_budget: 4096 },
+        requestFields: { reasoning_effort: 'max' },
+        expectedEffort: undefined,
+        expectedBudget: 4096,
+        expectedThinking: true,
+      },
+      {
+        name: 'request-level thinking_budget over configured effort',
+        extraBody: undefined,
+        requestFields: { thinking_budget: 2048 },
+        expectedEffort: undefined,
+        expectedBudget: 2048,
+        expectedThinking: undefined,
+      },
+      {
+        name: 'extra_body effort over request-level thinking_budget',
+        extraBody: { reasoning_effort: 'max' },
+        requestFields: { thinking_budget: 2048 },
+        expectedEffort: 'max',
+        expectedBudget: undefined,
+        expectedThinking: undefined,
+      },
+    ])('resolves $name', (testCase) => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'qwen3.8-max-preview',
+          reasoning: { effort: 'low' },
+          extra_body: testCase.extraBody,
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const result = generator.buildRequest(
+        {
+          ...baseRequest,
+          model: 'qwen3.8-max-preview',
+          ...testCase.requestFields,
+          reasoning: { effort: 'low' },
+        } as unknown as Parameters<typeof generator.buildRequest>[0],
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning_effort']).toBe(testCase.expectedEffort);
+      expect(result['thinking_budget']).toBe(testCase.expectedBudget);
+      expect(result['enable_thinking']).toBe(testCase.expectedThinking);
+      expect(result['reasoning']).toBeUndefined();
+    });
+
     it('strips the pipeline-injected nested reasoning when enable_thinking is added on a qwen model', () => {
       // The pipeline injects a nested `reasoning: { effort }` object for
       // OpenAI-compatible endpoints. qwen drives thinking via `enable_thinking`,

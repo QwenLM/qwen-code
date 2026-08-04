@@ -241,6 +241,22 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       qwenEffortConfig['reasoning_effort'] = requestParams['reasoning_effort'];
     }
     const hasQwenEffortConfig = Object.keys(qwenEffortConfig).length > 0;
+    // qwen3.8 rejects reasoning_effort with thinking_budget. Resolve conflicts
+    // across precedence layers, but leave explicit same-layer pairs untouched.
+    const hasTieredQwenEffort = 'reasoning_effort' in qwenEffortConfig;
+    const extraBodyHasEffort = extraBody?.['reasoning_effort'] !== undefined;
+    const extraBodyHasBudget = extraBody?.['thinking_budget'] !== undefined;
+    const requestHasEffort = requestParams['reasoning_effort'] !== undefined;
+    const requestHasBudget = requestParams['thinking_budget'] !== undefined;
+    const thinkingBudgetWins =
+      hasTieredQwenEffort &&
+      !extraBodyHasEffort &&
+      (extraBodyHasBudget || (!requestHasEffort && requestHasBudget));
+    const extraBodyEffortWins =
+      hasTieredQwenEffort && extraBodyHasEffort && !extraBodyHasBudget;
+    if (thinkingBudgetWins) {
+      delete qwenEffortConfig['reasoning_effort'];
+    }
 
     if (this.isVisionModel(request.model)) {
       // DashScope-exclusive fields not present in the OpenAI SDK types; spread
@@ -264,6 +280,12 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       // we don't ship two competing knobs. User extra_body still wins.
       if (hasQwenEffortConfig && 'reasoning' in visionResult) {
         delete visionResult['reasoning'];
+      }
+      if (thinkingBudgetWins) {
+        delete visionResult['reasoning_effort'];
+      }
+      if (extraBodyEffortWins) {
+        delete visionResult['thinking_budget'];
       }
       return {
         ...visionResult,
@@ -289,6 +311,12 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     // we don't ship two competing knobs. User extra_body still wins.
     if (hasQwenEffortConfig && 'reasoning' in result) {
       delete result['reasoning'];
+    }
+    if (thinkingBudgetWins) {
+      delete result['reasoning_effort'];
+    }
+    if (extraBodyEffortWins) {
+      delete result['thinking_budget'];
     }
     return {
       ...result,
