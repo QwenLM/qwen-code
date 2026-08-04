@@ -355,9 +355,17 @@ describe('GithubChannel', () => {
   describe('connect', () => {
     it('resolves bot username', async () => {
       mockOctokit.paginate.mockResolvedValue([]);
-      await channel.connect();
-      expect(mockOctokit.rest.users.getAuthenticated).toHaveBeenCalled();
-      channel.disconnect();
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        await channel.connect();
+        expect(mockOctokit.rest.users.getAuthenticated).toHaveBeenCalled();
+        expect(stderr).toHaveBeenCalledWith(
+          '[Channel:test-github] authenticated as "test-bot"\n',
+        );
+      } finally {
+        channel.disconnect();
+        stderr.mockRestore();
+      }
     });
 
     it('requires explicit opt-in before using local gh authentication', async () => {
@@ -371,6 +379,44 @@ describe('GithubChannel', () => {
         'configure a GitHub token or enable local GitHub CLI authentication',
       );
       expect(mockExecFile).not.toHaveBeenCalled();
+    });
+
+    it('rejects a whitespace-only token', async () => {
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ token: ' ' }),
+        makeBridge(),
+      );
+
+      await expect(channel.connect()).rejects.toThrow(
+        'configure a GitHub token or enable local GitHub CLI authentication',
+      );
+      expect(mockExecFile).not.toHaveBeenCalled();
+    });
+
+    it('falls back to local gh for a whitespace-only token', async () => {
+      mockExecFile.mockImplementation(
+        (
+          _file: string,
+          _args: string[],
+          _options: unknown,
+          callback: (error: Error | null, stdout: string) => void,
+        ) => callback(null, 'local-gh-token\n'),
+      );
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ token: ' ', useLocalGh: true }),
+        makeBridge(),
+      );
+      mockOctokit.paginate.mockResolvedValue([]);
+
+      await channel.connect();
+
+      expect(mockExecFile).toHaveBeenCalled();
+      expect(mockOctokitConstructor).toHaveBeenCalledWith(
+        expect.objectContaining({ auth: 'local-gh-token' }),
+      );
+      channel.disconnect();
     });
 
     it('uses local gh authentication when explicitly enabled', async () => {
@@ -603,6 +649,7 @@ describe('GithubChannel', () => {
     });
 
     it('surfaces bounded gh stderr in the authentication failure', async () => {
+      const rawStderr = `\u001b[2Jsecret${'x'.repeat(600)}`;
       mockExecFile.mockImplementation(
         (
           _file: string,
@@ -617,7 +664,7 @@ describe('GithubChannel', () => {
           callback(
             Object.assign(new Error('exit 1'), { code: 1 }),
             '',
-            'gh: no oauth token stored for github.com',
+            rawStderr,
           ),
       );
       channel = new TestableGithubChannel(
@@ -629,9 +676,14 @@ describe('GithubChannel', () => {
       await expect(channel.connect()).rejects.toThrow(
         'gh auth login --hostname github.com',
       );
-      await expect(channel.connect()).rejects.toThrow(
-        'gh stderr: gh: no oauth token stored for github.com',
-      );
+      const error = (await channel
+        .connect()
+        .catch((err: unknown) => err)) as Error;
+      expect(error).toBeInstanceOf(Error);
+      expect(error.message).not.toContain('\u001b');
+      const hint = error.message.split(' gh stderr: ')[1] ?? '';
+      expect(hint).toContain('[2Jsecret');
+      expect(Array.from(hint).length).toBeLessThanOrEqual(512);
     });
 
     it('reports when the GitHub CLI authentication lookup times out', async () => {

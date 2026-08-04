@@ -531,6 +531,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     try {
       const { data } = await this.octokit.rest.users.getAuthenticated();
       this.botUsername = data.login;
+      process.stderr.write(
+        `[Channel:${this.name}] authenticated as "${data.login}"\n`,
+      );
     } catch (err) {
       throw new Error(
         `[Channel:${this.name}] failed to resolve bot identity: ${err}`,

@@ -41,9 +41,14 @@ Document local `gh auth login` as an explicit opt-in and explicit PAT configurat
 - `packages/channels/github/src/index.ts`
 - `packages/channels/github/src/GithubAdapter.ts`
 - `packages/channels/github/src/GithubAdapter.test.ts`
+- `packages/cli/src/commands/channel/channel-registry.test.ts`
+- `packages/web-shell/client/components/channels/channel-editor-state.ts`
 - `packages/web-shell/client/components/channels/channel-editor-state.test.ts`
+- `packages/web-shell/client/components/channels/ChannelEditorDialog.tsx`
+- `packages/web-shell/client/e2e/visuals/screenshots.spec.ts`
 - `packages/web-shell/client/i18n.tsx`
 - `docs/users/features/channels/github.md`
+- `docs/design/github-channel-gh-auth.md`
 
 ## Scope boundaries
 

@@ -135,6 +135,19 @@ describe('Channel editor state', () => {
     });
   });
 
+  it('does not clear a required secret from a blank replacement', () => {
+    const draft = createChannelEditorDraft(DINGTALK);
+    draft.name = 'release-bot';
+    draft.values.clientId = 'ding-client-id';
+    draft.secrets.clientSecret = { operation: 'replace', value: ' ' };
+
+    expect(
+      buildChannelUpsertRequest(DINGTALK, draft, 'revision-5').secrets,
+    ).toEqual({
+      clientSecret: { operation: 'replace', value: ' ' },
+    });
+  });
+
   it('requires a unique name, required fields, a replacement secret, and an access policy', () => {
     const draft = createChannelEditorDraft(DINGTALK);
     draft.name = 'existing';
@@ -234,7 +247,7 @@ describe('Descriptor-driven senderPolicy', () => {
         senderPolicy: 'pairing',
         allowedUsers: ['alice', 'bob'],
       },
-      secrets: { token: { present: true, source: 'stored' } },
+      secrets: { token: { present: true, source: 'literal' } },
       startsWithServe: false,
       runtime: { state: 'stopped' },
     };
@@ -248,7 +261,7 @@ describe('Descriptor-driven senderPolicy', () => {
     const instance: DaemonChannelInstanceSnapshot = {
       name: 'legacy-bot',
       config: { type: 'github' },
-      secrets: { token: { present: true, source: 'stored' } },
+      secrets: { token: { present: true, source: 'literal' } },
       startsWithServe: false,
       runtime: { state: 'stopped' },
     };
@@ -303,7 +316,7 @@ describe('Descriptor-driven senderPolicy', () => {
         groupPolicy: 'open',
         senderPolicy: 'allowlist',
       },
-      secrets: { token: { present: true, source: 'stored' } },
+      secrets: { token: { present: true, source: 'literal' } },
       startsWithServe: false,
       runtime: { state: 'stopped' },
     };
@@ -323,7 +336,7 @@ describe('Descriptor-driven senderPolicy', () => {
         groupPolicy: 'open',
         senderPolicy: 'allowlist',
       },
-      secrets: { token: { present: true, source: 'stored' } },
+      secrets: { token: { present: true, source: 'literal' } },
       startsWithServe: false,
       runtime: { state: 'stopped' },
     };
