@@ -462,7 +462,7 @@ export type HistoryItemContextUsage = HistoryItemBase & {
   mcpTools: ContextToolDetail[];
   memoryFiles: ContextMemoryDetail[];
   skills: ContextSkillDetail[];
-  /** True when totalTokens is estimated (no API call yet) rather than from API response */
+  /** True when totalTokens is absent or derived from a local estimate rather than provider usage. */
   isEstimated?: boolean;
   /** When true, show per-item detail sections (tools, memory, skills). Default: false (compact). */
   showDetails?: boolean;

@@ -13,8 +13,9 @@ Compression first attempts a specialized single-turn request when all of the
 following are true:
 
 - the compression model is the current main model;
-- the active provider is Anthropic, DashScope, Gemini, or Vertex AI and cache
-  control is enabled;
+- the active provider is Anthropic or DashScope and cache control is enabled,
+  or the provider is Gemini or Vertex AI (implicit provider-managed caching;
+  `enableCacheControl` does not apply);
 - slimming found no media that would change the provider-facing history.
 
 The request uses the current turn's effective generation config, including

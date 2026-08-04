@@ -506,14 +506,17 @@ const TRANSPORT_STREAM_RETRY_CONFIG = {
  * Pad added when sizing the output clamp from an estimate-derived prompt
  * count. This includes a fresh session (`lastPromptTokenCount === 0`) and
  * counts propagated through compression or resume before provider usage is
- * available. The char/4 history walk misses the system prompt, tool
+ * available. A history-derived count can miss the system prompt, tool
  * definitions, and skill content — estimatePromptTokens documents this as
- * "typically ~15-20K of under-estimate" — and an under-counted prompt is the
- * one way `prompt + max_tokens` can overflow the window (issue #5950). Sized
- * to the documented worst case; costs nothing on large windows (the output
- * ceiling binds long before the pad matters).
+ * "typically ~15-20K of under-estimate" — so pad conservatively until
+ * provider usage arrives. Counts derived from an API baseline may already
+ * preserve some non-visible overhead; double-counting it is accepted because
+ * the error direction is safe and provider usage self-corrects it. An
+ * under-counted prompt is the one way `prompt + max_tokens` can overflow the
+ * window (issue #5950). Sized to the documented worst case; costs nothing on
+ * large windows (the output ceiling binds long before the pad matters).
  */
-const FIRST_SEND_CLAMP_OVERHEAD_PAD = 20_000;
+const ESTIMATE_CLAMP_OVERHEAD_PAD = 20_000;
 
 /**
  * Max recovery attempts when the escalated response is also truncated.
@@ -1978,11 +1981,10 @@ export class GeminiChat {
     });
 
     if (info.compressionStatus === CompressionStatus.COMPRESSED && newHistory) {
-      // Every current compression path mixes local estimates into the output
-      // count: the cold path estimates fixed/restored content, cache sharing
-      // estimates the visible-history delta, and fast compression estimates
-      // the removed-content delta. Never present that count as API-authoritative.
-      info.newTokenCountIsEstimated = true;
+      // ChatCompressionService owns provenance. Keep a conservative fallback
+      // for older/custom implementations that omit the field, but preserve an
+      // explicit authoritative `false`.
+      info.newTokenCountIsEstimated ??= true;
       if (!options?.deferChatCompressionRecord) {
         this.chatRecordingService?.recordChatCompression({
           info,
@@ -1992,7 +1994,10 @@ export class GeminiChat {
       this.setHistory(newHistory);
       debugLogger.debug('[FILE_READ_CACHE] clear after auto tryCompress');
       this.config.getFileReadCache().clear();
-      this.setLastPromptTokenCount(info.newTokenCount, true);
+      this.setLastPromptTokenCount(
+        info.newTokenCount,
+        info.newTokenCountIsEstimated,
+      );
       this.telemetryService?.setLastPromptTokenCount(info.newTokenCount);
       // Reset the consecutive-failure counter on success so a forced /compress
       // (or any successful compaction) recovers a chat whose breaker had
@@ -2500,12 +2505,14 @@ export class GeminiChat {
       // newTokenCount by compression/resume), re-estimate from the counts —
       // cheap, no history walk. When it is still 0, reuse the pre-push gate
       // estimate: userContent is already in history here, so a fresh history
-      // walk would double-count it. Any estimate-derived count misses the
+      // walk would double-count it. Estimate-derived counts can omit the
       // system prompt, tool definitions, and skill content (see
-      // estimatePromptTokens — "typically ~15-20K of under-estimate"), and
-      // an under-count is the ONE way `prompt + max_tokens` can still
-      // overflow the window, so keep the pad until provider usage replaces
-      // the estimate.
+      // estimatePromptTokens — "typically ~15-20K of under-estimate"). Some
+      // counts based on prior API usage already preserve part of that
+      // overhead, but conservatively double-counting it is safe and
+      // self-corrects when provider usage arrives. An under-count is the ONE
+      // way `prompt + max_tokens` can still overflow the window, so keep the
+      // pad until provider usage replaces the estimate.
       promptTokensForClamp =
         this.lastPromptTokenCount > 0
           ? estimatePromptTokens(
@@ -2518,7 +2525,7 @@ export class GeminiChat {
             )
           : effectiveTokens;
       if (this.promptCountIsEstimateDerived()) {
-        promptTokensForClamp += FIRST_SEND_CLAMP_OVERHEAD_PAD;
+        promptTokensForClamp += ESTIMATE_CLAMP_OVERHEAD_PAD;
       }
       const clampedMaxOutputTokens = clampOutputTokensToWindow(
         outputCeiling,
@@ -3459,7 +3466,7 @@ export class GeminiChat {
               estimateContentTokens(
                 recoveryContents,
                 recoveryImageTokenEstimate,
-              ) + FIRST_SEND_CLAMP_OVERHEAD_PAD;
+              ) + ESTIMATE_CLAMP_OVERHEAD_PAD;
             const recoveryPromptEstimate = Math.max(
               countBasedRecoveryEstimate,
               walkRecoveryEstimate,

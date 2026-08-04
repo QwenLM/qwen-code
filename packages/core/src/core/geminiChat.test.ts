@@ -3920,6 +3920,7 @@ describe('GeminiChat', async () => {
           info: {
             originalTokenCount: 176_000,
             newTokenCount: 40_000,
+            newTokenCountIsEstimated: true,
             compressionStatus: CompressionStatus.COMPRESSED,
           },
         });
@@ -4060,6 +4061,7 @@ describe('GeminiChat', async () => {
       expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
       expect(recordChatCompression).not.toHaveBeenCalled();
       expect(chatWithRecording.getLastPromptTokenCount()).toBe(176_999);
+      expect(chatWithRecording.isLastPromptTokenCountEstimated()).toBe(false);
       expect(chatWithRecording.getHistory()[0].parts?.[0].text).toBe(
         originalHistory[0].parts?.[0].text,
       );
@@ -4113,6 +4115,7 @@ describe('GeminiChat', async () => {
       expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
       expect(recordChatCompression).not.toHaveBeenCalled();
       expect(chatWithRecording.getLastPromptTokenCount()).toBe(175_500);
+      expect(chatWithRecording.isLastPromptTokenCountEstimated()).toBe(false);
       expect(chatWithRecording.getHistory()[0].parts?.[0].text).toBe(
         originalHistory[0].parts?.[0].text,
       );
@@ -5276,6 +5279,49 @@ describe('GeminiChat', async () => {
 
       expect(chatInstance.getLastPromptTokenCount()).toBe(123);
       expect(chatInstance.isLastPromptTokenCountEstimated()).toBe(false);
+    });
+
+    it('keeps estimated provenance when provider usage has no usable count', async () => {
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_GEMINI,
+        model: 'test-model',
+        contextWindowSize: 40_000,
+      });
+      vi.spyOn(ChatCompressionService.prototype, 'compress').mockResolvedValue({
+        newHistory: null,
+        info: {
+          originalTokenCount: 79,
+          newTokenCount: 79,
+          compressionStatus: CompressionStatus.NOOP,
+        },
+      });
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        makeStreamResponse('usage omitted', {
+          promptTokenCount: 0,
+          totalTokenCount: 0,
+        }),
+      );
+
+      const chatInstance = new GeminiChat(
+        mockConfig,
+        config,
+        [],
+        undefined,
+        uiTelemetryService,
+      );
+      chatInstance.seedResumeTokenCounts(79, 0, true);
+
+      const stream = await chatInstance.sendMessageStream(
+        'test-model',
+        { message: 'hi' },
+        'prompt-provider-usage-keeps-estimate',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      expect(chatInstance.getLastPromptTokenCount()).toBe(79);
+      expect(chatInstance.isLastPromptTokenCountEstimated()).toBe(true);
     });
 
     it('keeps a sane input budget on small custom windows (issue #6144)', async () => {
@@ -14196,6 +14242,7 @@ describe('GeminiChat', async () => {
           info: {
             originalTokenCount: 1000,
             newTokenCount: 200,
+            newTokenCountIsEstimated: true,
             compressionStatus: CompressionStatus.COMPRESSED,
           },
         });
@@ -14331,6 +14378,38 @@ describe('GeminiChat', async () => {
       expect(recordChatCompression).toHaveBeenCalledWith(
         expect.objectContaining({
           info: expect.objectContaining({ newTokenCountIsEstimated: true }),
+        }),
+      );
+    });
+
+    it('preserves an authoritative compression count from the service', async () => {
+      const recordChatCompression = vi.fn();
+      const recordingChat = new GeminiChat(
+        mockConfig,
+        config,
+        [userMsg('history'), modelMsg('response')],
+        {
+          recordChatCompression,
+        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        uiTelemetryService,
+      );
+      vi.spyOn(ChatCompressionService.prototype, 'compress').mockResolvedValue({
+        newHistory: [userMsg('summary'), modelMsg('ok')],
+        info: {
+          originalTokenCount: 1000,
+          newTokenCount: 200,
+          newTokenCountIsEstimated: false,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+      });
+
+      const info = await recordingChat.tryCompress('p-authoritative', true);
+
+      expect(info.newTokenCountIsEstimated).toBe(false);
+      expect(recordingChat.isLastPromptTokenCountEstimated()).toBe(false);
+      expect(recordChatCompression).toHaveBeenCalledWith(
+        expect.objectContaining({
+          info: expect.objectContaining({ newTokenCountIsEstimated: false }),
         }),
       );
     });
