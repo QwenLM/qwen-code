@@ -509,6 +509,11 @@ jobs:
         env:
           FREEZE_VERSION: '0.2.2'
           FREEZE_SHA256: '012fdbdd16c0c19570f9052aac34d16d93d7d0d3b565b05374cc59492f53539b'
+          # sha256 of the freeze binary INSIDE the pinned tarball: the
+          # persistent cache is re-verified against it on every run, because
+          # the tarball checksum guards only the first download and a cached
+          # binary's own --version is attacker-controllable.
+          FREEZE_BIN_SHA256: '3a1077a3afcd04fc17c629af47b9a6e892e9fee9533efc6675d1c717aa69bcaf'
         run: |-
           # Deliberately no `set -e`: every failure mode below is tolerated by
           # construction (missing sudo, broken apt, flaky download, checksum
@@ -524,28 +529,39 @@ jobs:
           else
             echo 'tmux unavailable; rendering captures will refuse and claims stay argued in prose.'
           fi
-          # Step-owned tool dir: only THIS directory is promoted onto PATH
-          # (and into GITHUB_PATH for the job's later steps) — never the
-          # general-purpose ~/.local/bin, which a persistent runner lets any
-          # earlier job write to, and whose binaries would then resolve ahead
-          # of the system gh/git in the secret-bearing review step. $HOME
-          # persists across runs on the self-hosted runner, so the directory
-          # doubles as the freeze cache: the next review probes it and skips
-          # the download.
-          tools_bin="$HOME/.qwen-review-tools/bin"
-          mkdir -p "$tools_bin"
-          PATH="$tools_bin:$PATH"
-          echo "$tools_bin" >> "$GITHUB_PATH"
-          # Probe the VERSION, not just the binary: a persistent self-hosted
-          # runner keeps yesterday's freeze on PATH, and a bare `command -v`
-          # gate would silently pin this workflow to whatever installed
-          # first, making the FREEZE_VERSION/FREEZE_SHA256 bump above a
-          # no-op. Digit-bounded match: a cached 0.2.20 CONTAINS a 0.2.2 pin
-          # as a substring, so a substring grep would silently void a
-          # downgrade.
+          # Two-tier tool dir. The persistent cache dir under $HOME is exactly
+          # as writable by any earlier job on the shared runner as the
+          # ~/.local/bin this step refuses to promote, so it is NEVER promoted
+          # onto PATH: a planted binary there (a fake freeze, or a gh/git the
+          # secret-bearing review step would resolve ahead of the system ones)
+          # is read only as a cache artifact, and only after its bytes
+          # re-verify against the workflow-pinned hash. Later steps execute
+          # only what THIS step installs into the fresh per-run dir below —
+          # and only THAT dir is promoted (PATH + GITHUB_PATH).
+          cache_bin="$HOME/.qwen-review-tools/bin"
+          mkdir -p "$cache_bin"
+          tools_bin=$(mktemp -d "${RUNNER_TEMP:-/tmp}/qwen-review-tools.XXXXXX") || tools_bin=''
+          if [ -n "$tools_bin" ]; then
+            PATH="$tools_bin:$PATH"
+            echo "$tools_bin" >> "$GITHUB_PATH"
+          fi
+          # Digit-bounded match: a resolved 0.2.20 CONTAINS a 0.2.2 pin as a
+          # substring, so a substring grep would silently void a downgrade.
           version_re="(^|[^0-9])${FREEZE_VERSION//./\\.}([^0-9]|$)"
+          # Re-verify the cached binary before trusting it: a mismatch
+          # (planted or stale) is deleted so the checksummed download path
+          # replaces it instead of the fake getting executed.
+          if [ -f "$cache_bin/freeze" ] \
+            && ! echo "${FREEZE_BIN_SHA256}  $cache_bin/freeze" | sha256sum -c - >/dev/null 2>&1; then
+            rm -f "$cache_bin/freeze"
+          fi
           have_freeze=false
-          if command -v freeze >/dev/null 2>&1 && freeze --version 2>/dev/null | grep -qE "$version_re"; then
+          if [ -n "$tools_bin" ] && [ -f "$cache_bin/freeze" ] \
+            && install -m 0755 "$cache_bin/freeze" "$tools_bin/freeze"; then
+            have_freeze=true
+          elif command -v freeze >/dev/null 2>&1 && freeze --version 2>/dev/null | grep -qE "$version_re"; then
+            # A pinned-version freeze already on PATH (e.g. baked into the
+            # runner image) satisfies the pin without a download.
             have_freeze=true
           fi
           if [ "$have_freeze" = false ] && [ "$(uname -sm)" = 'Linux x86_64' ]; then
@@ -563,12 +579,17 @@ jobs:
                   echo 'verified tarball contains no freeze binary; captures degrade to ans-only.'
                 elif ! install -m 0755 "$bin" "$tools_bin/freeze"; then
                   echo 'freeze install failed; captures degrade to ans-only.'
+                else
+                  install -m 0755 "$bin" "$cache_bin/freeze" 2>/dev/null \
+                    || echo 'freeze cache update failed; the next run will re-download.'
                 fi
               fi
             else
               echo 'freeze download failed; captures degrade to ans-only.'
             fi
             [ -n "$tmp" ] && rm -rf "$tmp"
+          elif [ "$have_freeze" = false ]; then
+            echo "freeze unavailable on $(uname -sm); rendering captures will degrade to ans-only."
           fi
           # Report what the job's later steps will actually resolve, and say
           # so when it is not the pinned version: silent degradation is what

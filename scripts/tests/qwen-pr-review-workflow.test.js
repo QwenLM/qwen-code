@@ -360,16 +360,17 @@ function captureToolsSource() {
   expect(step).toBeDefined();
   // The YAML half of the never-fails promise.
   expect(step['continue-on-error']).toBe(true);
-  // A freeze bump edits exactly these two adjacent lines. The harness exports
-  // both into every stub, so a malformed or missing value can never disagree
-  // with itself downstream — only this shape check sees it.
+  // A freeze bump edits exactly these three adjacent lines. The harness
+  // exports all of them into every stub, so a malformed or missing value can
+  // never disagree with itself downstream — only this shape check sees it.
   expect(step.env.FREEZE_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
   expect(step.env.FREEZE_SHA256).toMatch(/^[0-9a-f]{64}$/);
+  expect(step.env.FREEZE_BIN_SHA256).toMatch(/^[0-9a-f]{64}$/);
   return { run: step.run, env: step.env };
 }
 
 // The download half of the happy path: a curl that satisfies `-o <out>` but
-// only for the exact pinned release URL, a sha256sum that only accepts the
+// only for the exact pinned release URL, a sha256sum that only accepts a
 // pinned checksum over a file curl actually wrote, and a tar that only
 // "extracts" an existing file. Shared by the scenarios that vary only the
 // verify/install half — each stub models its real contract's consumption
@@ -387,8 +388,17 @@ const okCurlStub = [
 ].join('\n');
 const okSha256Stub = [
   'read -r hash file',
-  '[ "$hash" = "$FREEZE_SHA256" ] || exit 1',
   '[ -f "$file" ] || exit 1',
+  // The tarball check (FREEZE_SHA256) passes once curl wrote the file. The
+  // cache re-verification (FREEZE_BIN_SHA256) models the real check's outcome
+  // per scenario: CACHE_HASH_OK=1 means the cached bytes are the pinned
+  // binary's; anything else is a planted or stale cache and must be rejected.
+  'if [ "$hash" = "$FREEZE_SHA256" ]; then exit 0; fi',
+  'if [ "$hash" = "$FREEZE_BIN_SHA256" ]; then',
+  '  [ "${CACHE_HASH_OK:-0}" = 1 ] && exit 0',
+  '  exit 1',
+  'fi',
+  'exit 1',
 ].join('\n');
 const okTarStub = [
   'src=""; dest=""; prev=""',
@@ -402,16 +412,33 @@ const okTarStub = [
   'printf \'#!/bin/bash\\necho "freeze ${FREEZE_VERSION}"\\n\' > "$dest/freeze_x/freeze"',
   'chmod +x "$dest/freeze_x/freeze"',
 ].join('\n');
+// Extracts "nothing": the tarball checksum passes but the archive holds no
+// freeze binary.
+const noBinTarStub = [
+  'src=""; dest=""; prev=""',
+  'for a in "$@"; do',
+  '  [ "$prev" = "-xzf" ] && src="$a"',
+  '  [ "$prev" = "-C" ] && dest="$a"',
+  '  prev="$a"',
+  'done',
+  '[ -f "$src" ] || exit 1',
+  'mkdir -p "$dest/freeze_x"',
+].join('\n');
 
-function runCaptureToolsStep({ stubs = {} } = {}) {
+function runCaptureToolsStep({
+  stubs = {},
+  cacheFreeze = null,
+  cacheHashOk = false,
+} = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'capture-tools-'));
   try {
     const bin = join(dir, 'bin');
     const homeDir = join(dir, 'home');
     const tmpRoot = join(dir, 'tmp');
+    const runnerTemp = join(dir, 'runner-temp');
     const ghPath = join(dir, 'github_path');
     const calls = join(dir, 'calls');
-    execFileSync('mkdir', ['-p', bin, homeDir, tmpRoot]);
+    execFileSync('mkdir', ['-p', bin, homeDir, tmpRoot, runnerTemp]);
     writeFileSync(ghPath, '');
     writeFileSync(calls, '');
     const write = (name, body) => {
@@ -433,6 +460,13 @@ function runCaptureToolsStep({ stubs = {} } = {}) {
     write('apt-get', 'exit 100');
     for (const [name, body] of Object.entries(stubs)) {
       write(name, body);
+    }
+    const cacheDir = join(homeDir, '.qwen-review-tools/bin');
+    if (cacheFreeze !== null) {
+      execFileSync('mkdir', ['-p', cacheDir]);
+      const p = join(cacheDir, 'freeze');
+      writeFileSync(p, cacheFreeze);
+      chmodSync(p, 0o755);
     }
     const { run, env } = captureToolsSource();
     // Hide the host's tmux so whether the step's apt branch runs depends on
@@ -465,11 +499,18 @@ function runCaptureToolsStep({ stubs = {} } = {}) {
       `export HOME="${homeDir}"`,
       `export GITHUB_PATH="${ghPath}"`,
       `export CALLS="${calls}"`,
-      // Pin TMPDIR so the step's mktemp dir lands inside the scenario: its
-      // cleanup (`rm -rf "$tmp"`) is otherwise invisible to every test.
+      // Pin TMPDIR so the step's download-scratch mktemp dir lands inside the
+      // scenario: its cleanup (`rm -rf "$tmp"`) is otherwise invisible to
+      // every test.
       `export TMPDIR="${tmpRoot}"`,
+      // The promoted per-run dir is created under RUNNER_TEMP — job-scoped
+      // and runner-cleaned on real runners — pinned here so tests can assert
+      // exactly what the job's later steps would resolve from PATH.
+      `export RUNNER_TEMP="${runnerTemp}"`,
       `export FREEZE_VERSION="${env.FREEZE_VERSION}"`,
       `export FREEZE_SHA256="${env.FREEZE_SHA256}"`,
+      `export FREEZE_BIN_SHA256="${env.FREEZE_BIN_SHA256}"`,
+      ...(cacheHashOk ? ['export CACHE_HASH_OK=1'] : []),
       run,
     ].join('\n');
     let status = 0;
@@ -485,21 +526,40 @@ function runCaptureToolsStep({ stubs = {} } = {}) {
       status = e.status ?? 1;
       stdout = `${e.stdout ?? ''}${e.stderr ?? ''}`;
     }
-    const freezePath = join(homeDir, '.qwen-review-tools/bin/freeze');
+    // The dir GITHUB_PATH names is the ONLY PATH entry this step adds for the
+    // job's later steps; its contents are exactly what those steps can
+    // resolve ahead of the system gh/git.
+    const promotedDir = readFileSync(ghPath, 'utf8').trim();
+    const promotedFreeze = promotedDir ? join(promotedDir, 'freeze') : '';
+    const promotedFreezeExists =
+      promotedDir !== '' && existsSync(promotedFreeze);
     return {
       status,
       stdout,
       freezeVersion: env.FREEZE_VERSION,
       ghPath: readFileSync(ghPath, 'utf8'),
       calls: readFileSync(calls, 'utf8'),
-      // Snapshot the mktemp dir's fate before the scenario cleanup below:
-      // the step's `rm -rf "$tmp"` must leave TMPDIR empty, and on the
-      // persistent runner anything left behind accumulates forever.
-      tmpDirEntries: readdirSync(tmpRoot),
-      installedFreeze: existsSync(freezePath),
+      promotedDir: promotedDir || null,
+      promotedEntries:
+        promotedDir !== '' && existsSync(promotedDir)
+          ? readdirSync(promotedDir)
+          : [],
+      promotedFreezeExists,
       // Existence is not usability: later steps execute mode bits, not files.
-      installedFreezeExecutable:
-        existsSync(freezePath) && (statSync(freezePath).mode & 0o111) !== 0,
+      promotedFreezeExecutable:
+        promotedFreezeExists && (statSync(promotedFreeze).mode & 0o111) !== 0,
+      // The persistent cache dir is storage only — never promoted onto PATH.
+      // The content snapshot outlives the scenario-dir cleanup for assertions.
+      cacheFreezeExists: existsSync(join(cacheDir, 'freeze')),
+      cacheFreezeContent: existsSync(join(cacheDir, 'freeze'))
+        ? readFileSync(join(cacheDir, 'freeze'), 'utf8')
+        : null,
+      // Snapshot the download-scratch mktemp dir's fate before the scenario
+      // cleanup below: the step's `rm -rf "$tmp"` must leave TMPDIR empty,
+      // and on the persistent runner anything left behind accumulates
+      // forever. The promoted per-run dir lives in the separate RUNNER_TEMP
+      // tree and is exempt by design — later steps still execute from it.
+      leakedTmpEntries: readdirSync(tmpRoot),
     };
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -516,7 +576,8 @@ describe('capture-tools install step (real bash, stubbed binaries)', () => {
     // Part of the never-stalls contract: a hung connection must abort at the
     // cap, not run out the job budget.
     expect(r.calls).toContain('--connect-timeout 10 --max-time 120');
-    expect(r.installedFreeze).toBe(false);
+    expect(r.promotedFreezeExists).toBe(false);
+    expect(r.cacheFreezeExists).toBe(false);
   });
 
   it('exits 0 when the checksum rejects the download — and installs nothing', () => {
@@ -530,13 +591,14 @@ describe('capture-tools install step (real bash, stubbed binaries)', () => {
     expect(r.stdout).toContain('freeze checksum mismatch');
     expect(r.calls).toContain('sha256sum ');
     expect(r.calls).not.toContain('tar ');
-    expect(r.installedFreeze).toBe(false);
+    expect(r.promotedFreezeExists).toBe(false);
+    expect(r.cacheFreezeExists).toBe(false);
     // The mktemp cleanup is load-bearing on the persistent runner: /tmp
     // survives across runs there, so a leaked tarball accumulates forever.
-    expect(r.tmpDirEntries).toStrictEqual([]);
+    expect(r.leakedTmpEntries).toStrictEqual([]);
   });
 
-  it('happy path installs a USABLE pinned freeze into the step-owned dir', () => {
+  it('happy path promotes a FRESH per-run dir holding exactly the pinned freeze', () => {
     const r = runCaptureToolsStep({
       stubs: { curl: okCurlStub, sha256sum: okSha256Stub, tar: okTarStub },
     });
@@ -546,40 +608,94 @@ describe('capture-tools install step (real bash, stubbed binaries)', () => {
     expect(r.calls).toContain(
       'curl -fsSL --retry 3 --connect-timeout 10 --max-time 120 -o',
     );
-    // The pairing later steps depend on: the binary AT the path GITHUB_PATH
-    // names — one without the other and freeze is invisible or missing.
-    expect(r.installedFreeze).toBe(true);
-    expect(r.ghPath).toContain('.qwen-review-tools/bin');
+    // The pairing later steps depend on: the executable binary IN the dir
+    // GITHUB_PATH names, holding nothing else — one without the other and
+    // freeze is invisible, missing, or shadowed by a planted neighbour.
+    expect(r.promotedEntries).toStrictEqual(['freeze']);
+    expect(r.promotedFreezeExecutable).toBe(true);
+    // The promoted dir is a fresh per-run dir, never the persistent cache:
+    // $HOME survives across runs on the self-hosted runner and is writable
+    // by any earlier job, so promoting it would resolve planted binaries
+    // ahead of the system gh/git in the secret-bearing review step.
+    expect(r.ghPath).toContain('qwen-review-tools.');
+    expect(r.ghPath).not.toContain('.qwen-review-tools');
     // ~/.local/bin is a persistent runner's general-purpose dumping ground:
     // promoting it would resolve arbitrary binaries ahead of the system
     // gh/git in the secret-bearing review step.
     expect(r.ghPath).not.toContain('.local/bin');
-    // Existence is not usability: an install -m 0644 regression ships a file
-    // that later steps cannot execute, silently degrading every capture.
-    expect(r.installedFreezeExecutable).toBe(true);
+    // The verified download refreshes the cache for the next run.
+    expect(r.cacheFreezeExists).toBe(true);
     expect(r.stdout).toContain(r.freezeVersion);
     // The pinned version resolved, so the stale-renderer warning stays silent.
     expect(r.stdout).not.toContain('not the pinned');
-    expect(r.tmpDirEntries).toStrictEqual([]);
+    expect(r.leakedTmpEntries).toStrictEqual([]);
   });
 
-  it('re-downloads when the cached freeze is the WRONG version', () => {
-    // A persistent runner keeps yesterday's freeze on PATH: a bare
-    // `command -v` gate would make the FREEZE_VERSION bump a silent no-op.
+  it('accepts a cache whose bytes re-verify against the pinned hash — no download', () => {
+    const r = runCaptureToolsStep({
+      cacheFreeze: '#!/bin/bash\necho "freeze ${FREEZE_VERSION}"\n',
+      cacheHashOk: true,
+      stubs: { sha256sum: okSha256Stub },
+    });
+    expect(r.status).toBe(0);
+    expect(r.calls).toContain('sha256sum ');
+    // The hash gate cleared, so the checksummed download stays skipped.
+    expect(r.calls).not.toContain('curl ');
+    expect(r.promotedEntries).toStrictEqual(['freeze']);
+    expect(r.promotedFreezeExecutable).toBe(true);
+    expect(r.cacheFreezeExists).toBe(true);
+    expect(r.stdout).toContain(r.freezeVersion);
+    expect(r.stdout).not.toContain('not the pinned');
+  });
+
+  it('hash-rejects a planted cache freeze that merely REPORTS the pinned version', () => {
+    // The planted binary's --version lies about the pin — the old design
+    // promoted the cache dir and trusted exactly this self-report. The marker
+    // lives OUTSIDE the scenario dir (which the harness deletes) and proves
+    // the plant never executes on the new path.
+    const markerDir = mkdtempSync(join(tmpdir(), 'planted-marker-'));
+    try {
+      const planted = `#!/bin/bash
+touch "${join(markerDir, 'pwned')}"
+echo "freeze \${FREEZE_VERSION}"
+`;
+      const r = runCaptureToolsStep({
+        cacheFreeze: planted,
+        stubs: { curl: okCurlStub, sha256sum: okSha256Stub, tar: okTarStub },
+      });
+      expect(r.status).toBe(0);
+      expect(r.calls).toContain('sha256sum ');
+      expect(existsSync(join(markerDir, 'pwned'))).toBe(false);
+      // The mismatch deletes the plant and forces the checksummed re-download.
+      expect(r.calls).toContain('curl ');
+      expect(r.promotedEntries).toStrictEqual(['freeze']);
+      expect(r.promotedFreezeExists).toBe(true);
+      // The cache now holds the verified download, not the plant.
+      expect(r.cacheFreezeExists).toBe(true);
+      expect(r.cacheFreezeContent).not.toBe(planted);
+    } finally {
+      rmSync(markerDir, { recursive: true, force: true });
+    }
+  });
+
+  it('re-downloads when the freeze already on PATH is the WRONG version', () => {
+    // A freeze otherwise already on PATH must satisfy the pin by version,
+    // not mere presence: a bare `command -v` gate would make the
+    // FREEZE_VERSION bump a silent no-op.
     const r = runCaptureToolsStep({
       stubs: { freeze: 'echo "freeze version 0.0.1"' },
     });
     expect(r.status).toBe(0);
     expect(r.calls).toContain('curl ');
-    // The re-download fails (dead-network stub), so the stale cached freeze
-    // is what later steps resolve — the step must say so.
+    // The re-download fails (dead-network stub), so the stale freeze is what
+    // later steps resolve — the step must say so.
     expect(r.stdout).toContain('not the pinned');
   });
 
-  it('re-downloads when the cached version merely CONTAINS the pin', () => {
-    // A downgrade (0.2.20 -> 0.2.2) must re-download: the newer cached
-    // version contains the older pin as a substring, so an unanchored grep
-    // matched it and silently voided the pin.
+  it('re-downloads when the resolved version merely CONTAINS the pin', () => {
+    // A downgrade (0.2.20 -> 0.2.2) must re-download: the newer version
+    // contains the older pin as a substring, so an unanchored grep matched it
+    // and silently voided the pin.
     const r = runCaptureToolsStep({
       stubs: { freeze: 'echo "freeze version ${FREEZE_VERSION}0"' },
     });
@@ -587,8 +703,8 @@ describe('capture-tools install step (real bash, stubbed binaries)', () => {
     expect(r.calls).toContain('curl ');
   });
 
-  it('re-downloads when the cached version extends the pin with a leading digit', () => {
-    // Mirror of the CONTAINS case (pin 0.2.2, cached 10.2.2): without the
+  it('re-downloads when the resolved version extends the pin with a leading digit', () => {
+    // Mirror of the CONTAINS case (pin 0.2.2, resolved 10.2.2): without the
     // LEFT digit boundary the grep matches and the bump is a silent no-op.
     const r = runCaptureToolsStep({
       stubs: { freeze: 'echo "freeze version 1${FREEZE_VERSION}"' },
@@ -597,12 +713,66 @@ describe('capture-tools install step (real bash, stubbed binaries)', () => {
     expect(r.calls).toContain('curl ');
   });
 
-  it('skips the download when the cached freeze already matches the pin', () => {
+  it('skips the download when the freeze already on PATH matches the pin', () => {
     const r = runCaptureToolsStep({
       stubs: { freeze: 'echo "freeze version ${FREEZE_VERSION}"' },
     });
     expect(r.status).toBe(0);
     expect(r.calls).not.toContain('curl ');
+  });
+
+  it('exits 0 when tar extraction fails — and installs nothing', () => {
+    const r = runCaptureToolsStep({
+      stubs: { curl: okCurlStub, sha256sum: okSha256Stub, tar: 'exit 1' },
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('freeze tarball extraction failed');
+    expect(r.calls).toContain('tar ');
+    expect(r.promotedFreezeExists).toBe(false);
+    expect(r.cacheFreezeExists).toBe(false);
+    expect(r.leakedTmpEntries).toStrictEqual([]);
+  });
+
+  it('exits 0 when the verified tarball contains no freeze binary — and installs nothing', () => {
+    const r = runCaptureToolsStep({
+      stubs: { curl: okCurlStub, sha256sum: okSha256Stub, tar: noBinTarStub },
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('verified tarball contains no freeze binary');
+    expect(r.promotedFreezeExists).toBe(false);
+    expect(r.cacheFreezeExists).toBe(false);
+    expect(r.leakedTmpEntries).toStrictEqual([]);
+  });
+
+  it('exits 0 when the freeze install fails — and installs nothing', () => {
+    const r = runCaptureToolsStep({
+      stubs: {
+        curl: okCurlStub,
+        sha256sum: okSha256Stub,
+        tar: okTarStub,
+        install: 'exit 1',
+      },
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('freeze install failed');
+    expect(r.promotedFreezeExists).toBe(false);
+    expect(r.cacheFreezeExists).toBe(false);
+    expect(r.leakedTmpEntries).toStrictEqual([]);
+  });
+
+  it('says why freeze is absent on a non-x86_64 runner', () => {
+    // The platform guard used to skip the download silently: a pool
+    // migrating to arm64 would degrade every capture with zero log lines,
+    // contradicting the step's own never-degrade-silently contract.
+    const r = runCaptureToolsStep({
+      stubs: { uname: 'echo "Linux aarch64"', tmux: 'echo "tmux 3.4"' },
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain(
+      'freeze unavailable on Linux aarch64; rendering captures will degrade to ans-only.',
+    );
+    expect(r.calls).not.toContain('curl ');
+    expect(r.promotedFreezeExists).toBe(false);
   });
 
   it('skips apt entirely when tmux is already present', () => {
@@ -632,7 +802,7 @@ describe('capture-tools install step (real bash, stubbed binaries)', () => {
     expect(r.calls).toContain('sudo apt-get update -qq');
     expect(r.calls).toContain('sudo apt-get install -y -qq tmux');
     expect(r.calls).not.toContain('sudo install');
-    expect(r.installedFreeze).toBe(true);
+    expect(r.promotedFreezeExists).toBe(true);
   });
 });
 
