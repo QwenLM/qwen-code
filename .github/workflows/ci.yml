@@ -190,19 +190,20 @@ jobs:
           # script: this runs pre-checkout on shared runners, where leftover
           # workspace files are untrusted.
           if [ -e "$GITHUB_WORKSPACE/.git" ]; then
-            git -C "$GITHUB_WORKSPACE" worktree prune -v || true
-            git -C "$GITHUB_WORKSPACE" worktree list --porcelain \
+            GIT_SAFE=(git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$GITHUB_WORKSPACE")
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" worktree list --porcelain \
               | awk '$1 == "worktree" && index($0, "/.qwen/tmp/review-pr-") > 0 { sub(/^worktree /, ""); print }' \
               | while read -r worktree; do
                   [ -n "$worktree" ] || continue
-                  git -C "$GITHUB_WORKSPACE" worktree remove --force "$worktree" ||
+                  "${GIT_SAFE[@]}" worktree remove --force "$worktree" ||
                     echo "::warning::could not remove review worktree: $worktree"
                 done || true
-            git -C "$GITHUB_WORKSPACE" worktree prune -v || true
-            git -C "$GITHUB_WORKSPACE" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
               | while read -r stale_ref; do
                   if [ -n "$stale_ref" ]; then
-                    git -C "$GITHUB_WORKSPACE" branch -D "$stale_ref" ||
+                    "${GIT_SAFE[@]}" branch -D "$stale_ref" ||
                       echo "::warning::could not remove review branch: $stale_ref"
                   fi
                 done || true
@@ -568,19 +569,20 @@ jobs:
           # script: this runs pre-checkout on shared runners, where leftover
           # workspace files are untrusted.
           if [ -e "$GITHUB_WORKSPACE/.git" ]; then
-            git -C "$GITHUB_WORKSPACE" worktree prune -v || true
-            git -C "$GITHUB_WORKSPACE" worktree list --porcelain \
+            GIT_SAFE=(git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$GITHUB_WORKSPACE")
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" worktree list --porcelain \
               | awk '$1 == "worktree" && index($0, "/.qwen/tmp/review-pr-") > 0 { sub(/^worktree /, ""); print }' \
               | while read -r worktree; do
                   [ -n "$worktree" ] || continue
-                  git -C "$GITHUB_WORKSPACE" worktree remove --force "$worktree" ||
+                  "${GIT_SAFE[@]}" worktree remove --force "$worktree" ||
                     echo "::warning::could not remove review worktree: $worktree"
                 done || true
-            git -C "$GITHUB_WORKSPACE" worktree prune -v || true
-            git -C "$GITHUB_WORKSPACE" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
               | while read -r stale_ref; do
                   if [ -n "$stale_ref" ]; then
-                    git -C "$GITHUB_WORKSPACE" branch -D "$stale_ref" ||
+                    "${GIT_SAFE[@]}" branch -D "$stale_ref" ||
                       echo "::warning::could not remove review branch: $stale_ref"
                   fi
                 done || true
@@ -897,19 +899,20 @@ jobs:
           # script: this runs pre-checkout on shared runners, where leftover
           # workspace files are untrusted.
           if [ -e "$GITHUB_WORKSPACE/.git" ]; then
-            git -C "$GITHUB_WORKSPACE" worktree prune -v || true
-            git -C "$GITHUB_WORKSPACE" worktree list --porcelain \
+            GIT_SAFE=(git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$GITHUB_WORKSPACE")
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" worktree list --porcelain \
               | awk '$1 == "worktree" && index($0, "/.qwen/tmp/review-pr-") > 0 { sub(/^worktree /, ""); print }' \
               | while read -r worktree; do
                   [ -n "$worktree" ] || continue
-                  git -C "$GITHUB_WORKSPACE" worktree remove --force "$worktree" ||
+                  "${GIT_SAFE[@]}" worktree remove --force "$worktree" ||
                     echo "::warning::could not remove review worktree: $worktree"
                 done || true
-            git -C "$GITHUB_WORKSPACE" worktree prune -v || true
-            git -C "$GITHUB_WORKSPACE" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
               | while read -r stale_ref; do
                   if [ -n "$stale_ref" ]; then
-                    git -C "$GITHUB_WORKSPACE" branch -D "$stale_ref" ||
+                    "${GIT_SAFE[@]}" branch -D "$stale_ref" ||
                       echo "::warning::could not remove review branch: $stale_ref"
                   fi
                 done || true

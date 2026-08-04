@@ -78,6 +78,15 @@ function expectCleanupRecipe(run) {
   expect(code.indexOf(`refs/heads/${branchFamily}*`)).toBeGreaterThan(remove);
 }
 
+function expectHardenedGit(run) {
+  expect(run).toContain(
+    'GIT_SAFE=(git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$GITHUB_WORKSPACE")',
+  );
+  expect(run).not.toMatch(
+    /^\s+git(?:\s+-C\s+"\$GITHUB_WORKSPACE")?\s+(?:worktree|for-each-ref|branch)\b/m,
+  );
+}
+
 const awkAvailable = spawnSync('awk', ['BEGIN { exit 0 }']).status === 0;
 
 describe('review worktree cleanup steps', () => {
@@ -95,11 +104,13 @@ describe('review worktree cleanup steps', () => {
         `job "${id}" checks out on the shared pool and must clean stale .qwen state first`,
       ).toBeDefined();
       expectCleanupRecipe(run);
+      expectHardenedGit(run);
     }
   });
 
   it('keeps the review-job cleanup sweep pinned to paths.ts', () => {
     expectCleanupRecipe(reviewCleanStep);
+    expectHardenedGit(reviewCleanStep);
     // Fallback for worktree directories Git no longer knows about.
     expect(reviewCleanStep).toContain(`rm -rf ${worktreePrefix}*`);
     // Leases are session+prompt scoped so a stale one is inert, but the glob
@@ -113,6 +124,7 @@ describe('review worktree cleanup steps', () => {
     // Directories are rm -rf'd first there, so no `worktree remove` to pin.
     expect(agentStateCleanStep).toContain(`rm -rf ${worktreePrefix}*`);
     expect(agentStateCleanStep).toContain(`refs/heads/${branchFamily}*`);
+    expectHardenedGit(agentStateCleanStep);
   });
 
   it('uses one identical worktree filter at every list-driven sweep', () => {

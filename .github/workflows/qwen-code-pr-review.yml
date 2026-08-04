@@ -397,15 +397,16 @@ jobs:
             echo "no prior workspace; nothing to clean"
             exit 0
           fi
+          GIT_SAFE=(git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$GITHUB_WORKSPACE")
           rm -rf .qwen/tmp/review-pr-* 2>/dev/null || true
-          git worktree prune -v || true
-          git for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
+          "${GIT_SAFE[@]}" worktree prune -v || true
+          "${GIT_SAFE[@]}" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
             | while read -r stale_ref; do
                 if [ -n "$stale_ref" ]; then
-                  git branch -D "$stale_ref" || true
+                  "${GIT_SAFE[@]}" branch -D "$stale_ref" || true
                 fi
               done || true
-          git worktree prune -v || true
+          "${GIT_SAFE[@]}" worktree prune -v || true
           echo "stale agent state cleaned"
 
       # SECURITY: checkout trusted base code; /review fetches PR diff context.
@@ -1002,20 +1003,21 @@ jobs:
             exit 0
           fi
 
-          git worktree prune -v || true
-          git worktree list --porcelain \
+          GIT_SAFE=(git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$GITHUB_WORKSPACE")
+          "${GIT_SAFE[@]}" worktree prune -v || true
+          "${GIT_SAFE[@]}" worktree list --porcelain \
             | awk '$1 == "worktree" && index($0, "/.qwen/tmp/review-pr-") > 0 { sub(/^worktree /, ""); print }' \
             | while read -r worktree; do
                 [ -n "$worktree" ] || continue
-                git worktree remove --force "$worktree" ||
+                "${GIT_SAFE[@]}" worktree remove --force "$worktree" ||
                   echo "::warning::could not remove review worktree: $worktree"
               done || true
           rm -rf .qwen/tmp/review-pr-* 2>/dev/null || true
-          git worktree prune -v || true
-          git for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
+          "${GIT_SAFE[@]}" worktree prune -v || true
+          "${GIT_SAFE[@]}" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
             | while read -r review_ref; do
                 [ -n "$review_ref" ] || continue
-                git branch -D "$review_ref" ||
+                "${GIT_SAFE[@]}" branch -D "$review_ref" ||
                   echo "::warning::could not remove review branch: $review_ref"
               done || true
           rm -f .qwen/tmp/qwen-review-lease-pr-*.json 2>/dev/null || true
