@@ -39,6 +39,7 @@ import type { Config } from '@qwen-code/qwen-code-core';
 import { ApprovalMode, OutputFormat } from '@qwen-code/qwen-code-core';
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
+const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockConsumeLastRenderError = vi.hoisted(() => vi.fn());
 const mockHandleListExtensions = vi.hoisted(() => vi.fn());
 const mockStartEarlyStartupPrefetches = vi.hoisted(() => vi.fn());
@@ -143,7 +144,7 @@ vi.mock('./utils/sandbox.js', () => ({
 
 vi.mock('./utils/stdioHelpers.js', () => ({
   writeStderrLine: mockWriteStderrLine,
-  writeStdoutLine: vi.fn(),
+  writeStdoutLine: mockWriteStdoutLine,
   clearScreen: vi.fn(),
 }));
 
@@ -2797,17 +2798,13 @@ describe('startInteractiveUI', () => {
       const sessionFile = join(projectDir, 'chats', `${sessionId}.jsonl`);
       writeFileSync(sessionFile, '');
 
-      const writeSpy = vi
-        .spyOn(process.stdout, 'write')
-        .mockImplementation(() => true);
       try {
         await runCleanup(makeRecordingConfig(sessionId, sessionFile));
 
-        expect(writeSpy).toHaveBeenCalledWith(
-          `\nTo continue this session, run\nqwen --resume ${sessionId}\n`,
+        expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+          `\nTo continue this session, run\nqwen --resume ${sessionId}`,
         );
       } finally {
-        writeSpy.mockRestore();
         rmSync(projectDir, { recursive: true, force: true });
       }
     });
@@ -2816,48 +2813,41 @@ describe('startInteractiveUI', () => {
       const projectDir = mkdtempSync(join(tmpdir(), 'resume-echo-'));
       const sessionFile = join(projectDir, 'chats', 'missing-session-id.jsonl');
 
-      const writeSpy = vi
-        .spyOn(process.stdout, 'write')
-        .mockImplementation(() => true);
       try {
         await runCleanup(
           makeRecordingConfig('missing-session-id', sessionFile),
         );
 
-        for (const [chunk] of writeSpy.mock.calls) {
-          expect(String(chunk)).not.toContain('qwen --resume');
-        }
+        expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+          expect.stringContaining('qwen --resume'),
+        );
       } finally {
-        writeSpy.mockRestore();
         rmSync(projectDir, { recursive: true, force: true });
       }
     });
 
     // The ID is echoed as paste-into-shell text, and resume reads session
     // IDs from transcript contents, so a crafted transcript must not be
-    // able to smuggle extra commands past the echo.
+    // able to smuggle extra commands or CLI flags past the echo.
     it.each([
       ['newline', 'evil\nrm -rf ~'],
       ['escape sequence', 'evil\u001B]52;c;pwned\u0007session'],
-    ])('does not echo a session ID containing a %s', async (_, sessionId) => {
+      ['leading dash', '-cafebabe0123456789abcdef01234567'],
+    ])('does not echo a session ID with a %s', async (_, sessionId) => {
       // Win32 forbids control bytes in file names, so stub the existence
       // gate instead of creating a real session file.
       const existsMock = vi.mocked(existsSync).mockReturnValue(true);
 
-      const writeSpy = vi
-        .spyOn(process.stdout, 'write')
-        .mockImplementation(() => true);
       try {
         await runCleanup(
           makeRecordingConfig(sessionId, '/project/session.jsonl'),
         );
 
-        for (const [chunk] of writeSpy.mock.calls) {
-          expect(String(chunk)).not.toContain('qwen --resume');
-        }
+        expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+          expect.stringContaining('qwen --resume'),
+        );
       } finally {
         existsMock.mockReset();
-        writeSpy.mockRestore();
       }
     });
 
@@ -2868,20 +2858,16 @@ describe('startInteractiveUI', () => {
       const sessionFile = join(projectDir, 'chats', `${sessionId}.jsonl`);
       writeFileSync(sessionFile, '');
 
-      const writeSpy = vi
-        .spyOn(process.stdout, 'write')
-        .mockImplementation(() => true);
       try {
         await runCleanup({
           ...makeRecordingConfig(sessionId, sessionFile),
           getChatRecordingService: () => undefined,
         } as unknown as Config);
 
-        for (const [chunk] of writeSpy.mock.calls) {
-          expect(String(chunk)).not.toContain('qwen --resume');
-        }
+        expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+          expect.stringContaining('qwen --resume'),
+        );
       } finally {
-        writeSpy.mockRestore();
         rmSync(projectDir, { recursive: true, force: true });
       }
     });
@@ -2897,17 +2883,13 @@ describe('startInteractiveUI', () => {
       const sessionFile = join(projectDir, 'chats', `${sessionId}.jsonl`);
       writeFileSync(sessionFile, '');
 
-      const writeSpy = vi
-        .spyOn(process.stdout, 'write')
-        .mockImplementation(() => true);
       try {
         await runCleanup(makeRecordingConfig(sessionId, sessionFile));
 
-        for (const [chunk] of writeSpy.mock.calls) {
-          expect(String(chunk)).not.toContain('qwen --resume');
-        }
+        expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+          expect.stringContaining('qwen --resume'),
+        );
       } finally {
-        writeSpy.mockRestore();
         rmSync(projectDir, { recursive: true, force: true });
       }
     });

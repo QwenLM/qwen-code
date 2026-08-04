@@ -47,7 +47,7 @@ import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
 import { stopAndGetCapturedInput } from '../utils/earlyInputCapture.js';
 import { t } from '../i18n/index.js';
 import { profileCheckpoint } from '../utils/startupProfiler.js';
-import { writeStderrLine } from '../utils/stdioHelpers.js';
+import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import { sanitizeTerminalText } from './utils/textUtils.js';
 import { startPostRenderPrefetches } from '../startup/startup-prefetch.js';
 import {
@@ -343,10 +343,14 @@ export async function startInteractiveUI(
         // IDs from transcript contents any user-level process can write, so
         // gate the echo to a single safe token: sanitizeTerminalText
         // preserves LF and cannot stop a crafted ID pasting as extra
-        // commands.
-        if (fs.existsSync(sessionFile) && /^[0-9a-zA-Z._-]+$/.test(sessionId)) {
-          process.stdout.write(
-            `\n${t('To continue this session, run')}\nqwen --resume ${sanitizeTerminalText(sessionId)}\n`,
+        // commands, and a dash-leading ID would reparse as CLI flags
+        // instead of `--resume`'s value.
+        if (
+          fs.existsSync(sessionFile) &&
+          /^[0-9a-zA-Z][0-9a-zA-Z._-]*$/.test(sessionId)
+        ) {
+          writeStdoutLine(
+            `\n${t('To continue this session, run')}\nqwen --resume ${sanitizeTerminalText(sessionId)}`,
           );
         }
       }
