@@ -242,6 +242,48 @@ describe('WorkspaceSection label', () => {
     ).not.toBeNull();
   });
 
+  it('does not render sessions loaded for the previous source', async () => {
+    let resolveChannel: (sessions: DaemonSessionSummary[]) => void = () => {};
+    const channelSessions = new Promise<DaemonSessionSummary[]>((resolve) => {
+      resolveChannel = resolve;
+    });
+    const listWorkspaceSessions = vi.fn((options?: { sourceType?: string }) =>
+      options?.sourceType === 'channel'
+        ? channelSessions
+        : Promise.resolve([
+            {
+              sessionId: 'task-session',
+              displayName: 'Task session',
+              sourceType: 'default',
+            },
+          ]),
+    );
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessions,
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+
+    renderSection({ client, expanded: true, sourceType: 'default' });
+    await flush();
+    expect(container.textContent).toContain('Task session');
+
+    renderSection({ client, expanded: true, sourceType: 'channel' });
+    expect(container.textContent).not.toContain('Task session');
+
+    resolveChannel([
+      {
+        sessionId: 'channel-session',
+        displayName: 'Channel session',
+        sourceType: 'channel',
+      },
+    ]);
+    await flush();
+    expect(container.textContent).toContain('Channel session');
+  });
+
   it('groups a secondary workspace with its own channel catalog', async () => {
     const client = {
       workspaceByCwd: vi.fn(() => ({

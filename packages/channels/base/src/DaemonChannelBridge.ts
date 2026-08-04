@@ -12,6 +12,7 @@ import type {
   ChannelLoopToolHandler,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
+import { CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY } from './ChannelAgentBridge.js';
 import { readAvailableCommandAltNames } from './AcpBridge.js';
 import {
   ChannelLoopMcpServer,
@@ -20,7 +21,6 @@ import {
 import type { SessionScope } from './types.js';
 
 const MAX_RESPONDED_PERMISSION_REQUESTS = 256;
-const DAEMON_PROMPT_DISPLAY_TEXT_META_KEY = 'qwen.daemon.promptDisplayText';
 
 export interface DaemonChannelEvent {
   id?: number;
@@ -87,6 +87,10 @@ export interface DaemonChannelBridgeOptions {
   modelServiceId?: string;
   sessionScope?: SessionScope;
   channelLoopMcpHost?: DaemonChannelLoopMcpHost;
+  deleteSessionData?: (
+    sessionId: string,
+    workspaceCwd: string,
+  ) => Promise<void>;
 }
 
 export interface DaemonPermissionRequestEvent {
@@ -234,10 +238,22 @@ export class DaemonChannelBridge
   private lifecycleGeneration = 0;
   private latestAvailableCommandsSessionId: string | undefined;
   private lastError: unknown;
+  readonly deleteSessionData?: (sessionId: string) => Promise<void>;
 
   constructor(options: DaemonChannelBridgeOptions) {
     super();
     this.options = options;
+    const deleteSessionData = options.deleteSessionData;
+    if (deleteSessionData) {
+      this.deleteSessionData = async (sessionId) => {
+        const session = this.ensureSession(sessionId);
+        try {
+          await deleteSessionData(sessionId, session.workspaceCwd);
+        } finally {
+          this.removeSessionBinding(sessionId);
+        }
+      };
+    }
     this.on('error', (error) => {
       this.lastError = error;
     });
@@ -413,7 +429,7 @@ export class DaemonChannelBridge
           ...(options?.displayText !== undefined
             ? {
                 _meta: {
-                  [DAEMON_PROMPT_DISPLAY_TEXT_META_KEY]: options.displayText,
+                  [CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY]: options.displayText,
                 },
               }
             : {}),

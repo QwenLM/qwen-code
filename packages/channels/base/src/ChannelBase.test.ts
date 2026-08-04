@@ -9945,16 +9945,39 @@ describe('ChannelBase', () => {
       expect(secondPrompt).not.toContain('Be concise.');
     });
 
-    it('keeps channel context out of the user-facing prompt text', async () => {
-      const ch = createChannel({ instructions: 'Be concise.' });
+    it('keeps all model-only context out of the user-facing prompt text', async () => {
+      const ch = createChannel({
+        instructions: 'Be concise.',
+        sessionScope: 'thread',
+        groupPolicy: 'open',
+      });
 
-      await ch.handleInbound(envelope({ text: 'hello' }));
+      await ch.handleInbound(
+        envelope({
+          text: 'hello',
+          isGroup: true,
+          isMentioned: true,
+          referencedText: 'earlier message',
+          metadata: 'Issue: hidden metadata',
+          attachments: [
+            {
+              type: 'file',
+              filePath: '/tmp/hidden.txt',
+              mimeType: 'text/plain',
+            },
+          ],
+        }),
+      );
 
       const [sessionId, modelText, options] = (
         bridge.prompt as ReturnType<typeof vi.fn>
       ).mock.calls[0]!;
       expect(sessionId).toEqual(expect.any(String));
       expect(modelText).toContain('Be concise.');
+      expect(modelText).toContain('[User 1]');
+      expect(modelText).toContain('earlier message');
+      expect(modelText).toContain('/tmp/hidden.txt');
+      expect(modelText).toContain('Issue: hidden metadata');
       expect(options).toMatchObject({ displayText: 'hello' });
     });
 
@@ -15473,7 +15496,7 @@ describe('ChannelBase', () => {
           expect.stringContaining(
             '[External event "ci_failed" from github-ci]',
           ),
-          {},
+          { displayText: 'CI failed' },
         );
         expect(ch.proactive).toEqual([
           { chatId: 'group-1', text: 'CI failed because lint broke.' },
@@ -16079,6 +16102,9 @@ describe('ChannelBase', () => {
         const collectedPrompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
           .calls[1][1] as string;
         expect(collectedPrompt).toContain('follow-up while webhook runs');
+        expect(
+          (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[1][2],
+        ).toMatchObject({ displayText: 'follow-up while webhook runs' });
       });
 
       it('waits for bridge recovery before resolving a webhook session', async () => {
@@ -16410,7 +16436,7 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).toHaveBeenLastCalledWith(
         expect.any(String),
         '[Loop "daily summary" created by Alice] Scheduled task running unattended: no one is present to answer questions, and your final response is delivered to this chat automatically — do whatever work the task requires, then put the result in your final response instead of trying to deliver it to this chat yourself.\n\npost summary',
-        {},
+        { displayText: 'post summary' },
       );
       expect(ch.proactive).toEqual([
         { chatId: 'group-1', text: 'loop response' },
@@ -17729,7 +17755,7 @@ describe('ChannelBase', () => {
         expect(bridge.prompt).toHaveBeenLastCalledWith(
           's-1',
           '[Loop "daily summary" created by Alice] Scheduled task running unattended: no one is present to answer questions, and your final response is delivered to this chat automatically — do whatever work the task requires, then put the result in your final response instead of trying to deliver it to this chat yourself.\n\npost again',
-          {},
+          { displayText: 'post again' },
         );
         expect(ch.proactive).toEqual([
           { chatId: 'chat1', text: 'second response' },
@@ -18415,7 +18441,7 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).toHaveBeenLastCalledWith(
         expect.any(String),
         'while loop runs',
-        expect.any(Object),
+        { displayText: 'while loop runs' },
       );
     });
 

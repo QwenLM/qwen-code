@@ -3,6 +3,9 @@ import type {
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
 
+export const CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY =
+  'qwen.daemon.promptDisplayText';
+
 export interface AvailableCommand {
   name: string;
   description: string;
@@ -130,6 +133,8 @@ export interface ChannelAgentBridge {
     sessionId: string,
     expectedBindingToken?: object,
   ): Promise<void>;
+  /** Permanently remove an internal bridge session and its persisted data. */
+  deleteSessionData?(sessionId: string): Promise<void>;
   respondToPermission?(
     requestId: string,
     response: RequestPermissionResponse,

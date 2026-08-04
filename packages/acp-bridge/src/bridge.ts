@@ -5482,7 +5482,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         promptId,
         queuedAt,
         ...(originatorClientId !== undefined ? { originatorClientId } : {}),
-        text: extractPromptText(req.prompt),
+        text:
+          entry.sourceType === 'channel' &&
+          typeof req._meta?.[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY] === 'string'
+            ? req._meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY]
+            : extractPromptText(req.prompt),
         abortController: pendingAbort,
         state: isQueued ? 'queued' : 'running',
       };

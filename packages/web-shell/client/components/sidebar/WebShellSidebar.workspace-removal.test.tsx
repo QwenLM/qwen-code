@@ -59,8 +59,11 @@ const {
   const active = makeSessions();
   const archived = makeSessions();
   const useSessions = vi.fn(
-    (options?: { archiveState?: string; sourceType?: string }) =>
-      options?.archiveState === 'archived' ? archived : active,
+    (options?: {
+      archiveState?: string;
+      sourceType?: string;
+      group?: string;
+    }) => (options?.archiveState === 'archived' ? archived : active),
   );
   const exportArchivedSession = vi.fn();
   const sessionActions = { renameSession: vi.fn() };
@@ -2916,6 +2919,42 @@ describe('WebShellSidebar primary workspace header', () => {
 });
 
 describe('WebShellSidebar session source switch', () => {
+  it('never renders primary sessions from the inactive source', async () => {
+    active.sessions.push(
+      {
+        sessionId: 'task-session',
+        displayName: 'Task session',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'default',
+      },
+      {
+        sessionId: 'channel-session',
+        displayName: 'Channel session',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'channel',
+      },
+    );
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    expect(container.textContent).toContain('Task session');
+    expect(container.textContent).not.toContain('Channel session');
+
+    const channelsTab = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    ).find((button) => button.textContent?.trim() === 'Channels');
+    await act(async () => {
+      channelsTab!.dispatchEvent(
+        new MouseEvent('mousedown', { bubbles: true, button: 0 }),
+      );
+      channelsTab!.click();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).not.toContain('Task session');
+    expect(container.textContent).toContain('Channel session');
+  });
+
   it('switches primary and workspace-qualified lists from tasks to channels', async () => {
     renderSidebar();
 
@@ -2931,10 +2970,11 @@ describe('WebShellSidebar session source switch', () => {
     expect(tasksTab?.getAttribute('data-state')).toBe('active');
     expect(channelsTab).toBeDefined();
     expect(
-      useSessions.mock.calls.some(
-        ([options]) => options?.sourceType === 'default',
-      ),
-    ).toBe(true);
+      useSessions.mock.calls.find(
+        ([options]) =>
+          options?.archiveState === 'active' && options.group !== 'pinned',
+      )?.[0]?.sourceType,
+    ).toBe('default');
 
     await act(async () => {
       channelsTab!.dispatchEvent(
@@ -2946,10 +2986,11 @@ describe('WebShellSidebar session source switch', () => {
 
     expect(channelsTab?.getAttribute('data-state')).toBe('active');
     expect(
-      useSessions.mock.calls.some(
-        ([options]) => options?.sourceType === 'channel',
-      ),
-    ).toBe(true);
+      useSessions.mock.calls.findLast(
+        ([options]) =>
+          options?.archiveState === 'active' && options.group !== 'pinned',
+      )?.[0]?.sourceType,
+    ).toBe('channel');
 
     await expandWorkspace('other');
     expect(

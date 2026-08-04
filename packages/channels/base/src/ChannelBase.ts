@@ -269,7 +269,11 @@ type PendingPermissionLookup =
   | { kind: 'found'; pending: PendingPermission }
   | { kind: 'none'; explicit: boolean }
   | { kind: 'ambiguous'; requestIds: string[] };
-type CollectBufferEntry = { text: string; envelope: Envelope };
+type CollectBufferEntry = {
+  text: string;
+  displayText: string;
+  envelope: Envelope;
+};
 type ActivePrompt = {
   runId: string;
   owner?: ChannelPromptOwner;
@@ -1408,11 +1412,13 @@ export abstract class ChannelBase {
     this.collectBuffers.delete(sessionId);
     const lost = buffer.length;
     const coalesced = buffer.map((b) => b.text).join('\n\n');
+    const coalescedDisplayText = buffer.map((b) => b.displayText).join('\n\n');
     const lastEnvelope = buffer[buffer.length - 1]!.envelope;
     this.notifyPromptBufferDrained(lastEnvelope.chatId, sessionId, buffer);
     const syntheticEnvelope: Envelope = {
       ...lastEnvelope,
       text: coalesced,
+      displayText: coalescedDisplayText,
       alreadyPrefixed: true,
       referencedText: undefined,
       attachments: undefined,
@@ -1635,6 +1641,7 @@ export abstract class ChannelBase {
           promptBridge,
           sessionId,
           promptToSend,
+          job.prompt,
           promptState,
           job.id,
           options.timeoutMs,
@@ -1806,6 +1813,9 @@ export abstract class ChannelBase {
       },
     );
     const promptText = buildChannelWebhookPrompt(task, target);
+    const displayText = [task.title, task.summary]
+      .filter((part): part is string => Boolean(part))
+      .join('\n\n');
     const taskId = `webhook:${task.source}:${task.eventType}`;
     const safeTaskId = sanitizeLogText(taskId, 64);
     const safeChannel = sanitizeLogText(this.name, 64);
@@ -1931,6 +1941,7 @@ export abstract class ChannelBase {
           promptBridge,
           sessionId,
           promptToSend,
+          displayText,
           promptState,
           taskId,
           options.timeoutMs,
@@ -2035,11 +2046,12 @@ export abstract class ChannelBase {
     promptBridge: ChannelAgentBridge,
     sessionId: string,
     promptText: string,
+    displayText: string,
     promptState: ActivePrompt,
     jobId: string,
     timeoutMs: number | undefined,
   ): Promise<string> {
-    const prompt = promptBridge.prompt(sessionId, promptText, {});
+    const prompt = promptBridge.prompt(sessionId, promptText, { displayText });
     prompt.catch(() => {});
     if (timeoutMs === undefined) {
       return prompt;
@@ -4950,6 +4962,7 @@ export abstract class ChannelBase {
       this.observedContactEnvelopes.add(envelope);
       await this.recordObservedContact(envelope);
     }
+    const displayText = envelope.displayText ?? envelope.text;
 
     let memoryIntent: ResolvedChannelMemoryIntent | null =
       parseChannelMemoryIntent(envelope.text);
@@ -5197,7 +5210,7 @@ export abstract class ChannelBase {
             buffer = [];
             this.collectBuffers.set(sessionId, buffer);
           }
-          buffer.push({ text: promptText, envelope });
+          buffer.push({ text: promptText, displayText, envelope });
           try {
             this.onPromptBuffered(
               envelope.chatId,
@@ -5530,7 +5543,7 @@ export abstract class ChannelBase {
         const response = await promptBridge.prompt(sessionId, promptToSend, {
           imageBase64,
           imageMimeType,
-          displayText: promptText,
+          displayText,
         });
 
         await this.settleCancelRequested(promptState);
@@ -5681,6 +5694,9 @@ export abstract class ChannelBase {
           this.collectBuffers.delete(sessionId);
           const lost = buffer.length;
           const coalesced = buffer.map((b) => b.text).join('\n\n');
+          const coalescedDisplayText = buffer
+            .map((b) => b.displayText)
+            .join('\n\n');
           const lastEnvelope = buffer[buffer.length - 1]!.envelope;
           this.notifyPromptBufferDrained(
             lastEnvelope.chatId,
@@ -5691,6 +5707,7 @@ export abstract class ChannelBase {
           const syntheticEnvelope: Envelope = {
             ...lastEnvelope,
             text: coalesced,
+            displayText: coalescedDisplayText,
             // Coalesced text already carries each message's [sender] prefix.
             alreadyPrefixed: true,
             // Clear attachments/references — already resolved in original text

@@ -135,6 +135,9 @@ export function WorkspaceSection({
   onOpenCommit,
 }: WorkspaceSectionProps) {
   const [sessions, setSessions] = useState<DaemonSessionSummary[]>([]);
+  const [sessionsSourceType, setSessionsSourceType] = useState(
+    sourceType ?? '',
+  );
   const [groups, setGroups] = useState<DaemonSessionGroup[]>([]);
   const [channelCatalog, setChannelCatalog] = useState<{
     catalog: DaemonChannelTypeCatalog;
@@ -148,10 +151,12 @@ export function WorkspaceSection({
   const [actionsVisible, setActionsVisible] = useState(false);
   const [gitStatus, setGitStatus] = useState<DaemonWorkspaceGitStatus>();
   const [branchPickerOpen, setBranchPickerOpen] = useState(false);
+  const sessionLoadRequestId = useRef(0);
   const { t } = useI18n();
   const expanded = controlledExpanded ?? internalExpanded;
   const readOnly = !workspace.primary && !workspace.trusted;
   const disabled = workspace.primary && !workspace.trusted;
+  const searchActive = searchQuery.trim().length > 0;
 
   // A workspace always starts collapsed, including the primary workspace.
   useEffect(() => {
@@ -172,6 +177,7 @@ export function WorkspaceSection({
 
   const loadSessions = useCallback(async () => {
     if (disabled) return;
+    const requestId = ++sessionLoadRequestId.current;
     try {
       const result = await client
         .workspaceByCwd(workspace.cwd)
@@ -183,13 +189,18 @@ export function WorkspaceSection({
             ? { view: 'organized' as const, group: 'all' }
             : {}),
         });
-      setSessions(result);
-      setLoadError(false);
+      if (requestId === sessionLoadRequestId.current) {
+        setSessions(result);
+        setSessionsSourceType(sourceType ?? '');
+        setLoadError(false);
+      }
     } catch (err) {
       // Surface connectivity failures so users can distinguish a broken
       // daemon from genuinely zero sessions.
       console.warn('[WorkspaceSection] session poll failed:', err);
-      setLoadError(true);
+      if (requestId === sessionLoadRequestId.current) {
+        setLoadError(true);
+      }
     }
   }, [client, disabled, organizationEnabled, sourceType, workspace.cwd]);
 
@@ -221,11 +232,11 @@ export function WorkspaceSection({
   ]);
 
   useEffect(() => {
-    if (!renderSessions || disabled || !channelGroupingEnabled) {
+    if (!renderSessions || disabled || readOnly || !channelGroupingEnabled) {
       setChannelCatalog(undefined);
       return;
     }
-    if (!expanded && !searchQuery.trim()) return;
+    if (!expanded && !searchActive) return;
     let cancelled = false;
     const workspaceClient = client.workspaceByCwd(workspace.cwd);
     void Promise.all([
@@ -246,15 +257,16 @@ export function WorkspaceSection({
     client,
     disabled,
     expanded,
+    readOnly,
     reloadToken,
     renderSessions,
-    searchQuery,
+    searchActive,
     workspace.cwd,
   ]);
 
   useEffect(() => {
     if (!renderSessions) return;
-    if (!expanded && !searchQuery.trim()) return;
+    if (!expanded && !searchActive) return;
     void loadSessions();
     if (readOnly) return;
     const timer = setInterval(() => void loadSessions(), 10_000);
@@ -265,7 +277,7 @@ export function WorkspaceSection({
     readOnly,
     reloadToken,
     renderSessions,
-    searchQuery,
+    searchActive,
   ]);
 
   // Undefined when `cwd` is not a real path (synthetic fallback workspace), so
@@ -327,6 +339,7 @@ export function WorkspaceSection({
   ]);
 
   const visibleSessions = useMemo(() => {
+    if (sessionsSourceType !== (sourceType ?? '')) return [];
     const query = searchQuery.trim().toLowerCase();
     return sessions.filter((session) => {
       if (excludePinned && session.isPinned) return false;
@@ -336,7 +349,7 @@ export function WorkspaceSection({
         label.includes(query) || session.sessionId.toLowerCase().includes(query)
       );
     });
-  }, [excludePinned, searchQuery, sessions]);
+  }, [excludePinned, searchQuery, sessions, sessionsSourceType, sourceType]);
 
   const groupedSessions = useMemo(() => {
     if (!organizationEnabled || groups.length === 0) return null;

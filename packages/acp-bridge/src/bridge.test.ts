@@ -7237,7 +7237,10 @@ describe('createAcpSessionBridge', () => {
       const bridge = makeBridge({
         channelFactory: async () => handle.channel,
       });
-      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sourceType: 'channel',
+      });
       const sub = (async () => {
         for await (const ev of bridge.subscribeEvents(session.sessionId)) {
           events.push(ev);
@@ -7257,7 +7260,10 @@ describe('createAcpSessionBridge', () => {
         session.sessionId,
         {
           sessionId: session.sessionId,
-          prompt: [{ type: 'text', text: 'queued behind first' }],
+          prompt: [
+            { type: 'text', text: 'hidden context\n\nqueued behind first' },
+          ],
+          _meta: { 'qwen.daemon.promptDisplayText': 'queued behind first' },
         },
         undefined,
         { promptId: 'prompt-second' },
@@ -7303,6 +7309,9 @@ describe('createAcpSessionBridge', () => {
         (startedEvents[0] as BridgeEvent & { data: { text: string } }).data
           .text,
       ).toBe('queued behind first');
+      expect(handle.agent.promptCalls[1]?.prompt).toEqual([
+        { type: 'text', text: 'hidden context\n\nqueued behind first' },
+      ]);
       const completedEvents = events.filter(
         (e) => e.type === 'pending_prompt_completed',
       );

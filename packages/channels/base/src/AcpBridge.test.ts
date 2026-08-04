@@ -432,6 +432,26 @@ describe('AcpBridge', () => {
     );
   });
 
+  it('forwards the user-facing prompt projection to the daemon', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const prompt = vi.fn().mockResolvedValue({});
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = { extMethod: vi.fn(), prompt };
+
+    await bridge.prompt('s-1', 'hidden context\n\nhello', {
+      displayText: 'hello',
+    });
+
+    expect(prompt).toHaveBeenCalledWith({
+      sessionId: 's-1',
+      prompt: [{ type: 'text', text: 'hidden context\n\nhello' }],
+      _meta: { 'qwen.daemon.promptDisplayText': 'hello' },
+    });
+  });
+
   it('excludes nested subagent text from the final response', async () => {
     const bridge = new AcpBridge({
       cliEntryPath: '/tmp/qwen',

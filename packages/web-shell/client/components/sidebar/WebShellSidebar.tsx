@@ -120,6 +120,17 @@ const DEFAULT_CUSTOM_GROUP_COLOR: DaemonSessionGroupHexColor = '#416ef5';
 
 type SidebarSessionSource = 'default' | 'channel';
 
+function matchesSessionSource(
+  session: DaemonSessionSummary,
+  source: SidebarSessionSource | undefined,
+): boolean {
+  if (source === 'channel') return session.sourceType === 'channel';
+  if (source === 'default') {
+    return session.sourceType === undefined || session.sourceType === 'default';
+  }
+  return true;
+}
+
 function getSessionIdentity(
   sessionId: string,
   workspaceCwd: string | undefined,
@@ -644,10 +655,12 @@ export function WebShellSidebar({
     !organizationEnabled ||
     !includePrimaryWorkspaceSessions ||
     sessionsPage !== undefined;
+  const loadPinnedSessions =
+    organizationEnabled && selectedSessionSource !== 'channel';
   const { sessions: primaryPinnedSessions, reload: reloadPinnedSessions } =
     useSessions({
-      autoLoad: organizationEnabled,
-      enabled: organizationEnabled && includePrimaryWorkspaceSessions,
+      autoLoad: loadPinnedSessions,
+      enabled: loadPinnedSessions && includePrimaryWorkspaceSessions,
       pageSize: SESSION_LIST_PAGE_SIZE,
       archiveState: 'active',
       ...(selectedSessionSource ? { sourceType: selectedSessionSource } : {}),
@@ -840,6 +853,7 @@ export function WebShellSidebar({
       ...(includePrimaryWorkspaceSessions ? primaryPinnedSessions : []),
       ...secondaryPinnedSessions,
     ]) {
+      if (!matchesSessionSource(session, selectedSessionSource)) continue;
       byId.set(
         getSessionIdentity(
           session.sessionId,
@@ -853,6 +867,7 @@ export function WebShellSidebar({
     includePrimaryWorkspaceSessions,
     primaryWorkspaceCwd,
     primaryPinnedSessions,
+    selectedSessionSource,
     secondaryPinnedSessions,
   ]);
   const resolveSessionWorkspaceScope = useCallback(
@@ -1067,7 +1082,7 @@ export function WebShellSidebar({
   );
 
   useEffect(() => {
-    if (!organizationEnabled) {
+    if (!organizationEnabled || selectedSessionSource === 'channel') {
       setSecondaryPinnedSessions([]);
       return;
     }
@@ -1117,6 +1132,7 @@ export function WebShellSidebar({
       ...(includePrimaryWorkspaceSessions ? archivedSessions : []),
       ...secondaryArchivedSessions,
     ]) {
+      if (!matchesSessionSource(session, selectedSessionSource)) continue;
       byIdentity.set(getIdentityForSession(session), session);
     }
     return [...byIdentity.values()];
@@ -1124,6 +1140,7 @@ export function WebShellSidebar({
     archivedSessions,
     getIdentityForSession,
     includePrimaryWorkspaceSessions,
+    selectedSessionSource,
     secondaryArchivedSessions,
   ]);
   const effectiveArchivedLoading =
@@ -2561,10 +2578,13 @@ export function WebShellSidebar({
 
   const filteredSessions = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
+    const sourceScopedSessions = sessions.filter((session) =>
+      matchesSessionSource(session, selectedSessionSource),
+    );
     const unpinnedSessions =
       selectedSessionSource === 'channel'
-        ? sessions
-        : sessions.filter((session) => !session.isPinned);
+        ? sourceScopedSessions
+        : sourceScopedSessions.filter((session) => !session.isPinned);
     const nextSessions = query
       ? unpinnedSessions.filter((session) => {
           const label = getSessionLabel(session).toLowerCase();

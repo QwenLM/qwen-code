@@ -17,10 +17,12 @@ import type {
 import type {
   AvailableCommand,
   ChannelAgentBridge,
+  ChannelAgentBridgePromptOptions,
   ChannelAgentBridgeSessionOptions,
   ChannelLoopToolHandler,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
+import { CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY } from './ChannelAgentBridge.js';
 import {
   CHANNEL_LOOP_MCP_SERVER_NAME,
   CLIENT_MCP_MESSAGE_METHOD,
@@ -244,7 +246,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   async prompt(
     sessionId: string,
     text: string,
-    options?: { imageBase64?: string; imageMimeType?: string },
+    options?: ChannelAgentBridgePromptOptions,
   ): Promise<string> {
     const conn = this.ensureConnection();
 
@@ -280,6 +282,13 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       await conn.prompt({
         sessionId,
         prompt: prompt as Array<{ type: 'text'; text: string }>,
+        ...(options?.displayText !== undefined
+          ? {
+              _meta: {
+                [CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY]: options.displayText,
+              },
+            }
+          : {}),
       });
     } finally {
       this.off('textChunk', onChunk);

@@ -131,6 +131,26 @@ function turnCompleteEvent(sessionId = 'session-1'): DaemonChannelEvent {
 }
 
 describe('DaemonChannelBridge', () => {
+  it('deletes an internal session through its owning workspace', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const deleteSessionData = vi.fn().mockResolvedValue(undefined);
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+      deleteSessionData,
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+    await bridge.deleteSessionData?.('session-1');
+
+    expect(deleteSessionData).toHaveBeenCalledWith('session-1', '/repo');
+    expect(bridge.listSessions()).toEqual([]);
+    events.close();
+    bridge.stop();
+  });
+
   it('registers the loop MCP server for the exact daemon session', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);
