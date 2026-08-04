@@ -8,7 +8,7 @@ status: 'confirmed'
 
 > Companion to [`2026-08-04-reasoning-episode-invariants.md`](./2026-08-04-reasoning-episode-invariants.md)
 > and [#8533](https://github.com/QwenLM/qwen-code/issues/8533). Filed as
-> [#TBD](#) once opened. Verdict reached independently by four reviewers on
+> [#8535](https://github.com/QwenLM/qwen-code/issues/8535). Verdict reached independently by four reviewers on
 > different model families, cross-checked against each other, and verified
 > directly by the consolidator against
 > [`fix/geminichat-thought-consolidation`](https://github.com/QwenLM/qwen-code/tree/fix/geminichat-thought-consolidation)
@@ -19,7 +19,7 @@ status: 'confirmed'
 
 `--resume` (and `--continue`) can reconstruct the exact "dangling unsigned
 thinking part immediately preceding a `tool_use`" hazard that PR #8260's
-[`dropDanglingUnsignedTrailingThought`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/geminiChat.ts#L1045-L1051)
+[`dropDanglingUnsignedTrailingThought`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/geminiChat.ts#L1045-L1054)
 was built to prevent on the live path. The mechanism is not "the resume path
 re-runs stale logic" — it's that the resume path runs **no** reasoning-episode
 consolidation at all, and the resulting un-coalesced `Content[]` shape is
