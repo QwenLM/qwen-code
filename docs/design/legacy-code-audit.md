@@ -321,17 +321,25 @@ subcommand, `qwen audit plan-files <path>`, which plays the role
   not rescued by the path-choice principle: that principle keeps `vendor/` a
   subject because vendored source is code a path choice plausibly names, while
   a directory named `dist` is build output in every position, root included.
+  The exclusion carries the same visibility as the other skip classes:
+  every name-excluded directory rides into the header's walks record by
+  path, so real source under a colliding name (`tools/build/`, a
+  pypa-layout `src/build/`) drops out legibly rather than silently, and
+  where the exclusion is what empties the subject set, the refusal names
+  it — "only excluded directories under <path>" — distinguishing the
+  case from a genuinely empty directory.
   `.git/` is the
-  sharp case: the walk deliberately ignores `.gitignore`, every
-  checkout with history carries one, and its text files
-  (`COMMIT_EDITMSG`, `config`, `hooks/*.sample`, `packed-refs`) match
-  no kind rule and classify as `source` — line-counted into the subject
-  arm and handed to whole-file walkers, so on any repository with
-  history `/audit .` refuses at the gate on git internals, the same
-  failure the `dist/` example names, on a directory every repository
-  has (its binary objects land
-  in the uncoverable-subject class below; the text files are what reach
-  the gate). The remaining `GENERATED_RE` clauses — lockfiles, `.snap`,
+  sharp case: the walk deliberately ignores `.gitignore`, and every
+  checkout with history carries one — without this exclusion, its text
+  files (`COMMIT_EDITMSG`, `config`, `hooks/*.sample`, `packed-refs`)
+  would match no kind rule and would classify as `source`, line-counted
+  into the subject arm and handed to whole-file walkers, so on any
+  repository with history `/audit .` would refuse at the gate on git
+  internals, the same failure the `dist/` example names, on a directory
+  every repository has (its binary objects would land in the
+  uncoverable-subject class below; the text files are what would reach
+  the gate) — the failure mode that puts `.git/` in the excluded
+  class. The remaining `GENERATED_RE` clauses — lockfiles, `.snap`,
   `.min.js|css` — stay classified `generated` and stay subjects
   under the same path-choice rule. The one routing rule is unchanged:
   only `test` routes out of the subject set, into Agent 5's corpus;
@@ -415,8 +423,12 @@ mutate: a runnable probe flips under the implied fix on a scratch copy of
 the probed file — a sibling under a reserved scratch-name prefix in the
 probed file's own directory, created for the probe and deleted when it
 lands or when the probe errors, so its relative imports resolve exactly as
-the original's do while the checkout's copy is never mutated and a killed
-shard leaves no scratch sibling behind — and the surviving baseline test
+the original's do while the checkout's copy is never mutated — deletion has
+no third handler, so a killed shard (SIGKILL, OOM, force-timeout, user
+abort) may leave the sibling behind, and `plan-files` treats
+reserved-prefix files as audit-owned residue: excluded from subjects, and
+surfaced at plan time for deletion with the user's confirmation — and the
+surviving baseline test
 run (Open questions) executes the module's own tests. Audited-module code
 may be vendored or third-party, and execution is consent-gated, not
 disclose-after: the pre-launch confirmation (Budget ceiling) names the two
@@ -447,8 +459,9 @@ read, or a read-only verification as an executed one.
 - Verification shards are not counted against the agent bound — the finding
   count is unknowable at plan time. High-tier round auditors are not counted
   either: the bound is a roster bound, and their plan-time bound —
-  roster + file-group count × the 5-round cap, computed from `plan-files`
-  output — is disclosed at the confirmation instead, with the header
+  roster + file-group count × the 5-round cap × 2 (the whiff relaunch
+  every auditor may receive), computed from `plan-files` output — is
+  disclosed at the confirmation instead, with the header
   recording the actual agent count.
 - A plan over the token cap refuses and asks for a narrower path or a lower
   tier;
@@ -512,16 +525,18 @@ the product — so it ships with a stated bound, not an open tab:
   not a run bound, naming both classes it does not count: verification shards,
   which scale with the finding count, unknowable at plan time; and high-tier
   round auditors, which are plan-time-predictable — the bound is roster +
-  file-group count × the 5-round cap, computed from `plan-files` output — and
-  disclosed as such at the confirmation. A run that finds much exceeds it, and
+  file-group count × the 5-round cap × 2 (the whiff relaunch every auditor
+  may receive), computed from `plan-files` output — and disclosed as such
+  at the confirmation. A run that finds much exceeds it, and
   a high run near the gate reaches
-  3–4× of it (a ~9,000-subject module tiles into ~23 groups at the
-  400-line group constant — ~11 roster + up to 5 rounds × ~23 auditors +
-  shards). The overshoot is made visible rather than prevented — the
-  report header records the run's actual token consumption against the
-  estimate, split between the priced core and the unpriced additions (6a,
-  verification, high-tier rounds) so the delta can feed the per-line rate
-  uncontaminated, and the actual agent count against the 40 bound — and a plan
+  ~6× of it (a ~9,000-subject module tiles into ~23 groups at the
+  400-line group constant — ~11 roster + up to 5 rounds × ~23 auditors,
+  doubled for whiff relaunches, + shards). The overshoot is made visible
+  rather than prevented — the report header records the run's actual token
+  consumption against the estimate, split between the priced core and the
+  unpriced additions (6a, verification, high-tier personas, high-tier
+  rounds) so the delta can feed the per-line rate uncontaminated, and the
+  actual agent count against the 40 bound — and a plan
   whose priced part is over the token cap refuses and asks for a narrower path
   or a lower tier. Both constants are unmeasured first cuts
   — 60M is ~1.3× the larger measured arm — and they ride into the report
@@ -685,10 +700,11 @@ which callers were name-registered only.
 module is an event/lifecycle system, 1c's brief adds: enumerate the events
 the module defines, then every call-site path that should fire each one —
 including early-return, error, and abort paths in the _callers_. Round 2's
-two unique Criticals (a failure hook that never fires on API-error turn ends
-in headless mode, and on loop detection in ACP sessions) came from exactly
-this walk; both were adjacent-class siblings of a historical fix that had
-covered only one UI path. **It also made 1c the single most expensive agent
+two unique Criticals came from exactly this walk — both fire-misses, both
+adjacent-class siblings of a historical fix that had covered only one UI
+path, and both withheld class and mechanism included under the Context
+section's criterion (unpatched as of writing, no public tracking artifact
+cites them yet). **It also made 1c the single most expensive agent
 of either round (16M tokens, ~35% of the arm)** — repo-wide path enumeration
 scales with the module's fan-out, so that walk gets its own budget rule in
 the same shape: deep-read at most **N = 10** call sites per event (an
@@ -781,11 +797,11 @@ user files the cluster.
 **Independent discovery is evidence, not noise:** a root cause hit by
 several agents from different dimensions is a high-confidence signal, and
 the cluster's report entry should say "found independently by N agents" —
-Round 2's most-confirmed findings (a redirect SSRF and a permission-merge flaw,
-3-4 independent discoveries each) were also its most severe. The
-permission-merge flaw is the hooks module's own — its aggregator merges
-PermissionRequest hook outputs, permission decisions included — not a
-carry-over from Round 1's permissions subject.
+Round 2's most-confirmed findings (3-4 independent discoveries each) were
+also its most severe — one a redirect SSRF, the other withheld class and
+mechanism included under the Context section's criterion (unpatched as of
+writing, no public tracking artifact cites it yet). The withheld one is the
+hooks module's own — not a carry-over from Round 1's permissions subject.
 
 Verification keeps the `/review` shape — sharded batches ruling on each
 finding's failure scenario against the real code, minus the one clause
@@ -835,9 +851,10 @@ capped accordingly, the reason recorded in the header.
 - The report opens with a run-metadata header — audited commit SHA,
   model id, dirty/clean state with a path-scoped sidecar on dirty runs
   — plus the consumption record and the walks record.
-- Drift stops the run only when the drifted file is already walked and
-  carries anchored findings; any other drift marks the file uncoverable
-  and the run continues.
+- Drift stops the run only when the drifted file is already walked — or
+  deep-read, for 1c's out-of-path callers — and carries anchored
+  findings; any other drift marks the file uncoverable and the run
+  continues.
 - The check-ignore probe consolidates the two existing copies into one
   shared helper in `packages/core`, checked at plan time and re-checked
   at write time, with the outside-repo fallback as the relocation
@@ -873,19 +890,29 @@ capped accordingly, the reason recorded in the header.
   anchors drift with HEAD, so a re-audit after fixes must be alignable
   with the run it follows — a promise the SHA keeps only when the
   checkout was clean. On a dirty run `/audit` therefore captures the
-  dirty content, scoped to the audited path, next to the report wherever
+  dirty content at run start — after the opted-in baseline suite, when
+  it runs — scoped to the audited path, next to the report wherever
   the report lands (`.qwen/audits/` or the outside-repo fallback):
   `git diff HEAD -- <audited path>` for tracked and staged changes —
   path-scoped like the rest of this machinery, so the sidecar never
   carries unrelated dirty content from elsewhere in the repository — and,
   for untracked files, names plus contents:
   `git ls-files --others -- <audited path>`, with no
-  `--exclude-standard`, so the list covers the gitignored-untracked
-  class — vendored code typically arrives uncommitted _and gitignored_,
-  and `--exclude-standard` drops it from the list while `git status`
-  and `git diff HEAD` never show it — plus a content copy of each
-  listed file, because names alone cannot keep anchors resolvable once
-  a file is edited or deleted. The header names which dirt classes
+  `--exclude-standard` — the raw listing is what covers the
+  gitignored-untracked class (vendored code typically arrives
+  uncommitted _and gitignored_, and `--exclude-standard` drops it from
+  the list while `git status` and `git diff HEAD` never show it) —
+  filtered to the files `plan-files` enumerates, subjects and test
+  corpus alike, so the capture inherits the enumeration's
+  directory-name exclusions: without the filter the raw listing
+  re-includes exactly the trees the enumeration excludes outright —
+  probe-verified, `--others` names `dist/` and package-local
+  `node_modules/` contents where `--exclude-standard` returns empty —
+  copying tens of thousands of build-output files the subject gate
+  cannot catch (excluded directories contribute zero subject lines) and
+  re-comparing them at every drift checkpoint — plus a content copy of
+  each listed file, because names alone cannot keep anchors resolvable
+  once a file is edited or deleted. The header names which dirt classes
   were captured. Outside any git worktree there is no SHA or dirty
   state to record; the header says so — "no VCS — anchors not
   alignable" — and names the content-hash snapshot below as the run's
@@ -893,28 +920,34 @@ capped accordingly, the reason recorded in the header.
   with none.
 - **The consumption record:** the run's actual consumption against
   the estimate — split between the priced 8-dimension core and
-  the unpriced additions (6a, verification, high-tier rounds), so the
-  calibration loop can isolate the per-line rate uncontaminated by
+  the unpriced additions (6a, verification, high-tier personas,
+  high-tier rounds), so the calibration loop can isolate the per-line
+  rate uncontaminated by
   unpriced work — and the actual agent count against the 40 bound, so the delta
   lands in the record and feeds the next calibration.
 - **Drift protection:** re-checks the audited path, not the
   repository, before each high-tier round, before verification, and
   at write time — before anchor resolution, alongside the write-time
   check-ignore re-check:
-  worktree/index drift against the plan-time
+  worktree/index drift against the run-start
   `git diff HEAD -- <audited path>` capture; HEAD drift against
   `git rev-parse HEAD:<audited path>` — the subtree hash, recorded in
   the header, so a commit elsewhere in
-  the repository neither breaks alignment nor stops the run; the
-  untracked classes against the plan-time content copies; and, outside
+  the repository neither breaks alignment nor stops the run, and where
+  the audited path has no HEAD entry at all — the flagship vendored
+  case, which arrives uncommitted and gitignored — the subtree-hash arm
+  is vacuous, the header records the absence, and drift rests on the
+  arms below; the untracked classes against the run-start content
+  copies; and, outside
   any git worktree, a per-file content-hash snapshot of the audited path
   (the same hash the incremental re-audit item names) taken at the same
-  checkpoints. The audit's own mutations are excluded from the
+  checkpoints. The run-start captures are taken after the opted-in
+  baseline suite completes, when it runs, so the suite's write set is
+  part of the baseline the checkpoints compare against rather than drift
+  against it; the audit's own mutations are otherwise excluded from the
   comparison: probe scratch copies carry the reserved scratch-name
   prefix and are cleaned up on the error path as well as the success
-  path, and the opted-in baseline suite — when it runs — runs before the
-  header and sidecar capture, so its artifacts are part of the captured
-  baseline rather than drift; the header distinguishes a self-caused
+  path; the header distinguishes a self-caused
   state change from user drift when it records one. Drift stops the run
   only when it invalidates something the run already produced, and
   degrades-and-flags otherwise: the two use cases that dominate v1 —
@@ -932,7 +965,14 @@ capped accordingly, the reason recorded in the header.
   uncoverable in the walks record, and the run continues: nothing the
   run has produced refers to that file, and anything produced against
   it later stands or falls by write-time anchor resolution like any
-  other finding.
+  other finding. Files 1c deep-reads outside the audited path join the
+  comparison as a per-file content-hash snapshot taken at the same
+  checkpoints — the set exists by construction, since 1c registers
+  every caller it deep-reads — and follow the same per-file predicate:
+  the audit's headline cross-file claims are claims about those callers,
+  so drift in a deep-read caller carrying anchored findings stops the
+  run like a walked subject, and drift in the rest of the set marks the
+  caller drifted and continues.
 - **The walks record:** the effort tier, and the walks completed,
   skipped with reason, or uncoverable (over-cap lines, non-text files,
   drifted files) — a partially failed run (1c budget-exhausted,
@@ -971,7 +1011,10 @@ capped accordingly, the reason recorded in the header.
   per-agent prompt records the reused plan machinery produces — `/review` lands
   that class under `.qwen/tmp/` (`prompt-record.ts` derives the record
   directory from the plan path), and agent returns quote the module verbatim,
-  so the class carries the same exploitable content as the report. The
+  so the class carries the same exploitable content as the report; the
+  dirty-run sidecar is the same class with a cross-run purpose — the
+  re-audit alignment the header advertises — and shares the report's
+  flip-time fate below. The
   agent-output cache (`.qwen/review-cache/`) is the same class where it exists;
   v1 writes none, because the incremental cache keys on re-audit, an open
   question. The property holds only when the project ignores
@@ -998,11 +1041,19 @@ capped accordingly, the reason recorded in the header.
   helper: `test-plan.ts`, `team-memory-git-status.ts`, and
   `plan-files`. The merge is explicit because the two copies encode
   different lessons, and lifting either one as-is silently drops the
-  other's: from the review copy, the process-wide memo (a consumer
-  naming the same path twice pays once) and the git deadline (a hang
-  must still end); from the team-memory copy, the representative
-  _file_-not-directory probe — a directory-form re-include negation
-  only applies to paths git knows are directories, so probing the
+  other's: from the review copy, the git deadline (a hang must still
+  end) — but not its process-wide memo, which stays a caller-side cache
+  in the review family rather than lifting into the shared helper: the
+  audit caller re-asks the same (worktree, path) key in the same
+  process and requires a fresh answer twice — the remedy re-run must be
+  able to flip to "ignored", and the write-time re-check must be able
+  to see a mid-run flip — while a helper-carried memo would answer both
+  with the first answer forever, turning the "not a dead end" refusal
+  into a dead end; the team-memory caller likewise consumes the helper
+  fresh, keeping the semantics it has today. From the team-memory copy,
+  the representative _file_-not-directory probe — a directory-form
+  re-include negation only applies to paths git knows are directories,
+  so probing the
   directory spuriously reports ignored — and the rule that one
   representative file can pass while the landing is still exposed:
   team memory deliberately probes two files, the index and a topic
@@ -1014,17 +1065,28 @@ capped accordingly, the reason recorded in the header.
   the reason — per module-derived directory, the audits directory and each
   intermediate directory alike — because `.git/info/exclude` is not
   equally effective everywhere — tracked `.gitignore` patterns outrank
-  it, so a tracked re-include negation (`.qwen/*` then `!.qwen/audits/`
-  — the pattern shape this repo itself uses) beats an exclude entry and
-  the report stays committable: (a) where nothing ignores a module-derived
-  directory, the plan offers to add its ignore rule to `.git/info/exclude`
+  it where they match the representative report file, and whether they
+  match is a shape question the probe decides, not a premise: a full
+  re-include (`.qwen/*`, `!.qwen/audits/`, `!.qwen/audits/**` — the
+  shape this repo itself uses for its re-included `.qwen/` subtrees)
+  matches the file, beats an exclude entry, and keeps the report
+  committable; a directory-only negation (`.qwen/*`, `!.qwen/audits/`)
+  re-includes only the directory, leaving the files beneath it exposed
+  to an exclude entry — probe-verified both ways: (a) where nothing
+  ignores a module-derived directory, the plan offers to add its ignore
+  rule to `.git/info/exclude`
   rather than the tracked `.gitignore`, so the
   remedy does not dirty the checkout with its own edit and stamp the
   run's header dirty on a repo the user had clean (with the user's
   confirmation) — and in a fresh repository that has never used
   qwen-code, that offer is the default first-run experience; (b) where a
-  tracked pattern re-includes the audits path, the exclude entry would
-  be inert, so the plan offers the outside-repo fallback or removing the
+  tracked pattern re-includes the audits path, the probe's answer decides
+  the remedy: where the re-include leaves the representative file exposed
+  (the directory-only shape), the plan offers the exclude entry first — the
+  same zero-footprint remedy as (a), verified by the probe re-run answering
+  "ignored" after it is applied; only where the re-include
+  matches the file itself (the full `**` shape) is the exclude entry
+  inert, and the plan offers the outside-repo fallback or removing the
   tracked negation, disclosing that the latter edits the tracked
   `.gitignore` and dirties the checkout; (c) where the index probe finds
   force-added audit files, the plan refuses the in-repo landing and
@@ -1038,10 +1100,12 @@ capped accordingly, the reason recorded in the header.
   an upstream merge — and a flipped answer relocates the report to the
   outside-repo fallback; the plan-time check keeps its rationale, and the
   write-time re-check keeps the property. The intermediates are run-scoped and
-  deleted when the run ends — the report is the only durable artifact — so a
-  flip that relocates the report deletes them with it rather than leaving
-  module-derived content in a repository whose ignore state no longer covers
-  them. The outside-repo fallback
+  deleted when the run ends; the report and its sidecar are the only durable
+  artifacts — the alignment promise requires the sidecar to survive the run,
+  so a flip that relocates the report relocates the sidecar with it rather
+  than deleting it, and deletes the intermediates, leaving no module-derived
+  content in a repository whose ignore state no longer covers them.
+  The outside-repo fallback
   root resolves through the `Storage` hub — a new state-dir helper
   honoring the `QWEN_HOME` / `QWEN_RUNTIME_DIR` overrides the hub
   already applies to sensitive per-user artifacts, and carrying the
@@ -1158,7 +1222,8 @@ The tiers, in detail:
   same dedup and verification as fan-out findings, and each round's
   confirmed results merge into the cumulative list before the next round
   begins. The confirmation quotes the plan-time agent bound — roster +
-  file-group count × the 5-round cap — alongside the estimate range, and
+  file-group count × the 5-round cap, doubled for the whiff relaunch every
+  auditor may receive — alongside the estimate range, and
   the header records the actual agent count against the forward bound (Budget
   ceiling). Unmeasured; flagged as extrapolation in the report header
   until replicated — alongside any twice-whiffed scopes, since `/audit`
@@ -1267,7 +1332,17 @@ capped, sold as triage — as above.)
   uncoverable-subject exclusion (over-cap lines, non-text files); the
   topology gates (the subject arm at every tier, the test arm at the
   tiers that run Agent 5, and the empty-subject-set refusal; all are
-  refusal bounds in v1); the non-interactive refusal (a start without
+  refusal bounds in v1); the estimate and cap-check arithmetic at the pinned
+  rates — floor and top pricing for both calibration modules (permissions
+  32.5–42.3M against measured ~32.5M, hooks 46M–~60M against measured
+  ~46M), the corner that passes both gate arms and still refuses at the cap
+  check (9,000 subject / 18,000 test → ~65M top), and the precision case
+  (rounded ~2.6/~1.5 rates must price the hooks module over the cap and
+  fail its admission); the name-exclusion visibility (excluded directories
+  recorded in the walks record, and the refusal names the exclusion when it
+  empties the subject set); the reserved-prefix residue rule (a
+  reserved-prefix file is excluded from subjects and surfaced at plan
+  time); the non-interactive refusal (a start without
   an interactive terminal refuses); the local-only guard —
   `plan-files`' `git check-ignore` probe on a representative report
   file path (not the directory) plus the index probe
@@ -1275,17 +1350,40 @@ capped, sold as triage — as above.)
   re-include case (`.qwen/` ignored but the audits path re-included
   → refuse), the force-add case (a
   committed force-added audit file → refuse, where `check-ignore` alone
-  passes on the fresh report path), the remedy branches — including that
-  the exclude entry is offered only where no tracked pattern re-includes
-  the audits path, asserted by the probe answering "ignored" after the
-  remedy is applied, which an unconditional exclude entry fails in a
-  re-include repository — and the vacuous pass outside any worktree; the
+  passes on the fresh report path), the remedy branches — including both
+  re-include shapes, asserted by the probe answering "ignored" after the
+  remedy is applied: the exclude entry takes effect where a
+  directory-only re-include leaves the representative file exposed, and
+  an unconditional exclude entry fails where the full dir+`**`
+  re-include matches the file (the case that routes to the outside-repo
+  fallback or negation removal) — the probe's freshness alongside them
+  (the remedy re-run and the write-time re-check re-ask the same key in
+  the same process and must receive a fresh answer, which is why the
+  shared helper stays fresh-by-default and the review-side memo stays
+  caller-side), and the vacuous pass outside any worktree; the
   drift predicates — the path-scoped diff, the subtree hash, the
-  audit-owned exclusion (scratch prefix, baseline ordering), the
+  audit-owned exclusion (scratch prefix, run-start capture after the
+  opted-in baseline suite), the registered-caller arm (drift in a
+  deep-read out-of-path caller follows the same per-file stop/degrade
+  predicate), the
   per-file stop/degrade rule (drift in a walked file with anchored
   findings stops the run; drift elsewhere marks the file uncoverable
   and continues), the write-time re-check, and the content-hash
-  predicate outside any git worktree; roster selection per tier; the
+  predicate outside any git worktree; roster selection per tier;
+  write-time anchor resolution — synthetic findings whose snippets
+  resolve uniquely, resolve ambiguously, and do not resolve against the
+  audited fixtures, asserting the refuse/downgrade behavior at write
+  time; the whiff machinery and dry-round predicate — whiff
+  classification (a bare return vs an evidence-bearing receipt),
+  relaunch-once-then-record-not-audited on a second bare return, and the
+  stop rule (a twice-whiffed auditor makes its round not dry; stop only
+  on two consecutive dry rounds; the 5-round cap reported as a cap, not
+  convergence); the output-marking rules — the unverified label on
+  low-tier findings and on the findings of a run whose verification did
+  not complete (a drift stop, an abort), asserted distinguishable from
+  verified rendering, and the evidence-tier caps (a declined opt-in or
+  read-only degradation caps every evidence tier accordingly; cross-file
+  findings cap below the end-to-end tier); the
   dedup clusterer's merge behavior on synthetic overlapping findings
   — including the max-severity rule (a cluster whose mildest copy is
   a Suggestion must
