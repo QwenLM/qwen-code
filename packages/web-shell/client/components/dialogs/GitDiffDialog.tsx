@@ -469,9 +469,14 @@ function SearchableDiffRefSelect({
                 item.value === value ? styles.refItemActive : ''
               }`}
               onClick={() => {
-                onChange(item.value);
                 setOpen(false);
                 setQuery('');
+                // Re-clicking the selected ref must be a no-op: the onChange
+                // handlers reset the diff into a loading state, and with an
+                // unchanged ref no fetch effect dep changes — the view would
+                // be stuck on "Loading changes…" forever.
+                if (item.value === value) return;
+                onChange(item.value);
               }}
             >
               {item.label}
@@ -490,10 +495,15 @@ function SearchableDiffRefSelect({
 export function GitDiffContent({
   workspaceCwd,
   gitCwd,
+  revision,
   onSubtitleChange,
 }: {
   workspaceCwd: string;
   gitCwd?: string;
+  /** Bumped by the host after git mutations (a commit landed) or when the
+   *  diff tab becomes visible again — refreshes the diff and the cached
+   *  commit/branch lists while keeping the selected source. */
+  revision?: number;
   onSubtitleChange?: (subtitle: string | undefined) => void;
 }) {
   const { t } = useI18n();
@@ -512,6 +522,7 @@ export function GitDiffContent({
   const [sourceError, setSourceError] = useState<'commit' | 'branch' | null>(
     null,
   );
+  const [sourceNonce, setSourceNonce] = useState(0);
 
   useEffect(() => {
     setMode('uncommitted');
@@ -524,6 +535,18 @@ export function GitDiffContent({
   }, [workspaceCwd, gitCwd]);
 
   useEffect(() => {
+    // Refresh (not reset): the selected source stays, but the cached lists
+    // and refs are dropped so the fetch effects below re-run against the
+    // post-mutation repository state.
+    setCommitRef('');
+    setBranchRef('');
+    setCommits(null);
+    setCommitsHasMore(false);
+    setBranches(null);
+    setSourceError(null);
+  }, [revision]);
+
+  useEffect(() => {
     if (mode !== 'commit' || commits !== null) return;
     let cancelled = false;
     setSourceError(null);
@@ -532,6 +555,10 @@ export function GitDiffContent({
       .workspaceGitLog(200, 0, gitCwd)
       .then((result) => {
         if (cancelled) return;
+        if (result.available === false) {
+          setSourceError('commit');
+          return;
+        }
         setCommits(result.entries);
         setCommitsHasMore(result.hasMore);
         setCommitRef(result.entries[0]?.sha ?? '');
@@ -542,7 +569,7 @@ export function GitDiffContent({
     return () => {
       cancelled = true;
     };
-  }, [client, workspaceCwd, gitCwd, mode, commits]);
+  }, [client, workspaceCwd, gitCwd, mode, commits, sourceNonce]);
 
   useEffect(() => {
     if (mode !== 'branch' || branches !== null) return;
@@ -553,6 +580,10 @@ export function GitDiffContent({
       .workspaceGitBranches(gitCwd)
       .then((result) => {
         if (cancelled) return;
+        if (result.available === false) {
+          setSourceError('branch');
+          return;
+        }
         setBranches(result);
         setBranchRef(
           result.local.find((branch) => !branch.isHead)?.name ??
@@ -566,7 +597,7 @@ export function GitDiffContent({
     return () => {
       cancelled = true;
     };
-  }, [client, workspaceCwd, gitCwd, mode, branches]);
+  }, [client, workspaceCwd, gitCwd, mode, branches, sourceNonce]);
 
   const options = useMemo<
     DaemonWorkspaceGitDiffOptions | undefined | null
@@ -645,6 +676,7 @@ export function GitDiffContent({
     commits,
     branches,
     sourceError,
+    revision,
   ]);
 
   const subtitle =
@@ -660,11 +692,48 @@ export function GitDiffContent({
     onSubtitleChange?.(subtitle);
   }, [onSubtitleChange, subtitle]);
 
+  const retrySource = () => {
+    setSourceError(null);
+    // The failed fetch left the cache at null, so only a nonce bump (not a
+    // cache reset) re-runs the guarded source effect.
+    setSourceNonce((nonce) => nonce + 1);
+  };
+
+  // Loaded-but-empty lists are a distinct dead end from "unavailable": every
+  // request succeeded, the repo just has nothing selectable (zero commits, or
+  // only the current branch).
+  const sourceListEmpty =
+    (mode === 'commit' && commits !== null && commitItems.length === 0) ||
+    (mode === 'branch' && branches !== null && branchItems.length === 0);
+
   let body: ReactNode;
   if (loading) {
     body = <div className={styles.placeholder}>{t('gitDiff.loading')}</div>;
   } else if (error) {
-    body = <div className={styles.placeholder}>{t('gitDiff.error')}</div>;
+    body = (
+      <div className={styles.placeholder}>
+        {t('gitDiff.error')}
+        {sourceError === mode && (
+          <button
+            type="button"
+            className={styles.retryButton}
+            onClick={retrySource}
+          >
+            {t('gitDiff.retry')}
+          </button>
+        )}
+      </div>
+    );
+  } else if (sourceListEmpty) {
+    body = (
+      <div className={styles.placeholder}>
+        {t(
+          mode === 'commit'
+            ? 'gitDiff.noCommitsToCompare'
+            : 'gitDiff.noBranchesToCompare',
+        )}
+      </div>
+    );
   } else if (!diff || !diff.available) {
     body = (
       <div className={styles.placeholder}>

@@ -93,6 +93,7 @@ export function GitModePopover({
   );
   const [existingLoading, setExistingLoading] = useState(false);
   const [existingError, setExistingError] = useState<string | null>(null);
+  const [existingRetryNonce, setExistingRetryNonce] = useState(0);
   const [checkoutRef, setCheckoutRef] = useState<string | null>(null);
 
   const contentRef = useRef<HTMLDivElement>(null);
@@ -156,7 +157,7 @@ export function GitModePopover({
     return () => {
       cancelled = true;
     };
-  }, [client, open, selectedMode, workspaceCwd]);
+  }, [client, open, selectedMode, workspaceCwd, existingRetryNonce]);
 
   const existingGroups = useMemo(() => {
     const query = existingSearch.trim().toLowerCase();
@@ -286,6 +287,7 @@ export function GitModePopover({
             type="button"
             role="radio"
             aria-checked={selectedMode === 'current'}
+            disabled={checkoutRef !== null}
             className={`${styles.option} ${selectedMode === 'current' ? styles.optionSelected : ''}`}
             onClick={handleSelectCurrent}
           >
@@ -309,6 +311,7 @@ export function GitModePopover({
             type="button"
             role="radio"
             aria-checked={selectedMode === 'existing'}
+            disabled={checkoutRef !== null}
             className={`${styles.option} ${selectedMode === 'existing' ? styles.optionSelected : ''}`}
             onClick={() => {
               if (selectedMode === 'existing') return;
@@ -353,7 +356,19 @@ export function GitModePopover({
                 onWheelCapture={(event) => event.stopPropagation()}
               >
                 {existingError && (
-                  <div className={styles.existingError}>{existingError}</div>
+                  <div className={styles.existingError}>
+                    {existingError}
+                    <button
+                      type="button"
+                      className={styles.existingRetry}
+                      onClick={() => {
+                        setExistingError(null);
+                        setExistingRetryNonce((nonce) => nonce + 1);
+                      }}
+                    >
+                      {t('gitMode.retry')}
+                    </button>
+                  </div>
                 )}
                 {existingLoading ? (
                   <div className={styles.existingStatus}>
@@ -419,6 +434,7 @@ export function GitModePopover({
             type="button"
             role="radio"
             aria-checked={selectedMode === 'branch'}
+            disabled={checkoutRef !== null}
             className={`${styles.option} ${selectedMode === 'branch' ? styles.optionSelected : ''}`}
             onClick={() => setSelectedMode('branch')}
           >
@@ -497,6 +513,7 @@ export function GitModePopover({
             type="button"
             role="radio"
             aria-checked={selectedMode === 'worktree'}
+            disabled={checkoutRef !== null}
             className={`${styles.option} ${selectedMode === 'worktree' ? styles.optionSelected : ''}`}
             onClick={() => setSelectedMode('worktree')}
           >

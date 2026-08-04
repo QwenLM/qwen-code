@@ -159,6 +159,20 @@
   color: var(--muted-foreground);
 }
 
+.retryButton {
+  margin-left: 6px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--primary, #60a5fa);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.retryButton:hover {
+  text-decoration: underline;
+}
+
 .fileList {
   display: flex;
   flex-direction: column;

@@ -77,7 +77,9 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', async (importOriginal) => {
 const { I18nProvider } = await import('../i18n');
 const { GitModePopover } = await import('./GitModePopover');
 
-globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+(
+  globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
+).IS_REACT_ACT_ENVIRONMENT = true;
 
 let container: HTMLDivElement;
 let root: Root;
@@ -428,6 +430,14 @@ describe('GitModePopover existing branches', () => {
     act(() => inFlight[1]?.click());
     expect(workspaceGitCheckout).toHaveBeenCalledTimes(1);
     expect(workspaceGitCheckout).toHaveBeenCalledWith('topic');
+    // The mode radios stay disabled while the checkout is in flight too: a
+    // slow checkout must not be able to overwrite an intent the user
+    // confirms in another mode while it runs.
+    const radios = Array.from(
+      document.body.querySelectorAll('[role="radio"]'),
+    ) as HTMLButtonElement[];
+    expect(radios).toHaveLength(4);
+    expect(radios.every((radio) => radio.disabled)).toBe(true);
 
     await act(async () => {
       resolveCheckout({ branch: 'topic', detached: false });
@@ -436,6 +446,40 @@ describe('GitModePopover existing branches', () => {
     expect(onIntentChange).toHaveBeenCalledWith({ mode: 'current' });
     expect(popoverHarness.open).toBe(false);
     expect(optionButtons()).toHaveLength(0);
+  });
+
+  it('offers a retry when the existing-branch list fails to load', async () => {
+    workspaceGitBranches
+      .mockRejectedValueOnce(new Error('bridge closed'))
+      .mockResolvedValueOnce({
+        v: 1,
+        workspaceCwd: '/repo',
+        available: true,
+        local: [
+          { name: 'main', isHead: true },
+          { name: 'topic', isHead: false },
+        ],
+        remote: [],
+        tags: [],
+        recent: [],
+        head: 'main',
+        detached: false,
+      });
+    renderPopover();
+    openChip();
+    clickButton('Existing branch');
+    await flush();
+    expect(document.body.textContent).toContain('bridge closed');
+    expect(optionButtons()).toHaveLength(0);
+
+    clickButton('Retry');
+    await flush();
+
+    expect(workspaceGitBranches).toHaveBeenCalledTimes(2);
+    expect(document.body.textContent).not.toContain('bridge closed');
+    expect(optionButtons().map((option) => option.textContent?.trim())).toEqual(
+      ['topic'],
+    );
   });
 
   it('re-enables the choices after a failed checkout so a retry can proceed', async () => {

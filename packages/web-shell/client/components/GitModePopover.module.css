@@ -423,6 +423,19 @@
   color: var(--error-color);
 }
 
+.existingRetry {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--primary);
+  font-size: 10.5px;
+  cursor: pointer;
+}
+
+.existingRetry:hover {
+  text-decoration: underline;
+}
+
 .spin {
   flex-shrink: 0;
   animation: git-mode-spin 0.8s linear infinite;

@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import express from 'express';
 import request from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -208,6 +211,48 @@ describe('workspace Git diff routes', () => {
       'old-a.ts',
       { mode: 'commit', ref: 'abc1234' },
     );
+  });
+
+  it('accepts an explicit mode=uncommitted', async () => {
+    fetchGitDiffMock.mockResolvedValue({
+      stats: { filesCount: 0, linesAdded: 0, linesRemoved: 0 },
+      perFileStats: new Map(),
+    });
+    const app = express();
+    registerWorkspaceGitDiffRoutes(app, {
+      boundWorkspace: '/work/main',
+      sendBridgeError,
+    });
+
+    const response = await request(app).get(
+      '/workspace/git/diff?mode=uncommitted',
+    );
+
+    expect(response.status).toBe(200);
+    expect(fetchGitDiffMock).toHaveBeenCalledWith('/work/main', {
+      mode: 'uncommitted',
+    });
+  });
+
+  it('rejects invalid diff source queries on the file route', async () => {
+    const app = express();
+    registerWorkspaceGitDiffRoutes(app, {
+      boundWorkspace: '/work/main',
+      sendBridgeError,
+    });
+
+    expect(
+      (await request(app).get('/workspace/git/diff/file?path=a.ts&mode=commit'))
+        .status,
+    ).toBe(400);
+    expect(
+      (
+        await request(app).get(
+          '/workspace/git/diff/file?path=a.ts&mode=garbage&ref=main',
+        )
+      ).status,
+    ).toBe(400);
+    expect(fetchGitDiffHunksForFileMock).not.toHaveBeenCalled();
   });
 
   it('rejects invalid diff source queries', async () => {
@@ -453,23 +498,36 @@ describe('workspace Git diff routes', () => {
       stats: { filesCount: 0, linesAdded: 0, linesRemoved: 0 },
       perFileStats: new Map(),
     });
-    const app = express();
-    const primary = runtime('primary', '/work/main', true);
-    const secondary = runtime('secondary', '/work/secondary', true);
-    registerWorkspaceQualifiedGitDiffRoutes(app, {
-      workspaceRegistry: registry([primary, secondary]),
-      sendBridgeError,
-    });
-
-    const response = await request(app).get(
-      '/workspaces/secondary/git/diff?cwd=%2Fwork%2Fsecondary%2Fwt&mode=branch&ref=topic',
+    // A REAL workspace directory with a wt/ subdirectory: resolveContainedCwd
+    // must resolve the ?cwd parameter to it. With a non-existent ?cwd the
+    // resolver falls back to the runtime root, and the assertion below could
+    // not tell containment apart from the fallback.
+    const workspaceRoot = mkdtempSync(
+      path.join(os.tmpdir(), 'qwen-git-diff-route-'),
     );
+    const containedCwd = path.join(workspaceRoot, 'wt');
+    mkdirSync(containedCwd);
+    try {
+      const app = express();
+      const primary = runtime('primary', '/work/main', true);
+      const secondary = runtime('secondary', workspaceRoot, true);
+      registerWorkspaceQualifiedGitDiffRoutes(app, {
+        workspaceRegistry: registry([primary, secondary]),
+        sendBridgeError,
+      });
 
-    expect(response.status).toBe(200);
-    expect(fetchGitDiffMock).toHaveBeenCalledWith('/work/secondary', {
-      mode: 'branch',
-      ref: 'topic',
-    });
+      const response = await request(app).get(
+        `/workspaces/secondary/git/diff?cwd=${encodeURIComponent(containedCwd)}&mode=branch&ref=topic`,
+      );
+
+      expect(response.status).toBe(200);
+      expect(fetchGitDiffMock).toHaveBeenCalledWith(containedCwd, {
+        mode: 'branch',
+        ref: 'topic',
+      });
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
   });
 
   it('rejects an untrusted workspace before diffing', async () => {

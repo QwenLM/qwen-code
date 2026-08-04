@@ -18,6 +18,7 @@ import {
   fetchGitLog,
   fetchGitCommitDetail,
   getGitWorkingTreeStatus,
+  type GitDiffMode,
   MAX_DIFF_SIZE_BYTES,
   MAX_FILES,
   MAX_LINES_PER_FILE,
@@ -520,7 +521,12 @@ describe('fetchGitDiff', () => {
     ).toBeNull();
   });
 
-  it('does not double-count an untracked path tracked by the baseline branch', async () => {
+  it('shows a worktree file colliding with a baseline path as modified, not deleted', async () => {
+    // The baseline tracks collision.txt while the worktree holds an UNTRACKED
+    // collision.txt: `git diff <baseline>` proxies the worktree through the
+    // index and reports a phantom deletion. The branch-mode contract is
+    // worktree-vs-baseline, so the file must render as one modified row
+    // diffing the baseline blob against the local content.
     await fs.writeFile(path.join(repo, 'seed.txt'), 'seed\n');
     await git(repo, 'add', '.');
     await git(repo, 'commit', '-q', '-m', 'base');
@@ -529,6 +535,7 @@ describe('fetchGitDiff', () => {
     await git(repo, 'add', 'collision.txt');
     await git(repo, 'commit', '-q', '-m', 'baseline file');
     await git(repo, 'switch', '-q', 'main');
+    await fs.writeFile(path.join(repo, 'seed.txt'), 'seed edited\n');
     await fs.writeFile(path.join(repo, 'collision.txt'), 'local untracked\n');
 
     const result = await fetchGitDiff(repo, {
@@ -536,20 +543,66 @@ describe('fetchGitDiff', () => {
       ref: 'baseline',
     });
     expect(result?.stats).toEqual({
-      filesCount: 1,
-      linesAdded: 0,
-      linesRemoved: 1,
+      filesCount: 2,
+      linesAdded: 2,
+      linesRemoved: 2,
     });
     const collision = result?.perFileStats.get('collision.txt');
-    expect(collision?.isDeleted).toBe(true);
+    expect(collision).toMatchObject({ added: 1, removed: 1, isBinary: false });
+    expect(collision?.isDeleted).toBeUndefined();
     expect(collision?.isUntracked).toBeUndefined();
+    expect(result?.perFileStats.has('seed.txt')).toBe(true);
     const hunks = await fetchGitDiffHunksForFile(
       repo,
       'collision.txt',
       undefined,
       { mode: 'branch', ref: 'baseline' },
     );
-    expect(hunks?.hunks.flatMap((h) => h.lines)).toContain('-baseline');
+    const lines = hunks?.hunks.flatMap((h) => h.lines);
+    expect(lines).toContain('-baseline');
+    expect(lines).toContain('+local untracked');
+  });
+
+  it('synthesizes an all-added hunk for a branch-mode untracked file absent from the baseline', async () => {
+    await fs.writeFile(path.join(repo, 'seed.txt'), 'seed\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'base');
+    await git(repo, 'switch', '-q', '-c', 'baseline');
+    await fs.writeFile(path.join(repo, 'there.txt'), 'baseline file\n');
+    await git(repo, 'add', 'there.txt');
+    await git(repo, 'commit', '-q', '-m', 'baseline file');
+    await git(repo, 'switch', '-q', 'main');
+    await fs.writeFile(path.join(repo, 'new.txt'), 'new file content\n');
+
+    const hunks = await fetchGitDiffHunksForFile(repo, 'new.txt', undefined, {
+      mode: 'branch',
+      ref: 'baseline',
+    });
+    expect(hunks?.truncated).toBe(false);
+    expect(hunks?.hunks).toEqual([
+      {
+        oldStart: 0,
+        oldLines: 0,
+        newStart: 1,
+        newLines: 1,
+        lines: ['+new file content'],
+      },
+    ]);
+  });
+
+  it('rejects unknown diff modes even when the ref resolves', async () => {
+    await fs.writeFile(path.join(repo, 'seed.txt'), 'seed\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'base');
+
+    const mode = 'garbage' as GitDiffMode;
+    expect(await fetchGitDiff(repo, { mode, ref: 'HEAD' })).toBeNull();
+    expect(
+      await fetchGitDiffHunksForFile(repo, 'seed.txt', undefined, {
+        mode,
+        ref: 'HEAD',
+      }),
+    ).toBeNull();
   });
 
   it('does not treat a shallow boundary commit as a root commit', async () => {

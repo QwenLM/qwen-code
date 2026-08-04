@@ -73,6 +73,9 @@ export function GitDialog({
   const [diffVisited, setDiffVisited] = useState(
     initialView === 'diff' || initialView === 'commit',
   );
+  // Bumped after git mutations and when the diff tab becomes visible again so
+  // the kept-mounted GitDiffContent refetches instead of showing stale state.
+  const [diffRevision, setDiffRevision] = useState(0);
   const [subtitle, setSubtitle] = useState<string>();
   const [commitMsg, setCommitMsg] = useState('');
   const [commitBusy, setCommitBusy] = useState<'commit' | 'push' | null>(null);
@@ -223,6 +226,20 @@ export function GitDialog({
     : 'diff';
   const diffActive = clampedTab === 'diff' || isCommit;
 
+  // Returning to the diff tab used to unmount/remount GitDiffContent, which
+  // incidentally refetched; now that it stays mounted (to preserve the
+  // selected source), refetch explicitly on the hidden→visible transition.
+  // The first activation is skipped: the mount-time fetch already covers it.
+  const prevDiffActiveRef = useRef(diffActive);
+  const diffShownOnceRef = useRef(diffActive);
+  useEffect(() => {
+    if (diffActive && !prevDiffActiveRef.current && diffShownOnceRef.current) {
+      setDiffRevision((current) => current + 1);
+    }
+    prevDiffActiveRef.current = diffActive;
+    if (diffActive) diffShownOnceRef.current = true;
+  }, [diffActive]);
+
   const selectView = useCallback((next: GitDialogView) => {
     setSubtitle(undefined);
     if (next === 'diff' || next === 'commit') setDiffVisited(true);
@@ -282,6 +299,7 @@ export function GitDialog({
           { all: true },
           gitCwd,
         );
+        setDiffRevision((current) => current + 1);
         if (andPush) {
           try {
             await ws.workspaceGitPush({ setUpstream: true }, gitCwd);
@@ -613,6 +631,7 @@ export function GitDialog({
                 key={`${workspaceCwd}:${gitCwd ?? ''}`}
                 workspaceCwd={workspaceCwd}
                 gitCwd={gitCwd}
+                revision={diffRevision}
                 onSubtitleChange={diffActive ? setSubtitle : undefined}
               />
             </div>

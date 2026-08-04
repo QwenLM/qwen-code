@@ -178,14 +178,32 @@ test('git mode chip checks out an existing branch', async ({
   await list.getByRole('option', { name: 'origin/develop' }).click();
 
   await expect(popover).not.toBeVisible();
+  // Match the workspace-scoped route exactly: the legacy process-scoped
+  // checkout would mutate the bound workspace instead of the session's
+  // resolved runtime, and the mock daemon answers both identically.
+  const gitStatusRequests = () =>
+    daemon.requests.filter(
+      (request) =>
+        request.method === 'GET' &&
+        /^\/workspaces\/[^/]+\/git\/?$/.test(request.path),
+    ).length;
+  const statusCallsAtCheckout = gitStatusRequests();
   await expect
     .poll(() =>
       daemon.requests.find(
         (request) =>
-          request.method === 'POST' && request.path.endsWith('/git/checkout'),
+          request.method === 'POST' &&
+          /^\/workspaces\/[^/]+\/git\/checkout\/?$/.test(request.path),
       ),
     )
     .toMatchObject({ body: { ref: 'origin/develop' } });
+  // Quiescence: the checkout success path bumps the git-status revision,
+  // which fires follow-up status fetches; wait for them to land before
+  // asserting no session was created, so a late session-create riding the
+  // same effect chain cannot slip past the negative assertion.
+  await expect
+    .poll(() => gitStatusRequests())
+    .toBeGreaterThan(statusCallsAtCheckout);
   expect(sessionCreateBody(daemon)).toBeUndefined();
 });
 
@@ -238,6 +256,9 @@ test('existing branch groups collapse and stay pinned while scrolling', async ({
   await list.evaluate((element) => {
     element.scrollTop = 60;
   });
+  // If the list ever stops being scrollable the assignment silently clamps
+  // to 0 and the pinned-header assertion below would pass vacuously.
+  expect(await list.evaluate((element) => element.scrollTop)).toBe(60);
   const listBounds = await list.boundingBox();
   const groupBounds = await localGroup.boundingBox();
   const listPaddingTop = await list.evaluate((element) =>

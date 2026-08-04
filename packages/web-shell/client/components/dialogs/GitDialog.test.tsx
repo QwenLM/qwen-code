@@ -234,7 +234,86 @@ describe('GitDialog', () => {
       document.body.querySelector('button[aria-label="Select commit"]')
         ?.textContent,
     ).toContain('keep selected');
-    expect(workspaceGitLog).toHaveBeenCalledTimes(2);
+    // One source fetch on selection, one from the Log tab's own view, and one
+    // refetch when the diff tab becomes visible again (the kept-mounted
+    // content refreshes instead of showing stale state).
+    expect(workspaceGitLog).toHaveBeenCalledTimes(3);
+  });
+
+  it('refreshes the diff content after a successful commit', async () => {
+    workspaceGitDiff.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      filesCount: 1,
+      linesAdded: 1,
+      linesRemoved: 0,
+      files: [
+        {
+          path: 'pending.txt',
+          added: 1,
+          removed: 0,
+          isBinary: false,
+          isUntracked: true,
+          isDeleted: false,
+          truncated: false,
+        },
+      ],
+      hiddenCount: 0,
+    });
+    workspaceGitCommit.mockResolvedValue({
+      sha: 'abc1234',
+      subject: 'test commit',
+    });
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GitDialog
+            workspaceCwd="/repo"
+            initialView="commit"
+            onClose={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+    expect(workspaceGitDiff).toHaveBeenCalledTimes(1);
+
+    const textarea = document.body.querySelector(
+      '[data-web-shell-dialog] textarea',
+    );
+    await act(async () => {
+      const nativeSetter = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        'value',
+      )?.set;
+      nativeSetter?.call(textarea, 'fix: land it');
+      textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flush();
+
+    const commitBtn = Array.from(
+      document.body.querySelectorAll('[data-web-shell-dialog] button'),
+    ).find(
+      (b) =>
+        b.textContent?.includes('Commit') &&
+        !b.textContent?.includes('Push') &&
+        b.getAttribute('role') !== 'tab',
+    );
+    expect(commitBtn).toBeTruthy();
+    await act(async () => {
+      commitBtn!.click();
+    });
+    await flush();
+
+    // The kept-mounted diff content must refetch so it stops showing the
+    // already-committed file as a pending change.
+    expect(workspaceGitCommit).toHaveBeenCalledTimes(1);
+    expect(workspaceGitDiff).toHaveBeenCalledTimes(2);
   });
 
   it('supports arrow-key tab navigation', async () => {
