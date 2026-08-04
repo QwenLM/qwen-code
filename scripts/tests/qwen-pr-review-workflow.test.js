@@ -19,7 +19,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { parse } from 'yaml';
 
 const workflow = readFileSync(
@@ -364,6 +364,14 @@ function captureToolsSource() {
   // cap a stalled `sudo apt-get update` mirror eats the job's 300-minute
   // budget instead of degrading to ans-only.
   expect(step['timeout-minutes']).toBe(5);
+  // The curl budget must fit that cap: if the worst-case retry budget
+  // exceeds it, the cap fires mid-retry and the degradation branch and
+  // scratch cleanup below the curl line are unreachable.
+  const curlRetries = Number(/--retry (\d+)/.exec(step.run)[1]);
+  const curlMaxTime = Number(/--max-time (\d+)/.exec(step.run)[1]);
+  expect((curlRetries + 1) * curlMaxTime).toBeLessThanOrEqual(
+    step['timeout-minutes'] * 60,
+  );
   // A freeze bump edits exactly these three adjacent lines. The harness
   // exports all of them into every stub, so a malformed or missing value can
   // never disagree with itself downstream — only this shape check sees it.
@@ -435,7 +443,12 @@ const noBinTarStub = [
 // `$tools_bin`.
 const mktempNoToolsDirStub = [
   'for a in "$@"; do',
-  '  case "$a" in *qwen-review-tools*) exit 1 ;; esac',
+  '  case "$a" in',
+  // The download-scratch template still succeeds: only the per-run tool
+  // dir is unwritable in this scenario.
+  '    *qwen-review-tools.dl.*) ;;',
+  '    *qwen-review-tools*) exit 1 ;;',
+  '  esac',
   'done',
   'd="${TMPDIR:-/tmp}/mkstub-$$"',
   'mkdir -p "$d" && echo "$d"',
@@ -515,9 +528,9 @@ function runCaptureToolsStep({
       `export HOME="${homeDir}"`,
       `export GITHUB_PATH="${ghPath}"`,
       `export CALLS="${calls}"`,
-      // Pin TMPDIR so the step's download-scratch mktemp dir lands inside the
-      // scenario: its cleanup (`rm -rf "$tmp"`) is otherwise invisible to
-      // every test.
+      // Pin TMPDIR: a regression to an untemplated `mktemp -d` puts the
+      // download-scratch dir here, where leakedTmpEntries below sees it, and
+      // the mktemp-failure stubs honor TMPDIR like the real mktemp.
       `export TMPDIR="${tmpRoot}"`,
       // The promoted per-run dir is created under RUNNER_TEMP, which survives
       // across jobs on the shared pool; 'Clean stale agent state' removes the
@@ -576,13 +589,17 @@ function runCaptureToolsStep({
       cacheFreezeContent: existsSync(join(cacheDir, 'freeze'))
         ? readFileSync(join(cacheDir, 'freeze'), 'utf8')
         : null,
-      // Snapshot the download-scratch mktemp dir's fate before the scenario
-      // cleanup below: the step's `rm -rf "$tmp"` must leave TMPDIR empty,
-      // and on the persistent runner anything left behind accumulates
-      // forever. The promoted per-run dir lives in the separate RUNNER_TEMP
-      // tree and is exempt here — later steps of the same job still execute
-      // from it; 'Clean stale agent state' removes it before the next run.
+      // Leak snapshots, taken before the scenario cleanup below: on the
+      // persistent runner anything the step leaves behind accumulates
+      // forever. TMPDIR catches a regression to an untemplated `mktemp -d`;
+      // the templated scratch dir and the promoted tool dir land in the
+      // separate RUNNER_TEMP tree, where only the promoted dir is exempt —
+      // later steps of the same job still execute from it, and 'Clean stale
+      // agent state' removes it before the next run.
       leakedTmpEntries: readdirSync(tmpRoot),
+      leakedRunnerTempEntries: readdirSync(runnerTemp).filter(
+        (e) => promotedDir === '' || e !== basename(promotedDir),
+      ),
     };
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -598,7 +615,7 @@ describe('capture-tools install step (real bash, stubbed binaries)', () => {
     expect(r.stdout).toContain('tmux unavailable');
     // Part of the never-stalls contract: a hung connection must abort at the
     // cap, not run out the job budget.
-    expect(r.calls).toContain('--connect-timeout 10 --max-time 120');
+    expect(r.calls).toContain('--connect-timeout 10 --max-time 90');
     expect(r.promotedFreezeExists).toBe(false);
     expect(r.cacheFreezeExists).toBe(false);
     // A freeze whose --version produces nothing is broken, not stale — the
@@ -619,9 +636,11 @@ describe('capture-tools install step (real bash, stubbed binaries)', () => {
     expect(r.calls).not.toContain('tar ');
     expect(r.promotedFreezeExists).toBe(false);
     expect(r.cacheFreezeExists).toBe(false);
-    // The mktemp cleanup is load-bearing on the persistent runner: /tmp
-    // survives across runs there, so a leaked tarball accumulates forever.
+    // The mktemp cleanup is load-bearing on the persistent runner:
+    // RUNNER_TEMP survives across runs there, so a leaked scratch dir +
+    // tarball accumulates forever.
     expect(r.leakedTmpEntries).toStrictEqual([]);
+    expect(r.leakedRunnerTempEntries).toStrictEqual([]);
   });
 
   it('happy path promotes a FRESH per-run dir holding exactly the pinned freeze', () => {
@@ -632,7 +651,7 @@ describe('capture-tools install step (real bash, stubbed binaries)', () => {
     // The full flag set: dropping `-L` leaves curl writing 0 bytes of a 302
     // redirect, which the checksum stage then blames on the pin/SHA pair.
     expect(r.calls).toContain(
-      'curl -fsSL --retry 3 --connect-timeout 10 --max-time 120 -o',
+      'curl -fsSL --retry 2 --connect-timeout 10 --max-time 90 -o',
     );
     // The pairing later steps depend on: the executable binary IN the dir
     // GITHUB_PATH names, holding nothing else — one without the other and
@@ -656,6 +675,7 @@ describe('capture-tools install step (real bash, stubbed binaries)', () => {
     // The pinned version resolved, so the stale-renderer warning stays silent.
     expect(r.stdout).not.toContain('not the pinned');
     expect(r.leakedTmpEntries).toStrictEqual([]);
+    expect(r.leakedRunnerTempEntries).toStrictEqual([]);
   });
 
   it('accepts a cache whose bytes re-verify against the pinned hash — no download', () => {
@@ -703,6 +723,31 @@ echo "freeze \${FREEZE_VERSION}"
       // The cache now holds the verified download, not the plant.
       expect(r.cacheFreezeExists).toBe(true);
       expect(r.cacheFreezeContent).not.toBe(planted);
+    } finally {
+      rmSync(markerDir, { recursive: true, force: true });
+    }
+  });
+
+  it('deletes BOTH copies of a hash-rejected cache when the re-download cannot run', () => {
+    // Dead-network twin of the scenario above: a successful re-download
+    // overwrites both copies anyway, so only this variant catches a dropped
+    // `rm -f` — with it gone the plant survives in the promoted per-run dir
+    // and in the cache, and the step's own report probe executes it. The
+    // default stubs model the dead network (curl exits 22); the marker
+    // outside the scenario dir proves the plant never runs.
+    const markerDir = mkdtempSync(join(tmpdir(), 'planted-deadnet-marker-'));
+    try {
+      const planted = `#!/bin/bash
+touch "${join(markerDir, 'pwned')}"
+echo "freeze \${FREEZE_VERSION}"
+`;
+      const r = runCaptureToolsStep({ cacheFreeze: planted });
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain('cached freeze failed re-verification');
+      expect(r.stdout).toContain('freeze download failed');
+      expect(existsSync(join(markerDir, 'pwned'))).toBe(false);
+      expect(r.promotedFreezeExists).toBe(false);
+      expect(r.cacheFreezeExists).toBe(false);
     } finally {
       rmSync(markerDir, { recursive: true, force: true });
     }
@@ -930,6 +975,12 @@ describe('capture-tools step wiring', () => {
     expect(install).toBeGreaterThan(
       workflow.indexOf("- name: 'Resolve PR context'"),
     );
+    // And after the stale-state sweep: moved below the install step, the
+    // sweep would rm -rf THIS run's freshly promoted tool dir before
+    // 'Run review' resolves freeze.
+    expect(install).toBeGreaterThan(
+      workflow.indexOf("- name: 'Clean stale agent state'"),
+    );
   });
 
   it('only runs when the review runs', () => {
@@ -956,6 +1007,19 @@ describe('capture-tools step wiring', () => {
     ).run;
     expect(clean).toContain(
       'rm -rf "${RUNNER_TEMP:-/tmp}"/qwen-review-tools.*',
+    );
+  });
+
+  it('names the download scratch dir for the stale-dir sweep', () => {
+    // A step killed mid-download never runs the scratch dir's own cleanup;
+    // the next run's sweep is its only removal, so the mktemp template must
+    // match the sweep's glob in both the parent dir and the name prefix.
+    const doc = parse(workflow);
+    const install = doc.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Install capture tools (tmux + freeze)',
+    ).run;
+    expect(install).toContain(
+      'tmp=$(mktemp -d "${RUNNER_TEMP:-/tmp}/qwen-review-tools.dl.',
     );
   });
 
