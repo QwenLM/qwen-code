@@ -9,15 +9,18 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 import {
+  LEASE_PREFIX,
+  REVIEW_TMP_DIR,
   reviewBranch,
   worktreePath,
 } from '../../packages/cli/src/commands/review/lib/paths.js';
 
 // The cleanup steps in ci.yml and qwen-code-pr-review.yml hard-code the
-// review-artifact layout owned by worktreePath()/reviewBranch() in paths.ts.
-// Derive the expected patterns from that module so renaming the layout there
-// fails the build here instead of silently no-op-ing the sweeps on the shared
-// runners — a suffix rename already broke a sweeper once (see paths.ts).
+// review-artifact layout owned by paths.ts: worktreePath()/reviewBranch()
+// and LEASE_PREFIX. Derive the expected patterns from that module so
+// renaming the layout there fails the build here instead of silently
+// no-op-ing the sweeps on the shared runners — a suffix rename already
+// broke a sweeper once (see paths.ts).
 const probePr = 12345;
 const toPosix = (value) => value.replace(/\\/g, '/');
 const worktreePrefix = toPosix(worktreePath(probePr)).slice(
@@ -30,12 +33,20 @@ const branchFamily = toPosix(reviewBranch(probePr)).slice(
 );
 
 const ciYaml = parse(readFileSync('.github/workflows/ci.yml', 'utf8'));
-const ciCleanStep = ciYaml.jobs.test.steps.find(
-  (s) => s.name === 'Clean stale .qwen before checkout',
-).run;
-const integrationCleanStep = ciYaml.jobs.integration_cli.steps.find(
-  (s) => s.name === 'Clean stale .qwen before checkout',
-).run;
+// Every ci.yml job that checks out on the shared self-hosted pool inherits a
+// possibly dirty workspace. Enumerate by pool + checkout instead of job name
+// so the next such job fails here instead of on the runners.
+const ciCleanSteps = Object.entries(ciYaml.jobs)
+  .filter(
+    ([, job]) =>
+      JSON.stringify(job['runs-on']).includes('ubuntu_runner') &&
+      job.steps.some((s) => String(s.uses ?? '').includes('actions/checkout')),
+  )
+  .map(([id, job]) => ({
+    id,
+    run: job.steps.find((s) => s.name === 'Clean stale .qwen before checkout')
+      ?.run,
+  }));
 const reviewYaml = parse(
   readFileSync('.github/workflows/qwen-code-pr-review.yml', 'utf8'),
 );
@@ -53,29 +64,49 @@ function expectCleanupRecipe(run) {
   expect(run).toContain(`index($0, "/${worktreePrefix}")`);
   expect(run).toContain('worktree remove --force');
   expect(run).toContain(`refs/heads/${branchFamily}*`);
-  const remove = run.indexOf('worktree remove --force');
-  const firstPrune = run.indexOf('worktree prune');
+  // Order assertions below cover the commands only: comments may name the
+  // recipe pieces out of order when explaining them.
+  const code = run
+    .split('\n')
+    .filter((line) => !line.trim().startsWith('#'))
+    .join('\n');
+  const remove = code.indexOf('worktree remove --force');
+  const firstPrune = code.indexOf('worktree prune');
   expect(firstPrune).toBeGreaterThan(-1);
   expect(firstPrune).toBeLessThan(remove);
-  expect(run.indexOf('worktree prune', remove)).toBeGreaterThan(remove);
-  expect(run.indexOf(`refs/heads/${branchFamily}*`)).toBeGreaterThan(remove);
+  expect(code.indexOf('worktree prune', remove)).toBeGreaterThan(remove);
+  expect(code.indexOf(`refs/heads/${branchFamily}*`)).toBeGreaterThan(remove);
 }
 
 const awkAvailable = spawnSync('awk', ['BEGIN { exit 0 }']).status === 0;
 
 describe('review worktree cleanup steps', () => {
-  it('keeps the ci.yml test-job sweep pinned to paths.ts', () => {
-    expectCleanupRecipe(ciCleanStep);
-  });
-
-  it('keeps the ci.yml integration_cli sweep pinned to paths.ts', () => {
-    expectCleanupRecipe(integrationCleanStep);
+  it('keeps every shared-pool ci.yml checkout sweep pinned to paths.ts', () => {
+    expect(ciCleanSteps.map(({ id }) => id)).toEqual(
+      expect.arrayContaining([
+        'test',
+        'web_shell_e2e_smoke',
+        'integration_cli',
+      ]),
+    );
+    for (const { id, run } of ciCleanSteps) {
+      expect(
+        run,
+        `job "${id}" checks out on the shared pool and must clean stale .qwen state first`,
+      ).toBeDefined();
+      expectCleanupRecipe(run);
+    }
   });
 
   it('keeps the review-job cleanup sweep pinned to paths.ts', () => {
     expectCleanupRecipe(reviewCleanStep);
     // Fallback for worktree directories Git no longer knows about.
     expect(reviewCleanStep).toContain(`rm -rf ${worktreePrefix}*`);
+    // Leases are session+prompt scoped so a stale one is inert, but the glob
+    // must stay in sync with LEASE_PREFIX or it silently never matches.
+    expect(reviewCleanStep).toContain(
+      `rm -f ${toPosix(REVIEW_TMP_DIR)}/${LEASE_PREFIX}pr-*.json`,
+    );
   });
 
   it('keeps the pre-checkout agent-state sweep pinned to paths.ts', () => {
@@ -87,8 +118,9 @@ describe('review worktree cleanup steps', () => {
   it('uses one identical worktree filter at every list-driven sweep', () => {
     const filter = reviewCleanStep.match(/awk '([^']+)'/)?.[1];
     expect(filter).toBeTruthy();
-    expect(ciCleanStep).toContain(`awk '${filter}'`);
-    expect(integrationCleanStep).toContain(`awk '${filter}'`);
+    for (const { id, run } of ciCleanSteps) {
+      expect(run, id).toContain(`awk '${filter}'`);
+    }
   });
 
   it.skipIf(!awkAvailable)(
