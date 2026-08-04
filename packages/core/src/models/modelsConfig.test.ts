@@ -1599,6 +1599,39 @@ describe('ModelsConfig', () => {
     });
   });
 
+  it('uses catalog modalities for raw model switches', async () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      generationConfig: {
+        model: 'old-model',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        apiKeyEnvKey: 'OPENROUTER_API_KEY',
+        modalities: {},
+      },
+      generationConfigSources: {
+        modalities: { kind: 'computed', detail: 'auto-detected from model' },
+      },
+      modelMetadataCatalog: {
+        openrouter: {
+          models: {
+            'new-model': { modalities: { input: ['text', 'image', 'pdf'] } },
+          },
+        },
+      },
+    });
+
+    await modelsConfig.setModel('new-model');
+
+    expect(modelsConfig.getGenerationConfig().modalities).toEqual({
+      image: true,
+      pdf: true,
+    });
+    expect(modelsConfig.getGenerationConfigSources()['modalities']).toEqual({
+      kind: 'computed',
+      detail: 'loaded from models.dev catalog',
+    });
+  });
+
   it('refreshes model-derived modalities when hot-switching to the default qwen-oauth model', async () => {
     // Start on qwen-oauth with a text-only model so modalities are empty.
     const modelsConfig = new ModelsConfig({

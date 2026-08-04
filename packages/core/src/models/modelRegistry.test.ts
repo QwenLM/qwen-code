@@ -256,6 +256,61 @@ describe('ModelRegistry', () => {
       expect(model?.generationConfig.modalities).toEqual(explicitModalities);
     });
 
+    it('prefers catalog modalities over model-name heuristics', () => {
+      const registry = new ModelRegistry(
+        {
+          openai: [
+            {
+              id: 'gpt-new',
+              baseUrl: 'https://openrouter.ai/api/v1',
+              envKey: 'OPENROUTER_API_KEY',
+            },
+          ],
+        },
+        undefined,
+        {
+          openrouter: {
+            models: {
+              'gpt-new': { modalities: { input: ['text', 'video'] } },
+            },
+          },
+        },
+      );
+
+      expect(
+        registry.getModel(AuthType.USE_OPENAI, 'gpt-new')?.generationConfig
+          .modalities,
+      ).toEqual({ video: true });
+    });
+
+    it('keeps explicit modalities ahead of catalog metadata', () => {
+      const registry = new ModelRegistry(
+        {
+          openai: [
+            {
+              id: 'gpt-new',
+              baseUrl: 'https://openrouter.ai/api/v1',
+              envKey: 'OPENROUTER_API_KEY',
+              generationConfig: { modalities: { pdf: true } },
+            },
+          ],
+        },
+        undefined,
+        {
+          openrouter: {
+            models: {
+              'gpt-new': { modalities: { input: ['text', 'video'] } },
+            },
+          },
+        },
+      );
+
+      expect(
+        registry.getModel(AuthType.USE_OPENAI, 'gpt-new')?.generationConfig
+          .modalities,
+      ).toEqual({ pdf: true });
+    });
+
     it('returns text-only ({}) for models with no multimodal default', () => {
       const registry = new ModelRegistry({
         openai: [

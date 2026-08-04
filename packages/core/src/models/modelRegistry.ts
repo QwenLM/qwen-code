@@ -18,6 +18,10 @@ import {
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { QWEN_OAUTH_MODELS } from './constants.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  getCatalogModalities,
+  type ModelMetadataCatalog,
+} from './model-metadata-catalog.js';
 
 const debugLogger = createDebugLogger('MODEL_REGISTRY');
 
@@ -85,6 +89,7 @@ export function modelRegistryKey(id: string, baseUrl?: string): string {
  */
 export class ModelRegistry {
   private modelsByAuthType: Map<AuthType, Map<string, ResolvedModelConfig>>;
+  private readonly modelMetadataCatalog?: ModelMetadataCatalog;
 
   /** providerId -> SDK protocol mapping; persists across reloads. */
   private providerProtocolConfig: ProviderProtocolConfig;
@@ -103,9 +108,11 @@ export class ModelRegistry {
   constructor(
     modelProvidersConfig?: ModelProvidersConfig,
     providerProtocolConfig?: ProviderProtocolConfig,
+    modelMetadataCatalog?: ModelMetadataCatalog,
   ) {
     this.modelsByAuthType = new Map();
     this.providerProtocolConfig = providerProtocolConfig ?? {};
+    this.modelMetadataCatalog = modelMetadataCatalog;
 
     // Always register qwen-oauth models (hard-coded, cannot be overridden)
     this.registerAuthTypeModels(AuthType.QWEN_OAUTH, QWEN_OAUTH_MODELS);
@@ -201,7 +208,7 @@ export class ModelRegistry {
         );
         continue;
       }
-      const resolved = this.resolveModelConfig(config, authType);
+      const resolved = this.resolveModelConfig(config, authType, providerId);
       modelMap.set(key, resolved);
     }
 
@@ -305,6 +312,7 @@ export class ModelRegistry {
   private resolveModelConfig(
     config: ModelConfig,
     authType: AuthType,
+    providerId?: string,
   ): ResolvedModelConfig {
     this.validateModelConfig(config, authType);
 
@@ -317,7 +325,14 @@ export class ModelRegistry {
       generationConfig.modalities === undefined ||
       shouldUseCanonicalModalities(config.id)
     ) {
-      generationConfig.modalities = defaultModalities(config.id);
+      generationConfig.modalities =
+        getCatalogModalities(this.modelMetadataCatalog, {
+          providerId,
+          authType,
+          modelId: config.id,
+          baseUrl: config.baseUrl,
+          envKey: config.envKey,
+        }) ?? defaultModalities(config.id);
     }
 
     return {

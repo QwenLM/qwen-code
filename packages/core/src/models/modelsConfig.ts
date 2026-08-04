@@ -14,6 +14,10 @@ import { tokenLimit } from '../core/tokenLimits.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
 import { RUNTIME_SNAPSHOT_PREFIX } from '../utils/runtimeModelPrefix.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  getCatalogModalities,
+  type ModelMetadataCatalog,
+} from './model-metadata-catalog.js';
 
 import { ModelRegistry } from './modelRegistry.js';
 import {
@@ -63,6 +67,8 @@ export interface ModelsConfigOptions {
   generationConfigSources?: ContentGeneratorConfigSources;
   /** Exact initial registry baseUrl; null selects an implicit route. */
   initialRegistryBaseUrl?: string | null;
+  /** API-backed model metadata loaded by the host application. */
+  modelMetadataCatalog?: ModelMetadataCatalog;
   /** Callback when model changes require refresh */
   onModelChange?: OnModelChangeCallback;
 }
@@ -80,6 +86,7 @@ export interface ModelsConfigOptions {
  */
 export class ModelsConfig {
   private readonly modelRegistry: ModelRegistry;
+  private readonly modelMetadataCatalog?: ModelMetadataCatalog;
 
   // Current selection state
   private currentAuthType: AuthType | undefined;
@@ -156,7 +163,9 @@ export class ModelsConfig {
     this.modelRegistry = new ModelRegistry(
       options.modelProvidersConfig,
       options.providerProtocolConfig,
+      options.modelMetadataCatalog,
     );
+    this.modelMetadataCatalog = options.modelMetadataCatalog;
     this.onModelChange = options.onModelChange;
 
     // Initialize generation config
@@ -182,7 +191,52 @@ export class ModelsConfig {
       if (initialModel) {
         this.currentRegistryBaseUrl = initialModel.registryBaseUrl ?? null;
       }
+      this.applyCatalogModalities(
+        initialModelId,
+        initialModel?.baseUrl ?? this._generationConfig.baseUrl,
+        initialModel?.envKey ?? this._generationConfig.apiKeyEnvKey,
+      );
     }
+  }
+
+  private applyCatalogModalities(
+    modelId: string,
+    baseUrl?: string,
+    envKey?: string,
+    replaceModelDerivedValue = false,
+  ): boolean {
+    const source = this.generationConfigSources['modalities'];
+    if (
+      source === undefined &&
+      this._generationConfig.modalities !== undefined &&
+      !replaceModelDerivedValue
+    ) {
+      return false;
+    }
+    if (
+      !replaceModelDerivedValue &&
+      source &&
+      source.kind !== 'computed' &&
+      source.kind !== 'default' &&
+      source.kind !== 'unknown'
+    ) {
+      return false;
+    }
+
+    const modalities = getCatalogModalities(this.modelMetadataCatalog, {
+      authType: this.currentAuthType,
+      modelId,
+      baseUrl,
+      envKey,
+    });
+    if (modalities === undefined) return false;
+
+    this._generationConfig.modalities = modalities;
+    this.generationConfigSources['modalities'] = {
+      kind: 'computed',
+      detail: 'loaded from models.dev catalog',
+    };
+    return true;
   }
 
   /**
@@ -435,11 +489,19 @@ export class ModelsConfig {
    */
   private applyRawModelDerivedDefaults(modelId: string): void {
     if (this.shouldUpdateModelDerivedDefault('modalities')) {
-      this._generationConfig.modalities = defaultModalities(modelId);
-      this.generationConfigSources['modalities'] = {
-        kind: 'computed',
-        detail: 'auto-detected from model',
-      };
+      const appliedCatalog = this.applyCatalogModalities(
+        modelId,
+        this._generationConfig.baseUrl,
+        this._generationConfig.apiKeyEnvKey,
+        true,
+      );
+      if (!appliedCatalog) {
+        this._generationConfig.modalities = defaultModalities(modelId);
+        this.generationConfigSources['modalities'] = {
+          kind: 'computed',
+          detail: 'auto-detected from model',
+        };
+      }
     }
 
     if (this.shouldUpdateModelDerivedDefault('contextWindowSize')) {
