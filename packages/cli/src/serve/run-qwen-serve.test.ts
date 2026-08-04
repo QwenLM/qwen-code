@@ -1949,7 +1949,8 @@ describe('runQwenServe permissionResponseTimeoutMs validation', () => {
 });
 
 /**
- * The budget is resolved at boot and reported; it does not size any child yet.
+ * The budget is resolved at boot and reported. Whether it also sizes a child
+ * depends on `childHeapMode`, which defaults to `observe` and sizes nothing.
  * The only boot-time behavior is rejecting an out-of-range flag value.
  */
 describe('runQwenServe memory budget', () => {

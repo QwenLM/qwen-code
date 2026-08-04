@@ -260,26 +260,26 @@ describe('createSpawnChannelFactory child-heap admission', () => {
     return argv?.find((a) => a.startsWith('--max-old-space-size='));
   };
 
-  it('applies the share under enforce and shrinks it as children accumulate', async () => {
+  it('applies the same partitioned ceiling to every child under enforce', async () => {
     const processRegistry = new ProcessRegistry();
+    const policy = createChildHeapPolicy({ budget, mode: 'enforce' });
     const factory = createSpawnChannelFactory({
       processRegistry,
-      childHeapPolicy: createChildHeapPolicy({ budget, mode: 'enforce' }),
+      childHeapPolicy: policy,
     });
+    const { perChildCeilingMb } = policy.snapshot();
 
     await factory('/tmp/a');
     const first = Number(heapArg()!.split('=')[1]);
-    // First child alone gets the whole pool, capped by the legacy ceiling.
-    expect(first).toBe(
-      Math.min(budget.childPoolMb, budget.legacyChildCeilingMb),
-    );
-
     mockSpawn.mockClear();
     await factory('/tmp/b');
     const second = Number(heapArg()!.split('=')[1]);
-    // Two live children now, so the second is sized for two — the whole point
-    // of keying on concurrency rather than on the host.
-    expect(second).toBeLessThan(first);
+
+    // Constant, not a share of the pool at this instant. A ceiling that shrank
+    // as children arrived would leave the earlier, larger grants outstanding
+    // and the authorised total unbounded — V8 cannot lower a running child.
+    expect(first).toBe(perChildCeilingMb);
+    expect(second).toBe(perChildCeilingMb);
   });
 
   it('computes but applies nothing under observe', async () => {

@@ -13,6 +13,7 @@ import {
   SessionWriterUnavailableError,
 } from '@qwen-code/qwen-code-core';
 import { sendBridgeError } from './error-response.js';
+import { ChildHeapPoolExhaustedError } from '../acp-session-bridge.js';
 import { DaemonDrainingError } from './session-archive.js';
 
 function responseMock(): {
@@ -27,6 +28,38 @@ function responseMock(): {
   json.mockReturnValue(response);
   return { response: response as unknown as Response, status, json };
 }
+
+describe('sendBridgeError child heap pool exhaustion', () => {
+  it('maps the spawn refusal to a retryable 503 with its figures', () => {
+    // The spawn-policy tests exercise the throw; nothing exercised the wire
+    // shape, so a transport regression here would have shipped silently.
+    const status = vi.fn();
+    const json = vi.fn();
+    const set = vi.fn();
+    const response = { status, json, set };
+    status.mockReturnValue(response);
+    json.mockReturnValue(response);
+    set.mockReturnValue(response);
+
+    sendBridgeError(
+      response as unknown as Response,
+      new ChildHeapPoolExhaustedError(3_687, 8, 512),
+    );
+
+    expect(status).toHaveBeenCalledWith(503);
+    // Retryable without operator action: the condition clears the moment any
+    // child exits, so the header is part of the contract, not decoration.
+    expect(set).toHaveBeenCalledWith('Retry-After', '5');
+    expect(json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'child_heap_pool_exhausted',
+        childPoolMb: 3_687,
+        concurrentChildren: 8,
+        minChildHeapMb: 512,
+      }),
+    );
+  });
+});
 
 describe('sendBridgeError session writer errors', () => {
   it('maps sealed session maintenance to daemon_draining', () => {

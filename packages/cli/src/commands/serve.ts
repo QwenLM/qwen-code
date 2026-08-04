@@ -332,7 +332,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'derived as 50% of cgroup-constrained ' +
           'or host memory, and capped at the resolved available memory either ' +
           'way. Currently observed and reported under `limits.memory` in daemon ' +
-          'status; it does not yet size any child process. Must be an integer ' +
+          'status. Under `--child-heap-mode enforce` it also sizes every ' +
+          '`qwen --acp` child and bounds how many run at once; under the ' +
+          'default `observe` it sizes nothing. Must be an integer ' +
           'in [1024, 1048576].',
       })
       .option('memory-pressure-mode', {

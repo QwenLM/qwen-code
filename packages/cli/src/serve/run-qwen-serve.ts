@@ -3497,12 +3497,17 @@ async function runQwenServeImpl(
     // One policy for the whole daemon, beside the one registry it reads. Both
     // must be shared: a per-factory registry would report a concurrent count
     // of 1 on every spawn and hand each child the entire pool.
-    const childHeapPolicy: ChildHeapPolicy | undefined = opts.daemonMemoryBudget
-      ? createChildHeapPolicy({
-          budget: opts.daemonMemoryBudget,
-          mode: opts.childHeapMode ?? 'observe',
-        })
-      : undefined;
+    // Not built for an injected bridge: `deps.bridge` brings its own channel
+    // and never goes through the factory this policy rides on, so a policy
+    // here would size nothing while `limits.memory.enforced` claimed
+    // otherwise — a status field asserting enforcement that is not happening.
+    const childHeapPolicy: ChildHeapPolicy | undefined =
+      opts.daemonMemoryBudget && !deps.bridge
+        ? createChildHeapPolicy({
+            budget: opts.daemonMemoryBudget,
+            mode: opts.childHeapMode ?? 'observe',
+          })
+        : undefined;
     managedChildHeapPolicy = childHeapPolicy;
     const fsFactory = runtime.resolveBridgeFsFactory({
       // Secondary roots share a write-capable factory only after their own
