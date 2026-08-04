@@ -39,6 +39,12 @@ const configSchema = z.discriminatedUnion('version', [
       version: z.literal(1),
       timeoutMs: z.number().int().min(1).max(30_000).default(5000),
       provider: providerSchema,
+      write: z
+        .object({
+          enabled: z.literal(true),
+        })
+        .strict()
+        .optional(),
     })
     .strict(),
   z
@@ -107,10 +113,17 @@ export async function loadConfig(
 
   const provider = resolveProvider(result.data.provider, env);
   if (result.data.version === 1) {
+    if (
+      result.data.write !== undefined &&
+      provider.type !== 'mem0-platform-v3'
+    ) {
+      throw new ConfigurationError('External context config is invalid.');
+    }
     return {
       version: 1,
       timeoutMs: result.data.timeoutMs,
       provider,
+      ...(result.data.write === undefined ? {} : { write: result.data.write }),
     };
   }
 
