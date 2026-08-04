@@ -1,5 +1,5 @@
 name: 'Self-hosted Node.js preflight'
-description: 'Preflight for self-hosted runners that reuse their pre-installed Node.js instead of downloading one (nodejs.org is unreachable through the ECS egress proxy): fails the job when Node is missing and warns when the major version is not 22.'
+description: 'Preflight for self-hosted runners that reuse their pre-installed Node.js instead of downloading one on ECS, where nodejs.org may be unreachable through the egress proxy: fails the job when Node is missing and warns when the major version is not 22.'
 
 runs:
   using: 'composite'

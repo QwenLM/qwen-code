@@ -13,4 +13,9 @@ runs:
         "TEMP=$env:RUNNER_TEMP" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
         "TMP=$env:RUNNER_TEMP" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
         "LC_ALL=C.UTF-8" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-        'C:\Program Files\Git\bin' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        $gitBash = 'C:\Program Files\Git\bin'
+        if (!(Test-Path $gitBash)) {
+          Write-Output "::error::Git Bash not found at $gitBash"
+          exit 1
+        }
+        $gitBash | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append

@@ -12,23 +12,14 @@ export default defineConfig({
     environment: 'node',
     include: ['scripts/tests/**/*.test.{js,ts}'],
     // Script tests that drive Linux-only CI (ubuntu-latest workflow jobs, or
-    // bash/shell fixtures Windows cannot express) fail on a Windows runner —
-    // e.g. execFileSync('mkdir') has no executable to resolve, and
-    // `${bin}:${process.env.PATH}` corrupts the ';'-separated Windows PATH.
-    // Exclude them on win32; Linux CI remains their authoritative coverage. Do
-    // not remove an entry unless that file is also made Windows-compatible.
+    // bash/shell fixtures Windows cannot express) fail on a Windows runner.
+    // Linux CI remains their authoritative coverage.
     exclude:
       process.platform === 'win32'
         ? [
             ...configDefaults.exclude,
             'scripts/tests/pr-self-report-label.test.js',
-            'scripts/tests/qwen-autofix-workflow.test.js',
-            'scripts/tests/qwen-fleet-shepherd-workflow.test.js',
-            'scripts/tests/qwen-pr-review-workflow.test.js',
-            'scripts/tests/qwen-repo-hygiene-workflow.test.js',
-            'scripts/tests/qwen-resolve-workflow.test.js',
-            'scripts/tests/qwen-triage-finalize-workflow.test.js',
-            'scripts/tests/qwen-triage-workflow.test.js',
+            'scripts/tests/qwen-*-workflow.test.js',
           ]
         : [...configDefaults.exclude],
     setupFiles: ['scripts/tests/test-setup.ts'],

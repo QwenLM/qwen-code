@@ -45,12 +45,14 @@ const releaseScriptUtilsUrl = pathToFileURL(
 // Windows batch behavior has separate Windows-only E2E coverage below.
 const itOnUnix = process.platform === 'win32' ? it.skip : it;
 const itOnWindows = process.platform === 'win32' ? it : it.skip;
-// The POSIX fixture helpers shell out to the `zip` binary, which minimal
-// runner images may not ship (Windows uses PowerShell instead); skip the
-// tests that need it where it is absent instead of failing the suite.
+// The POSIX fixture helpers shell out to the `zip` binary. Local minimal
+// images may omit it, but CI must keep the archive-safety cases active.
 const zipAvailable =
   process.platform === 'win32' ||
   spawnSync('zip', ['--version']).error === undefined;
+if (process.env.CI && process.platform !== 'win32' && !zipAvailable) {
+  throw new Error('`zip` missing on a CI host; archive tests would skip.');
+}
 const itWithZip = zipAvailable ? it : it.skip;
 const itOnUnixWithZip = zipAvailable ? itOnUnix : it.skip;
 

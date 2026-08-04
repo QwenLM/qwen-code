@@ -294,7 +294,11 @@ describe('no-AK integration CI wiring', () => {
       );
     }
     expect(configureAction).toContain(
-      "'C:\\Program Files\\Git\\bin' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append",
+      "$gitBash = 'C:\\Program Files\\Git\\bin'",
+    );
+    expect(configureAction).toContain('Test-Path $gitBash');
+    expect(configureAction).toContain(
+      '$gitBash | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append',
     );
     // The runner-validation smoke must consume the same action, or it
     // validates a different configuration than the gate actually uses.
@@ -304,6 +308,10 @@ describe('no-AK integration CI wiring', () => {
     );
     expect(smokeWorkflow).toContain(
       "uses: './.github/actions/configure-windows-runner'",
+    );
+    expect(smokeWorkflow).toContain('npm run test:ci');
+    expect(smokeWorkflow).not.toContain(
+      'npm run test:ci --workspaces --if-present --parallel',
     );
     // Same ordering as the gate: autocrlf off before the checkout, the `./`
     // configure action after it.
