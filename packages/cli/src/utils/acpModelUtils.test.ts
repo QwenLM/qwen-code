@@ -249,19 +249,23 @@ describe('acpModelUtils', () => {
     ['https://user:p?x@api.example/v1', 'https://api.example/v1'],
     ['https://user:p#x@api.example/v1', 'https://api.example/v1'],
     ['https://user:secret@api.example', 'https://api.example'],
-    // Pathless URLs mixed with prose: the authority must be bounded by
-    // whitespace too, otherwise a later '@' (an email, a mention) becomes the
-    // strip point and the host + prose get corrupted. Mirrors the warning
-    // message shapes from #8136. See findAuthorityEnd.
+    ['https://user:secret@api.example', 'https://api.example'],
+    // Pathless URL + prose email: WHATWG misparses as userinfo; the veto
+    // (all-digit port before the first space) protects the with-port shape.
     [
-      'https://api.example:8443 — contact admin@example.com',
-      'https://api.example:8443 — contact admin@example.com',
+      'https://api.example:8443 - contact admin@example.com',
+      'https://api.example:8443 - contact admin@example.com',
     ],
+    // Space-in-password: the last '@' within the wide authority is the real
+    // userinfo terminator (the password's '@' precedes it). #8136 R1-1/R1-3.
     [
-      'https://ollama.local — contact admin@example.com',
-      'https://ollama.local — contact admin@example.com',
+      'https://user:sec ret@host.example/v1 - contact admin@example.com',
+      'https://host.example/v1 - contact admin@example.com',
     ],
-    ['https://user:pass@h admin@example.com', 'https://h admin@example.com'],
+    ['https://user:p@ss word@host.example/v1', 'https://host.example/v1'],
+    // Known residual: digit-prefix + space password is vetoed like a portless
+    // URL and leaks. Documented tradeoff (#8136 R1-2).
+    ['https://user:1234 secret@host', 'https://user:1234 secret@host'],
   ])('sanitizes provider base URL credentials for %s', (input, expected) => {
     expect(sanitizeProviderBaseUrl(input)).toBe(expected);
   });

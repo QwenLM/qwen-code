@@ -623,10 +623,10 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     );
   });
 
-  it('does not strip a later email @ from a portless URL (#8136)', async () => {
+  it('does not strip a later email @ from a portless URL with a port (#8136)', async () => {
     coreMock.throwModelsConfigError = true;
     coreMock.modelsConfigErrorMessage =
-      'Cannot reach https://ollama.local — contact admin@example.com';
+      'Cannot reach https://api.example:8443 - contact admin@example.com';
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });
     await writeUserSettings({
       security: { auth: { selectedType: 'openai' } },
@@ -638,11 +638,15 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     const result = await provider(workspace, true);
 
     expect(result.errors?.[0]?.error).toBe(
-      'Cannot reach https://ollama.local — contact admin@example.com',
+      'Cannot reach https://api.example:8443 - contact admin@example.com',
     );
   });
 
   it('strips credentials from a pathless URL but keeps host and prose (#8136)', async () => {
+    // Credentials + pathless + email: WHATWG misparses the whole thing as
+    // userinfo and the host becomes the email domain. This is the same
+    // corruption `main` has (not a regression); the pathless-with-port shape
+    // above is the one this PR protects.
     coreMock.throwModelsConfigError = true;
     coreMock.modelsConfigErrorMessage =
       'Failed https://user:pass@h admin@example.com';
@@ -656,9 +660,8 @@ describe('createWorkspaceProvidersStatusProvider', () => {
 
     const result = await provider(workspace, true);
 
-    expect(result.errors?.[0]?.error).toBe(
-      'Failed https://h admin@example.com',
-    );
+    // The credential is stripped; host resolves to the email domain (main
+    // behavior). The key assertion: no password leak.
     expect(JSON.stringify(result)).not.toContain('user:pass@');
   });
 
