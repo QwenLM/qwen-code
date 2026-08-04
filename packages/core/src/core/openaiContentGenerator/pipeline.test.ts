@@ -4519,7 +4519,7 @@ describe('ContentGenerationPipeline', () => {
       expect(sent.messages.at(-1)?.content).toBe('compression directive');
     });
 
-    it('uses the official OpenAI SDK default endpoint when baseUrl is unset', async () => {
+    it('does not add official OpenAI cache fields when baseUrl is unset', async () => {
       mockContentGeneratorConfig.baseUrl = undefined;
       mockContentGeneratorConfig.model = 'gpt-5.6';
       mockCliConfig = {
@@ -4554,14 +4554,9 @@ describe('ContentGenerationPipeline', () => {
         .calls[0]?.[0] as OpenAI.Chat.ChatCompletionCreateParams & {
         prompt_cache_options?: { mode?: string };
       };
-      expect(sent.prompt_cache_key).toBe('qwen-code:session-123');
-      expect(sent.prompt_cache_options).toEqual({ mode: 'explicit' });
-      expect(sent.messages[1]?.content).toEqual([
-        expect.objectContaining({
-          text: 'main request',
-          prompt_cache_breakpoint: { mode: 'explicit' },
-        }),
-      ]);
+      expect(sent.prompt_cache_key).toBeUndefined();
+      expect(sent.prompt_cache_options).toBeUndefined();
+      expect(sent.messages[1]?.content).toBe('main request');
     });
 
     it('should pass arbitrary samplingParams keys through verbatim when the window has room (e.g. max_completion_tokens for GPT-5)', async () => {

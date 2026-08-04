@@ -36,8 +36,9 @@ export function isOfficialOpenAIEndpoint(
 ): boolean {
   if (contentGeneratorConfig.authType !== AuthType.USE_OPENAI) return false;
   const { baseUrl } = contentGeneratorConfig;
-  // The OpenAI SDK defaults to the official API when no base URL is set.
-  if (!baseUrl) return true;
+  // An unset base URL is routed to the DashScope provider by provider
+  // selection, so only an explicit official OpenAI endpoint qualifies.
+  if (!baseUrl) return false;
   try {
     return new URL(baseUrl).hostname.toLowerCase() === 'api.openai.com';
   } catch {

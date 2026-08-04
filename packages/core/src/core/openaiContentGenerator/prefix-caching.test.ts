@@ -54,7 +54,7 @@ describe('supportsOpenAIPrefixCaching', () => {
 
 describe('official OpenAI prompt caching', () => {
   it('recognizes only the official OpenAI API origin', () => {
-    expect(isOfficialOpenAIEndpoint(config(AuthType.USE_OPENAI))).toBe(true);
+    expect(isOfficialOpenAIEndpoint(config(AuthType.USE_OPENAI))).toBe(false);
     expect(
       isOfficialOpenAIEndpoint(
         config(AuthType.USE_OPENAI, 'https://api.openai.com/v1'),
