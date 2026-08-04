@@ -795,6 +795,8 @@ jobs:
         id: 'scan'
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+          # Must resolve to the same issue as this job's concurrency group
+          # expression; a test pins the two equal.
           FORCED_ISSUE: '${{ needs.route.outputs.issue_number || github.event.issue.number }}'
         run: |-
           mkdir -p "${WORKDIR}"

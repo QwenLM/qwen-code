@@ -1897,6 +1897,20 @@ describe('qwen-autofix workflow', () => {
     );
     expect(issueAutofixJob).not.toContain('|| github.run_id }}');
     expect(issueAutofixJob).toContain('cancel-in-progress: false');
+    // The group identity and the scan step's FORCED_ISSUE env are
+    // load-bearingly coupled: both must resolve to the same issue on every
+    // trigger path, or runs aimed at one issue land in different groups and
+    // the double-claim race reopens while every literal pin above stays
+    // green. Assert the two expressions equal so neither side can drift
+    // alone.
+    const groupKeyedOn = issueAutofixJob.match(
+      /qwen-autofix-issue-\$\{\{ (.+?) \|\| 'scheduled' \}\}/,
+    )?.[1];
+    const forcedIssueSource = issueAutofixJob.match(
+      /id: 'scan'[\s\S]*?FORCED_ISSUE: '\$\{\{ (.+?) \}\}'/,
+    )?.[1];
+    expect(groupKeyedOn).toBeTruthy();
+    expect(groupKeyedOn).toBe(forcedIssueSource);
     expect(workflow).toContain(
       '(.labels // []) | map(.name) as $labels | ($labels | index($ready))',
     );
