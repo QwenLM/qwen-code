@@ -394,6 +394,93 @@ describe('BackgroundTasksDialog', () => {
     expect(h.probe.current!.state.dialogMode).toBe('list');
   });
 
+  it('exits to list mode when a paused workflow entry being viewed settles', () => {
+    // Pins the `seen.status === 'paused'` branch of the active → terminal
+    // detail-exit: opening detail on an already-paused run and stopping it
+    // must return to the list exactly like the running case.
+    const paused = workflowEntry({
+      runId: 'wf_paused',
+      id: 'wf_paused',
+      status: 'paused',
+      endTime: undefined,
+    });
+    const h = setup([paused]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    h.call(() => h.probe.current!.actions.enterDetail());
+    expect(h.probe.current!.state.dialogMode).toBe('detail');
+
+    h.setEntries([{ ...paused, status: 'cancelled', endTime: Date.now() }]);
+
+    expect(h.probe.current!.state.dialogMode).toBe('list');
+  });
+
+  it('exits to list mode when a pausing workflow entry being viewed settles', () => {
+    const pausing = workflowEntry({
+      runId: 'wf_pausing',
+      id: 'wf_pausing',
+      status: 'pausing',
+      endTime: undefined,
+    });
+    const h = setup([pausing]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    h.call(() => h.probe.current!.actions.enterDetail());
+    expect(h.probe.current!.state.dialogMode).toBe('detail');
+
+    h.setEntries([{ ...pausing, status: 'cancelled', endTime: Date.now() }]);
+
+    expect(h.probe.current!.state.dialogMode).toBe('list');
+  });
+
+  it('re-renders a paused workflow detail on the 1s tick and runs no tick for terminal entries', () => {
+    vi.useFakeTimers();
+    try {
+      const paused = workflowEntry({
+        runId: 'wf_paused',
+        id: 'wf_paused',
+        status: 'paused',
+        startTime: Date.now() - 5_000,
+        endTime: undefined,
+      });
+      const h = setup([paused]);
+      h.call(() => h.probe.current!.actions.openDialog());
+      h.call(() => h.probe.current!.actions.enterDetail());
+      expect(h.probe.current!.state.dialogMode).toBe('detail');
+      expect(h.lastFrame()).toContain(
+        'Paused cooperatively; press p to resume.',
+      );
+
+      const before = h.lastFrame();
+      act(() => {
+        vi.advanceTimersByTime(2000);
+      });
+      // The 1s interval re-renders the detail body, advancing the
+      // wall-clock elapsed subtitle even though no status change fired.
+      expect(h.lastFrame()).not.toBe(before);
+
+      // Terminal entries must not start the interval at all.
+      const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+      const done = workflowEntry({
+        runId: 'wf_done',
+        id: 'wf_done',
+        status: 'completed',
+        startTime: 0,
+        endTime: 5_000,
+      });
+      const h2 = setup([done]);
+      h2.call(() => h2.probe.current!.actions.openDialog());
+      h2.call(() => h2.probe.current!.actions.enterDetail());
+      expect(h2.probe.current!.state.dialogMode).toBe('detail');
+      expect(
+        setIntervalSpy.mock.calls.filter((call) => call[1] === 1000),
+      ).toHaveLength(0);
+      setIntervalSpy.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('routes monitor cancel via monitorRegistry.cancel(monitorId)', () => {
     // Pin the monitor-cancel branch in `cancelSelected` — flipping it to
     // anything else (e.g. shell's `requestCancel`) would silently break,

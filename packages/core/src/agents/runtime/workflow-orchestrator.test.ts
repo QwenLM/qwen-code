@@ -1189,6 +1189,55 @@ describe('WorkflowOrchestrator', () => {
     }
   });
 
+  it('raises no unhandledRejection for an un-awaited queued dispatch on cancel', async () => {
+    // Error-arm counterpart of the success-path test above: a
+    // fire-and-forget dispatch still QUEUED when the run is cancelled is
+    // rejected with AbortError by abortPending(). The rethrow must still
+    // reach awaiting callers, but the unobserved rejection must not
+    // surface as a process-level unhandledRejection alarm on a
+    // correctly-cancelled run.
+    const controller = new AbortController();
+    const scheduler = new WorkflowDispatchScheduler(1, controller.signal);
+    let finishDispatch: ((value: string) => void) | undefined;
+    const orchestrator = new WorkflowOrchestrator(
+      () =>
+        new Promise<string>((resolve) => {
+          finishDispatch = resolve;
+        }),
+    );
+
+    let unhandled = 0;
+    const onUnhandled = () => {
+      unhandled += 1;
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const run = orchestrator.run({
+        script: `
+          agent('inflight');
+          agent('notify');
+          try { await agent('keep'); } catch (e) {}
+          return 'done';
+        `,
+        args: undefined,
+        scheduler,
+      });
+      await vi.waitFor(() => expect(finishDispatch).toBeDefined());
+      scheduler.pause();
+      finishDispatch?.('A');
+      await vi.waitFor(() => expect(scheduler.snapshot().state).toBe('paused'));
+
+      controller.abort();
+
+      await expect(run).resolves.toMatchObject({ result: 'done' });
+      // Let any pending unhandledRejection events fire before asserting.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(unhandled).toBe(0);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
   it('delivers a cached dispatch result when cancellation aborts its pause gate', async () => {
     const { buildReplay } = await import('./workflow-journal.js');
     const entries: Array<import('./workflow-journal.js').JournalEntry> = [];

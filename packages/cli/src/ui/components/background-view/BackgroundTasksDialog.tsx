@@ -1239,15 +1239,18 @@ const WorkflowDetailBody: React.FC<{
       )}
 
       {(entry.status === 'pausing' || entry.status === 'paused') && (
-        <Box>
-          <Text color={theme.status.warning}>
-            {entry.status === 'pausing'
-              ? t(
-                  'Pause is cooperative; in-flight work may finish before the workflow is paused.',
-                )
-              : t('Paused cooperatively; press p to resume.')}
-          </Text>
-        </Box>
+        <Fragment>
+          <Box />
+          <Box>
+            <Text color={theme.status.warning}>
+              {entry.status === 'pausing'
+                ? t(
+                    'Pause is cooperative; in-flight work may finish before the workflow is paused.',
+                  )
+                : t('Paused cooperatively; press p to resume.')}
+            </Text>
+          </Box>
+        </Fragment>
       )}
 
       <Box />

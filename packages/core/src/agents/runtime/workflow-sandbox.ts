@@ -541,10 +541,15 @@ export interface SandboxOptions {
   emitter?: WorkflowOrchestratorEmitter;
   /**
    * The run's dispatch scheduler. When provided, the async wall-clock
-   * watchdog suspends while the scheduler is not `running` (pausing /
-   * paused): a paused run executes nothing and spends no tokens, so
-   * paused time must neither burn wall-clock budget nor let the timer
-   * kill the run mid-pause (resume would then be impossible).
+   * watchdog suspends only while the scheduler is `paused`: by then no
+   * dispatch is in flight or being issued, so paused time must neither
+   * burn wall-clock budget nor let the timer kill the run mid-pause
+   * (resume would then be impossible). During `pausing` an in-flight
+   * dispatch is still executing real work, so the backstop stays armed.
+   *
+   * The guarantee covers dispatch-gated code only: script awaits outside
+   * a scheduler gate keep executing while paused and are not covered by
+   * the wall-clock backstop until resume.
    */
   scheduler?: WorkflowDispatchScheduler;
 }
@@ -868,7 +873,7 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       // stays in the vm realm.
       function vmAsync(hostFn) {
         return function (...vmArgs) {
-          return new Promise(function (resolve, reject) {
+          const p = new Promise(function (resolve, reject) {
             try {
               const hostPromise = hostFn.apply(null, vmArgs);
               hostPromise.then(
@@ -887,6 +892,15 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
               reject(new Error(msg));
             }
           });
+          // Fire-and-forget calls never attach a handler. When a run is
+          // cancelled or settles, abortPending rejects still-queued
+          // dispatches with AbortError; without an observer here that
+          // teardown rejection would surface as a process-level
+          // unhandledRejection alarm on a correctly-cancelled run.
+          // Awaiting callers still receive the rejection through their
+          // own handlers.
+          p.catch(function () {});
+          return p;
         };
       }
 
@@ -1228,12 +1242,17 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
           );
         });
       });
-      // Pause-aware watchdog: suspend while the scheduler is not running
-      // so a paused run can neither be killed mid-pause nor burn budget
-      // it will need after resume.
+      // Pause-aware watchdog: suspend only while the scheduler is
+      // `paused` — once truly idle, the run must neither burn budget it
+      // will need after resume nor be killed mid-pause (resume would
+      // then be impossible). During `pausing` an in-flight dispatch is
+      // still executing real work, so the hang backstop stays armed.
+      // Note the suspension assumes the script is idle while paused
+      // (blocked at a dispatch gate); ungated script awaits still run
+      // and are not covered by the backstop until resume.
       const stopWatchingState = opts.scheduler?.onStateChange(({ state }) => {
-        if (state === 'running') watchdog?.resume();
-        else watchdog?.pause();
+        if (state === 'paused') watchdog?.pause();
+        else watchdog?.resume();
       });
       try {
         return await Promise.race([result, timeoutPromise]);

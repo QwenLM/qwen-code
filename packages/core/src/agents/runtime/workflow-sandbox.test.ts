@@ -973,10 +973,10 @@ describe('createWorkflowSandbox security', () => {
     }
   });
 
-  // Pause-aware watchdog: a paused run executes nothing and spends no
-  // tokens, so paused time must neither burn the wall-clock budget nor
-  // let the timer kill the run mid-pause (resume would then be
-  // impossible while the UI promises "press p to resume").
+  // Pause-aware watchdog: once the scheduler is `paused` no dispatch is
+  // in flight or being issued, so paused time must neither burn the
+  // wall-clock budget nor let the timer kill the run mid-pause (resume
+  // would then be impossible while the UI promises "press p to resume").
   it('suspends the wall-clock watchdog while the scheduler is paused', async () => {
     const scheduler = new WorkflowDispatchScheduler(1);
     const sandbox = createWorkflowSandbox({
@@ -1041,6 +1041,28 @@ describe('createWorkflowSandbox security', () => {
     // The banked remainder (~80 ms) fires promptly; a fresh full budget
     // (200 ms) would overshoot this bound.
     expect(Date.now() - resumedAt).toBeLessThan(150);
+  });
+
+  it('keeps the wall-clock watchdog armed while an in-flight dispatch drains a pause', async () => {
+    // `pausing` means a dispatch is still executing real work — the exact
+    // hang the backstop exists for. Suspending the watchdog on `pausing`
+    // would leave a hung in-flight subagent unbounded (and resume()
+    // returns false while stuck in `pausing`, so the backstop could not
+    // re-arm from that state).
+    const scheduler = new WorkflowDispatchScheduler(1);
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      // Route through the scheduler like the orchestrator does so the
+      // hung thunk counts as in-flight and the pause parks in `pausing`.
+      dispatch: () => scheduler.run(() => new Promise<string>(() => {})),
+      maxWallClockMs: 100,
+      scheduler,
+    });
+    const run = sandbox.run(`await agent('a');`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(scheduler.pause()).toBe(true);
+    expect(scheduler.snapshot().state).toBe('pausing');
+    await expect(run).rejects.toThrow(/timed out after 100 ms wall clock/);
   });
 
   // FIX-E (Round 4 Critical): Array args used to leak host process because
