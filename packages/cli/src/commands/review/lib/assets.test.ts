@@ -327,9 +327,9 @@ describe('sniffImageFormat / validateAssetContent', () => {
   it('admits every allowed extension by content — the two gates agree', () => {
     // Admitting a format is a TWO-place change: the allowlist key and the
     // matching sniffImageFormat branch. This pin binds them — a format
-    // admitted by name whose signature the sniffer does not recognize would
-    // refuse every real file of it while CI stayed green. Naming the
-    // extension in the assertion itself says WHICH admission is dead.
+    // admitted by name whose signature the sniffer does not recognize
+    // refuses every real file of it, and this assertion fails CI naming
+    // WHICH admission is dead.
     const canonical: Record<string, Uint8Array> = {
       png: PNG,
       jpg: JPEG,

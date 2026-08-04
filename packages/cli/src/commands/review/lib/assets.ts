@@ -23,7 +23,8 @@
  * allowlist's single source of truth: `ASSET_EXTENSIONS` derives from these
  * keys — but admitting a format is a two-place change: add the key here AND
  * the matching `sniffImageFormat` branch below, or the content gate refuses
- * every real file of the new format while CI stays green.
+ * every real file of the new format — the "two gates agree" pin in
+ * `assets.test.ts` fails CI and names which admission is dead.
  * An allowlist, not a denylist: SVG is deliberately absent (it is a script
  * container), and anything non-image is refused rather than hosted — this
  * command publishes review evidence, not arbitrary files. */
