@@ -506,6 +506,10 @@ jobs:
       - name: 'Install capture tools (tmux + freeze)'
         if: "steps.context.outputs.should_run == 'true'"
         continue-on-error: true
+        # continue-on-error bounds failure, not duration: a hung `sudo
+        # apt-get update` against a stalled mirror has no other bound and
+        # would eat the job cap instead of degrading to ans-only.
+        timeout-minutes: 5
         env:
           FREEZE_VERSION: '0.2.2'
           FREEZE_SHA256: '012fdbdd16c0c19570f9052aac34d16d93d7d0d3b565b05374cc59492f53539b'
@@ -534,10 +538,10 @@ jobs:
           # ~/.local/bin this step refuses to promote, so it is NEVER promoted
           # onto PATH: a planted binary there (a fake freeze, or a gh/git the
           # secret-bearing review step would resolve ahead of the system ones)
-          # is read only as a cache artifact, and only after its bytes
-          # re-verify against the workflow-pinned hash. Later steps execute
-          # only what THIS step installs into the fresh per-run dir below —
-          # and only THAT dir is promoted (PATH + GITHUB_PATH).
+          # is read only as a cache artifact: the copy re-verifies against
+          # the workflow-pinned hash before anything trusts it. Later steps
+          # execute only what THIS step installs into the fresh per-run dir
+          # below — and only THAT dir is promoted (PATH + GITHUB_PATH).
           cache_bin="$HOME/.qwen-review-tools/bin"
           mkdir -p "$cache_bin"
           tools_bin=$(mktemp -d "${RUNNER_TEMP:-/tmp}/qwen-review-tools.XXXXXX") || tools_bin=''
@@ -548,22 +552,25 @@ jobs:
           # Digit-bounded match: a resolved 0.2.20 CONTAINS a 0.2.2 pin as a
           # substring, so a substring grep would silently void a downgrade.
           version_re="(^|[^0-9])${FREEZE_VERSION//./\\.}([^0-9]|$)"
-          # Re-verify the cached binary before trusting it: a mismatch
-          # (planted or stale) is deleted so the checksummed download path
-          # replaces it instead of the fake getting executed.
-          if [ -f "$cache_bin/freeze" ] \
-            && ! echo "${FREEZE_BIN_SHA256}  $cache_bin/freeze" | sha256sum -c - >/dev/null 2>&1; then
-            rm -f "$cache_bin/freeze"
-          fi
           have_freeze=false
+          # Copy-then-verify: install the cached binary into the fresh
+          # per-run dir FIRST, then verify THOSE bytes — the verified bytes
+          # are exactly the bytes later steps execute, so a concurrent job
+          # swapping the cache file between check and copy can never replace
+          # what runs. A mismatch (planted or stale) deletes both copies so
+          # the checksummed download below replaces them.
           if [ -n "$tools_bin" ] && [ -f "$cache_bin/freeze" ] \
             && install -m 0755 "$cache_bin/freeze" "$tools_bin/freeze"; then
-            have_freeze=true
-          elif command -v freeze >/dev/null 2>&1 && freeze --version 2>/dev/null | grep -qE "$version_re"; then
-            # A pinned-version freeze already on PATH (e.g. baked into the
-            # runner image) satisfies the pin without a download.
-            have_freeze=true
+            if echo "${FREEZE_BIN_SHA256}  $tools_bin/freeze" | sha256sum -c - >/dev/null 2>&1; then
+              have_freeze=true
+            else
+              rm -f "$tools_bin/freeze" "$cache_bin/freeze"
+            fi
           fi
+          # A freeze already on PATH is never trusted: its own --version is
+          # attacker-controllable, and probing it would execute the plant.
+          # Only bytes this step installed and verified count, so any PATH
+          # freeze falls through to the checksummed download.
           if [ "$have_freeze" = false ] && [ "$(uname -sm)" = 'Linux x86_64' ]; then
             tmp=$(mktemp -d) || tmp=''
             url="https://github.com/charmbracelet/freeze/releases/download/v${FREEZE_VERSION}/freeze_${FREEZE_VERSION}_Linux_x86_64.tar.gz"
@@ -577,7 +584,7 @@ jobs:
                 bin=$(find "$tmp" -type f -name freeze | head -1)
                 if [ -z "$bin" ]; then
                   echo 'verified tarball contains no freeze binary; captures degrade to ans-only.'
-                elif ! install -m 0755 "$bin" "$tools_bin/freeze"; then
+                elif [ -z "$tools_bin" ] || ! install -m 0755 "$bin" "$tools_bin/freeze"; then
                   echo 'freeze install failed; captures degrade to ans-only.'
                 else
                   install -m 0755 "$bin" "$cache_bin/freeze" 2>/dev/null \
@@ -596,9 +603,13 @@ jobs:
           # this step exists to prevent.
           if command -v freeze >/dev/null 2>&1; then
             resolved_version=$(freeze --version 2>/dev/null)
-            echo "$resolved_version"
-            printf '%s\n' "$resolved_version" | grep -qE "$version_re" \
-              || echo "warning: resolved freeze is not the pinned v${FREEZE_VERSION}; captures may render with a stale renderer."
+            if [ -n "$resolved_version" ]; then
+              echo "$resolved_version"
+              printf '%s\n' "$resolved_version" | grep -qE "$version_re" \
+                || echo "warning: resolved freeze is not the pinned v${FREEZE_VERSION}; captures may render with a different renderer."
+            else
+              echo 'warning: resolved freeze produced no version output; it is likely broken, and captures may fail to render.'
+            fi
           fi
           exit 0
 
