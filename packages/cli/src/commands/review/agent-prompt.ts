@@ -41,7 +41,14 @@ import type { CommandModule } from 'yargs';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { writeStdoutLine } from '../../utils/stdioHelpers.js';
+import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import {
+  expectedRoundSeconds,
+  reverseAuditBudgetExhausted,
+  reverseAuditBudgetMessage,
+  stampRound,
+  writeBudgetStop,
+} from './lib/deadline.js';
 import {
   READ_FILE_CHAR_CAP,
   chunkIdsProblem,
@@ -1372,24 +1379,24 @@ function runRoster(report: PlanReport, planPath: string, rules?: string): void {
  * as `--roster`: one call, labelled numbered blocks, an end marker, and nothing
  * left to reconstruct.
  */
-function runAllChunks(
-  report: PlanReport,
-  planPath: string,
-  role: RoleId,
-  findingsContent: string,
-  rules?: string,
-  round?: number,
-): void {
+/**
+ * The structural floor an --all-chunks round stands on, refused as its OWN
+ * error. The same refusal coverage makes (`readPlan`), made BEFORE any
+ * brief, record or block is written. Filtering the unusable ids out instead
+ * shrank the round: `[13, "x", 15]` printed a complete-looking two-auditor
+ * round with one territory silently gone, and a duplicated id resolved both
+ * blocks to the first matching chunk and keyed them to one record — the
+ * second territory never audited, under an end marker that says the round
+ * is whole. Also called ahead of the budget gate: a plan no round could
+ * ever be built from must get this diagnosis whatever the clock says —
+ * refusing it as a budget stop would write a marker over a corrupt plan,
+ * say "proceed to Step 6", and preempt the one actionable repair.
+ */
+function requireAuditableChunks(report: PlanReport): DiffChunk[] {
   if (!Array.isArray(report.chunks) || report.chunks.length === 0) {
     throw new Error('agent-prompt: the plan has no `chunks[]`.');
   }
   const chunks = report.chunks as DiffChunk[];
-  // The same refusal coverage makes (`readPlan`), made BEFORE any brief,
-  // record or block is written. Filtering the unusable ids out instead shrank
-  // the round: `[13, "x", 15]` printed a complete-looking two-auditor round
-  // with one territory silently gone, and a duplicated id resolved both blocks
-  // to the first matching chunk and keyed them to one record — the second
-  // territory never audited, under an end marker that says the round is whole.
   const problem = chunkIdsProblem(chunks.map((c) => c?.id));
   if (problem) {
     throw new Error(
@@ -1398,6 +1405,18 @@ function runAllChunks(
         'Re-run the Step 1 capture; do not hand-edit the plan.',
     );
   }
+  return chunks;
+}
+
+function runAllChunks(
+  report: PlanReport,
+  planPath: string,
+  role: RoleId,
+  findingsContent: string,
+  rules?: string,
+  round?: number,
+): void {
+  const chunks = requireAuditableChunks(report);
   const digest = findingsDigest(findingsContent, rules);
   const roundPart = round !== undefined ? `--round-${round}` : '';
   const blocks = chunks.map((c, i) => {
@@ -1575,6 +1594,19 @@ function runAgentPrompt(args: AgentPromptArgs): void {
         );
       }
     }
+    // The Step 5 loop's clock keys on the round label — the record key's
+    // round part, the identity line, and the budget gate's per-round stamps
+    // all read it, and SKILL.md's Step 5 calls always pass it. A round-less
+    // call would stamp an unlabeled admission no later estimate can
+    // attribute, so it gets its own error here with every other malformed
+    // call.
+    if (role === 'reverse-audit' && !hasRound) {
+      bad(
+        '--role reverse-audit builds one round of the Step 5 loop and ' +
+          'requires --round <k>: the label keys the record and the budget ' +
+          "gate's per-round accounting.",
+      );
+    }
   } else if (hasFindings) {
     // `--findings` with no role: it has no prompt to fold into. A territory chunk
     // agent reviews the diff, not a findings list. Name the roles it needs from the
@@ -1703,6 +1735,45 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     }
   }
 
+  // The all-chunks dispatch below builds from `chunks[]`; validate that
+  // structure BEFORE the budget gate, so a plan no round could ever be
+  // built from gets its structural error whatever the clock says — refused
+  // as a budget stop it would write a marker over a corrupt plan and tell
+  // the orchestrator to proceed to Step 6 when the actionable repair is a
+  // Step 1 re-capture.
+  if (args.allChunks && args.role && findingsContent !== undefined) {
+    requireAuditableChunks(report);
+  }
+
+  // The budget gate — after every validation and every file read, because a
+  // malformed call or a broken plan deserves its own error (refusing here
+  // would record a budget stop against a plan that cannot even parse) —
+  // before any build or record: a refused round must leave no prompt on
+  // disk for a later check to expect an agent for.
+  // Reverse-audit only: the loop is the one open-ended stage, and the
+  // reserve this gate protects exists precisely to let verify/compose run.
+  // What must fit is the round being admitted PLUS the tail — a gate that
+  // admits on the reserve alone hands the terminal round a start right at
+  // the boundary, which is the killed-mid-verification failure one round
+  // wide. The round's cost is the previous round's, measured admission to
+  // admission. The admission is stamped AFTER the build succeeds (below),
+  // never here: the stamp is what the next round's gate measures cost from,
+  // and a build that throws must not leave one behind — priced from a
+  // failed build, the next round would be floored to the 600s minimum,
+  // widening admission in exactly the unsafe direction.
+  if (args.role === 'reverse-audit') {
+    const spent = reverseAuditBudgetExhausted(
+      process.env,
+      expectedRoundSeconds(args.plan, args.round),
+    );
+    if (spent !== null) {
+      writeBudgetStop(args.plan, spent, args.round);
+      writeStderrLine(reverseAuditBudgetMessage(spent, args.round));
+      process.exitCode = 4;
+      return;
+    }
+  }
+
   if (args.allChunks && args.role && findingsContent !== undefined) {
     runAllChunks(
       report,
@@ -1712,6 +1783,11 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       rules,
       args.round,
     );
+    // Admitted AND built: stamp now, so the next round's gate can measure
+    // this one — see the gate comment above for why not earlier.
+    if (args.role === 'reverse-audit') {
+      stampRound(args.plan, args.round);
+    }
     return;
   }
 
@@ -1769,6 +1845,12 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       : prompt;
   recordPrompt(args.plan, key, printed);
   writeStdoutLine(printed);
+  // Admitted AND built — the single-build twin of the all-chunks stamp
+  // above (a `--chunk <id>` rebuild lands here; the one-per-round guard in
+  // `stampRound` keeps it from shrinking its own round's observed cost).
+  if (args.role === 'reverse-audit') {
+    stampRound(args.plan, args.round);
+  }
 }
 
 export const agentPromptCommand: CommandModule = {
@@ -1776,7 +1858,9 @@ export const agentPromptCommand: CommandModule = {
   describe:
     "Build a review agent's launch prompt from the plan (the diff path, its line " +
     "ranges and the agent's own brief are welded in, not left to the caller to " +
-    'remember)',
+    'remember). Exit codes: 0 built; 4 the review time budget refused another ' +
+    'reverse-audit round (a termination rule, not an error — see the BUDGET line ' +
+    'on stderr); anything else is a bad call or a broken plan.',
   builder: (yargs) =>
     yargs
       .option('plan', {
