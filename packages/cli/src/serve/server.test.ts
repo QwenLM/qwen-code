@@ -891,6 +891,9 @@ interface FakeBridge extends AcpSessionBridge {
   readonly liveTaskToolRequestHandler: Parameters<
     NonNullable<AcpSessionBridge['setLiveTaskToolRequestHandler']>
   >[0];
+  readonly liveSpeakToUserHandler: Parameters<
+    NonNullable<AcpSessionBridge['setLiveSpeakToUserHandler']>
+  >[0];
   calls: BridgeSpawnRequest[];
   loadCalls: BridgeRestoreSessionRequest[];
   resumeCalls: BridgeRestoreSessionRequest[];
@@ -1174,6 +1177,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   >[0];
   let liveTaskToolRequestHandler: Parameters<
     NonNullable<AcpSessionBridge['setLiveTaskToolRequestHandler']>
+  >[0];
+  let liveSpeakToUserHandler: Parameters<
+    NonNullable<AcpSessionBridge['setLiveSpeakToUserHandler']>
   >[0];
   const spawnImpl =
     opts.spawnImpl ??
@@ -1690,6 +1696,12 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     },
     setLiveTaskToolRequestHandler(handler) {
       liveTaskToolRequestHandler = handler;
+    },
+    get liveSpeakToUserHandler() {
+      return liveSpeakToUserHandler;
+    },
+    setLiveSpeakToUserHandler(handler) {
+      liveSpeakToUserHandler = handler;
     },
     calls,
     loadCalls,
@@ -26804,6 +26816,9 @@ describe('Live Appshot server integration', () => {
       get captureHandler() {
         return conversationBridge.liveScreenContextHandler;
       },
+      get speakHandler() {
+        return conversationBridge.liveSpeakToUserHandler;
+      },
       connectHost(instanceNonce: string) {
         const socket = new FakeLiveHostSocket();
         coordinator.attachHost(
@@ -27095,6 +27110,7 @@ describe('Live Appshot server integration', () => {
       channelGate.resolve(undefined);
       await vi.waitFor(() => {
         expect(setup.captureHandler).toEqual(expect.any(Function));
+        expect(setup.speakHandler).toEqual(expect.any(Function));
         expect(setup.coordinator.getStatus()).toMatchObject({
           available: true,
           state: 'idle',
