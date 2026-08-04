@@ -28,7 +28,7 @@ export interface RecordArtifactParams {
   metadata?: Record<string, string | number | boolean | null>;
 }
 
-const DESCRIPTION = `Registers a session artifact so clients can show it in an artifacts panel. Use it after creating a useful file, URL, image, report, notebook, or other intermediate result that the user may want to open later, unless the producing tool already returned artifact metadata. For example, write_file automatically records HTML, image, PDF, and notebook files it writes inside the workspace, so do not call record_artifact again for the same workspacePath; still call it for other formats such as Markdown, CSV, JSON, and plain text, and for files produced outside write_file.
+const DESCRIPTION = `Registers a session artifact so clients can show it in an artifacts panel. Use it after creating a useful file, URL, image, report, notebook, or other intermediate result that the user may want to open later, unless the producing tool already returned artifact metadata. For example, write_file automatically records HTML, image, PDF, and notebook files it writes inside the workspace, so do not call record_artifact again for the same workspacePath; still call it for other formats such as Markdown, CSV, JSON, and plain text, and for files produced outside write_file. When the session creates a remote resource, such as a pull request, issue, or comment submitted via gh, record its URL with kind "link" and the url locator so the user can reopen it later.
 
 This tool only records metadata. It does not publish, upload, read, write, or verify the referenced resource. Provide exactly one locator: workspacePath, managedId, or url. Use the Artifact tool, not record_artifact, for published interactive HTML artifacts.`;
 
