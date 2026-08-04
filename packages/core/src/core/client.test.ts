@@ -3268,6 +3268,59 @@ describe('Gemini Client (client.ts)', () => {
       );
     });
 
+    it('omits the soft-exceeded marker when clearing lands exactly on the watermark', async () => {
+      // Pins the marker's absence at the boundary: virtual total after
+      // clearing == watermark must NOT be flagged (kills the `>=` and
+      // always-true mutants of the marker condition).
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+      const { history } = await makeReadFileResponses(3, 150_000);
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory,
+      } as unknown as GeminiChat;
+      vi.mocked(mockConfig.getClearContextOnIdle).mockReturnValue({
+        toolResultsThresholdMinutes: 60,
+        toolResultsNumToKeep: 1,
+        toolResultsTotalCharsThreshold: 500_000,
+      });
+      client['lastApiCompletionTimestamp'] = Date.now();
+      mockClientDebugLogger.info.mockClear();
+
+      const stream = client.sendMessageStream(
+        [
+          {
+            functionResponse: {
+              id: 'pending-shell-exact',
+              name: 'run_shell_command',
+              response: { output: 'Y'.repeat(100_000) },
+            },
+          },
+        ],
+        new AbortController().signal,
+        'prompt-toolresult-watermark-boundary',
+        { type: SendMessageType.ToolResult },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      // 550K total → clear two 150K reads → 150K committed + 100K pending
+      // sits exactly on the 250K watermark.
+      expect(setHistory).toHaveBeenCalled();
+      expect(clear).not.toHaveBeenCalled();
+      expect(markReadEvictedFromHistory).toHaveBeenCalledTimes(2);
+      expect(mockClientDebugLogger.info).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'history now 150000 (+100000 pending), target 250000',
+        ),
+      );
+      expect(mockClientDebugLogger.info).not.toHaveBeenCalledWith(
+        expect.stringContaining('(soft-exceeded)'),
+      );
+    });
+
     it('logs size overages when protected results leave nothing to clear', async () => {
       const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
       const { history } = await makeReadFileResponses(2, 400_000);
