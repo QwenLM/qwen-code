@@ -30,6 +30,11 @@ import {
   verificationGaps,
   TranscriptsUnavailableError,
 } from './lib/coverage.js';
+import {
+  BUDGET_STOP_PHRASE,
+  budgetStopDisclosure,
+  readBudgetStop,
+} from './lib/deadline.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import { gh, setGhHost } from './lib/gh.js';
 import {
@@ -351,6 +356,36 @@ function composeReviewBody(
     subjectZh?: string;
     reasonZh?: string;
   }> = [];
+  // The budget-stop marker: when the reverse-audit round builder refused a
+  // round on the review's time budget, it recorded the refusal beside the
+  // prompt records. Synthesizing the disclosure from the marker makes the
+  // verdict cap deterministic — the orchestrator's own copy of the entry
+  // (the stderr instruction asks for one) is a courtesy to the terminal
+  // reader, and a run that drops the sentence still cannot approve past a
+  // truncated audit. Rendered STRUCTURAL, both languages, like every other
+  // coverage entry — the orchestrator's relayed copy is English-only prose,
+  // so the marker's phrase dedups it out and the two channels never say it
+  // twice.
+  // The marker's entry is tracked by reference: its relays are deduped by
+  // the phrase splice here, so the caller-echo filter below must NOT also
+  // prefix-match on its `reverse audit` subject — that shadow silently
+  // dropped every OTHER reverse-audit scope the orchestrator disclosed
+  // (`reverse audit — chunk 2's auditor returned nothing substantive
+  // twice`), in exactly the runs where a partial audit makes such scopes
+  // likeliest.
+  let budgetEntry: (typeof coverageEntries)[number] | undefined;
+  if (input.planPath) {
+    const stop = readBudgetStop(input.planPath);
+    if (stop !== null) {
+      for (let i = unreviewed.length - 1; i >= 0; i--) {
+        if (unreviewed[i].includes(BUDGET_STOP_PHRASE)) {
+          unreviewed.splice(i, 1);
+        }
+      }
+      budgetEntry = budgetStopDisclosure(stop.round ?? undefined);
+      coverageEntries.push(budgetEntry);
+    }
+  }
   // The fixes for the gaps above, for stderr — never for the body. The gap says
   // what the review cannot certify, to the PR author; the remediation names the
   // command that repairs it, to the orchestrator. #7012's public body was fourteen
@@ -881,8 +916,15 @@ function composeReviewBody(
   for (const d of unreviewed) {
     if (seenCaller.has(d)) continue; // a caller pasting itself twice
     seenCaller.add(d);
+    // The budget-stop entry never prefix-matches: its relays are already
+    // deduped by the marker phrase above, and letting its `reverse audit`
+    // subject claim the prefix swallowed unrelated reverse-audit scopes the
+    // caller disclosed with their own reasons (a bare subject echo still
+    // dedups).
     const echoesCoverage = covEntries.some(
-      (e) => d === e.subject || d.startsWith(`${e.subject} — `),
+      (e) =>
+        d === e.subject ||
+        (e !== budgetEntry && d.startsWith(`${e.subject} — `)),
     );
     if (!echoesCoverage) callerLeft.push(d);
   }
