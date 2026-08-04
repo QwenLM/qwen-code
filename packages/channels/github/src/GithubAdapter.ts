@@ -52,9 +52,10 @@ function ghHostname(channelName: string, baseUrl: string): string {
       `[Channel:${channelName}] local GitHub CLI authentication requires an HTTPS baseUrl.`,
     );
   }
-  return url.host === 'api.github.com' ? 'github.com' : url.host;
+  return url.hostname === 'api.github.com' ? 'github.com' : url.hostname;
 }
 
+// Sibling gh subprocess wrappers: core/src/utils/github-prs.ts, cli/src/commands/review/lib/gh.ts
 function resolveGhAuthToken(
   channelName: string,
   hostname: string,
@@ -78,14 +79,19 @@ function resolveGhAuthToken(
       (error, stdout, stderr) => {
         if (error) {
           const code = (error as NodeJS.ErrnoException).code;
-          const message =
-            code === 'ENOENT'
-              ? 'GitHub CLI (gh) is not installed on the daemon host.'
-              : (error as { killed?: unknown }).killed === true
-                ? `GitHub CLI authentication lookup for ${hostname} timed out after ${GH_AUTH_TIMEOUT_MS / 1000} seconds.`
-                : typeof code === 'number'
-                  ? `No GitHub CLI authentication is available for ${hostname}. Run \`gh auth login --hostname ${hostname}\` on the daemon host.`
-                  : `GitHub CLI authentication lookup for ${hostname} failed to execute.`;
+          let message: string;
+          if (code === 'ENOENT') {
+            message =
+              'GitHub CLI (gh) is not installed on the daemon host or is not on the daemon PATH.';
+          } else if ((error as { killed?: unknown }).killed === true) {
+            // Node sets killed=true even when the timed-out child also exited
+            // with a numeric code, so this must precede the exit-code branch.
+            message = `GitHub CLI authentication lookup for ${hostname} timed out after ${GH_AUTH_TIMEOUT_MS / 1000} seconds.`;
+          } else if (typeof code === 'number') {
+            message = `No GitHub CLI authentication is available for ${hostname}. Run \`gh auth login --hostname ${hostname}\` on the daemon host.`;
+          } else {
+            message = `GitHub CLI authentication lookup for ${hostname} failed to execute.`;
+          }
           const stderrHint = stderr ? sanitizeLogText(stderr, 512).trim() : '';
           reject(
             new Error(
@@ -518,6 +524,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const auth = configuredToken
       ? configuredToken
       : await resolveGhAuthToken(this.name, ghHostname(this.name, baseUrl));
+    process.stderr.write(
+      `[Channel:${this.name}] using ${
+        configuredToken
+          ? 'configured token'
+          : `local gh credential for ${ghHostname(this.name, baseUrl)}`
+      }\n`,
+    );
     this.webOrigin = baseUrl
       .replace(/\/api\/v3\/?$/, '')
       .replace(/^https:\/\/api\.github\.com/, 'https://github.com');
@@ -532,7 +545,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       const { data } = await this.octokit.rest.users.getAuthenticated();
       this.botUsername = data.login;
       process.stderr.write(
-        `[Channel:${this.name}] authenticated as "${data.login}"\n`,
+        `[Channel:${this.name}] authenticated as "${sanitizeLogText(data.login, 64)}"\n`,
       );
     } catch (err) {
       throw new Error(

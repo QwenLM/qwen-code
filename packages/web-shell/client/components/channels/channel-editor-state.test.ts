@@ -328,6 +328,27 @@ describe('Descriptor-driven senderPolicy', () => {
     ).toEqual({ token: { operation: 'clear' } });
   });
 
+  it('replaces an existing optional secret with a non-blank value', () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'my-bot',
+      config: {
+        type: 'github',
+        useLocalGh: true,
+        groupPolicy: 'open',
+        senderPolicy: 'allowlist',
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(GITHUB, instance);
+    draft.secrets.token = { operation: 'replace', value: 'ghp_new' };
+
+    expect(
+      buildChannelUpsertRequest(GITHUB, draft, 'rev-6', instance).secrets,
+    ).toEqual({ token: { operation: 'replace', value: 'ghp_new' } });
+  });
+
   it('keeps an unchanged stored token valid while editing an existing channel', () => {
     const instance: DaemonChannelInstanceSnapshot = {
       name: 'my-bot',

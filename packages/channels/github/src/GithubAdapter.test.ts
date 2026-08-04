@@ -360,7 +360,27 @@ describe('GithubChannel', () => {
         await channel.connect();
         expect(mockOctokit.rest.users.getAuthenticated).toHaveBeenCalled();
         expect(stderr).toHaveBeenCalledWith(
+          '[Channel:test-github] using configured token\n',
+        );
+        expect(stderr).toHaveBeenCalledWith(
           '[Channel:test-github] authenticated as "test-bot"\n',
+        );
+      } finally {
+        channel.disconnect();
+        stderr.mockRestore();
+      }
+    });
+
+    it('sanitizes the authenticated login in the stderr audit line', async () => {
+      mockOctokit.rest.users.getAuthenticated.mockResolvedValue({
+        data: { id: 99999, login: 'bot\nforged-line' },
+      });
+      mockOctokit.paginate.mockResolvedValue([]);
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        await channel.connect();
+        expect(stderr).toHaveBeenCalledWith(
+          '[Channel:test-github] authenticated as "bot\\nforged-line"\n',
         );
       } finally {
         channel.disconnect();
@@ -488,16 +508,24 @@ describe('GithubChannel', () => {
         makeBridge(),
       );
       mockOctokit.paginate.mockResolvedValue([]);
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
 
-      await channel.connect();
+      try {
+        await channel.connect();
 
-      expect(mockExecFile).toHaveBeenCalledWith(
-        'gh',
-        ['auth', 'token', '--hostname', 'ghe.example.com:8443'],
-        expect.any(Object),
-        expect.any(Function),
-      );
-      channel.disconnect();
+        expect(mockExecFile).toHaveBeenCalledWith(
+          'gh',
+          ['auth', 'token', '--hostname', 'ghe.example.com'],
+          expect.any(Object),
+          expect.any(Function),
+        );
+        expect(stderr).toHaveBeenCalledWith(
+          '[Channel:test-github] using local gh credential for ghe.example.com\n',
+        );
+      } finally {
+        channel.disconnect();
+        stderr.mockRestore();
+      }
     });
 
     it('rejects an insecure API URL before resolving local gh credentials', async () => {
