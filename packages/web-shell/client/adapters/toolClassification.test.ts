@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { ACPToolCall } from './types';
-import { isBackgroundSubAgentToolCall } from './toolClassification';
+import {
+  isActiveToolStatus,
+  isBackgroundSubAgentToolCall,
+} from './toolClassification';
 
 function agentTool(args: Record<string, unknown> = {}): ACPToolCall {
   return {
@@ -10,6 +13,19 @@ function agentTool(args: Record<string, unknown> = {}): ACPToolCall {
     status: 'completed',
   };
 }
+
+describe('isActiveToolStatus', () => {
+  it.each(['pending', 'in_progress', 'running'])(
+    'treats %s as active',
+    (status) => {
+      expect(isActiveToolStatus(status)).toBe(true);
+    },
+  );
+
+  it.each(['completed', 'failed'])('treats %s as terminal', (status) => {
+    expect(isActiveToolStatus(status)).toBe(false);
+  });
+});
 
 describe('isBackgroundSubAgentToolCall', () => {
   it('treats an ordinary agent as background when the flag is omitted', () => {
