@@ -395,13 +395,18 @@ describe('qwen resolve workflow', () => {
     expect(runStep).toContain(
       'EFFECTIVE_TIMEOUT_MINUTES="${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}"',
     );
-    // Unordered containment would survive swapping the two assignments between
-    // the branches, which silently inverts the tiers.
-    expect(runStep.indexOf('EFFECTIVE_TIMEOUT_MINUTES=180')).toBeLessThan(
-      runStep.indexOf(
-        'EFFECTIVE_TIMEOUT_MINUTES="${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}"',
-      ),
+    // Slice the small-PR arm so a swap of the two assignments between the
+    // branches fails: unordered containment keeps both texts present.
+    const smallPrStart = runStep.indexOf(
+      'if [ "$PR_SIZE_LINES" -le 300 ]; then',
     );
+    expect(smallPrStart).toBeGreaterThan(-1);
+    const smallPrArm = runStep.slice(
+      smallPrStart,
+      runStep.indexOf('else', smallPrStart),
+    );
+    expect(smallPrArm).toContain('EFFECTIVE_TIMEOUT_MINUTES=180');
+    expect(smallPrArm).not.toContain('vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES');
     expect(runStep).not.toContain('EFFECTIVE_TIMEOUT_MINUTES=210');
     expect(runStep).toContain(
       'echo "effective_timeout_minutes=$EFFECTIVE_TIMEOUT_MINUTES"',
@@ -432,11 +437,15 @@ describe('qwen resolve workflow', () => {
     expect(fallbackStep).toContain('if [ "$FAILURE_KIND" = "timeout" ]; then');
     // Slice the below-max arm so a transposition of the two bodies fails:
     // unordered containment keeps both texts present in the wrong arms.
+    // Search for the else from the arm start so an unrelated earlier if/else
+    // in this step cannot invert the slice.
+    const belowMaxStart = fallbackStep.indexOf(
+      'if [ "$TIMEOUT_MINUTES" -lt "$MAX_TIMEOUT_MINUTES" ]; then',
+    );
+    expect(belowMaxStart).toBeGreaterThan(-1);
     const belowMaxArm = fallbackStep.slice(
-      fallbackStep.indexOf(
-        'if [ "$TIMEOUT_MINUTES" -lt "$MAX_TIMEOUT_MINUTES" ]; then',
-      ),
-      fallbackStep.indexOf('else'),
+      belowMaxStart,
+      fallbackStep.indexOf('else', belowMaxStart),
     );
     expect(belowMaxArm).toContain(
       '@qwen-code /review --timeout=${MAX_TIMEOUT_MINUTES}',
@@ -607,9 +616,13 @@ describe('qwen resolve workflow', () => {
     expect(authorizeStep).toMatch(
       /if \[ "\$PR_ACTION" = "review_requested" \]; then\s+principal="\$SENDER"/,
     );
+    const reviewRequestedStart = authorizeStep.indexOf(
+      'if [ "$PR_ACTION" = "review_requested" ]; then',
+    );
+    expect(reviewRequestedStart).toBeGreaterThan(-1);
     const reviewRequestedBranch = authorizeStep.slice(
-      authorizeStep.indexOf('if [ "$PR_ACTION" = "review_requested" ]; then'),
-      authorizeStep.indexOf('else'),
+      reviewRequestedStart,
+      authorizeStep.indexOf('else', reviewRequestedStart),
     );
     expect(reviewRequestedBranch).toContain('principal="$SENDER"');
     expect(reviewRequestedBranch).not.toContain(
