@@ -519,9 +519,9 @@ function runCaptureToolsStep({
       // scenario: its cleanup (`rm -rf "$tmp"`) is otherwise invisible to
       // every test.
       `export TMPDIR="${tmpRoot}"`,
-      // The promoted per-run dir is created under RUNNER_TEMP — job-scoped
-      // and runner-cleaned on real runners — pinned here so tests can assert
-      // exactly what the job's later steps would resolve from PATH.
+      // The promoted per-run dir is created under RUNNER_TEMP, which survives
+      // across jobs on the shared pool; 'Clean stale agent state' removes the
+      // stale dirs before each run (pinned in the wiring block below).
       `export RUNNER_TEMP="${runnerTemp}"`,
       `export FREEZE_VERSION="${env.FREEZE_VERSION}"`,
       `export FREEZE_SHA256="${env.FREEZE_SHA256}"`,
@@ -580,7 +580,8 @@ function runCaptureToolsStep({
       // cleanup below: the step's `rm -rf "$tmp"` must leave TMPDIR empty,
       // and on the persistent runner anything left behind accumulates
       // forever. The promoted per-run dir lives in the separate RUNNER_TEMP
-      // tree and is exempt by design — later steps still execute from it.
+      // tree and is exempt here — later steps of the same job still execute
+      // from it; 'Clean stale agent state' removes it before the next run.
       leakedTmpEntries: readdirSync(tmpRoot),
     };
   } finally {
@@ -691,6 +692,9 @@ echo "freeze \${FREEZE_VERSION}"
       });
       expect(r.status).toBe(0);
       expect(r.calls).toContain('sha256sum ');
+      // The rejection speaks: a silent rm here is exactly the degradation
+      // the step's report exists to prevent.
+      expect(r.stdout).toContain('cached freeze failed re-verification');
       expect(existsSync(join(markerDir, 'pwned'))).toBe(false);
       // The mismatch deletes the plant and forces the checksummed re-download.
       expect(r.calls).toContain('curl ');
@@ -800,6 +804,31 @@ echo "freeze \${FREEZE_VERSION}"
     expect(r.leakedTmpEntries).toStrictEqual([]);
   });
 
+  it('ignores a hash-valid cache when the per-run mktemp fails — never installs at an empty-prefix path', () => {
+    // Cache-path twin of the download-path guard: without the cache branch's
+    // `[ -n "$tools_bin" ] &&`, the install target resolves to `/freeze` and
+    // the recorded call fails this test. The valid cache must survive: it is
+    // only ever deleted on a hash mismatch, not because the per-run dir is
+    // absent.
+    const r = runCaptureToolsStep({
+      cacheFreeze: '#!/bin/bash\necho "freeze ${FREEZE_VERSION}"\n',
+      cacheHashOk: true,
+      stubs: {
+        mktemp: mktempNoToolsDirStub,
+        curl: okCurlStub,
+        sha256sum: okSha256Stub,
+        tar: okTarStub,
+        install: 'exit 0',
+      },
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('freeze install failed');
+    expect(r.calls).not.toContain('install ');
+    expect(r.promotedDir).toBeNull();
+    expect(r.cacheFreezeExists).toBe(true);
+    expect(r.leakedTmpEntries).toStrictEqual([]);
+  });
+
   it('exits 0 when tar extraction fails — and installs nothing', () => {
     const r = runCaptureToolsStep({
       stubs: { curl: okCurlStub, sha256sum: okSha256Stub, tar: 'exit 1' },
@@ -879,6 +908,7 @@ echo "freeze \${FREEZE_VERSION}"
     });
     expect(r.status).toBe(0);
     expect(r.calls).toContain('sudo apt-get update -qq');
+    expect(r.calls).toContain('sudo -n true');
     expect(r.calls).toContain('sudo apt-get install -y -qq tmux');
     expect(r.calls).not.toContain('sudo install');
     expect(r.promotedFreezeExists).toBe(true);
@@ -889,12 +919,44 @@ describe('capture-tools step wiring', () => {
   it('installs before the review step its PATH promotion exists for', () => {
     // GITHUB_PATH entries and in-step PATH exports only reach LATER steps:
     // moved below 'Run review', the installed freeze is invisible to the
-    // review while the install log still shows success.
+    // review while the install log still shows success. Above 'Resolve PR
+    // context', the step's if: reads an output that does not exist yet,
+    // evaluates false, and the step is silently skipped on every run.
     const install = workflow.indexOf(
       "- name: 'Install capture tools (tmux + freeze)'",
     );
     expect(install).toBeGreaterThan(-1);
     expect(install).toBeLessThan(workflow.indexOf("- name: 'Run review'"));
+    expect(install).toBeGreaterThan(
+      workflow.indexOf("- name: 'Resolve PR context'"),
+    );
+  });
+
+  it('only runs when the review runs', () => {
+    // Sibling-consistent guard: without it (or a misspelling of it) the
+    // install step runs on every non-review firing of this workflow —
+    // apt-get, a network download, and persistent cache + GITHUB_PATH writes
+    // for a review that never happens. The job-level gate subsumes it today;
+    // this pin catches a future loosening.
+    const doc = parse(workflow);
+    const step = doc.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Install capture tools (tmux + freeze)',
+    );
+    expect(step.if).toBe("steps.context.outputs.should_run == 'true'");
+  });
+
+  it('cleans stale per-run tool dirs before the next run creates one', () => {
+    // The install step creates one qwen-review-tools.* dir per run under
+    // RUNNER_TEMP and nothing else removes it; RUNNER_TEMP survives across
+    // jobs on the shared pool, so without this line every review run
+    // accumulates one dir + one Go binary on the runner, unbounded.
+    const doc = parse(workflow);
+    const clean = doc.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Clean stale agent state',
+    ).run;
+    expect(clean).toContain(
+      'rm -rf "${RUNNER_TEMP:-/tmp}"/qwen-review-tools.*',
+    );
   });
 
   it('passes the assets-repo variable into the review step', () => {

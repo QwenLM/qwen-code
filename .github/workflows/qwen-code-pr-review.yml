@@ -374,9 +374,10 @@ jobs:
 
       # Self-hosted runners reuse $HOME, /tmp and the workspace, so a prior run
       # can bleed into this one: its agent session/memory (under QWEN_HOME),
-      # leftover draft comments (/tmp/stage-*.md, which survive `git clean`), or
-      # a stale `.qwen/tmp/review-pr-*` worktree / `qwen-review/*` branch from an
-      # interrupted review. Reset all three per run; never fail the job.
+      # leftover draft comments (/tmp/stage-*.md, which survive `git clean`),
+      # a stale `.qwen/tmp/review-pr-*` worktree / `qwen-review/*` branch from
+      # an interrupted review, or stale per-run capture-tools dirs under
+      # RUNNER_TEMP. Reset all of them per run; never fail the job.
       - name: 'Clean stale agent state'
         run: |-
           set -uo pipefail
@@ -386,6 +387,12 @@ jobs:
           rm -rf "$QWEN_HOME" 2>/dev/null || true
           mkdir -p "$QWEN_HOME"
           rm -f /tmp/stage-*.md 2>/dev/null || true
+          # Stale per-run capture-tools dirs: 'Install capture tools' creates
+          # one under RUNNER_TEMP per run and nothing else removes it, and
+          # RUNNER_TEMP survives across jobs on the shared pool (see the EACCES
+          # incident note in 'Run review'). Runs before that step creates this
+          # run's dir, so only stale dirs are touched.
+          rm -rf "${RUNNER_TEMP:-/tmp}"/qwen-review-tools.* 2>/dev/null || true
           # `.git` is a directory in a normal checkout but a gitlink file in a
           # worktree; -e covers both, and a missing .git (first run) too.
           if [ ! -e .git ]; then
@@ -511,6 +518,11 @@ jobs:
         # would eat the job cap instead of degrading to ans-only.
         timeout-minutes: 5
         env:
+          # Bump checklist: verify BOTH hashes against the real release
+          # artifacts (tarball bytes vs FREEZE_SHA256, extracted binary vs
+          # FREEZE_BIN_SHA256) before pushing — the harness stubs key on these
+          # same values, so a transposed pair passes every test and fails only
+          # at run time.
           FREEZE_VERSION: '0.2.2'
           FREEZE_SHA256: '012fdbdd16c0c19570f9052aac34d16d93d7d0d3b565b05374cc59492f53539b'
           # sha256 of the freeze binary INSIDE the pinned tarball: the
@@ -564,6 +576,7 @@ jobs:
             if echo "${FREEZE_BIN_SHA256}  $tools_bin/freeze" | sha256sum -c - >/dev/null 2>&1; then
               have_freeze=true
             else
+              echo 'cached freeze failed re-verification against the pinned sha256; removing and falling back to the download path.'
               rm -f "$tools_bin/freeze" "$cache_bin/freeze"
             fi
           fi
