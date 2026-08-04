@@ -24,6 +24,7 @@ import { AuthType } from '../core/contentGenerator.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
 import * as sideQueryModule from '../utils/sideQuery.js';
 import * as postCompactModule from './postCompactAttachments.js';
+import * as slimmingModule from './compactionInputSlimming.js';
 import { logChatCompression } from '../telemetry/loggers.js';
 
 vi.mock('../telemetry/uiTelemetry.js');
@@ -2339,6 +2340,7 @@ describe('ChatCompressionService.compress cache sharing', () => {
     const history = makeMediaHistory();
     const { chat, config, generateText } = makeFixture({ history });
     const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
+    const slimSpy = vi.spyOn(slimmingModule, 'slimCompactionInput');
 
     await new ChatCompressionService().compress(chat, {
       promptId: 'p',
@@ -2356,6 +2358,7 @@ describe('ChatCompressionService.compress cache sharing', () => {
     expect(JSON.stringify(request.contents)).toContain('image-bytes');
     expect(JSON.stringify(request.contents)).toContain('pdf-bytes');
     expect(coldSpy).not.toHaveBeenCalled();
+    expect(slimSpy).not.toHaveBeenCalled();
   });
 
   it.each([AuthType.QWEN_OAUTH, AuthType.USE_OPENAI])(
@@ -2612,6 +2615,7 @@ describe('ChatCompressionService.compress cache sharing', () => {
     const history = makeMediaHistory();
     const { chat, config, generateText } = makeFixture({ history });
     generateText.mockRejectedValue(new Error('provider failed'));
+    const slimSpy = vi.spyOn(slimmingModule, 'slimCompactionInput');
     const coldSpy = vi
       .spyOn(sideQueryModule, 'runSideQuery')
       .mockResolvedValue({
@@ -2632,6 +2636,7 @@ describe('ChatCompressionService.compress cache sharing', () => {
     });
 
     expect(generateText).toHaveBeenCalledTimes(1);
+    expect(slimSpy).toHaveBeenCalledTimes(1);
     expect(coldSpy).toHaveBeenCalledTimes(1);
     expect(coldSpy.mock.calls[0]![1].contents[0]?.parts).toEqual([
       { text: '[image: image/png]' },
