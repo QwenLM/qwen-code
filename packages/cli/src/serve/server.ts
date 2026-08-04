@@ -1246,6 +1246,13 @@ export function createServeApp(
       throw new Error('Live conversation runtime has no task-tool channel.');
     }
     setTaskHandler.call(runtime.bridge, (info) => liveTaskService.handle(info));
+    const setSpeakHandler = runtime.bridge.setLiveSpeakToUserHandler;
+    if (!setSpeakHandler) {
+      throw new Error('Live conversation runtime has no speech channel.');
+    }
+    setSpeakHandler.call(runtime.bridge, ({ callerSessionId, message }) =>
+      liveSessionCoordinator.speakToUser(callerSessionId, message),
+    );
   };
   const ensureLiveConversationRuntime = (): Promise<WorkspaceRuntime> => {
     if (liveCoordinatorSealed) {
@@ -1473,6 +1480,7 @@ export function createServeApp(
     liveCoordinatorStopped = true;
     liveRuntime?.bridge.setLiveScreenContextCaptureHandler?.(undefined);
     liveRuntime?.bridge.setLiveTaskToolRequestHandler?.(undefined);
+    liveRuntime?.bridge.setLiveSpeakToUserHandler?.(undefined);
     liveSessionCoordinator.dispose();
     liveCoordinator.dispose();
   };

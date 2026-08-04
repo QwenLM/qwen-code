@@ -575,6 +575,17 @@ export type LiveTaskToolRequestHandler = (
   info: LiveTaskToolRequestInfo,
 ) => Promise<Record<string, unknown>>;
 
+export const MAX_LIVE_SPEAK_TO_USER_MESSAGE_CHARS = 32_000;
+
+export interface LiveSpeakToUserInfo {
+  callerSessionId: string;
+  message: string;
+}
+
+export type LiveSpeakToUserHandler = (
+  info: LiveSpeakToUserInfo,
+) => Promise<void>;
+
 // Canonical set — cli channel-delivery-ipc.ts and bridgeClient.ts import this;
 // sdk-typescript events.ts carries an independent copy with a cross-check test.
 export type ChannelDeliveryErrorCode =

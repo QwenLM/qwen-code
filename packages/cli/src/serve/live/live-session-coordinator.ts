@@ -50,6 +50,7 @@ export { LIVE_SESSION_SOURCE_PREFIX } from './session-source.js';
 const MAX_COORDINATOR_REQUEST_CHARS = 32_000;
 const MAX_COORDINATOR_RESULT_CHARS = 48_000;
 const COORDINATOR_TURN_TIMEOUT_MS = 10 * 60_000;
+const BACKEND_CONTEXT_FLUSH_MS = 200;
 const DEFAULT_GRACEFUL_STOP_DRAIN_MS = 30_000;
 const SESSION_SCAN_SIZE = 100;
 const MAX_LIVE_CAPTION_CHARS = 8_192;
@@ -179,6 +180,7 @@ interface LiveCallContext {
   delegatesInFlight: number;
   delegateAdmissions: Map<string, DelegateAdmission>;
   activeHandoff?: ActiveHandoff;
+  flushBackendContext?: () => void;
   completedInputTranscripts: Map<string, string>;
   admittedInputItemIds: Set<string>;
   partialInputTranscripts: Map<string, string>;
@@ -444,6 +446,23 @@ export class LiveSessionCoordinator {
       1,
       options.gracefulStopDrainMs ?? DEFAULT_GRACEFUL_STOP_DRAIN_MS,
     );
+  }
+
+  async speakToUser(callerSessionId: string, message: string): Promise<void> {
+    const context = this.active;
+    if (
+      !context ||
+      !this.isActive(context) ||
+      context.stopping ||
+      context.coordinator?.sessionId !== callerSessionId ||
+      !context.realtime
+    ) {
+      throw new Error('No active Live conversation owns this backend session.');
+    }
+    context.flushBackendContext?.();
+    if (!context.realtime.speakToUser(message)) {
+      throw new Error('The active Live conversation could not speak.');
+    }
   }
 
   async start(call: {
@@ -720,6 +739,13 @@ export class LiveSessionCoordinator {
         const admission = createDelegateAdmission();
         context.delegateAdmissions.set(trackedInputItemId, admission);
         context.delegatesInFlight += 1;
+        const markPromptAdmitted = () => {
+          admission.state = 'admitted';
+          context.admittedInputItemIds.add(trackedInputItemId);
+          this.resolveCommittedInput(context, trackedInputItemId);
+          admission.settle(true);
+          this.maybeFinishGracefulStop(context);
+        };
         const activeHandoff = context.activeHandoff;
         if (activeHandoff) {
           admission.state = 'dispatching';
@@ -729,12 +755,7 @@ export class LiveSessionCoordinator {
             generation,
             source,
             activeHandoff,
-            () => {
-              admission.state = 'admitted';
-              context.admittedInputItemIds.add(trackedInputItemId);
-              admission.settle(true);
-              this.maybeFinishGracefulStop(context);
-            },
+            markPromptAdmitted,
           )
             .then((persisted) => {
               if (!persisted) {
@@ -771,12 +792,13 @@ export class LiveSessionCoordinator {
           ...createTurnCompletion(),
         };
         context.activeHandoff = handoff;
-        void this.handleDelegate(context, event, generation, source, () => {
-          admission.state = 'admitted';
-          context.admittedInputItemIds.add(trackedInputItemId);
-          admission.settle(true);
-          this.maybeFinishGracefulStop(context);
-        })
+        void this.handleDelegate(
+          context,
+          event,
+          generation,
+          source,
+          markPromptAdmitted,
+        )
           .then((persisted) => {
             if (!persisted) {
               admission.state = 'cancelled';
@@ -1249,7 +1271,7 @@ export class LiveSessionCoordinator {
       },
       (message) => {
         if (this.isCurrentSocket(context, generation)) {
-          source.sendBackendUpdate(message);
+          source.sendBackendContext(message);
         }
       },
     );
@@ -1269,7 +1291,6 @@ export class LiveSessionCoordinator {
       this.options.host.setCallState(context.epoch, 'thinking');
     }
     let persisted = false;
-    let sentMessages = 0;
     try {
       await context.transcriptPersistence;
       const locator = await this.ensureCoordinator(context);
@@ -1283,14 +1304,13 @@ export class LiveSessionCoordinator {
         (message) => {
           if (
             this.isCurrentSocket(context, generation) &&
-            context.realtime === source &&
+            context.realtime === source
+          ) {
             source.sendHandoffUpdate({
               callEpoch: context.epoch,
               callId: event.callId,
               output: message,
-            })
-          ) {
-            sentMessages += 1;
+            });
           }
         },
       );
@@ -1299,18 +1319,16 @@ export class LiveSessionCoordinator {
       const message = `The Qwen Code agent could not complete the request: ${errorMessage(error)}`;
       if (
         this.isCurrentSocket(context, generation) &&
-        context.realtime === source &&
+        context.realtime === source
+      ) {
         source.sendHandoffUpdate({
           callEpoch: context.epoch,
           callId: event.callId,
           output: message,
-        })
-      ) {
-        sentMessages += 1;
+        });
       }
     }
     if (
-      sentMessages > 0 &&
       this.isCurrentSocket(context, generation) &&
       context.realtime === source &&
       source.completeHandoff({
@@ -1545,12 +1563,26 @@ export class LiveSessionCoordinator {
     const signal = turnAbort.signal;
     let text = '';
     let agentMessage = '';
+    let agentMessageTimer: ReturnType<typeof setTimeout> | undefined;
     let stopReason: string | undefined;
     const flushAgentMessage = () => {
+      if (agentMessageTimer) {
+        clearTimeout(agentMessageTimer);
+        agentMessageTimer = undefined;
+      }
       if (!agentMessage.trim()) return;
       onAgentMessage?.(agentMessage);
       agentMessage = '';
     };
+    const scheduleAgentMessageFlush = () => {
+      if (agentMessageTimer || !agentMessage.trim()) return;
+      agentMessageTimer = setTimeout(
+        flushAgentMessage,
+        BACKEND_CONTEXT_FLUSH_MS,
+      );
+      agentMessageTimer.unref?.();
+    };
+    context.flushBackendContext = flushAgentMessage;
     const collect = (async () => {
       for await (const event of bridge.subscribeEvents(locator.sessionId, {
         lastEventId,
@@ -1564,6 +1596,7 @@ export class LiveSessionCoordinator {
           const chunk = updateText(update);
           text = appendBounded(text, chunk);
           agentMessage = appendBounded(agentMessage, chunk);
+          scheduleAgentMessageFlush();
         } else if (update?.['sessionUpdate'] === 'tool_call') {
           flushAgentMessage();
         } else if (event.type === 'turn_complete') {
@@ -1623,6 +1656,10 @@ export class LiveSessionCoordinator {
       }
       return { text, stopReason };
     } finally {
+      flushAgentMessage();
+      if (context.flushBackendContext === flushAgentMessage) {
+        context.flushBackendContext = undefined;
+      }
       if (this.isActive(context)) {
         this.options.host.setStatusText(context.epoch);
       }
@@ -1698,9 +1735,9 @@ export class LiveSessionCoordinator {
               context.workerIds.has(backgroundTaskId) &&
               this.isActive(context) &&
               !context.stopping &&
-              context.realtime?.sendBackendUpdate(spoken)
+              context.realtime?.sendBackendContext(spoken)
             ) {
-              this.options.host.setCallState(context.epoch, 'thinking');
+              this.options.host.setStatusText(context.epoch);
             }
             announcement = '';
             response = '';

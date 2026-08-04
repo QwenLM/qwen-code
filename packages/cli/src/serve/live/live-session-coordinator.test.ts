@@ -74,7 +74,8 @@ type FakeRealtimeSession = QwenRealtimeSession & {
   cancelResponse: ReturnType<typeof vi.fn>;
   sendHandoffUpdate: ReturnType<typeof vi.fn>;
   completeHandoff: ReturnType<typeof vi.fn>;
-  sendBackendUpdate: ReturnType<typeof vi.fn>;
+  sendBackendContext: ReturnType<typeof vi.fn>;
+  speakToUser: ReturnType<typeof vi.fn>;
   takeTranscriptTail: ReturnType<typeof vi.fn>;
   close: ReturnType<typeof vi.fn>;
 };
@@ -230,7 +231,8 @@ function makeHarness(
     cancelResponse: vi.fn(() => true),
     sendHandoffUpdate: vi.fn(() => true),
     completeHandoff: vi.fn(() => true),
-    sendBackendUpdate: vi.fn(() => true),
+    sendBackendContext: vi.fn(() => true),
+    speakToUser: vi.fn(() => true),
     takeTranscriptTail: vi.fn(() => options.transcriptTail ?? []),
     close: vi.fn(() => resolveClosed({ reason: 'client' })),
   } satisfies FakeRealtimeSession;
@@ -462,6 +464,43 @@ describe('LiveSessionCoordinator', () => {
     ).resolves.toBeUndefined();
   });
 
+  it('stops without waiting for response.done after a handoff is admitted', async () => {
+    const harness = makeHarness({ gracefulStopDrainMs: 5 });
+    await harness.coordinator.start({
+      epoch: 1,
+      callId: 'call-1',
+      mode: 'new',
+    });
+    harness.callbacks.onInputCommitted?.({
+      callEpoch: 1,
+      itemId: 'input-handoff',
+    });
+    harness.callbacks.onInputTranscriptDone?.({
+      callEpoch: 1,
+      itemId: 'input-handoff',
+      text: '创建一个新任务',
+    });
+    harness.callbacks.onDelegateCall?.({
+      callEpoch: 1,
+      responseId: 'response-handoff',
+      inputItemId: 'input-handoff',
+      callId: 'handoff-1',
+      request: '创建一个新任务',
+      activeTranscript: [{ role: 'user', text: '创建一个新任务' }],
+    });
+    await waitFor(() => expect(harness.pendingTurns).toHaveLength(1));
+
+    await expect(
+      harness.coordinator.stop({ epoch: 1, callId: 'call-1' }),
+    ).resolves.toBeUndefined();
+    expect(harness.realtime.close).toHaveBeenCalledWith();
+    expect(harness.realtime.close).not.toHaveBeenCalledWith({
+      discardPendingInput: true,
+    });
+
+    await harness.finishTurn(0, []);
+  });
+
   it('uses the attached Live session and sends the exact delegation envelope', async () => {
     const harness = makeHarness();
     await harness.coordinator.start({
@@ -605,6 +644,33 @@ describe('LiveSessionCoordinator', () => {
     );
   });
 
+  it('completes the handoff when the backend turn ends without ordinary text', async () => {
+    const harness = makeHarness();
+    await harness.coordinator.start({
+      epoch: 1,
+      callId: 'call-1',
+      mode: 'new',
+    });
+    harness.callbacks.onDelegateCall?.({
+      callEpoch: 1,
+      responseId: 'response-1',
+      callId: 'handoff-1',
+      request: '执行任务',
+      activeTranscript: [{ role: 'user', text: '执行任务' }],
+    });
+    await waitFor(() => expect(harness.pendingTurns).toHaveLength(1));
+
+    await harness.finishTurn(0, []);
+
+    await waitFor(() =>
+      expect(harness.realtime.completeHandoff).toHaveBeenCalledWith({
+        callEpoch: 1,
+        callId: 'handoff-1',
+      }),
+    );
+    expect(harness.realtime.sendHandoffUpdate).not.toHaveBeenCalled();
+  });
+
   it('routes a second handoff into the active backend turn', async () => {
     const harness = makeHarness({ enqueueAccepted: true });
     await harness.coordinator.start({
@@ -678,10 +744,65 @@ describe('LiveSessionCoordinator', () => {
 
     await harness.finishTurn(1, [{ type: 'message', text: '第二步完成。' }]);
     await waitFor(() =>
-      expect(harness.realtime.sendBackendUpdate).toHaveBeenCalledWith(
+      expect(harness.realtime.sendBackendContext).toHaveBeenCalledWith(
         '第二步完成。',
       ),
     );
+  });
+
+  it('streams backend message deltas into silent context on the Codex cadence', async () => {
+    const harness = makeHarness();
+    await harness.coordinator.start({
+      epoch: 1,
+      callId: 'call-1',
+      mode: 'new',
+    });
+    harness.callbacks.onDelegateCall?.({
+      callEpoch: 1,
+      responseId: 'response-1',
+      callId: 'handoff-1',
+      request: '执行任务',
+      activeTranscript: [{ role: 'user', text: '执行任务' }],
+    });
+    await waitFor(() => expect(harness.pendingTurns).toHaveLength(1));
+    const promptId = harness.pendingTurns[0]!.promptId;
+
+    harness.publish({
+      type: 'session_update',
+      promptId,
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { text: '增量进度' },
+        },
+      },
+    });
+
+    await waitFor(() =>
+      expect(harness.realtime.sendHandoffUpdate).toHaveBeenCalledWith({
+        callEpoch: 1,
+        callId: 'handoff-1',
+        output: '增量进度',
+      }),
+    );
+  });
+
+  it('routes backend speak_to_user to the owning Realtime conversation', async () => {
+    const harness = makeHarness();
+    await harness.coordinator.start({
+      epoch: 1,
+      callId: 'call-1',
+      mode: 'new',
+    });
+
+    await harness.coordinator.speakToUser('live-new', '正在检查，请稍等。');
+
+    expect(harness.realtime.speakToUser).toHaveBeenCalledWith(
+      '正在检查，请稍等。',
+    );
+    await expect(
+      harness.coordinator.speakToUser('another-session', '错误路由'),
+    ).rejects.toThrow(/No active Live conversation owns/u);
   });
 
   it('resumes only a compatible projectless Live session', async () => {

@@ -35,9 +35,6 @@ export class HostAudioEngine {
   private captureSource: MediaStreamAudioSourceNode | undefined;
   private captureNode: AudioWorkletNode | undefined;
   private outputContext: AudioContext | undefined;
-  private outputDestination: MediaStreamAudioDestinationNode | undefined;
-  private outputStream: MediaStream | undefined;
-  private outputElement: HTMLAudioElement | undefined;
   private outputSources = new Set<AudioBufferSourceNode>();
   private outputCursor = 0;
   private outputGeneration = 0;
@@ -210,7 +207,7 @@ export class HostAudioEngine {
       return;
     }
     const generation = this.outputGeneration;
-    const { context, destination, element } = await this.ensureOutputContext();
+    const context = await this.ensureOutputContext();
     if (generation !== this.outputGeneration || this.outputMuted) {
       this.onDiagnostic('output_frame_stale', {
         bytes: frame.byteLength,
@@ -250,7 +247,7 @@ export class HostAudioEngine {
 
     const source = context.createBufferSource();
     source.buffer = audioBuffer;
-    source.connect(destination);
+    source.connect(context.destination);
     source.onended = () => {
       this.outputSources.delete(source);
       this.onDiagnostic('output_source_ended', {
@@ -261,12 +258,6 @@ export class HostAudioEngine {
     };
     this.outputSources.add(source);
     source.start(schedule.startAt);
-    void element.play().catch((error: unknown) => {
-      this.onDiagnostic('output_element_play_rejected', {
-        error: errorCode(error),
-        generation,
-      });
-    });
     this.outputCursor = schedule.endAt;
     this.onDiagnostic('output_frame_scheduled', {
       bytes: frame.byteLength,
@@ -277,6 +268,8 @@ export class HostAudioEngine {
       endAt: schedule.endAt,
       queuedSeconds: Math.max(0, schedule.endAt - context.currentTime),
       activeSources: this.outputSources.size,
+      contextSampleRate: context.sampleRate,
+      sourceSampleRate: OUTPUT_SAMPLE_RATE,
       rms: Math.sqrt(sumSquares / samples),
       peak,
       zeroCrossings,
@@ -290,7 +283,6 @@ export class HostAudioEngine {
       contextState: this.outputContext?.state,
       contextTime: this.outputContext?.currentTime,
       outputCursor: this.outputCursor,
-      elementPaused: this.outputElement?.paused,
     });
     this.outputGeneration += 1;
     for (const source of this.outputSources) {
@@ -302,16 +294,8 @@ export class HostAudioEngine {
     }
     this.outputSources.clear();
     const context = this.outputContext;
-    const outputStream = this.outputStream;
-    const outputElement = this.outputElement;
     this.outputContext = undefined;
-    this.outputDestination = undefined;
-    this.outputStream = undefined;
-    this.outputElement = undefined;
     this.outputCursor = 0;
-    outputElement?.pause();
-    if (outputElement) outputElement.srcObject = null;
-    for (const track of outputStream?.getTracks() ?? []) track.stop();
     void context?.close().catch(() => undefined);
   }
 
@@ -349,39 +333,21 @@ export class HostAudioEngine {
   }
 
   private async checkOutput(): Promise<void> {
-    if (typeof AudioContext === 'undefined' || typeof Audio === 'undefined') {
+    if (typeof AudioContext === 'undefined')
       throw new Error('audio_output_unavailable');
-    }
   }
 
-  private async ensureOutputContext(): Promise<{
-    context: AudioContext;
-    destination: MediaStreamAudioDestinationNode;
-    element: HTMLAudioElement;
-  }> {
+  private async ensureOutputContext(): Promise<AudioContext> {
     const context =
       this.outputContext ??
       new AudioContext({
         latencyHint: 'interactive',
-        sampleRate: OUTPUT_SAMPLE_RATE,
       });
-    const destination =
-      this.outputDestination ?? context.createMediaStreamDestination();
-    destination.channelCount = 1;
-    const stream = this.outputStream ?? destination.stream;
-    const element = this.outputElement ?? new Audio();
-    element.autoplay = true;
-    element.hidden = true;
-    element.muted = this.outputMuted;
-    if (element.srcObject !== stream) element.srcObject = stream;
     this.outputContext = context;
-    this.outputDestination = destination;
-    this.outputStream = stream;
-    this.outputElement = element;
     if (context.state === 'suspended') await context.resume();
     if (context.state !== 'running')
       throw new Error('audio_output_unavailable');
-    return { context, destination, element };
+    return context;
   }
 
   private async startCapture(): Promise<void> {

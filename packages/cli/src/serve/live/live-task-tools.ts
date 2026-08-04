@@ -98,7 +98,8 @@ const LIVE_TASK_TOOL_SPECS: readonly LiveTaskToolSpec[] = [
       'attention. New user input ends the wait early. Use timeoutMs: 0 for ' +
       'an immediate snapshot. Commentary never wakes the wait. An up-to-date ' +
       'cursor omits previously delivered final text; a timeout includes ' +
-      'compact progress for all targets.',
+      'compact progress for all targets. A timeout is a normal observation-' +
+      'window result and does not mean that a task failed.',
     kind: Kind.Read,
     parameters: {
       type: 'object',
@@ -150,7 +151,10 @@ const LIVE_TASK_TOOL_SPECS: readonly LiveTaskToolSpec[] = [
     displayName: 'CreateTask',
     description:
       'Create a separate task only when the user explicitly asks for a new ' +
-      'task. Use project for work in an existing WebShell project or ' +
+      'task, session, or conversation. The active Live conversation is not ' +
+      'that separate task; call this tool instead of doing the requested ' +
+      'work in the active Live conversation or merely promising to create ' +
+      'it. Use project for work in an existing WebShell project or ' +
       'projectless for work without a repository. Creation is non-blocking.',
     kind: Kind.Agent,
     parameters: {

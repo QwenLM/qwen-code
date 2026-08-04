@@ -190,6 +190,10 @@ import {
   type LiveTaskTool,
 } from '../../serve/live/live-task-tools.js';
 import {
+  SPEAK_TO_USER_TOOL_NAME,
+  SpeakToUserTool,
+} from '../../serve/live/live-speak-to-user.js';
+import {
   LIVE_BACKEND_END_INSTRUCTIONS,
   LIVE_BACKEND_START_INSTRUCTIONS,
 } from '../../serve/live/live-backend-instructions.js';
@@ -1350,6 +1354,7 @@ export class Session implements SessionContext {
   private readonly messageEmitter: MessageEmitter;
   private liveScreenContextTool?: CaptureScreenContextTool;
   private liveTaskTools: readonly LiveTaskTool[] = [];
+  private liveSpeakToUserTool?: SpeakToUserTool;
   private liveConversationActive: boolean | undefined;
   private liveEndInstructionPending = false;
 
@@ -2022,6 +2027,31 @@ export class Session implements SessionContext {
       }
       this.liveTaskTools = tools;
     }
+
+    const existingSpeakToUser = registry.getTool(SPEAK_TO_USER_TOOL_NAME);
+    if (
+      existingSpeakToUser &&
+      existingSpeakToUser !== this.liveSpeakToUserTool
+    ) {
+      throw new Error(
+        'speak_to_user is reserved for the trusted Live speech channel.',
+      );
+    }
+    if (!this.liveSpeakToUserTool) {
+      const tool = new SpeakToUserTool(async (message) => {
+        await this.client.extMethod(SERVE_CONTROL_EXT_METHODS.liveSpeakToUser, {
+          callerSessionId: this.sessionId,
+          message,
+        });
+      });
+      registry.registerTool(tool);
+      if (registry.getTool(SPEAK_TO_USER_TOOL_NAME) !== tool) {
+        throw new Error(
+          'speak_to_user is required for Live Voice but is disabled.',
+        );
+      }
+      this.liveSpeakToUserTool = tool;
+    }
     await this.#syncLiveToolDeclarations();
   }
 
@@ -2612,7 +2642,11 @@ export class Session implements SessionContext {
       );
     }
     await this.assertCanStartTurn();
-    if (this.liveScreenContextTool || this.liveTaskTools.length > 0) {
+    if (
+      this.liveScreenContextTool ||
+      this.liveTaskTools.length > 0 ||
+      this.liveSpeakToUserTool
+    ) {
       await this.#syncLiveToolDeclarations();
     }
     if (this.closing) {
@@ -7693,11 +7727,13 @@ export class Session implements SessionContext {
         const isTrustedLiveTaskTool = this.liveTaskTools.includes(
           tool as LiveTaskTool,
         );
+        const isTrustedLiveSpeakToUserTool = tool === this.liveSpeakToUserTool;
         const pm = this.config.getPermissionManager?.();
         if (
           pm &&
           !isTrustedLiveScreenContextTool &&
           !isTrustedLiveTaskTool &&
+          !isTrustedLiveSpeakToUserTool &&
           !(await pm.isToolEnabled(policyToolName))
         ) {
           return earlyErrorResponse(

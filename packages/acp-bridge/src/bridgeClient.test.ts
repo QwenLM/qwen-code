@@ -50,9 +50,11 @@ import {
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import { BridgeClient } from './bridgeClient.js';
 import {
+  type LiveSpeakToUserHandler,
   MAX_SUB_SESSION_NAME_CHARS,
   MAX_SUB_SESSION_PROMPT_CHARS,
 } from './bridgeOptions.js';
+import { SERVE_CONTROL_EXT_METHODS } from './status.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
 import type {
   BridgePendingInteraction,
@@ -95,6 +97,64 @@ function makeClient(fileSystem?: BridgeFileSystem): BridgeClient {
     fileSystem,
   );
 }
+
+function makeLiveSpeakClient(
+  handler: LiveSpeakToUserHandler,
+  ownsSession: (sessionId: string) => boolean = () => true,
+): BridgeClient {
+  const noPermissionFlow = () => {
+    throw new Error('test: permission flow should not run');
+  };
+  return new BridgeClient(
+    (() => undefined) as never,
+    (() => undefined) as never,
+    { request: noPermissionFlow } as never,
+    0,
+    Infinity,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    ownsSession,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    () => handler,
+  );
+}
+
+describe('BridgeClient — Live speak-to-user channel', () => {
+  it('routes exact speech only for a session owned by the connection', async () => {
+    const handler = vi.fn(async () => undefined);
+    const client = makeLiveSpeakClient(
+      handler,
+      (sessionId) => sessionId === 'live-session',
+    );
+
+    await expect(
+      client.extMethod(SERVE_CONTROL_EXT_METHODS.liveSpeakToUser, {
+        callerSessionId: 'live-session',
+        message: '原样说出这句话。',
+      }),
+    ).resolves.toEqual({ accepted: true });
+    expect(handler).toHaveBeenCalledWith({
+      callerSessionId: 'live-session',
+      message: '原样说出这句话。',
+    });
+
+    await expect(
+      client.extMethod(SERVE_CONTROL_EXT_METHODS.liveSpeakToUser, {
+        callerSessionId: 'other-session',
+        message: '不应发送',
+      }),
+    ).rejects.toMatchObject({ code: -32602 });
+  });
+});
 
 describe('BridgeClient — background notification turn boundary', () => {
   it('publishes the child end-turn signal for the owned live session', async () => {

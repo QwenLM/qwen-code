@@ -51,6 +51,7 @@ import { CommandKind } from '../../ui/commands/types.js';
 import { MessageType } from '../../ui/types.js';
 import { buildAcpModelOptions } from '../../utils/acpModelUtils.js';
 import { CAPTURE_SCREEN_CONTEXT_TOOL_NAME } from '../../serve/live/capture-screen-context.js';
+import { SPEAK_TO_USER_TOOL_NAME } from '../../serve/live/live-speak-to-user.js';
 
 const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
 const debugLoggerDebugSpy = vi.hoisted(() => vi.fn());
@@ -1326,6 +1327,16 @@ describe('Session', () => {
       expect(mockClient.extMethod).toHaveBeenCalledWith(
         'qwen/control/live/capture-screen-context',
         { callerSessionId: 'test-session-id' },
+      );
+      const speakTool = registered.get(SPEAK_TO_USER_TOOL_NAME);
+      const speakInvocation = speakTool?.build({ message: '测试语音' });
+      await expect(speakInvocation?.getDefaultPermission()).resolves.toBe(
+        'allow',
+      );
+      await speakInvocation?.execute(new AbortController().signal);
+      expect(mockClient.extMethod).toHaveBeenCalledWith(
+        'qwen/control/live/speak-to-user',
+        { callerSessionId: 'test-session-id', message: '测试语音' },
       );
       expect(mockGeminiClient.setTools).toHaveBeenCalledOnce();
     } finally {

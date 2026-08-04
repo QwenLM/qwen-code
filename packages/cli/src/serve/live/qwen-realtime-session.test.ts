@@ -194,6 +194,9 @@ describe('qwen-realtime-session', () => {
     expect(tools[0]?.function.description).toContain(
       'Before invoking this function for the first time in a user turn, first output one short, concrete assistant speech sentence',
     );
+    expect(tools[0]?.function.description).toContain(
+      'never creates a separate user-visible task, session, or conversation by itself',
+    );
     expect(String(session['instructions'])).toContain(
       'Respond directly only when the request is clearly self-contained',
     );
@@ -207,7 +210,16 @@ describe('qwen-realtime-session', () => {
       "Call `background_agent` with the user's exact words",
     );
     expect(String(session['instructions'])).toContain(
+      'A handoff is not the requested separate task',
+    );
+    expect(String(session['instructions'])).toContain(
       'Messages from the backend are prefixed with [BACKEND] .',
+    );
+    expect(String(session['instructions'])).toContain(
+      '[BACKEND] messages are silent context',
+    );
+    expect(String(session['instructions'])).toContain(
+      'speak exactly the text after the prefix, verbatim',
     );
     expect(String(session['instructions'])).toContain(
       'If the user explicitly requests frequent or detailed updates',
@@ -441,7 +453,6 @@ describe('qwen-realtime-session', () => {
       'conversation.item.create',
       'conversation.item.create',
       'conversation.item.create',
-      'response.create',
     ]);
     expect(sentJson(socket, 1)['item']).toEqual({
       type: 'message',
@@ -461,7 +472,7 @@ describe('qwen-realtime-session', () => {
     });
   });
 
-  it('acknowledges a second handoff as steering while routing its text', async () => {
+  it('keeps a second handoff silent while routing its text as steering', async () => {
     const socket = new FakeSocket();
     const callbacks = { onDelegateCall: vi.fn() };
     const session = await connect(socket, callbacks);
@@ -510,7 +521,7 @@ describe('qwen-realtime-session', () => {
     });
     expect(
       sentTypes(socket).filter((type) => type === 'response.create'),
-    ).toHaveLength(1);
+    ).toHaveLength(0);
 
     expect(
       session.sendHandoffUpdate({
@@ -524,14 +535,7 @@ describe('qwen-realtime-session', () => {
     ).toBe(true);
     expect(
       sentTypes(socket).filter((type) => type === 'response.create'),
-    ).toHaveLength(1);
-
-    responseCreated(socket, 'response-steer-ack');
-    responseDone(socket, 'response-steer-ack');
-    await Promise.resolve();
-    expect(
-      sentTypes(socket).filter((type) => type === 'response.create'),
-    ).toHaveLength(2);
+    ).toHaveLength(0);
   });
 
   it('handles remain_silent without creating backend work or another response', async () => {
@@ -623,6 +627,7 @@ describe('qwen-realtime-session', () => {
       output: '任务完成。',
     });
     session.completeHandoff({ callEpoch: 7, callId: 'call-work' });
+    session.speakToUser('任务完成。');
     responseCreated(socket, 'response-work-result');
     socket.message({
       type: 'response.audio_transcript.done',
@@ -743,14 +748,106 @@ describe('qwen-realtime-session', () => {
     );
   });
 
-  it('coalesces backend response.create while a response is active', async () => {
+  it('finalizes a superseded response when the provider omits its done event', async () => {
+    const socket = new FakeSocket();
+    const callbacks = {
+      onError: vi.fn(),
+      onResponseDone: vi.fn(),
+      onDirectTranscript: vi.fn(),
+    } satisfies QwenRealtimeCallbacks;
+    const session = await connect(socket, callbacks);
+
+    commitFinalInput(socket, 'input-first', '第一个问题');
+    responseCreated(socket, 'response-first');
+    socket.message({
+      type: 'response.audio_transcript.done',
+      response_id: 'response-first',
+      transcript: '第一个回答。',
+    });
+
+    commitFinalInput(socket, 'input-second', '第二个问题');
+    responseCreated(socket, 'response-second');
+    socket.message({
+      type: 'response.audio_transcript.done',
+      response_id: 'response-second',
+      transcript: '第二个回答。',
+    });
+    responseDone(socket, 'response-second');
+
+    expect(callbacks.onError).not.toHaveBeenCalled();
+    expect(callbacks.onResponseDone).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        responseId: 'response-first',
+        inputItemId: 'input-first',
+        status: 'cancelled',
+      }),
+    );
+    expect(callbacks.onResponseDone).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        responseId: 'response-second',
+        inputItemId: 'input-second',
+        status: 'completed',
+      }),
+    );
+    expect(callbacks.onDirectTranscript).toHaveBeenNthCalledWith(1, {
+      callEpoch: 7,
+      entries: [
+        { role: 'user', text: '第一个问题' },
+        { role: 'assistant', text: '第一个回答。' },
+      ],
+    });
+    expect(session.takeTranscriptTail()).toEqual([]);
+  });
+
+  it('keeps delegated work alive when its response is superseded without done', async () => {
+    const socket = new FakeSocket();
+    const callbacks = {
+      onDelegateCall: vi.fn(),
+      onResponseDone: vi.fn(),
+      onDirectTranscript: vi.fn(),
+    } satisfies QwenRealtimeCallbacks;
+    const session = await connect(socket, callbacks);
+
+    commitFinalInput(socket, 'input-handoff', '检查当前页面');
+    responseCreated(socket, 'response-handoff');
+    functionCall(
+      socket,
+      'response-handoff',
+      'call-handoff',
+      'background_agent',
+      JSON.stringify({ prompt: '检查当前页面' }),
+    );
+
+    commitFinalInput(socket, 'input-next', '谢谢');
+    responseCreated(socket, 'response-next');
+
+    expect(callbacks.onResponseDone).toHaveBeenCalledWith(
+      expect.objectContaining({
+        responseId: 'response-handoff',
+        inputItemId: 'input-handoff',
+        status: 'cancelled',
+      }),
+    );
+    expect(callbacks.onDirectTranscript).not.toHaveBeenCalled();
+    expect(
+      session.completeHandoff({ callEpoch: 7, callId: 'call-handoff' }),
+    ).toBe(true);
+    expect(sentTypes(socket)).not.toContain('response.create');
+
+    responseDone(socket, 'response-next');
+    expect(session.takeTranscriptTail()).toEqual([]);
+  });
+
+  it('keeps backend context silent while a response is active', async () => {
     const socket = new FakeSocket();
     const session = await connect(socket);
 
     commitFinalInput(socket, 'input-active', '你好');
     responseCreated(socket, 'response-active');
-    expect(session.sendBackendUpdate('后台消息一')).toBe(true);
-    expect(session.sendBackendUpdate('后台消息二')).toBe(true);
+    expect(session.sendBackendContext('后台消息一')).toBe(true);
+    expect(session.sendBackendContext('后台消息二')).toBe(true);
     expect(
       sentTypes(socket).filter((type) => type === 'response.create'),
     ).toHaveLength(0);
@@ -759,7 +856,121 @@ describe('qwen-realtime-session', () => {
     await Promise.resolve();
     expect(
       sentTypes(socket).filter((type) => type === 'response.create'),
-    ).toHaveLength(1);
+    ).toHaveLength(0);
+  });
+
+  it('speaks only explicit backend speech with backend_speech authority', async () => {
+    const socket = new FakeSocket();
+    const callbacks = { onResponseCreated: vi.fn() };
+    const session = await connect(socket, callbacks);
+
+    expect(session.sendBackendContext('静默上下文')).toBe(true);
+    expect(session.speakToUser('正在检查，请稍等。')).toBe(true);
+    expect(sentTypes(socket)).toEqual([
+      'session.update',
+      'conversation.item.create',
+      'conversation.item.create',
+      'response.create',
+    ]);
+    expect(sentJson(socket, 2)['item']).toEqual({
+      type: 'message',
+      role: 'user',
+      content: [
+        {
+          type: 'input_text',
+          text: '[SPEAK_TO_USER] 正在检查，请稍等。',
+        },
+      ],
+    });
+    expect(sentJson(socket, 3)).toMatchObject({
+      type: 'response.create',
+      response: { modalities: ['text', 'audio'] },
+    });
+
+    responseCreated(socket, 'response-speech');
+    expect(callbacks.onResponseCreated).toHaveBeenCalledWith(
+      expect.objectContaining({
+        responseId: 'response-speech',
+        authority: 'backend_speech',
+      }),
+    );
+  });
+
+  it('drops queued backend speech when the user starts speaking', async () => {
+    const socket = new FakeSocket();
+    const session = await connect(socket);
+
+    commitFinalInput(socket, 'input-active', '你好');
+    responseCreated(socket, 'response-active');
+    expect(session.speakToUser('旧进度一')).toBe(true);
+    expect(session.speakToUser('旧进度二')).toBe(true);
+    socket.message({
+      type: 'input_audio_buffer.speech_started',
+      event_id: 'speech-started-new',
+      item_id: 'input-new',
+    });
+    responseDone(socket, 'response-active');
+    await Promise.resolve();
+
+    expect(
+      sentTypes(socket).filter((type) => type === 'response.create'),
+    ).toHaveLength(0);
+  });
+
+  it('serializes multiple explicit speech requests without combining them', async () => {
+    const socket = new FakeSocket();
+    const session = await connect(socket);
+
+    commitFinalInput(socket, 'input-active', '你好');
+    responseCreated(socket, 'response-active');
+    expect(session.speakToUser('第一条')).toBe(true);
+    expect(session.speakToUser('第二条')).toBe(true);
+    expect(
+      sentTypes(socket).filter((type) => type === 'conversation.item.create'),
+    ).toHaveLength(0);
+
+    responseDone(socket, 'response-active');
+    await Promise.resolve();
+    responseCreated(socket, 'response-first-speech');
+    responseDone(socket, 'response-first-speech');
+    await Promise.resolve();
+
+    const speechItems = socket.sent
+      .map(sentJsonEntry)
+      .filter((entry) => entry['type'] === 'conversation.item.create')
+      .map((entry) => entry['item']);
+    expect(speechItems).toEqual([
+      {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: '[SPEAK_TO_USER] 第一条' }],
+      },
+      {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: '[SPEAK_TO_USER] 第二条' }],
+      },
+    ]);
+    expect(
+      sentTypes(socket).filter((type) => type === 'response.create'),
+    ).toHaveLength(2);
+  });
+
+  it('cancels backend speech requested just before user speech', async () => {
+    const socket = new FakeSocket();
+    const callbacks = { onResponseCreated: vi.fn() };
+    const session = await connect(socket, callbacks);
+
+    expect(session.speakToUser('即将过期的进度')).toBe(true);
+    socket.message({
+      type: 'input_audio_buffer.speech_started',
+      event_id: 'speech-started-before-created',
+      item_id: 'input-new',
+    });
+    responseCreated(socket, 'response-stale-speech');
+
+    expect(sentTypes(socket)).toContain('response.cancel');
+    expect(callbacks.onResponseCreated).not.toHaveBeenCalled();
   });
 
   it('preserves audio backpressure and frame bounds', async () => {

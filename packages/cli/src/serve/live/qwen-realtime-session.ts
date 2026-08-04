@@ -35,6 +35,7 @@ const MAX_TRACKED_INPUT_ITEMS = 32;
 const BACKGROUND_AGENT_TOOL_NAME = 'background_agent';
 const REMAIN_SILENT_TOOL_NAME = 'remain_silent';
 const REALTIME_BACKEND_TEXT_PREFIX = '[BACKEND] ';
+const REALTIME_SPEAK_TO_USER_PREFIX = '[SPEAK_TO_USER] ';
 const REALTIME_V2_HANDOFF_COMPLETE_ACKNOWLEDGEMENT =
   'Background agent finished. Use the preceding [BACKEND] messages as the result.';
 const REALTIME_V2_STEER_ACKNOWLEDGEMENT =
@@ -44,7 +45,7 @@ const BACKGROUND_AGENT_TOOL = {
   function: {
     name: BACKGROUND_AGENT_TOOL_NAME,
     description:
-      "Send a user request to the background agent. Use this as the default action. Do not rephrase the user's ask or rewrite it in your own words; pass along the user's own words. If the background agent is idle, this starts a new task and returns the final result to the user. If the background agent is already working on a task, this sends the request as guidance to steer that previous task. If the user asks to do something next, later, after this, or once current work finishes, call this tool so the work is actually queued instead of merely promising to do it later. Before invoking this function for the first time in a user turn, first output one short, concrete assistant speech sentence naming what you are about to check or do. The speech must be emitted before the function call; a tool-only response is invalid. Then invoke this function immediately without waiting for the user. If this function is steering an already active task, do not repeat the acknowledgement.",
+      "Send a user request to the execution agent attached to the current Live conversation. Use this as the default action. Do not rephrase the user's ask or rewrite it in your own words; pass along the user's own words. This tool starts or steers a backend turn in the same persistent Live session; it never creates a separate user-visible task, session, or conversation by itself. If the user asks to create, open, or start a separate task, session, or conversation, pass that exact request through so the execution agent can call create_thread. If the user asks to do something next, later, after this, or once current work finishes, call this tool so the work is actually queued instead of merely promising to do it later. Before invoking this function for the first time in a user turn, first output one short, concrete assistant speech sentence naming what you are about to check or do. The speech must be emitted before the function call; a tool-only response is invalid. Then invoke this function immediately without waiting for the user. If this function is steering an already active task, do not repeat the acknowledgement.",
     parameters: {
       type: 'object',
       properties: {
@@ -105,6 +106,7 @@ When interacting with the user, do not mention "backend". Present every work as 
 * Do not claim that you cannot perform some actions. ALWAYS delegate the actions/tasks to the backend.
 * Never answer capability questions based only on your own realtime-model capabilities. Questions such as "can you see/access/use/do X?" refer to the capabilities of the unified assistant. Call \`background_agent\` with the user's exact words and let it determine or attempt the capability before answering. Never claim that the unified assistant cannot do something before consulting the background agent.
 * Always use the backend when the user asks about the current screen, visible page, window, or other displayed content. Never claim that you cannot see it.
+* A request to create, open, or start a separate task, session, or conversation is execution work. Call \`background_agent\` with the user's exact words. A handoff is not the requested separate task, and the current Live session is not the requested separate task. Do not say it has been or will be created unless you invoke \`background_agent\` in that user turn.
 * Ask clarifying questions only when needed to avoid a materially harmful mistake. Otherwise, make a reasonable assumption and use the backend.
 * Running backend work remains steerable. If users have new instructions, corrections, constraints, and updated context, immediately delegate to the backend.
 * Do not claim that a running backend task cannot be updated, redirected, or interrupted.
@@ -115,6 +117,8 @@ When interacting with the user, do not mention "backend". Present every work as 
 * Messages from the user are prefixed with [USER] . Messages from the backend are prefixed with [BACKEND] .
 * Backend messages may be intermediate updates or final outputs.
 * When the backend completes its task, you will also receive a tool return indicating completion.
+* [BACKEND] messages are silent context. Never respond merely because one arrives, including when the backend completes.
+* A [SPEAK_TO_USER] message is an explicit one-shot speech request. When the host requests a response for it, speak exactly the text after the prefix, verbatim, without adding, omitting, translating, summarizing, or calling a tool.
 
 ## Presenting backend results
 
@@ -192,7 +196,7 @@ export interface RealtimeResponseEvent extends RealtimeEventContext {
   status?: string;
 }
 
-export type RealtimeResponseAuthority = 'direct' | 'handoff' | 'backend_update';
+export type RealtimeResponseAuthority = 'direct' | 'backend_speech';
 
 export interface RealtimeResponseCreatedEvent extends RealtimeResponseEvent {
   authority: RealtimeResponseAuthority;
@@ -293,7 +297,8 @@ export interface QwenRealtimeSession {
   cancelResponse: () => boolean;
   sendHandoffUpdate: (update: RealtimeHandoffUpdate) => boolean;
   completeHandoff: (handoff: RealtimeHandoffReference) => boolean;
-  sendBackendUpdate: (text: string) => boolean;
+  sendBackendContext: (text: string) => boolean;
+  speakToUser: (message: string) => boolean;
   takeTranscriptTail: () => readonly RealtimeTranscriptEntry[];
   close: (options?: RealtimeCloseOptions) => void;
 }
@@ -381,11 +386,16 @@ interface PendingFunctionCall {
   dispatched: boolean;
   outputSubmitted: boolean;
   responseCompleted: boolean;
-  backendMessages: number;
   pendingOutput?: {
     output: string;
-    authority?: Exclude<RealtimeResponseAuthority, 'direct'>;
   };
+}
+
+interface ResponseCreateRequest {
+  authority: Exclude<RealtimeResponseAuthority, 'direct'>;
+  speechMessage?: string;
+  speechGeneration: number;
+  cancelled: boolean;
 }
 
 interface ProviderMessage extends Record<string, unknown> {
@@ -562,14 +572,9 @@ export function openQwenRealtimeSession(
     let activeResponseId: string | undefined;
     let lastCompletedResponseId: string | undefined;
     let activeAudioResponseId: string | undefined;
-    let responseCreatePending = false;
-    let pendingResponseAuthority:
-      | Exclude<RealtimeResponseAuthority, 'direct'>
-      | undefined;
-    let responseCreateQueued = false;
-    let queuedResponseAuthority:
-      | Exclude<RealtimeResponseAuthority, 'direct'>
-      | undefined;
+    let pendingResponseCreate: ResponseCreateRequest | undefined;
+    let responseCreateQueue: ResponseCreateRequest[] = [];
+    let speechGeneration = 0;
     let activeResponseAuthority: RealtimeResponseAuthority | undefined;
     let activeHandoffCallId: string | undefined;
     let backpressureWarned = false;
@@ -764,33 +769,71 @@ export function openQwenRealtimeSession(
       return true;
     };
 
-    const requestResponseCreate = (
-      authority: Exclude<RealtimeResponseAuthority, 'direct'>,
-    ): boolean => {
-      if (responseCreatePending || activeResponseId) {
-        responseCreateQueued = true;
-        queuedResponseAuthority = authority;
+    const sendResponseCreate = (request: ResponseCreateRequest): boolean => {
+      if (
+        request.authority === 'backend_speech' &&
+        request.speechGeneration !== speechGeneration
+      ) {
         return true;
       }
-      responseCreatePending = true;
-      pendingResponseAuthority = authority;
-      if (sendJson({ type: 'response.create' })) return true;
-      responseCreatePending = false;
-      pendingResponseAuthority = undefined;
+      if (
+        request.speechMessage !== undefined &&
+        !sendBackendConversationItem(
+          request.speechMessage,
+          REALTIME_SPEAK_TO_USER_PREFIX,
+        )
+      ) {
+        return false;
+      }
+      pendingResponseCreate = request;
+      if (
+        sendJson({
+          type: 'response.create',
+          ...(request.authority === 'backend_speech'
+            ? { response: { modalities: ['text', 'audio'] } }
+            : {}),
+        })
+      ) {
+        return true;
+      }
+      pendingResponseCreate = undefined;
       return false;
     };
 
-    const flushResponseCreate = (): void => {
-      if (!responseCreateQueued || responseCreatePending || activeResponseId) {
-        return;
+    const requestResponseCreate = (
+      authority: Exclude<RealtimeResponseAuthority, 'direct'>,
+      speechMessage?: string,
+    ): boolean => {
+      const request = {
+        authority,
+        ...(speechMessage !== undefined ? { speechMessage } : {}),
+        speechGeneration,
+        cancelled: false,
+      };
+      if (pendingResponseCreate || activeResponseId) {
+        responseCreateQueue.push(request);
+        return true;
       }
-      const authority = queuedResponseAuthority ?? 'handoff';
-      responseCreateQueued = false;
-      queuedResponseAuthority = undefined;
-      requestResponseCreate(authority);
+      return sendResponseCreate(request);
     };
 
-    const sendBackendConversationItem = (text: string): boolean =>
+    const flushResponseCreate = (): void => {
+      if (pendingResponseCreate || activeResponseId) {
+        return;
+      }
+      const next = responseCreateQueue.shift();
+      if (!next) return;
+      if (next.cancelled) {
+        queueMicrotask(flushResponseCreate);
+        return;
+      }
+      sendResponseCreate(next);
+    };
+
+    const sendBackendConversationItem = (
+      text: string,
+      prefix = REALTIME_BACKEND_TEXT_PREFIX,
+    ): boolean =>
       sendJson({
         type: 'conversation.item.create',
         item: {
@@ -799,7 +842,7 @@ export function openQwenRealtimeSession(
           content: [
             {
               type: 'input_text',
-              text: `${REALTIME_BACKEND_TEXT_PREFIX}${text}`,
+              text: `${prefix}${text}`,
             },
           ],
         },
@@ -808,15 +851,14 @@ export function openQwenRealtimeSession(
     const queueFunctionCallOutput = (
       call: PendingFunctionCall,
       output: string,
-      authority?: Exclude<RealtimeResponseAuthority, 'direct'>,
     ): boolean => {
       if (call.outputSubmitted || call.pendingOutput) return false;
       if (!call.responseCompleted && activeResponseId === call.responseId) {
-        call.pendingOutput = { output, authority };
+        call.pendingOutput = { output };
         return true;
       }
       if (!sendFunctionCallOutput(call, output)) return false;
-      return authority ? requestResponseCreate(authority) : true;
+      return true;
     };
 
     const completePendingCallsForResponse = (
@@ -833,11 +875,7 @@ export function openQwenRealtimeSession(
         const pendingOutput = call.pendingOutput;
         if (!pendingOutput) continue;
         call.pendingOutput = undefined;
-        if (sendFunctionCallOutput(call, pendingOutput.output)) {
-          if (pendingOutput.authority) {
-            requestResponseCreate(pendingOutput.authority);
-          }
-        }
+        sendFunctionCallOutput(call, pendingOutput.output);
       }
     };
 
@@ -1050,6 +1088,38 @@ export function openQwenRealtimeSession(
       return true;
     };
 
+    const finalizeCancelledResponse = (responseId: string): void => {
+      if (!cancelledResponseIds.has(responseId)) {
+        markResponseCancelled(responseId);
+      }
+      const responseInputItemId = responseInputItemIds.get(responseId);
+      collectDirectTranscript(responseId);
+      completePendingCallsForResponse(responseId, 'cancelled');
+      consumeResponseInput(responseId);
+      if (activeResponseId === responseId) {
+        activeResponseId = undefined;
+        activeResponseAuthority = undefined;
+      }
+      if (activeAudioResponseId === responseId) {
+        activeAudioResponseId = undefined;
+      }
+      lastCompletedResponseId = responseId;
+      cancelledResponseIds.delete(responseId);
+      callback(() =>
+        callbacks.onResponseDone?.({
+          callEpoch: config.callEpoch,
+          responseId,
+          ...(responseInputItemId ? { inputItemId: responseInputItemId } : {}),
+          status: 'cancelled',
+        }),
+      );
+      responseAuthorities.delete(responseId);
+      delegatedResponseIds.delete(responseId);
+      responseOutputText.delete(responseId);
+      collectedDirectResponseIds.delete(responseId);
+      queueMicrotask(flushResponseCreate);
+    };
+
     const eventContext = (message: ProviderMessage): RealtimeEventContext => ({
       callEpoch: config.callEpoch,
       eventId: optionalString(message.event_id),
@@ -1172,13 +1242,7 @@ export function openQwenRealtimeSession(
       delegatedResponseIds.add(call.responseId);
       const steering = activeHandoffCallId !== undefined;
       if (steering) {
-        if (
-          !queueFunctionCallOutput(
-            call,
-            REALTIME_V2_STEER_ACKNOWLEDGEMENT,
-            'handoff',
-          )
-        ) {
+        if (!queueFunctionCallOutput(call, REALTIME_V2_STEER_ACKNOWLEDGEMENT)) {
           return;
         }
       } else {
@@ -1249,7 +1313,9 @@ export function openQwenRealtimeSession(
         }
         const responseId = activeResponseId;
         markResponseCancelled(responseId);
-        return sendJson({ type: 'response.cancel' });
+        const sent = sendJson({ type: 'response.cancel' });
+        finalizeCancelledResponse(responseId);
+        return sent;
       },
       sendHandoffUpdate: (update) => {
         const call = pendingCalls.get(update.callId);
@@ -1280,7 +1346,6 @@ export function openQwenRealtimeSession(
           );
         }
         if (!sendBackendConversationItem(update.output)) return false;
-        call.backendMessages += 1;
         return true;
       },
       completeHandoff: (handoff) => {
@@ -1290,7 +1355,6 @@ export function openQwenRealtimeSession(
           !call ||
           !call.dispatched ||
           call.outputSubmitted ||
-          call.backendMessages === 0 ||
           terminal ||
           closedByClient
         ) {
@@ -1309,22 +1373,33 @@ export function openQwenRealtimeSession(
         return queueFunctionCallOutput(
           call,
           REALTIME_V2_HANDOFF_COMPLETE_ACKNOWLEDGEMENT,
-          'handoff',
         );
       },
-      sendBackendUpdate: (text) => {
+      sendBackendContext: (text) => {
         if (
           typeof text !== 'string' ||
           text.trim().length === 0 ||
           text.length > QWEN_REALTIME_LIMITS.maxFunctionOutputChars
         ) {
           throw new RangeError(
-            'Realtime backend update exceeded the allowed size.',
+            'Realtime backend context exceeded the allowed size.',
           );
         }
         if (terminal || closedByClient) return false;
-        if (!sendBackendConversationItem(text)) return false;
-        return requestResponseCreate('backend_update');
+        return sendBackendConversationItem(text);
+      },
+      speakToUser: (message) => {
+        if (
+          typeof message !== 'string' ||
+          message.trim().length === 0 ||
+          message.length > QWEN_REALTIME_LIMITS.maxFunctionOutputChars
+        ) {
+          throw new RangeError(
+            'Realtime speech request exceeded the allowed size.',
+          );
+        }
+        if (terminal || closedByClient) return false;
+        return requestResponseCreate('backend_speech', message);
       },
       takeTranscriptTail,
       close: (options) => {
@@ -1458,9 +1533,17 @@ export function openQwenRealtimeSession(
           newInputEntry = true;
           speechInputInProgress = true;
           speechCommitPending = true;
+          speechGeneration += 1;
+          responseCreateQueue = responseCreateQueue.filter(
+            (request) => request.authority !== 'backend_speech',
+          );
+          if (pendingResponseCreate?.authority === 'backend_speech') {
+            pendingResponseCreate.cancelled = true;
+          }
           if (
             activeResponseId &&
-            activeAudioResponseId === activeResponseId &&
+            (activeAudioResponseId === activeResponseId ||
+              activeResponseAuthority === 'backend_speech') &&
             !cancelledResponseIds.has(activeResponseId)
           ) {
             const interruptedResponseId = activeResponseId;
@@ -1471,6 +1554,7 @@ export function openQwenRealtimeSession(
               }),
             );
             markResponseCancelled(interruptedResponseId);
+            finalizeCancelledResponse(interruptedResponseId);
           }
           callback(() =>
             callbacks.onSpeechStarted?.({
@@ -1644,12 +1728,13 @@ export function openQwenRealtimeSession(
             break;
           }
           if (activeResponseId && activeResponseId !== responseId) {
-            markResponseCancelled(activeResponseId);
+            const supersededResponseId = activeResponseId;
+            markResponseCancelled(supersededResponseId);
+            finalizeCancelledResponse(supersededResponseId);
           }
+          const responseRequest = pendingResponseCreate;
           const responseAuthority: RealtimeResponseAuthority =
-            responseCreatePending
-              ? (pendingResponseAuthority ?? 'handoff')
-              : 'direct';
+            responseRequest?.authority ?? 'direct';
           activeResponseId = responseId;
           activeResponseAuthority = responseAuthority;
           responseAuthorities.set(responseId, responseAuthority);
@@ -1658,9 +1743,14 @@ export function openQwenRealtimeSession(
             bindResponseInput(responseId);
             if (terminal) break;
           }
-          responseCreatePending = false;
-          pendingResponseAuthority = undefined;
+          pendingResponseCreate = undefined;
           activeAudioResponseId = undefined;
+          if (responseRequest?.cancelled) {
+            markResponseCancelled(responseId);
+            sendJson({ type: 'response.cancel' });
+            finalizeCancelledResponse(responseId);
+            break;
+          }
           const response = isRecord(message['response'])
             ? message['response']
             : undefined;
@@ -1846,7 +1936,6 @@ export function openQwenRealtimeSession(
             dispatched: false,
             outputSubmitted: false,
             responseCompleted: false,
-            backendMessages: 0,
           };
           if (
             call.arguments.length + delta.length >
@@ -1921,7 +2010,6 @@ export function openQwenRealtimeSession(
             dispatched: false,
             outputSubmitted: false,
             responseCompleted: false,
-            backendMessages: 0,
           };
           call.name = name;
           pendingCalls.set(callId, call);
@@ -1974,7 +2062,6 @@ export function openQwenRealtimeSession(
             dispatched: false,
             outputSubmitted: false,
             responseCompleted: false,
-            backendMessages: 0,
           };
           call.name = name;
           pendingCalls.set(callId, call);

@@ -11,16 +11,25 @@ const audioEngine = readFileSync(
 );
 
 describe('Live Host audio architecture', () => {
-  it('matches the Codex virtual microphone graph instead of hardware output', () => {
+  it('matches the Codex virtual microphone graph for capture', () => {
     assert.match(audioEngine, /createMediaStreamDestination\(\)/);
     assert.match(audioEngine, /worklet\.connect\(destination\)/);
     assert.doesNotMatch(audioEngine, /silent\.connect\(context\.destination\)/);
   });
 
-  it('fully releases playback routing when output is cleared', () => {
-    assert.match(audioEngine, /outputElement\?\.pause\(\)/);
-    assert.match(audioEngine, /outputElement\.srcObject = null/);
-    assert.match(audioEngine, /outputStream\?\.getTracks\(\)/);
+  it('plays provider PCM on the device clock without a second media clock', () => {
+    assert.match(
+      audioEngine,
+      /context\.createBuffer\(1, samples, OUTPUT_SAMPLE_RATE\)/,
+    );
+    assert.match(audioEngine, /source\.connect\(context\.destination\)/);
+    assert.doesNotMatch(audioEngine, /sampleRate: OUTPUT_SAMPLE_RATE/);
+    assert.doesNotMatch(audioEngine, /private outputDestination:/);
+    assert.doesNotMatch(audioEngine, /private outputStream:/);
+    assert.doesNotMatch(audioEngine, /private outputElement:/);
+  });
+
+  it('fully releases the device-clock playback context when output is cleared', () => {
     assert.match(audioEngine, /context\?\.close\(\)/);
   });
 });

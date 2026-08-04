@@ -200,6 +200,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
   createSubSession: 'qwen/control/create-sub-session',
   liveCaptureScreenContext: 'qwen/control/live/capture-screen-context',
   liveTaskTool: 'qwen/control/live/task-tool',
+  liveSpeakToUser: 'qwen/control/live/speak-to-user',
   channelDelivery: 'qwen/control/channel-delivery',
 } as const;
 

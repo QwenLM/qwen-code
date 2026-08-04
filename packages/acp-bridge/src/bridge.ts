@@ -153,6 +153,7 @@ import type {
   BridgeSessionLifecycleEvent,
   BridgeTelemetry,
   LiveScreenContextCaptureHandler,
+  LiveSpeakToUserHandler,
   LiveTaskToolRequestHandler,
 } from './bridgeOptions.js';
 import { MCP_RESTART_SERVER_DEADLINE_MS } from './mcpTimeouts.js';
@@ -1387,6 +1388,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     | LiveScreenContextCaptureHandler
     | undefined;
   let liveTaskToolRequestHandler: LiveTaskToolRequestHandler | undefined;
+  let liveSpeakToUserHandler: LiveSpeakToUserHandler | undefined;
   const defaultSessionScope = opts.sessionScope ?? 'single';
   // `undefined` → default 32 (intentionally tight to avoid resource cliffs).
   // `0` → explicitly unlimited (operator opt-out).
@@ -2328,6 +2330,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             channelInfo.sessionSpawnsInFlight > 0,
           () => liveScreenContextCaptureHandler,
           () => liveTaskToolRequestHandler,
+          () => liveSpeakToUserHandler,
         );
         connection = new ClientSideConnection(() => client, channel.stream);
       } catch (error) {
@@ -5092,6 +5095,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     },
     setLiveTaskToolRequestHandler(handler) {
       liveTaskToolRequestHandler = handler;
+    },
+    setLiveSpeakToUserHandler(handler) {
+      liveSpeakToUserHandler = handler;
     },
     getDaemonStatusSnapshot(): BridgeDaemonStatusSnapshot {
       return {

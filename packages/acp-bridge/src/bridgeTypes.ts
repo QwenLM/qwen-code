@@ -934,6 +934,11 @@ export interface AcpSessionBridge {
       | undefined,
   ): void;
 
+  /** Installs the daemon-owned handler for the backend-only Live speech tool. */
+  setLiveSpeakToUserHandler?(
+    handler: import('./bridgeOptions.js').LiveSpeakToUserHandler | undefined,
+  ): void;
+
   /**
    * Create a new session, or — under `sessionScope: 'single'` — attach to an
    * existing session for the same workspace.

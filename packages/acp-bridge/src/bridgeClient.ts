@@ -44,12 +44,14 @@ import type {
   ClientMcpMessageSender,
   CreateSubSessionHandler,
   LiveScreenContextCaptureHandler,
+  LiveSpeakToUserHandler,
   LiveTaskToolRequestHandler,
 } from './bridgeOptions.js';
 import {
   CHANNEL_DELIVERY_ERROR_CODES,
   LIVE_TASK_TOOL_NAMES,
   MAX_LIVE_SCREEN_CONTEXT_TEXT_CHARS,
+  MAX_LIVE_SPEAK_TO_USER_MESSAGE_CHARS,
   MAX_SUB_SESSION_NAME_CHARS,
   MAX_SUB_SESSION_PROMPT_CHARS,
 } from './bridgeOptions.js';
@@ -697,6 +699,9 @@ export class BridgeClient implements Client {
     private readonly getLiveTaskToolRequestHandler: () =>
       | LiveTaskToolRequestHandler
       | undefined = () => undefined,
+    private readonly getLiveSpeakToUserHandler: () =>
+      | LiveSpeakToUserHandler
+      | undefined = () => undefined,
   ) {}
 
   async requestPermission(
@@ -1088,6 +1093,9 @@ export class BridgeClient implements Client {
     }
     if (method === SERVE_CONTROL_EXT_METHODS.liveTaskTool) {
       return this.handleLiveTaskTool(params);
+    }
+    if (method === SERVE_CONTROL_EXT_METHODS.liveSpeakToUser) {
+      return this.handleLiveSpeakToUser(params);
     }
     if (method === SERVE_CONTROL_EXT_METHODS.channelDelivery) {
       return this.handleChannelDelivery(params);
@@ -1572,6 +1580,34 @@ export class BridgeClient implements Client {
       name: name as (typeof LIVE_TASK_TOOL_NAMES)[number],
       arguments: args as Record<string, unknown>,
     });
+  }
+
+  private async handleLiveSpeakToUser(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const handler = this.getLiveSpeakToUserHandler();
+    if (!handler) {
+      throw RequestError.methodNotFound(
+        SERVE_CONTROL_EXT_METHODS.liveSpeakToUser,
+      );
+    }
+    const callerSessionId = params['callerSessionId'];
+    const message = params['message'];
+    if (
+      typeof callerSessionId !== 'string' ||
+      callerSessionId.length === 0 ||
+      !this.ownsSession(callerSessionId) ||
+      typeof message !== 'string' ||
+      message.trim().length === 0 ||
+      message.length > MAX_LIVE_SPEAK_TO_USER_MESSAGE_CHARS
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Invalid Live speak-to-user request.',
+      );
+    }
+    await handler({ callerSessionId, message });
+    return { accepted: true };
   }
 
   /**
