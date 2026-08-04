@@ -538,7 +538,6 @@ export async function resolveAtCommandQuery({
   const urlMediaLabels: string[] = [];
   if (urlMediaRefs.length > 0) {
     const core = await import('@qwen-code/qwen-code-core');
-    const os = await import('node:os');
     for (let i = 0; i < urlMediaRefs.length; i++) {
       const ref = urlMediaRefs[i];
       const callId = `client-url-media-${userMessageTimestamp}-${i}`;
@@ -549,7 +548,7 @@ export async function resolveAtCommandQuery({
           return 'invalid-url';
         }
       })();
-      let tempDir: string | undefined;
+      let tempPartPath: string | undefined;
       try {
         const store = new core.OmniObjectStore(config.storage.getQwenDir());
         const downloadsDir = path.join(store.getOmniRootDir(), 'downloads');
@@ -559,7 +558,7 @@ export async function resolveAtCommandQuery({
           maxBytes: core.effectiveMaxDownloadFileBytes(config),
           signal,
         });
-        tempDir = downloaded.partPath;
+        tempPartPath = downloaded.partPath;
         // Full local-file pipeline on the downloaded bytes: sniff/probe/
         // hash again (the design requires re-recognition from the local
         // file — never trust transfer-time observations), guard, store,
@@ -588,7 +587,22 @@ export async function resolveAtCommandQuery({
           confirmationDetails: undefined,
         });
       } catch (error) {
-        if (signal.aborted) throw error;
+        if (signal.aborted) {
+          // User cancelled mid-download: end the turn quietly instead of
+          // throwing — resolveAtCommandQuery has no throw contract, and a
+          // rejection here would surface as an unhandled-rejection banner
+          // (cancelOngoingRequest already handles the UI reset).
+          if (tempPartPath) {
+            await fs.rm(tempPartPath, { force: true }).catch(() => {});
+          }
+          return {
+            processedQuery: null,
+            shouldProceed: false,
+            toolDisplays: [...urlMediaDisplays],
+            filesRead: urlMediaLabels,
+            // No chat-recording entry for a user-cancelled resolution.
+          };
+        }
         const reason = getErrorMessage(error);
         onDebugMessage(`Failed to localize media URL ${ref.url}: ${reason}`);
         urlMediaDisplays.push({
@@ -600,12 +614,11 @@ export async function resolveAtCommandQuery({
           confirmationDetails: undefined,
         });
       } finally {
-        if (tempDir) {
-          await fs.rm(tempDir, { force: true }).catch(() => {});
+        if (tempPartPath) {
+          await fs.rm(tempPartPath, { force: true }).catch(() => {});
         }
       }
     }
-    void os; // reserved for future temp-dir strategies
   }
 
   const resourceParts: Part[] = [];

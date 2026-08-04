@@ -170,6 +170,34 @@ export async function hashFileSha256(
 const SNIFF_BYTES = 4096;
 
 /**
+ * Cheap pre-gate: sniff a file's header and report the detected modality,
+ * or null when the content is not a supported media container. Used by
+ * fileUtils to decide omni-vs-legacy BEFORE committing to the fail-closed
+ * pipeline — a legitimate .bmp/.tiff (no sniff support) must fall back to
+ * the baseline inline path, not hard-fail.
+ */
+export async function sniffFileModality(
+  filePath: string,
+): Promise<OmniModality | null> {
+  let handle;
+  try {
+    handle = await fs.open(filePath, 'r');
+  } catch {
+    return null;
+  }
+  try {
+    const stat = await handle.stat();
+    const buf = Buffer.alloc(Math.min(SNIFF_BYTES, stat.size));
+    await handle.read(buf, 0, buf.length, 0);
+    return sniffMediaType(buf)?.modality ?? null;
+  } catch {
+    return null;
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
  * Recognize a local media file: content sniff (magic bytes), streaming
  * SHA-256, and ffprobe metadata. Throws when the content does not sniff as
  * a supported media container or when probing fails — the omni pipeline

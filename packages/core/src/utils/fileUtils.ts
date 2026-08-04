@@ -1278,7 +1278,17 @@ export async function processSingleFileContent(
     ) {
       const omni = await import('../omni/index.js');
       if (omni.isOmniDeliveryActive(config)) {
-        omniModule = omni;
+        // Cheap content pre-sniff decides omni-vs-legacy BEFORE committing
+        // to the fail-closed pipeline: formats the recognizer does not
+        // support (bmp/tiff/heic images, exotic containers) must keep the
+        // baseline inline behavior instead of hard-failing, and a file
+        // whose bytes sniff as a DIFFERENT modality than its extension
+        // suggests also falls back (the legacy path sends it inline under
+        // its extension-derived type, exactly as before omni).
+        const sniffedModality = await omni.sniffFileModality(filePath);
+        if (sniffedModality === fileType) {
+          omniModule = omni;
+        }
       }
     }
 

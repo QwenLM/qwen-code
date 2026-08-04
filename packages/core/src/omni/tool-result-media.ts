@@ -16,6 +16,11 @@ import { sniffMediaType } from './recognition.js';
 
 const debugLogger = createDebugLogger('omni:tool-result');
 
+/** Upload-count budget per tool result (excess parts stay inline). */
+const MAX_UPLOADS_PER_TOOL_RESULT = 8;
+/** Aggregate upload-byte budget per tool result. */
+const MAX_UPLOAD_BYTES_PER_TOOL_RESULT = 128 * 1024 * 1024;
+
 /**
  * Second normalization trigger point (design §5.2/§8.2): tool-result media
  * flows through the same recognize → guard → store → upload pipeline as
@@ -45,18 +50,34 @@ export async function processToolResultOmniMedia(
 
   const modalities = config.getContentGeneratorConfig?.()?.modalities ?? {};
   let changed = false;
+  // Per-tool-result upload budget: a malicious/compromised tool must not
+  // be able to fan out an unbounded number of uploads (cost/quota burn,
+  // multi-minute stalls) from a single result. Parts over budget stay
+  // inline (safe: they were produced locally and already fit in memory).
+  let uploadsRemaining = MAX_UPLOADS_PER_TOOL_RESULT;
+  let uploadBytesRemaining = MAX_UPLOAD_BYTES_PER_TOOL_RESULT;
 
   const convertPart = async (part: Part): Promise<Part> => {
     const inline = part.inlineData;
     if (!inline?.data || !inline.mimeType) return part;
     const top = inline.mimeType.split('/')[0];
     if (top !== 'image' && top !== 'audio' && top !== 'video') return part;
-    if (!modalities[top as 'image' | 'audio' | 'video']) return part;
 
     // Sniff the decoded bytes before touching disk — non-media or
-    // unsupported containers stay inline untouched.
+    // unsupported containers stay inline untouched. The SNIFFED modality
+    // is the authoritative gate: a part declared audio/* whose bytes are
+    // actually a video container must not slip past a video-disabled
+    // config on the strength of its declared MIME type.
     const bytes = Buffer.from(inline.data, 'base64');
-    if (!sniffMediaType(bytes.subarray(0, 4096))) return part;
+    const sniffed = sniffMediaType(bytes.subarray(0, 4096));
+    if (!sniffed) return part;
+    if (!modalities[sniffed.modality]) return part;
+    if (uploadsRemaining <= 0 || bytes.length > uploadBytesRemaining) {
+      debugLogger.debug(
+        `tool-result media budget exhausted; keeping part inline (${bytes.length} bytes)`,
+      );
+      return part;
+    }
 
     const store = new OmniObjectStore(config.storage.getQwenDir());
     const stagingDir = path.join(store.getOmniRootDir(), 'downloads');
@@ -68,9 +89,12 @@ export async function processToolResultOmniMedia(
     try {
       await fs.writeFile(tempPath, bytes, { mode: 0o600 });
       const delivery = await processMediaForOmniDelivery(tempPath, config, {
+        expectedModality: sniffed.modality,
         signal,
       });
       changed = true;
+      uploadsRemaining--;
+      uploadBytesRemaining -= bytes.length;
       return {
         fileData: {
           fileUri: delivery.fileUri,

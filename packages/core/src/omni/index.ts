@@ -40,6 +40,7 @@ export {
   recognizeMediaFile,
   recognizeVideoFile,
   sniffMediaType,
+  sniffFileModality,
   sniffVideoMimeType,
   hashFileSha256,
   type OmniModality,
@@ -61,6 +62,17 @@ export {
 } from './download.js';
 
 const debugLogger = createDebugLogger('omni');
+
+/**
+ * Scrub absolute POSIX path segments out of an error message, keeping the
+ * basename — fs errors embed full paths (`ENOENT: … stat '/Users/x/…'`)
+ * and several wraps below flow into model-visible llmContent, which must
+ * never carry real paths.
+ */
+function sanitizeErrorMessage(err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.replace(/(?:\/[\w~. -]+)+\/([\w. -]+)/g, '$1');
+}
 
 /**
  * Placeholder the model-config resolver assigns under Qwen OAuth; the real
@@ -184,9 +196,7 @@ export async function processMediaForOmniDelivery(
   // must not stream through SHA-256 only to be rejected.
   const stat = await fs.stat(filePath).catch((err) => {
     throw new OmniDeliveryError(
-      `Cannot stat media file ${displayName}: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
+      `Cannot stat media file ${displayName}: ${sanitizeErrorMessage(err)}`,
       { cause: err },
     );
   });
@@ -201,9 +211,7 @@ export async function processMediaForOmniDelivery(
   } catch (err) {
     if (signal?.aborted) throw err;
     throw new OmniDeliveryError(
-      `Media recognition failed for ${displayName}: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
+      `Media recognition failed for ${displayName}: ${sanitizeErrorMessage(err)}`,
       { cause: err },
     );
   }
@@ -227,9 +235,7 @@ export async function processMediaForOmniDelivery(
   } catch (err) {
     if (signal?.aborted) throw err;
     throw new OmniDeliveryError(
-      `Failed to store media in the omni object store: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
+      `Failed to store media in the omni object store: ${sanitizeErrorMessage(err)}`,
       { cause: err },
     );
   }
