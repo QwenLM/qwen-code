@@ -15,6 +15,7 @@ import {
   writeRuntimeStatus,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
+import { isValidSessionId } from '../config/config.js';
 import type { InitializationResult } from '../core/initializer.js';
 import type { ExtensionRefreshState } from '../config/extension-refresh-state.js';
 import { DualOutputBridge } from '../dualOutput/DualOutputBridge.js';
@@ -340,17 +341,14 @@ export async function startInteractiveUI(
         const sessionId = config.getSessionId();
         const sessionFile = config.getTranscriptPath();
         // The echoed ID is paste-into-shell text, and resume reads session
-        // IDs from transcript contents any user-level process can write, so
-        // gate the echo to a single safe token: sanitizeTerminalText
-        // preserves LF and cannot stop a crafted ID pasting as extra
-        // commands, and a dash-leading ID would reparse as CLI flags
-        // instead of `--resume`'s value.
-        if (
-          fs.existsSync(sessionFile) &&
-          /^[0-9a-zA-Z][0-9a-zA-Z._-]*$/.test(sessionId)
-        ) {
+        // IDs from transcript contents any user-level process can write.
+        // Gate to the canonical shape `--resume` itself accepts
+        // (isValidSessionId): a single token with no newlines, escapes, or
+        // leading dash, which also keeps the echoed command from falling
+        // through to title matching on paste.
+        if (fs.existsSync(sessionFile) && isValidSessionId(sessionId)) {
           writeStdoutLine(
-            `\n${t('To continue this session, run')}\nqwen --resume ${sanitizeTerminalText(sessionId)}`,
+            `\n${t('To continue this session, run')}\nqwen --resume ${sessionId}`,
           );
         }
       }

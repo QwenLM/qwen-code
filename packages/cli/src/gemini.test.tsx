@@ -112,6 +112,11 @@ vi.mock('./config/config.js', () => ({
   parseArguments: vi.fn().mockResolvedValue({}),
   isDebugMode: vi.fn(() => false),
   buildDisabledSkillNamesProvider: vi.fn(() => () => new Set<string>()),
+  isValidSessionId: vi.fn((value: string) =>
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      value,
+    ),
+  ),
 }));
 
 vi.mock('read-package-up', () => ({
@@ -2792,7 +2797,7 @@ describe('startInteractiveUI', () => {
     }
 
     it('echoes the resume command when the session file exists', async () => {
-      const sessionId = 'echo-session-id';
+      const sessionId = 'b2a1c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
       const projectDir = mkdtempSync(join(tmpdir(), 'resume-echo-'));
       mkdirSync(join(projectDir, 'chats'), { recursive: true });
       const sessionFile = join(projectDir, 'chats', `${sessionId}.jsonl`);
@@ -2801,8 +2806,11 @@ describe('startInteractiveUI', () => {
       try {
         await runCleanup(makeRecordingConfig(sessionId, sessionFile));
 
+        // Match only the locale-independent command part: earlier main()
+        // tests run the real initializeI18n('auto') and leave the machine
+        // locale's dictionary in the i18n module state.
         expect(mockWriteStdoutLine).toHaveBeenCalledWith(
-          `\nTo continue this session, run\nqwen --resume ${sessionId}`,
+          expect.stringContaining(`qwen --resume ${sessionId}`),
         );
       } finally {
         rmSync(projectDir, { recursive: true, force: true });
@@ -2810,13 +2818,12 @@ describe('startInteractiveUI', () => {
     });
 
     it('does not echo when the session file is missing', async () => {
+      const sessionId = '11111111-2222-4333-8444-555555555555';
       const projectDir = mkdtempSync(join(tmpdir(), 'resume-echo-'));
-      const sessionFile = join(projectDir, 'chats', 'missing-session-id.jsonl');
+      const sessionFile = join(projectDir, 'chats', `${sessionId}.jsonl`);
 
       try {
-        await runCleanup(
-          makeRecordingConfig('missing-session-id', sessionFile),
-        );
+        await runCleanup(makeRecordingConfig(sessionId, sessionFile));
 
         expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
           expect.stringContaining('qwen --resume'),
@@ -2833,6 +2840,7 @@ describe('startInteractiveUI', () => {
       ['newline', 'evil\nrm -rf ~'],
       ['escape sequence', 'evil\u001B]52;c;pwned\u0007session'],
       ['leading dash', '-cafebabe0123456789abcdef01234567'],
+      ['non-UUID token', 'abc123'],
     ])('does not echo a session ID with a %s', async (_, sessionId) => {
       // Win32 forbids control bytes in file names, so stub the existence
       // gate instead of creating a real session file.
@@ -2852,7 +2860,7 @@ describe('startInteractiveUI', () => {
     });
 
     it('does not echo when chat recording is disabled', async () => {
-      const sessionId = 'disabled-recording-session';
+      const sessionId = 'aaaaaaaa-bbbb-4ccc-9ddd-eeeeeeeeeeee';
       const projectDir = mkdtempSync(join(tmpdir(), 'resume-echo-'));
       mkdirSync(join(projectDir, 'chats'), { recursive: true });
       const sessionFile = join(projectDir, 'chats', `${sessionId}.jsonl`);
@@ -2877,7 +2885,7 @@ describe('startInteractiveUI', () => {
         value: false,
         configurable: true,
       });
-      const sessionId = 'non-tty-session';
+      const sessionId = '0f0e0d0c-0b0a-4908-8706-050403020100';
       const projectDir = mkdtempSync(join(tmpdir(), 'resume-echo-'));
       mkdirSync(join(projectDir, 'chats'), { recursive: true });
       const sessionFile = join(projectDir, 'chats', `${sessionId}.jsonl`);
