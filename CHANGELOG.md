@@ -12,6 +12,48 @@ are listed; nightly and preview pre-releases are intentionally omitted.
 > [GitHub Releases](https://github.com/QwenLM/qwen-code/releases). Do not edit it
 > by hand — run `npm run changelog` to regenerate.
 
+## [0.21.5](https://github.com/QwenLM/qwen-code/releases/tag/v0.21.5) - 2026-08-04
+
+### Highlights
+
+- Adds an opt-in one-time update bridge for macOS users to migrate from the Electron desktop app to the new Tauri shell. ([#8392](https://github.com/QwenLM/qwen-code/pull/8392))
+- Introduces detailed execution-specific outcome tracking for tool calls to distinguish between invocation success, failure, and cancellation. ([#8180](https://github.com/QwenLM/qwen-code/pull/8180))
+- Prevents unsafe replay of MCP tool calls after connection loss unless the tool is explicitly marked idempotent and the workspace is trusted. ([#8387](https://github.com/QwenLM/qwen-code/pull/8387))
+- Stops infinite Goal mode retries after evidence catalog exhaustion by transitioning the Goal to a usage_limited state requiring user intervention. ([#8430](https://github.com/QwenLM/qwen-code/pull/8430))
+- Introduces a structured, finding-centric view in Web Shell for review results, displaying severity, confidence, and suggested fixes. ([#8402](https://github.com/QwenLM/qwen-code/pull/8402))
+- Prevents unexpected page scrolling when closing cell-value dialogs in enhanced Markdown tables while preserving keyboard focus. ([#8407](https://github.com/QwenLM/qwen-code/pull/8407))
+
+### Breaking Changes
+
+No known breaking changes.
+
+### Complete Change List
+
+#### Features
+
+- Adds an opt-in one-time update bridge for macOS users to migrate from the Electron desktop app to the new Tauri shell. ([#8392](https://github.com/QwenLM/qwen-code/pull/8392)) by @yiliang114
+- Introduces detailed execution-specific outcome tracking for tool calls to distinguish between invocation success, failure, and cancellation. ([#8180](https://github.com/QwenLM/qwen-code/pull/8180)) by @doudouOUC
+- Introduces a structured, finding-centric view in Web Shell for review results, displaying severity, confidence, and suggested fixes alongside durable reports. ([#8402](https://github.com/QwenLM/qwen-code/pull/8402)) by @wenshao
+- Enables support for Qwen 3.8 reasoning effort levels by mapping existing effort flags to the provider-specific reasoning_effort parameter. ([#8472](https://github.com/QwenLM/qwen-code/pull/8472)) by @DragonnZhang
+
+#### Bug Fixes
+
+- Prevents unexpected page scrolling when closing cell-value dialogs in enhanced Markdown tables while preserving keyboard focus. ([#8407](https://github.com/QwenLM/qwen-code/pull/8407)) by @carffuca
+- Clarifies write_file guidance to explicitly require reading a target file before writing when its existence or contents are unknown. ([#8428](https://github.com/QwenLM/qwen-code/pull/8428)) by @doudouOUC
+- Fixes the Windows desktop release smoke test by reading logs from the correct LocalAppData path used by the Tauri runtime. ([#8381](https://github.com/QwenLM/qwen-code/pull/8381)) by @yiliang114
+- Prevents unsafe replay of MCP tool calls after connection loss unless the tool is explicitly marked idempotent and the workspace is trusted. ([#8387](https://github.com/QwenLM/qwen-code/pull/8387)) by @doudouOUC
+- Stops infinite Goal mode retries after evidence catalog exhaustion by transitioning the Goal to a usage_limited state requiring user intervention. ([#8430](https://github.com/QwenLM/qwen-code/pull/8430)) by @qqqys
+- Prevents the review system from unnecessarily re-running agents for launches that were already successfully delivered, saving time and tokens. ([#8466](https://github.com/QwenLM/qwen-code/pull/8466)) by @wenshao
+- Fixes a failing unit test for MCP reconnection to ensure it correctly validates safe replay policies with trusted server configurations. ([#8478](https://github.com/QwenLM/qwen-code/pull/8478)) by @wenshao
+- Updates review workflow tests to correctly assert against externalized timeout variables, resolving failures in the Quality Checks job. ([#8486](https://github.com/QwenLM/qwen-code/pull/8486)) by @wenshao
+
+#### Internal Changes
+
+- Removes the broken legacy scheduled PR triage workflow that previously failed to sync labels due to incorrect issue reference parsing. ([#8434](https://github.com/QwenLM/qwen-code/pull/8434)) by @wenshao
+- Reduces queue times for SDK Java tests by canceling stale runs on new commits and routing trusted Linux jobs to faster ECS runners. ([#8441](https://github.com/QwenLM/qwen-code/pull/8441)) by @yiliang114
+
+**Full Changelog**: https://github.com/QwenLM/qwen-code/compare/v0.21.4...v0.21.5
+
 ## [0.21.4](https://github.com/QwenLM/qwen-code/releases/tag/v0.21.4) - 2026-08-03
 
 ### Highlights
