@@ -46,6 +46,7 @@ import {
   reportOpenAiResponse,
   type GenAiAttemptHandle,
 } from '../../telemetry/gen-ai-request.js';
+import { getCurrentAgentId } from '../../agents/runtime/agent-context.js';
 
 const debugLogger = createDebugLogger('OPENAI_PIPELINE');
 
@@ -852,6 +853,7 @@ export class ContentGenerationPipeline {
         providerRequest,
         this.config.cliConfig.getSessionId?.(),
         request.promptCacheSharing === true,
+        getCurrentAgentId() ?? undefined,
       );
     }
 

@@ -146,6 +146,24 @@ describe('official OpenAI prompt caching', () => {
     expect(result.messages).toEqual(request.messages);
   });
 
+  it('partitions a session cache key by subagent identity', () => {
+    const request = {
+      model: 'gpt-5.6',
+      messages: [{ role: 'user', content: 'subagent request' }],
+    } as OpenAI.Chat.ChatCompletionCreateParams;
+
+    const result = applyOfficialOpenAIPromptCaching(
+      request,
+      'session-123',
+      false,
+      'Explore-a1b2c3d4',
+    );
+
+    expect(result.prompt_cache_key).toBe(
+      'qwen-code:session-123:Explore-a1b2c3d4',
+    );
+  });
+
   it('does not rewrite regular GPT-5.6 requests', () => {
     const request = {
       model: 'gpt-5.6',

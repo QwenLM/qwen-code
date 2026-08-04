@@ -43,6 +43,7 @@ import {
   setGenAiUsageProvenance,
 } from '../../telemetry/gen-ai-usage.js';
 import { setToolCallPreparations } from '../tool-call-preparation.js';
+import { runWithAgentContext } from '../../agents/runtime/agent-context.js';
 
 // Mock dependencies
 const mockReportOpenAiRequest = vi.hoisted(() => vi.fn());
@@ -4244,6 +4245,45 @@ describe('ContentGenerationPipeline', () => {
         expect.objectContaining({
           prompt_cache_key: 'qwen-code:session-123',
           messages,
+        }),
+        expect.anything(),
+      );
+    });
+
+    it('partitions official OpenAI cache keys for concurrent subagents', async () => {
+      mockContentGeneratorConfig.baseUrl = 'https://api.openai.com/v1';
+      mockContentGeneratorConfig.model = 'gpt-5.6';
+      mockCliConfig = {
+        getSessionId: vi.fn().mockReturnValue('session-123'),
+      } as unknown as Config;
+      mockConfig.cliConfig = mockCliConfig;
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Hello from a subagent' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'test',
+        choices: [{ message: { content: 'response' } }],
+      });
+
+      await runWithAgentContext('Explore-a1b2c3d4', () =>
+        pipeline.execute(
+          {
+            model: 'gpt-5.6',
+            contents: [
+              { role: 'user', parts: [{ text: 'Hello from a subagent' }] },
+            ],
+          },
+          'prompt-id',
+        ),
+      );
+
+      expect(mockClient.chat.completions.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          prompt_cache_key: 'qwen-code:session-123:Explore-a1b2c3d4',
         }),
         expect.anything(),
       );

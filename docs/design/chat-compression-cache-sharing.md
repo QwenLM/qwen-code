@@ -38,9 +38,14 @@ OpenAI-compatible endpoints use the same prefix-preserving request shape even
 when their cache controls are unknown, allowing server-side automatic prefix
 caches such as vLLM to match it. Qwen Code does not send provider-specific cache
 fields to these endpoints. For the official OpenAI API, requests share a stable
-session cache key. GPT-5.6 and later compression requests additionally mark the
-last reusable user/tool boundaries and select explicit-only cache mode, so the
-new compression directive does not move the effective cache breakpoint.
+session cache key; each concurrently running subagent appends its stable agent
+identity so unrelated prefixes do not compete under the parent's key. This
+follows OpenAI's recommendation to keep total traffic across all prefixes for
+one key near 15 requests per minute and partition higher-volume traffic with a
+[stable mapping](https://developers.openai.com/api/docs/guides/prompt-caching#improve-cache-hit-rates-with-a-prompt-cache-key).
+GPT-5.6 and later compression requests additionally mark the last reusable
+user/tool boundaries and select explicit-only cache mode, so the new
+compression directive does not move the effective cache breakpoint.
 
 ## Verification
 

@@ -76,10 +76,12 @@ export function applyOfficialOpenAIPromptCaching(
   request: OpenAI.Chat.ChatCompletionCreateParams,
   sessionId: string | undefined,
   cacheSharing: boolean,
+  cacheKeyPartition?: string,
 ): OpenAI.Chat.ChatCompletionCreateParams {
   const result = { ...request } as OpenAIRequestWithExplicitCaching;
   if (sessionId && !result.prompt_cache_key) {
-    result.prompt_cache_key = `${CACHE_KEY_PREFIX}${sessionId}`;
+    const partition = cacheKeyPartition ? `:${cacheKeyPartition}` : '';
+    result.prompt_cache_key = `${CACHE_KEY_PREFIX}${sessionId}${partition}`;
   }
   if (!cacheSharing || !supportsExplicitOpenAIPromptCaching(request.model)) {
     return result;
