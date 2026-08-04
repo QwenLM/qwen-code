@@ -101,3 +101,24 @@ export const SPAN_HOOK = 'qwen-code.hook';
  * (#3731 Phase 3).
  */
 export const SPAN_SUBAGENT = 'qwen-code.subagent';
+
+// Tool failure kind span attribute and vocabulary — shared across
+// coreToolScheduler, session-tracing, and telemetry docs so the
+// write sites and documented values cannot drift.
+export const TOOL_FAILURE_KIND_ATTRIBUTE = 'tool.failure_kind';
+export const TOOL_FAILURE_KIND_CANCELLED = 'cancelled';
+export const TOOL_FAILURE_KIND_PRE_HOOK_BLOCKED = 'pre_hook_blocked';
+export const TOOL_FAILURE_KIND_INVOCATION_GUARD_DENIED =
+  'invocation_guard_denied';
+export const TOOL_FAILURE_KIND_POST_HOOK_STOPPED = 'post_hook_stopped';
+export const TOOL_FAILURE_KIND_TOOL_ERROR = 'tool_error';
+export const TOOL_FAILURE_KIND_TOOL_EXCEPTION = 'tool_exception';
+export const TOOL_FAILURE_KIND_PERMISSION_DENIED = 'permission_denied';
+export const TOOL_FAILURE_KIND_PERMISSION_HOOK_DENIED =
+  'permission_hook_denied';
+export const TOOL_FAILURE_KIND_PLAN_MODE_BLOCKED = 'plan_mode_blocked';
+export const TOOL_FAILURE_KIND_NON_INTERACTIVE_DENIED =
+  'non_interactive_denied';
+export const TOOL_FAILURE_KIND_BACKGROUND_AGENT_DENIED =
+  'background_agent_denied';
+export const TOOL_FAILURE_KIND_TIMEOUT = 'timeout';

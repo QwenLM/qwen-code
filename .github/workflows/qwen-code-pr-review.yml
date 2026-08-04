@@ -228,7 +228,9 @@ jobs:
         startsWith(github.event.review.body, '@qwen-code /review')))
     # Canonical same-repo guard: this job loads CI_BOT_PAT, so fork-triggered
     # runs stay on hosted (ephemeral); only in-repo PR events on QwenLM/qwen-code
-    # use the persistent ECS runner.
+    # use the persistent ECS runner. The job IS the write-permission check, so
+    # it cannot route on its own output; downstream jobs already route on the
+    # repository guard alone.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     permissions:
@@ -347,10 +349,13 @@ jobs:
          startsWith(github.event.review.body, '@qwen-code /review ') ||
          startsWith(github.event.review.body, format('@qwen-code /review{0}', '\n'))) &&
         needs.authorize.outputs.should_review == 'true'))
-    # 300 (not 260): the per-review budget auto-scales to 240 minutes for any
-    # non-small PR (see "Run review"), and the shared retry budget plus comment
-    # posting need headroom above that within the job-level cap.
-    timeout-minutes: 300
+    # The per-review budget auto-scales to QWEN_REVIEW_MAX_TIMEOUT_MINUTES
+    # for any non-small PR (see "Run review"), and the shared retry budget
+    # plus comment posting need headroom above that within the job-level cap.
+    # Tunable via the `QWEN_REVIEW_JOB_TIMEOUT_MINUTES` repository variable
+    # (default: 360); must stay above QWEN_REVIEW_MAX_TIMEOUT_MINUTES so
+    # retry plus posting never hit the cap.
+    timeout-minutes: '${{ fromJSON(vars.QWEN_REVIEW_JOB_TIMEOUT_MINUTES) }}'
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions:
       contents: 'read'
@@ -721,8 +726,9 @@ jobs:
           if [ "$TIMEOUT_MINUTES" -le 5 ]; then
             fail "timeout_minutes must be greater than 5"
           fi
-          if [ "$TIMEOUT_MINUTES" -gt 240 ]; then
-            fail "timeout_minutes must not exceed 240 minutes"
+          MAX_TIMEOUT_MINUTES="${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}"
+          if [ "$TIMEOUT_MINUTES" -gt "$MAX_TIMEOUT_MINUTES" ]; then
+            fail "timeout_minutes must not exceed ${MAX_TIMEOUT_MINUTES} minutes"
           fi
 
           # Size-aware default timeout. A fixed 180-minute default times out
@@ -732,9 +738,10 @@ jobs:
           # same PR had finished in ~90 minutes on a less loaded runner, so the
           # variance alone argues for a wide budget. When the caller did not
           # pass an explicit --timeout, give any non-small PR (> 300 changed
-          # lines, additions + deletions) the full 240 cap; small PRs keep the
-          # proven 180. An explicit --timeout always wins. A size lookup failure
-          # falls back to the 180 default rather than failing the review.
+          # lines, additions + deletions) the full QWEN_REVIEW_MAX_TIMEOUT_MINUTES
+          # cap; small PRs keep the proven 180. An explicit --timeout always wins;
+          # a size lookup failure falls back to the 180 default rather than
+          # failing the review.
           EFFECTIVE_TIMEOUT_MINUTES="$TIMEOUT_MINUTES"
           if [ "${TIMEOUT_EXPLICIT:-false}" != "true" ]; then
             PR_SIZE_LINES=''
@@ -748,7 +755,7 @@ jobs:
               if [ "$PR_SIZE_LINES" -le 300 ]; then
                 EFFECTIVE_TIMEOUT_MINUTES=180
               else
-                EFFECTIVE_TIMEOUT_MINUTES=240
+                EFFECTIVE_TIMEOUT_MINUTES="${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}"
               fi
               echo "PR #${PR_NUMBER} changed ${PR_SIZE_LINES} lines; auto timeout ${EFFECTIVE_TIMEOUT_MINUTES} minutes."
             else
@@ -964,11 +971,12 @@ jobs:
             echo "Skipping fallback comment: PR #${PR_NUMBER} moved from ${EXPECTED_HEAD_SHA} to ${current_head}." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
+          MAX_TIMEOUT_MINUTES="${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}"
           if [ "$FAILURE_KIND" = "timeout" ]; then
-            if [ "$TIMEOUT_MINUTES" -lt 240 ]; then
-              body="**Qwen Code review timed out.** ${FAILURE_REASON} For large PRs, retry with a longer timeout by commenting: \`@qwen-code /review --timeout=240\`. See [workflow logs](${RUN_URL})."
+            if [ "$TIMEOUT_MINUTES" -lt "$MAX_TIMEOUT_MINUTES" ]; then
+              body="**Qwen Code review timed out.** ${FAILURE_REASON} For large PRs, retry with a longer timeout by commenting: \`@qwen-code /review --timeout=${MAX_TIMEOUT_MINUTES}\`. See [workflow logs](${RUN_URL})."
             else
-              body="**Qwen Code review timed out.** ${FAILURE_REASON} This run already used the maximum 240 minute timeout. See [workflow logs](${RUN_URL})."
+              body="**Qwen Code review timed out.** ${FAILURE_REASON} This run already used the maximum ${MAX_TIMEOUT_MINUTES} minute timeout. See [workflow logs](${RUN_URL})."
             fi
           elif [ "$FAILURE_KIND" = "quota" ]; then
             # A quota reset is typically hours out, so an in-run retry can't
@@ -1211,7 +1219,7 @@ jobs:
       - name: 'Resolve conflicts'
         if: "steps.prepare.outputs.decision == 'run'"
         id: 'resolve_conflicts'
-        uses: 'QwenLM/qwen-code-action@6d08e91aa807257b9c8af60edb5bb6bb2d7d951f'
+        uses: 'QwenLM/qwen-code-action@05f81718976f3b7da657422e6e8e4d372b8621d7'
         env:
           PR_NUMBER: '${{ steps.resolve.outputs.pr_number }}'
           BASE_REF: '${{ steps.prepare.outputs.base_ref }}'
