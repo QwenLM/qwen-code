@@ -104,6 +104,19 @@ export const probes = {
   freeze: () => probeOutput('freeze', '--help') !== undefined,
 };
 
+/** Every signal whose default action would terminate the process past the
+ * finally-based reap: a closed terminal window HUPs the foreground process
+ * group (measured: exit 129 with server, socket and holder all surviving),
+ * and the capture window legally runs up to an hour. Exported so the signal
+ * tests iterate the REAL list. */
+export const REAP_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT'] as const;
+
+/** The tmux control-call deadline, exported as a seam like its freezeRender
+ * sibling: belt-less, a wedged server blocks the first execFileSync forever
+ * — and in reap() the process could not even die on the re-raised signal.
+ * Tests shorten it; production never does. */
+export const tmuxControl = { timeoutMs: 15_000 };
+
 function tmux(argv: string[]): string {
   return execFileSync('tmux', argv, {
     encoding: 'utf8',
@@ -111,9 +124,9 @@ function tmux(argv: string[]): string {
     // problem — capture-pane returns the visible pane only.
     maxBuffer: 8 * 1024 * 1024,
     // Every tmux command here is a quick control call; a server wedged hard
-    // enough to sit on one for 15s should turn into a refusal, not hang the
-    // whole review agent behind it.
-    timeout: 15_000,
+    // enough to sit on one this long should turn into a refusal, not hang
+    // the whole review agent behind it.
+    timeout: tmuxControl.timeoutMs,
   }) as string;
 }
 
@@ -203,20 +216,19 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // The probe uses a UNIQUE sibling, never the .ans itself: truncating the
     // real one would delete the previous run's text while its manifest/png
     // survive to misdescribe it.
+    // Clear the previous run's artifacts BEFORE the write probe, not after:
+    // a probe failure (ENOSPC, EMFILE at openSync — measured) must ALSO
+    // refuse with the stale evidence gone. Every exit path — including a
+    // refusal for a typo'd flag later in this validation chain — must leave
+    // THIS run's artifacts or nothing; a stale manifest next to a refusal
+    // hands a verifier evidence from a different capture.
+    rmSync(ansPath, { force: true });
+    rmSync(pngPath, { force: true });
+    rmSync(manifestPath, { force: true });
     const probePath = `${outBase}.write-probe-${randomBytes(4).toString('hex')}`;
     const fd = openSync(probePath, 'w');
     closeSync(fd);
     rmSync(probePath, { force: true });
-    // Clear the previous run's artifacts BEFORE any other gate can refuse:
-    // every exit path — including a refusal for a typo'd flag later in this
-    // validation chain — must leave THIS run's artifacts or nothing. A
-    // refusal that left a stale manifest behind would hand a verifier
-    // evidence from a different capture, the exact failure this command
-    // exists to prevent (measured: a typo'd --until used to leave all three
-    // prior artifacts in place).
-    rmSync(ansPath, { force: true });
-    rmSync(pngPath, { force: true });
-    rmSync(manifestPath, { force: true });
   } catch (e) {
     refuse(
       `--out is not writable: ${e instanceof Error ? e.message : String(e)}`,
@@ -447,11 +459,8 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       // Litter is cosmetic; never let cleanup mask the capture's own result.
     }
   };
-  // SIGHUP and SIGQUIT too: their default actions terminate identically —
-  // a closed terminal window HUPs the foreground process group (measured:
-  // exit 129 with server, socket and holder all surviving), and the capture
-  // window legally runs up to an hour.
-  const REAP_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT'] as const;
+  // (REAP_SIGNALS is module-level and exported so the signal tests iterate
+  // the REAL list — a dropped entry must fail a test, not ship silently.)
   const releaseSignals = (): void => {
     for (const s of REAP_SIGNALS) process.removeListener(s, onSignal);
   };
@@ -664,6 +673,14 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       degradations.push(
         `freeze failed (${why}${errTail ? `: ${errTail}` : ''}) — .ans text captured, no image rendered`,
       );
+      // A failed render can leave a partial/0-byte png at the very path the
+      // manifest is about to deny — remove it (measured: a fake freeze that
+      // wrote bytes then exited 9 left a torn png behind).
+      try {
+        rmSync(pngPath, { force: true });
+      } catch {
+        // The degradation entry above is the primary signal.
+      }
     }
   }
 
@@ -708,6 +725,9 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     try {
       rmSync(ansPath, { force: true });
       rmSync(pngPath, { force: true });
+      // The failed write itself can leave a PARTIAL manifest at the path —
+      // worse than none: it parses or half-parses as evidence description.
+      rmSync(manifestPath, { force: true });
     } catch {
       // The refusal reason below is the primary signal either way.
     }

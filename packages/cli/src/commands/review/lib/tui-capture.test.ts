@@ -43,6 +43,18 @@ describe('validGeometry', () => {
       expect(v.ok, `${c}x${r}`).toBe(false);
     }
   });
+
+  it('names the FLAG that violated, not its sibling', () => {
+    // The reason is user-facing: a flag-name swap once produced
+    // "--rows must be an integer in [20, 500], got 10" for a --cols
+    // violation — the caller then "fixes" the wrong flag.
+    const cols = validGeometry(10, 24);
+    if (!cols.ok) expect(cols.reason).toContain('--cols');
+    const rows = validGeometry(80, 1000);
+    if (!rows.ok) expect(rows.reason).toContain('--rows');
+    expect(cols.ok).toBe(false);
+    expect(rows.ok).toBe(false);
+  });
 });
 
 describe('tmuxSupportsCaptureN', () => {
@@ -182,14 +194,17 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
       command: `printf '%s' "it's"`,
       cwd: '/work',
     });
-    // A single quote in the command must not close either layer's quoting:
-    // the outer wrapper starts and ends the holder, the hold line survives
-    // verbatim, and the command's own text is still present inside.
+    // A single quote in the command must not close either layer's quoting.
+    // The expectation is COMPOSED with the same POSIX escaping rule stated
+    // independently ('→'\'' at each layer): dropping esc() from either
+    // layer breaks the equality (measured: the inner-layer mutant produced
+    // a holder /bin/sh rejects with an unmatched quote, while the previous
+    // structural assertions all stayed green).
+    const esc = (v: string): string => v.replaceAll("'", "'\\''");
+    const cmd = `printf '%s' "it's"`;
+    const inner = `sh -c '${esc(cmd)}'`;
     const held = p.start[p.start.length - 1];
-    expect(held.startsWith("sh -c 'sh -c ")).toBe(true);
-    expect(held.endsWith("\nsleep 7200'")).toBe(true);
-    expect(held).toContain('%s');
-    expect(held).toContain('it');
+    expect(held).toBe(`sh -c '${esc(`${inner}\nsleep 7200`)}'`);
   });
 
   it('matches --until on a joined, escape-free view while .ans stays physical', () => {

@@ -17,6 +17,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import { CAPTURE_SERVER_PREFIX } from './lib/tui-capture.js';
 import { clearReviewWorktreeLease } from '../../services/review-worktree-lease.js';
 import { currentUser, getGhHost, ghApiAll, setGhHost } from './lib/gh.js';
 import { parseReceiptIds } from './lib/receipt.js';
@@ -380,21 +381,23 @@ function auditPrWrites(target: string, prNumber: string): void {
  * fails is a note, never a cleanup failure. Returns whether anything was
  * reaped, so the "Nothing to clean" claim stays true.
  */
-function reapOrphanedCaptureServers(): boolean {
+function reapOrphanedCaptureServers(): { reaped: boolean; failed: boolean } {
   const uid = process.getuid?.();
   // tmux is POSIX-only, and so is the socket dir layout below.
-  if (uid === undefined) return false;
+  if (uid === undefined) return { reaped: false, failed: false };
   const base = process.env['TMUX_TMPDIR']?.trim() || '/tmp';
   const dir = join(base, `tmux-${uid}`);
   let entries: string[] = [];
   try {
     entries = existsSync(dir) ? readdirSync(dir) : [];
   } catch {
-    return false;
+    return { reaped: false, failed: false };
   }
   let reapedAny = false;
+  let failedAny = false;
+  const orphanRe = new RegExp(`^${CAPTURE_SERVER_PREFIX}(\\d+)-`);
   for (const name of entries) {
-    const m = /^qwen-review-capture-(\d+)-/.exec(name);
+    const m = orphanRe.exec(name);
     if (!m) continue;
     let alive = true;
     try {
@@ -410,7 +413,12 @@ function reapOrphanedCaptureServers(): boolean {
     // unlinked socket makes a live server unreachable forever.
     let serverDead = false;
     try {
-      execFileSync('tmux', ['-L', name, 'kill-server'], { stdio: 'pipe' });
+      execFileSync('tmux', ['-L', name, 'kill-server'], {
+        stdio: 'pipe',
+        // Same belt as capture-tui's own control calls: a wedged server
+        // must not hang the whole cleanup behind one socket.
+        timeout: 15_000,
+      });
       serverDead = true;
     } catch (e) {
       serverDead = /no server running/i.test(
@@ -418,6 +426,7 @@ function reapOrphanedCaptureServers(): boolean {
       );
     }
     if (!serverDead) {
+      failedAny = true;
       writeStderrLine(
         `note: could not reap orphaned capture server ${name} ` +
           `(tmux -L ${name} kill-server to reap it by hand)`,
@@ -432,7 +441,7 @@ function reapOrphanedCaptureServers(): boolean {
     writeStdoutLine(`Reaped orphaned capture server: ${name}`);
     reapedAny = true;
   }
-  return reapedAny;
+  return { reaped: reapedAny, failed: failedAny };
 }
 
 export function runCleanup(target: string): void {
@@ -546,7 +555,15 @@ export function runCleanup(target: string): void {
   // --- Orphaned capture servers (capture-tui) ---------------------------
   // Not target-scoped: any crashed capture on this host left them, and
   // Step 9's sweep is the only deterministic pass that reliably runs.
-  if (reapOrphanedCaptureServers()) removedAny = true;
+  {
+    // An unreapable orphan is a FAILURE, not a nothing: without threading it
+    // into failedAny, stderr says "could not reap" while stdout announces
+    // "Nothing to clean" — the two streams contradicting each other, and
+    // the stdout half is the one a script reads.
+    const sweep = reapOrphanedCaptureServers();
+    if (sweep.reaped) removedAny = true;
+    if (sweep.failed) failedAny = true;
+  }
 
   if (!failedAny) {
     clearReviewWorktreeLease(process.cwd(), target);

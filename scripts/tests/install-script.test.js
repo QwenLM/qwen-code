@@ -54,6 +54,14 @@ const hasZipTooling =
     spawnSync('unzip', ['-v'], { stdio: 'ignore' }).status === 0);
 const itWithZipTooling = hasZipTooling ? it : it.skip;
 const itOnUnixWithZipTooling = hasZipTooling ? itOnUnix : it.skip;
+if (!hasZipTooling) {
+  // Loud, not silent: these skips drop the packaging tests INCLUDING the
+  // zip path-traversal case, and a skip is invisible in a green run.
+  console.warn(
+    '[install-script.test] zip/unzip missing on this runner: packaging ' +
+      'tests (including the path-traversal case) will SKIP.',
+  );
+}
 
 vi.setConfig({ testTimeout: 30_000 });
 
@@ -2158,7 +2166,10 @@ describe('standalone release packaging', () => {
     }
   });
 
-  itWithZipTooling('rejects unexpected dist assets', () => {
+  // Not zip-gated: the assertion path never invokes zip/unzip (measured —
+  // the failure fires at copyRuntimeAssets), and gating it silently lost
+  // always-on dist validation on zip-less runners.
+  it('rejects unexpected dist assets', () => {
     const createdDist = ensureMinimalDist();
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
 

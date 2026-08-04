@@ -6,6 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { parse } from 'yaml';
 
 // The real-tmux capture suite is describe.skipIf(!hasTmux)-gated and vitest
 // does not fail on skips: if the CI install step disappears (a refactor, an
@@ -15,17 +16,31 @@ import { readFileSync } from 'node:fs';
 // existence and its two load-bearing properties.
 describe('ci.yml capture tooling', () => {
   const ci = readFileSync('.github/workflows/ci.yml', 'utf8');
+  const doc = parse(ci);
+  const steps = doc.jobs['test'].steps;
+  const nameIndex = (name) => steps.findIndex((st) => st.name === name);
 
-  it('installs tmux on the Linux test lane', () => {
-    expect(ci).toContain("- name: 'Install tmux'");
-    expect(ci).toMatch(/sudo apt-get install -y -qq[^\n]* tmux/);
+  it('installs tmux INSIDE the test job, before the tests run', () => {
+    // Whole-file substring pins survive the step moving to another job or
+    // below the test step — where the real-tmux suite silently skips, the
+    // exact failure mode this file exists to prevent.
+    const install = nameIndex('Install tmux');
+    const runTests = nameIndex('Run tests and generate reports');
+    expect(install).toBeGreaterThan(-1);
+    expect(runTests).toBeGreaterThan(-1);
+    expect(install).toBeLessThan(runTests);
+    expect(steps[install].run).toMatch(/sudo apt-get install -y -qq[^\n]* tmux/);
   });
 
-  it('keeps the step advisory — neither branch may fail the required check', () => {
+  it('keeps the step advisory — no branch may fail the required check', () => {
+    const run = steps[nameIndex('Install tmux')].run;
     // A broken-but-installed tmux (dangling symlink, missing lib) must not
     // turn the Test check red before a single test has run.
-    expect(ci).toMatch(/tmux -V \|\| echo/);
+    expect(run).toMatch(/tmux -V \|\| echo/);
+    // The apt-install fallback is guarded too: without its || echo, an apt
+    // hiccup exits the run script non-zero and reds the required check.
+    expect(run).toMatch(/apt-get install[^\n]*tmux[^\n]*\\?\n?[^\n]*\|\| echo/);
     // And the no-sudo/no-apt fallback stays a message, not a failure.
-    expect(ci).toContain('real-tmux capture tests will be skipped');
+    expect(run).toContain('real-tmux capture tests will be skipped');
   });
 });

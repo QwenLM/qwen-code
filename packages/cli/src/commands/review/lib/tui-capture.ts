@@ -26,8 +26,13 @@
  * "drives the user's own windows". A pid+nonce-scoped socket name means even
  * two concurrent reviews cannot collide.
  */
+/** The one server-name prefix, shared by the producer (captureServerName)
+ * and the orphan sweep's matcher (cleanup.ts): as two independent literals,
+ * a prefix rename silently turns the sweep into a permanent no-op. */
+export const CAPTURE_SERVER_PREFIX = 'qwen-review-capture-';
+
 export function captureServerName(pid: number, nonce: string): string {
-  return `qwen-review-capture-${pid}-${nonce}`;
+  return `${CAPTURE_SERVER_PREFIX}${pid}-${nonce}`;
 }
 
 /** Default geometry: the classic terminal, which is also where most layout
