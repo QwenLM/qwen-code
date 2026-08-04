@@ -14,10 +14,14 @@ const skillDir = path.dirname(fileURLToPath(import.meta.url));
 // Titles may end in one parenthesized qualifier, e.g. "The two-dot phantom
 // regressions (PR #6626)", so the match allows a single nested group.
 const POINTER_RE = /\(measured; DESIGN\.md — ([^()\n]+(?:\([^()\n]*\))?)\)/g;
+const POINTER_OPEN = '(measured; DESIGN.md — ';
 
-function incidentPointers(): string[] {
-  const skill = fs.readFileSync(path.join(skillDir, 'SKILL.md'), 'utf8');
-  return [...skill.matchAll(POINTER_RE)].map(([, title]) => title.trim());
+function skillBody(): string {
+  return fs.readFileSync(path.join(skillDir, 'SKILL.md'), 'utf8');
+}
+
+function incidentPointers(body: string): string[] {
+  return [...body.matchAll(POINTER_RE)].map(([, title]) => title.trim());
 }
 
 function incidentHeadings(): string[] {
@@ -30,8 +34,21 @@ function incidentHeadings(): string[] {
 
 describe('bundled review skill', () => {
   it('anchors every SKILL.md incident pointer at a DESIGN.md heading', () => {
-    const pointers = incidentPointers();
+    const body = skillBody();
+    const pointers = incidentPointers(body);
     expect(pointers.length).toBeGreaterThan(0);
+
+    // A pointer the regex cannot parse must fail loudly, not drop silently:
+    // every literal opener owes exactly one match.
+    let opens = 0;
+    for (
+      let i = body.indexOf(POINTER_OPEN);
+      i !== -1;
+      i = body.indexOf(POINTER_OPEN, i + POINTER_OPEN.length)
+    ) {
+      opens++;
+    }
+    expect(pointers).toHaveLength(opens);
 
     const headings = new Set(incidentHeadings());
     for (const title of pointers) {
@@ -43,12 +60,24 @@ describe('bundled review skill', () => {
   });
 
   it('leaves no DESIGN.md incident heading without a SKILL.md pointer', () => {
-    const referenced = new Set(incidentPointers());
+    const referenced = new Set(incidentPointers(skillBody()));
     for (const title of incidentHeadings()) {
       expect(
         referenced.has(title),
         `DESIGN.md incident heading has no SKILL.md pointer: "### ${title}"`,
       ).toBe(true);
     }
+  });
+
+  it('keeps the runtime guard against reading DESIGN.md mid-review', () => {
+    expect(skillBody()).toContain(
+      'Never `read_file` DESIGN.md during a review.',
+    );
+  });
+
+  it('pins the setup-batch ordering constraints', () => {
+    const body = skillBody();
+    expect(body).toContain('`fetch-pr` before all of them');
+    expect(body).toContain('`agent-prompt --roster` after the rules load');
   });
 });

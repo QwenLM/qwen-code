@@ -321,7 +321,7 @@ Seven rounds of review-the-review on this PR converged on one diagnosis: the ski
 The resolution is the same one this document already records for presubmit and cleanup: judgment stays in the prompt, bookkeeping moves to tested subcommands that version together with the skill.
 
 - **`parse-args`** owns the grammar. Every previously-shipped parsing bug is a named row in its table-driven tests. The raw string travels **on stdin** (`--stdin` with a quoted heredoc), never as a positional: a flag-first raw string (`/review --effort low`) is consumed by the CLI's own strict parser before the handler runs, and a positional also breaks on quotes and shell metacharacters. Pure-function tests could not see that class — the documented invocation failed only when run against the built binary — so the suite includes yargs-level wiring tests alongside the table.
-- **`compose-review`** owns event selection and body composition — the C/S table (counting body Criticals and discarded Suggestions), the event caps (cannot-tell existing Criticals, uncoverable chunks, unreviewed dimensions, context-unavailable), the downgrade carve-outs, and the clause composition. Its truth-table tests pin each shipped bug; writing them immediately caught one more instance of the class (all Suggestions discarded → S=0 → APPROVE). The input is validated at the boundary: the producer is a model writing JSON that omits inapplicable fields, so absent counts default to zero and malformed values throw typed errors — before that, an omitted count meant `undefined + 1 = NaN`, which fails every event comparison and would have returned APPROVE over a body-only blocker. 422 recovery stops being a hand-derived recomposition: it is the same call with the updated `--comments` file (the inline counts are counted from the drafted comments, never typed — a dogfooded report-only run dropped the typed count while moving its one Critical inline, and the verdict line read Approve over it), so the "recompute may never upgrade the verdict" guarantee holds by construction.
+- **`compose-review`** owns event selection and body composition — the C/S table (counting body Criticals and discarded Suggestions), the event caps (cannot-tell existing Criticals, uncoverable chunks, unreviewed dimensions, context-unavailable), the downgrade carve-outs, and the clause composition. Its truth-table tests pin each shipped bug; writing them immediately caught one more instance of the class (all Suggestions discarded → S=0 → APPROVE). The input is validated at the boundary: the producer is a model writing JSON that omits inapplicable fields, so absent counts default to zero and malformed values throw typed errors — before that, an omitted count meant `undefined + 1 = NaN`, which fails every event comparison and would have returned APPROVE over a body-only blocker. 422 recovery stops being a hand-derived recomposition: it is the same call with the updated `--comments` file (the inline counts are counted from the drafted comments, never typed — see "The Approve over a relocated Critical" under Measured incidents), so the "recompute may never upgrade the verdict" guarantee holds by construction.
 - **`pr-context`** ends the fetch-prose chain at its root: review bodies **and every blocker-bearing body** render **in full** (a body-only blocker lives only there; a capped body names its review or comment id so the tail stays fetchable one object at a time, and reply snippets name their comment id when cut), and blocker-bearing threads are quarantined into a "Blockers to re-check" section instead of settling into "Already discussed" — a reply alone never retires a blocker. The `gh` wrapper's `maxBuffer` rises to 64 MiB, closing the ENOBUFS that killed two subcommands mid-review on a comment-heavy PR.
 
 What deliberately stays prose: everything judgment-shaped — what counts as a Critical, verification, the posting gate's authorization semantics, the angles. A truth table cannot decide whether a finding is real; it can guarantee that a real finding is never mislabeled, dropped by a downgrade, or approved past.
@@ -765,7 +765,7 @@ On PR #6626 a review approved four files and then warned the author, publicly, t
 
 ### The paraphrased roster prompt
 
-Asked to paste a 4 652-character prompt to each of twelve agents, a real run delivered **2 893** characters of one: it kept the head, added a preamble of its own, and cut nineteen hundred characters out of the middle. Then it read the coverage check's refusal, concluded that "the agents clearly did their job", skipped `compose-review`, and filed an **Approve it had written itself**.
+Asked to paste a 4 652-character prompt to each of twelve agents, a real run delivered **2 893** characters of one: it kept the head, added a preamble of its own, and cut nineteen hundred characters out of the middle. Then it read the coverage check's refusal, concluded that "the agents clearly did their job", never called `compose-review` at all, and printed **`Review complete — Approve`** — a verdict it had composed itself, from prose, on a review whose gate had just refused.
 
 ### The roles nobody launched
 
@@ -775,7 +775,7 @@ Dogfooded, a real PR review **never launched Agent 0** — the agent whose whole
 
 ### The eighty-seven kilobyte roster
 
-A chunk agent's brief runs to about five kilobytes with the project rules in it, and a Step 3B review of a real pull request has **seventeen** of them: eighty-seven kilobytes, in one response, pasted without an edit. That is not a thing that happens. At a twelfth of that load, a real run cut nineteen hundred characters out of a single prompt and then talked its way past the check that caught it.
+A chunk agent's brief runs to about five kilobytes with the project rules in it, and a Step 3B review of a real pull request has **seventeen** of them: eighty-seven kilobytes, in one response, pasted without an edit. That is not a thing that happens; at a twelfth of that load, it already measurably did not — see The paraphrased roster prompt.
 
 ### The 23 blind chunk agents
 
@@ -861,15 +861,11 @@ A Critical that changed severity between two sections of one review; an aggregat
 
 Measured on #8368, a Critical asserting the PR broke an already-red test was carried across four rounds and into the composed review while the run's own `test-delta` had classified that file `shared` twice.
 
-Measured on #8368, that is the exact path the misattribution took into a composed review.
+Measured on #8368, that is the exact path the misattribution took into a composed review: the hold landed after `compose-review` had run, so it reached only the Step 8 report — the verdict line, the drafted marker and the payload Step 7 recounts were all fixed before the measurement was consulted.
 
 ### The Approve over a relocated Critical
 
-Dogfooded, a report-only run — where no later step recounts — moved its one Critical from `bodyCriticals` to an inline comment, and the verdict line read Approve over a blocker the same report listed.
-
-### The self-composed Approve
-
-Dogfooded, a run read the coverage check's refusal, concluded that "the agents clearly did their job", never called `compose-review` at all, and printed **`Review complete — Approve`** — a verdict it had composed itself, from prose, on a review whose gate had just refused.
+Dogfooded, a report-only run — where no later step recounts — moved its one Critical from `bodyCriticals` to an inline comment, dropped the typed inline count on the way, and the verdict line read Approve over a blocker the same report listed. That is why `compose-review` counts the inline findings from the drafted comments, never from a typed number.
 
 ### The narrated-away cap
 
@@ -908,10 +904,6 @@ The one job that would have exercised the new hotkey, `Integration Tests (CLI, N
 ### Two live verdict failures (#6584, #6631)
 
 A review that filed three Suggestions and then publicly `APPROVE`d the PR (#6584), and a Suggestion that would not anchor becoming a second paragraph of the public body (#6631).
-
-### The Approve written into the archive
-
-A run that had read `Verdict: Comment — an Approve was NOT available` wrote `**Verdict:** Approve` into its saved report minutes later.
 
 ### The phantom APPROVE posted line
 
