@@ -45,12 +45,14 @@ function isResolvedPathWithinDirectory(childPath: string, parentPath: string) {
  * crash), but the snapshot dir is never removed, so
  * `%TEMP%/qwen-*-sess-*` entries accumulate forever (#7906). Sweep the
  * project dirs that are keyed by a worktree path and whose worktree
- * sidecars all point at paths that no longer exist. Anything that cannot
- * prove itself stale (no sidecar, corrupted sidecars, at least one live
- * worktree) is kept. Normal project buckets are never touched: they can
+ * sidecars all point at paths that no longer exist, plus the buckets
+ * keyed by a gone ephemeral launch cwd inside the OS temp dir. Anything
+ * that cannot prove itself stale (no sidecar, corrupted sidecars, at
+ * least one live worktree, a launch cwd outside the temp dir or still
+ * present) is kept. Normal project buckets are never touched: they can
  * hold worktree sidecars of their own (enter/exit run from the original
- * repo does not relocate session storage), so a bucket whose name is not a
- * sanitized worktree path is skipped regardless of what its sidecars say.
+ * repo does not relocate session storage), so a bucket whose launch cwd
+ * is not in the temp dir is kept regardless of what its sidecars say.
  */
 export async function sweepStaleWorktreeProjects(
   runtimeBaseDir: string,
@@ -64,27 +66,42 @@ export async function sweepStaleWorktreeProjects(
   }
 
   const removed: string[] = [];
-  for (const entry of entries) {
+  for (const entry of entries.sort()) {
     const chatsDir = path.join(projectsDir, entry, 'chats');
-    const worktreePaths = await readWorktreeSidecarPaths(chatsDir);
-    if (worktreePaths.length === 0) continue;
+    const sidecars = await readWorktreeSidecarRecords(chatsDir);
+    if (sidecars.length === 0) continue;
 
-    // Only a bucket actually keyed by a worktree path may be swept. A normal
-    // project bucket can hold worktree sidecars too (enter/exit run from the
-    // original repo never relocates the session storage), and deleting it
-    // would wipe the repo's chat history.
+    const allWorktreesGone = sidecars.every(
+      (sidecar) => !isDirectorySync(sidecar.worktreePath),
+    );
+
+    let stale: boolean;
     if (
-      !worktreePaths.some((worktreePath) => entry === sanitizeCwd(worktreePath))
+      sidecars.some((sidecar) => entry === sanitizeCwd(sidecar.worktreePath))
     ) {
-      continue;
+      // Bucket keyed by a worktree path itself. A normal project bucket can
+      // hold worktree sidecars too (enter/exit run from the original repo
+      // never relocates the session storage), so only this arm may sweep,
+      // and only once every worktree is gone.
+      stale = allWorktreesGone;
+    } else {
+      // Bucket keyed by a gone ephemeral launch cwd, #7906's main class:
+      // enter_worktree from a throwaway T lands the sidecar here with
+      // worktreePath = T/.qwen/worktrees/<slug>, which the arm above can
+      // never match. Sweep only when every parseable sidecar places its
+      // launch cwd inside the OS temp dir and that cwd is gone too. A real
+      // repo path (or a missing originalCwd) always keeps the bucket: an
+      // absent repo dir can mean an unplugged drive, not garbage.
+      stale =
+        allWorktreesGone &&
+        sidecars.every(
+          (sidecar) =>
+            sidecar.originalCwd !== undefined &&
+            isResolvedPathWithinDirectory(sidecar.originalCwd, os.tmpdir()) &&
+            !isDirectorySync(sidecar.originalCwd),
+        );
     }
-
-    // One live worktree anywhere in the bucket is enough to keep it; the
-    // snapshot is stale only when every parseable sidecar points at a gone
-    // worktree. A plain file at the worktree path is not a worktree.
-    if (worktreePaths.some((worktreePath) => isDirectorySync(worktreePath))) {
-      continue;
-    }
+    if (!stale) continue;
 
     // sanitizeCwd collapses distinct worktrees to one bucket name (dots and
     // dashes both become dashes), so the name gate above cannot prove which
@@ -116,11 +133,14 @@ export async function sweepStaleWorktreeProjects(
 }
 
 /**
- * Collect the worktreePath of every readable sidecar under `chats/` and
- * `chats/archive/`. A corrupted sidecar proves nothing and is skipped, never
- * treated as a reason to delete or keep on its own.
+ * Collect the worktreePath (and originalCwd when present) of every readable
+ * sidecar under `chats/` and `chats/archive/`. A corrupted sidecar proves
+ * nothing and is skipped, never treated as a reason to delete or keep on its
+ * own.
  */
-async function readWorktreeSidecarPaths(chatsDir: string): Promise<string[]> {
+async function readWorktreeSidecarRecords(
+  chatsDir: string,
+): Promise<Array<{ worktreePath: string; originalCwd?: string }>> {
   const sidecars: string[] = [];
   for (const dir of [chatsDir, path.join(chatsDir, 'archive')]) {
     let names: string[];
@@ -137,7 +157,7 @@ async function readWorktreeSidecarPaths(chatsDir: string): Promise<string[]> {
   }
   sidecars.sort();
 
-  const worktreePaths: string[] = [];
+  const records: Array<{ worktreePath: string; originalCwd?: string }> = [];
   for (const sidecar of sidecars) {
     try {
       const parsed: unknown = JSON.parse(await fsp.readFile(sidecar, 'utf-8'));
@@ -146,13 +166,20 @@ async function readWorktreeSidecarPaths(chatsDir: string): Promise<string[]> {
         typeof parsed === 'object' &&
         typeof (parsed as Record<string, unknown>)['worktreePath'] === 'string'
       ) {
-        worktreePaths.push((parsed as Record<string, string>)['worktreePath']);
+        const record = parsed as Record<string, unknown>;
+        records.push({
+          worktreePath: record['worktreePath'] as string,
+          originalCwd:
+            typeof record['originalCwd'] === 'string'
+              ? (record['originalCwd'] as string)
+              : undefined,
+        });
       }
     } catch {
       // corrupted sidecar: try the next one before judging the bucket
     }
   }
-  return worktreePaths;
+  return records;
 }
 
 function isDirectorySync(candidate: string): boolean {
