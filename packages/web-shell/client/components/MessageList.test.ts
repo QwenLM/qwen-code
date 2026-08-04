@@ -1188,6 +1188,114 @@ describe('applyTurnCollapse', () => {
     });
   });
 
+  it('keeps a completed main turn expanded while a background agent is pending', () => {
+    const firstAgent = makeBackgroundAgentToolGroup('a1');
+    const secondAgent = makeBackgroundAgentToolGroup('a2');
+    if (firstAgent.role !== 'tool_group' || secondAgent.role !== 'tool_group') {
+      throw new Error('Expected background agent tool groups');
+    }
+    firstAgent.tools[0] = {
+      ...firstAgent.tools[0],
+      status: 'completed',
+    };
+
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      firstAgent,
+      secondAgent,
+      makeAssistantMessage('a1'),
+    ]);
+    const out = collapseItems(items);
+
+    expect(rowIds(out)).toEqual(['u1', 'tc-u1', 'par-a1', 'a1']);
+    expect(collapseOf(out, 'u1')?.collapsed).toBe(false);
+  });
+
+  it('keeps a completed main turn expanded while one background agent is pending', () => {
+    const agent = makeBackgroundAgentToolGroup('a1');
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      agent,
+      makeAssistantMessage('a1'),
+    ]);
+    const out = collapseItems(items);
+
+    expect(rowIds(out)).toEqual(['u1', 'tc-u1', 'a1', 'a1']);
+    expect(collapseOf(out, 'u1')?.collapsed).toBe(false);
+  });
+
+  it('collapses a completed main turn once its only background agent finishes', () => {
+    const agent = makeBackgroundAgentToolGroup('a1');
+    if (agent.role !== 'tool_group') {
+      throw new Error('Expected a background agent tool group');
+    }
+    agent.tools[0] = { ...agent.tools[0], status: 'completed' };
+
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      agent,
+      makeAssistantMessage('a1'),
+    ]);
+    const out = collapseItems(items);
+
+    expect(collapseOf(out, 'u1')?.collapsed).toBe(true);
+    expect(rowIds(out)).toEqual(['u1', 'tc-u1', 'a1']);
+  });
+
+  it('lets an explicit user collapse win over an active background agent', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeBackgroundAgentToolGroup('a1'),
+      makeAssistantMessage('a1'),
+    ]);
+    const out = collapseItems(items, {
+      overrides: new Map([['u1', false]]),
+    });
+
+    expect(collapseOf(out, 'u1')?.collapsed).toBe(true);
+    expect(rowIds(out)).toEqual(['u1', 'tc-u1', 'a1']);
+  });
+
+  it('does not pin a completed turn open for a pending non-agent tool', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      {
+        id: 'g1',
+        role: 'tool_group',
+        tools: [{ callId: 'c1', toolName: 'Read', status: 'pending' }],
+      },
+      makeAssistantMessage('a1'),
+    ]);
+    const out = collapseItems(items);
+
+    expect(collapseOf(out, 'u1')?.collapsed).toBe(true);
+    expect(rowIds(out)).toEqual(['u1', 'tc-u1', 'a1']);
+  });
+
+  it('keeps an earlier turn open for a pending agent while later turns complete', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeBackgroundAgentToolGroup('a1'),
+      makeAssistantMessage('ans1'),
+      makeUserMessage('u2'),
+      makeMultiToolGroup('g2'),
+      makeAssistantMessage('ans2'),
+    ]);
+    const out = collapseItems(items);
+
+    expect(collapseOf(out, 'u1')?.collapsed).toBe(false);
+    expect(rowIds(out)).toEqual([
+      'u1',
+      'tc-u1',
+      'a1',
+      'ans1',
+      'u2',
+      'tc-u2',
+      'ans2',
+    ]);
+    expect(collapseOf(out, 'u2')?.collapsed).toBe(true);
+  });
+
   it('still allows manually collapsing a turn with no final answer', () => {
     const items = groupParallelAgents([
       makeUserMessage('u1'),
