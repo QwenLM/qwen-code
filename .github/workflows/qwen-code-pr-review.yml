@@ -816,6 +816,32 @@ jobs:
             OUTCOME='fatal'
             REASON=''
             KIND=''
+            # The in-process soft deadline: the review's reverse-audit loop
+            # stops itself while there is still time to verify, compose and
+            # post, instead of being killed by the GNU timeout below holding
+            # hours of confirmed findings (#8368: five audit rounds, 3.5h,
+            # killed mid-verification, nothing posted). Recomputed per attempt
+            # so a retry gets a fresh deadline; ignored by CLIs that predate
+            # the gate.
+            QWEN_REVIEW_DEADLINE_EPOCH="$(( $(date +%s) + attempt_timeout ))"
+            export QWEN_REVIEW_DEADLINE_EPOCH
+            # The budget itself is chosen outside this file — repository
+            # variable, workflow input, or a /review --timeout=N comment — so
+            # the reserve scales with whatever arrived instead of assuming a
+            # size: a quarter of the attempt, floored at 10 minutes (a tiny
+            # explicit budget degrades to skipping the audit loop, correctly)
+            # and capped at 60 (the verify+compose+post tail does not grow
+            # just because the budget did). The 3600 cap mirrors
+            # DEFAULT_RESERVE_SECONDS in packages/cli/src/commands/review/
+            # lib/deadline.ts (the CLI's fallback when this var is absent) —
+            # keep the two in sync.
+            QWEN_REVIEW_DEADLINE_RESERVE_SECONDS="$(( attempt_timeout / 4 ))"
+            if [ "$QWEN_REVIEW_DEADLINE_RESERVE_SECONDS" -lt 600 ]; then
+              QWEN_REVIEW_DEADLINE_RESERVE_SECONDS=600
+            elif [ "$QWEN_REVIEW_DEADLINE_RESERVE_SECONDS" -gt 3600 ]; then
+              QWEN_REVIEW_DEADLINE_RESERVE_SECONDS=3600
+            fi
+            export QWEN_REVIEW_DEADLINE_RESERVE_SECONDS
             set +e
             # GNU timeout times out command children unless --foreground is used.
             timeout --kill-after=10s "${attempt_timeout}s" qwen \
