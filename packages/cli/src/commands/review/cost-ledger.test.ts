@@ -891,7 +891,7 @@ describe('cost-ledger — the spend, from the records already on disk', () => {
   it('separates rounds by label while shards of one round still fold', () => {
     const { plan, env, project } = fixture();
     writeMainCall(project);
-    const put = (file, identity, input) =>
+    const put = (file: string, identity: string, input: number) =>
       writeFileSync(
         join(project, 'subagents', SESSION, file),
         [
