@@ -35,6 +35,10 @@
       "types": "./dist/status.d.ts",
       "import": "./dist/status.js"
     },
+    "./externalToolGuard": {
+      "types": "./dist/externalToolGuard.d.ts",
+      "import": "./dist/externalToolGuard.js"
+    },
     "./workspacePaths": {
       "types": "./dist/workspacePaths.d.ts",
       "import": "./dist/workspacePaths.js"
