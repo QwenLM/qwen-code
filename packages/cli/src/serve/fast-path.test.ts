@@ -706,11 +706,27 @@ describe('serve fast path argument parsing', () => {
       ['rate-limit-read', ['--rate-limit-read', '120']],
       ['rate-limit-window-ms', ['--rate-limit-window-ms', '60000']],
       ['experimental-lsp', ['--experimental-lsp']],
+      ['external-tool-guard-mode', ['--external-tool-guard-mode', 'off']],
+      [
+        'external-tool-guard-endpoint',
+        ['--external-tool-guard-endpoint', 'http://127.0.0.1:3001/v1'],
+      ],
+      [
+        'external-tool-guard-timeout-ms',
+        ['--external-tool-guard-timeout-ms', '3000'],
+      ],
       ['channel', ['--channel', 'telegram']],
       ['help', ['--help']],
       ['version', ['--version']],
     ]);
-    const expectedFallbackOptions = new Set(['channel', 'help', 'version']);
+    const expectedFallbackOptions = new Set([
+      'channel',
+      'external-tool-guard-endpoint',
+      'external-tool-guard-mode',
+      'external-tool-guard-timeout-ms',
+      'help',
+      'version',
+    ]);
 
     expect(longOptionNames.sort()).toEqual(
       [...sampleArgvByOption.keys()].sort(),
