@@ -360,7 +360,10 @@ describe('qwen resolve workflow', () => {
       'MAX_TIMEOUT_MINUTES="${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}"',
     );
     expect(runStep).toContain(
-      'timeout_minutes must not exceed ${MAX_TIMEOUT_MINUTES} minutes',
+      'if [ "$TIMEOUT_MINUTES" -gt "$MAX_TIMEOUT_MINUTES" ]; then',
+    );
+    expect(runStep).toContain(
+      'fail "timeout_minutes must not exceed ${MAX_TIMEOUT_MINUTES} minutes"',
     );
     expect(runStep).toContain('QWEN_TIMEOUT="$EFFECTIVE_TIMEOUT_MINUTES"');
     expect(runStep).not.toContain('QWEN_TIMEOUT=$((TIMEOUT_MINUTES - 5))');
@@ -414,6 +417,9 @@ describe('qwen resolve workflow', () => {
     );
     expect(fallbackStep).toContain(
       'MAX_TIMEOUT_MINUTES="${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}"',
+    );
+    expect(fallbackStep).toContain(
+      'if [ "$TIMEOUT_MINUTES" -lt "$MAX_TIMEOUT_MINUTES" ]; then',
     );
     expect(fallbackStep).toContain(
       '@qwen-code /review --timeout=${MAX_TIMEOUT_MINUTES}',

@@ -225,15 +225,22 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
 
     const extraBody = this.contentGeneratorConfig.extra_body;
 
-    // When the user picks a reasoning effort (/effort), turn thinking on for
-    // qwen hybrid models. qwen has no per-tier `reasoning_effort` field yet, so
-    // the unified effort maps onto the on/off `enable_thinking` switch — extend
-    // this to a real tier mapping when qwen ships one. User extra_body wins
-    // (merged last); the disable path (reasoning: false) is handled upstream in
-    // the pipeline.
-    const enableThinkingFromEffort = this.shouldEnableThinkingFromEffort(
-      request.model,
-    );
+    // qwen3.8-max accepts the unified effort tiers directly. Older qwen hybrid
+    // models still expose only the on/off `enable_thinking` switch. User
+    // extra_body wins (merged last); the disable path (reasoning: false) is
+    // handled upstream in the pipeline.
+    const qwenEffortConfig = this.buildQwenEffortConfig(request.model);
+    const requestParams = requestWithTokenLimits as unknown as Record<
+      string,
+      unknown
+    >;
+    if (
+      'reasoning_effort' in requestParams &&
+      'reasoning_effort' in qwenEffortConfig
+    ) {
+      qwenEffortConfig['reasoning_effort'] = requestParams['reasoning_effort'];
+    }
+    const hasQwenEffortConfig = Object.keys(qwenEffortConfig).length > 0;
 
     if (this.isVisionModel(request.model)) {
       // DashScope-exclusive fields not present in the OpenAI SDK types; spread
@@ -243,7 +250,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       const dashscopeExtras: Record<string, unknown> = {
         vl_high_resolution_images: true,
         preserve_thinking: true,
-        ...(enableThinkingFromEffort ? { enable_thinking: true } : {}),
+        ...qwenEffortConfig,
       };
       const visionResult: Record<string, unknown> = {
         ...requestWithTokenLimits,
@@ -252,11 +259,10 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
         ...(this.buildMetadata(userPromptId) || {}),
         ...dashscopeExtras,
       };
-      // qwen drives thinking via `enable_thinking`, not the OpenAI-style nested
-      // `reasoning` object the pipeline injects from /effort. Drop it so we
-      // don't ship two competing knobs (mirrors deepseek.ts / zai.ts). User
-      // extra_body still wins (merged last).
-      if (enableThinkingFromEffort && 'reasoning' in visionResult) {
+      // DashScope qwen models use top-level effort fields, not the OpenAI-style
+      // nested `reasoning` object the pipeline injects from /effort. Drop it so
+      // we don't ship two competing knobs. User extra_body still wins.
+      if (hasQwenEffortConfig && 'reasoning' in visionResult) {
         delete visionResult['reasoning'];
       }
       return {
@@ -269,7 +275,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     // extra_body wins (merged last).
     const dashscopeExtras: Record<string, unknown> = {
       preserve_thinking: true,
-      ...(enableThinkingFromEffort ? { enable_thinking: true } : {}),
+      ...qwenEffortConfig,
     };
     const result: Record<string, unknown> = {
       ...requestWithTokenLimits, // Preserve all original parameters including sampling params and adjusted max_tokens
@@ -278,11 +284,10 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       ...(this.buildMetadata(userPromptId) || {}),
       ...dashscopeExtras,
     };
-    // qwen drives thinking via `enable_thinking`, not the OpenAI-style nested
-    // `reasoning` object the pipeline injects from /effort. Drop it so we don't
-    // ship two competing knobs (mirrors deepseek.ts / zai.ts). User extra_body
-    // still wins (merged last).
-    if (enableThinkingFromEffort && 'reasoning' in result) {
+    // DashScope qwen models use top-level effort fields, not the OpenAI-style
+    // nested `reasoning` object the pipeline injects from /effort. Drop it so
+    // we don't ship two competing knobs. User extra_body still wins.
+    if (hasQwenEffortConfig && 'reasoning' in result) {
       delete result['reasoning'];
     }
     return {
@@ -291,25 +296,25 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
   }
 
-  /**
-   * Whether to send `enable_thinking: true` because the user selected a
-   * reasoning effort. qwen's hybrid-thinking models expose thinking as the
-   * boolean `enable_thinking` rather than a tiered `reasoning_effort`, so the
-   * unified effort ladder collapses to on/off here. Gated to qwen-family wire
-   * models (mirroring the pipeline's disable gate) so the qwen-specific field
-   * never leaks to a non-qwen model sharing the DashScope endpoint.
-   */
-  private shouldEnableThinkingFromEffort(model: string | undefined): boolean {
+  private buildQwenEffortConfig(
+    model: string | undefined,
+  ): Record<string, unknown> {
     const reasoning = this.contentGeneratorConfig.reasoning;
     if (!reasoning || reasoning.effort === undefined) {
-      return false;
+      return {};
     }
     const wireModel = (
       model ??
       this.contentGeneratorConfig.model ??
       ''
     ).toLowerCase();
-    return wireModel.startsWith('qwen') || wireModel === 'coder-model';
+    if (wireModel === 'qwen3.8-max' || wireModel === 'qwen3.8-max-preview') {
+      return { reasoning_effort: reasoning.effort };
+    }
+    if (wireModel.startsWith('qwen') || wireModel === 'coder-model') {
+      return { enable_thinking: true };
+    }
+    return {};
   }
 
   buildMetadata(userPromptId: string): DashScopeRequestMetadata {
