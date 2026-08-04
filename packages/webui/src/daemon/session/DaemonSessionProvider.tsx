@@ -136,6 +136,8 @@ interface LiveJournalRepairEpisode {
   target: LiveJournalRepairTarget;
   checkpoint: DaemonTranscriptState;
   markerBlockId?: string;
+  observedSnapshotEventIds: ReadonlySet<number>;
+  snapshotLastEventId: number;
   lastObservedEventId: number;
   terminalSeen: boolean;
   attempted: boolean;
@@ -1426,7 +1428,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               const isNewRepairEvent =
                 repairingEpisode !== undefined &&
                 replayEvent.id !== undefined &&
-                replayEvent.id > repairingEpisode.lastObservedEventId;
+                !repairingEpisode.observedSnapshotEventIds.has(
+                  replayEvent.id,
+                ) &&
+                !(
+                  replayEvent.id > repairingEpisode.snapshotLastEventId &&
+                  replayEvent.id <= repairingEpisode.lastObservedEventId
+                );
               try {
                 const replayUiEvents = normalizeAndFilterEvent(
                   replayEvent,
@@ -1583,6 +1591,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                         ...(markerBlock
                           ? { markerBlockId: markerBlock.id }
                           : {}),
+                        observedSnapshotEventIds: new Set(
+                          liveJournal.flatMap((event) =>
+                            event.id === undefined ? [] : [event.id],
+                          ),
+                        ),
+                        snapshotLastEventId: activeSession.lastEventId ?? 0,
                         lastObservedEventId: activeSession.lastEventId ?? 0,
                         terminalSeen: false,
                         attempted: false,

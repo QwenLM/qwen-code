@@ -4237,6 +4237,7 @@ describe('DaemonSessionProvider', () => {
   ] as const)(
     'repairs a truncated live turn after a matching %s terminal',
     async (_label, terminalType, stopReason) => {
+      clearSidechannelMidTurnInjected();
       sdkMocks.capabilities.mockResolvedValue({
         workspaceCwd: '/mock-workspace',
         features: ['session_transcript_pagination'],
@@ -4244,7 +4245,7 @@ describe('DaemonSessionProvider', () => {
       const terminalGate = createDeferred<void>();
       const localPromptAcceptance = createDeferred<NonBlockingPromptAccepted>();
       const terminalEvent: DaemonEvent = {
-        id: 10,
+        id: 11,
         v: 1,
         type: terminalType,
         promptId: 'prompt-live',
@@ -4253,8 +4254,20 @@ describe('DaemonSessionProvider', () => {
             ? { promptId: 'prompt-live', stopReason }
             : { promptId: 'prompt-live', message: 'model failed' },
       };
+      const observedMidTurnEvent: DaemonEvent = {
+        id: 10,
+        v: 1,
+        type: 'mid_turn_message_injected',
+        promptId: 'prompt-live',
+        originatorClientId: 'client-live',
+        data: {
+          sessionId: 'session-live-repair',
+          messages: ['observed queued message'],
+          messageIds: ['observed-message'],
+        },
+      };
       const followupUserEvent: DaemonEvent = {
-        id: 11,
+        id: 12,
         v: 1,
         type: 'session_update',
         promptId: 'prompt-next',
@@ -4269,7 +4282,7 @@ describe('DaemonSessionProvider', () => {
         },
       };
       const metadataEvent: DaemonEvent = {
-        id: 12,
+        id: 13,
         v: 1,
         type: 'session_metadata_updated',
         promptId: 'prompt-next',
@@ -4373,6 +4386,7 @@ describe('DaemonSessionProvider', () => {
             ),
           ]);
           if (options.signal?.aborted) return;
+          yield observedMidTurnEvent;
           yield terminalEvent;
           await new Promise<void>((resolve) =>
             options.signal?.addEventListener('abort', () => resolve(), {
@@ -4411,6 +4425,18 @@ describe('DaemonSessionProvider', () => {
           },
         },
         {
+          id: 6,
+          v: 1,
+          type: 'mid_turn_message_injected',
+          promptId: 'prompt-live',
+          originatorClientId: 'client-live',
+          data: {
+            sessionId: 'session-live-repair',
+            messages: ['evicted queued message'],
+            messageIds: ['evicted-message'],
+          },
+        },
+        {
           id: 8,
           v: 1,
           type: 'memory_changed',
@@ -4422,12 +4448,13 @@ describe('DaemonSessionProvider', () => {
             bytesWritten: 12,
           },
         },
+        observedMidTurnEvent,
         terminalEvent,
       ];
       const repairedSession = createMockSession({
         sessionId: 'session-live-repair',
         hasActivePrompt: true,
-        lastEventId: 12,
+        lastEventId: 13,
         replaySnapshot: {
           compactedReplay: [...prefix, ...targetTurn],
           liveJournal: [followupUserEvent, metadataEvent],
@@ -4592,6 +4619,22 @@ describe('DaemonSessionProvider', () => {
       ).not.toHaveProperty('historyPageSize');
       expect(initialSession.prompt).not.toHaveBeenCalled();
       expect(repairedSession.prompt).not.toHaveBeenCalled();
+      const midTurnInjected = getSidechannelMidTurnInjected();
+      clearSidechannelMidTurnInjected();
+      expect(midTurnInjected).toEqual([
+        {
+          sessionId: 'session-live-repair',
+          messages: ['observed queued message'],
+          messageIds: ['observed-message'],
+          originatorClientId: 'client-live',
+        },
+        {
+          sessionId: 'session-live-repair',
+          messages: ['evicted queued message'],
+          messageIds: ['evicted-message'],
+          originatorClientId: 'client-live',
+        },
+      ]);
     },
   );
 
