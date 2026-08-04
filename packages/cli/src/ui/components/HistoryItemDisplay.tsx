@@ -130,9 +130,9 @@ const ClickableThinkMessage: React.FC<{
   const { rows: terminalHeight } = useTerminalSize();
   const settings = useSettings();
   const mouseTrackingEnabled = useMouseTrackingEnabled();
-  // fullDetail (Ctrl+O) forces every thought open and the toggle guard
-  // ignores clicks while it is on, so do not advertise a click target that
-  // would be swallowed.
+  // fullDetail (Ctrl+O) forces every thought open and its clicks are
+  // swallowed, so do not advertise a click target that would be ignored.
+  // This single check gates both the hint text and the mouse subscription.
   const clickable =
     useVirtualViewport(settings.merged.ui?.useTerminalBuffer) &&
     mouseTrackingEnabled &&
@@ -178,9 +178,9 @@ const ClickableThinkMessage: React.FC<{
       },
       [onToggle, terminalHeight],
     ),
-    // Active while pending too: clicking a streaming thought expands it so the
-    // reasoning can be watched live (and collapsed again).
-    { isActive: true },
+    // Stays armed while pending too: clicking a streaming thought expands it
+    // so the reasoning can be watched live (and collapsed again).
+    { isActive: clickable },
   );
 
   return (
@@ -338,12 +338,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           contentWidth={contentWidth}
           durationMs={itemForDisplay.durationMs}
           fullDetail={fullDetail}
-          onToggle={() => {
-            // While fullDetail forces every thought open, a click would only
-            // record a per-item toggle that flips state once fullDetail is
-            // turned back off. Ignore it.
-            if (!fullDetail) toggleThought(thoughtGroupHeadId);
-          }}
+          onToggle={() => toggleThought(thoughtGroupHeadId)}
         />
       )}
       {itemForDisplay.type === 'gemini_thought_content' && (

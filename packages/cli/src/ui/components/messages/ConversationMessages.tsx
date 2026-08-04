@@ -57,14 +57,19 @@ interface AssistantMessageContentProps {
 interface ThinkMessageProps {
   text: string;
   isPending: boolean;
-  /** When committed (not pending), whether to show the full reasoning. */
+  /**
+   * Whether to show the full reasoning. Applies to both pending (streaming)
+   * and committed thoughts; a collapsed thought renders only the header hint
+   * line.
+   */
   expanded?: boolean;
   availableTerminalHeight?: number;
   contentWidth: number;
   durationMs?: number;
   /**
-   * VP mode only: the collapsed line is mouse-clickable, so the hint advertises
-   * "click" in addition to the keyboard toggle. Non-VP has no click handler.
+   * VP mode only: the header line is mouse-clickable, so the hint advertises
+   * "click" in addition to the keyboard toggle — both the collapsed expand
+   * hint and the expanded collapse hint. Non-VP has no click handler.
    */
   clickable?: boolean;
 }

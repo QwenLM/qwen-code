@@ -488,6 +488,67 @@ describe('<HistoryItemDisplay />', () => {
     );
   });
 
+  it('renders a pending thought expanded when its expansion key is recorded', () => {
+    const head: HistoryItem = {
+      id: 1,
+      type: 'gemini_thought',
+      text: 'Streaming the reasoning',
+    };
+    const tail: HistoryItem = {
+      id: 2,
+      type: 'gemini_thought_content',
+      text: 'Continuing the reasoning',
+    };
+
+    const renderPendingWithHeadIds = (
+      item: HistoryItem,
+      thoughtHeadId: number,
+      expandedHeadIds: ReadonlySet<number>,
+    ) =>
+      renderWithProviders(
+        <ThoughtExpandedProvider
+          value={{
+            allExpanded: false,
+            expandedHeadIds,
+            toggle: () => {},
+          }}
+        >
+          <HistoryItemDisplay
+            item={item}
+            terminalWidth={100}
+            isPending={true}
+            thoughtHeadId={thoughtHeadId}
+          />
+        </ThoughtExpandedProvider>,
+      );
+
+    // Read side of the pending keying: expansion recorded under the sentinel
+    // while streaming must actually render expanded (and collapse again when
+    // the key is absent).
+    const expandedHead = renderPendingWithHeadIds(
+      head,
+      PENDING_THOUGHT_HEAD_ID,
+      new Set([PENDING_THOUGHT_HEAD_ID]),
+    ).lastFrame();
+    expect(expandedHead).toContain('Streaming the reasoning');
+    expect(expandedHead).toContain(`${toggleKeyHint} to collapse`);
+    expect(
+      renderPendingWithHeadIds(
+        head,
+        PENDING_THOUGHT_HEAD_ID,
+        new Set(),
+      ).lastFrame(),
+    ).not.toContain('Streaming the reasoning');
+
+    // A pending tail keyed off its committed head id reads the same way.
+    expect(
+      renderPendingWithHeadIds(tail, 42, new Set([42])).lastFrame(),
+    ).toContain('Continuing the reasoning');
+    expect(
+      renderPendingWithHeadIds(tail, 42, new Set()).lastFrame(),
+    ).not.toContain('Continuing the reasoning');
+  });
+
   it('renders committed thinking expanded when ThoughtExpandedProvider is true', () => {
     const item: HistoryItem = {
       id: 1,
@@ -716,16 +777,18 @@ describe('<HistoryItemDisplay />', () => {
     it('subscribes the click handler without bypassVpGate (stays VP-gated)', () => {
       vi.mocked(useMouseEvents).mockClear();
       renderWithProviders(
-        <HistoryItemDisplay
-          item={thoughtItem}
-          terminalWidth={100}
-          isPending={false}
-        />,
+        <VirtualViewportContext.Provider value={true}>
+          <HistoryItemDisplay
+            item={thoughtItem}
+            terminalWidth={100}
+            isPending={false}
+          />
+        </VirtualViewportContext.Provider>,
       );
       expect(vi.mocked(useMouseEvents)).toHaveBeenCalled();
       const opts = vi.mocked(useMouseEvents).mock.calls.at(-1)?.[1];
-      // Collapsed thought → the handler is "active", but it must NOT bypass the
-      // VP gate, so useMouseEvents only arms it in VP mode.
+      // Clickable in VP → the handler is active, but it must NOT bypass the VP
+      // gate, so useMouseEvents only arms it in VP mode.
       expect(opts?.isActive).toBe(true);
       expect(opts?.bypassVpGate ?? false).toBe(false);
     });
@@ -785,19 +848,14 @@ describe('<HistoryItemDisplay />', () => {
 
     it('keeps the click handler active while the thought is pending', () => {
       vi.mocked(useMouseEvents).mockClear();
-      vi.mocked(measureElementPosition).mockReturnValue({
-        x: 0,
-        y: 0,
-        width: 80,
-        height: 3,
-      });
-      vi.mocked(layoutRowForEvent).mockImplementation((_node, row) => row - 1);
       renderWithProviders(
-        <HistoryItemDisplay
-          item={thoughtItem}
-          terminalWidth={100}
-          isPending={true}
-        />,
+        <VirtualViewportContext.Provider value={true}>
+          <HistoryItemDisplay
+            item={thoughtItem}
+            terminalWidth={100}
+            isPending={true}
+          />
+        </VirtualViewportContext.Provider>,
       );
       const opts = vi.mocked(useMouseEvents).mock.calls.at(-1)?.[1];
       // A streaming thought must stay clickable — the user expands it to
@@ -833,38 +891,24 @@ describe('<HistoryItemDisplay />', () => {
       expect(toggle).toHaveBeenCalledWith(PENDING_THOUGHT_HEAD_ID);
     });
 
-    it('does not record a toggle while fullDetail (Ctrl+O) is active', () => {
-      const toggle = vi.fn();
-      vi.mocked(measureElementPosition).mockReturnValue({
-        x: 0,
-        y: 0,
-        width: 80,
-        height: 3,
-      });
-      vi.mocked(layoutRowForEvent).mockImplementation((_node, row) => row - 1);
+    it('disarms the click handler while fullDetail (Ctrl+O) is active', () => {
+      vi.mocked(useMouseEvents).mockClear();
       renderWithProviders(
-        <ThoughtExpandedProvider
-          value={{
-            allExpanded: true,
-            expandedHeadIds: new Set<number>(),
-            toggle,
-          }}
-        >
+        <VirtualViewportContext.Provider value={true}>
           <HistoryItemDisplay
             item={thoughtItem}
             terminalWidth={100}
             isPending={true}
             fullDetail={true}
           />
-        </ThoughtExpandedProvider>,
+        </VirtualViewportContext.Provider>,
       );
-      const handler = vi.mocked(useMouseEvents).mock.calls.at(-1)?.[0];
+      const opts = vi.mocked(useMouseEvents).mock.calls.at(-1)?.[1];
 
-      handler?.(mouseEvent('left-press', 5));
-      handler?.(mouseEvent('left-release', 5));
-      // fullDetail already forces the thought open; a click must not silently
-      // record a per-item toggle that would flip once fullDetail turns off.
-      expect(toggle).not.toHaveBeenCalled();
+      // fullDetail already forces the thought open; the handler must not
+      // subscribe, so a click cannot silently record a per-item toggle that
+      // would flip once fullDetail turns off.
+      expect(opts?.isActive).toBe(false);
     });
 
     it('drops the click wording from the collapse hint while fullDetail is active', () => {
