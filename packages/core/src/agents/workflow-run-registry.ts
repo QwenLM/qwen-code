@@ -727,7 +727,16 @@ export class WorkflowRunRegistry {
    */
   onBudgetUpdated(runId: string, spent: number, total: number | null): void {
     const entry = this.entries.get(runId);
-    if (!entry || !isActiveWorkflowStatus(entry.status)) return;
+    // Symmetric with `onAgentCompleted` / `setRecentLogs`: dispatches in
+    // flight at cancel time still settle afterwards (the production
+    // dispatch reports tokens in a `finally`), and their burn must keep
+    // mirroring into `tokensSpent` — otherwise a cancelled run's
+    // completed-agent count and token total diverge.
+    if (
+      !entry ||
+      (!isActiveWorkflowStatus(entry.status) && entry.status !== 'cancelled')
+    )
+      return;
     const delta = spent - entry.tokensSpent;
     const totalChanged = entry.tokenBudgetTotal !== total;
     // P5 R1 (#8): skip the statusChange emit when nothing observable

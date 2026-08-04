@@ -436,6 +436,45 @@ describe('WorkflowRunner', () => {
     }
   });
 
+  it('settles a cancelled paused run as cancelled even if its awaited dispatch succeeded', async () => {
+    // The success arm resolves held successful dispatches on abort, so a
+    // cancelled run's script can still finish normally. The settlement
+    // must report the cancellation, not a success that contradicts the
+    // registry entry, telemetry, and snapshot.
+    const { config, registry } = configWithRegistry();
+    const observed = observeSettlement(registry);
+    let finishDispatch: ((value: string) => void) | undefined;
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: 'return await agent("work")',
+      args: undefined,
+      runInBackground: true,
+      dispatch: () =>
+        new Promise<string>((resolve) => {
+          finishDispatch = resolve;
+        }),
+    });
+    await vi.waitFor(() => expect(finishDispatch).toBeDefined());
+    registry.pause(handle.runId);
+    finishDispatch?.('done');
+    await vi.waitFor(() =>
+      expect(registry.get(handle.runId)?.status).toBe('paused'),
+    );
+
+    registry.cancel(handle.runId, Date.now());
+
+    await expect(handle.completion).resolves.toMatchObject({
+      ok: false,
+      message: 'Workflow run cancelled.',
+    });
+    expect(registry.get(handle.runId)?.status).toBe('cancelled');
+    // cancel() fires the terminal statusChange; setRecentLogs then
+    // mirrors the final logs onto the already-cancelled entry and
+    // re-emits it — both fires are 'cancelled', never a success state.
+    expect(observed.terminalStatuses).toEqual(['cancelled', 'cancelled']);
+  });
+
   it('rejects a concurrent resume while the original run is active', async () => {
     const { config, registry } = configWithRegistry();
     const runId = 'wf_1234abcd';

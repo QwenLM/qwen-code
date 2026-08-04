@@ -1065,6 +1065,108 @@ describe('createWorkflowSandbox security', () => {
     await expect(run).rejects.toThrow(/timed out after 100 ms wall clock/);
   });
 
+  it('re-arms the pause-suspended watchdog on abort so a cancelled paused run still settles', async () => {
+    // Cancelling a paused run aborts the controller, but abortPending()
+    // emits no scheduler transition — a pause-suspended watchdog that
+    // never re-armed would leave a script hung in ungated code pending
+    // forever (no settlement, snapshot, or telemetry). The abort must
+    // re-arm the banked remainder.
+    const scheduler = new WorkflowDispatchScheduler(1);
+    const abortOnTimeout = new AbortController();
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+      maxWallClockMs: 100,
+      scheduler,
+      abortOnTimeout,
+    });
+    const run = sandbox.run(`return new Promise(() => {});`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(scheduler.pause()).toBe(true);
+    expect(scheduler.snapshot().state).toBe('paused');
+
+    abortOnTimeout.abort();
+    const rearmAt = Date.now();
+    await expect(run).rejects.toThrow(/timed out after 100 ms wall clock/);
+    // The banked remainder (~80 ms) bounds the settle; pre-fix the race
+    // never settled at all.
+    expect(Date.now() - rearmAt).toBeLessThan(150);
+  });
+
+  it('keeps the watchdog armed when a post-abort drain lands paused', async () => {
+    // An in-flight dispatch that settles AFTER the abort still lands the
+    // scheduler's `pausing` → `paused` transition (pump's finally). The
+    // watchdog must not re-suspend on that post-abort transition, or a
+    // script that catches the abort and hangs in ungated code is
+    // orphaned again.
+    const scheduler = new WorkflowDispatchScheduler(1);
+    const abortOnTimeout = new AbortController();
+    let finishDispatch: ((value: string) => void) | undefined;
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      // Route through the scheduler like the orchestrator does so the
+      // thunk counts as in-flight and the pause parks in `pausing`.
+      dispatch: () =>
+        scheduler.run(
+          () =>
+            new Promise<string>((resolve) => {
+              finishDispatch = resolve;
+            }),
+        ),
+      maxWallClockMs: 150,
+      scheduler,
+      abortOnTimeout,
+    });
+    const run = sandbox.run(`
+      try { await agent('a'); } catch {}
+      return new Promise(() => {});
+    `);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(scheduler.pause()).toBe(true);
+    expect(scheduler.snapshot().state).toBe('pausing');
+
+    abortOnTimeout.abort();
+    finishDispatch?.('late');
+    await vi.waitFor(() => expect(scheduler.snapshot().state).toBe('paused'));
+
+    // The post-abort `paused` transition must not re-suspend the
+    // watchdog — the hung script still settles on the banked remainder.
+    await expect(run).rejects.toThrow(/timed out after 150 ms wall clock/);
+  });
+
+  it('suspends the watchdog of a sandbox created while the scheduler is already paused', async () => {
+    // A nested workflow() sandbox can be created mid-pause; the state
+    // subscription only sees FUTURE transitions, so the watchdog must be
+    // seeded with the current state or it kills the nested run mid-pause.
+    const scheduler = new WorkflowDispatchScheduler(1);
+    expect(scheduler.pause()).toBe(true);
+    expect(scheduler.snapshot().state).toBe('paused');
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+      maxWallClockMs: 100,
+      scheduler,
+    });
+    const run = sandbox.run(`return new Promise(() => {});`);
+    // Wait out the entire budget while paused — pre-fix the watchdog was
+    // armed at creation and fired mid-pause.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    let settled = false;
+    void run.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+
+    expect(scheduler.resume()).toBe(true);
+    await expect(run).rejects.toThrow(/timed out after 100 ms wall clock/);
+  });
+
   // FIX-E (Round 4 Critical): Array args used to leak host process because
   // `deepNullProto` recursed into elements but left Array.prototype intact
   // on the array body. PoC: `args.constructor.constructor("return process")()`
@@ -1611,6 +1713,30 @@ describe('createWorkflowSandbox primitives', () => {
     `);
     expect(result).toEqual(['1', '2']);
     expect(order).toEqual([1, 2]);
+  });
+
+  it('logs non-abort rejections of un-awaited dispatches instead of swallowing them', async () => {
+    // An un-awaited agent() refused at the entry gate or failing mid-run
+    // reaches no other surface — the rejection must be mirrored into the
+    // run log rather than silently observed.
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: () => Promise.reject(new Error('dispatch-boom')),
+    });
+    await sandbox.run(`agent('a'); return 'done';`);
+    expect(sandbox.getLogs()).toEqual([
+      'fire-and-forget dispatch failed: dispatch-boom',
+    ]);
+  });
+
+  it('does not log teardown abort rejections of un-awaited dispatches', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: () =>
+        Promise.reject(new Error('Workflow dispatch scheduler aborted.')),
+    });
+    await sandbox.run(`agent('a'); return 'done';`);
+    expect(sandbox.getLogs()).toEqual([]);
   });
 
   // T5 (Round 1 review Suggestion): console.log/warn/error must route to

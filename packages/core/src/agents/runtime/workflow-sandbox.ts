@@ -544,8 +544,14 @@ export interface SandboxOptions {
    * watchdog suspends only while the scheduler is `paused`: by then no
    * dispatch is in flight or being issued, so paused time must neither
    * burn wall-clock budget nor let the timer kill the run mid-pause
-   * (resume would then be impossible). During `pausing` an in-flight
-   * dispatch is still executing real work, so the backstop stays armed.
+   * (resume would then be impossible). During `pausing` the backstop
+   * stays armed because an in-flight dispatch is typically still
+   * executing real work. Known limitation: an in-flight dispatch parked
+   * on a tool approval waits on the user rather than executing, but
+   * `pausing` time still burns wall-clock budget until the approval is
+   * answered (the watchdog cannot suspend on `pausing` without losing
+   * the backstop for genuinely executing dispatches, and `resume()`
+   * only works from `paused`).
    *
    * The guarantee covers dispatch-gated code only: script awaits outside
    * a scheduler gate keep executing while paused and are not covered by
@@ -898,8 +904,21 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
           // teardown rejection would surface as a process-level
           // unhandledRejection alarm on a correctly-cancelled run.
           // Awaiting callers still receive the rejection through their
-          // own handlers.
-          p.catch(function () {});
+          // own handlers. Non-abort rejections are mirrored into the run
+          // log: an un-awaited dispatch refused at the entry gate
+          // (budget / agent cap) or failing mid-run reaches no other
+          // surface, so the silent drop left no log, alarm, or telemetry.
+          p.catch(function (err) {
+            const msg = String(
+              err && err.message != null ? err.message : err,
+            );
+            if (
+              msg.indexOf('aborted') === -1 &&
+              msg.indexOf('AbortError') === -1
+            ) {
+              __b.pushLog('fire-and-forget dispatch failed: ' + msg);
+            }
+          });
           return p;
         };
       }
@@ -1245,18 +1264,50 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       // Pause-aware watchdog: suspend only while the scheduler is
       // `paused` — once truly idle, the run must neither burn budget it
       // will need after resume nor be killed mid-pause (resume would
-      // then be impossible). During `pausing` an in-flight dispatch is
-      // still executing real work, so the hang backstop stays armed.
+      // then be impossible). During `pausing` the backstop stays armed:
+      // an in-flight dispatch is typically still executing real work.
+      // Known edge: an in-flight dispatch parked on a tool approval
+      // waits on the user, not on real work, yet still burns budget
+      // until it is answered — see the `scheduler` option docs.
       // Note the suspension assumes the script is idle while paused
       // (blocked at a dispatch gate); ungated script awaits still run
-      // and are not covered by the backstop until resume.
+      // and are not covered by the backstop until resume. Once the run
+      // is aborted the watchdog must stay armed: a draining in-flight
+      // dispatch can still land a `pausing` → `paused` transition after
+      // the abort, and re-suspending would orphan a hung script.
+      const aborted = (): boolean =>
+        opts.abortOnTimeout?.signal.aborted === true;
       const stopWatchingState = opts.scheduler?.onStateChange(({ state }) => {
-        if (state === 'paused') watchdog?.pause();
+        if (state === 'paused' && !aborted()) watchdog?.pause();
         else watchdog?.resume();
       });
+      // A nested sandbox created while the scheduler is ALREADY `paused`
+      // never receives a `paused` transition (the subscription only sees
+      // future transitions), so seed the current state — otherwise the
+      // watchdog stays armed and kills the nested run mid-pause.
+      if (opts.scheduler?.snapshot().state === 'paused' && !aborted()) {
+        watchdog?.pause();
+      }
+      // Cancellation must settle the run even when the script hangs in
+      // ungated code: `registry.cancel()` aborts this controller, but
+      // `abortPending()` emits no state transition, so a pause-suspended
+      // watchdog would never re-arm and the race below has no abort arm
+      // — the hung run would never reach its settlement `finally`
+      // (snapshot, telemetry, and handle release all skipped). Re-arm
+      // with the banked remainder on abort to restore the bound.
+      const rearmWatchdogOnAbort = (): void => watchdog?.resume();
+      opts.abortOnTimeout?.signal.addEventListener(
+        'abort',
+        rearmWatchdogOnAbort,
+        { once: true },
+      );
       try {
         return await Promise.race([result, timeoutPromise]);
       } finally {
+        opts.abortOnTimeout?.signal.removeEventListener(
+          'abort',
+          rearmWatchdogOnAbort,
+        );
         stopWatchingState?.();
         watchdog?.stop();
       }

@@ -202,6 +202,13 @@ export class WorkflowRunner {
             }
           }
           registry?.setRecentLogs(runId, outcome.logs);
+          // A held successful dispatch resolves its gate on abort, so a
+          // cancelled run's script can still finish normally. Settle as
+          // cancelled instead of reporting a success that contradicts
+          // the registry entry, telemetry, and snapshot.
+          if (entry?.status === 'cancelled') {
+            return { ok: false, message: 'Workflow run cancelled.' };
+          }
           registry?.complete(runId, outcome.result, Date.now());
           return { ok: true, outcome };
         } catch (error) {

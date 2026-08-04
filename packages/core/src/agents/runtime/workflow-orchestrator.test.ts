@@ -477,7 +477,7 @@ describe('WorkflowOrchestrator', () => {
     expect(caught).toBeInstanceOf(Error);
     // Cross-realm: the sandbox wraps the host error in a vm-realm Error
     // (per T1/T8/T14 defense). The dispatch is never invoked because the
-    // gate short-circuits before limiter.run.
+    // gate short-circuits before scheduler.run.
     expect(String(caught)).toContain('exceeded the token budget');
     expect(String(caught)).toContain('1000');
     expect(dispatchCalls).toBe(0);
@@ -543,13 +543,13 @@ describe('WorkflowOrchestrator', () => {
     expect(dispatchCalls).toBe(2);
   });
 
-  it('P5 R1 #2: parallel-batch overshoot is bounded by the intra-limiter re-check', async () => {
-    // R1 Critical #2 — without the intra-limiter gate, a parallel() of N
+  it('P5 R1 #2: parallel-batch overshoot is bounded by the in-scheduler re-check', async () => {
+    // R1 Critical #2 — without the slot-acquire gate, a parallel() of N
     // thunks queues them all in one microtask burst with spent=0, so the
     // entry gate passes for every queued dispatch and the budget
     // overshoots by up to `(N-1) × per_dispatch_tokens`.
     //
-    // With the intra-limiter re-check, the gate observes budget mutations
+    // With the slot-acquire re-check, the gate observes budget mutations
     // from already-completed in-flight dispatches at slot-acquire time, so
     // queued thunks that arrive AFTER the budget is busted are refused
     // (the parallel() batch collapses them to `null`).
@@ -565,8 +565,8 @@ describe('WorkflowOrchestrator', () => {
       return 'ok';
     });
     // 10 thunks — far more than the budget (100 / 40 ≈ 3 successful).
-    // The intra-limiter gate must reject the rest BEFORE this.dispatch
-    // runs, so `dispatchCalls` should be 3 (or 4 — see below), NOT 10.
+    // The slot-acquire gate must reject the rest BEFORE this.dispatch
+    // runs, so `dispatchCalls` is exactly 3, NOT 10.
     const outcome = await orchestrator.run({
       script: `const results = await parallel(Array.from({length: 10}, () => () => agent('q'))); return results;`,
       args: undefined,
@@ -584,13 +584,10 @@ describe('WorkflowOrchestrator', () => {
     const successes = results.filter((r) => r === 'ok').length;
     const nulls = results.filter((r) => r === null).length;
     expect(successes + nulls).toBe(10);
-    // Bounded overshoot: at most `concurrency_window` dispatches can be
-    // already inside `limiter.run` when the budget tips over, so the
-    // upper bound on successful dispatches is
-    // `ceil(cap / per_dispatch) + concurrency_window`. The concurrency
-    // window on test machines is `min(16, cpus-2)` ≥ 1. With cap=100,
-    // per=40, the soft cap is reached at 3 dispatches (spent=120). We
-    // ASSERT it doesn't reach 10 (the without-fix overshoot value).
+    // ASSERT it doesn't reach 10 (the without-fix overshoot value):
+    // with the scheduler pinned to limit 1, slot-acquire re-checks are
+    // serialized, so exactly 3 dispatches pass (spent 0/40/80 at acquire;
+    // cap 100).
     expect(dispatchCalls).toBe(3);
     expect(successes).toBe(3);
     expect(dispatched).toBe(10);
@@ -1104,11 +1101,13 @@ describe('WorkflowOrchestrator', () => {
   });
 
   it('delivers a successful dispatch result when cancellation aborts its pause gate', async () => {
-    // A fire-and-forget dispatch that succeeded before the run was
-    // cancelled must resolve with its result, not reject with AbortError:
-    // the script never attached a handler, so the rejection would cross
-    // the vm bridge as an unobserved promise rejection and surface a
-    // spurious process-level alarm for a correctly-cancelled run.
+    // A dispatch that succeeded before the run was cancelled must resolve
+    // with its result even though abort rejects the pause-gate waiter:
+    // the success arm resolves held results on abort, so this AWAITING
+    // script (two-arm .then + `await p`) observes the completed work
+    // instead of an AbortError. The unhandledRejection rationale for the
+    // resolve-on-abort arm belongs to the next test, whose fixture is
+    // genuinely fire-and-forget.
     const controller = new AbortController();
     const scheduler = new WorkflowDispatchScheduler(1, controller.signal);
     let finishDispatch: ((value: string) => void) | undefined;

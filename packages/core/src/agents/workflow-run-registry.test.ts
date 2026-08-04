@@ -858,6 +858,25 @@ describe('WorkflowRunRegistry', () => {
     r.onAgentCompleted(entry.runId);
     expect(entry.agentsCompleted).toBe(1);
   });
+
+  it('mirrors post-cancel budget updates like post-cancel completions', () => {
+    // Dispatches in flight at cancel time settle afterwards and report
+    // their tokens in a `finally`; onBudgetUpdated must follow them the
+    // same way onAgentCompleted does, or a cancelled run's
+    // completed-agent count and tokensSpent diverge.
+    const r = new WorkflowRunRegistry();
+    const entry = r.register(reg('wf_budget_cancel', { isBackgrounded: true }));
+
+    r.onAgentDispatched(entry.runId);
+    r.onBudgetUpdated(entry.runId, 100, 1000);
+    expect(entry.tokensSpent).toBe(100);
+
+    r.cancel(entry.runId, 2_000);
+    r.onAgentCompleted(entry.runId);
+    r.onBudgetUpdated(entry.runId, 350, 1000);
+    expect(entry.agentsCompleted).toBe(1);
+    expect(entry.tokensSpent).toBe(350);
+  });
   it('does not pause a foreground workflow', () => {
     const r = new WorkflowRunRegistry();
     const entry = r.register(reg('wf_foreground'));
