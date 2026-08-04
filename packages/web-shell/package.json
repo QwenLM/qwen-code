@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/web-shell",
-  "version": "0.21.4",
+  "version": "0.21.4-nightly.20260804.d6f55a1c9",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
