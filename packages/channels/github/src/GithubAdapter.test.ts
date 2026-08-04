@@ -509,6 +509,7 @@ describe('GithubChannel', () => {
       expect(options.env).not.toHaveProperty('GITHUB_TOKEN');
       expect(options.env).not.toHaveProperty('GH_ENTERPRISE_TOKEN');
       expect(options.env).not.toHaveProperty('GITHUB_ENTERPRISE_TOKEN');
+      expect(options.env['PATH']).toBe(process.env['PATH']);
       expect(mockOctokitConstructor).toHaveBeenCalledWith(
         expect.objectContaining({ auth: 'local-gh-token' }),
       );
@@ -603,6 +604,42 @@ describe('GithubChannel', () => {
 
       await expect(channel.connect()).rejects.toThrow(
         '[Channel:test-github] baseUrl is not a valid URL: ghe.example.com:8443/api/v3',
+      );
+      expect(mockExecFile).not.toHaveBeenCalled();
+      expect(mockOctokitConstructor).not.toHaveBeenCalled();
+    });
+
+    it('rejects a baseUrl hostname that begins with a dash before spawning gh', async () => {
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({
+          token: '',
+          useLocalGh: true,
+          baseUrl: 'https://--evil/api/v3',
+        }),
+        makeBridge(),
+      );
+
+      await expect(channel.connect()).rejects.toThrow(
+        '[Channel:test-github] baseUrl hostname is invalid: --evil',
+      );
+      expect(mockExecFile).not.toHaveBeenCalled();
+      expect(mockOctokitConstructor).not.toHaveBeenCalled();
+    });
+
+    it('rejects a baseUrl hostname outside the gh hostname allowlist', async () => {
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({
+          token: '',
+          useLocalGh: true,
+          baseUrl: 'https://ghe.example_company.com/api/v3',
+        }),
+        makeBridge(),
+      );
+
+      await expect(channel.connect()).rejects.toThrow(
+        '[Channel:test-github] baseUrl hostname is invalid: ghe.example_company.com',
       );
       expect(mockExecFile).not.toHaveBeenCalled();
       expect(mockOctokitConstructor).not.toHaveBeenCalled();
@@ -825,7 +862,7 @@ describe('GithubChannel', () => {
       expect(error.message).not.toContain('\u001b');
       const hint = error.message.split(' gh stderr: ')[1] ?? '';
       expect(hint).toContain('[2Jsecret');
-      expect(Array.from(hint).length).toBeLessThanOrEqual(512);
+      expect(Array.from(hint).length).toBeLessThanOrEqual(256);
     });
 
     it('reports when the GitHub CLI authentication lookup times out', async () => {

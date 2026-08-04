@@ -37,6 +37,9 @@ interface GithubConfig extends ChannelConfig {
 
 const GH_AUTH_TIMEOUT_MS = 10_000;
 const GH_AUTH_MAX_BUFFER = 64 * 1024;
+// Same allowlist as the sibling gh wrappers, plus a leading-dash rejection so
+// the value cannot be parsed as a gh option when passed to `gh auth token`.
+const GH_HOSTNAME_RE = /^[A-Za-z0-9.-]+$/;
 
 function ghHostname(channelName: string, baseUrl: string): string {
   let url: URL;
@@ -57,7 +60,14 @@ function ghHostname(channelName: string, baseUrl: string): string {
       `[Channel:${channelName}] local GitHub CLI authentication requires an HTTPS baseUrl.`,
     );
   }
-  return url.hostname === 'api.github.com' ? 'github.com' : url.hostname;
+  const hostname =
+    url.hostname === 'api.github.com' ? 'github.com' : url.hostname;
+  if (hostname.startsWith('-') || !GH_HOSTNAME_RE.test(hostname)) {
+    throw new Error(
+      `[Channel:${channelName}] baseUrl hostname is invalid: ${hostname}`,
+    );
+  }
+  return hostname;
 }
 
 // Sibling gh subprocess wrappers: core/src/utils/github-prs.ts, cli/src/commands/review/lib/gh.ts
@@ -104,7 +114,7 @@ function resolveGhAuthToken(
           } else {
             message = `GitHub CLI authentication lookup for ${hostname} failed to execute.`;
           }
-          const stderrHint = stderr ? sanitizeLogText(stderr, 512).trim() : '';
+          const stderrHint = stderr ? sanitizeLogText(stderr, 256).trim() : '';
           reject(
             new Error(
               `[Channel:${channelName}] ${message}${
@@ -580,7 +590,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     ) {
       if (allowed.every((user) => user === botUsername)) {
         throw new Error(
-          `[Channel:${this.name}] GitHub allowlist only contains the authenticated GitHub account "${this.botUsername}", which cannot trigger this channel because self-authored comments are ignored. Use a separate bot-owned PAT and allowlist the operator account.`,
+          `[Channel:${this.name}] GitHub allowlist only contains the authenticated GitHub account "${this.botUsername}", which cannot trigger this channel because self-authored comments are ignored. Use a separate bot account (or a separate bot-owned PAT) and allowlist the operator account.`,
         );
       }
       process.stderr.write(
