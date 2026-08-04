@@ -4537,8 +4537,18 @@ class QwenAgent implements Agent {
             logger: debugLogger,
           });
           if (!bulkReplay) {
-            for (const update of replay.updates) {
-              await liveSession.sendUpdate(update);
+            try {
+              for (const update of replay.updates) {
+                await liveSession.sendUpdate(update);
+              }
+            } finally {
+              // Replayed plan updates re-stamp the revision via sendUpdate;
+              // drop it so a replayed snapshot cannot bind a later approval
+              // (same rule Session.replayHistory applies to cold loads),
+              // even if delivery fails part-way. The bulk path keeps a live
+              // binding on purpose: it hands the updates to the client
+              // instead of replaying them through this session.
+              liveSession.clearActiveTodoPlanRevision();
             }
             if (replay.replayError !== undefined) {
               throw RequestError.internalError(undefined, replay.replayError);
@@ -9161,6 +9171,9 @@ class QwenAgent implements Agent {
         }
         const current = config.getApprovalMode();
         if (current === 'plan') {
+          if (previous !== 'plan') {
+            session.clearActiveTodoPlanRevision();
+          }
           session.clearTodoStopGuardTrust();
         }
         return { previous, current };
@@ -10640,6 +10653,7 @@ class QwenAgent implements Agent {
                 try {
                   config.setApprovalMode(newMode as ApprovalMode);
                   if (newMode === 'plan') {
+                    session.clearActiveTodoPlanRevision();
                     session.clearTodoStopGuardTrust();
                   }
                 } catch (err) {
