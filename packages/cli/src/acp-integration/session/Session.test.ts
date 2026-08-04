@@ -2376,6 +2376,28 @@ describe('Session', () => {
       expect(mockChat.getHistory).not.toHaveBeenCalled();
     });
 
+    it('clears the active Todo plan revision when restoring history', async () => {
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [{ content: 'old', priority: 'medium', status: 'pending' }],
+        _meta: {
+          qwenTodoPlan: { id: 'old-plan' },
+          qwenTranscript: { planToolCallId: 'old-call' },
+        },
+      });
+      expect(
+        (session as unknown as { activeTodoPlanRevision?: unknown })
+          .activeTodoPlanRevision,
+      ).toEqual({ planId: 'old-plan', sourceCallId: 'old-call' });
+
+      session.restoreHistory([]);
+
+      expect(
+        (session as unknown as { activeTodoPlanRevision?: unknown })
+          .activeTodoPlanRevision,
+      ).toBeUndefined();
+    });
+
     it('rejects history restore while a prompt is running', () => {
       (session as unknown as { pendingPrompt: AbortController }).pendingPrompt =
         new AbortController();

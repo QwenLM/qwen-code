@@ -14381,6 +14381,9 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       timestamp: 4242,
     });
     expect(liveSession.clearActiveTodoPlanRevision).toHaveBeenCalledOnce();
+    expect(
+      liveSession.clearActiveTodoPlanRevision.mock.invocationCallOrder[0],
+    ).toBeGreaterThan(liveSession.sendUpdate.mock.invocationCallOrder.at(-1)!);
 
     mockConnectionState.resolve();
     await agentPromise;
