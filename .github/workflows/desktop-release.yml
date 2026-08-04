@@ -281,16 +281,28 @@ jobs:
         env:
           WINDOWS_CERTIFICATE: '${{ secrets.WINDOWS_CERTIFICATE }}'
           WINDOWS_CERTIFICATE_PASSWORD: '${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}'
+          LEGACY_WIN_CSC_LINK: '${{ secrets.WIN_CSC_LINK }}'
+          LEGACY_WIN_CSC_KEY_PASSWORD: '${{ secrets.WIN_CSC_KEY_PASSWORD }}'
         run: |
-          if (-not $env:WINDOWS_CERTIFICATE -or -not $env:WINDOWS_CERTIFICATE_PASSWORD) {
-            throw 'WINDOWS_CERTIFICATE and WINDOWS_CERTIFICATE_PASSWORD are required for published Windows releases.'
+          # Prefer the Tauri-style WINDOWS_CERTIFICATE pair; fall back to the
+          # legacy electron-builder WIN_CSC_LINK pair if only that exists.
+          if ($env:WINDOWS_CERTIFICATE -and $env:WINDOWS_CERTIFICATE_PASSWORD) {
+            $path = Join-Path $env:RUNNER_TEMP 'qwen-code-desktop.pfx'
+            [IO.File]::WriteAllBytes($path, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+            $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+            $certificate = Import-PfxCertificate -FilePath $path -CertStoreLocation Cert:\CurrentUser\My -Password $password
+            $windowsConfig = @{ bundle = @{ windows = @{ certificateThumbprint = $certificate.Thumbprint } } } | ConvertTo-Json -Compress -Depth 3
+            "WINDOWS_CONFIG=$windowsConfig" | Out-File -FilePath $env:GITHUB_ENV -Append
+          } elseif ($env:LEGACY_WIN_CSC_LINK -and $env:LEGACY_WIN_CSC_KEY_PASSWORD) {
+            $path = Join-Path $env:RUNNER_TEMP 'qwen-code-desktop.pfx'
+            [IO.File]::WriteAllBytes($path, [Convert]::FromBase64String($env:LEGACY_WIN_CSC_LINK))
+            $password = ConvertTo-SecureString $env:LEGACY_WIN_CSC_KEY_PASSWORD -AsPlainText -Force
+            $certificate = Import-PfxCertificate -FilePath $path -CertStoreLocation Cert:\CurrentUser\My -Password $password
+            $windowsConfig = @{ bundle = @{ windows = @{ certificateThumbprint = $certificate.Thumbprint } } } | ConvertTo-Json -Compress -Depth 3
+            "WINDOWS_CONFIG=$windowsConfig" | Out-File -FilePath $env:GITHUB_ENV -Append
+          } else {
+            Write-Output "::warning::Windows signing certificate is not configured. Windows artifacts will be unsigned and may trigger SmartScreen warnings."
           }
-          $path = Join-Path $env:RUNNER_TEMP 'qwen-code-desktop.pfx'
-          [IO.File]::WriteAllBytes($path, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
-          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
-          $certificate = Import-PfxCertificate -FilePath $path -CertStoreLocation Cert:\CurrentUser\My -Password $password
-          $windowsConfig = @{ bundle = @{ windows = @{ certificateThumbprint = $certificate.Thumbprint } } } | ConvertTo-Json -Compress -Depth 3
-          "WINDOWS_CONFIG=$windowsConfig" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: 'Prepare bundled runtime'
         working-directory: 'packages/desktop-shell'
