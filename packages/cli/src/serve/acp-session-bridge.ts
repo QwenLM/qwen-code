@@ -125,6 +125,7 @@ export {
   WorkspaceDrainingError,
   InvalidRewindTargetError,
   TotalSessionLimitExceededError,
+  ChildHeapPoolExhaustedError,
   NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE,
   // Multi-client permission coordination errors.
   CancelSentinelCollisionError,

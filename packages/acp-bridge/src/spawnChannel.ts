@@ -15,7 +15,27 @@ import { MissingCliEntryError } from './status.js';
 import { ProcessRegistry } from './process-registry.js';
 
 let cachedMemoryArgs: string[] | undefined;
-export function getAcpMemoryArgs(): string[] {
+/**
+ * V8 flags for a spawned ACP child.
+ *
+ * With no argument this is the historical behaviour: half of cgroup/host
+ * memory, capped at 16 GB, emitted only when it would *raise* the child above
+ * the spawning process's own heap limit, and cached for the process lifetime.
+ * Single-child callers — the interactive CLI, the IDE companion, direct-embed
+ * bridges — want exactly that and are unchanged.
+ *
+ * `explicitMb` is the daemon's budget-derived share, and deliberately bypasses
+ * **both** the cache and the raise-only guard. The cache, because the share
+ * depends on how many children are live right now rather than on the host. The
+ * guard, because a budget-derived share is normally *below* the daemon's own
+ * heap limit — so passing it through `targetMB > currentLimitMB` would drop
+ * the flag, silently restore the overcommit, and leave every test green. That
+ * failure mode is the whole reason this parameter exists; see #8182.
+ */
+export function getAcpMemoryArgs(explicitMb?: number): string[] {
+  if (explicitMb !== undefined) {
+    return [`--max-old-space-size=${explicitMb}`, '--expose-gc'];
+  }
   if (cachedMemoryArgs) return cachedMemoryArgs;
   const constrainedMemory = (process as { constrainedMemory?: () => number })
     .constrainedMemory;

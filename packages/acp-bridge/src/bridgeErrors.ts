@@ -187,6 +187,40 @@ export class TotalSessionLimitExceededError extends Error {
 }
 
 /**
+ * Thrown at spawn time when the daemon's child pool cannot cover another ACP
+ * child at the minimum heap. Refusing here rather than at registration is
+ * deliberate: registration allocates nothing (a dormant workspace has no
+ * child), so this surfaces as "no new session in this workspace right now",
+ * which is both true and retryable — the condition clears as soon as another
+ * child exits.
+ *
+ * Only `--child-heap-mode enforce` throws it. Under `observe` the same
+ * condition is counted and reported instead, so a deployment can find out
+ * whether enforcement would have refused anything before it does.
+ */
+export class ChildHeapPoolExhaustedError extends Error {
+  readonly childPoolMb: number;
+  readonly concurrentChildren: number;
+  readonly minChildHeapMb: number;
+  constructor(
+    childPoolMb: number,
+    concurrentChildren: number,
+    minChildHeapMb: number,
+  ) {
+    super(
+      `Daemon child heap pool (${childPoolMb} MB) cannot cover ` +
+        `${concurrentChildren} concurrent children at the ${minChildHeapMb} MB ` +
+        `minimum. Wait for a child to exit, reduce concurrent workspaces, or ` +
+        `raise --memory-budget-mb.`,
+    );
+    this.name = 'ChildHeapPoolExhaustedError';
+    this.childPoolMb = childPoolMb;
+    this.concurrentChildren = concurrentChildren;
+    this.minChildHeapMb = minChildHeapMb;
+  }
+}
+
+/**
  * Thrown by `sendPrompt` when a session already has too many accepted
  * prompts waiting or running. The REST route maps this to 503 with
  * `Retry-After`; SDK clients can retry after observing a turn completion.

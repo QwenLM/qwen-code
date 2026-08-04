@@ -35,6 +35,7 @@
 import { EventEmitter } from 'node:events';
 import type { ChildProcess } from 'node:child_process';
 import { PassThrough } from 'node:stream';
+import { getHeapStatistics } from 'node:v8';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mockSpawn = vi.hoisted(() => vi.fn());
@@ -526,5 +527,37 @@ describe('getAcpMemoryArgs', () => {
       const sizeMB = Number(heapArg.split('=')[1]);
       expect(sizeMB).toBeLessThanOrEqual(16_384);
     }
+  });
+
+  it('emits an explicit share even far below this process own heap limit', () => {
+    // THE regression guard for #8182. The no-argument path emits the flag only
+    // when it would RAISE the child above the spawning process's own limit. A
+    // budget-derived share is normally well below it — 614 MB against a
+    // multi-GB test runner — so routing it through that guard would drop the
+    // flag, silently restore the 25x overcommit, and break nothing else. If
+    // this assertion ever goes soft, the fix is gone.
+    const currentLimitMb = Math.floor(
+      getHeapStatistics().heap_size_limit / (1024 * 1024),
+    );
+    expect(614).toBeLessThan(currentLimitMb);
+    expect(getAcpMemoryArgs(614)).toEqual([
+      '--max-old-space-size=614',
+      '--expose-gc',
+    ]);
+  });
+
+  it('keeps the explicit path out of the module cache, in both directions', () => {
+    // The share depends on how many children are live right now, so caching it
+    // would pin the first spawn's answer for the process lifetime. Asserting
+    // both directions is what makes a cache-reset hook unnecessary.
+    const first = getAcpMemoryArgs(1_024);
+    const second = getAcpMemoryArgs(2_048);
+    expect(first).toEqual(['--max-old-space-size=1024', '--expose-gc']);
+    expect(second).toEqual(['--max-old-space-size=2048', '--expose-gc']);
+
+    // And it neither poisons nor is poisoned by the cached default.
+    const derived = getAcpMemoryArgs();
+    expect(derived).not.toContain('--max-old-space-size=2048');
+    expect(getAcpMemoryArgs()).toBe(derived);
   });
 });
