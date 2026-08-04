@@ -2819,6 +2819,58 @@ describe('runQwenServe pre-listen bridge option validation', () => {
     ).rejects.toThrow(/Injected bridge dependencies/);
     expect(stdoutWrites.join('')).not.toContain('qwen serve listening on');
   });
+
+  it('rejects an unknown embedded external Tool Guard mode before listening', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-guard-opt-')),
+    );
+    const stdoutWrites: string[] = [];
+    vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
+      stdoutWrites.push(String(chunk));
+      return true;
+    });
+    process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'] = 'ambient-secret';
+
+    await expect(
+      runQwenServe({
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        externalToolGuard: {
+          mode: 'optional',
+        },
+      } as unknown as Parameters<typeof runQwenServe>[0]),
+    ).rejects.toThrow(/externalToolGuard/);
+    expect(stdoutWrites.join('')).not.toContain('qwen serve listening on');
+    expect(process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN']).toBeUndefined();
+  });
+
+  it('rejects unsafe required provider configuration before listening', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-guard-config-')),
+    );
+    const stdoutWrites: string[] = [];
+    vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
+      stdoutWrites.push(String(chunk));
+      return true;
+    });
+
+    await expect(
+      runQwenServe({
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        externalToolGuard: {
+          mode: 'required',
+          endpoint: 'https://policy.example.com',
+          token: 'secret',
+        },
+      }),
+    ).rejects.toThrow(/loopback/);
+    expect(stdoutWrites.join('')).not.toContain('qwen serve listening on');
+  });
 });
 
 describe('runQwenServe session reaper timeout validation', () => {
