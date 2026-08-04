@@ -128,6 +128,7 @@ interface ChatEditorProps {
   cancelArmed?: boolean;
   disabled?: boolean;
   placeholderText?: string;
+  animatePlaceholder?: boolean;
   commands: CommandInfo[];
   skills?: SkillInfo[];
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
@@ -135,6 +136,7 @@ interface ChatEditorProps {
   onPopQueuedMessages?: () => boolean;
   onClearQueuedMessages?: () => boolean;
   currentMode?: string;
+  sessionWorkflowEnabled?: boolean;
   currentModel?: string;
   gitBranch?: string;
   /** Whether the session is in a worktree (styles the git chip purple). */
@@ -772,6 +774,7 @@ function ToolbarPopover({
               className={`${styles.dropdownItem} ${
                 item.id === activeId ? styles.dropdownItemActive : ''
               }`}
+              title={item.label}
               onClick={() => {
                 selectionRef.current = true;
                 onSelect(item.id);
@@ -1147,12 +1150,14 @@ export const ChatEditor = memo(
       cancelArmed = false,
       disabled = false,
       placeholderText = 'Type a message...',
+      animatePlaceholder = true,
       commands,
       skills = [],
       slashCommandCategoryOrder,
       queuedMessages = [],
       onPopQueuedMessages,
       currentMode = 'default',
+      sessionWorkflowEnabled = false,
       currentModel = '',
       gitBranch,
       gitWorktree,
@@ -1284,6 +1289,7 @@ export const ChatEditor = memo(
     const hasSlashMenu = Boolean(slashMenu);
     const hasAtMenu = Boolean(atMenu);
     const showTypewriterPlaceholder =
+      animatePlaceholder &&
       !disabled &&
       Boolean(placeholderText) &&
       !core.hasInput() &&
@@ -1353,11 +1359,18 @@ export const ChatEditor = memo(
       () =>
         DAEMON_APPROVAL_MODES.map((id) => ({
           id,
-          label: getModeListLabel(id, t),
-          description: t(`mode.desc.${id}`),
+          label:
+            id === 'plan' && sessionWorkflowEnabled
+              ? t('mode.listLabel.planReview')
+              : getModeListLabel(id, t),
+          description: t(
+            id === 'plan' && sessionWorkflowEnabled
+              ? 'mode.desc.planReview'
+              : `mode.desc.${id}`,
+          ),
           icon: <ModeIcon mode={id} />,
         })),
-      [t],
+      [sessionWorkflowEnabled, t],
     );
     const visibleActionSet = useMemo(() => {
       if (!visibleToolbarActions) return null;
@@ -1629,7 +1642,10 @@ export const ChatEditor = memo(
     };
 
     // Mode display label
-    const modeLabel = getModeLabel(currentMode, t);
+    const modeLabel =
+      currentMode === 'plan' && sessionWorkflowEnabled
+        ? t('mode.label.planReview')
+        : getModeLabel(currentMode, t);
 
     const currentModelLabel = currentModel
       ? (availableModels.find((model) => model.id === currentModel)?.label ??
@@ -2257,7 +2273,8 @@ export const ChatEditor = memo(
                               core.closeAtMenu();
                               setQuickActionsOpen(false);
                             }}
-                            aria-label={t('model.select')}
+                            aria-label={`${t('model.select')}: ${modelLabel}`}
+                            title={modelLabel}
                           >
                             <span className={styles.toolBtnModelIcon}>
                               <ModelIcon />

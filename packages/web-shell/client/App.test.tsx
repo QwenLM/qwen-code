@@ -105,6 +105,18 @@ function voiceSetting(effective: string): DaemonSettingDescriptor {
   };
 }
 
+function sessionWorkflowSetting(): DaemonSettingDescriptor {
+  return {
+    key: 'experimental.sessionWorkflow',
+    type: 'boolean',
+    label: 'Session Workflow Plan & Review',
+    category: 'Experimental',
+    requiresRestart: false,
+    default: false,
+    values: { effective: true },
+  };
+}
+
 const {
   mockConnection,
   mockSessionActions,
@@ -183,6 +195,10 @@ const {
       attachSession: vi.fn().mockResolvedValue(undefined),
       clearSession: vi.fn().mockResolvedValue(undefined),
       releaseSession: vi.fn().mockResolvedValue(undefined),
+      recapSession: vi.fn().mockResolvedValue({
+        sessionId: 'session-1',
+        recap: null,
+      }),
       refreshCommands: vi.fn().mockResolvedValue(undefined),
       setModel: vi.fn().mockResolvedValue(undefined),
       setApprovalMode: vi.fn().mockResolvedValue(undefined),
@@ -269,7 +285,13 @@ const {
       } | null,
       latestAddWorkspaceDialogProps: null as AddWorkspaceDialogTestProps | null,
       latestToolApprovalKeyboardActive: null as boolean | null,
+      latestToolApprovalPlanTodos: [] as Array<{ id: string }>,
       latestAskUserQuestionKeyboardActive: null as boolean | null,
+      latestTodoPanelTodos: [] as Array<{
+        id: string;
+        blockedBy?: string[];
+      }>,
+      latestTodoPanelOnOpen: null as (() => void) | null,
       latestAskUserQuestionOnError: null as
         | ((error: unknown, fallback: string) => void)
         | null,
@@ -283,6 +305,8 @@ const {
           }) => Promise<boolean>)
         | null,
       latestTasksStatusProps: null as {
+        planTodos?: Array<{ id: string }>;
+        agentTools?: Array<{ callId: string }>;
         onOpenMonitor?: (task: DaemonSessionMonitorTaskStatus) => void;
       } | null,
       settings: [] as DaemonSettingDescriptor[],
@@ -412,7 +436,6 @@ vi.mock('./hooks/useQueuedPrompts', () => ({
     queuedTexts,
     enqueuePrompt: rawEnqueuePrompt,
     removeQueuedPrompt: vi.fn(),
-    insertQueuedPrompt: vi.fn(),
     editQueuedPrompt: vi.fn(),
     editLastQueuedPrompt,
     clearQueuedPrompts,
@@ -851,7 +874,19 @@ vi.doMock('./components/StreamingStatus', async () => {
   };
 });
 mockComponent('./components/ToastHost', 'ToastHost');
-mockComponent('./components/panels/TodoPanel', 'TodoPanel');
+vi.doMock('./components/panels/TodoPanel', async () => {
+  const React = await import('react');
+  return {
+    TodoPanel: (props: {
+      todos: Array<{ id: string; blockedBy?: string[] }>;
+      onOpen?: () => void;
+    }) => {
+      testState.latestTodoPanelTodos = props.todos;
+      testState.latestTodoPanelOnOpen = props.onOpen ?? null;
+      return React.createElement('div');
+    },
+  };
+});
 mockComponent('./components/WelcomeHeader', 'WelcomeHeader');
 mockComponent('./components/dialogs/ApprovalModeDialog', 'ApprovalModeDialog');
 mockComponent('./components/dialogs/ResumeDialog', 'ResumeDialog');
@@ -910,6 +945,10 @@ vi.doMock('./components/SplitView', async () => {
         updatedAt: '2026-07-10T00:01:00Z',
         sizeBytes: 20,
       };
+      const changedArtifact = {
+        ...updatedArtifact,
+        status: 'changed',
+      };
       return React.createElement(
         'div',
         { 'data-testid': 'split-view-mock' },
@@ -963,6 +1002,20 @@ vi.doMock('./components/SplitView', async () => {
               ),
           },
           'updated artifact',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'split-report-changed-artifact',
+            type: 'button',
+            onClick: () =>
+              props.onPaneArtifactsChange?.(
+                'pane-session',
+                [changedArtifact],
+                paneActions,
+              ),
+          },
+          'changed artifact',
         ),
         React.createElement(
           'button',
@@ -1113,8 +1166,12 @@ mockComponent('./components/messages/AuthMessage', 'AuthMessage');
 vi.doMock('./components/messages/ToolApproval', async () => {
   const React = await import('react');
   return {
-    ToolApproval: (props: { keyboardActive?: boolean }) => {
+    ToolApproval: (props: {
+      keyboardActive?: boolean;
+      planTodos?: Array<{ id: string }>;
+    }) => {
       testState.latestToolApprovalKeyboardActive = props.keyboardActive ?? null;
+      testState.latestToolApprovalPlanTodos = props.planTodos ?? [];
       return React.createElement('div', {
         'data-web-shell-permission-panel': '',
       });
@@ -1139,6 +1196,8 @@ vi.doMock('./components/messages/TasksStatusMessage', async () => {
   const React = await import('react');
   return {
     TasksStatusMessage: (props: {
+      planTodos?: Array<{ id: string }>;
+      agentTools?: Array<{ callId: string }>;
       onOpenMonitor?: (task: DaemonSessionMonitorTaskStatus) => void;
     }) => {
       testState.latestTasksStatusProps = props;
@@ -2057,6 +2116,34 @@ function deferred<T>(): {
   return { promise, resolve, reject };
 }
 
+async function triggerAutoRecap(): Promise<{
+  recap: ReturnType<
+    typeof deferred<{ sessionId: string; recap: string | null }>
+  >;
+  container: HTMLElement;
+  rerender: (nextProps?: React.ComponentProps<typeof App>) => void;
+}> {
+  const recap = deferred<{ sessionId: string; recap: string | null }>();
+  mockSessionActions.recapSession.mockReturnValueOnce(recap.promise);
+  testState.blocks = [{}, {}, {}, {}];
+  let hidden = true;
+  Object.defineProperty(document, 'hidden', {
+    configurable: true,
+    get: () => hidden,
+  });
+  let now = 1;
+  vi.spyOn(Date, 'now').mockImplementation(() => now);
+
+  const { container, rerender } = renderApp();
+  await flush();
+  act(() => document.dispatchEvent(new Event('visibilitychange')));
+  now += 3 * 60 * 1000;
+  hidden = false;
+  act(() => document.dispatchEvent(new Event('visibilitychange')));
+  expect(mockSessionActions.recapSession).toHaveBeenCalledOnce();
+  return { recap, container, rerender };
+}
+
 // A transcript block shaped like extractPendingPermission() expects. Defaults to
 // a non-AskUserQuestion tool (→ pendingToolApproval); pass toolName
 // 'ask_user_question' to exercise the pendingAskUserApproval branch instead.
@@ -2064,7 +2151,7 @@ function deferred<T>(): {
 // array, so the ask-user variant carries a toolCall.input.questions payload
 // (getPermissionRawInput reads toolCall.input) — a bare toolName isn't enough.
 function makePendingPermissionBlock(
-  overrides: { resolved?: boolean; toolName?: string } = {},
+  overrides: { resolved?: boolean; toolName?: string; kind?: string } = {},
 ): unknown {
   const toolName = overrides.toolName ?? 'run_shell_command';
   const isAskUser = toolName === 'ask_user_question';
@@ -2076,7 +2163,7 @@ function makePendingPermissionBlock(
     title: 'Run ls',
     toolCall: {
       toolCallId: 'tc-1',
-      kind: isAskUser ? 'other' : 'execute',
+      kind: overrides.kind ?? (isAskUser ? 'other' : 'execute'),
       _meta: { toolName },
       ...(isAskUser
         ? { input: { questions: [{ question: 'Pick one', options: [] }] } }
@@ -2094,6 +2181,10 @@ beforeEach(() => {
   // auto-restore into the next test's App mount.
   sessionStorage.clear();
   localStorage.removeItem('qwen-code-web-shell-chat-width');
+  Object.defineProperty(document, 'hidden', {
+    configurable: true,
+    get: () => false,
+  });
   Object.defineProperty(window, 'matchMedia', {
     configurable: true,
     // Query-aware: report a large screen (min-width matches) so the Session
@@ -2162,12 +2253,15 @@ beforeEach(() => {
   testState.latestMessageListProps = null;
   testState.latestAddWorkspaceDialogProps = null;
   testState.latestToolApprovalKeyboardActive = null;
+  testState.latestToolApprovalPlanTodos = [];
   testState.latestAskUserQuestionKeyboardActive = null;
+  testState.latestTodoPanelTodos = [];
+  testState.latestTodoPanelOnOpen = null;
+  testState.latestTasksStatusProps = null;
   testState.latestAskUserQuestionOnError = null;
   testState.latestBackgroundTasksRefreshTrigger = null;
   testState.backgroundTasks = [];
   testState.latestMonitorDetailsOnOpen = null;
-  testState.latestTasksStatusProps = null;
   testState.settings = [];
   testState.latestSettingsState = null;
   testState.latestScheduledTasksProps = null;
@@ -2220,6 +2314,10 @@ beforeEach(() => {
   mockSessionActions.attachSession.mockResolvedValue(undefined);
   mockSessionActions.clearSession.mockResolvedValue(undefined);
   mockSessionActions.releaseSession.mockResolvedValue(undefined);
+  mockSessionActions.recapSession.mockResolvedValue({
+    sessionId: 'session-1',
+    recap: null,
+  });
   mockSessionActions.loadSession.mockResolvedValue(undefined);
   mockSessionActions.reloadSession.mockResolvedValue(undefined);
   mockSessionActions.refreshCommands.mockResolvedValue(undefined);
@@ -2278,6 +2376,125 @@ afterEach(() => {
   }
   vi.useRealTimers();
   vi.restoreAllMocks();
+});
+
+describe('App plan todos', () => {
+  it('gates the exit-plan workflow on the experimental setting', async () => {
+    testState.messages = [
+      {
+        id: 'plan',
+        role: 'plan',
+        todos: [
+          { id: 'prepare', content: 'Prepare', status: 'completed' },
+          {
+            id: 'ship',
+            content: 'Ship',
+            status: 'pending',
+            blockedBy: ['prepare'],
+          },
+        ],
+      },
+      { id: 'revision', role: 'user', content: 'Revise the wording' },
+    ];
+    testState.blocks = [
+      makePendingPermissionBlock({
+        toolName: 'exit_plan_mode',
+        kind: 'switch_mode',
+      }),
+    ];
+
+    const { rerender } = renderApp();
+    await flush();
+
+    expect(testState.latestToolApprovalPlanTodos).toEqual([]);
+
+    testState.settings = [sessionWorkflowSetting()];
+    rerender();
+    await flush();
+
+    expect(
+      testState.latestToolApprovalPlanTodos.map((todo) => todo.id),
+    ).toEqual(['prepare', 'ship']);
+  });
+
+  it('refreshes dependencies when only blockedBy changes', async () => {
+    testState.messages = [
+      {
+        id: 'plan',
+        role: 'plan',
+        todos: [
+          { id: 'prepare', content: 'Prepare', status: 'completed' },
+          {
+            id: 'ship',
+            content: 'Ship',
+            status: 'pending',
+            blockedBy: ['prepare'],
+          },
+        ],
+      },
+    ];
+    const { rerender } = renderApp();
+    await flush();
+
+    expect(testState.latestTodoPanelTodos[1]?.blockedBy).toEqual(['prepare']);
+
+    testState.messages = [
+      {
+        id: 'plan',
+        role: 'plan',
+        todos: [
+          { id: 'prepare', content: 'Prepare', status: 'completed' },
+          {
+            id: 'ship',
+            content: 'Ship',
+            status: 'pending',
+            blockedBy: [],
+          },
+        ],
+      },
+    ];
+    rerender();
+    await flush();
+
+    expect(testState.latestTodoPanelTodos[1]?.blockedBy).toEqual([]);
+  });
+
+  it('opens the workflow dialog with plan todos and linked agents', async () => {
+    testState.settings = [sessionWorkflowSetting()];
+    testState.messages = [
+      {
+        id: 'plan',
+        role: 'plan',
+        todos: [{ id: 'work', content: 'Work', status: 'in_progress' }],
+      },
+      {
+        id: 'agents',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'agent-call',
+            toolName: 'Agent',
+            status: 'in_progress',
+            args: { todo_id: 'work' },
+          },
+        ],
+      },
+    ];
+    renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestTodoPanelOnOpen?.();
+      await Promise.resolve();
+    });
+
+    expect(
+      testState.latestTasksStatusProps?.planTodos?.map((todo) => todo.id),
+    ).toEqual(['work']);
+    expect(
+      testState.latestTasksStatusProps?.agentTools?.map((tool) => tool.callId),
+    ).toEqual(['agent-call']);
+  });
 });
 
 describe('App composer footer renderer', () => {
@@ -4311,7 +4528,7 @@ describe('App session callbacks', () => {
       emptyActions?.querySelectorAll<HTMLButtonElement>('button') ?? [],
     );
     expect(actions).toHaveLength(1);
-    expect(actions[0]?.textContent).toContain('Review');
+    expect(actions[0]?.textContent).toContain('Changes');
     expect(actions[0]?.disabled).toBe(true);
     expect(
       container.querySelector('button[aria-label="Add panel"]'),
@@ -4388,16 +4605,16 @@ describe('App session callbacks', () => {
         )
         ?.click();
     });
-    const review = Array.from(
+    const changes = Array.from(
       container.querySelectorAll<HTMLButtonElement>(
         '[data-testid="right-panel-empty-actions"] button',
       ),
-    ).find((button) => button.textContent?.startsWith('Review'));
-    expect(review?.disabled).toBe(false);
+    ).find((button) => button.textContent?.startsWith('Changes'));
+    expect(changes?.disabled).toBe(false);
 
-    act(() => review?.click());
+    act(() => changes?.click());
 
-    expect(container.querySelector('button[title="Review"]')).not.toBeNull();
+    expect(container.querySelector('button[title="Changes"]')).not.toBeNull();
     expect(container.textContent).toContain('latest.ts');
     expect(container.textContent).not.toContain('first.ts');
   });
@@ -6504,6 +6721,125 @@ describe('App session callbacks', () => {
       expect(onSessionIdChange).toHaveBeenCalledTimes(1);
     },
   );
+
+  it('dispatches an automatic recap when the session remains active', async () => {
+    const { recap } = await triggerAutoRecap();
+    await act(async () => {
+      recap.resolve({ sessionId: 'session-1', recap: 'Current session recap' });
+      await recap.promise;
+    });
+
+    expect(mockStore.dispatch).toHaveBeenCalledWith([
+      expect.objectContaining({
+        source: 'recap',
+        text: expect.stringContaining('Current session recap'),
+      }),
+    ]);
+  });
+
+  it('discards an automatic recap after starting a new session', async () => {
+    const { recap, container } = await triggerAutoRecap();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="new-session"]')
+        ?.click();
+      recap.resolve({
+        sessionId: 'session-1',
+        recap: 'Previous session recap',
+      });
+      await recap.promise;
+    });
+
+    expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+    expect(mockStore.dispatch).not.toHaveBeenCalledWith([
+      expect.objectContaining({ source: 'recap' }),
+    ]);
+  });
+
+  it('discards an automatic recap tagged for a different session', async () => {
+    const { recap } = await triggerAutoRecap();
+    await act(async () => {
+      recap.resolve({ sessionId: 'session-2', recap: 'Stale recap' });
+      await recap.promise;
+    });
+
+    expect(mockStore.dispatch).not.toHaveBeenCalledWith([
+      expect.objectContaining({ source: 'recap' }),
+    ]);
+  });
+
+  it('discards an automatic recap after switching to an existing session', async () => {
+    const { recap, container } = await triggerAutoRecap();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="load-session"]')
+        ?.click();
+      recap.resolve({
+        sessionId: 'session-1',
+        recap: 'Previous session recap',
+      });
+      await recap.promise;
+    });
+
+    expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-2', {
+      workspaceCwd: undefined,
+    });
+    expect(mockStore.dispatch).not.toHaveBeenCalledWith([
+      expect.objectContaining({ source: 'recap' }),
+    ]);
+  });
+
+  it('discards an automatic recap after resuming a session by command', async () => {
+    const { recap } = await triggerAutoRecap();
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/resume session-3');
+      recap.resolve({
+        sessionId: 'session-1',
+        recap: 'Previous session recap',
+      });
+      await recap.promise;
+    });
+
+    expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-3');
+    expect(mockStore.dispatch).not.toHaveBeenCalledWith([
+      expect.objectContaining({ source: 'recap' }),
+    ]);
+  });
+
+  it('discards an automatic recap after clearing the screen', async () => {
+    const { recap } = await triggerAutoRecap();
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          bubbles: true,
+          cancelable: true,
+          ctrlKey: true,
+          key: 'l',
+        }),
+      );
+      recap.resolve({ sessionId: 'session-1', recap: 'Stale recap' });
+      await recap.promise;
+    });
+
+    expect(mockStore.reset).toHaveBeenCalled();
+    expect(mockStore.dispatch).not.toHaveBeenCalledWith([
+      expect.objectContaining({ source: 'recap' }),
+    ]);
+  });
+
+  it('discards an automatic recap when the connection session id changes', async () => {
+    const { recap, rerender } = await triggerAutoRecap();
+    await act(async () => {
+      mockConnection.sessionId = 'session-reconnected';
+      rerender();
+      recap.resolve({ sessionId: 'session-1', recap: 'Stale recap' });
+      await recap.promise;
+    });
+
+    expect(mockStore.dispatch).not.toHaveBeenCalledWith([
+      expect.objectContaining({ source: 'recap' }),
+    ]);
+  });
 
   it('focuses the composer after starting a new session', async () => {
     const { container } = renderApp();
@@ -9599,6 +9935,17 @@ describe('App session callbacks', () => {
     });
 
     expect(document.body.textContent).toContain('20 B');
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="split-report-changed-artifact"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(document.body.textContent).toContain('changed');
 
     await act(async () => {
       container

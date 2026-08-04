@@ -47,6 +47,7 @@ function createConfig(
     getProjectRoot: vi.fn().mockReturnValue(projectRoot),
     getUserMemory: vi.fn().mockReturnValue('QWEN/AGENTS guidance'),
     getMemoryAgentTimeoutMinutes: vi.fn().mockReturnValue(undefined),
+    getMemoryAgentMaxTurns: vi.fn().mockReturnValue(undefined),
     ...overrides,
   } as unknown as Config;
 }
@@ -230,6 +231,50 @@ describe('remember memory helper', () => {
 
     expect(runForkedAgent).toHaveBeenCalledWith(
       expect.objectContaining({ maxTimeMinutes: 5 }),
+    );
+  });
+
+  it('threads the configured memory agent turn limit into the forked agent', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [],
+      filesWritten: [],
+    } satisfies ForkedAgentResult);
+    const config = createConfig(projectRoot);
+    vi.mocked(config.getMemoryAgentMaxTurns).mockReturnValue(25);
+
+    await runManagedRememberByAgent({
+      config,
+      projectRoot,
+      content: 'Remember this.',
+      contextMode: 'workspace',
+    });
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTurns: 25 }),
+    );
+  });
+
+  it('passes the zero turn-limit sentinel through to the forked agent', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [],
+      filesWritten: [],
+    } satisfies ForkedAgentResult);
+    const config = createConfig(projectRoot);
+    vi.mocked(config.getMemoryAgentMaxTurns).mockReturnValue(0);
+
+    await runManagedRememberByAgent({
+      config,
+      projectRoot,
+      content: 'Remember this.',
+      contextMode: 'workspace',
+    });
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTurns: 0 }),
     );
   });
 

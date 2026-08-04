@@ -89,7 +89,7 @@ export default {
   'to search history': 'поиск в истории',
   'to paste images': 'вставить изображения',
   'for external editor': 'внешний редактор',
-  'to view transcript': 'показать транскрипт',
+  'to expand details': 'развернуть детали',
 
   // ============================================================================
   // Поля системной информации
@@ -255,9 +255,6 @@ export default {
   'Unknown Step': 'Неизвестный шаг',
   'Esc to close': 'Esc для закрытия',
   Transcript: 'Транскрипт',
-  'to close': 'закрыть',
-  'to scroll': 'прокрутить',
-  'Failed to render transcript.': 'Не удалось отобразить транскрипт.',
   'Read {{count}} file': 'Прочитано файлов: {{count}}',
   'Read {{count}} files': 'Прочитано файлов: {{count}}',
   'Reading {{count}} file': 'Чтение файлов: {{count}}',
@@ -1008,6 +1005,14 @@ export default {
     'Генерация сводки уже выполняется, дождитесь завершения предыдущего запроса',
   'No conversation found to summarize.':
     'Не найдено диалогов для создания сводки.',
+  'Summary path already exists and is not a generated summary: {{path}}':
+    'Путь сводки уже существует и не является сгенерированной сводкой: {{path}}',
+  'Summary path must be within the project root.':
+    'Путь сводки должен находиться в корне проекта.',
+  'Summary path resolves to an existing directory: {{path}}':
+    'Путь сводки указывает на существующий каталог: {{path}}',
+  'Summary path ends with a separator but is an existing file: {{path}}':
+    'Путь сводки заканчивается разделителем, но является существующим файлом: {{path}}',
   'Failed to generate project context summary: {{error}}':
     'Не удалось сгенерировать сводку контекста проекта: {{error}}',
   'Saved project summary to {{filePathForDisplay}}.':
@@ -2215,4 +2220,66 @@ export default {
     'Запись сеанса остановлена после ошибки записи. Новые сообщения затронутого сеанса не будут сохранены. Проверьте свободное место и разрешения, затем начните новый сеанс, чтобы возобновить запись. Подробности см. в журнале отладки.',
   'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
     'Запись сеанса остановлена после ошибки записи. Новые сообщения затронутого сеанса не будут сохранены. Проверьте свободное место и разрешения, затем выполните `/clear`, чтобы начать новый записываемый сеанс. Подробности см. в журнале отладки.',
+
+  // ==========================================================================
+  // Auto-skill curator (/curator command)
+  // ==========================================================================
+  'Maintain project auto-skills based on recent use.':
+    'Управление автоматическими навыками проекта с учетом недавнего использования.',
+  'Show project auto-skill lifecycle status.':
+    'Показать состояние жизненного цикла автоматических навыков проекта.',
+  'Run project auto-skill lifecycle maintenance.':
+    'Запустить обслуживание жизненного цикла автоматических навыков проекта.',
+  'Restore an archived project auto-skill.':
+    'Восстановить архивированный автоматический навык проекта.',
+  'Auto-skill curator': 'Куратор автоматических навыков',
+  'Last run: {{time}}': 'Последний запуск: {{time}}',
+  'Active: {{count}}': 'Активные: {{count}}',
+  'Stale: {{count}}': 'Устаревшие: {{count}}',
+  'Archived: {{count}}': 'Архивированные: {{count}}',
+  'Stale skills:': 'Устаревшие навыки:',
+  'Pinned skills:': 'Закрепленные навыки:',
+  'Archived skills:': 'Архивированные навыки:',
+  'Dry run complete.': 'Пробный запуск завершен.',
+  'Curator run complete.': 'Запуск куратора завершен.',
+  'Checked: {{count}}': 'Проверено: {{count}}',
+  'First observed: {{count}}': 'Обнаружено впервые: {{count}}',
+  'Marked stale: {{count}}': 'Отмечено как устаревшие: {{count}}',
+  'Reactivated: {{count}}': 'Повторно активировано: {{count}}',
+  'Skipped archive collisions: {{count}}':
+    'Пропущено конфликтов архивирования: {{count}}',
+  'Archive candidates:': 'Кандидаты на архивирование:',
+  'Skipped archive collisions:': 'Пропущенные конфликты архивирования:',
+  'Skipped rename errors: {{count}}':
+    'Пропущено ошибок переименования: {{count}}',
+  'Skipped rename errors:': 'Пропущенные ошибки переименования:',
+  '{{verb}}: {{count}}': '{{verb}}: {{count}}',
+  'Would archive': 'Будет архивировано',
+  Archived: 'Архивировано',
+  'Failed to read auto-skill curator status: {{message}}':
+    'Не удалось прочитать состояние куратора автоматических навыков: {{message}}',
+  'Usage: /curator run [--dry-run]': 'Использование: /curator run [--dry-run]',
+  'Failed to run auto-skill curator: {{message}}':
+    'Не удалось запустить куратор автоматических навыков: {{message}}',
+  'Usage: /curator restore <directory>':
+    'Использование: /curator restore <каталог>',
+  'Restored auto-skill: {{name}}':
+    'Автоматический навык восстановлен: {{name}}',
+  'Failed to restore auto-skill: {{message}}':
+    'Не удалось восстановить автоматический навык: {{message}}',
+  'Exclude an auto-skill from automatic maintenance.':
+    'Исключить автоматический навык из автоматического обслуживания.',
+  'Return a pinned auto-skill to automatic maintenance.':
+    'Вернуть закрепленный автоматический навык в автоматическое обслуживание.',
+  'Usage: /curator pin <directory>': 'Использование: /curator pin <каталог>',
+  'Usage: /curator unpin <directory>':
+    'Использование: /curator unpin <каталог>',
+  'Pinned auto-skill: {{name}}': 'Автоматический навык закреплен: {{name}}',
+  'Unpinned auto-skill: {{name}}': 'Автоматический навык откреплен: {{name}}',
+  'Failed to update auto-skill pin: {{message}}':
+    'Не удалось изменить закрепление автоматического навыка: {{message}}',
+  'Auto-skill curator changes are disabled in safe mode.':
+    'Изменения куратора автоматических навыков отключены в безопасном режиме.',
+  'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
+    'Изменения куратора автоматических навыков доступны только в доверенных рабочих пространствах. Сделайте эту папку доверенной с помощью `/trust` и повторите попытку.',
 };

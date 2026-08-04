@@ -64,7 +64,7 @@ interface MessageListProps {
   loadingOlderHistory?: boolean;
   historyCapacityReached?: boolean;
   historyPaginationError?: boolean;
-  onLoadOlderHistory?: () => Promise<void>;
+  onLoadOlderHistory?: (options?: { force?: boolean }) => Promise<void>;
   transcriptBlockCount?: number;
   transcriptActivity?: {
     getSnapshot(): {
@@ -123,6 +123,7 @@ interface MessageListProps {
   onOpenArtifact?: (artifactId: string, previewContent?: string) => void;
   onOpenScheduledTask?: (task: TurnOutputScheduledTask) => void;
   onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
+  onError?: (error: unknown, fallback: string) => void;
   generateContent?: SessionContentGenerator;
 }
 
@@ -2233,6 +2234,7 @@ export const MessageList = memo(
       onOpenArtifact,
       onOpenScheduledTask,
       onTurnOutputOpen,
+      onError,
       generateContent,
     },
     ref,
@@ -3184,14 +3186,14 @@ export const MessageList = memo(
     }, [visibleItems, headerOffset, performScrollToRow]);
 
     const loadOlderHistory = useCallback(
-      async (allowRetry = false) => {
+      async (allowRetry = false, force = false) => {
         const el = containerRef.current;
         if (
           !el ||
           !onLoadOlderHistory ||
           loadingOlderHistory ||
           olderHistoryLoadInFlight.current ||
-          historyPaginationError ||
+          (historyPaginationError && !force) ||
           (olderHistoryRetryBlocked.current && !allowRetry)
         ) {
           return;
@@ -3203,7 +3205,7 @@ export const MessageList = memo(
         const previousTop = el.scrollTop;
         followPausedByUserRef.current = true;
         try {
-          await onLoadOlderHistory();
+          await onLoadOlderHistory(force ? { force: true } : undefined);
           setOlderHistoryAnchor({
             scrollHeight: previousHeight,
             scrollTop: previousTop,
@@ -3217,6 +3219,10 @@ export const MessageList = memo(
       },
       [loadingOlderHistory, onLoadOlderHistory, historyPaginationError],
     );
+
+    const retryOlderHistory = useCallback(() => {
+      void loadOlderHistory(true, true);
+    }, [loadOlderHistory]);
 
     // Rules 2 & 3: detect scroll direction to toggle follow mode.
     // Runs synchronously in the scroll handler — no rAF needed since
@@ -3654,6 +3660,7 @@ export const MessageList = memo(
                 onOpenScheduledTask={
                   onOpenScheduledTask ?? noopTurnOutputAction
                 }
+                onError={onError}
               />
             );
           }
@@ -3761,6 +3768,7 @@ export const MessageList = memo(
         onOpenScheduledTask,
         onReviewChanges,
         onTurnOutputOpen,
+        onError,
       ],
     );
 
@@ -3842,8 +3850,17 @@ export const MessageList = memo(
         {historyPaginationError &&
           !showLoadingSkeleton &&
           !historyCapacityReached && (
-            <div className={styles.historyStatus} role="status">
-              {t('history.paginationError')}
+            <div className={styles.historyStatus}>
+              <span role="status">{t('history.paginationError')}</span>
+              {onLoadOlderHistory && (
+                <button
+                  type="button"
+                  className={styles.historyRetryButton}
+                  onClick={retryOlderHistory}
+                >
+                  {t('history.retry')}
+                </button>
+              )}
             </div>
           )}
         <SessionTimeline

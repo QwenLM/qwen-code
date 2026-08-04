@@ -21,6 +21,7 @@ import {
   parseNdjson,
   gh,
   ghWithInput,
+  ghWithInputRetried,
   ensureAuthenticated,
 } from './gh.js';
 
@@ -186,6 +187,42 @@ describe('gh() transient-error retry', () => {
     expect(atomsWaitSpy).toHaveBeenCalledTimes(2);
     expect(atomsWaitSpy.mock.calls[0]![3]).toBe(3000);
     expect(atomsWaitSpy.mock.calls[1]![3]).toBe(6000);
+  });
+});
+
+describe('ghWithInputRetried() DOES retry (idempotent writes)', () => {
+  beforeEach(() => {
+    mockExecFileSync.mockReset();
+  });
+
+  it('retries a transient HTTP 500 and succeeds on the second attempt', () => {
+    // The symmetric contract to ghWithInput's single-call pin below: the
+    // retried variant exists precisely so publish-assets' content-hashed PUTs
+    // survive a proxy blip, and a regression rewiring it to the plain
+    // execFileSync path must fail here.
+    mockExecFileSync
+      .mockImplementationOnce(() => {
+        throw ghError('Internal Server Error (HTTP 500)');
+      })
+      .mockReturnValueOnce('{"content":{}}\n');
+
+    const result = ghWithInputRetried('{"x":1}', 'api', '--input', '-');
+    expect(result).toBe('{"content":{}}');
+    expect(mockExecFileSync).toHaveBeenCalledTimes(2);
+    expect(mockExecFileSync.mock.calls[0]![2]).toHaveProperty(
+      'input',
+      '{"x":1}',
+    );
+  });
+
+  it('throws immediately on a NON-transient error', () => {
+    mockExecFileSync.mockImplementationOnce(() => {
+      throw ghError('HTTP 401: Bad credentials');
+    });
+    expect(() => ghWithInputRetried('{"x":1}', 'api', '--input', '-')).toThrow(
+      /401/,
+    );
+    expect(mockExecFileSync).toHaveBeenCalledTimes(1);
   });
 });
 

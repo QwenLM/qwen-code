@@ -23,7 +23,15 @@ describe('useBracketedPaste', () => {
     const { unmount } = renderHook(() => useBracketedPaste());
 
     expect(writeSpy).toHaveBeenCalledWith(ENABLE_BRACKETED_PASTE);
-    expect(processOnSpy).not.toHaveBeenCalled();
+    expect(processOnSpy).not.toHaveBeenCalledWith('exit', expect.any(Function));
+    expect(processOnSpy).not.toHaveBeenCalledWith(
+      'SIGINT',
+      expect.any(Function),
+    );
+    expect(processOnSpy).not.toHaveBeenCalledWith(
+      'SIGTERM',
+      expect.any(Function),
+    );
 
     unmount();
 

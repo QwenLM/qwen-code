@@ -34,6 +34,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from 'react';
 import { useI18n } from '../../i18n';
+import { extractErrorDetail } from '../../utils/errorDetail';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
 import { DialogShell } from '../dialogs/DialogShell';
 import { isSafeHref, Markdown } from '../messages/Markdown';
@@ -54,16 +55,19 @@ import {
 import taskStyles from '../dialogs/ScheduledTasksDialog.module.css';
 import {
   artifactKindLabel,
+  downloadWorkspaceFile,
   formatArtifactSize,
   getArtifactLocation,
   getArtifactImageMimeType,
   getImageMimeTypeFromPath,
+  getReviewDownloadMimeType,
   normalizePath,
   readWorkspaceFileAsBlob,
   withArtifactPreviewCsp,
 } from './artifactUtils';
 import {
   displayPath,
+  isDownloadableReviewFilePath,
   isRenderedFilePath,
   type TurnOutputFileChange,
   type TurnOutputFileDiff,
@@ -72,6 +76,7 @@ import {
 } from './TurnOutputs';
 import { LineStats, sumLineStats } from './LineStats';
 import styles from './ArtifactPanel.module.css';
+import { CodeReviewArtifactDetail } from './CodeReviewArtifactDetail';
 import { SubagentDetail } from './SubagentDetail';
 import { SideTaskPanel } from './SideTaskPanel';
 import {
@@ -221,7 +226,8 @@ interface ArtifactPanelProps {
     artifacts: readonly DaemonSessionArtifact[],
     workspaceActions: DaemonWorkspaceActions,
   ) => void;
-  onSideTaskError?: (error: unknown, fallback: string) => void;
+  onError?: (error: unknown, fallback: string) => void;
+  sessionWorkflowEnabled?: boolean;
   onClose: () => void;
   variant?: 'docked' | 'drawer';
 }
@@ -252,7 +258,8 @@ export function ArtifactPanel({
   onSideTaskTitleChange,
   onNestedRightPanelOpen,
   onNestedArtifactsChange,
-  onSideTaskError,
+  onError,
+  sessionWorkflowEnabled,
   onClose,
   variant = 'docked',
 }: ArtifactPanelProps) {
@@ -570,6 +577,24 @@ export function ArtifactPanel({
                 activeTab.workspaceCwd ?? workspaceCwd,
               )
             }
+            onDownloadFile={(change, isCancelled) =>
+              downloadWorkspaceFile(
+                activeWorkspaceActions,
+                change.path,
+                getReviewDownloadMimeType(change.path),
+                isCancelled,
+              )
+            }
+            onDownloadError={(downloadError) => {
+              const message = t('common.downloadFailed', {
+                message: extractErrorDetail(downloadError),
+              });
+              if (onError) {
+                onError(new Error(message, { cause: downloadError }), message);
+              } else {
+                console.error(message, downloadError);
+              }
+            }}
           />
         ) : activeTab.kind === 'file' ? (
           <WorkspaceFilePreview
@@ -596,6 +621,7 @@ export function ArtifactPanel({
             workspaceCwd={activeTab.workspaceCwd ?? workspaceCwd}
             onRightPanelOpen={onNestedRightPanelOpen}
             onArtifactsChange={onNestedArtifactsChange}
+            onError={onError}
           />
         ) : activeTab.kind === 'monitor' ? (
           <MonitorTaskDetail
@@ -626,7 +652,8 @@ export function ArtifactPanel({
             onTitleChange={onSideTaskTitleChange ?? ignoreSideTaskTitleChange}
             onRightPanelOpen={onNestedRightPanelOpen}
             onArtifactsChange={onNestedArtifactsChange}
-            onError={onSideTaskError}
+            onError={onError}
+            sessionWorkflowEnabled={sessionWorkflowEnabled}
           />
         ) : (
           <ScheduledTaskDetail
@@ -1294,11 +1321,18 @@ function ReviewChanges({
   selectedPath,
   workspaceCwd,
   onOpenFilePreview,
+  onDownloadFile,
+  onDownloadError,
 }: {
   changes: readonly TurnOutputFileChange[];
   selectedPath: string | null;
   workspaceCwd?: string;
   onOpenFilePreview: (change: TurnOutputFileChange) => void;
+  onDownloadFile: (
+    change: TurnOutputFileChange,
+    isCancelled: () => boolean,
+  ) => Promise<void>;
+  onDownloadError: (error: unknown) => void;
 }) {
   const { t } = useI18n();
   const [isTreeOpen, setIsTreeOpen] = useState(false);
@@ -1309,6 +1343,18 @@ function ReviewChanges({
   const reviewContentRef = useRef<HTMLDivElement | null>(null);
   const reviewResizeCleanupRef = useRef<(() => void) | null>(null);
   const [expandedPath, setExpandedPath] = useState<string | null>(null);
+  const [downloadingPaths, setDownloadingPaths] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    // StrictMode replays setup -> cleanup -> setup without re-running useRef's
+    // initializer, so restore the flag or every download looks cancelled.
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   const showTree = isTreeOpen;
   const fileTree = useMemo(
     () => buildFileTree(changes, workspaceCwd),
@@ -1403,6 +1449,21 @@ function ReviewChanges({
   const toggleDiff = (path: string) => {
     setExpandedPath((current) => (current === path ? null : path));
   };
+  const downloadFile = async (change: TurnOutputFileChange) => {
+    if (downloadingPaths.has(change.path)) return;
+    setDownloadingPaths((current) => new Set(current).add(change.path));
+    try {
+      await onDownloadFile(change, () => !mountedRef.current);
+    } catch (error) {
+      if (mountedRef.current) onDownloadError(error);
+    } finally {
+      setDownloadingPaths((current) => {
+        const next = new Set(current);
+        next.delete(change.path);
+        return next;
+      });
+    }
+  };
 
   return (
     <div className={styles.review}>
@@ -1488,6 +1549,7 @@ function ReviewChanges({
             {changes.map((change) => {
               const isExpanded = expandedPath === change.path;
               const canOpenPreview = isRenderedFilePath(change.path);
+              const canDownload = isDownloadableReviewFilePath(change.path);
               return (
                 <div
                   key={`${change.toolCallId}:${change.path}`}
@@ -1525,6 +1587,21 @@ function ReviewChanges({
                           title={`${t('turnOutputs.preview')} ${change.path}`}
                         >
                           {t('turnOutputs.preview')}
+                        </button>
+                      )}
+                      {canDownload && (
+                        <button
+                          type="button"
+                          className={styles.reviewOpenButton}
+                          onClick={() => void downloadFile(change)}
+                          title={`${t('common.download')} ${change.path}`}
+                          disabled={downloadingPaths.has(change.path)}
+                        >
+                          {t(
+                            downloadingPaths.has(change.path)
+                              ? 'common.downloading'
+                              : 'common.download',
+                          )}
                         </button>
                       )}
                     </span>
@@ -2040,9 +2117,26 @@ function ArtifactDetail({
   const safeUrl = isSafeHref(artifact.url) ? artifact.url : undefined;
   const isAutomationSnapshot =
     artifact.metadata?.['artifactType'] === 'automation_snapshot';
+  const isCodeReview = artifact.metadata?.['artifactType'] === 'code_review';
   const canPreviewWorkspaceFile =
     artifact.storage === 'workspace' && Boolean(artifact.workspacePath);
   const imageMimeType = getArtifactImageMimeType(artifact);
+
+  if (isCodeReview) {
+    if (artifact.status !== 'available') {
+      return <CodeReviewUnavailable status={artifact.status} />;
+    }
+    if (!canPreviewWorkspaceFile || !artifact.workspacePath) {
+      return <CodeReviewWorkspaceRequired />;
+    }
+    return (
+      <CodeReviewArtifactDetail
+        workspacePath={artifact.workspacePath}
+        artifactVersion={`${artifact.status}:${artifact.updatedAt}`}
+        workspaceActions={workspaceActions}
+      />
+    );
+  }
 
   if (canPreviewWorkspaceFile && artifact.workspacePath) {
     return (
@@ -2126,6 +2220,24 @@ function ArtifactDetail({
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+function CodeReviewUnavailable({ status }: { status: string }) {
+  const { t } = useI18n();
+  return (
+    <div className={styles.previewError} role="alert">
+      {t('codeReview.unavailable', { status })}
+    </div>
+  );
+}
+
+function CodeReviewWorkspaceRequired() {
+  const { t } = useI18n();
+  return (
+    <div className={styles.previewError} role="alert">
+      {t('codeReview.workspaceRequired')}
     </div>
   );
 }

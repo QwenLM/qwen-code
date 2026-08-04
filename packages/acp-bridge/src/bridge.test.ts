@@ -83,6 +83,7 @@ import {
 } from './internal/testUtils.js';
 import { SessionArtifactAuthorizationError } from './sessionArtifacts.js';
 import {
+  REQUESTED_SESSION_ID_META_KEY,
   MID_TURN_QUEUE_DRAIN_METHOD,
   PROMPT_CANCEL_METHOD,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
@@ -1280,6 +1281,27 @@ describe('createAcpSessionBridge', () => {
 
     await bridge.shutdown();
     expect(handles[0]?.killed).toBe(true);
+  });
+
+  it('injects REQUESTED_SESSION_ID_META_KEY into newSession _meta when sessionId is set', async () => {
+    const handles: ChannelHandle[] = [];
+    const factory: ChannelFactory = async () => {
+      const h = makeChannel();
+      handles.push(h);
+      return h.channel;
+    };
+    const bridge = makeBridge({ channelFactory: factory });
+
+    await bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      sessionId: '550e8400-e29b-41d4-a716-446655440000',
+    });
+
+    expect(handles[0]?.agent.newSessionCalls[0]!._meta).toMatchObject({
+      [REQUESTED_SESSION_ID_META_KEY]: '550e8400-e29b-41d4-a716-446655440000',
+    });
+
+    await bridge.shutdown();
   });
 
   it('reuses the existing session under sessionScope:single', async () => {
@@ -18893,7 +18915,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await new Promise((r) => setTimeout(r, 10));
     expect(
       bridge.enqueueMidTurnMessage(session.sessionId, 'also check tests'),
-    ).toEqual({ accepted: true });
+    ).toEqual({ accepted: true, messageId: expect.any(String) });
 
     // Settle the turn → the queue flips back to idle and the undrained copy is
     // dropped server-side (the browser resends it as the next turn).
@@ -18936,6 +18958,105 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     expect(() => bridge.enqueueMidTurnMessage('nope', 'hi')).toThrow(
       SessionNotFoundError,
     );
+    await bridge.shutdown();
+  });
+
+  it('removes an undrained message only for its originating client', async () => {
+    const { factory, release } = hangingPromptFactory();
+    const bridge = makeBridge({ channelFactory: factory });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const promptPromise = bridge
+      .sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'go' }],
+        },
+        undefined,
+        { clientId: session.clientId },
+      )
+      .catch(() => {});
+    await new Promise((r) => setTimeout(r, 10));
+
+    const admission = bridge.enqueueMidTurnMessage(
+      session.sessionId,
+      'remove me',
+      { clientId: session.clientId },
+    );
+    expect(admission).toEqual({
+      accepted: true,
+      messageId: expect.any(String),
+    });
+    expect(
+      bridge.removeMidTurnMessage(session.sessionId, admission.messageId!),
+    ).toEqual({ removed: false });
+    expect(
+      bridge.removeMidTurnMessage(session.sessionId, admission.messageId!, {
+        clientId: session.clientId,
+      }),
+    ).toEqual({ removed: true });
+    expect(
+      bridge.removeMidTurnMessage(session.sessionId, admission.messageId!, {
+        clientId: session.clientId,
+      }),
+    ).toEqual({ removed: false });
+
+    release();
+    await promptPromise;
+    await bridge.shutdown();
+  });
+
+  it('mints distinct stable ids so two same-text messages remove independently', async () => {
+    const { factory, release } = hangingPromptFactory();
+    const bridge = makeBridge({ channelFactory: factory });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const promptPromise = bridge
+      .sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'go' }],
+        },
+        undefined,
+        { clientId: session.clientId },
+      )
+      .catch(() => {});
+    await new Promise((r) => setTimeout(r, 10));
+
+    const first = bridge.enqueueMidTurnMessage(session.sessionId, 'same text', {
+      clientId: session.clientId,
+    });
+    const second = bridge.enqueueMidTurnMessage(
+      session.sessionId,
+      'same text',
+      { clientId: session.clientId },
+    );
+    expect(first.messageId).toEqual(expect.any(String));
+    expect(second.messageId).toEqual(expect.any(String));
+    // A reused or unstable id would couple the two entries; each admission must
+    // mint its own so a removal addresses exactly one of them.
+    expect(first.messageId).not.toBe(second.messageId);
+
+    expect(
+      bridge.removeMidTurnMessage(session.sessionId, second.messageId!, {
+        clientId: session.clientId,
+      }),
+    ).toEqual({ removed: true });
+    // The first entry survives its sibling's removal and is independently
+    // removable by its own id.
+    expect(
+      bridge.removeMidTurnMessage(session.sessionId, first.messageId!, {
+        clientId: session.clientId,
+      }),
+    ).toEqual({ removed: true });
+    expect(
+      bridge.removeMidTurnMessage(session.sessionId, first.messageId!, {
+        clientId: session.clientId,
+      }),
+    ).toEqual({ removed: false });
+
+    release();
+    await promptPromise;
     await bridge.shutdown();
   });
 
@@ -19019,9 +19140,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     const t1 = send('t1');
     await new Promise((r) => setTimeout(r, 10));
     expect(bridge.enqueueMidTurnMessage(session.sessionId, 'leftover')).toEqual(
-      {
-        accepted: true,
-      },
+      { accepted: true, messageId: expect.any(String) },
     );
     releases[0]!();
     await t1;
@@ -19084,6 +19203,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     ).toEqual({ messages: [], hasQueuedPrompt: true });
     expect(bridge.enqueueMidTurnMessage(session.sessionId, 'x')).toEqual({
       accepted: true,
+      messageId: expect.any(String),
     });
 
     releases[0]!(); // settle p1 — session still busy (p2 pending), so NOT idle
@@ -19237,11 +19357,13 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       .catch(() => {});
     await new Promise((r) => setTimeout(r, 10));
 
-    expect(
-      bridge.enqueueMidTurnMessage(session.sessionId, 'hi', {
-        clientId: session.clientId,
-      }),
-    ).toEqual({ accepted: true });
+    const admission = bridge.enqueueMidTurnMessage(session.sessionId, 'hi', {
+      clientId: session.clientId,
+    });
+    expect(admission).toEqual({
+      accepted: true,
+      messageId: expect.any(String),
+    });
 
     // Subscribe before the drain so the live injection frame is captured. The
     // hanging prompt publishes nothing in between, so it is the first frame.
@@ -19260,7 +19382,15 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     expect(next.value?.type).toBe('mid_turn_message_injected');
     expect(next.value?.promptId).toBe('prompt-mid-turn');
     expect(next.value?.originatorClientId).toBe(session.clientId);
-    expect(next.value?.data).toMatchObject({ messages: ['hi'] });
+    expect(next.value?.data).toMatchObject({
+      messages: ['hi'],
+      messageIds: [admission.messageId],
+    });
+    expect(
+      bridge.removeMidTurnMessage(session.sessionId, admission.messageId!, {
+        clientId: session.clientId,
+      }),
+    ).toEqual({ removed: false });
 
     abort.abort();
     release?.();
@@ -19289,6 +19419,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     for (let i = 0; i < 20; i++) {
       expect(bridge.enqueueMidTurnMessage(session.sessionId, `m${i}`)).toEqual({
         accepted: true,
+        messageId: expect.any(String),
       });
     }
     expect(bridge.enqueueMidTurnMessage(session.sessionId, 'overflow')).toEqual(
@@ -19327,7 +19458,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
 
     expect(
       bridge.enqueueMidTurnMessage(session.sessionId, '   hello   '),
-    ).toEqual({ accepted: true });
+    ).toEqual({ accepted: true, messageId: expect.any(String) });
     const drained = await handle.agentConnection.extMethod(
       'craft/drainMidTurnQueue',
       { sessionId: session.sessionId },

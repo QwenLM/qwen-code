@@ -9,8 +9,8 @@ failure modes:
 - Kitty keyboard flags can be popped while the alternate screen is still
   active, leaving the push on the main screen unbalanced.
 - Terminal restoration can sit behind slow asynchronous cleanup and be skipped
-  when the overall cleanup timeout expires. `SIGHUP` also bypasses cleanup
-  entirely.
+  when the overall cleanup timeout expires. Signal-driven exits, including
+  `SIGHUP`, need the terminal restored synchronously before that cleanup begins.
 
 ## Design
 

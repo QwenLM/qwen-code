@@ -82,9 +82,6 @@ export enum Command {
   // Thinking expansion
   TOGGLE_THINKING_EXPANDED = 'toggleThinkingExpanded',
 
-  // Transcript full-detail screen (Ctrl+O)
-  TOGGLE_TRANSCRIPT = 'toggleTranscript',
-
   // Scroll commands
   SCROLL_UP = 'scrollUp',
   SCROLL_DOWN = 'scrollDown',
@@ -266,11 +263,11 @@ export const defaultKeyBindings: KeyBindingConfig = {
   [Command.EXPAND_SUGGESTION]: [{ key: 'right' }],
   [Command.COLLAPSE_SUGGESTION]: [{ key: 'left' }],
 
-  // Thinking expansion
-  [Command.TOGGLE_THINKING_EXPANDED]: [{ key: 't', meta: true }],
-
-  // Transcript full-detail screen
-  [Command.TOGGLE_TRANSCRIPT]: [{ key: 'o', ctrl: true }],
+  // Thinking expansion (Ctrl+O primary, Alt+T legacy)
+  [Command.TOGGLE_THINKING_EXPANDED]: [
+    { key: 'o', ctrl: true },
+    { key: 't', meta: true },
+  ],
 
   // Scroll commands
   [Command.SCROLL_UP]: [{ key: 'up', shift: true }],

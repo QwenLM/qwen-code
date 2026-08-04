@@ -7,6 +7,7 @@
 import os from 'node:os';
 import {
   detectRuntime,
+  formatMemoryUsage,
   redactProxyCredentials,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -14,17 +15,6 @@ import {
   type ServeEnvCell,
   type ServeWorkspaceEnvStatus,
 } from '@qwen-code/acp-bridge/status';
-
-function formatMemoryUsage(bytes: number): string {
-  const gb = bytes / (1024 * 1024 * 1024);
-  if (bytes < 1024 * 1024) {
-    return `${(bytes / 1024).toFixed(1)} KB`;
-  }
-  if (bytes < 1024 * 1024 * 1024) {
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  }
-  return `${gb.toFixed(2)} GB`;
-}
 
 /**
  * Whitelisted environment variables whose **presence** the daemon will

@@ -192,6 +192,7 @@ export default {
   'toolDisplayName.Agent': 'toolDisplayName.Agent',
   'toolDisplayName.Artifact': 'toolDisplayName.Artifact',
   'toolDisplayName.RecordArtifact': 'toolDisplayName.RecordArtifact',
+  'toolDisplayName.DisplayImage': 'toolDisplayName.DisplayImage',
   'toolDisplayName.Skill': 'toolDisplayName.Skill',
   'toolDisplayName.EnterPlanMode': 'toolDisplayName.EnterPlanMode',
   'toolDisplayName.ExitPlanMode': 'toolDisplayName.ExitPlanMode',
@@ -276,7 +277,7 @@ export default {
   'to search history': 'to search history',
   'to paste images': 'to paste images',
   'for external editor': 'for external editor',
-  'to view transcript': 'to view transcript',
+  'to expand details': 'to expand details',
   'Jump through words in the input': 'Jump through words in the input',
   'Close dialogs, cancel requests, or quit application':
     'Close dialogs, cancel requests, or quit application',
@@ -506,9 +507,6 @@ export default {
   'Unknown Step': 'Unknown Step',
   'Esc to close': 'Esc to close',
   Transcript: 'Transcript',
-  'to close': 'to close',
-  'to scroll': 'to scroll',
-  'Failed to render transcript.': 'Failed to render transcript.',
   'Read {{count}} file': 'Read {{count}} file',
   'Read {{count}} files': 'Read {{count}} files',
   'Reading {{count}} file': 'Reading {{count}} file',
@@ -1472,6 +1470,14 @@ export default {
   'Already generating summary, wait for previous request to complete':
     'Already generating summary, wait for previous request to complete',
   'No conversation found to summarize.': 'No conversation found to summarize.',
+  'Summary path already exists and is not a generated summary: {{path}}':
+    'Summary path already exists and is not a generated summary: {{path}}',
+  'Summary path must be within the project root.':
+    'Summary path must be within the project root.',
+  'Summary path resolves to an existing directory: {{path}}':
+    'Summary path resolves to an existing directory: {{path}}',
+  'Summary path ends with a separator but is an existing file: {{path}}':
+    'Summary path ends with a separator but is an existing file: {{path}}',
   'Failed to generate project context summary: {{error}}':
     'Failed to generate project context summary: {{error}}',
   'Saved project summary to {{filePathForDisplay}}.':
@@ -1494,8 +1500,8 @@ export default {
     'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, [model-id] to switch immediately).',
   'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
     'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).',
-  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --image for the image generation model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
-    'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --image for the image generation model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).',
+  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --compaction for chat compression model, --image for the image generation model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
+    'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --compaction for chat compression model, --image for the image generation model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).',
   "Inline one-shot override isn't supported in this mode — run '/model {{model}}' first, then send your prompt.":
     "Inline one-shot override isn't supported in this mode — run '/model {{model}}' first, then send your prompt.",
   "Inline one-shot override can't switch providers. '{{model}}' belongs to a different provider — run '/model {{model}}' first, then send your prompt.":
@@ -1511,6 +1517,8 @@ export default {
     'Set the image-capable model used to transcribe images for a text-only main model',
   'Set the model used to generate images':
     'Set the model used to generate images',
+  'Set the model used for chat compression (auto-compaction)':
+    'Set the model used for chat compression (auto-compaction)',
   'Persist the model selection to the project settings (workspace scope)':
     'Persist the model selection to the project settings (workspace scope)',
   'Persist the model selection to the user settings (global scope)':
@@ -1518,10 +1526,21 @@ export default {
   'Select Fast Model': 'Select Fast Model',
   'Select Vision Model': 'Select Vision Model',
   'Select Image Model': 'Select Image Model',
+  'Select Compaction Model': 'Select Compaction Model',
   'Select Voice Model': 'Select Voice Model',
   'Vision Model': 'Vision Model',
   'Image Model': 'Image Model',
+  'Compaction Model': 'Compaction Model',
+  'Compaction model override cleared': 'Compaction model override cleared',
+  'Current compaction model: {{compactionModel}}\nUse "/model --compaction <model-id>" to set compaction model, or "/model --compaction clear" to clear the override.':
+    'Current compaction model: {{compactionModel}}\nUse "/model --compaction <model-id>" to set compaction model, or "/model --compaction clear" to clear the override.',
+  'not set (falls back to the main model)':
+    'not set (falls back to the main model)',
+  'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /auth to configure or switch providers, or run /model --compaction without a model to choose from configured models.':
+    'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /auth to configure or switch providers, or run /model --compaction without a model to choose from configured models.',
   'Voice Model': 'Voice Model',
+  'Selected compaction model is unavailable.':
+    'Selected compaction model is unavailable.',
   'Selected voice model is unavailable.':
     'Selected voice model is unavailable.',
   'Selected image model is unavailable.':
@@ -2463,6 +2482,7 @@ export default {
     'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.',
   'Set a goal — keep working until the condition is met':
     'Set a goal — keep working until the condition is met',
+  'Set or control a session goal': 'Set or control a session goal',
   'Exited plan mode. Previous approval mode restored.':
     'Exited plan mode. Previous approval mode restored.',
   'Enabled plan mode. The agent will analyze and plan without executing tools.':
@@ -2739,4 +2759,62 @@ export default {
     'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording. See the debug log for details.',
   'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
     'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.',
+
+  // ==========================================================================
+  // Auto-skill curator (/curator command)
+  // ==========================================================================
+  'Maintain project auto-skills based on recent use.':
+    'Maintain project auto-skills based on recent use.',
+  'Show project auto-skill lifecycle status.':
+    'Show project auto-skill lifecycle status.',
+  'Run project auto-skill lifecycle maintenance.':
+    'Run project auto-skill lifecycle maintenance.',
+  'Restore an archived project auto-skill.':
+    'Restore an archived project auto-skill.',
+  'Auto-skill curator': 'Auto-skill curator',
+  'Last run: {{time}}': 'Last run: {{time}}',
+  'Active: {{count}}': 'Active: {{count}}',
+  'Stale: {{count}}': 'Stale: {{count}}',
+  'Archived: {{count}}': 'Archived: {{count}}',
+  'Stale skills:': 'Stale skills:',
+  'Pinned skills:': 'Pinned skills:',
+  'Archived skills:': 'Archived skills:',
+  'Dry run complete.': 'Dry run complete.',
+  'Curator run complete.': 'Curator run complete.',
+  'Checked: {{count}}': 'Checked: {{count}}',
+  'First observed: {{count}}': 'First observed: {{count}}',
+  'Marked stale: {{count}}': 'Marked stale: {{count}}',
+  'Reactivated: {{count}}': 'Reactivated: {{count}}',
+  'Skipped archive collisions: {{count}}':
+    'Skipped archive collisions: {{count}}',
+  'Archive candidates:': 'Archive candidates:',
+  'Skipped archive collisions:': 'Skipped archive collisions:',
+  'Skipped rename errors: {{count}}': 'Skipped rename errors: {{count}}',
+  'Skipped rename errors:': 'Skipped rename errors:',
+  '{{verb}}: {{count}}': '{{verb}}: {{count}}',
+  'Would archive': 'Would archive',
+  Archived: 'Archived',
+  'Failed to read auto-skill curator status: {{message}}':
+    'Failed to read auto-skill curator status: {{message}}',
+  'Usage: /curator run [--dry-run]': 'Usage: /curator run [--dry-run]',
+  'Failed to run auto-skill curator: {{message}}':
+    'Failed to run auto-skill curator: {{message}}',
+  'Usage: /curator restore <directory>': 'Usage: /curator restore <directory>',
+  'Restored auto-skill: {{name}}': 'Restored auto-skill: {{name}}',
+  'Failed to restore auto-skill: {{message}}':
+    'Failed to restore auto-skill: {{message}}',
+  'Exclude an auto-skill from automatic maintenance.':
+    'Exclude an auto-skill from automatic maintenance.',
+  'Return a pinned auto-skill to automatic maintenance.':
+    'Return a pinned auto-skill to automatic maintenance.',
+  'Usage: /curator pin <directory>': 'Usage: /curator pin <directory>',
+  'Usage: /curator unpin <directory>': 'Usage: /curator unpin <directory>',
+  'Pinned auto-skill: {{name}}': 'Pinned auto-skill: {{name}}',
+  'Unpinned auto-skill: {{name}}': 'Unpinned auto-skill: {{name}}',
+  'Failed to update auto-skill pin: {{message}}':
+    'Failed to update auto-skill pin: {{message}}',
+  'Auto-skill curator changes are disabled in safe mode.':
+    'Auto-skill curator changes are disabled in safe mode.',
+  'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
+    'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.',
 };

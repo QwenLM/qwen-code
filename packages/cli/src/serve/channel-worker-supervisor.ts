@@ -36,7 +36,7 @@ import {
   type ChannelDeliveryAccepted,
   type ChannelDeliveryErrorCode,
   type ChannelDeliveryRequest,
-} from './channel-delivery-ipc.js';
+} from '../runtime/channel-delivery-ipc.js';
 import {
   createWorkerDiagnosticRedactor,
   normalizeWorkerDiagnostic,

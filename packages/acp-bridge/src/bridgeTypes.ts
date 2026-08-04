@@ -98,6 +98,14 @@ export interface BridgeSpawnRequest {
   worktree?: { slug: string; path: string; branch: string };
   /** Branch metadata, set by the daemon route before spawn. */
   branch?: { name: string; baseBranch: string };
+  /**
+   * Optional caller-supplied session id. When provided, the agent uses this
+   * id instead of generating a random UUID. Must be validated at the route
+   * boundary since the core Config constructor uses it verbatim. Passed
+   * through ACP `_meta` since the protocol's NewSessionRequest has no native
+   * sessionId field.
+   */
+  sessionId?: string;
 }
 
 export interface BridgeSession {
@@ -171,6 +179,8 @@ export const LOAD_REPLAY_HIDE_INHERITED_META_KEY =
   'qwen.session.loadReplayHideInherited';
 export const LOAD_REPLAY_BULK_MODE = 'bulk';
 export const LOAD_REPLAY_VERSION = 1 as const;
+
+export const REQUESTED_SESSION_ID_META_KEY = 'qwen-code/sessionId';
 
 export const CHANNEL_STARTUP_PROFILE_META_KEY =
   'qwen.daemon.channelStartupProfile';
@@ -661,6 +671,7 @@ export type ClientMcpOverWsRuntimeConfig = Record<string, unknown> & {
  * same session must not dedupe a message it did not queue.
  */
 export interface MidTurnQueueEntry {
+  messageId: string;
   text: string;
   originatorClientId?: string;
 }
@@ -1428,7 +1439,14 @@ export interface AcpSessionBridge {
     sessionId: string,
     message: string,
     context?: BridgeClientRequestContext,
-  ): { accepted: boolean };
+  ): { accepted: boolean; messageId?: string };
+
+  /** Remove a message that has not yet been drained into the running turn. */
+  removeMidTurnMessage(
+    sessionId: string,
+    messageId: string,
+    context?: BridgeClientRequestContext,
+  ): { removed: boolean };
 
   /**
    * Execute a shell command directly on the daemon (no LLM involvement).

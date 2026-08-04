@@ -115,6 +115,11 @@ interface FakeBridge extends AcpSessionBridge {
     message: string;
     context?: BridgeClientRequestContext;
   }>;
+  readonly removeMidTurnMessageCalls: Array<{
+    sessionId: string;
+    messageId: string;
+    context?: BridgeClientRequestContext;
+  }>;
   readonly taskCancelCalls: Array<{
     sessionId: string;
     taskId: string;
@@ -279,6 +284,7 @@ function makeBridge(
   const recapCalls: FakeBridge['recapCalls'] = [];
   const btwCalls: FakeBridge['btwCalls'] = [];
   const midTurnMessageCalls: FakeBridge['midTurnMessageCalls'] = [];
+  const removeMidTurnMessageCalls: FakeBridge['removeMidTurnMessageCalls'] = [];
   const taskCancelCalls: FakeBridge['taskCancelCalls'] = [];
   const goalClearCalls: string[] = [];
   const continueCalls: FakeBridge['continueCalls'] = [];
@@ -310,6 +316,7 @@ function makeBridge(
     recapCalls,
     btwCalls,
     midTurnMessageCalls,
+    removeMidTurnMessageCalls,
     taskCancelCalls,
     goalClearCalls,
     continueCalls,
@@ -492,7 +499,24 @@ function makeBridge(
         message,
         ...(context ? { context } : {}),
       });
-      return { accepted: workspaceCwd === SECONDARY_CWD };
+      return {
+        accepted: workspaceCwd === SECONDARY_CWD,
+        ...(workspaceCwd === SECONDARY_CWD
+          ? { messageId: 'mid-secondary' }
+          : {}),
+      };
+    },
+    removeMidTurnMessage(
+      sessionId: string,
+      messageId: string,
+      context?: BridgeClientRequestContext,
+    ) {
+      removeMidTurnMessageCalls.push({
+        sessionId,
+        messageId,
+        ...(context ? { context } : {}),
+      });
+      return { removed: workspaceCwd === SECONDARY_CWD };
     },
     async cancelSessionTask(
       sessionId: string,
@@ -840,7 +864,7 @@ describe('multi-workspace session dispatch', () => {
         trusted: true,
       },
     ]);
-    expect(res.body.limits.maxSessionsPerWorkspace).toBe(20);
+    expect(res.body.limits.maxSessionsPerWorkspace).toBe(32);
     expect(res.body.limits.maxTotalSessions).toBeNull();
   });
 
@@ -1790,7 +1814,18 @@ describe('multi-workspace session dispatch', () => {
       .set('X-Qwen-Client-Id', 'secondary-client')
       .send({ message: '  remember this  ' });
     expect(midTurnRes.status).toBe(200);
-    expect(midTurnRes.body).toEqual({ accepted: true });
+    expect(midTurnRes.body).toEqual({
+      accepted: true,
+      messageId: 'mid-secondary',
+    });
+
+    const removeMidTurnRes = await request(app)
+      .delete('/session/secondary-session/mid-turn-messages/mid-secondary')
+      .set('Host', host())
+      .set('Authorization', TEST_AUTHORIZATION)
+      .set('X-Qwen-Client-Id', 'secondary-client');
+    expect(removeMidTurnRes.status).toBe(200);
+    expect(removeMidTurnRes.body).toEqual({ removed: true });
 
     const taskCancelRes = await request(app)
       .post('/session/secondary-session/tasks/task-1/cancel')
@@ -1840,6 +1875,13 @@ describe('multi-workspace session dispatch', () => {
         context: { clientId: 'secondary-client' },
       },
     ]);
+    expect(secondaryBridge.removeMidTurnMessageCalls).toEqual([
+      {
+        sessionId: 'secondary-session',
+        messageId: 'mid-secondary',
+        context: { clientId: 'secondary-client' },
+      },
+    ]);
     expect(secondaryBridge.taskCancelCalls).toEqual([
       {
         sessionId: 'secondary-session',
@@ -1854,6 +1896,7 @@ describe('multi-workspace session dispatch', () => {
       primaryBridge.recapCalls,
       primaryBridge.btwCalls,
       primaryBridge.midTurnMessageCalls,
+      primaryBridge.removeMidTurnMessageCalls,
       primaryBridge.taskCancelCalls,
       primaryBridge.goalClearCalls,
     ]) {
@@ -2039,6 +2082,7 @@ describe('multi-workspace session dispatch', () => {
       expect(bridge.languageCalls).toEqual([]);
       expect(bridge.addArtifactCalls).toEqual([]);
       expect(bridge.removeArtifactCalls).toEqual([]);
+      expect(bridge.removeMidTurnMessageCalls).toEqual([]);
     }
   });
 
@@ -2057,9 +2101,14 @@ describe('multi-workspace session dispatch', () => {
       auth(
         request(missing.app).delete('/session/missing/artifacts/artifact-1'),
       ).set('X-Qwen-Client-Id', 'secondary-client'),
+      auth(
+        request(missing.app).delete(
+          '/session/missing/mid-turn-messages/mid-missing',
+        ),
+      ).set('X-Qwen-Client-Id', 'secondary-client'),
     ]);
     expect(missingResponses.map((response) => response.status)).toEqual([
-      404, 404, 404, 404,
+      404, 404, 404, 404, 404,
     ]);
     for (const response of missingResponses) {
       expect(response.body.code).toBe('session_not_found');
@@ -2069,6 +2118,7 @@ describe('multi-workspace session dispatch', () => {
       expect(bridge.languageCalls).toEqual([]);
       expect(bridge.addArtifactCalls).toEqual([]);
       expect(bridge.removeArtifactCalls).toEqual([]);
+      expect(bridge.removeMidTurnMessageCalls).toEqual([]);
     }
 
     const duplicate = makeSummary('duplicate-session', PRIMARY_CWD);
@@ -2084,9 +2134,14 @@ describe('multi-workspace session dispatch', () => {
       auth(
         request(ambiguous.app).post('/session/duplicate-session/continue'),
       ).send({}),
+      auth(
+        request(ambiguous.app).delete(
+          '/session/duplicate-session/mid-turn-messages/mid-duplicate',
+        ),
+      ),
     ]);
     expect(ambiguousResponses.map((response) => response.status)).toEqual([
-      500, 500,
+      500, 500, 500,
     ]);
     for (const response of ambiguousResponses) {
       expect(response.body.code).toBe('ambiguous_session_owner');
@@ -2095,6 +2150,8 @@ describe('multi-workspace session dispatch', () => {
     expect(ambiguous.secondaryBridge.languageCalls).toEqual([]);
     expect(ambiguous.primaryBridge.continueCalls).toEqual([]);
     expect(ambiguous.secondaryBridge.continueCalls).toEqual([]);
+    expect(ambiguous.primaryBridge.removeMidTurnMessageCalls).toEqual([]);
+    expect(ambiguous.secondaryBridge.removeMidTurnMessageCalls).toEqual([]);
   });
 
   it('preserves primary routing for remaining mutations', async () => {
@@ -2205,10 +2262,13 @@ describe('multi-workspace session dispatch', () => {
         .post('/session/secondary-session/goal/clear')
         .set('Host', host())
         .send({}),
+      request(app)
+        .delete('/session/secondary-session/mid-turn-messages/mid-1')
+        .set('Host', host()),
     ]);
 
     expect(responses.map((response) => response.status)).toEqual([
-      401, 401, 401,
+      401, 401, 401, 401,
     ]);
     expect(primaryBridge.metadataCalls).toEqual([]);
     expect(secondaryBridge.metadataCalls).toEqual([]);
@@ -2216,6 +2276,8 @@ describe('multi-workspace session dispatch', () => {
     expect(secondaryBridge.taskCancelCalls).toEqual([]);
     expect(primaryBridge.goalClearCalls).toEqual([]);
     expect(secondaryBridge.goalClearCalls).toEqual([]);
+    expect(primaryBridge.removeMidTurnMessageCalls).toEqual([]);
+    expect(secondaryBridge.removeMidTurnMessageCalls).toEqual([]);
   });
 
   it('rejects invalid secondary owner-local inputs before bridge actions', async () => {
@@ -2290,6 +2352,10 @@ describe('multi-workspace session dispatch', () => {
         .set('Authorization', TEST_AUTHORIZATION)
         .send({ kind: 'agent' }),
       request(app)
+        .delete('/session/secondary-session/mid-turn-messages/mid-blocked')
+        .set('Host', host())
+        .set('Authorization', TEST_AUTHORIZATION),
+      request(app)
         .post('/session/secondary-session/goal/clear')
         .set('Host', host())
         .set('Authorization', TEST_AUTHORIZATION)
@@ -2297,7 +2363,7 @@ describe('multi-workspace session dispatch', () => {
     ]);
 
     expect(responses.map((response) => response.status)).toEqual([
-      403, 403, 403, 403, 403, 403,
+      403, 403, 403, 403, 403, 403, 403,
     ]);
     for (const response of responses) {
       expect(response.body.code).toBe('untrusted_workspace');
@@ -2307,6 +2373,7 @@ describe('multi-workspace session dispatch', () => {
       expect(bridge.recapCalls).toEqual([]);
       expect(bridge.btwCalls).toEqual([]);
       expect(bridge.midTurnMessageCalls).toEqual([]);
+      expect(bridge.removeMidTurnMessageCalls).toEqual([]);
       expect(bridge.taskCancelCalls).toEqual([]);
       expect(bridge.goalClearCalls).toEqual([]);
     }
@@ -2976,7 +3043,7 @@ describe('multi-workspace session dispatch', () => {
         sessionId,
         cwd: SECONDARY_CWD,
         timestamp: '2026-07-08T00:00:00.000Z',
-        prompt: 'x'.repeat(4 * 1024 * 1024),
+        prompt: 'x'.repeat(33 * 1024 * 1024),
         mtime: new Date('2026-07-08T00:00:00.000Z'),
       });
       const { app, secondaryBridge } = makeHarness({
@@ -2991,11 +3058,44 @@ describe('multi-workspace session dispatch', () => {
       expect(response.body).toMatchObject({
         code: 'transcript_page_too_large',
         sessionId,
-        maxBytes: 4 * 1024 * 1024,
+        maxBytes: 32 * 1024 * 1024,
       });
       expect(response.body.pageBytes).toBeGreaterThan(
         response.body.maxBytes as number,
       );
+      expect(secondaryBridge.spawnCalls).toEqual([]);
+      expect(secondaryBridge.restoreCalls).toEqual([]);
+    });
+  });
+
+  it('serves an indivisible record that exceeds the reader page budget', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440280';
+      const prompt = 'x'.repeat(5 * 1024 * 1024);
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt,
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      const { app, secondaryBridge } = makeHarness({
+        secondaryTrusted: false,
+      });
+
+      const response = await request(app)
+        .get(`/workspaces/secondary-id/session/${sessionId}/transcript`)
+        .set('Host', host());
+
+      // A single record cannot be split, so it rides over the 4 MiB reader
+      // budget (hard ceiling remains the 32 MiB serialization cap).
+      expect(response.status).toBe(200);
+      expect(
+        response.body.events.some(
+          (event: { data?: { content?: { text?: string } } }) =>
+            event.data?.content?.text?.length === prompt.length,
+        ),
+      ).toBe(true);
       expect(secondaryBridge.spawnCalls).toEqual([]);
       expect(secondaryBridge.restoreCalls).toEqual([]);
     });

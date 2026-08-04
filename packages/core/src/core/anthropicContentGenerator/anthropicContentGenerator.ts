@@ -261,9 +261,20 @@ type StreamingBlockState = {
 // and the adaptive shape for 4.6+. Centralized so the message-params type,
 // the streaming-request override, and `buildThinkingConfig`'s return type
 // stay in lockstep when a third shape (e.g. `extended`) eventually lands.
+//
+// `display` controls whether adaptive thinking is rendered as readable text
+// ('summarized') or withheld ('omitted', the server default per Anthropic's
+// own migration docs — Opus 4.7+/Fable 5/etc. all default to 'omitted', so
+// a caller that surfaces reasoning to users must set 'summarized' or every
+// thinking block comes back empty).
+type AnthropicThinkingDisplay = 'summarized' | 'omitted';
 type AnthropicThinkingParam =
-  | { type: 'enabled'; budget_tokens: number }
-  | { type: 'adaptive' };
+  | {
+      type: 'enabled';
+      budget_tokens: number;
+      display?: AnthropicThinkingDisplay;
+    }
+  | { type: 'adaptive'; display?: AnthropicThinkingDisplay };
 
 type MessageCreateParamsWithThinking = MessageCreateParamsNonStreaming & {
   thinking?: AnthropicThinkingParam;
@@ -727,6 +738,13 @@ export class AnthropicContentGenerator implements ContentGenerator {
       !!thinking &&
       this.modelSupportsAdaptiveThinking() &&
       !isAnthropicNativeBaseUrl(this.contentGeneratorConfig);
+    // Opus/Sonnet 4.6+ and every 5.x family reject a request whose final
+    // message has role 'assistant' ("assistant message prefill") with a
+    // hard 400 — per Anthropic's own migration guidance this is a
+    // model-generation behavior change, identical on the native API,
+    // Vertex AI, and Bedrock, so (unlike the signature workaround above)
+    // this is NOT gated on baseURL.
+    const stripTrailingAssistantPrefill = this.modelSupportsAdaptiveThinking();
 
     // Sample the live cache-control flags once per request and forward
     // them to the converter (body-side `cache_control`). The converter's
@@ -761,6 +779,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
         injectThinkingOnToolUseTurns: deepseekThinkingOn,
         dropUnsignedAssistantThinking,
         stripAssistantThinking,
+        stripTrailingAssistantPrefill,
         enableCacheControl,
         useGlobalCacheScope,
         cacheRetention,
@@ -1023,16 +1042,22 @@ export class AnthropicContentGenerator implements ContentGenerator {
     }
 
     const reasoning = this.contentGeneratorConfig.reasoning;
+    const requestBudgetCap = request.config?.thinkingConfig?.thinkingBudget;
+    const applyRequestBudgetCap = (budgetTokens: number): number =>
+      typeof requestBudgetCap === 'number' && requestBudgetCap > 0
+        ? Math.min(budgetTokens, requestBudgetCap)
+        : budgetTokens;
 
     if (reasoning === false) {
       return undefined;
     }
 
     // Explicit budget_tokens is an escape hatch from the effort ladder: honor
-    // exactly what the user asked for, without re-clamping to track the
-    // (possibly clamped) effort label — the budget field is just an integer the
-    // server accepts within its context window, so an explicit override stays
-    // explicit. This only applies to models that still accept the manual
+    // what the user asked for without re-clamping to the effort label. A caller
+    // may still provide a smaller per-request thinkingBudget when it also sets
+    // a lower maxOutputTokens; Anthropic requires budget_tokens < max_tokens,
+    // so that request-local ceiling keeps bounded side queries valid. This only
+    // applies to models that still accept the manual
     // `{ type: 'enabled', budget_tokens }` shape (Opus 4.5/4.6, Sonnet 4.6,
     // older 4.x, and unknown/unversioned ids). Opus 4.7+ and every 5.x family
     // reject manual thinking with a 400 and require adaptive thinking, so on
@@ -1049,7 +1074,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     ) {
       return {
         type: 'enabled',
-        budget_tokens: reasoning.budget_tokens,
+        budget_tokens: applyRequestBudgetCap(reasoning.budget_tokens),
       };
     }
 
@@ -1073,8 +1098,18 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // Models that support adaptive thinking use { type: 'adaptive' } without
     // a budget_tokens field. The server controls the thinking budget via
     // output_config.effort instead.
+    //
+    // `display: 'summarized'` is set explicitly rather than relying on the
+    // server default: Sonnet 4.6 defaults adaptive thinking's `display` to
+    // `'summarized'`, but Opus 4.7+ and every 5.x family (Sonnet 5, Fable 5,
+    // Mythos 5, …) silently changed the default to `'omitted'` — with no
+    // error, thinking blocks stream back with empty `thinking` text, which
+    // looks like a long pause before output to anyone rendering reasoning.
+    // Setting it explicitly is a no-op on 4.6 (matches its existing default)
+    // and required on 4.7+ to keep behavior consistent across the whole
+    // adaptive-thinking model population.
     if (this.modelSupportsAdaptiveThinking()) {
-      return { type: 'adaptive' };
+      return { type: 'adaptive', display: 'summarized' };
     }
 
     // Budget path for non-adaptive (pre-4.6) models. resolveEffectiveEffort has
@@ -1095,7 +1130,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
 
     return {
       type: 'enabled',
-      budget_tokens: budgetTokens,
+      budget_tokens: applyRequestBudgetCap(budgetTokens),
     };
   }
 

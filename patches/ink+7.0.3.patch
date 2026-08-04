@@ -18,7 +18,7 @@ index 1d7bf6b..29401a6 100644
 -export default function Text({ color, backgroundColor, dimColor, bold, italic, underline, strikethrough, inverse, wrap, children, 'aria-label': ariaLabel, 'aria-hidden': ariaHidden, }: Props): React.JSX.Element | null;
 +export default function Text({ color, backgroundColor, dimColor, bold, italic, underline, strikethrough, inverse, wrap, selectable, selectionFlow, selectionBreakAfter, selectionJoiner, children, 'aria-label': ariaLabel, 'aria-hidden': ariaHidden, }: Props): React.JSX.Element | null;
 diff --git a/node_modules/ink/build/components/Text.js b/node_modules/ink/build/components/Text.js
-index 2e4b9ff..77ed0f6 100644
+index 2e4b9ff..1ec2ae6 100644
 --- a/node_modules/ink/build/components/Text.js
 +++ b/node_modules/ink/build/components/Text.js
 @@ -6,7 +6,7 @@ import { backgroundContext } from './BackgroundContext.js';
@@ -38,12 +38,11 @@ index 2e4b9ff..77ed0f6 100644
 +    return (React.createElement("ink-text", { style: { flexGrow: 0, flexShrink: 1, flexDirection: 'row', textWrap: wrap }, internal_transform: transform, selectable: selectable, selectionFlow: selectionFlow, selectionBreakAfter: selectionBreakAfter, selectionJoiner: selectionJoiner }, childrenOrAriaLabel));
  }
  //# sourceMappingURL=Text.js.map
-\ No newline at end of file
 diff --git a/node_modules/ink/build/cursor-helpers.d.ts b/node_modules/ink/build/cursor-helpers.d.ts
 index c6e9466..6dd4c0f 100644
 --- a/node_modules/ink/build/cursor-helpers.d.ts
 +++ b/node_modules/ink/build/cursor-helpers.d.ts
-@@ -11,9 +11,11 @@
+@@ -11,9 +11,11 @@ Compare two cursor positions. Returns true if they differ.
  export declare const cursorPositionChanged: (a: CursorPosition | undefined, b: CursorPosition | undefined) => boolean;
  /**
  Build escape sequence to move cursor from bottom of output to the target position and show it.
@@ -57,7 +56,7 @@ index c6e9466..6dd4c0f 100644
  /**
  Build escape sequence to move cursor from previousCursorPosition back to the bottom of output.
  This must be done before eraseLines or any operation that assumes cursor is at the bottom.
-@@ -25,6 +27,7 @@
+@@ -25,6 +27,7 @@ export type CursorOnlyInput = {
      previousCursorPosition: CursorPosition | undefined;
      visibleLineCount: number;
      cursorPosition: CursorPosition | undefined;
@@ -487,7 +486,7 @@ index 0f4523f..a3ef634 100644
  }
  export {};
 diff --git a/node_modules/ink/build/output.js b/node_modules/ink/build/output.js
-index c763b77..bfd3d08 100644
+index c763b77..ac81f2e 100644
 --- a/node_modules/ink/build/output.js
 +++ b/node_modules/ink/build/output.js
 @@ -1,6 +1,26 @@
@@ -777,7 +776,7 @@ index 127c620..6d5a005 100644
  }) => void;
  export default renderNodeToOutput;
 diff --git a/node_modules/ink/build/render-node-to-output.js b/node_modules/ink/build/render-node-to-output.js
-index f00a278..e6bc4ca 100644
+index f00a278..07a98d0 100644
 --- a/node_modules/ink/build/render-node-to-output.js
 +++ b/node_modules/ink/build/render-node-to-output.js
 @@ -1,7 +1,6 @@

@@ -64,7 +64,9 @@ type OnSignalExit = (
   options: { alwaysLast: boolean },
 ) => () => void;
 
-// signal-exit v3 is CommonJS; the namespace's default is its callable export.
+// Keep this dependency on Ink's v3 major. Separate v3 copies coordinate through
+// process.__signal_exit_emitter__; v4 uses a different global rendezvous.
+// signal-exit v3 is CommonJS, so the namespace's default is its callable export.
 const onSignalExit = (signalExitModule as unknown as { default: OnSignalExit })
   .default;
 
