@@ -266,6 +266,49 @@ describe('TurnOutputs artifact downloads', () => {
     act(() => root.unmount());
   });
 
+  it('hides Download when the artifact workspace cannot be resolved', () => {
+    workspaceByCwd.mockReturnValue(undefined);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-unknown"
+            workspaceCwd="/unknown"
+            changes={[]}
+            artifacts={[
+              {
+                id: 'unknown-artifact',
+                kind: 'file',
+                storage: 'workspace',
+                status: 'available',
+                title: 'Unknown report',
+                workspacePath: 'report.txt',
+              } as DaemonSessionArtifact,
+            ]}
+            scheduledTasks={[]}
+            onReviewChanges={() => {}}
+            onOpenArtifact={() => {}}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(
+      Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent?.trim() === 'Download',
+      ),
+    ).toBeUndefined();
+    expect(readFileBytes).not.toHaveBeenCalled();
+    expect(secondaryReadFileBytes).not.toHaveBeenCalled();
+
+    act(() => root.unmount());
+  });
+
   it('stamps secondary ownership onto every panel open request', () => {
     const onOpenRequest = vi.fn();
     const artifact = {

@@ -13,6 +13,7 @@ import type {
 } from '@qwen-code/webui/daemon-react-sdk';
 import { I18nProvider } from '../../i18n';
 import type { ArtifactWorkspaceTarget } from './useArtifactWorkspaceTarget';
+import type { TurnOutputScheduledTask } from './TurnOutputs';
 
 const {
   mockActions,
@@ -238,7 +239,29 @@ const secondaryScheduledTask: DaemonScheduledTask = {
   runs: [],
 };
 
-function scheduledTaskPanel() {
+function scheduledTaskPanel(
+  options: {
+    workspaceCwd?: string;
+    workspaceId?: string;
+    task?: Partial<TurnOutputScheduledTask>;
+  } = {},
+) {
+  const workspaceCwd = options.workspaceCwd ?? '/secondary';
+  const workspaceId = Object.hasOwn(options, 'workspaceId')
+    ? options.workspaceId
+    : 'secondary-id';
+  const taskPatch = options.task ?? {};
+  const task: TurnOutputScheduledTask = {
+    id: 'cron-secondary',
+    toolCallId: 'cron-call',
+    title: 'Secondary task',
+    cron: '0 9 * * *',
+    prompt: 'secondary only',
+    recurring: true,
+    durable: true,
+    workspaceId,
+    ...taskPatch,
+  };
   return (
     <I18nProvider language="en">
       <ArtifactPanel
@@ -248,18 +271,9 @@ function scheduledTaskPanel() {
             id: 'scheduled-task:secondary:cron-call',
             kind: 'scheduled_task',
             title: 'Scheduled Tasks',
-            workspaceCwd: '/secondary',
-            workspaceId: 'secondary-id',
-            task: {
-              id: 'cron-secondary',
-              toolCallId: 'cron-call',
-              title: 'Secondary task',
-              cron: '0 9 * * *',
-              prompt: 'secondary only',
-              recurring: true,
-              durable: true,
-              workspaceId: 'secondary-id',
-            },
+            workspaceCwd,
+            workspaceId,
+            task,
           },
         ]}
         activeTabId="scheduled-task:secondary:cron-call"
@@ -385,10 +399,81 @@ describe('artifact workspace authority', () => {
       ],
     };
     act(() => root.render(<ArtifactWorkspaceTargetProbe revision={2} />));
+    expect(latestArtifactWorkspaceTarget).toBeDefined();
     expect(latestArtifactWorkspaceTarget?.actions).not.toBe(initialActions);
 
     resolveRead?.({ content: 'stale-secret', truncated: false });
     await expect(read).rejects.toThrow(
+      'Workspace artifact owner is no longer available',
+    );
+  });
+
+  it('revokes every pending file read when its owner is removed', async () => {
+    let resolveText:
+      | ((file: { content: string; truncated: boolean }) => void)
+      | undefined;
+    let resolveBytes:
+      | ((file: {
+          contentBase64: string;
+          offset: number;
+          returnedBytes: number;
+          sizeBytes: number;
+        }) => void)
+      | undefined;
+    let resolveStat:
+      | ((stat: { sizeBytes: number; modifiedMs: number }) => void)
+      | undefined;
+    mockSecondaryWorkspaceActions.readWorkspaceFile.mockReturnValue(
+      new Promise((resolve) => {
+        resolveText = resolve;
+      }),
+    );
+    mockSecondaryWorkspaceActions.readWorkspaceFileBytes.mockReturnValue(
+      new Promise((resolve) => {
+        resolveBytes = resolve;
+      }),
+    );
+    mockSecondaryWorkspaceActions.fileStat.mockReturnValue(
+      new Promise((resolve) => {
+        resolveStat = resolve;
+      }),
+    );
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(<ArtifactWorkspaceTargetProbe revision={0} />));
+    const actions = latestArtifactWorkspaceTarget?.actions;
+    expect(actions).toBeDefined();
+    const textRead = actions?.readWorkspaceFile('report.txt');
+    const bytesRead = actions?.readFileBytes('report.bin', {
+      offset: 0,
+      maxBytes: 1024,
+    });
+    const statRead = actions?.stat('report.bin');
+
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      workspaces: [mockWorkspace.capabilities.workspaces[0]!],
+    };
+    act(() => root.render(<ArtifactWorkspaceTargetProbe revision={1} />));
+
+    resolveText?.({ content: 'stale-text', truncated: false });
+    resolveBytes?.({
+      contentBase64: btoa('stale-bytes'),
+      offset: 0,
+      returnedBytes: 11,
+      sizeBytes: 11,
+    });
+    resolveStat?.({ sizeBytes: 11, modifiedMs: 1 });
+    await expect(textRead).rejects.toThrow(
+      'Workspace artifact owner is no longer available',
+    );
+    await expect(bytesRead).rejects.toThrow(
+      'Workspace artifact owner is no longer available',
+    );
+    await expect(statRead).rejects.toThrow(
       'Workspace artifact owner is no longer available',
     );
   });
@@ -659,6 +744,277 @@ describe('ArtifactPanel scheduled-task ownership', () => {
     });
     expect(mockWorkspaceActions.deleteScheduledTask).toHaveBeenCalledWith(
       'cron-secondary',
+      'secondary-id',
+    );
+  });
+
+  it('fails closed for a durable task whose workspace owner is unavailable', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          workspaceCwd: '/unknown',
+          workspaceId: 'missing-id',
+          task: { workspaceId: 'missing-id' },
+        }),
+      ),
+    );
+    await flush();
+
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      'This workspace may have been removed',
+    );
+    expect(mockWorkspaceActions.listScheduledTasks).not.toHaveBeenCalled();
+    expect(mockWorkspaceActions.updateScheduledTask).not.toHaveBeenCalled();
+    expect(mockWorkspaceActions.deleteScheduledTask).not.toHaveBeenCalled();
+  });
+
+  it('shows a session-scoped task snapshot without a workspace owner', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          workspaceCwd: '/unknown',
+          workspaceId: 'missing-id',
+          task: {
+            id: 'session-task',
+            durable: false,
+            prompt: 'local session snapshot',
+            workspaceId: 'missing-id',
+          },
+        }),
+      ),
+    );
+    await flush();
+
+    expect(container.textContent).toContain('session-scoped scheduled task');
+    expect(container.textContent).toContain('local session snapshot');
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(mockWorkspaceActions.listScheduledTasks).not.toHaveBeenCalled();
+  });
+
+  it('keeps legacy single-workspace scheduled-task routes unqualified', async () => {
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/primary',
+    } as typeof mockWorkspace.capabilities;
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([
+      secondaryScheduledTask,
+    ]);
+    mockWorkspaceActions.updateScheduledTask.mockResolvedValue({
+      ...secondaryScheduledTask,
+      enabled: false,
+    });
+    mockWorkspaceActions.deleteScheduledTask.mockResolvedValue(undefined);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          workspaceCwd: '/primary',
+          workspaceId: undefined,
+          task: { workspaceId: undefined },
+        }),
+      ),
+    );
+    await flush();
+    expect(mockWorkspaceActions.listScheduledTasks).toHaveBeenCalledWith(
+      undefined,
+    );
+
+    const disable = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Disable',
+    );
+    await act(async () => {
+      disable?.click();
+      await Promise.resolve();
+    });
+    expect(mockWorkspaceActions.updateScheduledTask).toHaveBeenCalledWith(
+      'cron-secondary',
+      { enabled: false },
+      undefined,
+    );
+
+    const openDelete = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Delete',
+    );
+    act(() => openDelete?.click());
+    const confirmDelete = Array.from(document.body.querySelectorAll('button'))
+      .filter((button) => button.textContent?.trim() === 'Delete')
+      .at(-1);
+    await act(async () => {
+      confirmDelete?.click();
+      await Promise.resolve();
+    });
+    expect(mockWorkspaceActions.deleteScheduledTask).toHaveBeenCalledWith(
+      'cron-secondary',
+      undefined,
+    );
+  });
+
+  it.each(['save', 'toggle', 'delete'] as const)(
+    'settles a pending reload after a %s mutation',
+    async (mutation) => {
+      let resolveReload: ((tasks: DaemonScheduledTask[]) => void) | undefined;
+      mockWorkspaceActions.listScheduledTasks
+        .mockResolvedValueOnce([secondaryScheduledTask])
+        .mockReturnValueOnce(
+          new Promise((resolve) => {
+            resolveReload = resolve;
+          }),
+        );
+      const updatedTask = {
+        ...secondaryScheduledTask,
+        name: `${mutation} result`,
+        enabled: false,
+      };
+      mockWorkspaceActions.updateScheduledTask.mockResolvedValue(updatedTask);
+      mockWorkspaceActions.deleteScheduledTask.mockResolvedValue(undefined);
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+
+      act(() => root.render(scheduledTaskPanel()));
+      await flush();
+      act(() =>
+        root.render(
+          scheduledTaskPanel({ task: { prompt: `reload ${mutation}` } }),
+        ),
+      );
+      await flush();
+      expect(container.textContent).toContain('Loading…');
+
+      if (mutation === 'save') {
+        const edit = Array.from(container.querySelectorAll('button')).find(
+          (button) => button.textContent?.trim() === 'Edit',
+        );
+        act(() => edit?.click());
+        const save = Array.from(document.body.querySelectorAll('button')).find(
+          (button) => button.textContent?.trim() === 'Save',
+        );
+        await act(async () => {
+          save?.click();
+          await Promise.resolve();
+        });
+      } else if (mutation === 'toggle') {
+        const disable = Array.from(container.querySelectorAll('button')).find(
+          (button) => button.textContent?.trim() === 'Disable',
+        );
+        await act(async () => {
+          disable?.click();
+          await Promise.resolve();
+        });
+      } else {
+        const openDelete = Array.from(
+          container.querySelectorAll('button'),
+        ).find((button) => button.textContent?.trim() === 'Delete');
+        act(() => openDelete?.click());
+        const confirmDelete = Array.from(
+          document.body.querySelectorAll('button'),
+        )
+          .filter((button) => button.textContent?.trim() === 'Delete')
+          .at(-1);
+        await act(async () => {
+          confirmDelete?.click();
+          await Promise.resolve();
+        });
+      }
+
+      await act(async () => {
+        resolveReload?.([secondaryScheduledTask]);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(container.textContent).not.toContain('Loading…');
+      if (mutation === 'delete') {
+        expect(container.textContent).toContain('has been deleted');
+      } else {
+        expect(container.textContent).toContain(`${mutation} result`);
+      }
+    },
+  );
+
+  it('discards a pending mutation when the task scope changes', async () => {
+    const replacementTask: DaemonScheduledTask = {
+      ...secondaryScheduledTask,
+      id: 'cron-replacement',
+      name: 'Replacement task',
+      prompt: 'replacement only',
+    };
+    let resolveStaleMutation: ((task: DaemonScheduledTask) => void) | undefined;
+    mockWorkspaceActions.listScheduledTasks
+      .mockResolvedValueOnce([secondaryScheduledTask])
+      .mockResolvedValueOnce([replacementTask]);
+    mockWorkspaceActions.updateScheduledTask.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveStaleMutation = resolve;
+      }),
+    );
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(scheduledTaskPanel()));
+    await flush();
+    const disable = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Disable',
+    );
+    act(() => disable?.click());
+    await flush();
+
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          task: {
+            id: replacementTask.id,
+            title: replacementTask.name ?? replacementTask.prompt,
+            prompt: replacementTask.prompt,
+          },
+        }),
+      ),
+    );
+    await flush();
+    expect(container.textContent).toContain('Replacement task');
+
+    await act(async () => {
+      resolveStaleMutation?.({
+        ...secondaryScheduledTask,
+        name: 'Stale mutation result',
+        enabled: false,
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.textContent).not.toContain('Stale mutation result');
+    expect(container.textContent).toContain('Replacement task');
+
+    mockWorkspaceActions.updateScheduledTask.mockResolvedValueOnce({
+      ...replacementTask,
+      enabled: false,
+    });
+    const replacementDisable = Array.from(
+      container.querySelectorAll('button'),
+    ).find((button) => button.textContent?.trim() === 'Disable');
+    await act(async () => {
+      replacementDisable?.click();
+      await Promise.resolve();
+    });
+    expect(mockWorkspaceActions.updateScheduledTask).toHaveBeenLastCalledWith(
+      'cron-replacement',
+      { enabled: false },
       'secondary-id',
     );
   });

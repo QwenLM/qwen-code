@@ -595,7 +595,9 @@ export function ArtifactPanel({
                 </DropdownMenu>
               ))}
           </div>
-        ) : isWorkspaceScopedTab(activeTab) && !activeWorkspaceActions ? (
+        ) : isWorkspaceScopedTab(activeTab) &&
+          (activeTab.kind !== 'scheduled_task' || activeTab.task.durable) &&
+          !activeWorkspaceActions ? (
           <div className={styles.empty} role="alert">
             {t('workspace.notFoundDescription')}
           </div>
@@ -886,6 +888,7 @@ function ScheduledTaskDetail({
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const requestRef = useRef(0);
+  const loadRequestRef = useRef(0);
   const requestScopeRef = useRef({
     actions,
     taskId: task.id,
@@ -913,9 +916,27 @@ function ScheduledTaskDetail({
     },
     [],
   );
+  const isCurrentLoad = useCallback(
+    (
+      request: number,
+      requestActions: ArtifactWorkspaceActions,
+      taskId: string,
+      workspaceId: string | undefined,
+    ) => {
+      const scope = requestScopeRef.current;
+      return (
+        request === loadRequestRef.current &&
+        scope.actions === requestActions &&
+        scope.taskId === taskId &&
+        scope.workspaceId === workspaceId
+      );
+    },
+    [],
+  );
   useEffect(
     () => () => {
       requestRef.current += 1;
+      loadRequestRef.current += 1;
     },
     [],
   );
@@ -927,6 +948,7 @@ function ScheduledTaskDetail({
 
   const loadTask = useCallback(async () => {
     const request = ++requestRef.current;
+    const loadRequest = ++loadRequestRef.current;
     const taskId = task.id;
     const workspaceId = task.workspaceId;
     if (!task.durable) {
@@ -955,16 +977,17 @@ function ScheduledTaskDetail({
         setBuilder(parseCronToBuilder(task.cron));
       }
     } catch (err) {
-      if (isCurrentRequest(request, actions, taskId, workspaceId)) {
+      if (isCurrentLoad(loadRequest, actions, taskId, workspaceId)) {
         setLoadError(err instanceof Error ? err.message : String(err));
       }
     } finally {
-      if (isCurrentRequest(request, actions, taskId, workspaceId)) {
+      if (isCurrentLoad(loadRequest, actions, taskId, workspaceId)) {
         setLoading(false);
       }
     }
   }, [
     actions,
+    isCurrentLoad,
     isCurrentRequest,
     task.cron,
     task.durable,

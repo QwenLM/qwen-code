@@ -9890,7 +9890,7 @@ describe('App session callbacks', () => {
     ).toBe('s1,s2,s3');
   });
 
-  it('reconciles split pane artifact snapshots in the right panel', async () => {
+  it('replaces an extra artifact with its split pane snapshot', async () => {
     mockWorkspace.capabilities = {
       workspaceCwd: '/tmp/project',
       workspaces: [
@@ -9913,15 +9913,15 @@ describe('App session callbacks', () => {
     });
     await act(async () => {
       container
-        .querySelector<HTMLButtonElement>(
-          '[data-testid="split-report-artifact"]',
-        )
+        .querySelector<HTMLButtonElement>('[data-testid="split-open-artifact"]')
         ?.click();
       await Promise.resolve();
     });
     await act(async () => {
       container
-        .querySelector<HTMLButtonElement>('[data-testid="split-open-artifact"]')
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="split-report-artifact"]',
+        )
         ?.click();
       await Promise.resolve();
     });
@@ -9989,6 +9989,17 @@ describe('App session callbacks', () => {
   });
 
   it('clears split pane artifact snapshots when switching sessions', async () => {
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
     const { container, rerender } = renderApp();
     await flush();
 
@@ -10014,6 +10025,10 @@ describe('App session callbacks', () => {
     });
 
     expect(document.body.textContent).toContain('Pane artifact');
+    expect(document.body.textContent).toContain('10 B');
+    expect(document.body.textContent).not.toContain(
+      'This workspace may have been removed',
+    );
 
     await act(async () => {
       mockConnection.sessionId = 'session-2';
