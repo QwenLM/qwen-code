@@ -30,6 +30,11 @@ import {
   verificationGaps,
   TranscriptsUnavailableError,
 } from './lib/coverage.js';
+import {
+  BUDGET_STOP_PHRASE,
+  budgetStopDisclosure,
+  readBudgetStop,
+} from './lib/deadline.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import { gh, setGhHost } from './lib/gh.js';
 import {
@@ -55,6 +60,12 @@ import {
   unmarkedComments,
   type DraftedComment,
 } from './lib/inline-counts.js';
+import {
+  REVIEW_FOOTER_RE,
+  footerVersion,
+  isFooterSafeModelId,
+  reviewFooter,
+} from './lib/review-footer.js';
 
 export type ReviewEvent = 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
 
@@ -235,6 +246,10 @@ function toStringList(value: unknown, field: string): string[] {
   return [...(value as string[])];
 }
 
+function stripReviewFooter(entry: string): string {
+  return entry.replace(REVIEW_FOOTER_RE, '');
+}
+
 // Booleans get the same boundary treatment as the counts: the JSON is
 // model-written, and a stringified `"false"` is truthy — it once stood to
 // fire the downgrade sentence on a review that was never downgraded, and to
@@ -303,7 +318,9 @@ function ledgerMarkerFor(input: ComposeReviewInput): string | null {
           line?: unknown;
           body?: unknown;
         }>,
-        toStringList(input.bodyCriticals, 'bodyCriticals'),
+        toStringList(input.bodyCriticals, 'bodyCriticals')
+          .map(stripReviewFooter)
+          .filter((entry) => entry.trim() !== ''),
       ),
     );
   } catch {
@@ -321,7 +338,14 @@ function composeReviewBody(
     input.suggestionsInline,
     'suggestionsInline',
   );
-  const bodyCriticals = toStringList(input.bodyCriticals, 'bodyCriticals');
+  // Stripped per entry, not on the assembled body: these model-written
+  // strings render verbatim as the LAST body part, and a forged footer
+  // relocated into one would post directly above the canonical footer —
+  // the `$`-anchored regex only sees an entry's end, before the footer is
+  // appended.
+  const bodyCriticals = toStringList(input.bodyCriticals, 'bodyCriticals')
+    .map(stripReviewFooter)
+    .filter((entry) => entry.trim() !== '');
   const suggestionsDiscarded = toCount(
     input.suggestionsDiscarded,
     'suggestionsDiscarded',
@@ -329,7 +353,9 @@ function composeReviewBody(
   const cannotTell = toStringList(
     input.cannotTellCriticals,
     'cannotTellCriticals',
-  );
+  )
+    .map(stripReviewFooter)
+    .filter((entry) => entry.trim() !== '');
   const uncoverable = toStringList(
     input.uncoverableChunks,
     'uncoverableChunks',
@@ -352,6 +378,36 @@ function composeReviewBody(
     subjectZh?: string;
     reasonZh?: string;
   }> = [];
+  // The budget-stop marker: when the reverse-audit round builder refused a
+  // round on the review's time budget, it recorded the refusal beside the
+  // prompt records. Synthesizing the disclosure from the marker makes the
+  // verdict cap deterministic — the orchestrator's own copy of the entry
+  // (the stderr instruction asks for one) is a courtesy to the terminal
+  // reader, and a run that drops the sentence still cannot approve past a
+  // truncated audit. Rendered STRUCTURAL, both languages, like every other
+  // coverage entry — the orchestrator's relayed copy is English-only prose,
+  // so the marker's phrase dedups it out and the two channels never say it
+  // twice.
+  // The marker's entry is tracked by reference: its relays are deduped by
+  // the phrase splice here, so the caller-echo filter below must NOT also
+  // prefix-match on its `reverse audit` subject — that shadow silently
+  // dropped every OTHER reverse-audit scope the orchestrator disclosed
+  // (`reverse audit — chunk 2's auditor returned nothing substantive
+  // twice`), in exactly the runs where a partial audit makes such scopes
+  // likeliest.
+  let budgetEntry: (typeof coverageEntries)[number] | undefined;
+  if (input.planPath) {
+    const stop = readBudgetStop(input.planPath);
+    if (stop !== null) {
+      for (let i = unreviewed.length - 1; i >= 0; i--) {
+        if (unreviewed[i].includes(BUDGET_STOP_PHRASE)) {
+          unreviewed.splice(i, 1);
+        }
+      }
+      budgetEntry = budgetStopDisclosure(stop.round ?? undefined);
+      coverageEntries.push(budgetEntry);
+    }
+  }
   // The fixes for the gaps above, for stderr — never for the body. The gap says
   // what the review cannot certify, to the PR author; the remediation names the
   // command that repairs it, to the orchestrator. #7012's public body was fourteen
@@ -680,6 +736,13 @@ function composeReviewBody(
       'compose-review: modelId is required (the public footer names the reviewing model)',
     );
   }
+  if (!isFooterSafeModelId(modelId)) {
+    throw new TypeError(
+      'compose-review: modelId is interpolated into the public footer ' +
+        'verbatim — it must be a single line that does not contain the ' +
+        'footer marker',
+    );
+  }
 
   // `C` counts every Critical the review posts anywhere — inline or body.
   // `S` counts every *confirmed* Suggestion — anchored or discarded: the
@@ -788,7 +851,7 @@ function composeReviewBody(
     }
   }
 
-  const footer = `_— ${modelId} via Qwen Code /review (v${cliVersion})_`;
+  const footer = reviewFooter(modelId, cliVersion);
   // Bilingual rendering: when the plan (fetch-pr's report) says the PR
   // description contains Han characters, the posted body carries the complete
   // Chinese version collapsed under the English one — the shape this repo's
@@ -892,8 +955,15 @@ function composeReviewBody(
   for (const d of unreviewed) {
     if (seenCaller.has(d)) continue; // a caller pasting itself twice
     seenCaller.add(d);
+    // The budget-stop entry never prefix-matches: its relays are already
+    // deduped by the marker phrase above, and letting its `reverse audit`
+    // subject claim the prefix swallowed unrelated reverse-audit scopes the
+    // caller disclosed with their own reasons (a bare subject echo still
+    // dedups).
     const echoesCoverage = covEntries.some(
-      (e) => d === e.subject || d.startsWith(`${e.subject} — `),
+      (e) =>
+        d === e.subject ||
+        (e !== budgetEntry && d.startsWith(`${e.subject} — `)),
     );
     if (!echoesCoverage) callerLeft.push(d);
   }
@@ -1786,7 +1856,10 @@ export const composeReviewCommand: CommandModule = {
         ...countInlineFindings(drafted),
         draftedComments: drafted,
       },
-      await getCliVersion(),
+      // Same pin as `submit`: the startup stamp, not a version resolved at
+      // compose time — a shared runner can rewrite the install mid-session.
+      footerVersion(process.env['QWEN_CODE_STARTUP_VERSION']) ??
+        (await getCliVersion()),
     );
     // The exact terminal verdict, persisted beside the fields it is computed
     // from. `event` + `cappedBy` alone cannot reconstruct it — a presubmit
