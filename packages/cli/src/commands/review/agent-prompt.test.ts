@@ -20,12 +20,28 @@ import {
   afterEach,
   type Mock,
 } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+  readFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
-vi.mock('../../utils/stdioHelpers.js', () => ({ writeStdoutLine: vi.fn() }));
-import { writeStdoutLine } from '../../utils/stdioHelpers.js';
+vi.mock('../../utils/stdioHelpers.js', () => ({
+  writeStdoutLine: vi.fn(),
+  writeStderrLine: vi.fn(),
+}));
+import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import {
+  DEADLINE_ENV,
+  RESERVE_ENV,
+  readBudgetStop,
+  readRoundStamps,
+} from './lib/deadline.js';
 import {
   buildChunkAgentPrompt,
   buildChunkLaunchPrompt,
@@ -38,6 +54,7 @@ import {
 import {
   readRecordedPrompts,
   briefPath,
+  promptRecordDir,
   wasDeliveredVerbatim,
 } from './lib/prompt-record.js';
 
@@ -372,6 +389,7 @@ describe('agent-prompt (command boundary)', () => {
           role: 'reverse-audit',
           chunk: 14,
           findings,
+          round: 1,
         }),
       ).not.toThrow();
       const recorded = readRecordedPrompts(plan);
@@ -379,7 +397,9 @@ describe('agent-prompt (command boundary)', () => {
       expect(keys).toHaveLength(1);
       // The chunk in the key (the delivery check finds the record by it), plus
       // the findings digest — each round is its own record now.
-      expect(keys[0]).toMatch(/^reverse-audit--chunk-14--[0-9a-f]{12}$/);
+      expect(keys[0]).toMatch(
+        /^reverse-audit--chunk-14--round-1--[0-9a-f]{12}$/,
+      );
       const briefText = readFileSync(briefPath(plan, keys[0]), 'utf8');
       expect(briefText).toContain('offset=4024, limit=176'); // chunk 14 only
       expect(briefText).not.toContain('offset=3807'); // not chunk 13
@@ -485,6 +505,7 @@ describe('--all-chunks — every auditor of a Step 5 round, in one call', () => 
         role: 'reverse-audit',
         'all-chunks': true,
         findings,
+        round: 1,
       });
 
       const printed = (writeStdoutLine as unknown as Mock).mock
@@ -550,6 +571,7 @@ describe('--all-chunks — every auditor of a Step 5 round, in one call', () => 
             role: 'reverse-audit',
             'all-chunks': true,
             findings,
+            round: 1,
           }),
         ).toThrow(/no `chunks\[\]`/);
         expect(readRecordedPrompts(plan).size).toBe(0);
@@ -584,6 +606,7 @@ describe('--all-chunks — every auditor of a Step 5 round, in one call', () => 
           role: 'reverse-audit',
           'all-chunks': true,
           findings,
+          round: 1,
         }),
       ).toThrow(/no positive integer id/);
     } finally {
@@ -621,6 +644,7 @@ describe('--all-chunks — every auditor of a Step 5 round, in one call', () => 
             role: 'reverse-audit',
             'all-chunks': true,
             findings,
+            round: 1,
           }),
         ).toThrow(pattern);
         // Refused BEFORE any brief, record or stdout block — a partial round
@@ -708,6 +732,7 @@ describe('--all-chunks — every auditor of a Step 5 round, in one call', () => 
         role: 'reverse-audit',
         'all-chunks': true,
         findings,
+        round: 1,
       });
       const printed = (writeStdoutLine as unknown as Mock).mock
         .calls[0][0] as string;
@@ -744,6 +769,7 @@ describe('--all-chunks — every auditor of a Step 5 round, in one call', () => 
         'all-chunks': true,
         findings,
         rules: rulesFile,
+        round: 1,
       });
       const keys = [...readRecordedPrompts(plan).keys()];
       expect(keys).toHaveLength(3);
@@ -1426,7 +1452,7 @@ describe('--findings — fold the list in, print one block, record EXACTLY that 
   });
 
   it('a reverse auditor gets the do-not-re-report framing', () => {
-    const { printed, plan } = run({ role: 'reverse-audit' });
+    const { printed, plan } = run({ role: 'reverse-audit', round: 1 });
     expect(printed).toContain('Already confirmed — do not re-report these');
     // and NOT the verifier's framing — the mirror of the assertion above.
     expect(printed).not.toContain('The findings you are ruling on');
@@ -1441,7 +1467,11 @@ describe('--findings — fold the list in, print one block, record EXACTLY that 
     // --findings <cumulative>` per chunk per round. The findings fold above the
     // chunk-scoped prompt; the record is that chunk's block, findings-free, keyed by
     // the chunk. (PLAN's chunks are 13/14/15 — chunk 14 is offset 4024, limit 176.)
-    const { printed, plan } = run({ role: 'reverse-audit', chunk: 14 });
+    const { printed, plan } = run({
+      role: 'reverse-audit',
+      chunk: 14,
+      round: 1,
+    });
     expect(printed).toContain('Already confirmed — do not re-report these');
     expect(printed).toContain('foo.ts:10 — the collision drops arguments');
     expect(printed).toContain('offset=4024, limit=176'); // this chunk's range only
@@ -1471,6 +1501,7 @@ describe('--findings — fold the list in, print one block, record EXACTLY that 
       plan,
       role: 'reverse-audit',
       findings,
+      round: 1,
     });
     const printed = (writeStdoutLine as unknown as Mock).mock
       .calls[0][0] as string;
@@ -1502,6 +1533,7 @@ describe('--findings — fold the list in, print one block, record EXACTLY that 
         plan,
         role: 'reverse-audit',
         findings,
+        round: 1,
       }),
     ).not.toThrow();
   });
@@ -1747,6 +1779,7 @@ describe('buildWholeDiffBlock — the agents that walk the whole diff', () => {
           role: 'reverse-audit',
           chunk: 999,
           findings,
+          round: 1,
         }),
       ).toThrow(/the plan has no chunk 999/);
     } finally {
@@ -2418,5 +2451,325 @@ describe('verify and reverse-audit briefs — the Step 4/5 methodology, in code'
       expect(launch).toContain(`read_file(file_path="/t/${role}.brief.md")`);
       expect(launch).toContain(PLAN.diffPathAbsolute);
     }
+  });
+});
+
+describe('the reverse-audit budget gate — the loop must end by reporting', () => {
+  // Measured on CI run #8368 (+1699 lines): the audit loop ran to the 5-round
+  // cap, spent 3.5 of the job's 4 budgeted hours, and the outer kill arrived
+  // while round 5's findings were still being verified — nothing was posted.
+  // The gate turns that into a refusal at the round BUILDER, where the
+  // orchestrator has to come for its prompts.
+  const dirs: string[] = [];
+  beforeEach(() => {
+    (writeStdoutLine as unknown as Mock).mockClear();
+    (writeStderrLine as unknown as Mock).mockClear();
+  });
+  afterEach(() => {
+    delete process.env[DEADLINE_ENV];
+    delete process.env[RESERVE_ENV];
+    process.exitCode = undefined;
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  function call(role: string, extra: Record<string, unknown> = {}): string {
+    const dir = mkdtempSync(join(tmpdir(), 'ap-budget-'));
+    dirs.push(dir);
+    const plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(PLAN));
+    const findings = join(dir, 'findings.md');
+    writeFileSync(findings, '');
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role,
+      findings,
+      ...extra,
+    });
+    return plan;
+  }
+
+  it('refuses a round inside the reserve: exit 4, no prompt, no record', () => {
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 60);
+    const plan = call('reverse-audit', { round: 2 });
+
+    expect(process.exitCode).toBe(4);
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(0);
+    // A refused round leaves no record for a delivery check to expect an
+    // agent against.
+    expect(readRecordedPrompts(plan).size).toBe(0);
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('BUDGET:');
+    expect(msg).toContain(
+      '`reverse audit — stopped before round 2 by the review time budget`',
+    );
+    expect(msg).toContain('proceed to Step 6');
+    // The deterministic half: the marker compose-review synthesizes the
+    // verdict-capping disclosure from, written even though nothing was built.
+    expect(readBudgetStop(plan)?.entry).toBe(
+      'reverse audit — stopped before round 2 by the review time budget',
+    );
+    // A refused round is not an admission; it must not be stamped as one.
+    expect(readRoundStamps(plan)).toHaveLength(0);
+  });
+
+  it('builds normally when the deadline is far, and when there is none', () => {
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 7200);
+    const plan = call('reverse-audit', { round: 1 });
+    expect(process.exitCode).toBeUndefined();
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(1);
+    // The admission is stamped WITH its round label, so the next round's gate
+    // can measure this one: both stamp consumers key on `round` — an
+    // unlabeled `{round: null}` stamp would slip the one-per-round guard and
+    // price a same-round rebuild at the 600s floor.
+    expect(readRoundStamps(plan)).toEqual([
+      { round: 1, atMs: expect.any(Number) },
+    ]);
+
+    (writeStdoutLine as unknown as Mock).mockClear();
+    delete process.env[DEADLINE_ENV];
+    call('reverse-audit', { round: 1 });
+    expect(process.exitCode).toBeUndefined();
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(1);
+  });
+
+  it('does not gate the verifier — the reserve exists so it can run', () => {
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 60);
+    const dir = mkdtempSync(join(tmpdir(), 'ap-budget-v-'));
+    dirs.push(dir);
+    const plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(PLAN));
+    const findings = join(dir, 'findings.md');
+    writeFileSync(findings, '- x.test.ts:3 — off-by-one in retry cap\n');
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'verify',
+      findings,
+    });
+    expect(process.exitCode).toBeUndefined();
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(1);
+    expect((writeStderrLine as unknown as Mock).mock.calls).toHaveLength(0);
+    // And it leaves no admission stamp: the stamps are the reverse-audit
+    // loop's clock, and a verifier build hoisted into the stamping path
+    // would corrupt the round measurements without ever being gated.
+    expect(readRoundStamps(plan)).toHaveLength(0);
+  });
+
+  it('honours a shorter reserve override', () => {
+    // 600s reserve + the 1800s round-1 estimate = 2400s required.
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 2500);
+    process.env[RESERVE_ENV] = '600';
+    call('reverse-audit', { round: 4 });
+    expect(process.exitCode).toBeUndefined();
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(1);
+  });
+
+  it('refuses an --all-chunks round too: exit 4, and none of the per-chunk records', () => {
+    // The loop's real Step 5 form is --role reverse-audit --all-chunks
+    // --findings …, and that path writes one record PER CHUNK — so "no
+    // record written" is at its strongest here: PLAN has three chunks, and
+    // none of the three may exist for a delivery check to expect agents for.
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 60);
+    const plan = call('reverse-audit', { 'all-chunks': true, round: 3 });
+
+    expect(process.exitCode).toBe(4);
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(0);
+    expect(readRecordedPrompts(plan).size).toBe(0);
+    expect(readBudgetStop(plan)?.entry).toBe(
+      'reverse audit — stopped before round 3 by the review time budget',
+    );
+    expect(readRoundStamps(plan)).toHaveLength(0);
+  });
+
+  it('throws the validation error first: a malformed call beats the budget refusal', () => {
+    // The ordering the gate's comment claims, pinned: an invalid --round gets
+    // the validation error even with the budget exhausted — exit 4 is for a
+    // well-formed round the time budget refuses, never a replacement error.
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 60);
+    expect(() => call('reverse-audit', { round: 0 })).toThrow(
+      /--round is a 1-based round number/,
+    );
+    expect(process.exitCode).toBeUndefined();
+    expect((writeStderrLine as unknown as Mock).mock.calls).toHaveLength(0);
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(0);
+  });
+
+  it('rejects a --round-less reverse-audit call — the clock keys on the label', () => {
+    // SKILL.md's Step 5 always passes --round <k>: the label is the record
+    // key's round part and the budget gate's accounting unit. An unlabeled
+    // admission would stamp {round: null}, which the one-per-round guard
+    // cannot dedup and no later estimate can attribute.
+    expect(() => call('reverse-audit')).toThrow(/requires --round/);
+    expect(process.exitCode).toBeUndefined();
+    expect((writeStderrLine as unknown as Mock).mock.calls).toHaveLength(0);
+  });
+
+  it('a broken plan still throws when the budget is exhausted — reads beat the gate', () => {
+    // The gate needs only the plan's PATH, but it must not speak first: a
+    // refusal would record a budget stop against a plan that cannot even
+    // parse, and stderr would say "proceed to Step 6" over a call that was
+    // never buildable.
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 60);
+    const dir = mkdtempSync(join(tmpdir(), 'ap-budget-broken-'));
+    dirs.push(dir);
+    const plan = join(dir, 'no-such-dir', 'plan.json');
+    const findings = join(dir, 'findings.md');
+    writeFileSync(findings, '');
+    expect(() =>
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        role: 'reverse-audit',
+        findings,
+        round: 2,
+      }),
+    ).toThrow(/cannot read the plan/);
+    expect(process.exitCode).toBeUndefined();
+    expect((writeStderrLine as unknown as Mock).mock.calls).toHaveLength(0);
+  });
+
+  it('an unreadable findings file throws before the round is stamped admitted', () => {
+    // The stamp says the round was admitted; if the build then failed on its
+    // findings read, the next round's cost would be measured from a round
+    // that produced nothing.
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 7200);
+    const dir = mkdtempSync(join(tmpdir(), 'ap-budget-nofind-'));
+    dirs.push(dir);
+    const plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(PLAN));
+    expect(() =>
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        role: 'reverse-audit',
+        findings: join(dir, 'no-such-findings.md'),
+        round: 2,
+      }),
+    ).toThrow(/cannot read the findings/);
+    expect(process.exitCode).toBeUndefined();
+    expect(readRoundStamps(plan)).toHaveLength(0);
+  });
+
+  it('a build that throws after admission leaves no stamp', () => {
+    // The stamp is written after the build succeeds, not at admission: a
+    // stamp is the next round's cost measurement, and one left by a build
+    // that produced nothing would be floored to 600s — widening the next
+    // admission by 1200s in exactly the unsafe direction (a terminal round
+    // admitted on headroom it does not have).
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 7200);
+    const dir = mkdtempSync(join(tmpdir(), 'ap-budget-throw-'));
+    dirs.push(dir);
+    const plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(PLAN));
+    const findings = join(dir, 'findings.md');
+    writeFileSync(findings, '');
+    expect(() =>
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        role: 'reverse-audit',
+        findings,
+        round: 2,
+        chunk: 99, // passes validation and both reads; the BUILD throws
+      }),
+    ).toThrow(/no chunk 99/);
+    expect(readRoundStamps(plan)).toHaveLength(0);
+  });
+
+  it('a structurally unbuildable plan gets its own error, never a budget stop', () => {
+    // Parses, but no round could ever be built from it. Near the deadline
+    // the gate must not speak first: refusing "on the budget" would write a
+    // marker over a corrupt plan, say "proceed to Step 6", and preempt the
+    // actionable repair (re-run the Step 1 capture) — and the same
+    // diagnosis must not flip with the clock.
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 60);
+    const dir = mkdtempSync(join(tmpdir(), 'ap-budget-nochunks-'));
+    dirs.push(dir);
+    const plan = join(dir, 'plan.json');
+    writeFileSync(
+      plan,
+      JSON.stringify({ diffPathAbsolute: PLAN.diffPathAbsolute }),
+    );
+    const findings = join(dir, 'findings.md');
+    writeFileSync(findings, '');
+    expect(() =>
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        role: 'reverse-audit',
+        findings,
+        round: 2,
+        'all-chunks': true,
+      }),
+    ).toThrow(/has no `chunks\[\]`/);
+    expect(process.exitCode).toBeUndefined();
+    expect(readBudgetStop(plan)).toBeNull();
+    expect((writeStderrLine as unknown as Mock).mock.calls).toHaveLength(0);
+  });
+
+  it("ignores a previous run's stamps — the plan rewrite fences them off", () => {
+    // A run killed by the outer deadline leaves budget-rounds.json behind
+    // (Step 9 cleanup never ran). The next review of the same PR rewrites
+    // the plan at capture, so those stamps predate the plan and must not
+    // price this run's rounds: an 8h-old stamp would read as an ~8h round
+    // and refuse round 1 of a fresh budget.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-budget-stale-'));
+    dirs.push(dir);
+    const plan = join(dir, 'plan.json');
+    const recordDir = promptRecordDir(plan);
+    mkdirSync(recordDir, { recursive: true });
+    writeFileSync(
+      join(recordDir, 'budget-rounds.json'),
+      JSON.stringify([{ round: 4, atMs: Date.now() - 28_800_000 }]),
+    );
+    writeFileSync(plan, JSON.stringify(PLAN)); // this run's capture, after
+    const findings = join(dir, 'findings.md');
+    writeFileSync(findings, '');
+    // 5500s remaining fits reserve + the 1800s CONSTANT (5400) — admitted —
+    // while the stale ~28800s measurement would refuse.
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 5500);
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'reverse-audit',
+      findings,
+      round: 1,
+    });
+    expect(process.exitCode).toBeUndefined();
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(1);
+  });
+
+  it("measures the previous round's cost at the gate, not the constant", () => {
+    // Round 1 admitted with a far deadline (it stamps); backdate the stamp
+    // 3000s. The second deadline leaves room for reserve + the CONSTANT
+    // round estimate (3600 + 1800 fits in 5500) but not for reserve + the
+    // MEASURED 3000s — so only a gate that measures refuses. The unsafe
+    // direction is under-estimation: admitting a terminal round that does
+    // not fit, the killed-mid-verification outcome this gate exists to
+    // prevent.
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 7200);
+    const plan = call('reverse-audit', { round: 1 });
+    expect(readRoundStamps(plan)).toHaveLength(1);
+    writeFileSync(
+      join(promptRecordDir(plan), 'budget-rounds.json'),
+      JSON.stringify([{ round: 1, atMs: Date.now() - 3_000_000 }]),
+    );
+    // Date the plan capture before the backdated stamp: the stamp belongs to
+    // THIS run, and the previous-run fence keys on the plan's mtime.
+    const captured = (Date.now() - 4_000_000) / 1000;
+    utimesSync(plan, captured, captured);
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 5500);
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'reverse-audit',
+      findings: join(dirname(plan), 'findings.md'),
+      round: 2,
+    });
+    expect(process.exitCode).toBe(4);
+    // The stderr line names the MEASURED cost — a ~50-minute round, not the
+    // ~30-minute constant.
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('BUDGET:');
+    expect(msg).toContain('~50-minute round');
+    // A refusal is not an admission.
+    expect(readRoundStamps(plan)).toHaveLength(1);
   });
 });
