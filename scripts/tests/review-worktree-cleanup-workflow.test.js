@@ -111,6 +111,15 @@ describe('review worktree cleanup steps', () => {
       expectCleanupRecipe(run);
       expectHardenedGit(run);
     }
+    // The copies are deliberate: a pre-checkout step cannot trust leftover
+    // workspace scripts, so the recipe stays inline per job. Pin them
+    // byte-identical so a fix to one sweep lands in all of them.
+    const [firstCopy, ...otherCopies] = ciCleanSteps;
+    for (const { id, run } of otherCopies) {
+      expect(run, `job "${id}" sweep drifted from the first copy`).toBe(
+        firstCopy.run,
+      );
+    }
   });
 
   it('keeps the review-job cleanup sweep pinned to paths.ts', () => {
