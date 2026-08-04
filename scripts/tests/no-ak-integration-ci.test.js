@@ -165,6 +165,10 @@ describe('no-AK integration CI wiring', () => {
     expect(guardAction).toContain(
       'if ! git merge-base --is-ancestor "${EXPECTED_SHA}" HEAD; then',
     );
+    // Pin the input-to-env wiring too: re-binding EXPECTED_SHA to a context
+    // value (e.g. github.sha) would pass for every checkout, including the
+    // stale ones this guard must reject, while the pins above stay green.
+    expect(guardAction).toContain("EXPECTED_SHA: '${{ inputs.expected_sha }}'");
     expect(guardAction).toContain(
       '::error::Checked out ref does not contain expected head',
     );
@@ -348,6 +352,45 @@ describe('no-AK integration CI wiring', () => {
     expect(nodeAction).toContain(
       'if [[ "$(node -p \'process.versions.node.split(".")[0]\')" != "22" ]]; then',
     );
+  });
+
+  it('pins the shared Node preflight wiring on the Linux gates', () => {
+    const workflow = readFileSync(
+      path.join(ROOT, '.github/workflows/ci.yml'),
+      'utf8',
+    );
+
+    // The Windows gate and the smoke workflow are pinned above; these three
+    // call sites must be pinned too, or a revert to the inline pre-PR script
+    // keeps the suite green and only surfaces when a self-hosted machine
+    // lacks Node on PATH and runs without the preflight's fail-fast error.
+    const nodeCalls = {
+      test: getWorkflowStep(
+        getWorkflowJob(workflow, 'test'),
+        'Use pre-installed Node.js (self-hosted)',
+      ),
+      web_shell_e2e_smoke: getWorkflowStep(
+        getWorkflowJob(workflow, 'web_shell_e2e_smoke'),
+        'Use pre-installed Node.js (self-hosted)',
+      ),
+      integration_cli: getWorkflowStep(
+        getWorkflowJob(workflow, 'integration_cli'),
+        'Use pre-installed Node.js (self-hosted)',
+      ),
+    };
+    for (const [jobName, call] of Object.entries(nodeCalls)) {
+      expect(call, `${jobName} must use the shared Node preflight`).toContain(
+        "uses: './.github/actions/self-hosted-node'",
+      );
+    }
+    expect(nodeCalls.test).toContain(
+      "if: \"${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}\"",
+    );
+    for (const jobName of ['web_shell_e2e_smoke', 'integration_cli']) {
+      expect(nodeCalls[jobName]).toContain(
+        'if: "${{ runner.environment == \'self-hosted\' }}"',
+      );
+    }
   });
 
   it('keeps the lightweight coverage comment job on the hosted runner', () => {
