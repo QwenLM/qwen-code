@@ -40,9 +40,6 @@ export function getInlineImageData(part: Part): InlineImageData | null {
   return {
     data: inlineData.data,
     mimeType: inlineData.mimeType,
-    ...(typeof inlineData.displayName === 'string'
-      ? { displayName: inlineData.displayName }
-      : {}),
   };
 }
 

@@ -77,7 +77,6 @@ describe('mapToDisplay — detailedDisplay (§4.9 live path)', () => {
         {
           data: 'dG9vbC1pbWFnZQ==',
           mimeType: 'image/png',
-          displayName: 'result.png',
         },
       ]);
     },

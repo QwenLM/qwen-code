@@ -1494,6 +1494,12 @@ export const AppContainer = (props: AppContainerProps) => {
     });
   }, [addHistoryItem, config]);
 
+  const clearPendingStateRef = useRef<() => void>(() => {});
+  const clearPendingStateFromRef = useCallback(
+    () => clearPendingStateRef.current(),
+    [],
+  );
+
   const {
     isResumeDialogOpen,
     resumeMatchedSessions,
@@ -1505,6 +1511,7 @@ export const AppContainer = (props: AppContainerProps) => {
     settings,
     historyManager,
     startNewSession,
+    clearPendingState: clearPendingStateFromRef,
     setSessionName,
     remount: refreshStatic,
   });
@@ -1514,6 +1521,7 @@ export const AppContainer = (props: AppContainerProps) => {
     settings,
     historyManager,
     startNewSession,
+    clearPendingState: clearPendingStateFromRef,
     setSessionName,
     remount: refreshStatic,
   });
@@ -1578,7 +1586,6 @@ export const AppContainer = (props: AppContainerProps) => {
   // whose implementations are swapped in once the real callbacks exist.
   const openRewindSelectorRef = useRef<() => void>(() => {});
   const cancelOngoingRequestRef = useRef<() => void>(() => {});
-  const clearPendingStateRef = useRef<() => void>(() => {});
 
   // /diff opens a per-turn diff dialog. Unlike rewind, no double-press or
   // history-bound guard is needed, so the open/close handlers can live here
@@ -2931,6 +2938,7 @@ export const AppContainer = (props: AppContainerProps) => {
   );
 
   const handleClearScreen = useCallback(() => {
+    clearPendingStateRef.current();
     historyManager.clearItems();
     clearScreen();
     remountStaticHistory();
@@ -3578,6 +3586,7 @@ export const AppContainer = (props: AppContainerProps) => {
           const truncatedUi = expandCollapsedHistory(
             originalHistory.filter((h) => h.id < userItem.id),
           );
+          clearPendingStateRef.current();
           historyManager.loadHistory(truncatedUi);
 
           refreshStatic();

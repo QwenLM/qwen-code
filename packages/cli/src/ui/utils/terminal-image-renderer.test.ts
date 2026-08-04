@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   containsCmdShellMetacharacters,
   getTerminalImageRenderSupport,
+  MAX_INLINE_IMAGE_PIXELS,
   markKittyImageWritten,
   prepareInlineTerminalImage,
   renderTerminalImage,
@@ -149,6 +150,20 @@ describe('terminalImageRenderer', () => {
     expect(
       prepareInlineTerminalImage({
         data: pngWithSize(1_000_001, 1).toString('base64'),
+        mimeType: 'image/png',
+        contentWidth: 24,
+        env: { TERM: 'xterm-kitty' },
+        stdoutIsTTY: true,
+      }),
+    ).toEqual({ fallbackText: '[image: png]', result: null });
+  });
+
+  it('rejects inline PNGs above the total pixel limit', () => {
+    const width = 8_001;
+    const height = Math.floor(MAX_INLINE_IMAGE_PIXELS / width) + 1;
+    expect(
+      prepareInlineTerminalImage({
+        data: pngWithSize(width, height).toString('base64'),
         mimeType: 'image/png',
         contentWidth: 24,
         env: { TERM: 'xterm-kitty' },

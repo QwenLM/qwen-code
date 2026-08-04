@@ -74,14 +74,16 @@ vi.mock('../TerminalImage.js', () => ({
   TerminalImage: ({
     data,
     image,
+    availableTerminalHeight,
   }: {
     data?: { filePath: string; mimeType: string };
     image?: { mimeType: string };
+    availableTerminalHeight?: number;
   }) => (
     <Text>
       {image
-        ? `MockTerminalImage:${image.mimeType}`
-        : `MockTerminalImage:${data?.filePath}:${data?.mimeType}`}
+        ? `MockTerminalImage:${image.mimeType}:height=${availableTerminalHeight ?? 'undef'}`
+        : `MockTerminalImage:${data?.filePath}:${data?.mimeType}:height=${availableTerminalHeight ?? 'undef'}`}
     </Text>
   ),
 }));
@@ -210,6 +212,22 @@ describe('<ToolMessage />', () => {
     );
 
     expect(lastFrame()).toContain('[+2 more images]');
+  });
+
+  it('shares the tool height budget across inline images', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        availableTerminalHeight={20}
+        images={[
+          { data: 'Zmlyc3Q=', mimeType: 'image/png' },
+          { data: 'c2Vjb25k', mimeType: 'image/png' },
+        ]}
+      />,
+      StreamingState.Responding,
+    );
+
+    expect(lastFrame()).toContain('MockTerminalImage:image/png:height=4');
   });
 
   it('always shows the vision bridge disclosure for a completed read', () => {

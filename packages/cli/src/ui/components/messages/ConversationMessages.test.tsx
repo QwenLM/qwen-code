@@ -16,8 +16,17 @@ import {
 } from './ConversationMessages.js';
 
 vi.mock('../TerminalImage.js', () => ({
-  TerminalImage: ({ image }: { image: { mimeType: string } }) => (
-    <Text>MockTerminalImage:{image.mimeType}</Text>
+  TerminalImage: ({
+    image,
+    availableTerminalHeight,
+  }: {
+    image: { mimeType: string };
+    availableTerminalHeight?: number;
+  }) => (
+    <Text>
+      MockTerminalImage:{image.mimeType}:height=
+      {availableTerminalHeight ?? 'undef'}
+    </Text>
   ),
 }));
 
@@ -46,6 +55,23 @@ describe('<AssistantMessage />', () => {
     );
 
     expect(lastFrame()).toContain('[+2 more images]');
+  });
+
+  it('shares the pending height budget across assistant images', () => {
+    const { lastFrame } = render(
+      <AssistantMessage
+        text="streaming"
+        images={[
+          { data: 'Zmlyc3Q=', mimeType: 'image/png' },
+          { data: 'c2Vjb25k', mimeType: 'image/png' },
+        ]}
+        isPending={true}
+        availableTerminalHeight={20}
+        contentWidth={80}
+      />,
+    );
+
+    expect(lastFrame()).toContain('MockTerminalImage:image/png:height=6');
   });
 });
 

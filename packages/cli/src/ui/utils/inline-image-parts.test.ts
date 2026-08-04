@@ -22,7 +22,7 @@ describe('collectInlineImages', () => {
     };
 
     expect(collectInlineImages([{ inlineData: image }])).toEqual({
-      images: [image],
+      images: [{ data: image.data, mimeType: image.mimeType }],
       omittedImageCount: 0,
     });
   });

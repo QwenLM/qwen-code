@@ -486,6 +486,7 @@ export const useSlashCommandProcessor = (
           refreshStatic();
           setSessionName?.(null);
         },
+        clearPendingState: actions.clearPendingState,
         loadHistory,
         refreshStatic,
         setDebugMessage: actions.setDebugMessage,

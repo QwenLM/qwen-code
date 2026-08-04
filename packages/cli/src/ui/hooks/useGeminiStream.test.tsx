@@ -6111,7 +6111,6 @@ describe('useGeminiStream', () => {
       const image = {
         data: 'aW1hZ2U=',
         mimeType: 'image/png',
-        displayName: 'chart.png',
       };
       mockSendMessageStream.mockReturnValue(
         (async function* () {
@@ -6168,6 +6167,55 @@ describe('useGeminiStream', () => {
       });
     });
 
+    it('commits mixed content in order before scheduling a tool call', async () => {
+      const image = {
+        data: 'dG9vbC1ib3VuZGFyeQ==',
+        mimeType: 'image/png',
+      };
+      const toolCall = {
+        callId: 'tool-after-image',
+        name: 'read_file',
+        args: { path: '/tmp/example.ts' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-tool-boundary',
+      };
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'beforeafter',
+            parts: [
+              { text: 'before' },
+              { inlineData: image },
+              { text: 'after' },
+            ],
+          };
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: toolCall,
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('read after showing a chart');
+      });
+
+      const assistantItems = mockAddItem.mock.calls
+        .map(([item]) => item as HistoryItem)
+        .filter(
+          (item) => item.type === 'gemini' || item.type === 'gemini_content',
+        );
+      expect(assistantItems).toEqual([
+        expect.objectContaining({ type: 'gemini', text: 'before' }),
+        { type: 'gemini_content', text: '', images: [image] },
+        { type: 'gemini_content', text: 'after' },
+      ]);
+      expect(mockScheduleToolCalls).toHaveBeenCalledTimes(1);
+      expect(mockScheduleToolCalls.mock.calls[0][0]).toEqual([toolCall]);
+    });
+
     it('does not overwrite an image with whitespace before the next image', async () => {
       vi.useFakeTimers();
 
@@ -6178,12 +6226,10 @@ describe('useGeminiStream', () => {
       const firstImage = {
         data: 'Zmlyc3Q=',
         mimeType: 'image/png',
-        displayName: 'first.png',
       };
       const secondImage = {
         data: 'c2Vjb25k',
         mimeType: 'image/png',
-        displayName: 'second.png',
       };
       mockSendMessageStream.mockReturnValue(
         (async function* () {
@@ -6278,6 +6324,153 @@ describe('useGeminiStream', () => {
       await act(async () => {
         releaseStream();
       });
+    });
+
+    it('applies the inline image cap across multiple content events', async () => {
+      const images = Array.from(
+        { length: MAX_INLINE_IMAGES_PER_ITEM + 2 },
+        (_, index) => ({
+          data: Buffer.from(`multi-event-image-${index}`).toString('base64'),
+          mimeType: 'image/png',
+        }),
+      );
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          for (const inlineData of images) {
+            yield {
+              type: ServerGeminiEventType.Content,
+              value: '',
+              parts: [{ inlineData }],
+            };
+          }
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('show many streamed charts');
+      });
+
+      const assistantItems = mockAddItem.mock.calls
+        .map(([item]) => item as HistoryItem)
+        .filter(
+          (item) => item.type === 'gemini' || item.type === 'gemini_content',
+        );
+      expect(assistantItems.flatMap((item) => item.images ?? [])).toEqual(
+        images.slice(0, MAX_INLINE_IMAGES_PER_ITEM),
+      );
+      expect(assistantItems.at(-1)).toMatchObject({
+        text: '',
+        omittedImageCount: 2,
+      });
+    });
+
+    it('resets the inline image cap after a fresh retry', async () => {
+      const failedImages = Array.from(
+        { length: MAX_INLINE_IMAGES_PER_ITEM },
+        (_, index) => ({
+          data: Buffer.from(`retry-image-${index}`).toString('base64'),
+          mimeType: 'image/png',
+        }),
+      );
+      const replacementImage = {
+        data: Buffer.from('retry-replacement').toString('base64'),
+        mimeType: 'image/png',
+      };
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: '',
+            parts: failedImages.map((inlineData) => ({ inlineData })),
+          };
+          yield {
+            type: ServerGeminiEventType.Retry,
+            isContinuation: false,
+          };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: '',
+            parts: [{ inlineData: replacementImage }],
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('retry the charts');
+      });
+
+      const assistantItems = mockAddItem.mock.calls
+        .map(([item]) => item as HistoryItem)
+        .filter(
+          (item) => item.type === 'gemini' || item.type === 'gemini_content',
+        );
+      expect(assistantItems.flatMap((item) => item.images ?? [])).toEqual([
+        replacementImage,
+      ]);
+      expect(assistantItems.some((item) => item.omittedImageCount)).toBe(false);
+    });
+
+    it('resets the inline image cap after model fallback', async () => {
+      const failedImages = Array.from(
+        { length: MAX_INLINE_IMAGES_PER_ITEM },
+        (_, index) => ({
+          data: Buffer.from(`fallback-image-${index}`).toString('base64'),
+          mimeType: 'image/png',
+        }),
+      );
+      const replacementImage = {
+        data: Buffer.from('fallback-replacement').toString('base64'),
+        mimeType: 'image/png',
+      };
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: '',
+            parts: failedImages.map((inlineData) => ({ inlineData })),
+          };
+          yield {
+            type: ServerGeminiEventType.ModelFallback,
+            fromModel: 'primary-model',
+            toModel: 'fallback-model',
+            fallbackIndex: 1,
+          };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: '',
+            parts: [{ inlineData: replacementImage }],
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('fallback the charts');
+      });
+
+      const assistantItems = mockAddItem.mock.calls
+        .map(([item]) => item as HistoryItem)
+        .filter(
+          (item) => item.type === 'gemini' || item.type === 'gemini_content',
+        );
+      expect(assistantItems.flatMap((item) => item.images ?? [])).toEqual([
+        replacementImage,
+      ]);
+      expect(assistantItems.some((item) => item.omittedImageCount)).toBe(false);
     });
 
     it('resets the inline image cap at a finished response boundary', async () => {
@@ -6397,7 +6590,6 @@ describe('useGeminiStream', () => {
       const image = {
         data: 'aW1hZ2U=',
         mimeType: 'image/png',
-        displayName: 'trailing-space.png',
       };
       mockSendMessageStream.mockReturnValue(
         (async function* () {
@@ -6462,7 +6654,6 @@ describe('useGeminiStream', () => {
       const image = {
         data: 'aW1hZ2U=',
         mimeType: 'image/png',
-        displayName: 'failed.png',
       };
       mockSendMessageStream.mockReturnValue(
         (async function* () {
@@ -6542,7 +6733,6 @@ describe('useGeminiStream', () => {
       const image = {
         data: 'aW1hZ2U=',
         mimeType: 'image/png',
-        displayName: 'partial.png',
       };
       mockSendMessageStream.mockReturnValue(
         (async function* () {
@@ -6618,7 +6808,6 @@ describe('useGeminiStream', () => {
       const image = {
         data: 'aW1hZ2U=',
         mimeType: 'image/png',
-        displayName: 'failed.png',
       };
       mockSendMessageStream.mockReturnValue(
         (async function* () {
@@ -6692,7 +6881,6 @@ describe('useGeminiStream', () => {
       const failedImage = {
         data: 'aW1hZ2U=',
         mimeType: 'image/png',
-        displayName: 'failed.png',
       };
       mockSendMessageStream
         .mockReturnValueOnce(
@@ -6758,7 +6946,6 @@ describe('useGeminiStream', () => {
       const failedImage = {
         data: 'aW1hZ2U=',
         mimeType: 'image/png',
-        displayName: 'partial.png',
       };
       mockSendMessageStream
         .mockReturnValueOnce(
@@ -6820,7 +7007,6 @@ describe('useGeminiStream', () => {
       const failedImage = {
         data: 'aW1hZ2U=',
         mimeType: 'image/png',
-        displayName: 'cleared.png',
       };
       mockSendMessageStream
         .mockReturnValueOnce(
@@ -9881,6 +10067,51 @@ describe('useGeminiStream', () => {
   });
 
   describe('Citation event', () => {
+    it('starts a fresh assistant item after a shown citation', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'Hello world',
+          };
+          yield {
+            type: ServerGeminiEventType.Citation,
+            value: 'Citation text',
+          };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: ' more',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('test shown citation');
+      });
+
+      const outputItems = mockAddItem.mock.calls
+        .map(([item]) => item as HistoryItem)
+        .filter(
+          (item) =>
+            item.type === 'gemini' ||
+            item.type === 'gemini_content' ||
+            item.type === MessageType.INFO,
+        );
+      expect(outputItems).toEqual([
+        expect.objectContaining({ type: 'gemini', text: 'Hello world' }),
+        expect.objectContaining({
+          type: MessageType.INFO,
+          text: 'Citation text',
+        }),
+        expect.objectContaining({ type: 'gemini', text: ' more' }),
+      ]);
+    });
+
     it('preserves streamed text across hidden citation events', async () => {
       const settingsWithCitationsHidden = {
         ...mockLoadedSettings,
@@ -10017,7 +10248,6 @@ describe('useGeminiStream', () => {
       const image = {
         data: 'aW1hZ2U=',
         mimeType: 'image/png',
-        displayName: 'truncated.png',
       };
       // Setup mock to return a stream with MAX_TOKENS finish reason
       mockSendMessageStream.mockReturnValue(
@@ -10115,7 +10345,6 @@ describe('useGeminiStream', () => {
       const image = {
         data: 'aW1hZ2U=',
         mimeType: 'image/png',
-        displayName: 'boundary.png',
       };
       mockSendMessageStream.mockReturnValue(
         (async function* () {
@@ -12889,7 +13118,6 @@ describe('useGeminiStream', () => {
       const image = {
         data: 'aW1hZ2U=',
         mimeType: 'image/png',
-        displayName: 'goal.png',
       };
       mockSendMessageStream.mockReturnValue(
         (async function* () {

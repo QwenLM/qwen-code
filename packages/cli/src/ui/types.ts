@@ -57,7 +57,6 @@ export enum ToolCallStatus {
 export interface InlineImageData {
   data: string;
   mimeType: string;
-  displayName?: string;
 }
 
 export interface ToolCallEvent {

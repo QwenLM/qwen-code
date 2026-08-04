@@ -31,6 +31,7 @@ const ESTIMATED_CELL_WIDTH_PX = 8;
 const ESTIMATED_CELL_HEIGHT_PX = 16;
 const MAX_REASON_CHARS = 200;
 const MAX_INLINE_IMAGE_DIMENSION = 1_000_000;
+export const MAX_INLINE_IMAGE_PIXELS = 64_000_000;
 // cmd.exe treats these as command separators / metacharacters. With shell:true
 // Node forwards arguments unquoted, so a model-chosen path containing any of
 // them is a command-injection vector through a .cmd/.bat chafa shim.
@@ -45,6 +46,11 @@ const RENDER_CACHE_LIMIT = 40;
 const RENDER_CACHE_BYTE_LIMIT = 32 * 1024 * 1024;
 const renderCache = new Map<string, TerminalImageRenderResult>();
 let renderCacheBytes = 0;
+const INLINE_DECODE_CACHE_LIMIT = 4;
+const inlineDecodeCache = new Map<
+  string,
+  { png: Buffer; size: { width: number; height: number } }
+>();
 
 // A Kitty terminal keeps a transmitted image and redraws it from the placeholder
 // cells alone. The live-row -> Static-row move and every resize remount
@@ -165,14 +171,11 @@ export function prepareInlineTerminalImage({
     return { fallbackText: emptyFallback, result: null };
   }
 
-  const png = decodeInlineImage(data);
-  if (!png) {
+  const decoded = getDecodedInlinePng(data);
+  if (!decoded) {
     return { fallbackText: emptyFallback, result: null };
   }
-  const size = readValidatedInlinePngSize(png);
-  if (!size) {
-    return { fallbackText: emptyFallback, result: null };
-  }
+  const { png, size } = decoded;
 
   const fallbackText = `[image: ${size.width}x${size.height} png]`;
   if (disabled) {
@@ -366,6 +369,31 @@ function decodeInlineImage(data: string): Buffer | null {
   return decoded;
 }
 
+function getDecodedInlinePng(
+  data: string,
+): { png: Buffer; size: { width: number; height: number } } | null {
+  const cached = inlineDecodeCache.get(data);
+  if (cached) {
+    inlineDecodeCache.delete(data);
+    inlineDecodeCache.set(data, cached);
+    return cached;
+  }
+
+  const png = decodeInlineImage(data);
+  if (!png) return null;
+  const size = readValidatedInlinePngSize(png);
+  if (!size) return null;
+
+  const decoded = { png, size };
+  inlineDecodeCache.set(data, decoded);
+  while (inlineDecodeCache.size > INLINE_DECODE_CACHE_LIMIT) {
+    const oldest = inlineDecodeCache.keys().next().value;
+    if (oldest === undefined) break;
+    inlineDecodeCache.delete(oldest);
+  }
+  return decoded;
+}
+
 function readValidatedInlinePngSize(
   png: Buffer,
 ): { width: number; height: number } | null {
@@ -384,7 +412,8 @@ function readValidatedInlinePngSize(
     size.width <= 0 ||
     size.height <= 0 ||
     size.width > MAX_INLINE_IMAGE_DIMENSION ||
-    size.height > MAX_INLINE_IMAGE_DIMENSION
+    size.height > MAX_INLINE_IMAGE_DIMENSION ||
+    size.width * size.height > MAX_INLINE_IMAGE_PIXELS
   ) {
     return null;
   }

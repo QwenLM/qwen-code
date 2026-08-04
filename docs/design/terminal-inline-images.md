@@ -31,7 +31,8 @@ This is the render-and-forget slice requested by issue #8090:
 - show a deterministic text placeholder when an image cannot be rendered.
 
 Kitty deletion, resize-driven replacement, terminal cell pixel queries, and
-global scroll lifecycle ownership remain out of scope.
+global scroll lifecycle ownership remain out of scope and are tracked in
+#8520.
 
 ## Data Flow
 
@@ -53,11 +54,17 @@ Text-only events keep their existing runtime shape, so non-interactive output,
 SDK, ACP, daemon, channel, Web UI, and VS Code consumers continue using
 `value` unchanged.
 
+After a thrown stream, staged output remains transient so an explicit retry can
+discard the failed attempt. If an out-of-band shell or slash-command item is
+added before the next model submit, that item can enter committed history before
+the staged output. The next model submit commits the staged output; history
+clear, resume, branch, restore, rewind, and Ctrl+L paths discard it instead.
+
 Resume logic reconstructs ordered text/image runs when persisted parts contain
 them. Tool responses retain nested image parts in the session record. The
 current Core recorder flattens assistant output to text, so live assistant
 images are not restored by `--continue`; assistant-image persistence is outside
-this slice.
+this slice and tracked in #8521.
 
 ### Tool output
 
@@ -80,7 +87,8 @@ adds an in-memory PNG entry point that:
 
 1. validates bounded base64 before decoding;
 2. verifies the PNG signature and IHDR dimensions;
-3. rejects payloads above 8 MiB or dimensions above 1,000,000 pixels;
+3. rejects payloads above 8 MiB, dimensions above 1,000,000 pixels, or images
+   above 64 million total pixels;
 4. reuses the existing terminal sizing and bounded render cache;
 5. uses native Kitty placement in direct Kitty/Ghostty sessions;
 6. passes PNG bytes to `chafa` over stdin in other supported environments;

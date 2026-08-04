@@ -171,6 +171,10 @@ const PrefixedMarkdownMessage: React.FC<PrefixedMarkdownMessageProps> = ({
   sourceCopyIndexOffsets,
 }) => {
   const prefixWidth = getPrefixWidth(prefix);
+  const imageHeightBudget =
+    availableTerminalHeight !== undefined && images?.length
+      ? Math.max(1, Math.floor(availableTerminalHeight / (images.length + 1)))
+      : availableTerminalHeight;
 
   return (
     <Box flexDirection="row">
@@ -195,7 +199,7 @@ const PrefixedMarkdownMessage: React.FC<PrefixedMarkdownMessageProps> = ({
             key={index}
             image={image}
             contentWidth={contentWidth - prefixWidth}
-            availableTerminalHeight={availableTerminalHeight}
+            availableTerminalHeight={imageHeightBudget}
           />
         ))}
         {omittedImageCount !== undefined && omittedImageCount > 0 && (
@@ -220,6 +224,10 @@ const ContinuationMarkdownMessage: React.FC<
   sourceCopyIndexOffsets,
 }) => {
   const prefixWidth = getPrefixWidth(basePrefix);
+  const imageHeightBudget =
+    availableTerminalHeight !== undefined && images?.length
+      ? Math.max(1, Math.floor(availableTerminalHeight / (images.length + 1)))
+      : availableTerminalHeight;
 
   return (
     <Box flexDirection="column" paddingLeft={prefixWidth}>
@@ -238,7 +246,7 @@ const ContinuationMarkdownMessage: React.FC<
           key={index}
           image={image}
           contentWidth={contentWidth - prefixWidth}
-          availableTerminalHeight={availableTerminalHeight}
+          availableTerminalHeight={imageHeightBudget}
         />
       ))}
       {omittedImageCount !== undefined && omittedImageCount > 0 && (

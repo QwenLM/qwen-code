@@ -852,7 +852,6 @@ describe('resumeHistoryUtils', () => {
           {
             data: 'aW1hZ2U=',
             mimeType: 'image/png',
-            displayName: 'chart.png',
           },
         ],
       },
