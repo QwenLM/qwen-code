@@ -6,14 +6,18 @@
 
 import type { MCPServerConfig } from '../config/config.js';
 
+export function normalizeMcpIncludeEntry(entry: string): string {
+  const paren = entry.indexOf('(');
+  return paren === -1 ? entry : entry.slice(0, paren);
+}
+
 function normalizeFilter(
   entries: readonly string[] | undefined,
   stripParenthesizedSuffix: boolean,
 ): string[] {
   const normalized = (entries ?? []).map((entry) => {
     if (!stripParenthesizedSuffix) return entry;
-    const paren = entry.indexOf('(');
-    return paren === -1 ? entry : entry.slice(0, paren);
+    return normalizeMcpIncludeEntry(entry);
   });
   return [...new Set(normalized)].sort();
 }

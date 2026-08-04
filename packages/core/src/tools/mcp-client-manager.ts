@@ -1654,7 +1654,18 @@ export class McpClientManager {
           // transport and registry churn.
           const existingConnection = this.pooledConnections.get(name);
           if (existingConnection) {
-            existingConnection.updateConfig(config);
+            try {
+              existingConnection.updateConfig(config);
+            } catch (err) {
+              // Settings reconciliation is a bulk pass: one session-view
+              // refresh must not prevent sibling servers from refreshing or
+              // connecting. Runtime add/replace keeps its stricter error
+              // propagation because that operation has a single caller-owned
+              // outcome.
+              debugLogger.error(
+                `Pool metadata refresh failed for ${name}: ${getErrorMessage(err)}`,
+              );
+            }
             return;
           }
           try {

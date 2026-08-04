@@ -13,7 +13,10 @@ import type {
   DiscoveredMCPResource,
 } from './mcp-client.js';
 import type { DiscoveredMCPTool } from './mcp-tool.js';
-import { mcpSessionMetadataKey } from './mcp-session-config.js';
+import {
+  mcpSessionMetadataKey,
+  normalizeMcpIncludeEntry,
+} from './mcp-session-config.js';
 import type { ToolRegistry } from './tool-registry.js';
 
 const debugLogger = createDebugLogger('McpPool:View');
@@ -49,11 +52,7 @@ function compileNameFilter(
   return {
     excludeSet: excludeTools ? new Set(excludeTools) : undefined,
     includeSet: includeTools
-      ? new Set(
-          includeTools.map((entry) =>
-            entry.includes('(') ? entry.slice(0, entry.indexOf('(')) : entry,
-          ),
-        )
+      ? new Set(includeTools.map(normalizeMcpIncludeEntry))
       : undefined,
   };
 }

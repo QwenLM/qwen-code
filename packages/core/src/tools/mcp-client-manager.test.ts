@@ -655,6 +655,77 @@ describe('McpClientManager', () => {
     expect(release).toHaveBeenCalledOnce();
   });
 
+  it('isolates retained connection metadata refresh failures between servers', async () => {
+    let serverConfigs = {
+      srvA: { command: 'node', includeTools: ['first-a'] } as MCPServerConfig,
+      srvB: { command: 'node', includeTools: ['first-b'] } as MCPServerConfig,
+    };
+    const updateA = vi.fn();
+    const updateB = vi.fn();
+    const connections = {
+      srvA: {
+        release: vi.fn(),
+        updateConfig: updateA,
+        on: vi.fn(),
+        off: vi.fn(),
+        id: 'srvA::unpooled-0',
+        transportId: connectionIdOf('srvA', serverConfigs.srvA),
+        serverName: 'srvA',
+        entryIndex: 0,
+      },
+      srvB: {
+        release: vi.fn(),
+        updateConfig: updateB,
+        on: vi.fn(),
+        off: vi.fn(),
+        id: 'srvB::unpooled-0',
+        transportId: connectionIdOf('srvB', serverConfigs.srvB),
+        serverName: 'srvB',
+        entryIndex: 0,
+      },
+    };
+    const acquire = vi.fn((name: 'srvA' | 'srvB') =>
+      Promise.resolve(connections[name]),
+    );
+    const fakePool = {
+      acquire,
+      releaseSession: vi.fn(),
+      getBudget: vi.fn().mockReturnValue(undefined),
+    } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => serverConfigs,
+      getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
+      getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
+      getWorkspaceContext: () => ({}),
+      getDebugMode: () => false,
+      getSessionId: () => 'sid-1',
+      isMcpServerDisabled: () => false,
+    } as unknown as Config;
+    const manager = mkManager({
+      config: mockConfig,
+      options: { pool: fakePool },
+    });
+    await manager.discoverAllMcpTools(mockConfig);
+
+    serverConfigs = {
+      srvA: { command: 'node', includeTools: ['second-a'] } as MCPServerConfig,
+      srvB: { command: 'node', includeTools: ['second-b'] } as MCPServerConfig,
+    };
+    updateA.mockImplementationOnce(() => {
+      throw new Error('refresh A failed');
+    });
+
+    await expect(manager.discoverAllMcpTools(mockConfig)).resolves.toBe(
+      undefined,
+    );
+    expect(updateA).toHaveBeenCalledWith(serverConfigs.srvA);
+    expect(updateB).toHaveBeenCalledWith(serverConfigs.srvB);
+    expect(acquire).toHaveBeenCalledTimes(2);
+  });
+
   it('routes single-server discovery through the pool when injected', async () => {
     const acquireSpy = vi.fn().mockResolvedValue({
       release: vi.fn(),
