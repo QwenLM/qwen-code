@@ -175,12 +175,17 @@ export function parseEnvFileContent(content: string): Record<string, string> {
   return result;
 }
 
-// Mirrors the CLI's home-.env fill (loadEnvironment): <qwen dir>/.env first,
-// ~/.env only when QWEN_HOME is unset, the first definition of a key wins, and
-// the process env wins over file values — except an empty-string env var,
-// which the CLI treats as "effectively unset" and fills from .env. Settings
-// interpolation applies the stricter getHomeEnvFallbackVars precedence on top
-// of this (see resolveSettingsEnvVars).
+// Home-.env fallback shared by credential lookup and settings interpolation:
+// <qwen dir>/.env first, ~/.env only when QWEN_HOME is unset, the first
+// definition of a key wins, and the process env wins over file values —
+// except an empty-string env var, which the CLI treats as "effectively unset"
+// and fills from .env. This adopts the CLI's narrower getHomeEnvFallbackVars
+// candidate set on purpose, not loadEnvironment's broader fill (which also
+// reads ~/.env under a redirected QWEN_HOME, the legacy ~/.qwen/.env, and
+// workspace .env files): a user who redirects QWEN_HOME isolates their Qwen
+// configuration, desktop has no workspace context to mirror loadEnvironment
+// fully, and credential lookup fails closed rather than pulling from a shared
+// home .env.
 async function getHomeEnvFallback(
   env: NodeJS.ProcessEnv,
   readHomeEnvFile: (file: string) => Promise<string | undefined>,
@@ -437,10 +442,16 @@ function readProviderApiKey(
   settings: QwenSettings | undefined,
   envSource: NodeJS.ProcessEnv,
 ): string | undefined {
-  const envKey = provider.envKey?.trim();
+  if (typeof provider.envKey !== 'string') return undefined;
+  const envKey = provider.envKey.trim();
   if (!envKey) return undefined;
+  const settingsEnvValue = settings?.env?.[envKey];
   return (
-    envSource[envKey]?.trim() || settings?.env?.[envKey]?.trim() || undefined
+    envSource[envKey]?.trim() ||
+    (typeof settingsEnvValue === 'string'
+      ? settingsEnvValue.trim()
+      : undefined) ||
+    undefined
   );
 }
 
@@ -465,7 +476,14 @@ function fromExactModelProvider(
 ): ResolvedCredentials | undefined {
   if (!settings) return undefined;
   const providers = Object.values(settings.modelProviders ?? {}).flat();
-  const matches = providers.filter((provider) => provider.id === voiceModel);
+  // Trusted settings are hand-editable JSON; ignore elements that are not
+  // provider objects instead of crashing on their missing shape.
+  const matches = providers.filter(
+    (provider): provider is QwenProvider =>
+      provider !== null &&
+      typeof provider === 'object' &&
+      provider.id === voiceModel,
+  );
   // The CLI registry keys models by (id, baseUrl) and keeps the first
   // registration of a duplicate — even when envKey differs, matching the
   // registry's warn-and-skip (envKey is not part of the composite key); only
@@ -485,6 +503,11 @@ function fromExactModelProvider(
   }
   const provider = distinct[0];
   if (!provider) return undefined;
+  if (provider.baseUrl != null && typeof provider.baseUrl !== 'string') {
+    throw new Error(
+      `Voice model '${voiceModel}' baseUrl must be a string. ${PROVIDER_ENTRY_REMEDY}`,
+    );
+  }
   const rawBaseUrl = provider.baseUrl?.trim();
   if (!rawBaseUrl) {
     // Too incomplete to classify; keep the legacy fall-through.
@@ -502,10 +525,15 @@ function fromExactModelProvider(
     );
   }
   const normalizedBaseUrl = parsedBaseUrl.toString().replace(/\/+$/, '');
-  const allowInsecureBaseUrl = isInsecureVoiceBaseUrlAllowed(
-    settings,
-    normalizedBaseUrl,
-  );
+  // Preserve the legacy /v1 inference only for the official DashScope
+  // compatible-mode endpoint. Custom and regional gateway paths remain
+  // authoritative and are never rewritten. Compute the final URL before any
+  // policy check so the allowlist is matched against the same string here
+  // and in the top-level recheck of resolveDesktopVoiceConfig.
+  const baseUrl = isDashscopeCompatible(normalizedBaseUrl)
+    ? normalizeBaseUrl(normalizedBaseUrl)
+    : normalizedBaseUrl;
+  const allowInsecureBaseUrl = isInsecureVoiceBaseUrlAllowed(settings, baseUrl);
   const isLoopback = isLoopbackHost(parsedBaseUrl.hostname);
   const isPublicHttps =
     parsedBaseUrl.protocol === 'https:' &&
@@ -536,7 +564,7 @@ function fromExactModelProvider(
     !allowInsecureBaseUrl
   ) {
     throw new Error(
-      `Voice model '${voiceModel}' must use an https baseUrl. Voice audio must not be transmitted in cleartext. To trust this managed endpoint, add its exact complete normalized URL (${normalizedBaseUrl}) to security.allowedInsecureVoiceBaseUrls. ${PROVIDER_ENTRY_REMEDY}`,
+      `Voice model '${voiceModel}' must use an https baseUrl. Voice audio must not be transmitted in cleartext. To trust this managed endpoint, add its exact complete normalized URL (${baseUrl}) to security.allowedInsecureVoiceBaseUrls. ${PROVIDER_ENTRY_REMEDY}`,
     );
   }
   if (
@@ -545,15 +573,14 @@ function fromExactModelProvider(
     isPrivateNetworkIp(parsedBaseUrl.hostname)
   ) {
     throw new Error(
-      `Voice model '${voiceModel}' must not use a private-network baseUrl. To trust this managed endpoint, add its exact complete normalized URL (${normalizedBaseUrl}) to security.allowedInsecureVoiceBaseUrls. ${PROVIDER_ENTRY_REMEDY}`,
+      `Voice model '${voiceModel}' must not use a private-network baseUrl. To trust this managed endpoint, add its exact complete normalized URL (${baseUrl}) to security.allowedInsecureVoiceBaseUrls. ${PROVIDER_ENTRY_REMEDY}`,
     );
   }
-  // Preserve the legacy /v1 inference only for the official DashScope
-  // compatible-mode endpoint. Custom and regional gateway paths remain
-  // authoritative and are never rewritten.
-  const baseUrl = isDashscopeCompatible(normalizedBaseUrl)
-    ? normalizeBaseUrl(normalizedBaseUrl)
-    : normalizedBaseUrl;
+  if (provider.envKey != null && typeof provider.envKey !== 'string') {
+    throw new Error(
+      `Voice model '${voiceModel}' envKey must be a string. ${PROVIDER_ENTRY_REMEDY}`,
+    );
+  }
   const envKey = provider.envKey?.trim();
   if (!envKey) {
     // CLI parity: an entry without envKey resolves keyless (for example a
@@ -582,7 +609,12 @@ function fromLegacyDashscopeProvider(
   if (!settings) return undefined;
   const providers = Object.values(settings.modelProviders ?? {}).flat();
   for (const fallback of providers) {
-    if (fallback.baseUrl && isDashscopeCompatible(fallback.baseUrl)) {
+    if (
+      fallback !== null &&
+      typeof fallback === 'object' &&
+      fallback.baseUrl &&
+      isDashscopeCompatible(fallback.baseUrl)
+    ) {
       const apiKey = readProviderApiKey(fallback, settings, envSource);
       if (apiKey) {
         return { baseUrl: normalizeBaseUrl(fallback.baseUrl), apiKey };

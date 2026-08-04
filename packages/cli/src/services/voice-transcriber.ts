@@ -538,7 +538,7 @@ export function resolveVoiceTranscriptionConfig({
     !allowInsecureBaseUrl
   ) {
     throw new Error(
-      `Voice model '${voiceModel}' must use an https baseUrl. Voice audio must not be transmitted in cleartext. To trust this managed endpoint, add its exact complete normalized URL (${normalizedBaseUrl}) to security.allowedInsecureVoiceBaseUrls.`,
+      `Voice model '${voiceModel}' must use an https baseUrl. Voice audio must not be transmitted in cleartext. To trust this managed endpoint, add its exact complete normalized URL (${normalizedBaseUrl}) to security.allowedInsecureVoiceBaseUrls. This setting is only honored from User, System, or SystemDefaults scope settings; Workspace entries are ignored.`,
     );
   }
   if (
@@ -547,7 +547,7 @@ export function resolveVoiceTranscriptionConfig({
     isPrivateNetworkIp(parsedBaseUrl.hostname)
   ) {
     throw new Error(
-      `Voice model '${voiceModel}' must not use a private-network baseUrl. To trust this managed endpoint, add its exact complete normalized URL (${normalizedBaseUrl}) to security.allowedInsecureVoiceBaseUrls.`,
+      `Voice model '${voiceModel}' must not use a private-network baseUrl. To trust this managed endpoint, add its exact complete normalized URL (${normalizedBaseUrl}) to security.allowedInsecureVoiceBaseUrls. This setting is only honored from User, System, or SystemDefaults scope settings; Workspace entries are ignored.`,
     );
   }
 

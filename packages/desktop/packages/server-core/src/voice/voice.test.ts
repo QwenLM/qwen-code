@@ -481,4 +481,38 @@ describe('assertVoiceBaseUrlNetworkAllowed', () => {
       "Voice model 'm': DNS lookup failed for voice.example. Cannot verify network safety.",
     )
   })
+
+  it('rejects a multi-record DNS answer when any record is blocked', async () => {
+    // defaultLookupHost (dnsLookup with { all: true }) always returns an
+    // array; a blocked record hidden among legitimate ones must reject the
+    // whole answer even when another record would pass on its own.
+    await expect(
+      assertVoiceBaseUrlNetworkAllowed(
+        {
+          baseUrl: 'http://voice.internal.example/v1',
+          model: 'm',
+          allowInsecureBaseUrl: true,
+        },
+        async () => [{ address: '10.0.0.9' }, { address: '169.254.169.254' }],
+      ),
+    ).rejects.toThrow('resolved to an address that is always blocked')
+
+    await expect(
+      assertVoiceBaseUrlNetworkAllowed(
+        { baseUrl: 'https://voice.example', model: 'm' },
+        async () => [{ address: '93.184.216.34' }, { address: '10.1.2.3' }],
+      ),
+    ).rejects.toThrow(/private-network/)
+
+    await expect(
+      assertVoiceBaseUrlNetworkAllowed(
+        {
+          baseUrl: 'http://voice.internal.example/v1',
+          model: 'm',
+          allowInsecureBaseUrl: true,
+        },
+        async () => [{ address: '10.0.0.9' }, { address: '10.0.0.10' }],
+      ),
+    ).resolves.toBeUndefined()
+  })
 })

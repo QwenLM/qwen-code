@@ -1433,6 +1433,221 @@ describe('resolveDesktopVoiceConfig', () => {
     })
   })
 
+  it('ignores malformed non-object provider entries instead of crashing', async () => {
+    // Hand-edited or merged settings can carry null/scalar elements in a
+    // provider group; resolution must fall through to OAuth instead of
+    // throwing a raw TypeError out of the provider scan.
+    const config = await resolveDesktopVoiceConfig({
+      getVoiceModel: () => 'qwen3-asr-flash',
+      now: () => 1_700_000_000_000,
+      env: {},
+      readQwenJson: async <T,>(file: string) => {
+        if (file === 'oauth_creds.json') {
+          return {
+            access_token: 'oauth-token',
+            resource_url: 'dashscope.aliyuncs.com/compatible-mode',
+            expiry_date: future,
+          } as T
+        }
+        if (file === 'settings.json') {
+          return {
+            modelProviders: { openai: [null], custom: ['entry', 42] },
+          } as T
+        }
+        return undefined
+      },
+      readSystemJson: async () => undefined,
+      readHomeEnvFile: async () => undefined,
+    })
+
+    expect(config).toEqual({
+      model: 'qwen3-asr-flash',
+      baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      apiKey: 'oauth-token',
+    })
+  })
+
+  it('skips malformed entries while scanning the legacy DashScope fallback', async () => {
+    const config = await resolveDesktopVoiceConfig({
+      getVoiceModel: () => 'qwen3-asr-flash',
+      env: {},
+      readQwenJson: async <T,>(file: string) =>
+        (file === 'settings.json'
+          ? {
+              env: { DASHSCOPE_API_KEY: 'settings-key' },
+              modelProviders: {
+                openai: [null, 42],
+                dashscope: [
+                  {
+                    baseUrl:
+                      'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                    envKey: 'DASHSCOPE_API_KEY',
+                  },
+                ],
+              },
+            }
+          : undefined) as T | undefined,
+      readSystemJson: async () => undefined,
+      readHomeEnvFile: async () => undefined,
+    })
+
+    expect(config.apiKey).toBe('settings-key')
+    expect(config.baseUrl).toBe(
+      'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    )
+  })
+
+  it('reports a non-string provider baseUrl with the remediation error', async () => {
+    await expect(
+      resolveDesktopVoiceConfig({
+        getVoiceModel: () => 'qwen3-asr-flash',
+        env: {},
+        readQwenJson: async <T,>(file: string) =>
+          (file === 'settings.json'
+            ? {
+                modelProviders: {
+                  openai: [
+                    {
+                      id: 'qwen3-asr-flash',
+                      baseUrl: 8080,
+                      envKey: 'VOICE_KEY',
+                    },
+                  ],
+                },
+              }
+            : undefined) as T | undefined,
+        readSystemJson: async () => undefined,
+        readHomeEnvFile: async () => undefined,
+      }),
+    ).rejects.toThrow(
+      "Voice model 'qwen3-asr-flash' baseUrl must be a string. Remove or complete this provider entry to fall back to your Qwen sign-in.",
+    )
+  })
+
+  it('reports a non-string provider envKey with the remediation error', async () => {
+    const baseUrl = 'http://voice.region-a.internal.example/v1'
+    await expect(
+      resolveDesktopVoiceConfig({
+        getVoiceModel: () => 'qwen3-asr-flash',
+        env: {},
+        readQwenJson: async <T,>(file: string) =>
+          (file === 'settings.json'
+            ? {
+                security: { allowedInsecureVoiceBaseUrls: [baseUrl] },
+                modelProviders: {
+                  openai: [
+                    { id: 'qwen3-asr-flash', baseUrl, envKey: 12345 },
+                  ],
+                },
+              }
+            : undefined) as T | undefined,
+        readSystemJson: async () => undefined,
+        readHomeEnvFile: async () => undefined,
+      }),
+    ).rejects.toThrow(
+      "Voice model 'qwen3-asr-flash' envKey must be a string. Remove or complete this provider entry to fall back to your Qwen sign-in.",
+    )
+  })
+
+  it('reports a missing key instead of crashing on a non-string settings env value', async () => {
+    const baseUrl = 'http://voice.region-a.internal.example/v1'
+    await expect(
+      resolveDesktopVoiceConfig({
+        getVoiceModel: () => 'qwen3-asr-flash',
+        env: {},
+        readQwenJson: async <T,>(file: string) =>
+          (file === 'settings.json'
+            ? {
+                env: { VOICE_KEY: 12345 },
+                security: { allowedInsecureVoiceBaseUrls: [baseUrl] },
+                modelProviders: {
+                  openai: [
+                    { id: 'qwen3-asr-flash', baseUrl, envKey: 'VOICE_KEY' },
+                  ],
+                },
+              }
+            : undefined) as T | undefined,
+        readSystemJson: async () => undefined,
+        readHomeEnvFile: async () => undefined,
+      }),
+    ).rejects.toThrow("Voice model 'qwen3-asr-flash' requires VOICE_KEY.")
+  })
+
+  it('matches the DashScope-compatible allowlist on the final post-/v1 URL', async () => {
+    // Split-horizon deployments can serve the official DashScope hostname
+    // over cleartext. The allowlist must converge on a single string: the
+    // final post-/v1 URL that the top-level recheck also matches against.
+    const config = await resolveDesktopVoiceConfig({
+      getVoiceModel: () => 'qwen3-asr-flash',
+      env: {},
+      readQwenJson: async <T,>(file: string) =>
+        (file === 'settings.json'
+          ? {
+              env: { VOICE_KEY: 'settings-key' },
+              security: {
+                allowedInsecureVoiceBaseUrls: [
+                  'http://dashscope.aliyuncs.com/compatible-mode/v1',
+                ],
+              },
+              modelProviders: {
+                openai: [
+                  {
+                    id: 'qwen3-asr-flash',
+                    baseUrl: 'http://dashscope.aliyuncs.com/compatible-mode',
+                    envKey: 'VOICE_KEY',
+                  },
+                ],
+              },
+            }
+          : undefined) as T | undefined,
+      readSystemJson: async () => undefined,
+      readHomeEnvFile: async () => undefined,
+    })
+
+    expect(config).toEqual({
+      model: 'qwen3-asr-flash',
+      baseUrl: 'http://dashscope.aliyuncs.com/compatible-mode/v1',
+      apiKey: 'settings-key',
+      allowInsecureBaseUrl: true,
+    })
+  })
+
+  it('reports the post-/v1 URL in the remedy for DashScope-compatible entries', async () => {
+    // Listing only the pre-/v1 form must not resolve; the error points at
+    // the same post-/v1 form the top-level recheck demands, so a single
+    // allowlist entry converges.
+    await expect(
+      resolveDesktopVoiceConfig({
+        getVoiceModel: () => 'qwen3-asr-flash',
+        env: {},
+        readQwenJson: async <T,>(file: string) =>
+          (file === 'settings.json'
+            ? {
+                env: { VOICE_KEY: 'settings-key' },
+                security: {
+                  allowedInsecureVoiceBaseUrls: [
+                    'http://dashscope.aliyuncs.com/compatible-mode',
+                  ],
+                },
+                modelProviders: {
+                  openai: [
+                    {
+                      id: 'qwen3-asr-flash',
+                      baseUrl:
+                        'http://dashscope.aliyuncs.com/compatible-mode',
+                      envKey: 'VOICE_KEY',
+                    },
+                  ],
+                },
+              }
+            : undefined) as T | undefined,
+        readSystemJson: async () => undefined,
+        readHomeEnvFile: async () => undefined,
+      }),
+    ).rejects.toThrow(
+      'add its exact complete normalized URL (http://dashscope.aliyuncs.com/compatible-mode/v1) to security.allowedInsecureVoiceBaseUrls',
+    )
+  })
 })
 
 describe('getQwenConfigDir', () => {

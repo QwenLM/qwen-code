@@ -686,6 +686,41 @@ describe('voice-transcriber', () => {
     }
   });
 
+  it('rejects a multi-record DNS answer when any record is blocked', async () => {
+    // Production lookups (dnsLookup with { all: true }) always return an
+    // array; a blocked record hidden among legitimate ones must reject the
+    // whole answer even when another record would pass on its own.
+    const trusted = {
+      model: 'qwen3-asr-flash',
+      baseUrl: 'http://voice.internal.example/v1',
+      allowInsecureBaseUrl: true,
+    };
+
+    await expect(
+      assertVoiceBaseUrlNetworkAllowed(trusted, async () => [
+        { address: '8.8.8.8' },
+        { address: '169.254.169.254' },
+      ]),
+    ).rejects.toThrow('resolved to an address that is always blocked');
+
+    await expect(
+      assertVoiceBaseUrlNetworkAllowed(
+        {
+          model: 'qwen3-asr-flash',
+          baseUrl: 'http://voice.internal.example/v1',
+        },
+        async () => [{ address: '8.8.8.8' }, { address: '10.23.45.67' }],
+      ),
+    ).rejects.toThrow(/private-network/);
+
+    await expect(
+      assertVoiceBaseUrlNetworkAllowed(trusted, async () => [
+        { address: '8.8.8.8' },
+        { address: '10.23.45.67' },
+      ]),
+    ).resolves.toBeUndefined();
+  });
+
   it('requires the trusted voice base URL to match host, port, and path', () => {
     for (const baseUrl of [
       'http://voice.region-b.internal.example/v1',
@@ -890,7 +925,7 @@ describe('voice-transcriber', () => {
         voiceModel: 'qwen3-asr-flash',
       }),
     ).toThrow(
-      /add its exact complete normalized URL \(http:\/\/voice\.region-a\.internal\.example\/v1\) to security\.allowedInsecureVoiceBaseUrls/,
+      /add its exact complete normalized URL \(http:\/\/voice\.region-a\.internal\.example\/v1\) to security\.allowedInsecureVoiceBaseUrls\. This setting is only honored from User, System, or SystemDefaults scope settings; Workspace entries are ignored\./,
     );
 
     const privateConfig = createConfig([
@@ -908,7 +943,7 @@ describe('voice-transcriber', () => {
         voiceModel: 'qwen3-asr-flash',
       }),
     ).toThrow(
-      /add its exact complete normalized URL \(https:\/\/10\.0\.0\.5\/v1\) to security\.allowedInsecureVoiceBaseUrls/,
+      /add its exact complete normalized URL \(https:\/\/10\.0\.0\.5\/v1\) to security\.allowedInsecureVoiceBaseUrls\. This setting is only honored from User, System, or SystemDefaults scope settings; Workspace entries are ignored\./,
     );
   });
 
