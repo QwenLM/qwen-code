@@ -2878,6 +2878,28 @@ describe('ShellTool', () => {
       expect(result.error?.message).toContain('failed output');
     });
 
+    it('reports a foreground signal termination as a tool error', async () => {
+      const invocation = shellTool.build({
+        command: 'signal-terminated-command',
+        is_background: false,
+      });
+      const promise = invocation.execute(mockAbortSignal);
+      resolveShellExecution({
+        output: '',
+        exitCode: null,
+        signal: 15,
+        error: null,
+        aborted: false,
+      });
+
+      const result = await promise;
+
+      expect(result.error).toEqual({
+        message: expect.stringContaining('Signal: 15'),
+        type: ToolErrorType.SHELL_EXECUTE_ERROR,
+      });
+    });
+
     it.each([
       'grep pattern file',
       'rg pattern file',

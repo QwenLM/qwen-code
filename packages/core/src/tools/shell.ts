@@ -3016,7 +3016,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
               type: ToolErrorType.SHELL_EXECUTE_ERROR,
             },
           }
-        : isShellExitError(this.params.command, result.exitCode)
+        : result.signal !== null ||
+            isShellExitError(this.params.command, result.exitCode)
           ? {
               error: {
                 // Schedulers use error.message as the model-facing response.
