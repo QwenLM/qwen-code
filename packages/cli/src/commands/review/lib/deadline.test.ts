@@ -5,15 +5,18 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
+  BUDGET_STOP_PHRASE,
   DEADLINE_ENV,
   RESERVE_ENV,
   DEFAULT_RESERVE_SECONDS,
   DEFAULT_ROUND_SECONDS,
   budgetStopEntry,
+  budgetStopEntryZh,
   expectedRoundSeconds,
   readBudgetStop,
   readRoundStamps,
@@ -43,6 +46,16 @@ describe('reverseAuditBudgetExhausted — the round must fit, and its tail', () 
 
   it('admits a round while round-plus-reserve still fits', () => {
     const env = { [DEADLINE_ENV]: String(NOW_S + REQUIRED + 60) };
+    expect(
+      reverseAuditBudgetExhausted(env, DEFAULT_ROUND_SECONDS, NOW_MS),
+    ).toBeNull();
+  });
+
+  it('admits at EXACT cover — remaining equal to reserve plus round cost', () => {
+    // The `>=` is the documented rule: exact cover admits. Pin the boundary
+    // so a future "safety margin" edit cannot silently end the loop one
+    // round early whenever remaining lands exactly on it.
+    const env = { [DEADLINE_ENV]: String(NOW_S + REQUIRED) };
     expect(
       reverseAuditBudgetExhausted(env, DEFAULT_ROUND_SECONDS, NOW_MS),
     ).toBeNull();
@@ -139,6 +152,15 @@ describe('the round-cost estimate — measured when it can be', () => {
     expect(expectedRoundSeconds(p, 2, NOW_MS)).toBe(2400);
   });
 
+  it('measures the NEWEST previous round when several are on file', () => {
+    const p = plan();
+    stampRound(p, 1, NOW_MS - 3_000_000); // round 1 admitted 50 min ago
+    stampRound(p, 2, NOW_MS - 1_200_000); // round 2 admitted 20 min ago
+    // Scanning oldest-first would report 3000; the loop's cost trend is the
+    // newest admission's.
+    expect(expectedRoundSeconds(p, 3, NOW_MS)).toBe(1200);
+  });
+
   it('ignores a stamp of the SAME round — a rebuild is not a round', () => {
     const p = plan();
     stampRound(p, 1, NOW_MS - 2_400_000);
@@ -159,6 +181,19 @@ describe('the round-cost estimate — measured when it can be', () => {
     stampRound(p, 1, NOW_MS - 100);
     stampRound(p, 1, NOW_MS);
     expect(readRoundStamps(p)).toHaveLength(1);
+  });
+
+  it('persists a round-less stamp as null, outside the one-per-round guard', () => {
+    // The guard dedups by round LABEL; an unlabeled stamp has none to dedup
+    // by, so it persists — pinned here because `agent-prompt` rejects a
+    // round-less reverse-audit call and nothing else exercises the shape.
+    const p = plan();
+    stampRound(p, undefined, NOW_MS - 100);
+    stampRound(p, undefined, NOW_MS);
+    expect(readRoundStamps(p)).toEqual([
+      { round: null, atMs: NOW_MS - 100 },
+      { round: null, atMs: NOW_MS },
+    ]);
   });
 });
 
@@ -187,8 +222,51 @@ describe('the budget-stop marker — the deterministic half of the disclosure', 
     expect(stop?.entry).toBe(
       'reverse audit — stopped before round 4 by the review time budget',
     );
+    expect(stop?.entryZh).toBe('反向审计——评审时间预算不足，未能开始第 4 轮');
     expect(stop?.round).toBe(4);
     expect(readBudgetStop(join(dir, 'other.json'))).toBeNull();
+  });
+
+  it('the dedup phrase travels with the entry it identifies', () => {
+    // compose-review dedups the orchestrator's relayed copy by this phrase;
+    // a reword of the entry that left the phrase behind would post the
+    // disclosure twice.
+    expect(budgetStopEntry(2)).toContain(BUDGET_STOP_PHRASE);
+    expect(budgetStopEntry(undefined)).toContain(BUDGET_STOP_PHRASE);
+  });
+
+  it('the zh entry pairs the en one, for a numbered round and without', () => {
+    expect(budgetStopEntryZh(4)).toBe(
+      '反向审计——评审时间预算不足，未能开始第 4 轮',
+    );
+    expect(budgetStopEntryZh(undefined)).toBe(
+      '反向审计——评审时间预算不足，未能开始下一轮',
+    );
+  });
+});
+
+describe('the CI wiring contract', () => {
+  it('the workflow exports the exact env names the gate reads', () => {
+    // Renaming either side compiles, lints, and leaves every test green —
+    // the CLI just never sees a deadline, every round is admitted, and the
+    // outer kill returns. Pin the two halves of the contract together.
+    const workflow = readFileSync(
+      join(
+        dirname(fileURLToPath(import.meta.url)),
+        '..',
+        '..',
+        '..',
+        '..',
+        '..',
+        '..',
+        '.github',
+        'workflows',
+        'qwen-code-pr-review.yml',
+      ),
+      'utf8',
+    );
+    expect(workflow).toContain(`export ${DEADLINE_ENV}`);
+    expect(workflow).toContain(`export ${RESERVE_ENV}`);
   });
 });
 

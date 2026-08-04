@@ -193,16 +193,53 @@ export interface BudgetStop {
   /** The exact `unreviewedDimensions` entry, composed here so the text that
    * caps the verdict is this module's in both channels. */
   entry: string;
+  /** The Chinese pair of `entry` — the posted body is bilingual. */
+  entryZh: string;
   round: number | null;
   remainingSeconds: number;
   reserveSeconds: number;
   atMs: number;
 }
 
+/**
+ * The phrase that identifies the budget-stop disclosure wherever it is
+ * relayed. Exported so `compose-review` dedups the orchestrator's copy
+ * against the marker's by the same text the entry itself is spelled with —
+ * a reword of the entry moves its key along with it.
+ */
+export const BUDGET_STOP_PHRASE = 'review time budget';
+
+/**
+ * The disclosure as structural parts, both languages: compose-review renders
+ * it through the same bilingual coverage path as every other structural gap.
+ * The entry texts below are these parts joined, never the other way around.
+ */
+export function budgetStopDisclosure(round: number | undefined): {
+  subject: string;
+  reason: string;
+  subjectZh: string;
+  reasonZh: string;
+} {
+  const which = round !== undefined ? `round ${round}` : 'the next round';
+  const whichZh = round !== undefined ? `第 ${round} 轮` : '下一轮';
+  return {
+    subject: 'reverse audit',
+    reason: `stopped before ${which} by the ${BUDGET_STOP_PHRASE}`,
+    subjectZh: '反向审计',
+    reasonZh: `评审时间预算不足，未能开始${whichZh}`,
+  };
+}
+
 /** The disclosure entry, spelled once for the marker AND the stderr message. */
 export function budgetStopEntry(round: number | undefined): string {
-  const which = round !== undefined ? `round ${round}` : 'the next round';
-  return `reverse audit — stopped before ${which} by the review time budget`;
+  const d = budgetStopDisclosure(round);
+  return `${d.subject} — ${d.reason}`;
+}
+
+/** The Chinese pair of `budgetStopEntry` — the marker carries both. */
+export function budgetStopEntryZh(round: number | undefined): string {
+  const d = budgetStopDisclosure(round);
+  return `${d.subjectZh}——${d.reasonZh}`;
 }
 
 /**
@@ -223,6 +260,7 @@ export function writeBudgetStop(
     mkdirSync(dir, { recursive: true });
     const stop: BudgetStop = {
       entry: budgetStopEntry(round),
+      entryZh: budgetStopEntryZh(round),
       round: round ?? null,
       remainingSeconds: spent.remainingSeconds,
       reserveSeconds: spent.reserveSeconds,

@@ -71,6 +71,7 @@ import {
 } from './roster.js';
 import { BRIEFS } from './agent-briefs.js';
 import { chunkIdsProblem } from './diff-plan.js';
+import { readBudgetStop } from './deadline.js';
 import { shellQuotePath } from './shell-quote.js';
 
 export interface CoverageFromTranscripts {
@@ -1249,8 +1250,15 @@ export function verificationGaps(
     (k) => k === 'reverse-audit' || k.startsWith('reverse-audit--'),
   );
   const reverse = bestDelivery(reverseKeys);
+  // A budget-stop marker means the round builder itself refused the reverse
+  // audit on the run's time budget. Like medium, the absence is then by
+  // design, and the gap's FIX (rebuild the round) would be refused by the
+  // very gate that stopped it — exit 4, deterministically, time only moves
+  // forward. compose-review synthesizes the marker's own disclosure instead:
+  // it names the stop honestly and caps the verdict.
+  const budgetStopped = readBudgetStop(planPath) !== null;
   // A repairable reverse-audit gap only at high: medium is complete without it.
-  const reverseGap = !balancedMedium && reverse !== 'ok';
+  const reverseGap = !balancedMedium && !budgetStopped && reverse !== 'ok';
   if (reverseGap) {
     // The fix template carries `--plan <plan>`; a literal `<plan>` pasted into a
     // POSIX shell parses as input redirection, so the one repair round Step 6

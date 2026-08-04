@@ -514,6 +514,58 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     expect(r2.body.split('review time budget').length - 1).toBe(1);
   });
 
+  it('a round-1 budget stop stands alone — no rogue-audit gap, no rebuild FIX', () => {
+    // The gate refused round 1, so no reverse-audit record exists. Without
+    // the marker the floor would report the absence as a rogue/unlaunched
+    // audit and direct a rebuild the same gate deterministically refuses
+    // (exit 4) — misattributing a deliberate stop. The budget disclosure
+    // must stand alone, and the remediation must stay silent.
+    const plan = coveredPlan([]); // nothing ran: the round-1 refusal shape
+    writeBudgetStop(
+      plan,
+      {
+        remainingSeconds: 900,
+        reserveSeconds: 3600,
+        expectedRoundSeconds: 1800,
+      },
+      1,
+    );
+    // Not base(): its planPath default runs coveredPlan() again on the same
+    // path and would re-record the Step 4/5 pair this case means to lack.
+    const r = composeReview({ planPath: plan, env: ENV, modelId: MODEL });
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain(
+      'Not reviewed: reverse audit — stopped before round 1 by the review time budget.',
+    );
+    expect(r.body).not.toContain('no auditor was launched');
+    expect(r.body).not.toContain('its prompt was built');
+    expect(r.remediation.join(' ')).not.toContain('reverse audit:');
+  });
+
+  it('renders the budget stop bilingually on a Han-description PR', () => {
+    // Every sibling structural disclosure carries a zh pair; the budget stop
+    // used to ride the caller-prose path and posted English into both halves.
+    const plan = coveredPlan(['verify', 'reverse-audit'], { han: true });
+    writeBudgetStop(
+      plan,
+      {
+        remainingSeconds: 900,
+        reserveSeconds: 3600,
+        expectedRoundSeconds: 1800,
+      },
+      4,
+    );
+    // Not base(): its planPath default runs coveredPlan() again on the same
+    // path and would overwrite the han-stamped plan.
+    const r = composeReview({ planPath: plan, env: ENV, modelId: MODEL });
+    expect(r.body).toContain(
+      'Not reviewed: reverse audit — stopped before round 4 by the review time budget.',
+    );
+    expect(r.body).toContain(
+      '未审查：反向审计——评审时间预算不足，未能开始第 4 轮。',
+    );
+  });
+
   it('an uncoverable chunk caps APPROVE at COMMENT and names the chunk', () => {
     const r = composeReview(
       base({ uncoverableChunks: ['chunk 5 (src/big.min.js)'] }),

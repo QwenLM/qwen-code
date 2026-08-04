@@ -30,7 +30,11 @@ import {
   verificationGaps,
   TranscriptsUnavailableError,
 } from './lib/coverage.js';
-import { readBudgetStop } from './lib/deadline.js';
+import {
+  BUDGET_STOP_PHRASE,
+  budgetStopDisclosure,
+  readBudgetStop,
+} from './lib/deadline.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import { gh, setGhHost } from './lib/gh.js';
 import {
@@ -338,23 +342,6 @@ function composeReviewBody(
     input.unreviewedDimensions,
     'unreviewedDimensions',
   );
-  // The budget-stop marker: when the reverse-audit round builder refused a
-  // round on the review's time budget, it recorded the refusal beside the
-  // prompt records. Synthesizing the disclosure from the marker makes the
-  // verdict cap deterministic — the orchestrator's own copy of the entry
-  // (the stderr instruction asks for one) is a courtesy to the terminal
-  // reader, and a run that drops the sentence still cannot approve past a
-  // truncated audit. Deduped by the marker's own phrase so the two channels
-  // never say it twice.
-  if (input.planPath) {
-    const stop = readBudgetStop(input.planPath);
-    if (
-      stop !== null &&
-      !unreviewed.some((u) => u.includes('review time budget'))
-    ) {
-      unreviewed.push(stop.entry);
-    }
-  }
   // The coverage-derived disclosures, kept STRUCTURAL ({subject, reason})
   // from the site that knows the boundary — reparsing the rendered prose for
   // it was the bug. `unreviewed` above stays what the caller wrote, verbatim.
@@ -369,6 +356,27 @@ function composeReviewBody(
     subjectZh?: string;
     reasonZh?: string;
   }> = [];
+  // The budget-stop marker: when the reverse-audit round builder refused a
+  // round on the review's time budget, it recorded the refusal beside the
+  // prompt records. Synthesizing the disclosure from the marker makes the
+  // verdict cap deterministic — the orchestrator's own copy of the entry
+  // (the stderr instruction asks for one) is a courtesy to the terminal
+  // reader, and a run that drops the sentence still cannot approve past a
+  // truncated audit. Rendered STRUCTURAL, both languages, like every other
+  // coverage entry — the orchestrator's relayed copy is English-only prose,
+  // so the marker's phrase dedups it out and the two channels never say it
+  // twice.
+  if (input.planPath) {
+    const stop = readBudgetStop(input.planPath);
+    if (stop !== null) {
+      for (let i = unreviewed.length - 1; i >= 0; i--) {
+        if (unreviewed[i].includes(BUDGET_STOP_PHRASE)) {
+          unreviewed.splice(i, 1);
+        }
+      }
+      coverageEntries.push(budgetStopDisclosure(stop.round ?? undefined));
+    }
+  }
   // The fixes for the gaps above, for stderr — never for the body. The gap says
   // what the review cannot certify, to the PR author; the remediation names the
   // command that repairs it, to the orchestrator. #7012's public body was fourteen

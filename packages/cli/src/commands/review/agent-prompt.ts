@@ -1582,28 +1582,18 @@ function runAgentPrompt(args: AgentPromptArgs): void {
         );
       }
     }
-    // The budget gate — after every validation, because a malformed call
-    // deserves its own error, and before any build or record: a refused round
-    // must leave no prompt on disk for a later check to expect an agent for.
-    // Reverse-audit only: the loop is the one open-ended stage, and the
-    // reserve this gate protects exists precisely to let verify/compose run.
-    // What must fit is the round being admitted PLUS the tail — a gate that
-    // admits on the reserve alone hands the terminal round a start right at
-    // the boundary, which is the killed-mid-verification failure one round
-    // wide. The round's cost is the previous round's, measured admission to
-    // admission; a passing admission is stamped so the next one can measure.
-    if (role === 'reverse-audit') {
-      const spent = reverseAuditBudgetExhausted(
-        process.env,
-        expectedRoundSeconds(args.plan, args.round),
+    // The Step 5 loop's clock keys on the round label — the record key's
+    // round part, the identity line, and the budget gate's per-round stamps
+    // all read it, and SKILL.md's Step 5 calls always pass it. A round-less
+    // call would stamp an unlabeled admission no later estimate can
+    // attribute, so it gets its own error here with every other malformed
+    // call.
+    if (role === 'reverse-audit' && !hasRound) {
+      bad(
+        '--role reverse-audit builds one round of the Step 5 loop and ' +
+          'requires --round <k>: the label keys the record and the budget ' +
+          "gate's per-round accounting.",
       );
-      if (spent !== null) {
-        writeBudgetStop(args.plan, spent, args.round);
-        writeStderrLine(reverseAuditBudgetMessage(spent, args.round));
-        process.exitCode = 4;
-        return;
-      }
-      stampRound(args.plan, args.round);
     }
   } else if (hasFindings) {
     // `--findings` with no role: it has no prompt to fold into. A territory chunk
@@ -1731,6 +1721,33 @@ function runAgentPrompt(args: AgentPromptArgs): void {
           'findings; only an early reverse-audit round passes an empty file.',
       );
     }
+  }
+
+  // The budget gate — after every validation and every file read, because a
+  // malformed call or a broken plan deserves its own error (refusing here
+  // would record a budget stop against a plan that cannot even parse), and a
+  // round is stamped admitted only once its findings read proved the call
+  // buildable — before any build or record: a refused round must leave no
+  // prompt on disk for a later check to expect an agent for.
+  // Reverse-audit only: the loop is the one open-ended stage, and the
+  // reserve this gate protects exists precisely to let verify/compose run.
+  // What must fit is the round being admitted PLUS the tail — a gate that
+  // admits on the reserve alone hands the terminal round a start right at
+  // the boundary, which is the killed-mid-verification failure one round
+  // wide. The round's cost is the previous round's, measured admission to
+  // admission; a passing admission is stamped so the next one can measure.
+  if (args.role === 'reverse-audit') {
+    const spent = reverseAuditBudgetExhausted(
+      process.env,
+      expectedRoundSeconds(args.plan, args.round),
+    );
+    if (spent !== null) {
+      writeBudgetStop(args.plan, spent, args.round);
+      writeStderrLine(reverseAuditBudgetMessage(spent, args.round));
+      process.exitCode = 4;
+      return;
+    }
+    stampRound(args.plan, args.round);
   }
 
   if (args.allChunks && args.role && findingsContent !== undefined) {
