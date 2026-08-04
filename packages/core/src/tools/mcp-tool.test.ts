@@ -28,6 +28,10 @@ import {
   runWithInvocationContext,
   type InvocationContextV1,
 } from '../utils/invocation-context.js';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 
 vi.mock('node:fs/promises');
 
@@ -2668,6 +2672,135 @@ describe('DiscoveredMCPTool', () => {
 
       expect(discoverToolsForServer).not.toHaveBeenCalled();
       expect(liveClient.callTool).not.toHaveBeenCalled();
+    });
+
+    it('classifies a real never-connected SDK client rejection as never delivered', async () => {
+      const params = { param: 'test' };
+      // A real SDK Client that never connected: Protocol.request() rejects
+      // with a bare 'Not connected' before writing the request. Driving the
+      // gate with the genuine rejection pins the contract to the actual
+      // dependency — a reworded pre-send rejection in an SDK bump turns this
+      // test red instead of silently regressing the carve-out.
+      const deadClient: McpDirectClient = new Client({
+        name: 'real-sdk-client',
+        version: '0.0.0',
+      });
+      const liveClient: McpDirectClient = {
+        callTool: vi
+          .fn()
+          .mockResolvedValueOnce({ content: [{ type: 'text', text: 'OK' }] }),
+      };
+      const newTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined, // untrusted
+        undefined,
+        undefined,
+        liveClient, // unannotated
+      );
+      // A real reconnect restores CONNECTED before the retried call.
+      const discoverToolsForServer = vi.fn().mockImplementation(async () => {
+        updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      });
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool: vi.fn().mockResolvedValue(newTool),
+        }),
+        getTruncateToolOutputThreshold: () => 0,
+        getTruncateToolOutputLines: () => 0,
+      };
+
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+
+      const reconnectTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined, // untrusted
+        undefined,
+        mockConfig as any,
+        deadClient, // unannotated
+      );
+
+      const result = await reconnectTool
+        .build(params)
+        .execute(new AbortController().signal);
+
+      expect(discoverToolsForServer).toHaveBeenCalled();
+      expect(liveClient.callTool).toHaveBeenCalledTimes(1);
+      expect(result.llmContent).toEqual([{ text: 'OK' }]);
+    });
+
+    it('still gates a real SDK in-flight transport close', async () => {
+      const params = { param: 'test' };
+      // A real client/server pair over the SDK's in-memory transport: the
+      // server has already received the call when the transport dies, so the
+      // failure is ambiguous and must stay gated — symmetric pin to the
+      // never-delivered test above, at the real dependency.
+      const [clientTransport, serverTransport] =
+        InMemoryTransport.createLinkedPair();
+      const server = new Server(
+        { name: 'real-sdk-server', version: '0.0.0' },
+        { capabilities: { tools: {} } },
+      );
+      let requestReceived!: () => void;
+      const requestArrived = new Promise<void>((resolve) => {
+        requestReceived = resolve;
+      });
+      server.setRequestHandler(CallToolRequestSchema, () => {
+        requestReceived();
+        // Never respond: keep the call in flight until the transport dies.
+        return new Promise<never>(() => {});
+      });
+      await server.connect(serverTransport);
+
+      const realClient: McpDirectClient = new Client({
+        name: 'real-sdk-client',
+        version: '0.0.0',
+      });
+      await realClient.connect(clientTransport);
+
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool: vi.fn(),
+        }),
+        getTruncateToolOutputThreshold: () => 0,
+        getTruncateToolOutputLines: () => 0,
+      };
+
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+
+      const reconnectTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined, // untrusted
+        undefined,
+        mockConfig as any,
+        realClient, // unannotated
+      );
+
+      const execution = reconnectTool
+        .build(params)
+        .execute(new AbortController().signal);
+      await requestArrived;
+      await clientTransport.close();
+
+      await expect(execution).rejects.toThrow(unsafeReplayErrorMessage);
+
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
     });
   });
 
