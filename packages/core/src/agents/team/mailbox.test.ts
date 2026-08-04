@@ -7,6 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import lockfile from 'proper-lockfile';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { MailboxMessage } from './mailbox.js';
 import {
@@ -137,6 +138,40 @@ describe('mailbox', () => {
     expect(texts).toContain('recent-read'); // read but within window → kept
     expect(texts).toContain('aged-unread'); // unread → never dropped
     expect(texts).toContain('fresh');
+  });
+
+  // ─── Lock compromise ─────────────────────────────────────
+
+  it('still writes the message when the lock is compromised', async () => {
+    // After a compromise, proper-lockfile marks the lock released
+    // before invoking onCompromised, so release() later rejects with
+    // ERELEASED. Without the release guard, that rejection from the
+    // finally block would replace the successful write's result.
+    let onCompromised: ((error: Error) => void) | undefined;
+    const releaseError = Object.assign(new Error('Lock is already released'), {
+      code: 'ERELEASED',
+    });
+    const lockSpy = vi
+      .spyOn(lockfile, 'lock')
+      .mockImplementationOnce(async (_file, options) => {
+        onCompromised = options?.onCompromised;
+        onCompromised?.(
+          Object.assign(new Error('lock lost'), { code: 'ECOMPROMISED' }),
+        );
+        return () => Promise.reject(releaseError);
+      });
+
+    try {
+      await expect(
+        writeMessage('team', 'worker', makeMessage({ text: 'compromised' })),
+      ).resolves.toBeUndefined();
+      expect(onCompromised).toBeTypeOf('function');
+    } finally {
+      lockSpy.mockRestore();
+    }
+
+    const messages = await readInbox('team', 'worker');
+    expect(messages.map((m) => m.text)).toEqual(['compromised']);
   });
 
   // ─── consumeUnread ─────────────────────────────────────────
