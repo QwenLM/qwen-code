@@ -11,6 +11,7 @@ import {
   getActiveTodosForPlanRevision,
   getTodoStatusIcon,
   getTodoWindow,
+  isExitPlanApprovalRequest,
   isTodoWriteToolName,
   todoDetailSignature,
   todoStateKey,
@@ -637,6 +638,38 @@ describe('isTodoWriteToolName', () => {
 
   it.each(['read', 'edit', 'write_file', ''])('rejects %s', (name) => {
     expect(isTodoWriteToolName(name)).toBe(false);
+  });
+});
+
+describe('isExitPlanApprovalRequest', () => {
+  it('matches a switch_mode exit_plan_mode request', () => {
+    expect(
+      isExitPlanApprovalRequest({
+        toolKind: 'switch_mode',
+        toolName: 'Exit_Plan_Mode',
+      }),
+    ).toBe(true);
+  });
+
+  it('rejects a mismatched kind or name', () => {
+    expect(
+      isExitPlanApprovalRequest({
+        toolKind: 'execute',
+        toolName: 'exit_plan_mode',
+      }),
+    ).toBe(false);
+    expect(
+      isExitPlanApprovalRequest({
+        toolKind: 'switch_mode',
+        toolName: 'read_file',
+      }),
+    ).toBe(false);
+  });
+
+  it('rejects a missing or null request', () => {
+    expect(isExitPlanApprovalRequest(undefined)).toBe(false);
+    expect(isExitPlanApprovalRequest(null)).toBe(false);
+    expect(isExitPlanApprovalRequest({})).toBe(false);
   });
 });
 

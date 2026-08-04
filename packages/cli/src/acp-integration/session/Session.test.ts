@@ -1920,6 +1920,83 @@ describe('Session', () => {
     });
   });
 
+  // Runs a full exit_plan_mode approval turn and returns the permission
+  // request the client received, so tests can assert the observable
+  // `_meta.qwenTodoApproval` binding instead of poking the private
+  // `activeTodoPlanRevision` field. Mirrors the it.each harness in the
+  // prompt describe block.
+  async function runExitPlanModeApprovalPrompt(): Promise<
+    Parameters<AgentSideConnection['requestPermission']>[0]
+  > {
+    let mode = ApprovalMode.PLAN;
+    const hookSpy = vi
+      .spyOn(core, 'firePermissionRequestHook')
+      .mockResolvedValue({
+        hasDecision: true,
+        shouldAllow: true,
+        updatedInput: { plan: 'Hook-replaced plan' },
+        denyMessage: undefined,
+      });
+    const invocation = {
+      params: { plan: 'Original plan' },
+      requiresUserInteraction: vi.fn().mockReturnValue(true),
+      getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+      getConfirmationDetails: vi.fn().mockResolvedValue({
+        type: 'plan',
+        title: 'Approve plan',
+        plan: 'Original plan',
+        hideAlwaysAllow: true,
+        onConfirm: vi.fn().mockResolvedValue(undefined),
+      }),
+      getDescription: vi.fn().mockReturnValue('Plan:'),
+      toolLocations: vi.fn().mockReturnValue([]),
+      execute: vi.fn().mockImplementation(async () => {
+        mode = ApprovalMode.DEFAULT;
+        return { llmContent: 'approved', returnDisplay: 'approved' };
+      }),
+    };
+    const tool = {
+      name: core.ToolNames.EXIT_PLAN_MODE,
+      kind: core.Kind.Think,
+      build: vi.fn().mockReturnValue(invocation),
+    };
+
+    mockToolRegistry.getTool.mockReturnValue(tool);
+    mockConfig.getApprovalMode = vi.fn(() => mode);
+    mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+    mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+    mockConfig.getMessageBus = vi.fn().mockReturnValue({});
+    mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+      createStreamWithChunks([
+        {
+          type: core.StreamEventType.CHUNK,
+          value: {
+            functionCalls: [
+              {
+                id: 'call-exit-plan',
+                name: core.ToolNames.EXIT_PLAN_MODE,
+                args: { plan: 'Original plan' },
+              },
+            ],
+          },
+        },
+      ]),
+    );
+
+    try {
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'approve the plan' }],
+      });
+    } finally {
+      hookSpy.mockRestore();
+    }
+
+    const calls = vi.mocked(mockClient.requestPermission).mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    return calls.at(-1)![0];
+  }
+
   describe('setMode', () => {
     it.each([
       ['plan', ApprovalMode.PLAN],
@@ -1985,10 +2062,12 @@ describe('Session', () => {
         modeId: 'plan',
       });
 
-      expect(
-        (session as unknown as { activeTodoPlanRevision?: unknown })
-          .activeTodoPlanRevision,
-      ).toBeUndefined();
+      const request = await runExitPlanModeApprovalPrompt();
+      expect(request.toolCall._meta).toEqual(
+        expect.not.objectContaining({
+          qwenTodoApproval: expect.anything(),
+        }),
+      );
     });
 
     it('preserves the active Todo plan revision when re-selecting plan mode', async () => {
@@ -2007,10 +2086,12 @@ describe('Session', () => {
         modeId: 'plan',
       });
 
-      expect(
-        (session as unknown as { activeTodoPlanRevision?: unknown })
-          .activeTodoPlanRevision,
-      ).toEqual({ planId: 'plan-1', sourceCallId: 'todo-call-1' });
+      const request = await runExitPlanModeApprovalPrompt();
+      expect(request.toolCall._meta).toEqual(
+        expect.objectContaining({
+          qwenTodoApproval: { planId: 'plan-1', sourceCallId: 'todo-call-1' },
+        }),
+      );
     });
   });
 
@@ -2073,6 +2154,7 @@ describe('Session', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
       await session.sendUpdate({
         sessionUpdate: 'plan',
         entries: [{ content: 'old', priority: 'medium', status: 'pending' }],
@@ -2087,10 +2169,12 @@ describe('Session', () => {
       expect(result).toEqual({ targetTurnIndex: 1, apiTruncateIndex: 2 });
       expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
       expect(mockChat.stripThoughtsFromHistory).toHaveBeenCalled();
-      expect(
-        (session as unknown as { activeTodoPlanRevision?: unknown })
-          .activeTodoPlanRevision,
-      ).toBeUndefined();
+      const request = await runExitPlanModeApprovalPrompt();
+      expect(request.toolCall._meta).toEqual(
+        expect.not.objectContaining({
+          qwenTodoApproval: expect.anything(),
+        }),
+      );
       expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
         1,
         { truncatedCount: 2 },
@@ -2385,17 +2469,21 @@ describe('Session', () => {
           qwenTranscript: { planToolCallId: 'old-call' },
         },
       });
-      expect(
-        (session as unknown as { activeTodoPlanRevision?: unknown })
-          .activeTodoPlanRevision,
-      ).toEqual({ planId: 'old-plan', sourceCallId: 'old-call' });
+      const bound = await runExitPlanModeApprovalPrompt();
+      expect(bound.toolCall._meta).toEqual(
+        expect.objectContaining({
+          qwenTodoApproval: { planId: 'old-plan', sourceCallId: 'old-call' },
+        }),
+      );
 
       session.restoreHistory([]);
 
-      expect(
-        (session as unknown as { activeTodoPlanRevision?: unknown })
-          .activeTodoPlanRevision,
-      ).toBeUndefined();
+      const restored = await runExitPlanModeApprovalPrompt();
+      expect(restored.toolCall._meta).toEqual(
+        expect.not.objectContaining({
+          qwenTodoApproval: expect.anything(),
+        }),
+      );
     });
 
     it('rejects history restore while a prompt is running', () => {
@@ -13961,10 +14049,12 @@ describe('Session', () => {
       });
 
       expect(executeSpy).toHaveBeenCalled();
-      expect(
-        (session as unknown as { activeTodoPlanRevision?: unknown })
-          .activeTodoPlanRevision,
-      ).toBeUndefined();
+      const request = await runExitPlanModeApprovalPrompt();
+      expect(request.toolCall._meta).toEqual(
+        expect.not.objectContaining({
+          qwenTodoApproval: expect.anything(),
+        }),
+      );
     });
 
     it('routes ACP protected L4 allow writes through AUTO review', async () => {

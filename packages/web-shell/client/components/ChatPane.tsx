@@ -49,7 +49,7 @@ import { isVisibleComposerModel } from '../utils/composerModels';
 import { shouldBlockComposerSubmit } from '../utils/composerInputState';
 import {
   getActiveTodosForPlanRevision,
-  isExitPlanModeToolName,
+  isExitPlanApprovalRequest,
 } from '../utils/todos';
 import { findMonitorTaskForTool } from '../utils/monitorTasks';
 import { invokeSlashCommandHandler } from '../utils/slash-command-action';
@@ -349,9 +349,7 @@ export function ChatPane({
     pendingApproval && !isAskUser ? pendingApproval : null;
   const pendingAskUserApproval =
     pendingApproval && isAskUser ? pendingApproval : null;
-  const isExitPlanApproval =
-    pendingToolApproval?.toolKind === 'switch_mode' &&
-    isExitPlanModeToolName(pendingToolApproval?.toolName);
+  const isExitPlanApproval = isExitPlanApprovalRequest(pendingToolApproval);
   const planTodos = useMemo(
     () =>
       sessionWorkflowEnabled && isExitPlanApproval

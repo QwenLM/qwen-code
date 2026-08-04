@@ -259,7 +259,7 @@ import {
   getAgentToolsForPlan,
   getFloatingTodos,
   getActiveTodosForPlanRevision,
-  isExitPlanModeToolName,
+  isExitPlanApprovalRequest,
   todoDetailSignature,
   todoTimelineSignature,
   type TodoDetail,
@@ -3236,7 +3236,7 @@ export function App({
   );
   const approvalPlanTodos = useMemo(
     () =>
-      isExitPlanModeToolName(pendingToolApproval?.toolName)
+      isExitPlanApprovalRequest(pendingToolApproval)
         ? getActiveTodosForPlanRevision(messages, pendingToolApproval?.todoPlan)
         : [],
     [messages, pendingToolApproval],

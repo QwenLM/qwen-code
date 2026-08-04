@@ -1,4 +1,9 @@
-import type { ACPToolCall, Message, TodoItem } from '../adapters/types';
+import type {
+  ACPToolCall,
+  Message,
+  PermissionRequest,
+  TodoItem,
+} from '../adapters/types';
 import { isSubAgentToolCall } from '../adapters/toolClassification';
 
 /**
@@ -12,11 +17,17 @@ export function isTodoWriteToolName(name: string): boolean {
 }
 
 /**
- * Shared by App, ChatPane, and ToolApproval so the exit-plan wire name never
- * drifts between the surfaces that gate the revision-bound approval UI.
+ * The full exit-plan approval rule: the switch_mode frame kind plus the
+ * exit_plan_mode wire name. Shared by App, ChatPane, and ToolApproval so the
+ * surfaces that gate the revision-bound approval UI never drift.
  */
-export function isExitPlanModeToolName(name: string | undefined): boolean {
-  return name?.toLowerCase() === 'exit_plan_mode';
+export function isExitPlanApprovalRequest(
+  request: Pick<PermissionRequest, 'toolKind' | 'toolName'> | null | undefined,
+): boolean {
+  return (
+    request?.toolKind === 'switch_mode' &&
+    request?.toolName?.toLowerCase() === 'exit_plan_mode'
+  );
 }
 
 export function parseTodoItemsFromEntries(

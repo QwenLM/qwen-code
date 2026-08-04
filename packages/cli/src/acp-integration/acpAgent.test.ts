@@ -3800,7 +3800,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect(lastSessionMock?.clearTodoStopGuardTrust).toHaveBeenCalledOnce();
 
       // Re-selecting plan (the Web Shell /plan path) must keep the revision
-      // captured during the current plan cycle.
+      // captured during the current plan cycle, while the stop guard trust
+      // still clears, as it does on every transition into plan.
       await expect(
         agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionApprovalMode, {
           sessionId,
@@ -3810,7 +3811,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect(
         lastSessionMock?.clearActiveTodoPlanRevision,
       ).toHaveBeenCalledOnce();
-      expect(lastSessionMock?.clearTodoStopGuardTrust).toHaveBeenCalledOnce();
+      expect(lastSessionMock?.clearTodoStopGuardTrust).toHaveBeenCalledTimes(2);
     } finally {
       approvalModes.splice(0, approvalModes.length, ...originalApprovalModes);
     }
