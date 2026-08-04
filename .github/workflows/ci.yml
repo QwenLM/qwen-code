@@ -279,6 +279,13 @@ jobs:
             echo "::warning::Expected Node 22.x but found $(node -v); tests will run against the runner's Node."
           fi
 
+      - name: 'Isolate temp directory (self-hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        run: |-
+          echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
+          echo "TEMP=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
+          echo "TMP=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
+
       - name: 'Configure persistent npm cache (self-hosted)'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
         run: |-
@@ -561,6 +568,13 @@ jobs:
           if [[ "$(node -p 'process.versions.node.split(".")[0]')" != "22" ]]; then
             echo "::warning::Expected Node 22.x but found $(node -v); web-shell smoke tests will run against the runner's Node."
           fi
+
+      - name: 'Isolate temp directory (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
+          echo "TEMP=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
+          echo "TMP=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
 
       - name: 'Configure persistent npm cache (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -857,6 +871,13 @@ jobs:
           if [[ "$(node -p 'process.versions.node.split(".")[0]')" != "22" ]]; then
             echo "::warning::Expected Node 22.x but found $(node -v); integration tests will run against the runner's Node."
           fi
+
+      - name: 'Isolate temp directory (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
+          echo "TEMP=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
+          echo "TMP=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
 
       - name: 'Configure persistent npm cache (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
