@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
   ArrowLeft,
@@ -31,11 +31,11 @@ import type {
   QwenProviderSummary,
 } from '../../../shared/types';
 import {
+  apiKeyAfterBaseUrlChange,
   defaultBaseUrl,
   initialModelIds,
   modelIdsAfterBaseUrlChange,
   parseModelIds,
-  shouldResetApiKeyAfterBaseUrlChange,
 } from './provider-state';
 
 type ProviderGroup = 'alibaba' | 'third-party' | 'custom';
@@ -116,6 +116,7 @@ export function ProviderConnectForm({
   const [contextWindowSize, setContextWindowSize] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const apiKeyDraftsRef = useRef(new Map<string, string>());
 
   const groups = useMemo(
     () =>
@@ -178,6 +179,7 @@ export function ProviderConnectForm({
     const existingConfig = provider.existingConfig;
     const contextWindowSize = existingConfig?.advancedConfig?.contextWindowSize;
     const baseUrl = existingConfig?.baseUrl ?? defaultBaseUrl(provider);
+    apiKeyDraftsRef.current.clear();
     setSelectedProviderId(provider.id);
     setProtocol(existingConfig?.protocol ?? defaultProtocol(provider));
     setBaseUrl(baseUrl);
@@ -424,15 +426,15 @@ export function ProviderConnectForm({
                 onValueChange={(value) => {
                   setBaseUrl(value);
                   if (value !== baseUrl) {
-                    if (
-                      shouldResetApiKeyAfterBaseUrlChange(
+                    setApiKey(
+                      apiKeyAfterBaseUrlChange(
                         selectedProvider,
                         baseUrl,
                         value,
-                      )
-                    ) {
-                      setApiKey('');
-                    }
+                        apiKey,
+                        apiKeyDraftsRef.current,
+                      ),
+                    );
                     setModelIdsText(
                       modelIdsAfterBaseUrlChange(
                         selectedProvider,

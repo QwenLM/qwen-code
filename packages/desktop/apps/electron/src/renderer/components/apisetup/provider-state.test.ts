@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import type { QwenProviderSummary } from '../../../shared/types';
 import {
+  apiKeyAfterBaseUrlChange,
   defaultModelIds,
   initialModelIds,
   modelIdsAfterBaseUrlChange,
@@ -90,5 +91,55 @@ describe('provider endpoint state', () => {
         'https://api.kimi.com/coding/v1',
       ),
     ).toBe(true);
+  });
+
+  it('keeps a same-domain API key unchanged on endpoint switch', () => {
+    const regionalKimi: QwenProviderSummary = {
+      ...kimi,
+      baseUrl: [
+        {
+          id: 'api-cn',
+          label: 'API China',
+          url: 'https://api.moonshot.cn/v1',
+          envKey: 'MOONSHOT_API_KEY',
+        },
+        {
+          id: 'api-global',
+          label: 'API Global',
+          url: 'https://api.moonshot.ai/v1',
+          envKey: 'MOONSHOT_API_KEY',
+        },
+      ],
+    };
+    const drafts = new Map<string, string>();
+
+    expect(
+      apiKeyAfterBaseUrlChange(
+        regionalKimi,
+        'https://api.moonshot.cn/v1',
+        'https://api.moonshot.ai/v1',
+        'typed-key',
+        drafts,
+      ),
+    ).toBe('typed-key');
+    expect(drafts.size).toBe(0);
+  });
+
+  it('restores API key drafts across a cross-domain endpoint round trip', () => {
+    const drafts = new Map<string, string>();
+    const codingUrl = 'https://api.kimi.com/coding/v1';
+    const apiUrl = 'https://api.moonshot.ai/v1';
+
+    expect(
+      apiKeyAfterBaseUrlChange(kimi, codingUrl, apiUrl, 'typed-code-key', drafts),
+    ).toBe('');
+
+    expect(
+      apiKeyAfterBaseUrlChange(kimi, apiUrl, codingUrl, 'typed-api-key', drafts),
+    ).toBe('typed-code-key');
+
+    expect(
+      apiKeyAfterBaseUrlChange(kimi, codingUrl, apiUrl, '', drafts),
+    ).toBe('typed-api-key');
   });
 });

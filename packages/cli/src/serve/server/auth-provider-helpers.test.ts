@@ -41,6 +41,20 @@ describe('buildAuthProviderCatalog', () => {
     expect(options[2]?.models).toEqual(options[1]?.models);
   });
 
+  it('populates per-option envKey for providers with a static envKey', () => {
+    const catalog = buildAuthProviderCatalog('/workspace');
+    const xiaomi = catalog.providers.find(
+      (provider) => provider.id === 'xiaomi-mimo',
+    );
+
+    expect(xiaomi?.envKey).toBe('MIMO_API_KEY');
+    const options = xiaomi?.baseUrl as ServeAuthProviderBaseUrlOption[];
+    expect(options).toHaveLength(4);
+    for (const option of options) {
+      expect(option.envKey).toBe('MIMO_API_KEY');
+    }
+  });
+
   it('does not synthesize an environment key before a custom endpoint is entered', () => {
     const catalog = buildAuthProviderCatalog('/workspace');
     const custom = catalog.providers.find(

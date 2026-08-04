@@ -8,6 +8,9 @@ import { describe, expect, it } from 'vitest';
 import {
   ALL_PROVIDERS,
   AuthType,
+  KIMI_API_ENV_KEY,
+  KIMI_CODE_BASE_URL,
+  KIMI_CODE_ENV_KEY,
   THIRD_PARTY_PROVIDERS,
   buildInstallPlan,
   findProviderByCredentials,
@@ -143,6 +146,70 @@ describe('kimiProvider', () => {
       baseUrl: 'https://api.moonshot.ai/v1',
       envKey: 'MOONSHOT_API_KEY',
     });
+  });
+
+  it('owns installed models in both credential domains', () => {
+    expect(
+      kimiProvider.ownsModel?.({
+        id: 'k3-256k',
+        name: '[Kimi Code] k3-256k',
+        baseUrl: KIMI_CODE_BASE_URL,
+        envKey: KIMI_CODE_ENV_KEY,
+      }),
+    ).toBe(true);
+    expect(
+      kimiProvider.ownsModel?.({
+        id: 'kimi-k3',
+        name: '[Kimi API] kimi-k3',
+        baseUrl: 'https://api.moonshot.ai/v1',
+        envKey: KIMI_API_ENV_KEY,
+      }),
+    ).toBe(true);
+    expect(
+      kimiProvider.ownsModel?.({
+        id: 'kimi-k3',
+        name: '[Kimi API] kimi-k3',
+        baseUrl: 'https://api.moonshot.cn/v1',
+        envKey: KIMI_API_ENV_KEY,
+      }),
+    ).toBe(true);
+  });
+
+  it('refuses ownership for cross-paired names and env keys', () => {
+    expect(
+      kimiProvider.ownsModel?.({
+        id: 'kimi-k3',
+        name: '[Kimi API] kimi-k3',
+        baseUrl: 'https://api.moonshot.ai/v1',
+        envKey: KIMI_CODE_ENV_KEY,
+      }),
+    ).toBe(false);
+    expect(
+      kimiProvider.ownsModel?.({
+        id: 'k3-256k',
+        name: '[Kimi Code] k3-256k',
+        baseUrl: KIMI_CODE_BASE_URL,
+        envKey: KIMI_API_ENV_KEY,
+      }),
+    ).toBe(false);
+  });
+
+  it('refuses ownership for unrelated env keys or missing names', () => {
+    expect(
+      kimiProvider.ownsModel?.({
+        id: 'user-model',
+        name: '[Kimi Code] user-model',
+        baseUrl: KIMI_CODE_BASE_URL,
+        envKey: 'MY_PRIVATE_GATEWAY_KEY',
+      }),
+    ).toBe(false);
+    expect(
+      kimiProvider.ownsModel?.({
+        id: 'k3-256k',
+        baseUrl: KIMI_CODE_BASE_URL,
+        envKey: KIMI_CODE_ENV_KEY,
+      }),
+    ).toBe(false);
   });
 
   it('registers a single Kimi entry and discovers every endpoint', () => {

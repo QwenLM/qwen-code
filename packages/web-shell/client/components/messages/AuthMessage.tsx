@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   useWorkspaceActions,
   type DaemonAuthProviderCatalog,
@@ -8,12 +8,12 @@ import {
 import { useI18n } from '../../i18n';
 import styles from './AuthMessage.module.css';
 import {
+  apiKeyAfterBaseUrlChange,
   baseUrlOptionModelIds,
   normalizeModelIds,
   selectedBaseUrlEnvKey,
   selectedBaseUrlModelIds,
   selectedBaseUrlOptionIndex,
-  shouldResetApiKeyAfterBaseUrlChange,
 } from './auth-provider-state';
 
 type AuthView = 'groups' | 'providers' | 'step' | 'review';
@@ -168,6 +168,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     (currentStep === 'baseUrl' && !Array.isArray(provider?.baseUrl));
 
   const [optionIndex, setOptionIndex] = useState(0);
+  const apiKeyDraftsRef = useRef(new Map<string, string>());
 
   useEffect(() => {
     if (
@@ -187,6 +188,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     ) => {
       setProvider(nextProvider);
       setSetupBackView(backView);
+      apiKeyDraftsRef.current.clear();
       const nextProtocol =
         nextProvider.protocolOptions?.[0] ?? nextProvider.protocol;
       setProtocol(nextProtocol);
@@ -436,16 +438,16 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       if (selected) {
         setBaseUrl(selected.url);
         if (selected.url !== baseUrl) {
-          if (
-            shouldResetApiKeyAfterBaseUrlChange(
+          setApiKey(
+            apiKeyAfterBaseUrlChange(
               provider,
               baseUrl,
               selected.url,
+              apiKey,
               protocol,
-            )
-          ) {
-            setApiKey('');
-          }
+              apiKeyDraftsRef.current,
+            ),
+          );
           setModels(baseUrlOptionModelIds(selected, provider, models));
         }
       }
@@ -474,6 +476,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     view,
     activateAdvancedOption,
     advancedOptionValues,
+    apiKey,
     baseUrl,
   ]);
 
@@ -525,16 +528,16 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
         if (selected) {
           setBaseUrl(selected.url);
           if (selected.url !== baseUrl) {
-            if (
-              shouldResetApiKeyAfterBaseUrlChange(
+            setApiKey(
+              apiKeyAfterBaseUrlChange(
                 provider,
                 baseUrl,
                 selected.url,
+                apiKey,
                 protocol,
-              )
-            ) {
-              setApiKey('');
-            }
+                apiKeyDraftsRef.current,
+              ),
+            );
             setModels(baseUrlOptionModelIds(selected, provider, models));
           }
         }
@@ -554,6 +557,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       protocol,
       activateAdvancedOption,
       advancedOptionValues,
+      apiKey,
       baseUrl,
       provider,
       providers,

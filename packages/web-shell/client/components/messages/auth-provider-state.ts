@@ -84,3 +84,36 @@ export function shouldResetApiKeyAfterBaseUrlChange(
     selectedBaseUrlEnvKey(provider, nextBaseUrl, protocol)
   );
 }
+
+/**
+ * Computes the API key to show after an endpoint switch while keeping
+ * per-credential-domain drafts in `drafts`, so a key typed for one endpoint
+ * survives a round trip through another endpoint's key domain.
+ */
+export function apiKeyAfterBaseUrlChange(
+  provider: DaemonAuthProviderDescriptor,
+  currentBaseUrl: string,
+  nextBaseUrl: string,
+  currentApiKey: string,
+  protocol: string,
+  drafts: Map<string, string>,
+): string {
+  if (
+    !shouldResetApiKeyAfterBaseUrlChange(
+      provider,
+      currentBaseUrl,
+      nextBaseUrl,
+      protocol,
+    )
+  ) {
+    return currentApiKey;
+  }
+  const currentDomain = selectedBaseUrlEnvKey(
+    provider,
+    currentBaseUrl,
+    protocol,
+  );
+  const nextDomain = selectedBaseUrlEnvKey(provider, nextBaseUrl, protocol);
+  drafts.set(currentDomain, currentApiKey);
+  return drafts.get(nextDomain) ?? '';
+}

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { DaemonAuthProviderDescriptor } from '@qwen-code/webui/daemon-react-sdk';
 import {
+  apiKeyAfterBaseUrlChange,
   baseUrlOptionModelIds,
   selectedBaseUrlEnvKey,
   selectedBaseUrlModelIds,
@@ -91,6 +92,71 @@ describe('auth provider endpoint state', () => {
         'openai',
       ),
     ).toBe(true);
+  });
+
+  it('keeps a same-domain API key unchanged on endpoint switch', () => {
+    const regionalKimi = {
+      ...kimi,
+      baseUrl: [
+        {
+          id: 'api-cn',
+          label: 'API China',
+          url: 'https://api.moonshot.cn/v1',
+          envKey: 'MOONSHOT_API_KEY',
+        },
+        {
+          id: 'api-global',
+          label: 'API Global',
+          url: 'https://api.moonshot.ai/v1',
+          envKey: 'MOONSHOT_API_KEY',
+        },
+      ],
+    } satisfies DaemonAuthProviderDescriptor;
+    const drafts = new Map<string, string>();
+
+    expect(
+      apiKeyAfterBaseUrlChange(
+        regionalKimi,
+        'https://api.moonshot.cn/v1',
+        'https://api.moonshot.ai/v1',
+        'typed-key',
+        'openai',
+        drafts,
+      ),
+    ).toBe('typed-key');
+    expect(drafts.size).toBe(0);
+  });
+
+  it('restores API key drafts across a cross-domain endpoint round trip', () => {
+    const drafts = new Map<string, string>();
+    const codingUrl = 'https://api.kimi.com/coding/v1';
+    const apiUrl = 'https://api.moonshot.ai/v1';
+
+    expect(
+      apiKeyAfterBaseUrlChange(
+        kimi,
+        codingUrl,
+        apiUrl,
+        'typed-code-key',
+        'openai',
+        drafts,
+      ),
+    ).toBe('');
+
+    expect(
+      apiKeyAfterBaseUrlChange(
+        kimi,
+        apiUrl,
+        codingUrl,
+        'typed-api-key',
+        'openai',
+        drafts,
+      ),
+    ).toBe('typed-code-key');
+
+    expect(
+      apiKeyAfterBaseUrlChange(kimi, codingUrl, apiUrl, '', 'openai', drafts),
+    ).toBe('typed-api-key');
   });
 
   it('restores the highlighted endpoint from the selected base URL', () => {

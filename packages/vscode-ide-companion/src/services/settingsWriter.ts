@@ -692,7 +692,9 @@ export function clearPersistedAuth(): void {
           delete env[p.envKey];
           continue;
         }
-        const protocols = p.protocolOptions ?? [p.protocol];
+        const protocols = p.protocolOptions?.length
+          ? p.protocolOptions
+          : [p.protocol];
         const baseUrls = Array.isArray(p.baseUrl)
           ? p.baseUrl.map((option) => option.url)
           : [p.baseUrl ?? ''];

@@ -74,3 +74,31 @@ export function shouldResetApiKeyAfterBaseUrlChange(
   const nextEnvKey = selectedBaseUrlEnvKey(provider, nextBaseUrl);
   return !currentEnvKey || !nextEnvKey || currentEnvKey !== nextEnvKey;
 }
+
+/**
+ * Computes the API key to show after an endpoint switch while keeping
+ * per-credential-domain drafts in `drafts`, so a key typed for one endpoint
+ * survives a round trip through another endpoint's key domain.
+ */
+export function apiKeyAfterBaseUrlChange(
+  provider: QwenProviderSummary,
+  currentBaseUrl: string,
+  nextBaseUrl: string,
+  currentApiKey: string,
+  drafts: Map<string, string>,
+): string {
+  if (
+    !shouldResetApiKeyAfterBaseUrlChange(
+      provider,
+      currentBaseUrl,
+      nextBaseUrl,
+    )
+  ) {
+    return currentApiKey;
+  }
+  const currentDomain = selectedBaseUrlEnvKey(provider, currentBaseUrl);
+  const nextDomain = selectedBaseUrlEnvKey(provider, nextBaseUrl);
+  if (!currentDomain || !nextDomain) return '';
+  drafts.set(currentDomain, currentApiKey);
+  return drafts.get(nextDomain) ?? '';
+}

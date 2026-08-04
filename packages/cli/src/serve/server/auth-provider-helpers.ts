@@ -60,7 +60,7 @@ function buildAuthProviderDescriptor(
         ...option,
         ...(typeof provider.envKey === 'function'
           ? { envKey: provider.envKey(provider.protocol, option.url) }
-          : {}),
+          : { envKey: provider.envKey }),
         ...(option.models
           ? { models: option.models.map(serializeProviderModel) }
           : {}),
