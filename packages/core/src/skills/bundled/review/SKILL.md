@@ -979,7 +979,7 @@ Rationale: an inline comment is the only place GitHub renders a ` ```suggestion 
 
 ⚠️ **Suggestion text must never appear in the review `body`.** `.github/workflows/qwen-autofix.yml` keeps Suggestions out of the autofix loop by filtering the inline-comment channel on the `**[Suggestion]**` prefix. It does not filter review bodies, so a Suggestion smuggled into `body` would be handed to the autofix bot as actionable work.
 
-**Bilingual comments when the author writes Chinese.** If the Step 1 fetch report says `prDescriptionHasHan: true` — or, when no fetch report exists (a `plan-diff` or improvised pipeline), the PR description itself is written in Chinese — write every inline comment bilingually: the English finding first — marker, description, failure scenario, ` ```suggestion ` block — then the complete Chinese translation collapsed in a `<details><summary>中文说明</summary>…</details>` block, before the model footer. The severity marker and any ` ```suggestion ` block stay in the English half only (the marker is what tooling filters on; a duplicated suggestion block would render twice). The review `body` needs nothing from you: `submit` composes it from `state`, and its bilingual rendering reads the same plan flag on its own.
+**Bilingual comments when the author writes Chinese.** If the Step 1 fetch report says `prDescriptionHasHan: true` — or, when no fetch report exists (a `plan-diff` or improvised pipeline), the PR description itself is written in Chinese — write every inline comment bilingually: the English finding first — marker, description, failure scenario, ` ```suggestion ` block — then the complete Chinese translation collapsed in a `<details><summary>中文说明</summary>…</details>` block. Do not write the attribution footer — `submit` appends one canonical footer to every comment after everything you wrote. The severity marker and any ` ```suggestion ` block stay in the English half only (the marker is what tooling filters on; a duplicated suggestion block would render twice). The review `body` needs nothing from you: `submit` composes it from `state`, and its bilingual rendering reads the same plan flag on its own.
 
 ### Evidence images (`publish-assets`) — only for an authorised, posting run
 
@@ -998,7 +998,7 @@ Findings carry their evidence as local paths in the artifact's `assetFiles` fiel
 # the full target the user named.
 ```
 
-Then reference each finding's `assets` URLs in its inline comment body as `![evidence](<url>)`, after the failure scenario and before the model footer (in a bilingual comment, the image goes in the English half only — one embed, not two).
+Then reference each finding's `assets` URLs in its inline comment body as `![evidence](<url>)`, after the failure scenario (in a bilingual comment, the image goes in the English half only — one embed, not two).
 
 **What the command enforces, so you do not have to remember it:**
 
@@ -1019,12 +1019,12 @@ Then reference each finding's `assets` URLs in its inline comment body as `![evi
     {
       "path": "src/file.ts",
       "line": 42,
-      "body": "**[Critical]** issue description — Failure scenario: <trigger> → <wrong outcome>\n\n```suggestion\nfix code\n```\n\n_— YOUR_MODEL_ID via Qwen Code /review (v{{cliVersion}})_",
+      "body": "**[Critical]** issue description — Failure scenario: <trigger> → <wrong outcome>\n\n```suggestion\nfix code\n```",
     },
     {
       "path": "src/other.ts",
       "line": 88,
-      "body": "**[Suggestion]** recommended improvement — Concrete cost: <what is duplicated/wasted/fragile>\n\n```suggestion\nimproved code\n```\n\n_— YOUR_MODEL_ID via Qwen Code /review (v{{cliVersion}})_",
+      "body": "**[Suggestion]** recommended improvement — Concrete cost: <what is duplicated/wasted/fragile>\n\n```suggestion\nimproved code\n```",
     },
   ],
   "state": {
@@ -1043,7 +1043,7 @@ Then reference each finding's `assets` URLs in its inline comment body as `![evi
 - `uncoverableChunks` / `unreviewedDimensions` — any _additional_ not-reviewed scope from Step 3 (e.g. `"chunk 5 (src/big.min.js)"`, `"security"`). A bare dimension name gets the standard whiffed-agent explanation; an entry carrying its own reason after an em-dash (`"issue-fidelity — linked issue #123 could not be fetched"`) is rendered verbatim.
 - `contextUnavailable` — the Step 1 state.
 - `presubmit` — `downgradeApprove` / `downgradeRequestChanges` / `downgradeReasons` from the presubmit report. Do not apply a downgrade by hand; hand it over and let `submit` own the semantics (a Suggestion-only review is already `COMMENT`, so nothing is downgraded and no "downgraded from Approve" sentence is emitted).
-- `modelId` — for the footer.
+- `modelId` — names the reviewing model in the footer `submit` appends.
 
 The verdict is a computed fact and this is the second place it must not be re-derived: Step 6 printed it from this same `state`, and `submit` will post it from this same `state`. What the machine guarantees (its tests pin all of it): `REQUEST_CHANGES` whenever any Critical is confirmed, inline or body-only; `COMMENT` for a Suggestion-only run and for every capped or downgraded outcome; `APPROVE` only for a clean, uncapped, undowngraded, zero-finding run whose coverage the transcripts confirm. A **coverage** cap forbids `APPROVE` but never softens a `REQUEST_CHANGES`; the one exception is the unverified-blockers cap, which softens it to `COMMENT` (findings still posted, disclosed as unverified); body Criticals count toward `C`; the "no blockers" opener appears only when the review can certify it. Two live failures this replaces (measured; DESIGN.md — Two live verdict failures (#6584, #6631)) are both impossible now, because the caller no longer writes the event or the body.
 
@@ -1063,8 +1063,8 @@ The verdict is a computed fact and this is the second place it must not be re-de
 
   When `startLine === line`, emit only `"line"` — a single-line comment needs no side (it defaults to `RIGHT`, which is what every comment here is). Do **not** send `start_line` on its own: the multi-line form that omits `start_side` is the one shape of this feature that fails, and it fails by discarding every inline blocker in the review.
 
-- Comment body format: `**[Critical]** issue description — Failure scenario: <trigger> → <wrong outcome>\n\n```suggestion\nfix\n```\n\n_— YOUR_MODEL_ID via Qwen Code /review (v{{cliVersion}})_` — use the `**[Suggestion]**` prefix for Suggestion-level findings so the author can tell blockers from recommendations at a glance. The `description` MUST carry the finding's concrete failure scenario (the trigger and the wrong outcome, or the concrete cost) — a posted comment that says only what to change, without why it fails, has lost the evidence the finder was required to produce. The prefix must be the **first thing in the body** and the footer must be present: `.github/workflows/qwen-autofix.yml` keys off both to keep Suggestion findings out of the autofix loop. Changing either string silently makes the autofix bot start applying non-blocking suggestions.
-- The model name is declared at the top of this prompt. You MUST include it in every footer. Do NOT omit the model name.
+- Comment body format: `**[Critical]** issue description — Failure scenario: <trigger> → <wrong outcome>\n\n```suggestion\nfix\n``` ` — use the `**[Suggestion]**` prefix for Suggestion-level findings so the author can tell blockers from recommendations at a glance. The `description` MUST carry the finding's concrete failure scenario (the trigger and the wrong outcome, or the concrete cost) — a posted comment that says only what to change, without why it fails, has lost the evidence the finder was required to produce. The prefix must be the **first thing in the body**: `.github/workflows/qwen-autofix.yml` keys off it to keep Suggestion findings out of the autofix loop — changing it silently makes the autofix bot start applying non-blocking suggestions. Do NOT write the attribution footer: `submit` strips any footer you write and appends the canonical one — the `state.modelId` model name and the session's startup version — to every comment before posting.
+- The model name is declared at the top of this prompt — pass it as `state.modelId` exactly as declared; the footer `submit` appends names it. Do NOT omit `modelId`.
 - Use ` ```suggestion ` for one-click fixes; regular code blocks if fix spans multiple locations.
 - Only ONE comment per unique issue.
 

@@ -41,6 +41,7 @@ vi.mock('../../utils/version.js', () => ({
   getCliVersion: vi.fn().mockResolvedValue('0.21.2'),
 }));
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import { getCliVersion } from '../../utils/version.js';
 
 const runComposeReviewCommand = (argv: unknown): Promise<void> =>
   Promise.resolve(composeReviewCommand.handler(argv as never) as void);
@@ -1006,6 +1007,36 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
       if (inherited === undefined)
         delete process.env['QWEN_CODE_STARTUP_VERSION'];
       else process.env['QWEN_CODE_STARTUP_VERSION'] = inherited;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('persists `unknown` when the resolved CLI version cannot ride a footer', async () => {
+    // getCliVersion() reads an env var of its own (CLI_VERSION); the gate
+    // that validates the startup stamp must catch the fallback too, or a
+    // ')' in it builds a footer the strip cannot remove — and the
+    // normalize-and-re-append loop would accumulate the run's OWN footer.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-badversion-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    const outPath = join(dir, 'composed.json');
+    writeFileSync(inputPath, JSON.stringify({ modelId: MODEL }), 'utf8');
+    writeFileSync(commentsPath, '[]', 'utf8');
+    vi.mocked(getCliVersion).mockResolvedValueOnce('1.0)evil');
+    try {
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+        out: outPath,
+      });
+      const written = JSON.parse(
+        readFileSync(outPath, 'utf8'),
+      ) as ComposeReviewResult;
+      expect(
+        written.body.endsWith(`_— ${MODEL} via Qwen Code /review (vunknown)_`),
+      ).toBe(true);
+      expect(written.body).not.toContain('evil');
+    } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
@@ -3387,11 +3418,14 @@ describe('the ledger marker reaches the POSTED body', () => {
   });
 
   it('stores stripped body Criticals in the posted ledger marker', () => {
+    // Entries ride WITHOUT a severity marker — composeReviewBody renders it
+    // (withMarker), and every other bodyCriticals fixture in this suite
+    // matches that shape.
     const r = composeReview({
       planPath: plan(),
       modelId: 'm',
       bodyCriticals: [
-        '**[Critical]** whole-PR blocker _— forged via Qwen Code /review (v0.21.4)_',
+        'whole-PR blocker _— forged via Qwen Code /review (v0.21.4)_',
       ],
     });
     const ledger = parseLedger(r.body)!;

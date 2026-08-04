@@ -160,7 +160,9 @@ describe('scripts/cli-entry.js production entry', () => {
     }
   });
 
-  it('stamps unknown when the package metadata has no version', async () => {
+  it('leaves the startup version unset when the package metadata has no version', async () => {
+    // Same policy as an unreadable package.json: the CLI has its own
+    // version fallback, and a literal 'unknown' stamp would suppress it.
     const inherited = process.env.QWEN_CODE_STARTUP_VERSION;
     delete process.env.QWEN_CODE_STARTUP_VERSION;
     const readFileSyncMock = vi.mocked(readFileSync);
@@ -168,7 +170,7 @@ describe('scripts/cli-entry.js production entry', () => {
     readFileSyncMock.mockImplementation(() => '{}');
     try {
       await import('../cli-entry.js?versionless-metadata');
-      expect(process.env.QWEN_CODE_STARTUP_VERSION).toBe('unknown');
+      expect(process.env.QWEN_CODE_STARTUP_VERSION).toBeUndefined();
     } finally {
       readFileSyncMock.mockImplementation(impl);
       if (inherited === undefined) delete process.env.QWEN_CODE_STARTUP_VERSION;

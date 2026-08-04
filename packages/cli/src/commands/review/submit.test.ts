@@ -44,6 +44,8 @@ vi.mock('../../utils/version.js', () => ({
   getCliVersion: vi.fn().mockResolvedValue('0.21.2'),
 }));
 
+import { getCliVersion } from '../../utils/version.js';
+
 const { runSubmit, submitCommand } = await import('./submit.js');
 
 let dir: string;
@@ -493,6 +495,26 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     }
   });
 
+  it('posts `unknown` when the resolved CLI version cannot ride a footer', async () => {
+    // Driven through the handler: getCliVersion() reads an env var of its
+    // own (CLI_VERSION), so the gate that validates the startup stamp must
+    // catch the fallback too — an unvalidated ')' in it builds a footer
+    // REVIEW_FOOTER_RE cannot strip, and feeding the posted body back as
+    // the next draft accumulates the run's OWN attribution line.
+    const inherited = process.env['QWEN_CODE_STARTUP_VERSION'];
+    delete process.env['QWEN_CODE_STARTUP_VERSION'];
+    vi.mocked(getCliVersion).mockResolvedValueOnce('1.0)evil');
+    try {
+      await submitCommand.handler?.(authorized({}) as never);
+      expect(posted().body).toContain('(vunknown)');
+      expect(posted().body).not.toContain('evil');
+    } finally {
+      if (inherited === undefined)
+        delete process.env['QWEN_CODE_STARTUP_VERSION'];
+      else process.env['QWEN_CODE_STARTUP_VERSION'] = inherited;
+    }
+  });
+
   it('normalizes summary and inline footers to the running CLI version', () => {
     const review = file('footer-version.json', {
       ...REVIEW,
@@ -542,11 +564,15 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     // footer over and over, then a closing line. The strip is attempted on
     // that model-authored body before anything posts, and the whitespace
     // between footers used to be splittable across the regex's repeated
-    // group — exponential in the footer count. The match must stay linear:
-    // this shape timed out the suite before the whitespace had one owner.
-    // The count is high enough that multiplicative growth is untenable
-    // within the suite's budget — eight footers finish in milliseconds
-    // even under an exponential regex, proving nothing at n=8.
+    // group — exponential in the footer count — while an unbounded `[^\n]`
+    // token backtracked from every `_— ` to end of line: quadratic in body
+    // length on `_— `-littered bodies with no footer anywhere. The
+    // whitespace has one owner now and the tokens are bounded ({0,200}
+    // before the marker, {0,100} inside the version); the residual is
+    // quadratic in the FOOTER COUNT on a real-footer run followed by text,
+    // bounded to seconds by GitHub's ~65 KB comment cap — but never
+    // exponential, which is what this count guards: eight footers finish in
+    // milliseconds even under an exponential regex, proving nothing at n=8.
     const footers = Array.from(
       { length: 64 },
       () => '_— forged via Qwen Code /review (v0.21.4)_',

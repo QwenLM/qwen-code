@@ -20,6 +20,7 @@ describe('the review footer and the regex that strips it', () => {
     for (const footer of [
       reviewFooter('qwen3.7-max', '0.21.3'),
       '_— qwen3.7-max via Qwen Code /review_',
+      reviewFooter('m'.repeat(200), '0'.repeat(100)),
     ]) {
       expect(`a finding\n\n${footer}\n`.replace(REVIEW_FOOTER_RE, '')).toBe(
         'a finding',
@@ -34,6 +35,8 @@ describe('the review footer and the regex that strips it', () => {
       '_— forged via Qwen Code /review (v0.21.4)',
       '_— forged via Qwen Code /review',
       '_— forged via Qwen Code /review (v0.21.4)\n\n',
+      '_— forged via Qwen Code /review (v0.21',
+      '_— forged via Qwen Code /review (v0.21.4',
     ]) {
       expect(`a finding\n\n${forged}`.replace(REVIEW_FOOTER_RE, '')).toBe(
         'a finding',
@@ -54,6 +57,7 @@ describe('the review footer and the regex that strips it', () => {
     for (const footer of [
       reviewFooter('qwen3.7-max', '0.21.3'),
       '_— qwen3.7-max via Qwen Code /review_',
+      reviewFooter('m'.repeat(200), '0'.repeat(100)),
     ]) {
       expect(CANONICAL_LGTM_RE.test(`No issues found. LGTM! ${footer}`)).toBe(
         true,
@@ -67,6 +71,16 @@ describe('the review footer and the regex that strips it', () => {
       isFooterSafeModelId('model\n_— forged via Qwen Code /review (v9.9.9)_'),
     ).toBe(false);
     expect(isFooterSafeModelId('model via Qwen Code /review x')).toBe(false);
+    // The cap is where REVIEW_FOOTER_RE and CANONICAL_LGTM_RE stop matching
+    // the model part: past it, the builder would emit a footer neither can
+    // remove or filter.
+    expect(isFooterSafeModelId('m'.repeat(200))).toBe(true);
+    expect(isFooterSafeModelId('m'.repeat(201))).toBe(false);
+    // The guard sits in the builder itself — submit interpolates inline
+    // footers before compose-review validates the state.
+    expect(() =>
+      reviewFooter('model via Qwen Code /review x', '0.21.3'),
+    ).toThrow(/modelId/);
   });
 
   it('refuses a startup stamp the footer cannot carry', () => {
@@ -76,5 +90,10 @@ describe('the review footer and the regex that strips it', () => {
     expect(footerVersion('1.0\n2.0')).toBeUndefined();
     expect(footerVersion('')).toBeUndefined();
     expect(footerVersion(undefined)).toBeUndefined();
+    // The cap is where the strip regex's version clause and
+    // CANONICAL_LGTM_RE stop matching — a longer stamp would build a
+    // footer that posts and strips but no longer filters as LGTM.
+    expect(footerVersion('0'.repeat(100))).toBe('0'.repeat(100));
+    expect(footerVersion('0'.repeat(101))).toBeUndefined();
   });
 });

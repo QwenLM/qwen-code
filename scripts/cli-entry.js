@@ -275,7 +275,10 @@ const packageJsonPath =
 if (!process.env['QWEN_CODE_STARTUP_VERSION']?.trim()) {
   try {
     const pkg = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
-    process.env['QWEN_CODE_STARTUP_VERSION'] = pkg.version || 'unknown';
+    // Stamp only a REAL version: a literal 'unknown' passes the footer's
+    // shape check and would suppress the CLI's own version fallback — the
+    // same fallback the unreadable-metadata branch deliberately leaves to.
+    if (pkg.version) process.env['QWEN_CODE_STARTUP_VERSION'] = pkg.version;
   } catch {
     // The CLI has its own version fallback when package metadata is unavailable.
   }

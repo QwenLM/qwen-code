@@ -60,9 +60,9 @@ import {
   severityOf,
 } from './lib/inline-counts.js';
 import {
-  REVIEW_FOOTER_RE,
   footerVersion,
   reviewFooter,
+  stripReviewFooters,
 } from './lib/review-footer.js';
 
 /** The only events GitHub's Create Review API accepts. */
@@ -142,7 +142,7 @@ function normalizeInlineComments(
     typeof comment.body === 'string' && comment.body.trim() !== ''
       ? {
           ...comment,
-          body: `${comment.body.replace(REVIEW_FOOTER_RE, '')}\n\n${footer}`,
+          body: `${stripReviewFooters(comment.body)}\n\n${footer}`,
         }
       : comment,
   );
@@ -605,10 +605,14 @@ export const submitCommand: CommandModule = {
         describe: 'Check authorisation and payload consistency, then stop.',
       }),
   handler: async (argv) => {
-    // Do not use CLI_VERSION here: esbuild replaces it with a build-time value.
+    // Do not use CLI_VERSION here: esbuild replaces it with a build-time
+    // value. The fallback reads an env var of its own (CLI_VERSION), so it
+    // goes through the same gate — a `)` in it would build a footer the
+    // strip cannot remove, and re-normalization would accumulate it.
     const cliVersion =
       footerVersion(process.env['QWEN_CODE_STARTUP_VERSION']) ??
-      (await getCliVersion());
+      footerVersion(await getCliVersion()) ??
+      'unknown';
     runSubmit(argv as unknown as SubmitArgs, cliVersion);
   },
 };
