@@ -122,6 +122,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // `mcp_budget_warning` and `mcp_child_refused_batch`. Always-on;
   // orthogonal to `mcp_guardrails` (the snapshot surface).
   mcp_guardrail_events: { since: 'v1' },
+  // Managed ACP invokes an authenticated external policy provider exactly once
+  // at the final tool-execution boundary. Advertised only after the required
+  // provider completed its startup handshake.
+  external_tool_guard: { since: 'v1', modes: ['required'] },
   // Always-on. Daemon supports runtime MCP server mutation via
   // `POST /workspace/mcp/servers` (add) and
   // `DELETE /workspace/mcp/servers/:name` (remove). SDK clients
@@ -416,6 +420,7 @@ export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;
 export interface AdvertiseFeatureToggles {
   requireAuth?: boolean;
   mcpPoolActive?: boolean;
+  externalToolGuardActive?: boolean;
   allowOriginActive?: boolean;
   promptDeadlineMs?: number;
   writerIdleTimeoutMs?: number;
@@ -502,6 +507,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ['require_auth', (toggles) => toggles.requireAuth === true],
   ['mcp_workspace_pool', (toggles) => toggles.mcpPoolActive === true],
   ['mcp_pool_restart', (toggles) => toggles.mcpPoolActive === true],
+  [
+    'external_tool_guard',
+    (toggles) => toggles.externalToolGuardActive === true,
+  ],
   ['allow_origin', (toggles) => toggles.allowOriginActive === true],
   [
     'prompt_absolute_deadline',
