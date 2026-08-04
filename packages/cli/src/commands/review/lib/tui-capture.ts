@@ -53,8 +53,9 @@ export function validGeometry(
 
 /** Whether a `tmux -V` line ("tmux 3.3a") names a tmux with capture-pane
  * `-N`: the trailing-space flag the physical capture is load-bearing on
- * landed in 3.0a. Undefined when the version does not parse — an unnameable
- * version is not a reason to refuse, but a NAMED old one is. */
+ * landed in 3.1 — the whole 3.0 line, letters included, is too old.
+ * Undefined when the version does not parse — an unnameable version is not
+ * a reason to refuse, but a NAMED old one is. */
 export function tmuxSupportsCaptureN(versionLine: string): boolean | undefined {
   const m = /(\d+)\.(\d+)([a-z]*)/i.exec(versionLine);
   if (!m) return undefined;
