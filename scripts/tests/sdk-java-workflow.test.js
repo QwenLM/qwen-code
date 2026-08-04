@@ -15,6 +15,10 @@ describe('SDK Java self-hosted workflow guards', () => {
       "github.repository == ''QwenLM/qwen-code''",
       'github.event.pull_request.head.repo.full_name == github.repository',
       "vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true''",
+      // Write-access fork authors route to ECS too; the association list is
+      // the repo's established trusted set. Negative associations (CONTRIBUTOR,
+      // NONE, '') fail contains() and stay hosted.
+      'contains(fromJSON(\'\'["OWNER","MEMBER","COLLABORATOR"]\'\'), github.event.pull_request.author_association)',
       'fromJSON(\'\'["self-hosted", "linux", "x64", "ecs-qwen"]\'\')',
       "format('refs/pull/{0}/head', github.event.pull_request.number)",
       "EXPECTED_SHA: '${{ github.event.pull_request.head.sha }}'",
