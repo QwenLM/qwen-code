@@ -8,6 +8,7 @@ import {
   APPROVAL_MODES,
   type ApprovalMode,
   BTW_MAX_INPUT_LENGTH,
+  type CredentialStore,
   createDebugLogger,
   GROUP_COLOR_OPTIONS,
   Storage,
@@ -814,6 +815,7 @@ export class AcpDispatcher {
     private readonly sessionShellCommandEnabled: boolean = false,
     private readonly registry?: ConnectionRegistry,
     private readonly archiveCoordinator: SessionArchiveCoordinator = new SessionArchiveCoordinator(),
+    private readonly credentialStore?: CredentialStore,
     private readonly isWorkspaceTrusted: () => boolean = () => true,
     private readonly captureGenerationAssertion: () =>
       | (() => void)
@@ -2512,6 +2514,7 @@ export class AcpDispatcher {
           try {
             const workspaceTrusted = this.isWorkspaceTrusted();
             const settings = loadSettings(this.boundWorkspace, {
+              credentialStore: this.credentialStore,
               skipLoadEnvironment: true,
               skipWorkspaceSettings: !workspaceTrusted,
               workspaceTrusted,

@@ -123,33 +123,31 @@ describe('HookRunner', () => {
       expect(mockSpawn).toHaveBeenCalled();
     });
 
-    it('strips Qwen-internal daemon secrets from the hook child env (#6601)', async () => {
+    it('scrubs daemon secrets from the hook subprocess environment', async () => {
       const originalServerToken = process.env['QWEN_SERVER_TOKEN'];
       const originalDaemonToken = process.env['QWEN_DAEMON_TOKEN'];
-      process.env['QWEN_SERVER_TOKEN'] = 'serve-secret';
-      process.env['QWEN_DAEMON_TOKEN'] = 'daemon-secret';
+      const originalGhToken = process.env['GH_TOKEN'];
+      process.env['QWEN_SERVER_TOKEN'] = 'daemon-secret';
+      process.env['QWEN_DAEMON_TOKEN'] = 'daemon-token-secret';
+      process.env['GH_TOKEN'] = 'user-credential';
+      const mockProcess = createMockProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+
       try {
-        const mockProcess = createMockProcess(0, 'hello');
-        mockSpawn.mockImplementation(() => mockProcess);
-
-        const hookConfig: HookConfig = {
-          type: HookType.Command,
-          command: 'echo hello',
-          source: HooksConfigSource.Project,
-        };
-
         await hookRunner.executeHook(
-          hookConfig,
+          {
+            type: HookType.Command,
+            command: 'echo hello',
+            source: HooksConfigSource.Project,
+          },
           HookEventName.PreToolUse,
           createMockInput(),
         );
 
-        const spawnOptions = mockSpawn.mock.calls[0][2];
-        // A user-authored hook command is a child process launched on the
-        // agent's behalf; internal daemon secrets must not leak into it.
+        const spawnOptions = mockSpawn.mock.calls[0]![2];
         expect(spawnOptions.env['QWEN_SERVER_TOKEN']).toBeUndefined();
         expect(spawnOptions.env['QWEN_DAEMON_TOKEN']).toBeUndefined();
-        // Benign inherited env and the hook's own vars are still present.
+        expect(spawnOptions.env['GH_TOKEN']).toBe('user-credential');
         expect(spawnOptions.env['PATH']).toBeDefined();
         expect(spawnOptions.env['QWEN_PROJECT_DIR']).toBe('/test');
       } finally {
@@ -162,6 +160,11 @@ describe('HookRunner', () => {
           delete process.env['QWEN_DAEMON_TOKEN'];
         } else {
           process.env['QWEN_DAEMON_TOKEN'] = originalDaemonToken;
+        }
+        if (originalGhToken === undefined) {
+          delete process.env['GH_TOKEN'];
+        } else {
+          process.env['GH_TOKEN'] = originalGhToken;
         }
       }
     });

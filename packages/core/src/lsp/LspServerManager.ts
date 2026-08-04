@@ -33,6 +33,10 @@ import type {
 } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { lspServerConfigHash } from './configHash.js';
+import {
+  collectSensitiveShellEnvKeys,
+  scrubChildEnv,
+} from '../utils/child-env-scrub.js';
 
 const debugLogger = createDebugLogger('LSP');
 const SECURITY_SENSITIVE_ENV_KEYS = new Set([
@@ -748,12 +752,9 @@ export class LspServerManager {
 
   private buildProcessEnv(
     env: Record<string, string> | undefined,
-  ): NodeJS.ProcessEnv | undefined {
-    if (!env || Object.keys(env).length === 0) {
-      return undefined;
-    }
+  ): NodeJS.ProcessEnv {
     const filteredEnv: Record<string, string> = {};
-    for (const [key, value] of Object.entries(env)) {
+    for (const [key, value] of Object.entries(env ?? {})) {
       if (SECURITY_SENSITIVE_ENV_KEYS.has(key.toUpperCase())) {
         debugLogger.warn(
           `Ignoring security-sensitive LSP server env override: ${key}`,
@@ -762,7 +763,11 @@ export class LspServerManager {
       }
       filteredEnv[key] = value;
     }
-    return { ...process.env, ...filteredEnv };
+    return scrubChildEnv(
+      process.env,
+      collectSensitiveShellEnvKeys(process.env),
+      filteredEnv,
+    );
   }
 
   /**
@@ -776,12 +781,9 @@ export class LspServerManager {
    */
   private buildCommandProbeEnv(
     env: Record<string, string> | undefined,
-  ): NodeJS.ProcessEnv | undefined {
-    if (!env || Object.keys(env).length === 0) {
-      return undefined;
-    }
+  ): NodeJS.ProcessEnv {
     const filteredEnv: Record<string, string> = {};
-    for (const [key, value] of Object.entries(env)) {
+    for (const [key, value] of Object.entries(env ?? {})) {
       const normalizedKey = key.toUpperCase();
       if (
         normalizedKey === 'PATH' ||
@@ -794,7 +796,11 @@ export class LspServerManager {
       }
       filteredEnv[key] = value;
     }
-    return { ...process.env, ...filteredEnv };
+    return scrubChildEnv(
+      process.env,
+      collectSensitiveShellEnvKeys(process.env),
+      filteredEnv,
+    );
   }
 
   private async connectSocketWithRetry(

@@ -5,6 +5,7 @@
  */
 
 import type { Application, Request, Response } from 'express';
+import type { CredentialStore } from '@qwen-code/qwen-code-core';
 import { loadSettings, SettingScope } from '../../config/settings.js';
 import {
   redactMcpServersSetting,
@@ -110,9 +111,11 @@ function getAllowedKeys(): Set<string> {
 function buildSettingsResponse(
   boundWorkspace: string,
   keys: ReadonlySet<string>,
+  credentialStore?: CredentialStore,
   workspaceTrusted = true,
 ): SettingsResponse {
   const loaded = loadSettings(boundWorkspace, {
+    credentialStore,
     skipLoadEnvironment: true,
     skipWorkspaceSettings: !workspaceTrusted,
     workspaceTrusted,
@@ -183,6 +186,7 @@ function prepareSettingWrite(
   key: string,
   value: unknown,
   mcpServerMutation?: McpServerSettingMutation,
+  credentialStore?: CredentialStore,
   workspaceTrusted = true,
 ): { persistedValue: unknown; publicValue: unknown } {
   if (key !== 'mcpServers') {
@@ -190,6 +194,7 @@ function prepareSettingWrite(
   }
   const existing =
     loadSettings(workspace, {
+      credentialStore,
       skipLoadEnvironment: true,
       skipWorkspaceSettings: !workspaceTrusted,
       workspaceTrusted,
@@ -276,6 +281,7 @@ export interface WorkspaceSettingsRouteDeps {
     req: Request,
     res: Response,
   ) => string | undefined | null;
+  credentialStore?: CredentialStore;
 }
 
 export function registerWorkspaceSettingsRoutes(
@@ -289,6 +295,7 @@ export function registerWorkspaceSettingsRoutes(
     persistSetting,
     broadcastSettingsChanged,
     parseAndValidateClientId,
+    credentialStore,
   } = deps;
 
   const allowedKeys = getAllowedKeys();
@@ -301,6 +308,7 @@ export function registerWorkspaceSettingsRoutes(
       const response = buildSettingsResponse(
         boundWorkspace,
         allowedKeys,
+        credentialStore,
         deps.isWorkspaceTrusted?.() ?? true,
       );
       res.status(200).json(response);
@@ -420,6 +428,7 @@ export function registerWorkspaceSettingsRoutes(
             key,
             value,
             mcpServerMutation,
+            credentialStore,
             deps.isWorkspaceTrusted?.() ?? true,
           );
           publicValue = prepared.publicValue;
@@ -493,7 +502,7 @@ export function registerWorkspaceQualifiedSettingsRoutes(
   app: Application,
   deps: Pick<
     WorkspaceSettingsRouteDeps,
-    'mutate' | 'safeBody' | 'persistSetting'
+    'mutate' | 'safeBody' | 'persistSetting' | 'credentialStore'
   > & {
     workspaceRegistry: WorkspaceRegistry;
     invalidateServeFeaturesCache: () => void;
@@ -512,7 +521,11 @@ export function registerWorkspaceQualifiedSettingsRoutes(
     // the Phase 3 core-route trust gate.
     if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
     try {
-      const response = buildSettingsResponse(runtime.workspaceCwd, allowedKeys);
+      const response = buildSettingsResponse(
+        runtime.workspaceCwd,
+        allowedKeys,
+        deps.credentialStore,
+      );
       res.status(200).json(response);
     } catch (err) {
       writeStderrLine(
@@ -625,6 +638,7 @@ export function registerWorkspaceQualifiedSettingsRoutes(
             key,
             value,
             mcpServerMutation,
+            deps.credentialStore,
             true,
           );
           publicValue = prepared.publicValue;

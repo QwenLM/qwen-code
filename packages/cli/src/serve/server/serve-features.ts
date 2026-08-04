@@ -11,6 +11,7 @@ import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { resolveAcpHttpEnabled } from '../acp-http-enabled.js';
 import { getAdvertisedServeFeatures } from '../capabilities.js';
 import { isBrowserAutomationMcpAvailable } from '../cdp-mcp-command.js';
+import type { CredentialStore } from '@qwen-code/qwen-code-core';
 import type { ServeOptions } from '../types.js';
 
 // Keep in sync with acp-bridge bridge.ts and SDK DaemonClient.ts.
@@ -58,6 +59,7 @@ interface CreateServeFeaturesDeps {
   workspaceTrustHotReloadAvailable?: boolean;
   isPrimaryWorkspaceTrusted?: () => boolean;
   env?: Readonly<Record<string, string | undefined>>;
+  credentialStore?: CredentialStore;
   getEnv?: () => Readonly<Record<string, string | undefined>>;
 }
 
@@ -89,6 +91,7 @@ export function createServeFeatures(
     workspaceRuntimeRemovalAvailable,
     workspaceTrustHotReloadAvailable,
   } = deps;
+  const credentialStore = deps.credentialStore;
   const getEnv = deps.getEnv ?? (() => deps.env ?? process.env);
   let cachedVoiceTranscriptionAvailable: boolean | undefined;
   const invalidateServeFeaturesCache = () => {
@@ -98,6 +101,7 @@ export function createServeFeatures(
     cachedVoiceTranscriptionAvailable ??=
       isWorkspaceVoiceTranscriptionAvailable(
         boundWorkspace,
+        credentialStore,
         getEnv(),
         deps.env !== undefined || deps.getEnv !== undefined,
         deps.isPrimaryWorkspaceTrusted?.() ?? true,
@@ -158,6 +162,7 @@ export function createServeFeatures(
 
 function isWorkspaceVoiceTranscriptionAvailable(
   boundWorkspace: string,
+  credentialStore: CredentialStore | undefined,
   env: Readonly<Record<string, string | undefined>>,
   skipLoadEnvironment: boolean,
   workspaceTrusted: boolean,
@@ -165,6 +170,7 @@ function isWorkspaceVoiceTranscriptionAvailable(
   try {
     return hasConfiguredBatchVoiceTranscriptionModel(
       loadSettings(boundWorkspace, {
+        credentialStore,
         skipLoadEnvironment: skipLoadEnvironment || !workspaceTrusted,
         skipWorkspaceSettings: !workspaceTrusted,
         workspaceTrusted,

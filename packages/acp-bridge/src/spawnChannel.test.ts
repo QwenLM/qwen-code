@@ -69,6 +69,7 @@ describe('createSpawnChannelFactory env policy', () => {
   const originalArgv1 = process.argv[1];
   let originalSimple: string | undefined;
   let originalServerToken: string | undefined;
+  let originalDaemonToken: string | undefined;
   let originalCliEntry: string | undefined;
   let originalRuntimeOnlyForTest: string | undefined;
 
@@ -76,11 +77,13 @@ describe('createSpawnChannelFactory env policy', () => {
     mockSpawn.mockReset();
     originalSimple = process.env['QWEN_CODE_SIMPLE'];
     originalServerToken = process.env['QWEN_SERVER_TOKEN'];
+    originalDaemonToken = process.env['QWEN_DAEMON_TOKEN'];
     originalCliEntry = process.env['QWEN_CLI_ENTRY'];
     originalRuntimeOnlyForTest = process.env['RUNTIME_ONLY_FOR_TEST'];
     process.argv[1] = '/tmp/qwen.js';
     process.env['QWEN_CODE_SIMPLE'] = '1';
     process.env['QWEN_SERVER_TOKEN'] = 'secret';
+    process.env['QWEN_DAEMON_TOKEN'] = 'daemon-secret';
   });
 
   afterEach(() => {
@@ -94,6 +97,11 @@ describe('createSpawnChannelFactory env policy', () => {
       delete process.env['QWEN_SERVER_TOKEN'];
     } else {
       process.env['QWEN_SERVER_TOKEN'] = originalServerToken;
+    }
+    if (originalDaemonToken === undefined) {
+      delete process.env['QWEN_DAEMON_TOKEN'];
+    } else {
+      process.env['QWEN_DAEMON_TOKEN'] = originalDaemonToken;
     }
     if (originalCliEntry === undefined) {
       delete process.env['QWEN_CLI_ENTRY'];
@@ -114,6 +122,7 @@ describe('createSpawnChannelFactory env policy', () => {
     await factory('/tmp/project', {
       QWEN_CODE_SIMPLE: '1',
       QWEN_SERVER_TOKEN: 'override-secret',
+      QWEN_DAEMON_TOKEN: 'override-daemon-secret',
     });
 
     const spawnOptions = mockSpawn.mock.calls[0]?.[2] as
@@ -121,7 +130,28 @@ describe('createSpawnChannelFactory env policy', () => {
       | undefined;
     expect(spawnOptions?.env).not.toHaveProperty('QWEN_CODE_SIMPLE');
     expect(spawnOptions?.env).not.toHaveProperty('QWEN_SERVER_TOKEN');
+    expect(spawnOptions?.env).not.toHaveProperty('QWEN_DAEMON_TOKEN');
     expect(spawnOptions?.env?.['QWEN_CODE_NO_RELAUNCH']).toBe('true');
+  });
+
+  it('scrubs mixed-case daemon tokens on Windows', async () => {
+    const platformSpy = vi
+      .spyOn(process, 'platform', 'get')
+      .mockReturnValue('win32');
+    mockSpawn.mockReturnValue(createFakeChildProcess());
+    try {
+      const factory = createSpawnChannelFactory({
+        sourceEnv: { qwen_daemon_token: 'secret' },
+      });
+      await factory('/tmp/project', { Qwen_Daemon_Token: 'override-secret' });
+      const spawnOptions = mockSpawn.mock.calls[0]?.[2] as
+        | { env?: NodeJS.ProcessEnv }
+        | undefined;
+      expect(spawnOptions?.env).not.toHaveProperty('qwen_daemon_token');
+      expect(spawnOptions?.env).not.toHaveProperty('Qwen_Daemon_Token');
+    } finally {
+      platformSpy.mockRestore();
+    }
   });
 
   it('passes optional child args after --acp', async () => {
@@ -158,6 +188,70 @@ describe('createSpawnChannelFactory env policy', () => {
     expect(args).not.toContain('/process/qwen.js');
     expect(spawnOptions?.env?.['RUNTIME_ONLY_FOR_TEST']).toBe('from-runtime');
     expect(spawnOptions?.env).not.toHaveProperty('QWEN_SERVER_TOKEN');
+  });
+
+  it('sourceEnv function is re-invoked on each spawn (dynamic credential updates)', async () => {
+    // The daemon passes a function so credentialStore.snapshot() is
+    // re-read at spawn time, not frozen at factory creation time.
+    mockSpawn.mockReturnValue(createFakeChildProcess());
+    process.env['QWEN_CLI_ENTRY'] = '/qwen.js';
+
+    const dynamicEnv: Record<string, string> = {
+      QWEN_CLI_ENTRY: '/qwen.js',
+      QWEN_CUSTOM_API_KEY_FOO: 'initial-key',
+    };
+    const factory = createSpawnChannelFactory({
+      sourceEnv: () => ({ ...dynamicEnv }),
+    });
+
+    // First spawn sees the initial key.
+    await factory('/tmp/project');
+    let spawnOptions = mockSpawn.mock.calls[0]?.[2] as
+      | { env?: NodeJS.ProcessEnv }
+      | undefined;
+    expect(spawnOptions?.env?.['QWEN_CUSTOM_API_KEY_FOO']).toBe('initial-key');
+
+    // Mutate the env (simulating credential store update after reload/install).
+    dynamicEnv['QWEN_CUSTOM_API_KEY_FOO'] = 'updated-key';
+    dynamicEnv['QWEN_CUSTOM_API_KEY_NEW'] = 'late-key';
+
+    // Second spawn sees the updated values — NOT the initial snapshot.
+    await factory('/tmp/project');
+    spawnOptions = mockSpawn.mock.calls[1]?.[2] as
+      | { env?: NodeJS.ProcessEnv }
+      | undefined;
+    expect(spawnOptions?.env?.['QWEN_CUSTOM_API_KEY_FOO']).toBe('updated-key');
+    expect(spawnOptions?.env?.['QWEN_CUSTOM_API_KEY_NEW']).toBe('late-key');
+  });
+
+  it('sourceEnv function sees credential deletion between spawns', async () => {
+    mockSpawn.mockReturnValue(createFakeChildProcess());
+    process.env['QWEN_CLI_ENTRY'] = '/qwen.js';
+
+    const dynamicEnv: Record<string, string> = {
+      QWEN_CLI_ENTRY: '/qwen.js',
+      QWEN_CUSTOM_API_KEY_BAR: 'to-be-deleted',
+    };
+    const factory = createSpawnChannelFactory({
+      sourceEnv: () => ({ ...dynamicEnv }),
+    });
+
+    await factory('/tmp/project');
+    let spawnOptions = mockSpawn.mock.calls[0]?.[2] as
+      | { env?: NodeJS.ProcessEnv }
+      | undefined;
+    expect(spawnOptions?.env?.['QWEN_CUSTOM_API_KEY_BAR']).toBe(
+      'to-be-deleted',
+    );
+
+    // Simulate credential deletion (e.g. provider uninstall).
+    delete dynamicEnv['QWEN_CUSTOM_API_KEY_BAR'];
+
+    await factory('/tmp/project');
+    spawnOptions = mockSpawn.mock.calls[1]?.[2] as
+      | { env?: NodeJS.ProcessEnv }
+      | undefined;
+    expect(spawnOptions?.env).not.toHaveProperty('QWEN_CUSTOM_API_KEY_BAR');
   });
 
   it('threads NDJSON pipe hooks through daemon-side spawned channels', async () => {

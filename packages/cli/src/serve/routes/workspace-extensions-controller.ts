@@ -10,6 +10,7 @@ import {
   redactUrlCredentials,
   stripAnsiAndControl,
   type ClaudeMarketplaceConfig,
+  type CredentialStore,
   type ExtensionSetting,
 } from '@qwen-code/qwen-code-core';
 import type { Request, Response } from 'express';
@@ -188,6 +189,12 @@ export interface CreateExtensionsControllerDeps {
   bridge: AcpSessionBridge;
   workspace: DaemonWorkspaceService;
   maxExtensionOperationHistory?: number;
+  /**
+   * Credential store for `QWEN_CUSTOM_API_KEY_*` redirection when the daemon
+   * loads workspace settings. Passing it keeps custom keys routed to the store
+   * instead of `process.env`, so they stay OS-invisible after scrub.
+   */
+  credentialStore?: CredentialStore;
   isWorkspaceTrusted?: () => boolean;
   captureGenerationAssertion?: () => (() => void) | undefined;
 }
@@ -255,7 +262,7 @@ export interface ExtensionsController {
 export function createExtensionsController(
   deps: CreateExtensionsControllerDeps,
 ): ExtensionsController {
-  const { boundWorkspace, bridge, workspace } = deps;
+  const { boundWorkspace, bridge, workspace, credentialStore } = deps;
   const maxExtensionOperationHistory = deps.maxExtensionOperationHistory ?? 100;
 
   const preparationQueue = createFifoTaskQueue(
@@ -292,8 +299,10 @@ export function createExtensionsController(
       locale: resolveExtensionLocale(workspaceDir, workspaceTrusted),
       isWorkspaceTrusted:
         workspaceTrusted ??
-        getWorkspaceTrustStatus(loadSettings(workspaceDir).merged, workspaceDir)
-          .effective.state === 'trusted',
+        getWorkspaceTrustStatus(
+          loadSettings(workspaceDir, { credentialStore }).merged,
+          workspaceDir,
+        ).effective.state === 'trusted',
       requestConsent: () => Promise.resolve(),
       networkPolicy: 'public',
       requestSetting:

@@ -692,6 +692,35 @@ describe('MonitorTool', () => {
       expect(result.returnDisplay).toContain('watch app logs');
     });
 
+    it('scrubs daemon secrets from the monitor subprocess environment', async () => {
+      const originalServerToken = process.env['QWEN_SERVER_TOKEN'];
+      const originalGhToken = process.env['GH_TOKEN'];
+      process.env['QWEN_SERVER_TOKEN'] = 'daemon-secret';
+      process.env['GH_TOKEN'] = 'user-credential';
+      const invocation = createInvocation({
+        command: 'tail -f /var/log/app.log',
+      });
+
+      try {
+        await invocation.execute(new AbortController().signal);
+
+        const spawnOptions = mockSpawn.mock.calls[0]![2];
+        expect(spawnOptions.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+        expect(spawnOptions.env['GH_TOKEN']).toBe('user-credential');
+      } finally {
+        if (originalServerToken === undefined) {
+          delete process.env['QWEN_SERVER_TOKEN'];
+        } else {
+          process.env['QWEN_SERVER_TOKEN'] = originalServerToken;
+        }
+        if (originalGhToken === undefined) {
+          delete process.env['GH_TOKEN'];
+        } else {
+          process.env['GH_TOKEN'] = originalGhToken;
+        }
+      }
+    });
+
     it('uses default pager env for spawned processes when pager is unset', async () => {
       const invocation = createInvocation({
         command: 'tail -f /var/log/app.log',

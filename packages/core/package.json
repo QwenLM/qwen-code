@@ -13,6 +13,10 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./credentials": {
+      "types": "./dist/src/models/credential-provider.d.ts",
+      "import": "./dist/src/models/credential-provider.js"
+    },
     "./transcriptRecords": {
       "types": "./dist/src/utils/transcript-records.d.ts",
       "import": "./dist/src/utils/transcript-records.js"

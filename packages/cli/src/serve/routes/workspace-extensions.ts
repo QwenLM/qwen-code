@@ -9,6 +9,7 @@ import {
   parseInstallSource,
   redactUrlCredentials,
   SettingScope,
+  type CredentialStore,
   type Extension,
   type ExtensionInstallMetadata,
   type ExtensionManager,
@@ -171,6 +172,7 @@ interface RegisterWorkspaceExtensionRoutesDeps {
   safeBody: SafeBody;
   sendBridgeError: SendBridgeError;
   maxExtensionOperationHistory?: number;
+  credentialStore?: CredentialStore;
   isWorkspaceTrusted?: () => boolean;
   captureGenerationAssertion?: () => (() => void) | undefined;
   // Enables V2 workspace projection and targeted reconciliation routes.
@@ -199,6 +201,7 @@ export function registerWorkspaceExtensionRoutes(
     mutate,
     safeBody,
     sendBridgeError,
+    credentialStore,
     workspaceRegistry,
   } = deps;
   const maxExtensionOperationHistory = deps.maxExtensionOperationHistory;
@@ -217,6 +220,7 @@ export function registerWorkspaceExtensionRoutes(
       boundWorkspace: ws,
       bridge: wsBridge,
       workspace: wsService,
+      credentialStore,
       ...(isWorkspaceTrusted ? { isWorkspaceTrusted } : {}),
       ...(ws === boundWorkspace && deps.captureGenerationAssertion
         ? { captureGenerationAssertion: deps.captureGenerationAssertion }

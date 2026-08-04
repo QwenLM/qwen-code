@@ -152,6 +152,7 @@ export class SleepInhibitor {
   private probeNoAskPassword(callback: () => void): void {
     try {
       const probe = this.spawn('systemd-inhibit', ['--help'], {
+        env: this.getSpawnEnv(),
         stdio: ['ignore', 'pipe', 'pipe'],
       });
       let output = '';

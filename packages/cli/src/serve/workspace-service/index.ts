@@ -215,6 +215,7 @@ export function createDaemonWorkspaceService(
     isWorkspaceTrusted,
     assertGenerationOpen,
     contextFilename,
+    credentialStore,
     statusProvider,
     workspaceProvidersStatusProvider,
     workspaceSkillsStatusProvider,
@@ -233,9 +234,13 @@ export function createDaemonWorkspaceService(
     publishWorkspaceEvent,
   } = deps;
 
-  const loadBoundSettings = (skipLoadEnvironment = false) => {
+  const loadBoundSettings = (
+    skipLoadEnvironment = false,
+    credentialStoreOverride?: typeof credentialStore,
+  ) => {
     const workspaceTrusted = isWorkspaceTrusted();
     return loadSettings(boundWorkspace, {
+      credentialStore: credentialStoreOverride,
       skipLoadEnvironment: skipLoadEnvironment || !workspaceTrusted,
       skipWorkspaceSettings: !workspaceTrusted,
       workspaceTrusted,
@@ -622,19 +627,19 @@ export function createDaemonWorkspaceService(
 
     async getWorkspaceTrustStatus(_ctx: WorkspaceRequestContext) {
       return getWorkspaceTrustStatus(
-        loadBoundSettings(true).merged,
+        loadBoundSettings(true, credentialStore).merged,
         boundWorkspace,
       );
     },
 
     async getWorkspacePermissionsStatus(_ctx: WorkspaceRequestContext) {
-      return buildPermissionSettings(loadBoundSettings());
+      return buildPermissionSettings(loadBoundSettings(false, credentialStore));
     },
 
     async getWorkspaceVoiceStatus(_ctx: WorkspaceRequestContext) {
       return buildWorkspaceVoiceStatus(
         boundWorkspace,
-        loadBoundSettings(Boolean(voiceEnv)),
+        loadBoundSettings(Boolean(voiceEnv), credentialStore),
       );
     },
 
@@ -705,8 +710,12 @@ export function createDaemonWorkspaceService(
         );
       }
 
-      const settings = loadBoundSettings(Boolean(voiceEnv));
-      validateWorkspaceVoiceState(settings, request, { env: voiceEnv });
+      const settings = loadBoundSettings(Boolean(voiceEnv), credentialStore);
+      validateWorkspaceVoiceState(settings, request, {
+        env: credentialStore
+          ? { ...(voiceEnv ?? {}), ...credentialStore.snapshot() }
+          : voiceEnv,
+      });
       const writes = buildWorkspaceVoiceSettingsWrites(settings, request, {
         workspaceTrusted: isWorkspaceTrusted(),
         ...(voiceSettingsScope ? { scopeOverride: voiceSettingsScope } : {}),
@@ -778,7 +787,7 @@ export function createDaemonWorkspaceService(
 
       return buildWorkspaceVoiceStatus(
         boundWorkspace,
-        loadBoundSettings(Boolean(voiceEnv)),
+        loadBoundSettings(Boolean(voiceEnv), credentialStore),
       );
     },
 
@@ -828,9 +837,9 @@ export function createDaemonWorkspaceService(
         skill.disabledReason === undefined;
       const disabledBySettings =
         needsLegacyInactiveCheck &&
-        resolveSkillSettings(loadBoundSettings(true)).disabledNames.has(
-          normalizedName,
-        );
+        resolveSkillSettings(
+          loadBoundSettings(true, credentialStore),
+        ).disabledNames.has(normalizedName);
       if (
         skill.level === 'extension' &&
         skill.status === 'disabled' &&

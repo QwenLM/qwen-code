@@ -9,6 +9,7 @@ import type { Application } from 'express';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
 import {
   hashDaemonWorkspace,
+  type CredentialStore,
   Storage,
   type DurableCronTask,
 } from '@qwen-code/qwen-code-core';
@@ -368,6 +369,19 @@ function getRuntimeEffectiveEnv(
   return metadata.effectiveEnv ?? {};
 }
 
+/**
+ * Merge credential store snapshot into an env object. The daemon scrubs
+ * QWEN_CUSTOM_API_KEY_* from process.env; this restores them for paths that
+ * resolve credentials from an env object (voice transcription). Store wins.
+ */
+function mergeCredentialStore(
+  env: Readonly<Record<string, string | undefined>> | undefined,
+  store?: CredentialStore,
+): Record<string, string | undefined> | undefined {
+  if (!store) return env;
+  return { ...(env ?? {}), ...store.snapshot() };
+}
+
 export interface ServeAppDeps {
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
   bridge?: AcpSessionBridge;
@@ -546,6 +560,14 @@ export interface ServeAppDeps {
   primaryRuntimeEnv?: WorkspaceRuntimeEnvMetadata;
   daemonEnv?: Readonly<NodeJS.ProcessEnv>;
   voiceTranscriber?: WorkspaceVoiceRouteDeps['transcribe'];
+  /**
+   * Daemon-private credential store. Used to inject QWEN_CUSTOM_API_KEY_*
+   * into the voice transcription path (which resolves credentials from an
+   * env object, not ModelsConfig.credentialProvider). When omitted, voice
+   * falls back to the effective runtime env (which may lack custom keys
+   * after daemon scrub).
+   */
+  credentialStore?: CredentialStore;
   voiceCoordinator?: WorkspaceVoiceCoordinator;
 }
 
@@ -887,6 +909,7 @@ export function createServeApp(
         : primaryEffectiveEnv
           ? { env: primaryEffectiveEnv }
           : {}),
+      credentialStore: deps.credentialStore,
     });
   (
     app.locals as {
@@ -1541,6 +1564,7 @@ export function createServeApp(
     mutate,
     safeBody,
     sendBridgeError,
+    credentialStore: deps.credentialStore,
     workspaceRegistry,
     ...(primaryRuntimeTrustAuthoritative
       ? { isWorkspaceTrusted: isPrimaryWorkspaceTrusted }
@@ -1664,6 +1688,7 @@ export function createServeApp(
       broadcastSettingsChanged,
       parseAndValidateClientId: (req, res) =>
         parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+      credentialStore: deps.credentialStore,
     });
     registerWorkspaceQualifiedSettingsRoutes(app, {
       workspaceRegistry,
@@ -1673,6 +1698,7 @@ export function createServeApp(
         await persistSetting(...args);
       },
       invalidateServeFeaturesCache,
+      credentialStore: deps.credentialStore,
     });
   }
   registerWorkspacePermissionsRoutes(app, {
@@ -1684,11 +1710,13 @@ export function createServeApp(
     workspace: primaryWorkspace,
     parseAndValidateClientId: (req, res) =>
       parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+    credentialStore: deps.credentialStore,
   });
   registerWorkspaceQualifiedPermissionsRoutes(app, {
     workspaceRegistry,
     mutate,
     safeBody,
+    credentialStore: deps.credentialStore,
   });
   registerWorkspaceVoiceRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
@@ -1697,7 +1725,6 @@ export function createServeApp(
     persistSetting: deps.persistSetting,
     persistSettings: deps.persistSettings,
     transcribe: deps.voiceTranscriber,
-    env: primaryRuntimeEffectiveEnv,
     captureGenerationAssertion: capturePrimaryGenerationAssertion,
     acquireVoiceLease: acquirePrimaryVoiceLease,
     ...(primaryRuntimeTrustAuthoritative
@@ -1706,6 +1733,11 @@ export function createServeApp(
     broadcastSettingsChanged,
     parseAndValidateClientId: (req, res) =>
       parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+    env: mergeCredentialStore(
+      getRuntimeEffectiveEnv(primaryRuntime.env),
+      deps.credentialStore,
+    ),
+    credentialStore: deps.credentialStore,
   });
   registerWorkspaceQualifiedVoiceRoutes(app, {
     workspaceRegistry,
@@ -1718,6 +1750,7 @@ export function createServeApp(
     parseAndValidateClientId: (req, res, runtime) =>
       parseAndValidateWorkspaceClientId(req, res, runtime.bridge),
     invalidateServeFeaturesCache,
+    credentialStore: deps.credentialStore,
   });
   if (deps.persistSettings) {
     registerWorkspaceModelsRoutes(app, {
@@ -1730,6 +1763,7 @@ export function createServeApp(
       broadcastSettingsChanged,
       parseAndValidateClientId: (req, res) =>
         parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+      credentialStore: deps.credentialStore,
     });
   }
 
@@ -2131,6 +2165,7 @@ export function createServeApp(
     hostname: opts.hostname,
     sessionShellCommandEnabled,
     workspaceRememberLane,
+    credentialStore: deps.credentialStore,
     checkRate: rateLimiter?.checkRate,
     clientMcpOverWs: opts.clientMcpOverWs === true,
     // Reverse tool channel (issue #5626, Phase 2). Per-connection provider:
@@ -2159,7 +2194,11 @@ export function createServeApp(
       {
         path: '/voice/stream',
         onConnection: createVoiceWsConnectionHandler(primaryBoundWorkspace, {
-          env: primaryRuntimeEffectiveEnv,
+          env: mergeCredentialStore(
+            getRuntimeEffectiveEnv(primaryRuntime.env),
+            deps.credentialStore,
+          ),
+          credentialStore: deps.credentialStore,
           isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
           acquireVoiceLease: acquirePrimaryVoiceLease,
         }),
@@ -2167,7 +2206,11 @@ export function createServeApp(
     ],
     workspaceVoiceConnection: (runtime, ws, req) =>
       createVoiceWsConnectionHandler(runtime.workspaceCwd, {
-        env: getRuntimeEffectiveEnv(runtime.env),
+        env: mergeCredentialStore(
+          getRuntimeEffectiveEnv(runtime.env),
+          deps.credentialStore,
+        ),
+        credentialStore: deps.credentialStore,
         isWorkspaceTrusted: () => runtime.trusted,
         acquireVoiceLease: () => voiceCoordinator.acquire(runtime),
       })(ws, req),

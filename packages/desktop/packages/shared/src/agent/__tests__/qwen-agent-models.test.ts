@@ -8,6 +8,7 @@ import type { ModelDefinition } from '../../config/models.ts';
 import type { BackendConfig } from '../backend/types.ts';
 import {
   QwenAgent,
+  buildQwenAcpEnv,
   extractQwenParentToolUseId,
   formatQwenAcpErrorMessage,
   resolveQwenParentToolUseId,
@@ -117,6 +118,34 @@ describe('QwenAgent ACP error formatting', () => {
 });
 
 describe('QwenAgent model metadata', () => {
+  it('scrubs daemon credentials from ACP child env while preserving provider keys', () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-agent-env-'));
+    const originalEnv = process.env;
+    process.env = {
+      ...originalEnv,
+      QWEN_SERVER_TOKEN: 'server-token',
+      QWEN_DAEMON_TOKEN: 'daemon-token',
+      QWEN_CODE_SIMPLE: '1',
+      OPENAI_API_KEY: 'provider-key',
+      GH_TOKEN: 'github-token',
+      CRAFT_SESSION_DIR: '/tmp/session',
+      SAFE_VAR: 'ok',
+    };
+    try {
+      const env = buildQwenAcpEnv('qwen', [], {});
+
+      expect(env.QWEN_SERVER_TOKEN).toBeUndefined();
+      expect(env.QWEN_DAEMON_TOKEN).toBeUndefined();
+      expect(env.QWEN_CODE_SIMPLE).toBeUndefined();
+      expect(env.CRAFT_SESSION_DIR).toBeUndefined();
+      expect(env.OPENAI_API_KEY).toBe('provider-key');
+      expect(env.GH_TOKEN).toBe('github-token');
+      expect(env.SAFE_VAR).toBe('ok');
+    } finally {
+      process.env = originalEnv;
+    }
+  });
+
   it('extracts subagent parent metadata from Qwen ACP updates', () => {
     expect(
       extractQwenParentToolUseId({

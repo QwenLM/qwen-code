@@ -5,6 +5,7 @@
  */
 
 import type { Application, Request, Response } from 'express';
+import type { CredentialStore } from '@qwen-code/qwen-code-core';
 import {
   buildPermissionSettings,
   isPermissionRuleType,
@@ -37,6 +38,7 @@ export interface WorkspacePermissionsRouteDeps {
     req: Request,
     res: Response,
   ) => string | undefined | null;
+  credentialStore?: CredentialStore;
 }
 
 export function registerWorkspacePermissionsRoutes(
@@ -49,6 +51,7 @@ export function registerWorkspacePermissionsRoutes(
     safeBody,
     workspace,
     parseAndValidateClientId,
+    credentialStore,
   } = deps;
 
   app.get('/workspace/permissions', (_req: Request, res: Response) => {
@@ -60,6 +63,7 @@ export function registerWorkspacePermissionsRoutes(
       res.status(200).json(
         buildPermissionSettings(
           loadSettings(boundWorkspace, {
+            credentialStore,
             skipLoadEnvironment: true,
             skipWorkspaceSettings: workspaceTrusted === false,
             workspaceTrusted,
@@ -127,6 +131,7 @@ export function registerWorkspacePermissionsRoutes(
       try {
         const workspaceTrusted = deps.isWorkspaceTrusted?.();
         const settings = loadSettings(boundWorkspace, {
+          credentialStore,
           skipLoadEnvironment: true,
           skipWorkspaceSettings: workspaceTrusted === false,
           workspaceTrusted,
@@ -192,7 +197,10 @@ export function registerWorkspacePermissionsRoutes(
 
 export function registerWorkspaceQualifiedPermissionsRoutes(
   app: Application,
-  deps: Pick<WorkspacePermissionsRouteDeps, 'mutate' | 'safeBody'> & {
+  deps: Pick<
+    WorkspacePermissionsRouteDeps,
+    'mutate' | 'safeBody' | 'credentialStore'
+  > & {
     workspaceRegistry: WorkspaceRegistry;
   },
 ): void {
@@ -204,13 +212,14 @@ export function registerWorkspaceQualifiedPermissionsRoutes(
     );
     if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
     try {
-      res
-        .status(200)
-        .json(
-          buildPermissionSettings(
-            loadSettings(runtime.workspaceCwd, { workspaceTrusted: true }),
-          ),
-        );
+      res.status(200).json(
+        buildPermissionSettings(
+          loadSettings(runtime.workspaceCwd, {
+            credentialStore: deps.credentialStore,
+            workspaceTrusted: true,
+          }),
+        ),
+      );
     } catch (err) {
       writeStderrLine(
         `qwen serve: GET /workspaces/:workspace/permissions error: ${
@@ -259,6 +268,7 @@ export function registerWorkspaceQualifiedPermissionsRoutes(
       let rules: string[];
       try {
         const settings = loadSettings(runtime.workspaceCwd, {
+          credentialStore: deps.credentialStore,
           workspaceTrusted: true,
         });
         const existingRules = readPermissionRuleSet(

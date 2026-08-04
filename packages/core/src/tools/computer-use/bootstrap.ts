@@ -39,6 +39,10 @@ import type { ComputerUseClient } from './client.js';
 import { isPackageSpecApproved, saveInstallState } from './install-state.js';
 import { approvalKey, binaryPath } from './constants.js';
 import { ensureInstalled } from './downloader.js';
+import {
+  collectSensitiveShellEnvKeys,
+  scrubChildEnv,
+} from '../../utils/child-env-scrub.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -117,6 +121,10 @@ function killServeDaemons(): void {
       'pkill',
       ['-f', 'CuaDriver.app/Contents/MacOS/cua-driver serve'],
       {
+        env: scrubChildEnv(
+          process.env,
+          collectSensitiveShellEnvKeys(process.env),
+        ),
         stdio: 'ignore',
       },
     );
@@ -136,7 +144,13 @@ export async function probePermissionsViaStatus(): Promise<PermissionProbeResult
     const { stdout } = await execFileAsync(
       binaryPath(homedir()),
       ['permissions', 'status', '--json'],
-      { timeout: 10_000, env: process.env as NodeJS.ProcessEnv },
+      {
+        timeout: 10_000,
+        env: scrubChildEnv(
+          process.env,
+          collectSensitiveShellEnvKeys(process.env),
+        ),
+      },
     );
     return parsePermissionsStatus(stdout);
   } catch {
@@ -164,7 +178,13 @@ export function startStatusDaemonProcess(): StatusDaemon {
         'serve',
         '--no-permissions-gate',
       ],
-      { stdio: 'ignore' },
+      {
+        env: scrubChildEnv(
+          process.env,
+          collectSensitiveShellEnvKeys(process.env),
+        ),
+        stdio: 'ignore',
+      },
     );
   } catch {
     // ignore — the poll loop reports 'unknown' and retries.
@@ -184,7 +204,13 @@ export function openPermissionPaneProcess(
     spawnSync(
       'open',
       [`x-apple.systempreferences:com.apple.preference.security?${anchor}`],
-      { stdio: 'ignore' },
+      {
+        env: scrubChildEnv(
+          process.env,
+          collectSensitiveShellEnvKeys(process.env),
+        ),
+        stdio: 'ignore',
+      },
     );
   } catch {
     // ignore — the message still tells the user where to go.

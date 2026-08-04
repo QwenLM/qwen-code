@@ -415,6 +415,7 @@ describe('editor utils', () => {
           {
             stdio: 'inherit',
             shell: process.platform === 'win32',
+            env: expect.any(Object),
           },
         );
         expect(mockSpawnOn).toHaveBeenCalledWith('close', expect.any(Function));
@@ -470,6 +471,7 @@ describe('editor utils', () => {
           {
             stdio: 'inherit',
             shell: false,
+            env: expect.any(Object),
           },
         );
       });
@@ -521,6 +523,7 @@ describe('editor utils', () => {
           diffCommand.args,
           {
             stdio: 'inherit',
+            env: expect.any(Object),
           },
         );
       });

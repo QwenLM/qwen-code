@@ -48,3 +48,16 @@ export {
   type ModelConfigResolutionResult,
   type ModelConfigValidationResult,
 } from './modelConfigResolver.js';
+
+export {
+  type CredentialProvider,
+  type CredentialStore,
+  createCredentialStore,
+  createCredentialProvider,
+  defaultCredentialProvider,
+  resolveCredential,
+  isCustomCredentialKey,
+  readEnvKey,
+  writeEnvKey,
+  deleteEnvKey,
+} from './credential-provider.js';

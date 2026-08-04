@@ -31,7 +31,11 @@
  */
 
 import { SkillManager, isSafeModeEnv } from '@qwen-code/qwen-code-core';
-import type { Config, SkillLevel } from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  CredentialStore,
+  SkillLevel,
+} from '@qwen-code/qwen-code-core';
 import type { ServeWorkspaceSkillsStatus } from '@qwen-code/acp-bridge/status';
 import { STATUS_SCHEMA_VERSION } from '@qwen-code/acp-bridge/status';
 import { loadSettings } from '../config/settings.js';
@@ -45,6 +49,7 @@ export interface WorkspaceSkillsStatusProvider {
 }
 
 export interface WorkspaceSkillsStatusProviderOptions {
+  credentialStore?: CredentialStore;
   workspaceTrusted?: boolean;
 }
 
@@ -87,6 +92,7 @@ export function createWorkspaceSkillsStatusProvider(
     buildWorkspaceSkillsStatus(
       workspaceCwd,
       managers,
+      options.credentialStore,
       options.workspaceTrusted ?? true,
     )) as WorkspaceSkillsStatusProvider;
   provider.invalidate = (workspaceCwd) => managers.delete(workspaceCwd);
@@ -96,11 +102,13 @@ export function createWorkspaceSkillsStatusProvider(
 async function buildWorkspaceSkillsStatus(
   workspaceCwd: string,
   managers: Map<string, SkillManager>,
-  workspaceTrusted: boolean,
+  credentialStore?: CredentialStore,
+  workspaceTrusted: boolean = true,
 ): Promise<ServeWorkspaceSkillsStatus> {
   try {
     const settings = loadSettings(workspaceCwd, {
       consumeCorruptionEnvVars: false,
+      credentialStore,
       skipLoadEnvironment: !workspaceTrusted,
       skipWorkspaceSettings: !workspaceTrusted,
       workspaceTrusted,

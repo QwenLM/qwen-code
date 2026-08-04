@@ -22,10 +22,13 @@ import { DiscoveredMCPTool } from './mcp-tool.js';
 import { parse } from 'shell-quote';
 import { ToolErrorType } from './tool-error.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
+import {
+  collectSensitiveShellEnvKeys,
+  scrubChildEnv,
+} from '../utils/child-env-scrub.js';
+import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
 import type { EventEmitter } from 'node:events';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
-import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
 import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
 import { normalizeMcpToolName } from '../utils/tool-name-utils.js';
 import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
@@ -64,13 +67,11 @@ class DiscoveredToolInvocation extends BaseToolInvocation<
     _updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
     const callCommand = this.config.getToolCallCommand()!;
-    // The user-configured tool-call command is a child process launched on the
-    // agent's behalf, so it must not inherit Qwen-internal daemon secrets.
-    // Passing `env` explicitly loses the native inheritance that resolved
-    // Windows' case-insensitive PATH keys, so normalize as the shell and MCP
-    // spawn sites do (a no-op off win32).
     const child = spawn(callCommand, [this.toolName], {
-      env: normalizePathEnvForWindows(sanitizeChildEnv(process.env)),
+      env: scrubChildEnv(
+        normalizePathEnvForWindows(process.env),
+        collectSensitiveShellEnvKeys(process.env),
+      ),
     });
     child.stdin.write(JSON.stringify(this.params));
     child.stdin.end();
@@ -602,11 +603,11 @@ export class ToolRegistry {
           'Tool discovery command is empty or contains only whitespace.',
         );
       }
-      // Same as the tool-call command above: the discovery command is
-      // agent-launched, must not inherit Qwen-internal daemon secrets, and
-      // needs the Windows PATH normalization that comes with an explicit env.
       const proc = spawn(cmdParts[0] as string, cmdParts.slice(1) as string[], {
-        env: normalizePathEnvForWindows(sanitizeChildEnv(process.env)),
+        env: scrubChildEnv(
+          normalizePathEnvForWindows(process.env),
+          collectSensitiveShellEnvKeys(process.env),
+        ),
       });
       let stdout = '';
       const stdoutDecoder = new StringDecoder('utf8');

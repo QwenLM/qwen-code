@@ -9,6 +9,7 @@ import express, {
   type Request,
   type Response,
 } from 'express';
+import type { CredentialStore } from '@qwen-code/qwen-code-core';
 import {
   loadSettings,
   SettingScope,
@@ -92,10 +93,15 @@ export interface WorkspaceVoiceRouteDeps {
     req: Request,
     res: Response,
   ) => string | undefined | null;
-  env?: Readonly<Record<string, string | undefined>>;
   scopeOverride?: SettingScope;
   acquireVoiceLease?: () => VoiceAdmissionResult;
   transcribe?: WorkspaceVoiceTranscriber;
+  credentialStore?: CredentialStore;
+  /**
+   * Env for voice credential resolution. The daemon passes a store-merged env
+   * so QWEN_CUSTOM_API_KEY_* (scrubbed from process.env) reach the transcriber.
+   */
+  env?: Readonly<Record<string, string | undefined>>;
   isWorkspaceTrusted?: () => boolean;
   captureGenerationAssertion?: () => (() => void) | undefined;
 }
@@ -114,6 +120,7 @@ export interface WorkspaceQualifiedVoiceRouteDeps {
     runtime: WorkspaceRuntime,
   ) => string | undefined | null;
   invalidateServeFeaturesCache: () => void;
+  credentialStore?: CredentialStore;
 }
 
 function sendVoiceError(res: Response, err: unknown): boolean {
@@ -316,11 +323,13 @@ function loadVoiceSettings(deps: WorkspaceVoiceRouteDeps): LoadedSettings {
     deps.boundWorkspace,
     deps.env
       ? {
+          credentialStore: deps.credentialStore,
           skipLoadEnvironment: true,
           skipWorkspaceSettings: workspaceTrusted === false,
           workspaceTrusted,
         }
       : {
+          credentialStore: deps.credentialStore,
           consumeCorruptionEnvVars: true,
           skipLoadEnvironment: workspaceTrusted === false,
           skipWorkspaceSettings: workspaceTrusted === false,
@@ -737,7 +746,8 @@ function createRuntimeVoiceDeps(
     persistSetting: deps.persistSetting,
     persistSettings: deps.persistSettings,
     transcribe: deps.transcribe,
-    ...(env ? { env } : {}),
+    ...(env ? { env: { ...env, ...deps.credentialStore?.snapshot() } } : {}),
+    credentialStore: deps.credentialStore,
     scopeOverride: SettingScope.Workspace,
     acquireVoiceLease: () => deps.acquireVoiceLease(runtime),
     isWorkspaceTrusted: () => runtime.trusted,

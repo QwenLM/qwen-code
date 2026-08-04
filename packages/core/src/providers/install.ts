@@ -6,6 +6,12 @@
 
 import type { AuthType } from '../core/contentGenerator.js';
 import type { ModelProvidersConfig } from '../models/types.js';
+import {
+  type CredentialStore,
+  readEnvKey,
+  writeEnvKey,
+  deleteEnvKey,
+} from '../models/credential-provider.js';
 import type {
   ProviderInstallPlan,
   ProviderModelProvidersPatch,
@@ -81,6 +87,12 @@ function applyModelProvidersPatch(
 
 export interface ApplyProviderInstallPlanOptions {
   settings: ProviderSettingsAdapter;
+  /**
+   * Credential store for `QWEN_CUSTOM_API_KEY_*` redirection. The daemon
+   * passes its store so custom-provider keys are written to the store
+   * (not `process.env`), keeping them OS-invisible after boot scrub.
+   */
+  credentialStore?: CredentialStore;
   /** Callback to reload model providers config in the runtime. */
   reloadModelProviders?: (mp: ModelProvidersConfig) => void;
   /** Callback to sync auth state after install. */
@@ -173,7 +185,7 @@ export async function applyProviderInstallPlan(
           `Install plan must not set reserved environment variable: ${key}`,
         );
       }
-      const previous = process.env[key];
+      const previous = readEnvKey(key, options.credentialStore);
       // Detect when a shell env var or .env file already has this key with a
       // different value — on restart, the higher-priority source will shadow
       // the value we're about to write to settings.env.
@@ -182,7 +194,7 @@ export async function applyProviderInstallPlan(
       }
       previousEnvValues.set(key, previous);
       settings.setValue(`env.${key}`, value);
-      process.env[key] = value;
+      writeEnvKey(key, value, options.credentialStore);
     }
 
     if (shadowedEnvKeys.length > 0) {
@@ -317,9 +329,9 @@ export async function applyProviderInstallPlan(
     try {
       for (const [key, prev] of previousEnvValues) {
         if (prev === undefined) {
-          delete process.env[key];
+          deleteEnvKey(key, options.credentialStore);
         } else {
-          process.env[key] = prev;
+          writeEnvKey(key, prev, options.credentialStore);
         }
       }
     } catch (envErr) {

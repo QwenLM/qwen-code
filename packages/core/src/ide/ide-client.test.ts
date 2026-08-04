@@ -212,6 +212,8 @@ describe('IdeClient', () => {
 
     it('should connect using stdio when stdio config is provided in file', async () => {
       process.env['QWEN_CODE_IDE_SERVER_PORT'] = '8080';
+      process.env['QWEN_SERVER_TOKEN'] = 'server-token';
+      process.env['OPENAI_API_KEY'] = 'provider-key';
       const config = { stdio: { command: 'test-cmd', args: ['--foo'] } };
       vi.mocked(fs.promises.readFile).mockResolvedValue(JSON.stringify(config));
 
@@ -227,6 +229,8 @@ describe('IdeClient', () => {
         IDEConnectionStatus.Connected,
       );
       delete process.env['QWEN_CODE_IDE_SERVER_PORT'];
+      delete process.env['QWEN_SERVER_TOKEN'];
+      delete process.env['OPENAI_API_KEY'];
     });
 
     it('should prioritize port over stdio when both are in config file', async () => {

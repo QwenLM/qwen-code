@@ -56,7 +56,11 @@ import {
 import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 import { getShellContextEnvVars } from '../utils/shellContextEnv.js';
 import { getShellPagerEnv } from '../utils/shell-pager-env.js';
-import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
+import {
+  collectSensitiveShellEnvKeys,
+  scrubChildEnv,
+} from '../utils/child-env-scrub.js';
+import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
 
 const debugLogger = createDebugLogger('MONITOR');
 
@@ -365,16 +369,19 @@ class MonitorToolInvocation extends BaseToolInvocation<
         cwd: this.params.directory || this.config.getTargetDir(),
         stdio: ['ignore', 'pipe', 'pipe'],
         detached: true,
-        env: {
-          ...sanitizeChildEnv(process.env),
-          QWEN_CODE: '1',
-          TERM: 'dumb', // no color codes for streaming
-          ...getShellPagerEnv(this.config.getShellExecutionConfig().pager, {
-            includeGitPager: false,
-            platform: os.platform(),
-          }),
-          ...getShellContextEnvVars(),
-        },
+        env: scrubChildEnv(
+          normalizePathEnvForWindows(process.env),
+          collectSensitiveShellEnvKeys(process.env),
+          {
+            QWEN_CODE: '1',
+            TERM: 'dumb', // no color codes for streaming
+            ...getShellPagerEnv(this.config.getShellExecutionConfig().pager, {
+              includeGitPager: false,
+              platform: os.platform(),
+            }),
+            ...getShellContextEnvVars(),
+          },
+        ),
       });
     } catch (err) {
       return {
