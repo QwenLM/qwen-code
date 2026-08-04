@@ -53,24 +53,27 @@ export const RESERVE_ENV = 'QWEN_REVIEW_DEADLINE_RESERVE_SECONDS';
  * verification of that round's findings, compose-review, anchor resolution
  * and the submission itself.
  *
- * The measured round estimate ALSO contains one verification pass — a round
- * is admitted only after the previous round's findings were verified and
- * merged (SKILL.md Step 5), so an admission-to-admission span includes the
- * verification between them — which means the gate holds back roughly one
- * verification more than the terminal round strictly needs. That overlap is
- * deliberate margin, not double-entry bookkeeping that slipped: round costs
- * trend UP (each round re-reads the diff against a longer findings list, and
- * repair relaunches land mid-loop), so the previous round's measurement
- * under-predicts the next in exactly the runs that end near the boundary —
- * and the two error directions are not symmetric. Over-reserving ends the
- * loop at most one round early, disclosed as a budget stop; under-reserving
- * is #8368 — killed mid-verification, holding every confirmed finding.
+ * Under the pipelined loop (SKILL.md Step 5), a round's verification
+ * launches WITH the next round's auditors instead of sitting between
+ * admissions — so the admission-to-admission span the gate measures
+ * contains no verification pass, and the terminal round's verification has
+ * exactly one cover: this reserve. That makes the reserve's sizing the
+ * whole margin, not a top-up on an overlap the measurement already
+ * carried, and the two error directions are still not symmetric: round
+ * costs trend UP (each round re-reads the diff against a longer findings
+ * list, and repair relaunches land mid-loop), so the previous round's
+ * measurement under-predicts the next in exactly the runs that end near
+ * the boundary. Over-reserving ends the loop at most one round early,
+ * disclosed as a budget stop; under-reserving is #8368 — killed
+ * mid-verification, holding every confirmed finding.
  *
  * This is only the fallback: the budget itself is
  * chosen outside the CLI (a repository variable, a workflow input, a
  * `/review --timeout=N` comment), so the review workflow passes a reserve
  * scaled to the budget it resolved rather than trusting this constant to fit
- * an arbitrary one. A local run has no deadline and no reserve at all.
+ * an arbitrary one. The workflow caps that scaled reserve at this same
+ * number (`.github/workflows/qwen-code-pr-review.yml`) — keep the two in
+ * sync. A local run has no deadline and no reserve at all.
  */
 export const DEFAULT_RESERVE_SECONDS = 3600;
 
@@ -176,11 +179,12 @@ export function stampRound(
 
 /**
  * What the round about to be admitted is expected to cost, in seconds: the
- * observed cost of the previous round (admission-to-admission — its agents,
- * their verification, the orchestration between) when a stamp exists, else
- * the conservative constant. The span deliberately overlaps the tail
- * reserve by one verification pass — see `DEFAULT_RESERVE_SECONDS` for why
- * that margin is kept rather than netted out. A stamp of the SAME round is
+ * observed cost of the previous round (admission-to-admission — its audit
+ * fan-out and the orchestration around it; under the pipelined loop a
+ * round's verification overlaps the NEXT round instead of sitting between
+ * admissions, so it is not in this measure, and the terminal round's
+ * verification is exactly what the deadline's reserve covers) when a stamp
+ * exists, else the conservative constant. A stamp of the SAME round is
  * ignored — that is a rebuild, and measuring it would report a round as
  * cheap because its prompts were built twice quickly.
  */
