@@ -20,7 +20,14 @@ import {
   afterEach,
   type Mock,
 } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+  writeFileSync,
+  readFileSync,
+  utimesSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -2560,5 +2567,345 @@ describe('the reverse-audit budget gate — the loop must end by reporting', () 
     expect(process.exitCode).toBeUndefined();
     expect((writeStderrLine as unknown as Mock).mock.calls).toHaveLength(0);
     expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(0);
+  });
+});
+
+describe('per-chunk retirement — cold territories stop costing a round', () => {
+  // Measured on a real 3B run (6 chunks × 5 rounds = 30 auditors, ~95
+  // minutes): chunks 3 and 6 were dry in ALL five rounds; chunks 1, 2 and 4
+  // yielded in most. The round-global convergence rule made one hot chunk
+  // keep every cold one under audit for the whole run. These tests drive the
+  // real handler round by round, writing transcripts the way the harness
+  // does, and assert the schedule that falls out of that history.
+  const dirs: string[] = [];
+  let dir: string;
+  let plan: string;
+  let findings: string;
+  let seq = 0;
+  const SAVED: Record<string, string | undefined> = {};
+  const DIFF = PLAN.diffPathAbsolute;
+
+  // Substantive receipts and returns, in the shapes the classifier reads:
+  // DRY clears both the no-issues phrase and the ~120-char substance floor;
+  // WHIFF is the bare stock sentence the floor exists to reject; YIELD files
+  // a finding block against a real file.
+  const DRY =
+    'No new issues found — re-walked the whole territory, the retry cap and ' +
+    "both changed exports' call sites; every gap I checked was already in " +
+    'the confirmed list.';
+  const WHIFF = 'No issues found.';
+  const YIELD =
+    'Found one gap the prior rounds missed.\n\n' +
+    '- **File:** packages/cli/src/commands/review/x.test.ts:12\n' +
+    '- **Anchor:** const a = 1\n' +
+    '- **Issue:** off-by-one in the retry cap\n' +
+    '- **Severity:** Suggestion\n';
+
+  beforeEach(() => {
+    (writeStdoutLine as unknown as Mock).mockClear();
+    (writeStderrLine as unknown as Mock).mockClear();
+    dir = mkdtempSync(join(tmpdir(), 'ap-retire-'));
+    dirs.push(dir);
+    plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(PLAN)); // chunks 13, 14, 15
+    // Backdate the plan so every transcript this test writes counts as newer
+    // — the same mtime fence coverage uses against a previous review's agents.
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    findings = join(dir, 'findings.md');
+    writeFileSync(findings, '');
+    for (const k of ['QWEN_CODE_PROJECT_DIR', 'QWEN_CODE_SESSION_ID']) {
+      SAVED[k] = process.env[k];
+    }
+    process.env['QWEN_CODE_PROJECT_DIR'] = dir;
+    process.env['QWEN_CODE_SESSION_ID'] = 'S1';
+    mkdirSync(join(dir, 'subagents', 'S1'), { recursive: true });
+  });
+  afterEach(() => {
+    process.exitCode = undefined;
+    delete process.env[DEADLINE_ENV];
+    for (const [k, v] of Object.entries(SAVED)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  /** Run one --all-chunks round through the real handler; return its stdout. */
+  function runRound(round: number): string {
+    (writeStdoutLine as unknown as Mock).mockClear();
+    (writeStderrLine as unknown as Mock).mockClear();
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'reverse-audit',
+      findings,
+      'all-chunks': true,
+      round,
+    });
+    const calls = (writeStdoutLine as unknown as Mock).mock.calls;
+    return calls.length > 0 ? (calls[0][0] as string) : '';
+  }
+
+  /** The record the round's build wrote for one chunk — the launch text. */
+  function recordOf(round: number, chunk: number): string {
+    for (const [key, prompt] of readRecordedPrompts(plan)) {
+      if (key.startsWith(`reverse-audit--chunk-${chunk}--round-${round}--`)) {
+        return prompt;
+      }
+    }
+    throw new Error(`no record for chunk ${chunk} round ${round}`);
+  }
+
+  /** Round-`round` record keys, one string per chunk they were built for. */
+  function keysOf(round: number): string[] {
+    return [...readRecordedPrompts(plan).keys()].filter((k) =>
+      k.includes(`--round-${round}--`),
+    );
+  }
+
+  /**
+   * Write a transcript the way the harness writes one: the launch prompt as
+   * the first record, then `calls` successful reads of the diff, then the
+   * final text. `calls: 0` is the whiff shape — prose and nothing else.
+   */
+  function auditorTranscript(
+    launchPrompt: string,
+    finalText: string,
+    opts: { calls?: number } = {},
+  ): void {
+    const id = `aud-${++seq}`;
+    const base = { agentId: id, agentName: 'general-purpose', sessionId: 'S1' };
+    const lines = [
+      JSON.stringify({
+        ...base,
+        type: 'user',
+        message: { role: 'user', parts: [{ text: launchPrompt }] },
+      }),
+    ];
+    for (let i = 0; i < (opts.calls ?? 1); i++) {
+      lines.push(
+        JSON.stringify({
+          ...base,
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  name: 'read_file',
+                  args: { file_path: DIFF, offset: 0, limit: 100 },
+                },
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          ...base,
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  name: 'read_file',
+                  response: { output: 'diff bytes' },
+                },
+              },
+            ],
+          },
+        }),
+      );
+    }
+    lines.push(
+      JSON.stringify({
+        ...base,
+        type: 'assistant',
+        message: { role: 'model', parts: [{ text: finalText }] },
+      }),
+    );
+    writeFileSync(
+      join(dir, 'subagents', 'S1', `agent-${id}.jsonl`),
+      lines.join('\n') + '\n',
+    );
+  }
+
+  /**
+   * Run a round and answer each built chunk with the given final text — the
+   * transcript's launch prompt is the record itself, exactly what a verbatim
+   * delivery looks like. `null` answers with no transcript at all.
+   */
+  function answerRound(
+    round: number,
+    texts: Record<number, string | null>,
+  ): string {
+    const out = runRound(round);
+    for (const [chunk, text] of Object.entries(texts)) {
+      if (text === null) continue;
+      auditorTranscript(recordOf(round, Number(chunk)), text);
+    }
+    return out;
+  }
+
+  it('rounds 1 and 2 always fan out to every chunk — they establish the record', () => {
+    const r1 = answerRound(1, { 13: DRY, 14: DRY, 15: DRY });
+    expect(r1).toContain('3 auditors required this round — one per chunk.');
+    // Even on a round-1 history that is already all-dry, round 2 is full:
+    // one dry audit is not a certificate, and the rule only reads at k >= 3.
+    const r2 = runRound(2);
+    expect(r2).toContain('3 auditors required this round — one per chunk.');
+    expect(r2).not.toContain('retirement:');
+    expect(keysOf(2)).toHaveLength(3);
+  });
+
+  it('round 3 skips a chunk dry in rounds 1 and 2, and the note names it', () => {
+    answerRound(1, { 13: DRY, 14: YIELD, 15: YIELD });
+    answerRound(2, { 13: DRY, 14: YIELD, 15: YIELD });
+    const out = runRound(3);
+
+    expect(process.exitCode).toBeUndefined();
+    expect(out).toContain('2 auditors required this round');
+    expect(out).toContain('— chunk 14 ─');
+    expect(out).toContain('— chunk 15 ─');
+    expect(out).not.toContain('— chunk 13 ─');
+    expect(out).toContain('───── end of round — 2 auditors ─────');
+    // The certificate, after the end-of-round line, exactly relayable.
+    expect(out).toContain(
+      'chunk 13 — retired: dry in rounds 1 and 2, next cold check round 4',
+    );
+    expect(out.indexOf('retirement:')).toBeGreaterThan(
+      out.indexOf('end of round'),
+    );
+    // The skipped chunk leaves no record — nothing downstream is owed a
+    // launch for it (check-coverage's roster never contains reverse-audit
+    // keys, and verificationGaps reads only keys that exist).
+    const keys = keysOf(3);
+    expect(keys).toHaveLength(2);
+    expect(keys.some((k) => k.includes('--chunk-13--'))).toBe(false);
+    // A partial round is still an admission: the stamp is written.
+    expect(readRoundStamps(plan).some((s) => s.round === 3)).toBe(true);
+  });
+
+  it('the cold check comes due on parity — the retired chunk is built again', () => {
+    answerRound(1, { 13: DRY, 14: YIELD, 15: YIELD });
+    answerRound(2, { 13: DRY, 14: YIELD, 15: YIELD });
+    answerRound(3, { 14: YIELD, 15: YIELD }); // 13 skipped, odd offset
+    const out = runRound(4);
+
+    // (4 - 2) is even: the cold check is due, and the round is whole again.
+    expect(out).toContain('3 auditors required this round — one per chunk.');
+    expect(out).toContain('— chunk 13 (cold check) ─');
+    expect(out).not.toContain('retirement:');
+    expect(keysOf(4)).toHaveLength(3);
+  });
+
+  it('a cold check that yields returns the chunk to every-round auditing', () => {
+    answerRound(1, { 13: DRY, 14: YIELD, 15: YIELD });
+    answerRound(2, { 13: DRY, 14: YIELD, 15: YIELD });
+    answerRound(3, { 14: YIELD, 15: YIELD });
+    answerRound(4, { 13: YIELD, 14: YIELD, 15: YIELD }); // the cold check yields
+    const out = runRound(5);
+
+    // Its two most recent audits are now [dry, yielded]: hot, due, untagged.
+    expect(out).toContain('3 auditors required this round — one per chunk.');
+    expect(out).toContain('— chunk 13 ─');
+    expect(out).not.toContain('(cold check)');
+    expect(out).not.toContain('retired');
+  });
+
+  it('a whiffed or missing receipt keeps the chunk hot', () => {
+    answerRound(1, { 13: DRY, 14: DRY, 15: YIELD });
+    // 13's round-2 receipt is the bare stock sentence (under the substance
+    // floor, zero tool calls); 14's round-2 auditor left no transcript at
+    // all. Neither is a dry audit, so neither chunk may retire.
+    const r2 = runRound(2);
+    auditorTranscript(recordOf(2, 13), WHIFF, { calls: 0 });
+    auditorTranscript(recordOf(2, 15), YIELD);
+    expect(r2).toContain('3 auditors required');
+    const out = runRound(3);
+    expect(out).toContain('3 auditors required this round — one per chunk.');
+    expect(out).not.toContain('retirement:');
+  });
+
+  it('all retired and none due: exit 5, CONVERGED, nothing built, nothing stamped', () => {
+    answerRound(1, { 13: DRY, 14: DRY, 15: DRY });
+    answerRound(2, { 13: DRY, 14: DRY, 15: DRY });
+    const recordsBefore = readRecordedPrompts(plan).size;
+    const stampsBefore = readRoundStamps(plan).length;
+    const out = runRound(3);
+
+    expect(process.exitCode).toBe(5);
+    expect(out).toBe(''); // no stdout blocks at all
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('CONVERGED');
+    expect(msg).toContain('stop the loop and proceed to Step 6');
+    expect(msg).toContain('no unreviewedDimensions entry is owed');
+    // No new records, and no admission stamp — a round that builds nothing
+    // was never admitted, and must not skew the next admission's estimate.
+    expect(readRecordedPrompts(plan).size).toBe(recordsBefore);
+    expect(readRoundStamps(plan)).toHaveLength(stampsBefore);
+  });
+
+  it('a cold-check-only round is still built, admitted and stamped', () => {
+    answerRound(1, { 13: DRY, 14: DRY, 15: DRY });
+    answerRound(2, { 13: DRY, 14: DRY, 15: DRY });
+    // Round 4 directly: (4 - 2) is even for every chunk, so the whole round
+    // is cold checks — built, and stamped like any admission.
+    const out = runRound(4);
+
+    expect(process.exitCode).toBeUndefined();
+    expect(out).toContain('3 auditors required this round');
+    expect(out).toContain('— chunk 13 (cold check) ─');
+    expect(out).toContain('— chunk 15 (cold check) ─');
+    expect(keysOf(4)).toHaveLength(3);
+    expect(readRoundStamps(plan).some((s) => s.round === 4)).toBe(true);
+  });
+
+  it('a single --chunk rebuild bypasses retirement — a repair is not scheduling', () => {
+    answerRound(1, { 13: DRY, 14: YIELD, 15: YIELD });
+    answerRound(2, { 13: DRY, 14: YIELD, 15: YIELD });
+    // 13 is retired and NOT due at round 3 — but the rebuild path is the
+    // orchestrator repairing a delivery, and it must never be refused one.
+    (writeStdoutLine as unknown as Mock).mockClear();
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'reverse-audit',
+      chunk: 13,
+      findings,
+      round: 3,
+    });
+    expect(process.exitCode).toBeUndefined();
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(1);
+    expect(
+      keysOf(3).some((k) => k.startsWith('reverse-audit--chunk-13--')),
+    ).toBe(true);
+  });
+
+  it('transcripts unavailable: full fan-out, never fewer', () => {
+    answerRound(1, { 13: DRY, 14: DRY, 15: DRY });
+    answerRound(2, { 13: DRY, 14: DRY, 15: DRY });
+    // The history says "converged" — but without the harness's records it is
+    // unreadable, and an unreadable history must degrade to today's
+    // behaviour: every territory audited.
+    delete process.env['QWEN_CODE_PROJECT_DIR'];
+    const out = runRound(3);
+    expect(process.exitCode).toBeUndefined();
+    expect(out).toContain('3 auditors required this round — one per chunk.');
+    expect(keysOf(3)).toHaveLength(3);
+  });
+
+  it('the budget gate outranks retirement: a refused round is exit 4, not 5', () => {
+    answerRound(1, { 13: DRY, 14: DRY, 15: DRY });
+    answerRound(2, { 13: DRY, 14: DRY, 15: DRY });
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 60);
+    const out = runRound(3);
+    expect(process.exitCode).toBe(4);
+    expect(out).toBe('');
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('BUDGET:');
+    expect(msg).not.toContain('CONVERGED');
   });
 });

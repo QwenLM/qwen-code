@@ -55,6 +55,10 @@ import {
   type DiffChunk,
 } from './lib/diff-plan.js';
 import { recordPrompt, writeBrief } from './lib/prompt-record.js';
+import {
+  scheduleReverseAuditRound,
+  type RoundSchedule,
+} from './lib/retirement.js';
 import { BRIEFS, type RoleId } from './lib/agent-briefs.js';
 import { pathRulesFor } from './lib/path-rules.js';
 import {
@@ -1405,9 +1409,69 @@ function runAllChunks(
         'Re-run the Step 1 capture; do not hand-edit the plan.',
     );
   }
+
+  // Which chunks this round actually owes an auditor. Rounds 1 and 2 always
+  // fan out to every chunk — they establish each chunk's record — and from
+  // round 3 the schedule reads the audit history (the CLI's own prompt
+  // records against the harness's transcripts, the same pair every delivery
+  // check trusts) and retires the territories that have twice in a row
+  // returned a substantive all-clear. Measured on a real 3B run (6 chunks ×
+  // 5 rounds, ~95 minutes), two chunks were dry in all five rounds while
+  // three yielded in most: the loop earns its keep in the hot territories,
+  // and the cold ones were a third of its bill.
+  let schedule: RoundSchedule | null = null;
+  if (role === 'reverse-audit' && round !== undefined && round >= 3) {
+    try {
+      schedule = scheduleReverseAuditRound(
+        planPath,
+        chunks.map((c) => c.id),
+        round,
+        process.env,
+        typeof report.diffPathAbsolute === 'string'
+          ? report.diffPathAbsolute
+          : undefined,
+      );
+    } catch {
+      // Transcripts unavailable, an unreadable plan stat, anything: the
+      // schedule is an optimization, and a broken optimizer must degrade to
+      // today's behaviour — every territory audited — never to fewer
+      // auditors. `null` below means "everything is due".
+      schedule = null;
+    }
+  }
+
+  if (schedule !== null && schedule.converged) {
+    // Nothing to build, and that is the loop's OTHER termination rule, not
+    // an error and not a gap: every territory has proven itself cold twice
+    // over, so another round would audit nothing the history has not
+    // already answered. No record and no stamp is written — a round that
+    // builds nothing was never admitted.
+    writeStderrLine(
+      'CONVERGED: every chunk holds two consecutive substantive dry audits; ' +
+        'the reverse audit has converged — stop the loop and proceed to ' +
+        'Step 6. This is a clean convergence, not a gap: no ' +
+        'unreviewedDimensions entry is owed.',
+    );
+    process.exitCode = 5;
+    return;
+  }
+
+  // The admission stamp, deferred here from the budget gate for --all-chunks
+  // builds (the gate itself still ran first — a refused round is refused
+  // regardless of retirement). A round that builds ANY auditor is an
+  // admission, a cold-check-only round included; the converged round above
+  // built nothing and stamped nothing.
+  if (role === 'reverse-audit') stampRound(planPath, round);
+
+  const dueSet = schedule === null ? null : new Set(schedule.due);
+  const dueChunks =
+    dueSet === null ? chunks : chunks.filter((c) => dueSet.has(c.id));
+  const coldSet = new Set(schedule?.coldChecks ?? []);
+  const skipped = schedule?.skipped ?? [];
+
   const digest = findingsDigest(findingsContent, rules);
   const roundPart = round !== undefined ? `--round-${round}` : '';
-  const blocks = chunks.map((c, i) => {
+  const blocks = dueChunks.map((c, i) => {
     const key = `${role}--chunk-${c.id}${roundPart}--${digest}`;
     const { prompt } = buildLaunch(
       report,
@@ -1417,25 +1481,56 @@ function runAllChunks(
     );
     const printed = foldFindings(role, findingsContent, prompt);
     recordPrompt(planPath, key, printed);
+    // The cold-check tag lives in the SEPARATOR label, never in the prompt:
+    // separators are display, and the delivery check compares prompts.
+    const cold = coldSet.has(c.id) ? ' (cold check)' : '';
     return (
-      `───── auditor ${i + 1} of ${chunks.length} — chunk ${c.id} ─────\n\n` +
+      `───── auditor ${i + 1} of ${dueChunks.length} — chunk ${c.id}${cold} ─────\n\n` +
       printed
     );
   });
+  // The scope clause names the retirement when there is one, so the reader
+  // learns the round shrank from the header and not from a diff of block
+  // counts; when nothing is retired the sentence is byte-identical to what
+  // it always said.
+  const scope =
+    skipped.length === 0
+      ? 'one per chunk'
+      : `one per chunk still under audit (${skipped.length} retired ` +
+        `chunk(s) skipped; the retirement note after the end-of-round line ` +
+        `says which — relay it to the terminal)`;
+  const retirementNote =
+    skipped.length === 0
+      ? []
+      : [
+          `retirement: a chunk whose two most recent audits are substantive ` +
+            `dry receipts is cold-checked on alternating rounds instead of ` +
+            `audited on every one; a cold check that yields returns it to ` +
+            `every-round auditing. Skipped this round:\n` +
+            skipped
+              .map(
+                (s) =>
+                  `chunk ${s.chunkId} — retired: dry in rounds ` +
+                  `${s.dryRounds[0]} and ${s.dryRounds[1]}, next cold check ` +
+                  `round ${s.nextColdCheck}`,
+              )
+              .join('\n'),
+        ];
   writeStdoutLine(
     [
-      `${chunks.length} auditors required this round — one per chunk. Launch ` +
+      `${dueChunks.length} auditors required this round — ${scope}. Launch ` +
         `one agent per block below, passing its block VERBATIM — copy, do not ` +
         `retype, and NEVER sample this output (no \`| head\`): the text IS the ` +
         `deliverable, and a launch reconstructed from a sample matches no ` +
-        `record. Blocks are numbered \`auditor k of ${chunks.length}\` and the ` +
+        `record. Blocks are numbered \`auditor k of ${dueChunks.length}\` and the ` +
         `output ends with an end-of-round line — if either is missing, the ` +
         `output was truncated in transit; rebuild just the missing chunks with ` +
         `--chunk <id>. Write each Agent call's \`description\` (the task ` +
         `name the user watches) in your output language, translating the ` +
         `separator label — display only; the prompt stays the block VERBATIM.`,
       ...blocks,
-      `───── end of round — ${chunks.length} auditors ─────`,
+      `───── end of round — ${dueChunks.length} auditors ─────`,
+      ...retirementNote,
     ].join('\n\n'),
   );
 }
@@ -1603,7 +1698,16 @@ function runAgentPrompt(args: AgentPromptArgs): void {
         process.exitCode = 4;
         return;
       }
-      stampRound(args.plan, args.round);
+      // The admission stamp — except for an --all-chunks round, whose stamp
+      // moves into the round builder: from round 3 retirement can conclude
+      // the round CONVERGED there and build nothing (exit 5), and a round
+      // that built nothing was never admitted — a stamp for it would hand
+      // the next admission a phantom round to measure. A round the builder
+      // does build, a cold-check-only one included, is stamped there. The
+      // gate above stays here in both paths: budget first, retirement second
+      // — a refused round is refused regardless of what retirement would
+      // have scheduled.
+      if (!args.allChunks) stampRound(args.plan, args.round);
     }
   } else if (hasFindings) {
     // `--findings` with no role: it has no prompt to fold into. A territory chunk
@@ -1808,7 +1912,10 @@ export const agentPromptCommand: CommandModule = {
     "ranges and the agent's own brief are welded in, not left to the caller to " +
     'remember). Exit codes: 0 built; 4 the review time budget refused another ' +
     'reverse-audit round (a termination rule, not an error — see the BUDGET line ' +
-    'on stderr); anything else is a bad call or a broken plan.',
+    'on stderr); 5 the reverse audit CONVERGED — every chunk holds two ' +
+    'consecutive substantive dry audits and none is due a cold check, so stop ' +
+    'the loop and proceed to Step 6 (also a termination rule, and a clean one: ' +
+    'no disclosure is owed); anything else is a bad call or a broken plan.',
   builder: (yargs) =>
     yargs
       .option('plan', {
@@ -1840,7 +1947,12 @@ export const agentPromptCommand: CommandModule = {
         describe:
           'With --role reverse-audit --findings: build one block per chunk ' +
           'in one call, labelled and separated (Step 5, 3B). Never sample ' +
-          'the output; each block is pasted verbatim to its own agent.',
+          'the output; each block is pasted verbatim to its own agent. From ' +
+          '--round 3 on, a chunk whose two most recent audits were both ' +
+          'substantive dry receipts is retired to alternating-round cold ' +
+          'checks (the retirement note after the end-of-round line says ' +
+          'which); a round where every chunk is retired and none is due ' +
+          'exits 5 — the audit has converged.',
       })
       .option('roster', {
         type: 'boolean',
