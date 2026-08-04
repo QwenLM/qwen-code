@@ -258,7 +258,8 @@ import {
   computeTodoTimeline,
   getAgentToolsForPlan,
   getFloatingTodos,
-  getLatestActiveTodos,
+  getActiveTodosForPlanRevision,
+  isExitPlanApprovalRequest,
   todoDetailSignature,
   todoTimelineSignature,
   type TodoDetail,
@@ -3239,8 +3240,11 @@ export function App({
     [messages],
   );
   const approvalPlanTodos = useMemo(
-    () => getLatestActiveTodos(messages),
-    [messages],
+    () =>
+      isExitPlanApprovalRequest(pendingToolApproval)
+        ? getActiveTodosForPlanRevision(messages, pendingToolApproval?.todoPlan)
+        : [],
+    [messages, pendingToolApproval],
   );
   // Keep the timeline Map referentially stable across streaming ticks that
   // don't touch any todo snapshot. The Map is a context value, so a fresh
