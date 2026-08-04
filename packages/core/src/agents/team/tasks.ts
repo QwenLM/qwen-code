@@ -132,7 +132,11 @@ async function withTaskFileLock<T>(
     try {
       return await fn();
     } finally {
-      await release();
+      try {
+        await release();
+      } catch (error) {
+        debug.warn('Failed to release task lock:', error);
+      }
     }
   });
 }

@@ -150,7 +150,11 @@ async function withInboxLock<T>(
     try {
       return await fn();
     } finally {
-      await release();
+      try {
+        await release();
+      } catch (error) {
+        debug.debug('Failed to release mailbox lock:', error);
+      }
     }
   });
 }

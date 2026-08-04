@@ -269,6 +269,33 @@ describe('ExtensionStore', () => {
     });
   });
 
+  it('registers a lock-compromised handler and completes when the store lock is compromised', async () => {
+    const store = makeStore();
+    const identity = { id: 'd4'.repeat(32), name: 'demo' };
+    let onCompromised: ((error: Error) => void) | undefined;
+    const releaseError = Object.assign(new Error('Lock is already released'), {
+      code: 'ERELEASED',
+    });
+    const lockSpy = vi
+      .spyOn(lockfile, 'lock')
+      .mockImplementationOnce(async (_file, options) => {
+        onCompromised = options?.onCompromised;
+        onCompromised?.(
+          Object.assign(new Error('lock lost'), { code: 'ECOMPROMISED' }),
+        );
+        return () => Promise.reject(releaseError);
+      });
+
+    try {
+      await expect(store.ensureInitialized([identity])).resolves.toMatchObject({
+        generation: 0,
+      });
+      expect(onCompromised).toBeTypeOf('function');
+    } finally {
+      lockSpy.mockRestore();
+    }
+  });
+
   it('serializes mutations from two Node processes sharing QWEN_HOME', async () => {
     const id = 'd2'.repeat(32);
     const store = makeStore();
