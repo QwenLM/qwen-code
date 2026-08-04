@@ -168,6 +168,28 @@ describe('<VirtualizedList />', () => {
     ]);
   });
 
+  it('keeps the full viewport height when requested by the caller', () => {
+    const liveItems = [{ id: -1, label: 'live' }];
+
+    const { lastFrame } = render(
+      <VirtualizedList<Item>
+        data={liveItems}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={SCROLL_TO_ITEM_END}
+        isStaticItem={(item) => item.id >= 0}
+        containerHeight={5}
+        keepFullHeight
+        width={40}
+        showScrollbar={false}
+      />,
+    );
+
+    expect(lastFrame()?.split('\n')).toHaveLength(5);
+    expect(lastFrame()).toContain('live');
+  });
+
   it('targetScrollIndex anchors to that index on first usable render', () => {
     type RefShape = VirtualizedListRef<Item>;
     let listRef: RefShape | null = null;

@@ -10,6 +10,7 @@ import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import * as pty from '@lydell/node-pty';
+import xtermHeadless from '@xterm/headless';
 import { hashMcpServerConfig } from '@qwen-code/qwen-code-core';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -24,6 +25,14 @@ const IS_SANDBOX = Boolean(
   SANDBOX_MODE && SANDBOX_MODE !== 'false' && SANDBOX_MODE !== '0',
 );
 const EVENT_ID = '123e4567-e89b-12d3-a456-426614174000';
+const LONG_CONFIRMATION_CONTENT = [
+  'CONFIRM_TOP [visible](https://hidden.example/target) **bold** `code` <u>under</u>',
+  ...Array.from(
+    { length: 140 },
+    (_, index) => `repository-policy-line-${index.toString().padStart(3, '0')}`,
+  ),
+  'CONFIRM_TAIL',
+].join('\n');
 const ENVIRONMENT_KEYS = [
   'QWEN_HOME',
   'QWEN_CODE_SYSTEM_SETTINGS_PATH',
@@ -72,6 +81,9 @@ const ENVIRONMENT_KEYS = [
       approveWrite: true,
       expectedRequests: 1,
       expectsMcpConfirmation: true,
+      content:
+        'LINK [visible label](https://hidden.example/secret-target) BOLD **bold-value** CODE `code-value` UNDER <u>under-value</u>',
+      verifiesShortLiteral: true,
     },
     {
       name: 'does not write when content confirmation is rejected',
@@ -87,8 +99,17 @@ const ENVIRONMENT_KEYS = [
       expectedRequests: 1,
       expectsMcpConfirmation: false,
     },
+    {
+      name: 'shows long content literally and expands it before approval',
+      approvalMode: 'yolo',
+      approveWrite: true,
+      expectedRequests: 1,
+      expectsMcpConfirmation: false,
+      content: LONG_CONFIRMATION_CONTENT,
+      verifiesLongConfirmation: true,
+    },
   ])('$name', async (scenario) => {
-    const content = '  Keep this\nrepository policy.  ';
+    const content = scenario.content ?? '  Keep this\nrepository policy.  ';
     const providerRequests: Array<{
       authorization: string | undefined;
       path: string | undefined;
@@ -140,7 +161,7 @@ const ENVIRONMENT_KEYS = [
           }
         : { content: 'MEM0_WRITE_E2E_DONE' },
     );
-    const { ptyProcess, promise } = runInteractive(
+    const { ptyProcess, promise, screen } = runInteractive(
       rig,
       '--approval-mode',
       scenario.approvalMode,
@@ -172,14 +193,57 @@ const ENVIRONMENT_KEYS = [
         await type(ptyProcess, '\r');
       }
 
-      expect(
-        await rig.waitForText(
-          'Save this exact content to the bound Mem0 repository memory?',
-          30_000,
-        ),
-        'content-visible Hook confirmation did not appear',
-      ).toBe(true);
-      expect(rig._interactiveOutput).toContain('Keep this');
+      if (scenario.verifiesLongConfirmation) {
+        const constrainedScreen = await waitForScreen(
+          screen,
+          (value) =>
+            value.includes('CONFIRM_TOP') &&
+            value.includes('lines hidden') &&
+            value.includes('Press ctrl-s to show more lines'),
+          'bounded literal content confirmation',
+        );
+        const constrainedConfirmation = constrainedScreen.slice(
+          constrainedScreen.lastIndexOf(
+            'Save this exact content to the bound Mem0 repository memory?',
+          ),
+        );
+        expect(constrainedConfirmation).toContain(
+          '[visible](https://hidden.example/target)',
+        );
+        expect(constrainedConfirmation).toContain('**bold**');
+        expect(constrainedConfirmation).toContain('`code`');
+        expect(constrainedConfirmation).toContain('<u>under</u>');
+        expect(constrainedConfirmation).not.toContain('CONFIRM_TAIL');
+
+        ptyProcess.write('\x13');
+        const expandedScreen = await waitForScreen(
+          screen,
+          (value) => value.includes('CONFIRM_TAIL'),
+          'expanded complete content confirmation',
+        );
+        expect(expandedScreen).toContain('CONFIRM_TAIL');
+        expect(expandedScreen).not.toContain('lines hidden');
+      } else if (scenario.verifiesShortLiteral) {
+        const screenWithConfirmation = await waitForScreen(
+          screen,
+          (value) =>
+            confirmationSection(value).includes('hidden.example/secret-target'),
+          'short literal content confirmation',
+        );
+        const confirmationScreen = confirmationSection(screenWithConfirmation);
+        expect(confirmationScreen).toContain('**bold-value**');
+        expect(confirmationScreen).toContain('`code-value`');
+        expect(confirmationScreen).toContain('<u>under-value</u>');
+      } else {
+        expect(
+          await rig.waitForText(
+            'Save this exact content to the bound Mem0 repository memory?',
+            30_000,
+          ),
+          'content-visible Hook confirmation did not appear',
+        ).toBe(true);
+        expect(rig._interactiveOutput).toContain('Keep this');
+      }
       await type(ptyProcess, scenario.approveWrite ? '\r' : '\x1b');
 
       if (scenario.approveWrite) {
@@ -357,6 +421,14 @@ function fakeMem0McpSource(integrationRoot: string): string {
 
 function runInteractive(rig: TestRig, ...args: string[]) {
   rig._interactiveOutput = '';
+  const { Terminal } = xtermHeadless;
+  const terminal = new Terminal({
+    cols: 100,
+    rows: 36,
+    scrollback: 1000,
+    allowProposedApi: true,
+  });
+  let pendingWrite = Promise.resolve();
   const ptyProcess = pty.spawn(
     process.execPath,
     [rig.bundlePath, '--no-chat-recording', ...args],
@@ -370,6 +442,12 @@ function runInteractive(rig: TestRig, ...args: string[]) {
   );
   ptyProcess.onData((data) => {
     rig._interactiveOutput += data;
+    pendingWrite = pendingWrite.then(
+      () =>
+        new Promise<void>((resolve) => {
+          terminal.write(data, resolve);
+        }),
+    );
     if (process.env['VERBOSE'] === 'true') {
       process.stdout.write(data);
     }
@@ -380,10 +458,49 @@ function runInteractive(rig: TestRig, ...args: string[]) {
     output: string;
   }>((resolve) => {
     ptyProcess.onExit(({ exitCode, signal }) => {
-      resolve({ exitCode, signal, output: rig._interactiveOutput });
+      void pendingWrite.finally(() => {
+        terminal.dispose();
+        resolve({ exitCode, signal, output: rig._interactiveOutput });
+      });
     });
   });
-  return { ptyProcess, promise };
+  const screen = async () => {
+    await pendingWrite;
+    const buffer = terminal.buffer.active;
+    const lines: string[] = [];
+    for (let index = 0; index < buffer.length; index += 1) {
+      lines.push(buffer.getLine(index)?.translateToString(true) ?? '');
+    }
+    return lines.join('\n');
+  };
+  return { ptyProcess, promise, screen };
+}
+
+async function waitForScreen(
+  screen: () => Promise<string>,
+  predicate: (value: string) => boolean,
+  description: string,
+  timeoutMs = 30_000,
+): Promise<string> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const value = await screen();
+    if (predicate(value)) {
+      return value;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  const value = await screen();
+  throw new Error(
+    `Timed out waiting for ${description}. Last screen:\n${value.slice(-1000)}`,
+  );
+}
+
+function confirmationSection(screen: string): string {
+  const heading =
+    'Save this exact content to the bound Mem0 repository memory?';
+  const start = screen.lastIndexOf(heading);
+  return start === -1 ? '' : screen.slice(start);
 }
 
 function escapePosix(value: string): string {

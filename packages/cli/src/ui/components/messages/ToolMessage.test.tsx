@@ -624,6 +624,28 @@ describe('<ToolMessage />', () => {
       expect(lastFrame()).toContain('?');
     });
 
+    it('truncates the duplicated tool description for plain-text Hook confirmations', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          status={ToolCallStatus.Confirming}
+          description={`DESCRIPTION_TOP ${'middle '.repeat(40)} DESCRIPTION_TAIL`}
+          confirmationDetails={{
+            type: 'info',
+            title: 'Hook confirmation',
+            prompt: 'Complete content is shown in the confirmation.',
+            renderPromptAsPlainText: true,
+            onConfirm: vi.fn(),
+          }}
+          contentWidth={50}
+        />,
+        StreamingState.Idle,
+      );
+
+      expect(lastFrame()).toContain('DESCRIPTION_TOP');
+      expect(lastFrame()).not.toContain('DESCRIPTION_TAIL');
+    });
+
     it('shows - for Canceled status', () => {
       const { lastFrame } = renderWithContext(
         <ToolMessage {...baseProps} status={ToolCallStatus.Canceled} />,

@@ -569,7 +569,23 @@ export const ToolConfirmationMessage: React.FC<
       key: 'No, suggest changes (esc)',
     });
 
-    bodyContent = (
+    bodyContent = infoProps.renderPromptAsPlainText ? (
+      <Box flexDirection="column" paddingX={1} marginLeft={1}>
+        <MaxSizedBox
+          maxHeight={availableBodyContentHeight()}
+          maxWidth={warningContentWidth}
+          overflowDirection="bottom"
+        >
+          {infoProps.prompt.split('\n').map((line, index) => (
+            <Box key={index}>
+              <Text color={theme.text.link} wrap="wrap">
+                {line}
+              </Text>
+            </Box>
+          ))}
+        </MaxSizedBox>
+      </Box>
+    ) : (
       <Box flexDirection="column" paddingX={1} marginLeft={1}>
         <Text color={theme.text.link}>
           <RenderInline text={infoProps.prompt} textColor={theme.text.link} />

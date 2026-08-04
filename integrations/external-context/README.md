@@ -180,12 +180,15 @@ another copy of the same content.
 In regular interactive mode, the `permissions.ask` rule presents Qwen's normal
 server/tool confirmation and the `PreToolUse` Hook then presents a second
 confirmation containing a reversible, safely escaped representation of the
-complete text. YOLO bypasses the ordinary permission rule, but a working Hook
-still asks once. Plan mode, unknown permission modes, malformed Hook input,
-and environments unable to confirm are denied. Hook transport failure follows
-Qwen's existing fail-open semantics, so this is a user-experience safeguard,
-not an enforceable authorization boundary. Strict approval requires the
-governed profile.
+complete text. The Hook confirmation is rendered literally rather than as
+inline Markdown, so formatting markers and link targets remain visible. If the
+text exceeds the constrained terminal area, Qwen reports the hidden line count
+and `Ctrl-S` reveals the remaining confirmation content. YOLO
+bypasses the ordinary permission rule, but a working Hook still asks once.
+Plan mode, unknown permission modes, malformed Hook input, and environments
+unable to confirm are denied. Hook transport failure follows Qwen's existing
+fail-open semantics, so this is a user-experience safeguard, not an enforceable
+authorization boundary. Strict approval requires the governed profile.
 
 The confirmation Hook code does not read the Provider configuration or
 credential, but Qwen command Hooks inherit ordinary third-party credentials

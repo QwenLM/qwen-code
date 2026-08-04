@@ -39,6 +39,7 @@ export type VirtualizedListProps<T> = {
   width?: number | string;
   containerHeight?: number;
   showScrollbar?: boolean;
+  keepFullHeight?: boolean;
 };
 
 export type VirtualizedListRef<T> = {
@@ -877,13 +878,17 @@ function VirtualizedList<T>(
   // to that height unconditionally left a tall empty gap below short content
   // and pushed the composer far down the screen — the legacy <Static> path
   // instead grows with its content. Collapse to `totalHeight` whenever the
-  // content fits so the composer sits right beneath the conversation; only
-  // when the content overflows do we clamp to `containerHeight` and let the
-  // viewport scroll. `scrollableContainerHeight` (the scroll math) still uses
-  // the full `containerHeight`, so scrolling is unaffected.
+  // content fits so the composer sits right beneath the conversation. A
+  // caller can temporarily keep the full viewport while content changes
+  // shape under a stable item key; otherwise a stale cached total can clip
+  // the new content before it is measured. `scrollableContainerHeight` (the
+  // scroll math) still uses the full `containerHeight`, so scrolling is
+  // unaffected.
   const rootHeight =
     props.containerHeight !== undefined
-      ? Math.min(props.containerHeight, totalHeight)
+      ? props.keepFullHeight
+        ? props.containerHeight
+        : Math.min(props.containerHeight, totalHeight)
       : '100%';
 
   return (

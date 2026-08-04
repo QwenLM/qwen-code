@@ -694,6 +694,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   name,
   description,
   resultDisplay,
+  confirmationDetails,
   visionBridgeNotice,
   detailedDisplay,
   status,
@@ -884,6 +885,11 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
           status={status}
           description={description}
           emphasis={emphasis}
+          truncateDescription={
+            status === ToolCallStatus.Confirming &&
+            confirmationDetails?.type === 'info' &&
+            confirmationDetails.renderPromptAsPlainText === true
+          }
         />
         {shouldShowFocusHint && (
           <Box marginLeft={1} flexShrink={0}>
@@ -990,12 +996,14 @@ type ToolInfo = {
   description: string;
   status: ToolCallStatus;
   emphasis: TextEmphasis;
+  truncateDescription?: boolean;
 };
 const ToolInfo: React.FC<ToolInfo> = ({
   name,
   description,
   status,
   emphasis,
+  truncateDescription,
 }) => {
   const nameColor = React.useMemo<string>(() => {
     switch (emphasis) {
@@ -1013,7 +1021,10 @@ const ToolInfo: React.FC<ToolInfo> = ({
   }, [emphasis]);
   return (
     <Box flexGrow={1}>
-      <Text wrap="wrap" strikethrough={status === ToolCallStatus.Canceled}>
+      <Text
+        wrap={truncateDescription ? 'truncate-end' : 'wrap'}
+        strikethrough={status === ToolCallStatus.Canceled}
+      >
         <Text color={nameColor} bold>
           {localizeToolDisplayName(name)}
         </Text>{' '}

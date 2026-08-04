@@ -150,7 +150,16 @@ arguments return `deny`.
 The reason contains the complete text as a JSON string. JSON escaping makes
 quotes, backslashes, newlines, and C0 controls reversible; the renderer also
 escapes DEL/C1 controls and Unicode format characters such as bidi and
-zero-width controls. The Provider still receives the original string.
+zero-width controls. Qwen marks synthetic Hook confirmations for literal text
+rendering, so Markdown, inline code, HTML-like underline tags, and link targets
+remain visible instead of being interpreted by the confirmation UI. The
+Provider still receives the original string.
+
+When the complete reason does not fit in the constrained terminal view, the
+confirmation shows the beginning plus an explicit hidden-line count. The
+global `Ctrl-S` expansion then reveals the remaining reason before the user
+decides. This display behavior does not change the
+content sent to Mem0.
 
 ## Mem0 request and result semantics
 
