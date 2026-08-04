@@ -391,6 +391,16 @@ describe('qwen resolve workflow', () => {
     expect(runStep).toContain('--json additions,deletions');
     expect(runStep).toContain('if [ -n "$PR_SIZE_LINES" ]; then');
     expect(runStep).toContain('if [ "$PR_SIZE_LINES" -le 300 ]; then');
+    // The size guard must WRAP the comparison it protects: swapping the two
+    // ifs keeps both texts present while an empty PR_SIZE_LINES (a failed
+    // size lookup) hits the bare integer test and silently gets the cap.
+    const sizeGuardStart = runStep.indexOf('if [ -n "$PR_SIZE_LINES" ]; then');
+    expect(sizeGuardStart).toBeGreaterThan(-1);
+    const sizeGuardArm = runStep.slice(
+      sizeGuardStart,
+      runStep.indexOf('else', sizeGuardStart),
+    );
+    expect(sizeGuardArm).toContain('if [ "$PR_SIZE_LINES" -le 300 ]; then');
     expect(runStep).toContain('EFFECTIVE_TIMEOUT_MINUTES=180');
     expect(runStep).toContain(
       'EFFECTIVE_TIMEOUT_MINUTES="${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}"',
@@ -411,6 +421,25 @@ describe('qwen resolve workflow', () => {
     expect(runStep).toContain(
       'echo "effective_timeout_minutes=$EFFECTIVE_TIMEOUT_MINUTES"',
     );
+    // Every check above is order-independent containment: pin that both
+    // tiering writes precede both consumers, or a block moved below its
+    // consumer keeps the suite green while non-small PRs run on the
+    // pre-tier budget (the exact incident this feature exists for).
+    const tierInit = runStep.indexOf(
+      'EFFECTIVE_TIMEOUT_MINUTES="$TIMEOUT_MINUTES"',
+    );
+    const tierStart = runStep.indexOf(
+      'if [ "${TIMEOUT_EXPLICIT:-false}" != "true" ]; then',
+    );
+    for (const consumer of [
+      runStep.indexOf('QWEN_TIMEOUT="$EFFECTIVE_TIMEOUT_MINUTES"'),
+      runStep.indexOf(
+        'echo "effective_timeout_minutes=$EFFECTIVE_TIMEOUT_MINUTES"',
+      ),
+    ]) {
+      expect(tierInit).toBeLessThan(consumer);
+      expect(tierStart).toBeLessThan(consumer);
+    }
   });
 
   it('tells maintainers how to retry timed-out reviews with more time', () => {
@@ -451,17 +480,49 @@ describe('qwen resolve workflow', () => {
       '@qwen-code /review --timeout=${MAX_TIMEOUT_MINUTES}',
     );
     expect(belowMaxArm).not.toContain('This run already used the maximum');
+    // Symmetric slice for the at-max arm: it is an adjacent body= assignment
+    // in the same if-chain as the quota branch, the exact transposition class
+    // the belowMaxArm slice catches.
+    const atMaxStart = fallbackStep.indexOf('else', belowMaxStart);
+    expect(atMaxStart).toBeGreaterThan(-1);
+    const atMaxArm = fallbackStep.slice(
+      atMaxStart,
+      fallbackStep.indexOf('fi', atMaxStart),
+    );
+    expect(atMaxArm).toContain(
+      'This run already used the maximum ${MAX_TIMEOUT_MINUTES} minute timeout.',
+    );
+    expect(atMaxArm).not.toContain('/review --timeout=');
+    // The quota branch carries its own recovery advice; pin it to its arm.
+    const quotaStart = fallbackStep.indexOf(
+      'elif [ "$FAILURE_KIND" = "quota" ]; then',
+    );
+    expect(quotaStart).toBeGreaterThan(-1);
+    const quotaArm = fallbackStep.slice(
+      quotaStart,
+      fallbackStep.indexOf('else', quotaStart),
+    );
+    expect(quotaArm).toContain(
+      '**Qwen Code review paused — model quota exhausted.**',
+    );
     // The branch CONDITION, not just both branch bodies: with both bodies
     // pinned as substrings, any comparison flip (-ge/-gt/-le) keeps both
     // strings present and ships the wrong recovery advice on every timeout.
     expect(fallbackStep).toContain(
       'if [ "$TIMEOUT_MINUTES" -lt "$MAX_TIMEOUT_MINUTES" ]; then',
     );
-    expect(fallbackStep).toContain(
-      'This run already used the maximum ${MAX_TIMEOUT_MINUTES} minute timeout.',
-    );
-    expect(fallbackStep).toContain('gh pr comment "$PR_NUMBER"');
     expect(fallbackStep).toContain('**Qwen Code review timed out.**');
+    // The comment must come AFTER all three arms: containment holds wherever
+    // the line sits, so a move into one arm would silently drop the others.
+    const genericBodyStart = fallbackStep.indexOf(
+      '**Qwen Code review did not complete successfully.**',
+    );
+    expect(genericBodyStart).toBeGreaterThan(-1);
+    const commentStart = fallbackStep.indexOf('gh pr comment "$PR_NUMBER"');
+    expect(commentStart).toBeGreaterThan(genericBodyStart);
+    // The wiring that delivers every body pinned above: pointing the command
+    // at a different variable posts text none of these assertions protect.
+    expect(fallbackStep).toContain('--body "$body"');
     expect(fallbackStep).not.toContain(
       '_Qwen Code review did not complete successfully:',
     );
