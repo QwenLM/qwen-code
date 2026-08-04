@@ -21,6 +21,8 @@ import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 import { useI18n } from '../../i18n';
 import { formatRuntime } from '../../utils/formatRuntime';
 import { createSentinelSerializer } from '../../utils/sentinelMessage';
+import type { ACPToolCall, TodoItem } from '../../adapters/types';
+import { PlanExecutionView } from './PlanExecutionView';
 import {
   localizeAgentTypeName,
   localizeToolDisplayName,
@@ -247,12 +249,18 @@ export function TasksStatusMessage({
   embedded = false,
   manageActiveEvent = true,
   onClose,
+  planTodos = [],
+  agentTools = [],
+  onOpenSubagent,
   onOpenMonitor,
 }: {
   message: SerializedTasksMessage;
   embedded?: boolean;
   manageActiveEvent?: boolean;
   onClose?: () => void;
+  planTodos?: readonly TodoItem[];
+  agentTools?: readonly ACPToolCall[];
+  onOpenSubagent?: (tool: ACPToolCall) => void;
   onOpenMonitor?: (task: DaemonSessionMonitorTaskStatus) => void;
 }) {
   const { t } = useI18n();
@@ -413,6 +421,14 @@ export function TasksStatusMessage({
     (event: KeyboardEvent) => {
       if (!isOpen) return;
 
+      if (
+        event.key !== 'Escape' &&
+        event.target instanceof Element &&
+        event.target.closest('[data-plan-interactive]')
+      ) {
+        return;
+      }
+
       if (event.key === 'Escape') {
         event.preventDefault();
         event.stopPropagation();
@@ -559,6 +575,12 @@ export function TasksStatusMessage({
             {actionError && <div className={styles.error}>{actionError}</div>}
           </div>
         )}
+        <PlanExecutionView
+          todos={planTodos}
+          tools={agentTools}
+          tasks={tasks}
+          onOpenSubagent={onOpenSubagent}
+        />
         <div>
           <div className={styles.secondary}>{t('tasks.empty')}</div>
         </div>
@@ -596,6 +618,14 @@ export function TasksStatusMessage({
           </div>
         )}
 
+      {(embedded || step === 'list') && (
+        <PlanExecutionView
+          todos={planTodos}
+          tools={agentTools}
+          tasks={tasks}
+          onOpenSubagent={onOpenSubagent}
+        />
+      )}
       {(embedded || step === 'list') && (
         <div className={styles.list}>
           {!embedded && (

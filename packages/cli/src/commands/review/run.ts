@@ -27,8 +27,8 @@
 
 import type { CommandModule } from 'yargs';
 import { spawn, execFileSync } from 'node:child_process';
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import {
   writeStdoutLine,
   writeStderrLineSafe,
@@ -215,6 +215,44 @@ export function killProcessGroup(pid: number, signal: NodeJS.Signals): void {
   }
 }
 
+/**
+ * The child review's environment, with one correction: QWEN_CODE_CLI.
+ *
+ * cli.ts stamps QWEN_CODE_CLI first-writer-wins, so a `review run` launched
+ * from INSIDE a parent Qwen session inherits the parent's entry — and the
+ * skill's every `"${QWEN_CODE_CLI:-qwen}" review …` subcommand then runs the
+ * PARENT's build for the entire review. Measured: a working-tree `review run`
+ * issued from a 0.21.3 session had its whole prompt roster built by 0.21.3 —
+ * the review ran one version of the skill while its subcommands answered to
+ * another, and nothing raised an error.
+ *
+ * The inherited value is right only when it reaches THIS build (an outer
+ * launcher of the same install: the npm bin shim, cli-entry.js, the desktop
+ * bundle). The child runs argv[1], so compare the resolved package roots
+ * (dirname of realpathSync): cli-entry.js stamps itself but spawns cli.js,
+ * so an exact-file comparison would blank a valid same-install stamp. On a
+ * root mismatch — or an inherited path that does not resolve at all — write
+ * '': empty counts as unset in stampCliEntryEnv, and the child re-stamps
+ * from its own modules.
+ */
+function childEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  const inherited = env['QWEN_CODE_CLI'];
+  const ownEntry = process.argv[1];
+  if (!inherited || !ownEntry) {
+    return env;
+  }
+  try {
+    if (dirname(realpathSync(inherited)) === dirname(realpathSync(ownEntry))) {
+      return env;
+    }
+  } catch {
+    // An inherited entry that does not resolve cannot be this build's.
+  }
+  env['QWEN_CODE_CLI'] = '';
+  return env;
+}
+
 async function runReview(args: RunReviewArgs): Promise<void> {
   const startMs = Date.now();
   const prompt = buildReviewPrompt(args);
@@ -243,6 +281,7 @@ async function runReview(args: RunReviewArgs): Promise<void> {
       args.approvalMode,
     ],
     {
+      env: childEnv(),
       // stdin CLOSED, not inherited: piped input would be prepended to the
       // prompt and the leading `/` would no longer be the first character —
       // the slash command would reach the model as plain text.

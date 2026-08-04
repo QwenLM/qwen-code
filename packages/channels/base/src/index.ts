@@ -84,6 +84,7 @@ export {
   sanitizeSenderName,
   sanitizePromptText,
   sanitizeLogText,
+  truncateCodePoints,
 } from './sanitize.js';
 export { isTerminalTaskLifecycleType } from './types.js';
 export type {

@@ -263,6 +263,7 @@ export function useReactToolScheduler(
                   resultDisplay: message,
                   error: toolError,
                   errorType: ToolErrorType.UNHANDLED_EXCEPTION,
+                  executionStatus: 'not_started',
                   contentLength: message.length,
                 },
               };
@@ -355,7 +356,11 @@ export function mapToDisplay(
       let description: string;
       let renderOutputAsMarkdown = false;
 
-      if (trackedCall.status === 'error') {
+      if (
+        trackedCall.status === 'error' ||
+        trackedCall.tool === undefined ||
+        trackedCall.invocation === undefined
+      ) {
         displayName =
           trackedCall.tool === undefined
             ? trackedCall.request.name

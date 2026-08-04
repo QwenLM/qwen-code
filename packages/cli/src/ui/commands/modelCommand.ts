@@ -41,6 +41,9 @@ const FAST_MODEL_CONFIGURATION_HINT =
 const VISION_MODEL_CONFIGURATION_HINT =
   'Configure an image-capable model in settings.modelProviders and ensure the required environment variables are set. Run /model --vision <model-id> to set it, or leave it unset to auto-pick a same-provider vision model.';
 
+const COMPACTION_MODEL_CONFIGURATION_HINT =
+  'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /auth to configure or switch providers, or run /model --compaction without a model to choose from configured models.';
+
 const IMAGE_MODEL_CONFIGURATION_HINT =
   'Configure a model with imageOnly: true, baseUrl, and envKey in settings.modelProviders. Run /model --image <model-id> to select it.';
 
@@ -146,7 +149,12 @@ async function switchMainModel(
 }
 
 function formatUnavailableModelMessage(
-  kind: 'Model' | 'Fast model' | 'Vision model' | 'Image model',
+  kind:
+    | 'Model'
+    | 'Fast model'
+    | 'Vision model'
+    | 'Compaction model'
+    | 'Image model',
   modelName: string,
   authType: AuthType,
   availableModels: AvailableModel[],
@@ -164,9 +172,11 @@ function formatUnavailableModelMessage(
       ? FAST_MODEL_CONFIGURATION_HINT
       : kind === 'Vision model'
         ? VISION_MODEL_CONFIGURATION_HINT
-        : kind === 'Image model'
-          ? IMAGE_MODEL_CONFIGURATION_HINT
-          : MAIN_MODEL_CONFIGURATION_HINT;
+        : kind === 'Compaction model'
+          ? COMPACTION_MODEL_CONFIGURATION_HINT
+          : kind === 'Image model'
+            ? IMAGE_MODEL_CONFIGURATION_HINT
+            : MAIN_MODEL_CONFIGURATION_HINT;
 
   return (
     `${kind} '${modelName}' is not available for auth type '${authType}'.\n` +
@@ -178,7 +188,7 @@ function formatUnavailableModelMessage(
 // Auxiliary model selectors share the same "not configured for any auth type"
 // message shape, differing only in the label and configuration hint.
 function formatUnavailableAuxModelMessage(
-  label: 'Fast model' | 'Vision model' | 'Image model',
+  label: 'Fast model' | 'Vision model' | 'Compaction model' | 'Image model',
   modelName: string,
   availableModels: AvailableModel[],
   hint: string,
@@ -219,6 +229,18 @@ function formatUnavailableVisionModelMessage(
     modelName,
     availableModels,
     VISION_MODEL_CONFIGURATION_HINT,
+  );
+}
+
+function formatUnavailableCompactionModelMessage(
+  modelName: string,
+  availableModels: AvailableModel[],
+): string {
+  return formatUnavailableAuxModelMessage(
+    'Compaction model',
+    modelName,
+    availableModels,
+    COMPACTION_MODEL_CONFIGURATION_HINT,
   );
 }
 
@@ -311,7 +333,7 @@ function formatUnavailableVoiceModelMessage(
 // Get an array of the available model IDs as strings, filtered by mode
 function getAvailableModelIds(
   context: CommandContext,
-  mode: 'main' | 'fast' | 'voice' | 'vision' | 'image' = 'main',
+  mode: 'main' | 'fast' | 'voice' | 'vision' | 'compaction' | 'image' = 'main',
 ) {
   const { services } = context;
   const { config } = services;
@@ -325,10 +347,11 @@ function getAvailableModelIds(
   const availableModels = models.filter((m) => {
     if (mode === 'image')
       return m.imageOnly === true && !m.fastOnly && !m.voiceOnly;
-    if (mode === 'fast') return !m.voiceOnly && !m.imageOnly;
-    if (mode === 'voice') return !m.fastOnly && !m.imageOnly;
-    // 'vision' and 'main' both exclude selector-only models.
-    return !m.fastOnly && !m.voiceOnly && !m.imageOnly;
+    if (mode === 'vision') return !m.fastOnly && !m.voiceOnly && !m.imageOnly;
+    if (mode === 'fast') return !m.voiceOnly && !m.imageOnly && !m.visionOnly;
+    if (mode === 'voice') return !m.fastOnly && !m.imageOnly && !m.visionOnly;
+    // 'main' and 'compaction' exclude all selector-only models.
+    return !m.fastOnly && !m.voiceOnly && !m.imageOnly && !m.visionOnly;
   });
   return availableModels.map((model) => model.id);
 }
@@ -338,11 +361,11 @@ export const modelCommand: SlashCommand = {
   completionPriority: 100,
   get description() {
     return t(
-      'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --image for the image generation model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).',
+      'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --compaction for chat compression model, --image for the image generation model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).',
     );
   },
   argumentHint:
-    '[--fast|--voice|--vision|--image] [--project|--global] [<model-id>] | <model-id> <prompt>',
+    '[--fast|--voice|--vision|--compaction|--image] [--project|--global] [<model-id>] | <model-id> <prompt>',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   completion: async (context, partialArg) => {
@@ -362,6 +385,12 @@ export const modelCommand: SlashCommand = {
           value: '--vision',
           description: t(
             'Set the image-capable model used to transcribe images for a text-only main model',
+          ),
+        },
+        {
+          value: '--compaction',
+          description: t(
+            'Set the model used for chat compression (auto-compaction)',
           ),
         },
         {
@@ -386,12 +415,19 @@ export const modelCommand: SlashCommand = {
       }
       const trimmed = partialArg.trim();
       if (trimmed) {
-        let mode: 'main' | 'fast' | 'voice' | 'vision' | 'image' = 'main';
+        let mode:
+          | 'main'
+          | 'fast'
+          | 'voice'
+          | 'vision'
+          | 'compaction'
+          | 'image' = 'main';
         // Strip all known flags to isolate the model prefix for completion
         const modelPrefix = trimmed
           .replace(/(?:^|\s)--fast(?:\s|$)/, ' ')
           .replace(/(?:^|\s)--voice(?:\s|$)/, ' ')
           .replace(/(?:^|\s)--vision(?:\s|$)/, ' ')
+          .replace(/(?:^|\s)--compaction(?:\s|$)/, ' ')
           .replace(/(?:^|\s)--image(?:\s|$)/, ' ')
           .replace(/(?:^|\s)--project(?:\s|$)/, ' ')
           .replace(/(?:^|\s)--global(?:\s|$)/, ' ')
@@ -399,6 +435,8 @@ export const modelCommand: SlashCommand = {
         if (/(?:^|\s)--fast(?:\s|$)/.test(trimmed)) mode = 'fast';
         else if (/(?:^|\s)--voice(?:\s|$)/.test(trimmed)) mode = 'voice';
         else if (/(?:^|\s)--vision(?:\s|$)/.test(trimmed)) mode = 'vision';
+        else if (/(?:^|\s)--compaction(?:\s|$)/.test(trimmed))
+          mode = 'compaction';
         else if (/(?:^|\s)--image(?:\s|$)/.test(trimmed)) mode = 'image';
         return getAvailableModelIds(context, mode).filter((id) =>
           id.startsWith(modelPrefix),
@@ -498,7 +536,7 @@ export const modelCommand: SlashCommand = {
 
       const availableModels = config
         .getAllConfiguredModels()
-        .filter((m) => !m.fastOnly && !m.imageOnly);
+        .filter((m) => !m.fastOnly && !m.imageOnly && !m.visionOnly);
       const matches = availableModels.filter((model) => model.id === modelName);
       if (matches.length === 0) {
         return {
@@ -594,7 +632,7 @@ export const modelCommand: SlashCommand = {
         selector.authType
           ? config.getAvailableModelsForAuthType(selector.authType)
           : config.getAllConfiguredModels()
-      ).filter((m) => !m.voiceOnly && !m.imageOnly);
+      ).filter((m) => !m.voiceOnly && !m.imageOnly && !m.visionOnly);
       if (!availableModels.some((model) => model.id === selector.modelId)) {
         return {
           type: 'message',
@@ -737,6 +775,104 @@ export const modelCommand: SlashCommand = {
         messageType: 'info',
         content:
           t('Vision Model') + ': ' + modelName + scopeSuffix + visionWarning,
+      };
+    }
+
+    const isCompactionModelCommand =
+      args === '--compaction' || args.startsWith('--compaction ');
+    if (isCompactionModelCommand) {
+      const modelName = args.replace('--compaction', '').trim();
+      if (!modelName || modelName === 'clear') {
+        if (modelName === 'clear') {
+          if (!settings) {
+            return {
+              type: 'message',
+              messageType: 'error',
+              content: t('Settings service not available.'),
+            };
+          }
+          persistSetting(settings, 'compactionModel', undefined, scopeOverride);
+          config.setCompactionModel(undefined);
+          return {
+            type: 'message',
+            messageType: 'info',
+            content: t('Compaction model override cleared') + scopeSuffix,
+          };
+        }
+        if (context.executionMode !== 'interactive') {
+          const compactionModel =
+            context.services.settings?.merged?.compactionModel?.trim() ||
+            t('not set (falls back to the main model)');
+          return {
+            type: 'message',
+            messageType: 'info',
+            content: t(
+              'Current compaction model: {{compactionModel}}\nUse "/model --compaction <model-id>" to set compaction model, or "/model --compaction clear" to clear the override.',
+              { compactionModel },
+            ),
+          };
+        }
+        return {
+          type: 'dialog',
+          dialog: 'compaction-model',
+          ...persistScopeSpread(scopeOverride),
+        };
+      }
+      if (!settings) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: t('Settings service not available.'),
+        };
+      }
+
+      const selector = (() => {
+        try {
+          return resolveModelId(modelName);
+        } catch {
+          return undefined;
+        }
+      })();
+      if (!selector) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: formatUnavailableCompactionModelMessage(modelName, []),
+        };
+      }
+
+      const availableModels = (
+        selector.authType
+          ? config.getAvailableModelsForAuthType(selector.authType)
+          : config.getAllConfiguredModels()
+      ).filter(
+        (m) => !m.fastOnly && !m.voiceOnly && !m.imageOnly && !m.visionOnly,
+      );
+      if (!availableModels.some((model) => model.id === selector.modelId)) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: selector.authType
+            ? formatUnavailableModelMessage(
+                'Compaction model',
+                selector.modelId,
+                selector.authType,
+                availableModels,
+              )
+            : formatUnavailableCompactionModelMessage(
+                modelName,
+                availableModels,
+              ),
+        };
+      }
+
+      persistSetting(settings, 'compactionModel', modelName, scopeOverride);
+      // Sync runtime Config so the compression service picks it up immediately.
+      config.setCompactionModel(modelName);
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: t('Compaction Model') + ': ' + modelName + scopeSuffix,
       };
     }
 

@@ -227,7 +227,7 @@ function mount(
     loadingOlderHistory?: boolean;
     historyCapacityReached?: boolean;
     historyPaginationError?: boolean;
-    onLoadOlderHistory?: () => Promise<void>;
+    onLoadOlderHistory?: (options?: { force?: boolean }) => Promise<void>;
     transcriptBlockCount?: number;
     transcriptActivity?: {
       getSnapshot(): {
@@ -1703,6 +1703,27 @@ describe('MessageList — turn collapse (DOM)', () => {
 
     // It should NOT call loadMore because paginationError blocks it
     expect(onLoadOlderHistory).not.toHaveBeenCalled();
+  });
+
+  it('retries loading older history with force when the retry button is clicked', async () => {
+    const onLoadOlderHistory = vi.fn().mockResolvedValue(undefined);
+    const c = mount([userMsg('u1')], undefined, {
+      historyPaginationError: true,
+      onLoadOlderHistory,
+    });
+
+    const button = Array.from(c.querySelectorAll('button')).find(
+      (el) => el.textContent === 'Retry',
+    );
+    expect(button).toBeDefined();
+
+    await act(async () => {
+      button!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+    expect(onLoadOlderHistory).toHaveBeenCalledWith({ force: true });
   });
 
   it('does not smooth-scroll when existing session history loads after an empty render', () => {

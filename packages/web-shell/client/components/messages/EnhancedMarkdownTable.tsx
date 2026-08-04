@@ -1927,7 +1927,7 @@ export function EnhancedTable({
     return () => {
       const focusReturn = cellDialogFocusReturnRef.current;
       cellDialogFocusReturnRef.current = null;
-      if (focusReturn?.isConnected) focusReturn.focus();
+      if (focusReturn?.isConnected) focusReturn.focus({ preventScroll: true });
     };
   }, [cellDialog]);
 
