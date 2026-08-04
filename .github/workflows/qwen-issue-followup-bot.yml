@@ -51,7 +51,10 @@ jobs:
         github.repository == 'QwenLM/qwen-code' &&
         (github.event_name == 'workflow_dispatch' || vars.QWEN_ISSUE_FOLLOWUP_BOT_ENABLED == 'true')
       }}
-    runs-on: 'ubuntu-latest'
+    # Checks out nothing and runs no repository code (schedule/dispatch use
+    # base-repo YAML), so the persistent ECS pool is safe.
+    # Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     steps:
       - name: 'Prepare issue follow-up runtime'
         id: 'runtime'
