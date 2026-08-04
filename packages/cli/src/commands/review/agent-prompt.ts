@@ -484,7 +484,13 @@ export function buildWholeDiffBlock(
   rules?: string,
 ): string {
   const diffPath = requireDiffPath(report);
-  return [...diffReadingBlock(report, diffPath), ...tail(rules)].join('\n');
+  const parts = [...diffReadingBlock(report, diffPath)];
+  const repositoryContext = repositoryContextOf(report);
+  if (repositoryContext) {
+    parts.push('', ...repositoryContextBlock(repositoryContext));
+  }
+  parts.push(...tail(rules));
+  return parts.join('\n');
 }
 
 /** The diff path, or the error this whole command exists to make impossible. */

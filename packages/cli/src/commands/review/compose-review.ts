@@ -1335,10 +1335,22 @@ export function repositoryContextGate(planPath: string): string[] {
   // this field fails closed on one — coverage throws, the roster throws; the
   // disclosure cannot be the one place that silently shrugs.
   const context = repositoryContextOf(plan);
-  return (context?.unverifiedDimensions ?? []).map(
-    (dimension) =>
-      `${mdField(dimension)} — the repository context marks this proof boundary as unverified`,
-  );
+  const dimensions = context?.unverifiedDimensions ?? [];
+  // The same cap discipline testPlanGate applies: unbounded entries joined
+  // into one disclosure drown the verdict they ride on — and at the schema
+  // bounds (128 x 512 chars) the paragraph outruns the review body's own
+  // budget before any other content gets a word in.
+  const MAX_DIMENSIONS = 5;
+  const disclosed = dimensions
+    .slice(0, MAX_DIMENSIONS)
+    .map(
+      (dimension) =>
+        `${mdField(dimension)} — the repository context marks this proof boundary as unverified`,
+    );
+  if (dimensions.length > MAX_DIMENSIONS) {
+    disclosed.push(`and ${dimensions.length - MAX_DIMENSIONS} more`);
+  }
+  return disclosed;
 }
 
 /**

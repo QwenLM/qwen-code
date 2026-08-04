@@ -30,6 +30,15 @@ describe('repository context validation', () => {
     expect(repositoryContextOf({})).toBeNull();
   });
 
+  it('fails closed on a present-but-null repositoryContext', () => {
+    // repo-context writes literal `null` artifact files, so a corrupted plan
+    // can carry the shape; a falsy-check regression would degrade open in
+    // every consumer at once instead of failing closed.
+    expect(() => repositoryContextOf({ repositoryContext: null })).toThrow(
+      'repositoryContext must be an object',
+    );
+  });
+
   it('rejects unknown or missing fields and versions', () => {
     expect(() => validateRepositoryContext({ ...valid, version: 2 })).toThrow(
       'unsupported repositoryContext version',
@@ -87,6 +96,101 @@ describe('repository context validation', () => {
         domains: Array.from({ length: 129 }, (_, index) => `d${index}`),
       }),
     ).toThrow('domains is invalid');
+  });
+
+  it('enforces sorted-and-unique on every array field', () => {
+    // The manifest provider pre-sorts today; a future provider or a
+    // hand-edited plan would not, so the wire check is pinned per field.
+    const probes: Record<string, [unsorted: string[], duplicated: string[]]> = {
+      relatedPaths: [
+        ['src/runtime.ts', 'src/compiler.ts'],
+        ['src/compiler.ts', 'src/compiler.ts'],
+      ],
+      requiredAgents: [
+        ['test-matrix', '1a'],
+        ['test-matrix', 'test-matrix'],
+      ],
+      unverifiedDimensions: [
+        ['later boundary', 'earlier boundary'],
+        ['same boundary', 'same boundary'],
+      ],
+      verificationNotes: [
+        ['second note', 'first note'],
+        ['same note', 'same note'],
+      ],
+    };
+    for (const [field, [unsorted, duplicated]] of Object.entries(probes)) {
+      expect(() =>
+        validateRepositoryContext({ ...valid, [field]: unsorted }),
+      ).toThrow(`${field} must be sorted and unique`);
+      expect(() =>
+        validateRepositoryContext({ ...valid, [field]: duplicated }),
+      ).toThrow(`${field} must be sorted and unique`);
+    }
+  });
+
+  it('accepts every length bound exactly and rejects one past it', () => {
+    // provider 64, label 120, token 160, path 512, note 512: the accept side
+    // pins `>` (a `>=` regression would reject manifests at the documented
+    // bounds) and the reject side pins the four remaining constants.
+    const atBound = {
+      ...valid,
+      provider: 'p'.repeat(64),
+      label: 'l'.repeat(120),
+      domains: ['t'.repeat(160)],
+      relatedPaths: ['a'.repeat(512)],
+      recommendedTests: ['t'.repeat(160)],
+      requiredConfigurations: ['t'.repeat(160)],
+      unverifiedDimensions: ['n'.repeat(512)],
+      verificationNotes: ['n'.repeat(512)],
+    };
+    expect(validateRepositoryContext(atBound)).toEqual(atBound);
+
+    expect(() =>
+      validateRepositoryContext({ ...valid, provider: 'p'.repeat(65) }),
+    ).toThrow('provider is invalid');
+    expect(() =>
+      validateRepositoryContext({ ...valid, label: 'l'.repeat(121) }),
+    ).toThrow('label is invalid');
+    expect(() =>
+      validateRepositoryContext({ ...valid, domains: ['t'.repeat(161)] }),
+    ).toThrow('domains is invalid');
+    expect(() =>
+      validateRepositoryContext({
+        ...valid,
+        relatedPaths: ['a'.repeat(513)],
+      }),
+    ).toThrow('relatedPaths is invalid');
+    expect(() =>
+      validateRepositoryContext({
+        ...valid,
+        recommendedTests: ['t'.repeat(161)],
+      }),
+    ).toThrow('recommendedTests is invalid');
+    expect(() =>
+      validateRepositoryContext({
+        ...valid,
+        requiredConfigurations: ['t'.repeat(161)],
+      }),
+    ).toThrow('requiredConfigurations is invalid');
+  });
+
+  it('rejects control characters inside array items', () => {
+    for (const field of [
+      'domains',
+      'relatedPaths',
+      'unverifiedDimensions',
+      'verificationNotes',
+    ] as const) {
+      for (const separator of ['\n', '\u0085', '\u2028', '\u2029']) {
+        expect(() =>
+          validateRepositoryContext({
+            ...valid,
+            [field]: [`bad${separator}item`],
+          }),
+        ).toThrow(`${field} is invalid`);
+      }
+    }
   });
 
   it('rejects unsafe paths and roles that cannot join the initial roster', () => {

@@ -512,6 +512,41 @@ describe('repository context proof boundary', () => {
     ]);
   });
 
+  it('caps the unverified-dimension disclosure at five entries', () => {
+    // The schema admits 128 dimensions x 512 chars; joined into one
+    // disclosure that outruns the review body's own size budget — the same
+    // cap discipline testPlanGate applies to its notes.
+    const planPath = join(dir, 'capped-plan.json');
+    writeFileSync(
+      planPath,
+      JSON.stringify({
+        repositoryContext: {
+          version: 1,
+          provider: 'fake-provider',
+          label: 'Example project',
+          domains: [],
+          relatedPaths: [],
+          recommendedTests: [],
+          requiredConfigurations: [],
+          requiredAgents: [],
+          unverifiedDimensions: Array.from(
+            { length: 8 },
+            (_, index) => `dimension ${index}`,
+          ),
+          verificationNotes: [],
+        },
+      }),
+    );
+    expect(repositoryContextGate(planPath)).toEqual([
+      ...Array.from(
+        { length: 5 },
+        (_, index) =>
+          `\`dimension ${index}\` — the repository context marks this proof boundary as unverified`,
+      ),
+      'and 3 more',
+    ]);
+  });
+
   it('returns no extra disclosure when the plan has no repository context', () => {
     const planPath = join(dir, 'generic-plan.json');
     writeFileSync(planPath, JSON.stringify({ files: [] }));

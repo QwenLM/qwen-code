@@ -29,14 +29,32 @@ import {
 const MANIFEST_PATH = '.qwen/review-context.json';
 /**
  * Visited-entry ceiling for one `relatedPaths` expansion, counted across all
- * scan roots. Deliberately far above any realistic subtree — this repository's
- * whole `packages/` tree is under it — so a honestly scoped manifest never
- * fails a review, while a `**`-at-the-root style pathological scan still ends.
- * Exceeded, the provider throws (fail closed), like every other manifest error.
+ * scan roots. Dependency and build-output trees (SKIPPED_DIRECTORIES) are
+ * never descended into, so only source-bearing entries count. Calibrated on
+ * this repository: the whole `packages/` tree of an installed checkout stays
+ * under it, so a honestly scoped manifest never fails a review, while a
+ * pathological scan still ends. Exceeded, the provider throws (fail closed),
+ * like every other manifest error.
  */
 export const MAX_GLOB_CANDIDATES = 16384;
 const MAX_RULES = 128;
 const MANIFEST_PREFIX = 'repository context manifest ';
+
+// Dependency and build-output trees hold orders of magnitude more entries
+// than any source subtree and can never be a review target; descending into
+// them would exhaust the visited-entry ceiling on every installed checkout.
+// Names tracked source must not live under in this repository's conventions
+// (a `build/` directory holds real scripts here) stay out of this set.
+const SKIPPED_DIRECTORIES = new Set([
+  '.git',
+  '.next',
+  '.turbo',
+  'coverage',
+  'dist',
+  'node_modules',
+  'out',
+  'target',
+]);
 
 const MANIFEST_KEYS = ['label', 'rules', 'version'].sort();
 const RULE_KEYS = [
@@ -134,10 +152,11 @@ function validateGlobArray(
   validateManifestStringArray(value, field, MAX_PATH_LENGTH);
   for (const pattern of value) {
     validateGlob(pattern, field);
-    if (
-      requireDirectoryPrefix &&
-      (!pattern.includes('/') || /[*?]/.test(pattern.split('/')[0]))
-    ) {
+    // A wildcard glob must start below a non-wildcard directory segment so
+    // expansion cannot begin with a repository-wide wildcard. A completely
+    // static entry can never start with one, so it may sit at the top level
+    // and resolves to itself when it exists as a regular file.
+    if (requireDirectoryPrefix && /[*?]/.test(pattern.split('/')[0])) {
       throw new Error(
         `repository context manifest ${field} requires a directory prefix`,
       );
@@ -247,27 +266,48 @@ function parseManifest(content: string): Manifest {
     };
   });
 
+  // Bound the rule-matching work fail-closed: the filter tests every changed
+  // path against every `paths` pattern, so the total — not just each rule's
+  // array — is what a bulk-change PR multiplies against.
+  const totalPathPatterns = rules.reduce(
+    (sum, rule) => sum + rule.paths.length,
+    0,
+  );
+  if (totalPathPatterns > MAX_ARRAY_ITEMS) {
+    throw new Error(`${MANIFEST_PREFIX}paths exceeds limit`);
+  }
+
   return { label: manifest['label'], rules };
 }
 
-// One compiled expression per pattern segment: at the bounds (thousands of
-// candidates x dozens of patterns) recompiling per (pattern, path) pair is six
-// figures of throwaway RegExp constructions for one repo-context run.
-const segmentExpressions = new Map<string, RegExp>();
-
+// Polynomial wildcard match for one segment. The backtracking regex this
+// replaced went exponential on a segment with several `*` — a legal manifest
+// pattern plus a legal long filename hangs one `test()` call effectively
+// forever, and in an untrusted repository both halves are attacker-committed.
 function segmentMatches(pattern: string, value: string): boolean {
-  let expression = segmentExpressions.get(pattern);
-  if (expression === undefined) {
-    let source = '^';
-    for (const character of pattern) {
-      if (character === '*') source += '[^/]*';
-      else if (character === '?') source += '[^/]';
-      else source += character.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
+  let patternIndex = 0;
+  let valueIndex = 0;
+  let starIndex = -1;
+  let markIndex = 0;
+  while (valueIndex < value.length) {
+    const character = pattern[patternIndex];
+    if (character === '?' || character === value[valueIndex]) {
+      patternIndex++;
+      valueIndex++;
+    } else if (character === '*') {
+      starIndex = patternIndex;
+      markIndex = valueIndex;
+      patternIndex++;
+    } else if (starIndex !== -1) {
+      patternIndex = starIndex + 1;
+      markIndex++;
+      valueIndex = markIndex;
+    } else {
+      return false;
     }
-    expression = new RegExp(`${source}$`);
-    segmentExpressions.set(pattern, expression);
   }
-  return expression.test(value);
+  while (pattern[patternIndex] === '*') patternIndex++;
+  return patternIndex === pattern.length;
 }
 
 function globMatches(pattern: string, path: string): boolean {
@@ -365,6 +405,11 @@ function expandRelatedPaths(
           isContainedFile(worktree, path)
         ) {
           matches.add(path);
+          if (matches.size > MAX_ARRAY_ITEMS) {
+            throw new Error(
+              'repository context manifest relatedPaths exceeds limit',
+            );
+          }
         }
         return;
       }
@@ -391,7 +436,7 @@ function expandRelatedPaths(
       if (entry.isSymbolicLink()) continue;
       const path = `${directory}/${entry.name}`;
       if (entry.isDirectory()) {
-        visit(path);
+        if (!SKIPPED_DIRECTORIES.has(entry.name)) visit(path);
         continue;
       }
       // Disk names can carry POSIX-legal bytes the wire format rejects (a
@@ -423,6 +468,19 @@ function sortedUnique(values: Iterable<string>): string[] {
   return [...new Set(values)].sort(compareText);
 }
 
+/**
+ * The merge of all matching rules can outgrow the wire bound even when every
+ * single rule honors it; cap it here so the error names the manifest instead
+ * of surfacing later as a shape error from the wire validator.
+ */
+function cappedSortedUnique(values: string[], field: string): string[] {
+  const merged = sortedUnique(values);
+  if (merged.length > MAX_ARRAY_ITEMS) {
+    throw new Error(`${MANIFEST_PREFIX}${field} exceeds limit`);
+  }
+  return merged;
+}
+
 export const manifestRepositoryContextProvider: RepositoryContextProvider = {
   provide(input) {
     const content = input.readIdentityFile(MANIFEST_PATH);
@@ -440,26 +498,37 @@ export const manifestRepositoryContextProvider: RepositoryContextProvider = {
       version: 1,
       provider: 'manifest',
       label: manifest.label,
-      domains: sortedUnique(matched.flatMap((rule) => rule.domains)),
+      domains: cappedSortedUnique(
+        matched.flatMap((rule) => rule.domains),
+        'domains',
+      ),
       relatedPaths: expandRelatedPaths(
         input.worktree,
-        sortedUnique(matched.flatMap((rule) => rule.relatedPaths)),
+        cappedSortedUnique(
+          matched.flatMap((rule) => rule.relatedPaths),
+          'relatedPaths',
+        ),
         changedPaths,
       ),
-      recommendedTests: sortedUnique(
+      recommendedTests: cappedSortedUnique(
         matched.flatMap((rule) => rule.recommendedTests),
+        'recommendedTests',
       ),
-      requiredConfigurations: sortedUnique(
+      requiredConfigurations: cappedSortedUnique(
         matched.flatMap((rule) => rule.requiredConfigurations),
+        'requiredConfigurations',
       ),
-      requiredAgents: sortedUnique(
+      requiredAgents: cappedSortedUnique(
         matched.flatMap((rule) => rule.requiredAgents),
+        'requiredAgents',
       ) as RepositoryContextRoleId[],
-      unverifiedDimensions: sortedUnique(
+      unverifiedDimensions: cappedSortedUnique(
         matched.flatMap((rule) => rule.unverifiedDimensions),
+        'unverifiedDimensions',
       ),
-      verificationNotes: sortedUnique(
+      verificationNotes: cappedSortedUnique(
         matched.flatMap((rule) => rule.verificationNotes),
+        'verificationNotes',
       ),
     };
     return validateRepositoryContext(context);

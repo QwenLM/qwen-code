@@ -164,7 +164,11 @@ describe('repo-context providers and trust boundary', () => {
     writeManifest(worktree);
     write(join(worktree, 'src', 'change.ts'), 'base\n');
     const base = commitAll(worktree);
+    // A second commit makes HEAD != mergeBaseSha: a reader that took the
+    // manifest from HEAD (instead of the recorded base) would see the
+    // forged non-matching scope and drop the context.
     writeManifest(worktree, ['docs/**']);
+    commitAll(worktree);
     expect(
       readJson(
         run(join(root, 'base-enabled'), worktree, {
@@ -179,7 +183,9 @@ describe('repo-context providers and trust boundary', () => {
     writeManifest(second, ['docs/**']);
     write(join(second, 'src', 'change.ts'), 'base\n');
     const disabledBase = commitAll(second);
+    // Head-side commit carries a matching manifest that must never opt IN.
     writeManifest(second);
+    commitAll(second);
     expect(
       readJson(
         run(join(root, 'base-disabled'), second, {
@@ -197,7 +203,10 @@ describe('repo-context providers and trust boundary', () => {
     write(join(worktree, '.review', 'identity'), 'base\n');
     write(join(worktree, 'src', 'change.ts'), 'base\n');
     const base = commitAll(worktree);
+    // Commit the forged head-side identity so HEAD != mergeBaseSha: a reader
+    // keyed on HEAD would return 'head' and fail the assertion.
     write(join(worktree, '.review', 'identity'), 'head\n');
+    commitAll(worktree);
     const provider: RepositoryContextProvider = {
       provide(input) {
         expect(input.readIdentityFile('.review/identity')).toBe('base');
@@ -223,6 +232,7 @@ describe('repo-context providers and trust boundary', () => {
     write(join(worktree, 'src', 'change.ts'), 'base\n');
     const base = commitAll(worktree);
     write(join(worktree, '.review', 'identity'), 'disabled\n');
+    commitAll(worktree);
     const enabled: RepositoryContextProvider = {
       provide(input) {
         return input.readIdentityFile('.review/identity') === 'enabled'
@@ -247,6 +257,7 @@ describe('repo-context providers and trust boundary', () => {
     write(join(second, 'src', 'change.ts'), 'base\n');
     const disabledBase = commitAll(second);
     write(join(second, '.review', 'identity'), 'enabled\n');
+    commitAll(second);
     expect(
       readJson(
         run(
@@ -262,25 +273,126 @@ describe('repo-context providers and trust boundary', () => {
     ).toBeNull();
   });
 
-  it('fails closed for failed, stale, or invalid base identity', () => {
+  it('writes null when the identity is absent at the base commit', () => {
+    // "Absent at the base" is a definite state (`ls-tree` exits 0 with no
+    // output), distinct from "git failed" — and a head-side manifest never
+    // substitutes for it: deleting the existence probe would make `git show`
+    // throw and this test fail instead of returning null.
     const root = temp();
     const worktree = join(root, 'repository');
     initGit(worktree);
     write(join(worktree, 'src', 'change.ts'), 'base\n');
     const base = commitAll(worktree);
-    const provider: RepositoryContextProvider = { provide: () => context() };
-    expect(() =>
-      run(
-        join(root, 'fetch-failed'),
-        worktree,
-        {
+    // Commit the head-side manifest: HEAD != mergeBaseSha, so a probe keyed
+    // on HEAD would find the manifest and fail closed on the base read.
+    writeManifest(worktree);
+    commitAll(worktree);
+    const { planPath, outPath } = run(root, worktree, {
+      files: [{ path: 'src/change.ts' }],
+      mergeBaseSha: base,
+    });
+    expect(readJson(outPath)).toBeNull();
+    expect(readJson(planPath)).not.toHaveProperty('repositoryContext');
+  });
+
+  // Committed symlink objects are not portable to Windows runners.
+  it.skipIf(process.platform === 'win32')(
+    'follows a committed symlink identity like the worktree reader',
+    () => {
+      const root = temp();
+      const worktree = join(root, 'repository');
+      initGit(worktree);
+      write(
+        join(worktree, '.qwen', 'manifest.json'),
+        JSON.stringify({
+          version: 1,
+          label: 'Manifest project',
+          rules: [{ paths: ['src/**'], domains: ['runtime'] }],
+        }),
+      );
+      symlinkSync(
+        'manifest.json',
+        join(worktree, '.qwen', 'review-context.json'),
+      );
+      write(join(worktree, 'src', 'change.ts'), 'base\n');
+      const base = commitAll(worktree);
+
+      expect(
+        readJson(
+          run(join(root, 'pr'), worktree, {
+            files: [{ path: 'src/change.ts' }],
+            mergeBaseSha: base,
+          }).outPath,
+        ),
+      ).toEqual(manifestContext());
+      expect(
+        readJson(
+          run(join(root, 'local'), worktree, {
+            files: [{ path: 'src/change.ts' }],
+          }).outPath,
+        ),
+      ).toEqual(manifestContext());
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'fails closed when a committed identity symlink escapes the tree',
+    () => {
+      const root = temp();
+      const worktree = join(root, 'repository');
+      initGit(worktree);
+      write(join(worktree, 'outside.json'), '{}');
+      mkdirSync(join(worktree, '.qwen'), { recursive: true });
+      symlinkSync(
+        '../../outside.json',
+        join(worktree, '.qwen', 'review-context.json'),
+      );
+      write(join(worktree, 'src', 'change.ts'), 'base\n');
+      const base = commitAll(worktree);
+      expect(() =>
+        run(join(root, 'escape'), worktree, {
           files: [{ path: 'src/change.ts' }],
           mergeBaseSha: base,
-          baseFetchFailed: true,
-        },
-        [provider],
-      ),
-    ).toThrow('base fetch failed');
+        }),
+      ).toThrow('escapes the worktree');
+    },
+  );
+
+  it('degrades to a null artifact when the base fetch failed', () => {
+    // merge-base documents the state as not fatal, fetch-pr warns and
+    // continues, base-tree refuses the possibly stale sha — repo-context
+    // degrades like the unresolved base instead of halting the review.
+    const root = temp();
+    const worktree = join(root, 'repository');
+    initGit(worktree);
+    writeManifest(worktree);
+    write(join(worktree, 'src', 'change.ts'), 'base\n');
+    const base = commitAll(worktree);
+    const provide = vi.fn<RepositoryContextProvider['provide']>(() =>
+      context(),
+    );
+    const { planPath, outPath } = run(
+      root,
+      worktree,
+      {
+        files: [{ path: 'src/change.ts' }],
+        mergeBaseSha: base,
+        baseFetchFailed: true,
+      },
+      [{ provide }],
+    );
+    expect(provide).not.toHaveBeenCalled();
+    expect(readJson(outPath)).toBeNull();
+    expect(readJson(planPath)).not.toHaveProperty('repositoryContext');
+  });
+
+  it('fails closed for an invalid or unresolvable base', () => {
+    const root = temp();
+    const worktree = join(root, 'repository');
+    initGit(worktree);
+    write(join(worktree, 'src', 'change.ts'), 'base\n');
+    commitAll(worktree);
+    const provider: RepositoryContextProvider = { provide: () => context() };
     expect(() =>
       run(
         join(root, 'invalid'),
@@ -393,8 +505,9 @@ describe('repo-context providers and trust boundary', () => {
     run(root, worktree, { files: [{ path: 'src/change.ts' }] }, [provider]);
   });
 
-  // Permission-based failure injection is meaningless to root.
-  const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+  // Permission-based failure injection is meaningless to root, and chmod(0)
+  // does not block reads on Windows — the repo convention for this case.
+  const isRoot = process.platform === 'win32' || process.getuid?.() === 0;
 
   it.skipIf(isRoot)(
     'fails closed when a present local identity file cannot be read',

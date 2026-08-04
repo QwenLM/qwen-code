@@ -15,7 +15,7 @@ import {
 } from 'node:fs';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
-import { git, gitOpt } from './lib/git.js';
+import { git, gitOpt, gitRaw } from './lib/git.js';
 import { manifestRepositoryContextProvider } from './lib/manifest-repository-context.js';
 import {
   isSafeRepositoryRelativePath,
@@ -77,12 +77,16 @@ function recordedWorktreeMatches(
 /**
  * Which identity source this plan may read from. `local` — no merge base was
  * ever recorded (a capture-local / plan-diff plan): the worktree. `base` — a
- * trusted, resolved merge base: that commit only. `none` — a PR plan whose
- * base never resolved (`fetch-pr` records `mergeBaseSha: null` and degrades
- * rather than failing): NO source. That third state is the whole point: the
- * natural-looking fallback would read the manifest from the PR head, the exact
- * read the trust boundary exists to forbid, so the command writes a `null`
- * artifact instead — the same degradation `fetch-pr` chose, taken one step.
+ * trusted, resolved merge base: that commit only. `none` — NO source, for
+ * two PR states the pipeline itself degrades: a base that never resolved
+ * (`fetch-pr` records `mergeBaseSha: null` rather than failing) and a FAILED
+ * base fetch (`merge-base` documents the state as not fatal, `fetch-pr`
+ * warns and continues on a possibly stale sha, `base-tree` refuses one — a
+ * possibly stale sha is not a trusted identity source either). The shape
+ * matters: the natural-looking fallback would read the manifest from the PR
+ * head, the exact read the trust boundary exists to forbid, so the command
+ * writes a `null` artifact instead — the same degradation `fetch-pr` chose,
+ * taken one step.
  */
 type MergeBaseResolution =
   | { kind: 'local' }
@@ -94,12 +98,9 @@ function trustedMergeBase(
   worktree: string,
 ): MergeBaseResolution {
   if (plan.mergeBaseSha === undefined) return { kind: 'local' };
-  if (plan.baseFetchFailed === true && plan.mergeBaseSha !== null) {
-    throw new Error(
-      'repo-context: base fetch failed, so plan.mergeBaseSha may be stale',
-    );
+  if (plan.baseFetchFailed === true || plan.mergeBaseSha === null) {
+    return { kind: 'none' };
   }
-  if (plan.mergeBaseSha === null) return { kind: 'none' };
   if (
     typeof plan.mergeBaseSha !== 'string' ||
     !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(plan.mergeBaseSha)
@@ -132,6 +133,105 @@ function isAbsentError(error: unknown): boolean {
   return code === 'ENOENT' || code === 'ENOTDIR';
 }
 
+/**
+ * One `git ls-tree <rev> -- <path>` entry. Exit 0 with empty output is git's
+ * DEFINITE "absent at this revision" — unlike `cat-file -e`, whose non-zero
+ * exit cannot be told from a failed git call, so a throwing git call below
+ * stays a throw (fail closed) and never masquerades as "not this repository".
+ */
+function baseTreeEntry(
+  worktree: string,
+  mergeBase: string,
+  path: string,
+): { mode: string; type: string } | null {
+  const output = git('-C', worktree, 'ls-tree', mergeBase, '--', path);
+  if (output === '') return null;
+  const [mode, type] = output.split(/\s+/);
+  return { mode, type };
+}
+
+function readBaseBlob(worktree: string, mergeBase: string, path: string) {
+  try {
+    // `gitRaw`'s raised maxBuffer: `git()` inherits execFileSync's 1 MB
+    // default, so a schema-legal manifest past 1 MB would die with ENOBUFS
+    // in PR mode while the worktree branch reads it without a cap.
+    return gitRaw('-C', worktree, 'show', `${mergeBase}:${path}`).toString(
+      'utf8',
+    );
+  } catch (error) {
+    throw new Error(
+      `repo-context: identity read failed for ${path}: ` +
+        `${(error as Error).message}`,
+    );
+  }
+}
+
+/**
+ * Resolve a committed symlink's target the way the filesystem resolves one:
+ * relative to the link's own directory. `null` means the target escapes the
+ * tree (absolute, or climbs past the root); `''` means it climbs to the tree
+ * root itself — a directory, never an identity file.
+ */
+function resolveTreeSymlinkTarget(
+  fromPath: string,
+  target: string,
+): string | null {
+  if (target.startsWith('/') || /^[A-Za-z]:/.test(target)) return null;
+  const segments = `${dirname(fromPath)}/${target}`.split('/');
+  const resolved: string[] = [];
+  for (const segment of segments) {
+    if (segment === '' || segment === '.') continue;
+    if (segment === '..') {
+      if (resolved.length === 0) return null;
+      resolved.pop();
+      continue;
+    }
+    resolved.push(segment);
+  }
+  return resolved.join('/');
+}
+
+const MAX_IDENTITY_SYMLINK_HOPS = 16;
+
+/**
+ * The base-mode identity read, mirroring the worktree branch entry by entry:
+ * `ls-tree` mode stands in for `lstat`/`statSync` (`cat-file -e` would
+ * happily "exist" for a tree or symlink entry and hand a provider content
+ * the worktree branch can never produce), committed symlinks are followed
+ * under the same containment rule `realpathSync` enforces on disk, and a
+ * directory yields `null` exactly like `isFile() === false`.
+ */
+function readBaseIdentity(
+  worktree: string,
+  mergeBase: string,
+  relativePath: string,
+): string | null {
+  let path = relativePath;
+  for (let hop = 0; hop < MAX_IDENTITY_SYMLINK_HOPS; hop++) {
+    const entry = baseTreeEntry(worktree, mergeBase, path);
+    if (entry === null) return null;
+    if (entry.mode === '120000') {
+      const target = readBaseBlob(worktree, mergeBase, path);
+      const resolved = resolveTreeSymlinkTarget(path, target);
+      if (resolved === null) {
+        throw new Error(
+          `repo-context: identity path escapes the worktree: ` +
+            `${JSON.stringify(relativePath)}`,
+        );
+      }
+      if (resolved === '') return null;
+      path = resolved;
+      continue;
+    }
+    if (entry.type !== 'blob') return null;
+    return normalizeIdentityContent(readBaseBlob(worktree, mergeBase, path));
+  }
+  throw new Error(
+    `repo-context: identity symlink chain is too deep: ` +
+      `${JSON.stringify(relativePath)}`,
+  );
+}
+
 function identityReader(
   worktree: string,
   mergeBase: string | null,
@@ -143,28 +243,7 @@ function identityReader(
       );
     }
     if (mergeBase !== null) {
-      // Probe existence first so "absent at the base" and "git failed" stay
-      // distinct: once the path IS there, a failing `show` throws (fail
-      // closed) instead of masquerading as "not this repository".
-      if (
-        gitOpt(
-          '-C',
-          worktree,
-          'cat-file',
-          '-e',
-          `${mergeBase}:${relativePath}`,
-        ) === null
-      ) {
-        return null;
-      }
-      try {
-        return git('-C', worktree, 'show', `${mergeBase}:${relativePath}`);
-      } catch (error) {
-        throw new Error(
-          `repo-context: identity read failed for ${relativePath}: ` +
-            `${(error as Error).message}`,
-        );
-      }
+      return readBaseIdentity(worktree, mergeBase, relativePath);
     }
     const candidate = resolve(worktree, relativePath);
     let resolved: string;

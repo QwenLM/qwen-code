@@ -101,6 +101,16 @@ describe('manifest repository context provider', () => {
     ).toBeNull();
   });
 
+  it('attaches nothing for an empty change set', () => {
+    // `[].some(...)` is false, so no rule matches an empty diff — pinning the
+    // filter against a `.every` mutation, under which EVERY rule matches.
+    const worktree = temp();
+    const content = manifest({
+      rules: [{ paths: ['**'], requiredAgents: ['test-matrix'] }],
+    });
+    expect(provide(worktree, [], content)).toBeNull();
+  });
+
   it.each([
     ['malformed JSON', '{'],
     ['unknown top-level field', manifest({ extra: true })],
@@ -120,8 +130,103 @@ describe('manifest repository context provider', () => {
         rules: [{ paths: ['src/**'], relatedPaths: ['**/*.ts'] }],
       }),
     ],
+    [
+      'root-level wildcard related glob',
+      manifest({
+        rules: [{ paths: ['src/**'], relatedPaths: ['*.ts'] }],
+      }),
+    ],
+    [
+      'first-segment wildcard related glob',
+      manifest({
+        rules: [{ paths: ['src/**'], relatedPaths: ['src*/*.ts'] }],
+      }),
+    ],
   ])('fails closed for %s', (_name, content) => {
     expect(() => provide(temp(), ['src/change.ts'], content)).toThrow();
+  });
+
+  it('fails closed when the total paths globs outgrow the matching bound', () => {
+    // The rule filter tests every changed path against every `paths` glob,
+    // so the total across rules — not each rule's array — is capped.
+    const worktree = temp();
+    const rules = [
+      { paths: Array.from({ length: 128 }, (_, index) => `area-${index}.ts`) },
+      { paths: ['src/**'] },
+    ];
+    expect(() =>
+      provide(worktree, ['src/change.ts'], manifest({ rules })),
+    ).toThrow('paths exceeds limit');
+  });
+
+  it('fails closed when merged fields or glob lists outgrow the wire bound', () => {
+    const worktree = temp();
+    // Every single rule honors the 128-item bound; the MERGE does not.
+    expect(() =>
+      provide(
+        worktree,
+        ['src/change.ts'],
+        manifest({
+          rules: [
+            {
+              paths: ['src/**'],
+              domains: Array.from(
+                { length: 128 },
+                (_, index) => `domain-a-${String(index).padStart(3, '0')}`,
+              ),
+            },
+            {
+              paths: ['src/**'],
+              domains: Array.from(
+                { length: 128 },
+                (_, index) => `domain-b-${String(index).padStart(3, '0')}`,
+              ),
+            },
+          ],
+        }),
+      ),
+    ).toThrow('domains exceeds limit');
+    expect(() =>
+      provide(
+        worktree,
+        ['src/change.ts'],
+        manifest({
+          rules: Array.from({ length: 65 }, (_, index) => ({
+            paths: ['src/**'],
+            verificationNotes: [
+              `note-a-${String(index).padStart(3, '0')}`,
+              `note-b-${String(index).padStart(3, '0')}`,
+            ],
+          })),
+        }),
+      ),
+    ).toThrow('verificationNotes exceeds limit');
+    // The merged `relatedPaths` pattern list is capped BEFORE any scan, or a
+    // max-cardinality manifest stalls expansion for minutes.
+    expect(() =>
+      provide(
+        worktree,
+        ['src/change.ts'],
+        manifest({
+          rules: [
+            {
+              paths: ['src/**'],
+              relatedPaths: Array.from(
+                { length: 128 },
+                (_, index) => `p-a/${index}.ts`,
+              ),
+            },
+            {
+              paths: ['src/**'],
+              relatedPaths: Array.from(
+                { length: 128 },
+                (_, index) => `p-b/${index}.ts`,
+              ),
+            },
+          ],
+        }),
+      ),
+    ).toThrow('relatedPaths exceeds limit');
   });
 
   it('excludes related file and directory symlink escapes', () => {
@@ -164,6 +269,28 @@ describe('manifest repository context provider', () => {
     },
   );
 
+  it('never descends into dependency or build-output trees', () => {
+    // Without the skip this installed-shape tree exceeds the visited-entry
+    // ceiling mid-scan; with it, only source entries count.
+    const worktree = temp();
+    write(join(worktree, 'src', 'keep.ts'));
+    write(join(worktree, 'src', 'dist', 'built.js'));
+    const deps = join(worktree, 'src', 'node_modules');
+    mkdirSync(deps, { recursive: true });
+    for (let index = 0; index < MAX_GLOB_CANDIDATES; index++) {
+      writeFileSync(join(deps, `${String(index).padStart(6, '0')}.js`), '');
+    }
+    expect(
+      provide(
+        worktree,
+        ['src/change.ts'],
+        manifest({
+          rules: [{ paths: ['src/**'], relatedPaths: ['src/**'] }],
+        }),
+      )?.relatedPaths,
+    ).toEqual(['src/keep.ts']);
+  }, 30_000);
+
   it('fails closed as soon as related matches exceed the bound', () => {
     const worktree = temp();
     const source = join(worktree, 'src');
@@ -180,6 +307,33 @@ describe('manifest repository context provider', () => {
         }),
       ),
     ).toThrow('exceeds limit');
+  });
+
+  it('fails closed on the static branch when merged matches exceed the bound', () => {
+    // 128 wildcard matches sit exactly at the bound, then a static root adds
+    // one more — the static-file branch enforces the same cap the directory
+    // branch does, or the wire validator reports a schema shape error instead.
+    const worktree = temp();
+    const source = join(worktree, 'src');
+    mkdirSync(source);
+    for (let index = 0; index < 128; index++) {
+      writeFileSync(join(source, `${String(index).padStart(3, '0')}.ts`), '');
+    }
+    write(join(worktree, 'zz', 'extra.ts'));
+    expect(() =>
+      provide(
+        worktree,
+        ['src/change.ts'],
+        manifest({
+          rules: [
+            {
+              paths: ['src/**'],
+              relatedPaths: ['src/**', 'zz/extra.ts'],
+            },
+          ],
+        }),
+      ),
+    ).toThrow('relatedPaths exceeds limit');
   });
 
   it('bounds candidate scanning even when matches are later excluded', () => {
@@ -203,6 +357,52 @@ describe('manifest repository context provider', () => {
         }),
       ),
     ).toThrow('scan exceeds limit');
+  }, 30_000);
+
+  it('expands nested related globs without double-counting the subsumed root', () => {
+    const worktree = temp();
+    write(join(worktree, 'docs', 'a.ts'));
+    write(join(worktree, 'docs', 'api', 'b.ts'));
+    expect(
+      provide(
+        worktree,
+        ['src/change.ts'],
+        manifest({
+          rules: [
+            {
+              paths: ['src/**'],
+              relatedPaths: ['docs/**', 'docs/api/**'],
+            },
+          ],
+        }),
+      )?.relatedPaths,
+    ).toEqual(['docs/a.ts', 'docs/api/b.ts']);
+  });
+
+  it('counts a subsumed subtree against the scan bound only once', () => {
+    // Double-scanning this tree against the shared counter visits ~2x8194
+    // entries and fails a legal manifest closed at half the tree.
+    const worktree = temp();
+    const api = join(worktree, 'docs', 'api');
+    mkdirSync(api, { recursive: true });
+    for (let index = 0; index < MAX_GLOB_CANDIDATES / 2; index++) {
+      mkdirSync(join(api, `dir-${String(index).padStart(5, '0')}`));
+    }
+    write(join(worktree, 'docs', 'a.ts'));
+    expect(
+      provide(
+        worktree,
+        ['src/change.ts'],
+        manifest({
+          rules: [
+            {
+              paths: ['src/**'],
+              relatedPaths: ['docs/**', 'docs/api/**'],
+            },
+          ],
+        }),
+      )?.relatedPaths,
+    ).toEqual(['docs/a.ts']);
   }, 30_000);
 
   it('accepts unsorted manifest arrays and sorts the merged output', () => {
@@ -255,6 +455,22 @@ describe('manifest repository context provider', () => {
     ).toEqual(['src/main.test.ts']);
   });
 
+  it('resolves a top-level static related entry as itself', () => {
+    // A completely static entry can never begin with a repository-wide
+    // wildcard, so the directory-prefix rule applies only to wildcard globs.
+    const worktree = temp();
+    write(join(worktree, 'package.json'), '{}');
+    expect(
+      provide(
+        worktree,
+        ['src/change.ts'],
+        manifest({
+          rules: [{ paths: ['src/**'], relatedPaths: ['package.json'] }],
+        }),
+      )?.relatedPaths,
+    ).toEqual(['package.json']);
+  });
+
   it('uses case-sensitive UTF-16 matching for rules and related expansion', () => {
     const worktree = temp();
     write(join(worktree, 'src', 'X.TS'));
@@ -282,10 +498,36 @@ describe('manifest repository context provider', () => {
     ).toBe('Example repository');
   });
 
+  it('matches multi-star segments in polynomial time', () => {
+    // `'ab*'` repeated in one segment is the catastrophic-backtracking shape
+    // the old compiled regex died on (a 45 s watchdog killed the probe at an
+    // 81-char filename); the matcher stays polynomial in pattern x value.
+    const worktree = temp();
+    write(join(worktree, 'src', `${'ab'.repeat(40)}x`));
+    write(join(worktree, 'src', 'ababab'));
+    const content = manifest({
+      rules: [
+        {
+          paths: ['src/**'],
+          relatedPaths: [`src/${'ab*'.repeat(30)}ab`, 'src/ab*ab*ab'],
+        },
+      ],
+    });
+    expect(provide(worktree, ['src/change.ts'], content)?.relatedPaths).toEqual(
+      ['src/ababab'],
+    );
+  }, 10_000);
+
   it('produces deterministic code-unit sorted output', () => {
     const worktree = temp();
     write(join(worktree, 'src', 'z.ts'));
     write(join(worktree, 'src', 'A.ts'));
+    // A directory that is a strict prefix of a sibling file's name: the scan
+    // emits the directory's contents before the sibling ('eslint' sorts
+    // before 'eslint.config.js'), the REVERSE of code-unit order ('.' 0x2E
+    // < '/' 0x2F) — the shape the final sort exists to repair.
+    write(join(worktree, 'src', 'eslint', 'index.ts'));
+    write(join(worktree, 'src', 'eslint.config.js'));
     const content = manifest({
       rules: [
         {
@@ -303,6 +545,11 @@ describe('manifest repository context provider', () => {
     const second = provide(worktree, ['src/change.ts'], content);
     expect(first).toEqual(second);
     expect(first?.domains).toEqual(['Alpha', 'zeta']);
-    expect(first?.relatedPaths).toEqual(['src/A.ts', 'src/z.ts']);
+    expect(first?.relatedPaths).toEqual([
+      'src/A.ts',
+      'src/eslint.config.js',
+      'src/eslint/index.ts',
+      'src/z.ts',
+    ]);
   });
 });

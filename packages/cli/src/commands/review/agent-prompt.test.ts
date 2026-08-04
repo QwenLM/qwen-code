@@ -1841,6 +1841,13 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(buildBrief).toContain('test:compiler');
     expect(buildBrief).toContain('debug, linux-x64');
     expect(buildBrief).toContain('Use the repository native test runner');
+
+    // The --whole-diff path builds Agent 8's briefs; it carries the same
+    // block, or the one finder launched for a dominant domain is the one
+    // reviewer denied that domain's guidance.
+    const wholeDiff = buildWholeDiffBlock(contextPlan);
+    expect(wholeDiff).toContain('Example project repository context');
+    expect(wholeDiff).toContain('src/compiler.ts');
   });
 
   it('carries the mutation-testing lens into Agent 5, equivalent-mutant escape hatch included', () => {
