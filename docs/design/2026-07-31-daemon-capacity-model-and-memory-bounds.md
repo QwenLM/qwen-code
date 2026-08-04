@@ -113,6 +113,10 @@ The real control is admission at spawn time keyed on concurrently live children,
 - **It must never raise a ceiling.** Clamping to `legacyChildCeilingMb` is what makes the policy safe to apply unconditionally; without it the minimum-budget constant and an over-large explicit flag both inflate the share.
 - **The spawn path has a trap.** `getAcpMemoryArgs()` emits `--max-old-space-size` only when its computed target exceeds the _spawning daemon's own_ `heap_size_limit` (`spawnChannel.ts:27-34`). A budget-derived share is normally below that, so a naive change is silently dropped and the overcommit returns. The regression test must assert the flag survives a value below the test process's own limit.
 
+**Modeled, not yet applied, as `--child-heap-mode`.** A first attempt sized each child by the count live at _its_ spawn; review showed that bounds the child count but not the memory, since V8 cannot lower a running child's ceiling and grants accumulate as P x H(n) — 2.6x the pool at seven children on 8 GB. The model is now a fixed partition: one constant ceiling for every child, with admission capped so the total stays inside the pool by construction.
+
+Applying it is deliberately deferred. The compatibility point above is why: enforcing changes child GC and OOM behaviour, and nothing yet tells an operator beforehand whether their workload fits the ceiling. The refusal count cannot — children run on the host-derived ceiling while observing, so it measures admission pressure, not ceiling adequacy. The enforcing mode ships with the measurement that justifies it: peak old-space per child, compared against the modeled ceiling.
+
 ### Part 2 — Observe, with a denominator, before enforcing
 
 This part splits by what each piece measures, because the denominators are independent and the cheap one is worth landing first.

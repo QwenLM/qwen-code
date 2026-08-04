@@ -23,6 +23,7 @@ import {
   recommendedChildShareMb,
   type DaemonMemoryBudget,
 } from '@qwen-code/acp-bridge/daemonMemoryBudget';
+import type { ChildHeapPolicySnapshot } from '@qwen-code/acp-bridge/childHeapPolicy';
 import {
   computeDaemonMemoryPressure,
   type DaemonMemoryPressure,
@@ -126,6 +127,8 @@ export interface BuildDaemonStatusOptions {
   getPerfSnapshot?: () => DaemonPerfSnapshot;
   getMetricsSeries?: () => DaemonMetricsBucket[];
   getTotalSessionAdmissionSnapshot?: () => TotalSessionAdmissionSnapshot;
+  /** Returns undefined when no policy was built — direct-embed, or no budget. */
+  getChildHeapPolicySnapshot?: () => ChildHeapPolicySnapshot | undefined;
 }
 
 interface DaemonStatusSection<T> {
@@ -196,6 +199,23 @@ export interface DaemonStatusMemoryLimits {
    * namespace for enforcement that has not shipped.
    */
   enforced: false;
+  /**
+   * The per-child heap partition the daemon models but does not apply.
+   * `null` when no policy was built.
+   */
+  childHeap: {
+    mode: 'off' | 'observe';
+    /** Children the pool could host at once. 0 when it cannot host one. */
+    maxConcurrentChildren: number;
+    /** What each would receive. `null` when none is admissible — never 0. */
+    perChildCeilingMb: number | null;
+    /**
+     * Spawns that would have exceeded `maxConcurrentChildren`. Admission
+     * pressure only: 0 does **not** mean the partition is safe to apply,
+     * because children still run on the much larger host-derived ceiling.
+     */
+    refusals: number;
+  } | null;
   /** What was asked for: the flag value, or half of available memory. */
   configuredBudgetMb: number;
   /** `configured` capped at resolved cgroup/host memory. */
@@ -226,10 +246,19 @@ export interface DaemonStatusMemoryLimits {
 
 export function toDaemonStatusMemoryLimits(
   budget: DaemonMemoryBudget | undefined,
+  childHeap?: ChildHeapPolicySnapshot,
 ): DaemonStatusMemoryLimits | null {
   if (!budget) return null;
   return {
     enforced: false,
+    childHeap: childHeap
+      ? {
+          mode: childHeap.mode,
+          maxConcurrentChildren: childHeap.maxConcurrentChildren,
+          perChildCeilingMb: childHeap.perChildCeilingMb,
+          refusals: childHeap.refusals,
+        }
+      : null,
     configuredBudgetMb: budget.configuredBudgetMb,
     effectiveBudgetMb: budget.effectiveBudgetMb,
     budgetSource: budget.budgetSource,
@@ -801,7 +830,10 @@ export async function buildDaemonStatusResponse(
       channelIdleTimeoutMs: bridgeSnapshot.limits.channelIdleTimeoutMs,
       sessionIdleTimeoutMs: bridgeSnapshot.limits.sessionIdleTimeoutMs,
       acpConnectionCap: acpSnapshot?.connectionCap ?? null,
-      memory: toDaemonStatusMemoryLimits(memoryBudget),
+      memory: toDaemonStatusMemoryLimits(
+        memoryBudget,
+        input.getChildHeapPolicySnapshot?.(),
+      ),
     },
     ...(workspaceRuntimes && workspaceRuntimes.length > 1
       ? {

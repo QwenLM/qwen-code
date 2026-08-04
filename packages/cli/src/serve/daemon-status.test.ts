@@ -25,6 +25,7 @@ import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
 import type { RateLimiterInstance, RateLimitTier } from './rate-limit.js';
 import type { DaemonWorkspaceService } from './workspace-service/index.js';
 import type { DaemonLogger } from './daemon-logger.js';
+import { createChildHeapPolicy } from '@qwen-code/acp-bridge/childHeapPolicy';
 import { resolveDaemonMemoryBudget } from '@qwen-code/acp-bridge/daemonMemoryBudget';
 
 const BASE_WORKSPACE = '/work/status';
@@ -128,6 +129,45 @@ describe('buildDaemonStatusResponse', () => {
     const response = await buildDaemonStatusResponse('summary', options);
 
     expect(response.limits.maxTotalSessions).toBe(50);
+  });
+
+  it('reports the modeled partition without claiming it is applied', async () => {
+    const budget = resolveDaemonMemoryBudget({ availableMemoryMb: 8_192 });
+    const options = makeOptions();
+    options.opts.daemonMemoryBudget = budget;
+    const policy = createChildHeapPolicy({ budget, mode: 'observe' });
+    policy.decide(10_000); // one would-be refusal, so the counter is not trivially 0
+    options.getChildHeapPolicySnapshot = () => policy.snapshot();
+
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    // The figures an operator needs to judge the partition for themselves —
+    // publishing them is the substitute for a refusal count that cannot say
+    // whether the ceiling would fit their workload.
+    expect(response.limits.memory).toMatchObject({
+      enforced: false,
+      childHeap: {
+        mode: 'observe',
+        maxConcurrentChildren: 7,
+        perChildCeilingMb: 526,
+        refusals: 1,
+      },
+    });
+  });
+
+  it('reports no child-heap policy as null rather than as a disabled one', async () => {
+    // Direct-embed and the bootstrap window build no policy. `null` says
+    // "there is no policy", which a client must not read as "mode off".
+    const options = makeOptions();
+    options.opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
+      availableMemoryMb: 8_192,
+    });
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    expect(response.limits.memory).toMatchObject({
+      enforced: false,
+      childHeap: null,
+    });
   });
 
   it('reports the resolved memory budget in daemon status limits', () => {

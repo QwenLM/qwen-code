@@ -1949,7 +1949,8 @@ describe('runQwenServe permissionResponseTimeoutMs validation', () => {
 });
 
 /**
- * The budget is resolved at boot and reported; it does not size any child yet.
+ * The budget is resolved at boot and reported. Whether it also sizes a child
+ * depends on `childHeapMode`, which defaults to `observe` and sizes nothing.
  * The only boot-time behavior is rejecting an out-of-range flag value.
  */
 describe('runQwenServe memory budget', () => {
@@ -1992,7 +1993,11 @@ describe('runQwenServe memory budget', () => {
       const body = (await res.json()) as {
         limits: {
           memory: {
-            enforced: false;
+            enforced: boolean;
+            childHeap: {
+              mode: string;
+              refusals: number;
+            } | null;
             configuredBudgetMb: number;
             effectiveBudgetMb: number;
             budgetSource: string;
@@ -2042,6 +2047,12 @@ describe('runQwenServe memory budget', () => {
 
       const memory = body.limits.memory;
       expect(memory).not.toBeNull();
+      // The child-heap policy reached status on a daemon that really booted.
+      // Default is `observe`, so it computed a share and applied nothing —
+      // `enforced` has to stay false or the field means "the feature exists"
+      // rather than "children are being sized by this".
+      expect(memory?.enforced).toBe(false);
+      expect(memory?.childHeap).toEqual({ mode: 'observe', refusals: 0 });
       // Nothing in this section is applied, and the wire says so.
       expect(memory?.enforced).toBe(false);
       expect(memory?.configuredBudgetMb).toBe(4096);

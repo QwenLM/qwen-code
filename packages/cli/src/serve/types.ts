@@ -228,7 +228,8 @@ export interface ServeOptions {
    * Total memory budget in MB for the whole daemon process tree — the root
    * plus every `qwen --acp` child it spawns. When unset, derived as half of
    * the cgroup-constrained or host memory. Currently observed and reported
-   * only; it does not yet size any child.
+   * only until `childHeapMode` is `enforce`, which sizes every ACP child from
+   * it and refuses spawns the child pool cannot cover.
    */
   memoryBudgetMb?: number;
   /**
@@ -245,6 +246,17 @@ export interface ServeOptions {
    * enforcement.
    */
   memoryPressureMode?: 'off' | 'observe';
+  /**
+   * Whether the daemon models a per-child heap partition of the budget.
+   *
+   * `observe` (default) computes the partition and counts the spawns it would
+   * have refused; nothing is applied. There is no `enforce` yet — applying it
+   * needs a way to tell an operator in advance whether their workload fits
+   * the ceiling, and `refusals` cannot answer that: it counts admission
+   * pressure, while children still run on the far larger host-derived
+   * ceiling. `off` models nothing.
+   */
+  childHeapMode?: 'off' | 'observe';
   /**
    * Resolved at boot by `runQwenServe`. Not an operator input, and not
    * consumed by any spawn path — it is reported under `limits.memory` on

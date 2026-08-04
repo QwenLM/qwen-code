@@ -687,6 +687,7 @@ describe('serve fast path argument parsing', () => {
       ['http-bridge', ['--no-http-bridge']],
       ['memory-budget-mb', ['--memory-budget-mb', '8192']],
       ['memory-pressure-mode', ['--memory-pressure-mode', 'observe']],
+      ['child-heap-mode', ['--child-heap-mode', 'observe']],
       ['mcp-client-budget', ['--mcp-client-budget', '10']],
       ['mcp-budget-mode', ['--mcp-budget-mode', 'warn']],
       ['allow-origin', ['--allow-origin', 'http://localhost:3000']],
@@ -780,6 +781,23 @@ describe('serve fast path argument parsing', () => {
     // inventing a second wording for the same error.
     expect(
       parseServeFastPathArgs(['serve', '--memory-pressure-mode', 'enforce']),
+    ).toEqual({ kind: 'fallback' });
+  });
+
+  it('parses --child-heap-mode and falls back on an unknown value', () => {
+    for (const argv of [
+      ['serve', '--child-heap-mode', 'off'],
+      ['serve', '--child-heap-mode=off'],
+    ]) {
+      expect(parseServeFastPathArgs(argv)).toMatchObject({
+        kind: 'serve',
+        options: { childHeapMode: 'off' },
+      });
+    }
+    // `enforce` is deliberately not a value yet, so it is the sample worth
+    // pinning: the fast path must defer to yargs rather than smuggle it in.
+    expect(
+      parseServeFastPathArgs(['serve', '--child-heap-mode', 'enforce']),
     ).toEqual({ kind: 'fallback' });
   });
 

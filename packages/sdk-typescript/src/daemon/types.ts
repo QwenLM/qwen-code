@@ -630,7 +630,23 @@ export interface DaemonStatusReport {
      */
     memory?: {
       /** Always false: nothing in this section is applied to a process. */
+      /** False, and required: nothing in this section is applied to a process. */
       enforced: false;
+      /**
+       * The per-child heap partition the daemon models but does not apply.
+       * `null` when no policy was built; absent on daemons predating it.
+       */
+      childHeap?: {
+        mode: 'off' | 'observe';
+        maxConcurrentChildren: number;
+        /** `null` when no child is admissible — never 0. */
+        perChildCeilingMb: number | null;
+        /**
+         * Admission pressure only. 0 does not mean the partition is safe to
+         * apply: children still run on the host-derived ceiling.
+         */
+        refusals: number;
+      } | null;
       configuredBudgetMb: number;
       effectiveBudgetMb: number;
       budgetSource: 'flag' | 'derived';
