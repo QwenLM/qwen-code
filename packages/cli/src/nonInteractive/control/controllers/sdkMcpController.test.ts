@@ -84,5 +84,28 @@ describe('SdkMcpController', () => {
     expect(requestSignal?.aborted).toBe(true);
     expect(session.signal.aborted).toBe(false);
     expect(secondTurn.signal.aborted).toBe(false);
+
+    requestSignal = undefined;
+    const sessionRequest = sendMcpMessage('sdk-server', {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/list',
+    } as JSONRPCMessage);
+    const sessionResult = sessionRequest.then(
+      () => ({ status: 'fulfilled' as const }),
+      (error: unknown) => ({ status: 'rejected' as const, error }),
+    );
+    await vi.waitFor(() => {
+      expect(requestSignal).toBeDefined();
+    });
+    const sessionOwnedSignal = requestSignal as AbortSignal | undefined;
+    session.abort();
+
+    await expect(sessionResult).resolves.toMatchObject({
+      status: 'rejected',
+      error: expect.objectContaining({ message: 'Request aborted' }),
+    });
+    expect(sessionOwnedSignal?.aborted).toBe(true);
+    expect(secondTurn.signal.aborted).toBe(false);
   });
 });

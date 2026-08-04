@@ -43,13 +43,6 @@ const DEFAULT_CAN_USE_TOOL_TIMEOUT_MS = 60_000;
 export class PermissionController extends BaseController {
   private pendingOutgoingRequests = new Set<string>();
 
-  private getTurnRequestAbortSignal(): AbortSignal {
-    const activeTurnSignal = this.context.getActiveTurnAbortSignal?.();
-    return activeTurnSignal
-      ? AbortSignal.any([this.context.abortSignal, activeTurnSignal])
-      : this.context.abortSignal;
-  }
-
   /**
    * Handle permission control requests
    */

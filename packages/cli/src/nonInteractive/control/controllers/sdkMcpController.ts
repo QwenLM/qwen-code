@@ -90,10 +90,7 @@ export class SdkMcpController extends BaseController {
     // Capture the current turn now. A later turn may become active while this
     // request is still pending, but interrupt must continue to target the turn
     // that created the request.
-    const activeTurnSignal = this.context.getActiveTurnAbortSignal?.();
-    const signal = activeTurnSignal
-      ? AbortSignal.any([this.context.abortSignal, activeTurnSignal])
-      : this.context.abortSignal;
+    const signal = this.getTurnRequestAbortSignal();
 
     // Send control request to SDK with the MCP message
     const response = await this.sendControlRequest(
