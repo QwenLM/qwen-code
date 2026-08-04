@@ -59,6 +59,12 @@ import {
   unmarkedComments,
   type DraftedComment,
 } from './lib/inline-counts.js';
+import {
+  REVIEW_FOOTER_RE,
+  footerVersion,
+  isFooterSafeModelId,
+  reviewFooter,
+} from './lib/review-footer.js';
 
 export type ReviewEvent = 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
 
@@ -239,6 +245,10 @@ function toStringList(value: unknown, field: string): string[] {
   return [...(value as string[])];
 }
 
+function stripReviewFooter(entry: string): string {
+  return entry.replace(REVIEW_FOOTER_RE, '');
+}
+
 // Booleans get the same boundary treatment as the counts: the JSON is
 // model-written, and a stringified `"false"` is truthy — it once stood to
 // fire the downgrade sentence on a review that was never downgraded, and to
@@ -307,7 +317,9 @@ function ledgerMarkerFor(input: ComposeReviewInput): string | null {
           line?: unknown;
           body?: unknown;
         }>,
-        toStringList(input.bodyCriticals, 'bodyCriticals'),
+        toStringList(input.bodyCriticals, 'bodyCriticals')
+          .map(stripReviewFooter)
+          .filter((entry) => entry.trim() !== ''),
       ),
     );
   } catch {
@@ -325,7 +337,14 @@ function composeReviewBody(
     input.suggestionsInline,
     'suggestionsInline',
   );
-  const bodyCriticals = toStringList(input.bodyCriticals, 'bodyCriticals');
+  // Stripped per entry, not on the assembled body: these model-written
+  // strings render verbatim as the LAST body part, and a forged footer
+  // relocated into one would post directly above the canonical footer —
+  // the `$`-anchored regex only sees an entry's end, before the footer is
+  // appended.
+  const bodyCriticals = toStringList(input.bodyCriticals, 'bodyCriticals')
+    .map(stripReviewFooter)
+    .filter((entry) => entry.trim() !== '');
   const suggestionsDiscarded = toCount(
     input.suggestionsDiscarded,
     'suggestionsDiscarded',
@@ -333,7 +352,9 @@ function composeReviewBody(
   const cannotTell = toStringList(
     input.cannotTellCriticals,
     'cannotTellCriticals',
-  );
+  )
+    .map(stripReviewFooter)
+    .filter((entry) => entry.trim() !== '');
   const uncoverable = toStringList(
     input.uncoverableChunks,
     'uncoverableChunks',
@@ -708,6 +729,13 @@ function composeReviewBody(
       'compose-review: modelId is required (the public footer names the reviewing model)',
     );
   }
+  if (!isFooterSafeModelId(modelId)) {
+    throw new TypeError(
+      'compose-review: modelId is interpolated into the public footer ' +
+        'verbatim — it must be a single line that does not contain the ' +
+        'footer marker',
+    );
+  }
 
   // `C` counts every Critical the review posts anywhere — inline or body.
   // `S` counts every *confirmed* Suggestion — anchored or discarded: the
@@ -812,7 +840,7 @@ function composeReviewBody(
     }
   }
 
-  const footer = `_— ${modelId} via Qwen Code /review (v${cliVersion})_`;
+  const footer = reviewFooter(modelId, cliVersion);
   // Bilingual rendering: when the plan (fetch-pr's report) says the PR
   // description contains Han characters, the posted body carries the complete
   // Chinese version collapsed under the English one — the shape this repo's
@@ -1767,7 +1795,10 @@ export const composeReviewCommand: CommandModule = {
         ...countInlineFindings(drafted),
         draftedComments: drafted,
       },
-      await getCliVersion(),
+      // Same pin as `submit`: the startup stamp, not a version resolved at
+      // compose time — a shared runner can rewrite the install mid-session.
+      footerVersion(process.env['QWEN_CODE_STARTUP_VERSION']) ??
+        (await getCliVersion()),
     );
     // The exact terminal verdict, persisted beside the fields it is computed
     // from. `event` + `cappedBy` alone cannot reconstruct it — a presubmit
