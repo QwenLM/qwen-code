@@ -4751,7 +4751,17 @@ export abstract class ChannelBase {
       return [];
     }
     try {
-      return this.groupHistory.drain(this.groupHistoryKey(envelope), limit);
+      const entries = this.groupHistory.drain(
+        this.groupHistoryKey(envelope),
+        limit,
+      );
+      if (
+        this.config.groupPolicy === 'pairing' &&
+        !this.groupGate.isGroupApproved(envelope.chatId)
+      ) {
+        return [];
+      }
+      return entries;
     } catch (err) {
       process.stderr.write(
         `[${this.name}] failed to drain group history for chat ${sanitizeLogText(envelope.chatId, 64)}: ${err instanceof Error ? err.message : err}\n`,

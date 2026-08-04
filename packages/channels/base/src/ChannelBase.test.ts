@@ -2716,6 +2716,71 @@ describe('ChannelBase', () => {
       }
     });
 
+    it('does not backfill paired-group history after the group is revoked', async () => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const qwenHome = mkdtempSync(join(tmpdir(), 'qwen-group-pairing-'));
+      process.env['QWEN_HOME'] = qwenHome;
+      try {
+        const store = new PairingStore('test-chan', '/tmp');
+        const code = store.createGroupRequest(
+          'chat1',
+          'Release Team',
+          'alice',
+          'Alice',
+        );
+        store.approve(code!);
+        const recoveryState: { current?: Promise<void> } = {};
+        const ch = createChannel(
+          {
+            groupPolicy: 'pairing',
+            senderPolicy: 'allowlist',
+            allowedUsers: [],
+            groupHistoryLimit: 10,
+            groups: { '*': { requireMention: true } },
+          },
+          {
+            bridgeRecovery: () => recoveryState.current,
+            groupHistoryPath: groupHistoryPath(),
+          },
+        );
+
+        await ch.handleInbound(
+          envelope({
+            isGroup: true,
+            senderId: 'bob',
+            senderName: 'Bob',
+            text: 'background',
+          }),
+        );
+
+        let releaseRecovery!: () => void;
+        recoveryState.current = new Promise<void>((resolve) => {
+          releaseRecovery = resolve;
+        });
+        const current = ch.handleInbound(
+          envelope({
+            isGroup: true,
+            isMentioned: true,
+            senderId: 'carol',
+            senderName: 'Carol',
+            text: '@bot summarize',
+          }),
+        );
+        store.revokeGroup('chat1');
+        releaseRecovery();
+        await current;
+
+        const prompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+          .calls[0][1] as string;
+        expect(prompt).not.toContain('- [Bob] background');
+        expect(prompt).toContain('[Carol] @bot summarize');
+      } finally {
+        if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+        else process.env['QWEN_HOME'] = previousQwenHome;
+        rmSync(qwenHome, { recursive: true, force: true });
+      }
+    });
+
     it('persists group history across channel instances', async () => {
       const historyPath = groupHistoryPath();
       const config = {

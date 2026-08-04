@@ -90,4 +90,8 @@ export class GroupGate {
 
     return { allowed: true };
   }
+
+  isGroupApproved(groupId: string): boolean {
+    return this.pairingStore?.isGroupApproved(groupId) ?? false;
+  }
 }
