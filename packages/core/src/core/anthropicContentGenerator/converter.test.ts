@@ -3284,6 +3284,59 @@ describe('AnthropicContentConverter', () => {
         { role: 'user', content: [{ type: 'text', text: 'Continue.' }] },
       ]);
     });
+
+    it('runs before dropEmptyTextThinkingBlocks so a promoted "new latest" turn keeps its empty-text signed thinking block', () => {
+      // Regression for a pipeline-ordering hazard: dropEmptyTextThinkingBlocks
+      // computes "the latest assistant message" once and skips stripping an
+      // empty-text thinking block only from that index. If a genuinely
+      // empty trailing assistant turn (a leftover prefill artifact) is
+      // popped by stripTrailingAssistantPrefill AFTER dropEmptyTextThinkingBlocks
+      // already ran, the turn it promotes to "new latest" -- which carries
+      // its own empty-text SIGNED thinking block plus a tool_use -- would
+      // have already had that thinking block stripped under the
+      // now-stale "non-latest" premise, violating manual-mode's
+      // leading-thinking requirement. stripTrailingAssistantPrefill must
+      // run first so dropEmptyTextThinkingBlocks sees the array's true
+      // final shape.
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            {
+              role: 'model',
+              parts: [
+                { text: '', thought: true, thoughtSignature: 'sig1' },
+                { functionCall: { id: 't1', name: 'tool', args: {} } },
+              ],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 't1',
+                    name: 'tool',
+                    response: { output: 'ok' },
+                  },
+                },
+              ],
+            },
+            // Whitespace-only trailing turn -- a leftover prefill artifact
+            // that stripTrailingAssistantPrefill should pop entirely.
+            { role: 'model', parts: [{ text: '   ' }] },
+          ],
+        },
+        { stripTrailingAssistantPrefill: true, enableCacheControl: false },
+      );
+
+      const assistantMessages = messages.filter((m) => m.role === 'assistant');
+      expect(assistantMessages).toHaveLength(1);
+      expect(assistantMessages[0]?.content).toEqual([
+        { type: 'thinking', thinking: '', signature: 'sig1' },
+        { type: 'tool_use', id: 't1', name: 'tool', input: {} },
+      ]);
+    });
   });
 
   describe('convertGeminiToolsToAnthropic', () => {

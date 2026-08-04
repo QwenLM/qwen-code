@@ -954,6 +954,58 @@ function appendRecoveryContinuationParts(
   return [...mergedParts, ...nextParts];
 }
 
+/**
+ * Drop the TRAILING thought part from `parts` if it's unsigned (has real
+ * text but no `thoughtSignature`) and `hasToolCall` is true. An unsigned
+ * trailing episode is a dangling reasoning episode that never received
+ * its terminating signature-only chunk (stream cut off mid-episode) --
+ * pairing it with a `tool_use` in the same turn permanently wedges the
+ * session once the tool result comes back:
+ * `dropUnsignedThinkingFromAssistantMessages` throws on every subsequent
+ * request on proxy-hosted adaptive Claude, or native Anthropic rejects
+ * the request outright.
+ *
+ * Deliberately TRAILING-ONLY, not a whole-array scan: an unsigned thought
+ * part earlier in the array (e.g. immediately preceding a `functionCall`
+ * in an otherwise complete, untruncated turn) is not a corruption
+ * signal -- it's DeepSeek's and other non-Anthropic providers' normal,
+ * complete wire shape (DeepSeek doesn't validate thinking signatures the
+ * way Anthropic does; `injectThinkingOnToolUseTurns` even synthesizes an
+ * empty-signature placeholder when none exists). A stream's own
+ * truncation can only ever leave the DANGLING episode as the trailing
+ * element -- any part that follows it in the same stream would have
+ * already flushed it via `flushThoughtEpisode()` -- so restricting to
+ * "trailing" is what lets this distinguish "truncated mid-episode" from
+ * "a provider that doesn't sign its thinking" using only the shape of
+ * the array, with no provider-specific context available at this layer.
+ * (A wire-protocol violation that drops a non-trailing episode's
+ * signature without truncating the connection is a distinct, accepted
+ * residual risk -- see the "Known limitation" note above the episode
+ * consolidation loop -- and is not safely fixable here for the same
+ * reason: it's indistinguishable from DeepSeek's legitimate shape.)
+ *
+ * Applied at TWO call sites: once at the end of a single stream's
+ * consolidation, and again on the truncated turn's OWN parts (with
+ * `hasToolCall` reinterpreted as "the recovery continuation is about to
+ * introduce a functionCall") immediately before `coalesceRecoveryPairs`
+ * merges it with a recovery continuation. The second call site exists
+ * because the per-stream trailing check can't see a functionCall that
+ * hasn't arrived yet: the MAX_TOKENS recovery loop only proceeds when the
+ * truncated turn has NO functionCall of its own, so the first call site's
+ * `hasToolCall` is false and it never fires -- exactly the precondition
+ * under which the merge is about to attach one from a different attempt.
+ */
+function dropDanglingUnsignedTrailingThought(
+  parts: Part[],
+  hasToolCall: boolean,
+): void {
+  if (!hasToolCall) return;
+  const lastPart = parts[parts.length - 1];
+  if (lastPart?.thought && lastPart.text && !lastPart.thoughtSignature) {
+    parts.pop();
+  }
+}
+
 function findLastPlainTextPartIndex(parts: Part[]): number {
   for (let i = parts.length - 1; i >= 0; i -= 1) {
     if (isPlainTextPart(parts[i])) {
@@ -4328,23 +4380,10 @@ export class GeminiChat {
     // A thought episode can be flushed while still incomplete if the
     // stream is cut off before its terminating signature-only chunk
     // arrives (SSE drop, MAX_TOKENS) -- see the "Known limitation" note
-    // above for the mechanics. Left in history, an unsigned trailing
-    // episode alongside a tool_use in the SAME turn permanently wedges the
-    // session: once the tool result comes back, this turn enters the
-    // active tool-use chain, and proxy-hosted adaptive Claude throws on
-    // every subsequent request (dropUnsignedThinkingFromAssistantMessages)
-    // rather than silently dropping it there, while native Anthropic
-    // rejects the unsigned block itself -- neither is recoverable without
-    // editing history out-of-band. Scoped to `hasToolCall`: a dangling
-    // unsigned episode with no tool_use in the same turn is filtered out
-    // safely downstream instead of ever entering the active-chain path.
-    if (hasToolCall) {
-      const lastPart =
-        consolidatedHistoryParts[consolidatedHistoryParts.length - 1];
-      if (lastPart?.thought && !lastPart.thoughtSignature) {
-        consolidatedHistoryParts.pop();
-      }
-    }
+    // above for the mechanics, and dropDanglingUnsignedTrailingThought's
+    // doc for why this must stay trailing-only and is applied again
+    // (with different semantics) after recovery-coalescing below.
+    dropDanglingUnsignedTrailingThought(consolidatedHistoryParts, hasToolCall);
 
     // Single predicate for "visible text part", shared by contentText's
     // computation here, its post-recovery recompute below, and the
@@ -4651,6 +4690,24 @@ export class GeminiChat {
         return;
       }
 
+      // The MAX_TOKENS recovery loop only reaches this merge when
+      // `precedingModel` had NO functionCall of its own (its own break
+      // condition), so the per-stream trailing guard's `hasToolCall` was
+      // false and never fired for a dangling unsigned episode there --
+      // exactly the precondition under which this merge is about to
+      // attach a functionCall from a DIFFERENT attempt. Re-run the same
+      // trailing-only check on `precedingModel.parts` BEFORE merging
+      // (not after): `appendRecoveryContinuationParts`'s dedup anchor is
+      // blind to `thought` parts, so post-merge the dangling episode is
+      // no longer trailing and this check would miss it entirely. See
+      // dropDanglingUnsignedTrailingThought's doc for why this must stay
+      // trailing-only rather than scanning the whole merged array.
+      if (precedingModel.parts) {
+        dropDanglingUnsignedTrailingThought(
+          precedingModel.parts,
+          (modelContinuation.parts ?? []).some((p) => p.functionCall),
+        );
+      }
       precedingModel.parts = appendRecoveryContinuationParts(
         precedingModel.parts,
         modelContinuation.parts,

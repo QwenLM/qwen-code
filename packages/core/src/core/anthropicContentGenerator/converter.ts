@@ -300,6 +300,21 @@ export class AnthropicContentConverter {
     if (options.dropUnsignedAssistantThinking) {
       messages = this.dropUnsignedThinkingFromAssistantMessages(messages);
     }
+    // Must run BEFORE dropEmptyTextThinkingBlocks: that pass computes
+    // "the latest assistant message" once and skips stripping an
+    // empty-text thinking block only from that index -- if a genuinely
+    // empty trailing assistant message (a leftover prefill artifact) gets
+    // popped here AFTER dropEmptyTextThinkingBlocks already ran, the
+    // message it promotes to "new latest" would have had its own
+    // empty-text signed thinking block stripped under the now-stale
+    // premise that it wasn't the latest turn, violating manual-mode
+    // thinking's leading-thinking requirement if that promoted message
+    // also carries a tool_use. Running this first ensures
+    // dropEmptyTextThinkingBlocks's one-shot "latest" computation reflects
+    // the array's true final shape.
+    if (options.stripTrailingAssistantPrefill) {
+      this.stripTrailingAssistantPrefill(messages);
+    }
     // Defense-in-depth against an empty-text thinking block surviving into
     // a non-latest turn (see dropEmptyTextThinkingBlocks's doc) -- e.g. one
     // that DOES carry a signature, so dropUnsignedThinkingFromAssistant...
@@ -316,9 +331,6 @@ export class AnthropicContentConverter {
       this.stripThinkingFromAssistantMessages(messages);
     }
     messages = mergeConsecutiveUserMessages(messages);
-    if (options.stripTrailingAssistantPrefill) {
-      this.stripTrailingAssistantPrefill(messages);
-    }
     if (options.ensureLeadingAssistantThinking) {
       ensureLeadingThinkingOnLatestAssistantMessage(messages);
     }

@@ -3340,6 +3340,64 @@ describe('GeminiChat', async () => {
       ]);
     });
 
+    it('pins current behavior: an unsigned thought immediately preceding a tool_use in an otherwise-complete stream is preserved, not dropped', async () => {
+      // Known residual risk (deliberately not fixed here): the trailing-only
+      // scope of dropDanglingUnsignedTrailingThought cannot catch a
+      // non-compliant proxy that drops exactly one episode's terminating
+      // signature-only chunk without the connection itself dropping,
+      // leaving an unsigned thought immediately BEFORE a functionCall
+      // instead of trailing (see the "Known limitation" note above the
+      // episode consolidation loop). Broadening the check to scan the
+      // whole array (tried and reverted) makes this shape indistinguishable
+      // from DeepSeek's normal, complete wire shape -- DeepSeek doesn't
+      // sign thinking blocks at all, so "unsigned thought right before a
+      // functionCall" is DeepSeek's ordinary, correct output, not a
+      // corruption signal (see "preserves thinking parts alongside
+      // tool_use when stream throws mid-tool" above). Since a stream's OWN
+      // truncation can only ever leave the dangling episode trailing (see
+      // dropDanglingUnsignedTrailingThought's doc), staying trailing-only
+      // is what lets the two cases be told apart at this layer. This test
+      // pins today's accepted behavior, not asserting it is safe against a
+      // genuinely non-compliant proxy -- see the design discussion for
+      // reachability.
+      const stream = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [
+                  {
+                    text: 'reasoning with a dropped signature',
+                    thought: true,
+                  },
+                  { functionCall: { id: 'call1', name: 'tool', args: {} } },
+                ],
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        stream,
+      );
+
+      const res = await chat.sendMessageStream(
+        'm1',
+        { message: 'buried dangling episode' },
+        'p-buried-dangling-episode',
+      );
+      for await (const _ of res);
+
+      const history = chat.getHistory();
+      const lastEntry = history[history.length - 1]!;
+      expect(lastEntry.parts).toEqual([
+        { text: 'reasoning with a dropped signature', thought: true },
+        { functionCall: { id: 'call1', name: 'tool', args: {} } },
+      ]);
+    });
+
     it('should split back-to-back reasoning episodes with no intervening tool call, once the first episode has its signature', async () => {
       // Both wires terminate an episode with a text-less, signature-only
       // chunk. Fresh text arriving after an already-signed open episode can
@@ -14612,6 +14670,65 @@ describe('GeminiChat', async () => {
       expect(thoughtIdx).toBeGreaterThanOrEqual(0);
       expect(mergedTextIdx).toBeGreaterThanOrEqual(0);
       expect(thoughtIdx).toBeLessThan(mergedTextIdx);
+    });
+
+    it('drops a dangling unsigned thought episode reintroduced by recovery coalescing when the continuation calls a tool', async () => {
+      // Regression for a gap the per-stream trailing-pop fix didn't cover:
+      // that check only fires when THAT stream's own hasToolCall is true,
+      // but a thought-only truncated turn (no functionCall yet) is
+      // exactly the precondition the MAX_TOKENS recovery loop requires to
+      // proceed (geminiChat.ts's recovery loop skips recovery only when
+      // the truncated turn already has a functionCall). If the recovery
+      // continuation then calls a tool -- an ordinary agentic-loop event,
+      // no proxy bug needed -- coalesceRecoveryPairs merges the two
+      // attempts via appendRecoveryContinuationParts, whose dedup anchor
+      // is blind to `thought` parts, burying the original unsigned
+      // episode in the same turn as the continuation's functionCall.
+      // Without re-checking after the merge, this reopens the exact
+      // permanent-wedge hazard the trailing-pop fix exists to prevent.
+      const streams = [
+        makeStream([makeChunk([{ text: 'discarded initial' }], 'MAX_TOKENS')]),
+        makeStream([
+          makeChunk(
+            [{ text: 'thinking about it', thought: true }],
+            'MAX_TOKENS',
+          ),
+        ]),
+        makeStream([
+          makeChunk(
+            [
+              {
+                text: 'continuing',
+                functionCall: { id: 'c1', name: 'tool', args: {} },
+              },
+            ],
+            'STOP',
+          ),
+        ]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-pro',
+        { message: 'do a task' },
+        'prompt-recovery-dangling-episode',
+      );
+      for await (const _event of stream) {
+        // consume
+      }
+
+      const history = chat.getHistory();
+      const lastEntry = history[history.length - 1]!;
+      const hasUnsignedThought = (lastEntry.parts ?? []).some(
+        (part) => part.thought && part.text && !part.thoughtSignature,
+      );
+      expect(hasUnsignedThought).toBe(false);
+      expect((lastEntry.parts ?? []).some((part) => part.functionCall)).toBe(
+        true,
+      );
     });
 
     it('should preserve a coincidental 2-character CJK overlap (byte floor insufficient for CJK)', async () => {
