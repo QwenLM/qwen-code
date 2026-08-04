@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { promptRecordDir, briefPath } from './lib/prompt-record.js';
+import { writeBudgetStop } from './lib/deadline.js';
 import { getGhHost, setGhHost } from './lib/gh.js';
 import { parseLedger } from './lib/ledger.js';
 import { countInlineFindings } from './lib/inline-counts.js';
@@ -478,6 +479,184 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     );
     expect(r.body).not.toContain('LGTM');
     expect(r.body).not.toContain('no blockers');
+  });
+
+  it('a budget-stop marker caps APPROVE at COMMENT with nothing relayed by the caller', () => {
+    // The round builder refused a round and recorded the refusal; the
+    // disclosure that caps the verdict is synthesized from that marker, not
+    // from a sentence the orchestrator remembered to carry.
+    const plan = coveredPlan();
+    writeBudgetStop(
+      plan,
+      {
+        remainingSeconds: 900,
+        reserveSeconds: 3600,
+        expectedRoundSeconds: 1800,
+      },
+      4,
+    );
+    const r = composeReview(base({ planPath: plan }));
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain(
+      'reverse audit — stopped before round 4 by the review time budget',
+    );
+    expect(r.body).not.toContain('LGTM');
+
+    // And said once when the orchestrator DID relay it.
+    const r2 = composeReview(
+      base({
+        planPath: plan,
+        unreviewedDimensions: [
+          'reverse audit — stopped before round 4 by the review time budget',
+        ],
+      }),
+    );
+    expect(r2.body.split('review time budget').length - 1).toBe(1);
+
+    // Still once when the relay was RESHAPED — an orchestrator prefix ahead
+    // of the subject. The coverage prefix filter cannot see this one (it no
+    // longer starts with `reverse audit — `); only the marker-phrase splice
+    // dedups it, so this is the assertion that fails when the splice goes.
+    const r3 = composeReview(
+      base({
+        planPath: plan,
+        unreviewedDimensions: [
+          'step 5 — reverse audit — stopped before round 4 by the review time budget',
+        ],
+      }),
+    );
+    expect(r3.body.split('review time budget').length - 1).toBe(1);
+  });
+
+  it('the marker does not shadow other reverse-audit scopes the caller disclosed', () => {
+    // The budget entry claims the subject `reverse audit`; the caller-echo
+    // prefix filter must not let it swallow a DIFFERENT reverse-audit scope
+    // reported with its own reason — a whiffed chunk from the rounds that
+    // DID run is exactly what a partially-run audit still owes the author.
+    const plan = coveredPlan();
+    writeBudgetStop(
+      plan,
+      {
+        remainingSeconds: 900,
+        reserveSeconds: 3600,
+        expectedRoundSeconds: 1800,
+      },
+      3,
+    );
+    const r = composeReview(
+      base({
+        planPath: plan,
+        unreviewedDimensions: [
+          "reverse audit — chunk 2's auditor returned nothing substantive twice",
+        ],
+      }),
+    );
+    expect(r.body).toContain(
+      'Not reviewed: reverse audit — stopped before round 3 by the review time budget.',
+    );
+    expect(r.body).toContain(
+      "Not reviewed: reverse audit — chunk 2's auditor returned nothing substantive twice.",
+    );
+    // The marker's own disclosure still renders exactly once.
+    expect(r.body.split('review time budget').length - 1).toBe(1);
+  });
+
+  it('a round-1 budget stop stands alone — no rogue-audit gap, no rebuild FIX', () => {
+    // The gate refused round 1, so no reverse-audit record exists. Without
+    // the marker the floor would report the absence as a rogue/unlaunched
+    // audit and direct a rebuild the same gate deterministically refuses
+    // (exit 4) — misattributing a deliberate stop. The budget disclosure
+    // must stand alone, and the remediation must stay silent.
+    const plan = coveredPlan([]); // nothing ran: the round-1 refusal shape
+    writeBudgetStop(
+      plan,
+      {
+        remainingSeconds: 900,
+        reserveSeconds: 3600,
+        expectedRoundSeconds: 1800,
+      },
+      1,
+    );
+    // Not base(): its planPath default runs coveredPlan() again on the same
+    // path and would re-record the Step 4/5 pair this case means to lack.
+    const r = composeReview({ planPath: plan, env: ENV, modelId: MODEL });
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain(
+      'Not reviewed: reverse audit — stopped before round 1 by the review time budget.',
+    );
+    expect(r.body).not.toContain('no auditor was launched');
+    expect(r.body).not.toContain('its prompt was built');
+    expect(r.remediation.join(' ')).not.toContain('reverse audit:');
+  });
+
+  it('renders the budget stop bilingually on a Han-description PR', () => {
+    // Every sibling structural disclosure carries a zh pair; the budget stop
+    // used to ride the caller-prose path and posted English into both halves.
+    const plan = coveredPlan(['verify', 'reverse-audit'], { han: true });
+    writeBudgetStop(
+      plan,
+      {
+        remainingSeconds: 900,
+        reserveSeconds: 3600,
+        expectedRoundSeconds: 1800,
+      },
+      4,
+    );
+    // Not base(): its planPath default runs coveredPlan() again on the same
+    // path and would overwrite the han-stamped plan.
+    const r = composeReview({ planPath: plan, env: ENV, modelId: MODEL });
+    expect(r.body).toContain(
+      'Not reviewed: reverse audit — stopped before round 4 by the review time budget.',
+    );
+    expect(r.body).toContain(
+      '未审查：反向审计——评审时间预算不足，未能开始第 4 轮。',
+    );
+  });
+
+  it('a budget stop does not launder a rewritten pre-stop round', () => {
+    // Round 1 RAN — with a hand-written launch that opened its brief but
+    // never got the built prompt — and round 2 was then refused on the
+    // budget. The marker explains the audit that never ran; it says nothing
+    // about the one that did, and the rewritten disclosure is still owed:
+    // without it, "stopped before round 2" implies round 1 was faithful.
+    const plan = coveredPlan(['verify']);
+    const d = promptRecordDir(plan);
+    const brief = briefPath(plan, 'reverse-audit');
+    writeFileSync(brief, 'The reverse-audit brief.');
+    const built =
+      'You are review agent `reverse-audit`.\n' +
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${DIFF}")`;
+    writeFileSync(join(d, 'reverse-audit.txt'), built);
+    transcript(
+      'v-ra-rewritten',
+      `Audit the diff for gaps. Your brief: ${brief}. Diff: ${DIFF}.`,
+      { toolCalls: 2, opens: [brief] },
+    );
+    writeBudgetStop(
+      plan,
+      {
+        remainingSeconds: 900,
+        reserveSeconds: 3600,
+        expectedRoundSeconds: 1800,
+      },
+      2,
+    );
+
+    // Not base(): its planPath default runs coveredPlan() again on the same
+    // path and would lay a verbatim reverse-audit pair over this fixture.
+    const r = composeReview({ planPath: plan, env: ENV, modelId: MODEL });
+    expect(r.event).toBe('COMMENT');
+    // The marker still discloses and caps…
+    expect(r.body).toContain(
+      'stopped before round 2 by the review time budget',
+    );
+    // …and the rewritten round is NOT laundered: the operator channel carries
+    // its exact repair. (The posted body collapses same-subject disclosures —
+    // both say "reverse audit" — so the author sees the stop; the rewritten
+    // repair rides stderr, which is where repairs are acted on.)
+    expect(r.remediation.join(' ')).toContain('reverse audit:');
+    expect(r.remediation.join(' ')).toContain('EXACTLY what it prints');
   });
 
   it('an uncoverable chunk caps APPROVE at COMMENT and names the chunk', () => {
