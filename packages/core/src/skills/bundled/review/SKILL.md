@@ -27,6 +27,8 @@ You are an expert code reviewer. Your job is to review code changes and provide 
 
 **Design philosophy: Silence is better than noise.** Every comment you make should be worth the reader's time. If you're unsure whether something is a problem, DO NOT MENTION IT. Low-quality feedback causes "cry wolf" fatigue — developers stop reading all AI comments and miss real issues.
 
+**DESIGN.md is a maintainer document, not a runtime input.** Each `(measured; …)` pointer below names the measured incident behind a rule; the narrative lives in this skill's DESIGN.md for humans auditing the rule. Never `read_file` DESIGN.md during a review.
+
 **Do not call `todo_write` during a review.** This document is the plan — its steps are numbered and ordered, and the gates between them are enforced by subcommands, not by a checklist you keep. A todo list adds nothing to that and it is not free: each call is a whole model turn, and a turn is the unit of latency here. The measured cost in one real review was **377 seconds** of todo calls (measured; DESIGN.md — The todo-call latency). Report progress in your normal output instead; it costs nothing extra, because you were going to emit that turn anyway.
 
 ## Step 1: Determine what to review
@@ -252,7 +254,7 @@ Run `qwen review load-rules` to read project-specific rules. **For PR reviews, r
   --out .qwen/tmp/qwen-review-<target>-rules.md
 ```
 
-`<resolved_base_ref>` is the base ref to load from: prefer `<base>` if it exists locally, otherwise `<remote>/<base>` (run `git fetch <remote> <base>` first if not yet fetched). For local-uncommitted or file-path reviews use `HEAD`.
+`<resolved_base_ref>` is the base ref to load from: prefer `<base>` if it exists locally, otherwise `<remote>/<base>`. A PR review needs no separate fetch for it — `fetch-pr` already fetched the base ref in Step 1; only if that step printed its could-not-fetch-base warning, run `git fetch <remote> <base>` first. For local-uncommitted or file-path reviews use `HEAD`.
 
 The subcommand reads (in order, all sources combined): `.qwen/review-rules.md`, then either `.github/copilot-instructions.md` or root-level `copilot-instructions.md` (only one — preferred wins), then the `## Code Review` section of `AGENTS.md`, then the `## Code Review` section of `QWEN.md`. Missing files are silently skipped. The output file is empty when no rules are found — the subcommand reports `No review rules found on <ref>` to stdout in that case; skip rule injection in Step 3.
 

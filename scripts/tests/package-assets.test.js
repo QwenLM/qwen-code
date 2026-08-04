@@ -102,6 +102,11 @@ describe('package asset scripts', () => {
       'packages/core/src/skills/bundled/dataviz/references/palette.md',
       '# Palette\n',
     );
+    writeFile(
+      rootDir,
+      'packages/core/src/skills/bundled/dataviz/DESIGN.md',
+      '# Design notes\n',
+    );
     writeFile(rootDir, 'dist/bundled/dataviz/scripts/stale.test.js', 'stale\n');
     stubConsole();
 
@@ -203,6 +208,9 @@ describe('package asset scripts', () => {
         ),
       ),
     ).toBe(true);
+    expect(
+      existsSync(path.join(rootDir, 'dist', 'bundled', 'dataviz', 'DESIGN.md')),
+    ).toBe(false);
   });
 
   it('includes extension examples in the prepared dist package', () => {
