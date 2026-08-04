@@ -92,4 +92,36 @@ describe('status event while an assistant block is streaming', () => {
       cachedTokens: 0,
     });
   });
+
+  it('resets the active user block even when clearActiveText is false', () => {
+    let state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [{ type: 'user.text.delta', text: '/stats' }],
+      { now: 1 },
+    );
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'status', text: 'stats output', clearActiveText: false }],
+      { now: 1 },
+    );
+
+    expect(state.activeUserBlockId).toBeUndefined();
+
+    // A peer client's prompt echo must open its own user block instead of
+    // merging into the local command echo.
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'user.text.delta', text: 'fix the bug' }],
+      { now: 1 },
+    );
+
+    expect(state.blocks.map((block) => block.kind)).toEqual([
+      'user',
+      'status',
+      'user',
+    ]);
+    expect(
+      state.blocks.map((block) => ('text' in block ? block.text : '')),
+    ).toEqual(['/stats', 'stats output', 'fix the bug']);
+  });
 });

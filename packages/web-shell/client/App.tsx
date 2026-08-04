@@ -7607,68 +7607,73 @@ export function App({
               workspaceActions.loadPreflight().catch(() => null),
               workspaceActions.loadProviders().catch(() => null),
               workspaceActions.loadEnv().catch(() => null),
-            ]).then(([preflight, providers, env]) => {
-              const sys = collectSystemInfo(preflight, env);
+            ])
+              .then(([preflight, providers, env]) => {
+                const sys = collectSystemInfo(preflight, env);
 
-              let authSource = sys.authSource;
-              if (!authSource && providers?.current?.authType) {
-                authSource = providers.current.authType;
-              }
-
-              const runtimeParts: string[] = [];
-              if (sys.nodeVersion)
-                runtimeParts.push(`Node.js v${sys.nodeVersion}`);
-              if (sys.npmVersion) runtimeParts.push(`npm ${sys.npmVersion}`);
-
-              let formattedAuth = '';
-              if (authSource) {
-                if (
-                  authSource.startsWith('oauth') ||
-                  authSource === 'qwen-oauth'
-                ) {
-                  formattedAuth = 'Qwen OAuth';
-                } else {
-                  formattedAuth = `API Key - ${authSource}`;
+                let authSource = sys.authSource;
+                if (!authSource && providers?.current?.authType) {
+                  authSource = providers.current.authType;
                 }
-              }
 
-              const platformStr = `${sys.platform} ${sys.arch}`.trim();
-              const curModel = currentModelRef.current;
-              const conn = connectionRef.current;
-              const qwenCodeVersion = conn.capabilities?.qwenCodeVersion || '';
-              const info: StatusInfo = {
-                cliVersion: qwenCodeVersion,
-                runtime: runtimeParts.join(' / '),
-                platform: platformStr,
-                auth: formattedAuth,
-                baseUrl: providers?.current?.baseUrl || '',
-                model:
-                  curModel ||
-                  conn.currentModel ||
-                  providers?.current?.modelId ||
-                  '',
-                fastModel:
-                  providers?.current?.fastModelId ||
-                  curModel ||
-                  conn.currentModel ||
-                  providers?.current?.modelId ||
-                  '',
-                sessionId: conn.sessionId || '',
-                sandbox: sys.sandbox,
-                proxy: sys.proxy,
-                memoryUsage: sys.memoryUsage,
-              };
+                const runtimeParts: string[] = [];
+                if (sys.nodeVersion)
+                  runtimeParts.push(`Node.js v${sys.nodeVersion}`);
+                if (sys.npmVersion) runtimeParts.push(`npm ${sys.npmVersion}`);
 
-              store.dispatch([
-                {
-                  type: 'status',
-                  text: serializeStatusMessage(info),
-                  // Mid-turn runs must not finalize the streaming block.
-                  clearActiveText: false,
-                },
-              ]);
-              resumeChatBottomFollow('smooth');
-            });
+                let formattedAuth = '';
+                if (authSource) {
+                  if (
+                    authSource.startsWith('oauth') ||
+                    authSource === 'qwen-oauth'
+                  ) {
+                    formattedAuth = 'Qwen OAuth';
+                  } else {
+                    formattedAuth = `API Key - ${authSource}`;
+                  }
+                }
+
+                const platformStr = `${sys.platform} ${sys.arch}`.trim();
+                const curModel = currentModelRef.current;
+                const conn = connectionRef.current;
+                const qwenCodeVersion =
+                  conn.capabilities?.qwenCodeVersion || '';
+                const info: StatusInfo = {
+                  cliVersion: qwenCodeVersion,
+                  runtime: runtimeParts.join(' / '),
+                  platform: platformStr,
+                  auth: formattedAuth,
+                  baseUrl: providers?.current?.baseUrl || '',
+                  model:
+                    curModel ||
+                    conn.currentModel ||
+                    providers?.current?.modelId ||
+                    '',
+                  fastModel:
+                    providers?.current?.fastModelId ||
+                    curModel ||
+                    conn.currentModel ||
+                    providers?.current?.modelId ||
+                    '',
+                  sessionId: conn.sessionId || '',
+                  sandbox: sys.sandbox,
+                  proxy: sys.proxy,
+                  memoryUsage: sys.memoryUsage,
+                };
+
+                store.dispatch([
+                  {
+                    type: 'status',
+                    text: serializeStatusMessage(info),
+                    // Mid-turn runs must not finalize the streaming block.
+                    clearActiveText: false,
+                  },
+                ]);
+                resumeChatBottomFollow('smooth');
+              })
+              .catch((error: unknown) => {
+                reportError(error, 'Failed to load status info');
+              });
             return true;
           }
           if (cmd === 'bug') {

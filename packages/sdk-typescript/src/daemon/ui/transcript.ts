@@ -1260,6 +1260,10 @@ function appendStatusBlock(
   };
   appendBlock(state, block);
   if (opts.clearActiveText !== false) clearActiveText(state);
+  // Opt-out only protects the streaming assistant/thought block; the user
+  // pointer must still reset, otherwise a later mergeable user.text.delta
+  // (e.g. a peer client's prompt echo) appends onto the command echo block.
+  else state.activeUserBlockId = undefined;
 }
 
 function appendPromptCancelledBlock(

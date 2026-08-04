@@ -210,6 +210,7 @@ const {
       sendShellCommand: vi.fn().mockResolvedValue(undefined),
       cancel: vi.fn().mockResolvedValue(undefined),
       getStats: vi.fn().mockResolvedValue({}),
+      getContextUsage: vi.fn().mockResolvedValue({}),
       getTasks: vi.fn().mockResolvedValue({
         v: 1,
         sessionId: 'session-1',
@@ -2331,6 +2332,7 @@ beforeEach(() => {
   mockSessionActions.sendShellCommand.mockResolvedValue(undefined);
   mockSessionActions.cancel.mockResolvedValue(undefined);
   mockSessionActions.getStats.mockResolvedValue({});
+  mockSessionActions.getContextUsage.mockResolvedValue({});
   mockSessionActions.getTasks.mockResolvedValue({
     v: 1,
     sessionId: 'session-1',
@@ -3898,6 +3900,69 @@ describe('App read-only local commands mid-turn', () => {
     });
 
     expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith('/about');
+  });
+
+  it('runs /context immediately while streaming and skips the echo', async () => {
+    const { rerender } = renderApp({});
+    await flush();
+
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({});
+    });
+
+    let accepted: boolean | void;
+    await act(async () => {
+      accepted = testState.latestChatEditorProps?.onSubmit('/context');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.getContextUsage).toHaveBeenCalled();
+      });
+    });
+
+    expect(accepted).toBe(true);
+    expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalled();
+    expect(mockStore.dispatch).toHaveBeenCalledWith([
+      expect.objectContaining({ type: 'status', clearActiveText: false }),
+    ]);
+  });
+
+  it('echoes /context when idle', async () => {
+    renderApp({});
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/context');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.getContextUsage).toHaveBeenCalled();
+      });
+    });
+
+    expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith('/context');
+  });
+
+  it('reports /stats load failures instead of swallowing them', async () => {
+    renderApp({});
+    await flush();
+
+    mockSessionActions.getStats.mockRejectedValueOnce(
+      new Error('stats unavailable'),
+    );
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/stats');
+      await vi.waitFor(() => {
+        expect(consoleError).toHaveBeenCalledWith(
+          '[web-shell]',
+          expect.stringContaining('stats unavailable'),
+          expect.anything(),
+        );
+      });
+    });
+
+    consoleError.mockRestore();
   });
 });
 
