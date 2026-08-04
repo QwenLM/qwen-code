@@ -111,6 +111,32 @@ function testDesktopReleaseSigningWorkflow() {
     ),
     'Unsigned Windows installers are only allowed when no signing config exists',
   );
+  assert.ok(
+    workflow.includes(
+      "--entitlements src-tauri/Entitlements.plist {} +",
+    ),
+    'ripgrep codesign failures must fail the signing step',
+  );
+  assert.match(
+    workflow,
+    /Ripgrep vendor directory not found at \$rg_dir/,
+    'missing ripgrep binaries must be visible in release logs',
+  );
+  assert.match(
+    workflow,
+    /Node\.js runtime binary not found at \$node_bin/,
+    'missing Node.js runtime binary must be visible in release logs',
+  );
+  assert.ok(
+    workflow.indexOf("name: 'Prepare bundled runtime'") <
+      workflow.indexOf("name: 'Sign bundled vendor binaries (macOS)'"),
+    'vendor binaries must be signed after the runtime is prepared',
+  );
+  assert.ok(
+    workflow.indexOf("name: 'Sign bundled vendor binaries (macOS)'") <
+      workflow.indexOf("name: 'Build desktop installers'"),
+    'vendor binaries must be signed before Tauri builds installers',
+  );
 }
 
 function testBootstrapBridgeConfiguration() {
