@@ -1725,7 +1725,10 @@ function createDelegatingServeApp(
           ? (options.authenticateDeferredChannelWebhookRequest ??
             options.authenticateDeferredRuntimeRequest)
           : options.authenticateDeferredRuntimeRequest;
-        if (authGate && !(await options.isPreAuthRequest?.(req))) {
+        const preAuthExempted =
+          authGate !== undefined &&
+          (await options.isPreAuthRequest?.(req)) === true;
+        if (authGate && !preAuthExempted) {
           if (!runSynchronousRequestGate(authGate, req, res, next)) {
             return;
           }
@@ -1737,6 +1740,16 @@ function createDelegatingServeApp(
         try {
           await options.runtimeReady;
         } catch {
+          if (preAuthExempted) {
+            // The bootstrap app serves the failure envelope only behind its
+            // bearer gate, which a pre-auth navigation cannot pass — answer
+            // here so the browser sees the startup failure, not a 401.
+            res.status(503).json({
+              error: 'Daemon runtime failed to start',
+              code: 'daemon_runtime_failed',
+            });
+            return;
+          }
           // Fall through to the bootstrap app so it can report the startup error.
         } finally {
           timing.waitMs =

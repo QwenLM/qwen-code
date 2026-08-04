@@ -5055,6 +5055,15 @@ describe('runQwenServe runtime startup failures', () => {
     );
 
     try {
+      // HEAD goes first so the cold deferred gate's pre-auth exemption is
+      // exercised for both methods the warm app serves pre-auth.
+      const headRes = await fetch(`${handle.url}/session/abc`, {
+        method: 'HEAD',
+        headers: { accept: 'text/html' },
+      });
+      expect(headRes.status).toBe(200);
+      expect(headRes.headers.get('content-type')).toContain('text/html');
+
       // A browser refresh of a session deep link carries no bearer header and
       // must load the shell (and start the runtime) instead of 401ing in the
       // deferred gate.
@@ -5306,6 +5315,75 @@ describe('runQwenServe runtime startup failures', () => {
       });
       expect(navRes.status).toBe(401);
       expect(createBridge).not.toHaveBeenCalled();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('answers pre-auth Web Shell navigations with the failure envelope when the deferred runtime fails', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-webshell-fail-')),
+    );
+    const shellDir = path.join(tmpDir, 'web-shell');
+    fs.mkdirSync(path.join(shellDir, 'assets'), { recursive: true });
+    fs.writeFileSync(
+      path.join(shellDir, 'index.html'),
+      '<!doctype html><body><div id="root"></div></body>',
+    );
+    vi.spyOn(webShellResolver, 'resolveWebShellDir').mockReturnValue(shellDir);
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockImplementation(() => {
+        throw new Error('runtime boom');
+      });
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        token: 'secret-token',
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+      },
+    );
+
+    try {
+      // These paths are declared pre-auth, so on a startup failure they must
+      // report the real fault instead of the bootstrap bearer gate's 401.
+      const navRes = await fetch(`${handle.url}/session/abc`, {
+        headers: { accept: 'text/html' },
+      });
+      expect(navRes.status).toBe(503);
+      expect(await navRes.json()).toEqual({
+        error: 'Daemon runtime failed to start',
+        code: 'daemon_runtime_failed',
+      });
+
+      const rootRes = await fetch(`${handle.url}/`);
+      expect(rootRes.status).toBe(503);
+      expect(await rootRes.json()).toEqual({
+        error: 'Daemon runtime failed to start',
+        code: 'daemon_runtime_failed',
+      });
+
+      // Non-exempted requests stay behind the bearer gate.
+      const jsonRes = await fetch(`${handle.url}/session/abc`, {
+        headers: { accept: 'application/json' },
+      });
+      expect(jsonRes.status).toBe(401);
+
+      expect(createBridge).toHaveBeenCalledTimes(1);
+      await expect(handle.runtimeReady).rejects.toThrow('runtime boom');
     } finally {
       await handle.close();
     }
