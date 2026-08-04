@@ -76,6 +76,19 @@ describe('WorkspaceChannelSettingsStore', () => {
               { value: 'farewell', label: 'Farewell' },
             ],
           },
+          {
+            key: 'nested',
+            label: 'Nested',
+            kind: 'object',
+            properties: [
+              {
+                key: 'requiredValue',
+                label: 'Required value',
+                kind: 'string',
+                required: true,
+              },
+            ],
+          },
         ],
       },
       createChannel() {
@@ -517,26 +530,61 @@ describe('WorkspaceChannelSettingsStore', () => {
     });
   });
 
+  it('rejects an omitted required nested descriptor property without writing', async () => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    const before = fs.readFileSync(settingsPath, 'utf8');
+
+    await expect(
+      store.upsert('bot', {
+        expectedRevision: store.snapshot().revision,
+        config: {
+          type: 'management-validation-test',
+          clientId: 'client-id',
+          nested: {},
+        },
+        secrets: { clientSecret: { operation: 'preserve' } },
+      }),
+    ).rejects.toMatchObject({
+      code: 'channel_settings_invalid_config',
+      message: 'Channel field "nested.requiredValue" is required.',
+    });
+
+    expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
+  });
+
   it.each([
+    {
+      label: 'non-object value',
+      interactiveCards: 'enabled',
+      expectedMessage: 'Channel field "interactiveCards" has an invalid value.',
+    },
     {
       label: 'string enabled flag',
       interactiveCards: { enabled: 'true' },
+      expectedMessage:
+        'Channel field "interactiveCards.enabled" has an invalid value.',
     },
     {
       label: 'invalid nested enabled flag',
       interactiveCards: { statusCard: { enabled: 'true' } },
+      expectedMessage:
+        'Channel field "interactiveCards.statusCard.enabled" has an invalid value.',
     },
     {
       label: 'non-positive question timeout',
       interactiveCards: { questionCard: { timeoutMs: 0 } },
+      expectedMessage:
+        'Channel field "interactiveCards.questionCard.timeoutMs" has an invalid value.',
     },
     {
       label: 'unknown nested field',
       interactiveCards: { unexpected: true },
+      expectedMessage:
+        'Channel field "interactiveCards.unexpected" is not manageable.',
     },
   ])(
     'rejects DingTalk interactive card configuration with $label',
-    async ({ interactiveCards }) => {
+    async ({ interactiveCards, expectedMessage }) => {
       writeWorkspaceSettings(`{
   "$version": 4,
   "channels": { "bot": {
@@ -558,7 +606,10 @@ describe('WorkspaceChannelSettingsStore', () => {
           },
           secrets: { clientSecret: { operation: 'preserve' } },
         }),
-      ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+      ).rejects.toMatchObject({
+        code: 'channel_settings_invalid_config',
+        message: expectedMessage,
+      });
 
       expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
     },
