@@ -118,6 +118,62 @@ describe('package asset scripts', () => {
     ).toBe(false);
   });
 
+  it('does not stamp a tree with no review sources', () => {
+    // The zero-files branch of the digest: with nothing to hash there is no
+    // digest to attest. The stamping cases pin the other side of the guard —
+    // that a tree WITH sources is stamped — and this pins the side that
+    // fires, so a guard that never fired would certify the empty-set digest
+    // of a bundle nothing digested was built from.
+    const rootDir = createFixtureRoot();
+    writeFile(rootDir, 'dist/cli.js', 'the bundle\n');
+    stubConsole();
+
+    copyBundleAssets({ root: rootDir });
+
+    expect(reviewSourceDigestForBuild(rootDir).digest).toBeUndefined();
+    expect(
+      existsSync(path.join(rootDir, 'dist', 'review-sources.sha256')),
+    ).toBe(false);
+  });
+
+  it('refuses by the newest source, not the last one walked', () => {
+    // `newest` must track the largest mtimeMs: the newer source here sorts
+    // first, so a comparison that kept the last file visited — or the
+    // smallest — would see only the older one and certify a bundle the
+    // newest source may not describe.
+    const rootDir = createFixtureRoot();
+    writeFile(rootDir, 'dist/cli.js', 'the bundle\n');
+    writeFile(
+      rootDir,
+      'packages/cli/src/commands/review/a-newer.ts',
+      'export const a = 1;\n',
+    );
+    writeFile(
+      rootDir,
+      'packages/cli/src/commands/review/z-older.ts',
+      'export const z = 1;\n',
+    );
+    const earlier = new Date(Date.now() - 3_600_000);
+    utimesSync(
+      path.join(rootDir, 'packages/cli/src/commands/review/z-older.ts'),
+      earlier,
+      earlier,
+    );
+    const later = new Date(Date.now() + 3_600_000);
+    utimesSync(
+      path.join(rootDir, 'packages/cli/src/commands/review/a-newer.ts'),
+      later,
+      later,
+    );
+    stubConsole();
+
+    copyBundleAssets({ root: rootDir });
+
+    expect(
+      existsSync(path.join(rootDir, 'dist', 'review-sources.sha256')),
+    ).toBe(false);
+  });
+
   it('does not fail the bundle when the review sources cannot be read', () => {
     // The stamp is the copier's last step, so throwing here would fail a build
     // whose every asset is already in place. A missing stamp is `unmeasured`,

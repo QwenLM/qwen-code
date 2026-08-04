@@ -28,6 +28,21 @@ describe('release workflow', () => {
     );
   });
 
+  it('fails the release when the review source stamp did not land', () => {
+    // The runtime staleness check degrades to "could not check" without the
+    // stamp this step is guarding, and no release job runs the scripts suite —
+    // so a future change that removes the stamp step or this guard must fail
+    // here instead of shipping a release that silently lost its digest.
+    expect(workflow).toContain(
+      'npm run bundle\n' +
+        '          # The review staleness check degrades to "could not check" without\n' +
+        '          # this stamp; fail here instead of shipping a release that silently\n' +
+        '          # lost it.\n' +
+        '          test -f dist/review-sources.sha256\n' +
+        '          npm run prepare:package',
+    );
+  });
+
   it('keeps a dispatch failure from failing an already-published release', () => {
     // The packages are published before this step runs, so it must not fail
     // the release; but the failure must still surface (as an error, not a
