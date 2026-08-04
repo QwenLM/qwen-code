@@ -445,7 +445,9 @@ export async function detectFileEncoding(
  * @returns The specific MIME type string (e.g., 'text/python', 'application/javascript') or undefined if not found or ambiguous.
  */
 export function getSpecificMimeType(filePath: string): string | undefined {
-  const lookedUpMime = mime.getType(filePath);
+  const lookedUpMime =
+    mime.getType(filePath) ??
+    MIME_LITE_MISSING_MEDIA_TYPES.get(path.extname(filePath).toLowerCase());
   return typeof lookedUpMime === 'string' ? lookedUpMime : undefined;
 }
 
@@ -780,14 +782,18 @@ function isTextMime(lookedUpMimeType: string): boolean {
 }
 
 /**
- * Video containers whose MIME type `mime/lite` does not carry in its default
- * "standard" database. `.m4v`'s `video/x-m4v` mapping lives only in the
- * non-default "other" set, so `mime.getType('clip.m4v')` returns null and —
- * without this override — {@link detectFileType} falls through to the content
- * sampler and misclassifies a real video as binary.
+ * Media containers whose MIME type `mime/lite` does not carry in its default
+ * "standard" database. Without these overrides, real media falls through to
+ * the content sampler and is misclassified as binary. Keep this map shared by
+ * the lightweight type detector, inline media reader, and synchronous MIME
+ * gates (for example ACP `@` path resolution).
  */
-const MIME_LITE_MISSING_VIDEO_TYPES: ReadonlyMap<string, string> = new Map([
+const MIME_LITE_MISSING_MEDIA_TYPES: ReadonlyMap<string, string> = new Map([
   ['.m4v', 'video/x-m4v'],
+  ['.flac', 'audio/x-flac'],
+  ['.wma', 'audio/x-ms-wma'],
+  ['.aiff', 'audio/x-aiff'],
+  ['.aif', 'audio/x-aiff'],
 ]);
 
 /**
@@ -817,11 +823,11 @@ export async function detectFileType(filePath: string): Promise<FileType> {
   }
 
   // Returns null if not found, or the mime type string. `mime/lite` omits a
-  // few video containers (see MIME_LITE_MISSING_VIDEO_TYPES), so fall back to
-  // that override before giving up — otherwise a real video falls through to
+  // a few media containers (see MIME_LITE_MISSING_MEDIA_TYPES), so fall back to
+  // that override before giving up — otherwise real media falls through to
   // the content sampler and is misclassified as binary.
   const lookedUpMimeType =
-    mime.getType(filePath) ?? MIME_LITE_MISSING_VIDEO_TYPES.get(ext) ?? null;
+    mime.getType(filePath) ?? MIME_LITE_MISSING_MEDIA_TYPES.get(ext) ?? null;
   if (lookedUpMimeType) {
     if (lookedUpMimeType.startsWith('image/')) {
       return 'image';
@@ -1119,7 +1125,7 @@ export async function processSingleFileContent(
       : await detectFileType(filePath);
     const mediaMimeType =
       mime.getType(filePath) ??
-      MIME_LITE_MISSING_VIDEO_TYPES.get(path.extname(filePath).toLowerCase()) ??
+      MIME_LITE_MISSING_MEDIA_TYPES.get(path.extname(filePath).toLowerCase()) ??
       'application/octet-stream';
     const shouldRenderImageOverview =
       fileType === 'image' && CANONICAL_IMAGE_MIME_TYPES.has(mediaMimeType);

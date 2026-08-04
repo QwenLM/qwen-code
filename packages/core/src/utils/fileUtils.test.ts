@@ -28,6 +28,7 @@ import {
   isWithinRoot,
   isBinaryFile,
   detectFileType,
+  getSpecificMimeType,
   processSingleFileContent,
   detectBOM,
   readFileWithLineAndLimit,
@@ -903,6 +904,14 @@ describe('fileUtils', () => {
       expect(await detectFileType('tutorial.m4v')).toBe('video');
     });
 
+    it.each(['.flac', '.wma', '.aiff', '.aif'])(
+      'should detect %s as audio when mime/lite has no mapping',
+      async (extension) => {
+        mockMimeGetType.mockReturnValueOnce(null);
+        expect(await detectFileType(`recording${extension}`)).toBe('audio');
+      },
+    );
+
     it('should detect known binary extensions as binary (e.g. .zip)', async () => {
       mockMimeGetType.mockReturnValueOnce('application/zip');
       expect(await detectFileType('archive.zip')).toBe('binary');
@@ -1525,6 +1534,32 @@ describe('fileUtils', () => {
         },
       });
       expect(result.returnDisplay).toContain('Read audio file');
+    });
+
+    it('keeps mime/lite-missing FLAC inline for the audio bridge', async () => {
+      const audioBytes = Buffer.from('fake flac data');
+      const audioPath = path.join(tempRootDir, 'clip.flac');
+      actualNodeFs.writeFileSync(audioPath, audioBytes);
+      mockMimeGetType.mockReturnValue(null);
+      const mockConfigNoAudio = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: {} }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        audioPath,
+        mockConfigNoAudio,
+        { preserveUnsupportedAudio: true },
+      );
+
+      expect(getSpecificMimeType(audioPath)).toBe('audio/x-flac');
+      expect(result.llmContent).toEqual({
+        inlineData: {
+          data: audioBytes.toString('base64'),
+          mimeType: 'audio/x-flac',
+          displayName: 'clip.flac',
+        },
+      });
     });
 
     it('keeps supported audio bytes unchanged', async () => {

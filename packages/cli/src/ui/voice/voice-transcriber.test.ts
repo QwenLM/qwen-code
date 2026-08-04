@@ -903,6 +903,7 @@ describe('voice-transcriber', () => {
     ['audio/x-m4a', 'm4a'],
     ['audio/x-aac', 'aac'],
     ['audio/x-flac', 'flac'],
+    ['audio/x-aiff', 'aiff'],
     ['audio/x-ogg', 'ogg'],
   ])(
     'maps %s to the supported input_audio format %s',

@@ -127,6 +127,7 @@ import { cleanupReviewWorktreeLeases } from '../../services/review-worktree-leas
 import {
   formatAudioBridgeNotice,
   hasAudioParts,
+  replaceAudioPartsWithUnavailable,
   runAudioBridge,
   shouldPreserveUnsupportedAudioForBridge,
 } from '../../services/audio-bridge-service.js';
@@ -1187,36 +1188,63 @@ export const useGeminiStream = (
       signal: AbortSignal,
     ): Promise<{ parts: PartListUnion | null; shouldProceed: boolean }> => {
       let nextParts = parts;
-      if (
-        nextParts !== null &&
-        hasAudioParts(nextParts) &&
-        !modelOverrideRef.current?.endsWith('\0') &&
-        !inlineModelOverrideActiveRef.current
-      ) {
-        const result = await runAudioBridge({
-          config,
-          settings,
-          parts: nextParts,
-          signal,
-        });
-        if (result.status !== 'skipped' || result.egressCount > 0) {
-          addItem(
-            {
-              type:
-                result.status === 'failed' &&
-                result.convertedCount === 0 &&
-                !signal.aborted
-                  ? MessageType.ERROR
-                  : MessageType.INFO,
-              text: formatAudioBridgeNotice(result),
-            },
-            timestamp,
-          );
+      if (nextParts !== null && hasAudioParts(nextParts)) {
+        const activeOverride = modelOverrideRef.current;
+        if (activeOverride !== undefined) {
+          const routeSelector = activeOverride.endsWith('\0')
+            ? activeOverride.slice(0, -1)
+            : activeOverride;
+          let supportsAudio = false;
+          try {
+            const runtimeView = await config
+              .getBaseLlmClient()
+              .resolveForModel(routeSelector, { failClosed: true });
+            supportsAudio =
+              runtimeView.contentGeneratorConfig.modalities?.audio === true;
+          } catch (error) {
+            debugLogger.warn(
+              `audio route capability check failed for '${routeSelector}': ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          }
+          if (!supportsAudio) {
+            const reason = 'the active model override does not support audio';
+            nextParts = replaceAudioPartsWithUnavailable(nextParts, reason);
+            addItem(
+              {
+                type: MessageType.ERROR,
+                text: `Audio was not sent: ${reason}.`,
+              },
+              timestamp,
+            );
+          }
+        } else {
+          const result = await runAudioBridge({
+            config,
+            settings,
+            parts: nextParts,
+            signal,
+          });
+          if (result.status !== 'skipped' || result.egressCount > 0) {
+            addItem(
+              {
+                type:
+                  result.status === 'failed' &&
+                  result.convertedCount === 0 &&
+                  !signal.aborted
+                    ? MessageType.ERROR
+                    : MessageType.INFO,
+                text: formatAudioBridgeNotice(result),
+              },
+              timestamp,
+            );
+          }
+          if (signal.aborted) {
+            return { parts: null, shouldProceed: false };
+          }
+          nextParts = result.parts;
         }
-        if (signal.aborted) {
-          return { parts: null, shouldProceed: false };
-        }
-        nextParts = result.parts;
       }
       return applyVisionBridgeIfNeeded(nextParts, timestamp, signal);
     },

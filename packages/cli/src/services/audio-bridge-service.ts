@@ -86,6 +86,16 @@ function unavailableBlock(reason: string): string {
   );
 }
 
+/** Replace audio bytes with an explicit fail-closed marker without egress. */
+export function replaceAudioPartsWithUnavailable(
+  parts: PartListUnion,
+  reason: string,
+): Part[] {
+  return normalizeParts(parts).map((part) =>
+    isAudioPart(part) ? { text: unavailableBlock(reason) } : part,
+  );
+}
+
 export function formatAudioBridgeNotice(result: AudioBridgeResult): string {
   if (result.status === 'ok' && result.modelId) {
     return `Converted ${result.convertedCount} audio file(s) to text via ${result.modelId}. Your audio was sent to that model.`;

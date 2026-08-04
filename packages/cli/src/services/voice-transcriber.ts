@@ -523,6 +523,7 @@ const AUDIO_FORMAT_ALIASES: Record<string, string> = {
   'x-wav': 'wav',
   'x-m4a': 'm4a',
   'x-aac': 'aac',
+  'x-aiff': 'aiff',
   'x-flac': 'flac',
   'x-ogg': 'ogg',
   'x-mpeg': 'mp3',
