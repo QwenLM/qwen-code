@@ -3676,6 +3676,23 @@ const SETTINGS_SCHEMA = {
               default: 1073741824,
             },
           },
+          cacheTtlHours: {
+            type: 'number',
+            label: 'Upload Cache TTL (hours)',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: 47,
+            description:
+              'Validity horizon for cached oss:// upload URLs. DashScope ' +
+              'temporary uploads live 48h; the default keeps a 1h margin. ' +
+              '0 disables the upload cache (every delivery re-uploads).',
+            showInDialog: false,
+            jsonSchemaOverride: {
+              type: 'number',
+              minimum: 0,
+              default: 47,
+            },
+          },
         },
       },
       transport: {

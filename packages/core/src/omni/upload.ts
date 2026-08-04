@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { openAsBlob } from 'node:fs';
 import path from 'node:path';
 import { combineAbortSignals } from '../utils/abortController.js';
@@ -45,6 +45,26 @@ export interface DashScopeUploaderOptions {
 const DEFAULT_ORIGIN = 'https://dashscope.aliyuncs.com';
 const GET_POLICY_TIMEOUT_MS = 30_000;
 const UPLOAD_TIMEOUT_MS = 15 * 60_000;
+/** Credential reuse window: official policy validity is 300s; 240s keeps
+ * a safety margin for the slowest accepted upload start. */
+const CREDENTIAL_TTL_MS = 240_000;
+
+interface CachedPolicy {
+  policy: Promise<DashScopeUploadPolicy>;
+  fetchedAt: number;
+}
+
+/** Module-level getPolicy cache: uploader instances are created per
+ * delivery, so an instance-level cache would never hit. Keyed by
+ * origin|model; in-flight promises are shared so N concurrent uploads
+ * spawn one credential request (same pattern as the ffmpeg availability
+ * cache). Rejections are evicted immediately. */
+const credentialCache = new Map<string, CachedPolicy>();
+
+/** Test-only. */
+export function resetCredentialCacheForTests(): void {
+  credentialCache.clear();
+}
 
 /** Strip everything but safe filename characters for the OSS object key. */
 function sanitizeFileName(name: string): string {
@@ -116,8 +136,40 @@ export class DashScopeUploader {
     this.fetchFn = options.fetchFn ?? fetch;
   }
 
-  /** Fetch a short-lived upload policy bound to `model`. */
+  /** Fetch a short-lived upload policy bound to `model`, reusing a cached
+   * credential within its validity window. */
   async getPolicy(
+    model: string,
+    signal?: AbortSignal,
+  ): Promise<DashScopeUploadPolicy> {
+    // Include the credential identity: two API keys on the same origin
+    // must not share upload policies (each policy scopes an account's
+    // upload_dir).
+    const keyDigest = createHash('sha256')
+      .update(this.apiKey)
+      .digest('hex')
+      .slice(0, 16);
+    const cacheKey = `${this.origin}|${model}|${keyDigest}`;
+    const cached = credentialCache.get(cacheKey);
+    if (cached && Date.now() - cached.fetchedAt < CREDENTIAL_TTL_MS) {
+      return cached.policy;
+    }
+    const entry: CachedPolicy = {
+      fetchedAt: Date.now(),
+      policy: this.fetchPolicy(model, signal),
+    };
+    credentialCache.set(cacheKey, entry);
+    entry.policy.catch(() => {
+      // Never cache a failed credential fetch.
+      if (credentialCache.get(cacheKey) === entry) {
+        credentialCache.delete(cacheKey);
+      }
+    });
+    return entry.policy;
+  }
+
+  /** Uncached policy fetch. */
+  private async fetchPolicy(
     model: string,
     signal?: AbortSignal,
   ): Promise<DashScopeUploadPolicy> {

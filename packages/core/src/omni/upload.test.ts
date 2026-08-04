@@ -8,7 +8,12 @@ import { describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { DashScopeUploader, type FetchFn } from './upload.js';
+import {
+  DashScopeUploader,
+  resetCredentialCacheForTests,
+  type FetchFn,
+} from './upload.js';
+import { beforeEach } from 'vitest';
 
 const POLICY = {
   policy: 'cG9saWN5',
@@ -40,6 +45,8 @@ async function withTempFile<T>(
     await fs.rm(dir, { recursive: true, force: true });
   }
 }
+
+beforeEach(() => resetCredentialCacheForTests());
 
 describe('DashScopeUploader', () => {
   it('requests a policy bound to the model with bearer auth', async () => {
@@ -212,5 +219,62 @@ describe('DashScopeUploader', () => {
         mimeType: 'video/mp4',
       }),
     ).rejects.toThrow(/Failed to open file for upload/);
+  });
+});
+
+describe('credential cache', () => {
+  beforeEach(() => resetCredentialCacheForTests());
+
+  it('reuses one getPolicy across multiple uploads within the TTL', async () => {
+    const fetchFn = vi.fn<FetchFn>().mockImplementation(async (url) => {
+      if (String(url).includes('getPolicy')) return policyResponse();
+      return new Response('', { status: 200 });
+    });
+    const uploader = new DashScopeUploader({ apiKey: 'k', fetchFn });
+    await withTempFile('a', (f) =>
+      uploader.uploadFile({ filePath: f, model: 'm', mimeType: 'video/mp4' }),
+    );
+    await withTempFile('b', (f) =>
+      uploader.uploadFile({ filePath: f, model: 'm', mimeType: 'video/mp4' }),
+    );
+    const policyCalls = fetchFn.mock.calls.filter((c) =>
+      String(c[0]).includes('getPolicy'),
+    );
+    expect(policyCalls).toHaveLength(1);
+  });
+
+  it('separates credentials per model and per origin', async () => {
+    const fetchFn = vi
+      .fn<FetchFn>()
+      .mockImplementation(async () => policyResponse());
+    const uploader = new DashScopeUploader({ apiKey: 'k', fetchFn });
+    await uploader.getPolicy('model-a');
+    await uploader.getPolicy('model-b');
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+
+  it('shares in-flight fetches between concurrent callers', async () => {
+    let resolveIt: (r: Response) => void;
+    const gate = new Promise<Response>((r) => (resolveIt = r));
+    const fetchFn = vi.fn<FetchFn>().mockReturnValue(gate as Promise<Response>);
+    const uploader = new DashScopeUploader({ apiKey: 'k', fetchFn });
+    const p1 = uploader.getPolicy('m');
+    const p2 = uploader.getPolicy('m');
+    resolveIt!(policyResponse());
+    await Promise.all([p1, p2]);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not cache a failed credential fetch', async () => {
+    const fetchFn = vi
+      .fn<FetchFn>()
+      .mockResolvedValueOnce(new Response('boom', { status: 500 }))
+      .mockResolvedValueOnce(policyResponse());
+    const uploader = new DashScopeUploader({ apiKey: 'k', fetchFn });
+    await expect(uploader.getPolicy('m')).rejects.toThrow(/HTTP 500/);
+    await expect(uploader.getPolicy('m')).resolves.toMatchObject({
+      upload_dir: POLICY.upload_dir,
+    });
+    expect(fetchFn).toHaveBeenCalledTimes(2);
   });
 });

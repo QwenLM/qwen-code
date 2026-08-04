@@ -255,6 +255,9 @@ describe('readMediaViaOmniDelivery result shape', () => {
         async putFile() {
           return { objectPath: '/tmp/obj.png', deduped: false };
         }
+        getOmniRootDir() {
+          return tmpDir;
+        }
       },
     }));
     vi.doMock('./upload.js', () => ({
@@ -305,6 +308,9 @@ describe('readMediaViaOmniDelivery result shape', () => {
       OmniObjectStore: class {
         async putFile() {
           return { objectPath: '/tmp/obj.mp3', deduped: false };
+        }
+        getOmniRootDir() {
+          return tmpDir;
         }
       },
     }));

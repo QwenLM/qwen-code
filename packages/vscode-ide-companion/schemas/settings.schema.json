@@ -3277,6 +3277,12 @@
               "minimum": 1,
               "default": 1073741824,
               "description": "Per-file byte ceiling for omni media uploads. Defaults to 1 GiB, the DashScope temporary-upload per-file cap. Inputs above the limit fail closed with an explanatory error."
+            },
+            "cacheTtlHours": {
+              "type": "number",
+              "minimum": 0,
+              "default": 47,
+              "description": "Validity horizon for cached oss:// upload URLs. DashScope temporary uploads live 48h; the default keeps a 1h margin. 0 disables the upload cache (every delivery re-uploads)."
             }
           }
         },

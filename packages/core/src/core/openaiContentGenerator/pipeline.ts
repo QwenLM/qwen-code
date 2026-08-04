@@ -1144,6 +1144,13 @@ export class ContentGenerationPipeline {
     try {
       return await executeAttempt();
     } catch (error) {
+      // Omni delivery-cache hygiene: when a request carrying oss:// media
+      // fails with a provider-side resolution error, drop the cached URL(s)
+      // so the user's retry re-uploads instead of resending a dead
+      // reference. Deliberately no automatic in-pipeline resend — the next
+      // interaction is the retry (design: omni-s3 D2). Conservative
+      // matching; never throws.
+      void this.invalidateOmniOssCacheOnError(openaiRequest, error);
       const model = context.model.toLowerCase();
       const wireRequest = openaiRequest as Record<string, unknown> | undefined;
       const chatTemplateKwargs = wireRequest?.['chat_template_kwargs'] as
@@ -1175,6 +1182,59 @@ export class ContentGenerationPipeline {
    * Shared error handling logic for both executeWithErrorHandling and processStreamWithLogging
    * This centralizes the common error processing steps to avoid duplication
    */
+  /** Fire-and-forget upload-cache invalidation for failed oss deliveries. */
+  private async invalidateOmniOssCacheOnError(
+    openaiRequest: OpenAI.Chat.ChatCompletionCreateParams | undefined,
+    error: unknown,
+  ): Promise<void> {
+    try {
+      if (!this.config.cliConfig.isOmniEnabled?.()) return;
+      // Throttling must never churn the cache: a 429 on a request that
+      // happens to carry oss media says nothing about the media's health
+      // (and some providers phrase quota errors as RESOURCE_EXHAUSTED).
+      if (getErrorStatus(error) === 429) return;
+      const message = getErrorMessage(error) ?? '';
+      // Dead-media provider errors either name the oss scheme outright or
+      // describe the media download step (DashScope: "Download the media
+      // resource timed out"). Anything else must not nuke the cache.
+      if (
+        !/oss/i.test(message) &&
+        !(/download/i.test(message) && /resource|media/i.test(message))
+      ) {
+        return;
+      }
+      const urls = new Set<string>();
+      for (const m of openaiRequest?.messages ?? []) {
+        const content = (m as { content?: unknown }).content;
+        if (!Array.isArray(content)) continue;
+        for (const part of content) {
+          const p = part as {
+            image_url?: { url?: string };
+            video_url?: { url?: string };
+            input_audio?: { data?: string };
+          };
+          for (const u of [
+            p.image_url?.url,
+            p.video_url?.url,
+            p.input_audio?.data,
+          ]) {
+            if (typeof u === 'string' && u.startsWith('oss://')) urls.add(u);
+          }
+        }
+      }
+      if (urls.size === 0) return;
+      const { OmniUploadCache } = await import('../../omni/upload-cache.js');
+      const { OmniObjectStore } = await import('../../omni/storage.js');
+      const store = new OmniObjectStore(
+        this.config.cliConfig.storage.getQwenDir(),
+      );
+      const cache = new OmniUploadCache(store.getOmniRootDir());
+      for (const u of urls) await cache.invalidateByUrl(u);
+    } catch {
+      // Hygiene only — never mask the original error.
+    }
+  }
+
   private async handleError(
     error: unknown,
     context: RequestContext,

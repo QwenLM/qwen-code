@@ -28,6 +28,11 @@ import {
 } from './recognition.js';
 import { OmniObjectStore } from './storage.js';
 import { DashScopeUploader } from './upload.js';
+import {
+  OmniUploadCache,
+  DEFAULT_UPLOAD_CACHE_TTL_HOURS,
+} from './upload-cache.js';
+import { runStartupRecoveryOnce } from './recovery.js';
 
 export {
   assertOmniRuntimeDependencies,
@@ -63,6 +68,15 @@ export {
 // Circular-safe (both modules only bind functions): lets the ./omni
 // subpath entry serve the tool-result funnel without the big barrel.
 export { processToolResultOmniMedia } from './tool-result-media.js';
+export {
+  OmniUploadCache,
+  DEFAULT_UPLOAD_CACHE_TTL_HOURS,
+} from './upload-cache.js';
+export {
+  runStartupRecoveryOnce,
+  resetRecoveryLatchForTests,
+} from './recovery.js';
+export { resetCredentialCacheForTests } from './upload.js';
 
 const debugLogger = createDebugLogger('omni');
 
@@ -121,6 +135,9 @@ export interface OmniMediaDelivery {
   tokenEstimate: OmniTokenEstimate;
   /** Whether the object store already held this content. */
   deduped: boolean;
+  /** True when the oss URL came from the persistent upload cache (no
+   * network transfer happened for this delivery). */
+  uploadCacheHit: boolean;
 }
 
 /** Thrown for omni pipeline failures. The pipeline fails closed: callers
@@ -263,6 +280,16 @@ export async function processMediaForOmniDelivery(
   }
 
   const store = new OmniObjectStore(config.storage.getQwenDir());
+  const configuredTtl = config.getOmniUploadCacheTtlHours?.();
+  const uploadCache = new OmniUploadCache(
+    store.getOmniRootDir(),
+    configuredTtl === undefined
+      ? DEFAULT_UPLOAD_CACHE_TTL_HOURS
+      : configuredTtl,
+  );
+  // Lazy one-time hygiene scan (expired .part files, promotion orphans,
+  // sampled object verification). Never throws.
+  await runStartupRecoveryOnce(store, uploadCache);
   const extension = extensionForMime(recognized.detectedMimeType);
   let objectPath: string;
   let deduped: boolean;
@@ -279,6 +306,23 @@ export async function processMediaForOmniDelivery(
     );
   }
 
+  const model = config.getModel();
+  const cachedUrl = await uploadCache.get(sha256, model);
+  if (cachedUrl) {
+    debugLogger.debug(
+      `omni upload cache hit: sha256=${sha256.slice(0, 12)}… model=${model}`,
+    );
+    return {
+      fileUri: cachedUrl,
+      mimeType: recognized.detectedMimeType,
+      sha256,
+      recognized,
+      tokenEstimate,
+      deduped,
+      uploadCacheHit: true,
+    };
+  }
+
   const cgc = config.getContentGeneratorConfig();
   const uploader = new DashScopeUploader({
     apiKey: cgc.apiKey ?? '',
@@ -288,7 +332,7 @@ export async function processMediaForOmniDelivery(
   try {
     fileUri = await uploader.uploadFile({
       filePath: objectPath,
-      model: config.getModel(),
+      model,
       mimeType: recognized.detectedMimeType,
       signal,
     });
@@ -309,6 +353,7 @@ export async function processMediaForOmniDelivery(
       `size=${recognized.sizeBytes} est=${tokenEstimate.estimatedTokenCount}(${tokenEstimate.status}) ` +
       `deduped=${deduped} uri=${fileUri}`,
   );
+  await uploadCache.put(sha256, model, fileUri);
   return {
     fileUri,
     mimeType: recognized.detectedMimeType,
@@ -316,6 +361,7 @@ export async function processMediaForOmniDelivery(
     recognized,
     tokenEstimate,
     deduped,
+    uploadCacheHit: false,
   };
 }
 

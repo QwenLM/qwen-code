@@ -1108,6 +1108,8 @@ export interface ConfigParameters {
   omniMaxEstimatedTokens?: number;
   /** Byte ceiling for omni URL downloads (unset = follow upload cap). */
   omniDownloadMaxFileBytes?: number;
+  /** Upload cache TTL in hours (0 disables the cache; default 47). */
+  omniUploadCacheTtlHours?: number;
   /** Image generation model selected through `/model --image`. */
   imageModel?: string;
   /**
@@ -1937,6 +1939,7 @@ export class Config {
   private readonly omniUploadMaxFileBytes?: number;
   private readonly omniMaxEstimatedTokens?: number;
   private readonly omniDownloadMaxFileBytes?: number;
+  private readonly omniUploadCacheTtlHours?: number;
   private workflowsEnabled = false;
   private readonly skipWorkflowUsageWarning: boolean = false;
   private readonly computerUseEnabled: boolean = true;
@@ -2216,6 +2219,7 @@ export class Config {
     this.omniUploadMaxFileBytes = params.omniUploadMaxFileBytes;
     this.omniMaxEstimatedTokens = params.omniMaxEstimatedTokens;
     this.omniDownloadMaxFileBytes = params.omniDownloadMaxFileBytes;
+    this.omniUploadCacheTtlHours = params.omniUploadCacheTtlHours;
     this.workflowsEnabled = params.workflowsEnabled ?? false;
     this.skipWorkflowUsageWarning = params.skipWorkflowUsageWarning ?? false;
     this.computerUseEnabled = params.computerUseEnabled ?? true;
@@ -6386,6 +6390,10 @@ export class Config {
 
   getOmniDownloadMaxFileBytes(): number | undefined {
     return this.omniDownloadMaxFileBytes;
+  }
+
+  getOmniUploadCacheTtlHours(): number | undefined {
+    return this.omniUploadCacheTtlHours;
   }
 
   resolveImageGenerationModel(
