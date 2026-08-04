@@ -115,6 +115,9 @@ describe('validateAssetFile', () => {
     expect(validateAssetFile('a.png', 100).ok).toBe(true);
     expect(validateAssetFile('a.JPG', 100).ok).toBe(true);
     expect(validateAssetFile('a.webp', 100).ok).toBe(true);
+    // A multi-dot name claims only its LAST extension (pins `lastIndexOf`
+    // in `claimedExtension` — see the matching content-gate pin below).
+    expect(validateAssetFile('figure-1.final.png', 100).ok).toBe(true);
   });
 
   it.each([
@@ -266,6 +269,11 @@ describe('sniffImageFormat / validateAssetContent', () => {
     expect(validateAssetContent('d.webp', WEBP).ok).toBe(true);
     // The batch gate lowercases extensions; the content gate must agree.
     expect(validateAssetContent('E.JPG', JPEG).ok).toBe(true);
+    // A multi-dot name claims only its LAST extension — pins `lastIndexOf`
+    // in `claimedExtension`: an `indexOf` mutant refuses this as
+    // "final.png" (fail-closed, but a false refusal of real evidence)
+    // while every other test in both suites stays green.
+    expect(validateAssetContent('figure-1.final.png', PNG).ok).toBe(true);
   });
 
   it('refuses a name whose content is a different format — or no image at all', () => {
@@ -307,6 +315,9 @@ describe('sniffImageFormat / validateAssetContent', () => {
   it.each([
     ['evil.svg', 'svg'],
     ['evil.SVG', 'svg'],
+    // The refusal must name the LAST extension: the `indexOf` mutant's
+    // `"png.sh"` reason is caught here in both gates at once.
+    ['a.png.sh', 'sh'],
     ['archive.', ''],
     ['noext', ''],
   ])('refuses %s with the one shared refusal in both gates', (name, ext) => {
