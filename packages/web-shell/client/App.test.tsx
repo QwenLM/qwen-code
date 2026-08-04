@@ -909,11 +909,7 @@ vi.doMock('./components/SplitView', async () => {
       onExit?: () => void;
       sessionIds?: string[];
       onPanesChange?: (ids: string[]) => void;
-      onPaneArtifactsChange?: (
-        sessionId: string,
-        artifacts: unknown[],
-        workspaceActions: unknown,
-      ) => void;
+      onPaneArtifactsChange?: (sessionId: string, artifacts: unknown[]) => void;
       onRightPanelOpen?: (request: unknown) => void;
       onOpenMonitor?: (
         task: DaemonSessionMonitorTaskStatus,
@@ -926,9 +922,6 @@ vi.doMock('./components/SplitView', async () => {
       }) => unknown;
       voiceWorkspaces?: readonly unknown[];
     }) => {
-      const paneActions = {
-        readWorkspaceFile: vi.fn().mockResolvedValue('<p>pane</p>'),
-      };
       const artifact = {
         id: 'pane-artifact',
         kind: 'report',
@@ -981,11 +974,7 @@ vi.doMock('./components/SplitView', async () => {
             'data-testid': 'split-report-artifact',
             type: 'button',
             onClick: () =>
-              props.onPaneArtifactsChange?.(
-                'pane-session',
-                [artifact],
-                paneActions,
-              ),
+              props.onPaneArtifactsChange?.('pane-session', [artifact]),
           },
           'artifact',
         ),
@@ -995,11 +984,7 @@ vi.doMock('./components/SplitView', async () => {
             'data-testid': 'split-report-updated-artifact',
             type: 'button',
             onClick: () =>
-              props.onPaneArtifactsChange?.(
-                'pane-session',
-                [updatedArtifact],
-                paneActions,
-              ),
+              props.onPaneArtifactsChange?.('pane-session', [updatedArtifact]),
           },
           'updated artifact',
         ),
@@ -1009,11 +994,7 @@ vi.doMock('./components/SplitView', async () => {
             'data-testid': 'split-report-changed-artifact',
             type: 'button',
             onClick: () =>
-              props.onPaneArtifactsChange?.(
-                'pane-session',
-                [changedArtifact],
-                paneActions,
-              ),
+              props.onPaneArtifactsChange?.('pane-session', [changedArtifact]),
           },
           'changed artifact',
         ),
@@ -1022,8 +1003,7 @@ vi.doMock('./components/SplitView', async () => {
           {
             'data-testid': 'split-clear-artifacts',
             type: 'button',
-            onClick: () =>
-              props.onPaneArtifactsChange?.('pane-session', [], paneActions),
+            onClick: () => props.onPaneArtifactsChange?.('pane-session', []),
           },
           'clear artifacts',
         ),
@@ -1040,7 +1020,9 @@ vi.doMock('./components/SplitView', async () => {
                 turnId: 'turn-1',
                 artifactId: artifact.id,
                 artifact,
-                workspaceActions: paneActions,
+                workspaceCwd: '/tmp/project',
+                workspaceId: 'primary',
+                sourceSessionId: 'pane-session',
                 previewContent: '<p>stale</p>',
               }),
           },
@@ -4554,6 +4536,17 @@ describe('App session callbacks', () => {
   });
 
   it('opens the latest reviewable turn from the empty right panel', () => {
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
     testState.messages = [
       {
         id: 'user-1',
@@ -9898,6 +9891,17 @@ describe('App session callbacks', () => {
   });
 
   it('reconciles split pane artifact snapshots in the right panel', async () => {
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
     const { container } = renderApp();
     await flush();
 

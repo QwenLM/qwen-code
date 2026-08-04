@@ -7,26 +7,68 @@ import type {
   DaemonSessionMonitorTaskStatus,
   DaemonSessionShellTaskStatus,
 } from '@qwen-code/sdk/daemon';
-import type { DaemonSessionActions } from '@qwen-code/webui/daemon-react-sdk';
+import type {
+  DaemonScheduledTask,
+  DaemonSessionActions,
+} from '@qwen-code/webui/daemon-react-sdk';
 import { I18nProvider } from '../../i18n';
 
-const { mockActions, mockWorkspaceActions } = vi.hoisted(() => ({
-  mockActions: {
-    cancelTask: vi.fn(),
-    getTasks: vi.fn(),
-  },
-  mockWorkspaceActions: {
-    readFileBytes: vi.fn(),
+const {
+  mockActions,
+  mockWorkspace,
+  mockWorkspaceActions,
+  mockSecondaryWorkspaceActions,
+} = vi.hoisted(() => {
+  const mockSecondaryWorkspaceActions = {
     readWorkspaceFile: vi.fn(),
-    stat: vi.fn(),
-  },
-}));
+    readWorkspaceFileBytes: vi.fn(),
+    fileStat: vi.fn(),
+  };
+  return {
+    mockActions: {
+      cancelTask: vi.fn(),
+      getTasks: vi.fn(),
+    },
+    mockWorkspaceActions: {
+      readFileBytes: vi.fn(),
+      readWorkspaceFile: vi.fn(),
+      stat: vi.fn(),
+      listScheduledTasks: vi.fn(),
+      updateScheduledTask: vi.fn(),
+      deleteScheduledTask: vi.fn(),
+    },
+    mockSecondaryWorkspaceActions,
+    mockWorkspace: {
+      capabilities: {
+        workspaceCwd: '/primary',
+        workspaces: [
+          {
+            id: 'primary-id',
+            cwd: '/primary',
+            primary: true,
+            trusted: true,
+          },
+          {
+            id: 'secondary-id',
+            cwd: '/secondary',
+            primary: false,
+            trusted: true,
+          },
+        ],
+      },
+      client: {
+        workspaceByCwd: vi.fn(() => mockSecondaryWorkspaceActions),
+      },
+    },
+  };
+});
 
 vi.mock(
   '@qwen-code/webui/daemon-react-sdk',
   async (importOriginal: () => Promise<Record<string, unknown>>) => ({
     ...(await importOriginal()),
     useActions: () => mockActions,
+    useWorkspace: () => mockWorkspace,
     useWorkspaceActions: () => mockWorkspaceActions,
   }),
 );
@@ -113,7 +155,13 @@ function codeReviewArtifact(
   };
 }
 
-function artifactPanel(artifact: DaemonSessionArtifact) {
+function artifactPanel(
+  artifact: DaemonSessionArtifact,
+  owner: { workspaceCwd: string; workspaceId: string } | null = {
+    workspaceCwd: '/primary',
+    workspaceId: 'primary-id',
+  },
+) {
   return (
     <I18nProvider language="en">
       <ArtifactPanel
@@ -124,9 +172,60 @@ function artifactPanel(artifact: DaemonSessionArtifact) {
             kind: 'artifact',
             title: artifact.title,
             artifactId: artifact.id,
+            ...(owner ?? {}),
           },
         ]}
         activeTabId="artifact:review-artifact"
+        reviewChanges={[]}
+        selectedReviewPath={null}
+        onSelectTab={() => {}}
+        onCloseTab={() => {}}
+        onOpenFilePreview={() => {}}
+        onClose={() => {}}
+      />
+    </I18nProvider>
+  );
+}
+
+const secondaryScheduledTask: DaemonScheduledTask = {
+  id: 'cron-secondary',
+  name: 'Secondary task',
+  cron: '0 9 * * *',
+  prompt: 'secondary only',
+  recurring: true,
+  enabled: true,
+  createdAt: 1_700_000_000_000,
+  lastFiredAt: null,
+  nextRunAt: null,
+  sessionId: null,
+  runs: [],
+};
+
+function scheduledTaskPanel() {
+  return (
+    <I18nProvider language="en">
+      <ArtifactPanel
+        artifacts={[]}
+        tabs={[
+          {
+            id: 'scheduled-task:secondary:cron-call',
+            kind: 'scheduled_task',
+            title: 'Scheduled Tasks',
+            workspaceCwd: '/secondary',
+            workspaceId: 'secondary-id',
+            task: {
+              id: 'cron-secondary',
+              toolCallId: 'cron-call',
+              title: 'Secondary task',
+              cron: '0 9 * * *',
+              prompt: 'secondary only',
+              recurring: true,
+              durable: true,
+              workspaceId: 'secondary-id',
+            },
+          },
+        ]}
+        activeTabId="scheduled-task:secondary:cron-call"
         reviewChanges={[]}
         selectedReviewPath={null}
         onSelectTab={() => {}}
@@ -149,6 +248,30 @@ afterEach(() => {
   mockWorkspaceActions.readFileBytes.mockReset();
   mockWorkspaceActions.readWorkspaceFile.mockReset();
   mockWorkspaceActions.stat.mockReset();
+  mockWorkspaceActions.listScheduledTasks.mockReset();
+  mockWorkspaceActions.updateScheduledTask.mockReset();
+  mockWorkspaceActions.deleteScheduledTask.mockReset();
+  mockSecondaryWorkspaceActions.readWorkspaceFile.mockReset();
+  mockSecondaryWorkspaceActions.readWorkspaceFileBytes.mockReset();
+  mockSecondaryWorkspaceActions.fileStat.mockReset();
+  mockWorkspace.client.workspaceByCwd.mockClear();
+  mockWorkspace.capabilities = {
+    workspaceCwd: '/primary',
+    workspaces: [
+      {
+        id: 'primary-id',
+        cwd: '/primary',
+        primary: true,
+        trusted: true,
+      },
+      {
+        id: 'secondary-id',
+        cwd: '/secondary',
+        primary: false,
+        trusted: true,
+      },
+    ],
+  };
 });
 
 function openAddMenu(container: HTMLElement) {
@@ -171,6 +294,27 @@ async function flush() {
 }
 
 describe('ArtifactPanel code review artifacts', () => {
+  it('fails closed when an artifact tab has no workspace owner', async () => {
+    mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
+      content: 'PRIMARY_WORKSPACE_SECRET',
+      truncated: false,
+    });
+    const artifact = codeReviewArtifact({ metadata: {} });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(artifactPanel(artifact, null)));
+    await flush();
+
+    expect(container.textContent).toContain(
+      'This workspace may have been removed or the link is no longer valid.',
+    );
+    expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain('PRIMARY_WORKSPACE_SECRET');
+  });
+
   it('dispatches an available workspace artifact to the dedicated renderer', async () => {
     mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
       content: JSON.stringify({
@@ -280,6 +424,124 @@ describe('ArtifactPanel code review artifacts', () => {
     expect(container.textContent).not.toContain('Authoritative verdict');
     expect(mockWorkspaceActions.readWorkspaceFile).toHaveBeenCalledWith(
       '.qwen/reviews/review.json',
+    );
+  });
+
+  it('discards a pending read when its workspace owner is replaced', async () => {
+    let resolveRead:
+      | ((file: { content: string; truncated: boolean }) => void)
+      | undefined;
+    mockSecondaryWorkspaceActions.readWorkspaceFile.mockReturnValue(
+      new Promise((resolve) => {
+        resolveRead = resolve;
+      }),
+    );
+    const artifact = codeReviewArtifact({ metadata: {} });
+    const owner = {
+      workspaceCwd: '/secondary',
+      workspaceId: 'secondary-id',
+    };
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(artifactPanel(artifact, owner)));
+    await flush();
+    expect(mockWorkspace.client.workspaceByCwd).toHaveBeenCalledWith(
+      '/secondary',
+    );
+
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      workspaces: [
+        mockWorkspace.capabilities.workspaces[0]!,
+        {
+          id: 'secondary-replacement-id',
+          cwd: '/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    };
+    act(() => root.render(artifactPanel(artifact, owner)));
+    await flush();
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      'removed',
+    );
+
+    await act(async () => {
+      resolveRead?.({ content: 'REMOVED_WORKSPACE_SECRET', truncated: false });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.textContent).not.toContain('REMOVED_WORKSPACE_SECRET');
+    expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
+  });
+});
+
+describe('ArtifactPanel scheduled-task ownership', () => {
+  it('loads a durable task through its secondary workspace route', async () => {
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([]);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(scheduledTaskPanel()));
+    await flush();
+
+    expect(mockWorkspaceActions.listScheduledTasks).toHaveBeenCalledWith(
+      'secondary-id',
+    );
+  });
+
+  it('updates and deletes only through the task workspace id', async () => {
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([
+      secondaryScheduledTask,
+    ]);
+    mockWorkspaceActions.updateScheduledTask.mockResolvedValue({
+      ...secondaryScheduledTask,
+      enabled: false,
+    });
+    mockWorkspaceActions.deleteScheduledTask.mockResolvedValue(undefined);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(scheduledTaskPanel()));
+    await flush();
+
+    const disable = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Disable',
+    );
+    await act(async () => {
+      disable?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mockWorkspaceActions.updateScheduledTask).toHaveBeenCalledWith(
+      'cron-secondary',
+      { enabled: false },
+      'secondary-id',
+    );
+
+    const openDelete = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Delete',
+    );
+    act(() => openDelete?.click());
+    const confirmDelete = Array.from(document.body.querySelectorAll('button'))
+      .filter((button) => button.textContent?.trim() === 'Delete')
+      .at(-1);
+    await act(async () => {
+      confirmDelete?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mockWorkspaceActions.deleteScheduledTask).toHaveBeenCalledWith(
+      'cron-secondary',
+      'secondary-id',
     );
   });
 });
@@ -564,7 +826,15 @@ describe('ArtifactPanel add menu', () => {
         <I18nProvider language="en">
           <ArtifactPanel
             artifacts={[]}
-            tabs={[{ id: 'review', kind: 'review', title: 'Review' }]}
+            tabs={[
+              {
+                id: 'review',
+                kind: 'review',
+                title: 'Review',
+                workspaceCwd: '/primary',
+                workspaceId: 'primary-id',
+              },
+            ]}
             activeTabId="review"
             reviewChanges={[]}
             selectedReviewPath={null}
@@ -604,6 +874,8 @@ describe('ArtifactPanel add menu', () => {
                 kind: 'artifact',
                 title: 'Report',
                 artifactId: 'report',
+                workspaceCwd: '/primary',
+                workspaceId: 'primary-id',
               },
             ]}
             activeTabId="artifact"
@@ -669,6 +941,8 @@ describe('ArtifactPanel review downloads', () => {
                 kind: 'review',
                 title: 'Review',
                 changes,
+                workspaceCwd: '/primary',
+                workspaceId: 'primary-id',
               },
             ]}
             activeTabId="review"
@@ -737,6 +1011,8 @@ describe('ArtifactPanel review downloads', () => {
                 kind: 'review',
                 title: 'Review',
                 changes,
+                workspaceCwd: '/primary',
+                workspaceId: 'primary-id',
               },
             ]}
             activeTabId="review"
@@ -796,6 +1072,8 @@ describe('ArtifactPanel review downloads', () => {
                 kind: 'review',
                 title: 'Review',
                 changes,
+                workspaceCwd: '/primary',
+                workspaceId: 'primary-id',
               },
             ]}
             activeTabId="review"
