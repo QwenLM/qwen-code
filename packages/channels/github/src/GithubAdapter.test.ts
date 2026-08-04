@@ -414,6 +414,32 @@ describe('GithubChannel', () => {
       expect(mockExecFile).not.toHaveBeenCalled();
     });
 
+    it('rejects a quoted useLocalGh value from hand-edited settings', async () => {
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ token: '', useLocalGh: 'true' }),
+        makeBridge(),
+      );
+
+      await expect(channel.connect()).rejects.toThrow(
+        '[Channel:test-github] useLocalGh must be a boolean.',
+      );
+      expect(mockExecFile).not.toHaveBeenCalled();
+    });
+
+    it('rejects a non-boolean useLocalGh even when a token is configured', async () => {
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ token: 'test-token', useLocalGh: 'true' }),
+        makeBridge(),
+      );
+
+      await expect(channel.connect()).rejects.toThrow(
+        'useLocalGh must be a boolean',
+      );
+      expect(mockOctokitConstructor).not.toHaveBeenCalled();
+    });
+
     it('falls back to local gh for a whitespace-only token', async () => {
       mockExecFile.mockImplementation(
         (
@@ -564,6 +590,24 @@ describe('GithubChannel', () => {
       expect(mockOctokitConstructor).not.toHaveBeenCalled();
     });
 
+    it('reports a scheme-less baseUrl with a port as malformed', async () => {
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({
+          token: '',
+          useLocalGh: true,
+          baseUrl: 'ghe.example.com:8443/api/v3',
+        }),
+        makeBridge(),
+      );
+
+      await expect(channel.connect()).rejects.toThrow(
+        '[Channel:test-github] baseUrl is not a valid URL: ghe.example.com:8443/api/v3',
+      );
+      expect(mockExecFile).not.toHaveBeenCalled();
+      expect(mockOctokitConstructor).not.toHaveBeenCalled();
+    });
+
     it('preserves explicit token support for an HTTP base URL', async () => {
       channel = new TestableGithubChannel(
         'test-github',
@@ -676,6 +720,27 @@ describe('GithubChannel', () => {
       await expect(channel.connect()).rejects.not.toThrow('secret stderr');
     });
 
+    it('names the gh config dir when the host is not authenticated', async () => {
+      vi.stubEnv('GH_CONFIG_DIR', '/tmp/test-gh-config');
+      mockExecFile.mockImplementation(
+        (
+          _file: string,
+          _args: string[],
+          _options: unknown,
+          callback: (error: Error & { code: number }, stdout: string) => void,
+        ) => callback(Object.assign(new Error('exit 1'), { code: 1 }), ''),
+      );
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ token: '', useLocalGh: true }),
+        makeBridge(),
+      );
+
+      await expect(channel.connect()).rejects.toThrow(
+        'gh config dir: /tmp/test-gh-config',
+      );
+    });
+
     it('surfaces bounded gh stderr in the authentication failure', async () => {
       const rawStderr = `\u001b[2Jsecret${'x'.repeat(600)}`;
       mockExecFile.mockImplementation(
@@ -743,6 +808,33 @@ describe('GithubChannel', () => {
       );
       await expect(channel.connect()).rejects.not.toThrow(
         'secret timeout failure',
+      );
+    });
+
+    it('treats a killed lookup that also exited as a timeout', async () => {
+      mockExecFile.mockImplementation(
+        (
+          _file: string,
+          _args: string[],
+          _options: unknown,
+          callback: (
+            error: Error & { code: number; killed: boolean },
+            stdout: string,
+          ) => void,
+        ) =>
+          callback(
+            Object.assign(new Error('exit 1'), { code: 1, killed: true }),
+            '',
+          ),
+      );
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ token: '', useLocalGh: true }),
+        makeBridge(),
+      );
+
+      await expect(channel.connect()).rejects.toThrow(
+        'authentication lookup for github.com timed out after 10 seconds',
       );
     });
 

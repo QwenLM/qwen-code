@@ -47,6 +47,11 @@ function ghHostname(channelName: string, baseUrl: string): string {
       `[Channel:${channelName}] baseUrl is not a valid URL: ${baseUrl}`,
     );
   }
+  if (!url.hostname) {
+    throw new Error(
+      `[Channel:${channelName}] baseUrl is not a valid URL: ${baseUrl}`,
+    );
+  }
   if (url.protocol !== 'https:') {
     throw new Error(
       `[Channel:${channelName}] local GitHub CLI authentication requires an HTTPS baseUrl.`,
@@ -88,7 +93,10 @@ function resolveGhAuthToken(
             // with a numeric code, so this must precede the exit-code branch.
             message = `GitHub CLI authentication lookup for ${hostname} timed out after ${GH_AUTH_TIMEOUT_MS / 1000} seconds.`;
           } else if (typeof code === 'number') {
-            message = `No GitHub CLI authentication is available for ${hostname}. Run \`gh auth login --hostname ${hostname}\` on the daemon host.`;
+            message = `No GitHub CLI authentication is available for ${hostname}. Run \`gh auth login --hostname ${hostname}\` on the daemon host. gh config dir: ${
+              env['GH_CONFIG_DIR'] ??
+              (env['HOME'] ? `${env['HOME']}/.config/gh` : 'unknown')
+            }`;
           } else {
             message = `GitHub CLI authentication lookup for ${hostname} failed to execute.`;
           }
@@ -516,21 +524,22 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     this.reasonFilter = normalizeReasonFilter(cfg, this.name);
     const baseUrl = cfg.baseUrl || 'https://api.github.com';
     const configuredToken = cfg.token?.trim() ?? '';
+    if (cfg.useLocalGh !== undefined && typeof cfg.useLocalGh !== 'boolean') {
+      throw new Error(`[Channel:${this.name}] useLocalGh must be a boolean.`);
+    }
     if (!configuredToken && cfg.useLocalGh !== true) {
       throw new Error(
         `[Channel:${this.name}] configure a GitHub token or enable local GitHub CLI authentication.`,
       );
     }
-    const auth = configuredToken
-      ? configuredToken
-      : await resolveGhAuthToken(this.name, ghHostname(this.name, baseUrl));
-    process.stderr.write(
-      `[Channel:${this.name}] using ${
-        configuredToken
-          ? 'configured token'
-          : `local gh credential for ${ghHostname(this.name, baseUrl)}`
-      }\n`,
-    );
+    let auth = configuredToken;
+    let credential = 'configured token';
+    if (!configuredToken) {
+      const hostname = ghHostname(this.name, baseUrl);
+      auth = await resolveGhAuthToken(this.name, hostname);
+      credential = `local gh credential for ${hostname}`;
+    }
+    process.stderr.write(`[Channel:${this.name}] using ${credential}\n`);
     this.webOrigin = baseUrl
       .replace(/\/api\/v3\/?$/, '')
       .replace(/^https:\/\/api\.github\.com/, 'https://github.com');

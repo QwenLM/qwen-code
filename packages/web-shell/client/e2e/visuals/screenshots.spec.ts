@@ -459,6 +459,38 @@ for (const theme of THEMES) {
         page,
         `github-channel-editor-credential-${theme}`,
       );
+      await page
+        .getByRole('switch', {
+          name: 'Use local GitHub CLI authentication',
+        })
+        .click();
+      await page.getByRole('button', { name: 'Save' }).click();
+      await expect(
+        page.getByText(
+          'Enter a token or enable local GitHub CLI authentication.',
+        ),
+      ).toHaveCount(0);
+      await expect(
+        page.getByRole('heading', { name: 'Configure GitHub' }),
+      ).toHaveCount(0);
+      await expect
+        .poll(() =>
+          daemon.requests.filter(
+            (request) =>
+              request.method === 'PUT' &&
+              request.path.endsWith('/channels/github-bot'),
+          ),
+        )
+        .toEqual([
+          expect.objectContaining({
+            body: expect.objectContaining({
+              config: expect.objectContaining({
+                type: 'github',
+                useLocalGh: true,
+              }),
+            }),
+          }),
+        ]);
     });
 
     test(`mermaid diagram`, async ({ page }, testInfo) => {
