@@ -1621,6 +1621,62 @@ describe('microcompactHistory', () => {
     };
     expect(kept.parts?.[0]?.inlineData?.data).toBe('BASE64IMAGE');
   });
+
+  it('does not blank zero-char tool refs on the idle path', () => {
+    // Zero-char refs (errors, prior placeholders, empty outputs) must not
+    // be blanked by an idle/force clear even though they are excluded from
+    // keepRecent protection slots. This mirrors the size-path guard.
+    const history: Content[] = [];
+    for (let i = 0; i < 7; i++) {
+      history.push(
+        makeToolCall('run_shell_command'),
+        makeToolResult('run_shell_command', 'Y'.repeat(60_000)),
+      );
+    }
+    history.push(
+      makeToolCall('run_shell_command'),
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'run_shell_command',
+              response: { error: 'boom' },
+            },
+          },
+        ],
+      },
+      makeToolCall('run_shell_command'),
+      makeToolResult('run_shell_command', MICROCOMPACT_CLEARED_MESSAGE),
+      makeToolCall('run_shell_command'),
+      makeToolResult('run_shell_command', ''),
+    );
+
+    const result = microcompactHistory(history, twoHoursAgo, {
+      ...DEFAULT_SETTINGS,
+      toolResultsNumToKeep: 5,
+    });
+
+    expect(result.meta!.triggerReason).toBe('idle');
+    // The 5 newest real outputs are protected; trailing zero-char refs are
+    // not cleared, so only the 2 oldest real outputs are blanked.
+    expect(result.meta!.toolsCleared).toBe(2);
+    expect(result.meta!.toolsKept).toBe(5);
+    for (const idx of [5, 7, 9, 11, 13]) {
+      expect(
+        result.history[idx]!.parts![0]!.functionResponse!.response!['output'],
+      ).toBe('Y'.repeat(60_000));
+    }
+    expect(
+      result.history[15]!.parts![0]!.functionResponse!.response!['error'],
+    ).toBe('boom');
+    expect(
+      result.history[17]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+    expect(
+      result.history[19]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe('');
+  });
 });
 
 describe('microcompactHistory evictedReadPaths (issue #4239)', () => {

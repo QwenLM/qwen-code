@@ -610,7 +610,22 @@ export function microcompactHistory(
       ...nestedMedia.slice(-keepRecent).map(refKey),
     ]);
     const allRefs: PartRef[] = [...tool, ...media, ...nestedMedia];
-    clearRefs = allRefs.filter((r) => !keepRefs.has(refKey(r)));
+    const toolKeys = new Set(tool.map(refKey));
+    clearRefs = allRefs.filter((r) => {
+      if (keepRefs.has(refKey(r))) return false;
+      const part = getPart(history, r);
+      // Zero-character non-media tool refs are never clearable (mirrors the
+      // size path's `chars <= 0` skip). They are excluded from keepRecent
+      // candidates above, so without this guard they would be blanked here.
+      if (
+        toolKeys.has(refKey(r)) &&
+        getToolOutputChars(part) === 0 &&
+        !(part && hasNestedMedia(part))
+      ) {
+        return false;
+      }
+      return true;
+    });
     keptPathRefs = tool;
   } else {
     const pending = normalizePendingContent(opts?.pendingContent);
