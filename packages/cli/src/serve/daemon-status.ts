@@ -391,10 +391,15 @@ interface DaemonStatusRuntimeMemory {
    *
    * Nested here rather than at `runtime`, so it is absent whenever no budget
    * resolved — even though the heap half of the signal needs no budget. That
-   * only reaches direct-embed callers: `runQwenServe` resolves the budget
-   * before the bootstrap app exists, so every daemon an operator runs reports
-   * it. Hoisting it out would restructure the block for a path that does not
-   * need the reading.
+   * reaches direct-embed callers, and also the bootstrap `/daemon/status`
+   * route — which omits `runtime.memory` wholesale even though the budget is
+   * resolved before the bootstrap app exists, so `limits.memory` is populated
+   * there while `pressure` is not. That window is not only startup: a daemon
+   * whose runtime fails to start keeps serving the bootstrap app for its
+   * lifetime, which is exactly when the reading would explain the most. Do
+   * not write a client against "budget resolved implies pressure present".
+   * Hoisting it out would restructure the block for a path that does not need
+   * the reading.
    */
   pressure: DaemonMemoryPressure & { mode: 'off' | 'observe' };
 }
@@ -707,9 +712,13 @@ export async function buildDaemonStatusResponse(
       // call the measured value a limit. `section` is omitted because every
       // other use of it names a workspace status section, and this is a
       // daemon-level concern — the same reason `daemon_log_degraded` omits it.
+      // One decimal, not zero: at 0 decimals a ratio of 0.795 rounds to "80%"
+      // while `level` still reads `hard`, and 80% is critical's documented
+      // threshold. An oncall engineer comparing the two sees a contradiction
+      // in the one feature whose whole purpose is trustworthy triage.
       message:
         `Daemon memory pressure is ${level} at ` +
-        `${(ratio * 100).toFixed(0)}% of ` +
+        `${(ratio * 100).toFixed(1)}% of ` +
         `${source === 'heap' ? 'the V8 heap limit' : 'available memory'}.`,
     });
   }
