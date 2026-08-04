@@ -136,6 +136,7 @@ interface ChatEditorProps {
   onPopQueuedMessages?: () => boolean;
   onClearQueuedMessages?: () => boolean;
   currentMode?: string;
+  sessionWorkflowEnabled?: boolean;
   currentModel?: string;
   gitBranch?: string;
   /** Whether the session is in a worktree (styles the git chip purple). */
@@ -1156,6 +1157,7 @@ export const ChatEditor = memo(
       queuedMessages = [],
       onPopQueuedMessages,
       currentMode = 'default',
+      sessionWorkflowEnabled = false,
       currentModel = '',
       gitBranch,
       gitWorktree,
@@ -1357,11 +1359,18 @@ export const ChatEditor = memo(
       () =>
         DAEMON_APPROVAL_MODES.map((id) => ({
           id,
-          label: getModeListLabel(id, t),
-          description: t(`mode.desc.${id}`),
+          label:
+            id === 'plan' && sessionWorkflowEnabled
+              ? t('mode.listLabel.planReview')
+              : getModeListLabel(id, t),
+          description: t(
+            id === 'plan' && sessionWorkflowEnabled
+              ? 'mode.desc.planReview'
+              : `mode.desc.${id}`,
+          ),
           icon: <ModeIcon mode={id} />,
         })),
-      [t],
+      [sessionWorkflowEnabled, t],
     );
     const visibleActionSet = useMemo(() => {
       if (!visibleToolbarActions) return null;
@@ -1633,7 +1642,10 @@ export const ChatEditor = memo(
     };
 
     // Mode display label
-    const modeLabel = getModeLabel(currentMode, t);
+    const modeLabel =
+      currentMode === 'plan' && sessionWorkflowEnabled
+        ? t('mode.label.planReview')
+        : getModeLabel(currentMode, t);
 
     const currentModelLabel = currentModel
       ? (availableModels.find((model) => model.id === currentModel)?.label ??
