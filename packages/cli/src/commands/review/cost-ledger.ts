@@ -23,21 +23,22 @@
 // environment-exported location — into per-stream totals. It is
 // **informational**: a ledger that cannot be computed prints why and exits 0,
 // because a review must never fail on its own accounting.
+//
+// A "model call" is an assistant record carrying `usageMetadata`; a turn
+// whose provider returned no usage is invisible, so call counts are a floor,
+// not an exact API-call tally.
 
 import type { CommandModule } from 'yargs';
-import {
-  mkdirSync,
-  readdirSync,
-  readFileSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs';
+import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { parseLineTolerant } from '@qwen-code/qwen-code-core';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   transcriptPaths,
+  listAgentTranscriptFiles,
   TranscriptsUnavailableError,
 } from './lib/transcripts.js';
+import { CHUNK_RE } from './lib/coverage.js';
 
 interface CostLedgerArgs {
   plan: string;
@@ -76,49 +77,57 @@ interface UsageEvent {
 /**
  * One read of a transcript: its usage-bearing assistant events, floor-filtered,
  * plus the head of the raw text the launch-prompt label comes from.
+ *
+ * Read failures throw; the caller decides what they mean — for the chat file,
+ * "the ledger cannot be computed"; for one agent file, "that agent is lost".
  */
 function readUsage(
   file: string,
   floorMs: number,
 ): { events: UsageEvent[]; head: string } {
-  let raw: string;
-  try {
-    raw = readFileSync(file, 'utf8');
-  } catch {
-    return { events: [], head: '' };
-  }
+  const raw = readFileSync(file, 'utf8');
   const events: UsageEvent[] = [];
   for (const line of raw.split('\n')) {
     if (line.trim() === '') continue;
-    let rec: Record<string, unknown>;
-    try {
-      rec = JSON.parse(line) as Record<string, unknown>;
-    } catch {
-      continue;
+    // parseLineTolerant recovers the `}{`-glued records an interrupted append
+    // leaves behind — the documented corruption shape of these incrementally
+    // flushed files — and drops non-object lines, which a bare JSON.parse
+    // parses happily (`null`, `42`) only to trip the property reads below.
+    for (const rec of parseLineTolerant<Record<string, unknown>>(line, file)) {
+      if (rec['type'] !== 'assistant') continue;
+      const usage = rec['usageMetadata'];
+      if (usage === null || typeof usage !== 'object') continue;
+      if (Array.isArray(usage)) continue;
+      const u = usage as Record<string, unknown>;
+      const ts = rec['timestamp'];
+      if (typeof ts !== 'string') continue;
+      const tsMs = Date.parse(ts);
+      // The chat file spans the whole session, not the review: a `/review`
+      // launched an hour into a working session would otherwise bill that hour's
+      // conversation to the review. The plan's own mtime marks the review start
+      // — the same floor `check-coverage` applies to transcripts.
+      if (!Number.isFinite(tsMs) || tsMs < floorMs) continue;
+      const n = (k: string): number => {
+        const v = u[k];
+        return typeof v === 'number' && Number.isFinite(v) ? v : 0;
+      };
+      const prompt = n('promptTokenCount');
+      const total = n('totalTokenCount');
+      events.push({
+        timestampMs: tsMs,
+        timestamp: ts,
+        input: prompt,
+        cached: n('cachedContentTokenCount'),
+        // `total − prompt` is the output including thinking under BOTH usage
+        // conventions — reasoning inside candidates, and thoughts disjoint
+        // from them — the same derivation tokenEstimation uses. Candidates
+        // alone is the fallback when the provider reported no total; it stays
+        // correct for the providers this CLI converts, which clamp thoughts
+        // inside candidates.
+        output: total > prompt ? total - prompt : n('candidatesTokenCount'),
+        thoughts: n('thoughtsTokenCount'),
+      });
     }
-    if (rec['type'] !== 'assistant') continue;
-    const usage = rec['usageMetadata'] as Record<string, unknown> | undefined;
-    if (usage === undefined) continue;
-    const ts = rec['timestamp'];
-    if (typeof ts !== 'string') continue;
-    const tsMs = Date.parse(ts);
-    // The chat file spans the whole session, not the review: a `/review`
-    // launched an hour into a working session would otherwise bill that hour's
-    // conversation to the review. The plan's own mtime marks the review start
-    // — the same floor `check-coverage` applies to transcripts.
-    if (!Number.isFinite(tsMs) || tsMs < floorMs) continue;
-    const n = (k: string): number => {
-      const v = usage[k];
-      return typeof v === 'number' && Number.isFinite(v) ? v : 0;
-    };
-    events.push({
-      timestampMs: tsMs,
-      timestamp: ts,
-      input: n('promptTokenCount'),
-      cached: n('cachedContentTokenCount'),
-      output: n('candidatesTokenCount'),
-      thoughts: n('thoughtsTokenCount'),
-    });
   }
   // The launch prompt is the first record; 64KB is far past any of them.
   return { events, head: raw.slice(0, 65536) };
@@ -126,9 +135,19 @@ function readUsage(
 
 /** A role label out of the launch prompt's head, else the fallback. */
 function labelOf(head: string, fallback: string): string {
+  // The identity line `agent-prompt` emits, with the role in backticks. A
+  // chunk agent's role is `chunk N of M`; prefixing it with "agent" would
+  // read as a malformed role, so resolve it through the same regex coverage
+  // uses. The round suffix lands outside the backticks, so a repair-round
+  // relaunch keeps its role and folds into one (×N) row.
   const role = /You are review agent `([^`]+)`/.exec(head);
-  if (role) return `agent ${role[1]}`;
-  const chunk = /reviewing chunk (\d+) of \d+/.exec(head);
+  if (role) {
+    const chunk = CHUNK_RE.exec(role[1]);
+    return chunk ? `chunk ${chunk[1]}` : `agent ${role[1]}`;
+  }
+  // No identity line (an older harness): the chunk the prompt text names,
+  // else the file's own id.
+  const chunk = CHUNK_RE.exec(head);
   if (chunk) return `chunk ${chunk[1]}`;
   return fallback;
 }
@@ -172,71 +191,133 @@ function foldEvents(
 /** 12_345_678 → "12.3M"; 45_600 → "46k"; 890 → "890". */
 function human(n: number): string {
   // 999_500 rounds to 1000k; from there up, render in M so it reads "1.0M".
+  // The same boundary at the B tier keeps 1.5e9 from reading "1500.0M".
+  if (n >= 999_500_000) return `${(n / 1_000_000_000).toFixed(1)}B`;
   if (n >= 999_500) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${Math.round(n / 1_000)}k`;
   return String(n);
 }
 
-export function computeLedger(
-  planPath: string,
-  env: NodeJS.ProcessEnv = process.env,
-): Ledger {
+/** "1 call", "2 calls" — the rendered block is archived verbatim. */
+const plural = (n: number, word: string): string =>
+  `${n} ${word}${n === 1 ? '' : 's'}`;
+
+/**
+ * The plan's mtime is the billing floor. Validate the file IS the Step 1 plan
+ * before trusting that mtime: a wrong-but-existing file (the findings JSON,
+ * the report written minutes earlier) would move the floor silently in either
+ * direction — the same two fields `check-coverage`'s reader of this same
+ * argument requires.
+ */
+function planFloorMs(planPath: string): number {
+  let raw: string;
   let floorMs: number;
   try {
+    raw = readFileSync(planPath, 'utf8');
     floorMs = statSync(planPath).mtimeMs;
   } catch (err) {
     throw new Error(
       `could not read the plan report ${planPath}: ${(err as Error).message}`,
     );
   }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    parsed = null;
+  }
+  const plan =
+    parsed !== null && typeof parsed === 'object'
+      ? (parsed as Record<string, unknown>)
+      : undefined;
+  const chunks = plan?.['chunks'];
+  if (
+    typeof plan?.['diffPathAbsolute'] !== 'string' ||
+    !Array.isArray(chunks) ||
+    chunks.length === 0
+  ) {
+    throw new Error(`not a review plan report: ${planPath}`);
+  }
+  return floorMs;
+}
+
+export function computeLedger(
+  planPath: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Ledger {
+  const floorMs = planFloorMs(planPath);
   const { projectDir, sessionId, dir } = transcriptPaths(env);
 
   const chatFile = join(projectDir, 'chats', `${sessionId}.jsonl`);
-  const mainEvents = readUsage(chatFile, floorMs).events;
+  let mainEvents: UsageEvent[];
+  try {
+    mainEvents = readUsage(chatFile, floorMs).events;
+  } catch (err) {
+    // The plan's existence proves the main loop ran: a missing or unreadable
+    // chat file is an infrastructure fact (chat recording off, or a fault),
+    // not a verdict that the loop made no calls. Agents-only totals would
+    // read as the review's whole cost, so say the ledger cannot be computed.
+    throw new Error(
+      `could not read the chat transcript ${chatFile}: ` +
+        `${(err as Error).message}`,
+    );
+  }
   const main =
     mainEvents.length > 0 ? foldEvents('main', 'main loop', mainEvents) : null;
 
-  const agents: StreamCost[] = [];
-  let files: string[] = [];
+  let files: string[];
   try {
-    files = readdirSync(dir).filter(
-      (f) => f.startsWith('agent-') && f.endsWith('.jsonl'),
-    );
-  } catch {
-    // No subagent dir is a real state (a low-effort review runs no agents);
-    // the ledger reports what exists.
+    files = listAgentTranscriptFiles(dir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      // No subagent dir is a real state (a low-effort review runs no agents);
+      // the ledger reports what exists.
+      files = [];
+    } else {
+      // EACCES/EIO/ENOTDIR are not "no agents": main-loop-only totals would
+      // read as the complete ledger.
+      throw new Error(
+        `could not list the subagent transcripts at ${dir}: ` +
+          `${(err as Error).message}`,
+      );
+    }
   }
+
+  const agents: StreamCost[] = [];
+  const agentEvents: UsageEvent[] = [];
   for (const f of files) {
-    const { events, head } = readUsage(join(dir, f), floorMs);
-    if (events.length === 0) continue;
+    const full = join(dir, f);
+    let mtimeMs: number;
+    try {
+      mtimeMs = statSync(full).mtimeMs;
+    } catch {
+      continue; // Gone between listing and stat.
+    }
+    // The transcript dir is session-scoped and never pruned: files from
+    // earlier reviews this session predate the floor, and a file whose last
+    // write predates it cannot hold an above-floor record — the same
+    // membership test `readTranscripts` applies. Skip it without opening.
+    if (mtimeMs < floorMs) continue;
+    let read: { events: UsageEvent[]; head: string };
+    try {
+      read = readUsage(full, floorMs);
+    } catch {
+      continue; // This agent's record is lost; the rest still count.
+    }
+    if (read.events.length === 0) continue;
     const id = f.replace(/^agent-/, '').replace(/\.jsonl$/, '');
-    agents.push(foldEvents(id, labelOf(head, id), events));
+    agents.push(foldEvents(id, labelOf(read.head, id), read.events));
+    agentEvents.push(...read.events);
   }
   agents.sort((a, b) => b.inputTokens - a.inputTokens);
 
-  const all = [...(main ? [main] : []), ...agents];
-  const totals = foldEvents('totals', 'totals', []);
-  for (const s of all) {
-    totals.calls += s.calls;
-    totals.inputTokens += s.inputTokens;
-    totals.cachedTokens += s.cachedTokens;
-    totals.outputTokens += s.outputTokens;
-    totals.thoughtsTokens += s.thoughtsTokens;
-    // Compare the instants, not the strings: a record without milliseconds
-    // sorts wrong lexically ("…:00Z" > "…:00.500Z", since 'Z' > '.').
-    if (s.firstAt !== null) {
-      const ms = Date.parse(s.firstAt);
-      if (totals.firstAt === null || ms < Date.parse(totals.firstAt)) {
-        totals.firstAt = s.firstAt;
-      }
-    }
-    if (s.lastAt !== null) {
-      const ms = Date.parse(s.lastAt);
-      if (totals.lastAt === null || ms > Date.parse(totals.lastAt)) {
-        totals.lastAt = s.lastAt;
-      }
-    }
-  }
+  // The same events the per-stream rows fold, folded once more — one
+  // accumulator, so a new usage counter cannot land in the rows and miss the
+  // headline.
+  const totals = foldEvents('totals', 'totals', [
+    ...mainEvents,
+    ...agentEvents,
+  ]);
   const wallSeconds =
     totals.firstAt !== null && totals.lastAt !== null
       ? Math.max(
@@ -257,18 +338,16 @@ export function renderLedger(ledger: Ledger): string {
   const cachedPct =
     t.inputTokens > 0 ? Math.round((t.cachedTokens / t.inputTokens) * 100) : 0;
   const lines: string[] = [];
-  // `thoughtsTokenCount` is a subset of `candidatesTokenCount` (the converters
-  // clamp it there), so output is reported once, with thinking as an "of which".
   lines.push(
-    `Cost ledger: ${t.calls} model calls · ${human(t.inputTokens)} input ` +
-      `(${cachedPct}% cached) · ${human(t.outputTokens)} ` +
-      `output (${human(t.thoughtsTokens)} thinking) · ` +
+    `Cost ledger: ${plural(t.calls, 'model call')} · ` +
+      `${human(t.inputTokens)} input (${cachedPct}% cached) · ` +
+      `${human(t.outputTokens)} output (${human(t.thoughtsTokens)} thinking) · ` +
       `${Math.round(t.wallSeconds / 60)} min wall`,
   );
   if (ledger.main !== null) {
     const m = ledger.main;
     lines.push(
-      `  main loop: ${m.calls} calls · ${human(m.inputTokens)} in · ` +
+      `  main loop: ${plural(m.calls, 'call')} · ${human(m.inputTokens)} in · ` +
         `${human(m.outputTokens)} out`,
     );
   }
@@ -300,12 +379,15 @@ export function renderLedger(ledger: Ledger): string {
         });
       }
     }
-    lines.push(`  agents: ${ledger.agents.length}`);
+    // Rank by the folded total, not the first member's share: a doubled run
+    // must not be truncated away by the half that sorted lower.
+    rows.sort((a, b) => b.inputTokens - a.inputTokens);
+    lines.push(`  agent runs: ${ledger.agents.length}`);
     for (const r of rows.slice(0, 8)) {
       const label = r.count > 1 ? `${r.label} (×${r.count})` : r.label;
       lines.push(
-        `    ${label}: ${r.calls} calls · ${human(r.inputTokens)} in · ` +
-          `${human(r.outputTokens)} out`,
+        `    ${label}: ${plural(r.calls, 'call')} · ` +
+          `${human(r.inputTokens)} in · ${human(r.outputTokens)} out`,
       );
     }
     if (rows.length > 8) {
@@ -313,7 +395,8 @@ export function renderLedger(ledger: Ledger): string {
       const restIn = rest.reduce((n, r) => n + r.inputTokens, 0);
       const restAgents = rest.reduce((n, r) => n + r.count, 0);
       lines.push(
-        `    …and ${restAgents} more agents · ${human(restIn)} in combined`,
+        `    …and ${plural(restAgents, 'more agent')} · ` +
+          `${human(restIn)} in combined`,
       );
     }
   }

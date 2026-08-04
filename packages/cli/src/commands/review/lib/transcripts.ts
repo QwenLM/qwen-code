@@ -322,6 +322,21 @@ function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
 }
 
 /**
+ * The session's subagent transcript files, one listing every reader shares.
+ *
+ * The coverage gate and the cost ledger both claim to read "the same records",
+ * and the harness writes sibling file kinds per agent (`.meta.json`,
+ * `.jsonl.stream`) with a generalized `<kind>-<id>.jsonl` namespace planned —
+ * so the definition of "which files are transcripts" lives here, once, not in
+ * each reader's own filter. Throws on any readdir failure; what the caller
+ * does with that (name the fault, or treat an absent dir as "no agents") is
+ * its decision.
+ */
+export function listAgentTranscriptFiles(dir: string): string[] {
+  return readdirSync(dir).filter((name) => name.endsWith('.jsonl'));
+}
+
+/**
  * Every subagent this session launched, as the harness recorded it.
  *
  * `since` drops transcripts older than the plan they are supposed to be evidence
@@ -338,7 +353,7 @@ export function readTranscripts(
   const dir = transcriptDir(env);
   let names: string[];
   try {
-    names = readdirSync(dir);
+    names = listAgentTranscriptFiles(dir);
   } catch (err) {
     // No directory at all is an *infrastructure* fact, not a verdict about the
     // agents. Conflating the two would let a read-only HOME or a full disk read
@@ -352,7 +367,6 @@ export function readTranscripts(
 
   const out: AgentRecord[] = [];
   for (const name of names) {
-    if (!name.endsWith('.jsonl')) continue;
     const rec = parseTranscript(join(dir, name), diffPath);
     if (!rec) continue;
     if (since !== undefined && rec.mtimeMs < since) continue;
