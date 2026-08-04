@@ -27,6 +27,8 @@ on:
         options:
           - 'self-hosted'
           - 'hosted'
+          - 'hk-1'
+          - 'hk-2'
 
 concurrency:
   group: '${{ github.workflow }}-${{ github.head_ref || github.ref }}'
@@ -124,8 +126,12 @@ jobs:
             OWNER|MEMBER|COLLABORATOR) trusted_author=true ;;
           esac
           if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
-            if [[ "${ECS_DISABLED}" != "true" && "${DISPATCH_LINUX_RUNNER}" == "self-hosted" ]]; then
-              ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
+            if [[ "${ECS_DISABLED}" != "true" ]]; then
+              case "${DISPATCH_LINUX_RUNNER}" in
+                self-hosted) ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]' ;;
+                hk-1) ubuntu_runner='["self-hosted", "linux", "x64", "ecs-update-hk-1"]' ;;
+                hk-2) ubuntu_runner='["self-hosted", "linux", "x64", "ecs-update-hk-2"]' ;;
+              esac
             fi
           elif [[ "${ECS_DISABLED}" != "true" && ( "${SAME_REPO}" == "true" || "${trusted_author}" == "true" || "${EVENT_NAME}" == "merge_group" ) ]]; then
             ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
