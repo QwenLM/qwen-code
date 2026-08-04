@@ -2386,6 +2386,123 @@ describe('DiscoveredMCPTool', () => {
       });
       expect(discoverToolsForServer).not.toHaveBeenCalled();
     });
+
+    it('reconnects and delivers an unannotated tool when the server was known disconnected', async () => {
+      const params = { param: 'test' };
+      const deadClient: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValueOnce(new Error('Connection closed')),
+      };
+      const liveClient: McpDirectClient = {
+        callTool: vi
+          .fn()
+          .mockResolvedValueOnce({ content: [{ type: 'text', text: 'OK' }] }),
+      };
+      const newTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined, // untrusted
+        undefined,
+        undefined,
+        liveClient, // unannotated
+      );
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool: vi.fn().mockResolvedValue(newTool),
+        }),
+        getTruncateToolOutputThreshold: () => 0,
+        getTruncateToolOutputLines: () => 0,
+      };
+
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+
+      const reconnectTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined, // untrusted
+        undefined,
+        mockConfig as any,
+        deadClient, // unannotated
+      );
+
+      const result = await reconnectTool
+        .build(params)
+        .execute(new AbortController().signal);
+
+      expect(discoverToolsForServer).toHaveBeenCalled();
+      expect(liveClient.callTool).toHaveBeenCalledTimes(1);
+      expect(result.llmContent).toEqual([{ text: 'OK' }]);
+    });
+
+    it('still gates a call that dies mid-flight on the recovered connection', async () => {
+      const params = { param: 'test' };
+      const deadClient: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValueOnce(new Error('Connection closed')),
+      };
+      const recoveredClient: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValue(new Error('Connection closed')),
+      };
+      const thirdClient: McpDirectClient = {
+        callTool: vi
+          .fn()
+          .mockResolvedValue({ content: [{ type: 'text', text: 'REPLAYED' }] }),
+      };
+      const mkTool = (mcpClient: McpDirectClient) =>
+        new DiscoveredMCPTool(
+          mockCallableToolInstance,
+          serverName,
+          serverToolName,
+          baseDescription,
+          inputSchema,
+          undefined,
+          undefined,
+          undefined,
+          mcpClient,
+        );
+      const ensureTool = vi
+        .fn()
+        .mockResolvedValueOnce(mkTool(recoveredClient))
+        .mockResolvedValue(mkTool(thirdClient));
+      // A real reconnect restores CONNECTED before the retried call is issued.
+      const discoverToolsForServer = vi.fn().mockImplementation(async () => {
+        updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      });
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({ discoverToolsForServer, ensureTool }),
+        getTruncateToolOutputThreshold: () => 0,
+        getTruncateToolOutputLines: () => 0,
+      };
+
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+
+      const reconnectTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        mockConfig as any,
+        deadClient,
+      );
+
+      await expect(
+        reconnectTool.build(params).execute(new AbortController().signal),
+      ).rejects.toThrow(unsafeReplayErrorMessage);
+
+      expect(recoveredClient.callTool).toHaveBeenCalledTimes(1);
+      expect(thirdClient.callTool).not.toHaveBeenCalled();
+    });
   });
 
   describe('MCP Tool Idle Timeout', () => {
