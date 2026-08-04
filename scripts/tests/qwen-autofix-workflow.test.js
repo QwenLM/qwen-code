@@ -3377,7 +3377,11 @@ printf '%s\\n' "\${status}"
     // forces a deliberate test update, however it is spaced or line-wrapped:
     // bump this count AND pipe the new site through the normalizer (bumping
     // the count below too) — bumping this pin alone leaves toBe(9) green.
-    expect(workflow.split('--paginate').length - 1).toBe(13);
+    expect(workflow.split('--paginate').length - 1).toBe(18);
+    // Five of those (the three approval-marker comment fetches, the approval
+    // timeline fetch, and the claim-comment recovery fetch) are inline
+    // --slurp consumers that flatten pages with .[].[] and never land in a
+    // WORKDIR file, so the normalizer count below stays nine.
     // scan ic + pr-events + ic re-fetch + scan rv/rc + prepare rv/rc/ic +
     // report COMMENTS_JSON fallback = nine normalized fetch sites.
     expect(workflow.split("jq -s 'add // []'").length - 1).toBe(9);
