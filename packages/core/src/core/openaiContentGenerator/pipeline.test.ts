@@ -780,25 +780,27 @@ describe('ContentGenerationPipeline', () => {
         expectedToolChoice: 'required',
       },
       {
-        name: 'strip the effort tier under the config-level reasoning opt-out',
+        name: 'emit the tier-native disable shape under the config-level reasoning opt-out',
         baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
         model: 'qwen3.8-max',
         extraBody: { reasoning_effort: 'high' },
         thinkingMandatory: undefined,
         reasoning: false,
         includeThoughts: true,
-        expectedThinking: false,
+        expectedThinking: undefined,
+        expectedReasoningEffort: 'none',
         expectedToolChoice: 'required',
       },
       {
-        name: 'strip the effort tier under the per-request thinking opt-out',
+        name: 'emit the tier-native disable shape under the per-request thinking opt-out',
         baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
         model: 'qwen3.8-max',
         extraBody: { reasoning_effort: 'high' },
         thinkingMandatory: undefined,
         reasoning: undefined,
         includeThoughts: false,
-        expectedThinking: false,
+        expectedThinking: undefined,
+        expectedReasoningEffort: 'none',
         expectedToolChoice: 'required',
       },
       {
@@ -926,14 +928,19 @@ describe('ContentGenerationPipeline', () => {
         .calls[0][0];
       expect(apiCall.enable_thinking).toBe(testCase.expectedThinking);
       expect(apiCall.tool_choice).toBe(testCase.expectedToolChoice);
+      if ('expectedReasoningEffort' in testCase) {
+        expect(apiCall.reasoning_effort).toBe(testCase.expectedReasoningEffort);
+      }
     });
 
-    it('feeds the real provider knob drop into the pipeline gate for a non-qwen preset shape', async () => {
+    it('keeps forced tool selection for a non-qwen preset shape end to end', async () => {
       // The table above mocks buildRequest as a plain extra_body merge, so
-      // the real provider drop never executes there. Run the actual
-      // DashScope provider instead: its family-gated drop must keep the glm
-      // preset's enable_thinking, which then trips the pipeline's
-      // enable_thinking === true clause and strips tool_choice.
+      // the real provider never executes there. Run the actual DashScope
+      // provider instead: its family-gated drop keeps the glm preset's
+      // enable_thinking, and the pipeline's enable_thinking clause is
+      // family-gated too — on glm the field is an opaque no-op (GLM reads
+      // thinking.enabled), not a thinking switch, so tool_choice=required
+      // must survive for its forced-tool side queries.
       mockContentGeneratorConfig = {
         ...mockContentGeneratorConfig,
         baseUrl:
@@ -999,7 +1006,7 @@ describe('ContentGenerationPipeline', () => {
         .calls[0][0];
       expect(apiCall.enable_thinking).toBe(true);
       expect(apiCall.reasoning_effort).toBe('high');
-      expect(apiCall.tool_choice).toBeUndefined();
+      expect(apiCall.tool_choice).toBe('required');
     });
 
     it('learns required thinking from a provider error and retries once', async () => {
@@ -1069,10 +1076,14 @@ describe('ContentGenerationPipeline', () => {
 
       const calls = (mockClient.chat.completions.create as Mock).mock.calls;
       expect(calls).toHaveLength(3);
+      // The tier-native disable shape is reasoning_effort: 'none' (the
+      // boolean is not a knob this family reads), and the retry trigger
+      // must recognise it.
       expect(calls[0][0]).toMatchObject({
-        enable_thinking: false,
+        reasoning_effort: 'none',
         tool_choice: 'required',
       });
+      expect(calls[0][0].enable_thinking).toBeUndefined();
       expect(calls[1][0].enable_thinking).toBe(true);
       expect(calls[1][0].tool_choice).toBeUndefined();
       expect(calls[2][0].enable_thinking).toBe(true);
@@ -2247,7 +2258,8 @@ describe('ContentGenerationPipeline', () => {
 
       const calls = (mockClient.chat.completions.create as Mock).mock.calls;
       expect(calls).toHaveLength(2);
-      expect(calls[0][0].enable_thinking).toBe(false);
+      expect(calls[0][0].reasoning_effort).toBe('none');
+      expect(calls[0][0].enable_thinking).toBeUndefined();
       expect(calls[1][0].enable_thinking).toBe(true);
       expect(mockReportOpenAiRequest).toHaveBeenNthCalledWith(1, calls[0][0]);
       expect(mockReportOpenAiRequest).toHaveBeenNthCalledWith(2, calls[1][0]);

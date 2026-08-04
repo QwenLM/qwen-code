@@ -88,6 +88,11 @@ import {
   SERVE_CAPABILITY_REGISTRY,
 } from './capabilities.js';
 import {
+  EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+  EXTERNAL_TOOL_GUARD_TOKEN_ENV,
+  PRIVATE_EXTERNAL_TOOL_GUARD_ENV,
+} from '@qwen-code/acp-bridge/externalToolGuard';
+import {
   CAPABILITIES_SCHEMA_VERSION,
   type CapabilitiesEnvelope,
   type ServeAuthProviderInstallRequest,
@@ -120,6 +125,7 @@ import type { PermissionPolicy } from '@qwen-code/acp-bridge';
 import type {
   ChannelDeliveryHandler,
   ChannelDeliveryHostResult,
+  ExternalToolGuardHandler,
 } from '@qwen-code/acp-bridge/bridgeOptions';
 import { getCliVersion } from '../utils/version.js';
 import { getRateLimiter } from './rate-limit.js';
@@ -1193,6 +1199,7 @@ function currentServeFeaturesForRunQwenServe(
   return getAdvertisedServeFeatures(undefined, {
     requireAuth: opts.requireAuth === true,
     mcpPoolActive: opts.mcpPoolActive !== false,
+    externalToolGuardActive: opts.externalToolGuard?.mode === 'required',
     allowOriginActive:
       opts.allowOrigins !== undefined && opts.allowOrigins.length > 0,
     ...(opts.promptDeadlineMs !== undefined
@@ -2008,6 +2015,9 @@ async function runQwenServeImpl(
   loggerLifecycle: DaemonLoggerLifecycleCallbacks,
 ): Promise<RunHandle> {
   const runStartedAt = performance.now();
+  // Embedded callers pass the credential through `optsIn`. Remove any ambient
+  // copy before freezing runtime environments or starting auxiliary workers.
+  delete process.env[EXTERNAL_TOOL_GUARD_TOKEN_ENV];
   const channelDeliveryAuthorizations = new ChannelDeliveryAuthorizationStore();
   let shouldPreheat = !deps.bridge && shouldPreheatBridge(deps);
   const startup: DaemonStartupSnapshot = {
@@ -2702,6 +2712,18 @@ async function runQwenServeImpl(
       );
     }
   }
+  const rawExternalToolGuard = (opts as { externalToolGuard?: unknown })
+    .externalToolGuard;
+  if (
+    rawExternalToolGuard !== undefined &&
+    (typeof rawExternalToolGuard !== 'object' ||
+      rawExternalToolGuard === null ||
+      (rawExternalToolGuard as { mode?: unknown }).mode !== 'required')
+  ) {
+    throw new TypeError(
+      "Invalid externalToolGuard: omit it for off mode or set mode to 'required'.",
+    );
+  }
   opts.maxTotalSessions ??= deriveDefaultMaxTotalSessions(
     opts.maxSessions,
     workspaceInputs.length,
@@ -2721,6 +2743,29 @@ async function runQwenServeImpl(
   if (opts.mcpPoolActive === undefined && inheritedNoPool) {
     opts.mcpPoolActive = false;
   }
+  let externalToolGuardHandler: ExternalToolGuardHandler | undefined;
+  if (opts.externalToolGuard?.mode === 'required') {
+    if (deps.bridge) {
+      throw new Error(
+        'Required external tool guarding cannot be combined with an injected bridge.',
+      );
+    }
+    const { RequiredExternalToolGuard } = await import(
+      './external-tool-guard-provider.js'
+    );
+    const provider = new RequiredExternalToolGuard({
+      endpoint: opts.externalToolGuard.endpoint,
+      token: opts.externalToolGuard.token,
+      ...(opts.externalToolGuard.timeoutMs !== undefined
+        ? { timeoutMs: opts.externalToolGuard.timeoutMs }
+        : {}),
+    });
+    await provider.initialize();
+    externalToolGuardHandler = provider.prepare;
+    writeStderrLine(
+      'qwen serve: required external tool guard handshake succeeded.',
+    );
+  }
   const childEnvOverrides: Record<string, string | undefined> = {
     QWEN_SERVE_MCP_CLIENT_BUDGET:
       opts.mcpClientBudget !== undefined
@@ -2728,6 +2773,9 @@ async function runQwenServeImpl(
         : undefined,
     QWEN_SERVE_MCP_BUDGET_MODE: opts.mcpBudgetMode,
     QWEN_SERVE_CDP_TUNNEL_OVER_WS: opts.cdpTunnelOverWs ? '1' : undefined,
+    [PRIVATE_EXTERNAL_TOOL_GUARD_ENV]: externalToolGuardHandler
+      ? EXTERNAL_TOOL_GUARD_REQUIRED_VALUE
+      : undefined,
   };
 
   const cliVersionPromise = getCliVersion();
@@ -3851,6 +3899,9 @@ async function runQwenServeImpl(
         sessionShellCommandEnabled,
         childEnvOverrides,
         channelFactory,
+        ...(externalToolGuardHandler
+          ? { externalToolGuard: externalToolGuardHandler }
+          : {}),
         onDiagnosticLine: diagnosticSink,
         telemetry: daemonTelemetry,
         ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
@@ -4246,6 +4297,9 @@ async function runQwenServeImpl(
         sessionShellCommandEnabled,
         childEnvOverrides,
         channelFactory: secondaryChannelFactory,
+        ...(externalToolGuardHandler
+          ? { externalToolGuard: externalToolGuardHandler }
+          : {}),
         onDiagnosticLine: diagnosticSink,
         telemetry: createRuntimeBridgeTelemetry(secondaryWorkspaceHash),
         ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
@@ -4748,6 +4802,9 @@ async function runQwenServeImpl(
           sessionShellCommandEnabled,
           childEnvOverrides,
           channelFactory: wsChannelFactory,
+          ...(externalToolGuardHandler
+            ? { externalToolGuard: externalToolGuardHandler }
+            : {}),
           onDiagnosticLine: diagnosticSink,
           telemetry: createRuntimeBridgeTelemetry(wsHash),
           ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),

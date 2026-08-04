@@ -77,6 +77,27 @@ export interface BridgeRuntimeEpochSource {
 }
 
 /**
+ * Trusted child-to-daemon request made immediately before a tool executor.
+ * `sessionId` and `promptId` are revalidated by BridgeClient against its
+ * runtime-owned active entry before this reaches the host handler.
+ */
+export interface ExternalToolGuardPrepareRequest {
+  readonly sessionId: string;
+  readonly promptId: string;
+  readonly toolCallId: string;
+  readonly toolName: string;
+  readonly arguments: Readonly<Record<string, unknown>>;
+}
+
+export type ExternalToolGuardPrepareResult =
+  | { readonly allowed: true }
+  | { readonly allowed: false; readonly reason?: string };
+
+export type ExternalToolGuardHandler = (
+  request: ExternalToolGuardPrepareRequest,
+) => Promise<ExternalToolGuardPrepareResult>;
+
+/**
  * Optional injection seam for daemon-host-specific status cells —
  * `process.env` snapshots and the daemon-side preflight checks
  * (Node version, CLI entry path, ripgrep, git, npm, workspace dir).
@@ -314,6 +335,14 @@ export interface BridgeOptions {
    * typically ignore it; the production factory merges it).
    */
   childEnvOverrides?: Readonly<Record<string, string | undefined>>;
+  /**
+   * Optional managed-ACP tool guard. When present, the private ACP child may
+   * request one pre-execution decision through the authenticated channel.
+   * BridgeClient validates session ownership and the active prompt before
+   * invoking this handler. Omitted callers retain the existing behavior and
+   * the child-to-parent method is unavailable.
+   */
+  externalToolGuard?: ExternalToolGuardHandler;
   /**
    * -- optional callback for persisting `tools.
    * approvalMode` to the workspace settings file. Invoked by

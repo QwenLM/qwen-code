@@ -25,6 +25,9 @@ This page collects every setting that affects the `qwen serve` daemon and its ad
 | `--http-bridge`                         | boolean                      | `true`                                                                            | Stage 1 bridge mode. `--no-http-bridge` still falls back to http-bridge and prints to stderr.                                                                                                                             |
 | `--mcp-client-budget <n>`               | positive integer             | unset                                                                             | Sets `WorkspaceMcpBudget.clientBudget` and forwards it to the ACP child through `childEnvOverrides`.                                                                                                                      |
 | `--mcp-budget-mode <m>`                 | `off` / `warn` / `enforce`   | `warn` when budget is set, otherwise `off`                                        | Sets `WorkspaceMcpBudget.mode`; `enforce` requires `--mcp-client-budget`.                                                                                                                                                 |
+| `--external-tool-guard-mode <m>`        | `off` / `required`           | `off`                                                                             | Enables the managed ACP external pre-execution Guard. `required` fails startup unless its loopback provider completes the v1 handshake.                                                                                   |
+| `--external-tool-guard-endpoint <url>`  | loopback HTTP(S) origin      | unset                                                                             | Provider origin used only in `required` mode. It must be origin-only and use `127.0.0.1`, `localhost`, or `::1`; paths, credentials, redirects, and proxy routing are rejected.                                           |
+| `--external-tool-guard-timeout-ms <n>`  | integer `100..30000`         | `3000`                                                                            | Per-handshake and per-prepare deadline. A timeout fails startup during the handshake or fails the invocation closed during a turn.                                                                                        |
 | `--allow-origin <pattern>`              | repeatable string            | unset                                                                             | Cross-origin allowlist that replaces the default CORS denial. `*` allows any origin but requires a token.                                                                                                                 |
 | `--allow-private-auth-base-url`         | boolean                      | `false`                                                                           | Allows `/workspace/auth/provider` to install localhost / private-network auth provider `baseUrl`; use only in trusted local development.                                                                                  |
 | `--prompt-deadline-ms <n>`              | positive integer             | unset                                                                             | Server-side prompt wallclock limit in ms. Timeout aborts and returns an error.                                                                                                                                            |
@@ -57,6 +60,12 @@ This page collects every setting that affects the `qwen serve` daemon and its ad
 | `QWEN_SERVE_RATE_LIMIT_READ`        | Env fallback for `--rate-limit-read`.                                                                                                                                                                                                                                                                                                                                                        |
 | `QWEN_SERVE_RATE_LIMIT_WINDOW_MS`   | Env fallback for `--rate-limit-window-ms`.                                                                                                                                                                                                                                                                                                                                                   |
 | `QWEN_CODE_MEMORY_PROJECT_SCOPE`    | `workspace` keys project memory by the exact workspace dir; any other value keeps the `git-root` scope (unrecognized values warn once). Propagates via the runtime base env, not `childEnvOverrides`; `--memory-project-scope` wins. Each workspace remember/forget/dream lane caps pending tasks at `MAX_PENDING = 16`; N workspaces allow up to 16·N queued tasks with no daemon-wide cap. |
+
+### Read by the `qwen serve` CLI wrapper
+
+| Env                                   | Effect                                                                                                                                                                                                                                                                                                                      |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN` | Non-blank bearer token of at most 8192 UTF-16 code units without control characters, copied into `ServeOptions.externalToolGuard` only in required mode. The CLI then deletes the ambient value before runtime environments are frozen; ACP children, channel workers, and executor environments also scrub it defensively. |
 
 ### Forwarded to the ACP child through `BridgeOptions.childEnvOverrides`
 
@@ -94,39 +103,41 @@ The daemon constructs each workspace runtime from that workspace's merged settin
 
 `packages/cli/src/serve/types.ts` defines the typed options object accepted by both `runQwenServe` and `createServeApp`. It mirrors the CLI flags above and adds:
 
-| Field                         | Effect                                                                                                   |
-| ----------------------------- | -------------------------------------------------------------------------------------------------------- |
-| `eventRingSize`               | Overrides the default per-session ring size.                                                             |
-| `memoryProjectScope`          | `'git-root' \| 'workspace'` project-memory partitioning; falls back to `QWEN_CODE_MEMORY_PROJECT_SCOPE`. |
-| `maxPendingPromptsPerSession` | Pending prompt cap per session; `0` / `Infinity` means unlimited.                                        |
-| `mcpPoolActive`               | Programmatic switch, defaulting from `QWEN_SERVE_NO_MCP_POOL`.                                           |
-| `allowOrigins`                | Cross-origin allowlist (`string[]`), corresponding to `--allow-origin`.                                  |
-| `allowPrivateAuthBaseUrl`     | Allows private / localhost auth provider `baseUrl` installation.                                         |
-| `enableSessionShell`          | Enables session shell execution; bearer token and session-bound client id are still required.            |
-| `promptDeadlineMs`            | Prompt wallclock limit.                                                                                  |
-| `writerIdleTimeoutMs`         | SSE writer idle timeout.                                                                                 |
-| `channelIdleTimeoutMs`        | ACP child auto-reap delay after runtime work drains; unset or `0` reaps immediately.                     |
-| `initializeTimeoutMs`         | ACP child startup deadline (channel factory + initialize handshake) and default request timeout.         |
-| `sessionReapIntervalMs`       | Session reaper scan interval.                                                                            |
-| `sessionIdleTimeoutMs`        | Disconnected-session idle reaping time.                                                                  |
-| `rateLimit*`                  | Per-tier HTTP rate limit switch, thresholds, and window.                                                 |
+| Field                         | Effect                                                                                                                                            |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `eventRingSize`               | Overrides the default per-session ring size.                                                                                                      |
+| `memoryProjectScope`          | `'git-root' \| 'workspace'` project-memory partitioning; falls back to `QWEN_CODE_MEMORY_PROJECT_SCOPE`.                                          |
+| `maxPendingPromptsPerSession` | Pending prompt cap per session; `0` / `Infinity` means unlimited.                                                                                 |
+| `mcpPoolActive`               | Programmatic switch, defaulting from `QWEN_SERVE_NO_MCP_POOL`.                                                                                    |
+| `externalToolGuard`           | Optional `{mode:'required', endpoint, token, timeoutMs?}`. Omission is fully off; required mode performs the provider handshake before listening. |
+| `allowOrigins`                | Cross-origin allowlist (`string[]`), corresponding to `--allow-origin`.                                                                           |
+| `allowPrivateAuthBaseUrl`     | Allows private / localhost auth provider `baseUrl` installation.                                                                                  |
+| `enableSessionShell`          | Enables session shell execution; bearer token and session-bound client id are still required.                                                     |
+| `promptDeadlineMs`            | Prompt wallclock limit.                                                                                                                           |
+| `writerIdleTimeoutMs`         | SSE writer idle timeout.                                                                                                                          |
+| `channelIdleTimeoutMs`        | ACP child auto-reap delay after runtime work drains; unset or `0` reaps immediately.                                                              |
+| `initializeTimeoutMs`         | ACP child startup deadline (channel factory + initialize handshake) and default request timeout.                                                  |
+| `sessionReapIntervalMs`       | Session reaper scan interval.                                                                                                                     |
+| `sessionIdleTimeoutMs`        | Disconnected-session idle reaping time.                                                                                                           |
+| `rateLimit*`                  | Per-tier HTTP rate limit switch, thresholds, and window.                                                                                          |
 
 ## `BridgeOptions` (programmatic bridge embedding)
 
 `packages/acp-bridge/src/bridgeOptions.ts` defines bridge options. See [`03-acp-bridge.md`](./03-acp-bridge.md) for the full table. Key fields:
 
-| Field                                                                                                                   | Effect                                                                                        |
-| ----------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| `boundWorkspace`                                                                                                        | Required canonical workspace.                                                                 |
-| `sessionScope`                                                                                                          | `'single'` (default) vs `'thread'`.                                                           |
-| `initializeTimeoutMs`, `maxSessions`, `eventRingSize`, `permissionResponseTimeoutMs`, `maxPendingPermissionsPerSession` | Bounded resource caps.                                                                        |
-| `channelFactory`                                                                                                        | Pluggable ACP child factory; default is `defaultSpawnChannelFactory`.                         |
-| `fileSystem`                                                                                                            | `BridgeFileSystem` adapter. See [`07-workspace-filesystem.md`](./07-workspace-filesystem.md). |
-| `permissionPolicy`, `permissionConsensusQuorum`, `permissionAudit`                                                      | Mediator wiring.                                                                              |
-| `statusProvider`                                                                                                        | Daemon-host preflight cells.                                                                  |
-| `childEnvOverrides`                                                                                                     | Per-handle environment additions or removals.                                                 |
-| `contextFilename`                                                                                                       | Overrides `getCurrentGeminiMdFilename()`.                                                     |
-| `channelIdleTimeoutMs`                                                                                                  | ACP child auto-reap delay after runtime work drains; unset or `0` reaps immediately.          |
+| Field                                                                                                                   | Effect                                                                                                                                                                        |
+| ----------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `boundWorkspace`                                                                                                        | Required canonical workspace.                                                                                                                                                 |
+| `sessionScope`                                                                                                          | `'single'` (default) vs `'thread'`.                                                                                                                                           |
+| `initializeTimeoutMs`, `maxSessions`, `eventRingSize`, `permissionResponseTimeoutMs`, `maxPendingPermissionsPerSession` | Bounded resource caps.                                                                                                                                                        |
+| `channelFactory`                                                                                                        | Pluggable ACP child factory; default is `defaultSpawnChannelFactory`.                                                                                                         |
+| `fileSystem`                                                                                                            | `BridgeFileSystem` adapter. See [`07-workspace-filesystem.md`](./07-workspace-filesystem.md).                                                                                 |
+| `permissionPolicy`, `permissionConsensusQuorum`, `permissionAudit`                                                      | Mediator wiring.                                                                                                                                                              |
+| `statusProvider`                                                                                                        | Daemon-host preflight cells.                                                                                                                                                  |
+| `childEnvOverrides`                                                                                                     | Per-handle environment additions or removals.                                                                                                                                 |
+| `externalToolGuard`                                                                                                     | Optional daemon-side handler for the private child-to-parent prepare RPC. The bridge validates channel ownership and the active Prompt before and after it calls the handler. |
+| `contextFilename`                                                                                                       | Overrides `getCurrentGeminiMdFilename()`.                                                                                                                                     |
+| `channelIdleTimeoutMs`                                                                                                  | ACP child auto-reap delay after runtime work drains; unset or `0` reaps immediately.                                                                                          |
 
 ## Important defaults
 
