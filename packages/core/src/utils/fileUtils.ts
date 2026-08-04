@@ -1269,11 +1269,14 @@ export async function processSingleFileContent(
         errorType: ToolErrorType.FILE_TOO_LARGE,
       };
     }
+    // Bridge-bound audio is capped later by the bridge's decoded-byte
+    // MAX_AUDIO_BYTES check, so the ~9.9 MB read-time gates don't apply.
     if (
       fileSizeInMB > 9.9 &&
       !willExtractPdfText &&
       fileType !== 'text' &&
-      !shouldRenderImageOverview
+      !shouldRenderImageOverview &&
+      !(fileType === 'audio' && preserveUnsupportedAudio)
     ) {
       return {
         llmContent: 'File size exceeds the 10MB limit.',
@@ -1549,7 +1552,10 @@ export async function processSingleFileContent(
         const base64Data = contentBuffer.toString('base64');
         const base64SizeInMB = base64Data.length / (1024 * 1024);
         // Use 9.9MB instead of 10MB to leave margin for small overhead (#1880)
-        if (base64SizeInMB > 9.9) {
+        if (
+          base64SizeInMB > 9.9 &&
+          !(fileType === 'audio' && preserveUnsupportedAudio)
+        ) {
           return {
             llmContent: `File exceeds the 10MB data URI limit after base64 encoding (${base64SizeInMB.toFixed(2)}MB encoded).`,
             returnDisplay: `File exceeds the 10MB data URI limit after base64 encoding.`,

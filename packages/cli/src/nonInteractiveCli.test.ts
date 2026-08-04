@@ -1326,7 +1326,7 @@ describe('runNonInteractive', () => {
     );
   });
 
-  it('does not bridge audio when a slash prompt selects another model', async () => {
+  it('does not bridge audio when a slash prompt selects an audio model', async () => {
     setupMetricsMock();
     const mockCommand = {
       name: 'audio-model',
@@ -1347,6 +1347,12 @@ describe('runNonInteractive', () => {
     ).getAvailableModelsForAuthType = vi
       .fn()
       .mockReturnValue([{ id: 'audio-model', authType: AuthType.QWEN_OAUTH }]);
+    const resolveForModel = vi.fn().mockResolvedValue({
+      contentGeneratorConfig: { modalities: { audio: true } },
+    });
+    (mockConfig as unknown as { getBaseLlmClient: Mock }).getBaseLlmClient = vi
+      .fn()
+      .mockReturnValue({ resolveForModel });
     mockGeminiClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents(finishedEvents),
     );
@@ -1359,6 +1365,9 @@ describe('runNonInteractive', () => {
     );
 
     expect(runAudioBridgeSpy).not.toHaveBeenCalled();
+    expect(resolveForModel).toHaveBeenCalledWith('audio-model', {
+      failClosed: true,
+    });
     expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledWith(
       headlessAudioParts,
       expect.any(AbortSignal),
@@ -1367,6 +1376,104 @@ describe('runNonInteractive', () => {
         type: SendMessageType.UserQuery,
         modelOverride: 'audio-model',
       },
+    );
+  });
+
+  it('fails closed when a slash prompt selects a text-only model', async () => {
+    setupMetricsMock();
+    const mockCommand = {
+      name: 'text-model',
+      description: 'submit audio to a text-only model',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: headlessAudioParts,
+        modelOverride: 'text-model',
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockCommand]);
+    (mockConfig.getContentGeneratorConfig as Mock).mockReturnValue({
+      authType: AuthType.QWEN_OAUTH,
+    });
+    (
+      mockConfig as unknown as { getAvailableModelsForAuthType: Mock }
+    ).getAvailableModelsForAuthType = vi
+      .fn()
+      .mockReturnValue([{ id: 'text-model', authType: AuthType.QWEN_OAUTH }]);
+    const resolveForModel = vi.fn().mockResolvedValue({
+      contentGeneratorConfig: { modalities: {} },
+    });
+    (mockConfig as unknown as { getBaseLlmClient: Mock }).getBaseLlmClient = vi
+      .fn()
+      .mockReturnValue({ resolveForModel });
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/text-model',
+      'prompt-audio-text-only',
+    );
+
+    expect(runAudioBridgeSpy).not.toHaveBeenCalled();
+    const sentParts = mockGeminiClient.sendMessageStream.mock.calls[0]?.[0];
+    expect(sentParts).toEqual([
+      { text: 'listen to this audio' },
+      expect.objectContaining({
+        text: expect.stringContaining(
+          'active model override does not support audio',
+        ),
+      }),
+    ]);
+    expect(JSON.stringify(sentParts)).not.toContain('audio/wav');
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Audio was not sent'),
+    );
+  });
+
+  it('notices a failed audio bridge that never sent audio anywhere', async () => {
+    setupMetricsMock();
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: vi.fn().mockReturnValue({}),
+    });
+    const { handleAtCommand } = await import(
+      './ui/hooks/atCommandProcessor.js'
+    );
+    vi.mocked(handleAtCommand).mockResolvedValue({
+      processedQuery: headlessAudioParts,
+      shouldProceed: true,
+    });
+    runAudioBridgeSpy.mockResolvedValue({
+      status: 'failed',
+      parts: [{ text: 'audio unavailable: no voice model is configured' }],
+      audioCount: 1,
+      convertedCount: 0,
+      egressCount: 0,
+      error: 'no voice model is configured',
+    });
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'listen @recording.wav',
+      'prompt-audio-no-voice-model',
+    );
+
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Audio bridge could not transcribe 1 audio file(s): no voice model is configured.',
+      ),
+    );
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledWith(
+      [{ text: 'audio unavailable: no voice model is configured' }],
+      expect.any(AbortSignal),
+      'prompt-audio-no-voice-model',
+      { type: SendMessageType.UserQuery },
     );
   });
 

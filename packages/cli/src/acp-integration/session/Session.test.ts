@@ -4527,6 +4527,11 @@ describe('Session', () => {
       expect(textParts(sent).join('\n')).toContain(
         'no voice model is configured',
       );
+      // The failed/no-egress notice is still emitted so the user sees why
+      // the audio was unavailable.
+      expect(agentMessageChunks()).toContain(
+        'Audio bridge could not transcribe 1 audio file(s): no voice model is configured.',
+      );
       expect(agentMessageChunks()).not.toEqual(
         expect.arrayContaining([
           expect.stringContaining('Converted 1 audio file'),

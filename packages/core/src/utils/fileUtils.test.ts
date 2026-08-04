@@ -1536,6 +1536,55 @@ describe('fileUtils', () => {
       expect(result.returnDisplay).toContain('Read audio file');
     });
 
+    it('exempts bridge-bound audio from the 9.9 MB read-time gates', async () => {
+      // 9.95 MiB: above both ~9.9 MB gates but within the bridge's decoded
+      // MAX_AUDIO_BYTES (10 MiB), so it must reach the bridge intact.
+      const audioBytes = Buffer.alloc(Math.floor(9.95 * 1024 * 1024), 7);
+      const audioPath = path.join(tempRootDir, 'long-recording.wav');
+      actualNodeFs.writeFileSync(audioPath, audioBytes);
+      mockMimeGetType.mockReturnValue('audio/wav');
+      const mockConfigNoAudio = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: {} }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        audioPath,
+        mockConfigNoAudio,
+        { preserveUnsupportedAudio: true },
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toEqual({
+        inlineData: {
+          data: audioBytes.toString('base64'),
+          mimeType: 'audio/wav',
+          displayName: 'long-recording.wav',
+        },
+      });
+    });
+
+    it('still applies the base64 gate to non-bridge audio', async () => {
+      const audioBytes = Buffer.alloc(8 * 1024 * 1024, 7);
+      const audioPath = path.join(tempRootDir, 'long-inline.wav');
+      actualNodeFs.writeFileSync(audioPath, audioBytes);
+      mockMimeGetType.mockReturnValue('audio/wav');
+      const audioConfig = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({
+          modalities: { audio: true },
+        }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(audioPath, audioConfig);
+
+      expect(typeof result.llmContent).toBe('string');
+      expect(result.llmContent).toContain(
+        'File exceeds the 10MB data URI limit after base64 encoding',
+      );
+      expect(result.errorType).toBe(ToolErrorType.FILE_TOO_LARGE);
+    });
+
     it('keeps mime/lite-missing FLAC inline for the audio bridge', async () => {
       const audioBytes = Buffer.from('fake flac data');
       const audioPath = path.join(tempRootDir, 'clip.flac');

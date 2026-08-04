@@ -538,6 +538,18 @@ function inputAudioFormat(mimeType: string): string {
   return AUDIO_FORMAT_ALIASES[raw] ?? raw;
 }
 
+// mime/lite resolves `.m4a` to `audio/mp4` (no extension maps to the `x-m4a`
+// alias), and qwen3-asr-flash's documented format list includes neither
+// `mp4` nor `m4a`, so fail closed instead of sending an undocumented format.
+// If the endpoint is ever verified to accept `m4a`, replace this with an
+// `mp4: 'm4a'` entry in AUDIO_FORMAT_ALIASES.
+const UNSUPPORTED_INPUT_AUDIO_FORMATS: ReadonlySet<string> = new Set(['mp4']);
+
+export function unsupportedAudioFormat(mimeType: string): string | undefined {
+  const format = inputAudioFormat(mimeType);
+  return UNSUPPORTED_INPUT_AUDIO_FORMATS.has(format) ? format : undefined;
+}
+
 function transcriptionAbortSignal(abortSignal?: AbortSignal): AbortSignal {
   const timeoutSignal = AbortSignal.timeout(INFERENCE_TIMEOUT_MS);
   return abortSignal

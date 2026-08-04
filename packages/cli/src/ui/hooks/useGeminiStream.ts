@@ -1190,7 +1190,14 @@ export const useGeminiStream = (
       let nextParts = parts;
       if (nextParts !== null && hasAudioParts(nextParts)) {
         const activeOverride = modelOverrideRef.current;
-        if (activeOverride !== undefined) {
+        // Only an explicit inline `/model <id> <prompt>` override is a
+        // user-chosen route whose audio capability must gate the parts.
+        // Internal overrides (full-turn vision, skill tools) still route
+        // audio through the voice bridge like the no-override case.
+        if (
+          inlineModelOverrideActiveRef.current &&
+          activeOverride !== undefined
+        ) {
           const routeSelector = activeOverride.endsWith('\0')
             ? activeOverride.slice(0, -1)
             : activeOverride;

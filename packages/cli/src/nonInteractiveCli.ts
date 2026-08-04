@@ -93,6 +93,7 @@ import { cleanupReviewWorktreeLeases } from './services/review-worktree-lease.js
 import {
   formatAudioBridgeNotice,
   hasAudioParts,
+  replaceAudioPartsWithUnavailable,
   runAudioBridge,
   shouldPreserveUnsupportedAudioForBridge,
 } from './services/audio-bridge-service.js';
@@ -1248,7 +1249,30 @@ export async function runNonInteractive(
           adapter.emitSystemMessage(subtype, { notice });
         }
       };
-      if (inlineModelOverride === undefined && hasAudioParts(initialParts)) {
+      if (inlineModelOverride !== undefined && hasAudioParts(initialParts)) {
+        let supportsAudio = false;
+        try {
+          const runtimeView = await config
+            .getBaseLlmClient()
+            .resolveForModel(inlineModelOverride, { failClosed: true });
+          supportsAudio =
+            runtimeView.contentGeneratorConfig.modalities?.audio === true;
+        } catch (error) {
+          debugLogger.warn(
+            `audio route capability check failed for '${inlineModelOverride}': ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+        if (!supportsAudio) {
+          const reason = 'the active model override does not support audio';
+          initialParts = replaceAudioPartsWithUnavailable(initialParts, reason);
+          emitBridgeNotice('audio_bridge', `Audio was not sent: ${reason}.`);
+        }
+      } else if (
+        inlineModelOverride === undefined &&
+        hasAudioParts(initialParts)
+      ) {
         const audioBridgeResult = await runAudioBridge({
           config,
           settings,

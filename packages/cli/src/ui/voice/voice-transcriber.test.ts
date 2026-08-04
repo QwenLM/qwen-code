@@ -18,6 +18,7 @@ import {
   resolveVoiceTranscriptionConfig,
   resolveVoiceTransport,
   transcribeVoiceAudio,
+  unsupportedAudioFormat,
 } from './voice-transcriber.js';
 
 function createConfig(models: ReturnType<Config['getAllConfiguredModels']>) {
@@ -898,12 +899,15 @@ describe('voice-transcriber', () => {
 
   it.each([
     ['audio/x-wav', 'wav'],
+    ['audio/wave', 'wav'],
+    ['audio/vnd.wave', 'wav'],
     ['audio/mpeg', 'mp3'],
     ['audio/x-mpeg', 'mp3'],
     ['audio/x-m4a', 'm4a'],
     ['audio/x-aac', 'aac'],
     ['audio/x-flac', 'flac'],
     ['audio/x-aiff', 'aiff'],
+    ['audio/x-ms-wma', 'wma'],
     ['audio/x-ogg', 'ogg'],
   ])(
     'maps %s to the supported input_audio format %s',
@@ -941,6 +945,13 @@ describe('voice-transcriber', () => {
       expect(userMsg.content[0].input_audio.format).toBe(format);
     },
   );
+
+  it('reports audio/mp4 as an unsupported transcription format', () => {
+    expect(unsupportedAudioFormat('audio/mp4')).toBe('mp4');
+    expect(unsupportedAudioFormat('audio/mp4;codecs=aac')).toBe('mp4');
+    expect(unsupportedAudioFormat('audio/wav')).toBeUndefined();
+    expect(unsupportedAudioFormat('audio/x-m4a')).toBeUndefined();
+  });
 
   it('falls back to wav for octet-stream audio uploads', async () => {
     const fetchFn = vi.fn().mockResolvedValue({

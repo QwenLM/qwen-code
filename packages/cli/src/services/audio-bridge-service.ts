@@ -18,6 +18,7 @@ import {
   MAX_AUDIO_BYTES,
   sanitizeVoiceErrorMessage,
   transcribeVoiceAudio,
+  unsupportedAudioFormat,
 } from './voice-transcriber.js';
 
 const debugLogger = createDebugLogger('AUDIO_BRIDGE');
@@ -209,6 +210,15 @@ export async function runAudioBridge(params: {
     }
 
     const inlineData = part.inlineData!;
+    const unsupportedFormat = unsupportedAudioFormat(inlineData.mimeType!);
+    if (unsupportedFormat) {
+      failedCount += 1;
+      const reason = `audio format '${unsupportedFormat}' is not supported by the voice model`;
+      firstFailureReason ??= reason;
+      converted.push({ text: unavailableBlock(reason) });
+      continue;
+    }
+
     if (approxBase64Bytes(inlineData.data!) > MAX_AUDIO_BYTES) {
       failedCount += 1;
       firstFailureReason ??= 'audio too large';
