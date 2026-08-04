@@ -25,6 +25,7 @@ import {
   convertToFunctionResponse,
 } from '../core/coreToolScheduler.js';
 import { evaluateToolInvocationGuard } from '../core/tool-invocation-guard.js';
+import { getInvocationContext } from '../utils/invocation-context.js';
 import { stripToolResultImages } from '../services/visionBridge/tool-result-vision-bridge.js';
 import { OverlayFs } from './overlayFs.js';
 import { evaluateToolCall, rewritePathArgs } from './speculationToolGate.js';
@@ -340,6 +341,7 @@ async function runSpeculativeLoop(
           const invocation = tool.build(args);
           const toolInvocationGuard = config.getToolInvocationGuard?.();
           if (toolInvocationGuard) {
+            const invocationContext = getInvocationContext();
             const guardDecision = await evaluateToolInvocationGuard(
               toolInvocationGuard,
               {
@@ -347,6 +349,7 @@ async function runSpeculativeLoop(
                 toolName: canonicalToolName(name),
                 args: invocation.params as Record<string, unknown>,
                 signal: state.abortController!.signal,
+                ...(invocationContext ? { invocationContext } : {}),
               },
             );
             if (state.abortController!.signal.aborted) {

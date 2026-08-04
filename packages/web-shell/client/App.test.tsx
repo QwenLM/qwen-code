@@ -723,10 +723,18 @@ vi.mock('./components/dialogs/GitDiffDialog', async () => {
 vi.mock('./components/dialogs/DialogShell', async () => {
   const React = await import('react');
   return {
-    DialogShell: (props: { children?: React.ReactNode }) =>
+    DialogShell: (props: {
+      children?: React.ReactNode;
+      title?: React.ReactNode;
+    }) =>
       React.createElement(
         'div',
-        { 'data-testid': 'dialog-shell' },
+        {
+          'data-testid': 'dialog-shell',
+          ...(typeof props.title === 'string'
+            ? { 'data-dialog-title': props.title }
+            : {}),
+        },
         props.children,
       ),
   };
@@ -2151,7 +2159,12 @@ async function triggerAutoRecap(): Promise<{
 // array, so the ask-user variant carries a toolCall.input.questions payload
 // (getPermissionRawInput reads toolCall.input) — a bare toolName isn't enough.
 function makePendingPermissionBlock(
-  overrides: { resolved?: boolean; toolName?: string; kind?: string } = {},
+  overrides: {
+    resolved?: boolean;
+    toolName?: string;
+    kind?: string;
+    todoPlan?: { planId: string; sourceCallId: string };
+  } = {},
 ): unknown {
   const toolName = overrides.toolName ?? 'run_shell_command';
   const isAskUser = toolName === 'ask_user_question';
@@ -2164,7 +2177,10 @@ function makePendingPermissionBlock(
     toolCall: {
       toolCallId: 'tc-1',
       kind: overrides.kind ?? (isAskUser ? 'other' : 'execute'),
-      _meta: { toolName },
+      _meta: {
+        toolName,
+        ...(overrides.todoPlan ? { qwenTodoApproval: overrides.todoPlan } : {}),
+      },
       ...(isAskUser
         ? { input: { questions: [{ question: 'Pick one', options: [] }] } }
         : {}),
@@ -2380,26 +2396,66 @@ afterEach(() => {
 
 describe('App plan todos', () => {
   it('gates the exit-plan workflow on the experimental setting', async () => {
+    const approvedEntries = [
+      {
+        content: 'Prepare',
+        status: 'completed',
+        _meta: { qwenTodo: { id: 'prepare' } },
+      },
+      {
+        content: 'Ship',
+        status: 'pending',
+        _meta: { qwenTodo: { id: 'ship', blockedBy: ['prepare'] } },
+      },
+    ];
     testState.messages = [
       {
-        id: 'plan',
-        role: 'plan',
-        todos: [
-          { id: 'prepare', content: 'Prepare', status: 'completed' },
+        id: 'approved-plan',
+        role: 'tool_group',
+        tools: [
           {
-            id: 'ship',
-            content: 'Ship',
-            status: 'pending',
-            blockedBy: ['prepare'],
+            callId: 'todo-approved',
+            toolName: 'todo_write',
+            status: 'completed',
+            rawOutput: {
+              entries: approvedEntries,
+              plan: { id: 'plan-1' },
+            },
           },
         ],
       },
       { id: 'revision', role: 'user', content: 'Revise the wording' },
+      {
+        id: 'newer-plan',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'todo-newer',
+            toolName: 'todo_write',
+            status: 'completed',
+            rawOutput: {
+              entries: [
+                ...approvedEntries.map((entry) => ({
+                  ...entry,
+                  status: 'completed',
+                })),
+                {
+                  content: 'Deploy',
+                  status: 'pending',
+                  _meta: { qwenTodo: { id: 'deploy' } },
+                },
+              ],
+              plan: { id: 'plan-1' },
+            },
+          },
+        ],
+      },
     ];
     testState.blocks = [
       makePendingPermissionBlock({
         toolName: 'exit_plan_mode',
         kind: 'switch_mode',
+        todoPlan: { planId: 'plan-1', sourceCallId: 'todo-approved' },
       }),
     ];
 
@@ -2494,6 +2550,43 @@ describe('App plan todos', () => {
     expect(
       testState.latestTasksStatusProps?.agentTools?.map((tool) => tool.callId),
     ).toEqual(['agent-call']);
+  });
+
+  it('keeps the tasks dialog plain when Session Workflow is off', async () => {
+    testState.messages = [
+      {
+        id: 'plan',
+        role: 'plan',
+        todos: [{ id: 'work', content: 'Work', status: 'in_progress' }],
+      },
+      {
+        id: 'agents',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'agent-call',
+            toolName: 'Agent',
+            status: 'in_progress',
+            args: { todo_id: 'work' },
+          },
+        ],
+      },
+    ];
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestTodoPanelOnOpen?.();
+      await Promise.resolve();
+    });
+
+    expect(testState.latestTasksStatusProps?.planTodos).toEqual([]);
+    expect(testState.latestTasksStatusProps?.agentTools).toEqual([]);
+    expect(
+      container
+        .querySelector('[data-testid="dialog-shell"]')
+        ?.getAttribute('data-dialog-title'),
+    ).toBe('Background tasks');
   });
 });
 

@@ -38,8 +38,8 @@ approving exits Plan Mode.
   `exit_plan_mode` approval request.
 - Resolve the approval DAG from that identity instead of the latest active
   Todo list.
-- Preserve the approved plan identity while later snapshots and Agent
-  executions update its status.
+- Reuse the existing plan ID lineage so later snapshots and Agent executions
+  continue updating the same Workflow without another store.
 - Fall back to the existing text-only approval when no matching snapshot is
   available.
 

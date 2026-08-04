@@ -2128,7 +2128,14 @@ jobs:
             # mutable head commit date: a base-sync HEAD would recreate the burial.
             CREATED_WM="$(jq -r '.createdAt // ""' <<< "${PR_META}")"
 
-            gh api "repos/${REPO}/issues/${PR}/comments" --paginate > "${WORKDIR}/ic.json"
+            # PAGINATION NOTE: gh >= v2.31.0 merges all pages of a REST array
+            # endpoint into ONE flat JSON array (cli/cli#7190), so the WORKDIR
+            # files below are single arrays on every hosted runner. The jq
+            # normalizer pipes are retained as cheap defense-in-depth:
+            # idempotent over a flat array, and they would also normalize the
+            # per-page "[…][…]" shape that older gh versions emitted.
+            gh api "repos/${REPO}/issues/${PR}/comments" --paginate \
+              | jq -s 'add // []' > "${WORKDIR}/ic.json"
             # First-pickup engage ack: fork label events carry no secrets and
             # manual labels may race the ack job, so a takeover PR with NO
             # engage ack yet gets one here (identity-verified) — it is also
@@ -2149,7 +2156,8 @@ jobs:
                 add | [.[] | select((.user.login // "") == $ab)
                      | select(.body // "" | contains("<!-- takeover-ack engaged -->"))
                      | .created_at] | sort | last // ""' "${WORKDIR}/ic.json")"
-              gh api "repos/${REPO}/issues/${PR}/events" --paginate > "${WORKDIR}/pr-events.json" 2> /dev/null \
+              gh api "repos/${REPO}/issues/${PR}/events" --paginate 2> /dev/null \
+                | jq -s 'add // []' > "${WORKDIR}/pr-events.json" \
                 || echo '[]' > "${WORKDIR}/pr-events.json"
               LAST_LABELED_TS="$(jq -rs --arg lb "${TAKEOVER_LABEL}" '
                 add | [.[] | select(.event == "labeled")
@@ -2200,8 +2208,19 @@ jobs:
               fi
               if [[ "${SCAN_BOT_ACTOR}" == "${AUTOFIX_BOT}" ]]; then
                 if gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🤝 Takeover engaged: the autofix loop now manages this PR — it will address new review feedback and resolve base conflicts until the label is removed or the round cap is reached. Remove the `%s` label (or comment `%s stop`) to release.\n\n<details>\n<summary>中文说明</summary>\n\n🤝 已接管：autofix 循环现在管理此 PR —— 将持续处理新的评审反馈与 base 冲突，直到移除标签或达到轮次上限。移除 `%s` 标签（或评论 `%s stop`）即可释放。\n\n</details>\n\n<!-- takeover-ack engaged -->' "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}")"; then
-                  gh api "repos/${REPO}/issues/${PR}/comments" --paginate > "${WORKDIR}/ic.json" \
-                    || echo "::warning::ic re-fetch after engage ack failed for #${PR}"
+                  # Atomic re-fetch: ic.json already holds a successful full
+                  # fetch from above; a truncated stream must not leave it 0
+                  # bytes (jq -s fails only AFTER the redirect truncates) —
+                  # MARKERS on an empty file exits 0 with '' and the round
+                  # cap silently resets. Empty history must still never
+                  # masquerade as "no markers", so swap in the fresh copy
+                  # only when the whole pipeline succeeded.
+                  if gh api "repos/${REPO}/issues/${PR}/comments" --paginate \
+                    | jq -s 'add // []' > "${WORKDIR}/ic.next.json"; then
+                    mv "${WORKDIR}/ic.next.json" "${WORKDIR}/ic.json"
+                  else
+                    echo "::warning::ic re-fetch after engage ack failed for #${PR}; window anchors on a later scan"
+                  fi
                 else
                   echo "::warning::first-pickup engage ack failed for #${PR}; window anchors on a later scan"
                 fi
@@ -2486,8 +2505,10 @@ jobs:
               ' <<< "${CHECKS_JSON}")"
             fi
 
-            gh api "repos/${REPO}/pulls/${PR}/reviews" --paginate > "${WORKDIR}/rv.json"
-            gh api "repos/${REPO}/pulls/${PR}/comments" --paginate > "${WORKDIR}/rc.json"
+            gh api "repos/${REPO}/pulls/${PR}/reviews" --paginate \
+              | jq -s 'add // []' > "${WORKDIR}/rv.json"
+            gh api "repos/${REPO}/pulls/${PR}/comments" --paginate \
+              | jq -s 'add // []' > "${WORKDIR}/rc.json"
             N_REVIEWS="$(jq --arg wm "${EFF_WM}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
               --argjson trust "${TRUSTED_ASSOC}" '
               [ .[]
@@ -2912,9 +2933,15 @@ jobs:
           echo "conflict=${CONFLICT}" >> "${GITHUB_OUTPUT}"
           echo "🔀 Conflict with base: ${CONFLICT}"
 
-          gh api "repos/${REPO}/pulls/${PR}/reviews" --paginate > "${WORKDIR}/rv.json"
-          gh api "repos/${REPO}/pulls/${PR}/comments" --paginate > "${WORKDIR}/rc.json"
-          gh api "repos/${REPO}/issues/${PR}/comments" --paginate > "${WORKDIR}/ic.json"
+          # Same flat-array normalization as the scan step (see its PAGINATION
+          # NOTE). NEWEST / LIVE_NEW below bind these files POSITIONALLY
+          # (.[0]..[3]), so each must remain a single well-formed array.
+          gh api "repos/${REPO}/pulls/${PR}/reviews" --paginate \
+            | jq -s 'add // []' > "${WORKDIR}/rv.json"
+          gh api "repos/${REPO}/pulls/${PR}/comments" --paginate \
+            | jq -s 'add // []' > "${WORKDIR}/rc.json"
+          gh api "repos/${REPO}/issues/${PR}/comments" --paginate \
+            | jq -s 'add // []' > "${WORKDIR}/ic.json"
           gh pr view "${PR}" --repo "${REPO}" \
             --json statusCheckRollup --jq '.statusCheckRollup // []' > "${WORKDIR}/checks.json" \
             2> /dev/null || echo '[]' > "${WORKDIR}/checks.json"
@@ -4481,7 +4508,12 @@ jobs:
               if [[ -f "${WORKDIR}/ic.json" ]]; then
                 COMMENTS_JSON="$(cat "${WORKDIR}/ic.json")"
               else
-                COMMENTS_JSON="$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate 2> /dev/null || true)"
+                # Truncated stream: jq -s fails and || true yields '' where
+                # the old code kept partial JSON — PRIOR_HEADS empties and
+                # duplicate-report suppression weakens for one round (a
+                # redundant comment at worst, never a cap reset); a total gh
+                # failure now yields '[]' instead of the old ''.
+                COMMENTS_JSON="$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate 2> /dev/null | jq -s 'add // []' || true)"
               fi
               PRIOR_HEADS="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg win "${WINDOW:-none}" '
                 [.[] | select((.user.login // "") == $ab)
