@@ -80,6 +80,8 @@ describe('PairingStore workspace scoping (#7017)', () => {
     store.approve(code!);
 
     expect(store.isGroupApproved('group-1')).toBe(true);
+    expect(store.isApproved('group-1')).toBe(false);
+    expect(store.revoke('group-1')).toBe(false);
     expect(store.isApproved('sender-1')).toBe(false);
   });
 
