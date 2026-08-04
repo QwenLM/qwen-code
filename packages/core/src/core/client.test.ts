@@ -1280,6 +1280,9 @@ describe('Gemini Client (client.ts)', () => {
             {
               functionCall: { name: 'cron_create', args: {} },
             } as never,
+            {
+              functionCall: { name: 'removed_deferred_tool', args: {} },
+            } as never,
           ],
         },
       ]);
@@ -1287,6 +1290,33 @@ describe('Gemini Client (client.ts)', () => {
       expect(reg.revealDeferredTool).toHaveBeenCalledWith('cron_create');
       // cron_list NOT in history → must NOT be revealed by the resume scan.
       expect(reg.revealDeferredTool).not.toHaveBeenCalledWith('cron_list');
+      // A historical call whose tool is no longer registered must stay absent.
+      expect(reg.revealDeferredTool).not.toHaveBeenCalledWith(
+        'removed_deferred_tool',
+      );
+      expect(mockClientDebugLogger.debug).toHaveBeenCalledWith(
+        '[DEFERRED_TOOLS] revealed from history: cron_create',
+      );
+    });
+
+    it('does not scan resumed history again from startChat setTools', async () => {
+      const reg = getRegistryMock();
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'cron_create', description: 'schedule' },
+      ]);
+      reg.getTool.mockImplementation((name: string) =>
+        name === 'tool_search' ? ({} as never) : null,
+      );
+      const getHistorySpy = vi.spyOn(client, 'getHistoryShallow');
+
+      await client.startChat([
+        {
+          role: 'model',
+          parts: [{ functionCall: { name: 'cron_create', args: {} } } as never],
+        },
+      ]);
+
+      expect(getHistorySpy).not.toHaveBeenCalled();
     });
 
     it('eagerly reveals every deferred tool when ToolSearch is unavailable', async () => {
@@ -1815,6 +1845,19 @@ describe('Gemini Client (client.ts)', () => {
       }
     }
 
+    it('avoids reading history without hidden deferred tools and resolves one summary', async () => {
+      const reg = getRegistryMock();
+      reg.getDeferredToolSummary.mockReturnValue([]);
+      const getHistorySpy = vi.spyOn(client, 'getHistoryShallow');
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+      reg.getDeferredToolSummary.mockClear();
+
+      await client.setTools();
+
+      expect(getHistorySpy).not.toHaveBeenCalled();
+      expect(reg.getDeferredToolSummary).toHaveBeenCalledTimes(1);
+    });
+
     it('carries active todos after tool results and clears them for new work', async () => {
       const reminder =
         '<system-reminder>unfinished todo: run tests</system-reminder>';
@@ -2133,6 +2176,88 @@ describe('Gemini Client (client.ts)', () => {
         parts: [
           {
             text: '<system-reminder>\nchanged mcp: added= removed=mcp__gone__do\n</system-reminder>',
+          },
+        ],
+      });
+    });
+
+    it('does not announce a still-registered tool as removed after history reveals it', async () => {
+      const reg = getRegistryMock();
+      const tool = {
+        name: 'mcp__calculator__add',
+        description: 'Add two numbers',
+        serverName: 'calculator',
+      };
+      let revealed = false;
+      let registered = true;
+      reg.getTool.mockImplementation((name: string) =>
+        name === 'tool_search' || (name === tool.name && registered)
+          ? ({} as never)
+          : null,
+      );
+      reg.getDeferredToolSummary.mockImplementation(() =>
+        registered ? [tool] : [],
+      );
+      reg.isDeferredToolRevealed.mockImplementation(
+        (name: string) => name === tool.name && revealed,
+      );
+      reg.revealDeferredTool.mockImplementation((name: string) => {
+        if (name === tool.name) revealed = true;
+      });
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+      const addHistorySpy = vi.spyOn(client.getChat(), 'addHistory');
+      const reminderState = client as unknown as {
+        announcedDeferredToolNames: Set<string>;
+        announcedMcpToolNames: Set<string>;
+      };
+      reminderState.announcedDeferredToolNames = new Set([tool.name]);
+      reminderState.announcedMcpToolNames = new Set([tool.name]);
+
+      client.setHistory([
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: { name: tool.name, args: { a: 1, b: 2 } },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: tool.name,
+                response: { output: '3' },
+              },
+            },
+          ],
+        },
+      ]);
+
+      await client.setTools();
+      await runTurn();
+
+      expect(revealed).toBe(true);
+      expect(buildChangedMcpToolsReminder).not.toHaveBeenCalled();
+      expect(addHistorySpy).not.toHaveBeenCalled();
+
+      registered = false;
+      vi.mocked(buildChangedMcpToolsReminder).mockClear();
+      addHistorySpy.mockClear();
+
+      await client.setTools();
+      await runTurn();
+
+      expect(buildChangedMcpToolsReminder).toHaveBeenCalledWith(
+        [],
+        [tool.name],
+      );
+      expect(addHistorySpy).toHaveBeenCalledWith({
+        role: 'user',
+        parts: [
+          {
+            text: '<system-reminder>\nchanged mcp: added= removed=mcp__calculator__add\n</system-reminder>',
           },
         ],
       });

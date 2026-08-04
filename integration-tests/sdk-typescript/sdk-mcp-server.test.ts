@@ -211,13 +211,9 @@ describe('SDK MCP Server Integration (E2E)', () => {
     it('keeps previously used MCP tools available when resuming a session', async () => {
       // Resume needs a persisted transcript; the rest of this suite keeps
       // recording disabled so enable it only for this case.
-      await helper.createFile(
-        '.qwen/settings.json',
-        JSON.stringify({
-          telemetry: { enabled: false },
-          general: { chatRecording: true },
-        }),
-      );
+      testDir = await helper.setup('sdk-mcp-server-integration', {
+        chatRecording: true,
+      });
 
       const calculatorTool = tool(
         'calculate_sum',
