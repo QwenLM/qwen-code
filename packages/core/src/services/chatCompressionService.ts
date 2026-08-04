@@ -47,11 +47,13 @@ import {
 const debugLogger = createDebugLogger('COMPRESSION');
 
 /**
- * Hard cap on compression generation. The cold path disables thinking. The
- * cache-sharing path preserves Anthropic's cache-sensitive thinking setting,
- * but disables returned thoughts for Google GenAI so they cannot consume the
- * summary budget. Mirrors claude-code's MAX_OUTPUT_TOKENS_FOR_SUMMARY
- * (autoCompact.ts:30), which is based on p99.99 of real compaction outputs.
+ * Hard cap on compression generation. The cold path asks providers to omit
+ * returned thoughts. The cache-sharing path preserves Anthropic's
+ * cache-sensitive thinking setting and makes the same returned-thought request
+ * for Google GenAI. On Google this does not disable thinking or prevent its
+ * tokens from sharing the output budget. Mirrors claude-code's
+ * MAX_OUTPUT_TOKENS_FOR_SUMMARY (autoCompact.ts:30), which is based on p99.99
+ * of real compaction outputs.
  */
 export const COMPACT_MAX_OUTPUT_TOKENS = 20_000;
 
@@ -319,12 +321,17 @@ function buildCompressionSystemPrompt(
 
 function supportsCompressionCacheSharing(config: Config): boolean {
   const provider = config.getContentGeneratorConfig();
-  if (provider.enableCacheControl === false) return false;
+  // Google GenAI prefix caching is implicit. `enableCacheControl` configures
+  // explicit provider cache markers, so it must not disable Gemini/Vertex
+  // cache sharing as an unrelated side effect.
   if (
-    provider.authType === AuthType.USE_ANTHROPIC ||
     provider.authType === AuthType.USE_GEMINI ||
     provider.authType === AuthType.USE_VERTEX_AI
   ) {
+    return true;
+  }
+  if (provider.enableCacheControl === false) return false;
+  if (provider.authType === AuthType.USE_ANTHROPIC) {
     return true;
   }
   return (
@@ -1071,6 +1078,7 @@ export class ChatCompressionService {
         info: {
           originalTokenCount,
           newTokenCount,
+          newTokenCountIsEstimated: true,
           compressionStatus: CompressionStatus.COMPRESSED,
           triggerReason,
           ...(compactionWarning && { warning: compactionWarning }),

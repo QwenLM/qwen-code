@@ -2538,6 +2538,31 @@ describe('SessionService', () => {
         isEstimated: true,
       });
     });
+
+    it('restores an explicit authoritative compression-checkpoint provenance', () => {
+      const authoritativeCompressionRecord: ChatRecord = {
+        ...compressionRecord,
+        systemPayload: {
+          info: {
+            originalTokenCount: 1000,
+            newTokenCount: 300,
+            newTokenCountIsEstimated: false,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+          compressedHistory: [],
+        },
+      };
+
+      expect(
+        getResumeTokenCounts(
+          makeConversation([authoritativeCompressionRecord]),
+        ),
+      ).toEqual({
+        promptTokenCount: 300,
+        outputTokenCount: 0,
+        isEstimated: false,
+      });
+    });
   });
 
   describe('buildApiHistoryFromConversation', () => {

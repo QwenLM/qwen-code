@@ -1901,6 +1901,12 @@ export class GeminiChat {
     return this.lastPromptTokenCountIsEstimated;
   }
 
+  private promptCountIsEstimateDerived(): boolean {
+    return (
+      this.lastPromptTokenCount === 0 || this.lastPromptTokenCountIsEstimated
+    );
+  }
+
   /**
    * Seed the restored prompt and previous-response output token counts in one
    * step. Resume restores chat history plus both counters and their provenance
@@ -1940,7 +1946,7 @@ export class GeminiChat {
   ): Promise<ChatCompressionInfo> {
     const originalTokenCountIsEstimated =
       options?.originalTokenCountOverride === undefined &&
-      (this.lastPromptTokenCount === 0 || this.lastPromptTokenCountIsEstimated);
+      this.promptCountIsEstimateDerived();
     const originalTokenCount = originalTokenCountIsEstimated
       ? (options?.precomputedEffectiveTokens ??
         estimateContentTokens(
@@ -1972,7 +1978,11 @@ export class GeminiChat {
     });
 
     if (info.compressionStatus === CompressionStatus.COMPRESSED && newHistory) {
-      info.newTokenCountIsEstimated = originalTokenCountIsEstimated;
+      // Every current compression path mixes local estimates into the output
+      // count: the cold path estimates fixed/restored content, cache sharing
+      // estimates the visible-history delta, and fast compression estimates
+      // the removed-content delta. Never present that count as API-authoritative.
+      info.newTokenCountIsEstimated = true;
       if (!options?.deferChatCompressionRecord) {
         this.chatRecordingService?.recordChatCompression({
           info,
@@ -1982,10 +1992,7 @@ export class GeminiChat {
       this.setHistory(newHistory);
       debugLogger.debug('[FILE_READ_CACHE] clear after auto tryCompress');
       this.config.getFileReadCache().clear();
-      this.setLastPromptTokenCount(
-        info.newTokenCount,
-        originalTokenCountIsEstimated,
-      );
+      this.setLastPromptTokenCount(info.newTokenCount, true);
       this.telemetryService?.setLastPromptTokenCount(info.newTokenCount);
       // Reset the consecutive-failure counter on success so a forced /compress
       // (or any successful compaction) recovers a chat whose breaker had
@@ -2059,8 +2066,7 @@ export class GeminiChat {
 
     const reduction = beforeEstimate - afterEstimate;
     const apiBaseline = this.lastPromptTokenCount || beforeEstimate;
-    const baselineIsEstimated =
-      this.lastPromptTokenCount === 0 || this.lastPromptTokenCountIsEstimated;
+    const baselineIsEstimated = this.promptCountIsEstimateDerived();
     const adjustedTokenCount = Math.max(0, apiBaseline - reduction);
 
     debugLogger.debug(
@@ -2071,7 +2077,7 @@ export class GeminiChat {
     const info: ChatCompressionInfo = {
       originalTokenCount: apiBaseline,
       newTokenCount: adjustedTokenCount,
-      newTokenCountIsEstimated: baselineIsEstimated,
+      newTokenCountIsEstimated: true,
       compressionStatus: CompressionStatus.COMPRESSED,
       triggerReason: 'manual',
     };
@@ -2089,7 +2095,7 @@ export class GeminiChat {
     );
     this.setHistory(newHistory);
     this.lastPromptTokenCount = adjustedTokenCount;
-    this.lastPromptTokenCountIsEstimated = baselineIsEstimated;
+    this.lastPromptTokenCountIsEstimated = true;
     this.telemetryService?.setLastPromptTokenCount(adjustedTokenCount);
     this.consecutiveFailures = 0;
 
@@ -2509,11 +2515,11 @@ export class GeminiChat {
               this.lastOutputTokenCount,
               imageTokenEstimate,
               /* conservative= */ true,
-            ) +
-            (this.lastPromptTokenCountIsEstimated
-              ? FIRST_SEND_CLAMP_OVERHEAD_PAD
-              : 0)
-          : effectiveTokens + FIRST_SEND_CLAMP_OVERHEAD_PAD;
+            )
+          : effectiveTokens;
+      if (this.promptCountIsEstimateDerived()) {
+        promptTokensForClamp += FIRST_SEND_CLAMP_OVERHEAD_PAD;
+      }
       const clampedMaxOutputTokens = clampOutputTokensToWindow(
         outputCeiling,
         contextWindowForClamp,

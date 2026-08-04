@@ -3950,6 +3950,7 @@ describe('Gemini Client (client.ts)', () => {
       await client.tryCompressChat('p2');
 
       expect(client['forceFullIdeContext']).toBe(true);
+      expect(client.getChat().isLastPromptTokenCountEstimated()).toBe(true);
     });
 
     it('re-prepends startup context and seeds the new chat after compression', async () => {

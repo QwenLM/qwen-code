@@ -2348,6 +2348,25 @@ describe('ChatCompressionService.compress cache sharing', () => {
     },
   );
 
+  it('keeps implicit Google cache sharing enabled when explicit cache control is disabled', async () => {
+    const { chat, config, generateText } = makeFixture({
+      authType: AuthType.USE_GEMINI,
+      enableCacheControl: false,
+    });
+    const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    expect(generateText).toHaveBeenCalledTimes(1);
+    expect(coldSpy).not.toHaveBeenCalled();
+  });
+
   it('appends a pending tool result after the cached history and before the directive', async () => {
     const history: Content[] = [
       { role: 'user', parts: [{ text: 'read the file' }] },
@@ -2413,6 +2432,7 @@ describe('ChatCompressionService.compress cache sharing', () => {
     });
 
     expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(result.info.newTokenCountIsEstimated).toBe(true);
     expect(result.info.newTokenCount).toBeGreaterThan(100_000);
   });
 
@@ -2594,13 +2614,6 @@ describe('ChatCompressionService.compress cache sharing', () => {
     {
       name: 'disabled cache control',
       options: { enableCacheControl: false },
-    },
-    {
-      name: 'Google GenAI with disabled cache control',
-      options: {
-        authType: AuthType.USE_GEMINI,
-        enableCacheControl: false,
-      },
     },
     {
       name: 'media-bearing history',

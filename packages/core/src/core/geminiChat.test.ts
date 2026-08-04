@@ -3965,7 +3965,7 @@ describe('GeminiChat', async () => {
           newTokenCount: 40_000,
         }),
       );
-      expect(recordPayload.info.newTokenCountIsEstimated).toBe(false);
+      expect(recordPayload.info.newTokenCountIsEstimated).toBe(true);
       expect(recordPayload.compressedHistory).toEqual([
         { role: 'user', parts: [{ text: 'summary' }] },
         { role: 'model', parts: [{ text: 'ack' }] },
@@ -14335,7 +14335,7 @@ describe('GeminiChat', async () => {
       );
     });
 
-    it('retains and records estimated provenance through real fast compression', () => {
+    it('marks and records the locally adjusted fast-compression count as estimated', () => {
       const recordChatCompression = vi.fn();
       vi.mocked(mockConfig.getClearContextOnIdle).mockReturnValue({
         toolResultsThresholdMinutes: 30,
@@ -14359,7 +14359,7 @@ describe('GeminiChat', async () => {
         } as unknown as ConstructorParameters<typeof GeminiChat>[3],
         uiTelemetryService,
       );
-      recordingChat.seedResumeTokenCounts(1000, 0, true);
+      recordingChat.seedResumeTokenCounts(1000, 0, false);
 
       const result = recordingChat.compressFast();
 

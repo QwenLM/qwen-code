@@ -3977,7 +3977,7 @@ export class GeminiClient {
       this.config.getFileReadCache().clear();
       this.getChat().setLastPromptTokenCount(
         info.newTokenCount,
-        info.newTokenCountIsEstimated ?? false,
+        info.newTokenCountIsEstimated ?? true,
       );
       // Re-send a full IDE context blob on the next regular message
       // compression may have summarized away the merged IDE context
