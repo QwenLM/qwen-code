@@ -5071,6 +5071,156 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
+  it('serves the Web Shell root during the deferred runtime window', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-root-')),
+    );
+    const shellDir = path.join(tmpDir, 'web-shell');
+    fs.mkdirSync(path.join(shellDir, 'assets'), { recursive: true });
+    fs.writeFileSync(
+      path.join(shellDir, 'index.html'),
+      '<!doctype html><body><div id="root"></div></body>',
+    );
+    vi.spyOn(webShellResolver, 'resolveWebShellDir').mockReturnValue(shellDir);
+    const bridge = makeRuntimeBridge();
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValue(
+        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        token: 'secret-token',
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+      },
+    );
+
+    try {
+      // First request to a cold daemon, so the `/` exemption is exercised at
+      // the deferred gate itself — there is no warm-app path it could take.
+      const rootRes = await fetch(`${handle.url}/`);
+      expect(rootRes.status).toBe(200);
+      expect(rootRes.headers.get('content-type')).toContain('text/html');
+      expect(await rootRes.text()).toContain('<div id="root">');
+      expect(createBridge).toHaveBeenCalledTimes(1);
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('serves Web Shell assets during the deferred runtime window', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-assets-')),
+    );
+    const shellDir = path.join(tmpDir, 'web-shell');
+    fs.mkdirSync(path.join(shellDir, 'assets'), { recursive: true });
+    fs.writeFileSync(
+      path.join(shellDir, 'index.html'),
+      '<!doctype html><body><div id="root"></div></body>',
+    );
+    fs.writeFileSync(
+      path.join(shellDir, 'assets', 'fixture.js'),
+      'console.log("fixture");',
+    );
+    vi.spyOn(webShellResolver, 'resolveWebShellDir').mockReturnValue(shellDir);
+    const bridge = makeRuntimeBridge();
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValue(
+        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        token: 'secret-token',
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+      },
+    );
+
+    try {
+      // First request to a cold daemon, so only the predicate's `/assets/`
+      // branch can exempt this from the bearer gate.
+      const assetRes = await fetch(`${handle.url}/assets/fixture.js`);
+      expect(assetRes.status).toBe(200);
+      expect(await assetRes.text()).toContain('console.log("fixture");');
+      expect(createBridge).toHaveBeenCalledTimes(1);
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('serves trailing-slash and case-variant session deep links during the deferred window', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-shapes-')),
+    );
+    const shellDir = path.join(tmpDir, 'web-shell');
+    fs.mkdirSync(path.join(shellDir, 'assets'), { recursive: true });
+    fs.writeFileSync(
+      path.join(shellDir, 'index.html'),
+      '<!doctype html><body><div id="root"></div></body>',
+    );
+    vi.spyOn(webShellResolver, 'resolveWebShellDir').mockReturnValue(shellDir);
+    const bridge = makeRuntimeBridge();
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValue(
+        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        token: 'secret-token',
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+      },
+    );
+
+    try {
+      // The warm app serves this shape pre-auth (Express matches routes
+      // case-insensitively and non-strictly by default), so the cold gate
+      // must exempt it too instead of 401ing the refresh.
+      const navRes = await fetch(`${handle.url}/Session/abc/`, {
+        headers: { accept: 'text/html' },
+      });
+      expect(navRes.status).toBe(200);
+      expect(navRes.headers.get('content-type')).toContain('text/html');
+      expect(await navRes.text()).toContain('<div id="root">');
+      expect(createBridge).toHaveBeenCalledTimes(1);
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('keeps JSON and API-subpath requests gated during the deferred runtime window', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-webshell-gate-')),

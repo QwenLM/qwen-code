@@ -95,8 +95,11 @@ const SESSION_DEEP_LINK_PATH = /^\/session\/[^/]+\/?$/u;
  */
 export function isPreAuthWebShellRequest(req: Request): boolean {
   if (req.method !== 'GET' && req.method !== 'HEAD') return false;
-  if (req.path === '/' || req.path.startsWith('/assets/')) return true;
-  return SESSION_DEEP_LINK_PATH.test(req.path) && isDocumentNavigation(req);
+  // Express route matching is case-insensitive by default, so the warm app
+  // serves /Session/<id> and /Assets/* pre-auth too; mirror that exactly.
+  const reqPath = req.path.toLowerCase();
+  if (reqPath === '/' || reqPath.startsWith('/assets/')) return true;
+  return SESSION_DEEP_LINK_PATH.test(reqPath) && isDocumentNavigation(req);
 }
 
 /**
