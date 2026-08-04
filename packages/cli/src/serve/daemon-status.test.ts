@@ -336,15 +336,18 @@ describe('buildDaemonStatusResponse', () => {
     } as unknown as AcpSessionBridge;
 
     const runtimes = [
+      // Descending age on purpose: with the oldest reading enumerated FIRST,
+      // a plain-overwrite accumulator yields 1_000 and fails. Ascending order
+      // would let "last contributor wins" pass with the same expectation.
       {
         workspaceId: 'a',
         workspaceCwd: BASE_WORKSPACE,
-        bridge: liveWith(100, 1_000),
+        bridge: liveWith(100, 9_000),
       },
       {
         workspaceId: 'b',
         workspaceCwd: '/work/b',
-        bridge: liveWith(200, 9_000),
+        bridge: liveWith(200, 1_000),
       },
       { workspaceId: 'c', workspaceCwd: '/work/c', bridge: liveUnpolled },
       { workspaceId: 'd', workspaceCwd: '/work/d', bridge: liveOlderContract },
@@ -378,6 +381,76 @@ describe('buildDaemonStatusResponse', () => {
     expect(response.runtime.memory!.children.sampled).toBeLessThan(
       response.runtime.memory!.activeAcpChildren,
     );
+  });
+
+  it('reports a zero age as zero, and ages a mixed-contract sum by the ones that can', async () => {
+    // `ageMs` is exactly 0 when a status read lands in the same millisecond as
+    // the sampler's stamp. A truthiness guard, or a trailing `|| null`, turns
+    // that measured-fresh reading into `null` — which the field's own docs say
+    // never means fresh.
+    const freshBridge = {
+      getDaemonStatusSnapshot: () => BASE_BRIDGE_SNAPSHOT,
+      isChannelLive: () => true,
+      getChildResourceSnapshot: () => ({
+        rssBytes: 100,
+        cpuPercent: 1,
+        ageMs: 0,
+      }),
+      lastActivityAt: null,
+    } as unknown as AcpSessionBridge;
+    const withRegistry = (bridges: AcpSessionBridge[]) => {
+      const runtimes = bridges.map((bridge, i) => ({
+        workspaceId: `w${i}`,
+        workspaceCwd: i === 0 ? BASE_WORKSPACE : `/work/w${i}`,
+        bridge,
+      }));
+      const options = makeOptions();
+      options.bridge = bridges[0];
+      options.workspaceRegistry = {
+        primary: { workspaceCwd: BASE_WORKSPACE, bridge: bridges[0] },
+        list: () => runtimes,
+        listManaged: () => runtimes,
+        listEntries: () => runtimes.map(() => ({})),
+      } as unknown as BuildDaemonStatusOptions['workspaceRegistry'];
+      options.opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
+        availableMemoryMb: 32_768,
+      });
+      return options;
+    };
+
+    const fresh = await buildDaemonStatusResponse(
+      'summary',
+      withRegistry([freshBridge]),
+    );
+    expect(fresh.runtime.memory?.children.oldestReadingAgeMs).toBe(0);
+
+    // Mixing an age-carrying contributor with a pre-`ageMs` one must age the
+    // sum by the ones that can report, not reset the whole thing to null.
+    const olderContract = {
+      getDaemonStatusSnapshot: () => BASE_BRIDGE_SNAPSHOT,
+      isChannelLive: () => true,
+      getChildResourceSnapshot: () => ({ rssBytes: 50, cpuPercent: 1 }),
+      lastActivityAt: null,
+    } as unknown as AcpSessionBridge;
+    const aged = {
+      getDaemonStatusSnapshot: () => BASE_BRIDGE_SNAPSHOT,
+      isChannelLive: () => true,
+      getChildResourceSnapshot: () => ({
+        rssBytes: 70,
+        cpuPercent: 1,
+        ageMs: 5_000,
+      }),
+      lastActivityAt: null,
+    } as unknown as AcpSessionBridge;
+    const mixed = await buildDaemonStatusResponse(
+      'summary',
+      withRegistry([olderContract, aged]),
+    );
+    expect(mixed.runtime.memory?.children).toMatchObject({
+      rssBytes: 120,
+      sampled: 2,
+      oldestReadingAgeMs: 5_000,
+    });
   });
 
   it('counts a child whose bridge predates ageMs, but cannot age the sum', async () => {
@@ -428,6 +501,15 @@ describe('buildDaemonStatusResponse', () => {
     const drainingBridge = {
       getDaemonStatusSnapshot: () => BASE_BRIDGE_SNAPSHOT, // channelLive: true
       isChannelLive: () => true,
+      // Reports RSS too: `list()` is active-state only and would drop this
+      // draining-but-process-holding workspace, so summing over it instead of
+      // `listManaged()` under-reports child RSS in exactly the drain window
+      // while `activeAcpChildren` still counts the child.
+      getChildResourceSnapshot: () => ({
+        rssBytes: 4_096,
+        cpuPercent: 1,
+        ageMs: 10,
+      }),
       lastActivityAt: null,
     } as unknown as AcpSessionBridge;
     const primaryRuntime = {
@@ -459,6 +541,15 @@ describe('buildDaemonStatusResponse', () => {
     expect(response.runtime.memory).toMatchObject({
       registeredWorkspaces: 2,
       activeAcpChildren: 2,
+    });
+    // Only the draining bridge reports a reading, so this byte count can come
+    // from nowhere else: it pins that the sum enumerates the process-holding
+    // set (`listManaged()`), not the active-state set (`list()`), which would
+    // drop this child and leave `sampled` at 0 — a silent under-report
+    // confined to the drain window, while `activeAcpChildren` still counts it.
+    expect(response.runtime.memory?.children).toMatchObject({
+      rssBytes: 4_096,
+      sampled: 1,
     });
   });
 
@@ -511,12 +602,77 @@ describe('buildDaemonStatusResponse', () => {
     expect(pressureIssues(observeResponse)).toHaveLength(1);
     // Warning, not error, while the thresholds are uncalibrated.
     expect(pressureIssues(observeResponse)[0].severity).toBe('warning');
+    // Pin the wire strings at runtime. Both the issue-code union member and
+    // the `pressure` field declaration are otherwise guarded only by tsc,
+    // which vitest does not run — a rename would ship green.
+    expect(pressureIssues(observeResponse)[0].code).toBe(
+      'daemon_memory_pressure',
+    );
+    expect(
+      Object.keys(observeResponse.runtime.memory!.pressure).sort(),
+    ).toEqual([
+      'availableBytes',
+      'heapLimitBytes',
+      'heapRatio',
+      'heapUsedBytes',
+      'level',
+      'mode',
+      'ratio',
+      'rssBytes',
+      'rssRatio',
+      'source',
+    ]);
+    // The denominator named in the message follows `source`; inverting the
+    // ternary is otherwise invisible, and would send an operator hunting RSS
+    // growth during a heap-driven incident.
+    expect(pressureIssues(observeResponse)[0].message).toContain(
+      'of available memory',
+    );
     // Both halves of the documented contract: the issue reaches the rollup in
     // `observe` (a severity or list that bypassed it would leave this `ok`),
     // and `off` leaves the rollup exactly where it was. Same input, so the
     // only difference between these two is the mode.
     expect(observeResponse.status).not.toBe('ok');
     expect(offResponse.status).toBe('ok');
+  });
+
+  it('raises nothing on a healthy daemon, and a warning once pressure leaves normal', async () => {
+    // The `level !== 'normal'` half of the gate. Without this, deleting that
+    // clause keeps the whole suite green while every /daemon/status response
+    // on a healthy daemon carries a daemon_memory_pressure warning and a
+    // top-level `warning` status — the exact false positive `off` exists for.
+    const healthy = makeOptions();
+    healthy.opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
+      availableMemoryMb: 1_048_576,
+    });
+    const healthyResponse = await buildDaemonStatusResponse('summary', healthy);
+    expect(healthyResponse.runtime.memory?.pressure.level).toBe('normal');
+    expect(
+      healthyResponse.issues.filter(
+        (issue) => issue.code === 'daemon_memory_pressure',
+      ),
+    ).toHaveLength(0);
+    expect(healthyResponse.status).toBe('ok');
+
+    // And the other side of the same clause: a denominator sized so this
+    // process lands between the soft and hard thresholds must raise exactly
+    // one warning. Tightening the gate to `=== 'critical'` fails here.
+    const rss = process.memoryUsage().rss;
+    const softOptions = makeOptions();
+    softOptions.opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
+      // Target ~57% — comfortably inside [0.5, 0.65) at either rounding edge.
+      availableMemoryMb: Math.ceil(rss / 0.57 / (1024 * 1024)),
+    });
+    const softResponse = await buildDaemonStatusResponse(
+      'summary',
+      softOptions,
+    );
+    expect(softResponse.runtime.memory?.pressure.level).toBe('soft');
+    expect(
+      softResponse.issues.filter(
+        (issue) => issue.code === 'daemon_memory_pressure',
+      ),
+    ).toHaveLength(1);
   });
 
   it('defaults to observe when no mode was configured', async () => {
