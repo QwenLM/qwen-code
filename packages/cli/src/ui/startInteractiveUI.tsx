@@ -5,7 +5,7 @@
  */
 
 import * as fs from 'node:fs';
-import { basename, join } from 'node:path';
+import { basename } from 'node:path';
 import { render } from 'ink';
 import React from 'react';
 import {
@@ -338,12 +338,13 @@ export async function startInteractiveUI(
     try {
       if (process.stdout.isTTY && config.getChatRecordingService()) {
         const sessionId = config.getSessionId();
-        const sessionFile = join(
-          config.storage.getProjectDir(),
-          'chats',
-          `${sessionId}.jsonl`,
-        );
-        if (fs.existsSync(sessionFile)) {
+        const sessionFile = config.getTranscriptPath();
+        // The echoed ID is paste-into-shell text, and resume reads session
+        // IDs from transcript contents any user-level process can write, so
+        // gate the echo to a single safe token: sanitizeTerminalText
+        // preserves LF and cannot stop a crafted ID pasting as extra
+        // commands.
+        if (fs.existsSync(sessionFile) && /^[0-9a-zA-Z._-]+$/.test(sessionId)) {
           process.stdout.write(
             `\n${t('To continue this session, run')}\nqwen --resume ${sanitizeTerminalText(sessionId)}\n`,
           );

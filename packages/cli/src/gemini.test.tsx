@@ -2752,7 +2752,7 @@ describe('startInteractiveUI', () => {
 
   // The quit screen's resume hint is drawn on the alternate screen in VP
   // mode and discarded on teardown, so cleanup echoes the command to the
-  // main screen. Pin the echo's gate, message shape, and sanitization.
+  // main screen. Pin the echo's gate, message shape, and paste-safe ID gate.
   describe('exit-time resume echo', () => {
     async function runCleanup(config: Config): Promise<void> {
       const unmount = vi.fn();
@@ -2781,12 +2781,12 @@ describe('startInteractiveUI', () => {
       await cleanupFn?.();
     }
 
-    function makeRecordingConfig(sessionId: string, projectDir: string) {
+    function makeRecordingConfig(sessionId: string, sessionFile: string) {
       return {
         ...mockConfig,
         getChatRecordingService: () => ({}),
         getSessionId: () => sessionId,
-        storage: { getProjectDir: () => projectDir },
+        getTranscriptPath: () => sessionFile,
       } as unknown as Config;
     }
 
@@ -2794,13 +2794,14 @@ describe('startInteractiveUI', () => {
       const sessionId = 'echo-session-id';
       const projectDir = mkdtempSync(join(tmpdir(), 'resume-echo-'));
       mkdirSync(join(projectDir, 'chats'), { recursive: true });
-      writeFileSync(join(projectDir, 'chats', `${sessionId}.jsonl`), '');
+      const sessionFile = join(projectDir, 'chats', `${sessionId}.jsonl`);
+      writeFileSync(sessionFile, '');
 
       const writeSpy = vi
         .spyOn(process.stdout, 'write')
         .mockImplementation(() => true);
       try {
-        await runCleanup(makeRecordingConfig(sessionId, projectDir));
+        await runCleanup(makeRecordingConfig(sessionId, sessionFile));
 
         expect(writeSpy).toHaveBeenCalledWith(
           `\nTo continue this session, run\nqwen --resume ${sessionId}\n`,
@@ -2813,12 +2814,15 @@ describe('startInteractiveUI', () => {
 
     it('does not echo when the session file is missing', async () => {
       const projectDir = mkdtempSync(join(tmpdir(), 'resume-echo-'));
+      const sessionFile = join(projectDir, 'chats', 'missing-session-id.jsonl');
 
       const writeSpy = vi
         .spyOn(process.stdout, 'write')
         .mockImplementation(() => true);
       try {
-        await runCleanup(makeRecordingConfig('missing-session-id', projectDir));
+        await runCleanup(
+          makeRecordingConfig('missing-session-id', sessionFile),
+        );
 
         for (const [chunk] of writeSpy.mock.calls) {
           expect(String(chunk)).not.toContain('qwen --resume');
@@ -2829,8 +2833,13 @@ describe('startInteractiveUI', () => {
       }
     });
 
-    it('sanitizes the echoed session ID', async () => {
-      const sessionId = 'evil\u001B]52;c;pwned\u0007session';
+    // The ID is echoed as paste-into-shell text, and resume reads session
+    // IDs from transcript contents, so a crafted transcript must not be
+    // able to smuggle extra commands past the echo.
+    it.each([
+      ['newline', 'evil\nrm -rf ~'],
+      ['escape sequence', 'evil\u001B]52;c;pwned\u0007session'],
+    ])('does not echo a session ID containing a %s', async (_, sessionId) => {
       // Win32 forbids control bytes in file names, so stub the existence
       // gate instead of creating a real session file.
       const existsMock = vi.mocked(existsSync).mockReturnValue(true);
@@ -2839,14 +2848,13 @@ describe('startInteractiveUI', () => {
         .spyOn(process.stdout, 'write')
         .mockImplementation(() => true);
       try {
-        await runCleanup(makeRecordingConfig(sessionId, '/project'));
+        await runCleanup(
+          makeRecordingConfig(sessionId, '/project/session.jsonl'),
+        );
 
-        const echoed = writeSpy.mock.calls
-          .map(([chunk]) => String(chunk))
-          .find((chunk) => chunk.includes('qwen --resume'));
-        expect(echoed).toBeDefined();
-        expect(echoed).not.toContain('\u001B');
-        expect(echoed).toContain('qwen --resume evil');
+        for (const [chunk] of writeSpy.mock.calls) {
+          expect(String(chunk)).not.toContain('qwen --resume');
+        }
       } finally {
         existsMock.mockReset();
         writeSpy.mockRestore();
@@ -2857,14 +2865,15 @@ describe('startInteractiveUI', () => {
       const sessionId = 'disabled-recording-session';
       const projectDir = mkdtempSync(join(tmpdir(), 'resume-echo-'));
       mkdirSync(join(projectDir, 'chats'), { recursive: true });
-      writeFileSync(join(projectDir, 'chats', `${sessionId}.jsonl`), '');
+      const sessionFile = join(projectDir, 'chats', `${sessionId}.jsonl`);
+      writeFileSync(sessionFile, '');
 
       const writeSpy = vi
         .spyOn(process.stdout, 'write')
         .mockImplementation(() => true);
       try {
         await runCleanup({
-          ...makeRecordingConfig(sessionId, projectDir),
+          ...makeRecordingConfig(sessionId, sessionFile),
           getChatRecordingService: () => undefined,
         } as unknown as Config);
 
@@ -2885,13 +2894,14 @@ describe('startInteractiveUI', () => {
       const sessionId = 'non-tty-session';
       const projectDir = mkdtempSync(join(tmpdir(), 'resume-echo-'));
       mkdirSync(join(projectDir, 'chats'), { recursive: true });
-      writeFileSync(join(projectDir, 'chats', `${sessionId}.jsonl`), '');
+      const sessionFile = join(projectDir, 'chats', `${sessionId}.jsonl`);
+      writeFileSync(sessionFile, '');
 
       const writeSpy = vi
         .spyOn(process.stdout, 'write')
         .mockImplementation(() => true);
       try {
-        await runCleanup(makeRecordingConfig(sessionId, projectDir));
+        await runCleanup(makeRecordingConfig(sessionId, sessionFile));
 
         for (const [chunk] of writeSpy.mock.calls) {
           expect(String(chunk)).not.toContain('qwen --resume');
