@@ -274,4 +274,41 @@ describe('hookUrlPatternCovers', () => {
     // catch-all would widen the higher-scope policy.
     expect(hookUrlPatternCovers('\\*', 'https://corp.com/*')).toBe(false);
   });
+
+  it('fails closed on alternation inside a pre-escaped entry', () => {
+    // The literal reading covers, but the runtime compiles a pre-escaped
+    // pattern's non-* text as raw regex: the ungrouped alternation would
+    // match hosts outside the higher-scope pattern.
+    expect(
+      hookUrlPatternCovers('https://corp\\.com/*', 'https://corp\\.com/x|y/*'),
+    ).toBe(false);
+  });
+
+  it('fails closed when a pattern carries regex classes beyond \\.', () => {
+    // `\d` reads literally here, but the runtime treats it as the digit
+    // class, so the literal comparison cannot prove coverage.
+    expect(
+      hookUrlPatternCovers(
+        'https://hooks\\.corp\\.com/status/\\d+/*',
+        'https://hooks.corp.com/status/1/exfil',
+      ),
+    ).toBe(false);
+    expect(
+      hookUrlPatternCovers('https://corp.com/*', 'https://corp.com/a+b'),
+    ).toBe(false);
+  });
+
+  it('stays linear on long near-miss entries instead of backtracking', () => {
+    const start = Date.now();
+    expect(
+      hookUrlPatternCovers(
+        'https://hooks.corp.com/*/*/*/done',
+        `https://hooks.corp.com/${'a/'.repeat(100_000)}not-quite`,
+      ),
+    ).toBe(false);
+    // The regex this replaced measured seconds at ~1000 separators and
+    // scaled ~cubically; a linear scan finishes in milliseconds even on
+    // 200 KB entries. The generous bound only guards against regressions.
+    expect(Date.now() - start).toBeLessThan(2000);
+  });
 });

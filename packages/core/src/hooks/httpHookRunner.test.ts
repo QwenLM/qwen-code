@@ -755,5 +755,39 @@ describe('HttpHookRunner', () => {
       await httpRunner.execute(config, HookEventName.PreToolUse, input);
       expect(mockFetch).toHaveBeenCalledTimes(2);
     });
+
+    it('should re-arm the redirect warning together with the once slot', async () => {
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 302,
+        headers: new Headers({ location: 'https://api.example.com/moved' }),
+      });
+
+      const config = createMockConfig({ once: true });
+      const input = createMockInput();
+
+      const first = await httpRunner.execute(
+        config,
+        HookEventName.SessionStart,
+        input,
+      );
+      expect(first.output?.systemMessage).toContain(
+        'returned a redirect (302)',
+      );
+
+      httpRunner.resetOnceHooks();
+
+      // The re-armed hook fetches again and the user-visible remedy is
+      // shown again — the warning slot must not survive the reset.
+      const afterReset = await httpRunner.execute(
+        config,
+        HookEventName.SessionStart,
+        input,
+      );
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      expect(afterReset.output?.systemMessage).toContain(
+        'returned a redirect (302)',
+      );
+    });
   });
 });

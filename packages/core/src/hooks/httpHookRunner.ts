@@ -504,6 +504,7 @@ export class HttpHookRunner {
    */
   resetOnceHooks(): void {
     this.executedOnceHooks.clear();
+    this.redirectWarnedHooks.clear();
   }
 
   /**

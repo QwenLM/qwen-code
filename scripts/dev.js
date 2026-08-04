@@ -74,12 +74,16 @@ const coreSourceUrl = pathToFileURL(coreSourcePath).href;
 const envVarResolverSourceUrl = pathToFileURL(
   join(root, 'packages', 'core', 'src', 'utils', 'envVarResolver.ts'),
 ).href;
+const memoryScopesSourceUrl = pathToFileURL(
+  join(root, 'packages', 'core', 'src', 'memory', 'scopes.ts'),
+).href;
 
 const loaderCode = `
 import { pathToFileURL } from 'node:url';
 
 const coreSourceUrl = '${coreSourceUrl}';
 const envVarResolverSourceUrl = '${envVarResolverSourceUrl}';
+const memoryScopesSourceUrl = '${memoryScopesSourceUrl}';
 
 export function resolve(specifier, context, nextResolve) {
   if (specifier === '@qwen-code/qwen-code-core') {
@@ -93,6 +97,13 @@ export function resolve(specifier, context, nextResolve) {
     return {
       shortCircuit: true,
       url: envVarResolverSourceUrl,
+      format: 'module',
+    };
+  }
+  if (specifier === '@qwen-code/qwen-code-core/memoryScopes') {
+    return {
+      shortCircuit: true,
+      url: memoryScopesSourceUrl,
       format: 'module',
     };
   }

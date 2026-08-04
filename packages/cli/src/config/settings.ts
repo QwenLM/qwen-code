@@ -379,9 +379,14 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
         `Warning: security.allowPrivateNetworkHooks in workspace settings (${workspaceFile.path}) is ignored. This setting is only honored from User, System, or SystemDefaults scope settings.`,
       );
     }
-    if (workspaceSecurity?.allowedHttpHookUrls !== undefined) {
+    // Narrowing only applies in trusted folders; untrusted workspace
+    // settings are discarded whole, so there is nothing to narrow.
+    if (
+      loadedSettings.isTrusted &&
+      workspaceSecurity?.allowedHttpHookUrls !== undefined
+    ) {
       warningSet.add(
-        `Warning: security.allowedHttpHookUrls in workspace settings (${workspaceFile.path}) can only narrow the whitelist from User, System, or SystemDefaults scope settings: entries not covered by a higher-scope whitelist are dropped, and the workspace value is ignored entirely when no higher-scope whitelist is set (HTTP hooks then remain unrestricted apart from SSRF protection).`,
+        `Warning: security.allowedHttpHookUrls in workspace settings (${workspaceFile.path}) can only narrow the whitelist from User or SystemDefaults scope settings: entries not covered by a higher-scope whitelist are dropped, and the workspace value is ignored entirely when no higher-scope whitelist is set (HTTP hooks then remain unrestricted apart from SSRF protection). A System-scope whitelist always takes precedence over the workspace value.`,
       );
     }
   }
@@ -440,8 +445,24 @@ function narrowWorkspaceHookSecurityOverrides(
   systemDefaults: Settings,
 ): Settings {
   const security = workspace.security;
+  if (security === undefined) {
+    return workspace;
+  }
   if (
-    !security ||
+    security === null ||
+    typeof security !== 'object' ||
+    Array.isArray(security)
+  ) {
+    // A non-object `security` (e.g. `"security": null` from a hand-edited
+    // file) carries nothing to narrow, but customDeepMerge would still
+    // assign it over the higher-scope object and wipe the user's entire
+    // security section — which the hook URL validator reads as "allow
+    // all". Drop it so the higher-scope policy survives.
+    const rest = { ...workspace };
+    delete rest.security;
+    return rest;
+  }
+  if (
     WORKSPACE_STRIPPED_SECURITY_FIELDS.every(
       (field) => security[field] === undefined,
     )
@@ -451,12 +472,24 @@ function narrowWorkspaceHookSecurityOverrides(
   const restSecurity = { ...security };
   delete restSecurity.allowPrivateNetworkHooks;
 
-  const workspaceUrls = security.allowedHttpHookUrls;
-  if (workspaceUrls !== undefined) {
-    const higherUrls =
+  if (security.allowedHttpHookUrls !== undefined) {
+    // Settings files are validated only as top-level JSON objects, so a
+    // hand-edited file can put null, a bare string, or non-string entries
+    // here; reduce both sides to valid string lists before comparing.
+    const workspaceUrls = Array.isArray(security.allowedHttpHookUrls)
+      ? security.allowedHttpHookUrls.filter(
+          (entry): entry is string => typeof entry === 'string',
+        )
+      : [];
+    const higherUrlsRaw =
       system.security?.allowedHttpHookUrls ??
       user.security?.allowedHttpHookUrls ??
       systemDefaults.security?.allowedHttpHookUrls;
+    const higherUrls = Array.isArray(higherUrlsRaw)
+      ? higherUrlsRaw.filter(
+          (entry): entry is string => typeof entry === 'string',
+        )
+      : undefined;
     const narrowed =
       higherUrls === undefined
         ? []
@@ -465,7 +498,9 @@ function narrowWorkspaceHookSecurityOverrides(
           );
     // A non-empty intersection replaces the higher-scope list (it is a
     // subset of what that list allows); otherwise the higher-scope policy
-    // stands unchanged.
+    // stands unchanged — a malformed workspace value is dropped here
+    // instead of reaching the merge, where it would replace the user's
+    // list and read as "allow all".
     if (narrowed.length > 0) {
       restSecurity.allowedHttpHookUrls = narrowed;
     } else {

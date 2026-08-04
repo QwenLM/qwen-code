@@ -194,22 +194,49 @@ export function createUrlValidator(
  * may only survive the merge when it merely narrows what a higher scope
  * already allows.
  *
- * The check matches `inner` (its `*` read as literal characters) against
- * `outer` compiled as a wildcard pattern; if `outer`'s literal chunks
- * appear in `inner` in order, any concrete URL expanding `inner`'s
- * wildcards keeps those chunks in order and therefore matches `outer`.
- * The `\.` escape — the only one the validator's pre-escaped spelling
- * uses — is normalized first so both spellings of the same pattern cover
- * each other; anything the check cannot prove covered fails closed
- * (returns false).
+ * Both patterns are read as literal text plus `*` wildcards — the language
+ * `compilePattern` assigns to a pattern carrying no regex content beyond
+ * the `\.` escape, which is normalized first so both spellings of the same
+ * pattern cover each other. Any other escape or regex metacharacter makes
+ * coverage unprovable (the pre-escaped `compilePattern` branch would read
+ * it as raw regex), so such patterns fail closed (return false).
+ *
+ * The comparison is a linear chunk scan — split `outer` on `*` and require
+ * the chunks in `inner` in order, anchored at both ends — never a regex
+ * test, because this runs on every startup merge and must stay O(n+m) on
+ * arbitrary-length workspace input (no catastrophic backtracking).
  */
 export function hookUrlPatternCovers(
   outerPattern: string,
   innerPattern: string,
 ): boolean {
   const unescape = (pattern: string) => pattern.replace(/\\\./g, '.');
-  const escaped = unescape(outerPattern)
-    .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
-    .replace(/\*/g, '.*');
-  return new RegExp(`^${escaped}$`, 'i').test(unescape(innerPattern));
+  const outer = unescape(outerPattern).toLowerCase();
+  const inner = unescape(innerPattern).toLowerCase();
+  // `compilePattern` treats everything but `*` as raw regex once a pattern
+  // contains `\.`, so any remaining regex-active character could widen the
+  // runtime language past the literal reading used here.
+  const regexActive = /[+?^${}()|[\]\\]/;
+  if (regexActive.test(outer) || regexActive.test(inner)) {
+    return false;
+  }
+  const chunks = outer.split('*');
+  if (chunks.length === 1) {
+    return inner === outer;
+  }
+  const first = chunks[0];
+  const last = chunks[chunks.length - 1];
+  if (!inner.startsWith(first) || !inner.endsWith(last)) {
+    return false;
+  }
+  let position = first.length;
+  const end = inner.length - last.length;
+  for (const chunk of chunks.slice(1, -1)) {
+    const found = inner.indexOf(chunk, position);
+    if (found === -1 || found + chunk.length > end) {
+      return false;
+    }
+    position = found + chunk.length;
+  }
+  return position <= end;
 }
