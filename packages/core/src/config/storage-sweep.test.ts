@@ -126,6 +126,21 @@ describe('sweepStaleWorktreeProjects', () => {
     expect(fs.existsSync(gone)).toBe(false);
   });
 
+  it('keeps a repo bucket that merely holds an ephemeral-launch sidecar', async () => {
+    // /cd relocation can move a sidecar into a bucket it does not key: the
+    // ephemeral-launch arm must not delete the repo's history over that.
+    const launchCwd = path.join(base, 'gone-launch-cwd');
+    const kept = makeProjectSnapshot(base, sanitizeCwd('/repo'), {
+      worktreePath: path.join(launchCwd, '.qwen', 'worktrees', 'slug'),
+      originalCwd: launchCwd,
+    });
+
+    const removed = await sweepStaleWorktreeProjects(base);
+
+    expect(removed).toEqual([]);
+    expect(fs.existsSync(kept)).toBe(true);
+  });
+
   it('keeps the bucket when the ephemeral launch cwd still exists', async () => {
     const launchCwd = path.join(base, 'still-here');
     fs.mkdirSync(launchCwd, { recursive: true });
