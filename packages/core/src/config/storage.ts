@@ -10,11 +10,18 @@ import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { getProjectHash, QWEN_DIR, sanitizeCwd } from '../utils/paths.js';
-import { readRuntimeStatus } from '../utils/runtimeStatus.js';
 import { FatalConfigError } from '../utils/errors.js';
-import { createDebugLogger } from '../utils/debugLogger.js';
 
-const logger = createDebugLogger('storage');
+// The sweep's debug logger and runtime-status reader are imported lazily
+// inside the functions that use them: static edges from storage.ts to
+// debugLogger.ts (which imports Storage back) and to runtimeStatus.ts
+// (via atomicFileWrite.ts, which also logs at module scope) close a
+// module cycle that crashes forked children whose graph reaches
+// debugLogger first.
+async function storageLogger() {
+  const { createDebugLogger } = await import('../utils/debugLogger.js');
+  return createDebugLogger('storage');
+}
 
 export { QWEN_DIR } from '../utils/paths.js';
 export const GOOGLE_ACCOUNTS_FILENAME = 'google_accounts.json';
@@ -69,6 +76,11 @@ export async function sweepStaleWorktreeProjects(
   for (const entry of entries.sort()) {
     const chatsDir = path.join(projectsDir, entry, 'chats');
     const sidecars = await readWorktreeSidecarRecords(chatsDir);
+    // An archived sidecar means archiveSessions moved that session, transcript
+    // included, into chats/archive/: an explicit user retention action. Only
+    // active-dir sidecars are deletion evidence, so a bucket with any readable
+    // archived sidecar is kept no matter where the worktrees went.
+    if (sidecars.some((sidecar) => sidecar.archived)) continue;
     if (sidecars.length === 0) continue;
 
     const allWorktreesGone = sidecars.every(
@@ -82,8 +94,17 @@ export async function sweepStaleWorktreeProjects(
       // Bucket keyed by a worktree path itself. A normal project bucket can
       // hold worktree sidecars too (enter/exit run from the original repo
       // never relocates the session storage), so only this arm may sweep,
-      // and only once every worktree is gone.
-      stale = allWorktreesGone;
+      // and only once every worktree is gone and the owning repo is still
+      // there: ENOENT on the worktree path also reads as a downed or
+      // unmounted volume, and a sweep while the drive is offline would erase
+      // transcripts that come back with it.
+      stale =
+        allWorktreesGone &&
+        sidecars.every(
+          (sidecar) =>
+            sidecar.originalCwd !== undefined &&
+            isDirectorySync(sidecar.originalCwd),
+        );
     } else {
       // Bucket keyed by a gone ephemeral launch cwd, #7906's main class:
       // enter_worktree from a throwaway T lands the sidecar here with
@@ -110,8 +131,13 @@ export async function sweepStaleWorktreeProjects(
     // dashes both become dashes), so the name gate above cannot prove which
     // worktree owns the bucket. A session started with a plain `cd` writes no
     // sidecar, and its live transcript would be deleted with the bucket; a
-    // live runtime.json anywhere in the bucket vetoes the sweep.
-    if (await hasLiveRuntime(chatsDir)) {
+    // live runtime.json anywhere in the bucket vetoes the sweep. runtime.json
+    // is only written by interactive sessions, so a recently touched
+    // transcript file vetoes too, covering headless/serve/ACP sessions.
+    if (
+      (await hasLiveRuntime(chatsDir)) ||
+      (await hasRecentTranscriptActivity(chatsDir))
+    ) {
       continue;
     }
 
@@ -122,13 +148,13 @@ export async function sweepStaleWorktreeProjects(
         force: true,
       });
     } catch (error) {
-      logger.debug(
+      (await storageLogger()).debug(
         `Failed to remove stale worktree project snapshot ${entry}: ${String(error)}`,
       );
       continue;
     }
     removed.push(entry);
-    logger.debug(
+    (await storageLogger()).debug(
       `Removed stale worktree project snapshot ${entry} (all worktree sidecars point at removed paths)`,
     );
   }
@@ -143,9 +169,14 @@ export async function sweepStaleWorktreeProjects(
  */
 async function readWorktreeSidecarRecords(
   chatsDir: string,
-): Promise<Array<{ worktreePath: string; originalCwd?: string }>> {
-  const sidecars: string[] = [];
-  for (const dir of [chatsDir, path.join(chatsDir, 'archive')]) {
+): Promise<
+  Array<{ worktreePath: string; originalCwd?: string; archived: boolean }>
+> {
+  const sidecars: Array<{ path: string; archived: boolean }> = [];
+  for (const [dir, archived] of [
+    [chatsDir, false],
+    [path.join(chatsDir, 'archive'), true],
+  ] as const) {
     let names: string[];
     try {
       names = await fsp.readdir(dir);
@@ -155,15 +186,21 @@ async function readWorktreeSidecarRecords(
     sidecars.push(
       ...names
         .filter((name) => name.endsWith('.worktree.json'))
-        .map((name) => path.join(dir, name)),
+        .map((name) => ({ path: path.join(dir, name), archived })),
     );
   }
-  sidecars.sort();
+  sidecars.sort((a, b) => a.path.localeCompare(b.path));
 
-  const records: Array<{ worktreePath: string; originalCwd?: string }> = [];
+  const records: Array<{
+    worktreePath: string;
+    originalCwd?: string;
+    archived: boolean;
+  }> = [];
   for (const sidecar of sidecars) {
     try {
-      const parsed: unknown = JSON.parse(await fsp.readFile(sidecar, 'utf-8'));
+      const parsed: unknown = JSON.parse(
+        await fsp.readFile(sidecar.path, 'utf-8'),
+      );
       if (
         parsed !== null &&
         typeof parsed === 'object' &&
@@ -176,6 +213,7 @@ async function readWorktreeSidecarRecords(
             typeof record['originalCwd'] === 'string'
               ? (record['originalCwd'] as string)
               : undefined,
+          archived: sidecar.archived,
         });
       }
     } catch {
@@ -195,6 +233,35 @@ function isDirectorySync(candidate: string): boolean {
   }
 }
 
+const TRANSCRIPT_LIVE_GRACE_MS = 10 * 60 * 1000;
+
+/**
+ * True when any chats/*.jsonl in the bucket was touched within the grace
+ * window. A running session keeps appending transcript lines regardless of
+ * session mode (interactive, headless, serve, ACP, daemon), so transcript
+ * freshness is the session-mode-agnostic liveness signal that runtime.json
+ * cannot provide for non-interactive sessions.
+ */
+async function hasRecentTranscriptActivity(chatsDir: string): Promise<boolean> {
+  const cutoff = Date.now() - TRANSCRIPT_LIVE_GRACE_MS;
+  let names: string[];
+  try {
+    names = await fsp.readdir(chatsDir);
+  } catch {
+    return false;
+  }
+  for (const name of names) {
+    if (!name.endsWith('.jsonl')) continue;
+    try {
+      const stat = await fsp.stat(path.join(chatsDir, name));
+      if (stat.mtimeMs >= cutoff) return true;
+    } catch {
+      continue;
+    }
+  }
+  return false;
+}
+
 /**
  * True when any `*.runtime.json` in the bucket reports a live process.
  * Mirrors getRuntimeStatusPathState: a different hostname cannot be verified
@@ -209,6 +276,7 @@ async function hasLiveRuntime(chatsDir: string): Promise<boolean> {
   }
   for (const name of names) {
     if (!name.endsWith('.runtime.json')) continue;
+    const { readRuntimeStatus } = await import('../utils/runtimeStatus.js');
     const status = await readRuntimeStatus(path.join(chatsDir, name));
     if (!status) continue;
     if (status.hostname !== os.hostname()) {
@@ -231,9 +299,13 @@ const staleWorktreeSweepStarted = new Set<string>();
 function scheduleStaleWorktreeSweep(runtimeBaseDir: string): void {
   if (staleWorktreeSweepStarted.has(runtimeBaseDir)) return;
   staleWorktreeSweepStarted.add(runtimeBaseDir);
-  void sweepStaleWorktreeProjects(runtimeBaseDir).catch((error: unknown) => {
-    logger.warn(`stale worktree project sweep failed: ${error}`);
-  });
+  void sweepStaleWorktreeProjects(runtimeBaseDir).catch(
+    async (error: unknown) => {
+      (await storageLogger()).warn(
+        `stale worktree project sweep failed: ${error}`,
+      );
+    },
+  );
 }
 
 export class Storage {

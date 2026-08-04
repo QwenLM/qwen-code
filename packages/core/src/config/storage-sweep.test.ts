@@ -85,7 +85,7 @@ describe('sweepStaleWorktreeProjects', () => {
     const entry = sanitizeCwd(goneWorktree);
     const gone = makeProjectSnapshot(base, entry, {
       worktreePath: goneWorktree,
-      originalCwd: '/repo',
+      originalCwd: base,
     });
 
     const removed = await sweepStaleWorktreeProjects(base);
@@ -215,7 +215,10 @@ describe('sweepStaleWorktreeProjects', () => {
     ).resolves.toEqual([]);
   });
 
-  it('judges by archived sidecars too', async () => {
+  it('keeps a bucket whose sidecar is archived: archiving is user retention', async () => {
+    // archiveSessions moves transcript and sidecar into chats/archive/ as an
+    // explicit retention action, so an archived sidecar is keep evidence even
+    // when the worktree is gone.
     const goneWorktree = path.join(base, 'definitely-not-here');
     const projectDir = path.join(base, 'projects', sanitizeCwd(goneWorktree));
     const archiveDir = path.join(projectDir, 'chats', 'archive');
@@ -227,11 +230,69 @@ describe('sweepStaleWorktreeProjects', () => {
         originalCwd: '/repo',
       }),
     );
+    fs.writeFileSync(
+      path.join(archiveDir, 'session-1.jsonl'),
+      '{"message":"hi"}\n',
+    );
 
     const removed = await sweepStaleWorktreeProjects(base);
 
-    expect(removed).toEqual([sanitizeCwd(goneWorktree)]);
-    expect(fs.existsSync(projectDir)).toBe(false);
+    expect(removed).toEqual([]);
+    expect(fs.existsSync(projectDir)).toBe(true);
+  });
+
+  it('keeps an arm-1 bucket when the owning repo is gone (unplugged drive)', async () => {
+    // ENOENT on the worktree path also reads as a downed volume; deleting
+    // requires the repo (originalCwd) to still be there.
+    const goneWorktree = path.join(base, 'gone-worktree');
+    const entry = sanitizeCwd(goneWorktree);
+    const kept = makeProjectSnapshot(base, entry, {
+      worktreePath: goneWorktree,
+      originalCwd: '/gone/repo',
+    });
+
+    const removed = await sweepStaleWorktreeProjects(base);
+
+    expect(removed).toEqual([]);
+    expect(fs.existsSync(kept)).toBe(true);
+  });
+
+  it('keeps the bucket when a transcript was touched just now', async () => {
+    // Headless/serve/ACP sessions never write runtime.json; a fresh jsonl is
+    // the mode-agnostic liveness signal.
+    const goneWorktree = path.join(base, 'gone-worktree');
+    const entry = sanitizeCwd(goneWorktree);
+    const kept = makeProjectSnapshot(base, entry, {
+      worktreePath: goneWorktree,
+      originalCwd: base,
+    });
+    fs.writeFileSync(
+      path.join(kept, 'chats', 'session-live.jsonl'),
+      '{"message":"hi"}\n',
+    );
+
+    const removed = await sweepStaleWorktreeProjects(base);
+
+    expect(removed).toEqual([]);
+    expect(fs.existsSync(kept)).toBe(true);
+  });
+
+  it('sweeps an arm-1 bucket when repo exists, worktree gone, transcript cold', async () => {
+    const goneWorktree = path.join(base, 'gone-worktree');
+    const entry = sanitizeCwd(goneWorktree);
+    const gone = makeProjectSnapshot(base, entry, {
+      worktreePath: goneWorktree,
+      originalCwd: base,
+    });
+    const coldJsonl = path.join(gone, 'chats', 'session-old.jsonl');
+    fs.writeFileSync(coldJsonl, '{"message":"hi"}\n');
+    const cold = (Date.now() - 3600_000) / 1000;
+    fs.utimesSync(coldJsonl, cold, cold);
+
+    const removed = await sweepStaleWorktreeProjects(base);
+
+    expect(removed).toEqual([entry]);
+    expect(fs.existsSync(gone)).toBe(false);
   });
 
   it('falls through a corrupted sidecar to the next valid one', async () => {
@@ -280,13 +341,13 @@ describe('sweepStaleWorktreeProjects', () => {
       sanitizeCwd(path.join(base, 'aaa-stuck-wt')),
       {
         worktreePath: path.join(base, 'aaa-stuck-wt'),
-        originalCwd: '/repo',
+        originalCwd: base,
       },
     );
     const goneWorktree = path.join(base, 'gone-2');
     const gone = makeProjectSnapshot(base, sanitizeCwd(goneWorktree), {
       worktreePath: goneWorktree,
-      originalCwd: '/repo',
+      originalCwd: base,
     });
 
     const removed = await sweepStaleWorktreeProjects(base);
@@ -327,7 +388,7 @@ describe('sweepStaleWorktreeProjects', () => {
     const entry = sanitizeCwd(goneWorktree);
     const projectDir = makeProjectSnapshot(base, entry, {
       worktreePath: goneWorktree,
-      originalCwd: '/repo',
+      originalCwd: base,
     });
     fs.writeFileSync(
       path.join(projectDir, 'chats', 'session-dead.runtime.json'),
@@ -354,7 +415,7 @@ describe('sweepStaleWorktreeProjects', () => {
     const entry = sanitizeCwd(filePath);
     const projectDir = makeProjectSnapshot(base, entry, {
       worktreePath: filePath,
-      originalCwd: '/repo',
+      originalCwd: base,
     });
 
     const removed = await sweepStaleWorktreeProjects(base);
@@ -367,7 +428,7 @@ describe('sweepStaleWorktreeProjects', () => {
     const missingWorktree = path.join(base, 'missing');
     makeProjectSnapshot(base, sanitizeCwd(missingWorktree), {
       worktreePath: missingWorktree,
-      originalCwd: '/repo',
+      originalCwd: base,
     });
 
     new Storage('/tmp/x', base);
