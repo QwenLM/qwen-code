@@ -1688,6 +1688,11 @@ jobs:
       ${{ needs.route.outputs.do_review == 'true' }}
     runs-on: 'ubuntu-latest'
     timeout-minutes: 15
+    # A forced scan can write the same status comment as review-address.
+    # Share its per-PR lock so neither writer can erase the other's state.
+    concurrency:
+      group: 'qwen-pr-head-write-${{ needs.route.outputs.pr_number || github.run_id }}'
+      cancel-in-progress: false
     outputs:
       targets: '${{ steps.scan.outputs.targets }}'
       has_targets: '${{ steps.scan.outputs.has_targets }}'

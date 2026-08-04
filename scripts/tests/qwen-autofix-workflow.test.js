@@ -47,6 +47,8 @@ const routeJob =
 const reviewScanJob =
   workflow.match(/\n {2}review-scan:[\s\S]*?(?=\n[ ]{2}# ==========)/)?.[0] ??
   '';
+const reviewAddressJob =
+  workflow.match(/\n {2}review-address:[\s\S]*$/)?.[0] ?? '';
 const issueAutofixJob =
   workflow.match(/\n {2}issue-autofix:[\s\S]*?(?=\n[ ]{2}# ==========)/)?.[0] ??
   '';
@@ -3405,6 +3407,17 @@ exit 1
       status: 0,
       stderr: '',
     });
+  });
+
+  it('serializes forced status writes with the matching address job', () => {
+    expect(reviewScanJob).toContain(
+      "group: 'qwen-pr-head-write-${{ needs.route.outputs.pr_number || github.run_id }}'",
+    );
+    expect(reviewScanJob).toContain('cancel-in-progress: false');
+    expect(reviewAddressJob).toContain(
+      "group: 'qwen-pr-head-write-${{ matrix.target.pr }}'",
+    );
+    expect(reviewAddressJob).toContain('cancel-in-progress: false');
   });
 
   it('exposes exactly one comment command: label-toggle takeover sugar', () => {
