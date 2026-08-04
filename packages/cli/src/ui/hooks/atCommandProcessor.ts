@@ -275,7 +275,7 @@ export async function resolveAtCommandQuery({
     // ENOENT skip silently drops it. Only intercepted when omni delivery
     // is active; otherwise preserve the legacy text fall-through.
     if (/^https?:\/\//i.test(pathName)) {
-      const omni = await import('@qwen-code/qwen-code-core');
+      const omni = await import('@qwen-code/qwen-code-core/omni');
       if (omni.isOmniDeliveryActive(config) && omni.parseHttpUrlRef(pathName)) {
         if (!urlMediaRefs.some((r) => r.url === pathName)) {
           urlMediaRefs.push({ originalAtPath, url: pathName });
@@ -537,7 +537,7 @@ export async function resolveAtCommandQuery({
   const urlMediaDisplays: IndividualToolCallDisplay[] = [];
   const urlMediaLabels: string[] = [];
   if (urlMediaRefs.length > 0) {
-    const core = await import('@qwen-code/qwen-code-core');
+    const core = await import('@qwen-code/qwen-code-core/omni');
     for (let i = 0; i < urlMediaRefs.length; i++) {
       const ref = urlMediaRefs[i];
       const callId = `client-url-media-${userMessageTimestamp}-${i}`;

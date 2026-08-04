@@ -60,6 +60,9 @@ export {
   OmniDownloadError,
   type DownloadedMedia,
 } from './download.js';
+// Circular-safe (both modules only bind functions): lets the ./omni
+// subpath entry serve the tool-result funnel without the big barrel.
+export { processToolResultOmniMedia } from './tool-result-media.js';
 
 const debugLogger = createDebugLogger('omni');
 

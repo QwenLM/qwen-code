@@ -173,7 +173,6 @@ import {
   normalizeParts,
 } from '../services/visionBridge/image-part-utils.js';
 import { bridgeToolResultImages } from '../services/visionBridge/tool-result-vision-bridge.js';
-import { processToolResultOmniMedia } from '../omni/tool-result-media.js';
 import {
   getInvocationContext,
   runWithInvocationContext,
@@ -1393,6 +1392,13 @@ export class CoreToolScheduler {
     // parts are invisible to isImagePart, so the bridge skips them. Sibling
     // step by design (§8.2): never mixed into bridge logic. Preserves the
     // identity-equality contract: unchanged input returns the same array.
+    // Dynamic import keeps the omni module graph out of the ACP/serve
+    // fast-path static bundle closure (mirrors fileUtils' pattern; the
+    // serve bundle-closure CI check forbids iconv-scale chunks on the
+    // acpAgent static path).
+    const { processToolResultOmniMedia } = await import(
+      '../omni/tool-result-media.js'
+    );
     const omniProcessed = await processToolResultOmniMedia(
       responseParts,
       this.config,

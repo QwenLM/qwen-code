@@ -153,7 +153,6 @@ import {
   normalizeParts,
   runVisionBridge,
   bridgeToolResultImages,
-  processToolResultOmniMedia,
   shouldRunVisionBridge,
   formatVisionBridgeNotice,
   formatFullTurnVisionNotice,
@@ -8268,11 +8267,18 @@ export class Session implements SessionContext {
           // CoreToolScheduler.processToolResultImages, design §8.2):
           // inline tool-result media becomes oss:// fileData before the
           // vision bridge runs, which then skips the converted parts.
-          responseParts = await processToolResultOmniMedia(
-            responseParts,
-            this.config,
-            activeToolAbortSignal,
-          );
+          {
+            // Dynamic import: keeps omni out of the ACP static closure
+            // (serve fast-path bundle-closure CI check).
+            const { processToolResultOmniMedia } = await import(
+              '@qwen-code/qwen-code-core/omni'
+            );
+            responseParts = await processToolResultOmniMedia(
+              responseParts,
+              this.config,
+              activeToolAbortSignal,
+            );
+          }
           const visionBridgeNotices: string[] = [];
           responseParts = await bridgeToolResultImages({
             config: this.config,
