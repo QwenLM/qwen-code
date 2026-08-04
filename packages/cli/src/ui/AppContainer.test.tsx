@@ -229,6 +229,20 @@ describe('AppContainer State Management', () => {
   let restoreCiEnv = () => {};
   const mockedRestorePromptStash = vi.mocked(restorePromptStash);
 
+  // Shared helper to extract AppContainer's global keypress handler
+  // (handleGlobalKeypress) from the useKeypress mock. The handler stringifies
+  // to include TOGGLE_THINKING_EXPANDED, so that token is the stable
+  // discovery idiom. Used by the Ctrl+O and Cancel Handler describe blocks.
+  const getGlobalKeypress = (): ((key: Key) => void) | undefined =>
+    mockedUseKeypress.mock.calls
+      .map((call) => call[0])
+      .reverse()
+      .find(
+        (handler): handler is (key: Key) => void =>
+          typeof handler === 'function' &&
+          handler.toString().includes('TOGGLE_THINKING_EXPANDED'),
+      );
+
   beforeEach(() => {
     vi.clearAllMocks();
     restoreCiEnv = clearCiEnv();
@@ -2381,14 +2395,7 @@ describe('AppContainer State Management', () => {
       await Promise.resolve();
       await Promise.resolve();
 
-      const handleKeypress = mockedUseKeypress.mock.calls
-        .map((call) => call[0])
-        .reverse()
-        .find(
-          (handler): handler is (key: Key) => void =>
-            typeof handler === 'function' &&
-            handler.toString().includes('TOGGLE_THINKING_EXPANDED'),
-        ) as ((key: Key) => void) | undefined;
+      const handleKeypress = getGlobalKeypress();
       expect(handleKeypress).toBeDefined();
 
       const escKey: Key = {
@@ -4992,16 +4999,6 @@ describe('AppContainer State Management', () => {
         sequence: '',
         ...overrides,
       }) as Key;
-
-    const getGlobalKeypress = () =>
-      mockedUseKeypress.mock.calls
-        .map((call) => call[0])
-        .reverse()
-        .find(
-          (handler): handler is (key: Key) => void =>
-            typeof handler === 'function' &&
-            handler.toString().includes('TOGGLE_THINKING_EXPANDED'),
-        ) as ((key: Key) => void) | undefined;
 
     const ctrlO = makeKey({ name: 'o', ctrl: true, sequence: '\x0f' });
 

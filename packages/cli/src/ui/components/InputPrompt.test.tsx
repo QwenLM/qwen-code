@@ -5741,6 +5741,42 @@ describe('InputPrompt', () => {
       expect(props.buffer.text).toBe('half typed message');
       unmount();
     });
+
+    it('returns false (no queue pop, no buffer clear) on ESC when responding with an empty buffer', async () => {
+      // Pins the `return false` branch at InputPrompt.tsx when the agent is
+      // Responding AND both the buffer and the queue are empty - the path that
+      // lets AppContainer's global ESC handler take its cancel-work branch.
+      // Without this, deleting that branch leaves all tests green. #8201.
+      mockedUseUIState.mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: [],
+        pendingGeminiHistoryItems: [],
+        streamingState: StreamingState.Responding,
+      } as unknown as ReturnType<typeof useUIState>);
+      const mockPopAllQueued = vi.fn(() => null);
+      mockedUseUIActions.mockReturnValue({
+        handleRetryLastPrompt: vi.fn(),
+        temporaryCloseFeedbackDialog: vi.fn(),
+        popAllQueuedMessages: mockPopAllQueued,
+        invalidateSubmittedPromptProvenance: vi.fn(),
+      } as unknown as ReturnType<typeof useUIActions>);
+      props.buffer.setText('');
+      const setTextSpy = vi.spyOn(props.buffer, 'setText');
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\x1B');
+      await wait();
+
+      // No queue pop, no buffer mutation - the branch returns false so
+      // AppContainer's broadcast ESC handler is the one that acts.
+      expect(mockPopAllQueued).not.toHaveBeenCalled();
+      expect(setTextSpy).not.toHaveBeenCalled();
+      unmount();
+    });
   });
 });
 function clean(str: string | undefined): string {
