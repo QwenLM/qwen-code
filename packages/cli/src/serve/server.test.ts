@@ -3030,7 +3030,7 @@ describe('createServeApp', () => {
       expect(res.text).toContain('<div id="root">');
     });
 
-    it('serves session document deep links before bearer auth without exposing APIs', async () => {
+    it('serves the shell for GET and HEAD /session/:id document navigations', async () => {
       const app = createServeApp({ ...baseOpts, token: 'secret' }, undefined, {
         webShellDir,
       });
@@ -3046,18 +3046,51 @@ describe('createServeApp', () => {
         .set('Host', host)
         .set('Accept', 'text/html');
       expect(head.status).toBe(200);
+      expect(head.headers['content-type']).toContain('text/html');
 
-      const nonNavigation = await request(app)
+      // Express non-strict routing: a refresh URL with a trailing slash is a
+      // real client shape and must load the shell too.
+      const trailingSlash = await request(app)
+        .get('/session/abc123/')
+        .set('Host', host)
+        .set('Accept', 'text/html');
+      expect(trailingSlash.status).toBe(200);
+      expect(trailingSlash.text).toContain('<div id="root">');
+    });
+
+    it('401s /session/:id for JSON requests', async () => {
+      const app = createServeApp({ ...baseOpts, token: 'secret' }, undefined, {
+        webShellDir,
+      });
+      const res = await request(app)
         .get('/session/abc123')
         .set('Host', host)
         .set('Accept', 'application/json');
-      expect(nonNavigation.status).toBe(401);
+      expect(res.status).toBe(401);
+    });
 
-      const api = await request(app)
+    it('401s session API subpaths', async () => {
+      const app = createServeApp({ ...baseOpts, token: 'secret' }, undefined, {
+        webShellDir,
+      });
+      const res = await request(app)
         .get('/session/abc123/status')
         .set('Host', host)
         .set('Accept', 'text/html');
-      expect(api.status).toBe(401);
+      expect(res.status).toBe(401);
+    });
+
+    it('401s /session/:id document navigations when the shell is disabled', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', serveWebShell: false },
+        undefined,
+        { webShellDir },
+      );
+      const res = await request(app)
+        .get('/session/abc123')
+        .set('Host', host)
+        .set('Accept', 'text/html');
+      expect(res.status).toBe(401);
     });
 
     it('leaves non-navigation API misses as JSON 404s', async () => {

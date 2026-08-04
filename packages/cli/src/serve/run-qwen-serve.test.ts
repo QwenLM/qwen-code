@@ -38,6 +38,7 @@ import type {
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import * as qwenCore from '@qwen-code/qwen-code-core';
 import * as serverModule from './server.js';
+import * as webShellResolver from './web-shell-resolver.js';
 import * as settingsRuntime from '../config/settings.js';
 import * as environmentRuntime from '../config/environment.js';
 import * as trustedFoldersRuntime from '../config/trustedFolders.js';
@@ -4962,6 +4963,147 @@ describe('runQwenServe runtime startup failures', () => {
       expect(await authorizedRes.json()).toEqual({ sessionId: 'session-1' });
       expect(createBridge).toHaveBeenCalledTimes(1);
       await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('serves Web Shell document navigations during the deferred runtime window', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-webshell-')),
+    );
+    const shellDir = path.join(tmpDir, 'web-shell');
+    fs.mkdirSync(path.join(shellDir, 'assets'), { recursive: true });
+    fs.writeFileSync(
+      path.join(shellDir, 'index.html'),
+      '<!doctype html><body><div id="root"></div></body>',
+    );
+    vi.spyOn(webShellResolver, 'resolveWebShellDir').mockReturnValue(shellDir);
+    const bridge = makeRuntimeBridge();
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValue(
+        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        token: 'secret-token',
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+      },
+    );
+
+    try {
+      // A browser refresh of a session deep link carries no bearer header and
+      // must load the shell (and start the runtime) instead of 401ing in the
+      // deferred gate.
+      const navRes = await fetch(`${handle.url}/session/abc`, {
+        headers: { accept: 'text/html' },
+      });
+      expect(navRes.status).toBe(200);
+      expect(navRes.headers.get('content-type')).toContain('text/html');
+      expect(await navRes.text()).toContain('<div id="root">');
+      expect(createBridge).toHaveBeenCalledTimes(1);
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('keeps JSON and API-subpath requests gated during the deferred runtime window', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-webshell-gate-')),
+    );
+    const shellDir = path.join(tmpDir, 'web-shell');
+    fs.mkdirSync(path.join(shellDir, 'assets'), { recursive: true });
+    fs.writeFileSync(
+      path.join(shellDir, 'index.html'),
+      '<!doctype html><body><div id="root"></div></body>',
+    );
+    vi.spyOn(webShellResolver, 'resolveWebShellDir').mockReturnValue(shellDir);
+    const bridge = makeRuntimeBridge();
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValue(
+        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        token: 'secret-token',
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+      },
+    );
+
+    try {
+      const jsonRes = await fetch(`${handle.url}/session/abc`, {
+        headers: { accept: 'application/json' },
+      });
+      expect(jsonRes.status).toBe(401);
+
+      const apiRes = await fetch(`${handle.url}/session/abc/status`, {
+        headers: { accept: 'text/html' },
+      });
+      expect(apiRes.status).toBe(401);
+
+      expect(createBridge).not.toHaveBeenCalled();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('keeps session document navigations gated during the deferred window with --no-web', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-noweb-')),
+    );
+    const bridge = makeRuntimeBridge();
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValue(
+        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+        token: 'secret-token',
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+      },
+    );
+
+    try {
+      const navRes = await fetch(`${handle.url}/session/abc`, {
+        headers: { accept: 'text/html' },
+      });
+      expect(navRes.status).toBe(401);
+      expect(createBridge).not.toHaveBeenCalled();
     } finally {
       await handle.close();
     }

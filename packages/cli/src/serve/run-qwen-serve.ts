@@ -1693,6 +1693,7 @@ function createDelegatingServeApp(
     runtimeReady?: Promise<void>;
     authenticateDeferredRuntimeRequest?: RequestHandler;
     authenticateDeferredChannelWebhookRequest?: RequestHandler;
+    isPreAuthRequest?: (req: Request) => boolean | Promise<boolean>;
   } = {},
 ): Application {
   const app = express();
@@ -1717,7 +1718,7 @@ function createDelegatingServeApp(
           ? (options.authenticateDeferredChannelWebhookRequest ??
             options.authenticateDeferredRuntimeRequest)
           : options.authenticateDeferredRuntimeRequest;
-        if (authGate) {
+        if (authGate && !(await options.isPreAuthRequest?.(req))) {
           if (!runSynchronousRequestGate(authGate, req, res, next)) {
             return;
           }
@@ -5689,6 +5690,17 @@ async function runQwenServeImpl(
       runtimeReady,
       authenticateDeferredRuntimeRequest: bearerAuth(opts.token),
       authenticateDeferredChannelWebhookRequest: deferredChannelWebhookAuth,
+      // The runtime app serves these before bearerAuth; a browser navigation
+      // cannot attach the bearer header, so the cold gate must let them
+      // through (and start the runtime) exactly like the warm app would.
+      // Dynamic import keeps web-shell-static out of the serve fast-path
+      // static closure (see the import-boundary guards in fast-path.test.ts).
+      isPreAuthRequest: webShellMounted
+        ? (req) =>
+            import('./web-shell-static.js').then((webShellStatic) =>
+              webShellStatic.isPreAuthWebShellRequest(req),
+            )
+        : undefined,
     });
 
   // Node's `app.listen()` wants the unbracketed IPv6 literal (`::1`) but
