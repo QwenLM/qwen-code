@@ -397,7 +397,9 @@ export function extractClaims(section: string): Array<{
       )
         continue;
       const t = tokens[i].replace(/[.,;:)'"]+$/, '');
-      if (PATH_RE.test(t) && isPathClaim(t)) {
+      // The bare-runner guard above applies to argument tokens too: `./mvnw`
+      // as a command's runner token is the runner, not a path claim.
+      if (PATH_RE.test(t) && isPathClaim(t) && !MAVEN_RUNNER_RE.test(t)) {
         push('path', base ? `${base}/${t}` : t);
       }
     }
@@ -616,6 +618,38 @@ function bareMavenLifecycle(command: string): string | null {
   );
 }
 
+/** The module set of a command's `-pl`/`--projects` selector, sorted. */
+function mavenPlModules(command: string): string[] | null {
+  const tokens = command.trim().split(/\s+/);
+  let value: string | undefined;
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (token === '-pl' || token === '--projects') value = tokens[i + 1];
+    else if (token.startsWith('-pl=')) value = token.slice('-pl='.length);
+    else if (token.startsWith('--projects='))
+      value = token.slice('--projects='.length);
+  }
+  if (!value) return null;
+  const modules = [
+    ...new Set(
+      value
+        .split(',')
+        .map((module) => module.trim())
+        .filter((module) => module.length > 0),
+    ),
+  ].sort();
+  return modules.length > 0 ? modules : null;
+}
+
+function sameModuleSet(a: string[] | null, b: string[] | null): boolean {
+  return (
+    a !== null &&
+    b !== null &&
+    a.length === b.length &&
+    a.every((module, i) => module === b[i])
+  );
+}
+
 function ruleCommand(
   text: string,
   worktree: string,
@@ -635,23 +669,47 @@ function ruleCommand(
   // differently scoped claim.
   const mavenRunnerClaim = MAVEN_RUNNER_RE.test(claimed);
   const claimedLifecycle = mavenLifecycle(claimed);
-  const claimScopesItself = claimed
-    .split(/\s+/)
-    .some(
-      (token) =>
-        token === '-pl' ||
-        token.startsWith('-pl=') ||
-        token === '--projects' ||
-        token.startsWith('--projects=') ||
-        token.startsWith('-P') ||
-        token.startsWith('-D'),
-    );
+  // Maven flags that scope a run to less — or other — than the full reactor.
+  // A claim carrying one can only be settled by a run of the SAME scope: one
+  // scoped run cannot settle a differently scoped claim.
+  const scopesNonPl = (token: string): boolean =>
+    token.startsWith('-P') ||
+    token.startsWith('-D') ||
+    token === '-rf' ||
+    token.startsWith('-rf=') ||
+    token === '-N' ||
+    token === '-f' ||
+    token.startsWith('-f=') ||
+    token === '--file' ||
+    token.startsWith('--file=');
+  const claimTokens = claimed.split(/\s+/);
+  const claimScopesItself = claimTokens.some(
+    (token) =>
+      token === '-pl' ||
+      token.startsWith('-pl=') ||
+      token === '--projects' ||
+      token.startsWith('--projects=') ||
+      scopesNonPl(token),
+  );
+  const claimPlModules = mavenPlModules(claimed);
+  // A claim scoped by `-pl` ALONE can settle on a recorded run with the same
+  // module set and final lifecycle — that is the SAME scope, and discarding
+  // the evidence would assert the review never ran what it did. Claims also
+  // carrying -P/-D/-rf/-N/-f keep the conservative treatment: those scopes
+  // cannot be compared here.
+  const claimOnlyPlScoped =
+    claimPlModules !== null && !claimTokens.some(scopesNonPl);
   const settledByLifecycle = (command: string): boolean =>
     command !== claimed &&
     !(command.startsWith(claimed) && command[claimed.length] === ' ') &&
     claimedLifecycle !== null &&
     !claimScopesItself &&
     mavenLifecycle(command) === claimedLifecycle;
+  const settledBySameScope = (command: string): boolean =>
+    claimOnlyPlScoped &&
+    claimedLifecycle !== null &&
+    mavenLifecycle(command) === claimedLifecycle &&
+    sameModuleSet(mavenPlModules(command), claimPlModules);
   const matches = [
     ...(buildTest?.build ?? []),
     ...(buildTest?.test ?? []),
@@ -665,7 +723,8 @@ function ruleCommand(
       (command.startsWith(claimed) &&
         command[claimed.length] === ' ' &&
         (!mavenRunnerClaim || bareMavenLifecycle(claimed) !== null)) ||
-      settledByLifecycle(command)
+      settledByLifecycle(command) ||
+      settledBySameScope(command)
     );
   });
   // build-test records one scoped command per package and does not stop on
@@ -678,31 +737,41 @@ function ruleCommand(
   // build-test note disavowed as environmental — it must not settle a claim.
   const finished = (c: CommandResult): boolean =>
     !c.timedOut && c.exitCode !== null && !c.infrastructure;
-  // A zero exit over fresh failing Surefire/Failsafe reports (surefire
-  // `testFailureIgnore`) is a FAILED run for ruling purposes: the Maven
-  // adapter marks the same result ok:false, so the claim must not read as
-  // reproduced.
+  // The marker is mined from the command's own output — PR test stdout can
+  // print it too, so it is not tamper-proof (same property as the npm
+  // console-summary parsing).
   const freshTestFailures = (c: CommandResult): boolean =>
     /^\[maven-test-failure\] /m.test(c.output ?? '');
+  // A zero exit over fresh failing reports (surefire `testFailureIgnore`),
+  // or over framed errors a fail-never setting swallowed, is a FAILED run
+  // for ruling purposes: the Maven adapter marks both ok:false, so the
+  // claim must not read as reproduced.
+  const ranFailed = (c: CommandResult): boolean =>
+    c.exitCode !== 0 || freshTestFailures(c) || c.swallowedFailure === true;
   const ran =
-    matches.find(
-      (c) => finished(c) && (c.exitCode !== 0 || freshTestFailures(c)),
-    ) ?? matches.find(finished);
+    matches.find((c) => finished(c) && ranFailed(c)) ?? matches.find(finished);
   if (ran) {
     // Reactor-wide recorded runs carry no `-pl`; calling those module-scoped
     // would understate what the evidence verified.
     const scoped =
-      settledByLifecycle(ran.command.trim()) &&
-      /(?:^|\s)-pl(?:\s|$)/.test(ran.command);
-    if (ran.exitCode === 0 && freshTestFailures(ran)) {
+      (settledByLifecycle(ran.command.trim()) ||
+        settledBySameScope(ran.command.trim())) &&
+      /(?:^|\s)-pl(?:\s|=|$)/.test(ran.command);
+    if (ran.exitCode === 0 && ranFailed(ran)) {
       return {
         kind: 'command',
         text,
         verdict: 'contradicted',
-        observed: 'exit 0, but fresh Surefire/Failsafe reports record failures',
-        note: scoped
-          ? 'this review ran a module-scoped form of it, and fresh test reports record failures despite the zero exit'
-          : 'this review ran it, but fresh test reports record failures despite the zero exit',
+        observed: freshTestFailures(ran)
+          ? 'exit 0, but fresh Surefire/Failsafe reports record failures'
+          : 'exit 0, but the output records failures the exit code did not fail on',
+        note: freshTestFailures(ran)
+          ? scoped
+            ? 'this review ran a module-scoped form of it, and fresh test reports record failures despite the zero exit'
+            : 'this review ran it, but fresh test reports record failures despite the zero exit'
+          : scoped
+            ? 'this review ran a module-scoped form of it, and the run recorded failures despite the zero exit'
+            : 'this review ran it, but the run recorded failures despite the zero exit',
       };
     }
     return ran.exitCode === 0
@@ -727,6 +796,24 @@ function ruleCommand(
   }
 
   if (mavenRunnerClaim) {
+    // A deadline kill or spawn death does not excuse the failures
+    // Surefire/Failsafe recorded before it: the adapter's own note says to
+    // treat those as test failures, so the claim ruling cannot read the
+    // interruption as neutral while the build-test side reports ok:false.
+    if (
+      matches.some(
+        (c) => (c.timedOut || c.exitCode === null) && freshTestFailures(c),
+      )
+    ) {
+      return {
+        kind: 'command',
+        text,
+        verdict: 'contradicted',
+        observed:
+          'interrupted, but fresh Surefire/Failsafe reports record failures',
+        note: 'this review ran it; it was interrupted, but fresh test reports record failures',
+      };
+    }
     if (matches.some((c) => c.timedOut)) {
       return {
         kind: 'command',
@@ -752,11 +839,19 @@ function ruleCommand(
       };
     }
 
+    // The review may still have run Maven at a different scope or phase —
+    // say so instead of asserting nothing ran.
+    const anyMavenRun = [
+      ...(buildTest?.build ?? []),
+      ...(buildTest?.test ?? []),
+    ].some((c) => mavenLifecycle(c.command.trim()) !== null);
     return {
       kind: 'command',
       text,
       verdict: 'unchecked',
-      note: 'this Maven command was not run by this review',
+      note: anyMavenRun
+        ? 'this Maven command was not run by this review — the Maven runs it made had a different scope or phase'
+        : 'this Maven command was not run by this review',
     };
   }
 

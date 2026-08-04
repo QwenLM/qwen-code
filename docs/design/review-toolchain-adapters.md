@@ -167,6 +167,24 @@ P0 changes:
 - `packages/cli/src/commands/review/build-test.test.ts`
   - Remains the end-to-end compatibility suite for the command facade.
 
+P1 changes:
+
+- `packages/cli/src/commands/review/lib/maven-toolchain.ts`
+  - Owns Maven reactor discovery, changed-file ownership, the scoped
+    lifecycle run, and the Surefire/Failsafe evidence.
+- `packages/cli/src/commands/review/lib/maven-toolchain.test.ts`
+  - Pins reactor parsing, ownership, classification, and evidence behavior.
+- `packages/cli/src/commands/review/lib/disk.ts`
+  - Shared disk-space preflight used by both adapters.
+- `packages/cli/src/commands/review/base-tree.ts`
+  - Skips Maven merge bases before checkout (root-pom probe,
+    npm-applicability probe, nested-pom probe).
+- `packages/cli/src/commands/review/test-plan.ts`
+  - Settles Maven command claims and Surefire test-count claims against the
+    recorded runs.
+- `packages/cli/src/commands/review/lib/agent-briefs.ts`
+  - Agent 7's Maven branch and the fail-closed fallback rules.
+
 ## Testing
 
 Focused tests must prove:
@@ -180,10 +198,29 @@ Focused tests must prove:
    remains unchanged through `runBuildTest`.
 6. The serialized report shape remains unchanged.
 
+P1 adds the Maven oracle set, pinned by `lib/maven-toolchain.test.ts` plus
+the Maven branches of the `test-plan`, `base-tree`, and `build-test` suites:
+
+1. Literal reactor discovery: aggregation edges AND `<parent>` inheritance
+   edges are read from checked-in POMs; property expressions, escaping paths,
+   missing child POMs, and shell-active module names fail closed.
+2. Ownership: changed paths map to the deepest owning module; documentation
+   and repository metadata are exempted; out-of-reactor projects fail closed.
+3. One root-cwd wrapper/Maven lifecycle command with `-pl <modules> -am`;
+   reactor-wide inputs disable narrowing.
+4. Fresh Surefire/Failsafe evidence: quote-aware, multi-suite parsing; stale
+   XML ignored; a green exit over fresh failing reports — or over framed
+   errors Maven did not fail on — is a failure, never a pass.
+5. Timeout, spawn death, and acquisition failures are infrastructure with the
+   diff-inputs exceptions, never a finding.
+6. Downstream consumers: `base-tree` skips Maven bases before checkout,
+   `test-plan` settles Maven claims against recorded runs, and Agent 7's
+   brief carries the Maven branch.
+
 Verification commands:
 
 ```bash
-cd packages/cli && npx vitest run src/commands/review/build-test.test.ts src/commands/review/lib/npm-toolchain.test.ts
+cd packages/cli && npx vitest run src/commands/review/build-test.test.ts src/commands/review/lib/npm-toolchain.test.ts src/commands/review/lib/maven-toolchain.test.ts src/commands/review/test-plan.test.ts src/commands/review/base-tree.test.ts src/commands/review/agent-prompt.test.ts
 npm run build
 npm run typecheck
 ```
@@ -288,17 +325,33 @@ Existing fields are generalized without changing their JSON shape:
 - `test`: contains the Maven `test` command in normal mode.
 - `timedOut`, `ok`, and `note`: retain their current cross-toolchain meaning.
 
-Dependency/plugin resolution failures, unavailable wrapper/runtime, and timeout
-are infrastructure outcomes, except when the diff changed the inputs that could
-have caused them: dependency-input changes (POMs, `.mvn/**`, the wrapper files)
-suppress the resolution carve-out, and a wrapper change suppresses the
-launch-failure carve-out, so a PR-caused breakage is filed against the PR, not
-the environment. A timeout or spawn death that still produced fresh failing
-reports discloses those failures as test evidence instead of framing the whole
-run as infrastructure. Compiler and test failures remain deterministic
-build/test evidence. Classification uses both command output and whether the
-current invocation produced fresh Surefire/Failsafe reports; a repository
-resolution failure with no fresh reports is never filed as a source defect.
+Command results carry two optional classification flags consumed by
+`test-plan`:
+
+- `CommandResult.infrastructure`: the adapter classified the failure as
+  environmental (Maven/Java or dependency acquisition, an unlaunchable
+  wrapper), so a Test Plan claim must not be settled against it.
+- `CommandResult.swallowedFailure`: the command exited 0 but its output
+  records failures Maven did not fail on (a fail-never setting), so a Test
+  Plan claim must not be ruled reproduced against it.
+
+Dependency/plugin resolution failures and unavailable wrapper/runtime are
+infrastructure outcomes, except when the diff changed the inputs that could
+have caused them: dependency-input changes (POMs, `.mvn/**`, the settings or
+repository locations `.mvn/maven.config` references, and the wrapper file
+this platform executes) suppress the resolution carve-out, and a change to
+the executed wrapper suppresses the launch-failure carve-out, so a PR-caused
+breakage is filed against the PR, not the environment. Timeout and spawn
+death are always infrastructure — no input exception exists for them — but
+when the interrupted run still produced fresh failing reports, those failures
+stay visible as test evidence instead of being framed as purely
+environmental. Compiler and test failures remain deterministic build/test
+evidence, and a zero exit that Maven's own `[ERROR]`/`[FATAL]` framing
+contradicts (a fail-never setting) counts as a failure, not a pass.
+Classification uses both command output and whether the current invocation
+produced fresh Surefire/Failsafe reports; a resolution failure with no fresh
+reports is filed as a source defect only when the diff changed the
+resolution inputs.
 
 ### Test reports
 
@@ -393,5 +446,7 @@ specifying this before two real adapters demonstrate the common boundary.
 
 ## Open questions
 
-None for P0. Maven/Gradle report-schema widening and multi-toolchain aggregation
-remain decisions for the phase that introduces those behaviors.
+None. P1 settled the report-schema widening it introduced (`toolchain`
+discriminant, `CommandResult.infrastructure`,
+`CommandResult.swallowedFailure`); multi-toolchain aggregation remains a
+decision for the phase that introduces that behavior.

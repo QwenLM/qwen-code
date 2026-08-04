@@ -13,7 +13,15 @@ import {
   statSync,
 } from 'node:fs';
 import type { Dirent } from 'node:fs';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from 'node:path';
 import type { BuildTestReport, CommandResult } from '../build-test.js';
 import { INSTALL_MIN_FREE_BYTES, freeDiskBytes, gib } from './disk.js';
 import { shellQuotePath } from './shell-quote.js';
@@ -29,6 +37,12 @@ export interface MavenReactor {
    * rather than directory prefixes.
    */
   children: Record<string, string[]>;
+  /**
+   * Inheritance edges: parent module dir -> the module dirs declaring it as
+   * their `<parent>`. A changed parent POM is inherited by these modules
+   * exactly as by aggregation children, so the POM-change closure walks both.
+   */
+  inheritors: Record<string, string[]>;
 }
 
 export interface MavenOwnership {
@@ -61,6 +75,16 @@ const MAX_FAILING_REPORT_LINES = 100;
 const MAX_FAILURE_CASE_LINES = 200;
 const MAX_CLEAN_ROLLUP_LINES = 100;
 
+/**
+ * Cap evidence files before reading them: Surefire/Failsafe XML is
+ * PR-controlled (the PR's own tests can write into `target/surefire-reports/`
+ * during the run, and the mtime freshness filter accepts any writer), so an
+ * uncapped read of a multi-gigabyte file is this harness's own denial-of-
+ * service surface. 2 MiB is far beyond any realistic per-class report; an
+ * oversized file simply contributes no evidence.
+ */
+const MAX_REPORT_BYTES = 2 * 1024 * 1024;
+
 function toPosix(path: string): string {
   return path.split(sep).join('/');
 }
@@ -73,26 +97,76 @@ function isInside(root: string, path: string): boolean {
   );
 }
 
-function moduleEntries(pom: string): string[] | null {
-  // CDATA goes first: a `-->` inside one (antrun/checkstyle/xml-generation
-  // config) would otherwise trip the leftover-comment guard below, and a
-  // `<module>` inside one would be mistaken for markup.
-  const withoutCdata = pom.replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, '');
-  const withoutComments = withoutCdata.replace(/<!--[\s\S]*?-->/g, '');
-  if (withoutComments.includes('<!--') || withoutComments.includes('-->')) {
-    return null;
+/**
+ * Strip comments and CDATA in one left-to-right state scan. Order matters in
+ * both directions: a `<![CDATA[` INSIDE a comment is literal comment text
+ * (pairing it with a later `]]>` swallows real markup between them), and a
+ * `-->` inside CDATA (antrun/checkstyle/xml-generation config) is literal
+ * too. A missing terminator fails the POM closed.
+ */
+function stripCdataAndComments(pom: string): string | null {
+  const chunks: string[] = [];
+  let i = 0;
+  let chunkStart = 0;
+  while (i < pom.length) {
+    if (pom.startsWith('<!--', i)) {
+      const end = pom.indexOf('-->', i + 4);
+      if (end === -1) return null;
+      chunks.push(pom.slice(chunkStart, i));
+      i = end + 3;
+      chunkStart = i;
+      continue;
+    }
+    if (pom.startsWith('<![CDATA[', i)) {
+      const end = pom.indexOf(']]>', i + 9);
+      if (end === -1) return null;
+      chunks.push(pom.slice(chunkStart, i));
+      i = end + 3;
+      chunkStart = i;
+      continue;
+    }
+    i += 1;
   }
+  chunks.push(pom.slice(chunkStart));
+  return chunks.join('');
+}
+
+interface PomParent {
+  artifactId: string;
+  /** Absent element: Maven's default `../pom.xml`. Empty string: `<relativePath/>` (repo-only resolution). */
+  relativePath: string | null;
+}
+
+interface PomStructure {
+  modules: string[];
+  artifactId: string | null;
+  parent: PomParent | null;
+}
+
+/**
+ * Parse the literal structure this adapter models: `<modules>` entries, the
+ * project artifactId, and the `<parent>` reference. Fails closed (null) on
+ * any shape it cannot read unambiguously.
+ */
+function parsePomStructure(pom: string): PomStructure | null {
+  const stripped = stripCdataAndComments(pom);
+  if (stripped === null) return null;
 
   const entries: string[] = [];
   const stack: string[] = [];
-  let moduleText: string | null = null;
+  let artifactId: string | null = null;
+  let parentArtifactId: string | null = null;
+  let parentRelativePath: string | null = null;
+  let capture: {
+    field: 'module' | 'artifactId' | 'parentArtifactId' | 'parentRelativePath';
+    text: string;
+  } | null = null;
   // Quote-aware: a `>` inside an attribute value is legal XML and occurs in
   // real plugin config; splitting the tag there fails the whole POM closed.
-  const tokens =
-    withoutComments.match(/<(?:"[^"]*"|'[^']*'|[^>"'])*>|[^<]+/g) ?? [];
+  const tokens = stripped.match(/<(?:"[^"]*"|'[^']*'|[^>"'])*>|[^<]+/g) ?? [];
   for (const token of tokens) {
     if (!token.startsWith('<')) {
-      if (moduleText !== null) moduleText += token;
+      if (capture) capture.text += token;
       continue;
     }
     if (/^<\?(?:.|\n)*\?>$/.test(token) || /^<![^-]/.test(token)) continue;
@@ -101,11 +175,23 @@ function moduleEntries(pom: string): string[] | null {
     if (closing) {
       const name = closing[1].split(':').at(-1) ?? '';
       if (stack.pop() !== name) return null;
-      if (name === 'module' && moduleText !== null) {
-        const entry = moduleText.trim();
-        if (!entry || /[<$>{}&%]/.test(entry)) return null;
-        entries.push(entry);
-        moduleText = null;
+      if (capture) {
+        const text = capture.text.trim();
+        if (capture.field === 'module') {
+          // `,` splits `-pl` selector arguments and `:` makes Maven read the
+          // selector as `[groupId]:artifactId` coordinates instead of a path,
+          // so neither can survive into a shell selector — fail closed like
+          // the other shell-active characters.
+          if (!text || /[<$>{}&%,:]/.test(text)) return null;
+          entries.push(text);
+        } else if (capture.field === 'artifactId') {
+          artifactId = text;
+        } else if (capture.field === 'parentArtifactId') {
+          parentArtifactId = text;
+        } else {
+          parentRelativePath = text;
+        }
+        capture = null;
       }
       continue;
     }
@@ -115,20 +201,63 @@ function moduleEntries(pom: string): string[] | null {
     if (!opening) return null;
     const name = opening[1].split(':').at(-1) ?? '';
     const selfClosing = /\/\s*>$/.test(token);
+    let field:
+      | 'module'
+      | 'artifactId'
+      | 'parentArtifactId'
+      | 'parentRelativePath'
+      | null = null;
     if (
       name === 'module' &&
       stack.length === 2 &&
       stack[0] === 'project' &&
       stack[1] === 'modules'
     ) {
-      if (selfClosing) return null;
-      moduleText = '';
-    } else if (moduleText !== null) {
-      return null;
+      field = 'module';
+    } else if (
+      name === 'artifactId' &&
+      stack.length === 1 &&
+      stack[0] === 'project'
+    ) {
+      field = 'artifactId';
+    } else if (
+      name === 'artifactId' &&
+      stack.length === 2 &&
+      stack[0] === 'project' &&
+      stack[1] === 'parent'
+    ) {
+      field = 'parentArtifactId';
+    } else if (
+      name === 'relativePath' &&
+      stack.length === 2 &&
+      stack[0] === 'project' &&
+      stack[1] === 'parent'
+    ) {
+      field = 'parentRelativePath';
     }
+    if (field) {
+      if (selfClosing) {
+        if (field === 'module') return null;
+        // `<relativePath/>` means "resolve the parent from the repository,
+        // not the filesystem" — no local edge to model.
+        if (field === 'parentRelativePath') parentRelativePath = '';
+      } else {
+        capture = { field, text: '' };
+        stack.push(name);
+      }
+      continue;
+    }
+    if (capture) return null;
     if (!selfClosing) stack.push(name);
   }
-  return stack.length === 0 && moduleText === null ? entries : null;
+  if (stack.length !== 0 || capture !== null) return null;
+  return {
+    modules: entries,
+    artifactId,
+    parent: parentArtifactId
+      ? { artifactId: parentArtifactId, relativePath: parentRelativePath }
+      : null,
+  };
 }
 
 export function readMavenReactor(root: string): MavenReactorResult {
@@ -141,6 +270,7 @@ export function readMavenReactor(root: string): MavenReactorResult {
   const modules = new Set<string>();
   const projectDirs = new Set<string>(['.']);
   const children = new Map<string, string[]>();
+  const structures = new Map<string, PomStructure>();
   const visited = new Set<string>();
 
   const visit = (pomPath: string): string | null => {
@@ -153,14 +283,15 @@ export function readMavenReactor(root: string): MavenReactorResult {
     } catch (error) {
       return `Cannot read ${toPosix(relative(reactorRoot, pomPath))}: ${(error as Error).message}`;
     }
-    const entries = moduleEntries(pom);
-    if (!entries) {
+    const structure = parsePomStructure(pom);
+    if (!structure) {
       return `Cannot safely parse literal Maven modules from ${toPosix(relative(reactorRoot, pomPath))}.`;
     }
 
     const aggregatorDir = dirname(pomPath);
     const aggregatorPath = toPosix(relative(reactorRoot, aggregatorDir)) || '.';
-    for (const entry of entries) {
+    structures.set(aggregatorPath, structure);
+    for (const entry of structure.modules) {
       if (isAbsolute(entry) || entry.includes('${') || entry.includes('@{')) {
         return `Maven module ${entry} in ${toPosix(relative(reactorRoot, pomPath))} is not a literal reactor-relative path.`;
       }
@@ -187,6 +318,40 @@ export function readMavenReactor(root: string): MavenReactorResult {
 
   const error = visit(rootPom);
   if (error) return { error };
+
+  // Inheritance edges: resolve each project's `<parent>` relativePath
+  // (default `../pom.xml`) and keep the edge only when it lands on another
+  // reactor project whose artifactId matches the declaration — the same
+  // check Maven applies before trusting a local parent POM. A matching
+  // parent can live ANYWHERE in the reactor (`../parent/pom.xml`), so the
+  // POM-change closure walks these edges rather than directory prefixes.
+  const inheritors = new Map<string, string[]>();
+  for (const [modulePath, structure] of structures) {
+    const parent = structure.parent;
+    if (!parent) continue;
+    // `<relativePath/>`: resolved from the repository, no local edge.
+    if (parent.relativePath === '') continue;
+    const relPath = parent.relativePath ?? '../pom.xml';
+    if (relPath.includes('${') || relPath.includes('@{')) {
+      return {
+        error: `Maven parent relativePath of ${modulePath} is not a literal path.`,
+      };
+    }
+    let parentPom = resolve(reactorRoot, modulePath, relPath);
+    if (basename(parentPom) !== 'pom.xml')
+      parentPom = join(parentPom, 'pom.xml');
+    const parentDir = dirname(parentPom);
+    if (!isInside(reactorRoot, parentDir)) continue;
+    const parentPath = toPosix(relative(reactorRoot, parentDir)) || '.';
+    if (parentPath === modulePath) continue;
+    const target = structures.get(parentPath);
+    if (!target || target.artifactId !== parent.artifactId) continue;
+    inheritors.set(parentPath, [
+      ...(inheritors.get(parentPath) ?? []),
+      modulePath,
+    ]);
+  }
+
   return {
     reactor: {
       modules: [...modules].sort(),
@@ -195,6 +360,12 @@ export function readMavenReactor(root: string): MavenReactorResult {
         [...children.entries()].map(([parent, aggregated]) => [
           parent,
           [...aggregated].sort(),
+        ]),
+      ),
+      inheritors: Object.fromEntries(
+        [...inheritors.entries()].map(([parent, inherited]) => [
+          parent,
+          [...inherited].sort(),
         ]),
       ),
     },
@@ -211,11 +382,16 @@ function normalizedChangedPath(
 }
 
 function isDocumentationPath(path: string): boolean {
+  // The `docs?/` prefix alone would skip a compilable file under a module's
+  // `doc/` tree and call the run complete; a documentation path is a
+  // documentation EXTENSION, with or without the prefix.
+  const isDocExtension =
+    !path.startsWith('src/') && /\.(?:md|mdx|adoc|rst|txt)$/i.test(path);
   return (
     path === 'README' ||
     /^README(?:\.|$)/i.test(path) ||
-    /^docs?\//i.test(path) ||
-    (!path.startsWith('src/') && /\.(?:md|mdx|adoc|rst|txt)$/i.test(path))
+    (/^docs?\//i.test(path) && isDocExtension) ||
+    isDocExtension
   );
 }
 
@@ -292,16 +468,20 @@ export function detectMavenOwnership(
     if (owner) {
       if (path === `${owner}/pom.xml`) {
         // A module POM is the parent config of every module aggregated
-        // beneath it: the descendants inherit what changed, and `-am` alone
-        // would compile only the aggregator and test nothing. The closure
-        // walks the recorded aggregation edges, not directory prefixes: a
-        // `<module>../its/app-it</module>` entry sits OUTSIDE the
-        // aggregator's directory and still inherits the parent change.
+        // beneath it AND of every module declaring it as `<parent>`: the
+        // descendants inherit what changed, and `-am` alone would compile
+        // only the aggregator and test nothing. The closure walks the
+        // recorded aggregation and inheritance edges, not directory
+        // prefixes: a `<module>../its/app-it</module>` entry sits OUTSIDE
+        // the aggregator's directory and still inherits the parent change.
         modules.add(owner);
         const queue = [owner];
         while (queue.length > 0) {
           const aggregator = queue.pop() as string;
-          for (const child of reactor.children[aggregator] ?? []) {
+          for (const child of [
+            ...(reactor.children[aggregator] ?? []),
+            ...(reactor.inheritors[aggregator] ?? []),
+          ]) {
             if (!modules.has(child)) {
               modules.add(child);
               queue.push(child);
@@ -327,7 +507,12 @@ export function detectMavenOwnership(
         inactiveProjects.add(nearestProject);
         continue;
       }
-      if (!isDocumentationPath(path.slice(owner.length + 1))) {
+      // Repo metadata is exempted module-relatively for the same reason as
+      // at the root: a module-level LICENSE cannot change what Maven builds.
+      if (
+        !isDocumentationPath(path.slice(owner.length + 1)) &&
+        !isRepoMetadataPath(path.slice(owner.length + 1))
+      ) {
         modules.add(owner);
       }
       continue;
@@ -435,36 +620,83 @@ function numberAttribute(
   name: string,
 ): number {
   const value = Number.parseInt(attributes.get(name) ?? '0', 10);
-  return Number.isFinite(value) ? value : 0;
+  if (!Number.isFinite(value)) return 0;
+  // A malformed report's negative count must not cancel legitimate counts
+  // from its neighbours when totals roll up across reports.
+  return Math.max(0, value);
 }
 
+/**
+ * Quote-aware attribute run for XML start tags. A `>` is legal unescaped
+ * inside a quoted attribute value (parameterized-test and @DisplayName
+ * suite/case names carry them), and `[^>]*` truncates there. The branches
+ * start on disjoint characters, so the scan stays linear on hostile input.
+ */
+const XML_ATTR_RUN = String.raw`(?:"[^"]*"|'[^']*'|[^>"'])*`;
+const TESTSUITE_HEADER_RE = new RegExp(
+  String.raw`<testsuite\b(${XML_ATTR_RUN})>`,
+  'gi',
+);
+const TESTCASE_HEADER_RE = new RegExp(
+  String.raw`<testcase\b(${XML_ATTR_RUN})\/?>`,
+  'gi',
+);
+const TESTCASE_CLOSE_RE = /<\/testcase\s*>/gi;
+
 function parseTestReport(root: string, path: string): MavenTestSummary | null {
+  try {
+    if (statSync(path).size > MAX_REPORT_BYTES) return null;
+  } catch {
+    return null;
+  }
   let xml: string;
   try {
     xml = readFileSync(path, 'utf8');
   } catch {
     return null;
   }
-  const suite = /<testsuite\b([^>]*)>/i.exec(xml);
-  if (!suite) return null;
-  const attributes = xmlAttributes(suite[1] ?? '');
+  // Aggregate counts across EVERY suite in the file: aggregate JUnit writers
+  // (jest-junit, karma reporters aimed at target/surefire-reports/ for
+  // SonarQube) emit several `<testsuite>` elements, and reading only the
+  // first undercounts later suites' failures to zero.
+  let tests = 0;
+  let failures = 0;
+  let errors = 0;
+  let skipped = 0;
+  let suites = 0;
+  for (const suite of xml.matchAll(TESTSUITE_HEADER_RE)) {
+    const attributes = xmlAttributes(suite[1] ?? '');
+    suites += 1;
+    tests += numberAttribute(attributes, 'tests');
+    failures += numberAttribute(attributes, 'failures');
+    errors += numberAttribute(attributes, 'errors');
+    skipped += numberAttribute(attributes, 'skipped');
+  }
+  if (suites === 0) return null;
   const failedCases: string[] = [];
-  const testcase = /<testcase\b([^>]*)(?:\/>|>([\s\S]*?)<\/testcase\s*>)/gi;
-  let match: RegExpExecArray | null;
-  while ((match = testcase.exec(xml)) !== null) {
-    const body = match[2] ?? '';
+  for (const header of xml.matchAll(TESTCASE_HEADER_RE)) {
+    const bodyStart = (header.index ?? 0) + header[0].length;
+    let body = '';
+    if (!header[0].endsWith('/>')) {
+      TESTCASE_CLOSE_RE.lastIndex = bodyStart;
+      const close = TESTCASE_CLOSE_RE.exec(xml);
+      // A file truncated mid-case has no closing tag to attribute a body to;
+      // every later opener has the same hole, so stop rather than rescan.
+      if (!close) break;
+      body = xml.slice(bodyStart, close.index);
+    }
     if (!/<(?:failure|error)\b/i.test(body)) continue;
-    const testcaseAttributes = xmlAttributes(match[1] ?? '');
+    const testcaseAttributes = xmlAttributes(header[1] ?? '');
     const className = decodeXml(testcaseAttributes.get('classname') ?? '');
     const name = decodeXml(testcaseAttributes.get('name') ?? 'unknown');
     failedCases.push(className ? `${className}#${name}` : name);
   }
   return {
     report: toPosix(relative(root, path)),
-    tests: numberAttribute(attributes, 'tests'),
-    failures: numberAttribute(attributes, 'failures'),
-    errors: numberAttribute(attributes, 'errors'),
-    skipped: numberAttribute(attributes, 'skipped'),
+    tests,
+    failures,
+    errors,
+    skipped,
     failedCases,
   };
 }
@@ -499,6 +731,13 @@ function projectDirOf(report: string): string {
   return dirname(dirname(dirname(report)));
 }
 
+/**
+ * NOTE: the `[maven-test-report]`/`[maven-test-failure]` markers below are
+ * text-mined by test-plan out of `output`, which is dominated by the PR's
+ * own test stdout — like the npm console-summary parsing, they are NOT
+ * tamper-proof. Verdicts that must survive a hostile PR belong in a
+ * structured report field, not in mined text.
+ */
 function appendTestSummaries(
   result: CommandResult,
   summaries: MavenTestSummary[],
@@ -624,9 +863,12 @@ function isLaunchFailure(output: string): boolean {
     .some(
       (line) =>
         /(?:mvn|java): (?:command )?not found/i.test(line) ||
+        /command not found: (?:mvn|java)(?:\.cmd)?\b/i.test(line) ||
         /(?:mvn|java)(?:\.cmd)?'? is not recognized as an internal or external command/i.test(
           line,
         ) ||
+        /The term '?(?:mvn|java)'? is not recognized/i.test(line) ||
+        /Unknown command: (?:mvn|java)\b/i.test(line) ||
         /JAVA_HOME.*(?:not defined|incorrectly)/i.test(line) ||
         /Unable to locate a Java Runtime/i.test(line) ||
         /^\[(?:ERROR|FATAL)\].*No space left on device/i.test(line),
@@ -661,9 +903,13 @@ function isDependencyFailure(output: string): boolean {
  * infrastructure result: a compile failure writes no Surefire XML, so
  * `freshFailures` cannot see it. `[ERROR]`-framed and line-level like
  * DEPENDENCY_FAILURE_LINE_RE, for the same trim-rescue reason.
+ *
+ * The line shapes cover the JVM compilers Maven hosts: Java's `.java:[l,c]`,
+ * Kotlin's `.kt: (l, c):`, Scala's `.scala:l:`, Groovy's `.groovy: l:`, plus
+ * the compiler-plugin goal framing a failed compile ends with.
  */
 const SOURCE_FAILURE_LINE_RE =
-  /^\[(?:ERROR|FATAL)\](?: COMPILATION ERROR| There are test failures| .*\.java:\[\d+,\d+\])/i;
+  /^\[(?:ERROR|FATAL)\](?: COMPILATION ERROR| There are test failures| .*\.java:\[\d+,\d+\]| .*\.kts?: ?\(\d+, ?\d+\)| .*\.scala:\d+| .*\.groovy: ?\d+| Failed to execute goal .*Compilation failure)/i;
 
 export function isSourceFailureLine(line: string): boolean {
   return SOURCE_FAILURE_LINE_RE.test(line);
@@ -741,6 +987,38 @@ export function mavenExecutable(
   }
 }
 
+/**
+ * Resolution inputs named by `.mvn/maven.config`: the launcher injects them
+ * into the very command this adapter runs, so a settings or local-repository
+ * location referenced there is a dependency input the PR can change.
+ */
+function mavenConfigDependencyInputs(root: string): string[] {
+  let config: string;
+  try {
+    config = readFileSync(join(root, '.mvn', 'maven.config'), 'utf8');
+  } catch {
+    return [];
+  }
+  const inputs: string[] = [];
+  const tokens = config.split(/\s+/);
+  const pairedFlags = new Set(['-s', '--settings', '-gs', '--global-settings']);
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    let value: string | undefined;
+    if (pairedFlags.has(token)) value = tokens[i + 1];
+    else if (token.startsWith('--settings='))
+      value = token.slice('--settings='.length);
+    else if (token.startsWith('--global-settings='))
+      value = token.slice('--global-settings='.length);
+    else if (token.startsWith('-Dmaven.repo.local='))
+      value = token.slice('-Dmaven.repo.local='.length);
+    if (!value) continue;
+    const path = normalizedChangedPath(root, value);
+    if (path !== null) inputs.push(path);
+  }
+  return inputs;
+}
+
 function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   const parsed = readMavenReactor(args.root);
   if (!parsed.reactor) {
@@ -783,23 +1061,50 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     const path = normalizedChangedPath(args.root, file);
     return path === 'mvnw' || path === 'mvnw.cmd';
   });
+  // Every wrapper repo ships both platform variants, but only ONE is ever
+  // executed here: a diff touching only the other platform's wrapper cannot
+  // affect this run, so the carve-out suppressions below key on the file
+  // this platform executes, not on either wrapper.
+  const executedWrapper =
+    executable === './mvnw'
+      ? 'mvnw'
+      : executable === 'mvnw.cmd'
+        ? 'mvnw.cmd'
+        : null;
+  const executedWrapperChanged =
+    executedWrapper !== null &&
+    args.changedFiles.some(
+      (file) => normalizedChangedPath(args.root, file) === executedWrapper,
+    );
   // The dependency carve-out below must not file a PR-caused breakage as
-  // environmental: when the diff changed POMs, `.mvn/**`, or the wrapper
-  // (which can redirect the local repository or settings), the resolution
-  // failure may be the diff's own doing. POMs under a project's `src/` tree
-  // are test fixtures (see isUnderTestSourceTree) and cannot change the
-  // reactor's dependency resolution, so they do not count.
+  // environmental: when the diff changed POMs, `.mvn/**`, the settings or
+  // repository locations `.mvn/maven.config` references, or the executed
+  // wrapper (which can redirect the local repository or settings), the
+  // resolution failure may be the diff's own doing. POMs under a project's
+  // `src/` tree are test fixtures (see isUnderTestSourceTree) and cannot
+  // change the reactor's dependency resolution — unless the reactor models
+  // them as live members, in which case they are real projects here too.
+  const settingsInputs = mavenConfigDependencyInputs(args.root);
   const dependencyInputsChanged = args.changedFiles.some((file) => {
     const path = normalizedChangedPath(args.root, file);
-    return (
-      path !== null &&
-      (path === 'pom.xml' ||
-        path.startsWith('.mvn/') ||
-        path === 'mvnw' ||
-        path === 'mvnw.cmd' ||
-        (path.endsWith('/pom.xml') &&
-          !isUnderTestSourceTree(path, parsed.reactor.projectDirs)))
-    );
+    if (path === null) return false;
+    if (path === 'pom.xml' || path.startsWith('.mvn/')) return true;
+    if (executedWrapper !== null && path === executedWrapper) return true;
+    if (
+      settingsInputs.some(
+        (input) => path === input || path.startsWith(`${input}/`),
+      )
+    ) {
+      return true;
+    }
+    if (path.endsWith('/pom.xml')) {
+      const projectDir = path.slice(0, -'/pom.xml'.length);
+      return (
+        parsed.reactor.projectDirs.includes(projectDir) ||
+        !isUnderTestSourceTree(path, parsed.reactor.projectDirs)
+      );
+    }
+    return false;
   });
   const lifecycle = args.buildOnly ? 'test-compile' : 'test';
   // `-am` builds the changed modules plus their upstream closure. `-amd`
@@ -848,7 +1153,22 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   // `testFailureIgnore` (or `-Dmaven.test.failure.ignore`) lets `mvn test`
   // exit 0 over failing tests, and the verdict must read the evidence.
   const freshFailures = hasFreshTestFailure(summaries);
-  const ok = result.exitCode === 0 && !result.timedOut && !freshFailures;
+  // A zero exit is not a pass when Maven's own framing records errors it did
+  // not fail on: a repo (or the PR itself) shipping `.mvn/maven.config` with
+  // `-fn`/`--fail-never` makes Maven exit 0 over compilation AND dependency
+  // resolution failures, and neither phase writes Surefire XML for
+  // `freshFailures` to see. Read the output, or the run verifies nothing
+  // while reporting green.
+  const swallowedFailure =
+    result.exitCode === 0 &&
+    !result.timedOut &&
+    !freshFailures &&
+    (isSourceFailure(result.output) || isDependencyFailure(result.output));
+  const ok =
+    result.exitCode === 0 &&
+    !result.timedOut &&
+    !freshFailures &&
+    !swallowedFailure;
   // Every carve-out carries a diff-inputs exception: when the PR changed
   // the wrapper or the dependency inputs, the failure may be the diff's own
   // doing and must not be laundered into an environmental result.
@@ -857,15 +1177,17 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     !freshFailures &&
     !isSourceFailure(result.output) &&
     result.exitCode !== null &&
-    ((isLaunchFailure(result.output) && !wrapperChanged) ||
+    ((isLaunchFailure(result.output) && !executedWrapperChanged) ||
       (isDependencyFailure(result.output) && !dependencyInputsChanged) ||
       (executable === './mvnw' &&
-        !wrapperChanged &&
+        !executedWrapperChanged &&
         (result.exitCode === 126 || result.exitCode === 127) &&
         WRAPPER_LAUNCH_FAILURE_RE.test(result.output)));
   const recorded = acquisitionFailure
     ? { ...result, infrastructure: true }
-    : result;
+    : swallowedFailure
+      ? { ...result, swallowedFailure: true }
+      : result;
   const report = mavenReport({
     affected,
     buildSet,
@@ -909,14 +1231,22 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
       'This is infrastructure evidence, not a source finding.';
   } else if (acquisitionFailure) {
     report.note =
-      `\`${result.command}\` failed while acquiring or starting Maven, Java, plugins, or dependencies. ` +
-      'This is infrastructure evidence, not a source finding.';
-  } else if (!ok && result.exitCode === 0) {
+      `\`${result.command}\` failed while acquiring or starting Maven, Java, plugins, or dependencies` +
+      (result.exitCode === 0
+        ? ' — a fail-never setting masked the failure with exit 0'
+        : '') +
+      '. This is infrastructure evidence, not a source finding.';
+  } else if (!ok && result.exitCode === 0 && freshFailures) {
     const totals = summaryTotals(summaries);
     report.note =
       `\`${result.command}\` exited 0 but fresh Surefire/Failsafe reports record ` +
       `${totals.failures} failure(s) and ${totals.errors} error(s) — a testFailureIgnore-style ` +
       'setting is swallowing them. Treat these as test failures, not a pass.';
+  } else if (!ok && result.exitCode === 0) {
+    report.note =
+      `\`${result.command}\` exited 0 but its output records failures Maven did not fail on — ` +
+      'a fail-never setting (e.g. `-fn`/`--fail-never` in `.mvn/maven.config`) is swallowing ' +
+      'them. Treat this as a failed run, not a pass.';
   } else if (!ok) {
     report.note =
       `\`${result.command}\` failed. Correlate compiler or test errors with the changed files; ` +
@@ -942,10 +1272,13 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
       '(`-pl … -am`); downstream dependents were NOT built — a POM or API change can break ' +
       "modules this run never compiled, and that coverage stays with the project's CI.";
   }
-  if (wrapperChanged && executable === 'mvn') {
+  if (wrapperChanged && !executedWrapperChanged) {
     report.note +=
-      ' Note: the diff changes the Maven wrapper, but this run used the system ' +
-      '`mvn` instead of it, so the wrapper change itself was not exercised.';
+      executable === 'mvn'
+        ? ' Note: the diff changes the Maven wrapper, but this run used the system ' +
+          '`mvn` instead of it, so the wrapper change itself was not exercised.'
+        : ` Note: the diff changes the Maven wrapper, but this run executed \`${executable}\`, ` +
+          'so the wrapper change itself was not exercised.';
   }
   return report;
 }

@@ -74,6 +74,12 @@ export interface CommandResult {
    * must not settle a Test Plan claim against.
    */
   infrastructure?: boolean;
+  /**
+   * The command exited 0 but its output records failures Maven did not fail
+   * on (a fail-never setting swallowed them): `test-plan` must not rule a
+   * Test Plan claim reproduced against this run.
+   */
+  swallowedFailure?: boolean;
 }
 
 export interface BuildTestReport {

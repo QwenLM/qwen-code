@@ -467,10 +467,22 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
 export const npmToolchainAdapter: ReviewToolchainAdapter = {
   // A root package.json alone is not an npm build project — docs sites, husky,
   // and lint configs put one in Java repos. Apply only when runNpmToolchain can
-  // actually scope something: workspaces, or a root build/test script. Without
-  // this, such repos collide with the Maven adapter and drop to `unsupported`
-  // where Maven verification would have run.
-  applies: (root) =>
-    readWorkspaceGlobs(root).length > 0 || readRootPackage(root) !== null,
+  // actually scope something: MODELED workspaces that resolve to at least one
+  // package, or a root build/test script. Mirroring the run-side gate here
+  // matters at mixed roots: an unmodeled-glob declaration (`packages/**`,
+  // `foo-*`) or a zero-package glob used to apply npm anyway, block Maven
+  // selection, and drop the repo to the very `unsupported` handoff this guard
+  // exists to prevent — even though npm.run would immediately concede
+  // unsupported and mvn.run alone would have succeeded.
+  applies: (root) => {
+    const globs = readWorkspaceGlobs(root);
+    if (globs.length > 0) {
+      return (
+        !hasUnmodeledWorkspaceGlob(globs) &&
+        readWorkspacePackages(root).length > 0
+      );
+    }
+    return readRootPackage(root) !== null;
+  },
   run: runNpmToolchain,
 };

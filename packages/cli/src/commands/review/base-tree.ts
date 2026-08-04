@@ -114,24 +114,68 @@ function gitHasPath(cwd: string, sha: string, path: string): boolean {
   return !r.error && r.status === 0;
 }
 
+function gitBlob(cwd: string, sha: string, path: string): string | null {
+  const r = spawnSync('git', ['cat-file', 'blob', `${sha}:${path}`], {
+    cwd,
+    encoding: 'utf8',
+  });
+  if (r.error || r.status !== 0) return null;
+  return r.stdout ?? '';
+}
+
+/**
+ * A root package.json the npm adapter would actually apply to: workspaces,
+ * or a root build/test script. A husky/lint-config/docs-tooling-only
+ * manifest applies to nothing, so suppressing the nested-pom probe for it
+ * would let a standalone-module Maven base pay the cold checkout this gate
+ * exists to prevent.
+ */
+function blobIsNpmProject(blob: string): boolean {
+  try {
+    const pkg = JSON.parse(blob) as {
+      workspaces?: unknown;
+      scripts?: Record<string, unknown>;
+    };
+    if (Array.isArray(pkg.workspaces) && pkg.workspaces.length > 0) {
+      return true;
+    }
+    const packages = (pkg.workspaces as { packages?: unknown } | undefined)
+      ?.packages;
+    if (Array.isArray(packages) && packages.length > 0) return true;
+    return (
+      typeof pkg.scripts === 'object' &&
+      pkg.scripts !== null &&
+      ('build' in pkg.scripts || 'test' in pkg.scripts)
+    );
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Nested-pom bases (standalone modules, no root aggregator) miss the root
- * `pom.xml` probe but are Maven just the same; when the base carries no root
- * `package.json` either, a depth-1 listing settles it before checkout. Only a
- * DIRECT child counts: a pom deeper than `<dir>/pom.xml` is a vendored
- * sample, an archetype fixture, or a maven-invoker IT, and counting one would
- * permanently — and silently — disable A/B attribution for a repo that merely
- * ships one.
+ * `pom.xml` probe but are Maven just the same; when the base carries no
+ * npm-applicable root `package.json` either, a depth-1 listing settles it
+ * before checkout. Only a DIRECT child counts: a pom deeper than
+ * `<dir>/pom.xml` is a vendored sample, an archetype fixture, or a
+ * maven-invoker IT, and counting one would permanently — and silently —
+ * disable A/B attribution for a repo that merely ships one.
  */
 function gitTreeHasNestedPom(cwd: string, sha: string): boolean {
-  const r = spawnSync('git', ['ls-tree', '--name-only', sha], {
+  // `-z` output is NUL-delimited and NEVER C-quoted, so directory names with
+  // non-ASCII bytes, quotes, tabs, or backslashes survive the round-trip
+  // into `cat-file` (the quoted `ls-tree` spelling resolves to nothing).
+  // Only mode 040000 entries are probed: file, symlink, and gitlink entries
+  // cannot hold a child pom.xml.
+  const r = spawnSync('git', ['ls-tree', '-z', sha], {
     cwd,
     encoding: 'utf8',
   });
   if (r.error || r.status !== 0) return false;
-  return (r.stdout ?? '')
-    .split('\n')
-    .some((entry) => entry && gitHasPath(cwd, sha, `${entry}/pom.xml`));
+  return (r.stdout ?? '').split('\0').some((entry) => {
+    const dir = /^040000 tree [0-9a-f]+\t(.+)$/.exec(entry)?.[1];
+    return dir ? gitHasPath(cwd, sha, `${dir}/pom.xml`) : false;
+  });
 }
 
 export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
@@ -237,11 +281,16 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
   // It still runs before the checkout, so a Maven base never pays for a tree
   // that would not be built — including the nested-pom shape (standalone
   // modules, no root aggregator), settled by a depth-1 listing when the base
-  // has no root package.json either.
+  // has no npm-applicable root package.json either. A husky-only manifest
+  // leaves no consumable npm half, so it must not suppress the probe.
+  const npmAtBase = (() => {
+    if (!gitHasPath(worktree, baseSha, 'package.json')) return false;
+    const blob = gitBlob(worktree, baseSha, 'package.json');
+    return blob !== null && blobIsNpmProject(blob);
+  })();
   if (
     gitHasPath(worktree, baseSha, 'pom.xml') ||
-    (!gitHasPath(worktree, baseSha, 'package.json') &&
-      gitTreeHasNestedPom(worktree, baseSha))
+    (!npmAtBase && gitTreeHasNestedPom(worktree, baseSha))
   ) {
     return unavailable(
       `the merge base is a Maven project, and this release's A/B attribution only reruns npm test ` +

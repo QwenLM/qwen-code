@@ -279,8 +279,67 @@ describe('runBuildTest', () => {
       install: false,
     });
     expect(rep.toolchain).toBe('unsupported');
-    expect(rep.note).toContain('does not model');
+    // The unscopable npm half no longer applies at selection, so the note
+    // is the generic handoff, not npm's unmodeled-glob wording.
+    expect(rep.note).toContain(
+      'No supported npm or Maven project here to scope',
+    );
     expect(rep.note).not.toContain('no package to build');
+  });
+
+  it('selects Maven when the npm half uses unmodeled workspace globs', () => {
+    // The guard exists for exactly this root: npm cannot scope `packages/**`,
+    // and applying anyway would block Maven selection into the same
+    // unsupported handoff this test's sibling pins.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'frontend', workspaces: ['packages/**'] }),
+    );
+    writeFileSync(join(root, 'pom.xml'), '<project/>');
+    writePlan(['src/Main.java']);
+    const exec = vi.fn();
+    const sentinel = { toolchain: 'maven' } as ReturnType<typeof runBuildTest>;
+    const runSpy = vi
+      .spyOn(mavenToolchainAdapter, 'run')
+      .mockReturnValue(sentinel);
+
+    const report = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 5,
+      install: false,
+      exec,
+    });
+
+    expect(report).toBe(sentinel);
+    expect(runSpy).toHaveBeenCalledOnce();
+    runSpy.mockRestore();
+  });
+
+  it('selects Maven when the npm glob matches zero packages', () => {
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'frontend', workspaces: ['packages/*'] }),
+    );
+    writeFileSync(join(root, 'pom.xml'), '<project/>');
+    writePlan(['src/Main.java']);
+    const exec = vi.fn();
+    const sentinel = { toolchain: 'maven' } as ReturnType<typeof runBuildTest>;
+    const runSpy = vi
+      .spyOn(mavenToolchainAdapter, 'run')
+      .mockReturnValue(sentinel);
+
+    const report = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 5,
+      install: false,
+      exec,
+    });
+
+    expect(report).toBe(sentinel);
+    expect(runSpy).toHaveBeenCalledOnce();
+    runSpy.mockRestore();
   });
 
   it('reinstalls when node_modules exists but is INCOMPLETE (no .package-lock.json)', () => {

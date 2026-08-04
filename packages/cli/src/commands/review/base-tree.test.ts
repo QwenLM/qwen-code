@@ -322,6 +322,100 @@ describe('runBaseTree', () => {
     expect(r.available).toBe(true);
   });
 
+  it('still detects a nested pom under a git-quoted directory name', () => {
+    // Non-ASCII names (and names with quotes, tabs, or backslashes) come
+    // back C-quoted from `ls-tree` under core.quotePath; the probe must
+    // resolve the raw name anyway, or the base slips past the gate.
+    mkdirSync(join(repo, 'm\u00f3dulo'), { recursive: true });
+    writeFileSync(join(repo, 'm\u00f3dulo', 'pom.xml'), '<project/>');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-qam', 'non-ascii nested maven base');
+    const sha = git(repo, 'rev-parse', 'HEAD');
+
+    const plan = join(repo, 'plan.json');
+    writeFileSync(plan, JSON.stringify({ mergeBaseSha: sha, files: [] }));
+    const builds: string[] = [];
+    const r = runBaseTree({
+      plan,
+      worktree,
+      timeout: 60,
+      install: false,
+      build: (w) => {
+        builds.push(w);
+        return okBuild;
+      },
+    });
+
+    expect(r.available).toBe(false);
+    expect(builds).toEqual([]);
+    expect(r.note).toContain('Maven');
+    expect(existsSync(baseWorktreePath(worktree))).toBe(false);
+  });
+
+  it('does NOT let a husky-only package.json suppress the nested-pom probe', () => {
+    // A script-less, workspace-less manifest is not an npm project under
+    // the adapter's applies rule, so a standalone Maven module beside it
+    // must still be caught before checkout.
+    mkdirSync(join(repo, 'app'), { recursive: true });
+    writeFileSync(join(repo, 'app', 'pom.xml'), '<project/>');
+    writeFileSync(
+      join(repo, 'package.json'),
+      JSON.stringify({ scripts: { prepare: 'husky' } }),
+    );
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-qam', 'husky + nested maven');
+    const sha = git(repo, 'rev-parse', 'HEAD');
+
+    const plan = join(repo, 'plan.json');
+    writeFileSync(plan, JSON.stringify({ mergeBaseSha: sha, files: [] }));
+    const builds: string[] = [];
+    const r = runBaseTree({
+      plan,
+      worktree,
+      timeout: 60,
+      install: false,
+      build: (w) => {
+        builds.push(w);
+        return okBuild;
+      },
+    });
+
+    expect(r.available).toBe(false);
+    expect(builds).toEqual([]);
+    expect(r.note).toContain('Maven');
+  });
+
+  it('suppresses the nested-pom probe for an npm-applicable package.json', () => {
+    // A build/test script (or workspaces) makes the base npm's to consume;
+    // the probe stays home and the build decides.
+    mkdirSync(join(repo, 'app'), { recursive: true });
+    writeFileSync(join(repo, 'app', 'pom.xml'), '<project/>');
+    writeFileSync(
+      join(repo, 'package.json'),
+      JSON.stringify({ scripts: { build: 'tsc' } }),
+    );
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-qam', 'npm + nested maven');
+    const sha = git(repo, 'rev-parse', 'HEAD');
+
+    const plan = join(repo, 'plan.json');
+    writeFileSync(plan, JSON.stringify({ mergeBaseSha: sha, files: [] }));
+    const builds: string[] = [];
+    const r = runBaseTree({
+      plan,
+      worktree,
+      timeout: 60,
+      install: false,
+      build: (w) => {
+        builds.push(w);
+        return okBuild;
+      },
+    });
+
+    expect(builds).toHaveLength(1);
+    expect(r.available).toBe(true);
+  });
+
   it('is NOT available for a Maven build report the delta machinery cannot consume', () => {
     const mavenBuild = {
       ok: true,

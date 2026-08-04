@@ -123,6 +123,7 @@ describe('maven toolchain adapter', () => {
           '.': ['core', 'nested-parent'],
           'nested-parent': ['nested-parent/nested-leaf'],
         },
+        inheritors: {},
       },
     });
     if (!parsed.reactor) throw new Error('expected reactor');
@@ -167,6 +168,7 @@ describe('maven toolchain adapter', () => {
         modules: ['core'],
         projectDirs: ['.', 'core'],
         children: { '.': ['core'] },
+        inheritors: {},
       },
     });
   });
@@ -195,14 +197,17 @@ describe('maven toolchain adapter', () => {
         modules: ['core'],
         projectDirs: ['.', 'core'],
         children: { '.': ['core'] },
+        inheritors: {},
       },
     });
   });
 
-  it('still fails closed on an unbalanced comment marker', () => {
+  it('still fails closed on an unpaired comment opener', () => {
+    // A bare \`-->\` in text or an attribute value is well-formed CharData
+    // and parses fine; only an opener with no terminator is unsafe.
     writeFileSync(
       join(root, 'pom.xml'),
-      pom(['core']).replace('</modules>', '-->\n  </modules>'),
+      pom(['core']).replace('</modules>', '<!--\n  </modules>'),
     );
     writeProject('core');
 
@@ -216,6 +221,11 @@ describe('maven toolchain adapter', () => {
     // cmd.exe expands %VAR% even inside `"…"`, and no legitimate Maven
     // module path uses `%`.
     ['a%b', 'shell-active module entries'],
+    // `-pl` splits its selector on commas, and Maven reads any selector
+    // carrying `:` as `[groupId]:artifactId` coordinates, never a path —
+    // neither shape can reach a shell selector.
+    ['a,b', '-pl selector separators'],
+    ['a:b', '-pl coordinate markers'],
   ])('fails closed for %s', (module, _description) => {
     writeProject('.', [module]);
     if (module === '../outside') {
@@ -690,6 +700,16 @@ describe('maven toolchain adapter', () => {
 
   it.each([
     ['sh: 1: mvn: not found', 127],
+    // zsh names the command LAST; it also prints this in sh-compat mode.
+    ['zsh: command not found: mvn', 127],
+    ['sh: command not found: mvn', 127],
+    // PowerShell's phrasing when Maven is absent.
+    [
+      "mvn: The term 'mvn' is not recognized as a name of a cmdlet, function, script file, or operable program",
+      127,
+    ],
+    // fish's phrasing.
+    ['fish: Unknown command: mvn', 127],
     // cmd.exe's wording when Maven is absent on Windows (exit 9009).
     ["'mvn' is not recognized as an internal or external command", 9009],
     [
@@ -796,13 +816,7 @@ describe('maven toolchain adapter', () => {
     const output =
       '[ERROR] Could not resolve dependencies for project example:core';
 
-    for (const changed of [
-      'pom.xml',
-      '.mvn/maven.config',
-      'core/pom.xml',
-      'mvnw',
-      'mvnw.cmd',
-    ]) {
+    for (const changed of ['pom.xml', '.mvn/maven.config', 'core/pom.xml']) {
       const report = mavenToolchainAdapter.run({
         root,
         changedFiles: [changed],
@@ -812,6 +826,21 @@ describe('maven toolchain adapter', () => {
       });
       expect(report.note).toContain('Correlate compiler or test errors');
       expect(report.note).not.toContain('infrastructure evidence');
+    }
+
+    // No executable wrapper exists on disk, so the run used the system
+    // `mvn`: a wrapper file this run never executed cannot have caused its
+    // resolution failure, so the carve-out stays — with a disclosure.
+    for (const changed of ['mvnw', 'mvnw.cmd']) {
+      const report = mavenToolchainAdapter.run({
+        root,
+        changedFiles: [changed],
+        timeout: 5,
+        install: false,
+        exec: (command) => result(command, { exitCode: 1, output }),
+      });
+      expect(report.note).toContain('infrastructure evidence');
+      expect(report.note).toContain('wrapper change itself was not exercised');
     }
   });
 
@@ -1379,6 +1408,7 @@ describe('maven toolchain adapter', () => {
         modules: ['a', 'b'],
         projectDirs: ['.', 'a', 'b'],
         children: { '.': ['a'], a: ['b'], b: ['a'] },
+        inheritors: {},
       },
     });
   });
@@ -1527,5 +1557,477 @@ describe('maven toolchain adapter', () => {
     expect(report.test).toEqual([]);
     expect(calls).toEqual([]);
     expect(report.note).toContain('Insufficient disk space');
+  });
+
+  it('attributes failures to the failing cases in declaration order', () => {
+    // Surefire writes passing cases self-closing, in execution order: a
+    // passing case must not absorb the following case's failure, and the
+    // real failing cases must be the ones reported.
+    writeReactor();
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Core.xml'),
+          '<testsuite tests="4" failures="2" errors="0" skipped="0">' +
+            '<testcase classname="example.CoreTest" name="alpha" time="0.01"/>' +
+            '<testcase classname="example.CoreTest" name="beta" time="0.01"><failure message="boom"/></testcase>' +
+            '<testcase classname="example.CoreTest" name="gamma" time="0.01"/>' +
+            '<testcase classname="example.CoreTest" name="delta" time="0.01"><failure message="boom"/></testcase>' +
+            '</testsuite>',
+        );
+        return result(command, { exitCode: 1, output: '[ERROR] Tests failed' });
+      },
+    });
+
+    const output = report.test[0]?.output ?? '';
+    expect(output).toContain('example.CoreTest#beta');
+    expect(output).toContain('example.CoreTest#delta');
+    expect(output).not.toContain('CoreTest#alpha');
+    expect(output).not.toContain('CoreTest#gamma');
+  });
+
+  it('keeps counts and identity when attribute values carry `>`', () => {
+    // A \`>\` is legal unescaped inside a quoted XML attribute value —
+    // parameterized-test and @DisplayName names carry them.
+    writeReactor();
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Core.xml'),
+          '<testsuite name="Params [a > b]" tests="1" failures="1" errors="0" skipped="0">' +
+            '<testcase classname="example.T" name="fails [x > y]"><failure message="boom"/></testcase>' +
+            '</testsuite>',
+        );
+        return result(command, { exitCode: 1, output: '[ERROR] Tests failed' });
+      },
+    });
+
+    expect(report.ok).toBe(false);
+    const output = report.test[0]?.output ?? '';
+    expect(output).toContain('tests=1, failures=1, errors=0, skipped=0');
+    expect(output).toContain('example.T#fails [x > y]');
+  });
+
+  it('aggregates every suite in one report file', () => {
+    // Aggregate JUnit writers (jest-junit, karma) emit several <testsuite>
+    // elements per file; reading only the first undercounts later suites'
+    // failures to zero and discards the failing cases.
+    writeReactor();
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Aggregate.xml'),
+          '<testsuites>' +
+            '<testsuite name="one" tests="1" failures="0" errors="0" skipped="0">' +
+            '<testcase classname="example.One" name="pass"/></testsuite>' +
+            '<testsuite name="two" tests="1" failures="1" errors="0" skipped="0">' +
+            '<testcase classname="example.Two" name="fails"><failure/></testcase>' +
+            '</testsuite>' +
+            '</testsuites>',
+        );
+        return result(command);
+      },
+    });
+
+    expect(report.ok).toBe(false);
+    const output = report.test[0]?.output ?? '';
+    expect(output).toContain('tests=2, failures=1, errors=0, skipped=0');
+    expect(output).toContain('example.Two#fails');
+    expect(report.note).toContain('exited 0');
+  });
+
+  it('ignores oversized report files rather than parsing them', () => {
+    // Evidence files are PR-controlled: the size cap keeps a multi-megabyte
+    // file from burning the outer deadline, at the cost of its evidence.
+    writeReactor();
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Huge.xml'),
+          '<testsuite tests="1" failures="1" errors="0" skipped="0">' +
+            '<testcase classname="example.Huge" name="x"'.repeat(60_000),
+        );
+        return result(command, { exitCode: 1, output: '[ERROR] Tests failed' });
+      },
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.output).not.toContain('TEST-Huge.xml');
+  });
+
+  it('does not pass a zero exit that recorded framed compile errors', () => {
+    // A fail-never setting (-fn/--fail-never) makes Maven exit 0 over a
+    // compilation failure; no Surefire XML exists for freshFailures to see.
+    writeReactor();
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) =>
+        result(command, {
+          exitCode: 0,
+          output:
+            '[ERROR] COMPILATION ERROR :\n' +
+            '[ERROR] /x/core/src/main/java/example/Main.java:[12,5] cannot find symbol',
+        }),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.swallowedFailure).toBe(true);
+    expect(report.test[0]?.infrastructure).toBeUndefined();
+    expect(report.note).toContain('exited 0');
+    expect(report.note).toContain('fail-never');
+    expect(report.note).not.toContain('Maven test passed');
+  });
+
+  it('classifies a fail-never dependency failure as infrastructure', () => {
+    // The same masking at the dependency phase — unless the diff changed
+    // the resolution inputs — stays environmental like the exit-1 form.
+    writeReactor();
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) =>
+        result(command, {
+          exitCode: 0,
+          output:
+            '[ERROR] Could not resolve dependencies for project example:core',
+        }),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.infrastructure).toBe(true);
+    expect(report.note).toContain('infrastructure evidence');
+    expect(report.note).toContain('fail-never');
+  });
+
+  it('keeps Kotlin compile failures source-attributed beside dependency words', () => {
+    writeReactor();
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.kt'],
+      timeout: 5,
+      install: false,
+      exec: (command) =>
+        result(command, {
+          exitCode: 1,
+          output:
+            '[ERROR] Could not transfer artifact org.example:lib:pom:1 from central: Connection timed out\n' +
+            '[ERROR] Failed to execute goal org.jetbrains.kotlin:kotlin-maven-plugin:1.9.0:compile (default-compile) on project core: Compilation failure\n' +
+            '[ERROR] /x/core/src/main/kotlin/example/Main.kt: (12, 5): Unresolved reference: foo',
+        }),
+    });
+
+    expect(report.note).toContain('Correlate compiler or test errors');
+    expect(report.note).not.toContain('infrastructure evidence');
+    expect(report.test[0]?.infrastructure).toBeUndefined();
+  });
+
+  it('ignores CDATA markers that only appear inside comments', () => {
+    // A CDATA-before-comments strip paired the commented \`<![CDATA[\` with a
+    // commented \`]]>\` later in the file and swallowed the real markup
+    // between them; inside a comment both are literal text.
+    writeFileSync(
+      join(root, 'pom.xml'),
+      `
+<project>
+  <!-- CDATA sections look like this: <![CDATA[ -->
+  <modules>
+    <module>app</module>
+  </modules>
+  <!-- and they end like this: ]]> -->
+</project>
+`,
+    );
+    writeProject('app');
+
+    expect(readMavenReactor(root)).toEqual({
+      reactor: {
+        modules: ['app'],
+        projectDirs: ['.', 'app'],
+        children: { '.': ['app'] },
+        inheritors: {},
+      },
+    });
+  });
+
+  it('keeps parsing POMs whose content carries literal comment markers', () => {
+    // replace/templating plugins substitute tokens like \`-->\` into text and
+    // attribute values; well-formed CharData must not fail the reactor closed.
+    writeFileSync(
+      join(root, 'pom.xml'),
+      `
+<project>
+  <build><plugins><plugin><configuration>
+    <replacement>--></replacement>
+    <arg value="a --> b"/>
+  </configuration></plugin></plugins></build>
+  <modules>
+    <module>core</module>
+  </modules>
+</project>
+`,
+    );
+    writeProject('core');
+
+    expect(readMavenReactor(root).reactor?.modules).toEqual(['core']);
+  });
+
+  it('still builds the owning module for compilable files under a doc prefix', () => {
+    // The docs?/ prefix exempts documentation EXTENSIONS only: a .java file
+    // under doc/ is compilable input, not documentation.
+    writeReactor();
+    const calls: string[] = [];
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/README.md', 'core/doc/Helper.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        calls.push(command);
+        return result(command);
+      },
+    });
+
+    expect(report.toolchain).toBe('maven');
+    expect(report.affected).toEqual(['core']);
+    expect(calls).toEqual([
+      'mvn --batch-mode --no-transfer-progress -pl core -am test',
+    ]);
+  });
+
+  it('leaves module repository metadata without Maven targets', () => {
+    writeReactor();
+    const calls: string[] = [];
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/LICENSE', 'core/.gitignore'],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        calls.push(command);
+        return result(command);
+      },
+    });
+
+    expect(report.toolchain).toBe('maven');
+    expect(report.ok).toBe(true);
+    expect(report.affected).toEqual([]);
+    expect(calls).toEqual([]);
+  });
+
+  const childPomInheriting = (relativePath?: string): string =>
+    pom().replace(
+      '<project>',
+      `<project>
+  <parent>
+    <groupId>example</groupId>
+    <artifactId>fixture</artifactId>
+    <version>1</version>${
+      relativePath ? `\n    <relativePath>${relativePath}</relativePath>` : ''
+    }
+  </parent>`,
+    );
+
+  it('fans a parent POM change out to the modules inheriting it', () => {
+    writeProject('.', ['parent', 'core', 'ext']);
+    writeProject('parent');
+    writeProject('core');
+    writeProject('ext');
+    for (const module of ['core', 'ext']) {
+      writeFileSync(
+        join(root, module, 'pom.xml'),
+        childPomInheriting('../parent/pom.xml'),
+      );
+    }
+
+    const parsed = readMavenReactor(root);
+    expect(parsed).toEqual({
+      reactor: {
+        modules: ['core', 'ext', 'parent'],
+        projectDirs: ['.', 'core', 'ext', 'parent'],
+        children: { '.': ['core', 'ext', 'parent'] },
+        inheritors: { parent: ['core', 'ext'] },
+      },
+    });
+    if (!parsed.reactor) throw new Error('expected reactor');
+    expect(
+      detectMavenOwnership(root, ['parent/pom.xml'], parsed.reactor),
+    ).toEqual({
+      reactorWide: false,
+      modules: ['core', 'ext', 'parent'],
+      inactiveProjects: [],
+    });
+  });
+
+  it('resolves a defaulted relativePath to the matching parent', () => {
+    writeProject('.', ['core']);
+    writeProject('core');
+    writeFileSync(join(root, 'core', 'pom.xml'), childPomInheriting());
+
+    // No explicit <relativePath>: Maven defaults to ../pom.xml, which here
+    // is the root project carrying the declared artifactId.
+    expect(readMavenReactor(root).reactor?.inheritors).toEqual({
+      '.': ['core'],
+    });
+  });
+
+  it('drops a parent edge whose artifactId does not match', () => {
+    writeProject('.', ['core']);
+    writeProject('core');
+    writeFileSync(
+      join(root, 'core', 'pom.xml'),
+      childPomInheriting('../parent/pom.xml').replace(
+        '<artifactId>fixture</artifactId>',
+        '<artifactId>corporate-parent</artifactId>',
+      ),
+    );
+    writeProject('parent');
+
+    // The local pom does not carry the declared parent; Maven resolves it
+    // from the repository, so there is no local edge to model.
+    expect(readMavenReactor(root).reactor?.inheritors).toEqual({});
+  });
+
+  it('treats settings referenced by .mvn/maven.config as dependency inputs', () => {
+    writeReactor();
+    mkdirSync(join(root, '.mvn'));
+    writeFileSync(join(root, '.mvn', 'maven.config'), '-s settings.xml\n');
+    writeFileSync(join(root, 'settings.xml'), '<settings/>\n');
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['settings.xml'],
+      timeout: 5,
+      install: false,
+      exec: (command) =>
+        result(command, {
+          exitCode: 1,
+          output:
+            '[ERROR] Could not resolve dependencies for project example:core',
+        }),
+    });
+
+    expect(report.note).toContain('Correlate compiler or test errors');
+    expect(report.note).not.toContain('infrastructure evidence');
+  });
+
+  it('treats a reactor-member POM under src/ as a dependency input', () => {
+    // A reactor aggregating a project under another project's src/ models
+    // it as a live member everywhere else, so changing its POM is a
+    // resolution input too — not an inert fixture.
+    writeProject('.', ['app', 'core/src/it/app']);
+    writeProject('app');
+    writeProject('core/src/it/app');
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/it/app/pom.xml'],
+      timeout: 5,
+      install: false,
+      exec: (command) =>
+        result(command, {
+          exitCode: 1,
+          output:
+            '[ERROR] Could not resolve dependencies for project example:app',
+        }),
+    });
+
+    expect(report.note).toContain('Correlate compiler or test errors');
+    expect(report.note).not.toContain('infrastructure evidence');
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'keeps the carve-out when only the other platform wrapper changed',
+    () => {
+      // POSIX executes ./mvnw; a changed mvnw.cmd cannot affect the run.
+      writeReactor();
+      writeWrapper();
+      writeFileSync(join(root, 'mvnw.cmd'), '@echo off\n');
+      const calls: string[] = [];
+
+      const report = mavenToolchainAdapter.run({
+        root,
+        changedFiles: ['mvnw.cmd'],
+        timeout: 5,
+        install: false,
+        exec: (command) => {
+          calls.push(command);
+          return result(command, {
+            exitCode: 1,
+            output:
+              '[ERROR] Could not resolve dependencies for project example:core',
+          });
+        },
+      });
+
+      expect(calls[0]).toContain('./mvnw');
+      expect(report.note).toContain('infrastructure evidence');
+      expect(report.note).toContain('wrapper change itself was not exercised');
+    },
+  );
+
+  it('clamps negative report counts to zero', () => {
+    // A malformed failures="-3" must not cancel legitimate counts when
+    // totals roll up across reports.
+    writeReactor();
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Core.xml'),
+          '<testsuite tests="1" failures="-3" errors="0" skipped="0">' +
+            '<testcase classname="example.T" name="pass"/></testsuite>',
+        );
+        return result(command);
+      },
+    });
+
+    expect(report.ok).toBe(true);
+    expect(report.test[0]?.output).toContain(
+      '[maven-test-report] core (1 report(s)): tests=1, failures=0, errors=0, skipped=0',
+    );
   });
 });
