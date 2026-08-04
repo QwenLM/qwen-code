@@ -221,7 +221,7 @@ describe('useProviderUpdates', () => {
     expect(entry?.diff.added).toContain(addedModelId);
   });
 
-  it('preserves user-added custom models when executing an update', async () => {
+  it('preserves custom models without including them in the stored version', async () => {
     const customModel = {
       id: 'my-custom-model',
       baseUrl: CODING_PLAN_CHINA_BASE_URL,
@@ -262,6 +262,11 @@ describe('useProviderUpdates', () => {
       expect.arrayContaining([
         expect.objectContaining({ id: 'my-custom-model' }),
       ]),
+    );
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      `${PROVIDER_METADATA_NS}.${METADATA_KEY}.version`,
+      chinaVersion,
     );
   });
 
