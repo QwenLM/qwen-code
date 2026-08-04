@@ -1258,11 +1258,15 @@ function gitOut(cwd: string, ...args: string[]): string {
  * same up-tree walk Node uses for the probe's own imports, so it also survives
  * non-hoisted layouts.
  */
-export function findVitestBin(worktree: string): string {
-  const req = createRequire(join(worktree, 'noop.js'));
+export function findVitestBin(
+  worktree: string,
+  resolveModule: (specifier: string) => string = createRequire(
+    join(worktree, 'noop.js'),
+  ).resolve,
+): string {
   let pkgPath: string;
   try {
-    pkgPath = req.resolve('vitest/package.json');
+    pkgPath = resolveModule('vitest/package.json');
   } catch (error) {
     // Only a genuine MODULE_NOT_FOUND is "vitest not found". A present vitest
     // whose `exports` no longer exposes `./package.json` throws

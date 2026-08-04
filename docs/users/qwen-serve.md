@@ -402,6 +402,9 @@ Notes:
 | `--max-journal-bytes <n>`               | `8388608`          | Per-session byte cap on the in-flight live journal. When exceeded, the oldest journal entries are dropped (at least one entry is always kept). Must be a positive safe integer. Defaults to 8 MiB.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `--mcp-client-budget <n>`               | —                  | Positive integer cap on live MCP clients. When `mcp_workspace_pool` is advertised, the cap and transports are shared per workspace runtime; when the tag is absent, the legacy per-session manager enforces it. Combine with `--mcp-budget-mode`. When unset, no accounting-driven enforcement (but `GET /workspace/mcp` still reports `clientCount`). Distinct from claude-code's `MCP_SERVER_CONNECTION_BATCH_SIZE`, which gates startup concurrency rather than total live clients. Pre-flight `caps.features.mcp_guardrails` and `caps.features.mcp_workspace_pool`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `--mcp-budget-mode <m>`                 | `warn` / `off`     | How `--mcp-client-budget` is enforced. `warn` (default when budget set): no refusal, snapshot's `budgets[0].status` flips to `warning` at ≥75% of budget. `enforce`: connects past the cap are refused, per-server cell shows `disabledReason: 'budget'`, deterministic by `mcpServers` declaration order. `off` (default when budget unset): pure observability. Boot rejects `enforce` without a budget.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `--external-tool-guard-mode <m>`        | `off`              | Managed ACP external pre-execution policy. `off` makes no provider calls and advertises no capability. `required` fails startup unless a compatible provider completes the v1 handshake, then fails every supported top-level tool invocation closed unless its single prepare request is allowed.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `--external-tool-guard-endpoint <url>`  | —                  | Origin-only loopback HTTP(S) provider URL used in `required` mode, for example `http://127.0.0.1:8787`. Paths, URL credentials, redirects, non-loopback hosts, and proxy routing are not accepted.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `--external-tool-guard-timeout-ms <n>`  | `3000`             | Integer `100..30000`; applies independently to the startup handshake and each prepare request.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `--http-bridge`                         | `true`             | Stage 1 mode: production attempts to preheat one primary `qwen --acp` child for compatibility and retries on first use after failure, while each trusted secondary can start one child on demand. Sessions targeting a runtime multiplex onto its child via ACP `newSession()`; untrusted secondaries cannot start ACP. Stage 2 native in-process becomes available later.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `--initialize-timeout-ms <n>`           | `10000`            | ACP child request timeout, including the `initialize` handshake (ms). Must be a positive integer up to `2147483647`. Values above the JS timer ceiling (`2^31-1`) are rejected at boot because Node silently compresses them to 1 ms. Cold-container deployments that need extra headroom for child startup can raise this; the same value governs `newSession`, workspace-status polls, and other ACP ext-method deadlines.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `--allow-origin <pat>`                  | —                  | T2.4 ([#4514](https://github.com/QwenLM/qwen-code/issues/4514)). Cross-origin allowlist for browser webui clients. Repeatable. Each value is `*` (any origin — boot refuses if no bearer token is configured; `--require-auth` on loopback is recommended so `/health` and `/demo` are also bearer-gated, since both are pre-auth on loopback by default) or a canonical URL origin (`<scheme>://<host>[:<port>]`, no trailing slash / path / userinfo / query). **Subdomain wildcards (`https://*.example.com`) are intentionally unsupported** — list each subdomain explicitly, or use `*` with a configured token (and `--require-auth` for full hardening). Matched origins receive CORS response headers (`Access-Control-Allow-Origin`, `Vary: Origin`, methods, headers, max-age, and exposed `Retry-After`); unmatched origins still get a 403 with the same envelope as today's wall. `Origin: null` (sandboxed iframes, file:// docs) is always rejected, even under `*`. Pre-flight via `caps.features.allow_origin`. Loopback self-origin hits are unaffected. |
@@ -426,6 +429,78 @@ Notes:
 >   is trimmed and lowercased (`"  Workspace  "` works); the CLI flag is
 >   matched case-sensitively by yargs `choices` (`--memory-project-scope
 Workspace` is rejected). Use lowercase values when copying between the two.
+
+### Required external Tool Guard
+
+This opt-in is for managed ACP deployments that need an external allow/deny
+decision at the final tool-executor boundary. It is fully dark unless
+`--external-tool-guard-mode=required` is present:
+
+```sh
+export QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN='replace-with-local-secret'
+
+qwen serve \
+  --external-tool-guard-mode=required \
+  --external-tool-guard-endpoint=http://127.0.0.1:8787 \
+  --external-tool-guard-timeout-ms=3000
+```
+
+The provider must expose `POST /v1/handshake` and `POST /v1/prepare`, require
+`Authorization: Bearer <token>`, return JSON, echo the supplied nonce or
+request ID, and use protocol version `1`. The token must be non-blank, at most
+8192 UTF-16 code units, and contain no control characters. Requests are limited
+to 1 MiB, responses to 64 KiB, and optional denial reasons to 500 UTF-16 code
+units without control characters. A successful prepare response is:
+
+```json
+{ "protocolVersion": 1, "requestId": "<echo>", "allowed": true }
+```
+
+A denial uses `allowed:false` and may add a short `reason`. For each supported
+top-level tool invocation that passes existing permission and `PreToolUse`
+gates and reaches the final execution boundary, Qwen Code sends one prepare
+request and never retries it. An earlier permission/hook denial sends no
+prepare request. Timeout, cancellation, transport failure, malformed or
+mismatched responses, and explicit denial prevent the executor from running.
+Each spawned ACP channel must also acknowledge that it installed the required
+callback; a missing or incompatible acknowledgement rejects the channel before
+Session creation.
+The provider request carries `sessionId`, `promptId`, `toolCallId`, canonical
+`toolName`, and final `arguments`; `toolCallId` is a correlation label, not an
+authentication identity or standalone idempotency key.
+
+Final arguments can contain sensitive application data. Treat them as such in
+provider logs and audit storage.
+
+`PreToolUse` hooks run before this final executor decision. Required Guard mode
+does not authorize or sandbox hook behavior; deployments that need a boundary
+around every possible side effect must disable hooks or govern their
+implementations separately.
+
+Slash-command actions also run before model/tool scheduling and are not Guard
+invocations. Some built-ins can directly change files or settings. A managed
+deployment that needs an all-effects boundary must reject slash-command input
+or disable every non-approved command through `slashCommands.disabled` or
+`--disabled-slash-commands`.
+
+The v1 managed scope is top-level tools invoked by an active foreground
+managed Prompt. Nested or delegating `agent`, `workflow`,
+`create_sub_session`, `send_message`, direct `/fork`, and agent-backed
+workspace memory remember/dream controls are rejected while required mode is
+active. A top-level background shell or monitor start is still one guarded
+invocation and its final arguments reach the provider, but this feature does
+not continuously authorize the process or add a process-completion audit
+protocol; a policy that requires foreground completion should deny those
+shapes. Guarded MCP calls also disable automatic reconnect/replay after a
+transport error. After a successful startup handshake, `/capabilities`
+advertises `external_tool_guard`; its absence means clients must not assume
+enforcement.
+
+This feature does not authorize explicit daemon REST/ACP management calls;
+those continue to use the daemon's existing authentication and route
+contracts. It also does not make an allowed tool or shell command
+deterministic or sandbox its internals; managed deployments must combine the
+provider decision with their normal tool policy and isolation boundary.
 
 > **Sizing the load knobs.** `--max-sessions` is the per-workspace fresh-session cap. `--max-total-sessions`, when set, is the daemon-wide fresh-session cap.
 > Three other layers also limit load — when sizing for a high-concurrency
