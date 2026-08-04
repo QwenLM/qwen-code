@@ -1586,6 +1586,41 @@ describe('microcompactHistory', () => {
     expect(cleared.response.output).toBe(MICROCOMPACT_CLEARED_MESSAGE);
     expect(cleared.parts).toBeUndefined();
   });
+
+  it('keeps a media-only tool result in the recent-result budget (idle path)', () => {
+    // An image/PDF read_file result carries empty text output with its
+    // bytes on functionResponse.parts. Empty output must not evict it
+    // from the keepRecent candidates — unlike errors or placeholders it
+    // IS clearable on this path, and it is the newest result here.
+    const mediaOnlyResult: Content = {
+      role: 'user',
+      parts: [
+        {
+          functionResponse: {
+            id: 'img',
+            name: 'read_file',
+            response: { output: '' },
+            parts: [
+              { inlineData: { mimeType: 'image/png', data: 'BASE64IMAGE' } },
+            ],
+          } as unknown as NonNullable<
+            Content['parts']
+          >[number]['functionResponse'],
+        },
+      ],
+    };
+    const history: Content[] = [makeToolCall('read_file'), mediaOnlyResult];
+
+    const result = microcompactHistory(history, twoHoursAgo, DEFAULT_SETTINGS);
+
+    expect(result.meta).toBeUndefined();
+    expect(result.history).toBe(history);
+    const kept = result.history[1]!.parts![0]!.functionResponse as {
+      response: { output: string };
+      parts?: Array<{ inlineData?: { data?: string } }>;
+    };
+    expect(kept.parts?.[0]?.inlineData?.data).toBe('BASE64IMAGE');
+  });
 });
 
 describe('microcompactHistory evictedReadPaths (issue #4239)', () => {
@@ -1647,9 +1682,10 @@ describe('microcompactHistory evictedReadPaths (issue #4239)', () => {
   });
 
   it('lets a kept write_file result vouch for residency', () => {
-    // A kept write_file/edit result proves the model authored the file's
-    // bytes, so the path stays resident when the older read_file result
-    // for the same file is blanked.
+    // A kept write_file result proves the file's complete current bytes
+    // are in history — the functionCall carries the full content — so
+    // the path stays resident when the older read_file result for the
+    // same file is blanked.
     const history: Content[] = [
       fileCall('old', 'read_file', '/proj/a.ts'),
       fileResult('old', 'read_file', 'old long content '.repeat(50)),
@@ -1665,6 +1701,27 @@ describe('microcompactHistory evictedReadPaths (issue #4239)', () => {
     expect(result.meta).toBeDefined();
     expect(result.meta!.toolsCleared).toBe(1);
     expect(result.meta!.evictedReadPaths).toEqual([]);
+    expect(result.meta!.unresolvedEvictedReads).toBe(0);
+  });
+
+  it('does not let a kept edit result vouch for residency', () => {
+    // An edit call carries only old/new snippets — the complete bytes
+    // lived in the older full read being blanked — yet it sets the
+    // cache's sticky full-read flags. Only write_file proves residency.
+    const history: Content[] = [
+      fileCall('old', 'read_file', '/proj/a.ts'),
+      fileResult('old', 'read_file', 'old long content '.repeat(50)),
+      fileCall('keep', 'edit', '/proj/a.ts'),
+      fileResult('keep', 'edit', 'edit success snippet'),
+    ];
+
+    const result = microcompactHistory(history, TWO_HOURS_AGO, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 1,
+    });
+
+    expect(result.meta!.toolsCleared).toBe(1);
+    expect(result.meta!.evictedReadPaths).toEqual(['/proj/a.ts']);
     expect(result.meta!.unresolvedEvictedReads).toBe(0);
   });
 

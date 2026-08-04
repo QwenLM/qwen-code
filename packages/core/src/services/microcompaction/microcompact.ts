@@ -368,10 +368,13 @@ function buildKeptFilePaths(
     if (!keepRefs.has(refKey(ref))) continue;
     const part = getPart(history, ref);
     if (!part || isErrorResponse(part) || isAlreadyCleared(part)) continue;
-    // Only write_file/edit results anchor bytes the model authored.
-    // read_file results can be cache-hit placeholders or partial slices,
-    // so they cannot prove a file stays resident (issue #4239).
-    if (part.functionResponse?.name === ToolNames.READ_FILE) {
+    // Only write_file results anchor the file's complete current bytes:
+    // the functionCall carries the full `content` on a model-role part
+    // microcompaction never blanks. read_file results can be cache-hit
+    // placeholders or partial slices, and edit results carry only an
+    // old/new snippet while still setting the cache's sticky full-read
+    // flags — neither proves the file stays resident (issue #4239).
+    if (part.functionResponse?.name !== ToolNames.WRITE_FILE) {
       continue;
     }
     const paths = getFilePathsForResponse(part, callIdToFilePath);
@@ -590,10 +593,15 @@ export function microcompactHistory(
     // threshold for "tool results".
     // Zero-char tool refs (errors, already-cleared placeholders, empty
     // output) are never clearable, so letting them absorb protection
-    // slots would strand real recent outputs unprotected. Media uses the
-    // same budget by count but is always clearable.
+    // slots would strand real recent outputs unprotected. Media-carrying
+    // results (image/PDF reads) have empty text output but ARE clearable
+    // on this path, so they must stay protection candidates. Media uses
+    // the same budget by count but is always clearable.
     const keepToolRefs = buildKeepRefs(
-      tool.filter((ref) => getToolOutputChars(getPart(history, ref)) > 0),
+      tool.filter((ref) => {
+        const part = getPart(history, ref);
+        return getToolOutputChars(part) > 0 || (!!part && hasNestedMedia(part));
+      }),
       keepRecent,
     );
     keepRefs = new Set([
