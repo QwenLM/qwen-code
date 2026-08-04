@@ -6,7 +6,12 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Argv, CommandModule } from 'yargs';
-import { fetchPrCommand } from './fetch-pr.js';
+import {
+  fetchPrCommand,
+  countDiffChangedLines,
+  isEmptyDiff,
+  isCollapsedFromUpstream,
+} from './fetch-pr.js';
 import { classifyHeavy } from './lib/heavy.js';
 import { PARSE_ARGS_REPORT } from './lib/paths.js';
 
@@ -447,5 +452,171 @@ describe('fetch-pr report assembly', () => {
       const report = await reportFor({});
       expect(report.effort).toBeUndefined();
     });
+  });
+});
+
+describe('isEmptyDiff', () => {
+  // The SKILL acts on this by recommending the PR be closed as superseded, so
+  // each guard is tested for the live PR it would otherwise close.
+  const base = {
+    diffPath: '/tmp/d.patch',
+    baseFetchFailed: false,
+    diffText: '',
+  };
+
+  it('is true only when a SUCCESSFUL capture found nothing', () => {
+    expect(isEmptyDiff(base)).toBe(true);
+    expect(isEmptyDiff({ ...base, diffText: '   \n  ' })).toBe(true);
+  });
+
+  it('is false when the capture never succeeded', () => {
+    // A capture that threw leaves diffText empty too. Reading that as "no
+    // changes" closes a live PR on an infrastructure error.
+    expect(isEmptyDiff({ ...base, diffPath: null })).toBe(false);
+  });
+
+  it('is false when the merge base came from a possibly stale local ref', () => {
+    // A stale base that already contains the head commits diffs to empty —
+    // same wrong recommendation, one cause further out.
+    expect(isEmptyDiff({ ...base, baseFetchFailed: true })).toBe(false);
+  });
+
+  it('is false whenever there is any diff at all', () => {
+    expect(isEmptyDiff({ ...base, diffText: '+a\n' })).toBe(false);
+  });
+});
+
+describe('isCollapsedFromUpstream', () => {
+  /** A diff with `n` changed lines. */
+  const diff = (n: number) =>
+    `diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n${'+x\n'.repeat(n)}`;
+
+  it('fires when the recomputed diff is 4x smaller past the 200-line floor', () => {
+    expect(
+      isCollapsedFromUpstream({
+        baseFetchFailed: false,
+        diffText: diff(50),
+        additions: 200,
+        deletions: 0,
+      }),
+    ).toBe(true);
+  });
+
+  it('holds the 4x boundary exactly', () => {
+    // 51 * 4 = 204 > 200: one line the other side of the ratio and the
+    // signature is gone. Pinned so the comparison cannot drift to `<`.
+    expect(
+      isCollapsedFromUpstream({
+        baseFetchFailed: false,
+        diffText: diff(51),
+        additions: 200,
+        deletions: 0,
+      }),
+    ).toBe(false);
+  });
+
+  it('holds the 200-line floor exactly', () => {
+    // Below it one file IS the ratio, which is what the floor exists to keep
+    // out — a rename-threshold disagreement, not an upstream collapse.
+    expect(
+      isCollapsedFromUpstream({
+        baseFetchFailed: false,
+        diffText: diff(40),
+        additions: 199,
+        deletions: 0,
+      }),
+    ).toBe(false);
+    expect(
+      isCollapsedFromUpstream({
+        baseFetchFailed: false,
+        diffText: diff(40),
+        additions: 100,
+        deletions: 100,
+      }),
+    ).toBe(true);
+  });
+
+  it('does not fire off a base the fetch could not confirm', () => {
+    // The sibling guard, for the sibling reason. `isEmptyDiff` refuses to rule
+    // on a possibly stale local base ref because such a base can already hold
+    // the head commits; the PARTIAL form of that lands here, shrinking the
+    // recomputed diff past the ratio. The flag then tells Agent 0 to read the
+    // body as description-of-history when the body may be perfectly current
+    // and the real cause is an infrastructure failure.
+    const collapsing = { diffText: diff(50), additions: 200, deletions: 0 };
+    expect(
+      isCollapsedFromUpstream({ ...collapsing, baseFetchFailed: false }),
+    ).toBe(true);
+    expect(
+      isCollapsedFromUpstream({ ...collapsing, baseFetchFailed: true }),
+    ).toBe(false);
+  });
+
+  it('never fires on an empty diff — that is emptyDiff, a different claim', () => {
+    expect(
+      isCollapsedFromUpstream({
+        baseFetchFailed: false,
+        diffText: '',
+        additions: 5000,
+        deletions: 0,
+      }),
+    ).toBe(false);
+  });
+});
+
+describe('countDiffChangedLines', () => {
+  it('counts +/- body lines and excludes file headers', () => {
+    const d = [
+      'diff --git a/x b/x',
+      '--- a/x',
+      '+++ b/x',
+      '@@ -1,2 +1,2 @@',
+      '-old',
+      '+new',
+      ' ctx',
+    ].join('\n');
+    expect(countDiffChangedLines(d)).toBe(2);
+    expect(countDiffChangedLines('')).toBe(0);
+  });
+
+  it('counts body lines whose own content starts with -- or ++', () => {
+    // A DELETED markdown rule / YAML marker / SQL comment arrives as `--- …`,
+    // and an ADDED `++x` as `+++x`. A prefix-shape rule has to drop both, and
+    // every dropped line pushes the ratio toward a false collapse disclosure
+    // (the flag fires when the recomputed count comes in LOW).
+    const d = [
+      'diff --git a/x.md b/x.md',
+      '--- a/x.md',
+      '+++ b/x.md',
+      '@@ -1,4 +1,4 @@',
+      '----',
+      '--- a title underline',
+      '+++ replacement',
+      '++i;',
+      ' ctx',
+      '\\ No newline at end of file',
+    ].join('\n');
+    expect(countDiffChangedLines(d)).toBe(4);
+  });
+
+  it('does not count the file headers of a SECOND file in the diff', () => {
+    // `diff --git` closes the previous hunk: without that, the next file's
+    // `---`/`+++` headers would be read as body lines of the hunk above.
+    const d = [
+      'diff --git a/a b/a',
+      '--- a/a',
+      '+++ b/a',
+      '@@ -1 +1 @@',
+      '-x',
+      '+y',
+      'diff --git a/b b/b',
+      'index 111..222 100644',
+      '--- a/b',
+      '+++ b/b',
+      '@@ -1 +1 @@',
+      '-p',
+      '+q',
+    ].join('\n');
+    expect(countDiffChangedLines(d)).toBe(4);
   });
 });

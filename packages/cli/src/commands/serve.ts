@@ -20,6 +20,10 @@ import {
   DEFAULT_MAX_JOURNAL_EVENTS,
 } from '@qwen-code/acp-bridge/replayWindowLimits';
 import {
+  isValidMemoryBudgetMb,
+  memoryBudgetRangeError,
+} from '@qwen-code/acp-bridge/daemonMemoryBudget';
+import {
   ApprovalMode,
   MCP_BUDGET_WARN_FRACTION,
   MEMORY_PROJECT_SCOPES,
@@ -123,6 +127,7 @@ interface ServeArgs {
   // handler reads `argv['http-bridge']` directly.
   'http-bridge': boolean;
   'mcp-client-budget'?: number;
+  'memory-budget-mb'?: number;
   'mcp-budget-mode'?: 'enforce' | 'warn' | 'off';
   'allow-origin'?: string[];
   'allow-private-auth-base-url': boolean;
@@ -318,6 +323,16 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'secondaries start one on demand. Stage 2 native in-process mode is ' +
           'not yet implemented; this flag will become opt-in then.',
       })
+      .option('memory-budget-mb', {
+        type: 'number',
+        description:
+          'Total memory budget in MB for the daemon process tree. When unset, ' +
+          'derived as 50% of cgroup-constrained ' +
+          'or host memory, and capped at the resolved available memory either ' +
+          'way. Currently observed and reported under `limits.memory` in daemon ' +
+          'status; it does not yet size any child process. Must be an integer ' +
+          'in [1024, 1048576].',
+      })
       .option('mcp-client-budget', {
         type: 'number',
         description:
@@ -477,6 +492,14 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
     }
     const resolvedMcpMode: 'enforce' | 'warn' | 'off' =
       mcpBudgetMode ?? (mcpClientBudget !== undefined ? 'warn' : 'off');
+    const memoryBudgetMb = argv['memory-budget-mb'];
+    if (
+      memoryBudgetMb !== undefined &&
+      !isValidMemoryBudgetMb(memoryBudgetMb)
+    ) {
+      writeStderrLine(memoryBudgetRangeError());
+      process.exit(1);
+    }
     const maxPendingPromptsPerSession = argv['max-pending-prompts-per-session'];
     if (
       maxPendingPromptsPerSession !== Number.POSITIVE_INFINITY &&
@@ -621,6 +644,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         allowPrivateAuthBaseUrl: argv['allow-private-auth-base-url'],
         mcpClientBudget,
         mcpBudgetMode: resolvedMcpMode,
+        ...(memoryBudgetMb !== undefined ? { memoryBudgetMb } : {}),
         ...(argv['allow-origin'] && argv['allow-origin'].length > 0
           ? { allowOrigins: argv['allow-origin'] }
           : {}),

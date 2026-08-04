@@ -38,11 +38,17 @@ describe('validateRequests', () => {
     expect(() => validateRequests([{ ...ok, anchor: '' }])).toThrow(/"anchor"/);
   });
 
-  it('rejects a non-numeric claimed line', () => {
-    expect(() => validateRequests([{ ...ok, line: '42' }])).toThrow(
-      /non-numeric "line"/,
-    );
-  });
+  it.each(['42', -1, 0, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    'rejects an invalid claimed line %s',
+    (line) => {
+      // The same rule the `findings` validator applies: the two validators in
+      // one pipeline must agree, so an entry that passes here cannot hard-fail
+      // there.
+      expect(() => validateRequests([{ ...ok, line }])).toThrow(
+        /invalid "line"/,
+      );
+    },
+  );
 
   it('names the offending index for a null element instead of crashing', () => {
     // `typeof null === 'object'`, so indexing it threw a bare TypeError that said

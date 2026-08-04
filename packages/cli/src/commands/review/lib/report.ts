@@ -13,6 +13,7 @@ import { statSync } from 'node:fs';
 import { writeStderrLine } from '../../../utils/stdioHelpers.js';
 import { classifyHeavy } from './heavy.js';
 import type { DiffChunk, DiffPlan, PathKind } from './diff-plan.js';
+import { reviewBudget, type ReviewBudget } from './budget.js';
 
 export interface FileMetric {
   path: string;
@@ -86,6 +87,15 @@ export interface PlanReport {
   /** Contiguous, non-overlapping line ranges tiling the whole diff file. */
   chunks: DiffChunk[];
   files: FileMetric[];
+  /**
+   * How much walking the size-elastic parts of the run owe (see lib/budget.ts).
+   *
+   * In the plan rather than in a flag, for the reason `effort` is: every reader
+   * must see the same number, and a budget the caller passes is a budget the
+   * caller can inflate. It never scales a *dimension* away — that is the
+   * roster's job, and the roster reads `effort`.
+   */
+  budget: ReviewBudget;
 }
 
 /**
@@ -150,6 +160,10 @@ export function buildPlanReport(
     generatedDiffLines: plan.generatedDiffLines,
     chunks: plan.chunks,
     files,
+    budget: reviewBudget({
+      srcDiffLines: plan.srcDiffLines,
+      diffLines: plan.diffLines,
+    }),
   };
 }
 
