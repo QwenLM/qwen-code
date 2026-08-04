@@ -371,6 +371,70 @@ function auditPrWrites(target: string, prNumber: string): void {
   }
 }
 
+/**
+ * Reap the capture servers capture-tui's own reap could not reach: a
+ * SIGKILL'd or OOM'd harness skips finally and the signal net alike, and
+ * the private server then lives until its pane holder's sleep expires (up
+ * to two hours). The launcher's pid rides in the socket name for exactly
+ * this — a socket whose pid is dead is an orphan. Best effort: a reap that
+ * fails is a note, never a cleanup failure. Returns whether anything was
+ * reaped, so the "Nothing to clean" claim stays true.
+ */
+function reapOrphanedCaptureServers(): boolean {
+  const uid = process.getuid?.();
+  // tmux is POSIX-only, and so is the socket dir layout below.
+  if (uid === undefined) return false;
+  const base = process.env['TMUX_TMPDIR']?.trim() || '/tmp';
+  const dir = join(base, `tmux-${uid}`);
+  let entries: string[] = [];
+  try {
+    entries = existsSync(dir) ? readdirSync(dir) : [];
+  } catch {
+    return false;
+  }
+  let reapedAny = false;
+  for (const name of entries) {
+    const m = /^qwen-review-capture-(\d+)-/.exec(name);
+    if (!m) continue;
+    let alive = true;
+    try {
+      process.kill(Number(m[1]), 0);
+    } catch (e) {
+      // ESRCH = the pid is dead (the orphan signal). EPERM means the pid
+      // is alive under another user — not ours to reap.
+      alive = (e as NodeJS.ErrnoException).code === 'EPERM';
+    }
+    if (alive) continue;
+    // Same rule as capture-tui's own reap: unlink the socket ONLY when the
+    // server is known dead — a kill that throws can leave it alive, and an
+    // unlinked socket makes a live server unreachable forever.
+    let serverDead = false;
+    try {
+      execFileSync('tmux', ['-L', name, 'kill-server'], { stdio: 'pipe' });
+      serverDead = true;
+    } catch (e) {
+      serverDead = /no server running/i.test(
+        String((e as { stderr?: unknown }).stderr ?? ''),
+      );
+    }
+    if (!serverDead) {
+      writeStderrLine(
+        `note: could not reap orphaned capture server ${name} ` +
+          `(tmux -L ${name} kill-server to reap it by hand)`,
+      );
+      continue;
+    }
+    try {
+      rmSync(join(dir, name), { force: true });
+    } catch {
+      // Litter is cosmetic; the server itself is already gone.
+    }
+    writeStdoutLine(`Reaped orphaned capture server: ${name}`);
+    reapedAny = true;
+  }
+  return reapedAny;
+}
+
 export function runCleanup(target: string): void {
   let removedAny = false;
   // Tracked separately from `removedAny`, because a failure is neither. Without
@@ -478,6 +542,11 @@ export function runCleanup(target: string): void {
       failedAny = true;
     }
   }
+
+  // --- Orphaned capture servers (capture-tui) ---------------------------
+  // Not target-scoped: any crashed capture on this host left them, and
+  // Step 9's sweep is the only deterministic pass that reliably runs.
+  if (reapOrphanedCaptureServers()) removedAny = true;
 
   if (!failedAny) {
     clearReviewWorktreeLease(process.cwd(), target);

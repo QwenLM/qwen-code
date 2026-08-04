@@ -54,7 +54,13 @@ describe('tmuxSupportsCaptureN', () => {
     for (const line of ['tmux 3.1', 'tmux 3.1b', 'tmux 3.3a', 'tmux 4.0']) {
       expect(tmuxSupportsCaptureN(line), `${line}`).toBe(true);
     }
-    for (const line of ['tmux 1.8', 'tmux 2.8', 'tmux 3.0', 'tmux 3.0a', 'tmux 3.0b']) {
+    for (const line of [
+      'tmux 1.8',
+      'tmux 2.8',
+      'tmux 3.0',
+      'tmux 3.0a',
+      'tmux 3.0b',
+    ]) {
       expect(tmuxSupportsCaptureN(line), `${line}`).toBe(false);
     }
     // Unparseable is undefined, not false: a version that cannot be named

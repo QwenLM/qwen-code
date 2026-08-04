@@ -42,7 +42,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { runInNewContext } from 'node:vm';
+import { createContext, runInContext, type Context } from 'node:vm';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   DEFAULT_COLS,
@@ -134,18 +134,25 @@ function sleep(ms: number): Promise<void> {
  * iteration past the shared deadline. */
 export const MATCH_BUDGET_MS = 500;
 
+// ONE context for every match of the run: the interrupt property lives in
+// the timeout option, which runInContext keeps — runInNewContext built a
+// fresh V8 context per poll (~14k of them across a 1h capture).
+// createContext wires the sandbox object in place, so writing re/text before
+// each match feeds the context without re-creating it.
+const matchSandbox: { re: RegExp; text: string } = { re: /(?!)/, text: '' };
+
+const matchContext: Context = createContext(matchSandbox);
+
 function testWithBudget(
   re: RegExp,
   text: string,
 ): 'match' | 'miss' | 'overrun' {
+  matchSandbox.re = re;
+  matchSandbox.text = text;
   try {
-    return runInNewContext(
-      're.test(text)',
-      { re, text },
-      {
-        timeout: MATCH_BUDGET_MS,
-      },
-    )
+    return runInContext('re.test(text)', matchContext, {
+      timeout: MATCH_BUDGET_MS,
+    })
       ? 'match'
       : 'miss';
   } catch {
@@ -389,9 +396,13 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   // itself before the re-raise, so any OTHER handler the host process
   // installed sees the signal a second time; accepted for a leaf
   // subcommand, which this is.
+  let serverStarted = false;
   let reaped = false;
   const reap = (): void => {
-    if (reaped) return;
+    // A start that threw never created a server: killing would fail twice
+    // and the warning would send an operator hunting a socket that was
+    // never created — on the one refusal path most likely on a broken host.
+    if (reaped || !serverStarted) return;
     reaped = true;
     // Unlink the socket ONLY when the server is known dead: kill can throw
     // with the server alive (the tmux CLIENT failing to spawn — EMFILE, a
@@ -459,6 +470,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   let captureFailed = false;
   try {
     tmux(plan.start);
+    serverStarted = true;
     // One deadline covers the ready gate AND the until poll: two separate
     // clocks would let a capture run to 2× --timeout-ms.
     const deadline = Date.now() + args.timeoutMs;
@@ -536,9 +548,10 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     refuse(`tmux failed mid-capture: ${detail}`);
     return;
   } finally {
-    // Always, even when start/capture threw: the private server holds every
-    // process this capture launched, and an orphaned TUI outliving the
-    // review is the mess this command exists to make impossible. The reap
+    // Always, even when the capture threw mid-run: the private server holds
+    // every process this capture launched, and an orphaned TUI outliving the
+    // review is the mess this command exists to make impossible. A start
+    // that threw has no server to reap, and reap() stays silent about it. The reap
     // runs FIRST — it can block up to the 15s tmux timeout against a wedged
     // server, and a signal in that window must still be caught (measured:
     // releasing before the reap left a 25ms-to-death window with no
@@ -641,7 +654,9 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
             ? // A belt kill carries BOTH signal and error (ETIMEDOUT); name
               // the belt, or it reads as an unexplained external kill.
               `signal ${r.signal}${
-                r.error ? ` after the ${freezeRender.timeoutMs}ms render belt` : ''
+                r.error
+                  ? ` after the ${freezeRender.timeoutMs}ms render belt`
+                  : ''
               }`
             : r.status !== null
               ? `exit ${String(r.status)}`

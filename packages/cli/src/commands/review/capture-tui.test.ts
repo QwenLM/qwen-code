@@ -409,7 +409,9 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
   it('survives a catastrophic-backtracking --until pattern', async () => {
     // The deadline is only checked between test() calls; the vm budget
     // interrupts a superlinear match so the poll keeps expiring on time.
-    const started = Date.now();
+    // Monotonic clock for every wall bound in this suite: Date.now() can be
+    // stepped by NTP mid-test and read a wrong elapsed value either way.
+    const started = performance.now();
     await run({
       command: `printf 'a%.0s' $(seq 1 79); printf '\\n'; sleep 30`,
       until: '(a+)+b',
@@ -425,7 +427,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     // Bounded TIGHT: vitest's own testTimeout kills anything over 15s, so a
     // 30s bound would have zero bite. Healthy runs measure ~2s; the budget
     // VALUE itself is declaration-pinned in the defaults test.
-    expect(Date.now() - started).toBeLessThan(8_000);
+    expect(performance.now() - started).toBeLessThan(8_000);
   });
 
   it('leaves no tmux server behind — the isolation is also the cleanup', async () => {
@@ -523,6 +525,10 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     }
     expect(process.exitCode).toBe(3);
     expect(stderr).toContain('tmux failed mid-capture');
+    // The start that threw created no server: reap() must stay silent — a
+    // kill-server warning here would send an operator hunting a socket that
+    // was never created.
+    expect(stderr).not.toContain('may still be running');
     expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
     expect(existsSync(join(dir, 'cap.json'))).toBe(false);
   });
@@ -766,10 +772,13 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     // The wait itself is pinned by wall clock: sleep(0) captures before the
     // TUI renders, sleep(timeoutMs) waits up to 20x longer than requested —
     // both shipped green when only the manifest field was asserted.
-    const started = Date.now();
+    const started = performance.now();
     await run({ until: undefined, settleMs: 600 });
-    const elapsed = Date.now() - started;
-    expect(elapsed).toBeGreaterThanOrEqual(600);
+    const elapsed = performance.now() - started;
+    // The 50ms of slack absorbs libuv starting the settle timer off a cached
+    // loop tick under load; the bound still catches the sleep(0) and
+    // sleep(timeoutMs) mutants it exists for.
+    expect(elapsed).toBeGreaterThanOrEqual(550);
     expect(elapsed).toBeLessThan(5_000);
     const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
     expect(manifest.settledBy).toBe('fixed-delay');
@@ -962,13 +971,22 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     // Two separate clocks would let a ready+until capture run to
     // 2× --timeout-ms: ready matches late (~1.5s), until never matches, and
     // the whole run must still end near the single 2s deadline, not 3.5s.
-    const started = Date.now();
-    await run({
-      command: 'sleep 1.5; printf "GATE-OPEN\\n"; sleep 30',
-      ready: 'GATE-OPEN',
-      until: 'NEVER-MATCHES',
-      timeoutMs: 2500,
-    });
+    // The freeze render is NOT what this test measures: leaving it in the
+    // timed window spends up to a second of the bound on the render, and
+    // hosts with freeze would test a different window than hosts without.
+    const realFreeze = probes.freeze;
+    probes.freeze = () => false;
+    const started = performance.now();
+    try {
+      await run({
+        command: 'sleep 1.5; printf "GATE-OPEN\\n"; sleep 30',
+        ready: 'GATE-OPEN',
+        until: 'NEVER-MATCHES',
+        timeoutMs: 2500,
+      });
+    } finally {
+      probes.freeze = realFreeze;
+    }
     expect(process.exitCode).toBeUndefined();
     const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
     expect(manifest.settledBy).toBe('timeout');
@@ -979,7 +997,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(manifest.timeoutMs).toBe(2500);
     // Pristine ends near the single 2.5s deadline; the two-clock mutant
     // needs ready(~1.6s) + until(2.5s) ≈ 4.1s and lands past the bound.
-    expect(Date.now() - started).toBeLessThan(3600);
+    expect(performance.now() - started).toBeLessThan(3600);
   });
 
   it('polls --ready even with no keys and no --until — and says how it settled', async () => {
@@ -1112,7 +1130,9 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     // Identity fields too: a command/ansPath/cols/rows mutant self-
     // consistently records the lie (measured: a transposed cols/rows pair
     // passes validGeometry and every prior assertion).
-    expect(manifest.command).toBe(`bash -c 'sleep 0.3; printf "MAPPED\\n"; cat'`);
+    expect(manifest.command).toBe(
+      `bash -c 'sleep 0.3; printf "MAPPED\\n"; cat'`,
+    );
     expect(manifest.ansPath).toBe(join(dir, 'mapped.ans'));
     expect(manifest.cols).toBe(80);
     expect(manifest.rows).toBe(24);
@@ -1123,7 +1143,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     // the manifest); a settle-ms→timeout-ms swap mutant shipped green until
     // this invocation, where the mapping is the active duration.
     await (captureTuiCommand.handler as (argv: unknown) => Promise<void>)({
-      command: 'printf "FIXED\n"; sleep 30',
+      command: 'printf "FIXED\\n"; sleep 30',
       cwd: dir,
       cols: 80,
       rows: 24,

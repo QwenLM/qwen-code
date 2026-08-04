@@ -1,12 +1,13 @@
 // Copyright 2026 Qwen Team
 // SPDX-License-Identifier: Apache-2.0
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { spawnSync } from 'node:child_process';
 
 const mocks = vi.hoisted(() => ({
   execFileSync: vi.fn(),
-  existsSync: vi.fn(() => false),
-  readdirSync: vi.fn(() => []),
+  existsSync: vi.fn((_path: string) => false),
+  readdirSync: vi.fn((_path: string): string[] => []),
   readFileSync: vi.fn((_path: string): string => {
     throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
   }),
@@ -151,6 +152,79 @@ describe('runCleanup', () => {
       '/repo/.qwen/tmp/review-pr-123-probe',
       '/repo/.qwen/tmp/review-pr-123-base',
     ]);
+  });
+
+  describe('orphaned capture-tui servers', () => {
+    // A SIGKILL'd harness leaves the private tmux server alive; cleanup is
+    // the sweep that reclaims it, keyed on the launcher pid in the socket
+    // name. The pid liveness probe and the tmux kill are the two halves.
+    const uid = process.getuid?.();
+    const dir = `/fake-tmp/tmux-${String(uid)}`;
+    // A pid that WAS alive and is not: spawn a process and let it exit.
+    const deadPid = String(spawnSync(process.execPath, ['-e', '']).pid ?? 0);
+    const orphan = `qwen-review-capture-${deadPid}-aaaa`;
+    const live = `qwen-review-capture-${process.pid}-bbbb`;
+
+    beforeEach(() => {
+      process.env['TMUX_TMPDIR'] = '/fake-tmp';
+      mocks.existsSync.mockImplementation((p: string) => p === dir);
+      mocks.readdirSync.mockImplementation((p: string) =>
+        p === dir ? [orphan, live, 'some-other-socket'] : [],
+      );
+      mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    });
+
+    afterEach(() => {
+      delete process.env['TMUX_TMPDIR'];
+    });
+
+    it('reaps sockets whose launcher pid is dead and leaves live ones alone', () => {
+      runCleanup('local');
+
+      expect(mocks.execFileSync).toHaveBeenCalledWith(
+        'tmux',
+        ['-L', orphan, 'kill-server'],
+        { stdio: 'pipe' },
+      );
+      expect(mocks.execFileSync).not.toHaveBeenCalledWith(
+        'tmux',
+        ['-L', live, 'kill-server'],
+        { stdio: 'pipe' },
+      );
+      expect(mocks.rmSync).toHaveBeenCalledWith(`${dir}/${orphan}`, {
+        force: true,
+      });
+      expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+        `Reaped orphaned capture server: ${orphan}`,
+      );
+      // Something WAS cleaned, so the nothing-to-clean claim must not print.
+      expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+        expect.stringContaining('Nothing to clean'),
+      );
+    });
+
+    it('notes a server it cannot kill and does not unlink a live server socket', () => {
+      mocks.execFileSync.mockImplementation((bin: string, _argv: string[]) => {
+        if (bin === 'tmux') {
+          throw Object.assign(new Error('wedged'), {
+            stderr: 'tmux: server is wedged',
+          });
+        }
+        return Buffer.from('');
+      });
+
+      runCleanup('local');
+
+      expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining(
+          `could not reap orphaned capture server ${orphan}`,
+        ),
+      );
+      expect(mocks.rmSync).not.toHaveBeenCalledWith(
+        `${dir}/${orphan}`,
+        expect.anything(),
+      );
+    });
   });
 
   it('sweeps a stale base-tree build lock left by a killed builder', () => {

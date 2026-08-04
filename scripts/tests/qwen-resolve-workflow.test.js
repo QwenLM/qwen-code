@@ -418,9 +418,6 @@ describe('qwen resolve workflow', () => {
     expect(fallbackStep).toContain(
       'MAX_TIMEOUT_MINUTES="${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}"',
     );
-    // The branch CONDITION, not just both branch bodies: with both bodies
-    // pinned as substrings, any comparison flip (-ge/-gt/-le) keeps both
-    // strings present and ships the wrong recovery advice on every timeout.
     expect(fallbackStep).toContain(
       'if [ "$TIMEOUT_MINUTES" -lt "$MAX_TIMEOUT_MINUTES" ]; then',
     );
