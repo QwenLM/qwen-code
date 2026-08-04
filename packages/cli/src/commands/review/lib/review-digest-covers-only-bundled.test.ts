@@ -74,28 +74,38 @@ const isFixture = (f: string) =>
 /** The modules `f` imports from within this repo, resolved to real paths. */
 function localImports(f: string): string[] {
   const src = readFileSync(f, 'utf8');
+  const specs: string[] = [];
+  // `from '…'` / `export … from '…'`, `await import('…')` — the directory
+  // has nine dynamic edges, and a helper reached only that way would be
+  // invisible here — and bare `import '…'`, which esbuild bundles for its
+  // side effects. Type-only statements are the opposite gap: esbuild erases
+  // them, so counting one folds a never-bundled file into what production
+  // imports.
+  for (const m of src.matchAll(
+    /\b(import|export)\b([^;'"]*)\bfrom\s+'(\.[^']+)'/g,
+  )) {
+    if (!/^\s*type\b/.test(m[2])) specs.push(m[3]);
+  }
+  for (const m of src.matchAll(/\bimport\s*\(\s*'(\.[^']+)'\s*\)/g))
+    specs.push(m[1]);
+  for (const m of src.matchAll(/\bimport\s+'(\.[^']+)'/g)) specs.push(m[1]);
+
   const out: string[] = [];
-  // `from '…'` and `await import('…')` alike — the directory has nine dynamic
-  // edges, and a helper reached only that way would be invisible here.
-  for (const m of src.matchAll(/(?:from\s+|import\s*\(\s*)'(\.[^']+)'/g)) {
-    const spec = m[1].replace(/\.js$/, '');
-    // The literal specifier first — `'./data.json'` keeps its extension —
-    // then every extension the digest admits. These two lists must agree: a
-    // production module in an extension this closure cannot resolve is
-    // digested but never lands in `importedByProduction`, and a correct
-    // change reddens this test with a wrong diagnosis.
+  for (const raw of specs) {
+    // The literal specifier first — `'./data.json'` keeps its extension, and
+    // a NodeNext `.mts` module is imported as `'./foo.mjs'` — then every
+    // extension the digest admits, with and without an `index` file, because
+    // esbuild resolves `./sub.ts` and `./sub/index.tsx` alike. These two
+    // lists must agree: a production module in an extension this closure
+    // cannot resolve is digested but never lands in `reachable`, and a
+    // correct change reddens this test with a wrong diagnosis.
+    const spec = raw.replace(/\.(?:m|c)?jsx?$/, '');
     const candidates = [
-      resolve(dirname(f), m[1]),
-      ...[
-        '.ts',
-        '.tsx',
-        '.mts',
-        '.cts',
-        '.js',
-        '.mjs',
-        '.json',
-        '/index.ts',
-      ].map((ext) => resolve(dirname(f), spec + ext)),
+      resolve(dirname(f), raw),
+      ...[...DIGESTED_EXTENSIONS.code].flatMap((ext) => [
+        resolve(dirname(f), spec + ext),
+        resolve(dirname(f), spec, `index${ext}`),
+      ]),
     ];
     for (const candidate of candidates) {
       try {
@@ -122,16 +132,25 @@ describe('the staleness digest covers only what the bundle can contain', () => {
       !NOT_BUNDLED_FILE.has(basename(f)),
   );
 
-  // What production code imports — including `review.ts`, which sits outside
-  // this directory and is where every subcommand is registered. Leaving it out
-  // makes each command look test-only, which is what the first draft of this
-  // guard did. The importer set is closed over `review/` plus `review.ts`:
-  // the day a review lib is imported from outside that closure, files here
-  // read as unreachable and this test fails on a change that is correct —
-  // widen the closure before believing the finding.
-  const importedByProduction = new Set<string>();
-  for (const f of [...digestedFiles, join(reviewDir, '..', 'review.ts')]) {
-    for (const dep of localImports(f)) importedByProduction.add(dep);
+  // What production reaches — the transitive closure from `review.ts`, not a
+  // flat union of every file's direct imports: a mutually-importing cluster
+  // of production-named files that nothing else imports passes a union while
+  // never reaching the bundle. `review.ts` sits outside this directory and
+  // is where every subcommand is registered; leaving it out makes each
+  // command look test-only, which is what the first draft of this guard did.
+  // The closure is seeded from `review/` plus `review.ts`: the day a review
+  // lib is imported from outside that closure, files here read as
+  // unreachable and this test fails on a change that is correct — widen the
+  // closure before believing the finding.
+  const reachable = new Set<string>();
+  {
+    const queue = [join(reviewDir, '..', 'review.ts')];
+    while (queue.length > 0) {
+      const from = queue.shift()!;
+      if (reachable.has(from)) continue;
+      reachable.add(from);
+      for (const dep of localImports(from)) queue.push(dep);
+    }
   }
 
   it('folds in no module that only tests import', () => {
@@ -145,7 +164,7 @@ describe('the staleness digest covers only what the bundle can contain', () => {
     // test importer let an orphan through.
     const entryPoints = new Set([join(reviewDir, '..', 'review.ts')]);
     const unreachable = digestedFiles.filter(
-      (f) => !importedByProduction.has(f) && !entryPoints.has(f),
+      (f) => !reachable.has(f) && !entryPoints.has(f),
     );
     expect(
       unreachable.map((f) => relative(repoRoot, f)),
@@ -160,7 +179,7 @@ describe('the staleness digest covers only what the bundle can contain', () => {
     // in, not a restatement of any single rule.
     const digested = new Set(digestedFiles);
     const excluded = files.filter((f) => !digested.has(f));
-    const wronglyExcluded = excluded.filter((f) => importedByProduction.has(f));
+    const wronglyExcluded = excluded.filter((f) => reachable.has(f));
     expect(wronglyExcluded.map((f) => relative(repoRoot, f))).toEqual([]);
   });
 });

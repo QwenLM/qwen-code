@@ -61,12 +61,21 @@ export const BUNDLED_SKILL_TEST_FILE_RE =
 // Mirrors NOT_BUNDLED_RE / NOT_BUNDLED_DIR / NOT_BUNDLED_FILE /
 // NOT_BUNDLED_SKILL_FILE / DIGESTED_EXTENSIONS in stale-bundle.ts; the
 // parity test keeps them equal.
-const NOT_BUNDLED_RE = /\.(?:test|spec)\.[cm]?[jt]sx?$/;
+const NOT_BUNDLED_RE = /\.(?:test|spec)\.(?:d\.)?[cm]?[jt]sx?$/;
 const NOT_BUNDLED_DIR = new Set(['__fixtures__', '__snapshots__']);
 const NOT_BUNDLED_FILE = new Set(['test-utils.ts']);
 const NOT_BUNDLED_SKILL_FILE = new Set(['DESIGN.md']);
 const DIGESTED_EXTENSIONS = {
-  code: new Set(['.ts', '.tsx', '.mts', '.cts', '.js', '.mjs', '.json']),
+  code: new Set([
+    '.ts',
+    '.tsx',
+    '.mts',
+    '.cts',
+    '.js',
+    '.mjs',
+    '.json',
+    '.jsx',
+  ]),
   skill: new Set(['.md']),
 };
 
@@ -163,7 +172,7 @@ function stampReviewSourceDigest(root, distDir) {
   // stamp beside a newer bundle is a weaker form of the misdescription the
   // refusal exists to avoid, and `unmeasured` is the state each refusal means.
   const refuse = (why) => {
-    fs.rmSync(stampPath, { force: true });
+    fs.rmSync(stampPath, { recursive: true, force: true });
     // `warn`, not `log`: the runtime message sends its reader back to this
     // build's output, and a refusal hidden among plain logs is not what they
     // are being sent to find.
@@ -212,7 +221,16 @@ function stampReviewSourceDigest(root, distDir) {
     );
     return;
   }
-  fs.writeFileSync(stampPath, digest);
+  try {
+    fs.writeFileSync(stampPath, digest);
+  } catch (error) {
+    refuse(
+      `Could not write the source digest; skipped the stamp: ${
+        error instanceof Error ? error.message : error
+      }`,
+    );
+    return;
+  }
   console.log(`Stamped the review source digest over ${count} files.`);
 }
 

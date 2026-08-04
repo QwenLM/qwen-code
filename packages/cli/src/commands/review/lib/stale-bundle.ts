@@ -72,7 +72,7 @@ export const DIGEST_FILE = 'review-sources.sha256';
  * that cannot change a single byte of the bundle. That is the false positive
  * this module already rejected once, in the timestamp version.
  */
-export const NOT_BUNDLED_RE = /\.(?:test|spec)\.[cm]?[jt]sx?$/;
+export const NOT_BUNDLED_RE = /\.(?:test|spec)\.(?:d\.)?[cm]?[jt]sx?$/;
 
 /**
  * Directories whose contents exist only for tests.
@@ -128,7 +128,16 @@ export const DIGESTED_EXTENSIONS: Record<
   ReviewSourceKind,
   ReadonlySet<string>
 > = {
-  code: new Set(['.ts', '.tsx', '.mts', '.cts', '.js', '.mjs', '.json']),
+  code: new Set([
+    '.ts',
+    '.tsx',
+    '.mts',
+    '.cts',
+    '.js',
+    '.mjs',
+    '.json',
+    '.jsx',
+  ]),
   skill: new Set(['.md']),
 };
 
@@ -260,8 +269,13 @@ function* sourceFilesUnder(
     let stats: Stats | undefined;
     try {
       stats = statSync(root.path);
-    } catch {
-      if (listed) state.incomplete = true;
+    } catch (err) {
+      // A root that was never there is silent only on ENOENT: EACCES/EPERM is
+      // a tree that IS there but cannot be measured — a permission-corrupted
+      // checkout — and silence there would drive a review against an
+      // arbitrarily stale bundle with no line at all.
+      if (listed || (err as NodeJS.ErrnoException).code !== 'ENOENT')
+        state.incomplete = true;
       return;
     }
     if (stats.isDirectory()) {
@@ -364,7 +378,12 @@ export function bundleStalenessNotices(
     const repoRoot = dirname(distDir);
     let stamped: string | undefined;
     try {
-      stamped = readFileSync(join(distDir, DIGEST_FILE), 'utf8').trim();
+      const raw = readFileSync(join(distDir, DIGEST_FILE), 'utf8').trim();
+      // A bundle step killed mid-write leaves a truncated or non-hex digest
+      // beside a current build; compared as-is it would accuse the build on
+      // every review until the next one, where an unmeasurable stamp owes
+      // the same 'could not check' as a missing one.
+      if (/^[0-9a-f]{64}$/.test(raw)) stamped = raw;
     } catch {
       // No stamp: an installed package, or a bundle from before the build wrote
       // one. Which of those it is depends on whether sources exist, below.
@@ -385,7 +404,11 @@ export function bundleStalenessNotices(
     // comes up empty each name themselves: a file or directory that could not
     // be read is a tree mid-change, where a root holding nothing the digest
     // admits (tests only, say) is a tree with nothing to compare.
-    if (stamped && !current && roots.some((r) => existsSync(r.path))) {
+    if (
+      stamped &&
+      !current &&
+      (measured.incomplete || roots.some((r) => existsSync(r.path)))
+    ) {
       const reason = measured.incomplete
         ? 'a review source could not be read, so nothing was compared' +
           (brief ? '.' : '. Re-run once the tree is settled.')

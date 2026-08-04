@@ -311,6 +311,12 @@ describe('reviewSourcesDigest', () => {
     expect(reviewSourcesDigest(root, [skill(skillDir)])).toBe(before);
     writeFileSync(join(skillDir, 'DESIGN.md'), '# design');
     expect(reviewSourcesDigest(root, [skill(skillDir)])).toBe(before);
+    // Membership says WHICH files count; the hash must also move when their
+    // CONTENT does — a mutant hashing an empty buffer for `.md` files
+    // survived this whole suite and was caught only by the scripts parity
+    // suite.
+    writeFileSync(join(skillDir, 'SKILL.md'), '# skill v2');
+    expect(reviewSourcesDigest(root, [skill(skillDir)])).not.toBe(before);
   });
 });
 
@@ -375,6 +381,9 @@ describe('staleBundleWarning', () => {
     expect(w).toContain('NOT built from the review sources in this tree');
     expect(w).toContain('npm run bundle');
     expect(w).not.toContain('runs the BUILT bundle, not the working tree');
+    // One line is the property: with an embedded newline the repeat is the
+    // paragraph again, and a repeated paragraph becomes wallpaper.
+    expect(w).not.toContain('\n');
   });
 
   it('says nothing when nothing is wrong', () => {

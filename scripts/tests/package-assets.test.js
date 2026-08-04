@@ -22,6 +22,7 @@ import fs from 'node:fs';
 
 const realReadFileSync = fs.readFileSync;
 const realReaddirSync = fs.readdirSync;
+const realStatSync = fs.statSync;
 import {
   copyBundleAssets,
   reviewSourceDigestForBuild,
@@ -54,6 +55,18 @@ describe('package asset scripts', () => {
     // The stamp attests to a bundle, so there has to be one, and it has to be
     // at least as new as the sources it claims to describe.
     writeFile(rootDir, 'dist/cli.js', 'the bundle\n');
+    // Force the boundary itself: the refusal is the strict
+    // `newestSource > builtAt`, so EQUAL mtimes must still stamp. Without a
+    // forced equality, whether a `>=` mutant fails depends on the runner's
+    // clock granularity — the non-determinism this removes.
+    const builtAt = new Date();
+    for (const rel of [
+      'packages/cli/src/commands/review/drive.ts',
+      'packages/cli/src/commands/review.ts',
+      'dist/cli.js',
+    ]) {
+      utimesSync(path.join(rootDir, rel), builtAt, builtAt);
+    }
     stubConsole();
 
     copyBundleAssets({ root: rootDir });
@@ -91,6 +104,11 @@ describe('package asset scripts', () => {
     expect(
       existsSync(path.join(rootDir, 'dist', 'review-sources.sha256')),
     ).toBe(false);
+    // `refuse()` warns because the runtime notice sends its reader back to
+    // this build's output; deleting the warn kept this whole suite green.
+    expect(console.warn).toHaveBeenCalledWith(
+      expect.stringContaining('newer than'),
+    );
   });
 
   it('removes an older stamp when it refuses to write a new one', () => {
@@ -138,33 +156,38 @@ describe('package asset scripts', () => {
   });
 
   it('refuses by the newest source, not the last one walked', () => {
-    // `newest` must track the largest mtimeMs: the newer source here sorts
-    // first, so a comparison that kept the last file visited — or the
-    // smallest — would see only the older one and certify a bundle the
-    // newest source may not describe.
+    // `newest` must track the largest mtimeMs. The newest file sits in the
+    // MIDDLE of the sort order, where both a keep-first and a keep-last
+    // comparison miss it; either would see only an older file and certify a
+    // bundle the newest source may not describe.
     const rootDir = createFixtureRoot();
     writeFile(rootDir, 'dist/cli.js', 'the bundle\n');
-    writeFile(
-      rootDir,
-      'packages/cli/src/commands/review/a-newer.ts',
-      'export const a = 1;\n',
-    );
-    writeFile(
-      rootDir,
-      'packages/cli/src/commands/review/z-older.ts',
-      'export const z = 1;\n',
-    );
+    for (const name of ['a-older.ts', 'm-newest.ts', 'z-older.ts']) {
+      writeFile(
+        rootDir,
+        `packages/cli/src/commands/review/${name}`,
+        `export const ${name[0]} = 1;\n`,
+      );
+    }
     const earlier = new Date(Date.now() - 3_600_000);
-    utimesSync(
-      path.join(rootDir, 'packages/cli/src/commands/review/z-older.ts'),
-      earlier,
-      earlier,
-    );
+    for (const name of ['a-older.ts', 'z-older.ts']) {
+      utimesSync(
+        path.join(rootDir, 'packages/cli/src/commands/review', name),
+        earlier,
+        earlier,
+      );
+    }
     const later = new Date(Date.now() + 3_600_000);
     utimesSync(
-      path.join(rootDir, 'packages/cli/src/commands/review/a-newer.ts'),
+      path.join(rootDir, 'packages/cli/src/commands/review/m-newest.ts'),
       later,
       later,
+    );
+    // The field directly, not only its consequence: with the newest file
+    // sorting middle, a keep-first or keep-last mutant still refuses, by the
+    // wrong file.
+    expect(reviewSourceDigestForBuild(rootDir).newest?.file).toBe(
+      path.join(rootDir, 'packages/cli/src/commands/review/m-newest.ts'),
     );
     stubConsole();
 
@@ -180,12 +203,15 @@ describe('package asset scripts', () => {
     // whose every asset is already in place. A missing stamp is `unmeasured`,
     // which the runtime check already accepts.
     const rootDir = createFixtureRoot();
-    writeFile(rootDir, 'dist/cli.js', 'the bundle\n');
     writeFile(
       rootDir,
       'packages/cli/src/commands/review/drive.ts',
       'export const drive = 1;\n',
     );
+    // The bundle LAST, so the sources are strictly older: the stamp's absence
+    // is then attributable only to the error refusal, where a bundle written
+    // first lets the mtime gate mask a skip-and-continue mutant.
+    writeFile(rootDir, 'dist/cli.js', 'the bundle\n');
     stubConsole();
     // The file vanishes between the walk that listed it and the read that
     // hashes it — a concurrent checkout, mid-build.
@@ -209,7 +235,6 @@ describe('package asset scripts', () => {
     // silently hashing the survivors, and the refusal must stay a refusal —
     // never a failed bundle with every asset already in place.
     const rootDir = createFixtureRoot();
-    writeFile(rootDir, 'dist/cli.js', 'the bundle\n');
     writeFile(
       rootDir,
       'packages/cli/src/commands/review/drive.ts',
@@ -220,6 +245,9 @@ describe('package asset scripts', () => {
       'packages/cli/src/commands/review/lib/ledger.ts',
       'export const ledger = 1;\n',
     );
+    // The bundle LAST, so the stamp's absence is attributable only to the
+    // error refusal, not the mtime gate (see the unreadable-file twin).
+    writeFile(rootDir, 'dist/cli.js', 'the bundle\n');
     stubConsole();
     const libDir = path.join(rootDir, 'packages/cli/src/commands/review/lib');
     vi.spyOn(fs, 'readdirSync').mockImplementation((target, ...rest) => {
@@ -236,6 +264,122 @@ describe('package asset scripts', () => {
       existsSync(path.join(rootDir, 'dist', 'review-sources.sha256')),
     ).toBe(false);
   });
+
+  it('does not fail the bundle when a directory vanishes mid-walk', () => {
+    // The parent walk listed this as a directory a moment ago; now both the
+    // listing and the stat fail. Skipping it would stamp a digest over the
+    // survivors, and every review after the tree settles would report stale
+    // against a byte-correct bundle — so the walk refuses instead, and the
+    // refusal must stay never-fatal.
+    const rootDir = createFixtureRoot();
+    writeFile(
+      rootDir,
+      'packages/cli/src/commands/review/drive.ts',
+      'export const drive = 1;\n',
+    );
+    writeFile(
+      rootDir,
+      'packages/cli/src/commands/review/lib/ledger.ts',
+      'export const ledger = 1;\n',
+    );
+    // The bundle LAST so the mtime gate cannot mask a skip-and-continue
+    // mutant digesting the survivors.
+    writeFile(rootDir, 'dist/cli.js', 'the bundle\n');
+    stubConsole();
+    const libDir = path.join(rootDir, 'packages/cli/src/commands/review/lib');
+    const vanished = Object.assign(new Error('ENOENT: vanished mid-build'), {
+      code: 'ENOENT',
+    });
+    vi.spyOn(fs, 'readdirSync').mockImplementation((target, ...rest) => {
+      if (String(target) === libDir) throw vanished;
+      return realReaddirSync(target, ...rest);
+    });
+    vi.spyOn(fs, 'statSync').mockImplementation((target, ...rest) => {
+      if (String(target) === libDir) throw vanished;
+      return realStatSync(target, ...rest);
+    });
+
+    expect(() => copyBundleAssets({ root: rootDir })).not.toThrow();
+    expect(
+      existsSync(path.join(rootDir, 'dist', 'review-sources.sha256')),
+    ).toBe(false);
+  });
+
+  it('does not stamp when there is no bundle to attest', () => {
+    // The stamp attests to a bundle; without `dist/cli.js` there is nothing
+    // to attest. An orphan digest beside a later-built bundle would report
+    // stale against sources that bundle may describe perfectly, instead of
+    // the honest 'could not check'.
+    const rootDir = createFixtureRoot();
+    writeFile(
+      rootDir,
+      'packages/cli/src/commands/review/drive.ts',
+      'export const drive = 1;\n',
+    );
+    stubConsole();
+
+    expect(() => copyBundleAssets({ root: rootDir })).not.toThrow();
+    expect(
+      existsSync(path.join(rootDir, 'dist', 'review-sources.sha256')),
+    ).toBe(false);
+  });
+
+  it('does not fail the bundle when the stamp cannot be written', () => {
+    // The final write sits under the same never-fatal contract as the digest
+    // walk: a stray directory occupying the stamp path makes writeFileSync
+    // throw EISDIR after every asset is already in place.
+    const rootDir = createFixtureRoot();
+    writeFile(
+      rootDir,
+      'packages/cli/src/commands/review/drive.ts',
+      'export const drive = 1;\n',
+    );
+    writeFile(rootDir, 'dist/cli.js', 'the bundle\n');
+    mkdirSync(path.join(rootDir, 'dist', 'review-sources.sha256'), {
+      recursive: true,
+    });
+    stubConsole();
+
+    expect(() => copyBundleAssets({ root: rootDir })).not.toThrow();
+    expect(
+      existsSync(path.join(rootDir, 'dist', 'review-sources.sha256')),
+    ).toBe(false);
+  });
+
+  // chmod is the only lever this case has: on Windows it is a no-op, and a
+  // root user reads through it, so the branch under test is unreachable
+  // there and the case skips instead of passing on the other branch.
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'refuses when a digest root exists but cannot be listed',
+    () => {
+      // The root-level arm of the unlistable-directory refusal: with the
+      // ROOT itself unreadable, skipping it would stamp a partial digest as
+      // the truth, and every review after the tree becomes readable would
+      // report stale against a bundle the full sources do not describe.
+      // `review.ts` is the survivor OUTSIDE the unreadable root: without it
+      // a skip-and-continue mutant finds zero files, refuses for the
+      // no-sources reason, and passes this test anyway.
+      const rootDir = createFixtureRoot();
+      writeFile(
+        rootDir,
+        'packages/cli/src/commands/review/drive.ts',
+        'export const drive = 1;\n',
+      );
+      writeFile(rootDir, 'packages/cli/src/commands/review.ts', 'registers\n');
+      writeFile(rootDir, 'dist/cli.js', 'the bundle\n');
+      const reviewDir = path.join(rootDir, 'packages/cli/src/commands/review');
+      stubConsole();
+      fs.chmodSync(reviewDir, 0o000);
+      try {
+        expect(() => copyBundleAssets({ root: rootDir })).not.toThrow();
+        expect(
+          existsSync(path.join(rootDir, 'dist', 'review-sources.sha256')),
+        ).toBe(false);
+      } finally {
+        fs.chmodSync(reviewDir, 0o755);
+      }
+    },
+  );
 
   it('copies extension examples into the bundled runtime dist', () => {
     const rootDir = createFixtureRoot();
@@ -315,6 +459,11 @@ describe('package asset scripts', () => {
       '# Design notes\n',
     );
     writeFile(rootDir, 'dist/bundled/dataviz/scripts/stale.test.js', 'stale\n');
+    writeFile(
+      rootDir,
+      'packages/core/src/skills/bundled/dataviz/.DS_Store',
+      'finder droppings\n',
+    );
     stubConsole();
 
     copyBundleAssets({ root: rootDir });
@@ -417,6 +566,12 @@ describe('package asset scripts', () => {
     ).toBe(true);
     expect(
       existsSync(path.join(rootDir, 'dist', 'bundled', 'dataviz', 'DESIGN.md')),
+    ).toBe(false);
+    // The copier's `.DS_Store` skip, pinned by the copier's own output: the
+    // boundary test in review-source-digest models the skip, so only this
+    // execution catches a copier that lost it.
+    expect(
+      existsSync(path.join(rootDir, 'dist', 'bundled', 'dataviz', '.DS_Store')),
     ).toBe(false);
   });
 

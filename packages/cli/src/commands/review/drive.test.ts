@@ -553,6 +553,9 @@ describe('drive warns when the bundle is not built from these sources', () => {
   });
   afterEach(() => rmSync(repo, { recursive: true, force: true }));
 
+  // Well-formed (64 hex) but matching no real tree: a malformed stamp is
+  // unmeasured, not stale, so the mismatch branch needs a plausible digest.
+  const foreignDigest = 'ab'.repeat(32);
   const stamp = (digest: string) =>
     writeFileSync(join(repo, 'dist', DIGEST_FILE), digest);
   const run = () => {
@@ -576,11 +579,18 @@ describe('drive warns when the bundle is not built from these sources', () => {
   };
 
   it('warns when the stamp does not match the sources', () => {
-    stamp('a digest from some other tree');
+    stamp(foreignDigest);
     run();
     expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
       'NOT built from the review sources',
     );
+    // …and BEFORE the first result: relocating the loop below `runDrive`
+    // keeps every substring assertion green while the warning lands only once
+    // the reviewer has already consumed results measured from the stale
+    // bundle — the failure mode this check exists to prevent.
+    expect(
+      vi.mocked(writeStderrLineSafe).mock.invocationCallOrder[0],
+    ).toBeLessThan(vi.mocked(writeStdoutLine).mock.invocationCallOrder[0]);
   });
 
   it('says nothing when the stamp matches', () => {
@@ -589,11 +599,20 @@ describe('drive warns when the bundle is not built from these sources', () => {
     expect(writeStderrLineSafe).not.toHaveBeenCalled();
   });
 
+  it('says it could not check when sources exist but the stamp does not', () => {
+    // The brief unmeasured form: the state of every existing checkout the
+    // day this ships — sources on disk, no stamp beside the bundle yet.
+    run();
+    const line = vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0] as string;
+    expect(line).toContain('could not check whether the bundle is current');
+    expect(line).toContain('Rebuild with `npm run bundle` to record one.');
+  });
+
   it('prints the one-line form — the full paragraph belongs to parse-args', () => {
     // One review can invoke `drive` many times, and each invocation prints
     // into an agent's tool output; the repeat keeps the trigger and the
     // remedy and drops the explanation.
-    stamp('a digest from some other tree');
+    stamp(foreignDigest);
     run();
     const line = vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0] as string;
     expect(line).toContain('NOT built from the review sources');
@@ -602,7 +621,7 @@ describe('drive warns when the bundle is not built from these sources', () => {
   });
 
   it('still drives — the notice is a diagnostic, not a gate', () => {
-    stamp('mismatched');
+    stamp(foreignDigest);
     run();
     expect(writeStdoutLine).toHaveBeenCalled();
   });

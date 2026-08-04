@@ -37,6 +37,7 @@ import { isAllowedDistEntry } from '../create-standalone-package.js';
 import {
   DIGESTED_EXTENSIONS,
   DIGEST_FILE,
+  NOT_BUNDLED_SKILL_FILE,
   reviewSourceRoots,
   reviewSourcesDigest,
 } from '../../packages/cli/src/commands/review/lib/stale-bundle.js';
@@ -117,15 +118,29 @@ describe('the build stamp and the staleness check agree', () => {
       writeFileSync(join(cli, 'review.ts'), 'registers everything');
       writeFileSync(join(cli, 'review', 'drive.ts'), 'drives');
       writeFileSync(join(cli, 'review', 'lib', 'ledger.ts'), 'ledgers');
+      // One production file per admitted code extension: dropping a member
+      // from one implementation's allowlist used to keep every suite green,
+      // because `.ts` was the only extension this tree exercised.
+      writeFileSync(join(cli, 'review', 'view.jsx'), 'export const v = 1;');
+      writeFileSync(join(cli, 'review', 'mod.mts'), 'export const m = 1;');
+      writeFileSync(join(cli, 'review', 'mod.cts'), 'export const c = 1;');
+      writeFileSync(join(cli, 'review', 'util.js'), 'export const u = 1;');
+      writeFileSync(join(cli, 'review', 'util.mjs'), 'export const w = 1;');
+      writeFileSync(join(cli, 'review', 'data.json'), '{}');
       writeFileSync(join(skillDir, 'SKILL.md'), '# skill');
+      // A fixture directory under the SKILL root is still digested: the
+      // directory exclusions are a code-root concern (`kind !== 'code'`),
+      // and nothing pinned the qualifier — it survived removal on both sides.
+      mkdirSync(join(skillDir, '__fixtures__'), { recursive: true });
+      writeFileSync(join(skillDir, '__fixtures__', 'example.md'), '# fixture');
       // DESIGN.md is the copier's deliberate skip, so it must move neither
-      // side of the digest — pinned by the count below staying at 4.
+      // side of the digest — pinned by the count below staying at 11.
       writeFileSync(join(skillDir, 'DESIGN.md'), '# design');
 
       expect(reviewSourceDigestForBuild(root).digest).toBe(
         reviewSourcesDigest(root, reviewSourceRoots(root)),
       );
-      expect(reviewSourceDigestForBuild(root).count).toBe(4);
+      expect(reviewSourceDigestForBuild(root).count).toBe(11);
 
       // ...and neither a test file, nor a spec, nor a fixture moves either.
       writeFileSync(join(cli, 'review', 'drive.test.ts'), 'a test');
@@ -135,14 +150,24 @@ describe('the build stamp and the staleness check agree', () => {
       // there used to pass both parity cases.
       writeFileSync(join(cli, 'review', 'drive.test.mts'), 'an mts test');
       writeFileSync(join(cli, 'review', 'drive.spec.cts'), 'a cts spec');
+      // The `j` alternative of `[jt]sx?`: every fixture above resolves
+      // through the `t` branch, and the real roots hold no `.js` tests.
+      writeFileSync(join(cli, 'review', 'drive.test.js'), 'a js test');
+      // The `(?:d\.)?` group: without it, even a TEST declaration file
+      // escapes exclusion, because `.ts` admits it and `test.d.ts` breaks
+      // the plain match.
+      writeFileSync(join(cli, 'review', 'drive.test.d.ts'), 'export {};');
       // The NOT_BUNDLED_FILE entry and a snapshot dir, pinned on both sides:
       // neither exists in the repo tree, so only a synthetic one can catch a
       // one-sided edit to either.
       writeFileSync(join(cli, 'review', 'lib', 'test-utils.ts'), 'test help');
       writeFileSync(join(cli, 'review', '.DS_Store'), 'finder droppings');
       mkdirSync(join(cli, 'review', '__snapshots__'), { recursive: true });
+      // A digested extension and a non-test name: only the directory rule
+      // can keep this out, where the `.snap` it replaced was already
+      // rejected by the extension allowlist and pinned nothing.
       writeFileSync(
-        join(cli, 'review', '__snapshots__', 'x.test.ts.snap'),
+        join(cli, 'review', '__snapshots__', 'snapshot-helper.ts'),
         'exports[`a`] = `b`;',
       );
       mkdirSync(join(cli, 'review', '__fixtures__'), { recursive: true });
@@ -160,7 +185,7 @@ describe('the build stamp and the staleness check agree', () => {
       expect(reviewSourceDigestForBuild(root).digest).toBe(
         reviewSourcesDigest(root, reviewSourceRoots(root)),
       );
-      expect(reviewSourceDigestForBuild(root).count).toBe(4);
+      expect(reviewSourceDigestForBuild(root).count).toBe(11);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -221,17 +246,24 @@ describe('the build stamp and the staleness check agree', () => {
       'review',
     );
     const shipped: string[] = [];
+    const admitted: string[] = [];
     const walk = (dir: string): void => {
       for (const e of readdirSync(dir, { withFileTypes: true })) {
         const full = join(dir, e.name);
         if (e.isDirectory()) walk(full);
-        else if (
-          e.isFile() &&
-          e.name !== '.DS_Store' &&
-          e.name !== 'DESIGN.md' &&
-          !BUNDLED_SKILL_TEST_FILE_RE.test(e.name)
-        )
-          shipped.push(full);
+        else if (e.isFile()) {
+          if (
+            e.name !== '.DS_Store' &&
+            e.name !== 'DESIGN.md' &&
+            !BUNDLED_SKILL_TEST_FILE_RE.test(e.name)
+          )
+            shipped.push(full);
+          if (
+            DIGESTED_EXTENSIONS.skill.has(extname(e.name)) &&
+            !NOT_BUNDLED_SKILL_FILE.has(e.name)
+          )
+            admitted.push(full);
+        }
       }
     };
     walk(skillDir);
@@ -239,5 +271,11 @@ describe('the build stamp and the staleness check agree', () => {
     for (const f of shipped) {
       expect(DIGESTED_EXTENSIONS.skill.has(extname(f))).toBe(true);
     }
+    // …and the reverse: nothing the digest folds in is a file the copier
+    // skips. Today `skill = {.md}` makes the two lists equal; the day a code
+    // extension joins the skill set, `SKILL.test.ts` becomes digested while
+    // the copier does not ship it, and an edit to it would move the digest
+    // without being able to change a byte of the bundle.
+    expect(admitted).toEqual(shipped);
   });
 });
