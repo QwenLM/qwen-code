@@ -3277,11 +3277,11 @@ describe('GeminiChat', async () => {
       );
     });
 
-    it('triggers compaction end-to-end through the real ChatCompressionService when lastPromptTokenCount === 0 and inherited history is large (R3.4)', async () => {
+    it('triggers cache-sharing compaction end-to-end when a provider token count is available (R3.4)', async () => {
       // Reviewer R3.4: the "forwards the pending user message" test above
       // mocks the service entirely, so the real cheap-gate (the actual
-      // estimatePromptTokens fallback branch when lastPromptTokenCount===0)
-      // never runs. Exercise the full chain here:
+      // estimatePromptTokens gate never runs. Exercise the full chain here
+      // with the provider token-count anchor required for cache sharing:
       //   sendMessageStream → tryCompress → service.compress (REAL) →
       //   cheap-gate (real estimate via getHistory + userMessage) →
       //   splitter (real) → cache-sharing request (mocked at baseLlmClient) →
@@ -3294,7 +3294,8 @@ describe('GeminiChat', async () => {
         { role: 'model', parts: [{ text: 'response' }] },
       ];
       chat.setHistory(inheritedHistory);
-      expect(chat.getLastPromptTokenCount()).toBe(0);
+      chat.setLastPromptTokenCount(172_000);
+      expect(chat.getLastPromptTokenCount()).toBe(172_000);
 
       // Full 200K window (DEFAULT_TOKEN_LIMIT): auto = 0.85 × 200K = 170K,
       // hard = 177K. ~172K sits between them, so the cheap-gate (force=false
@@ -3460,6 +3461,9 @@ describe('GeminiChat', async () => {
       expect(compressSpy.mock.calls[1][1].force).toBe(true);
       expect(compressSpy.mock.calls[1][1].trigger).toBe('auto');
       expect(compressSpy.mock.calls[1][1].originalTokenCount).toBe(135_000);
+      expect(compressSpy.mock.calls[1][1].precomputedEffectiveTokens).toBe(
+        135_000,
+      );
       expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
         2,
       );

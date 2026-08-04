@@ -455,9 +455,10 @@ interface TryCompressOptions {
    */
   pendingUserMessage?: Content;
   /**
-   * Pre-computed `estimatePromptTokens` value from the caller. When set,
-   * the cheap-gate uses this instead of recomputing — avoids a second
-   * `getHistory(true)` clone per send. (review #4168 R1.3 / R1.4)
+   * Pre-computed all-inclusive effective prompt count from the caller. When
+   * set, the cheap-gate uses this instead of recomputing — avoids a second
+   * `getHistory(true)` clone per send and prevents provider-reported overflow
+   * counts from double-counting the previous model output.
    */
   precomputedEffectiveTokens?: number;
   /** Per-request overrides needed to preserve the main request cache prefix. */
@@ -1832,6 +1833,11 @@ export class GeminiChat {
     return this.lastPromptTokenCount;
   }
 
+  /** Previous model-response tokens used by the next prompt estimate. */
+  getLastOutputTokenCount(): number {
+    return this.lastOutputTokenCount;
+  }
+
   /**
    * Builds request contents for the content generator without deep-cloning the
    * whole chat history. This is an internal hot path: long sessions can make a
@@ -3037,6 +3043,7 @@ export class GeminiChat {
                     params.config?.abortSignal,
                     {
                       originalTokenCountOverride: reactiveOriginalTokenCount,
+                      precomputedEffectiveTokens: reactiveOriginalTokenCount,
                       requestGenerationConfig: params.config,
                       trigger: 'auto',
                     },
