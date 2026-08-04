@@ -103,6 +103,20 @@ function isExecutionTimeoutFailure(
   );
 }
 
+/**
+ * The MCP SDK's Protocol.request() rejects with exactly this error before
+ * writing the request when the transport is already gone. Network-level
+ * failures (`Connection closed`, ECONNRESET, proxy 5xx, SSE drops) leave
+ * delivery ambiguous — the server may have received and executed the call —
+ * so only this pre-send rejection proves the call never left the client.
+ * The replay gate keys on it rather than the DISCONNECTED status, which can
+ * be written while the transport is still live (teardown windows, transient
+ * onerror events) and would then exempt a call that may have been delivered.
+ */
+function isNeverDeliveredError(error: unknown): boolean {
+  return getErrorMessage(error) === 'Not connected';
+}
+
 const PARENT_ABORT_OUTCOME = Symbol('parent_abort_outcome');
 
 type ParentAbortOutcome = {
@@ -247,17 +261,15 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   ToolResult
 > {
   private static readonly MAX_RECONNECT_RETRIES = 3;
+  /**
+   * The gate blocks only the automatic same-turn replay: a fresh model-
+   * initiated attempt goes through the normal reconnect path and is
+   * delivered as usual. For unannotated tools the guard is therefore a
+   * one-turn speed bump by design — a deliberate retry is the model's own
+   * decision, not an invisible automatic replay.
+   */
   private static readonly UNSAFE_REPLAY_ERROR_MESSAGE =
     'MCP tool execution may have completed before the connection failed. Automatic replay was skipped because the call could not be verified as safe to replay. Do not retry automatically; verify the outcome before trying again.';
-
-  /**
-   * The server's status when this invocation's call was issued, snapshotted
-   * in execute() before the attempt because the failure itself overwrites
-   * the status. A call issued while the server was already DISCONNECTED is
-   * believed never to have reached it — nothing "may have completed" — so
-   * retrying it is a first delivery, not a replay.
-   */
-  private statusAtCallStart: MCPServerStatus | undefined;
 
   constructor(
     private readonly mcpTool: CallableTool,
@@ -387,15 +399,17 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     }
 
     // A never-delivered call is a first delivery, not a replay.
-    const neverDelivered =
-      this.statusAtCallStart === MCPServerStatus.DISCONNECTED;
+    const neverDelivered = isNeverDeliveredError(error);
     if (neverDelivered) {
       debugLogger.info(
-        `Replay safety gate bypassed for MCP server '${this.serverName}': call was never delivered (DISCONNECTED at call start)`,
+        `Replay safety gate bypassed for MCP server '${this.serverName}': the call was rejected before it could be sent`,
       );
     }
 
     if (!neverDelivered && !this.canSafelyReplay()) {
+      debugLogger.info(
+        `Replay safety gate blocked retry for MCP server '${this.serverName}': the failed call may have reached the server`,
+      );
       throw new Error(DiscoveredMCPToolInvocation.UNSAFE_REPLAY_ERROR_MESSAGE);
     }
 
@@ -422,8 +436,12 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
           newTool['allowInvocationContext'] === true,
           this.retryCount + 1,
         );
-        // Same carve-out; the next hop re-snapshots and the gate re-applies.
+        // Same carve-out; the retried call is judged by its own failure
+        // evidence, so the gate re-applies in full on the next hop.
         if (!neverDelivered && !newInvocation.canSafelyReplay()) {
+          debugLogger.info(
+            `Replay safety gate blocked retry for MCP server '${this.serverName}': the re-discovered tool is not safe to replay`,
+          );
           throw new Error(
             DiscoveredMCPToolInvocation.UNSAFE_REPLAY_ERROR_MESSAGE,
           );
@@ -483,7 +501,6 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     signal: AbortSignal,
     updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
-    this.statusAtCallStart = getMCPServerStatus(this.serverName);
     // Use direct MCP client if available (supports progress notifications),
     // otherwise fall back to the @google/genai mcpToTool wrapper.
     if (this.mcpClient) {

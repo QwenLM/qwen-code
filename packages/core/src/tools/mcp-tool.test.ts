@@ -2387,10 +2387,13 @@ describe('DiscoveredMCPTool', () => {
       expect(discoverToolsForServer).not.toHaveBeenCalled();
     });
 
-    it('reconnects and delivers an unannotated tool when the server was known disconnected', async () => {
+    it('reconnects and delivers an unannotated tool when the call was never delivered', async () => {
       const params = { param: 'test' };
+      // The SDK rejects with exactly 'Not connected' before writing a
+      // request whose transport is already gone — positive proof the call
+      // never reached the server, so the retry is a first delivery.
       const deadClient: McpDirectClient = {
-        callTool: vi.fn().mockRejectedValueOnce(new Error('Connection closed')),
+        callTool: vi.fn().mockRejectedValueOnce(new Error('Not connected')),
       };
       const liveClient: McpDirectClient = {
         callTool: vi
@@ -2408,7 +2411,10 @@ describe('DiscoveredMCPTool', () => {
         undefined,
         liveClient, // unannotated
       );
-      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      // A real reconnect restores CONNECTED before the retried call.
+      const discoverToolsForServer = vi.fn().mockImplementation(async () => {
+        updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      });
       const mockConfig = {
         isTrustedFolder: () => true,
         getToolRegistry: () => ({
@@ -2444,8 +2450,11 @@ describe('DiscoveredMCPTool', () => {
 
     it('still gates a call that dies mid-flight on the recovered connection', async () => {
       const params = { param: 'test' };
+      // The first attempt is provably undelivered (pre-send rejection), so
+      // it passes the gate; the retried call then dies mid-flight with an
+      // ambiguous error, and the gate must re-apply to it.
       const deadClient: McpDirectClient = {
-        callTool: vi.fn().mockRejectedValueOnce(new Error('Connection closed')),
+        callTool: vi.fn().mockRejectedValueOnce(new Error('Not connected')),
       };
       const recoveredClient: McpDirectClient = {
         callTool: vi.fn().mockRejectedValue(new Error('Connection closed')),
@@ -2502,6 +2511,125 @@ describe('DiscoveredMCPTool', () => {
 
       expect(recoveredClient.callTool).toHaveBeenCalledTimes(1);
       expect(thirdClient.callTool).not.toHaveBeenCalled();
+    });
+
+    it('still gates a failure that flips the server status mid-flight', async () => {
+      const params = { param: 'test' };
+      // The real client marks the server DISCONNECTED when the transport
+      // dies (mcp-client.ts onerror wiring). That status write is a
+      // consequence of an ambiguous failure, not proof the call was never
+      // delivered, so it must not exempt the call from the gate.
+      const deadClient: McpDirectClient = {
+        callTool: vi.fn().mockImplementation(async () => {
+          updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+          throw new Error('Connection closed');
+        }),
+      };
+      const liveClient: McpDirectClient = {
+        callTool: vi
+          .fn()
+          .mockResolvedValue({ content: [{ type: 'text', text: 'REPLAYED' }] }),
+      };
+      const newTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined, // untrusted
+        undefined,
+        undefined,
+        liveClient, // unannotated
+      );
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool: vi.fn().mockResolvedValue(newTool),
+        }),
+        getTruncateToolOutputThreshold: () => 0,
+        getTruncateToolOutputLines: () => 0,
+      };
+
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+
+      const reconnectTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined, // untrusted
+        undefined,
+        mockConfig as any,
+        deadClient, // unannotated
+      );
+
+      await expect(
+        reconnectTool.build(params).execute(new AbortController().signal),
+      ).rejects.toThrow(unsafeReplayErrorMessage);
+
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+      expect(liveClient.callTool).not.toHaveBeenCalled();
+    });
+
+    it('still gates an ambiguous failure issued while the status was DISCONNECTED', async () => {
+      const params = { param: 'test' };
+      // DISCONNECTED at call start is not proof of non-delivery: teardown
+      // writes the status before the transport dies, and network transports
+      // report transient errors without closing. A call issued in either
+      // window can reach the server, so its ambiguous failure stays gated.
+      const deadClient: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValueOnce(new Error('Connection closed')),
+      };
+      const liveClient: McpDirectClient = {
+        callTool: vi
+          .fn()
+          .mockResolvedValue({ content: [{ type: 'text', text: 'REPLAYED' }] }),
+      };
+      const newTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined, // untrusted
+        undefined,
+        undefined,
+        liveClient, // unannotated
+      );
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool: vi.fn().mockResolvedValue(newTool),
+        }),
+        getTruncateToolOutputThreshold: () => 0,
+        getTruncateToolOutputLines: () => 0,
+      };
+
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+
+      const reconnectTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined, // untrusted
+        undefined,
+        mockConfig as any,
+        deadClient, // unannotated
+      );
+
+      await expect(
+        reconnectTool.build(params).execute(new AbortController().signal),
+      ).rejects.toThrow(unsafeReplayErrorMessage);
+
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+      expect(liveClient.callTool).not.toHaveBeenCalled();
     });
   });
 
