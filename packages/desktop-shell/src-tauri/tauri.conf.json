@@ -57,7 +57,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IENEREE1N0EwMkY5OUNDMzAKUldRd3pKa3ZvRmZhemRMb3Y0M3gzMytEZEtQZk5tWlNWWWhqTWM0ZUxiTHNzSHA4SUZJOFV5cnAK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDkzMTlFNDMyRTVFNkUyNUMKUldSYzR1YmxNdVFaa3pJWjBPMERVVUw0akFvU3ZxS0pNMTFrcUhCbDlUaEVuRkVEVEcxaDBHNEcK",
       "endpoints": [
         "https://github.com/QwenLM/qwen-code/releases/download/desktop-latest/desktop-latest.json"
       ]
