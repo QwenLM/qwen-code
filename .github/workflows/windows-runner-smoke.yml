@@ -27,6 +27,14 @@ jobs:
       - name: 'Configure Windows test environment'
         uses: './.github/actions/configure-windows-runner'
 
+      # Same stale-checkout guard as the gate: the smoke runs behind the same
+      # caching egress proxy, so fail loud if the checkout lacks the
+      # dispatched head instead of silently validating the wrong tree.
+      - name: 'Verify checkout includes expected head commit'
+        uses: './.github/actions/verify-checkout-head'
+        with:
+          expected_sha: '${{ github.sha }}'
+
       - name: 'Verify tools'
         shell: 'powershell'
         run: |-

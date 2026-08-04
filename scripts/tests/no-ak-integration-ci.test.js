@@ -160,19 +160,23 @@ describe('no-AK integration CI wiring', () => {
       path.join(ROOT, GUARD_ACTION_PATH),
       'utf8',
     );
-    // Pin the full negated condition: dropping the `!` would turn the guard
-    // into a pass-through for exactly the stale checkouts it must reject.
+    // Pin the reject path as one contiguous block so ordering is part of the
+    // contract: relocating `exit 1` into a never-taken branch would turn the
+    // guard into a pass-through for the stale checkouts it must reject while
+    // every substring pin stayed green.
     expect(guardAction).toContain(
-      'if ! git merge-base --is-ancestor "${EXPECTED_SHA}" HEAD; then',
+      [
+        'if ! git merge-base --is-ancestor "${EXPECTED_SHA}" HEAD; then',
+        '          echo "::error::Checked out ref does not contain expected head ${EXPECTED_SHA}."',
+        '          git log --oneline --decorate -5',
+        '          exit 1',
+        '        fi',
+      ].join('\n'),
     );
     // Pin the input-to-env wiring too: re-binding EXPECTED_SHA to a context
     // value (e.g. github.sha) would pass for every checkout, including the
-    // stale ones this guard must reject, while the pins above stay green.
+    // stale ones this guard must reject, while the pin above stays green.
     expect(guardAction).toContain("EXPECTED_SHA: '${{ inputs.expected_sha }}'");
-    expect(guardAction).toContain(
-      '::error::Checked out ref does not contain expected head',
-    );
-    expect(guardAction).toContain('exit 1');
 
     const guardCalls = {
       test: getWorkflowStep(ubuntuJob, GUARD_STEP),
@@ -211,6 +215,7 @@ describe('no-AK integration CI wiring', () => {
     expect(guardCalls.test_windows).toContain(
       'if: "${{ needs.classify_pr.outputs.skip_ci != \'true\' }}"',
     );
+    expect(guardCalls.integration_cli).not.toContain('if:');
   });
 
   it('pins the Windows gate kill-switch routing, tuning, and Node split', () => {
@@ -328,6 +333,12 @@ describe('no-AK integration CI wiring', () => {
         "uses: './.github/actions/configure-windows-runner'",
       ),
     ).toBeGreaterThan(smokeCheckoutIndex);
+    // The smoke runs behind the same caching egress proxy as the gate, so it
+    // takes the same stale-checkout guard, pinned to the dispatched head.
+    expect(
+      smokeWorkflow.indexOf("uses: './.github/actions/verify-checkout-head'"),
+    ).toBeGreaterThan(smokeCheckoutIndex);
+    expect(smokeWorkflow).toContain("expected_sha: '${{ github.sha }}'");
     // The smoke is self-hosted-only, so it must take the same Node path as
     // the gate's self-hosted side: the pre-installed Node, never a nodejs.org
     // download the ECS egress proxy cannot reach.
@@ -340,6 +351,7 @@ describe('no-AK integration CI wiring', () => {
     // powershell pin there would validate a shell the gate never runs.
     const smokeJob = getWorkflowJob(smokeWorkflow, 'validate');
     for (const stepName of [
+      'Configure persistent npm cache (self-hosted)',
       'Configure npm for rate limiting',
       'Install dependencies',
       'Run tests and generate reports',
@@ -361,7 +373,8 @@ describe('no-AK integration CI wiring', () => {
     expect(gateNpmCache).toContain('NPM_CONFIG_CACHE=');
 
     // Node split: hosted runners download Node, self-hosted runners reuse
-    // their pre-installed one and fail loud when it is missing or off-major.
+    // their pre-installed one: fail loud when Node is missing, warn when the
+    // major is not 22.
     const hostedSetup = getWorkflowStep(
       windowsJob,
       'Set up Node.js 22.x (hosted)',
@@ -384,6 +397,20 @@ describe('no-AK integration CI wiring', () => {
     expect(nodeAction).toContain('exit 1');
     expect(nodeAction).toContain(
       'if [[ "$(node -p \'process.versions.node.split(".")[0]\')" != "22" ]]; then',
+    );
+    expect(nodeAction).toContain('::warning::Expected Node 22.x but found');
+  });
+
+  it('keeps install-script.test.js out of the win32 exclude list', () => {
+    // install-script.test.js is the only home of the nine Windows installer
+    // end-to-end cases; excluding it on win32 would silently drop coverage
+    // docs/design/windows-ecs-ci-validation.md declares required.
+    const scriptSuiteConfig = readFileSync(
+      path.join(ROOT, 'scripts/tests/vitest.config.ts'),
+      'utf8',
+    );
+    expect(scriptSuiteConfig).not.toContain(
+      "'scripts/tests/install-script.test.js'",
     );
   });
 

@@ -26,7 +26,7 @@ export function getWorkflowStep(job, stepName) {
   expect(start).toBeGreaterThanOrEqual(0);
 
   const afterMarker = job.slice(start + marker.length);
-  const nextStep = afterMarker.match(/\n {6}- name: /);
+  const nextStep = afterMarker.match(/\n {6}- /);
 
   return job.slice(
     start,
