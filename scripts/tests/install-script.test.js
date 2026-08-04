@@ -2166,10 +2166,12 @@ describe('standalone release packaging', () => {
     }
   });
 
-  // Not zip-gated: the assertion path never invokes zip/unzip (measured —
-  // the failure fires at copyRuntimeAssets), and gating it silently lost
-  // always-on dist validation on zip-less runners.
-  it('rejects unexpected dist assets', () => {
+  // The fixture (createFakeWindowsNodeArchive → createZipForTest) shells
+  // out to zip BEFORE the packaging script runs, so this test is
+  // zip-dependent too — gate it like its siblings (probe-verified: on a
+  // zip-less PATH the fixture throws ENOENT inside the toThrow wrapper and
+  // the mismatched message fails red while the gated siblings skip).
+  itWithZipTooling('rejects unexpected dist assets', () => {
     const createdDist = ensureMinimalDist();
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
 

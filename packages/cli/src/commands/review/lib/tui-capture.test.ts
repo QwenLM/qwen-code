@@ -179,9 +179,12 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
     // (or `exec`, or its own `set -e`) takes the keep-alive down with it —
     // measured, deterministic "no server running" on `printf ...; exit 0`.
     // The inner sh absorbs the exit; the outer holds the pane, with the
-    // hold on its OWN LINE so no command tail (`;`, `#`) can void it.
+    // hold on its OWN LINE so no command tail (`;`, `#`) can void it — and
+    // `trap : INT` so one C-c through the capture's own --keys path kills
+    // neither the holder nor the server (measured: untrapped, pane →
+    // session → server died before the capture).
     expect(plan.start[plan.start.length - 1]).toBe(
-      `sh -c 'sh -c '\\''node cli.js'\\''\nsleep 7200'`,
+      `sh -c 'trap : INT\nsh -c '\\''node cli.js'\\''\nsleep 7200'`,
     );
   });
 
@@ -204,7 +207,7 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
     const cmd = `printf '%s' "it's"`;
     const inner = `sh -c '${esc(cmd)}'`;
     const held = p.start[p.start.length - 1];
-    expect(held).toBe(`sh -c '${esc(`${inner}\nsleep 7200`)}'`);
+    expect(held).toBe(`sh -c '${esc(`trap : INT\n${inner}\nsleep 7200`)}'`);
   });
 
   it('matches --until on a joined, escape-free view while .ans stays physical', () => {

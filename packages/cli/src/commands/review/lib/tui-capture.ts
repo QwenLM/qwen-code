@@ -152,6 +152,15 @@ export function tmuxPlan(opts: {
   // on `printf ...; exit 0`). The inner sh absorbs the exit; the outer one
   // holds the pane.
   //
+  // The outer holder ALSO survives SIGINT: non-interactive shells stay in
+  // the pane's foreground process group, so one C-c — a canonical --keys
+  // token — delivers INTR to the holder itself and would take pane →
+  // session → server down before the capture (measured). `trap : INT`, NOT
+  // `trap '' INT`: SIG_IGN inherits across exec and would silently blunt
+  // C-c for targets without their own handler, while a trapped signal
+  // resets to default in children — the command keeps its normal Ctrl-C
+  // behavior, and only the holder is protected.
+  //
   // The hold sits on its OWN LINE: appended with `;` it is voided by the
   // command's own tail — a trailing `;` makes `;;` (syntax error, pane dies
   // instantly), a trailing `#` comment swallows it (the one-shot failure
@@ -160,7 +169,7 @@ export function tmuxPlan(opts: {
   // every layer, so no shell parses its text adjacent to the hold
   // (probe-verified with odd-run shapes on this exact plan).
   const inner = `sh -c '${esc(opts.command)}'`;
-  const held = `sh -c '${esc(`${inner}\nsleep 7200`)}'`;
+  const held = `sh -c '${esc(`trap : INT\n${inner}\nsleep 7200`)}'`;
   return {
     // ONE client invocation, three properties:
     // - `-f /dev/null` starts the server CONFIG-FREE: without it the

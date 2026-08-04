@@ -23,9 +23,12 @@
 // discouraged. `kill-server` at the end reaps everything the capture started.
 //
 // Degradation is explicit, not silent: the manifest names which evidence rung
-// was reached (`png` / `ans-only` / `none`) and why, because a verifier must
-// say which rung its verdict stands on — a PNG is publishable rendering
-// evidence, an .ans proves bytes but not pixels, and prose is neither.
+// was reached (`png` or `ans-only`) and why, because a verifier must say
+// which rung its verdict stands on — a PNG is publishable rendering evidence,
+// an .ans proves bytes but not pixels, and prose is neither. A REFUSED
+// capture writes no manifest at all — the bottom rung (`none`) is reported by
+// the refusal JSON on stdout instead, so a missing manifest reads as a
+// refusal, not corruption.
 
 import type { CommandModule } from 'yargs';
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -204,6 +207,21 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     return;
   }
   const outBase = resolve(args.out);
+  // resolve('.') and resolve('./') are the cwd itself — the same shape the
+  // empty guard above refuses — and any existing directory sails through:
+  // artifacts would land as <dir>.ans/.png/.json NEXT TO the directory,
+  // silently clobbering whatever holds those names. Refuse before the
+  // stale-artifact clear so this refusal stays side-effect-free too.
+  let outIsDirectory = false;
+  try {
+    outIsDirectory = statSync(outBase).isDirectory();
+  } catch {
+    // A nonexistent out base is the normal shape.
+  }
+  if (outIsDirectory) {
+    refuse(`--out must not name an existing directory: ${outBase}`);
+    return;
+  }
   const ansPath = `${outBase}.ans`;
   const pngPath = `${outBase}.png`;
   const manifestPath = `${outBase}.json`;
@@ -222,9 +240,9 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // refusal for a typo'd flag later in this validation chain — must leave
     // THIS run's artifacts or nothing; a stale manifest next to a refusal
     // hands a verifier evidence from a different capture.
-    rmSync(ansPath, { force: true });
-    rmSync(pngPath, { force: true });
-    rmSync(manifestPath, { force: true });
+    rmSync(ansPath, { recursive: true, force: true });
+    rmSync(pngPath, { recursive: true, force: true });
+    rmSync(manifestPath, { recursive: true, force: true });
     const probePath = `${outBase}.write-probe-${randomBytes(4).toString('hex')}`;
     const fd = openSync(probePath, 'w');
     closeSync(fd);
@@ -560,11 +578,15 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // Always, even when the capture threw mid-run: the private server holds
     // every process this capture launched, and an orphaned TUI outliving the
     // review is the mess this command exists to make impossible. A start
-    // that threw has no server to reap, and reap() stays silent about it. The reap
-    // runs FIRST — it can block up to the 15s tmux timeout against a wedged
-    // server, and a signal in that window must still be caught (measured:
-    // releasing before the reap left a 25ms-to-death window with no
-    // listener). On the success path the listeners stay installed through
+    // that threw has no server to reap, and reap() stays silent about it.
+    // The reap runs FIRST — releasing the listeners before it left a
+    // measured 25ms-to-death window with no listener. Honest limit, also
+    // measured: Node cannot dispatch a JS handler while reap()'s synchronous
+    // execFileSync blocks (up to 2×15s against a wedged server), so a signal
+    // landing in that window only dispatches once the block ends — a kill
+    // there reads normal completion, and the no-orphan guarantee is the
+    // reap's, not the handler's. The listeners cover the await windows,
+    // where dispatch works. On the success path they stay installed through
     // the freeze render below, which can block up to its belt.
     reap();
     if (captureFailed) releaseSignals();
@@ -579,7 +601,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // .ans from an interrupted write (measured with a real ENOSPC) must not
     // persist undescribed.
     try {
-      rmSync(ansPath, { force: true });
+      rmSync(ansPath, { recursive: true, force: true });
     } catch {
       // The refusal reason below is the primary signal either way.
     }
@@ -640,10 +662,12 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       timeout: freezeRender.timeoutMs,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-    if (r.status === 0 && existsSync(pngPath)) {
+    if (r.status === 0 && existsSync(pngPath) && statSync(pngPath).size > 0) {
       // Exit code alone is not evidence: a freeze that exits 0 without
-      // writing the file would otherwise manifest a png rung pointing at
-      // nothing — and a verifier would publish a path with no pixels.
+      // writing the file — or leaving a 0-byte/truncated one (ENOSPC
+      // mid-write, the shape the .ans write guard's comment names) — would
+      // otherwise manifest a png rung with no pixels, and a verifier would
+      // publish it.
       png = pngPath;
     } else {
       // The stderr tail rides along: a bare exit code is undiagnosable from
@@ -677,7 +701,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       // manifest is about to deny — remove it (measured: a fake freeze that
       // wrote bytes then exited 9 left a torn png behind).
       try {
-        rmSync(pngPath, { force: true });
+        rmSync(pngPath, { recursive: true, force: true });
       } catch {
         // The degradation entry above is the primary signal.
       }
@@ -723,11 +747,11 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // (and possibly a png) with no manifest to describe them — best-effort
     // remove what this run already wrote before refusing.
     try {
-      rmSync(ansPath, { force: true });
-      rmSync(pngPath, { force: true });
+      rmSync(ansPath, { recursive: true, force: true });
+      rmSync(pngPath, { recursive: true, force: true });
       // The failed write itself can leave a PARTIAL manifest at the path —
       // worse than none: it parses or half-parses as evidence description.
-      rmSync(manifestPath, { force: true });
+      rmSync(manifestPath, { recursive: true, force: true });
     } catch {
       // The refusal reason below is the primary signal either way.
     }
@@ -796,7 +820,7 @@ export const captureTuiCommand: CommandModule = {
         type: 'string',
         array: true,
         describe:
-          'tmux send-keys tokens sent after start (or after --ready matches), one per token (e.g. --keys "/review" Enter)',
+          'tmux send-keys tokens sent after start (or after --ready matches), one per token (e.g. --keys "/review" Enter); a token starting with "-" must use the --keys=<token> form or yargs parses it as an unknown flag',
       })
       .option('out', {
         type: 'string',

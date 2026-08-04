@@ -404,23 +404,28 @@ jobs:
       # capture-tui's real-tmux suite is describe.skipIf(!hasTmux)-gated: on a
       # runner without tmux (the hosted ubuntu-latest image ships none) it
       # silently skips every real-tmux behavior — holder survival, matching,
-      # server reaping, refusal contracts. Install tmux where apt exists so
-      # the Linux lane actually executes them (qwen-autofix.yml does the same).
-      - name: 'Install tmux'
+      # server reaping, refusal contracts. The install-script packaging suite
+      # has the same shape with zip/unzip on self-hosted lanes. Install the
+      # tooling where apt exists so the Linux lane actually executes both
+      # (qwen-autofix.yml does the same for tmux).
+      - name: 'Install tmux and zip tooling'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.os == 'Linux' }}"
         run: |-
-          if command -v tmux > /dev/null 2>&1; then
+          if command -v tmux > /dev/null 2>&1 && command -v zip > /dev/null 2>&1 && command -v unzip > /dev/null 2>&1; then
             # Advisory here too: a broken-but-installed tmux (dangling
             # symlink, missing lib) must not fail the required Test check
             # before a single test has run.
-            tmux -V || echo 'tmux present but not answering; real-tmux capture tests will be skipped.'
+            tmux -V || echo '::warning::tmux present but not answering; real-tmux capture tests will be skipped.'
           elif command -v sudo > /dev/null 2>&1 && command -v apt-get > /dev/null 2>&1; then
-            # Advisory, not a gate: an apt hiccup must not fail the job for a
-            # suite that is describe.skipIf-gated and simply skips without tmux.
-            sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends tmux \
-              || echo 'tmux install failed; real-tmux capture tests will be skipped.'
+            # Advisory, not a gate: an apt hiccup must not fail the job for
+            # suites that are skipIf-gated and simply skip without the tools.
+            # ::warning:: (not a plain echo) so a lane where the install
+            # PERMANENTLY fails shows the skip in the check UI instead of
+            # hiding it as one line in a multi-thousand-line log.
+            sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends tmux zip unzip \
+              || echo '::warning::tmux/zip install failed; real-tmux and zip-packaging tests will be skipped.'
           else
-            echo 'tmux unavailable; real-tmux capture tests will be skipped.'
+            echo '::warning::tmux/zip unavailable; real-tmux and zip-packaging tests will be skipped.'
           fi
 
       - name: 'Run tests and generate reports'

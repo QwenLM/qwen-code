@@ -154,115 +154,155 @@ describe('runCleanup', () => {
     ]);
   });
 
-  describe.skipIf(process.platform === 'win32')('orphaned capture-tui servers', () => {
-    // win32: the implementation early-returns when process.getuid is
-    // undefined, so both halves under test are unreachable there and the
-    // fixtures (POSIX socket-dir layout) would fail for the wrong reason.
-    // A SIGKILL'd harness leaves the private tmux server alive; cleanup is
-    // the sweep that reclaims it, keyed on the launcher pid in the socket
-    // name. The pid liveness probe and the tmux kill are the two halves.
-    const uid = process.getuid?.();
-    const dir = `/fake-tmp/tmux-${String(uid)}`;
-    // A pid that WAS alive and is not: spawn a process and let it exit.
-    const deadPid = String(spawnSync(process.execPath, ['-e', '']).pid ?? 0);
-    const orphan = `qwen-review-capture-${deadPid}-aaaa`;
-    const live = `qwen-review-capture-${process.pid}-bbbb`;
+  describe.skipIf(process.platform === 'win32')(
+    'orphaned capture-tui servers',
+    () => {
+      // win32: the implementation early-returns when process.getuid is
+      // undefined, so both halves under test are unreachable there and the
+      // fixtures (POSIX socket-dir layout) would fail for the wrong reason.
+      // A SIGKILL'd harness leaves the private tmux server alive; cleanup is
+      // the sweep that reclaims it, keyed on the launcher pid in the socket
+      // name. The pid liveness probe and the tmux kill are the two halves.
+      const uid = process.getuid?.();
+      const dir = `/fake-tmp/tmux-${String(uid)}`;
+      // A pid that WAS alive and is not: spawn a process and let it exit.
+      const deadPid = String(spawnSync(process.execPath, ['-e', '']).pid ?? 0);
+      const deadPid2 = String(spawnSync(process.execPath, ['-e', '']).pid ?? 0);
+      const orphan = `qwen-review-capture-${deadPid}-aaaa`;
+      // Listed AFTER the wedged orphan: an unreapable entry must not stop the
+      // sweep (a continue→break mutant leaves this one alive for the holder's
+      // full 2h with no stderr trail).
+      const orphan2 = `qwen-review-capture-${deadPid2}-cccc`;
+      const live = `qwen-review-capture-${process.pid}-bbbb`;
 
-    beforeEach(() => {
-      process.env['TMUX_TMPDIR'] = '/fake-tmp';
-      mocks.existsSync.mockImplementation((p: string) => p === dir);
-      mocks.readdirSync.mockImplementation((p: string) =>
-        // The foreign socket comes FIRST: a continue→break mutant stops the
-        // sweep at the first non-matching name (typically the user's own
-        // socket), leaving every orphan after it alive.
-        p === dir ? ['some-other-socket', orphan, live] : [],
-      );
-      mocks.execFileSync.mockReturnValue(Buffer.from(''));
-    });
-
-    afterEach(() => {
-      delete process.env['TMUX_TMPDIR'];
-    });
-
-    it('reaps sockets whose launcher pid is dead and leaves live ones alone', () => {
-      runCleanup('local');
-
-      expect(mocks.execFileSync).toHaveBeenCalledWith(
-        'tmux',
-        ['-L', orphan, 'kill-server'],
-        { stdio: 'pipe', timeout: 15_000 },
-      );
-      expect(mocks.execFileSync).not.toHaveBeenCalledWith(
-        'tmux',
-        ['-L', live, 'kill-server'],
-        { stdio: 'pipe', timeout: 15_000 },
-      );
-      expect(mocks.rmSync).toHaveBeenCalledWith(`${dir}/${orphan}`, {
-        force: true,
-      });
-      expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
-        `Reaped orphaned capture server: ${orphan}`,
-      );
-      // Something WAS cleaned, so the nothing-to-clean claim must not print.
-      expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
-        expect.stringContaining('Nothing to clean'),
-      );
-    });
-
-    it('notes a server it cannot kill and does not unlink a live server socket', () => {
-      mocks.execFileSync.mockImplementation((bin: string, _argv: string[]) => {
-        if (bin === 'tmux') {
-          throw Object.assign(new Error('wedged'), {
-            stderr: 'tmux: server is wedged',
-          });
-        }
-        return Buffer.from('');
+      beforeEach(() => {
+        process.env['TMUX_TMPDIR'] = '/fake-tmp';
+        mocks.existsSync.mockImplementation((p: string) => p === dir);
+        mocks.readdirSync.mockImplementation((p: string) =>
+          // The foreign socket comes FIRST: a continue→break mutant stops the
+          // sweep at the first non-matching name (typically the user's own
+          // socket), leaving every orphan after it alive.
+          p === dir ? ['some-other-socket', orphan, orphan2, live] : [],
+        );
+        mocks.execFileSync.mockReturnValue(Buffer.from(''));
       });
 
-      runCleanup('local');
-
-      expect(mocks.writeStderrLine).toHaveBeenCalledWith(
-        expect.stringContaining(
-          `could not reap orphaned capture server ${orphan}`,
-        ),
-      );
-      expect(mocks.rmSync).not.toHaveBeenCalledWith(
-        `${dir}/${orphan}`,
-        expect.anything(),
-      );
-      // An unreapable orphan is a FAILURE, not a nothing: stdout must not
-      // contradict the stderr note with a "Nothing to clean" claim.
-      expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
-        expect.stringContaining('Nothing to clean'),
-      );
-    });
-
-    it('treats "no server running" as reaped — socket unlinked, success printed', () => {
-      // The kill throwing because the server is ALREADY dead is the goal
-      // state, not a failure: the socket is litter and must still go. A
-      // `serverDead = false` mutant ships this branch green otherwise.
-      mocks.execFileSync.mockImplementation((bin: string) => {
-        if (bin === 'tmux') {
-          throw Object.assign(new Error('exited 1'), {
-            stderr: Buffer.from(`no server running on ${dir}/${orphan}`),
-          });
-        }
-        return Buffer.from('');
+      afterEach(() => {
+        delete process.env['TMUX_TMPDIR'];
       });
 
-      runCleanup('local');
+      it('reaps sockets whose launcher pid is dead and leaves live ones alone', () => {
+        runCleanup('local');
 
-      expect(mocks.rmSync).toHaveBeenCalledWith(`${dir}/${orphan}`, {
-        force: true,
+        expect(mocks.execFileSync).toHaveBeenCalledWith(
+          'tmux',
+          ['-L', orphan, 'kill-server'],
+          { stdio: 'pipe', timeout: 15_000 },
+        );
+        expect(mocks.execFileSync).not.toHaveBeenCalledWith(
+          'tmux',
+          ['-L', live, 'kill-server'],
+          { stdio: 'pipe', timeout: 15_000 },
+        );
+        expect(mocks.rmSync).toHaveBeenCalledWith(`${dir}/${orphan}`, {
+          force: true,
+        });
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${orphan}`,
+        );
+        // The foreign socket stands in for the USER's own tmux server: the
+        // regex gate keeps the sweep off it entirely — a deleted `continue`
+        // on non-match kill-server'd the user's default server in probe (the
+        // blast radius private -L isolation exists to prevent).
+        expect(mocks.execFileSync).not.toHaveBeenCalledWith(
+          'tmux',
+          ['-L', 'some-other-socket', 'kill-server'],
+          expect.anything(),
+        );
+        expect(mocks.rmSync).not.toHaveBeenCalledWith(
+          `${dir}/some-other-socket`,
+          expect.anything(),
+        );
+        // Something WAS cleaned, so the nothing-to-clean claim must not print.
+        expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+          expect.stringContaining('Nothing to clean'),
+        );
       });
-      expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
-        `Reaped orphaned capture server: ${orphan}`,
-      );
-      expect(mocks.writeStderrLine).not.toHaveBeenCalledWith(
-        expect.stringContaining('could not reap'),
-      );
-    });
-  });
+
+      it('notes a server it cannot kill and does not unlink a live server socket', () => {
+        // Throw for the FIRST orphan only (both retry attempts), so the sweep
+        // must note it and CONTINUE to the second one.
+        mocks.execFileSync.mockImplementation((bin: string, argv: string[]) => {
+          if (bin === 'tmux' && argv?.[1] === orphan) {
+            throw Object.assign(new Error('wedged'), {
+              stderr: 'tmux: server is wedged',
+            });
+          }
+          return Buffer.from('');
+        });
+
+        runCleanup('local');
+
+        expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining(
+            `could not reap orphaned capture server ${orphan}`,
+          ),
+        );
+        expect(mocks.rmSync).not.toHaveBeenCalledWith(
+          `${dir}/${orphan}`,
+          expect.anything(),
+        );
+        // The sweep REACHED the orphan listed after the wedged one — a
+        // continue→break mutant left it alive for the 2h holder, unnoted.
+        expect(mocks.execFileSync).toHaveBeenCalledWith(
+          'tmux',
+          ['-L', orphan2, 'kill-server'],
+          { stdio: 'pipe', timeout: 15_000 },
+        );
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${orphan2}`,
+        );
+        // The title's second clause, pinned directly: the LIVE server's
+        // socket is never unlinked (unlinking it would make the live server
+        // unreachable forever).
+        expect(mocks.rmSync).not.toHaveBeenCalledWith(
+          `${dir}/${live}`,
+          expect.anything(),
+        );
+        // An unreapable orphan is a FAILURE, not a nothing: stdout must not
+        // contradict the stderr note with a "Nothing to clean" claim.
+        expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+          expect.stringContaining('Nothing to clean'),
+        );
+      });
+
+      it('treats "no server running" as reaped — socket unlinked, success printed', () => {
+        // The kill throwing because the server is ALREADY dead is the goal
+        // state, not a failure: the socket is litter and must still go. A
+        // `serverDead = false` mutant ships this branch green otherwise.
+        mocks.execFileSync.mockImplementation((bin: string) => {
+          if (bin === 'tmux') {
+            throw Object.assign(new Error('exited 1'), {
+              stderr: Buffer.from(`no server running on ${dir}/${orphan}`),
+            });
+          }
+          return Buffer.from('');
+        });
+
+        runCleanup('local');
+
+        expect(mocks.rmSync).toHaveBeenCalledWith(`${dir}/${orphan}`, {
+          force: true,
+        });
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${orphan}`,
+        );
+        expect(mocks.writeStderrLine).not.toHaveBeenCalledWith(
+          expect.stringContaining('could not reap'),
+        );
+      });
+    },
+  );
 
   it('sweeps a stale base-tree build lock left by a killed builder', () => {
     // The lock is a plain directory (`mkdirSync` test-and-set), not a worktree,

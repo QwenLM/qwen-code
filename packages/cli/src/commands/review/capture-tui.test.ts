@@ -7,9 +7,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import {
+  closeSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readdirSync,
   readFileSync,
   rmSync,
@@ -324,35 +326,108 @@ describe('capture-tui without tmux (probe seam)', () => {
     // Undefined required options are the exported-function vector of the
     // same class: demandOption covers the CLI path only.
     probes.tmux = () => undefined; // never reached — shapes refuse first
-    const base = {
-      cwd: undefined,
-      cols: 80,
-      rows: 24,
-      settleMs: 0,
-      until: undefined,
-      keys: undefined,
-      out: '/tmp/never-written',
-      timeoutMs: 1000,
-    };
-    for (const over of [
-      { command: ['a', 'b'] }, // --command A --command B
-      { command: false }, // --no-command
-      { command: undefined },
-      { command: 'x', until: ['A', 'B'] }, // --until A --until B
-      { command: 'x', keys: [false] }, // --no-keys
-      { command: 'x', out: ['x', 'y'] },
-      { command: 'x', out: undefined },
-      { command: 'x', ready: ['A', 'B'] }, // --ready A --ready B
-      { command: 'x', cwd: ['a', 'b'] },
-    ]) {
-      process.exitCode = undefined;
-      const { stderr } = await withStdio(() =>
-        runCaptureTui({ ...base, ...over } as never),
-      );
-      expect(process.exitCode).toBe(3);
-      expect(stderr).toContain('must');
+    // A test-owned out, not '/tmp/never-written': the hardcoded path
+    // routed most iterations through the mkdir+probe block before the
+    // guards under test, and on Windows resolve() lands it at the drive
+    // root (a stray <drive>:\tmp on admin lanes, EPERM on the others).
+    const dir = mkdtempSync(join(tmpdir(), 'capture-tui-shapes-'));
+    try {
+      const base = {
+        cwd: undefined,
+        cols: 80,
+        rows: 24,
+        settleMs: 0,
+        until: undefined,
+        keys: undefined,
+        out: join(dir, 'never-written'),
+        timeoutMs: 1000,
+      };
+      for (const [over, flag] of [
+        [{ command: ['a', 'b'] }, '--command'], // --command A --command B
+        [{ command: false }, '--command'], // --no-command
+        [{ command: undefined }, '--command'],
+        [{ command: 'x', until: ['A', 'B'] }, '--until'], // --until A --until B
+        [{ command: 'x', keys: [false] }, '--keys'], // --keys false
+        [{ command: 'x', keys: false }, '--keys'], // --no-keys (boolean)
+        [{ command: 'x', keys: 'Enter' }, '--keys'], // bare string
+        [{ command: 'x', out: ['x', 'y'] }, '--out'],
+        [{ command: 'x', out: undefined }, '--out'],
+        [{ command: 'x', ready: ['A', 'B'] }, '--ready'], // --ready A --ready B
+        [{ command: 'x', cwd: ['a', 'b'] }, '--cwd'],
+      ] as const) {
+        process.exitCode = undefined;
+        const { stderr } = await withStdio(() =>
+          runCaptureTui({ ...base, ...over } as never),
+        );
+        expect(process.exitCode).toBe(3);
+        // The FLAG NAME, not just the shared word 'must': a label↔value
+        // swap in production's guard loop misnames the offending flag in
+        // the machine-parsed refusal JSON, sending an agent consumer to
+        // fix a flag it never duplicated (measured: with --until/--ready
+        // labels swapped, a duplicated --until blamed --ready).
+        expect(stderr).toContain(`${flag} must`);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'clears stale artifacts even when the WRITE PROBE itself fails',
+    async () => {
+      // The clear must precede the probe too, not just the later gates: a
+      // probe refusal (EMFILE at openSync — measured) that ran first would
+      // leave the previous run's manifest claiming "evidence":"png" next to
+      // this run's refusal JSON — the exact wrong-evidence outcome the
+      // production comment names. Real fd exhaustion drives the EMFILE:
+      // vi.spyOn on node:fs does not reach this module's named imports.
+      // (win32 skipped: its handle limit is high enough to exhaust the
+      // loop's budget before the process's.)
+      const dir = mkdtempSync(join(tmpdir(), 'capture-tui-staleprobe-'));
+      const fds: number[] = [];
+      try {
+        writeFileSync(join(dir, 'cap.ans'), 'old run');
+        writeFileSync(join(dir, 'cap.png'), 'old run');
+        writeFileSync(join(dir, 'cap.json'), '{"evidence":"png"}');
+        const fdSource = join(dir, 'fd-source');
+        writeFileSync(fdSource, 'x');
+        for (;;) {
+          try {
+            fds.push(openSync(fdSource, 'r'));
+          } catch {
+            break; // EMFILE/ENFILE — the process is out of descriptors
+          }
+        }
+        const { stderr } = await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: undefined,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: undefined,
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 1000,
+          } as never),
+        );
+        expect(process.exitCode).toBe(3);
+        expect(stderr).toContain('not writable');
+        expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
+        expect(existsSync(join(dir, 'cap.png'))).toBe(false);
+        expect(existsSync(join(dir, 'cap.json'))).toBe(false);
+      } finally {
+        for (const fd of fds) {
+          try {
+            closeSync(fd);
+          } catch {
+            // Already closed — every descriptor is tried exactly once.
+          }
+        }
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 // The command boundary drives REAL tmux — a private-server capture the mocks
@@ -479,13 +554,27 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
   });
 
   it('leaves no tmux server behind — the isolation is also the cleanup', async () => {
-    await run();
+    // TMUX_TMPDIR under the test dir, restored after: standard CI lanes
+    // set no TMUX_TMPDIR, so without this the production TMUX_TMPDIR
+    // branch of the socket-dir resolution never runs there — a
+    // /tmp-hardcoding mutant ships green on those lanes, and on hosts that
+    // DO set the variable it unlinks in /tmp while tmux created the socket
+    // under $TMUX_TMPDIR/tmux-<uid>/ (measured: tmux honors the variable).
+    const tmuxTmp = join(dir, 'tmux-tmp');
+    mkdirSync(tmuxTmp, { mode: 0o700 });
+    const realTmuxTmpdir = process.env['TMUX_TMPDIR'];
+    process.env['TMUX_TMPDIR'] = tmuxTmp;
+    try {
+      await run();
+    } finally {
+      if (realTmuxTmpdir === undefined) delete process.env['TMUX_TMPDIR'];
+      else process.env['TMUX_TMPDIR'] = realTmuxTmpdir;
+    }
     // Any server this run created is named qwen-review-capture-<ourpid>-…;
-    // asking it for sessions must fail because the server is gone. The
-    // socket dir is resolved the way the production cleanup (and tmux)
-    // resolves it — TMUX_TMPDIR, else /tmp — so a regression in that branch
-    // cannot pass this probe vacuously.
-    const base = process.env['TMUX_TMPDIR']?.trim() || '/tmp';
+    // asking it for sessions must fail because the server is gone. Probe
+    // the SAME dir production resolved — the TMUX_TMPDIR this test set —
+    // so a regression in that branch cannot pass this probe vacuously.
+    const base = tmuxTmp;
     // Quote the dir and grep the names: interpolating ${base} unquoted into
     // a glob makes this assertion pass VACUOUSLY whenever TMUX_TMPDIR
     // carries whitespace (measured with a planted orphan in such a dir).
@@ -584,6 +673,54 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(existsSync(join(dir, 'cap.json'))).toBe(false);
   });
 
+  it('refuses a FAILED .ans write after capture — contract, not stack trace', async () => {
+    // The capture window legally runs up to an hour; the disk can fill (or
+    // the target turn hostile) inside it. The command itself creates a
+    // DIRECTORY at the .ans path mid-capture, so the final write fails
+    // EISDIR — real and deterministic, no fd-exhaustion harness needed.
+    const { stdout, stderr } = await withStdio(() =>
+      run({
+        command: 'mkdir cap.ans; printf "DIR-BLOCK\\n"; sleep 30',
+        until: 'DIR-BLOCK',
+      }),
+    );
+    expect(process.exitCode).toBe(3);
+    expect(stderr).toContain('cannot write capture output');
+    expect(JSON.parse(stdout.trim())).toEqual({
+      captured: false,
+      evidence: 'none',
+      reason: expect.stringContaining('cannot write capture output'),
+    });
+    // THIS run's artifacts or nothing — the catch's rmSync clears even the
+    // blocker dir the fixture created.
+    expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
+    expect(existsSync(join(dir, 'cap.png'))).toBe(false);
+    expect(existsSync(join(dir, 'cap.json'))).toBe(false);
+  });
+
+  it('refuses a FAILED manifest write and removes what it already wrote', async () => {
+    // Same seam aimed one write later: the command creates a DIRECTORY at
+    // the manifest path, so the .ans writes fine and the manifest write
+    // fails EISDIR — the run must not leave an undescribed .ans (and png)
+    // behind ("THIS run's artifacts or nothing").
+    const { stdout, stderr } = await withStdio(() =>
+      run({
+        command: 'mkdir cap.json; printf "DIR-BLOCK2\\n"; sleep 30',
+        until: 'DIR-BLOCK2',
+      }),
+    );
+    expect(process.exitCode).toBe(3);
+    expect(stderr).toContain('cannot write capture manifest');
+    expect(JSON.parse(stdout.trim())).toEqual({
+      captured: false,
+      evidence: 'none',
+      reason: expect.stringContaining('cannot write capture manifest'),
+    });
+    expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
+    expect(existsSync(join(dir, 'cap.png'))).toBe(false);
+    expect(existsSync(join(dir, 'cap.json'))).toBe(false);
+  });
+
   it('WARNS when kill-server fails twice — never an unqualified success', async () => {
     // A fake tmux that succeeds at everything except kill-server models the
     // wedged-server shape: the reap retries once, then must say so — a
@@ -598,9 +735,10 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     );
     const realPath = process.env['PATH'];
     process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
+    let stdout = '';
     let stderr = '';
     try {
-      ({ stderr } = await withStdio(() =>
+      ({ stdout, stderr } = await withStdio(() =>
         run({ until: undefined, settleMs: 0 }),
       ));
     } finally {
@@ -609,6 +747,17 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     }
     expect(stderr).toContain('WARNING');
     expect(stderr).toContain('kill-server failed twice');
+    // The other half of "never an unqualified success": a wedged reap is a
+    // WARNING next to a COMPLETE capture, not a failure — exit code clean,
+    // artifacts written, success JSON emitted (a mutant setting exitCode
+    // in the reap's !serverDead branch reports exit 3 next to a finished
+    // capture, and shipped green before these assertions).
+    expect(process.exitCode).toBeUndefined();
+    expect(existsSync(join(dir, 'cap.ans'))).toBe(true);
+    expect(existsSync(join(dir, 'cap.json'))).toBe(true);
+    expect(JSON.parse(stdout.trim().split('\n').at(-1) ?? '')).toMatchObject({
+      captured: true,
+    });
   });
 
   it('settles by regex when --until matches, and says so', async () => {
@@ -622,6 +771,11 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(process.exitCode).toBeUndefined();
     const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
     expect(manifest.settledBy).toBe('timeout');
+    // timeoutMs recorded on an UNTIL-ONLY run too: every other timeoutMs
+    // assertion in this suite rides a --ready run, so a spread mutated to
+    // `args.ready !== undefined` alone shipped green while every until-only
+    // capture silently lost the record of its governing budget.
+    expect(manifest.timeoutMs).toBe(1500);
     // The field whose contract is "why the ladder stopped" carries the late
     // frame too, not just the freeze rung.
     expect(manifest.degradedBecause).toContain('--until never matched');
@@ -643,6 +797,11 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     // The bounds are the guard's other half: without them a typo'd
     // --timeout-ms of a day is accepted and the poll loop runs for a day.
     await run({ until: undefined, settleMs: -1 });
+    expect(process.exitCode).toBe(3);
+    process.exitCode = undefined;
+    // settle-ms's 600_000 ceiling was unpinned: only its negative side was
+    // tested, and a raised-max mutant accepted a 1-hour fixed delay.
+    await run({ until: undefined, settleMs: 600_001 });
     expect(process.exitCode).toBe(3);
     process.exitCode = undefined;
     await run({ timeoutMs: 3_600_001 });
@@ -687,8 +846,10 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     // The fixture DRAINS its input before printing READY, the way a
     // slow-mounting TUI eats keystrokes fired at start (measured on this
     // repo's own onboarding dialog: a Down consumed, the Enter behind it
-    // lost). Keys sent at start land in the drain and never echo; keys
-    // gated on --ready land after it and do.
+    // lost). The drain does NOT hide early keys from the pane — the kernel
+    // echoes them before the fixture's read -s begins (measured) — so the
+    // pin below is the ORDER (gated keys after READY): the one signal that
+    // actually discriminates gated from ungated.
     await runCaptureTui({
       command: `bash -c 'sleep 0.7; IFS= read -rs -t 0.3 -n 10000 junk || true; printf "READY\\n"; cat'`,
       cwd: dir,
@@ -706,9 +867,13 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(manifest.settledBy).toBe('until-match');
     expect(manifest.keysSent).toBe(true);
     expect(manifest.ready).toBe('READY');
-    expect(readFileSync(join(dir, 'ready.ans'), 'utf8')).toContain(
-      'gated-input',
-    );
+    const ans = readFileSync(join(dir, 'ready.ans'), 'utf8');
+    expect(ans).toContain('gated-input');
+    // Order is the discriminating signal: ungated, the keys still echo
+    // into the pane, `until` matches on the echo, and every assertion
+    // above stays green against the exact regression this test was written
+    // to catch (measured: the no-gate mutant passed in 35ms).
+    expect(ans.indexOf('gated-input')).toBeGreaterThan(ans.indexOf('READY'));
   });
 
   it('withholds --keys when --ready never matches, and says so', async () => {
@@ -871,6 +1036,47 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(readFileSync(join(dir, 'cap.ans'), 'utf8')).toContain('HELLO-');
   });
 
+  it('settles by FIXED DELAY after a matched --ready without --until', async () => {
+    // Every ready-matched test also passed --until, leaving this branch —
+    // fixed delay AFTER the gate opens, and its dual-duration manifest —
+    // unpinned: two mutants shipped green (skipping the settle sleep;
+    // dropping settleMs from this shape's manifest).
+    const started = performance.now();
+    await runCaptureTui({
+      command: `bash -c 'printf "READY-NO-UNTIL\\n"; sleep 0.3; printf "SETTLED-LATE\\n"; cat'`,
+      cwd: dir,
+      cols: 80,
+      rows: 24,
+      settleMs: 600,
+      until: undefined,
+      ready: 'READY-NO-UNTIL',
+      keys: undefined,
+      out: join(dir, 'readyfixed'),
+      timeoutMs: 10_000,
+    } as never);
+    const elapsed = performance.now() - started;
+    expect(process.exitCode).toBeUndefined();
+    // Wall bound on the settle; the content check below is the real
+    // discriminator, and this bound catches a sleep(timeoutMs) mutant.
+    expect(elapsed).toBeGreaterThanOrEqual(550);
+    expect(elapsed).toBeLessThan(8_000);
+    const manifest = JSON.parse(
+      readFileSync(join(dir, 'readyfixed.json'), 'utf8'),
+    );
+    expect(manifest.settledBy).toBe('fixed-delay');
+    expect(manifest.settleMs).toBe(600);
+    // BOTH durations are active in this shape: ready spent the timeout
+    // budget AND settle governed the wait — omitting either misdescribes
+    // the run (the ACTIVE-durations contract).
+    expect(manifest.timeoutMs).toBe(10_000);
+    // The settle really waited: the frame carries the line that renders
+    // 300ms AFTER the ready marker matched — a skipped sleep captures
+    // before it exists.
+    const ans = readFileSync(join(dir, 'readyfixed.ans'), 'utf8');
+    expect(ans).toContain('READY-NO-UNTIL');
+    expect(ans).toContain('SETTLED-LATE');
+  });
+
   it('records an empty-pane capture honestly and never hands it to freeze', async () => {
     // A pane that rendered nothing (sleep, settle 0) is the blank-capture
     // branch: freeze on empty input fails with a misleading bounds error,
@@ -922,6 +1128,21 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(existsSync(join(dir, 'cap.ans'))).toBe(true);
   });
 
+  it('removes a TORN png when the render fails mid-write', async () => {
+    // A fake that writes bytes to the png path and THEN fails: without the
+    // failed-render cleanup a torn png persists at the very path the
+    // manifest denies (evidence 'ans-only', pngPath null), and a consumer
+    // globbing <out>.png picks it up as evidence (probe-verified: the
+    // rmSync-deletion mutant left torn bytes at cap.png).
+    await withFakeFreeze('#!/bin/sh\nprintf torn > "$5"\nexit 9\n', () =>
+      run(),
+    );
+    const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
+    expect(manifest.evidence).toBe('ans-only');
+    expect(manifest.pngPath).toBeNull();
+    expect(existsSync(join(dir, 'cap.png'))).toBe(false);
+  });
+
   it('cuts a HANGING freeze with the timeout belt and keeps the .ans', async () => {
     const realBelt = freezeRender.timeoutMs;
     freezeRender.timeoutMs = 1000;
@@ -944,6 +1165,19 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(manifest.evidence).toBe('ans-only');
     expect(manifest.pngPath).toBeNull();
     expect(manifest.degradedBecause).toContain('wrote no image');
+  });
+
+  it('never manifests a png rung on a 0-BYTE image either — size is checked', async () => {
+    // A freeze that exits 0 but leaves an empty/truncated png (ENOSPC
+    // mid-write — the shape the .ans write guard's comment names) would
+    // otherwise sail past an existence-only guard and publish zero pixels
+    // as "evidence": "png" (probe-verified end-to-end).
+    await withFakeFreeze('#!/bin/sh\n: > "$5"\nexit 0\n', () => run());
+    const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
+    expect(manifest.evidence).toBe('ans-only');
+    expect(manifest.pngPath).toBeNull();
+    // The failed-render cleanup removes the empty shell too.
+    expect(existsSync(join(dir, 'cap.png'))).toBe(false);
   });
 
   it('names a freeze that could not SPAWN, not "exit null"', async () => {
@@ -1020,6 +1254,33 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     await run({ command: 'printf "EXITY\\n"; exit 0', until: 'EXITY' });
     expect(process.exitCode).toBeUndefined();
     expect(readFileSync(join(dir, 'cap.ans'), 'utf8')).toContain('EXITY');
+  });
+
+  it('survives a C-c sent through --keys — the holder traps SIGINT', async () => {
+    // Non-interactive shells stay in the pane's foreground process group,
+    // so a C-c delivered by this feature's own --keys path reaches the
+    // holder shell too; untrapped, it dies and takes pane → session →
+    // server down before the capture (measured: exit 3, zero artifacts,
+    // misattributed "no server running"). The holder's `trap : INT` is
+    // what this pins — and a trapped (not ignored) signal resets to
+    // default in the children, so ^C still lands in the pane.
+    await runCaptureTui({
+      command: 'cat',
+      cwd: dir,
+      cols: 80,
+      rows: 24,
+      settleMs: 800,
+      until: undefined,
+      keys: ['C-c'],
+      out: join(dir, 'cc'),
+      timeoutMs: 10_000,
+    } as never);
+    expect(process.exitCode).toBeUndefined();
+    expect(existsSync(join(dir, 'cc.ans'))).toBe(true);
+    const manifest = JSON.parse(readFileSync(join(dir, 'cc.json'), 'utf8'));
+    expect(manifest.keysSent).toBe(true);
+    // The ^C landed in the pane: delivered, not swallowed.
+    expect(readFileSync(join(dir, 'cc.ans'), 'utf8')).toContain('^C');
   });
 
   it('refuses --until/--ready patterns that would MATCH a blank pane', async () => {
@@ -1131,6 +1392,22 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
 
   it('refuses an empty --out instead of writing <cwd>.ans', async () => {
     await run({ out: '' });
+    expect(process.exitCode).toBe(3);
+  });
+
+  it('refuses a --out naming an existing directory — artifacts land NEXT TO it', async () => {
+    // resolve('.') and resolve('./') are the cwd itself — the same shape
+    // the empty guard refuses — and any existing directory sails through
+    // an empty-string-only guard; artifacts would land as <dir>.ans next
+    // to it, silently clobbering whatever holds those names (measured:
+    // out '.' overwrote a pre-seeded <cwd>.ans with the pane text).
+    const adir = join(dir, 'adir');
+    mkdirSync(adir);
+    const { stderr } = await withStdio(() => run({ out: adir }));
+    expect(process.exitCode).toBe(3);
+    expect(stderr).toContain('must not name an existing directory');
+    process.exitCode = undefined;
+    await run({ out: '.' });
     expect(process.exitCode).toBe(3);
   });
 
@@ -1279,6 +1556,13 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     };
     (captureTuiCommand.builder as (y: unknown) => unknown)(fake);
     expect(options['keys']?.['array']).toBe(true);
+    // type:'string' is load-bearing for keys: yargs coerces UNTYPED array
+    // values to numbers (measured: `--keys 3 Enter` → [3, 'Enter']), and a
+    // numeric token is a legitimate send-keys shape — untyped, it hits the
+    // shape guard's misleading "--keys must be strings." refusal.
+    expect(options['keys']?.['type']).toBe('string');
+    expect(options['command']?.['type']).toBe('string');
+    expect(options['out']?.['type']).toBe('string');
     expect(options['command']?.['demandOption']).toBe(true);
     expect(options['out']?.['demandOption']).toBe(true);
     expect(options['cols']?.['default']).toBe(80);
@@ -1341,7 +1625,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
         'SIGQUIT',
         'SIGTERM',
       ]);
-      for (const signal of ['SIGTERM', 'SIGHUP'] as const) {
+      for (const signal of ['SIGTERM', 'SIGINT'] as const) {
         const outBase = join(dir, `sig-${signal}`);
         const driver = join(dir, `driver-${signal}.mts`);
         writeFileSync(
@@ -1368,7 +1652,17 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
         }
         expect(seen).toBe(true);
         child.kill(signal);
-        await new Promise((resolve) => child.once('exit', resolve));
+        // Capture the disposition: the re-raise half of the contract — the
+        // handler reaps FIRST and then re-raises, so the child must die OF
+        // the signal (the conventional exit disposition). A dropped
+        // re-raise reads normal completion to a harness killing a wedged
+        // capture (probe-verified: the exact mutant passed the
+        // exit-event-only version of this wait).
+        const [code, exitSignal] = await new Promise<
+          [number | null, NodeJS.Signals | null]
+        >((resolve) => child.once('exit', (c, sig) => resolve([c, sig])));
+        expect(exitSignal).toBe(signal);
+        expect(code).toBeNull();
         // The reap ran before the re-raise: no server named for the child.
         let gone = false;
         for (let i = 0; i < 40 && !gone; i++) {
@@ -1392,7 +1686,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     // never blocks — so this fake discriminates by SHAPE: fd 0 must be the
     // /dev/null character device, or it fails the way real freeze does.
     await withFakeFreeze(
-      '#!/bin/sh\nif [ ! -c /dev/stdin ]; then echo "ERROR No input" >&2; exit 1; fi\n: > "$5"\nexit 0\n',
+      '#!/bin/sh\nif [ ! -c /dev/stdin ]; then echo "ERROR No input" >&2; exit 1; fi\nprintf x > "$5"\nexit 0\n',
       () => run(),
     );
     const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));

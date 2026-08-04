@@ -377,9 +377,9 @@ function auditPrWrites(target: string, prNumber: string): void {
  * SIGKILL'd or OOM'd harness skips finally and the signal net alike, and
  * the private server then lives until its pane holder's sleep expires (up
  * to two hours). The launcher's pid rides in the socket name for exactly
- * this — a socket whose pid is dead is an orphan. Best effort: a reap that
- * fails is a note, never a cleanup failure. Returns whether anything was
- * reaped, so the "Nothing to clean" claim stays true.
+ * this — a socket whose pid is dead is an orphan. A reap that fails is
+ * noted on stderr AND surfaced as `failed`, so runCleanup neither claims
+ * "Nothing to clean" over a live orphan nor clears the worktree lease.
  */
 function reapOrphanedCaptureServers(): { reaped: boolean; failed: boolean } {
   const uid = process.getuid?.();
@@ -408,22 +408,27 @@ function reapOrphanedCaptureServers(): { reaped: boolean; failed: boolean } {
       alive = (e as NodeJS.ErrnoException).code === 'EPERM';
     }
     if (alive) continue;
-    // Same rule as capture-tui's own reap: unlink the socket ONLY when the
-    // server is known dead — a kill that throws can leave it alive, and an
-    // unlinked socket makes a live server unreachable forever.
+    // Same rules as capture-tui's own reap: unlink the socket ONLY when
+    // the server is known dead — a kill that throws can leave it alive,
+    // and an unlinked socket makes a live server unreachable forever — and
+    // one retry before giving up: a transient client-spawn failure (EMFILE
+    // after a long review's many spawns) is the named shape, and the
+    // identical second attempt reaps what otherwise lives out the 2h holder.
     let serverDead = false;
-    try {
-      execFileSync('tmux', ['-L', name, 'kill-server'], {
-        stdio: 'pipe',
-        // Same belt as capture-tui's own control calls: a wedged server
-        // must not hang the whole cleanup behind one socket.
-        timeout: 15_000,
-      });
-      serverDead = true;
-    } catch (e) {
-      serverDead = /no server running/i.test(
-        String((e as { stderr?: unknown }).stderr ?? ''),
-      );
+    for (let attempt = 0; attempt < 2 && !serverDead; attempt++) {
+      try {
+        execFileSync('tmux', ['-L', name, 'kill-server'], {
+          stdio: 'pipe',
+          // Same belt as capture-tui's own control calls: a wedged server
+          // must not hang the whole cleanup behind one socket.
+          timeout: 15_000,
+        });
+        serverDead = true;
+      } catch (e) {
+        serverDead = /no server running/i.test(
+          String((e as { stderr?: unknown }).stderr ?? ''),
+        );
+      }
     }
     if (!serverDead) {
       failedAny = true;
