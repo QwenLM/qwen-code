@@ -1,0 +1,92 @@
+name: 'HK Runner Smoke'
+
+on:
+  push:
+    branches: ['cx/hk-runner-smoke']
+  workflow_dispatch:
+
+permissions:
+  contents: 'read'
+
+env:
+  CI: 'true'
+
+jobs:
+  host-hk-1:
+    name: 'Host smoke (HK 64-1)'
+    runs-on: ['self-hosted', 'linux', 'x64', 'ecs-update-hk-1']
+    timeout-minutes: 10
+    steps:
+      - name: 'Verify host tools and network'
+        run: |-
+          set -euo pipefail
+          echo "runner=${RUNNER_NAME}"
+          echo "node=$(node -v) npm=$(npm -v) qwen=$(qwen --version)"
+          echo "qwen_path=$(command -v qwen)"
+          test "$(node -p 'process.versions.node.split(".")[0]')" = '22'
+          test "$(command -v qwen)" = '/usr/local/bin/qwen'
+          test -z "${NPM_CONFIG_PREFIX:-}"
+          gh --version
+          jq --version
+          git ls-remote https://github.com/QwenLM/qwen-code.git HEAD
+          df -h "${RUNNER_WORKSPACE}"
+      - name: 'Checkout repository'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+      - name: 'Verify writable workspace'
+        run: |-
+          set -euo pipefail
+          test -w "${GITHUB_WORKSPACE}"
+          git status --short
+
+  host-hk-2:
+    name: 'Host smoke (HK 64-2)'
+    runs-on: ['self-hosted', 'linux', 'x64', 'ecs-update-hk-2']
+    timeout-minutes: 10
+    steps:
+      - name: 'Verify host tools and network'
+        run: |-
+          set -euo pipefail
+          echo "runner=${RUNNER_NAME}"
+          echo "node=$(node -v) npm=$(npm -v) qwen=$(qwen --version)"
+          echo "qwen_path=$(command -v qwen)"
+          test "$(node -p 'process.versions.node.split(".")[0]')" = '22'
+          test "$(command -v qwen)" = '/usr/local/bin/qwen'
+          test -z "${NPM_CONFIG_PREFIX:-}"
+          gh --version
+          jq --version
+          git ls-remote https://github.com/QwenLM/qwen-code.git HEAD
+          df -h "${RUNNER_WORKSPACE}"
+      - name: 'Checkout repository'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+      - name: 'Verify writable workspace'
+        run: |-
+          set -euo pipefail
+          test -w "${GITHUB_WORKSPACE}"
+          git status --short
+
+  repo-hk-1:
+    name: 'Repository smoke (HK 64-1)'
+    needs: 'host-hk-1'
+    runs-on: ['self-hosted', 'linux', 'x64', 'ecs-update-hk-1']
+    timeout-minutes: 30
+    steps:
+      - name: 'Checkout repository'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+      - name: 'Install dependencies'
+        run: 'npm ci'
+      - name: 'Run typecheck'
+        run: 'npm run typecheck'
+
+  repo-hk-2:
+    name: 'Repository smoke (HK 64-2)'
+    needs: 'host-hk-2'
+    runs-on: ['self-hosted', 'linux', 'x64', 'ecs-update-hk-2']
+    timeout-minutes: 30
+    steps:
+      - name: 'Checkout repository'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+      - name: 'Install dependencies'
+        run: 'npm ci'
+      - name: 'Run MCP core tests'
+        working-directory: 'packages/core'
+        run: 'npx vitest run src/tools/mcp-tool.test.ts'
