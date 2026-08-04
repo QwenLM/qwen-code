@@ -46,6 +46,10 @@ import {
   resolveDaemonMemoryBudget,
 } from '@qwen-code/acp-bridge/daemonMemoryBudget';
 import {
+  createChildHeapPolicy,
+  type ChildHeapPolicy,
+} from '@qwen-code/acp-bridge/childHeapPolicy';
+import {
   canonicalizeWorkspace,
   translateAndCheckAbsoluteWorkspacePath,
 } from '@qwen-code/acp-bridge/workspacePaths';
@@ -1602,6 +1606,9 @@ function createBootstrapServeApp(input: {
         channelIdleTimeoutMs: channelIdleTimeoutMs(opts.channelIdleTimeoutMs),
         sessionIdleTimeoutMs: sessionIdleTimeoutMs(opts.sessionIdleTimeoutMs),
         acpConnectionCap: null,
+        // No child-heap policy during bootstrap: it is built with the
+        // runtime, so `enforced` is correctly false and `childHeap` null in
+        // this window even when the flag says `enforce`.
         memory: toDaemonStatusMemoryLimits(opts.daemonMemoryBudget),
       },
       capabilities: {
@@ -2776,6 +2783,9 @@ async function runQwenServeImpl(
         killAllSync(): void;
       }
     | undefined;
+  // Held for daemon status: `observe` mode's whole product is the would-be
+  // refusal count, which is useless unless it can be read back out.
+  let managedChildHeapPolicy: ChildHeapPolicy | undefined;
   const internalRuntimeBridgesForCleanup: AcpSessionBridge[] = [];
   let daemonEventLoopMonitor:
     | ReturnType<CoreRuntime['startEventLoopLagMonitor']>
@@ -3484,6 +3494,16 @@ async function runQwenServeImpl(
       workspaceTrustOperationGate.runExclusive('runtime-topology', operation);
     const processRegistry = new runtime.ProcessRegistry();
     managedProcessRegistry = processRegistry;
+    // One policy for the whole daemon, beside the one registry it reads. Both
+    // must be shared: a per-factory registry would report a concurrent count
+    // of 1 on every spawn and hand each child the entire pool.
+    const childHeapPolicy: ChildHeapPolicy | undefined = opts.daemonMemoryBudget
+      ? createChildHeapPolicy({
+          budget: opts.daemonMemoryBudget,
+          mode: opts.childHeapMode ?? 'observe',
+        })
+      : undefined;
+    managedChildHeapPolicy = childHeapPolicy;
     const fsFactory = runtime.resolveBridgeFsFactory({
       // Secondary roots share a write-capable factory only after their own
       // folder trust check passes; untrusted secondary roots stay outside.
@@ -3507,6 +3527,7 @@ async function runQwenServeImpl(
     });
     const channelFactory = runtime.createSpawnChannelFactory({
       processRegistry,
+      childHeapPolicy,
       sourceEnv: runtimeEffectiveEnv,
       onDiagnosticLine: diagnosticSink,
       pipeHooks: {
@@ -4120,6 +4141,7 @@ async function runQwenServeImpl(
       });
       const secondaryChannelFactory = runtime.createSpawnChannelFactory({
         processRegistry,
+        childHeapPolicy,
         sourceEnv: secondaryEnv.effectiveEnv,
         onDiagnosticLine: diagnosticSink,
         pipeHooks: {
@@ -4637,6 +4659,7 @@ async function runQwenServeImpl(
           : wsFsFactory;
       const wsChannelFactory = runtime.createSpawnChannelFactory({
         processRegistry,
+        childHeapPolicy,
         sourceEnv: wsEnv.effectiveEnv,
         onDiagnosticLine: diagnosticSink,
         pipeHooks: {
@@ -5373,6 +5396,7 @@ async function runQwenServeImpl(
       }),
       getMetricsSeries: () => metricsRing.snapshot(),
       getTotalSessionAdmissionSnapshot: totalSessionAdmission.snapshot,
+      getChildHeapPolicySnapshot: () => managedChildHeapPolicy?.snapshot(),
       recordDaemonRequest: (durationMs, statusCode) =>
         metricsRing.recordRequest(durationMs, statusCode),
       workspace: workspaceService,

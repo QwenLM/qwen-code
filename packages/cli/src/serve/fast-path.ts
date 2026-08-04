@@ -421,6 +421,24 @@ export function parseServeFastPathArgs(
       continue;
     }
 
+    if (flag === 'child-heap-mode') {
+      const read = readOptionValue(argv, i, inlineValue);
+      if (!read) return { kind: 'fallback' };
+      i = read.nextIndex;
+      // Same reasoning as memory-pressure-mode: yargs `choices` already owns
+      // the error message for a bad value, and letting an unknown string past
+      // here would put a value in `ServeOptions` its own type forbids.
+      if (
+        read.value !== 'off' &&
+        read.value !== 'observe' &&
+        read.value !== 'enforce'
+      ) {
+        return { kind: 'fallback' };
+      }
+      options.childHeapMode = read.value;
+      continue;
+    }
+
     if (flag === 'mcp-budget-mode') {
       const read = readOptionValue(argv, i, inlineValue);
       if (!read) return { kind: 'fallback' };

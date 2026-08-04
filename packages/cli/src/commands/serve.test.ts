@@ -342,6 +342,34 @@ describe('serve rate limit env parsing', () => {
     );
   });
 
+  it('passes --child-heap-mode to runQwenServe', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs('--no-web --child-heap-mode enforce');
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ childHeapMode: 'enforce' }),
+    );
+  });
+
+  it('defaults the child heap mode to observe, never enforce', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs('--no-web');
+
+    // The default is the safety property of this whole feature: enforcement
+    // must never switch itself on for a daemon that did not ask.
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ childHeapMode: 'observe' }),
+    );
+  });
+
   it('defaults the memory pressure mode to observe', async () => {
     mockRunQwenServe.mockResolvedValueOnce({
       url: 'http://127.0.0.1:4170/',

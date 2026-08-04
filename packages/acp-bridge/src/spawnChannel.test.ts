@@ -36,6 +36,13 @@ import { EventEmitter } from 'node:events';
 import type { ChildProcess } from 'node:child_process';
 import { PassThrough } from 'node:stream';
 import { getHeapStatistics } from 'node:v8';
+import { ProcessRegistry } from './process-registry.js';
+import { createChildHeapPolicy } from './child-heap-policy.js';
+import {
+  MIN_CHILD_HEAP_MB,
+  resolveDaemonMemoryBudget,
+} from './daemon-memory-budget.js';
+import { ChildHeapPoolExhaustedError } from './bridgeErrors.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mockSpawn = vi.hoisted(() => vi.fn());
@@ -227,6 +234,111 @@ describe('createSpawnChannelFactory env policy', () => {
       exitCode: 1,
       signalCode: null,
     });
+  });
+});
+
+describe('createSpawnChannelFactory child-heap admission', () => {
+  const originalArgv1 = process.argv[1];
+  // Big enough that several children fit — otherwise the very first spawn
+  // sits on the refusal boundary and there is no shrink to observe — but
+  // small enough that the boundary is still reachable in a few spawns.
+  const budget = resolveDaemonMemoryBudget({ availableMemoryMb: 8_192 });
+
+  beforeEach(() => {
+    mockSpawn.mockReset();
+    mockSpawn.mockReturnValue(createFakeChildProcess());
+    process.argv[1] = '/tmp/qwen.js';
+    process.env['QWEN_CLI_ENTRY'] = '/tmp/qwen.js';
+  });
+  afterEach(() => {
+    process.argv[1] = originalArgv1;
+    delete process.env['QWEN_CLI_ENTRY'];
+  });
+
+  const heapArg = () => {
+    const argv = mockSpawn.mock.calls[0]?.[1] as string[] | undefined;
+    return argv?.find((a) => a.startsWith('--max-old-space-size='));
+  };
+
+  it('applies the share under enforce and shrinks it as children accumulate', async () => {
+    const processRegistry = new ProcessRegistry();
+    const factory = createSpawnChannelFactory({
+      processRegistry,
+      childHeapPolicy: createChildHeapPolicy({ budget, mode: 'enforce' }),
+    });
+
+    await factory('/tmp/a');
+    const first = Number(heapArg()!.split('=')[1]);
+    // First child alone gets the whole pool, capped by the legacy ceiling.
+    expect(first).toBe(
+      Math.min(budget.childPoolMb, budget.legacyChildCeilingMb),
+    );
+
+    mockSpawn.mockClear();
+    await factory('/tmp/b');
+    const second = Number(heapArg()!.split('=')[1]);
+    // Two live children now, so the second is sized for two — the whole point
+    // of keying on concurrency rather than on the host.
+    expect(second).toBeLessThan(first);
+  });
+
+  it('computes but applies nothing under observe', async () => {
+    const policy = createChildHeapPolicy({ budget, mode: 'observe' });
+    const observeRegistry = new ProcessRegistry();
+    await createSpawnChannelFactory({
+      processRegistry: observeRegistry,
+      childHeapPolicy: policy,
+    })('/tmp/a');
+    const observed = mockSpawn.mock.calls[0]?.[1] as string[];
+
+    mockSpawn.mockClear();
+    const bareRegistry = new ProcessRegistry();
+    await createSpawnChannelFactory({ processRegistry: bareRegistry })(
+      '/tmp/a',
+    );
+    const bare = mockSpawn.mock.calls[0]?.[1] as string[];
+
+    // Byte-identical argv: passing --max-old-space-size changes child GC and
+    // OOM behaviour, which a reporting mode must not do.
+    expect(observed).toEqual(bare);
+  });
+
+  it('refuses under enforce once the pool cannot cover another child, and keeps the slot', async () => {
+    const processRegistry = new ProcessRegistry();
+    const policy = createChildHeapPolicy({ budget, mode: 'enforce' });
+    const factory = createSpawnChannelFactory({
+      processRegistry,
+      childHeapPolicy: policy,
+    });
+
+    const fits = Math.floor(budget.childPoolMb / MIN_CHILD_HEAP_MB);
+    for (let i = 0; i < fits; i++) await factory(`/tmp/w${i}`);
+    expect(processRegistry.committedProcessCount).toBe(fits);
+
+    await expect(factory('/tmp/over')).rejects.toBeInstanceOf(
+      ChildHeapPoolExhaustedError,
+    );
+    // The refused spawn released its reservation. Leaking it would inflate
+    // every later count until the daemon refused everything.
+    expect(processRegistry.committedProcessCount).toBe(fits);
+    expect(policy.snapshot().refusals).toBe(1);
+  });
+
+  it('never refuses under observe, but counts what enforce would have', async () => {
+    const processRegistry = new ProcessRegistry();
+    const policy = createChildHeapPolicy({ budget, mode: 'observe' });
+    const factory = createSpawnChannelFactory({
+      processRegistry,
+      childHeapPolicy: policy,
+    });
+
+    const fits = Math.floor(budget.childPoolMb / MIN_CHILD_HEAP_MB);
+    for (let i = 0; i < fits + 2; i++) await factory(`/tmp/w${i}`);
+
+    // Everything spawned, and the counter is the calibration signal that
+    // enforcing here would have failed two real spawns.
+    expect(processRegistry.committedProcessCount).toBe(fits + 2);
+    expect(policy.snapshot()).toMatchObject({ enforced: false, refusals: 2 });
   });
 });
 

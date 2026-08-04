@@ -628,7 +628,26 @@ export interface DaemonStatusReport {
      */
     memory?: {
       /** Always false: nothing in this section is applied to a process. */
-      enforced: false;
+      /**
+       * Whether children are actually being sized by these numbers — true only
+       * under `--child-heap-mode enforce`. Was a required literal `false` while
+       * the section described a policy that had not shipped; now a boolean, and
+       * still `false` under `observe`, which computes everything and applies
+       * nothing. Read it as "this is in effect", never as "this exists".
+       */
+      enforced: boolean;
+      /**
+       * How the derived per-child heap share is used. `null` when the daemon
+       * built no policy, and absent entirely on daemons predating the field.
+       */
+      childHeap?: {
+        mode: 'off' | 'observe' | 'enforce';
+        /**
+         * Spawns refused, or under `observe` that would have been refused —
+         * the signal for whether enabling `enforce` is safe on this host.
+         */
+        refusals: number;
+      } | null;
       configuredBudgetMb: number;
       effectiveBudgetMb: number;
       budgetSource: 'flag' | 'derived';

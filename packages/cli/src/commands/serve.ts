@@ -129,6 +129,7 @@ interface ServeArgs {
   'mcp-client-budget'?: number;
   'memory-budget-mb'?: number;
   'memory-pressure-mode'?: 'off' | 'observe';
+  'child-heap-mode'?: 'off' | 'observe' | 'enforce';
   'mcp-budget-mode'?: 'enforce' | 'warn' | 'off';
   'allow-origin'?: string[];
   'allow-private-auth-base-url': boolean;
@@ -345,6 +346,21 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'overall status rollup is unchanged — use it while calibrating, or ' +
           'if you alert on the top-level status. Nothing remediates in ' +
           'either mode.',
+      })
+      .option('child-heap-mode', {
+        choices: ['off', 'observe', 'enforce'] as const,
+        default: 'observe' as const,
+        description:
+          'What the daemon does with the per-child heap share it derives ' +
+          'from the memory budget. `observe` (default) computes the share ' +
+          'and the spawn-admission decision, applies neither, and reports ' +
+          'how many spawns would have been refused — use that count to ' +
+          'decide whether `enforce` is safe for your deployment. `enforce` ' +
+          'passes the share to each `qwen --acp` child and refuses a spawn ' +
+          'when the child pool cannot cover another at the minimum heap; ' +
+          'that refusal surfaces as a failure to open a new session in the ' +
+          'affected workspace, and clears when any child exits. `off` ' +
+          'computes nothing and leaves children on the host-derived ceiling.',
       })
       .option('mcp-client-budget', {
         type: 'number',
@@ -659,6 +675,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         mcpBudgetMode: resolvedMcpMode,
         ...(memoryBudgetMb !== undefined ? { memoryBudgetMb } : {}),
         memoryPressureMode: argv['memory-pressure-mode'],
+        childHeapMode: argv['child-heap-mode'],
         ...(argv['allow-origin'] && argv['allow-origin'].length > 0
           ? { allowOrigins: argv['allow-origin'] }
           : {}),

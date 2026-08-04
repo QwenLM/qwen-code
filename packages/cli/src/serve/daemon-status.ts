@@ -23,6 +23,7 @@ import {
   recommendedChildShareMb,
   type DaemonMemoryBudget,
 } from '@qwen-code/acp-bridge/daemonMemoryBudget';
+import type { ChildHeapPolicySnapshot } from '@qwen-code/acp-bridge/childHeapPolicy';
 import {
   computeDaemonMemoryPressure,
   type DaemonMemoryPressure,
@@ -126,6 +127,8 @@ export interface BuildDaemonStatusOptions {
   getPerfSnapshot?: () => DaemonPerfSnapshot;
   getMetricsSeries?: () => DaemonMetricsBucket[];
   getTotalSessionAdmissionSnapshot?: () => TotalSessionAdmissionSnapshot;
+  /** Returns undefined when no policy was built — direct-embed, or no budget. */
+  getChildHeapPolicySnapshot?: () => ChildHeapPolicySnapshot | undefined;
 }
 
 interface DaemonStatusSection<T> {
@@ -190,12 +193,29 @@ interface DaemonStatusLimits {
 
 export interface DaemonStatusMemoryLimits {
   /**
-   * False, and required. Every figure in this section is resolved input or a
-   * model of a policy that does not exist yet; nothing here is applied to a
-   * process. The flag exists so a client can never mistake the `limits`
-   * namespace for enforcement that has not shipped.
+   * Whether a spawn argument actually derives from these numbers — i.e. only
+   * under `--child-heap-mode enforce`.
+   *
+   * This was a required literal `false` while the whole section was a model of
+   * a policy that had not shipped. It is a boolean now because the policy has,
+   * and it stays narrow on purpose: `observe` computes every figure below and
+   * applies none of them, so it still reports `false`. A client must be able
+   * to read this as "children are being sized by this", never as "the feature
+   * exists".
    */
-  enforced: false;
+  enforced: boolean;
+  /** How the derived per-child share is used. `null` when no policy was built. */
+  childHeap: {
+    mode: 'off' | 'observe' | 'enforce';
+    /**
+     * Spawns refused, or — under `observe` — that would have been refused.
+     * The calibration signal for whether `enforce` is safe here: non-zero
+     * means enforcement would have failed a real spawn. Includes the
+     * channel-swap case, where a replacement child is counted alongside the
+     * process it is replacing.
+     */
+    refusals: number;
+  } | null;
   /** What was asked for: the flag value, or half of available memory. */
   configuredBudgetMb: number;
   /** `configured` capped at resolved cgroup/host memory. */
@@ -226,10 +246,16 @@ export interface DaemonStatusMemoryLimits {
 
 export function toDaemonStatusMemoryLimits(
   budget: DaemonMemoryBudget | undefined,
+  childHeap?: ChildHeapPolicySnapshot,
 ): DaemonStatusMemoryLimits | null {
   if (!budget) return null;
   return {
-    enforced: false,
+    // Derived, never hardcoded: the whole point of the field is that a client
+    // can trust it to track what the daemon actually does.
+    enforced: childHeap?.enforced ?? false,
+    childHeap: childHeap
+      ? { mode: childHeap.mode, refusals: childHeap.refusals }
+      : null,
     configuredBudgetMb: budget.configuredBudgetMb,
     effectiveBudgetMb: budget.effectiveBudgetMb,
     budgetSource: budget.budgetSource,
@@ -801,7 +827,10 @@ export async function buildDaemonStatusResponse(
       channelIdleTimeoutMs: bridgeSnapshot.limits.channelIdleTimeoutMs,
       sessionIdleTimeoutMs: bridgeSnapshot.limits.sessionIdleTimeoutMs,
       acpConnectionCap: acpSnapshot?.connectionCap ?? null,
-      memory: toDaemonStatusMemoryLimits(memoryBudget),
+      memory: toDaemonStatusMemoryLimits(
+        memoryBudget,
+        input.getChildHeapPolicySnapshot?.(),
+      ),
     },
     ...(workspaceRuntimes && workspaceRuntimes.length > 1
       ? {

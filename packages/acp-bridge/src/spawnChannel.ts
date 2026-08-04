@@ -13,6 +13,8 @@ import { redactLogCredentials } from './logRedaction.js';
 import { ndJsonStream, type NdJsonStreamHooks } from './ndJsonStream.js';
 import { MissingCliEntryError } from './status.js';
 import { ProcessRegistry } from './process-registry.js';
+import type { ChildHeapPolicy } from './child-heap-policy.js';
+import { ChildHeapPoolExhaustedError } from './bridgeErrors.js';
 
 let cachedMemoryArgs: string[] | undefined;
 /**
@@ -127,6 +129,17 @@ export interface SpawnChannelFactoryOptions {
   pipeHooks?: NdJsonStreamHooks;
   sourceEnv?: Readonly<NodeJS.ProcessEnv>;
   processRegistry?: ProcessRegistry;
+  /**
+   * Daemon child-heap policy. Only meaningful together with a **shared**
+   * `processRegistry`: the factory otherwise builds its own, every spawn sees
+   * a concurrent count of 1, and each child is handed the whole pool — the
+   * current overcommit, now with a policy object attesting to it. All three
+   * daemon factories pass the same registry.
+   *
+   * Omitted by every single-child caller (interactive CLI, IDE companion,
+   * direct-embed), which keeps the host-derived ceiling.
+   */
+  childHeapPolicy?: ChildHeapPolicy;
 }
 
 /**
@@ -155,11 +168,40 @@ export function createSpawnChannelFactory(
     );
     childEnv['QWEN_CODE_NO_RELAUNCH'] = 'true';
 
-    const memoryArgs = getAcpMemoryArgs();
     const execArgs = process.execArgv.filter(
       (a) => !/^--inspect(-brk)?($|=)/.test(a),
     );
+    // Reserve BEFORE deciding: the reservation is what makes this spawn
+    // visible to any other spawn racing it, so the count below includes this
+    // child and two concurrent spawns cannot both be told they are alone.
     const reservation = processRegistry.reserve();
+    let memoryArgs: string[];
+    try {
+      const policy = options.childHeapPolicy;
+      // Read the count once, while this reservation is still held, so the
+      // figure decided on and the figure reported are the same number.
+      const concurrentChildren = processRegistry.committedProcessCount;
+      const decision = policy?.decide(concurrentChildren);
+      const enforced = policy?.snapshot().enforced ?? false;
+      if (decision?.refuse && enforced) {
+        const { childPoolMb, minChildHeapMb } = policy!.snapshot();
+        throw new ChildHeapPoolExhaustedError(
+          childPoolMb,
+          concurrentChildren,
+          minChildHeapMb,
+        );
+      }
+      // `observe` computed a share above and must not apply it: passing the
+      // flag changes the child's GC and OOM behaviour, which is not something
+      // a reporting mode may do. Only `enforce` reaches the child.
+      memoryArgs = getAcpMemoryArgs(enforced ? decision?.ceilingMb : undefined);
+    } catch (error) {
+      // Covers both the refusal above and anything the policy throws. Leaking
+      // the reservation would inflate the count for every later spawn until
+      // the daemon refused everything.
+      reservation.cancel();
+      throw error;
+    }
     let child;
     try {
       child = spawn(

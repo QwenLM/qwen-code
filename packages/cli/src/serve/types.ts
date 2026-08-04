@@ -246,6 +246,26 @@ export interface ServeOptions {
    */
   memoryPressureMode?: 'off' | 'observe';
   /**
+   * What the daemon does with the per-child heap share it derives from
+   * `memoryBudgetMb`.
+   *
+   * `observe` (default) computes the share and the spawn-admission decision
+   * and applies **neither**, counting the refusals that would have happened.
+   * That counter is the point: the divisor has never been checked against a
+   * real multi-workspace deployment, and a non-zero count says enforcement
+   * would have refused a real spawn — including the channel-swap case, where
+   * a replacement child is counted alongside the one it replaces.
+   *
+   * `enforce` passes the share to the child and refuses the spawn when the
+   * pool cannot cover another. Unlike `memoryPressureMode`, this mode is
+   * included from the start because it is reachable and testable; the default
+   * is what keeps it safe.
+   *
+   * `off` computes nothing and leaves children on the historical host-derived
+   * ceiling.
+   */
+  childHeapMode?: 'off' | 'observe' | 'enforce';
+  /**
    * Resolved at boot by `runQwenServe`. Not an operator input, and not
    * consumed by any spawn path — it is reported under `limits.memory` on
    * `GET /daemon/status` so the daemon's memory denominator is observable
