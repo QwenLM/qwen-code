@@ -958,11 +958,14 @@ export class ContentGenerationPipeline {
     }
 
     const typed = providerRequest as unknown as Record<string, unknown>;
+    const reasoningEffort = typed['reasoning_effort'];
     // DashScope rejects forced tool selection while thinking is enabled.
     if (
       isDashScope &&
       typed['tool_choice'] === 'required' &&
-      (thinkingMandatory || typed['enable_thinking'] === true)
+      (thinkingMandatory ||
+        typed['enable_thinking'] === true ||
+        (typeof reasoningEffort === 'string' && reasoningEffort !== 'none'))
     ) {
       delete typed['tool_choice'];
     }
