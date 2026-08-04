@@ -1101,16 +1101,21 @@ describe('goal runtime', () => {
     });
     expect(host.started).toHaveLength(2);
 
+    const restoredJournal = fakeGoalJournal();
     const restoredHost = fakeGoalTurnHost();
     const restored = createGoalRuntime({
-      journal: fakeGoalJournal(),
+      journal: restoredJournal,
       evidenceSource,
       verifier,
       checkpointVerifier,
     });
     restored.bindHost(restoredHost);
-    await restored.restore([journal.records.at(-1)!]);
+    await restored.restore([journal.records.at(-2)!]);
 
+    expect(checkpointVerifier).toHaveBeenCalledTimes(2);
+    expect(restoredJournal.appended.map((payload) => payload.cause)).toEqual([
+      'verifier_reject',
+    ]);
     expect(restoredHost.inputs[0]?.verifierFeedback).toBe('More work remains');
   });
 

@@ -105,8 +105,14 @@ describe('createGoalCheckpointVerifier', () => {
     expect(JSON.stringify(payload)).not.toContain('preview');
     expect(payload).toMatchObject({
       goal: { objective: 'Ship the requested change' },
-      previousClaims: [{ id: 'checkpoint-1:1' }],
-      evidence: [{ uuid: 'tool-1', content: '18 tests passed' }],
+      previousClaims: [{ id: 'checkpoint-1:1', proofKind: 'user_input' }],
+      evidence: [
+        {
+          uuid: 'tool-1',
+          proofKind: 'external_fact',
+          content: '18 tests passed',
+        },
+      ],
     });
     expect(request.systemInstruction).toContain(
       'never change a source proofKind',
@@ -119,7 +125,7 @@ describe('createGoalCheckpointVerifier', () => {
   it('rejects oversized input before calling the provider', async () => {
     const { config, generateText } = configFor('{}');
     const oversized = input();
-    oversized.evidence[0]!.content = 'x'.repeat(256_000);
+    oversized.evidence[0]!.content = '中'.repeat(90_000);
 
     await expect(
       createGoalCheckpointVerifier(config)(oversized),
