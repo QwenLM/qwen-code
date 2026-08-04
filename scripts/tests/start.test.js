@@ -5,6 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { isAbsolute } from 'node:path';
 
 const { spawnMock, execSyncMock } = vi.hoisted(() => ({
   spawnMock: vi.fn(() => ({ on: vi.fn() })),
@@ -18,6 +19,7 @@ vi.mock('node:child_process', () => ({
 
 vi.mock('node:fs', () => ({
   readFileSync: vi.fn(() => JSON.stringify({ version: '0.0.0-test' })),
+  rmSync: vi.fn(),
 }));
 
 const normalizePath = (path) => String(path).replaceAll('\\', '/');
@@ -85,8 +87,18 @@ describe('scripts/start.js launcher', () => {
     const checkerPath = checkerOptions.env.QWEN_CODE_WARNINGS_FILE;
 
     expect(checkerPath).toBe(childOptions.env.QWEN_CODE_WARNINGS_FILE);
+    expect(isAbsolute(checkerPath)).toBe(true);
     expect(normalizePath(checkerPath)).toMatch(
       /qwen-code-warnings-\d+-[0-9a-f-]+\.txt$/,
+    );
+
+    await import('../start.js?scopes-startup-warnings-second');
+    const checkerCalls = execSyncMock.mock.calls.filter(
+      ([command]) => command === 'node ./scripts/check-build-status.js',
+    );
+    expect(checkerCalls).toHaveLength(2);
+    expect(checkerCalls[1][1].env.QWEN_CODE_WARNINGS_FILE).not.toBe(
+      checkerPath,
     );
   });
 });

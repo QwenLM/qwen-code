@@ -24,7 +24,7 @@ import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readFileSync } from 'node:fs';
+import { readFileSync, rmSync } from 'node:fs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
@@ -95,6 +95,12 @@ const child = spawn('node', nodeArgs, {
 });
 
 child.on('close', (code, signal) => {
+  try {
+    rmSync(startupWarningsFile, { force: true });
+  } catch {
+    // The checker or startup warnings consumer may already have removed it.
+  }
+
   // Same contract as scripts/dev.js: this launcher is a QWEN_CODE_CLI entry, and
   // a signal-killed child (`code === null`) must not exit 0 — `process.exit(null)`
   // coerces to success. Re-raise the signal; fall back to a non-zero exit.

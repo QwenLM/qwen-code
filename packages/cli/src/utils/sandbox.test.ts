@@ -49,6 +49,7 @@ afterEach(() => {
 describe('start_sandbox', () => {
   it('passes child environment variables into a container sandbox', async () => {
     vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
+    vi.stubEnv('QWEN_CODE_WARNINGS_FILE', '/tmp/qwen-code-warnings-test.txt');
     vi.spyOn(fs, 'existsSync').mockReturnValue(true);
     vi.spyOn(fs, 'realpathSync').mockImplementation((filePath) =>
       String(filePath),
@@ -86,6 +87,9 @@ describe('start_sandbox', () => {
       '--env',
       PRIVATE_ACP_CAPABILITY_ENV,
     ]);
+    expect(args).toContain(
+      'QWEN_CODE_WARNINGS_FILE=/tmp/qwen-code-warnings-test.txt',
+    );
     expect(options).toEqual(
       expect.objectContaining({
         env: expect.objectContaining({

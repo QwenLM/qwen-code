@@ -19,6 +19,28 @@ const buildDir = path.join(cliPackageDir, 'dist'); // Build output directory wit
 const warningsFilePath = process.env['QWEN_CODE_WARNINGS_FILE'];
 // ---------------------
 
+function clearWarningsFile() {
+  if (!warningsFilePath) return;
+  try {
+    if (fs.existsSync(warningsFilePath)) {
+      fs.unlinkSync(warningsFilePath);
+    }
+  } catch (err) {
+    console.warn(
+      `[Check Script] Warning: Could not delete previous warnings file: ${err.message}`,
+    );
+  }
+}
+
+function writeWarningsFile(content) {
+  if (!warningsFilePath) return;
+  try {
+    fs.writeFileSync(warningsFilePath, content);
+  } catch (err) {
+    console.error(`[Check Script] Error writing warnings file: ${err.message}`);
+  }
+}
+
 function getMtime(filePath) {
   try {
     return fs.statSync(filePath).mtimeMs; // Use mtimeMs for higher precision
@@ -57,32 +79,14 @@ function findSourceFiles(dir, allFiles = []) {
 console.error('Checking build status...');
 
 // Clean up old warnings file before check
-if (warningsFilePath) {
-  try {
-    if (fs.existsSync(warningsFilePath)) {
-      fs.unlinkSync(warningsFilePath);
-    }
-  } catch (err) {
-    console.warn(
-      `[Check Script] Warning: Could not delete previous warnings file: ${err.message}`,
-    );
-  }
-}
+clearWarningsFile();
 
 const buildMtime = getMtime(buildTimestampPath);
 if (!buildMtime) {
   // If build is missing, write that as a warning and exit(0) so app can display it
   const errorMessage = `ERROR: Build timestamp file (${path.relative(process.cwd(), buildTimestampPath)}) not found. Run \`npm run build\` first.`;
   console.error(errorMessage); // Still log error here
-  if (warningsFilePath) {
-    try {
-      fs.writeFileSync(warningsFilePath, errorMessage);
-    } catch (writeErr) {
-      console.error(
-        `[Check Script] Error writing missing build warning file: ${writeErr.message}`,
-      );
-    }
-  }
+  writeWarningsFile(errorMessage);
   process.exit(0); // Allow app to start and show the error
 }
 
@@ -132,31 +136,11 @@ if (newerSourceFileFound) {
   console.warn(finalWarning);
 
   // Write warnings to the temp file
-  if (warningsFilePath) {
-    try {
-      fs.writeFileSync(warningsFilePath, warningMessages.join('\n'));
-      // Removed debug log
-    } catch (err) {
-      console.error(
-        `[Check Script] Error writing warnings file: ${err.message}`,
-      );
-      // Proceed without writing, app won't show warnings
-    }
-  }
+  writeWarningsFile(warningMessages.join('\n'));
 } else {
   console.error('Build is up-to-date.');
   // Ensure no stale warning file exists if build is ok
-  if (warningsFilePath) {
-    try {
-      if (fs.existsSync(warningsFilePath)) {
-        fs.unlinkSync(warningsFilePath);
-      }
-    } catch (err) {
-      console.warn(
-        `[Check Script] Warning: Could not delete previous warnings file: ${err.message}`,
-      );
-    }
-  }
+  clearWarningsFile();
 }
 
 process.exit(0); // Always exit successfully so the app starts
