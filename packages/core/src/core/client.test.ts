@@ -3236,7 +3236,7 @@ describe('Gemini Client (client.ts)', () => {
             functionResponse: {
               id: 'pending-shell',
               name: 'run_shell_command',
-              response: { output: 'Y'.repeat(50_000) },
+              response: { output: 'Y'.repeat(140_000) },
             },
           },
         ],
@@ -3258,16 +3258,13 @@ describe('Gemini Client (client.ts)', () => {
       expect(markReadEvictedFromHistory).toHaveBeenCalledTimes(3);
       expect(mockClientDebugLogger.info).toHaveBeenCalledWith(
         expect.stringContaining(
-          '[TOOL-RESULT MC] tool result chars 530000 > 500000',
+          '[TOOL-RESULT MC] tool result chars 620000 > 500000',
         ),
       );
       expect(mockClientDebugLogger.info).toHaveBeenCalledWith(
         expect.stringContaining(
-          'history now 120000 (+50000 pending), target 250000',
+          'history now 120000 (+140000 pending), target 250000 (soft-exceeded)',
         ),
-      );
-      expect(mockClientDebugLogger.info).not.toHaveBeenCalledWith(
-        expect.stringContaining('(soft-exceeded)'),
       );
     });
 

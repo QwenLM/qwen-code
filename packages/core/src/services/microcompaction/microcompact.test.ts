@@ -1646,6 +1646,28 @@ describe('microcompactHistory evictedReadPaths (issue #4239)', () => {
     expect(result.meta!.unresolvedEvictedReads).toBe(0);
   });
 
+  it('lets a kept write_file result vouch for residency', () => {
+    // A kept write_file/edit result proves the model authored the file's
+    // bytes, so the path stays resident when the older read_file result
+    // for the same file is blanked.
+    const history: Content[] = [
+      fileCall('old', 'read_file', '/proj/a.ts'),
+      fileResult('old', 'read_file', 'old long content '.repeat(50)),
+      fileCall('keep', 'write_file', '/proj/a.ts'),
+      fileResult('keep', 'write_file', 'newer full content'),
+    ];
+
+    const result = microcompactHistory(history, TWO_HOURS_AGO, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 1,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.toolsCleared).toBe(1);
+    expect(result.meta!.evictedReadPaths).toEqual([]);
+    expect(result.meta!.unresolvedEvictedReads).toBe(0);
+  });
+
   it('reports the path even when a pending same-path read exists (conservative disarm)', () => {
     // A pending read_file result may be the file_unchanged cache-hit
     // placeholder rather than file bytes, and pending content is not

@@ -588,8 +588,16 @@ export function microcompactHistory(
     // `toolResultsNumToKeep: 1` keeps 1 of each, not 1 total. This
     // matches what users typically expect when they configure the
     // threshold for "tool results".
+    // Zero-char tool refs (errors, already-cleared placeholders, empty
+    // output) are never clearable, so letting them absorb protection
+    // slots would strand real recent outputs unprotected. Media uses the
+    // same budget by count but is always clearable.
+    const keepToolRefs = buildKeepRefs(
+      tool.filter((ref) => getToolOutputChars(getPart(history, ref)) > 0),
+      keepRecent,
+    );
     keepRefs = new Set([
-      ...tool.slice(-keepRecent).map(refKey),
+      ...keepToolRefs,
       ...media.slice(-keepRecent).map(refKey),
       ...nestedMedia.slice(-keepRecent).map(refKey),
     ]);
