@@ -44,6 +44,7 @@ interface SideTaskPanelProps {
     workspaceActions: DaemonWorkspaceActions,
   ) => void;
   onError?: (error: unknown, fallback: string) => void;
+  sessionWorkflowEnabled?: boolean;
 }
 
 const FIRST_PROMPT_RENAME_ATTEMPTS = 3;
@@ -62,6 +63,7 @@ export function SideTaskPanel({
   onRightPanelOpen,
   onArtifactsChange,
   onError,
+  sessionWorkflowEnabled,
 }: SideTaskPanelProps) {
   if (!sessionId) {
     return (
@@ -98,6 +100,7 @@ export function SideTaskPanel({
         onRightPanelOpen={onRightPanelOpen}
         onArtifactsChange={onArtifactsChange}
         onError={onError}
+        sessionWorkflowEnabled={sessionWorkflowEnabled}
       />
     </DaemonSessionProvider>
   );
@@ -189,6 +192,7 @@ function SideTaskSession({
   onRightPanelOpen,
   onArtifactsChange,
   onError,
+  sessionWorkflowEnabled,
 }: Omit<
   SideTaskPanelProps,
   'sessionId' | 'parentSessionId' | 'createSession' | 'onCreated'
@@ -280,6 +284,7 @@ function SideTaskSession({
       }
       onRightPanelOpen={onRightPanelOpen}
       onPaneArtifactsChange={onArtifactsChange}
+      sessionWorkflowEnabled={sessionWorkflowEnabled}
     />
   );
 }
