@@ -979,15 +979,51 @@ describe('ChatPane', () => {
   it('passes this pane workflow to its exit-plan approval', () => {
     messagesState = [
       {
-        id: 'plan',
-        role: 'plan',
-        todos: [
-          { id: 'prepare', content: 'Prepare', status: 'completed' },
+        id: 'plan-update',
+        role: 'tool_group',
+        tools: [
           {
-            id: 'ship',
-            content: 'Ship',
-            status: 'pending',
-            blockedBy: ['prepare'],
+            callId: 'todo-call-1',
+            toolName: 'todo_write',
+            status: 'completed',
+            rawOutput: {
+              entries: [
+                {
+                  content: 'Prepare',
+                  status: 'completed',
+                  _meta: { qwenTodo: { id: 'prepare' } },
+                },
+                {
+                  content: 'Ship',
+                  status: 'pending',
+                  _meta: {
+                    qwenTodo: { id: 'ship', blockedBy: ['prepare'] },
+                  },
+                },
+              ],
+              plan: { id: 'plan-1' },
+            },
+          },
+        ],
+      },
+      {
+        id: 'plan-update-newer',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'todo-call-2',
+            toolName: 'todo_write',
+            status: 'completed',
+            rawOutput: {
+              entries: [
+                {
+                  content: 'Ship v2',
+                  status: 'pending',
+                  _meta: { qwenTodo: { id: 'ship-v2' } },
+                },
+              ],
+              plan: { id: 'plan-1' },
+            },
           },
         ],
       },
@@ -1001,14 +1037,46 @@ describe('ChatPane', () => {
       id: 'perm-plan',
       toolKind: 'switch_mode',
       toolName: 'exit_plan_mode',
+      todoPlan: { planId: 'plan-1', sourceCallId: 'todo-call-1' },
+      rawInput: {},
+    };
+
+    render({ sessionWorkflowEnabled: true });
+
+    expect(testid('tool-approval')?.getAttribute('data-plan-todos')).toBe(
+      '["prepare","ship"]',
+    );
+  });
+
+  it('keeps the exit-plan approval text-only when Session Workflow is off', () => {
+    messagesState = [
+      {
+        id: 'plan-update',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'todo-call-1',
+            toolName: 'todo_write',
+            status: 'completed',
+            rawOutput: {
+              entries: [{ content: 'Ship', status: 'pending' }],
+              plan: { id: 'plan-1' },
+            },
+          },
+        ],
+      },
+    ];
+    pendingPermission = {
+      id: 'perm-plan',
+      toolKind: 'switch_mode',
+      toolName: 'exit_plan_mode',
+      todoPlan: { planId: 'plan-1', sourceCallId: 'todo-call-1' },
       rawInput: {},
     };
 
     render();
 
-    expect(testid('tool-approval')?.getAttribute('data-plan-todos')).toBe(
-      '["prepare","ship"]',
-    );
+    expect(testid('tool-approval')?.getAttribute('data-plan-todos')).toBe('[]');
   });
 
   it('reflects streaming state on the composer', () => {

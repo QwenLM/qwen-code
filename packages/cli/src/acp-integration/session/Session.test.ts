@@ -43,6 +43,7 @@ import type {
   PromptRequest,
   RequestPermissionResponse,
   SessionNotification,
+  SessionUpdate,
 } from '@agentclientprotocol/sdk';
 import type { LoadedSettings } from '../../config/settings.js';
 import * as nonInteractiveCliCommands from '../../nonInteractiveCliCommands.js';
@@ -59,6 +60,7 @@ const transcribeVoiceAudioSpy = vi.hoisted(() => vi.fn());
 const startToolSpanSpy = vi.hoisted(() => vi.fn());
 const addToolArgumentsAttributesSpy = vi.hoisted(() => vi.fn());
 const addToolCallResultAttributesSpy = vi.hoisted(() => vi.fn());
+const logLoopDetectedSpy = vi.hoisted(() => vi.fn());
 const TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD =
   'craft/claimTodoStopGuardContinuation';
 // Records every LoopTickResolver construction's deps so a test can assert what
@@ -96,6 +98,10 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     ) => {
       addToolCallResultAttributesSpy(...args);
       return actual.addToolCallResultAttributes(...args);
+    },
+    logLoopDetected: (...args: Parameters<typeof actual.logLoopDetected>) => {
+      logLoopDetectedSpy(...args);
+      return actual.logLoopDetected(...args);
     },
     // Transparent recording wrapper: records the constructor deps, then behaves
     // exactly like the real resolver (subclass → instanceof + methods preserved).
@@ -494,6 +500,7 @@ describe('Session', () => {
     startToolSpanSpy.mockClear();
     addToolArgumentsAttributesSpy.mockClear();
     addToolCallResultAttributesSpy.mockClear();
+    logLoopDetectedSpy.mockReset();
     runVisionBridgeSpy.mockReset();
     bridgeToolResultImagesSpy.mockReset();
     bridgeToolResultImagesSpy.mockImplementation(
@@ -1913,6 +1920,83 @@ describe('Session', () => {
     });
   });
 
+  // Runs a full exit_plan_mode approval turn and returns the permission
+  // request the client received, so tests can assert the observable
+  // `_meta.qwenTodoApproval` binding instead of poking the private
+  // `activeTodoPlanRevision` field. Mirrors the it.each harness in the
+  // prompt describe block.
+  async function runExitPlanModeApprovalPrompt(): Promise<
+    Parameters<AgentSideConnection['requestPermission']>[0]
+  > {
+    let mode = ApprovalMode.PLAN;
+    const hookSpy = vi
+      .spyOn(core, 'firePermissionRequestHook')
+      .mockResolvedValue({
+        hasDecision: true,
+        shouldAllow: true,
+        updatedInput: { plan: 'Hook-replaced plan' },
+        denyMessage: undefined,
+      });
+    const invocation = {
+      params: { plan: 'Original plan' },
+      requiresUserInteraction: vi.fn().mockReturnValue(true),
+      getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+      getConfirmationDetails: vi.fn().mockResolvedValue({
+        type: 'plan',
+        title: 'Approve plan',
+        plan: 'Original plan',
+        hideAlwaysAllow: true,
+        onConfirm: vi.fn().mockResolvedValue(undefined),
+      }),
+      getDescription: vi.fn().mockReturnValue('Plan:'),
+      toolLocations: vi.fn().mockReturnValue([]),
+      execute: vi.fn().mockImplementation(async () => {
+        mode = ApprovalMode.DEFAULT;
+        return { llmContent: 'approved', returnDisplay: 'approved' };
+      }),
+    };
+    const tool = {
+      name: core.ToolNames.EXIT_PLAN_MODE,
+      kind: core.Kind.Think,
+      build: vi.fn().mockReturnValue(invocation),
+    };
+
+    mockToolRegistry.getTool.mockReturnValue(tool);
+    mockConfig.getApprovalMode = vi.fn(() => mode);
+    mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+    mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+    mockConfig.getMessageBus = vi.fn().mockReturnValue({});
+    mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+      createStreamWithChunks([
+        {
+          type: core.StreamEventType.CHUNK,
+          value: {
+            functionCalls: [
+              {
+                id: 'call-exit-plan',
+                name: core.ToolNames.EXIT_PLAN_MODE,
+                args: { plan: 'Original plan' },
+              },
+            ],
+          },
+        },
+      ]),
+    );
+
+    try {
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'approve the plan' }],
+      });
+    } finally {
+      hookSpy.mockRestore();
+    }
+
+    const calls = vi.mocked(mockClient.requestPermission).mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    return calls.at(-1)![0];
+  }
+
   describe('setMode', () => {
     it.each([
       ['plan', ApprovalMode.PLAN],
@@ -1957,6 +2041,56 @@ describe('Session', () => {
       expect(mockClient.extNotification).not.toHaveBeenCalledWith(
         'qwen/notify/session/mode-update',
         expect.anything(),
+      );
+    });
+
+    it('clears the active Todo plan revision when transitioning into plan mode', async () => {
+      mockConfig.getApprovalMode = vi
+        .fn()
+        .mockReturnValue(ApprovalMode.DEFAULT);
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [{ content: 'Ship', priority: 'medium', status: 'pending' }],
+        _meta: {
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      });
+
+      await session.setMode({
+        sessionId: 'test-session-id',
+        modeId: 'plan',
+      });
+
+      const request = await runExitPlanModeApprovalPrompt();
+      expect(request.toolCall._meta).toEqual(
+        expect.not.objectContaining({
+          qwenTodoApproval: expect.anything(),
+        }),
+      );
+    });
+
+    it('preserves the active Todo plan revision when re-selecting plan mode', async () => {
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [{ content: 'Ship', priority: 'medium', status: 'pending' }],
+        _meta: {
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      });
+
+      await session.setMode({
+        sessionId: 'test-session-id',
+        modeId: 'plan',
+      });
+
+      const request = await runExitPlanModeApprovalPrompt();
+      expect(request.toolCall._meta).toEqual(
+        expect.objectContaining({
+          qwenTodoApproval: { planId: 'plan-1', sourceCallId: 'todo-call-1' },
+        }),
       );
     });
   });
@@ -2011,7 +2145,7 @@ describe('Session', () => {
   });
 
   describe('rewindToTurn', () => {
-    it('truncates model history before the requested user turn and records rewind', () => {
+    it('truncates model history before the requested user turn and records rewind', async () => {
       const history: Content[] = [
         { role: 'user', parts: [{ text: 'first' }] },
         { role: 'model', parts: [{ text: 'first reply' }] },
@@ -2020,12 +2154,27 @@ describe('Session', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [{ content: 'old', priority: 'medium', status: 'pending' }],
+        _meta: {
+          qwenTodoPlan: { id: 'old-plan' },
+          qwenTranscript: { planToolCallId: 'old-call' },
+        },
+      });
 
       const result = session.rewindToTurn(1);
 
       expect(result).toEqual({ targetTurnIndex: 1, apiTruncateIndex: 2 });
       expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
       expect(mockChat.stripThoughtsFromHistory).toHaveBeenCalled();
+      const request = await runExitPlanModeApprovalPrompt();
+      expect(request.toolCall._meta).toEqual(
+        expect.not.objectContaining({
+          qwenTodoApproval: expect.anything(),
+        }),
+      );
       expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
         1,
         { truncatedCount: 2 },
@@ -2309,6 +2458,32 @@ describe('Session', () => {
       expect(snapshot).toEqual(history);
       expect(mockChat.setHistory).toHaveBeenCalledWith(history);
       expect(mockChat.getHistory).not.toHaveBeenCalled();
+    });
+
+    it('clears the active Todo plan revision when restoring history', async () => {
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [{ content: 'old', priority: 'medium', status: 'pending' }],
+        _meta: {
+          qwenTodoPlan: { id: 'old-plan' },
+          qwenTranscript: { planToolCallId: 'old-call' },
+        },
+      });
+      const bound = await runExitPlanModeApprovalPrompt();
+      expect(bound.toolCall._meta).toEqual(
+        expect.objectContaining({
+          qwenTodoApproval: { planId: 'old-plan', sourceCallId: 'old-call' },
+        }),
+      );
+
+      session.restoreHistory([]);
+
+      const restored = await runExitPlanModeApprovalPrompt();
+      expect(restored.toolCall._meta).toEqual(
+        expect.not.objectContaining({
+          qwenTodoApproval: expect.anything(),
+        }),
+      );
     });
 
     it('rejects history restore while a prompt is running', () => {
@@ -5838,10 +6013,72 @@ describe('Session', () => {
         expect(result.parts[4].functionResponse?.response?.['error']).toEqual(
           'Skipped because loop detection stopped the current turn before this tool call could run.',
         );
+        // Loop-detection skips are not approval-mode denials: they must record
+        // UNKNOWN, not EXECUTION_DENIED, so the denial metric stays accurate.
+        expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.objectContaining({
+            callId: 'read_after_loop',
+            errorType: core.ToolErrorType.UNKNOWN,
+          }),
+        );
         expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
           expect.stringContaining(
             'Stopping ACP turn after repeated tool parameter errors from missing_tool',
           ),
+        );
+      });
+
+      it('keeps loop telemetry failures from duplicating terminal results', async () => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockToolRegistry.getTool.mockReturnValue(undefined);
+        logLoopDetectedSpy.mockImplementationOnce(() => {
+          throw new Error('loop telemetry unavailable');
+        });
+        const functionCalls: FunctionCall[] = [
+          { id: 'missing_1', name: 'missing_tool', args: {} },
+          { id: 'missing_2', name: 'missing_tool', args: {} },
+          { id: 'missing_3', name: 'missing_tool', args: {} },
+        ];
+        const toolLoopState = {
+          totalToolCalls: 0,
+          invalidToolParamErrors: new Map<string, number>(),
+          loopDetected: false,
+        };
+
+        const result = await (
+          session as unknown as {
+            runToolCalls: (
+              abortSignal: AbortSignal,
+              promptId: string,
+              calls: FunctionCall[],
+              loopState: typeof toolLoopState,
+            ) => Promise<{
+              parts: Part[];
+              stopAfterPermissionCancel: boolean;
+              loopDetected?: boolean;
+            }>;
+          }
+        ).runToolCalls(
+          new AbortController().signal,
+          'prompt-loop-telemetry-failure',
+          functionCalls,
+          toolLoopState,
+        );
+
+        expect(result.loopDetected).toBe(true);
+        expect(result.parts.map((part) => part.functionResponse?.id)).toEqual([
+          'missing_1',
+          'missing_2',
+          'missing_3',
+        ]);
+        expect(logLoopDetectedSpy).toHaveBeenCalledTimes(1);
+        expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledTimes(
+          3,
+        );
+        expect(debugLoggerDebugSpy).toHaveBeenCalledWith(
+          '[Session] Failed to record loop detection telemetry',
+          expect.objectContaining({ message: 'loop telemetry unavailable' }),
         );
       });
 
@@ -6322,14 +6559,29 @@ describe('Session', () => {
           .map(
             ([, ev]) =>
               ev as {
+                call_id?: string;
                 function_name?: string;
                 status?: string;
+                execution_status?: string;
                 success?: boolean;
+                error_type?: string;
               },
           )
           .find((ev) => ev.function_name === 'read_file');
+        expect(toolEvent?.call_id).toBe('call-1');
         expect(toolEvent?.status).toBe('error');
+        expect(toolEvent?.execution_status).toBe('error');
         expect(toolEvent?.success).toBe(false);
+        expect(toolEvent?.error_type).toBe(core.ToolErrorType.UNKNOWN);
+        expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.objectContaining({
+            callId: 'call-1',
+            status: 'error',
+            executionStatus: 'error',
+            errorType: core.ToolErrorType.UNKNOWN,
+          }),
+        );
         const followUp = vi.mocked(mockChat.sendMessageStream).mock
           .calls[1][1] as {
           message: Part[];
@@ -13531,45 +13783,230 @@ describe('Session', () => {
       );
     });
 
-    it('keeps exit_plan_mode in PLAN until ACP approval executes and then notifies once', async () => {
-      let mode = ApprovalMode.PLAN;
-      const hookSpy = vi
-        .spyOn(core, 'firePermissionRequestHook')
-        .mockResolvedValue({
-          hasDecision: true,
-          shouldAllow: true,
-          updatedInput: { plan: 'Hook-replaced plan' },
-          denyMessage: undefined,
+    it.each([
+      ['live update', 'live', true],
+      ['history replay', 'replay', false],
+      ['failed replacement', 'failed', false],
+      ['mode transition', 'cleared', false],
+      ['empty plan update', 'empty-entries', false],
+      ['plan update without identity', 'missing-meta', false],
+    ] as const)(
+      'keeps exit_plan_mode approval revision correct after %s',
+      async (_label, revisionSource, expectsRevision) => {
+        let mode = ApprovalMode.PLAN;
+        const hookSpy = vi
+          .spyOn(core, 'firePermissionRequestHook')
+          .mockResolvedValue({
+            hasDecision: true,
+            shouldAllow: true,
+            updatedInput: { plan: 'Hook-replaced plan' },
+            denyMessage: undefined,
+          });
+        const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
+        const executeSpy = vi.fn().mockImplementation(async () => {
+          const updatesBeforeExecute = vi
+            .mocked(mockClient.sessionUpdate)
+            .mock.calls.filter(
+              ([params]) =>
+                params.update.sessionUpdate === 'current_mode_update',
+            );
+          expect(mode).toBe(ApprovalMode.PLAN);
+          expect(updatesBeforeExecute).toHaveLength(0);
+          mode = ApprovalMode.DEFAULT;
+          return { llmContent: 'approved', returnDisplay: 'approved' };
         });
-      const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
-      const executeSpy = vi.fn().mockImplementation(async () => {
-        const updatesBeforeExecute = vi
+        const invocation = {
+          params: { plan: 'Original plan' },
+          requiresUserInteraction: vi.fn().mockReturnValue(true),
+          getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+          getConfirmationDetails: vi.fn().mockResolvedValue({
+            type: 'plan',
+            title: 'Approve plan',
+            plan: 'Original plan',
+            hideAlwaysAllow: true,
+            onConfirm: onConfirmSpy,
+          }),
+          getDescription: vi.fn().mockReturnValue('Plan:'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute: executeSpy,
+        };
+        const tool = {
+          name: core.ToolNames.EXIT_PLAN_MODE,
+          kind: core.Kind.Think,
+          build: vi.fn().mockReturnValue(invocation),
+        };
+
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn(() => mode);
+        mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+        mockConfig.getMessageBus = vi.fn().mockReturnValue({});
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'call-exit-plan',
+                    name: core.ToolNames.EXIT_PLAN_MODE,
+                    args: { plan: 'Original plan' },
+                  },
+                ],
+              },
+            },
+          ]),
+        );
+        const planUpdate: SessionUpdate = {
+          sessionUpdate: 'plan',
+          entries: [
+            {
+              content: 'Ship',
+              priority: 'medium',
+              status: 'pending',
+            },
+          ],
+          _meta: {
+            qwenTodoPlan: { id: 'plan-1' },
+            qwenTranscript: { planToolCallId: 'todo-call-1' },
+          },
+        };
+        if (revisionSource === 'replay') {
+          // A reloaded session replays the previous cycle's todo_write result;
+          // the replayed plan update must not bind the next approval.
+          await session.replayHistory([
+            chatRecord({
+              uuid: 'todo-exec-1',
+              type: 'tool_result',
+              message: {
+                parts: [
+                  {
+                    functionResponse: {
+                      name: core.ToolNames.TODO_WRITE,
+                      id: 'stale-call',
+                      response: {},
+                    },
+                  },
+                ],
+              },
+              toolCallResult: {
+                callId: 'stale-call',
+                resultDisplay: {
+                  type: 'todo_list',
+                  planId: 'stale-plan',
+                  todos: [
+                    { id: '1', content: 'Done task', status: 'completed' },
+                  ],
+                },
+              },
+            }),
+          ]);
+        } else if (revisionSource === 'empty-entries') {
+          await session.sendUpdate({ ...planUpdate, entries: [] });
+        } else if (revisionSource === 'missing-meta') {
+          await session.sendUpdate({
+            sessionUpdate: 'plan',
+            entries: planUpdate.entries,
+          });
+        } else {
+          await session.sendUpdate(planUpdate);
+        }
+        if (revisionSource === 'failed') {
+          vi.mocked(mockClient.sessionUpdate).mockRejectedValueOnce(
+            new Error('connection lost'),
+          );
+          await expect(
+            session.sendUpdate({
+              ...planUpdate,
+              _meta: {
+                qwenTodoPlan: { id: 'plan-2' },
+                qwenTranscript: { planToolCallId: 'todo-call-2' },
+              },
+            }),
+          ).rejects.toThrow('connection lost');
+        }
+        if (revisionSource === 'cleared') {
+          session.clearActiveTodoPlanRevision();
+        }
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'approve the plan' }],
+          });
+        } finally {
+          hookSpy.mockRestore();
+        }
+
+        expect(mockClient.requestPermission).toHaveBeenCalledWith(
+          expect.objectContaining({
+            options: [
+              expect.objectContaining({
+                kind: 'allow_once',
+                optionId: core.ToolConfirmationOutcome.RestorePrevious,
+              }),
+              expect.objectContaining({
+                kind: 'allow_always',
+                optionId: core.ToolConfirmationOutcome.ProceedAlways,
+              }),
+              expect.objectContaining({
+                kind: 'allow_once',
+                optionId: core.ToolConfirmationOutcome.ProceedOnce,
+              }),
+              expect.objectContaining({
+                kind: 'reject_once',
+                optionId: core.ToolConfirmationOutcome.Cancel,
+              }),
+            ],
+            toolCall: expect.objectContaining({
+              kind: 'switch_mode',
+              rawInput: { plan: 'Original plan' },
+              _meta: expectsRevision
+                ? expect.objectContaining({
+                    qwenTodoApproval: {
+                      planId: 'plan-1',
+                      sourceCallId: 'todo-call-1',
+                    },
+                  })
+                : expect.not.objectContaining({
+                    qwenTodoApproval: expect.anything(),
+                  }),
+            }),
+          }),
+        );
+        expect(onConfirmSpy).toHaveBeenCalledWith(
+          core.ToolConfirmationOutcome.ProceedOnce,
+          { answers: undefined },
+        );
+        expect(invocation.params).toEqual({ plan: 'Original plan' });
+        const modeUpdates = vi
           .mocked(mockClient.sessionUpdate)
           .mock.calls.filter(
             ([params]) => params.update.sessionUpdate === 'current_mode_update',
           );
-        expect(mode).toBe(ApprovalMode.PLAN);
-        expect(updatesBeforeExecute).toHaveLength(0);
-        mode = ApprovalMode.DEFAULT;
-        return { llmContent: 'approved', returnDisplay: 'approved' };
+        expect(modeUpdates).toHaveLength(1);
+        expect(modeUpdates[0]?.[0].update).toMatchObject({
+          currentModeId: ApprovalMode.DEFAULT,
+        });
+      },
+    );
+
+    it('clears the captured revision when enter_plan_mode execution enters plan mode', async () => {
+      let mode = ApprovalMode.DEFAULT;
+      const executeSpy = vi.fn().mockImplementation(async () => {
+        mode = ApprovalMode.PLAN;
+        return { llmContent: 'entered', returnDisplay: 'entered' };
       });
       const invocation = {
-        params: { plan: 'Original plan' },
-        requiresUserInteraction: vi.fn().mockReturnValue(true),
-        getDefaultPermission: vi.fn().mockResolvedValue('ask'),
-        getConfirmationDetails: vi.fn().mockResolvedValue({
-          type: 'plan',
-          title: 'Approve plan',
-          plan: 'Original plan',
-          hideAlwaysAllow: true,
-          onConfirm: onConfirmSpy,
-        }),
-        getDescription: vi.fn().mockReturnValue('Plan:'),
+        params: {},
+        getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+        getConfirmationDetails: vi.fn(),
+        getDescription: vi.fn().mockReturnValue('Enter plan mode'),
         toolLocations: vi.fn().mockReturnValue([]),
         execute: executeSpy,
       };
       const tool = {
-        name: core.ToolNames.EXIT_PLAN_MODE,
+        name: core.ToolNames.ENTER_PLAN_MODE,
         kind: core.Kind.Think,
         build: vi.fn().mockReturnValue(invocation),
       };
@@ -13577,7 +14014,7 @@ describe('Session', () => {
       mockToolRegistry.getTool.mockReturnValue(tool);
       mockConfig.getApprovalMode = vi.fn(() => mode);
       mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
-      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
       mockConfig.getMessageBus = vi.fn().mockReturnValue({});
       mockChat.sendMessageStream = vi.fn().mockResolvedValue(
         createStreamWithChunks([
@@ -13586,65 +14023,38 @@ describe('Session', () => {
             value: {
               functionCalls: [
                 {
-                  id: 'call-exit-plan',
-                  name: core.ToolNames.EXIT_PLAN_MODE,
-                  args: { plan: 'Original plan' },
+                  id: 'call-enter-plan',
+                  name: core.ToolNames.ENTER_PLAN_MODE,
+                  args: {},
                 },
               ],
             },
           },
         ]),
       );
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          { content: 'Old cycle', priority: 'medium', status: 'pending' },
+        ],
+        _meta: {
+          qwenTodoPlan: { id: 'old-plan' },
+          qwenTranscript: { planToolCallId: 'old-call' },
+        },
+      });
 
-      try {
-        await session.prompt({
-          sessionId: 'test-session-id',
-          prompt: [{ type: 'text', text: 'approve the plan' }],
-        });
-      } finally {
-        hookSpy.mockRestore();
-      }
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'plan this' }],
+      });
 
-      expect(mockClient.requestPermission).toHaveBeenCalledWith(
-        expect.objectContaining({
-          options: [
-            expect.objectContaining({
-              kind: 'allow_once',
-              optionId: core.ToolConfirmationOutcome.RestorePrevious,
-            }),
-            expect.objectContaining({
-              kind: 'allow_always',
-              optionId: core.ToolConfirmationOutcome.ProceedAlways,
-            }),
-            expect.objectContaining({
-              kind: 'allow_once',
-              optionId: core.ToolConfirmationOutcome.ProceedOnce,
-            }),
-            expect.objectContaining({
-              kind: 'reject_once',
-              optionId: core.ToolConfirmationOutcome.Cancel,
-            }),
-          ],
-          toolCall: expect.objectContaining({
-            kind: 'switch_mode',
-            rawInput: { plan: 'Original plan' },
-          }),
+      expect(executeSpy).toHaveBeenCalled();
+      const request = await runExitPlanModeApprovalPrompt();
+      expect(request.toolCall._meta).toEqual(
+        expect.not.objectContaining({
+          qwenTodoApproval: expect.anything(),
         }),
       );
-      expect(onConfirmSpy).toHaveBeenCalledWith(
-        core.ToolConfirmationOutcome.ProceedOnce,
-        { answers: undefined },
-      );
-      expect(invocation.params).toEqual({ plan: 'Original plan' });
-      const modeUpdates = vi
-        .mocked(mockClient.sessionUpdate)
-        .mock.calls.filter(
-          ([params]) => params.update.sessionUpdate === 'current_mode_update',
-        );
-      expect(modeUpdates).toHaveLength(1);
-      expect(modeUpdates[0]?.[0].update).toMatchObject({
-        currentModeId: ApprovalMode.DEFAULT,
-      });
     });
 
     it('routes ACP protected L4 allow writes through AUTO review', async () => {
@@ -15108,6 +15518,7 @@ describe('Session', () => {
             expect.objectContaining({
               callId: 'call-guard',
               status: 'error',
+              executionStatus: 'not_started',
               errorType: core.ToolErrorType.EXECUTION_DENIED,
             }),
           );
@@ -15226,6 +15637,7 @@ describe('Session', () => {
             expect.objectContaining({
               callId: 'call-guard-aborted',
               status: 'cancelled',
+              executionStatus: 'not_started',
             }),
           );
         });
@@ -15329,10 +15741,19 @@ describe('Session', () => {
 
         it('stops execution when PostToolUse hook returns shouldStop', async () => {
           const messageBus = {
-            request: vi.fn().mockResolvedValue({
-              success: true,
-              output: { shouldStop: true, reason: 'Stopping per hook request' },
-            }),
+            request: vi
+              .fn()
+              .mockImplementation(async (request: { eventName?: string }) => ({
+                success: true,
+                output:
+                  request.eventName === 'PostToolUse'
+                    ? {
+                        decision: 'allow',
+                        continue: false,
+                        stopReason: 'Stopping per hook request',
+                      }
+                    : { decision: 'allow' },
+              })),
           };
           mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
           mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
@@ -15388,11 +15809,28 @@ describe('Session', () => {
             }),
             expect.anything(),
           );
+          // The stop must produce an observable error result
+          expect(
+            mockChatRecordingService.recordToolResult,
+          ).toHaveBeenCalledWith(
+            expect.anything(),
+            expect.objectContaining({
+              callId: 'call-1',
+              status: 'error',
+              executionStatus: 'success',
+              errorType: core.ToolErrorType.EXECUTION_DENIED,
+            }),
+          );
         });
       });
 
       describe('PostToolUseFailure hook', () => {
         it('fires PostToolUseFailure hook when tool execution fails', async () => {
+          const startExecutionSpanSpy = vi.spyOn(
+            core,
+            'startToolExecutionSpan',
+          );
+          const endExecutionSpanSpy = vi.spyOn(core, 'endToolExecutionSpan');
           const messageBus = {
             request: vi
               .fn()
@@ -15464,6 +15902,30 @@ describe('Session', () => {
               }),
             }),
             expect.anything(),
+          );
+          expect(
+            mockChatRecordingService.recordToolResult,
+          ).toHaveBeenCalledWith(
+            expect.anything(),
+            expect.objectContaining({
+              callId: 'call-1',
+              status: 'error',
+              executionStatus: 'error',
+              errorType: core.ToolErrorType.UNHANDLED_EXCEPTION,
+            }),
+          );
+          expect(startExecutionSpanSpy).toHaveBeenCalledOnce();
+          expect(startExecutionSpanSpy).toHaveBeenCalledWith({
+            toolName: 'read_file',
+            callId: 'call-1',
+          });
+          expect(endExecutionSpanSpy).toHaveBeenCalledOnce();
+          expect(endExecutionSpanSpy).toHaveBeenCalledWith(
+            expect.anything(),
+            expect.objectContaining({
+              executionStatus: 'error',
+              errorType: core.ToolErrorType.UNHANDLED_EXCEPTION,
+            }),
           );
           expect(mockClient.extNotification).toHaveBeenCalledWith(
             'qwen/notify/session/artifact-event',
@@ -16392,6 +16854,1103 @@ describe('Session', () => {
       };
     }
 
+    it('records a missing tool name as a pre-execution failure', async () => {
+      const logToolCallSpy = vi
+        .spyOn(core, 'logToolCall')
+        .mockImplementation(() => {});
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-missing-name', [
+        {
+          id: 'missing_name_call',
+          args: {},
+        },
+      ]);
+
+      expect(mockToolRegistry.getTool).not.toHaveBeenCalled();
+      expect(result.parts[0].functionResponse).toMatchObject({
+        id: 'missing_name_call',
+        name: 'unknown_tool',
+        response: { error: 'Missing function name' },
+      });
+      expect(logToolCallSpy).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          call_id: 'missing_name_call',
+          function_name: 'unknown_tool',
+          status: 'error',
+          execution_status: 'not_started',
+          error_type: core.ToolErrorType.INVALID_TOOL_PARAMS,
+        }),
+      );
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        result.parts,
+        expect.objectContaining({
+          callId: 'missing_name_call',
+          status: 'error',
+          executionStatus: 'not_started',
+          errorType: core.ToolErrorType.INVALID_TOOL_PARAMS,
+        }),
+      );
+    });
+
+    it('preserves cancellation when tool enablement resolves after abort', async () => {
+      const logToolCallSpy = vi
+        .spyOn(core, 'logToolCall')
+        .mockImplementation(() => {});
+      const endToolSpanSpy = vi.spyOn(core, 'endToolSpan');
+      const abortController = new AbortController();
+      let resolveEnabled!: (enabled: boolean) => void;
+      const isToolEnabled = vi.fn(
+        () =>
+          new Promise<boolean>((resolve) => {
+            resolveEnabled = resolve;
+          }),
+      );
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue({
+        isToolEnabled,
+      });
+      const execute = vi.fn();
+      const build = vi.fn().mockReturnValue({
+        params: {},
+        execute,
+        getDefaultPermission: vi.fn(),
+        getDescription: vi.fn().mockReturnValue('enablement_tool'),
+        toolLocations: vi.fn().mockReturnValue([]),
+      });
+      mockToolRegistry.getTool.mockReturnValue({
+        name: 'enablement_tool',
+        kind: core.Kind.Read,
+        displayName: 'enablement_tool',
+        description: 'enablement_tool',
+        build,
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      });
+
+      const runPromise = (session as unknown as ToolCallInternals).runToolCalls(
+        abortController.signal,
+        'prompt-enablement-cancel',
+        [
+          {
+            id: 'enablement_cancel_call',
+            name: 'enablement_tool',
+            args: {},
+          },
+        ],
+      );
+
+      await vi.waitFor(() => expect(isToolEnabled).toHaveBeenCalledOnce());
+      abortController.abort();
+      resolveEnabled(false);
+      const result = await runPromise;
+
+      expect(build).not.toHaveBeenCalled();
+      expect(execute).not.toHaveBeenCalled();
+      expect(result.parts[0].functionResponse?.response).toEqual({
+        error: 'Tool call was cancelled before execution.',
+      });
+      expect(logToolCallSpy).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          call_id: 'enablement_cancel_call',
+          status: 'cancelled',
+          execution_status: 'not_started',
+        }),
+      );
+      expect(endToolSpanSpy).toHaveBeenCalledWith(expect.anything(), {
+        success: false,
+        cancelled: true,
+      });
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        result.parts,
+        expect.objectContaining({
+          callId: 'enablement_cancel_call',
+          status: 'cancelled',
+          executionStatus: 'not_started',
+          error: undefined,
+          errorType: undefined,
+        }),
+      );
+    });
+
+    it('preserves cancellation when permission flow resolves deny after abort', async () => {
+      const logToolCallSpy = vi
+        .spyOn(core, 'logToolCall')
+        .mockImplementation(() => {});
+      const abortController = new AbortController();
+      let resolvePermission!: (permission: 'deny') => void;
+      const getDefaultPermission = vi.fn(
+        () =>
+          new Promise<'deny'>((resolve) => {
+            resolvePermission = resolve;
+          }),
+      );
+      const execute = vi.fn();
+      const build = vi.fn().mockReturnValue({
+        params: {},
+        execute,
+        getDefaultPermission,
+        getDescription: vi.fn().mockReturnValue('permission_flow_tool'),
+        toolLocations: vi.fn().mockReturnValue([]),
+      });
+      mockToolRegistry.getTool.mockReturnValue({
+        name: 'permission_flow_tool',
+        kind: core.Kind.Read,
+        displayName: 'permission_flow_tool',
+        description: 'permission_flow_tool',
+        build,
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      });
+
+      const runPromise = (session as unknown as ToolCallInternals).runToolCalls(
+        abortController.signal,
+        'prompt-permission-flow-cancel',
+        [
+          {
+            id: 'permission_flow_cancel_call',
+            name: 'permission_flow_tool',
+            args: {},
+          },
+        ],
+      );
+
+      await vi.waitFor(() =>
+        expect(getDefaultPermission).toHaveBeenCalledOnce(),
+      );
+      abortController.abort();
+      resolvePermission('deny');
+      const result = await runPromise;
+
+      expect(build).toHaveBeenCalledOnce();
+      expect(execute).not.toHaveBeenCalled();
+      expect(result.parts[0].functionResponse?.response).toEqual({
+        error: 'Tool call was cancelled before execution.',
+      });
+      expect(logToolCallSpy).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          call_id: 'permission_flow_cancel_call',
+          status: 'cancelled',
+          execution_status: 'not_started',
+        }),
+      );
+      const event = logToolCallSpy.mock.calls.at(-1)?.[1];
+      expect(event).not.toHaveProperty('error');
+      expect(event).not.toHaveProperty('error_type');
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        result.parts,
+        expect.objectContaining({
+          callId: 'permission_flow_cancel_call',
+          status: 'cancelled',
+          executionStatus: 'not_started',
+          error: undefined,
+          errorType: undefined,
+        }),
+      );
+    });
+
+    it('records one successful terminal when ACP updates fail', async () => {
+      const logToolCallSpy = vi
+        .spyOn(core, 'logToolCall')
+        .mockImplementation(() => {});
+      vi.mocked(mockClient.sessionUpdate).mockRejectedValue(
+        new Error('ACP update unavailable'),
+      );
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'completed',
+        returnDisplay: 'completed',
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool('success_tool', execute),
+      );
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-success', [
+        { id: 'success_call', name: 'success_tool', args: {} },
+      ]);
+
+      expect(result.parts[0].functionResponse?.response).toEqual({
+        output: 'completed',
+      });
+      expect(logToolCallSpy).toHaveBeenCalledTimes(1);
+      expect(logToolCallSpy).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          call_id: 'success_call',
+          status: 'success',
+          execution_status: 'success',
+        }),
+      );
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledTimes(
+        1,
+      );
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        result.parts,
+        expect.objectContaining({
+          callId: 'success_call',
+          status: 'success',
+          executionStatus: 'success',
+        }),
+      );
+    });
+
+    it('records execution-stage cancellation on both axes', async () => {
+      const logToolCallSpy = vi
+        .spyOn(core, 'logToolCall')
+        .mockImplementation(() => {});
+      const endExecutionSpanSpy = vi.spyOn(core, 'endToolExecutionSpan');
+      const endToolSpanSpy = vi.spyOn(core, 'endToolSpan');
+      const abortController = new AbortController();
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      const execute = vi.fn().mockImplementation(async () => {
+        abortController.abort();
+        return {
+          llmContent: 'partial output',
+          returnDisplay: 'partial output',
+        };
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool('cancel_tool', execute),
+      );
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(abortController.signal, 'prompt-execution-cancel', [
+        { id: 'execution_cancel_call', name: 'cancel_tool', args: {} },
+      ]);
+
+      expect(result.parts[0].functionResponse?.response).toEqual({
+        error: 'The tool had already completed; its output was discarded.',
+      });
+      expect(endExecutionSpanSpy).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          executionStatus: 'cancelled',
+          cancelled: true,
+        }),
+      );
+      expect(endToolSpanSpy).toHaveBeenCalledWith(expect.anything(), {
+        success: false,
+        cancelled: true,
+      });
+      expect(logToolCallSpy).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          call_id: 'execution_cancel_call',
+          status: 'cancelled',
+          execution_status: 'cancelled',
+        }),
+      );
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        result.parts,
+        expect.objectContaining({
+          callId: 'execution_cancel_call',
+          status: 'cancelled',
+          executionStatus: 'cancelled',
+          error: undefined,
+          errorType: undefined,
+        }),
+      );
+    });
+
+    it('does not execute after cancellation settles during PreToolUse', async () => {
+      const logToolCallSpy = vi
+        .spyOn(core, 'logToolCall')
+        .mockImplementation(() => {});
+      const abortController = new AbortController();
+      let resolvePreHook:
+        | ((value: { success: true; output: { decision: 'allow' } }) => void)
+        | undefined;
+      const preHookPromise = new Promise<{
+        success: true;
+        output: { decision: 'allow' };
+      }>((resolve) => {
+        resolvePreHook = resolve;
+      });
+      const messageBus = {
+        request: vi.fn().mockReturnValue(preHookPromise),
+      };
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'should not execute',
+        returnDisplay: 'should not execute',
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool('pre_hook_tool', execute),
+      );
+
+      const runPromise = (session as unknown as ToolCallInternals).runToolCalls(
+        abortController.signal,
+        'prompt-pre-hook-cancel',
+        [
+          {
+            id: 'pre_hook_cancel_call',
+            name: 'pre_hook_tool',
+            args: {},
+          },
+        ],
+      );
+
+      await vi.waitFor(() => expect(messageBus.request).toHaveBeenCalledOnce());
+      abortController.abort();
+      resolvePreHook?.({
+        success: true,
+        output: { decision: 'allow' },
+      });
+      const result = await runPromise;
+
+      expect(execute).not.toHaveBeenCalled();
+      expect(result.parts[0].functionResponse?.response).toEqual({
+        error: 'Tool call was cancelled before execution.',
+      });
+      expect(logToolCallSpy).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          call_id: 'pre_hook_cancel_call',
+          status: 'cancelled',
+          execution_status: 'not_started',
+        }),
+      );
+      const event = logToolCallSpy.mock.calls.at(-1)?.[1];
+      expect(event).not.toHaveProperty('error');
+      expect(event).not.toHaveProperty('error_type');
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        result.parts,
+        expect.objectContaining({
+          callId: 'pre_hook_cancel_call',
+          status: 'cancelled',
+          executionStatus: 'not_started',
+          error: undefined,
+          errorType: undefined,
+        }),
+      );
+    });
+
+    it('preserves cancellation while emitting a PreToolUse block message', async () => {
+      const logToolCallSpy = vi
+        .spyOn(core, 'logToolCall')
+        .mockImplementation(() => {});
+      const abortController = new AbortController();
+      let markBlockMessageStarted!: () => void;
+      const blockMessageStarted = new Promise<void>((resolve) => {
+        markBlockMessageStarted = resolve;
+      });
+      let releaseBlockMessage!: () => void;
+      const blockMessageRelease = new Promise<void>((resolve) => {
+        releaseBlockMessage = resolve;
+      });
+      vi.mocked(mockClient.sessionUpdate).mockImplementation(async (params) => {
+        if (
+          params.update.sessionUpdate === 'agent_message_chunk' &&
+          params.update.content.type === 'text' &&
+          params.update.content.text.includes('PreToolUse blocked')
+        ) {
+          markBlockMessageStarted();
+          await blockMessageRelease;
+        }
+      });
+      const messageBus = {
+        request: vi.fn().mockResolvedValue({
+          success: true,
+          output: { decision: 'deny', reason: 'blocked by test hook' },
+        }),
+      };
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      const execute = vi.fn();
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool('blocked_tool', execute),
+      );
+
+      const runPromise = (session as unknown as ToolCallInternals).runToolCalls(
+        abortController.signal,
+        'prompt-block-message-cancel',
+        [
+          {
+            id: 'block_message_cancel_call',
+            name: 'blocked_tool',
+            args: {},
+          },
+        ],
+      );
+
+      await blockMessageStarted;
+      abortController.abort();
+      releaseBlockMessage();
+      const result = await runPromise;
+
+      expect(execute).not.toHaveBeenCalled();
+      expect(result.parts[0].functionResponse?.response).toEqual({
+        error: 'Tool call was cancelled before execution.',
+      });
+      expect(logToolCallSpy).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          call_id: 'block_message_cancel_call',
+          status: 'cancelled',
+          execution_status: 'not_started',
+        }),
+      );
+      const event = logToolCallSpy.mock.calls.at(-1)?.[1];
+      expect(event).not.toHaveProperty('error');
+      expect(event).not.toHaveProperty('error_type');
+    });
+
+    it('does not execute after cancellation settles during the start emitter', async () => {
+      const logToolCallSpy = vi
+        .spyOn(core, 'logToolCall')
+        .mockImplementation(() => {});
+      const startExecutionSpanSpy = vi.spyOn(core, 'startToolExecutionSpan');
+      const abortController = new AbortController();
+      let resolveStart: (() => void) | undefined;
+      vi.mocked(mockClient.sessionUpdate).mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveStart = resolve;
+          }),
+      );
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'should not execute',
+        returnDisplay: 'should not execute',
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool('start_emitter_tool', execute),
+      );
+
+      const runPromise = (session as unknown as ToolCallInternals).runToolCalls(
+        abortController.signal,
+        'prompt-start-emitter-cancel',
+        [
+          {
+            id: 'start_emitter_cancel_call',
+            name: 'start_emitter_tool',
+            args: {},
+          },
+        ],
+      );
+
+      await vi.waitFor(() =>
+        expect(mockClient.sessionUpdate).toHaveBeenCalledOnce(),
+      );
+      abortController.abort();
+      resolveStart?.();
+      const result = await runPromise;
+
+      expect(execute).not.toHaveBeenCalled();
+      expect(startExecutionSpanSpy).not.toHaveBeenCalled();
+      expect(result.parts[0].functionResponse?.response).toEqual({
+        error: 'Tool call was cancelled before execution.',
+      });
+      expect(logToolCallSpy).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          call_id: 'start_emitter_cancel_call',
+          status: 'cancelled',
+          execution_status: 'not_started',
+        }),
+      );
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        result.parts,
+        expect.objectContaining({
+          callId: 'start_emitter_cancel_call',
+          status: 'cancelled',
+          executionStatus: 'not_started',
+        }),
+      );
+    });
+
+    it('keeps a structured timeout exception ahead of a later parent abort', async () => {
+      const logToolCallSpy = vi
+        .spyOn(core, 'logToolCall')
+        .mockImplementation(() => {});
+      const endExecutionSpanSpy = vi.spyOn(core, 'endToolExecutionSpan');
+      const abortController = new AbortController();
+      const timeoutError = Object.assign(new Error('MCP request timed out'), {
+        errorType: core.ToolErrorType.EXECUTION_TIMEOUT,
+      });
+      const execute = vi.fn().mockImplementation(
+        () =>
+          new Promise<core.ToolResult>((_resolve, reject) => {
+            reject(timeoutError);
+            abortController.abort();
+          }),
+      );
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool('timeout_tool', execute),
+      );
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      const messageBus = {
+        request: vi
+          .fn()
+          .mockImplementation(async (request: { eventName?: string }) => ({
+            success: true,
+            output:
+              request.eventName === 'PreToolUse' ? { decision: 'allow' } : {},
+          })),
+      };
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(abortController.signal, 'prompt-structured-timeout', [
+        {
+          id: 'structured_timeout_call',
+          name: 'timeout_tool',
+          args: {},
+        },
+      ]);
+
+      expect(result.parts[0].functionResponse?.response).toEqual({
+        error: 'MCP request timed out',
+      });
+      expect(endExecutionSpanSpy).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          executionStatus: 'error',
+          errorType: core.ToolErrorType.EXECUTION_TIMEOUT,
+          cancelled: false,
+        }),
+      );
+      expect(logToolCallSpy).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          call_id: 'structured_timeout_call',
+          status: 'error',
+          execution_status: 'error',
+          error_type: core.ToolErrorType.EXECUTION_TIMEOUT,
+        }),
+      );
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        result.parts,
+        expect.objectContaining({
+          callId: 'structured_timeout_call',
+          status: 'error',
+          executionStatus: 'error',
+          errorType: core.ToolErrorType.EXECUTION_TIMEOUT,
+        }),
+      );
+      expect(messageBus.request).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventName: 'PostToolUseFailure',
+          input: expect.objectContaining({ is_interrupt: false }),
+        }),
+        expect.anything(),
+      );
+    });
+
+    it('records PostToolUse stop as an error after successful execution', async () => {
+      const logToolCallSpy = vi
+        .spyOn(core, 'logToolCall')
+        .mockImplementation(() => {});
+      const messageBus = {
+        request: vi
+          .fn()
+          .mockImplementation(async (request: { eventName?: string }) => ({
+            success: true,
+            output:
+              request.eventName === 'PostToolUse'
+                ? {
+                    decision: 'allow',
+                    continue: false,
+                    stopReason: 'Stopped by hook',
+                  }
+                : { decision: 'allow' },
+          })),
+      };
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'completed',
+        returnDisplay: 'completed',
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool('post_stop_tool', execute),
+      );
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-post-stop', [
+        { id: 'post_stop_call', name: 'post_stop_tool', args: {} },
+      ]);
+
+      expect(result.parts[0].functionResponse?.response).toEqual({
+        error: 'Stopped by hook',
+      });
+      expect(logToolCallSpy).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          call_id: 'post_stop_call',
+          status: 'error',
+          execution_status: 'success',
+          error_type: core.ToolErrorType.EXECUTION_DENIED,
+        }),
+      );
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        result.parts,
+        expect.objectContaining({
+          callId: 'post_stop_call',
+          status: 'error',
+          executionStatus: 'success',
+          errorType: core.ToolErrorType.EXECUTION_DENIED,
+        }),
+      );
+    });
+
+    it('records postprocessing failure after successful execution', async () => {
+      const logToolCallSpy = vi
+        .spyOn(core, 'logToolCall')
+        .mockImplementation(() => {});
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'completed',
+        returnDisplay: 'completed',
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool('postprocess_tool', execute),
+      );
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      bridgeToolResultImagesSpy.mockRejectedValueOnce(
+        new Error('image postprocessing failed'),
+      );
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-postprocess-fail', [
+        {
+          id: 'postprocess_success_call',
+          name: 'postprocess_tool',
+          args: {},
+        },
+      ]);
+
+      expect(result.parts[0].functionResponse?.response).toEqual({
+        error: 'image postprocessing failed',
+      });
+      expect(logToolCallSpy).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          call_id: 'postprocess_success_call',
+          status: 'error',
+          execution_status: 'success',
+          error_type: core.ToolErrorType.UNHANDLED_EXCEPTION,
+        }),
+      );
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        result.parts,
+        expect.objectContaining({
+          callId: 'postprocess_success_call',
+          status: 'error',
+          executionStatus: 'success',
+          errorType: core.ToolErrorType.UNHANDLED_EXCEPTION,
+        }),
+      );
+    });
+
+    it('preserves a structured postprocessing error type after successful execution', async () => {
+      const logToolCallSpy = vi
+        .spyOn(core, 'logToolCall')
+        .mockImplementation(() => {});
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'completed',
+        returnDisplay: 'completed',
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool('structured_postprocess_tool', execute),
+      );
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      bridgeToolResultImagesSpy.mockRejectedValueOnce(
+        Object.assign(new Error('structured postprocessing failure'), {
+          errorType: core.ToolErrorType.EXECUTION_FAILED,
+        }),
+      );
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-structured-post', [
+        {
+          id: 'structured_postprocess_call',
+          name: 'structured_postprocess_tool',
+          args: {},
+        },
+      ]);
+
+      expect(logToolCallSpy).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          call_id: 'structured_postprocess_call',
+          status: 'error',
+          execution_status: 'success',
+          error_type: core.ToolErrorType.EXECUTION_FAILED,
+        }),
+      );
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        result.parts,
+        expect.objectContaining({
+          status: 'error',
+          executionStatus: 'success',
+          errorType: core.ToolErrorType.EXECUTION_FAILED,
+        }),
+      );
+    });
+
+    it('records cancellation when abort arrives during exception failure hooks', async () => {
+      const logToolCallSpy = vi
+        .spyOn(core, 'logToolCall')
+        .mockImplementation(() => {});
+      const abortController = new AbortController();
+      const messageBus = {
+        request: vi
+          .fn()
+          .mockImplementation(async (request: { eventName?: string }) => {
+            if (request.eventName === 'PostToolUseFailure') {
+              abortController.abort();
+            }
+            return {
+              success: true,
+              output:
+                request.eventName === 'PreToolUse' ? { decision: 'allow' } : {},
+            };
+          }),
+      };
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool(
+          'cancel_during_failure_hook_tool',
+          vi.fn().mockRejectedValue(new Error('tool failed')),
+        ),
+      );
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(abortController.signal, 'prompt-failure-hook-cancel', [
+        {
+          id: 'failure_hook_cancel_call',
+          name: 'cancel_during_failure_hook_tool',
+          args: {},
+        },
+      ]);
+
+      expect(logToolCallSpy).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          call_id: 'failure_hook_cancel_call',
+          status: 'cancelled',
+          execution_status: 'error',
+        }),
+      );
+      expect(logToolCallSpy.mock.calls[0][1]).not.toHaveProperty('error_type');
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        result.parts,
+        expect.objectContaining({
+          status: 'cancelled',
+          executionStatus: 'error',
+          errorType: undefined,
+        }),
+      );
+    });
+
+    it('records one terminal when failure hooks and ACP updates fail', async () => {
+      const logToolCallSpy = vi
+        .spyOn(core, 'logToolCall')
+        .mockImplementation(() => {});
+      vi.mocked(mockClient.sessionUpdate).mockRejectedValue(
+        new Error('ACP update unavailable'),
+      );
+      const messageBus = {
+        request: vi
+          .fn()
+          .mockImplementation(async (request: { eventName?: string }) => {
+            if (request.eventName === 'PostToolUseFailure') {
+              throw new Error('failure hook unavailable');
+            }
+            return { success: true, output: { decision: 'allow' } };
+          }),
+      };
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      const execute = vi.fn().mockRejectedValue(new Error('tool failed'));
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool('failing_tool', execute),
+      );
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-hook-fail', [
+        { id: 'hook_fail_call', name: 'failing_tool', args: {} },
+      ]);
+
+      expect(result.parts[0].functionResponse?.response).toEqual({
+        error: 'tool failed',
+      });
+      expect(logToolCallSpy).toHaveBeenCalledTimes(1);
+      expect(logToolCallSpy).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          call_id: 'hook_fail_call',
+          status: 'error',
+          execution_status: 'error',
+          error_type: core.ToolErrorType.UNHANDLED_EXCEPTION,
+        }),
+      );
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledTimes(
+        1,
+      );
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        result.parts,
+        expect.objectContaining({
+          callId: 'hook_fail_call',
+          status: 'error',
+          executionStatus: 'error',
+          errorType: core.ToolErrorType.UNHANDLED_EXCEPTION,
+        }),
+      );
+    });
+
+    it('classifies postprocessing failures independently from a settled soft error', async () => {
+      const logToolCallSpy = vi
+        .spyOn(core, 'logToolCall')
+        .mockImplementation(() => {});
+      const endExecutionSpanSpy = vi.spyOn(core, 'endToolExecutionSpan');
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'timed out',
+        returnDisplay: 'timed out',
+        error: {
+          message: 'execution timed out',
+          type: core.ToolErrorType.EXECUTION_TIMEOUT,
+        },
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool('timeout_tool', execute),
+      );
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      bridgeToolResultImagesSpy.mockRejectedValueOnce(
+        new Error('image postprocessing failed'),
+      );
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-postprocess-error', [
+        {
+          id: 'postprocess_error_call',
+          name: 'timeout_tool',
+          args: {},
+        },
+      ]);
+
+      expect(result.parts[0].functionResponse?.response).toEqual({
+        error: 'image postprocessing failed',
+      });
+      expect(endExecutionSpanSpy).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          executionStatus: 'error',
+          errorType: core.ToolErrorType.EXECUTION_TIMEOUT,
+        }),
+      );
+      expect(logToolCallSpy).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          call_id: 'postprocess_error_call',
+          status: 'error',
+          execution_status: 'error',
+          error: 'image postprocessing failed',
+          error_type: core.ToolErrorType.UNHANDLED_EXCEPTION,
+        }),
+      );
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        result.parts,
+        expect.objectContaining({
+          callId: 'postprocess_error_call',
+          status: 'error',
+          executionStatus: 'error',
+          errorType: core.ToolErrorType.UNHANDLED_EXCEPTION,
+        }),
+      );
+    });
+
+    it.each([
+      {
+        label: 'successful execution',
+        toolResult: {
+          llmContent: 'completed output',
+          returnDisplay: 'completed output',
+        },
+        executionStatus: 'success' as const,
+      },
+      {
+        label: 'soft execution failure',
+        toolResult: {
+          llmContent: 'failed output',
+          returnDisplay: 'failed output',
+          error: {
+            message: 'tool failed',
+            type: core.ToolErrorType.EXECUTION_FAILED,
+          },
+        },
+        executionStatus: 'error' as const,
+      },
+      {
+        label: 'soft execution timeout',
+        toolResult: {
+          llmContent: 'timed out output',
+          returnDisplay: 'timed out output',
+          error: {
+            message: 'tool timed out',
+            type: core.ToolErrorType.EXECUTION_TIMEOUT,
+          },
+        },
+        executionStatus: 'error' as const,
+      },
+    ])(
+      'replaces $label output when image postprocessing is cancelled',
+      async ({ toolResult, executionStatus }) => {
+        const logToolCallSpy = vi
+          .spyOn(core, 'logToolCall')
+          .mockImplementation(() => {});
+        const abortController = new AbortController();
+        const execute = vi.fn().mockResolvedValue(toolResult);
+        mockToolRegistry.getTool.mockReturnValue(
+          mockAllowedTool('bridge_cancel_tool', execute),
+        );
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+        bridgeToolResultImagesSpy.mockImplementationOnce(
+          async ({ responseParts }: { responseParts: Part[] }) => {
+            abortController.abort();
+            return responseParts;
+          },
+        );
+
+        const result = await (
+          session as unknown as ToolCallInternals
+        ).runToolCalls(
+          abortController.signal,
+          `prompt-bridge-cancel-${executionStatus}`,
+          [
+            {
+              id: `bridge_cancel_${executionStatus}`,
+              name: 'bridge_cancel_tool',
+              args: {},
+            },
+          ],
+        );
+
+        expect(result.parts[0].functionResponse?.response).toEqual({
+          error: 'The tool had already completed; its output was discarded.',
+        });
+        expect(logToolCallSpy).toHaveBeenCalledWith(
+          mockConfig,
+          expect.objectContaining({
+            call_id: `bridge_cancel_${executionStatus}`,
+            status: 'cancelled',
+            execution_status: executionStatus,
+          }),
+        );
+        const event = logToolCallSpy.mock.calls.at(-1)?.[1];
+        expect(event).not.toHaveProperty('error');
+        expect(event).not.toHaveProperty('error_type');
+        expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+          result.parts,
+          expect.objectContaining({
+            callId: `bridge_cancel_${executionStatus}`,
+            status: 'cancelled',
+            executionStatus,
+            error: undefined,
+            errorType: undefined,
+          }),
+        );
+      },
+    );
+
+    it('prefers cancellation when PostToolUse stops after execution settles', async () => {
+      const logToolCallSpy = vi
+        .spyOn(core, 'logToolCall')
+        .mockImplementation(() => {});
+      const abortController = new AbortController();
+      const messageBus = {
+        request: vi
+          .fn()
+          .mockImplementation(async (request: { eventName?: string }) => {
+            if (request.eventName === 'PostToolUse') {
+              abortController.abort();
+              return {
+                success: true,
+                output: {
+                  decision: 'allow',
+                  continue: false,
+                  stopReason: 'Stopping per hook request',
+                },
+              };
+            }
+            return { success: true, output: { decision: 'allow' } };
+          }),
+      };
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'completed',
+        returnDisplay: 'completed',
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool('post_hook_tool', execute),
+      );
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(abortController.signal, 'prompt-post-hook-cancel', [
+        {
+          id: 'post_hook_cancel_call',
+          name: 'post_hook_tool',
+          args: {},
+        },
+      ]);
+
+      expect(execute).toHaveBeenCalledOnce();
+      expect(result.parts[0].functionResponse?.response).toEqual({
+        error: 'The tool had already completed; its output was discarded.',
+      });
+      expect(logToolCallSpy).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          call_id: 'post_hook_cancel_call',
+          status: 'cancelled',
+          execution_status: 'success',
+        }),
+      );
+      const event = logToolCallSpy.mock.calls.at(-1)?.[1];
+      expect(event).not.toHaveProperty('error');
+      expect(event).not.toHaveProperty('error_type');
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        result.parts,
+        expect.objectContaining({
+          callId: 'post_hook_cancel_call',
+          status: 'cancelled',
+          executionStatus: 'success',
+          error: undefined,
+          errorType: undefined,
+        }),
+      );
+    });
+
     it('publishes a persisted Todo plan when cancellation races completion', async () => {
       const controller = new AbortController();
       const execute = vi.fn().mockImplementation(async () => {
@@ -17316,6 +18875,23 @@ describe('Session', () => {
       });
       expect(cancelledExecute).not.toHaveBeenCalled();
       expect(laterExecute).not.toHaveBeenCalled();
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        [result.parts[0]],
+        expect.objectContaining({
+          callId: 'shell_call',
+          status: 'cancelled',
+          executionStatus: 'not_started',
+          error: undefined,
+          errorType: undefined,
+        }),
+      );
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        [result.parts[1]],
+        expect.objectContaining({
+          callId: 'read_call',
+          executionStatus: 'not_started',
+        }),
+      );
     });
 
     it('skips later pre-loop tools after non-question permission cancellation', async () => {
@@ -17494,6 +19070,9 @@ describe('Session', () => {
     });
 
     it('skips later tools after non-question permission request failure', async () => {
+      const logToolCallSpy = vi
+        .spyOn(core, 'logToolCall')
+        .mockImplementation(() => {});
       const failedPermissionExecute = vi.fn();
       const laterExecute = vi.fn().mockResolvedValue({
         llmContent: 'should not execute',
@@ -17541,6 +19120,92 @@ describe('Session', () => {
       });
       expect(failedPermissionExecute).not.toHaveBeenCalled();
       expect(laterExecute).not.toHaveBeenCalled();
+      expect(logToolCallSpy).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          call_id: 'shell_call',
+          status: 'error',
+          execution_status: 'not_started',
+          error_type: core.ToolErrorType.UNHANDLED_EXCEPTION,
+        }),
+      );
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        [result.parts[0]],
+        expect.objectContaining({
+          callId: 'shell_call',
+          status: 'error',
+          executionStatus: 'not_started',
+          errorType: core.ToolErrorType.UNHANDLED_EXCEPTION,
+        }),
+      );
+    });
+
+    it('does not treat a parent abort during permission as explicit rejection', async () => {
+      const permissionExecute = vi.fn();
+      const laterExecute = vi.fn().mockResolvedValue({
+        llmContent: 'should not execute',
+        returnDisplay: 'should not execute',
+      });
+      mockToolRegistry.getTool.mockImplementation((name: string) =>
+        name === core.ToolNames.SHELL
+          ? mockConfirmingTool(name, permissionExecute, 'exec')
+          : mockAllowedTool(name, laterExecute),
+      );
+      vi.mocked(mockClient.requestPermission).mockReturnValueOnce(
+        new Promise<never>(() => {
+          // requestPermissionWithAbort owns cancellation of this pending call.
+        }),
+      );
+      const abortController = new AbortController();
+
+      const runPromise = (session as unknown as ToolCallInternals).runToolCalls(
+        abortController.signal,
+        'prompt-shell-permission-parent-abort',
+        [
+          {
+            id: 'shell_call',
+            name: core.ToolNames.SHELL,
+            args: { command: 'echo denied' },
+          },
+          {
+            id: 'read_call',
+            name: core.ToolNames.READ_FILE,
+            args: { file_path: '/tmp/should-not-run' },
+          },
+        ],
+      );
+
+      await vi.waitFor(() =>
+        expect(mockClient.requestPermission).toHaveBeenCalledOnce(),
+      );
+      abortController.abort();
+      const result = await runPromise;
+
+      expect(result.stopAfterPermissionCancel).toBe(false);
+      expect(
+        result.parts.map((part) => part.functionResponse?.response),
+      ).toEqual([
+        { error: 'Tool call was cancelled before execution.' },
+        { error: 'Tool call was cancelled before execution.' },
+      ]);
+      expect(permissionExecute).not.toHaveBeenCalled();
+      expect(laterExecute).not.toHaveBeenCalled();
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        [result.parts[0]],
+        expect.objectContaining({
+          callId: 'shell_call',
+          status: 'cancelled',
+          executionStatus: 'not_started',
+        }),
+      );
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        [result.parts[1]],
+        expect.objectContaining({
+          callId: 'read_call',
+          status: 'cancelled',
+          executionStatus: 'not_started',
+        }),
+      );
     });
 
     it('keeps plan mode and gives manual guidance when switch_mode approval is unavailable', async () => {
@@ -18014,7 +19679,118 @@ describe('Session', () => {
       expect(secondSiblingSignal?.aborted).toBe(true);
     });
 
-    it('passes an already-aborted parent signal to Agent batches', async () => {
+    it('does not treat parent abort during nested Agent permission as explicit rejection', async () => {
+      const previousMaxConcurrency =
+        process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+      process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] = '1';
+      try {
+        const eventEmitter = new EventEmitter();
+        const respond = vi.fn().mockResolvedValue(undefined);
+        const firstExecute = vi
+          .fn()
+          .mockImplementation(async (signal: AbortSignal) => {
+            emitNestedInfoPermission(eventEmitter, respond);
+            await vi.waitFor(() => {
+              expect(signal.aborted).toBe(true);
+            });
+            return {
+              llmContent: 'agent stopped',
+              returnDisplay: 'agent stopped',
+            };
+          });
+        const secondExecute = vi.fn();
+        mockToolRegistry.getTool.mockReturnValue({
+          name: core.ToolNames.AGENT,
+          kind: core.Kind.Think,
+          displayName: 'Agent',
+          description: 'Agent',
+          build: vi
+            .fn()
+            .mockImplementation((args: Record<string, unknown>) => ({
+              params: { subagent_type: 'explore', ...args },
+              eventEmitter,
+              execute:
+                args['_test_id'] === 'first' ? firstExecute : secondExecute,
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              getDescription: vi.fn().mockReturnValue('Agent'),
+              toolLocations: vi.fn().mockReturnValue([]),
+            })),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        });
+        vi.mocked(mockClient.requestPermission).mockReturnValueOnce(
+          new Promise<never>(() => {}),
+        );
+        const abortController = new AbortController();
+
+        const runPromise = (
+          session as unknown as ToolCallInternals
+        ).runToolCalls(
+          abortController.signal,
+          'prompt-agent-nested-permission-parent-abort',
+          [
+            {
+              id: 'agent_first',
+              name: core.ToolNames.AGENT,
+              args: { _test_id: 'first', subagent_type: 'explore' },
+            },
+            {
+              id: 'agent_second',
+              name: core.ToolNames.AGENT,
+              args: { _test_id: 'second', subagent_type: 'explore' },
+            },
+          ],
+        );
+
+        await vi.waitFor(() => {
+          expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+        });
+        abortController.abort();
+        const result = await runPromise;
+
+        expect(result.stopAfterPermissionCancel).toBe(false);
+        expect(firstExecute).toHaveBeenCalledOnce();
+        expect(secondExecute).not.toHaveBeenCalled();
+        expect(
+          result.parts.map((part) => part.functionResponse?.response),
+        ).toEqual([
+          {
+            error: 'The tool had already completed; its output was discarded.',
+          },
+          { error: 'Tool call was cancelled before execution.' },
+        ]);
+        await vi.waitFor(() => {
+          expect(respond).toHaveBeenCalledWith(
+            core.ToolConfirmationOutcome.Cancel,
+          );
+        });
+        expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+          [result.parts[0]],
+          expect.objectContaining({
+            callId: 'agent_first',
+            status: 'cancelled',
+            executionStatus: 'cancelled',
+          }),
+        );
+        expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+          [result.parts[1]],
+          expect.objectContaining({
+            callId: 'agent_second',
+            status: 'cancelled',
+            executionStatus: 'not_started',
+          }),
+        );
+      } finally {
+        if (previousMaxConcurrency === undefined) {
+          delete process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+        } else {
+          process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] =
+            previousMaxConcurrency;
+        }
+      }
+    });
+
+    it('does not start Agent batches with an already-aborted parent signal', async () => {
       const eventEmitter = new EventEmitter();
       const receivedAbortStates: boolean[] = [];
       const execute = vi
@@ -18061,8 +19837,30 @@ describe('Session', () => {
       ]);
 
       expect(result.stopAfterPermissionCancel).toBe(false);
-      expect(execute).toHaveBeenCalledTimes(2);
-      expect(receivedAbortStates).toEqual([true, true]);
+      expect(execute).not.toHaveBeenCalled();
+      expect(receivedAbortStates).toEqual([]);
+      expect(
+        result.parts.map((part) => part.functionResponse?.response),
+      ).toEqual([
+        { error: 'Tool call was cancelled before execution.' },
+        { error: 'Tool call was cancelled before execution.' },
+      ]);
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        [result.parts[0]],
+        expect.objectContaining({
+          callId: 'agent_first',
+          status: 'cancelled',
+          executionStatus: 'not_started',
+        }),
+      );
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        [result.parts[1]],
+        expect.objectContaining({
+          callId: 'agent_second',
+          status: 'cancelled',
+          executionStatus: 'not_started',
+        }),
+      );
     });
 
     it('skips unstarted Agent calls after nested ask_user_question cancellation', async () => {
