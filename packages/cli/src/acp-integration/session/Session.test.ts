@@ -13595,6 +13595,8 @@ describe('Session', () => {
       ['history replay', 'replay', false],
       ['failed replacement', 'failed', false],
       ['mode transition', 'cleared', false],
+      ['empty plan update', 'empty-entries', false],
+      ['plan update without identity', 'missing-meta', false],
     ] as const)(
       'keeps exit_plan_mode approval revision correct after %s',
       async (_label, revisionSource, expectsRevision) => {
@@ -13706,6 +13708,13 @@ describe('Session', () => {
               },
             }),
           ]);
+        } else if (revisionSource === 'empty-entries') {
+          await session.sendUpdate({ ...planUpdate, entries: [] });
+        } else if (revisionSource === 'missing-meta') {
+          await session.sendUpdate({
+            sessionUpdate: 'plan',
+            entries: planUpdate.entries,
+          });
         } else {
           await session.sendUpdate(planUpdate);
         }
