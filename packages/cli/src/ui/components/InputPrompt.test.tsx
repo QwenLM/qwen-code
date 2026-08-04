@@ -5717,6 +5717,9 @@ describe('InputPrompt', () => {
 
       // popAllQueuedMessages must NOT be called when agent is responding
       expect(mockPopAllQueued).not.toHaveBeenCalled();
+      // ...and the shared buffer must stay empty so AppContainer's global ESC
+      // handler takes its cancel branch instead of "input has content".
+      expect(props.buffer.text).toBe('');
       unmount();
     });
 
@@ -5743,10 +5746,12 @@ describe('InputPrompt', () => {
     });
 
     it('returns false (no queue pop, no buffer clear) on ESC when responding with an empty buffer', async () => {
-      // Pins the `return false` branch at InputPrompt.tsx when the agent is
-      // Responding AND both the buffer and the queue are empty - the path that
-      // lets AppContainer's global ESC handler take its cancel-work branch.
-      // Without this, deleting that branch leaves all tests green. #8201.
+      // Pins the no-side-effect contract for ESC while the agent is Responding
+      // and both the buffer and the queue are empty: no queue pop and no
+      // buffer mutation. Note: the `return false` branch itself is defensive -
+      // KeypressContext.broadcast ignores handler return values and
+      // BaseTextInput's ESC clear is a no-op on an empty buffer - so deleting
+      // that branch would still leave this test green. #8201.
       mockedUseUIState.mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: [],
