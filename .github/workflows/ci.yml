@@ -408,6 +408,20 @@ jobs:
           node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
           npm run test:ci
 
+      # Release guard for the Chrome extension: build, package, and scan real
+      # artifacts for forbidden adapter signatures instead of leaving
+      # `scan:artifacts` manual-only. Linux leg only — packaging shells out to
+      # the POSIX `zip`; skip (not fail) where it is missing.
+      - name: 'Package and scan Chrome extension artifacts'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: |-
+          if ! command -v zip >/dev/null 2>&1; then
+            echo "::warning::zip is not installed; skipping the Chrome extension artifact scan"
+            exit 0
+          fi
+          npm -w packages/chrome-extension run package
+          npm -w packages/chrome-extension run scan:artifacts
+
       - name: 'Run required no-AK integration gate'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}"
         timeout-minutes: 20
