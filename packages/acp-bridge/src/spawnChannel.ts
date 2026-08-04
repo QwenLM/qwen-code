@@ -155,13 +155,18 @@ export function createSpawnChannelFactory(
     // visible to any other spawn racing it, so the count below includes this
     // child and two concurrent spawns cannot both be told they are alone.
     const reservation = processRegistry.reserve();
-    // Observation only: the policy is asked what it *would* decide so the
-    // refusal count is real, but nothing here acts on the answer — no derived
-    // ceiling reaches the child and no spawn is refused.
-    options.childHeapPolicy?.decide(processRegistry.committedProcessCount);
-    const memoryArgs = getAcpMemoryArgs();
     let child;
+    // Everything between `reserve()` and `attach()` belongs inside this try.
+    // `childHeapPolicy` is a public `createSpawnChannelFactory` option, so an
+    // externally supplied `decide()` can throw; outside the try that would
+    // reject the spawn while leaving the reservation held forever, inflating
+    // `committedProcessCount` for every later spawn.
     try {
+      // Observation only: the policy is asked what it *would* decide so the
+      // refusal count is real, but nothing here acts on the answer — no
+      // derived ceiling reaches the child and no spawn is refused.
+      options.childHeapPolicy?.decide(processRegistry.committedProcessCount);
+      const memoryArgs = getAcpMemoryArgs();
       child = spawn(
         process.execPath,
         [

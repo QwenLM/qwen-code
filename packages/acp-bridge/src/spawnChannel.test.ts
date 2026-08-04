@@ -289,6 +289,32 @@ describe('createSpawnChannelFactory child-heap observation', () => {
     expect(registry.committedProcessCount).toBe(limit + 2);
     expect(policy.snapshot().refusals).toBe(2);
   });
+
+  it('releases the reservation when a supplied policy throws', async () => {
+    // `childHeapPolicy` is a public factory option, so `decide()` is caller
+    // code and may throw. The reservation is taken before it runs; if the
+    // throw escapes without cancelling, the token is held for the process
+    // lifetime and every later spawn sees an inflated committed count.
+    const registry = new ProcessRegistry();
+    const factory = createSpawnChannelFactory({
+      processRegistry: registry,
+      childHeapPolicy: {
+        decide: () => {
+          throw new Error('policy exploded');
+        },
+        snapshot: () => {
+          throw new Error('unused');
+        },
+      },
+    });
+
+    await expect(factory('/tmp/w0')).rejects.toThrow('policy exploded');
+
+    // Nothing was spawned, so nothing may remain committed. A leak shows up
+    // here as 1 — the reservation that outlived its own spawn.
+    expect(registry.committedProcessCount).toBe(0);
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
 });
 
 describe('createStderrForwarder', () => {

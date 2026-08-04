@@ -1996,6 +1996,8 @@ describe('runQwenServe memory budget', () => {
             enforced: boolean;
             childHeap: {
               mode: string;
+              maxConcurrentChildren: number;
+              perChildCeilingMb: number | null;
               refusals: number;
             } | null;
             configuredBudgetMb: number;
@@ -2052,7 +2054,24 @@ describe('runQwenServe memory budget', () => {
       // `enforced` has to stay false or the field means "the feature exists"
       // rather than "children are being sized by this".
       expect(memory?.enforced).toBe(false);
-      expect(memory?.childHeap).toEqual({ mode: 'observe', refusals: 0 });
+      // Still `toEqual`, so an unannounced field added to the wire fails here
+      // rather than passing unnoticed. The two derived figures are host-
+      // dependent — this suite boots a real daemon, so the pool follows the
+      // machine — hence matchers for those and an exact value for the rest.
+      expect(memory?.childHeap).toEqual({
+        mode: 'observe',
+        maxConcurrentChildren: expect.any(Number),
+        perChildCeilingMb: expect.any(Number),
+        refusals: 0,
+      });
+      // What those two figures have to satisfy, on any host: a fixed ceiling
+      // handed to every admitted child must total no more than the pool it
+      // partitions. That product is the whole reason the partition is a bound
+      // and not just a per-spawn share.
+      expect(
+        (memory?.childHeap?.maxConcurrentChildren ?? 0) *
+          (memory?.childHeap?.perChildCeilingMb ?? 0),
+      ).toBeLessThanOrEqual(memory?.modeled.childPoolMb ?? 0);
       // Nothing in this section is applied, and the wire says so.
       expect(memory?.enforced).toBe(false);
       expect(memory?.configuredBudgetMb).toBe(4096);

@@ -227,9 +227,13 @@ export interface ServeOptions {
   /**
    * Total memory budget in MB for the whole daemon process tree — the root
    * plus every `qwen --acp` child it spawns. When unset, derived as half of
-   * the cgroup-constrained or host memory. Currently observed and reported
-   * only until `childHeapMode` is `enforce`, which sizes every ACP child from
-   * it and refuses spawns the child pool cannot cover.
+   * the cgroup-constrained or host memory.
+   *
+   * Observed and reported only. No child is sized from it and no spawn is
+   * refused on its basis: `childHeapMode: 'observe'` models a partition of it
+   * and publishes the model, but there is no mode that applies one. Sizing
+   * children arrives with the peak old-space measurement that can tell an
+   * operator beforehand whether their workload fits the partition.
    */
   memoryBudgetMb?: number;
   /**
