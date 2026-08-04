@@ -485,10 +485,12 @@ describe('qwen resolve workflow', () => {
     // the belowMaxArm slice catches.
     const atMaxStart = fallbackStep.indexOf('else', belowMaxStart);
     expect(atMaxStart).toBeGreaterThan(-1);
-    const atMaxArm = fallbackStep.slice(
-      atMaxStart,
-      fallbackStep.indexOf('fi', atMaxStart),
-    );
+    // Line-anchored end: a bare indexOf('fi') stops at the first word
+    // CONTAINING "fi" ("specified", "notification"), silently truncating the
+    // arm and giving the not-toContain below a vacuous pass.
+    const atMaxEnd = fallbackStep.slice(atMaxStart).search(/\n\s*fi\b/);
+    expect(atMaxEnd).toBeGreaterThan(-1);
+    const atMaxArm = fallbackStep.slice(atMaxStart, atMaxStart + atMaxEnd);
     expect(atMaxArm).toContain(
       'This run already used the maximum ${MAX_TIMEOUT_MINUTES} minute timeout.',
     );
