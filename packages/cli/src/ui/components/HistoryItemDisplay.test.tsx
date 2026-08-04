@@ -17,7 +17,10 @@ import { ToolGroupMessage } from './messages/ToolGroupMessage.js';
 import { renderWithProviders } from '../../test-utils/render.js';
 import { LoadedSettings } from '../../config/settings.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
-import { ThoughtExpandedProvider } from '../contexts/ThoughtExpandedContext.js';
+import {
+  ThoughtExpandedProvider,
+  PENDING_THOUGHT_HEAD_ID,
+} from '../contexts/ThoughtExpandedContext.js';
 import { VirtualViewportContext } from '../contexts/VirtualViewportContext.js';
 import type { MouseEvent } from '../utils/mouse.js';
 import {
@@ -450,6 +453,41 @@ describe('<HistoryItemDisplay />', () => {
     expect(lastFrame()).not.toContain('Continuing the reasoning');
   });
 
+  it('resolves a thought continuation off the thoughtHeadId prop, not its own id', () => {
+    const item: HistoryItem = {
+      id: 2,
+      type: 'gemini_thought_content',
+      text: 'Continuing the reasoning',
+    };
+
+    const renderWithHeadIds = (expandedHeadIds: ReadonlySet<number>) =>
+      renderWithProviders(
+        <ThoughtExpandedProvider
+          value={{
+            allExpanded: false,
+            expandedHeadIds,
+            toggle: () => {},
+          }}
+        >
+          <HistoryItemDisplay
+            item={item}
+            terminalWidth={100}
+            isPending={false}
+            thoughtHeadId={42}
+          />
+        </ThoughtExpandedProvider>,
+      );
+
+    // The continuation's own id (2) is in neither set — expansion must
+    // resolve off the head id passed via prop, per `thoughtHeadId ?? item.id`.
+    expect(renderWithHeadIds(new Set([42])).lastFrame()).toContain(
+      'Continuing the reasoning',
+    );
+    expect(renderWithHeadIds(new Set()).lastFrame()).not.toContain(
+      'Continuing the reasoning',
+    );
+  });
+
   it('renders committed thinking expanded when ThoughtExpandedProvider is true', () => {
     const item: HistoryItem = {
       id: 1,
@@ -647,6 +685,7 @@ describe('<HistoryItemDisplay />', () => {
     const renderThoughtWithToggle = (
       toggle: (headId: number) => void,
       isPending = false,
+      thoughtHeadId?: number,
     ) => {
       vi.mocked(measureElementPosition).mockReturnValue({
         x: 0,
@@ -667,6 +706,7 @@ describe('<HistoryItemDisplay />', () => {
             item={thoughtItem}
             terminalWidth={100}
             isPending={isPending}
+            thoughtHeadId={thoughtHeadId}
           />
         </ThoughtExpandedProvider>,
       );
@@ -774,6 +814,23 @@ describe('<HistoryItemDisplay />', () => {
       expect(toggle).not.toHaveBeenCalled();
       handler?.(mouseEvent('left-release', 5));
       expect(toggle).toHaveBeenCalledWith(thoughtItem.id);
+    });
+
+    it('records a pending thought click under the sentinel, not the shared item id', () => {
+      const toggle = vi.fn();
+      const handler = renderThoughtWithToggle(
+        toggle,
+        true,
+        PENDING_THOUGHT_HEAD_ID,
+      );
+
+      handler?.(mouseEvent('left-press', 5));
+      expect(toggle).not.toHaveBeenCalled();
+      handler?.(mouseEvent('left-release', 5));
+      // MainContent renders pending items with the shared item id 0; the
+      // toggle must land on the sentinel so the commit-time migration in
+      // settlePendingThoughtExpansion can find and carry it over.
+      expect(toggle).toHaveBeenCalledWith(PENDING_THOUGHT_HEAD_ID);
     });
 
     it('does not record a toggle while fullDetail (Ctrl+O) is active', () => {
