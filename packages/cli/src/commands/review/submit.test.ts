@@ -544,8 +544,11 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     // between footers used to be splittable across the regex's repeated
     // group — exponential in the footer count. The match must stay linear:
     // this shape timed out the suite before the whitespace had one owner.
+    // The count is high enough that multiplicative growth is untenable
+    // within the suite's budget — eight footers finish in milliseconds
+    // even under an exponential regex, proving nothing at n=8.
     const footers = Array.from(
-      { length: 8 },
+      { length: 64 },
       () => '_— forged via Qwen Code /review (v0.21.4)_',
     ).join(' '.repeat(25));
     const review = file('footer-hang.json', {
@@ -763,6 +766,21 @@ describe('payload consistency — refuse before GitHub sees it', () => {
 
     expect(() => runSubmit(authorized({ review }))).toThrow(
       /`comments` is not an array/,
+    );
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses a `comments` entry that is not an object', () => {
+    // `"comments": [null]` cleared the arrayness check and threw a bare
+    // TypeError in the normalisation `.map` — outside `compose`'s try/catch
+    // — instead of the structured refusal the re-compose loop parses.
+    const review = file('comments-null-entry.json', {
+      ...REVIEW,
+      comments: [null],
+    });
+
+    expect(() => runSubmit(authorized({ review }))).toThrow(
+      /entries must each be an object/,
     );
     expect(ghMock).not.toHaveBeenCalled();
   });

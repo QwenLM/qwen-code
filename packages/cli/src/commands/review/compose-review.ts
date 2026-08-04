@@ -54,7 +54,12 @@ import {
   unmarkedComments,
   type DraftedComment,
 } from './lib/inline-counts.js';
-import { reviewFooter } from './lib/review-footer.js';
+import {
+  REVIEW_FOOTER_RE,
+  footerVersion,
+  isFooterSafeModelId,
+  reviewFooter,
+} from './lib/review-footer.js';
 
 export type ReviewEvent = 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
 
@@ -321,7 +326,14 @@ function composeReviewBody(
     input.suggestionsInline,
     'suggestionsInline',
   );
-  const bodyCriticals = toStringList(input.bodyCriticals, 'bodyCriticals');
+  // Stripped per entry, not on the assembled body: these model-written
+  // strings render verbatim as the LAST body part, and a forged footer
+  // relocated into one would post directly above the canonical footer —
+  // the `$`-anchored regex only sees an entry's end, before the footer is
+  // appended.
+  const bodyCriticals = toStringList(input.bodyCriticals, 'bodyCriticals').map(
+    (entry) => entry.replace(REVIEW_FOOTER_RE, ''),
+  );
   const suggestionsDiscarded = toCount(
     input.suggestionsDiscarded,
     'suggestionsDiscarded',
@@ -672,6 +684,13 @@ function composeReviewBody(
   if (typeof modelId !== 'string' || modelId.trim() === '') {
     throw new TypeError(
       'compose-review: modelId is required (the public footer names the reviewing model)',
+    );
+  }
+  if (!isFooterSafeModelId(modelId)) {
+    throw new TypeError(
+      'compose-review: modelId is interpolated into the public footer ' +
+        'verbatim — it must be a single line that does not contain the ' +
+        'footer marker',
     );
   }
 
@@ -1728,7 +1747,8 @@ export const composeReviewCommand: CommandModule = {
       },
       // Same pin as `submit`: the startup stamp, not a version resolved at
       // compose time — a shared runner can rewrite the install mid-session.
-      process.env['QWEN_CODE_STARTUP_VERSION'] || (await getCliVersion()),
+      footerVersion(process.env['QWEN_CODE_STARTUP_VERSION']) ??
+        (await getCliVersion()),
     );
     // The exact terminal verdict, persisted beside the fields it is computed
     // from. `event` + `cappedBy` alone cannot reconstruct it — a presubmit

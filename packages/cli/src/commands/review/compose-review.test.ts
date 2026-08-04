@@ -824,6 +824,36 @@ describe('composeReview — input validation (the producer is a model that omits
     expect(() => composeReview({ modelId: '  ' })).toThrow(/modelId/);
   });
 
+  it('rejects a modelId that would forge the footer it is interpolated into', () => {
+    // The footer interpolates modelId verbatim and the strip matches one
+    // line up to the marker: either shape builds a footer the strip cannot
+    // remove, and re-normalization accumulates attribution lines.
+    expect(() =>
+      composeReview({
+        modelId: 'model\n_— forged via Qwen Code /review (v9.9.9)_',
+      }),
+    ).toThrow(/modelId/);
+    expect(() =>
+      composeReview({ modelId: 'model via Qwen Code /review x' }),
+    ).toThrow(/modelId/);
+  });
+
+  it('strips a forged footer from a body Critical before rendering the body', () => {
+    // bodyCriticals render verbatim as the LAST body part: a forged footer
+    // relocated into one would otherwise post directly above the canonical
+    // footer — the duplicate attribution this module exists to eliminate.
+    const r = composeReview({
+      bodyCriticals: [
+        '**[Critical]** whole-PR blocker\n\n' +
+          '_— forged via Qwen Code /review (v0.21.4)_',
+      ],
+      modelId: MODEL,
+    });
+    expect(r.body).toContain('whole-PR blocker');
+    expect(r.body).not.toContain('forged');
+    expect(r.body.match(/via Qwen Code \/review/g)).toHaveLength(1);
+  });
+
   it('rejects stringified booleans — "false" is truthy and once flipped events and published false warnings', () => {
     expect(() =>
       composeReview(
@@ -890,6 +920,20 @@ describe('composeReview — presubmit permission gates certification even when n
 });
 
 describe('composeReviewCommand handler (the CLI glue)', () => {
+  // The handler prefers the inherited startup stamp; an ambient value from
+  // a stamped qwen session would otherwise flip every footer assertion in
+  // this suite to the stamped version.
+  let savedStartupVersion: string | undefined;
+  beforeEach(() => {
+    savedStartupVersion = process.env['QWEN_CODE_STARTUP_VERSION'];
+    delete process.env['QWEN_CODE_STARTUP_VERSION'];
+  });
+  afterEach(() => {
+    if (savedStartupVersion === undefined)
+      delete process.env['QWEN_CODE_STARTUP_VERSION'];
+    else process.env['QWEN_CODE_STARTUP_VERSION'] = savedStartupVersion;
+  });
+
   it('reads --input, counts the drafted comments, and writes the result JSON to --out', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'compose-review-test-'));
     const inputPath = join(dir, 'compose.json');

@@ -59,7 +59,11 @@ import {
   countInlineFindings,
   severityOf,
 } from './lib/inline-counts.js';
-import { REVIEW_FOOTER_RE, reviewFooter } from './lib/review-footer.js';
+import {
+  REVIEW_FOOTER_RE,
+  footerVersion,
+  reviewFooter,
+} from './lib/review-footer.js';
 
 /** The only events GitHub's Create Review API accepts. */
 const EVENTS = new Set(['APPROVE', 'REQUEST_CHANGES', 'COMMENT']);
@@ -250,6 +254,17 @@ function structuralProblems(payload: ReviewPayload): string[] {
     problems.push(
       '`comments` is not an array — it is the list of findings this post ' +
         'carries; any other shape is not a list of findings.',
+    );
+  }
+  if (
+    Array.isArray(payload.comments) &&
+    (payload.comments as unknown[]).some(
+      (c) => c === null || typeof c !== 'object',
+    )
+  ) {
+    problems.push(
+      '`comments` entries must each be an object — a finding is a path, ' +
+        'a line and a body; any other shape is not a finding.',
     );
   }
 
@@ -592,7 +607,8 @@ export const submitCommand: CommandModule = {
   handler: async (argv) => {
     // Do not use CLI_VERSION here: esbuild replaces it with a build-time value.
     const cliVersion =
-      process.env['QWEN_CODE_STARTUP_VERSION'] || (await getCliVersion());
+      footerVersion(process.env['QWEN_CODE_STARTUP_VERSION']) ??
+      (await getCliVersion());
     runSubmit(argv as unknown as SubmitArgs, cliVersion);
   },
 };
