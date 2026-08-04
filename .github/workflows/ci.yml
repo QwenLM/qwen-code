@@ -194,7 +194,7 @@ jobs:
                   [ -n "$worktree" ] || continue
                   git -C "$GITHUB_WORKSPACE" worktree remove --force "$worktree" ||
                     echo "::warning::could not remove review worktree: $worktree"
-                done
+                done || true
             git -C "$GITHUB_WORKSPACE" worktree prune -v || true
             git -C "$GITHUB_WORKSPACE" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
               | while read -r stale_ref; do
@@ -202,7 +202,7 @@ jobs:
                     git -C "$GITHUB_WORKSPACE" branch -D "$stale_ref" ||
                       echo "::warning::could not remove review branch: $stale_ref"
                   fi
-                done
+                done || true
           fi
 
       # On PRs, check out refs/pull/N/head (the immutable PR head, published the
@@ -837,6 +837,40 @@ jobs:
             chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
           fi
           chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+
+      # Same pre-checkout recovery as the test job: this job lands on the
+      # same reused pool, so leftover review worktrees and branches from an
+      # interrupted review would break this checkout too.
+      - name: 'Clean stale .qwen before checkout'
+        run: |-
+          set -uo pipefail
+          if [ -d "$GITHUB_WORKSPACE/.qwen" ] && [ ! -L "$GITHUB_WORKSPACE/.qwen" ]; then
+            chmod -R u+w "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || true
+            rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || sudo -n rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || echo "::warning::leaked .qwen; runner needs manual cleanup"
+          fi
+          # Interrupted reviews leave worktree registrations under .qwen/tmp/
+          # and qwen-review/* branches behind; the rm above removed the
+          # directories, so sync Git's bookkeeping and drop the branches.
+          # Kept inline rather than a shared script: this runs pre-checkout on
+          # shared runners, where leftover workspace files are untrusted.
+          if [ -e "$GITHUB_WORKSPACE/.git" ]; then
+            git -C "$GITHUB_WORKSPACE" worktree prune -v || true
+            git -C "$GITHUB_WORKSPACE" worktree list --porcelain \
+              | awk '$1 == "worktree" && index($0, "/.qwen/tmp/review-pr-") > 0 { sub(/^worktree /, ""); print }' \
+              | while read -r worktree; do
+                  [ -n "$worktree" ] || continue
+                  git -C "$GITHUB_WORKSPACE" worktree remove --force "$worktree" ||
+                    echo "::warning::could not remove review worktree: $worktree"
+                done || true
+            git -C "$GITHUB_WORKSPACE" worktree prune -v || true
+            git -C "$GITHUB_WORKSPACE" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
+              | while read -r stale_ref; do
+                  if [ -n "$stale_ref" ]; then
+                    git -C "$GITHUB_WORKSPACE" branch -D "$stale_ref" ||
+                      echo "::warning::could not remove review branch: $stale_ref"
+                  fi
+                done || true
+          fi
 
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3

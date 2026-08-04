@@ -29,14 +29,22 @@ const branchFamily = toPosix(reviewBranch(probePr)).slice(
   -`pr-${probePr}`.length,
 );
 
-const ciCleanStep = parse(
-  readFileSync('.github/workflows/ci.yml', 'utf8'),
-).jobs.test.steps.find(
+const ciYaml = parse(readFileSync('.github/workflows/ci.yml', 'utf8'));
+const ciCleanStep = ciYaml.jobs.test.steps.find(
   (s) => s.name === 'Clean stale .qwen before checkout',
 ).run;
-const reviewCleanStep = parse(
+const integrationCleanStep = ciYaml.jobs.integration_cli.steps.find(
+  (s) => s.name === 'Clean stale .qwen before checkout',
+).run;
+const reviewYaml = parse(
   readFileSync('.github/workflows/qwen-code-pr-review.yml', 'utf8'),
-).jobs['review-pr'].steps.find((s) => s.name === 'Clean review worktrees').run;
+);
+const reviewCleanStep = reviewYaml.jobs['review-pr'].steps.find(
+  (s) => s.name === 'Clean review worktrees',
+).run;
+const agentStateCleanStep = reviewYaml.jobs['review-pr'].steps.find(
+  (s) => s.name === 'Clean stale agent state',
+).run;
 
 // prune (sync registrations) -> force-remove -> prune (drop now-stale
 // entries) -> delete branches: a branch checked out in a live worktree
@@ -56,8 +64,12 @@ function expectCleanupRecipe(run) {
 const awkAvailable = spawnSync('awk', ['BEGIN { exit 0 }']).status === 0;
 
 describe('review worktree cleanup steps', () => {
-  it('keeps the ci.yml pre-checkout sweep pinned to paths.ts', () => {
+  it('keeps the ci.yml test-job sweep pinned to paths.ts', () => {
     expectCleanupRecipe(ciCleanStep);
+  });
+
+  it('keeps the ci.yml integration_cli sweep pinned to paths.ts', () => {
+    expectCleanupRecipe(integrationCleanStep);
   });
 
   it('keeps the review-job cleanup sweep pinned to paths.ts', () => {
@@ -66,10 +78,17 @@ describe('review worktree cleanup steps', () => {
     expect(reviewCleanStep).toContain(`rm -rf ${worktreePrefix}*`);
   });
 
-  it('uses one identical worktree filter at both sites', () => {
+  it('keeps the pre-checkout agent-state sweep pinned to paths.ts', () => {
+    // Directories are rm -rf'd first there, so no `worktree remove` to pin.
+    expect(agentStateCleanStep).toContain(`rm -rf ${worktreePrefix}*`);
+    expect(agentStateCleanStep).toContain(`refs/heads/${branchFamily}*`);
+  });
+
+  it('uses one identical worktree filter at every list-driven sweep', () => {
     const filter = reviewCleanStep.match(/awk '([^']+)'/)?.[1];
     expect(filter).toBeTruthy();
     expect(ciCleanStep).toContain(`awk '${filter}'`);
+    expect(integrationCleanStep).toContain(`awk '${filter}'`);
   });
 
   it.skipIf(!awkAvailable)(

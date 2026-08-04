@@ -404,7 +404,7 @@ jobs:
                 if [ -n "$stale_ref" ]; then
                   git branch -D "$stale_ref" || true
                 fi
-              done
+              done || true
           git worktree prune -v || true
           echo "stale agent state cleaned"
 
@@ -1009,7 +1009,7 @@ jobs:
                 [ -n "$worktree" ] || continue
                 git worktree remove --force "$worktree" ||
                   echo "::warning::could not remove review worktree: $worktree"
-              done
+              done || true
           rm -rf .qwen/tmp/review-pr-* 2>/dev/null || true
           git worktree prune -v || true
           git for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
@@ -1017,7 +1017,7 @@ jobs:
                 [ -n "$review_ref" ] || continue
                 git branch -D "$review_ref" ||
                   echo "::warning::could not remove review branch: $review_ref"
-              done
+              done || true
           rm -f .qwen/tmp/qwen-review-lease-pr-*.json 2>/dev/null || true
           echo "review worktrees cleaned"
 
