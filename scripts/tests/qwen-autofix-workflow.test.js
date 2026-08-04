@@ -1893,7 +1893,7 @@ describe('qwen-autofix workflow', () => {
     // after assess and only narrows the race to the short gap between the
     // recheck and the claim's label write; it does not close it.
     expect(issueAutofixJob).toContain(
-      "group: >-\n        qwen-autofix-issue-${{ needs.route.outputs.issue_number || github.event.issue.number || 'scheduled' }}",
+      "group: >-\n        qwen-autofix-issue-${{ needs.route.outputs.issue_number || github.event.issue.number || 'scheduled' }}\n",
     );
     expect(issueAutofixJob).not.toContain('|| github.run_id }}');
     expect(issueAutofixJob).toContain('cancel-in-progress: false');
