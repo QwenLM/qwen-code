@@ -67,17 +67,32 @@ const loaderPath = join(tmpDir, 'loader.mjs');
 
 const coreSourcePath = join(root, 'packages', 'core', 'index.ts');
 const coreSourceUrl = pathToFileURL(coreSourcePath).href;
+// Core's package.json maps subpath exports (e.g. ./envVarResolver) to built
+// files under packages/core/dist, which a fresh checkout does not have. The
+// bare-specifier remap below does not cover subpaths, so each one cli source
+// imports needs its own remap to the source file.
+const envVarResolverSourceUrl = pathToFileURL(
+  join(root, 'packages', 'core', 'src', 'utils', 'envVarResolver.ts'),
+).href;
 
 const loaderCode = `
 import { pathToFileURL } from 'node:url';
 
 const coreSourceUrl = '${coreSourceUrl}';
+const envVarResolverSourceUrl = '${envVarResolverSourceUrl}';
 
 export function resolve(specifier, context, nextResolve) {
   if (specifier === '@qwen-code/qwen-code-core') {
     return {
       shortCircuit: true,
       url: coreSourceUrl,
+      format: 'module',
+    };
+  }
+  if (specifier === '@qwen-code/qwen-code-core/envVarResolver') {
+    return {
+      shortCircuit: true,
+      url: envVarResolverSourceUrl,
       format: 'module',
     };
   }
