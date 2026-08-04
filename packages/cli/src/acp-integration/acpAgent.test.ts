@@ -1834,6 +1834,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         restoreHistory: ReturnType<typeof vi.fn>;
         rewindToTurn: ReturnType<typeof vi.fn>;
         getRewindableUserTurnCount: ReturnType<typeof vi.fn>;
+        clearActiveTodoPlanRevision: ReturnType<typeof vi.fn>;
         clearTodoStopGuardTrust: ReturnType<typeof vi.fn>;
         hardSuspendTodoStopGuard: ReturnType<typeof vi.fn>;
         beginCloseIfAvailable: ReturnType<typeof vi.fn>;
@@ -3390,6 +3391,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           .fn()
           .mockReturnValue({ targetTurnIndex: 1, apiTruncateIndex: 2 }),
         getRewindableUserTurnCount: vi.fn().mockReturnValue(1),
+        clearActiveTodoPlanRevision: vi.fn(),
         clearTodoStopGuardTrust: vi.fn(),
         hardSuspendTodoStopGuard: vi.fn(),
         releaseTodoStopGuardQueuedPromptWait: vi.fn().mockReturnValue(true),
@@ -3792,7 +3794,24 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           mode: 'plan',
         }),
       ).resolves.toEqual({ previous: 'default', current: 'plan' });
+      expect(
+        lastSessionMock?.clearActiveTodoPlanRevision,
+      ).toHaveBeenCalledOnce();
       expect(lastSessionMock?.clearTodoStopGuardTrust).toHaveBeenCalledOnce();
+
+      // Re-selecting plan (the Web Shell /plan path) must keep the revision
+      // captured during the current plan cycle, while the stop guard trust
+      // still clears, as it does on every transition into plan.
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionApprovalMode, {
+          sessionId,
+          mode: 'plan',
+        }),
+      ).resolves.toEqual({ previous: 'plan', current: 'plan' });
+      expect(
+        lastSessionMock?.clearActiveTodoPlanRevision,
+      ).toHaveBeenCalledOnce();
+      expect(lastSessionMock?.clearTodoStopGuardTrust).toHaveBeenCalledTimes(2);
     } finally {
       approvalModes.splice(0, approvalModes.length, ...originalApprovalModes);
     }
@@ -13681,6 +13700,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
         assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
         sendUpdate: vi.fn().mockResolvedValue(undefined),
+        clearActiveTodoPlanRevision: vi.fn(),
         dispose: vi.fn(),
       };
       lastSessionMock = sessionMock;
@@ -14222,8 +14242,13 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       },
     });
     const replayUpdate = {
-      sessionUpdate: 'agent_message_chunk',
-      _meta: { timestamp: 4242 },
+      sessionUpdate: 'plan',
+      entries: [{ content: 'Ship', priority: 'medium', status: 'pending' }],
+      _meta: {
+        timestamp: 4242,
+        qwenTodoPlan: { id: 'plan-1' },
+        qwenTranscript: { planToolCallId: 'todo-call-1' },
+      },
     };
     mockHistoryReplay.mockImplementation(
       async (
@@ -14300,6 +14325,66 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     ).toBeLessThan(
       lastSessionMock!.startCronScheduler.mock.invocationCallOrder[0]!,
     );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('clears the replayed Todo plan revision on a live-session load', async () => {
+    const messages = [{ role: 'user', parts: [{ text: 'hi' }] }];
+    const innerConfig = makeRestoreInnerConfig({
+      resumedConversation: { messages },
+    });
+    innerConfig.getApprovalMode.mockReturnValue('plan');
+    innerConfig.getSessionService.mockReturnValue({
+      loadSession: vi
+        .fn()
+        .mockImplementation(() => innerConfig.getResumedSessionData()),
+    });
+    vi.mocked(loadSettings).mockReturnValue(makeRestoreSettings());
+    const replayUpdate = {
+      sessionUpdate: 'plan',
+      entries: [{ content: 'Old plan', priority: 'medium', status: 'done' }],
+      _meta: {
+        timestamp: 4242,
+        qwenTodoPlan: { id: 'old-plan' },
+        qwenTranscript: { planToolCallId: 'old-call' },
+      },
+    };
+    mockHistoryReplay.mockImplementation(async (context: unknown) => {
+      await (
+        context as { sendUpdate: (update: unknown) => Promise<void> }
+      ).sendUpdate(replayUpdate);
+    });
+    const liveSession = {
+      getId: vi.fn().mockReturnValue('persisted-1'),
+      getConfig: vi.fn().mockReturnValue(innerConfig),
+      assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
+      beginClose: vi.fn().mockReturnValue(vi.fn()),
+      waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
+      sendUpdate: vi.fn().mockResolvedValue(undefined),
+      clearActiveTodoPlanRevision: vi.fn(),
+    };
+    const { agent, agentPromise } = await spawnAgent();
+    (agent as unknown as { sessions: Map<string, unknown> }).sessions.set(
+      'persisted-1',
+      liveSession,
+    );
+
+    await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+    });
+
+    expect(liveSession.sendUpdate).toHaveBeenCalledWith({
+      ...replayUpdate,
+      timestamp: 4242,
+    });
+    expect(liveSession.clearActiveTodoPlanRevision).toHaveBeenCalledOnce();
+    expect(
+      liveSession.clearActiveTodoPlanRevision.mock.invocationCallOrder[0],
+    ).toBeGreaterThan(liveSession.sendUpdate.mock.invocationCallOrder.at(-1)!);
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -16635,6 +16720,7 @@ describe('sessionLanguage multi-session propagation', () => {
       }),
       setDisabledTools: vi.fn(),
     });
+    const clearActiveTodoPlanRevision = vi.fn();
     const clearTodoStopGuardTrust = vi.fn();
 
     vi.mocked(loadSettings).mockReturnValue(settings);
@@ -16645,6 +16731,7 @@ describe('sessionLanguage multi-session propagation', () => {
           getId: vi.fn().mockReturnValue('s-plan-reload'),
           getConfig: vi.fn().mockReturnValue(cfg),
           isIdle: vi.fn().mockReturnValue(true),
+          clearActiveTodoPlanRevision,
           clearTodoStopGuardTrust,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
@@ -16685,6 +16772,7 @@ describe('sessionLanguage multi-session propagation', () => {
         (cfg as typeof cfg & { setApprovalMode: ReturnType<typeof vi.fn> })
           .setApprovalMode,
       ).toHaveBeenCalledWith('plan');
+      expect(clearActiveTodoPlanRevision).toHaveBeenCalledOnce();
       expect(clearTodoStopGuardTrust).toHaveBeenCalledOnce();
     } finally {
       approvalModes.splice(0, approvalModes.length, ...originalApprovalModes);
