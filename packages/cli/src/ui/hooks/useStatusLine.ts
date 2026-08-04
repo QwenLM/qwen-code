@@ -356,7 +356,12 @@ export function useStatusLine(): {
       try {
         child = exec(
           PULL_REQUEST_LOOKUP_COMMAND,
-          { cwd: currentDir, timeout: 2000, maxBuffer: 1024 },
+          {
+            cwd: currentDir,
+            timeout: 2000,
+            maxBuffer: 1024,
+            windowsHide: true,
+          },
           (error, stdout) => {
             if (
               generation !== pullRequestLookupGenerationRef.current ||
@@ -507,7 +512,12 @@ export function useStatusLine(): {
     try {
       child = exec(
         cmd!,
-        { cwd: cfg.getTargetDir(), timeout: 5000, maxBuffer: 1024 * 10 },
+        {
+          cwd: cfg.getTargetDir(),
+          timeout: 5000,
+          maxBuffer: 1024 * 10,
+          windowsHide: true,
+        },
         (error, stdout) => {
           if (gen !== generationRef.current) return; // stale
           activeChildRef.current = undefined;
