@@ -290,6 +290,38 @@ describe('runBaseTree', () => {
     expect(existsSync(baseWorktreePath(worktree))).toBe(false);
   });
 
+  it('does NOT treat a deep fixture pom as a Maven base', () => {
+    // Vendored samples, archetype fixtures, and maven-invoker ITs live deeper
+    // than `<dir>/pom.xml`; counting one would permanently — and silently —
+    // disable A/B attribution for a repo that merely ships one.
+    const fixture = join(repo, 'src', 'test', 'resources', 'projects', 'it');
+    mkdirSync(fixture, { recursive: true });
+    writeFileSync(join(fixture, 'pom.xml'), '<project/>');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-qam', 'fixture pom');
+    const fixtureSha = git(repo, 'rev-parse', 'HEAD');
+
+    const plan = join(repo, 'plan.json');
+    writeFileSync(
+      plan,
+      JSON.stringify({ mergeBaseSha: fixtureSha, files: [] }),
+    );
+    const builds: string[] = [];
+    const r = runBaseTree({
+      plan,
+      worktree,
+      timeout: 60,
+      install: false,
+      build: (w) => {
+        builds.push(w);
+        return okBuild;
+      },
+    });
+
+    expect(builds).toHaveLength(1);
+    expect(r.available).toBe(true);
+  });
+
   it('is NOT available for a Maven build report the delta machinery cannot consume', () => {
     const mavenBuild = {
       ok: true,

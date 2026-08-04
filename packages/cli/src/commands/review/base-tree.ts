@@ -117,18 +117,21 @@ function gitHasPath(cwd: string, sha: string, path: string): boolean {
 /**
  * Nested-pom bases (standalone modules, no root aggregator) miss the root
  * `pom.xml` probe but are Maven just the same; when the base carries no root
- * `package.json` either, one bounded tree listing settles it before checkout.
+ * `package.json` either, a depth-1 listing settles it before checkout. Only a
+ * DIRECT child counts: a pom deeper than `<dir>/pom.xml` is a vendored
+ * sample, an archetype fixture, or a maven-invoker IT, and counting one would
+ * permanently — and silently — disable A/B attribution for a repo that merely
+ * ships one.
  */
 function gitTreeHasNestedPom(cwd: string, sha: string): boolean {
-  const r = spawnSync('git', ['ls-tree', '-r', '--name-only', sha], {
+  const r = spawnSync('git', ['ls-tree', '--name-only', sha], {
     cwd,
     encoding: 'utf8',
-    maxBuffer: 64 * 1024 * 1024,
   });
   if (r.error || r.status !== 0) return false;
   return (r.stdout ?? '')
     .split('\n')
-    .some((treePath) => treePath.endsWith('/pom.xml'));
+    .some((entry) => entry && gitHasPath(cwd, sha, `${entry}/pom.xml`));
 }
 
 export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
@@ -171,25 +174,6 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
   const worktree = resolve(args.worktree);
   if (!existsSync(worktree)) {
     return unavailable(`the review worktree ${worktree} does not exist`);
-  }
-
-  // A/B attribution reruns the recorded npm test commands (test-delta); no
-  // other toolchain has a delta consumer in this release — Agent 7's brief
-  // says the same for Maven. `cat-file` answers before a full checkout of
-  // what can be a very large Java reactor, so a Maven base never pays for a
-  // tree that would not be built — including the nested-pom shape (standalone
-  // modules, no root aggregator), settled by a bounded tree listing when the
-  // base has no root package.json either.
-  if (
-    gitHasPath(worktree, baseSha, 'pom.xml') ||
-    (!gitHasPath(worktree, baseSha, 'package.json') &&
-      gitTreeHasNestedPom(worktree, baseSha))
-  ) {
-    return unavailable(
-      `the merge base is a Maven project, and this release's A/B attribution only reruns npm test ` +
-        'commands — a base-side Maven build could not be consumed, so it was not run ' +
-        '(never a finding against the PR)',
-    );
   }
 
   const tree = baseWorktreePath(worktree);
@@ -244,6 +228,26 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
     }
   } catch {
     // No failed-marker: proceed to build.
+  }
+  // A/B attribution reruns the recorded npm test commands (test-delta); no
+  // other toolchain has a delta consumer in this release — Agent 7's brief
+  // says the same for Maven. The gate sits AFTER the marker checks: step 4
+  // launches its verifier shards together, and once a tree stands (built or
+  // failed) every later shard is answered by its marker without re-scanning.
+  // It still runs before the checkout, so a Maven base never pays for a tree
+  // that would not be built — including the nested-pom shape (standalone
+  // modules, no root aggregator), settled by a depth-1 listing when the base
+  // has no root package.json either.
+  if (
+    gitHasPath(worktree, baseSha, 'pom.xml') ||
+    (!gitHasPath(worktree, baseSha, 'package.json') &&
+      gitTreeHasNestedPom(worktree, baseSha))
+  ) {
+    return unavailable(
+      `the merge base is a Maven project, and this release's A/B attribution only reruns npm test ` +
+        'commands — a base-side Maven build could not be consumed, so it was not run ' +
+        '(never a finding against the PR)',
+    );
   }
   // A real mutual-exclusion lock around sweep+add+build, not just the marker.
   // The reuse fast path covers the AFTER-build window; this covers the build

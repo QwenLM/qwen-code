@@ -430,7 +430,7 @@ export function observedTestCounts(report: BuildTestReport | null): number[] {
   if (!report) return [];
   const counts: number[] = [];
   for (const cmd of report.test ?? []) {
-    // The same exclusion ruleCommand's finished() applies to command claims:
+    // The same exclusion that ruleCommand's finished() applies to command claims:
     // an interrupted or infrastructure-classified run is not a completed
     // suite, and its partial counts must not adjudicate a count claim.
     if (cmd.timedOut || cmd.exitCode === null || cmd.infrastructure) continue;
@@ -726,7 +726,7 @@ function ruleCommand(
         };
   }
 
-  if (claimedLifecycle !== null || mavenRunnerClaim) {
+  if (mavenRunnerClaim) {
     if (matches.some((c) => c.timedOut)) {
       return {
         kind: 'command',

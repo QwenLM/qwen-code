@@ -44,6 +44,7 @@ import { resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   isDependencyFailureLine,
+  isSourceFailureLine,
   mavenToolchainAdapter,
 } from './lib/maven-toolchain.js';
 import { npmToolchainAdapter } from './lib/npm-toolchain.js';
@@ -166,13 +167,16 @@ export function trimOutput(s: string): string {
         RUNNER_SUMMARY_RE.test(l.replace(ANSI_SGR_RE, '')) ||
         // Maven infra classification runs on this trimmed output; a
         // dependency-failure line lost to the trim would file a network
-        // outage against the PR — the exact error this command prevents.
-        isDependencyFailureLine(l.replace(ANSI_SGR_RE, '')),
+        // outage against the PR, and a source-failure line lost there would
+        // launder a compile error into infrastructure — the exact errors
+        // this command prevents.
+        isDependencyFailureLine(l.replace(ANSI_SGR_RE, '')) ||
+        isSourceFailureLine(l.replace(ANSI_SGR_RE, '')),
     )
     .slice(0, RESCUE_MAX);
   const omitted = s.length - KEEP_HEAD - KEEP_TAIL;
   const marker = rescued.length
-    ? `\n\n... [${omitted} characters omitted; module-resolution errors, dependency failures, and runner summaries kept] ...\n${rescued.join('\n')}\n\n`
+    ? `\n\n... [${omitted} characters omitted; module-resolution errors, dependency failures, source failures, and runner summaries kept] ...\n${rescued.join('\n')}\n\n`
     : `\n\n... [${omitted} characters omitted] ...\n\n`;
   return s.slice(0, KEEP_HEAD) + marker + s.slice(-KEEP_TAIL);
 }

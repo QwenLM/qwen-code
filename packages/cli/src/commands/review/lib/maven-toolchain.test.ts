@@ -213,6 +213,9 @@ describe('maven toolchain adapter', () => {
     ['${module.name}', 'property expressions'],
     ['../outside', 'paths escaping the reactor'],
     ['missing', 'missing child POMs'],
+    // cmd.exe expands %VAR% even inside `"…"`, and no legitimate Maven
+    // module path uses `%`.
+    ['a%b', 'shell-active module entries'],
   ])('fails closed for %s', (module, _description) => {
     writeProject('.', [module]);
     if (module === '../outside') {
@@ -592,6 +595,26 @@ describe('maven toolchain adapter', () => {
     expect(report.note).not.toContain('downstream dependents were NOT built');
   });
 
+  it('discloses that a reactor-wide timeout is expected to exceed the deadline', () => {
+    // On the large reactors this adapter targets, a root-POM change selects
+    // the whole reactor, and `test` over it cannot finish in the default
+    // deadline — say so, so no agent spends turns re-deriving it.
+    writeReactor();
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['pom.xml'],
+      timeout: 300,
+      install: false,
+      exec: (command) =>
+        result(command, { exitCode: null, timedOut: true, seconds: 300 }),
+    });
+
+    expect(report.note).toContain('infrastructure result');
+    expect(report.note).toContain('reactor-wide');
+    expect(report.note).toContain('same scope');
+  });
+
   it('classifies timeout and dependency resolution without fresh reports as infrastructure', () => {
     writeReactor();
     const timeout = mavenToolchainAdapter.run({
@@ -669,7 +692,10 @@ describe('maven toolchain adapter', () => {
     ['sh: 1: mvn: not found', 127],
     // cmd.exe's wording when Maven is absent on Windows (exit 9009).
     ["'mvn' is not recognized as an internal or external command", 9009],
-    ['java.io.IOException: No space left on device', 1],
+    [
+      '[ERROR] Failed to execute goal on project core: java.io.IOException: No space left on device',
+      1,
+    ],
     ['Error: The JAVA_HOME environment variable is not defined correctly', 1],
     ['Unable to locate a Java Runtime', 1],
   ])(
@@ -688,6 +714,29 @@ describe('maven toolchain adapter', () => {
       expect(report.note).toContain('infrastructure evidence');
     },
   );
+
+  it('does not classify unframed disk-full words as a launch failure', () => {
+    // `No space left on device` without Maven's `[ERROR]` framing is a test
+    // exercising a disk-full path, not an outage; free text cannot tell the
+    // two apart, so the framing decides, as for dependency failures.
+    writeReactor();
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) =>
+        result(command, {
+          exitCode: 1,
+          output: 'java.io.IOException: No space left on device',
+        }),
+    });
+
+    expect(report.note).toContain('Correlate compiler or test errors');
+    expect(report.note).not.toContain('infrastructure evidence');
+    expect(report.test[0]?.infrastructure).toBeUndefined();
+  });
 
   it.skipIf(process.platform === 'win32')(
     'classifies an unchanged wrapper launch failure as infrastructure',
@@ -1166,6 +1215,66 @@ describe('maven toolchain adapter', () => {
         }),
     });
     expect(framed.note).toContain('infrastructure evidence');
+  });
+
+  it('does not launder a compile failure into infrastructure when dependency words share the output', () => {
+    // A flaky mirror, or an upstream module pulled in by `-am`, can put one
+    // `[ERROR] Could not transfer artifact` line in the same output as a
+    // real compile error. The compile failure writes no Surefire XML, so
+    // only the source markers keep it from reading as infrastructure.
+    writeReactor();
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) =>
+        result(command, {
+          exitCode: 1,
+          output: [
+            '[ERROR] Could not transfer artifact org.foo:bar:jar:1.0 from/to central: Connection timed out',
+            '[ERROR] COMPILATION ERROR :',
+            '[ERROR] /tmp/x/core/src/main/java/Main.java:[12,5] cannot find symbol',
+          ].join('\n'),
+        }),
+    });
+
+    expect(report.note).toContain('Correlate compiler or test errors');
+    expect(report.note).not.toContain('infrastructure evidence');
+    expect(report.test[0]?.infrastructure).toBeUndefined();
+  });
+
+  it('keeps source-failure markers framed — unframed words stay infrastructure', () => {
+    writeReactor();
+
+    const runWith = (output: string) =>
+      mavenToolchainAdapter.run({
+        root,
+        changedFiles: ['core/src/Main.java'],
+        timeout: 5,
+        install: false,
+        exec: (command) => result(command, { exitCode: 1, output }),
+      });
+
+    const dependencyLine =
+      '[ERROR] Could not resolve dependencies for project example:core';
+
+    // Every Maven-framed marker outranks the dependency carve-out...
+    for (const marker of [
+      '[ERROR] COMPILATION ERROR :',
+      '[ERROR] /tmp/x/core/src/main/java/Main.java:[12,5] cannot find symbol',
+      '[ERROR] There are test failures.',
+    ]) {
+      const report = runWith(`${dependencyLine}\n${marker}`);
+      expect(report.note).toContain('Correlate compiler or test errors');
+      expect(report.note).not.toContain('infrastructure evidence');
+    }
+
+    // ...but the same words in a test's own stdout do not.
+    const unframed = runWith(`${dependencyLine}\nCOMPILATION ERROR`);
+    expect(unframed.note).toContain('infrastructure evidence');
+    expect(unframed.test[0]).toMatchObject({ infrastructure: true });
   });
 
   it('classifies a spawn-level death without an exit code as infrastructure', () => {

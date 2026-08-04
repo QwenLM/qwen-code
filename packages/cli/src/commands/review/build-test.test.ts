@@ -613,6 +613,17 @@ describe('runBuildTest', () => {
     expect(trimmed).toContain('dependency failures');
   });
 
+  it('rescues Maven source-failure lines from a trimmed middle', () => {
+    // The source markers outrank the infra carve-out; one lost to the trim
+    // would launder a compile failure into infrastructure.
+    const line = '[ERROR] COMPILATION ERROR :';
+    const trimmed = trimOutput(
+      'head\n' + 'x'.repeat(3000) + `\n${line}\n` + 'y'.repeat(9000),
+    );
+    expect(trimmed).toContain(line);
+    expect(trimmed).toContain('source failures');
+  });
+
   it('caps the rescue so hostile prose cannot void the trim', () => {
     // 40k lines matching the summary shape made the trim a no-op (1.6MB in,
     // 1.6MB out) — the rescue saves a handful of lines, never the middle.

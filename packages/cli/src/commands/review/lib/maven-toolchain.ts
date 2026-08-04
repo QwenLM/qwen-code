@@ -46,7 +46,8 @@ const REACTOR_WIDE_FILES = new Set(['pom.xml', 'mvnw', 'mvnw.cmd']);
  * `failsafe-reports` is forward-looking today: this adapter only ever runs
  * `test` and `test-compile`, and Failsafe binds to `integration-test` /
  * `verify`, so any XML found there is filtered out as stale. The scan stays
- * so the evidence is picked up if a later change ever runs a Failsafe phase.
+ * — one readdir per project per snapshot — so the evidence is picked up if a
+ * later change ever runs a Failsafe phase.
  */
 const REPORT_DIRS = ['surefire-reports', 'failsafe-reports'];
 
@@ -102,7 +103,7 @@ function moduleEntries(pom: string): string[] | null {
       if (stack.pop() !== name) return null;
       if (name === 'module' && moduleText !== null) {
         const entry = moduleText.trim();
-        if (!entry || /[<$>{}&]/.test(entry)) return null;
+        if (!entry || /[<$>{}&%]/.test(entry)) return null;
         entries.push(entry);
         moduleText = null;
       }
@@ -608,11 +609,28 @@ function mavenReport(
   return { toolchain: 'maven', ...fields };
 }
 
-/** Shell- and JVM-level facts that need no Maven framing to be recognized. */
+/**
+ * Shell and JVM launch diagnostics. The runner-missing and JAVA_HOME forms
+ * are printed bare by the shell or the mvn launcher — never with Maven
+ * framing — so requiring `[ERROR]` there would miss the real thing. `No
+ * space left on device` is different: a test exercising a disk-full path can
+ * print it in its own stdout, so only Maven's own `[ERROR]`/`[FATAL]` framing
+ * tells the outage from test output — the same argument
+ * DEPENDENCY_FAILURE_LINE_RE encodes.
+ */
 function isLaunchFailure(output: string): boolean {
-  return /(?:mvn|java): (?:command )?not found|(?:mvn|java)(?:\.cmd)?'? is not recognized as an internal or external command|No space left on device|JAVA_HOME.*(?:not defined|incorrectly)|Unable to locate a Java Runtime/i.test(
-    output,
-  );
+  return output
+    .split('\n')
+    .some(
+      (line) =>
+        /(?:mvn|java): (?:command )?not found/i.test(line) ||
+        /(?:mvn|java)(?:\.cmd)?'? is not recognized as an internal or external command/i.test(
+          line,
+        ) ||
+        /JAVA_HOME.*(?:not defined|incorrectly)/i.test(line) ||
+        /Unable to locate a Java Runtime/i.test(line) ||
+        /^\[(?:ERROR|FATAL)\].*No space left on device/i.test(line),
+    );
 }
 
 /**
@@ -635,6 +653,26 @@ function isDependencyFailure(output: string): boolean {
   return output.split('\n').some(isDependencyFailureLine);
 }
 
+/**
+ * Compile and test failure markers Maven itself prints once a run reaches
+ * building or executing code. A dependency outage can share the output with
+ * them (a flaky mirror, or an upstream module pulled in by `-am`), and the
+ * acquisition carve-out must not launder the source failure into an
+ * infrastructure result: a compile failure writes no Surefire XML, so
+ * `freshFailures` cannot see it. `[ERROR]`-framed and line-level like
+ * DEPENDENCY_FAILURE_LINE_RE, for the same trim-rescue reason.
+ */
+const SOURCE_FAILURE_LINE_RE =
+  /^\[(?:ERROR|FATAL)\](?: COMPILATION ERROR| There are test failures| .*\.java:\[\d+,\d+\])/i;
+
+export function isSourceFailureLine(line: string): boolean {
+  return SOURCE_FAILURE_LINE_RE.test(line);
+}
+
+function isSourceFailure(output: string): boolean {
+  return output.split('\n').some(isSourceFailureLine);
+}
+
 function hasFreshTestFailure(summaries: MavenTestSummary[]): boolean {
   return summaries.some(
     (summary) => summary.failures > 0 || summary.errors > 0,
@@ -648,6 +686,8 @@ function hasFreshTestFailure(summaries: MavenTestSummary[]): boolean {
  * 5.2 reports the same death as `cannot execute: required file not found`
  * and dash as a bare `not found`; a `#!/usr/bin/env sh\r` shebang names
  * `/usr/bin/env`, not the wrapper, so that line gets its own alternant.
+ * Win32 is known-uncovered: a broken `mvnw.cmd` (missing, CRLF, ACL) matches
+ * none of these POSIX shapes and stays attributed to the diff.
  */
 const WRAPPER_LAUNCH_FAILURE_RE =
   /(?:^|\n)(?:.*\.\/mvnw[^\n]*(?:Permission denied|bad interpreter|No such file or directory|cannot execute: required file not found|not found)|\/usr\/bin\/env:[^\n]*No such file or directory)(?:\n|$)/i;
@@ -673,8 +713,9 @@ export function shellSelector(
   // The command runs through cmd.exe on Windows, where POSIX quoting is
   // literal and a `"…"` wrap does not stop %VAR% expansion or an embedded
   // quote. That stays safe only because readMavenReactor rejects any module
-  // entry whose pom.xml is missing from disk (the existsSync gate), and a
-  // Windows filename cannot contain `"` or `|` — do not remove that gate.
+  // entry whose pom.xml is missing from disk (the existsSync gate), rejects
+  // `%` outright (moduleEntries — cmd.exe expands it even inside `"…"`), and
+  // a Windows filename cannot contain `"` or `|` — do not remove those gates.
   return platform === 'win32' ? `"${selector}"` : shellQuotePath(selector);
 }
 
@@ -814,6 +855,7 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   const acquisitionFailure =
     !ok &&
     !freshFailures &&
+    !isSourceFailure(result.output) &&
     result.exitCode !== null &&
     ((isLaunchFailure(result.output) && !wrapperChanged) ||
       (isDependencyFailure(result.output) && !dependencyInputsChanged) ||
@@ -853,6 +895,12 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     report.note =
       `\`${result.command}\` ran out of time (${args.timeout}s). This is an infrastructure result, ` +
       'not a defect in the diff — report it as informational.';
+    if (ownership.reactorWide) {
+      report.note +=
+        ' The scope is reactor-wide because the diff changes inputs every module inherits; ' +
+        'on large reactors that scope usually cannot finish within this deadline, so re-running ' +
+        'it at the same scope will spend the same budget for the same result.';
+    }
   } else if (result.exitCode === null) {
     // A spawn-level death (output past maxBuffer, an outside signal) leaves no
     // exit code and nothing to correlate — infrastructure, like a timeout.
