@@ -223,9 +223,9 @@ describe('commandUtils', () => {
       });
 
       it('should prefer wl-copy in a Wayland session', async () => {
-        const testText = 'Hello, Wayland!';
-        const linuxOptions: SpawnOptions = {
-          stdio: ['pipe', 'inherit', 'pipe'],
+        const testText = 'GIF89a selected source text 🧪';
+        const waylandOptions: SpawnOptions = {
+          stdio: ['pipe', 'inherit', 'ignore'],
         };
         vi.stubEnv('XDG_SESSION_TYPE', 'wayland');
 
@@ -236,16 +236,40 @@ describe('commandUtils', () => {
         await copyToClipboard(testText);
 
         expect(mockSpawn).toHaveBeenCalledTimes(1);
-        expect(mockSpawn).toHaveBeenCalledWith('wl-copy', [], linuxOptions);
+        expect(mockSpawn).toHaveBeenCalledWith(
+          'wl-copy',
+          ['-t', 'text/plain'],
+          waylandOptions,
+        );
         expect(mockChild.stdin.write).toHaveBeenCalledWith(testText);
         expect(mockChild.stdin.end).toHaveBeenCalled();
       });
 
-      it('should detect Wayland from WAYLAND_DISPLAY', async () => {
-        const linuxOptions: SpawnOptions = {
-          stdio: ['pipe', 'inherit', 'pipe'],
+      it('should detect a case-insensitive Wayland session type', async () => {
+        const waylandOptions: SpawnOptions = {
+          stdio: ['pipe', 'inherit', 'ignore'],
         };
-        vi.stubEnv('XDG_SESSION_TYPE', '');
+        vi.stubEnv('XDG_SESSION_TYPE', 'Wayland');
+
+        setTimeout(() => {
+          mockChild.emit('close', 0);
+        }, 0);
+
+        await copyToClipboard('Wayland');
+
+        expect(mockSpawn).toHaveBeenCalledTimes(1);
+        expect(mockSpawn).toHaveBeenCalledWith(
+          'wl-copy',
+          ['-t', 'text/plain'],
+          waylandOptions,
+        );
+      });
+
+      it('should detect Wayland from WAYLAND_DISPLAY when the session type is unset', async () => {
+        const waylandOptions: SpawnOptions = {
+          stdio: ['pipe', 'inherit', 'ignore'],
+        };
+        delete process.env['XDG_SESSION_TYPE'];
         vi.stubEnv('WAYLAND_DISPLAY', 'wayland-0');
 
         setTimeout(() => {
@@ -255,12 +279,19 @@ describe('commandUtils', () => {
         await copyToClipboard('WSL Wayland');
 
         expect(mockSpawn).toHaveBeenCalledTimes(1);
-        expect(mockSpawn).toHaveBeenCalledWith('wl-copy', [], linuxOptions);
+        expect(mockSpawn).toHaveBeenCalledWith(
+          'wl-copy',
+          ['-t', 'text/plain'],
+          waylandOptions,
+        );
       });
 
       it('should fall back to xclip when wl-copy is unavailable', async () => {
         const linuxOptions: SpawnOptions = {
           stdio: ['pipe', 'inherit', 'pipe'],
+        };
+        const waylandOptions: SpawnOptions = {
+          stdio: ['pipe', 'inherit', 'ignore'],
         };
         vi.stubEnv('XDG_SESSION_TYPE', 'wayland');
         let callCount = 0;
@@ -292,8 +323,8 @@ describe('commandUtils', () => {
         expect(mockSpawn).toHaveBeenNthCalledWith(
           1,
           'wl-copy',
-          [],
-          linuxOptions,
+          ['-t', 'text/plain'],
+          waylandOptions,
         );
         expect(mockSpawn).toHaveBeenNthCalledWith(
           2,
@@ -301,6 +332,105 @@ describe('commandUtils', () => {
           ['-selection', 'clipboard'],
           linuxOptions,
         );
+      });
+
+      it('should fall back to xclip when wl-copy exits non-zero', async () => {
+        const linuxOptions: SpawnOptions = {
+          stdio: ['pipe', 'inherit', 'pipe'],
+        };
+        const waylandOptions: SpawnOptions = {
+          stdio: ['pipe', 'inherit', 'ignore'],
+        };
+        vi.stubEnv('XDG_SESSION_TYPE', 'wayland');
+        let callCount = 0;
+
+        mockSpawn.mockImplementation(() => {
+          const child = Object.assign(new EventEmitter(), {
+            stdin: Object.assign(new EventEmitter(), {
+              write: vi.fn(),
+              end: vi.fn(),
+            }),
+            stderr: new EventEmitter(),
+          }) as MockChildProcess;
+
+          setTimeout(() => {
+            child.emit('close', callCount++ === 0 ? 1 : 0);
+          }, 0);
+
+          return child as unknown as ReturnType<typeof spawn>;
+        });
+
+        await copyToClipboard('fallback');
+
+        expect(mockSpawn).toHaveBeenCalledTimes(2);
+        expect(mockSpawn).toHaveBeenNthCalledWith(
+          1,
+          'wl-copy',
+          ['-t', 'text/plain'],
+          waylandOptions,
+        );
+        expect(mockSpawn).toHaveBeenNthCalledWith(
+          2,
+          'xclip',
+          ['-selection', 'clipboard'],
+          linuxOptions,
+        );
+      });
+
+      it('should include the wl-copy failure when all fallbacks fail', async () => {
+        vi.stubEnv('XDG_SESSION_TYPE', 'wayland');
+        let callCount = 0;
+        const originalStdoutIsTTY = process.stdout.isTTY;
+        const originalStderrIsTTY = process.stderr.isTTY;
+        Object.defineProperty(process.stdout, 'isTTY', {
+          value: false,
+          configurable: true,
+        });
+        Object.defineProperty(process.stderr, 'isTTY', {
+          value: false,
+          configurable: true,
+        });
+
+        mockSpawn.mockImplementation(() => {
+          const child = Object.assign(new EventEmitter(), {
+            stdin: Object.assign(new EventEmitter(), {
+              write: vi.fn(),
+              end: vi.fn(),
+            }),
+            stderr: new EventEmitter(),
+          }) as MockChildProcess;
+
+          setTimeout(() => {
+            const currentCall = callCount++;
+            if (currentCall === 0) {
+              child.emit('close', 1);
+              return;
+            }
+            const error = new Error(
+              `spawn ${currentCall === 1 ? 'xclip' : 'xsel'} ENOENT`,
+            );
+            (error as NodeJS.ErrnoException).code = 'ENOENT';
+            child.emit('error', error);
+          }, 0);
+
+          return child as unknown as ReturnType<typeof spawn>;
+        });
+
+        try {
+          await expect(copyToClipboard('failure')).rejects.toThrow(
+            /wl-copy failed \("'wl-copy' exited with code 1"\); xclip\/xsel not found/,
+          );
+          expect(mockSpawn).toHaveBeenCalledTimes(3);
+        } finally {
+          Object.defineProperty(process.stdout, 'isTTY', {
+            value: originalStdoutIsTTY,
+            configurable: true,
+          });
+          Object.defineProperty(process.stderr, 'isTTY', {
+            value: originalStderrIsTTY,
+            configurable: true,
+          });
+        }
       });
 
       it('should successfully copy text to clipboard using xclip', async () => {

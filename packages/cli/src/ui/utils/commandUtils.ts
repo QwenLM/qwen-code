@@ -13,7 +13,7 @@ import {
 } from '../../utils/commands.js';
 import type { SlashCommand } from '../commands/types.js';
 import type { RecentSlashCommands } from '../hooks/useSlashCompletion.js';
-import { writeOsc52 } from './clipboardUtils.js';
+import { isWaylandSession, writeOsc52 } from './clipboardUtils.js';
 import { toCodePoints } from './textUtils.js';
 
 /**
@@ -102,6 +102,8 @@ const debugLogger = createDebugLogger('COMMAND_UTILS');
 
 // Copies a string snippet to the clipboard for different platforms
 export const copyToClipboard = async (text: string): Promise<void> => {
+  let wlCopyError: unknown;
+
   const run = (cmd: string, args: string[], options?: SpawnOptions) =>
     new Promise<void>((resolve, reject) => {
       const child = options ? spawn(cmd, args, options) : spawn(cmd, args);
@@ -140,16 +142,22 @@ export const copyToClipboard = async (text: string): Promise<void> => {
     case 'darwin':
       return run('pbcopy', []);
     case 'linux':
-      if (
-        process.env['XDG_SESSION_TYPE']?.toLowerCase() === 'wayland' ||
-        Boolean(process.env['WAYLAND_DISPLAY'])
-      ) {
+      if (isWaylandSession()) {
         try {
           // Prefer the native Wayland clipboard. X11 tools may be installed
           // under XWayland but still be unable to access the active clipboard.
-          await run('wl-copy', [], linuxOptions);
+          // Ignore stderr because wl-copy's clipboard-owning daemon inherits it;
+          // a pipe would prevent Node's close event from firing.
+          await run('wl-copy', ['-t', 'text/plain'], {
+            stdio: ['pipe', 'inherit', 'ignore'],
+          });
           return;
-        } catch {
+        } catch (error) {
+          wlCopyError = error;
+          debugLogger.debug(
+            'wl-copy failed; falling back to other clipboard methods:',
+            error,
+          );
           // Fall through to the existing X11 and OSC 52 fallbacks.
         }
       }
@@ -166,12 +174,20 @@ export const copyToClipboard = async (text: string): Promise<void> => {
           const xselNotFound =
             fallbackError instanceof Error &&
             (fallbackError as NodeJS.ErrnoException).code === 'ENOENT';
+          const wlCopyFailure =
+            wlCopyError === undefined
+              ? ''
+              : `wl-copy failed ("${
+                  wlCopyError instanceof Error
+                    ? wlCopyError.message
+                    : String(wlCopyError)
+                }"); `;
           if (xclipNotFound && xselNotFound) {
             // Neither xclip nor xsel available — try OSC 52 escape sequence
             // (works over SSH without X11 display server).
             if (!writeOsc52(text)) {
               throw new Error(
-                'Clipboard unavailable: xclip/xsel not found and OSC 52 requires a TTY. Try running inside a terminal emulator.',
+                `Clipboard unavailable: ${wlCopyFailure}xclip/xsel not found and OSC 52 requires a TTY. Try running inside a terminal emulator.`,
               );
             }
             return;
@@ -196,7 +212,7 @@ export const copyToClipboard = async (text: string): Promise<void> => {
           if (writeOsc52(text)) return;
 
           throw new Error(
-            `Clipboard unavailable: xclip/xsel failed ("${primaryMsg}", "${fallbackMsg}") and OSC 52 requires a TTY. Try running inside a terminal emulator.`,
+            `Clipboard unavailable: ${wlCopyFailure}xclip/xsel failed ("${primaryMsg}", "${fallbackMsg}") and OSC 52 requires a TTY. Try running inside a terminal emulator.`,
           );
         }
       }
