@@ -993,6 +993,8 @@ jobs:
       # A cancelled or timed-out review may not reach the CLI's process cleanup.
       # Remove both the worktree directories and Git's worktree registrations so
       # the next job on this reused runner can delete qwen-review/* branches.
+      # The sweep deletes all review artifacts, not just this PR's: safe because
+      # a runner executes one job at a time.
       - name: 'Clean review worktrees'
         if: 'always()'
         timeout-minutes: 5
