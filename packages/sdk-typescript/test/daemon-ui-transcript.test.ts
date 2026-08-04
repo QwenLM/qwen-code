@@ -38,3 +38,58 @@ describe('daemon transcript rewind', () => {
     expect(state.activeAssistantBlockId).toBeUndefined();
   });
 });
+
+describe('status event while an assistant block is streaming', () => {
+  it('finalizes the active assistant block by default', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        { type: 'user.text.delta', text: 'question' },
+        { type: 'assistant.text.delta', text: 'answering' },
+        { type: 'status', text: 'mid-stream status' },
+        { type: 'assistant.text.delta', text: ' more' },
+        { type: 'assistant.done' },
+      ],
+      { now: 1 },
+    );
+
+    expect(state.blocks.map((block) => block.kind)).toEqual([
+      'user',
+      'assistant',
+      'status',
+      'assistant',
+    ]);
+  });
+
+  it('keeps the assistant block active when clearActiveText is false', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        { type: 'user.text.delta', text: 'question' },
+        { type: 'assistant.text.delta', text: 'answering' },
+        { type: 'status', text: 'mid-stream status', clearActiveText: false },
+        { type: 'assistant.text.delta', text: ' more' },
+        {
+          type: 'assistant.usage',
+          usage: { inputTokens: 3, outputTokens: 5 },
+        },
+        { type: 'assistant.done' },
+      ],
+      { now: 1 },
+    );
+
+    expect(state.blocks.map((block) => block.kind)).toEqual([
+      'user',
+      'assistant',
+      'status',
+    ]);
+    const assistant = state.blocks[1];
+    if (assistant.kind !== 'assistant') throw new Error('expected assistant');
+    expect(assistant.text).toBe('answering more');
+    expect(assistant.usage).toEqual({
+      inputTokens: 3,
+      outputTokens: 5,
+      cachedTokens: 0,
+    });
+  });
+});

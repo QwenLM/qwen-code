@@ -54,7 +54,11 @@ export function appendOrDeferLocalUserMessage(
  * not a turn boundary in `applyTurnCollapse`, so they can run mid-turn; only
  * the user echo row would split the active turn. Skipping the echo also
  * avoids `appendLocalUserTranscriptMessage` finalizing the in-flight
- * assistant block mid-stream.
+ * assistant block mid-stream — and the command's result dispatch must pass
+ * `clearActiveText: false` for the same reason.
+ *
+ * Delegates to `appendOrDeferLocalUserMessage` so the idle gate lives in one
+ * place; note the inverted polarity — here `true` means "echo appended".
  *
  * @returns `true` if the echo was appended, `false` if it was skipped.
  */
@@ -63,11 +67,7 @@ export function appendLocalUserEchoIfIdle(
   text: string,
   sink: LocalEchoSink,
 ): boolean {
-  if (isStreaming) {
-    return false;
-  }
-  sink.append(text);
-  return true;
+  return !appendOrDeferLocalUserMessage(isStreaming, text, undefined, sink);
 }
 
 /**

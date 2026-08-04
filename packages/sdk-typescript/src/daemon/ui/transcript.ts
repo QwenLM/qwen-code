@@ -341,6 +341,10 @@ function applyDaemonTranscriptEvent(
       break;
     case 'status':
     case 'debug':
+      appendStatusBlock(next, event.type, event.text, event, {
+        clearActiveText: event.clearActiveText,
+      });
+      break;
     case 'error':
       appendStatusBlock(next, event.type, event.text, event);
       break;

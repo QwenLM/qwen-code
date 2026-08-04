@@ -5010,6 +5010,8 @@ export function App({
   // commands (/stats, /about, /context) render their result as a status
   // block, which does not split the active turn, so they run immediately
   // mid-turn with only the echo skipped (see appendLocalUserEchoIfIdle).
+  // Their result dispatch must pass `clearActiveText: false`, otherwise the
+  // status block would finalize the in-flight assistant block mid-stream.
   const echoLocalCommandIfIdle = useCallback(
     (text: string): void => {
       appendLocalUserEchoIfIdle(streamingStateRef.current !== 'idle', text, {
@@ -5893,6 +5895,8 @@ export function App({
             {
               type: 'status',
               text: serializeContextUsageMessage(result),
+              // Mid-turn runs must not finalize the streaming block.
+              clearActiveText: false,
             },
           ]);
           resumeChatBottomFollow('smooth');
@@ -7586,11 +7590,15 @@ export function App({
                   {
                     type: 'status',
                     text: serializeStatsMessage(result, statsView),
+                    // Mid-turn runs must not finalize the streaming block.
+                    clearActiveText: false,
                   },
                 ]);
                 resumeChatBottomFollow('smooth');
               })
-              .catch(() => {});
+              .catch((error: unknown) => {
+                reportError(error, 'Failed to load stats');
+              });
             return true;
           }
           if (cmd === 'status' || cmd === 'about') {
@@ -7652,7 +7660,12 @@ export function App({
               };
 
               store.dispatch([
-                { type: 'status', text: serializeStatusMessage(info) },
+                {
+                  type: 'status',
+                  text: serializeStatusMessage(info),
+                  // Mid-turn runs must not finalize the streaming block.
+                  clearActiveText: false,
+                },
               ]);
               resumeChatBottomFollow('smooth');
             });

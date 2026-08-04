@@ -3821,6 +3821,86 @@ describe('App shell command queueing', () => {
   });
 });
 
+describe('App read-only local commands mid-turn', () => {
+  it('runs /stats immediately while streaming and skips the echo', async () => {
+    const { rerender } = renderApp({});
+    await flush();
+
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({});
+    });
+
+    let accepted: boolean | void;
+    await act(async () => {
+      accepted = testState.latestChatEditorProps?.onSubmit('/stats');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.getStats).toHaveBeenCalled();
+      });
+    });
+
+    expect(accepted).toBe(true);
+    expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalled();
+    expect(mockStore.dispatch).toHaveBeenCalledWith([
+      expect.objectContaining({ type: 'status', clearActiveText: false }),
+    ]);
+  });
+
+  it('echoes /stats when idle', async () => {
+    renderApp({});
+    await flush();
+
+    let accepted: boolean | void;
+    await act(async () => {
+      accepted = testState.latestChatEditorProps?.onSubmit('/stats');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.getStats).toHaveBeenCalled();
+      });
+    });
+
+    expect(accepted).toBe(true);
+    expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith('/stats');
+  });
+
+  it('runs /about immediately while streaming and skips the echo', async () => {
+    const { rerender } = renderApp({});
+    await flush();
+
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({});
+    });
+
+    let accepted: boolean | void;
+    await act(async () => {
+      accepted = testState.latestChatEditorProps?.onSubmit('/about');
+      await vi.waitFor(() => {
+        expect(mockWorkspaceActions.loadPreflight).toHaveBeenCalled();
+      });
+    });
+
+    expect(accepted).toBe(true);
+    expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalled();
+    expect(mockStore.dispatch).toHaveBeenCalledWith([
+      expect.objectContaining({ type: 'status', clearActiveText: false }),
+    ]);
+  });
+
+  it('echoes /about when idle', async () => {
+    renderApp({});
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/about');
+      await vi.waitFor(() => {
+        expect(mockWorkspaceActions.loadPreflight).toHaveBeenCalled();
+      });
+    });
+
+    expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith('/about');
+  });
+});
+
 describe('App session callbacks', () => {
   it('binds the main composer Voice target to its active secondary session', async () => {
     mockConnection.workspaceCwd = '/work/secondary';
