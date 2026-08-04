@@ -13,6 +13,7 @@ import type {
   DiscoveredMCPResource,
 } from './mcp-client.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
+import { mcpSessionMetadataKey } from './mcp-session-config.js';
 import { passesSessionFilter, SessionMcpView } from './session-mcp-view.js';
 import type { ToolRegistry } from './tool-registry.js';
 
@@ -25,6 +26,7 @@ function mkTool(
   serverName: string,
   serverToolName: string,
   trust?: boolean,
+  alwaysLoad = false,
 ): DiscoveredMCPTool {
   return new DiscoveredMCPTool(
     // mcpTool stub: tests only inspect `trust` / `name` / `serverName`,
@@ -35,6 +37,13 @@ function mkTool(
     /* description */ 'd',
     /* parameterSchema */ { type: 'object', properties: {} },
     trust,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    alwaysLoad,
   );
 }
 
@@ -121,6 +130,33 @@ describe('passesSessionFilter', () => {
   });
 });
 
+describe('mcpSessionMetadataKey', () => {
+  it('normalizes equivalent filters without erasing include-list presence', () => {
+    const first = {
+      command: 'node',
+      includeTools: ['beta', 'alpha(args)', 'alpha(args)'],
+      excludeTools: ['zeta', 'zeta'],
+    } as MCPServerConfig;
+    const equivalent = {
+      command: 'node',
+      includeTools: ['alpha', 'beta'],
+      excludeTools: ['zeta'],
+    } as MCPServerConfig;
+
+    expect(mcpSessionMetadataKey(first)).toBe(
+      mcpSessionMetadataKey(equivalent),
+    );
+    expect(
+      mcpSessionMetadataKey({ command: 'node' } as MCPServerConfig),
+    ).not.toBe(
+      mcpSessionMetadataKey({
+        command: 'node',
+        includeTools: [],
+      } as MCPServerConfig),
+    );
+  });
+});
+
 describe('SessionMcpView', () => {
   const cfg = new MCPServerConfig('node');
 
@@ -199,6 +235,23 @@ describe('SessionMcpView', () => {
       tools as unknown as { _toolMap: Map<string, DiscoveredMCPTool> }
     )._toolMap.get(snapshotTool.name);
     expect(registered).toBe(snapshotTool);
+  });
+
+  it('applyTools projects alwaysLoadTools per session without mutating the shared snapshot', () => {
+    const { tools, prompts, resources } = mkRegistries();
+    const snapshotTool = mkTool('srv', 'foo', undefined, false);
+    const view = new SessionMcpView(tools, prompts, resources, 'A', 'srv', {
+      command: 'node',
+      alwaysLoadTools: true,
+    } as MCPServerConfig);
+
+    view.applyTools([snapshotTool]);
+
+    const registered = tools._toolMap.get(snapshotTool.name);
+    expect(registered).toBeDefined();
+    expect(registered!.alwaysLoad).toBe(true);
+    expect(registered).not.toBe(snapshotTool);
+    expect(snapshotTool.alwaysLoad).toBe(false);
   });
 
   it('applyTools filters by includeTools', () => {
@@ -467,6 +520,31 @@ describe('SessionMcpView', () => {
     expect(tools.removeMcpToolsByServer).toHaveBeenCalledTimes(2);
     // No additional registration (still 1 from before).
     expect(tools.registerTool).toHaveBeenCalledTimes(1);
+  });
+
+  it('updateConfig detects metadata mutated in place on the same config object', () => {
+    const { tools, prompts, resources } = mkRegistries();
+    const mutableConfig = {
+      command: 'node',
+      includeTools: ['foo'],
+    } as MCPServerConfig;
+    const view = new SessionMcpView(
+      tools,
+      prompts,
+      resources,
+      'sid',
+      'srv',
+      mutableConfig,
+    );
+
+    (mutableConfig as { includeTools?: string[] }).includeTools = ['bar'];
+
+    expect(view.updateConfig(mutableConfig)).toBe(true);
+    view.applyTools([mkTool('srv', 'foo'), mkTool('srv', 'bar')]);
+    expect(tools.registerTool).toHaveBeenCalledOnce();
+    expect(tools.registerTool).toHaveBeenCalledWith(
+      expect.objectContaining({ serverToolName: 'bar' }),
+    );
   });
 
   it('teardown drops all three registries (idempotent across calls)', () => {
