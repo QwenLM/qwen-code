@@ -73,6 +73,25 @@ describe('<ThinkMessage />', () => {
     expect(withClick).toContain('to collapse');
   });
 
+  it('hints click-to-collapse when committed, expanded and clickable (VP mode)', () => {
+    const withoutClick = render(
+      <ThinkMessage {...defaultProps} isPending={false} expanded={true} />,
+    ).lastFrame();
+    expect(withoutClick).toContain(`${toggleKeyHint} to collapse`);
+    expect(withoutClick).not.toContain('click');
+
+    const withClick = render(
+      <ThinkMessage
+        {...defaultProps}
+        isPending={false}
+        expanded={true}
+        clickable={true}
+      />,
+    ).lastFrame();
+    expect(withClick).toContain('click');
+    expect(withClick).toContain('to collapse');
+  });
+
   it('should render collapsed line when committed and not expanded', () => {
     const { lastFrame } = render(
       <ThinkMessage {...defaultProps} isPending={false} expanded={false} />,

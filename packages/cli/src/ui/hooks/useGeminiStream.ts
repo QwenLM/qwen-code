@@ -1672,6 +1672,20 @@ export const useGeminiStream = (
     [setThought],
   );
 
+  // Commit a streamed thought item and, when it is a `gemini_thought` head,
+  // migrate the provisional expansion to the committed id. Content tails key
+  // off the head id, so they never settle a second entry.
+  const addItemAndSettleThoughtHead = useCallback(
+    (item: HistoryItemWithoutId, userMessageTimestamp: number): number => {
+      const committedId = addItem(item, userMessageTimestamp);
+      if (item.type === 'gemini_thought') {
+        settlePendingThoughtExpansion?.(committedId);
+      }
+      return committedId;
+    },
+    [addItem, settlePendingThoughtExpansion],
+  );
+
   const handleThoughtEvent = useCallback(
     (
       eventValue: ThoughtSummary,
@@ -1755,13 +1769,10 @@ export const useGeminiStream = (
           newThoughtBuffer,
           safeSplitPoint,
         );
-        const committedSplitId = addItem(
+        addItemAndSettleThoughtHead(
           buildThoughtItem(pendingThoughtType, beforeText),
           userMessageTimestamp,
         );
-        if (pendingThoughtType === 'gemini_thought') {
-          settlePendingThoughtExpansion?.(committedSplitId);
-        }
         pendingThoughtType = 'gemini_thought_content';
         newThoughtBuffer = afterText;
         splitPoint = findLastSafeSplitPoint(
@@ -1777,7 +1788,7 @@ export const useGeminiStream = (
       return newThoughtBuffer;
     },
     [
-      addItem,
+      addItemAndSettleThoughtHead,
       mergeThought,
       pendingThoughtItemRef,
       setPendingThoughtItem,
@@ -1794,20 +1805,12 @@ export const useGeminiStream = (
         if (item.type === 'gemini_thought' && thoughtStartTimeRef.current) {
           item.durationMs = Date.now() - thoughtStartTimeRef.current;
         }
-        const committedId = addItem(item, userMessageTimestamp);
-        if (item.type === 'gemini_thought') {
-          settlePendingThoughtExpansion?.(committedId);
-        }
+        addItemAndSettleThoughtHead(item, userMessageTimestamp);
       }
       setPendingThoughtItem(null);
       thoughtStartTimeRef.current = null;
     },
-    [
-      addItem,
-      pendingThoughtItemRef,
-      setPendingThoughtItem,
-      settlePendingThoughtExpansion,
-    ],
+    [addItemAndSettleThoughtHead, pendingThoughtItemRef, setPendingThoughtItem],
   );
 
   const handleUserCancelledEvent = useCallback(
