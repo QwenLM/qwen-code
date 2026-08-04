@@ -1891,12 +1891,18 @@ describe('qwen-autofix workflow', () => {
     // unforced dispatch) shares ONE group. A run-unique fallback here let two
     // overlapping scans double-claim the same issue — the claim recheck runs
     // after assess and only narrows the race to the short gap between the
-    // recheck and the claim's label write; it does not close it.
+    // recheck and the claim's label write; it does not close it. GitHub
+    // evaluates concurrency before the job `if`, but after `needs`, so the
+    // group is gated on the same runnability predicate as the job `if`:
+    // never-runnable runs get a run-unique group and cannot supersede a
+    // pending target-keyed run. The right edge is anchored to
+    // cancel-in-progress because the value is a folded block scalar — a
+    // run-unique suffix appended as a continuation line would also become
+    // part of the group value while a trailing-newline anchor stayed green.
     expect(issueAutofixJob).toContain(
-      "group: >-\n        qwen-autofix-issue-${{ needs.route.outputs.issue_number || github.event.issue.number || 'scheduled' }}\n",
+      "group: >-\n        ${{ needs.route.outputs.do_issue == 'true' && (github.event_name != 'schedule' || (needs.review-scan.result == 'success' && needs.review-scan.outputs.has_targets != 'true')) && format('qwen-autofix-issue-{0}', needs.route.outputs.issue_number || github.event.issue.number || 'scheduled') || format('qwen-autofix-issue-run-{0}', github.run_id) }}\n      cancel-in-progress: false",
     );
     expect(issueAutofixJob).not.toContain('|| github.run_id }}');
-    expect(issueAutofixJob).toContain('cancel-in-progress: false');
     // The group identity and the scan step's FORCED_ISSUE env are
     // load-bearingly coupled: both must resolve to the same issue on every
     // trigger path, or runs aimed at one issue land in different groups and
@@ -1904,7 +1910,7 @@ describe('qwen-autofix workflow', () => {
     // green. Assert the two expressions equal so neither side can drift
     // alone.
     const groupKeyedOn = issueAutofixJob.match(
-      /qwen-autofix-issue-\$\{\{ (.+?) \|\| 'scheduled' \}\}/,
+      /format\('qwen-autofix-issue-\{0\}', (.+?) \|\| 'scheduled'\)/,
     )?.[1];
     const forcedIssueSource = issueAutofixJob.match(
       /id: 'scan'[\s\S]*?FORCED_ISSUE: '\$\{\{ (.+?) \}\}'/,
