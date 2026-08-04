@@ -113,7 +113,7 @@ const ClickableThinkMessage: React.FC<{
   availableTerminalHeight?: number;
   contentWidth: number;
   durationMs?: number;
-  fullDetail: boolean;
+  forcedOpen: boolean;
   onToggle: () => void;
 }> = ({
   text,
@@ -122,7 +122,7 @@ const ClickableThinkMessage: React.FC<{
   availableTerminalHeight,
   contentWidth,
   durationMs,
-  fullDetail,
+  forcedOpen,
   onToggle,
 }) => {
   const ref = useRef<DOMElement>(null);
@@ -130,13 +130,14 @@ const ClickableThinkMessage: React.FC<{
   const { rows: terminalHeight } = useTerminalSize();
   const settings = useSettings();
   const mouseTrackingEnabled = useMouseTrackingEnabled();
-  // fullDetail (Ctrl+O) forces every thought open and its clicks are
-  // swallowed, so do not advertise a click target that would be ignored.
-  // This single check gates both the hint text and the mouse subscription.
+  // A forced-open thought — Ctrl+O full-detail or the `thoughtExpanded` prop
+  // (SessionPreview) — can never collapse on click, so don't advertise a
+  // click target that would be ignored. This single check gates both the
+  // hint text and the mouse subscription.
   const clickable =
     useVirtualViewport(settings.merged.ui?.useTerminalBuffer) &&
     mouseTrackingEnabled &&
-    !fullDetail;
+    !forcedOpen;
 
   useMouseEvents(
     useCallback(
@@ -266,6 +267,9 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
     fullDetail ||
     (thoughtExpanded ??
       (allExpanded || expandedHeadIds.has(thoughtGroupHeadId)));
+  // fullDetail and `thoughtExpanded === true` both pin the thought open, so
+  // a click could never collapse it — ClickableThinkMessage disarms itself.
+  const forcedOpen = fullDetail || thoughtExpanded === true;
   const settings = useSettings();
   const showTimestamps = settings.merged.output?.showTimestamps === true;
 
@@ -337,7 +341,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           }
           contentWidth={contentWidth}
           durationMs={itemForDisplay.durationMs}
-          fullDetail={fullDetail}
+          forcedOpen={forcedOpen}
           onToggle={() => toggleThought(thoughtGroupHeadId)}
         />
       )}

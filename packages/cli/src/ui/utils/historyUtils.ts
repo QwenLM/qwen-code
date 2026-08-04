@@ -174,3 +174,14 @@ export function buildThoughtHeadIdMap(
   }
   return map;
 }
+
+/** Id of the most recent `gemini_thought` head, or undefined when absent. */
+export function findLastThoughtHeadId(
+  items: readonly HistoryItem[],
+): number | undefined {
+  for (let i = items.length - 1; i >= 0; i--) {
+    const item = items[i];
+    if (item.type === 'gemini_thought') return item.id;
+  }
+  return undefined;
+}

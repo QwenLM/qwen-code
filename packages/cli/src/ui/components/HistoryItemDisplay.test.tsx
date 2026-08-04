@@ -930,6 +930,45 @@ describe('<HistoryItemDisplay />', () => {
       expect(output).not.toContain('click');
     });
 
+    it('disarms the click handler when the thoughtExpanded prop forces the thought open', () => {
+      vi.mocked(useMouseEvents).mockClear();
+      renderWithProviders(
+        <VirtualViewportContext.Provider value={true}>
+          <HistoryItemDisplay
+            item={thoughtItem}
+            terminalWidth={100}
+            isPending={true}
+            thoughtExpanded={true}
+          />
+        </VirtualViewportContext.Provider>,
+      );
+      const opts = vi.mocked(useMouseEvents).mock.calls.at(-1)?.[1];
+
+      // SessionPreview forces thoughts open via the prop; a click could never
+      // collapse one, so the handler must not subscribe — it would only
+      // toggle state the preview never reflects.
+      expect(opts?.isActive).toBe(false);
+    });
+
+    it('drops the click wording from the collapse hint when thoughtExpanded forces the thought open', () => {
+      const { lastFrame } = renderWithProviders(
+        <VirtualViewportContext.Provider value={true}>
+          <HistoryItemDisplay
+            item={thoughtItem}
+            terminalWidth={100}
+            isPending={false}
+            thoughtExpanded={true}
+          />
+        </VirtualViewportContext.Provider>,
+      );
+
+      const output = lastFrame() ?? '';
+      // Same contract as fullDetail: a forced-open thought must not
+      // advertise a click that can never collapse it.
+      expect(output).toContain(`${toggleKeyHint} to collapse`);
+      expect(output).not.toContain('click');
+    });
+
     it('does not toggle when selecting text by dragging', () => {
       const toggle = vi.fn();
       const handler = renderThoughtWithToggle(toggle);

@@ -1190,6 +1190,33 @@ describe('<MainContent />', () => {
         );
         expect(pendingTail.thoughtHeadId).toBe(42);
       });
+
+      it('keys a split pending tail off the committed head, not a committed tail (double-split)', () => {
+        historyItemDisplayPropsSpy.mockClear();
+        renderMainContent(
+          createUIState({
+            useTerminalBuffer: vp,
+            history: [
+              { id: 42, type: 'gemini_thought', text: 'head chunk' },
+              {
+                id: 43,
+                type: 'gemini_thought_content',
+                text: 'committed tail',
+              },
+            ],
+            pendingHistoryItems: [
+              { type: 'gemini_thought_content', text: 'streaming tail…' },
+            ],
+          }),
+        );
+        const pendingTail = findHistoryItemDisplayProps(
+          (c) => c.isPending && c.item.type === 'gemini_thought_content',
+        );
+        // A thought longer than 2x the pending-size cap splits twice: the
+        // already-committed tail item must not steal the key — the pending
+        // tail belongs to the head, so toggling the head expands it too.
+        expect(pendingTail.thoughtHeadId).toBe(42);
+      });
     });
 
     it('keeps the VP tail keyed to the head that commits mid-stream (ref freshness)', () => {

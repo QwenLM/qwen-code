@@ -24,7 +24,10 @@ import {
   countMarkdownSourceBlocks,
   type MarkdownSourceCopyIndexOffsets,
 } from '../utils/MarkdownDisplay.js';
-import { buildThoughtHeadIdMap } from '../utils/historyUtils.js';
+import {
+  buildThoughtHeadIdMap,
+  findLastThoughtHeadId,
+} from '../utils/historyUtils.js';
 import {
   ScrollableList,
   SCROLL_TO_ITEM_END,
@@ -332,15 +335,12 @@ export const MainContent = () => {
   const thoughtHeadIdByItemRef = useRef(thoughtHeadIdByItem);
   thoughtHeadIdByItemRef.current = thoughtHeadIdByItem;
 
-  // Id of the most recently committed `gemini_thought` head. A pending
-  // `gemini_thought_content` tail (long reasoning split) belongs to this head.
-  const lastCommittedThoughtHeadId = useMemo(() => {
-    for (let i = visibleHistory.length - 1; i >= 0; i--) {
-      const item = visibleHistory[i];
-      if (item && item.type === 'gemini_thought') return item.id;
-    }
-    return undefined;
-  }, [visibleHistory]);
+  // A pending `gemini_thought_content` tail (long reasoning split) belongs to
+  // the most recently committed `gemini_thought` head.
+  const lastCommittedThoughtHeadId = useMemo(
+    () => findLastThoughtHeadId(visibleHistory),
+    [visibleHistory],
+  );
   const lastCommittedThoughtHeadIdRef = useRef(lastCommittedThoughtHeadId);
   lastCommittedThoughtHeadIdRef.current = lastCommittedThoughtHeadId;
 
