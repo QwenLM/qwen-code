@@ -9,6 +9,7 @@ import {
   chmodSync,
   constants,
   existsSync,
+  realpathSync,
   statSync,
 } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -541,9 +542,17 @@ export async function runCliEntryPoint(
   }
 }
 
-if (
-  process.argv[1] !== undefined &&
-  import.meta.url === pathToFileURL(process.argv[1]).href
-) {
+let isMain = false;
+if (process.argv[1] !== undefined) {
+  try {
+    const argvRealHref = pathToFileURL(realpathSync(process.argv[1])).href;
+    const argvHref = pathToFileURL(process.argv[1]).href;
+    isMain = import.meta.url === argvHref || import.meta.url === argvRealHref;
+  } catch {
+    isMain = import.meta.url === pathToFileURL(process.argv[1]).href;
+  }
+}
+
+if (isMain) {
   void runCliEntryPoint();
 }

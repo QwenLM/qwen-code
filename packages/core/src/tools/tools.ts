@@ -540,6 +540,12 @@ export interface ToolResult {
    * turns within the same agentic loop.
    */
   modelOverride?: string;
+
+  /**
+   * End the current Goal turn after recording this successful result. Only
+   * honored when the tool batch carries a Goal context; ignored otherwise.
+   */
+  terminateTurn?: boolean;
 }
 
 /**
@@ -711,6 +717,29 @@ export function isShellProgressData(
   );
 }
 
+export const MAX_TERMINAL_IMAGE_BYTES = 8 * 1024 * 1024;
+
+export interface TerminalImageDisplay {
+  type: 'terminal_image';
+  filePath: string;
+  mimeType: 'image/png';
+}
+
+export function isTerminalImageDisplay(
+  display: unknown,
+): display is TerminalImageDisplay {
+  return (
+    typeof display === 'object' &&
+    display !== null &&
+    'type' in display &&
+    display.type === 'terminal_image' &&
+    'filePath' in display &&
+    typeof display.filePath === 'string' &&
+    'mimeType' in display &&
+    display.mimeType === 'image/png'
+  );
+}
+
 export type ToolResultDisplay =
   | string
   | FileDiff
@@ -722,7 +751,8 @@ export type ToolResultDisplay =
   | AnsiOutputDisplay
   | McpToolProgressData
   | VisionBridgeNoticeDisplay
-  | ShellProgressData;
+  | ShellProgressData
+  | TerminalImageDisplay;
 
 export interface TeamResultDisplay {
   type: 'team_result';
@@ -769,10 +799,12 @@ export interface DiffStat {
 
 export interface TodoResultDisplay {
   type: 'todo_list';
+  planId?: string;
   todos: Array<{
     id: string;
     content: string;
     status: 'pending' | 'in_progress' | 'completed';
+    blockedBy?: string[];
   }>;
 }
 

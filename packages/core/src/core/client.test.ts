@@ -3851,7 +3851,7 @@ describe('Gemini Client (client.ts)', () => {
       vi.mocked(client.tryCompressChat).mockRestore();
     });
 
-    it('forwards prompt id, model, force, and signal to chat.tryCompress', async () => {
+    it('forwards prompt id, force, and signal to chat.tryCompress', async () => {
       const tryCompress = vi.fn().mockResolvedValue({
         originalTokenCount: 0,
         newTokenCount: 0,
@@ -3861,21 +3861,14 @@ describe('Gemini Client (client.ts)', () => {
         tryCompress,
         getHistory: vi.fn().mockReturnValue([]),
       } as unknown as GeminiChat;
-      vi.mocked(mockConfig.getModel).mockReturnValue('the-model');
       const signal = new AbortController().signal;
 
       await client.tryCompressChat('p1', true, signal);
 
-      // 5th arg is the `options` bag — undefined when the caller supplies no
+      // 4th arg is the `options` bag — undefined when the caller supplies no
       // customInstructions (the output reservation was retired in favor of
       // the send-path window clamp).
-      expect(tryCompress).toHaveBeenCalledWith(
-        'p1',
-        'the-model',
-        true,
-        signal,
-        undefined,
-      );
+      expect(tryCompress).toHaveBeenCalledWith('p1', true, signal, undefined);
     });
 
     it('forwards customInstructions through the options bag when supplied', async () => {
@@ -3888,17 +3881,12 @@ describe('Gemini Client (client.ts)', () => {
         tryCompress,
         getHistory: vi.fn().mockReturnValue([]),
       } as unknown as GeminiChat;
-      vi.mocked(mockConfig.getModel).mockReturnValue('the-model');
 
       await client.tryCompressChat('p1', true, undefined, 'focus on auth bug');
 
-      expect(tryCompress).toHaveBeenCalledWith(
-        'p1',
-        'the-model',
-        true,
-        undefined,
-        { customInstructions: 'focus on auth bug' },
-      );
+      expect(tryCompress).toHaveBeenCalledWith('p1', true, undefined, {
+        customInstructions: 'focus on auth bug',
+      });
     });
 
     it('flips forceFullIdeContext on a successful compression', async () => {
@@ -6843,6 +6831,9 @@ hello
             config: mockConfig,
           }),
         );
+        expect(
+          mockMemoryManager.scheduleSkillReview.mock.calls[0][0],
+        ).not.toHaveProperty('maxTurns');
       });
 
       it('should reset toolCallCount and push promise when review is scheduled', async () => {

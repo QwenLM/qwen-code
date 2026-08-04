@@ -1,0 +1,922 @@
+name: 'Repo Hygiene Patrol'
+
+# Weekly consolidated hygiene PR (see issue #7383): the agent scans for small,
+# certain docs/test/code hygiene issues and commits fixes on ONE branch.
+# Two-phase design: scan job (read-only) produces findings.json as an
+# artifact; fix job (write) reads it, fixes, and pushes the PR.
+# Splitting keeps each phase within the model's tool-call budget.
+
+on:
+  schedule:
+    - cron: '0 3 * * 1' # Monday 03:00 UTC
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Scan, fix, and verify, but do not push or open a PR'
+        required: false
+        type: 'boolean'
+        default: false
+
+defaults:
+  run:
+    shell: 'bash'
+
+permissions:
+  contents: 'read'
+
+concurrency:
+  group: 'repo-hygiene'
+  cancel-in-progress: false
+
+env:
+  AUTOFIX_BOT: "${{ vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot' }}"
+  WORKDIR: '/tmp/hygiene'
+
+jobs:
+  # ── Phase 0: Dedup (skip the whole patrol while a hygiene PR is open) ───
+  dedup:
+    name: 'Dedup'
+    if: "${{ github.repository == 'QwenLM/qwen-code' }}"
+    # Checks out nothing and runs no repository code (schedule/dispatch use
+    # base-repo YAML), so the persistent ECS pool is safe.
+    # Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    timeout-minutes: 5
+    permissions:
+      contents: 'read'
+    env:
+      REPO: '${{ github.repository }}'
+    outputs:
+      open_prs_present: '${{ steps.dedup.outputs.open_prs_present }}'
+    steps:
+      - name: 'Skip when a hygiene PR is already open'
+        id: 'dedup'
+        env:
+          GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+        run: |-
+          OPEN_PRS="$(gh pr list --repo "${REPO}" --state open --author "${AUTOFIX_BOT}" --json number,headRefName --jq '[.[] | select(.headRefName | startswith("hygiene/")) | .number | tostring] | join(", ")')"
+          if [[ -n "${OPEN_PRS}" ]]; then
+            echo "::notice::Open hygiene PR(s) ${OPEN_PRS} still open; skipping this patrol."
+            echo 'open_prs_present=true' >> "${GITHUB_OUTPUT}"
+          else
+            echo 'open_prs_present=false' >> "${GITHUB_OUTPUT}"
+          fi
+
+  # ── Phase 1: Scan ───────────────────────────────────────────────────────
+  # "Read-only" here means no repository modifications, and that is enforced
+  # only by model compliance plus the AST read-only gate on shell commands —
+  # NOT by the coreTools list below, whose run_shell_command(<cmd>) specifiers
+  # match at the tool level (they enable the whole tool, not specific calls).
+  # With no `permissions` block, shell invocations fall back to the AST gate,
+  # which classifies by command name regardless of arguments, so a read-only
+  # command (e.g. `cat /proc/self/environ`) can still read this step's model
+  # API key. That secret is contained: it is not the write PAT, and it would
+  # only surface in an auditable PR comment. The scan also writes its own
+  # output files (findings.json, report-only.md) to WORKDIR.
+  scan:
+    name: 'Scan'
+    if: "${{ needs.dedup.outputs.open_prs_present == 'false' }}"
+    needs: 'dedup'
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 120
+    permissions:
+      contents: 'read'
+    env:
+      REPO: '${{ github.repository }}'
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: 'Reset hygiene workspace'
+        run: |-
+          rm -rf "${WORKDIR}"
+          mkdir -p "${WORKDIR}"
+
+      - name: 'Check bot credentials'
+        env:
+          GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+        run: |-
+          if [[ -z "${GITHUB_TOKEN}" ]]; then
+            echo '::error::CI_DEV_BOT_PAT is required.'
+            exit 1
+          fi
+          bot_actor="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq '.login')"
+          echo "CI_DEV_BOT_PAT authenticates as ${bot_actor}"
+
+      - name: 'Set up Node.js'
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22.x'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+
+      - name: 'Install dependencies and build'
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: |-
+          for attempt in 1 2 3; do
+            if npm ci --prefer-offline --no-audit --progress=false; then
+              break
+            fi
+            if [[ "${attempt}" == "3" ]]; then exit 1; fi
+            sleep $((attempt * 15))
+          done
+          git config core.hooksPath .husky
+          npm run build
+          npm run bundle
+
+      - name: 'Prepare Qwen Code CLI'
+        run: |-
+          qwen_version="$(node -p "require('./package.json').version")"
+          echo "Using checked-out Qwen Code bundle ${qwen_version}"
+          qwen_bin="${RUNNER_TEMP}/qwen-bin"
+          mkdir -p "${qwen_bin}"
+          cat > "${qwen_bin}/qwen" <<'EOF'
+          #!/usr/bin/env bash
+          exec node "${GITHUB_WORKSPACE}/dist/cli.js" "$@"
+          EOF
+          chmod +x "${qwen_bin}/qwen"
+          echo "${qwen_bin}" >> "${GITHUB_PATH}"
+          PATH="${qwen_bin}:${PATH}"
+          qwen --version
+
+      - name: 'Resolve sandbox image'
+        run: |-
+          node .github/scripts/resolve-sandbox-image.mjs \
+            "$(node -p "require('./package.json').config.sandboxImageUri")"
+
+      - name: 'Run scan agent'
+        id: 'scan'
+        timeout-minutes: 70
+        env:
+          OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.AUTOFIX_OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
+          NO_PROXY: '127.0.0.1,localhost,::1'
+          QWEN_HOME: '${{ runner.temp }}/qwen-hygiene-home'
+          QWEN_TIMEOUT_MS: '3900000'
+          SETTINGS_JSON: |-
+            {
+              "maxSessionTurns": 400,
+              "coreTools": [
+                "read_file",
+                "glob",
+                "search_file_content",
+                "write_file",
+                "agent",
+                "run_shell_command(cat)",
+                "run_shell_command(rg)",
+                "run_shell_command(git diff)",
+                "run_shell_command(git log)",
+                "run_shell_command(git status)",
+                "run_shell_command(ls)",
+                "run_shell_command(mkdir)",
+                "run_shell_command(pwd)"
+              ],
+              "tools": {
+                "sandbox": "docker"
+              }
+            }
+        run: |-
+          rm -rf "${QWEN_HOME}"
+          mkdir -p .qwen "${QWEN_HOME}"
+          if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+            echo '::error::AUTOFIX_OPENAI_API_KEY secret is required.'
+            exit 1
+          fi
+          printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
+          rm -f "${WORKDIR}/failure.md"
+          node .qwen/skills/repo-hygiene/scripts/run-agent.mjs \
+            --mode scan \
+            --workdir "${WORKDIR}"
+
+      - name: 'Upload scan findings'
+        if: 'always()'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'scan-findings'
+          path: |
+            ${{ env.WORKDIR }}/findings.json
+            ${{ env.WORKDIR }}/report-only.md
+            ${{ env.WORKDIR }}/failure.md
+            ${{ env.WORKDIR }}/agent.log
+          if-no-files-found: 'warn'
+          retention-days: 7
+
+  # ── Phase 2: Fix (write code, push PR) ──────────────────────────────────
+  fix:
+    name: 'Fix'
+    if: "${{ needs.scan.result == 'success' }}"
+    needs: 'scan'
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 180
+    permissions:
+      contents: 'read'
+    env:
+      REPO: '${{ github.repository }}'
+      DRY_RUN: "${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}"
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: 'Reset hygiene workspace'
+        run: |-
+          rm -rf "${WORKDIR}"
+          mkdir -p "${WORKDIR}"
+
+      - name: 'Stage trusted gates'
+        run: |-
+          cp .github/scripts/check-settings-schema.sh "${RUNNER_TEMP}/check-settings-schema.sh"
+          cp .github/scripts/check-autofix-contracts.sh "${RUNNER_TEMP}/check-autofix-contracts.sh"
+          cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"
+
+      - name: 'Download scan findings'
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
+        with:
+          name: 'scan-findings'
+          path: '${{ env.WORKDIR }}'
+
+      - name: 'Validate findings'
+        run: |-
+          # The scan runner exits 0 on an agent-written failure.md (blocked is
+          # a reportable outcome, not an infra error), so the gate lives here:
+          # never fix from a scan that said it could not complete.
+          if [[ -s "${WORKDIR}/failure.md" ]]; then
+            echo '::error::Scan phase reported it was blocked:'
+            cat "${WORKDIR}/failure.md"
+            exit 1
+          fi
+          if [[ ! -s "${WORKDIR}/findings.json" ]]; then
+            echo '::error::findings.json not found or empty.'
+            exit 1
+          fi
+          if ! jq -e . "${WORKDIR}/findings.json" > /dev/null; then
+            echo '::error::findings.json is not valid JSON.'
+            exit 1
+          fi
+          if ! jq -e '(.fixes | type == "array") and (.reportOnly | type == "array")' "${WORKDIR}/findings.json" > /dev/null; then
+            echo '::error::findings.json missing fixes/reportOnly arrays.'
+            exit 1
+          fi
+          echo "Findings: $(jq '.fixes | length' "${WORKDIR}/findings.json") fixes, $(jq '.reportOnly | length' "${WORKDIR}/findings.json") report-only."
+
+      - name: 'Check bot credentials'
+        id: 'creds'
+        env:
+          GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+        run: |-
+          if [[ -z "${GITHUB_TOKEN}" ]]; then
+            echo '::error::CI_DEV_BOT_PAT is required.'
+            exit 1
+          fi
+          bot_actor="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq '.login')"
+          if [[ "${bot_actor}" != "${AUTOFIX_BOT}" ]]; then
+            echo "::error::CI_DEV_BOT_PAT authenticates as ${bot_actor}; expected ${AUTOFIX_BOT}."
+            exit 1
+          fi
+
+      - name: 'Skip when a hygiene PR is already open'
+        id: 'dedup'
+        env:
+          GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+        run: |-
+          OPEN_PRS="$(gh pr list --repo "${REPO}" --state open --author "${AUTOFIX_BOT}" --json number,headRefName --jq '[.[] | select(.headRefName | startswith("hygiene/")) | .number | tostring] | join(", ")')"
+          if [[ -n "${OPEN_PRS}" ]]; then
+            echo "::notice::Open hygiene PR(s) ${OPEN_PRS} still open; skipping."
+            echo 'open_prs_present=true' >> "${GITHUB_OUTPUT}"
+          else
+            echo 'open_prs_present=false' >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: 'Check runner environment'
+        if: "${{ steps.dedup.outputs.open_prs_present == 'false' }}"
+        env:
+          RUNNER_ENVIRONMENT: '${{ runner.environment }}'
+        run: |-
+          case "${RUNNER_ENVIRONMENT}" in
+            github-hosted) ;;
+            *) echo "::error::Unsupported runner environment."; exit 1 ;;
+          esac
+
+      - name: 'Set up Node.js'
+        if: "${{ steps.dedup.outputs.open_prs_present == 'false' }}"
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22.x'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+
+      - name: 'Install dependencies and build'
+        if: "${{ steps.dedup.outputs.open_prs_present == 'false' }}"
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: |-
+          for attempt in 1 2 3; do
+            if npm ci --prefer-offline --no-audit --progress=false; then break; fi
+            if [[ "${attempt}" == "3" ]]; then exit 1; fi
+            sleep $((attempt * 15))
+          done
+          git config core.hooksPath .husky
+          npm run build
+          npm run bundle
+
+      - name: 'Prepare Qwen Code CLI'
+        if: "${{ steps.dedup.outputs.open_prs_present == 'false' }}"
+        run: |-
+          qwen_bin="${RUNNER_TEMP}/qwen-bin"
+          mkdir -p "${qwen_bin}"
+          cat > "${qwen_bin}/qwen" <<'EOF'
+          #!/usr/bin/env bash
+          exec node "${GITHUB_WORKSPACE}/dist/cli.js" "$@"
+          EOF
+          chmod +x "${qwen_bin}/qwen"
+          echo "${qwen_bin}" >> "${GITHUB_PATH}"
+          PATH="${qwen_bin}:${PATH}"
+          qwen --version
+
+      - name: 'Resolve branch name'
+        if: "${{ steps.dedup.outputs.open_prs_present == 'false' }}"
+        id: 'branch'
+        run: |-
+          echo "name=hygiene/$(date -u +%Y%m%d-%H%M)" >> "${GITHUB_OUTPUT}"
+
+      - name: 'Resolve sandbox image'
+        if: "${{ steps.dedup.outputs.open_prs_present == 'false' }}"
+        run: |-
+          node .github/scripts/resolve-sandbox-image.mjs \
+            "$(node -p "require('./package.json').config.sandboxImageUri")"
+
+      - name: 'Run fix agent'
+        if: "${{ steps.dedup.outputs.open_prs_present == 'false' }}"
+        id: 'agent'
+        timeout-minutes: 80
+        env:
+          OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.AUTOFIX_OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
+          NO_PROXY: '127.0.0.1,localhost,::1'
+          QWEN_HOME: '${{ runner.temp }}/qwen-hygiene-home'
+          QWEN_TIMEOUT_MS: '4500000'
+          SETTINGS_JSON: |-
+            {
+              "maxSessionTurns": 400,
+              "coreTools": [
+                "read_file",
+                "glob",
+                "search_file_content",
+                "write_file",
+                "run_shell_command(cat)",
+                "run_shell_command(rg)",
+                "run_shell_command(git add)",
+                "run_shell_command(git checkout)",
+                "run_shell_command(git clean)",
+                "run_shell_command(git commit)",
+                "run_shell_command(git diff)",
+                "run_shell_command(git log)",
+                "run_shell_command(git status)",
+                "run_shell_command(git switch)",
+                "run_shell_command(ls)",
+                "run_shell_command(mkdir)",
+                "run_shell_command(npm run build)",
+                "run_shell_command(npm run typecheck)",
+                "run_shell_command(npm run lint)",
+                "run_shell_command(npx vitest)",
+                "run_shell_command(npm run generate:settings-schema)",
+                "run_shell_command(pwd)"
+              ],
+              "permissions": {
+                "allow": [
+                  "run_shell_command(cat)",
+                  "run_shell_command(rg)",
+                  "run_shell_command(git add)",
+                  "run_shell_command(git checkout)",
+                  "run_shell_command(git clean)",
+                  "run_shell_command(git commit)",
+                  "run_shell_command(git diff)",
+                  "run_shell_command(git log)",
+                  "run_shell_command(git status)",
+                  "run_shell_command(git switch)",
+                  "run_shell_command(ls)",
+                  "run_shell_command(mkdir)",
+                  "run_shell_command(npm run build)",
+                  "run_shell_command(npm run typecheck)",
+                  "run_shell_command(npm run lint)",
+                  "run_shell_command(npx vitest)",
+                  "run_shell_command(npm run generate:settings-schema)",
+                  "run_shell_command(pwd)"
+                ],
+                "deny": [
+                  "write_file(/.git/**)",
+                  "write_file(/.husky/**)",
+                  "write_file(/.github/**)",
+                  "write_file(/.qwen/**)",
+                  "write_file(**/package.json)",
+                  "write_file(**/package-lock.json)",
+                  "write_file(**/.npmrc)",
+                  "write_file(**/makefile)",
+                  "write_file(**/Makefile)",
+                  "write_file(**/gnumakefile)",
+                  "write_file(**/GNUmakefile)",
+                  "write_file(**/justfile)",
+                  "write_file(**/.justfile)",
+                  "write_file(**/taskfile.yml)",
+                  "write_file(**/taskfile.yaml)",
+                  "write_file(**/tsconfig.json)",
+                  "write_file(**/tsconfig.*.json)",
+                  "write_file(**/eslint.config.*)",
+                  "write_file(**/eslint.legacy-filenames.*)",
+                  "write_file(**/vitest.config.*)",
+                  "write_file(**/vite.config.*)",
+                  "write_file(**/node_modules/**)"
+                ]
+              },
+              "tools": {
+                "sandbox": "docker"
+              }
+            }
+        run: |-
+          rm -rf "${QWEN_HOME}"
+          mkdir -p .qwen "${QWEN_HOME}"
+          printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
+          rm -f "${WORKDIR}/failure.md"
+          node .qwen/skills/repo-hygiene/scripts/run-agent.mjs \
+            --mode fix \
+            --workdir "${WORKDIR}" \
+            --branch "${{ steps.branch.outputs.name }}"
+
+      # Salvage: when the agent fails after committing, move committed
+      # findings to reportOnly so the issue step can still report them.
+      - name: 'Salvage committed findings on failure'
+        if: "${{ always() && steps.dedup.outputs.open_prs_present == 'false' }}"
+        run: |-
+          BRANCH="${{ steps.branch.outputs.name }}"
+          if [[ ! -f "${WORKDIR}/failure.md" ]] && [[ "${{ steps.agent.outcome }}" == "success" ]]; then
+            exit 0
+          fi
+          if ! git rev-parse --verify "${BRANCH}" > /dev/null 2>&1; then
+            exit 0
+          fi
+          COMMITS="$(git rev-list --count origin/main.."${BRANCH}" 2>/dev/null || echo 0)"
+          if [[ "${COMMITS}" -eq 0 ]]; then
+            exit 0
+          fi
+          echo "Agent failed after ${COMMITS} commit(s); salvaging committed findings."
+          SALVAGED_MSGS="$(git log --format='%s' origin/main.."${BRANCH}")"
+          export SALVAGED_MSGS
+          node -e '
+            const fs = require("fs");
+            const f = JSON.parse(fs.readFileSync(process.env.WORKDIR + "/findings.json", "utf8"));
+            const salvaged = (process.env.SALVAGED_MSGS || "").split("\n").filter(Boolean);
+            const moved = [];
+            f.fixes = f.fixes.filter(fix => {
+              if (!salvaged.some(msg => msg.includes(`[${fix.id}]`))) return true;
+              fix.status = "salvaged"; moved.push(fix); return false;
+            });
+            for (const m of moved) {
+              f.reportOnly.push({ id: m.id, rootCause: m.rootCause, evidence: m.evidence, whyReal: m.whyReal, minimalFix: m.minimalFix + " (salvaged: agent failed after committing)", status: "salvaged" });
+            }
+            fs.writeFileSync(process.env.WORKDIR + "/findings.json", JSON.stringify(f, null, 2));
+            console.log(`Salvaged ${moved.length} committed finding(s) to reportOnly.`);
+          '
+
+      # Gate: verify agent output before pushing
+      - name: 'Gate on agent outcome'
+        if: "${{ steps.dedup.outputs.open_prs_present == 'false' }}"
+        id: 'gate'
+        run: |-
+          BRANCH="${{ steps.branch.outputs.name }}"
+
+          if [[ -f "${WORKDIR}/failure.md" ]]; then
+            echo '🛑 Agent aborted intentionally:'
+            cat "${WORKDIR}/failure.md"
+            exit 1
+          fi
+
+          if ! git rev-parse --verify "${BRANCH}" > /dev/null 2>&1; then
+            echo 'No branch produced — no accepted fixes this run.'
+            echo 'result=no-fixes' >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          git config core.hooksPath /dev/null
+          git config core.fsmonitor false
+          git checkout "${BRANCH}"
+
+          # Move committed findings to reportOnly so they surface in the
+          # consolidated issue instead of vanishing when the artifact expires.
+          move_committed_to_report_only() {
+            node -e '
+              const fs = require("fs");
+              const f = JSON.parse(fs.readFileSync(process.env.WORKDIR + "/findings.json", "utf8"));
+              const moved = f.fixes.splice(0, f.fixes.length);
+              for (const m of moved) {
+                f.reportOnly.push({ id: m.id, rootCause: m.rootCause, evidence: m.evidence, whyReal: m.whyReal, minimalFix: m.minimalFix + " (gate failed before push)", status: "gate-failed" });
+              }
+              fs.writeFileSync(process.env.WORKDIR + "/findings.json", JSON.stringify(f, null, 2));
+              console.log("Moved " + moved.length + " committed finding(s) to reportOnly (gate failed).");
+            '
+          }
+
+          # Dirty-tree check must precede the no-diff early exit: an agent
+          # that edited files but never committed has no committed diff, and
+          # that failure must not pass as a clean no-fixes run.
+          if [[ -n "$(git status --porcelain)" ]]; then
+            echo '❌ Working tree is dirty:'
+            git status --short
+            move_committed_to_report_only
+            exit 1
+          fi
+
+          if git diff --quiet origin/main..."${BRANCH}"; then
+            echo 'Branch has no changes against main.'
+            echo 'result=no-fixes' >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          for f in pr-title.txt pr-body.md; do
+            if [[ ! -s "${WORKDIR}/${f}" ]]; then
+              echo "❌ Branch has commits but ${f} is missing"
+              move_committed_to_report_only
+              exit 1
+            fi
+          done
+
+          # Caps count production code only: fix.md mandates a regression
+          # test per fix, so counting tests/docs would drop in-policy work.
+          PROD_EXCLUDE='(^docs/|\.md$|\.test\.|\.spec\.|__tests__/|__snapshots__/)'
+          export PROD_EXCLUDE
+          MAX_FILES_PER_FIX='3'
+          MAX_LINES_PER_FIX='100'
+          DROPPED_COMMITS=()
+          while IFS= read -r sha; do
+            FILES="$(git diff-tree --no-commit-id --name-only -r "${sha}" | grep -c -v -E "${PROD_EXCLUDE}" || true)"
+            if [[ "${FILES}" -gt "${MAX_FILES_PER_FIX}" ]]; then
+              echo "⚠️  Commit ${sha:0:7} touches ${FILES} production files; cap is ${MAX_FILES_PER_FIX}. Dropping."
+              DROPPED_COMMITS+=("${sha}")
+              continue
+            fi
+            LINES="$(git diff-tree --no-commit-id --numstat -r "${sha}" | awk '$3 !~ ENVIRON["PROD_EXCLUDE"] {a+=$1+$2} END {print a+0}')"
+            if [[ "${LINES}" -gt "${MAX_LINES_PER_FIX}" ]]; then
+              echo "⚠️  Commit ${sha:0:7} has ${LINES} production diff lines; cap is ${MAX_LINES_PER_FIX}. Dropping."
+              DROPPED_COMMITS+=("${sha}")
+            fi
+          done < <(git rev-list origin/main.."${BRANCH}")
+
+          if [[ "${#DROPPED_COMMITS[@]}" -gt 0 ]]; then
+            # Capture commit messages before rebase removes them
+            DROPPED_MSGS="$(for sha in "${DROPPED_COMMITS[@]}"; do git log -1 --format='%s' "${sha}"; done)"
+
+            # Drop every bad commit in ONE rebase. Sequential rebases only
+            # work while drops stay newest-first (later rebases would chase
+            # SHAs rewritten by earlier ones); a single todo edit has no
+            # ordering assumption.
+            # core.abbrev=40 makes the todo list full SHAs so the sed match
+            # cannot hit a colliding short-SHA prefix.
+            SED_EXPRS=''
+            for sha in "${DROPPED_COMMITS[@]}"; do
+              SED_EXPRS="${SED_EXPRS} -e 's/^pick \(${sha}\)/drop \1/'"
+            done
+            if ! GIT_SEQUENCE_EDITOR="sed -i${SED_EXPRS}" git -c core.abbrev=40 rebase -i "origin/main"; then
+              echo '⚠️  Rebase conflicted while dropping oversized commits; aborting and salvaging.'
+              git rebase --abort || true
+              move_committed_to_report_only
+              exit 1
+            fi
+
+            # Update findings.json: move dropped fixes to reportOnly
+            export DROPPED_MSGS
+            node -e '
+              const fs = require("fs");
+              const f = JSON.parse(fs.readFileSync(process.env.WORKDIR + "/findings.json", "utf8"));
+              const dropped = (process.env.DROPPED_MSGS || "").split("\n").filter(Boolean);
+              const moved = [];
+              f.fixes = f.fixes.filter(fix => {
+                const match = dropped.some(msg => msg.includes(`[${fix.id}]`));
+                if (match) { fix.status = "dropped-gate"; moved.push(fix); return false; }
+                return true;
+              });
+              for (const m of moved) {
+                f.reportOnly.push({ id: m.id, rootCause: m.rootCause, evidence: m.evidence, whyReal: m.whyReal, minimalFix: m.minimalFix + " (dropped by gate: exceeded per-commit threshold)", status: "dropped-gate" });
+              }
+              fs.writeFileSync(process.env.WORKDIR + "/findings.json", JSON.stringify(f, null, 2));
+              console.log(`Moved ${moved.length} finding(s) to reportOnly.`);
+            '
+
+            # Keep the PR body honest about what was dropped
+            {
+              echo
+              echo '> **Note**: CI dropped the following commit(s) for exceeding the per-commit size cap; they are filed as report-only findings instead:'
+              while IFS= read -r msg; do
+                if [[ -n "${msg}" ]]; then echo "> - ${msg}"; fi
+              done <<< "${DROPPED_MSGS}"
+            } >> "${WORKDIR}/pr-body.md"
+
+            # If no commits left, bail
+            COMMITS="$(git rev-list --count origin/main..HEAD)"
+            if [[ "${COMMITS}" -eq 0 ]]; then
+              echo 'All commits dropped — nothing left to push.'
+              echo 'result=no-fixes' >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+          fi
+
+          COMMITS="$(git rev-list --count origin/main.."${BRANCH}")"
+          echo "commits=${COMMITS}" >> "${GITHUB_OUTPUT}"
+          echo 'result=fixes' >> "${GITHUB_OUTPUT}"
+
+      # Verification with auto-revert.
+      #
+      # SECURITY: the checks below compile and EXECUTE agent-written files —
+      # vitest runs the agent's test files, generate:settings-schema executes
+      # the writable settingsSchema.ts, and eslint/build/typecheck process the
+      # agent's source. Scanned repo content is untrusted, and fix.md mandates
+      # a regression test per fix, so a prompt-injected finding could smuggle in
+      # a "regression test" carrying top-level code. Running that on the bare
+      # runner would be arbitrary code execution as the runner user, which could
+      # then poison the workspace .git/config and hijack the PAT-bearing push
+      # that follows. Every code-touching check therefore runs inside the same
+      # docker sandbox image the agent uses, with networking disabled, so
+      # untrusted code executes in an isolated, egress-less container (the flags
+      # harden the CLI sandbox defaults and add --network none). Orchestration — the revert
+      # loop, findings.json bookkeeping, outputs — stays on the host; the push
+      # step additionally pushes from a clean clone so nothing this step touched
+      # can redirect it.
+      - name: 'Independent verification'
+        if: "${{ steps.gate.outputs.result == 'fixes' }}"
+        id: 'verify'
+        run: |-
+          # Each code-touching check below runs inside the network-less sandbox
+          # image using the docker args below, bound to the workspace so it sees
+          # the branch under verification. --user matches the runner uid so
+          # sandbox-created files stay runner-owned (the host's git reset --hard
+          # below must be able to overwrite them). RUNNER_TEMP is mounted
+          # read-only for the trusted staged gate scripts. WORKDIR holds the
+          # pr-title.txt / pr-body.md / findings.json that the publish and issue
+          # steps consume AFTER this step, so it is mounted read-only: untrusted
+          # code executing here must not rewrite the prose the bot later
+          # publishes. HOME and the npm cache therefore live in a dedicated
+          # read-write scratch dir (a sibling of WORKDIR) instead of WORKDIR.
+          # GITHUB_OUTPUT is deliberately NOT passed: the gate scripts skip their
+          # outcome write when it is unset and signal failure by exit code, which
+          # docker propagates back to this step. The docker run is invoked as a
+          # top-level command (not wrapped in a function) so a check failure
+          # trips the ERR salvage trap below exactly as the bare command did.
+          SANDBOX_SCRATCH="${WORKDIR}-sandbox"
+          SANDBOX_ARGS=(
+            --init --rm -i
+            --network none
+            --user "$(id -u):$(id -g)"
+            --cap-drop ALL
+            --security-opt no-new-privileges
+            --workdir "${GITHUB_WORKSPACE}"
+            --mount "type=bind,src=${GITHUB_WORKSPACE},dst=${GITHUB_WORKSPACE}"
+            --mount "type=bind,src=${WORKDIR},dst=${WORKDIR},readonly"
+            --mount "type=bind,src=${RUNNER_TEMP},dst=${RUNNER_TEMP},readonly"
+            --mount "type=bind,src=${SANDBOX_SCRATCH},dst=${SANDBOX_SCRATCH}"
+            -e "HOME=${SANDBOX_SCRATCH}/sandbox-home"
+            -e "npm_config_cache=${SANDBOX_SCRATCH}/npm-cache"
+          )
+          mkdir -p "${SANDBOX_SCRATCH}/sandbox-home" "${SANDBOX_SCRATCH}/npm-cache"
+
+          # Re-stage gate scripts from the trusted checkout: the agent's
+          # write_file deny list cannot cover RUNNER_TEMP (out-of-workspace),
+          # so overwrite any tampered copies before verification uses them.
+          cp .github/scripts/check-settings-schema.sh "${RUNNER_TEMP}/check-settings-schema.sh"
+          cp .github/scripts/check-autofix-contracts.sh "${RUNNER_TEMP}/check-autofix-contracts.sh"
+          cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"
+
+          # Typecheck only, by design: it catches most bad model-generated
+          # commits cheaply. Lint/build breakage still fails the job below.
+          REVERTED=0
+          REVERTED_MSGS=''
+          BREAKER_MSG=''
+          while true; do
+            if docker run "${SANDBOX_ARGS[@]}" "${QWEN_SANDBOX_IMAGE}" bash -c 'npm run typecheck'; then break; fi
+            COMMITS_LEFT="$(git rev-list --count origin/main..HEAD)"
+            if [[ "${COMMITS_LEFT}" -le 0 ]]; then
+              echo '❌ All commits reverted; baseline still fails typecheck.'
+              break
+            fi
+            BAD="$(git rev-parse --short HEAD)"
+            echo "⏪ Reverting ${BAD} (typecheck failed)"
+            REVERTED_MSGS="${REVERTED_MSGS}$(git log -1 --format='%s' HEAD)"$'\n'
+            git reset --hard HEAD~1
+            REVERTED=$((REVERTED + 1))
+          done
+          if [[ "${REVERTED}" -gt 0 ]]; then
+            # The last commit reverted is the one whose removal made typecheck
+            # pass — the actual breaker. Everything reverted before it is
+            # collateral: healthy commits discarded while isolating the fault.
+            BREAKER_MSG="$(tail -n 1 <<< "${REVERTED_MSGS%$'\n'}")"
+            echo "⚠️  Reverted ${REVERTED} commit(s); breaker: ${BREAKER_MSG}"
+            {
+              echo
+              echo '> **Note**: CI reverted the following commit(s) while isolating a typecheck failure; they are not included in this PR:'
+              while IFS= read -r msg; do
+                if [[ -n "${msg}" ]]; then echo "> - ${msg}"; fi
+              done <<< "${REVERTED_MSGS}"
+            } >> "${WORKDIR}/pr-body.md"
+
+            # Mirror the gate step: a reverted finding must not stay
+            # "committed" in findings.json, or the consolidated issue
+            # never reports it. The breaker gets "reverted-verify";
+            # collateral commits get "reverted-collateral" so the
+            # consolidated issue does not report healthy findings as failed.
+            export REVERTED_MSGS BREAKER_MSG
+            node -e '
+              const fs = require("fs");
+              const f = JSON.parse(fs.readFileSync(process.env.WORKDIR + "/findings.json", "utf8"));
+              const reverted = (process.env.REVERTED_MSGS || "").split("\n").filter(Boolean);
+              const breaker = (process.env.BREAKER_MSG || "").trim();
+              const moved = [];
+              f.fixes = f.fixes.filter(fix => {
+                if (!reverted.some(msg => msg.includes(`[${fix.id}]`))) return true;
+                const isBreaker = breaker.includes(`[${fix.id}]`);
+                fix.status = isBreaker ? "reverted-verify" : "reverted-collateral";
+                moved.push({ fix: fix, isBreaker: isBreaker });
+                return false;
+              });
+              for (const { fix: m, isBreaker } of moved) {
+                const suffix = isBreaker
+                  ? " (reverted by CI: typecheck failed)"
+                  : " (reverted by CI: collateral while isolating typecheck failure)";
+                f.reportOnly.push({ id: m.id, rootCause: m.rootCause, evidence: m.evidence, whyReal: m.whyReal, minimalFix: m.minimalFix + suffix, status: m.status });
+              }
+              fs.writeFileSync(process.env.WORKDIR + "/findings.json", JSON.stringify(f, null, 2));
+              console.log(`Moved ${moved.length} reverted finding(s) to reportOnly (${moved.filter(m => m.isBreaker).length} breaker, ${moved.filter(m => !m.isBreaker).length} collateral).`);
+            '
+
+            COMMITS="$(git rev-list --count origin/main..HEAD)"
+            echo "commits=${COMMITS}" >> "${GITHUB_OUTPUT}"
+            if [[ "${COMMITS}" -eq 0 ]]; then
+              echo 'result=no-fixes' >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+          fi
+          # Mirror the revert path above: if a post-typecheck check (build,
+          # lint, settings schema, or tests) fails, no PR opens, yet the
+          # surviving committed findings must still surface in the consolidated
+          # report-only issue instead of vanishing when the artifact expires.
+          # Under `bash -e` any failing command below trips this ERR trap, which
+          # moves every remaining fix to reportOnly before the step exits
+          # non-zero.
+          move_surviving_to_report_only() {
+            node -e '
+              const fs = require("fs");
+              const f = JSON.parse(fs.readFileSync(process.env.WORKDIR + "/findings.json", "utf8"));
+              const moved = f.fixes.splice(0, f.fixes.length);
+              for (const m of moved) {
+                f.reportOnly.push({ id: m.id, rootCause: m.rootCause, evidence: m.evidence, whyReal: m.whyReal, minimalFix: m.minimalFix + " (CI verification failed after typecheck)", status: "failed-verify" });
+              }
+              fs.writeFileSync(process.env.WORKDIR + "/findings.json", JSON.stringify(f, null, 2));
+              console.log(`Moved ${moved.length} surviving finding(s) to reportOnly (verify failed).`);
+            '
+          }
+          trap move_surviving_to_report_only ERR
+
+          docker run "${SANDBOX_ARGS[@]}" "${QWEN_SANDBOX_IMAGE}" bash -c 'npm run build'
+          docker run "${SANDBOX_ARGS[@]}" "${QWEN_SANDBOX_IMAGE}" bash -c 'npm run lint'
+          docker run "${SANDBOX_ARGS[@]}" "${QWEN_SANDBOX_IMAGE}" bash -c "bash '${RUNNER_TEMP}/check-settings-schema.sh'"
+          git diff --name-only origin/main...HEAD \
+            | docker run "${SANDBOX_ARGS[@]}" "${QWEN_SANDBOX_IMAGE}" bash -c "bash '${RUNNER_TEMP}/check-autofix-contracts.sh'"
+
+          CHANGED_PKGS="$(git diff --name-only origin/main...HEAD \
+            | docker run "${SANDBOX_ARGS[@]}" "${QWEN_SANDBOX_IMAGE}" bash -c "bash '${RUNNER_TEMP}/resolve-owning-packages.sh'")"
+          if [[ -z "${CHANGED_PKGS}" ]]; then
+            echo 'No package changes detected; skipping tests.'
+          else
+            for p in ${CHANGED_PKGS}; do
+              if [[ ! -f "${p}/package.json" ]]; then continue; fi
+              test_script="$(node -e 'const fs = require("node:fs"); const pkg = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(pkg.scripts?.test || "");' "${p}/package.json")"
+              if [[ "${test_script}" != *vitest* ]]; then continue; fi
+              echo "🧪 Testing ${p}..."
+              docker run "${SANDBOX_ARGS[@]}" "${QWEN_SANDBOX_IMAGE}" bash -c "npm run test --workspace '${p}' --if-present -- --changed origin/main --passWithNoTests"
+            done
+          fi
+
+      - name: 'Push and open PR'
+        if: "${{ success() && steps.gate.outputs.result == 'fixes' && steps.verify.outputs.result != 'no-fixes' && env.DRY_RUN != 'true' }}"
+        id: 'publish'
+        env:
+          GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+          MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
+        run: |-
+          MODEL_DISPLAY="${MODEL:-default}"
+          BRANCH="${{ steps.branch.outputs.name }}"
+
+          # SECURITY: the verification step executed agent-written files (now
+          # sandboxed and network-less) but still shared this workspace, so
+          # treat the workspace git config as untrusted: a poisoned .git/config
+          # (http.proxy / url.*.insteadOf) or a pre-push hook could reroute the
+          # PAT-bearing push below. Push from a fresh clone whose config git
+          # created clean, with global/system config neutralized and hooks
+          # bypassed, so nothing the verification touched can redirect the
+          # authenticated URL. The PAT is passed only on the push command line,
+          # never written to any config file.
+          PUSH_DIR="$(mktemp -d)"
+          export GIT_CONFIG_GLOBAL=/dev/null
+          export GIT_CONFIG_SYSTEM=/dev/null
+          git clone --no-checkout "file://${GITHUB_WORKSPACE}" "${PUSH_DIR}"
+          git -C "${PUSH_DIR}" push --no-verify \
+            "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git" \
+            "${BRANCH}:${BRANCH}"
+
+          if [[ -s "${WORKDIR}/pr-body.md" ]]; then
+            {
+              echo
+              echo "---"
+              echo "🧠 Scanned and fixed by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`"
+            } >> "${WORKDIR}/pr-body.md"
+          fi
+
+          PR_URL="$(gh pr create --repo "${REPO}" \
+            --base main --head "${BRANCH}" \
+            --title "$(cat "${WORKDIR}/pr-title.txt")" \
+            --body-file "${WORKDIR}/pr-body.md")"
+          echo "🚀 Opened ${PR_URL}"
+
+          # Label requested by issue #7383. Non-fatal: never create labels,
+          # and a repo without it should not fail the run.
+          gh pr edit "${PR_URL}" --add-label 'autofix/repo-hygiene' \
+            || echo '⚠️  Could not add label autofix/repo-hygiene (missing in this repo?)'
+
+          if [[ -s "${WORKDIR}/report-only.md" ]]; then
+            {
+              echo
+              echo "---"
+              echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`"
+            } >> "${WORKDIR}/report-only.md"
+            gh pr comment "${PR_URL}" --body-file "${WORKDIR}/report-only.md"
+          fi
+
+      - name: 'File report-only findings as issue'
+        if: "${{ always() && !cancelled() && steps.creds.outcome == 'success' && env.DRY_RUN != 'true' }}"
+        env:
+          GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+        run: |-
+          if [[ -s "${WORKDIR}/failure.md" ]]; then
+            SALVAGED="$(jq '[.reportOnly[] | select(.status == "salvaged")] | length' "${WORKDIR}/findings.json" 2>/dev/null || echo 0)"
+            if [[ "${SALVAGED}" -eq 0 ]]; then
+              echo 'Scan/fix was blocked — not filing partial findings.'
+              exit 0
+            fi
+            echo "Filing ${SALVAGED} salvaged finding(s) despite failure."
+          fi
+          if [[ ! -s "${WORKDIR}/findings.json" ]]; then
+            echo 'No findings.json — skipping.'
+            exit 0
+          fi
+          COUNT="$(jq '.reportOnly | length' "${WORKDIR}/findings.json")"
+          if [[ "${COUNT}" -eq 0 ]]; then
+            echo 'No report-only findings — skipping.'
+            exit 0
+          fi
+          BODY="$(jq -r '
+            .reportOnly | to_entries[] |
+            "## \(.value.id)\n\n" +
+            "**Root cause**: \(.value.rootCause)\n\n" +
+            "**Evidence**: `\(.value.evidence)`\n\n" +
+            "**Why real**: \(.value.whyReal)\n\n" +
+            "**Suggested fix**: \(.value.minimalFix)\n"
+          ' "${WORKDIR}/findings.json")"
+          FULL_BODY="$(printf '%s\n\n---\n\n_Auto-generated by repo-hygiene patrol on %s._\n' \
+            "${BODY}" "$(date -u '+%Y-%m-%d')")"
+          EXISTING_NUMBER="$(GH_TOKEN="${GITHUB_TOKEN}" gh issue list \
+            --repo "${REPO}" \
+            --state open \
+            --search "repo-hygiene report-only in:title" \
+            --json number --jq '.[0].number // empty')"
+          if [[ -n "${EXISTING_NUMBER}" ]]; then
+            GH_TOKEN="${GITHUB_TOKEN}" gh issue comment "${EXISTING_NUMBER}" \
+              --repo "${REPO}" \
+              --body "${FULL_BODY}"
+            echo "Appended ${COUNT} report-only findings to existing issue #${EXISTING_NUMBER}."
+            exit 0
+          fi
+          ISSUE_TITLE="[repo-hygiene] $(date -u '+%G-W%V') report-only findings (${COUNT} items)"
+          GH_TOKEN="${GITHUB_TOKEN}" gh issue create \
+            --repo "${REPO}" \
+            --title "${ISSUE_TITLE}" \
+            --body "${FULL_BODY}" \
+            --label "bug"
+          echo "Filed ${COUNT} report-only findings as issue."
+
+      - name: 'Upload run artifacts'
+        if: 'always()'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'fix-artifacts'
+          path: |
+            ${{ env.WORKDIR }}/findings.json
+            ${{ env.WORKDIR }}/report-only.md
+            ${{ env.WORKDIR }}/failure.md
+            ${{ env.WORKDIR }}/agent.log
+            ${{ env.WORKDIR }}/pr-title.txt
+            ${{ env.WORKDIR }}/pr-body.md
+          if-no-files-found: 'ignore'
+          retention-days: 14

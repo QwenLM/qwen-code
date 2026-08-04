@@ -438,9 +438,11 @@ describe('extension tests', () => {
       try {
         await manager.commitPreparedExtension(prepared);
         expect(
-          fs.readFileSync(
-            path.join(prepared.destinationDirectory, 'README.md'),
-            'utf8',
+          path.normalize(
+            fs.readFileSync(
+              path.join(prepared.destinationDirectory, 'README.md'),
+              'utf8',
+            ),
           ),
         ).toBe(path.join(prepared.destinationDirectory, 'scripts', 'setup.sh'));
       } finally {
@@ -1183,10 +1185,24 @@ describe('extension tests', () => {
 
       // Triggered by the enablement file moving, so the first refresh does not
       // observe ext-b.
-      fs.writeFileSync(
-        path.join(userExtensionsDir, 'extension-enablement.json'),
-        JSON.stringify({ touched: true }),
+      //
+      // Its mtime is pushed a second into the past on purpose. Hand-writing
+      // this file is how the test simulates "something outside the store
+      // changed the legacy projection", and that is precisely the condition
+      // `ExtensionStore` fails closed on when the two timestamps cannot be
+      // ordered. Left at `now`, the write lands in the same tick as the
+      // store's own often enough to trip that guard: measured, 3 failures in 6
+      // runs here and on unrelated branches, blocking CI on PRs that never
+      // touch extensions. An explicitly older projection is orderable, which
+      // is what this test needs and all it needs — the guard itself is doing
+      // its job and is left alone.
+      const enablementFile = path.join(
+        userExtensionsDir,
+        'extension-enablement.json',
       );
+      fs.writeFileSync(enablementFile, JSON.stringify({ touched: true }));
+      const older = new Date(Date.now() - 1_000);
+      fs.utimesSync(enablementFile, older, older);
       expect(await manager.refreshCacheIfSourcesChanged()).toBe(true);
       expect(manager.getLoadedExtensions()).toHaveLength(1);
 
