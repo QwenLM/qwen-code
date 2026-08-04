@@ -2400,7 +2400,7 @@ describe('AppContainer State Management', () => {
 
       const escKey: Key = {
         name: 'escape',
-        sequence: '',
+        sequence: '\u001b',
         ctrl: false,
         meta: false,
         shift: false,
