@@ -370,139 +370,12 @@ jobs:
           set -euo pipefail
           find "$RUNNER_TEMP/desktop-artifacts" -maxdepth 1 -type f -print
 
-  live-host:
-    name: 'Build Qwen Live Host'
-    needs: 'prepare'
-    runs-on: 'macos-latest'
-    timeout-minutes: 60
-    steps:
-      - uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
-
-      - uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
-        with:
-          node-version: '${{ env.NODE_VERSION }}'
-
-      - uses: 'oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6' # v2
-        with:
-          bun-version: '${{ env.BUN_VERSION }}'
-
-      - name: 'Install Live Host dependencies'
-        working-directory: 'packages/desktop'
-        run: 'bun install --frozen-lockfile'
-
-      - name: 'Set Live Host version'
-        working-directory: 'packages/desktop'
-        run: 'bun run bump-desktop-version "${{ needs.prepare.outputs.version }}"'
-
-      - name: 'Test Live Host'
-        working-directory: 'packages/desktop'
-        run: 'bun run live-host:typecheck && bun run live-host:test'
-
-      - name: 'Import macOS certificate'
-        if: '${{ inputs.dry_run == false }}'
-        shell: 'bash'
-        env:
-          APPLE_CERTIFICATE: '${{ secrets.APPLE_CERTIFICATE }}'
-          APPLE_CERTIFICATE_PASSWORD: '${{ secrets.APPLE_CERTIFICATE_PASSWORD }}'
-          KEYCHAIN_PASSWORD: '${{ secrets.APPLE_KEYCHAIN_PASSWORD }}'
-        run: |
-          set -euo pipefail
-          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD KEYCHAIN_PASSWORD; do
-            if [ -z "${!name}" ]; then echo "::error::$name is required for published Qwen Live Host releases."; exit 1; fi
-          done
-          certificate="$RUNNER_TEMP/qwen-live-host.p12"
-          keychain="$RUNNER_TEMP/qwen-live-host.keychain-db"
-          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$certificate"
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
-          security set-keychain-settings -lut 21600 "$keychain"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
-          security import "$certificate" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
-          security list-keychains -d user -s "$keychain" login.keychain-db
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$keychain"
-          identity="$(security find-identity -v -p codesigning "$keychain" | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' | head -n 1)"
-          if [ -z "$identity" ]; then echo '::error::Developer ID Application identity was not found.'; exit 1; fi
-          {
-            echo "CSC_NAME=$identity"
-            echo 'CSC_IDENTITY_AUTO_DISCOVERY=true'
-          } >> "$GITHUB_ENV"
-
-      - name: 'Configure Live Host notarization'
-        if: '${{ inputs.dry_run == false }}'
-        shell: 'bash'
-        env:
-          APPLE_API_ISSUER: '${{ secrets.APPLE_API_ISSUER }}'
-          APPLE_API_KEY_ID: '${{ secrets.APPLE_API_KEY }}'
-          APPLE_API_KEY_P8: '${{ secrets.APPLE_API_KEY_P8 }}'
-          APPLE_TEAM_ID: '${{ secrets.APPLE_TEAM_ID }}'
-        run: |
-          set -euo pipefail
-          for name in APPLE_API_ISSUER APPLE_API_KEY_ID APPLE_API_KEY_P8 APPLE_TEAM_ID; do
-            if [ -z "${!name}" ]; then echo "::error::$name is required for Qwen Live Host notarization."; exit 1; fi
-          done
-          key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
-          printf '%s' "$APPLE_API_KEY_P8" > "$key_path"
-          {
-            echo "APPLE_API_KEY=$key_path"
-            echo "APPLE_API_KEY_ID=$APPLE_API_KEY_ID"
-            echo "APPLE_API_ISSUER=$APPLE_API_ISSUER"
-            echo "APPLE_TEAM_ID=$APPLE_TEAM_ID"
-          } >> "$GITHUB_ENV"
-
-      - name: 'Build Qwen Live Host'
-        working-directory: 'packages/desktop'
-        env:
-          CSC_IDENTITY_AUTO_DISCOVERY: '${{ inputs.dry_run == false }}'
-        run: 'bun run live-host:dist:mac:no-publish'
-
-      - name: 'Verify published Qwen Live Host'
-        if: '${{ inputs.dry_run == false }}'
-        working-directory: 'packages/desktop'
-        shell: 'bash'
-        run: |
-          set -euo pipefail
-          app_count=0
-          while IFS= read -r -d '' app; do
-            app_count=$((app_count + 1))
-            codesign --verify --deep --strict --verbose=2 "$app"
-            signature="$(codesign -dv --verbose=4 "$app" 2>&1)"
-            if ! grep -q '^Authority=Developer ID Application:' <<<"$signature" || ! grep -qx 'TeamIdentifier=NF4574S59H' <<<"$signature"; then
-              echo '::error::Qwen Live Host was not signed by the expected Developer ID team.'
-              exit 1
-            fi
-            spctl -a -vv -t exec "$app"
-            xcrun stapler validate "$app"
-          done < <(find apps/live-host/release -type d -name '*.app' -print0)
-          if [ "$app_count" -eq 0 ]; then echo '::error::No packaged Qwen Live Host application was found.'; exit 1; fi
-          dmg_count=0
-          while IFS= read -r -d '' dmg; do
-            dmg_count=$((dmg_count + 1))
-            hdiutil verify "$dmg"
-          done < <(find apps/live-host/release -type f -name '*.dmg' -print0)
-          if [ "$dmg_count" -eq 0 ]; then echo '::error::No Qwen Live Host disk image was found.'; exit 1; fi
-
-      - if: "${{ github.repository == 'QwenLM/qwen-code' }}"
-        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
-        with:
-          name: 'qwen-live-host-macos'
-          path: |
-            packages/desktop/apps/live-host/release/*.dmg
-            packages/desktop/apps/live-host/release/*-manifest.json
-            packages/desktop/apps/live-host/release/*.zip
-          if-no-files-found: 'error'
-          retention-days: 14
-
-      - name: 'List Live Host artifacts for fork dry run'
-        if: "${{ github.repository != 'QwenLM/qwen-code' }}"
-        shell: 'bash'
-        run: 'find packages/desktop/apps/live-host/release -maxdepth 1 -type f -print'
-
   publish:
     name: 'Publish GitHub release'
     if: "${{ inputs.dry_run == false && github.repository == 'QwenLM/qwen-code' }}"
     needs:
       - 'prepare'
       - 'build'
-      - 'live-host'
     runs-on: 'ubuntu-latest'
     timeout-minutes: 20
     permissions:
@@ -573,9 +446,6 @@ jobs:
           set -euo pipefail
           stable_assets=(
             release-assets/desktop-latest.json
-            release-assets/Qwen-Live-Host-manifest.json
-            release-assets/Qwen-Live-Host-arm64.zip
-            release-assets/Qwen-Live-Host-x64.zip
           )
           if gh release view "$FEED_TAG" >/dev/null 2>&1; then
             gh release upload "$FEED_TAG" "${stable_assets[@]}" --clobber

@@ -4,13 +4,12 @@ on:
   pull_request:
     paths:
       - '.github/workflows/live-host.yml'
-      - '.github/workflows/desktop-release.yml'
+      - '.github/workflows/live-host-release.yml'
       - 'packages/cli/src/serve/live/**'
       - 'packages/desktop/apps/live-host/**'
       - 'packages/desktop/bun.lock'
       - 'packages/desktop/package.json'
-      - 'packages/desktop/scripts/check-release-version.ts'
-      - 'packages/desktop/scripts/desktop-release-version.ts'
+      - 'packages/desktop/scripts/bump-live-host-version.ts'
       - 'packages/sdk-typescript/src/daemon/types.ts'
   merge_group:
   workflow_dispatch:

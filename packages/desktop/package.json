@@ -103,6 +103,7 @@
     "live-host:test": "cd apps/live-host && bun run test",
     "live-host:dist:mac": "cd apps/live-host && bun run dist:mac",
     "live-host:dist:mac:no-publish": "cd apps/live-host && bun run dist:mac:no-publish",
+    "bump-live-host-version": "bun run scripts/bump-live-host-version.ts",
     "playground:dev": "bun run scripts/dev-vite.ts --config apps/electron/vite.config.ts --default-port 5173 --port-env CRAFT_VITE_PORT --label playground --open /playground.html",
     "viewer:dev": "bun run scripts/dev-vite.ts --config apps/viewer/vite.config.ts --default-port 5174 --port-env CRAFT_VIEWER_PORT --label viewer --open /s/tz5-13I84pwK_he",
     "viewer:typecheck": "cd apps/viewer && bun run typecheck",

@@ -21,7 +21,7 @@ export const LIVE_HOST_BUNDLE_ID = 'com.alibaba.qwen-code.live-host';
 export const LIVE_HOST_TEAM_IDENTIFIER = 'NF4574S59H';
 export const LIVE_HOST_APP_PATH = '/Applications/Qwen Live Host.app';
 export const LIVE_HOST_RELEASE_BASE_URL =
-  'https://github.com/QwenLM/qwen-code/releases/download/desktop-latest';
+  'https://github.com/QwenLM/qwen-code/releases/download/live-host-latest';
 export const LIVE_HOST_MANIFEST_NAME = 'Qwen-Live-Host-manifest.json';
 
 const LIVE_HOST_APP_NAME = 'Qwen Live Host.app';

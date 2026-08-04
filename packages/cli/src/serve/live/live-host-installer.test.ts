@@ -9,6 +9,7 @@ import { LIVE_HOST_PROTOCOL_VERSION } from './types.js';
 import {
   isExpectedLiveHostSignature,
   LiveHostInstaller,
+  LIVE_HOST_RELEASE_BASE_URL,
   parseLiveHostReleaseManifest,
 } from './live-host-installer.js';
 
@@ -36,6 +37,12 @@ function manifest() {
 }
 
 describe('LiveHostInstaller', () => {
+  it('downloads only from the independent stable Live Host feed', () => {
+    expect(LIVE_HOST_RELEASE_BASE_URL).toBe(
+      'https://github.com/QwenLM/qwen-code/releases/download/live-host-latest',
+    );
+  });
+
   it('accepts only the Qwen Developer ID team', () => {
     expect(
       isExpectedLiveHostSignature(
