@@ -16,6 +16,7 @@ const {
   active,
   archived,
   useSessions,
+  useChannels,
   listWorkspaceSessions,
   archiveSessionsData,
   unarchiveSessionsData,
@@ -67,6 +68,27 @@ const {
   );
   const exportArchivedSession = vi.fn();
   const sessionActions = { renameSession: vi.fn() };
+  const channelState = {
+    data: undefined as
+      | {
+          catalog: Array<{
+            type: string;
+            displayName: string;
+            manageable: boolean;
+            fields: [];
+          }>;
+          snapshot: { revision: string; instances: Record<string, unknown> };
+        }
+      | undefined,
+    catalog: [] as Array<{
+      type: string;
+      displayName: string;
+      manageable: boolean;
+      fields: [];
+    }>,
+    channels: {} as Record<string, unknown>,
+  };
+  const useChannels = vi.fn(() => channelState);
   return {
     connection: {
       status: 'connected',
@@ -109,6 +131,7 @@ const {
     active,
     archived,
     useSessions,
+    useChannels,
     listWorkspaceSessions,
     archiveSessionsData,
     unarchiveSessionsData,
@@ -117,26 +140,7 @@ const {
     exportSession,
     exportArchivedSession,
     sessionActions,
-    channelState: {
-      data: undefined as
-        | {
-            catalog: Array<{
-              type: string;
-              displayName: string;
-              manageable: boolean;
-              fields: [];
-            }>;
-            snapshot: { revision: string; instances: Record<string, unknown> };
-          }
-        | undefined,
-      catalog: [] as Array<{
-        type: string;
-        displayName: string;
-        manageable: boolean;
-        fields: [];
-      }>,
-      channels: {} as Record<string, unknown>,
-    },
+    channelState,
   };
 });
 
@@ -146,7 +150,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useWorkspace: () => workspace,
   useWorkspaceActions: () => workspaceActions,
   useSessions,
-  useChannels: () => channelState,
+  useChannels,
 }));
 
 const { I18nProvider } = await import('../../i18n');
@@ -510,6 +514,7 @@ beforeEach(() => {
   archived.reload.mockReset();
   archived.reload.mockResolvedValue(undefined);
   useSessions.mockClear();
+  useChannels.mockClear();
   active.sessions.length = 0;
   archived.sessions.length = 0;
   channelState.data = undefined;
@@ -3000,7 +3005,7 @@ describe('WebShellSidebar session source switch', () => {
     ).toBe(true);
   });
 
-  it('hides the switch and keeps legacy session requests unfiltered', () => {
+  it('hides the switch and keeps legacy session requests unfiltered', async () => {
     connection.capabilities = {
       ...capabilities,
       features: capabilities.features.filter(
@@ -3015,12 +3020,22 @@ describe('WebShellSidebar session source switch', () => {
         ([options]) => options?.sourceType === undefined,
       ),
     ).toBe(true);
+    await expandWorkspace('other');
+    expect(listWorkspaceSessions).toHaveBeenCalled();
+    expect(
+      listWorkspaceSessions.mock.calls.every(
+        ([options]) => options?.sourceType === undefined,
+      ),
+    ).toBe(true);
   });
 
   it('polls channel sessions on the active-session interval', async () => {
     const setIntervalSpy = vi.spyOn(window, 'setInterval');
     renderSidebar();
     await ensureWorkspaceExpanded('project');
+    expect(
+      setIntervalSpy.mock.calls.some(([, timeout]) => timeout === 2_000),
+    ).toBe(false);
     const channelsTab = Array.from(
       container.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
     ).find((button) => button.textContent?.trim() === 'Channels');
@@ -3070,6 +3085,10 @@ describe('WebShellSidebar session source switch', () => {
       await Promise.resolve();
     });
 
+    expect(useChannels).toHaveBeenCalledWith({
+      autoLoad: false,
+      enabled: false,
+    });
     expect(container.textContent).toContain('Legacy channel');
     expect(container.querySelector('section[aria-label]')).toBeNull();
   });
@@ -3164,6 +3183,11 @@ describe('WebShellSidebar session source switch', () => {
       );
       channelsTab!.click();
       await Promise.resolve();
+    });
+
+    expect(useChannels).toHaveBeenCalledWith({
+      autoLoad: true,
+      enabled: true,
     });
 
     const dingTalkGroup = container.querySelector<HTMLElement>(

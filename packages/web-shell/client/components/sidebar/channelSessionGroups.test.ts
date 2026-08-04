@@ -69,15 +69,33 @@ describe('groupSessionsByChannelType', () => {
 
   it('uses the raw type or fallback group when catalog metadata is incomplete', () => {
     const groups = groupSessionsByChannelType(
-      [session('github', 'github'), session('legacy')],
+      [
+        session('github', 'github'),
+        session('legacy-one'),
+        session('legacy-two'),
+      ],
       catalog,
       { github: instance('github', 'github') },
       'Other channels',
     );
 
-    expect(groups.map(({ label }) => label)).toEqual([
-      'github',
-      'Other channels',
+    expect(
+      groups.map(({ id, label, sessions }) => ({
+        id,
+        label,
+        sessions: sessions.map((item) => item.sessionId),
+      })),
+    ).toEqual([
+      {
+        id: 'channel-type:github',
+        label: 'github',
+        sessions: ['github'],
+      },
+      {
+        id: 'channel-type-fallback',
+        label: 'Other channels',
+        sessions: ['legacy-one', 'legacy-two'],
+      },
     ]);
   });
 });

@@ -148,6 +148,7 @@ function renderSection(
     expanded: boolean;
     sourceType: string;
     channelGroupingEnabled: boolean;
+    organizationEnabled: boolean;
   }> = {},
 ): void {
   act(() => {
@@ -163,7 +164,7 @@ function renderSection(
           trustToOpenLabel="Trust to open"
           noSessionsLabel="No sessions"
           loadErrorLabel="Load failed"
-          organizationEnabled={false}
+          organizationEnabled={overrides.organizationEnabled ?? false}
           sourceType={overrides.sourceType}
           channelGroupingEnabled={overrides.channelGroupingEnabled}
           ungroupedLabel="Ungrouped"
@@ -294,6 +295,7 @@ describe('WorkspaceSection label', () => {
             displayName: 'DingTalk secondary',
             sourceType: 'channel',
             sourceId: 'secondary-ding',
+            groupId: 'organization-group',
           },
           {
             sessionId: 'feishu-session',
@@ -302,7 +304,18 @@ describe('WorkspaceSection label', () => {
             sourceId: 'secondary-feishu',
           },
         ]),
-        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+        listSessionGroups: vi.fn().mockResolvedValue({
+          groups: [
+            {
+              id: 'organization-group',
+              name: 'Organization group',
+              color: 'blue',
+              order: 0,
+              createdAt: '2026-01-01T00:00:00.000Z',
+              updatedAt: '2026-01-01T00:00:00.000Z',
+            },
+          ],
+        }),
         workspaceChannelTypes: vi.fn().mockResolvedValue([
           {
             type: 'dingtalk',
@@ -345,6 +358,7 @@ describe('WorkspaceSection label', () => {
       expanded: true,
       sourceType: 'channel',
       channelGroupingEnabled: true,
+      organizationEnabled: true,
     });
     await flush();
 
@@ -354,6 +368,9 @@ describe('WorkspaceSection label', () => {
     expect(
       container.querySelector('section[aria-label="Feishu"]')?.textContent,
     ).toContain('Feishu secondary');
+    expect(
+      container.querySelector('section[aria-label="Organization group"]'),
+    ).toBeNull();
   });
 });
 
