@@ -113,6 +113,7 @@ import {
   type SessionArtifactSnapshotRecordPayload,
   type WorkspaceRememberContextMode,
   type ChatRecord,
+  type ToolInvocationGuard,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -293,6 +294,13 @@ import {
   type ServeWorkspaceExtensionsStatus,
   IDLE_HOOK_EVENTS,
 } from '@qwen-code/acp-bridge/status';
+import {
+  EXTERNAL_TOOL_GUARD_READY_META_KEY,
+  EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+  EXTERNAL_TOOL_GUARD_TOKEN_ENV,
+  isValidExternalToolGuardDenialReason,
+  PRIVATE_EXTERNAL_TOOL_GUARD_ENV,
+} from '@qwen-code/acp-bridge/externalToolGuard';
 import {
   parseSessionSource,
   SESSION_SOURCE_META_KEY,
@@ -2715,6 +2723,94 @@ export async function deliverClientMcpMessage(
   return payload as JSONRPCMessage;
 }
 
+/**
+ * Build the ACP child's side of the managed guard. It carries no provider
+ * endpoint or credential; those remain in the daemon. The private parent
+ * validates the session and active prompt before calling its provider.
+ */
+export function createManagedExternalToolGuard(
+  connection: AgentSideConnection,
+): ToolInvocationGuard {
+  return async (context) => {
+    const invocation = context.invocationContext;
+    if (!invocation) {
+      throw new Error(
+        'Managed external tool guard requires a runtime invocation context.',
+      );
+    }
+    if (context.signal.aborted) {
+      throw new DOMException('Tool invocation aborted', 'AbortError');
+    }
+    if (
+      context.toolName === ToolNames.AGENT ||
+      context.toolName === ToolNames.WORKFLOW ||
+      context.toolName === ToolNames.CREATE_SUB_SESSION ||
+      context.toolName === ToolNames.SEND_MESSAGE
+    ) {
+      return {
+        allowed: false,
+        reason:
+          'Managed external tool guard v1 does not support nested or delegated agent execution.',
+      };
+    }
+
+    let rejectOnAbort: ((error: Error) => void) | undefined;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      rejectOnAbort = reject;
+    });
+    const onAbort = () =>
+      rejectOnAbort?.(
+        new DOMException('Tool invocation aborted', 'AbortError'),
+      );
+    context.signal.addEventListener('abort', onAbort, { once: true });
+    // Close the check-to-listener race: AbortSignal does not replay an abort
+    // event to a listener added after the signal has already transitioned.
+    if (context.signal.aborted) onAbort();
+    try {
+      const response = await Promise.race([
+        connection.extMethod(
+          SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare,
+          {
+            sessionId: invocation.sessionId,
+            promptId: invocation.promptId,
+            toolCallId: context.callId,
+            toolName: context.toolName,
+            arguments: context.args,
+          },
+        ),
+        aborted,
+      ]);
+      const keys = Object.keys(response);
+      if (
+        typeof response['allowed'] !== 'boolean' ||
+        keys.some((key) => key !== 'allowed' && key !== 'reason')
+      ) {
+        throw new Error(
+          'Managed external tool guard returned an invalid reply.',
+        );
+      }
+      if (response['allowed']) {
+        if (Object.hasOwn(response, 'reason')) {
+          throw new Error(
+            'Managed external tool guard allow reply contains a reason.',
+          );
+        }
+        return { allowed: true };
+      }
+      const reason = response['reason'];
+      if (reason === undefined) return { allowed: false };
+      if (!isValidExternalToolGuardDenialReason(reason)) {
+        throw new Error(
+          'Managed external tool guard denial reason is invalid.',
+        );
+      }
+      return { allowed: false, reason };
+    } finally {
+      context.signal.removeEventListener('abort', onAbort);
+    }
+  };
+}
+
 interface RuntimeMcpRequest {
   name: string;
   runtimeClientId: string;
@@ -2829,7 +2925,10 @@ export async function runAcpAgent(
   config: Config,
   settings: LoadedSettings,
   argv: CliArgs,
-  options?: { privateParentCapability?: string },
+  options?: {
+    privateParentCapability?: string;
+    externalToolGuardRequired?: boolean;
+  },
 ) {
   // Freeze the restart-required writer protocol before the first await.
   // Per-request settings reloads must not mix leased and legacy writers
@@ -2843,6 +2942,14 @@ export async function runAcpAgent(
       ? process.env[PRIVATE_ACP_CAPABILITY_ENV]
       : options.privateParentCapability;
   delete process.env[PRIVATE_ACP_CAPABILITY_ENV];
+  delete process.env[PRIVATE_EXTERNAL_TOOL_GUARD_ENV];
+  delete process.env[EXTERNAL_TOOL_GUARD_TOKEN_ENV];
+  const externalToolGuardRequired = options?.externalToolGuardRequired === true;
+  if (externalToolGuardRequired && privateParentCapability === undefined) {
+    throw new Error(
+      'Required external tool guard is available only to a private managed ACP parent.',
+    );
+  }
 
   // Reverse tool channel (issue #5626, Phase 2). Runtime-MCP-add targets the
   // BOOTSTRAP (workspace-level) config's `McpClientManager` — `this.config` in
@@ -2964,6 +3071,9 @@ export async function runAcpAgent(
     });
     connection = new AgentSideConnection((conn) => {
       acpConnection = conn;
+      const managedToolInvocationGuard = externalToolGuardRequired
+        ? createManagedExternalToolGuard(conn)
+        : undefined;
       agentInstance = new QwenAgent(
         config,
         settings,
@@ -2971,6 +3081,7 @@ export async function runAcpAgent(
         conn,
         privateParentCapability,
         sessionWriterLeaseEnabledAtStartup,
+        managedToolInvocationGuard,
       );
       return agentInstance;
     }, stream);
@@ -3470,6 +3581,15 @@ class QwenAgent implements Agent {
     }
     if (this.managedShuttingDown) {
       throw new SessionWriterUnavailableError();
+    }
+  }
+
+  private rejectUnsupportedGuardedHiddenAgent(operation: string): void {
+    if (this.managedToolInvocationGuard) {
+      throw RequestError.invalidParams(
+        undefined,
+        `Managed external tool guard v1 does not support ${operation}.`,
+      );
     }
   }
 
@@ -4198,6 +4318,7 @@ class QwenAgent implements Agent {
     private connection: AgentSideConnection,
     private readonly expectedPrivateParentCapability?: string,
     private readonly sessionWriterLeaseEnabledAtStartup = false,
+    private readonly managedToolInvocationGuard?: ToolInvocationGuard,
   ) {
     // Pool kill switch via env var so operators can A/B compare or
     // roll back without rebuilding. `run-qwen-serve.ts` sets this when
@@ -4387,13 +4508,19 @@ class QwenAgent implements Agent {
       (requestedProfile as Record<string, unknown>)['v'] ===
         CHANNEL_STARTUP_PROFILE_VERSION;
 
-    return profileRequested && startupProfile
-      ? {
-          ...response,
-          _meta: {
-            [CHANNEL_STARTUP_PROFILE_META_KEY]: startupProfile,
-          },
-        }
+    const responseMeta: Record<string, unknown> = {
+      ...(this.managedToolInvocationGuard
+        ? {
+            [EXTERNAL_TOOL_GUARD_READY_META_KEY]:
+              EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+          }
+        : {}),
+      ...(profileRequested && startupProfile
+        ? { [CHANNEL_STARTUP_PROFILE_META_KEY]: startupProfile }
+        : {}),
+    };
+    return Object.keys(responseMeta).length > 0
+      ? { ...response, _meta: responseMeta }
       : response;
   }
 
@@ -4538,8 +4665,18 @@ class QwenAgent implements Agent {
             logger: debugLogger,
           });
           if (!bulkReplay) {
-            for (const update of replay.updates) {
-              await liveSession.sendUpdate(update);
+            try {
+              for (const update of replay.updates) {
+                await liveSession.sendUpdate(update);
+              }
+            } finally {
+              // Replayed plan updates re-stamp the revision via sendUpdate;
+              // drop it so a replayed snapshot cannot bind a later approval
+              // (same rule Session.replayHistory applies to cold loads),
+              // even if delivery fails part-way. The bulk path keeps a live
+              // binding on purpose: it hands the updates to the client
+              // instead of replaying them through this session.
+              liveSession.clearActiveTodoPlanRevision();
             }
             if (replay.replayError !== undefined) {
               throw RequestError.internalError(undefined, replay.replayError);
@@ -7891,9 +8028,14 @@ class QwenAgent implements Agent {
         ) as unknown as Record<string, unknown>;
       case SERVE_CONTROL_EXT_METHODS.workspaceMemoryRememberAvailability:
         return {
-          available: this.config.isManagedMemoryAvailable(),
+          available:
+            !this.managedToolInvocationGuard &&
+            this.config.isManagedMemoryAvailable(),
         };
       case SERVE_CONTROL_EXT_METHODS.workspaceMemoryRemember: {
+        this.rejectUnsupportedGuardedHiddenAgent(
+          'agent-backed workspace memory remember',
+        );
         const content = params['content'];
         if (typeof content !== 'string' || !content.trim()) {
           throw RequestError.invalidParams(
@@ -8080,6 +8222,9 @@ class QwenAgent implements Agent {
         }
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceMemoryDream: {
+        this.rejectUnsupportedGuardedHiddenAgent(
+          'agent-backed workspace memory dream',
+        );
         if (!this.config.isManagedMemoryAvailable()) {
           throw new RequestError(
             -32009,
@@ -9162,6 +9307,9 @@ class QwenAgent implements Agent {
         }
         const current = config.getApprovalMode();
         if (current === 'plan') {
+          if (previous !== 'plan') {
+            session.clearActiveTodoPlanRevision();
+          }
           session.clearTodoStopGuardTrust();
         }
         return { previous, current };
@@ -9429,6 +9577,12 @@ class QwenAgent implements Agent {
         return { sessionId, answer: result.text || null };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionForkAgent: {
+        if (this.managedToolInvocationGuard) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Managed external tool guard v1 does not support /fork.',
+          );
+        }
         const sessionId = params['sessionId'];
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
           throw RequestError.invalidParams(
@@ -10641,6 +10795,7 @@ class QwenAgent implements Agent {
                 try {
                   config.setApprovalMode(newMode as ApprovalMode);
                   if (newMode === 'plan') {
+                    session.clearActiveTodoPlanRevision();
                     session.clearTodoStopGuardTrust();
                   }
                 } catch (err) {
@@ -11048,6 +11203,9 @@ class QwenAgent implements Agent {
       // not process.exit(1) the shared ACP child and every session on its
       // channel. newSessionConfig maps the throw to a RequestError.
       true,
+      this.managedToolInvocationGuard
+        ? { toolInvocationGuard: this.managedToolInvocationGuard }
+        : undefined,
     );
     if (sessionSource) {
       config.setSessionSource(sessionSource.sourceType, sessionSource.sourceId);
