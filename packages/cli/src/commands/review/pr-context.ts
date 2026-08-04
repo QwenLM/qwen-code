@@ -425,7 +425,7 @@ export function findRootId<
  * below it, and a prefix match dropped exactly that body from the context
  * file, letting the re-check approve past the blocker.
  */
-const CANONICAL_LGTM_RE =
+export const CANONICAL_LGTM_RE =
   /^No issues found\.?\s*LGTM!?\s*(?:✅\s*)?(?:_— [^\n]{0,200} via Qwen Code \/review(?: \(v[^\n]{1,100}\))?_\s*)?$/i;
 
 /**

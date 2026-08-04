@@ -18,6 +18,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { copyBundleAssets } from '../copy_bundle_assets.js';
+import { copyFiles } from '../copy_files.js';
 import { preparePackage } from '../prepare-package.js';
 
 describe('package asset scripts', () => {
@@ -101,6 +102,11 @@ describe('package asset scripts', () => {
       rootDir,
       'packages/core/src/skills/bundled/dataviz/references/palette.md',
       '# Palette\n',
+    );
+    writeFile(
+      rootDir,
+      'packages/core/src/skills/bundled/dataviz/DESIGN.md',
+      '# Design notes\n',
     );
     writeFile(rootDir, 'dist/bundled/dataviz/scripts/stale.test.js', 'stale\n');
     stubConsole();
@@ -203,6 +209,38 @@ describe('package asset scripts', () => {
         ),
       ),
     ).toBe(true);
+    expect(
+      existsSync(path.join(rootDir, 'dist', 'bundled', 'dataviz', 'DESIGN.md')),
+    ).toBe(false);
+  });
+
+  it('keeps bundled-skill DESIGN.md out of the per-package dist/src copy', () => {
+    const rootDir = createFixtureRoot();
+    writeFile(
+      rootDir,
+      'packages/core/src/skills/bundled/review/SKILL.md',
+      '---\nname: review\ndescription: Review changes\n---\nBody\n',
+    );
+    writeFile(
+      rootDir,
+      'packages/core/src/skills/bundled/review/DESIGN.md',
+      '# Design notes\n',
+    );
+    writeFile(rootDir, 'packages/core/src/notes/DESIGN.md', '# Keep\n');
+    stubConsole();
+
+    copyFiles({ root: path.join(rootDir, 'packages', 'core') });
+
+    const distSrc = path.join(rootDir, 'packages', 'core', 'dist', 'src');
+    expect(
+      existsSync(path.join(distSrc, 'skills', 'bundled', 'review', 'SKILL.md')),
+    ).toBe(true);
+    expect(
+      existsSync(
+        path.join(distSrc, 'skills', 'bundled', 'review', 'DESIGN.md'),
+      ),
+    ).toBe(false);
+    expect(existsSync(path.join(distSrc, 'notes', 'DESIGN.md'))).toBe(true);
   });
 
   it('includes extension examples in the prepared dist package', () => {
