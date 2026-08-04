@@ -83,6 +83,7 @@ export function createChannelEditorDraft(
   const values: Record<string, string | boolean> = {};
   const secrets: Record<string, ChannelSecretDraft> = {};
   for (const field of descriptor.fields) {
+    if (field.kind === 'object') continue;
     if (field.kind === 'secret') {
       secrets[field.key] = instance?.secrets[field.key]?.present
         ? { operation: 'preserve' }
@@ -239,6 +240,7 @@ export function buildChannelUpsertRequest(
   };
   const secrets: Record<string, DaemonChannelSecretUpdate> = {};
   for (const field of descriptor.fields) {
+    if (field.kind === 'object') continue;
     if (field.kind === 'secret') {
       const secret = draft.secrets[field.key] ?? { operation: 'preserve' };
       secrets[field.key] =

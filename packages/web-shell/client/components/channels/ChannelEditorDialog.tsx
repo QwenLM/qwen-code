@@ -383,6 +383,7 @@ export function ChannelEditorDialog({
   };
 
   const renderField = (field: DaemonChannelConfigFieldDescriptor) => {
+    if (field.kind === 'object') return null;
     if (field.kind === 'secret') return renderSecret(field);
     const id = `${formId}-${field.key}`;
     const value = draft.values[field.key];

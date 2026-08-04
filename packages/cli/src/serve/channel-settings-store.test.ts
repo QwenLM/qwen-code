@@ -485,6 +485,85 @@ describe('WorkspaceChannelSettingsStore', () => {
     });
   });
 
+  it('persists DingTalk interactive card configuration through management metadata', async () => {
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "bot": {
+    "type": "dingtalk",
+    "clientId": "client-id",
+    "clientSecret": "existing-secret"
+  } }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    const next = await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'dingtalk',
+        clientId: 'client-id',
+        interactiveCards: {
+          enabled: true,
+          statusCard: { enabled: true },
+          questionCard: { enabled: true, timeoutMs: 270_000 },
+        },
+      },
+      secrets: { clientSecret: { operation: 'preserve' } },
+    });
+
+    expect(next.channels['bot']?.['interactiveCards']).toEqual({
+      enabled: true,
+      statusCard: { enabled: true },
+      questionCard: { enabled: true, timeoutMs: 270_000 },
+    });
+  });
+
+  it.each([
+    {
+      label: 'string enabled flag',
+      interactiveCards: { enabled: 'true' },
+    },
+    {
+      label: 'invalid nested enabled flag',
+      interactiveCards: { statusCard: { enabled: 'true' } },
+    },
+    {
+      label: 'non-positive question timeout',
+      interactiveCards: { questionCard: { timeoutMs: 0 } },
+    },
+    {
+      label: 'unknown nested field',
+      interactiveCards: { unexpected: true },
+    },
+  ])(
+    'rejects DingTalk interactive card configuration with $label',
+    async ({ interactiveCards }) => {
+      writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "bot": {
+    "type": "dingtalk",
+    "clientId": "client-id",
+    "clientSecret": "existing-secret"
+  } }
+}\n`);
+      const store = new WorkspaceChannelSettingsStore(workspace);
+      const before = fs.readFileSync(settingsPath, 'utf8');
+
+      await expect(
+        store.upsert('bot', {
+          expectedRevision: store.snapshot().revision,
+          config: {
+            type: 'dingtalk',
+            clientId: 'client-id',
+            interactiveCards,
+          },
+          secrets: { clientSecret: { operation: 'preserve' } },
+        }),
+      ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+
+      expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
+    },
+  );
+
   it('rejects clearing an existing required secret without writing', async () => {
     writeWorkspaceSettings(`{
   "$version": 4,

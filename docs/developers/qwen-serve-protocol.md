@@ -776,6 +776,11 @@ The catalog marks the types supported by this management API with
 presence metadata, startup state, and runtime state; literal secrets are never
 returned. Channel snapshots use `Cache-Control: no-store`.
 
+Field descriptors can expose nested object metadata through `properties`.
+Numeric descriptors can use `exclusiveMinimum` for open lower bounds. Clients
+that do not render an advertised field kind must preserve its existing config
+value instead of coercing or deleting it.
+
 Configuration writes use optimistic concurrency and the strict bearer-token
 gate:
 

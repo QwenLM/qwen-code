@@ -210,7 +210,39 @@ function assertSharedField(key: string, value: unknown): boolean {
 function assertDescriptorValue(
   field: ChannelConfigFieldDescriptor,
   value: unknown,
+  path = field.key,
 ): void {
+  if (field.kind === 'object') {
+    if (!isRecord(value)) {
+      throw invalidConfig(`Channel field "${path}" has an invalid value.`);
+    }
+    const properties = new Map(
+      (field.properties ?? []).map((property) => [property.key, property]),
+    );
+    for (const [key, nestedValue] of Object.entries(value)) {
+      const property = properties.get(key);
+      if (!property) {
+        throw invalidConfig(
+          `Channel field "${path}.${key}" is not manageable.`,
+        );
+      }
+      assertDescriptorValue(property, nestedValue, `${path}.${key}`);
+    }
+    for (const property of field.properties ?? []) {
+      if (!property.required) continue;
+      const nestedValue = value[property.key];
+      if (
+        nestedValue === undefined ||
+        nestedValue === null ||
+        nestedValue === ''
+      ) {
+        throw invalidConfig(
+          `Channel field "${path}.${property.key}" is required.`,
+        );
+      }
+    }
+    return;
+  }
   const invalidEnvironment =
     typeof value === 'string' &&
     isEnvironmentReference(value) &&
@@ -227,7 +259,9 @@ function assertDescriptorValue(
     (field.kind === 'boolean' && typeof value === 'boolean') ||
     (field.kind === 'number' &&
       typeof value === 'number' &&
-      Number.isFinite(value)) ||
+      Number.isFinite(value) &&
+      (field.exclusiveMinimum === undefined ||
+        value > field.exclusiveMinimum)) ||
     (field.kind === 'enum' &&
       typeof value === 'string' &&
       field.options?.some((option) => option.value === value) === true) ||
@@ -238,7 +272,7 @@ function assertDescriptorValue(
       isRecord(value) &&
       Object.values(value).every((v) => typeof v === 'string'));
   if (!valid) {
-    throw invalidConfig(`Channel field "${field.key}" has an invalid value.`);
+    throw invalidConfig(`Channel field "${path}" has an invalid value.`);
   }
 }
 

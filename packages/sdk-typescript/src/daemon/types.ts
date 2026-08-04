@@ -2988,7 +2988,8 @@ export type DaemonChannelConfigFieldKind =
   | 'number'
   | 'enum'
   | 'string-list'
-  | 'record';
+  | 'record'
+  | 'object';
 
 export interface DaemonChannelConfigFieldDescriptor {
   key: string;
@@ -2998,6 +2999,8 @@ export interface DaemonChannelConfigFieldDescriptor {
   envResolvable?: boolean;
   options?: ReadonlyArray<{ value: string; label: string }>;
   default?: string;
+  properties?: readonly DaemonChannelConfigFieldDescriptor[];
+  exclusiveMinimum?: number;
   description?: string;
 }
 

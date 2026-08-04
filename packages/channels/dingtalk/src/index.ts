@@ -24,6 +24,48 @@ export const plugin: ChannelPlugin = {
         required: true,
         envResolvable: true,
       },
+      {
+        key: 'interactiveCards',
+        label: 'Interactive Cards',
+        kind: 'object',
+        properties: [
+          {
+            key: 'enabled',
+            label: 'Enabled',
+            kind: 'boolean',
+          },
+          {
+            key: 'statusCard',
+            label: 'Status Card',
+            kind: 'object',
+            properties: [
+              {
+                key: 'enabled',
+                label: 'Enabled',
+                kind: 'boolean',
+              },
+            ],
+          },
+          {
+            key: 'questionCard',
+            label: 'Question Card',
+            kind: 'object',
+            properties: [
+              {
+                key: 'enabled',
+                label: 'Enabled',
+                kind: 'boolean',
+              },
+              {
+                key: 'timeoutMs',
+                label: 'Timeout (ms)',
+                kind: 'number',
+                exclusiveMinimum: 0,
+              },
+            ],
+          },
+        ],
+      },
     ],
   },
   createChannel: (name, config, bridge, options) =>

@@ -386,7 +386,8 @@ export type ChannelConfigFieldKind =
   | 'number'
   | 'enum'
   | 'string-list'
-  | 'record';
+  | 'record'
+  | 'object';
 
 export interface ChannelConfigFieldDescriptor {
   key: string;
@@ -396,6 +397,8 @@ export interface ChannelConfigFieldDescriptor {
   envResolvable?: boolean;
   options?: ReadonlyArray<{ value: string; label: string }>;
   default?: string;
+  properties?: readonly ChannelConfigFieldDescriptor[];
+  exclusiveMinimum?: number;
   description?: string;
 }
 

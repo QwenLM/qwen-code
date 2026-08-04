@@ -34,6 +34,11 @@ const DINGTALK: DaemonChannelTypeDescriptor = {
       required: true,
       envResolvable: true,
     },
+    {
+      key: 'interactiveCards',
+      label: 'Interactive Cards',
+      kind: 'object',
+    },
   ],
 };
 
@@ -46,6 +51,10 @@ function configuredInstance(): DaemonChannelInstanceSnapshot {
       senderPolicy: 'open',
       sessionScope: 'thread',
       model: 'qwen3-coder-plus',
+      interactiveCards: {
+        enabled: true,
+        statusCard: { enabled: true },
+      },
     },
     secrets: {
       clientSecret: { present: true, source: 'environment' },
@@ -96,6 +105,10 @@ describe('Channel editor state', () => {
         senderPolicy: 'open',
         sessionScope: 'thread',
         model: 'qwen3-coder-plus',
+        interactiveCards: {
+          enabled: true,
+          statusCard: { enabled: true },
+        },
       },
       secrets: {
         clientSecret: { operation: 'preserve' },

@@ -56,6 +56,19 @@ describe('channel registry', () => {
         }),
       );
     }
+    expect(
+      catalog.find((entry) => entry.type === 'dingtalk')?.fields,
+    ).toContainEqual(
+      expect.objectContaining({
+        key: 'interactiveCards',
+        kind: 'object',
+        properties: expect.arrayContaining([
+          expect.objectContaining({ key: 'enabled', kind: 'boolean' }),
+          expect.objectContaining({ key: 'statusCard', kind: 'object' }),
+          expect.objectContaining({ key: 'questionCard', kind: 'object' }),
+        ]),
+      }),
+    );
     expect(JSON.stringify(catalog)).not.toContain('createChannel');
   });
 });

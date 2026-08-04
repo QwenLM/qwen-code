@@ -33,6 +33,11 @@ const DINGTALK: DaemonChannelTypeDescriptor = {
       kind: 'secret',
       required: true,
     },
+    {
+      key: 'interactiveCards',
+      label: 'Interactive Cards',
+      kind: 'object',
+    },
   ],
 };
 
@@ -125,6 +130,12 @@ afterEach(() => {
 });
 
 describe('ChannelEditorDialog', () => {
+  it('does not render object metadata as a text field', async () => {
+    await renderDialog();
+
+    expect(inputByLabel('Interactive Cards')).toBeNull();
+  });
+
   it('preserves a stored secret until Replace is explicitly selected', async () => {
     await renderDialog({ instance: INSTANCE });
 
