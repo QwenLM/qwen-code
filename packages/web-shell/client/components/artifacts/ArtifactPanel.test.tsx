@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act } from 'react';
+import { act, StrictMode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type {
   DaemonSessionArtifact,
@@ -12,6 +12,7 @@ import type {
   DaemonSessionActions,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { I18nProvider } from '../../i18n';
+import type { ArtifactWorkspaceTarget } from './useArtifactWorkspaceTarget';
 
 const {
   mockActions,
@@ -74,12 +75,21 @@ vi.mock(
 );
 
 const { ArtifactPanel } = await import('./ArtifactPanel');
+const { useArtifactWorkspaceTarget } = await import(
+  './useArtifactWorkspaceTarget'
+);
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
 ).IS_REACT_ACT_ENVIRONMENT = true;
 
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
+let latestArtifactWorkspaceTarget: ArtifactWorkspaceTarget | undefined;
+
+function ArtifactWorkspaceTargetProbe({ revision }: { revision: number }) {
+  latestArtifactWorkspaceTarget = useArtifactWorkspaceTarget('/secondary');
+  return <span data-revision={revision} />;
+}
 
 function monitorPanel(
   task: DaemonSessionMonitorTaskStatus,
@@ -154,6 +164,33 @@ function codeReviewArtifact(
     ...patch,
   };
 }
+
+const validCodeReviewDocument = JSON.stringify({
+  schemaVersion: 1,
+  target: 'local',
+  effort: 'high',
+  verdict: {
+    event: 'APPROVE',
+    verdictLine: 'Verdict: Approve',
+    baseEvent: 'APPROVE',
+    cappedBy: [],
+    downgraded: false,
+    downgradedFrom: null,
+  },
+  findings: [],
+  counts: {
+    total: 0,
+    bySeverity: {
+      Critical: 0,
+      Suggestion: 0,
+      'Nice to have': 0,
+    },
+    byConfidence: { high: 0, low: 0 },
+    held: 0,
+  },
+  outcomesRecorded: false,
+  markdownReportPath: '.qwen/reviews/review.md',
+});
 
 function artifactPanel(
   artifact: DaemonSessionArtifact,
@@ -255,6 +292,7 @@ afterEach(() => {
   mockSecondaryWorkspaceActions.readWorkspaceFileBytes.mockReset();
   mockSecondaryWorkspaceActions.fileStat.mockReset();
   mockWorkspace.client.workspaceByCwd.mockClear();
+  latestArtifactWorkspaceTarget = undefined;
   mockWorkspace.capabilities = {
     workspaceCwd: '/primary',
     workspaces: [
@@ -272,6 +310,88 @@ afterEach(() => {
       },
     ],
   };
+});
+
+describe('artifact workspace authority', () => {
+  it('keeps an in-flight read across an equivalent capabilities refresh', async () => {
+    let resolveRead:
+      | ((file: { content: string; truncated: boolean }) => void)
+      | undefined;
+    mockSecondaryWorkspaceActions.readWorkspaceFile.mockReturnValue(
+      new Promise((resolve) => {
+        resolveRead = resolve;
+      }),
+    );
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(<ArtifactWorkspaceTargetProbe revision={0} />));
+    const initialActions = latestArtifactWorkspaceTarget?.actions;
+    const read = initialActions?.readWorkspaceFile('report.json');
+
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      workspaces: mockWorkspace.capabilities.workspaces.map((entry) => ({
+        ...entry,
+      })),
+    };
+    act(() => root.render(<ArtifactWorkspaceTargetProbe revision={1} />));
+
+    expect(latestArtifactWorkspaceTarget?.actions).toBe(initialActions);
+    resolveRead?.({ content: 'still-owned', truncated: false });
+    await expect(read).resolves.toEqual({
+      content: 'still-owned',
+      truncated: false,
+    });
+  });
+
+  it('does not revive an old read after the same owner is removed and re-added', async () => {
+    let resolveRead:
+      | ((file: { content: string; truncated: boolean }) => void)
+      | undefined;
+    mockSecondaryWorkspaceActions.readWorkspaceFile.mockReturnValue(
+      new Promise((resolve) => {
+        resolveRead = resolve;
+      }),
+    );
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(<ArtifactWorkspaceTargetProbe revision={0} />));
+    const initialActions = latestArtifactWorkspaceTarget?.actions;
+    const read = initialActions?.readWorkspaceFile('report.json');
+
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      workspaces: [mockWorkspace.capabilities.workspaces[0]!],
+    };
+    act(() => root.render(<ArtifactWorkspaceTargetProbe revision={1} />));
+    expect(latestArtifactWorkspaceTarget).toBeUndefined();
+
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      workspaces: [
+        mockWorkspace.capabilities.workspaces[0]!,
+        {
+          id: 'secondary-id',
+          cwd: '/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    };
+    act(() => root.render(<ArtifactWorkspaceTargetProbe revision={2} />));
+    expect(latestArtifactWorkspaceTarget?.actions).not.toBe(initialActions);
+
+    resolveRead?.({ content: 'stale-secret', truncated: false });
+    await expect(read).rejects.toThrow(
+      'Workspace artifact owner is no longer available',
+    );
+  });
 });
 
 function openAddMenu(container: HTMLElement) {
@@ -317,32 +437,7 @@ describe('ArtifactPanel code review artifacts', () => {
 
   it('dispatches an available workspace artifact to the dedicated renderer', async () => {
     mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
-      content: JSON.stringify({
-        schemaVersion: 1,
-        target: 'local',
-        effort: 'high',
-        verdict: {
-          event: 'APPROVE',
-          verdictLine: 'Verdict: Approve',
-          baseEvent: 'APPROVE',
-          cappedBy: [],
-          downgraded: false,
-          downgradedFrom: null,
-        },
-        findings: [],
-        counts: {
-          total: 0,
-          bySeverity: {
-            Critical: 0,
-            Suggestion: 0,
-            'Nice to have': 0,
-          },
-          byConfidence: { high: 0, low: 0 },
-          held: 0,
-        },
-        outcomesRecorded: false,
-        markdownReportPath: '.qwen/reviews/review.md',
-      }),
+      content: validCodeReviewDocument,
       truncated: false,
     });
     const container = document.createElement('div');
@@ -358,6 +453,29 @@ describe('ArtifactPanel code review artifacts', () => {
     expect(container.querySelector('.cm-editor')).toBeNull();
     expect(mockWorkspaceActions.readWorkspaceFile).toHaveBeenCalledWith(
       '.qwen/reviews/review.json',
+    );
+  });
+
+  it('loads an artifact under StrictMode effect replay', async () => {
+    mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
+      content: validCodeReviewDocument,
+      truncated: false,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        <StrictMode>{artifactPanel(codeReviewArtifact())}</StrictMode>,
+      ),
+    );
+    await flush();
+
+    expect(container.textContent).toContain('Authoritative verdict');
+    expect(container.textContent).not.toContain(
+      'Workspace artifact owner is no longer available',
     );
   });
 

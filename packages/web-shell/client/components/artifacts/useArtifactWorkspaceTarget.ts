@@ -26,6 +26,10 @@ interface ArtifactWorkspaceOwner {
   primary: boolean;
 }
 
+interface ArtifactWorkspaceAuthority {
+  owner: ArtifactWorkspaceOwner;
+}
+
 export interface ArtifactWorkspaceTarget {
   workspaceCwd: string;
   workspaceId?: string;
@@ -69,6 +73,17 @@ function workspaceOwner(
   };
 }
 
+function isSameWorkspaceOwner(
+  current: ArtifactWorkspaceOwner | undefined,
+  expected: ArtifactWorkspaceOwner,
+): current is ArtifactWorkspaceOwner {
+  return (
+    current?.cwd === expected.cwd &&
+    current.id === expected.id &&
+    current.primary === expected.primary
+  );
+}
+
 export function useArtifactWorkspaceTarget(
   workspaceCwd: string | undefined,
 ): ArtifactWorkspaceTarget | undefined {
@@ -78,24 +93,47 @@ export function useArtifactWorkspaceTarget(
     () => resolveArtifactWorkspaceOwner(workspace.capabilities, workspaceCwd),
     [workspace.capabilities, workspaceCwd],
   );
-  const ownerRef = useRef(owner);
-  ownerRef.current = owner;
+  const authorityRef = useRef<ArtifactWorkspaceAuthority | undefined>(
+    undefined,
+  );
+  if (!owner) {
+    authorityRef.current = undefined;
+  } else if (!isSameWorkspaceOwner(authorityRef.current?.owner, owner)) {
+    authorityRef.current = { owner };
+  }
+  const authority = authorityRef.current;
+  const authorityLifetimeRef = useRef<object | undefined>(undefined);
   useEffect(() => {
-    ownerRef.current = owner;
+    if (!authority) {
+      authorityLifetimeRef.current = undefined;
+      return undefined;
+    }
+    const lifetime = {};
+    authorityLifetimeRef.current = lifetime;
     return () => {
-      if (ownerRef.current === owner) ownerRef.current = undefined;
+      // StrictMode immediately replays setup after cleanup. Defer revocation so
+      // that replay can replace the lifetime token; a real unmount still
+      // revokes the authority as soon as that replay window closes.
+      queueMicrotask(() => {
+        if (
+          authorityLifetimeRef.current === lifetime &&
+          authorityRef.current === authority
+        ) {
+          authorityRef.current = undefined;
+        }
+      });
     };
-  }, [owner]);
+  }, [authority]);
 
   const actions = useMemo<ArtifactWorkspaceActions | undefined>(() => {
-    if (!owner) return undefined;
-    const expectedOwner = owner;
+    if (!authority) return undefined;
+    const expectedAuthority = authority;
     const requireOwner = () => {
-      const current = ownerRef.current;
-      if (current !== expectedOwner) {
+      const current = authorityRef.current;
+      if (current !== expectedAuthority) {
         throw new Error('Workspace artifact owner is no longer available');
       }
-      return current;
+      return current.owner;
     };
     const requireScheduledTaskOwner = (workspaceId: string | undefined) => {
       const current = requireOwner();
@@ -157,12 +195,12 @@ export function useArtifactWorkspaceTarget(
         requireScheduledTaskOwner(workspaceId);
       },
     };
-  }, [owner, primaryActions, workspace.client]);
+  }, [authority, primaryActions, workspace.client]);
 
-  if (!owner || !actions) return undefined;
+  if (!authority || !actions) return undefined;
   return {
-    workspaceCwd: owner.cwd,
-    ...(owner.id ? { workspaceId: owner.id } : {}),
+    workspaceCwd: authority.owner.cwd,
+    ...(authority.owner.id ? { workspaceId: authority.owner.id } : {}),
     actions,
   };
 }
