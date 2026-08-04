@@ -61,9 +61,14 @@ export class EnhancedErrorHandler implements ErrorHandler {
 
     // Provide helpful timeout-specific error message
     if (isTimeoutError) {
-      throw new Error(
+      const timeoutError = new Error(
         `${errorMessage}\n\n${this.getTimeoutTroubleshootingTips()}`,
+        { cause: redactedError },
       );
+      const status = getErrorStatus(redactedError);
+      throw Object.assign(timeoutError, {
+        ...(status !== undefined ? { status } : {}),
+      });
     }
 
     throw redactedError;

@@ -5243,19 +5243,13 @@ describe('ContentGenerationPipeline', () => {
       expect(gated.wasReturned()).toBe(true);
     });
 
-    it('bypasses the OpenAI error handler so the ETIMEDOUT code survives to the caller', async () => {
-      // Faithfully replicate EnhancedErrorHandler.handle's relevant behavior:
-      // it detects code 'ETIMEDOUT' as a timeout and re-throws a generic Error
-      // WITHOUT the code. If the inactivity timeout were routed through it, the
-      // retryable-transport classification (which reads err.code) would be lost.
-      (mockErrorHandler.handle as unknown as Mock).mockImplementation(
-        (error: unknown) => {
-          if ((error as { code?: string })?.code === 'ETIMEDOUT') {
-            throw new Error('stripped'); // the production failure mode
-          }
-          throw error;
-        },
-      );
+    it('bypasses the OpenAI error handler to retain inactivity timeout metadata', async () => {
+      // A generic handler is allowed to replace the original error. The
+      // inactivity-timeout path deliberately retains its dedicated type and
+      // telemetry fields instead.
+      (mockErrorHandler.handle as unknown as Mock).mockImplementation(() => {
+        throw new Error('wrapped');
+      });
       const gated = gatedStream(); // silent
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         gated.stream,
@@ -5274,8 +5268,10 @@ describe('ContentGenerationPipeline', () => {
       const err = await captured;
       expect(err).toBeInstanceOf(StreamInactivityTimeoutError);
       expect((err as { code?: string }).code).toBe('ETIMEDOUT');
+      expect((err as StreamInactivityTimeoutError).idleMs).toBe(1000);
+      expect((err as StreamInactivityTimeoutError).chunksReceived).toBe(0);
       expect(gated.wasReturned()).toBe(true);
-      // Proves the bypass: the handler (which would strip the code) is skipped.
+      // Proves the dedicated error was not replaced by the generic handler.
       expect(mockErrorHandler.handle).not.toHaveBeenCalled();
     });
 

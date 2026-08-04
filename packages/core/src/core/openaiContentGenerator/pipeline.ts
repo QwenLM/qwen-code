@@ -693,8 +693,8 @@ export class ContentGenerationPipeline {
         );
       }
 
-      // Bypass handleError: it strips `code` from timeout errors, which would
-      // prevent classifyRetryError from recognizing retryable ETIMEDOUT.
+      // Bypass handleError so callers retain the dedicated timeout type and
+      // its idle/chunk/lifetime metadata for retry telemetry and diagnostics.
       if (error instanceof StreamInactivityTimeoutError) {
         debugLogger.warn('OpenAI stream inactivity timeout', {
           idleMs: error.idleMs,

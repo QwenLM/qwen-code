@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { GenerateContentParameters } from '@google/genai';
 import { EnhancedErrorHandler } from './errorHandler.js';
 import type { RequestContext } from './types.js';
+import { classifyRetryError } from '../../utils/retryErrorClassification.js';
 
 const debugLoggerSpy = vi.hoisted(() => ({
   error: vi.fn(),
@@ -162,6 +163,56 @@ describe('EnhancedErrorHandler', () => {
       expect(() => {
         errorHandler.handle(timeoutError, mockContext, mockRequest);
       }).toThrow(/Request timeout after 5s.*Troubleshooting tips:/s);
+    });
+
+    it('preserves transport metadata when enhancing timeout errors', () => {
+      const timeoutError = Object.assign(
+        new Error('socket timed out via token@proxy.local:8080'),
+        { code: 'ETIMEDOUT' },
+      );
+      let thrown: unknown;
+
+      try {
+        errorHandler.handle(timeoutError, mockContext, mockRequest);
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toBeInstanceOf(Error);
+      expect((thrown as Error).message).toMatch(
+        /Request timeout after 5s.*Troubleshooting tips:/s,
+      );
+      expect((thrown as Error).cause).toBe(timeoutError);
+      expect((thrown as Error).cause).toMatchObject({
+        code: 'ETIMEDOUT',
+        message: 'socket timed out via <redacted>@proxy.local:8080',
+      });
+      expect(classifyRetryError(thrown)).toMatchObject({
+        kind: 'transport',
+        diagnosis: 'retryable',
+        transportCode: 'ETIMEDOUT',
+      });
+    });
+
+    it('keeps an HTTP client status authoritative on enhanced timeouts', () => {
+      const timeoutError = Object.assign(new Error('socket timed out'), {
+        code: 'ETIMEDOUT',
+        status: 400,
+      });
+      let thrown: unknown;
+
+      try {
+        errorHandler.handle(timeoutError, mockContext, mockRequest);
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(classifyRetryError(thrown)).toMatchObject({
+        kind: 'http',
+        diagnosis: 'fail-fast',
+        reason: 'client-error',
+        statusCode: 400,
+      });
     });
 
     it('should use custom suppression function', () => {
