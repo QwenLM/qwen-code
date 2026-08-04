@@ -5205,6 +5205,7 @@ describe('qwen-autofix workflow', () => {
 
     expect(workflow).toMatch(/issue-autofix:[\s\S]*?runs-on: 'ubuntu-latest'/);
     expect(workflow).toMatch(/review-address:[\s\S]*?runs-on: 'ubuntu-latest'/);
+    expect(workflow).toMatch(/build-cli:[\s\S]*?runs-on: 'ubuntu-latest'/);
     expect(workflow).not.toContain(
       '["self-hosted", "linux", "x64", "autofix"]',
     );
@@ -5214,7 +5215,9 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain(
       "RUNNER_ENVIRONMENT: '${{ runner.environment }}'",
     );
-    expect(prepareQwenCliSteps).toHaveLength(2);
+    // issue-autofix, build-cli, and review-address each stage the qwen shim
+    // against the workspace bundle.
+    expect(prepareQwenCliSteps).toHaveLength(3);
     for (const step of prepareQwenCliSteps) {
       expect(step).toContain(
         'qwen_version="$(node -p "require(\'./package.json\').version")"',
@@ -5279,6 +5282,8 @@ describe('qwen-autofix workflow', () => {
   });
 
   it('retries dependency installation before building', () => {
+    // issue-autofix and build-cli build from sources; review-address restores
+    // the shared bundle instead (see 'builds the review CLI bundle once...').
     expect(installAndBuildSteps).toHaveLength(2);
     for (const step of installAndBuildSteps) {
       expect(step).toContain('for attempt in 1 2 3; do');
@@ -5289,6 +5294,77 @@ describe('qwen-autofix workflow', () => {
       expect(step).toContain('npm run build');
       expect(step).toContain('npm run bundle');
     }
+  });
+
+  it('builds the review CLI bundle once and fans it out to the address legs', () => {
+    // Measured driver: 6 review-address legs each spent 3.5-5 minutes on
+    // npm ci + build + bundle of the SAME trusted base (~25 runner-minutes
+    // per scan) before the agent could start. The legs download the shared
+    // artifact instead; only their npm ci remains (the agent and the verify
+    // gate still need node_modules against the PR branch).
+    const buildCliJob =
+      workflow.match(
+        /\n {2}build-cli:[\s\S]*?(?=\n {2}review-address:)/,
+      )?.[0] ?? '';
+    const addressJob =
+      workflow.match(/\n {2}review-address:[\s\S]*$/)?.[0] ?? '';
+    const stepOf = (job, name) =>
+      job.match(
+        new RegExp(`- name: '${name}'[\\s\\S]*?(?=\\n[ ]{6}- name: |$)`),
+      )?.[0] ?? '';
+    expect(buildCliJob).toBeTruthy();
+    expect(addressJob).toBeTruthy();
+
+    expect(buildCliJob).toContain("needs: ['route', 'review-scan']");
+    expect(addressJob).toContain(
+      "needs: ['route', 'review-scan', 'build-cli']",
+    );
+    // An idle tick (no review targets) must not spend a build; the issue
+    // phase only runs when there are none, so gating on do_issue too would
+    // rebuild on every quiet scheduled tick.
+    expect(buildCliJob).toContain(
+      "needs.review-scan.outputs.has_targets == 'true'",
+    );
+    expect(buildCliJob).not.toContain('do_issue');
+
+    // The leg checks out the SHA the bundle was compiled from — a mid-run
+    // base push can never leave a leg running a bundle built from different
+    // sources than its checkout.
+    expect(buildCliJob).toContain(
+      "base_sha: '${{ steps.meta.outputs.base_sha }}'",
+    );
+    expect(buildCliJob).toContain(
+      'echo "base_sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"',
+    );
+    expect(stepOf(addressJob, 'Checkout trusted base')).toContain(
+      "ref: '${{ needs.build-cli.outputs.base_sha }}'",
+    );
+
+    // The artifact is the repo-root dist/ only — copy_bundle_assets.js
+    // already gathers every runtime asset under it; packages/*/dist would
+    // triple the size and is rebuilt from branch sources by the verify gate.
+    expect(buildCliJob).toContain(
+      'tar -czf "${RUNNER_TEMP}/qwen-cli-dist.tar.gz" dist',
+    );
+    expect(buildCliJob).toContain("name: 'qwen-autofix-cli-dist'");
+    expect(buildCliJob).toContain('retention-days: 1');
+    expect(buildCliJob).toContain("if-no-files-found: 'error'");
+
+    const restoreStep = stepOf(addressJob, 'Restore CLI bundle');
+    expect(restoreStep).toContain(
+      'tar -xzf "${RUNNER_TEMP}/cli-dist/qwen-cli-dist.tar.gz"',
+    );
+    expect(restoreStep).toContain('test -f dist/cli.js');
+    expect(stepOf(addressJob, 'Download CLI bundle')).toContain(
+      "name: 'qwen-autofix-cli-dist'",
+    );
+
+    // The leg itself never rebuilds the base bundle — that is the entire
+    // point of the fan-out.
+    const legInstall = stepOf(addressJob, 'Install dependencies');
+    expect(legInstall).toContain('npm ci --prefer-offline');
+    expect(legInstall).not.toContain('npm run build');
+    expect(legInstall).not.toContain('npm run bundle');
   });
 
   it('uses the standard checkout action for autonomous runner jobs', () => {

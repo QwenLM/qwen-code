@@ -2587,11 +2587,103 @@ jobs:
           echo "has_targets=$([[ "${COUNT}" -gt 0 ]] && echo true || echo false)" >> "${GITHUB_OUTPUT}"
 
   # ===========================================================================
+  # REVIEW PHASE (build) — compile the trusted-base CLI bundle ONCE per scan
+  # and fan it out to the address legs as an artifact. Each leg otherwise
+  # repeated the same base build: measured 3.5-5 minutes of npm ci + build +
+  # bundle per leg (6 legs ≈ 25 runner-minutes on one 2026-08 scan) before
+  # the agent could start. Gated on has_targets so an idle tick builds
+  # nothing — the issue phase runs only when there are no review targets, so
+  # gating on do_issue too would rebuild on every quiet scheduled tick.
+  # fetch-depth 1 suffices: nothing here needs history, and the legs (full
+  # fetch) always contain this commit as an ancestor of their base fetch.
+  # ===========================================================================
+  build-cli:
+    needs: ['route', 'review-scan']
+    if: |-
+      ${{ needs.review-scan.outputs.has_targets == 'true' }}
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 30
+    permissions:
+      contents: 'read'
+    outputs:
+      base_sha: '${{ steps.meta.outputs.base_sha }}'
+    steps:
+      - name: 'Checkout trusted base'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ github.event.repository.default_branch }}'
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: 'Set up Node.js (hosted)'
+        if: |-
+          ${{ runner.environment == 'github-hosted' }}
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22.x'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+
+      - name: 'Install dependencies and build'
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: |-
+          for attempt in 1 2 3; do
+            if npm ci --prefer-offline --no-audit --progress=false; then
+              break
+            fi
+            if [[ "${attempt}" == "3" ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
+          npm run build
+          npm run bundle
+
+      # Producer-side sanity: a bundle that cannot even answer --version
+      # fails THIS job once, instead of every leg failing its restore or
+      # first qwen invocation minutes later and N times over.
+      - name: 'Prepare Qwen Code CLI'
+        run: |-
+          qwen_version="$(node -p "require('./package.json').version")"
+          echo "Using checked-out Qwen Code bundle ${qwen_version}"
+          qwen_bin="${RUNNER_TEMP}/qwen-bin"
+          mkdir -p "${qwen_bin}"
+          cat > "${qwen_bin}/qwen" <<'EOF'
+          #!/usr/bin/env bash
+          exec node "${GITHUB_WORKSPACE}/dist/cli.js" "$@"
+          EOF
+          chmod +x "${qwen_bin}/qwen"
+          echo "${qwen_bin}" >> "${GITHUB_PATH}"
+          PATH="${qwen_bin}:${PATH}"
+          qwen --version
+
+      # Only the repo-root dist/ is shipped: copy_bundle_assets.js already
+      # gathers every runtime asset (chunks, vendor, web-shell, locales)
+      # under it. packages/*/dist would triple the artifact size and is
+      # never read by the legs — the verify gate's full `npm run build`
+      # wipes and rebuilds each package's dist from branch sources
+      # (build_package.js rms it first, so no staleness leaks through).
+      - name: 'Upload CLI bundle'
+        id: 'meta'
+        run: |-
+          echo "base_sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+          tar -czf "${RUNNER_TEMP}/qwen-cli-dist.tar.gz" dist
+
+      - name: 'Publish CLI bundle artifact'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'qwen-autofix-cli-dist'
+          path: '${{ runner.temp }}/qwen-cli-dist.tar.gz'
+          retention-days: 1
+          if-no-files-found: 'error'
+
+  # ===========================================================================
   # REVIEW PHASE (address) — one job per PR: triage, address (incl. conflict
   # resolution), verify, push, and report.
   # ===========================================================================
   review-address:
-    needs: ['route', 'review-scan']
+    needs: ['route', 'review-scan', 'build-cli']
     if: |-
       ${{ needs.review-scan.outputs.has_targets == 'true' }}
     runs-on: 'ubuntu-latest'
@@ -2660,14 +2752,17 @@ jobs:
       HEAD_REPO: '${{ matrix.target.head_repo }}'
     steps:
       # SECURITY: checkout trusted base code first. The PR branch is checked
-      # out later in "Prepare branch and feedback" after the trusted CLI bundle
-      # is built from this base. Without this pin, pull_request_review events
-      # would check out the PR merge ref by default, letting PR-controlled
-      # code influence the secret-bearing address run.
+      # out later in "Prepare branch and feedback" after the trusted CLI
+      # bundle (built once from this base in build-cli) is in place. Without
+      # this pin, pull_request_review events would check out the PR merge ref
+      # by default, letting PR-controlled code influence the secret-bearing
+      # address run. The ref is pinned to the SHA build-cli compiled — not
+      # the live default branch — so a mid-run base push can never leave a
+      # leg running a bundle built from DIFFERENT sources than its checkout.
       - name: 'Checkout trusted base'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
-          ref: '${{ github.event.repository.default_branch }}'
+          ref: '${{ needs.build-cli.outputs.base_sha }}'
           fetch-depth: 0
           persist-credentials: false
 
@@ -2736,7 +2831,12 @@ jobs:
             exit 1
           fi
 
-      - name: 'Install dependencies and build'
+      # npm ci only — the build itself ran ONCE in build-cli. The legs still
+      # need node_modules: the agent builds/tests the PR branch, and the
+      # verify gate rebuilds from branch sources (wiping the restored
+      # packages/*/dist via build_package.js, so no base staleness leaks
+      # into branch verification).
+      - name: 'Install dependencies'
         env:
           QWEN_SKIP_PREPARE: '1'
         run: |-
@@ -2750,8 +2850,17 @@ jobs:
             sleep $((attempt * 15))
           done
           git config core.hooksPath .husky
-          npm run build
-          npm run bundle
+
+      - name: 'Download CLI bundle'
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
+        with:
+          name: 'qwen-autofix-cli-dist'
+          path: '${{ runner.temp }}/cli-dist'
+
+      - name: 'Restore CLI bundle'
+        run: |-
+          tar -xzf "${RUNNER_TEMP}/cli-dist/qwen-cli-dist.tar.gz"
+          test -f dist/cli.js
 
       - name: 'Prepare Qwen Code CLI'
         run: |-
