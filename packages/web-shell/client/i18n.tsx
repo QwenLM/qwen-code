@@ -2579,7 +2579,11 @@ const EN: Messages = {
   'channels.editor.field.feishu.clientSecret': 'App Secret',
   'channels.editor.field.github.token': 'Personal Access Token',
   'channels.editor.field.github.token.description':
-    'Classic PAT with "notifications" scope',
+    'Optional classic PAT with "notifications" scope. Overrides local gh authentication',
+  'channels.editor.field.github.useLocalGh':
+    'Use local GitHub CLI authentication',
+  'channels.editor.field.github.useLocalGh.description':
+    'Explicitly reuse the daemon host’s account-wide gh login when no token is configured',
   'channels.editor.field.github.baseUrl': 'API Base URL',
   'channels.editor.field.github.baseUrl.description':
     'GitHub Enterprise API root (e.g. https://ghe.example.com/api/v3). Leave empty for github.com',
@@ -2692,6 +2696,8 @@ const EN: Messages = {
     'Anyone who can reach the bot can start a conversation.',
   'channels.editor.validation.required': (v) =>
     `${v?.label ?? 'This field'} is required.`,
+  'channels.editor.validation.credential':
+    'Enter a token or enable local GitHub CLI authentication.',
   'channels.editor.validation.duplicate':
     'A Channel with this name already exists.',
   'channels.editor.validation.invalidName': 'Choose a different instance name.',
@@ -5227,7 +5233,10 @@ const ZH: Messages = {
   'channels.editor.field.feishu.clientSecret': 'App Secret',
   'channels.editor.field.github.token': '个人访问令牌',
   'channels.editor.field.github.token.description':
-    '需要 "notifications" 权限的经典 PAT',
+    '可选。填写具有 "notifications" 权限的经典 PAT；优先于本地 gh 认证',
+  'channels.editor.field.github.useLocalGh': '使用本地 GitHub CLI 认证',
+  'channels.editor.field.github.useLocalGh.description':
+    '未配置令牌时，显式复用 daemon 主机上账户级的 gh 登录',
   'channels.editor.field.github.baseUrl': 'API 基础 URL',
   'channels.editor.field.github.baseUrl.description':
     'GitHub Enterprise API 根地址（如 https://ghe.example.com/api/v3），github.com 留空',
@@ -5335,6 +5344,8 @@ const ZH: Messages = {
     '所有能够访问机器人的用户均可直接开始对话。',
   'channels.editor.validation.required': (v) =>
     `${v?.label ?? '此字段'}为必填项。`,
+  'channels.editor.validation.credential':
+    '请输入令牌，或开启本地 GitHub CLI 认证。',
   'channels.editor.validation.duplicate': '已存在同名频道。',
   'channels.editor.validation.invalidName': '请使用其他实例名称。',
   'channels.editor.validation.invalidOption': '请移除不在允许列表中的值。',
