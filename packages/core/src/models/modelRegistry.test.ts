@@ -311,6 +311,75 @@ describe('ModelRegistry', () => {
       ).toEqual({ pdf: true });
     });
 
+    it('uses catalog metadata when a built-in auth default agrees', () => {
+      const registry = new ModelRegistry(
+        {
+          openai: [
+            {
+              id: 'MiniMax-M3',
+              baseUrl: 'https://api.minimax.io/v1',
+              envKey: 'MINIMAX_API_KEY',
+              generationConfig: {
+                modalities: { image: true, video: true },
+              },
+            },
+          ],
+        },
+        undefined,
+        {
+          minimax: {
+            models: {
+              'MiniMax-M3': {
+                modalities: { input: ['text', 'image', 'video'] },
+              },
+            },
+          },
+        },
+      );
+      const model = registry.getModel(AuthType.USE_OPENAI, 'MiniMax-M3')!;
+
+      expect(model.generationConfig.modalities).toEqual({
+        image: true,
+        video: true,
+      });
+      expect(registry.getModalitiesSource(model)).toBe('catalog');
+    });
+
+    it('keeps a built-in auth default when regional catalog metadata differs', () => {
+      const registry = new ModelRegistry(
+        {
+          openai: [
+            {
+              id: 'qwen3.5-plus',
+              baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
+              envKey: 'BAILIAN_CODING_PLAN_API_KEY',
+              generationConfig: {
+                modalities: { image: true, video: true },
+              },
+            },
+          ],
+        },
+        undefined,
+        {
+          'alibaba-coding-plan-cn': {
+            api: 'https://coding.dashscope.aliyuncs.com/v1',
+            models: {
+              'qwen3.5-plus': {
+                modalities: { input: ['text', 'image'] },
+              },
+            },
+          },
+        },
+      );
+      const model = registry.getModel(AuthType.USE_OPENAI, 'qwen3.5-plus')!;
+
+      expect(model.generationConfig.modalities).toEqual({
+        image: true,
+        video: true,
+      });
+      expect(registry.getModalitiesSource(model)).toBe('provider-default');
+    });
+
     it('returns text-only ({}) for models with no multimodal default', () => {
       const registry = new ModelRegistry({
         openai: [

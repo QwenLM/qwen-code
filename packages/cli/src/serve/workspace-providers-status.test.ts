@@ -131,6 +131,42 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     expect(second.current?.modelId).toBe('model-b(openai)');
   });
 
+  it('reports catalog modalities for configured workspace models', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({
+      env: {},
+      modelMetadataCatalog: {
+        openrouter: {
+          api: 'https://openrouter.ai/api/v1',
+          models: {
+            'google/gemma-3-12b-it': {
+              modalities: { input: ['text', 'image'] },
+            },
+          },
+        },
+      },
+    });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'google/gemma-3-12b-it' },
+      modelProviders: {
+        openai: [
+          {
+            id: 'google/gemma-3-12b-it',
+            baseUrl: 'https://openrouter.ai/api/v1',
+            envKey: 'OPENROUTER_API_KEY',
+          },
+        ],
+      },
+    });
+
+    const result = await provider(workspace, false);
+    const model = result.providers
+      .flatMap((entry) => entry.models)
+      .find((entry) => entry.baseModelId === 'google/gemma-3-12b-it');
+
+    expect(model?.modalities).toEqual({ image: true });
+  });
+
   it('returns the workspace approval mode', async () => {
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });
     await writeUserSettings({

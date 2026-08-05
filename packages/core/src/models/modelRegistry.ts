@@ -19,7 +19,10 @@ import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { QWEN_OAUTH_MODELS } from './constants.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
+  areModalitiesEqual,
   getCatalogModalities,
+  getProviderDefaultModalities,
+  type ModelModalitiesSource,
   type ModelMetadataCatalog,
 } from './model-metadata-catalog.js';
 
@@ -86,6 +89,10 @@ export function modelRegistryKey(id: string, baseUrl?: string): string {
 export class ModelRegistry {
   private modelsByAuthType: Map<AuthType, Map<string, ResolvedModelConfig>>;
   private readonly modelMetadataCatalog?: ModelMetadataCatalog;
+  private readonly modalitiesSources = new WeakMap<
+    ResolvedModelConfig,
+    ModelModalitiesSource
+  >();
 
   /** providerId -> SDK protocol mapping; persists across reloads. */
   private providerProtocolConfig: ProviderProtocolConfig;
@@ -277,6 +284,10 @@ export class ModelRegistry {
     return undefined;
   }
 
+  getModalitiesSource(model: ResolvedModelConfig): ModelModalitiesSource {
+    return this.modalitiesSources.get(model) ?? 'heuristic';
+  }
+
   /**
    * Check if model exists for given authType.
    * When baseUrl is provided, checks the exact endpoint or matching default.
@@ -313,22 +324,43 @@ export class ModelRegistry {
     this.validateModelConfig(config, authType);
 
     const generationConfig = { ...(config.generationConfig ?? {}) };
+    const lookup = {
+      providerId,
+      authType,
+      modelId: config.id,
+      baseUrl: config.baseUrl,
+      envKey: config.envKey,
+    };
+    const catalogModalities = getCatalogModalities(
+      this.modelMetadataCatalog,
+      lookup,
+    );
+    const providerDefaultModalities = getProviderDefaultModalities(lookup);
+    let modalitiesSource: ModelModalitiesSource = 'explicit';
     // Auto-fill modalities from the model name when the provider didn't set
     // them explicitly. Without this, downstream consumers that read straight
     // from the registry (e.g. sub-agents via getResolvedModel) would inherit
     // the parent session's modalities instead of the agent's own.
     if (generationConfig.modalities === undefined) {
       generationConfig.modalities =
-        getCatalogModalities(this.modelMetadataCatalog, {
-          providerId,
-          authType,
-          modelId: config.id,
-          baseUrl: config.baseUrl,
-          envKey: config.envKey,
-        }) ?? defaultModalities(config.id);
+        catalogModalities ?? defaultModalities(config.id);
+      modalitiesSource = catalogModalities ? 'catalog' : 'heuristic';
+    } else if (
+      providerDefaultModalities &&
+      areModalitiesEqual(generationConfig.modalities, providerDefaultModalities)
+    ) {
+      if (
+        catalogModalities &&
+        areModalitiesEqual(providerDefaultModalities, catalogModalities)
+      ) {
+        generationConfig.modalities = catalogModalities;
+        modalitiesSource = 'catalog';
+      } else {
+        modalitiesSource = 'provider-default';
+      }
     }
 
-    return {
+    const resolved: ResolvedModelConfig = {
       ...config,
       authType,
       name: config.name || config.id,
@@ -337,6 +369,8 @@ export class ModelRegistry {
       generationConfig,
       capabilities: config.capabilities || {},
     };
+    this.modalitiesSources.set(resolved, modalitiesSource);
+    return resolved;
   }
 
   /**

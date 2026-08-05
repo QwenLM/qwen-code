@@ -527,6 +527,18 @@ export class ModelsConfig {
     );
   }
 
+  private hasExplicitModalities(): boolean {
+    if (this._generationConfig.modalities === undefined) return false;
+    const source = this.generationConfigSources['modalities'];
+    return (
+      source === undefined ||
+      (source.kind !== 'computed' &&
+        source.kind !== 'default' &&
+        source.kind !== 'modelProviders' &&
+        source.kind !== 'unknown')
+    );
+  }
+
   /**
    * Switch model (and optionally authType).
    * Supports both registry-backed models and RuntimeModelSnapshots.
@@ -971,15 +983,34 @@ export class ModelsConfig {
 
     // Generation config: apply all fields from MODEL_GENERATION_CONFIG_FIELDS
     const gc = model.generationConfig;
+    const modalitiesSource = this.modelRegistry.getModalitiesSource(model);
     for (const field of MODEL_GENERATION_CONFIG_FIELDS) {
+      if (
+        field === 'modalities' &&
+        modalitiesSource !== 'explicit' &&
+        this.hasExplicitModalities()
+      ) {
+        continue;
+      }
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (this._generationConfig as any)[field] = gc[field];
-      this.generationConfigSources[field] = {
-        kind: 'modelProviders',
-        authType: model.authType,
-        modelId: model.id,
-        detail: `generationConfig.${field}`,
-      };
+      this.generationConfigSources[field] =
+        field === 'modalities' && modalitiesSource !== 'explicit'
+          ? {
+              kind: 'computed',
+              detail:
+                modalitiesSource === 'catalog'
+                  ? 'loaded from models.dev catalog'
+                  : modalitiesSource === 'provider-default'
+                    ? 'loaded from built-in provider metadata'
+                    : 'auto-detected from model',
+            }
+          : {
+              kind: 'modelProviders',
+              authType: model.authType,
+              modelId: model.id,
+              detail: `generationConfig.${field}`,
+            };
     }
 
     // contextWindowSize fallback: auto-detect from model when not set by provider

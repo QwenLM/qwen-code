@@ -9,7 +9,10 @@ import * as path from 'node:path';
 
 import type { InputModalities } from '../core/contentGenerator.js';
 import { Storage } from '../config/storage.js';
-import { findProviderByCredentials } from '../providers/all-providers.js';
+import {
+  findProviderByCredentials,
+  findProviderById,
+} from '../providers/all-providers.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { loadUndici, redactProxyError } from '../utils/runtimeFetchOptions.js';
@@ -58,6 +61,24 @@ export interface ModelMetadataLookup {
   envKey?: string;
 }
 
+export type ModelModalitiesSource =
+  | 'explicit'
+  | 'catalog'
+  | 'provider-default'
+  | 'heuristic';
+
+export function areModalitiesEqual(
+  a: InputModalities,
+  b: InputModalities,
+): boolean {
+  return (
+    Boolean(a.image) === Boolean(b.image) &&
+    Boolean(a.pdf) === Boolean(b.pdf) &&
+    Boolean(a.audio) === Boolean(b.audio) &&
+    Boolean(a.video) === Boolean(b.video)
+  );
+}
+
 interface CatalogState {
   current?: ModelMetadataCatalog;
   loading?: Promise<ModelMetadataCatalog>;
@@ -78,6 +99,7 @@ function parseCatalog(text: string): ModelMetadataCatalog | undefined {
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
       return undefined;
     }
+    let modelCount = 0;
     for (const provider of Object.values(parsed)) {
       if (
         !provider ||
@@ -86,8 +108,37 @@ function parseCatalog(text: string): ModelMetadataCatalog | undefined {
       ) {
         return undefined;
       }
+      const { api, env, models } = provider as CatalogProvider;
+      if (api !== undefined && typeof api !== 'string') return undefined;
+      if (
+        env !== undefined &&
+        (!Array.isArray(env) || env.some((key) => typeof key !== 'string'))
+      ) {
+        return undefined;
+      }
+      if (!models || typeof models !== 'object' || Array.isArray(models)) {
+        return undefined;
+      }
+      if (Object.keys(models).length === 0) return undefined;
+      for (const model of Object.values(models)) {
+        if (Array.isArray(model)) {
+          if (model.some((modality) => typeof modality !== 'string')) {
+            return undefined;
+          }
+        } else {
+          if (!model || typeof model !== 'object') return undefined;
+          const input = model.modalities?.input;
+          if (
+            !Array.isArray(input) ||
+            input.some((modality) => typeof modality !== 'string')
+          ) {
+            return undefined;
+          }
+        }
+        modelCount += 1;
+      }
     }
-    return parsed as ModelMetadataCatalog;
+    return modelCount > 0 ? (parsed as ModelMetadataCatalog) : undefined;
   } catch {
     return undefined;
   }
@@ -319,6 +370,18 @@ function mapIdealabProvider(modelId: string): string | undefined {
     default:
       return undefined;
   }
+}
+
+export function getProviderDefaultModalities(
+  lookup: ModelMetadataLookup,
+): InputModalities | undefined {
+  const provider =
+    findProviderByCredentials(lookup.baseUrl, lookup.envKey) ??
+    (lookup.providerId ? findProviderById(lookup.providerId) : undefined);
+  const model = provider?.models?.find(
+    (candidate) => candidate.id.toLowerCase() === lookup.modelId.toLowerCase(),
+  );
+  return model?.modalities ? { ...model.modalities } : undefined;
 }
 
 function resolveCatalogProviderId(

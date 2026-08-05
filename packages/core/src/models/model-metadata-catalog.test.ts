@@ -319,6 +319,33 @@ describe('loadModelMetadataCatalog', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('rejects a fresh cache without valid model metadata', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'models-dev-test-'));
+    tempDirs.push(dir);
+    const cachePath = path.join(dir, 'models-dev.json');
+    await fs.writeFile(
+      cachePath,
+      JSON.stringify({ openrouter: { models: {} } }),
+    );
+    const fetchMock = vi.fn(async () => {
+      throw new Error('offline');
+    });
+
+    const loaded = await loadModelMetadataCatalog({
+      cachePath,
+      fetch: fetchMock,
+    });
+
+    expect(Object.keys(loaded).length).toBeGreaterThan(1);
+    expect(
+      getCatalogModalities(loaded, {
+        providerId: 'openai',
+        modelId: 'gpt-4o',
+      }),
+    ).toEqual({ image: true, pdf: true });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+  });
+
   it('uses the built-in snapshot without waiting for a cold-cache fetch', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'models-dev-test-'));
     tempDirs.push(dir);
@@ -449,5 +476,29 @@ describe('loadModelMetadataCatalog', () => {
         modelId: 'gpt-4o',
       }),
     ).toEqual({ image: true, pdf: true });
+  });
+
+  it('does not publish or cache an invalid network catalog', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'models-dev-test-'));
+    tempDirs.push(dir);
+    const cachePath = path.join(dir, 'models-dev.json');
+    const fetchMock = vi.fn(
+      async () => new Response(JSON.stringify({ openrouter: {} })),
+    );
+
+    const first = await loadModelMetadataCatalog({
+      cachePath,
+      fetch: fetchMock,
+    });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const second = await loadModelMetadataCatalog({
+      cachePath,
+      fetch: fetchMock,
+    });
+
+    expect(second).toBe(first);
+    expect(Object.keys(second).length).toBeGreaterThan(1);
+    await expect(fs.stat(cachePath)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 });

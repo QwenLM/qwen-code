@@ -1663,6 +1663,55 @@ describe('ModelsConfig', () => {
     });
   });
 
+  it('preserves explicit settings modalities across auth sync and registry switches', async () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig: {
+        openai: [
+          {
+            id: 'vendor/old-model',
+            baseUrl: 'https://openrouter.ai/api/v1',
+            envKey: 'OPENROUTER_API_KEY',
+          },
+          {
+            id: 'vendor/new-model',
+            baseUrl: 'https://openrouter.ai/api/v1',
+            envKey: 'OPENROUTER_API_KEY',
+          },
+        ],
+      },
+      generationConfig: {
+        model: 'vendor/old-model',
+        modalities: { audio: true },
+      },
+      generationConfigSources: {
+        modalities: {
+          kind: 'settings',
+          settingsPath: 'model.generationConfig.modalities',
+        },
+      },
+      modelMetadataCatalog: {
+        openrouter: {
+          models: {
+            'vendor/old-model': { modalities: { input: ['text', 'image'] } },
+            'vendor/new-model': { modalities: { input: ['text', 'video'] } },
+          },
+        },
+      },
+    });
+
+    modelsConfig.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'vendor/old-model');
+    await modelsConfig.switchModel(AuthType.USE_OPENAI, 'vendor/new-model');
+
+    expect(modelsConfig.getGenerationConfig().modalities).toEqual({
+      audio: true,
+    });
+    expect(modelsConfig.getGenerationConfigSources()['modalities']).toEqual({
+      kind: 'settings',
+      settingsPath: 'model.generationConfig.modalities',
+    });
+  });
+
   it('refreshes model-derived modalities when hot-switching to the default qwen-oauth model', async () => {
     // Start on qwen-oauth with a text-only model so modalities are empty.
     const modelsConfig = new ModelsConfig({

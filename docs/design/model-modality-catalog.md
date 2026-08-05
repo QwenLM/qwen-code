@@ -35,6 +35,11 @@ Model modality resolution uses this precedence:
 Model-id rules, including MiniMax M3 defaults, are fallback behavior only and
 never override an explicit user value.
 
+Built-in `/auth` modality defaults that agree with models.dev are treated as
+catalog metadata rather than explicit user configuration. Region-specific
+provider defaults remain the fallback when the two sources differ. Explicit
+modalities edited by the user continue to take precedence over both.
+
 Provider identity is resolved from the configured provider when possible and
 otherwise from its endpoint or credential environment key. The catalog lookup
 is exact and case-insensitive; it does not guess across similarly named models.
@@ -58,6 +63,8 @@ The loaded catalog is passed to `ModelsConfig` and `ModelRegistry`. This covers
 initial resolution, provider-backed models installed through `/auth`, manually
 edited model providers, runtime model switches, and model-provider hot reloads
 without persisting remotely supplied metadata into user settings.
+The daemon workspace-provider status path uses the same catalog so model lists
+shown before a session starts match the configuration used by live sessions.
 
 ## Boundaries
 
