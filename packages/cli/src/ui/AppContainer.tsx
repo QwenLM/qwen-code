@@ -148,7 +148,7 @@ import {
 } from './contexts/VimModeContext.js';
 import {
   ThoughtExpandedProvider,
-  PENDING_THOUGHT_HEAD_ID,
+  settlePendingExpansion,
 } from './contexts/ThoughtExpandedContext.js';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
 import { calculatePromptWidths } from './components/InputPrompt.js';
@@ -786,20 +786,11 @@ export const AppContainer = (props: AppContainerProps) => {
       return next;
     });
   }, []);
-  // While streaming, a thought has no committed head id yet, so its click
-  // expansion is keyed by PENDING_THOUGHT_HEAD_ID. When the thought commits,
-  // migrate that entry to the real committed head id so a thought expanded
-  // while streaming stays expanded; a `null` id means the pending thought was
-  // dropped without committing, so just drop the provisional key.
   const settlePendingThoughtExpansion = useCallback(
     (committedHeadId: number | null) => {
-      setExpandedThoughtHeadIds((prev) => {
-        if (!prev.has(PENDING_THOUGHT_HEAD_ID)) return prev;
-        const next = new Set(prev);
-        next.delete(PENDING_THOUGHT_HEAD_ID);
-        if (committedHeadId != null) next.add(committedHeadId);
-        return next;
-      });
+      setExpandedThoughtHeadIds((prev) =>
+        settlePendingExpansion(prev, committedHeadId),
+      );
     },
     [],
   );
