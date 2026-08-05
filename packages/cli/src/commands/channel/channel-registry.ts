@@ -13,6 +13,42 @@ export interface ChannelTypeDescriptor {
 const registry = new Map<string, ChannelPlugin>();
 let builtinsPromise: Promise<void> | null = null;
 
+function assertManagementField(
+  field: ChannelConfigFieldDescriptor,
+  path = field.key,
+  nested = false,
+): void {
+  const envResolvable =
+    (field as { envResolvable?: unknown }).envResolvable === true;
+  const required = (field as { required?: unknown }).required === true;
+  if (field.kind === 'secret' && nested) {
+    throw new Error(`Channel field "${path}" cannot declare a nested secret.`);
+  }
+  if (envResolvable && nested) {
+    throw new Error(
+      `Channel field "${path}" cannot resolve environment references.`,
+    );
+  }
+  if (field.kind !== 'object') return;
+  if (required) {
+    throw new Error(`Channel field "${path}" cannot be a required object.`);
+  }
+  if (envResolvable) {
+    throw new Error(
+      `Channel field "${path}" cannot resolve environment references.`,
+    );
+  }
+  for (const property of field.properties ?? []) {
+    assertManagementField(property, `${path}.${property.key}`, true);
+  }
+}
+
+function assertManagementDescriptor(plugin: ChannelPlugin): void {
+  for (const field of plugin.management?.fields ?? []) {
+    assertManagementField(field);
+  }
+}
+
 function ensureBuiltins(): Promise<void> {
   if (!builtinsPromise) {
     builtinsPromise = (async () => {
@@ -32,6 +68,7 @@ function ensureBuiltins(): Promise<void> {
       for (let i = 0; i < results.length; i++) {
         const result = results[i]!;
         if (result.status === 'fulfilled') {
+          assertManagementDescriptor(result.value.plugin);
           registry.set(result.value.plugin.channelType, result.value.plugin);
         } else {
           process.stderr.write(
@@ -50,6 +87,7 @@ export function registerPlugin(plugin: ChannelPlugin): void {
       `Channel type "${plugin.channelType}" is already registered.`,
     );
   }
+  assertManagementDescriptor(plugin);
   registry.set(plugin.channelType, plugin);
 }
 

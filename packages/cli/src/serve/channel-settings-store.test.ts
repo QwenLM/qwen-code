@@ -87,6 +87,12 @@ describe('WorkspaceChannelSettingsStore', () => {
                 kind: 'string',
                 required: true,
               },
+              {
+                key: 'constructor',
+                label: 'Prototype-named value',
+                kind: 'string',
+                required: true,
+              },
             ],
           },
         ],
@@ -540,7 +546,7 @@ describe('WorkspaceChannelSettingsStore', () => {
         config: {
           type: 'management-validation-test',
           clientId: 'client-id',
-          nested: {},
+          nested: { constructor: 'present' },
         },
         secrets: { clientSecret: { operation: 'preserve' } },
       }),
@@ -550,6 +556,117 @@ describe('WorkspaceChannelSettingsStore', () => {
     });
 
     expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
+  });
+
+  it('rejects an omitted prototype-named required property without writing', async () => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    const before = fs.readFileSync(settingsPath, 'utf8');
+
+    await expect(
+      store.upsert('bot', {
+        expectedRevision: store.snapshot().revision,
+        config: {
+          type: 'management-validation-test',
+          clientId: 'client-id',
+          nested: { requiredValue: 'present' },
+        },
+        secrets: { clientSecret: { operation: 'preserve' } },
+      }),
+    ).rejects.toMatchObject({
+      code: 'channel_settings_invalid_config',
+      message: 'Channel field "nested.constructor" is required.',
+    });
+
+    expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
+  });
+
+  it('reports the full path for nested environment references', async () => {
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "bot": {
+    "type": "dingtalk",
+    "clientId": "client-id",
+    "clientSecret": "existing-secret"
+  } }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    await expect(
+      store.upsert('bot', {
+        expectedRevision: store.snapshot().revision,
+        config: {
+          type: 'dingtalk',
+          clientId: 'client-id',
+          interactiveCards: { statusCard: { enabled: '$STATUS_CARD' } },
+        },
+        secrets: { clientSecret: { operation: 'preserve' } },
+      }),
+    ).rejects.toMatchObject({
+      code: 'channel_settings_invalid_config',
+      message:
+        'Channel field "interactiveCards.statusCard.enabled" does not support environment references.',
+    });
+  });
+
+  it('only preserves unknown nested legacy fields when they are unchanged', async () => {
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "bot": {
+    "type": "dingtalk",
+    "clientId": "client-id",
+    "clientSecret": "existing-secret",
+    "interactiveCards": {
+      "enabled": true,
+      "questionCard": {
+        "enabled": true,
+        "legacyFlag": 1
+      }
+    }
+  } }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    const next = await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'dingtalk',
+        clientId: 'updated-id',
+        interactiveCards: {
+          enabled: true,
+          questionCard: { enabled: true, legacyFlag: 1 },
+        },
+      },
+      secrets: { clientSecret: { operation: 'preserve' } },
+    });
+
+    expect(next.channels['bot']).toMatchObject({
+      clientId: 'updated-id',
+      interactiveCards: {
+        enabled: true,
+        questionCard: { enabled: true, legacyFlag: 1 },
+      },
+    });
+
+    const beforeRejectedWrite = fs.readFileSync(settingsPath, 'utf8');
+    await expect(
+      store.upsert('bot', {
+        expectedRevision: next.revision,
+        config: {
+          type: 'dingtalk',
+          clientId: 'updated-id',
+          interactiveCards: {
+            enabled: true,
+            questionCard: { enabled: true, legacyFlag: 2 },
+          },
+        },
+        secrets: { clientSecret: { operation: 'preserve' } },
+      }),
+    ).rejects.toMatchObject({
+      code: 'channel_settings_invalid_config',
+      message:
+        'Channel field "interactiveCards.questionCard.legacyFlag" is not manageable.',
+    });
+    expect(fs.readFileSync(settingsPath, 'utf8')).toBe(beforeRejectedWrite);
   });
 
   it.each([

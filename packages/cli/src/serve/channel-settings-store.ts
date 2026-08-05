@@ -211,36 +211,30 @@ function assertDescriptorValue(
   field: ChannelConfigFieldDescriptor,
   value: unknown,
   path = field.key,
+  previous?: unknown,
 ): void {
   if (field.kind === 'object') {
     if (!isRecord(value)) {
       throw invalidConfig(`Channel field "${path}" has an invalid value.`);
     }
+    const previousRecord = isRecord(previous) ? previous : {};
     const properties = new Map(
       (field.properties ?? []).map((property) => [property.key, property]),
     );
     for (const [key, nestedValue] of Object.entries(value)) {
       const property = properties.get(key);
       if (!property) {
-        throw invalidConfig(
-          `Channel field "${path}.${key}" is not manageable.`,
-        );
+        assertPreservedUnknownField(path, key, nestedValue, previousRecord);
+        continue;
       }
-      assertDescriptorValue(property, nestedValue, `${path}.${key}`);
+      assertDescriptorValue(
+        property,
+        nestedValue,
+        `${path}.${key}`,
+        Object.hasOwn(previousRecord, key) ? previousRecord[key] : undefined,
+      );
     }
-    for (const property of field.properties ?? []) {
-      if (!property.required) continue;
-      const nestedValue = value[property.key];
-      if (
-        nestedValue === undefined ||
-        nestedValue === null ||
-        nestedValue === ''
-      ) {
-        throw invalidConfig(
-          `Channel field "${path}.${property.key}" is required.`,
-        );
-      }
-    }
+    assertRequiredFields(field.properties ?? [], value, path);
     return;
   }
   const invalidEnvironment =
@@ -249,7 +243,7 @@ function assertDescriptorValue(
     field.envResolvable !== true;
   if (invalidEnvironment) {
     throw invalidConfig(
-      `Channel field "${field.key}" does not support environment references.`,
+      `Channel field "${path}" does not support environment references.`,
     );
   }
   const valid =
@@ -276,6 +270,36 @@ function assertDescriptorValue(
   }
 }
 
+function assertRequiredFields(
+  fields: ReadonlyArray<Pick<ChannelConfigFieldDescriptor, 'key' | 'required'>>,
+  values: Record<string, unknown>,
+  path?: string,
+): void {
+  for (const field of fields) {
+    if (!field.required) continue;
+    const value = Object.hasOwn(values, field.key)
+      ? values[field.key]
+      : undefined;
+    if (value === undefined || value === null || value === '') {
+      const fieldPath = path ? `${path}.${field.key}` : field.key;
+      throw invalidConfig(`Channel field "${fieldPath}" is required.`);
+    }
+  }
+}
+
+function assertPreservedUnknownField(
+  path: string | undefined,
+  key: string,
+  value: unknown,
+  previous: Record<string, unknown>,
+): void {
+  if (Object.hasOwn(previous, key) && isDeepStrictEqual(previous[key], value)) {
+    return;
+  }
+  const fieldPath = path ? `${path}.${key}` : key;
+  throw invalidConfig(`Channel field "${fieldPath}" is not manageable.`);
+}
+
 function assertManagedConfig(
   config: Record<string, unknown>,
   previous: Record<string, unknown>,
@@ -286,24 +310,18 @@ function assertManagedConfig(
     if (key === 'type') continue;
     const field = descriptorFields.get(key);
     if (field) {
-      assertDescriptorValue(field, value);
+      assertDescriptorValue(
+        field,
+        value,
+        field.key,
+        Object.hasOwn(previous, key) ? previous[key] : undefined,
+      );
       continue;
     }
     if (assertSharedField(key, value)) continue;
-    if (
-      !Object.hasOwn(previous, key) ||
-      !isDeepStrictEqual(previous[key], value)
-    ) {
-      throw invalidConfig(`Channel field "${key}" is not manageable.`);
-    }
+    assertPreservedUnknownField(undefined, key, value, previous);
   }
-  for (const field of fields) {
-    if (!field.required) continue;
-    const value = config[field.key];
-    if (value === undefined || value === null || value === '') {
-      throw invalidConfig(`Channel field "${field.key}" is required.`);
-    }
-  }
+  assertRequiredFields(fields, config);
 }
 
 function validateSecretUpdate(

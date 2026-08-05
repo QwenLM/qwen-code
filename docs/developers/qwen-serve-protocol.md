@@ -779,7 +779,9 @@ returned. Channel snapshots use `Cache-Control: no-store`.
 Field descriptors can expose nested object metadata through `properties`.
 Numeric descriptors can use `exclusiveMinimum` for open lower bounds. Clients
 that do not render an advertised field kind must preserve its existing config
-value instead of coercing or deleting it.
+value instead of coercing or deleting it. Object fields cannot be required,
+and nested properties cannot be secrets or environment-resolvable fields;
+those management protocols remain top-level only.
 
 Configuration writes use optimistic concurrency and the strict bearer-token
 gate:

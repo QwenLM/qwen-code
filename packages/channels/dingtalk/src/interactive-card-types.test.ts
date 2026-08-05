@@ -1,11 +1,46 @@
 import { describe, expect, it } from 'vitest';
 import {
+  DINGTALK_INTERACTIVE_CARD_TIMEOUT_EXCLUSIVE_MINIMUM,
   parseDingtalkCardCallback,
   parseDingtalkInteractiveCardConfig,
 } from './interactive-card-types.js';
 import * as interactiveCardTypes from './interactive-card-types.js';
+import { plugin } from './index.js';
 
 describe('interactive card config', () => {
+  it('keeps management descriptor values compatible with the runtime parser', () => {
+    const interactiveCards = plugin.management?.fields.find(
+      (field) => field.key === 'interactiveCards',
+    );
+    const questionCard = interactiveCards?.properties?.find(
+      (field) => field.key === 'questionCard',
+    );
+    const timeout = questionCard?.properties?.find(
+      (field) => field.key === 'timeoutMs',
+    );
+
+    expect(DINGTALK_INTERACTIVE_CARD_TIMEOUT_EXCLUSIVE_MINIMUM).toBe(0);
+    expect(timeout?.exclusiveMinimum).toBe(
+      DINGTALK_INTERACTIVE_CARD_TIMEOUT_EXCLUSIVE_MINIMUM,
+    );
+    const descriptorAdmittedSamples = [
+      {},
+      { enabled: false },
+      { statusCard: {} },
+      { statusCard: { enabled: false } },
+      { questionCard: {} },
+      {
+        questionCard: {
+          enabled: false,
+          timeoutMs: DINGTALK_INTERACTIVE_CARD_TIMEOUT_EXCLUSIVE_MINIMUM + 1,
+        },
+      },
+    ];
+    for (const sample of descriptorAdmittedSamples) {
+      expect(() => parseDingtalkInteractiveCardConfig(sample)).not.toThrow();
+    }
+  });
+
   it('keeps omitted cards disabled while treating an object as opt-in', () => {
     expect(parseDingtalkInteractiveCardConfig(undefined)).toEqual({
       enabled: false,

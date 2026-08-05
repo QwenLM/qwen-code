@@ -1,7 +1,60 @@
 import { describe, expect, it } from 'vitest';
-import { supportedChannelCatalog } from './channel-registry.js';
+import type { ChannelPlugin } from '@qwen-code/channel-base';
+import { registerPlugin, supportedChannelCatalog } from './channel-registry.js';
 
 describe('channel registry', () => {
+  it.each([
+    {
+      type: 'invalid-nested-secret',
+      field: {
+        key: 'settings',
+        label: 'Settings',
+        kind: 'object',
+        properties: [{ key: 'token', label: 'Token', kind: 'secret' }],
+      },
+      message: 'Channel field "settings.token" cannot declare a nested secret.',
+    },
+    {
+      type: 'invalid-nested-environment',
+      field: {
+        key: 'settings',
+        label: 'Settings',
+        kind: 'object',
+        properties: [
+          {
+            key: 'endpoint',
+            label: 'Endpoint',
+            kind: 'string',
+            envResolvable: true,
+          },
+        ],
+      },
+      message:
+        'Channel field "settings.endpoint" cannot resolve environment references.',
+    },
+    {
+      type: 'invalid-required-object',
+      field: {
+        key: 'settings',
+        label: 'Settings',
+        kind: 'object',
+        required: true,
+      },
+      message: 'Channel field "settings" cannot be a required object.',
+    },
+  ])('rejects $type management metadata', ({ type, field, message }) => {
+    const plugin = {
+      channelType: type,
+      displayName: type,
+      management: { fields: [field] },
+      createChannel() {
+        throw new Error('not used');
+      },
+    } as unknown as ChannelPlugin;
+
+    expect(() => registerPlugin(plugin)).toThrow(message);
+  });
+
   it('only marks the manually configurable built-in types as manageable', async () => {
     const catalog = await supportedChannelCatalog();
     expect(catalog.map((entry) => entry.type)).toEqual([

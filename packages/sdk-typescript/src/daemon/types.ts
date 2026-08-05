@@ -2991,18 +2991,41 @@ export type DaemonChannelConfigFieldKind =
   | 'record'
   | 'object';
 
-export interface DaemonChannelConfigFieldDescriptor {
+interface DaemonChannelConfigFieldDescriptorBase {
   key: string;
   label: string;
-  kind: DaemonChannelConfigFieldKind;
-  required?: boolean;
-  envResolvable?: boolean;
   options?: ReadonlyArray<{ value: string; label: string }>;
   default?: string;
-  properties?: readonly DaemonChannelConfigFieldDescriptor[];
   exclusiveMinimum?: number;
   description?: string;
 }
+
+interface DaemonChannelConfigValueFieldDescriptor
+  extends DaemonChannelConfigFieldDescriptorBase {
+  kind: Exclude<DaemonChannelConfigFieldKind, 'object'>;
+  required?: boolean;
+  envResolvable?: boolean;
+  properties?: never;
+}
+
+interface DaemonChannelConfigObjectFieldDescriptor
+  extends DaemonChannelConfigFieldDescriptorBase {
+  kind: 'object';
+  required?: false;
+  envResolvable?: never;
+  properties?: readonly DaemonChannelConfigNestedFieldDescriptor[];
+}
+
+type DaemonChannelConfigNestedFieldDescriptor =
+  | (Omit<DaemonChannelConfigValueFieldDescriptor, 'kind' | 'envResolvable'> & {
+      kind: Exclude<DaemonChannelConfigFieldKind, 'secret' | 'object'>;
+      envResolvable?: never;
+    })
+  | DaemonChannelConfigObjectFieldDescriptor;
+
+export type DaemonChannelConfigFieldDescriptor =
+  | DaemonChannelConfigValueFieldDescriptor
+  | DaemonChannelConfigObjectFieldDescriptor;
 
 export interface DaemonChannelTypeDescriptor {
   type: string;

@@ -22,6 +22,7 @@ export type DingtalkCardCallbackResult =
     }
   | { kind: 'ignored'; actorId?: string };
 
+export const DINGTALK_INTERACTIVE_CARD_TIMEOUT_EXCLUSIVE_MINIMUM = 0;
 const DEFAULT_QUESTION_TIMEOUT_MS = 270_000;
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -84,7 +85,7 @@ export function parseDingtalkInteractiveCardConfig(
   if (
     typeof timeoutMs !== 'number' ||
     !Number.isFinite(timeoutMs) ||
-    timeoutMs <= 0
+    timeoutMs <= DINGTALK_INTERACTIVE_CARD_TIMEOUT_EXCLUSIVE_MINIMUM
   ) {
     throw new Error(
       'DingTalk interactiveCards.questionCard.timeoutMs must be a finite positive number.',

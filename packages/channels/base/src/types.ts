@@ -389,18 +389,41 @@ export type ChannelConfigFieldKind =
   | 'record'
   | 'object';
 
-export interface ChannelConfigFieldDescriptor {
+interface ChannelConfigFieldDescriptorBase {
   key: string;
   label: string;
-  kind: ChannelConfigFieldKind;
-  required?: boolean;
-  envResolvable?: boolean;
   options?: ReadonlyArray<{ value: string; label: string }>;
   default?: string;
-  properties?: readonly ChannelConfigFieldDescriptor[];
   exclusiveMinimum?: number;
   description?: string;
 }
+
+interface ChannelConfigValueFieldDescriptor
+  extends ChannelConfigFieldDescriptorBase {
+  kind: Exclude<ChannelConfigFieldKind, 'object'>;
+  required?: boolean;
+  envResolvable?: boolean;
+  properties?: never;
+}
+
+interface ChannelConfigObjectFieldDescriptor
+  extends ChannelConfigFieldDescriptorBase {
+  kind: 'object';
+  required?: false;
+  envResolvable?: never;
+  properties?: readonly ChannelConfigNestedFieldDescriptor[];
+}
+
+type ChannelConfigNestedFieldDescriptor =
+  | (Omit<ChannelConfigValueFieldDescriptor, 'kind' | 'envResolvable'> & {
+      kind: Exclude<ChannelConfigFieldKind, 'secret' | 'object'>;
+      envResolvable?: never;
+    })
+  | ChannelConfigObjectFieldDescriptor;
+
+export type ChannelConfigFieldDescriptor =
+  | ChannelConfigValueFieldDescriptor
+  | ChannelConfigObjectFieldDescriptor;
 
 export interface ChannelManagementDescriptor {
   fields: readonly ChannelConfigFieldDescriptor[];
