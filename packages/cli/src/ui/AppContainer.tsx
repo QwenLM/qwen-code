@@ -947,7 +947,10 @@ export const AppContainer = (props: AppContainerProps) => {
         // Seed the prompt counter from the resumed conversation so new
         // promptIds don't collide with restored file history snapshots.
         const userTurnCount = resumedSessionData.conversation.messages.filter(
-          (m) => m.type === 'user' && m.subtype !== 'mid_turn_user_message',
+          (m) =>
+            m.type === 'user' &&
+            m.subtype !== 'mid_turn_user_message' &&
+            m.subtype !== 'realtime_message',
         ).length;
         if (userTurnCount > 0) {
           seedPromptCount(userTurnCount);

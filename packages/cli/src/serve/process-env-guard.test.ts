@@ -148,6 +148,7 @@ const allowedProcessEnvAccesses = normalizeAllowances([
       reason:
         'The serve entry point owns daemon bootstrap, feature flags, and child-process defaults.',
       accesses: {
+        'computed:EXTERNAL_TOOL_GUARD_TOKEN_ENV': 1,
         'computed:QWEN_SERVER_TOKEN_ENV': 1,
         'computed:QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV': 1,
         'computed:QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV': 1,
@@ -184,6 +185,24 @@ const allowedProcessEnvAccesses = normalizeAllowances([
       reason:
         'Embedded feature detection defaults to the daemon process environment.',
       accesses: { whole: 1 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/live/live-host-coordinator.ts',
+    {
+      reason: 'Live Host diagnostics are enabled for the whole daemon process.',
+      accesses: { 'key:QWEN_LIVE_DIAGNOSTICS': 1 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/live/live-session-coordinator.ts',
+    {
+      reason:
+        'Live audio diagnostics are enabled and located for the whole daemon process.',
+      accesses: {
+        'key:QWEN_LIVE_DIAGNOSTICS': 2,
+        'key:QWEN_LIVE_DIAGNOSTICS_DIR': 1,
+      },
     },
   ],
 ]);

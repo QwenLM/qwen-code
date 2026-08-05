@@ -2890,6 +2890,45 @@ describe('WebShellSidebar primary workspace header', () => {
   });
 });
 
+describe('WebShellSidebar Live group', () => {
+  it('shows Live sessions without exposing the backing Conversations workspace', async () => {
+    const liveWorkspace: DaemonWorkspaceCapability = {
+      id: 'live',
+      cwd: '/Users/test/Documents/Qwen Code/Conversations',
+      displayName: 'Conversations',
+      primary: false,
+      trusted: true,
+      kind: 'live',
+    };
+    useWorkspaceSessionCatalog(async (cwd) =>
+      cwd === liveWorkspace.cwd
+        ? [{ sessionId: 'live-session', displayName: 'Voice check' }]
+        : [],
+    );
+    renderSidebar({
+      workspaces: [...capabilities.workspaces, liveWorkspace],
+    });
+
+    expect(container.textContent).toContain('Live');
+    expect(container.textContent).not.toContain('Conversations');
+    const liveToggle = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.includes('Live'));
+    expect(liveToggle).toBeDefined();
+    expect(
+      liveToggle?.parentElement?.querySelector('[aria-label="New task"]'),
+    ).toBeNull();
+
+    await expandWorkspace('Live');
+
+    expect(container.textContent).toContain('Voice check');
+    expect(listWorkspaceSessions).toHaveBeenCalledWith(
+      liveWorkspace.cwd,
+      expect.objectContaining({ archiveState: 'active' }),
+    );
+  });
+});
+
 describe('WebShellSidebar archived session export', () => {
   const exportResult = {
     content: '<p>exported</p>',
