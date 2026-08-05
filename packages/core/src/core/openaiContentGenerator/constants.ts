@@ -37,9 +37,9 @@ export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 240000;
 // takes precedence; a malformed value is ignored (falls back to the default).
 export const QWEN_STREAM_IDLE_TIMEOUT_MS_ENV = 'QWEN_STREAM_IDLE_TIMEOUT_MS';
 // Maximum JS timer delay (~24.8 days). setTimeout silently compresses larger
-// delays to 1ms, which would make the watchdog fire almost immediately, so an
-// idle timeout above this is treated as invalid.
-export const MAX_STREAM_IDLE_TIMEOUT_MS = 2_147_483_647;
+// delays to 1ms, which would make a watchdog fire almost immediately, so a
+// stream-guard timeout above this is treated as invalid.
+export const MAX_STREAM_GUARD_TIMEOUT_MS = 2_147_483_647;
 
 // Total-lifetime cap for a single streaming response, measured from the first
 // byte and NOT refreshed by chunk arrival. The idle watchdog above cannot see

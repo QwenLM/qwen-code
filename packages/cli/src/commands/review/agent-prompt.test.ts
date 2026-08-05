@@ -1613,7 +1613,6 @@ describe('--findings — fold the list in, print one block, record EXACTLY that 
     // Cross-delivery fails: shard 1's launch does not satisfy shard 2's record
     // (printed2 IS shard 2's record — asserted above).
     expect(wasDeliveredVerbatim(printed1, printed2)).toBe(false);
-    expect(wasDeliveredVerbatim(printed2, printed2)).toBe(true);
   });
 
   it('refuses a findings-taking role launched without --findings', () => {

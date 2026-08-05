@@ -281,20 +281,20 @@ function classifyReturn(
 ): AuditOutcome {
   const text = rec.finalText.trim();
   if (SEVERITY_LINE_RE.test(text)) {
+    // The cumulative list is on hand for this agent: since #8597 it rides
+    // a digest-named findings file the launch prompt points at (before, it
+    // was folded into the prompt verbatim), and every entry in it is a full
+    // block — File AND Severity. An auditor explaining "already covered,
+    // not re-reporting" can quote one whole, and the quotation must not
+    // read as a filing: an entry whose exact file line is already on the
+    // list cannot be a new finding against it. Skipping costs an audit at
+    // most; counting a quotation re-opens the never-retire direction on
+    // the loop's most common honest return.
+    const list = findingsListOf(rec.launchPrompt);
     for (const m of text.matchAll(FILE_LINE_RE)) {
       const file = (m[1] ?? '').trim();
       if (file === '' || /^N\/A\b/i.test(file)) continue;
-      // The cumulative list is on hand for this agent: since #8597 it rides
-      // a digest-named findings file the launch prompt points at (before, it
-      // was folded into the prompt verbatim), and every entry in it is a full
-      // block — File AND Severity. An auditor explaining "already covered,
-      // not re-reporting" can quote one whole, and the quotation must not
-      // read as a filing: an entry whose exact file line is already on the
-      // list cannot be a new finding against it. Skipping costs an audit at
-      // most; counting a quotation re-opens the never-retire direction on
-      // the loop's most common honest return.
-      if (findingsListOf(rec.launchPrompt).includes(`**File:** ${file}`))
-        continue;
+      if (list.includes(`**File:** ${file}`)) continue;
       return 'yielded';
     }
   }

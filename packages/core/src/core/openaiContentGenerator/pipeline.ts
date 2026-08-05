@@ -28,7 +28,7 @@ import {
 import {
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   DEFAULT_STREAM_MAX_LIFETIME_MS,
-  MAX_STREAM_IDLE_TIMEOUT_MS,
+  MAX_STREAM_GUARD_TIMEOUT_MS,
   QWEN_STREAM_IDLE_TIMEOUT_MS_ENV,
   QWEN_STREAM_MAX_LIFETIME_MS_ENV,
 } from './constants.js';
@@ -229,14 +229,14 @@ function resolveStreamGuardMs(
   if (typeof fromConfig === 'number') {
     if (
       Number.isInteger(fromConfig) &&
-      fromConfig <= MAX_STREAM_IDLE_TIMEOUT_MS
+      fromConfig <= MAX_STREAM_GUARD_TIMEOUT_MS
     ) {
       return fromConfig;
     }
     // eslint-disable-next-line no-console
     console.warn(
       `[qwen-code] Ignoring out-of-range ${configLabel}=${fromConfig} ` +
-        `(expected an integer in (-∞, ${MAX_STREAM_IDLE_TIMEOUT_MS}]); ` +
+        `(expected an integer in (-∞, ${MAX_STREAM_GUARD_TIMEOUT_MS}]); ` +
         `falling back to ${envName}/default.`,
     );
   }
@@ -248,14 +248,14 @@ function resolveStreamGuardMs(
   if (trimmed) {
     if (/^\d+$/.test(trimmed)) {
       const parsed = Number(trimmed);
-      if (parsed <= MAX_STREAM_IDLE_TIMEOUT_MS) {
+      if (parsed <= MAX_STREAM_GUARD_TIMEOUT_MS) {
         return parsed;
       }
     }
     // eslint-disable-next-line no-console
     console.warn(
       `[qwen-code] Ignoring invalid ${envName}="${raw}" ` +
-        `(expected an integer of milliseconds in [0, ${MAX_STREAM_IDLE_TIMEOUT_MS}]); ` +
+        `(expected an integer of milliseconds in [0, ${MAX_STREAM_GUARD_TIMEOUT_MS}]); ` +
         `using default ${defaultMs}ms.`,
     );
   }

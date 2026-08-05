@@ -33,7 +33,7 @@ import { DashScopeOpenAICompatibleProvider } from './provider/dashscope.js';
 import {
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   DEFAULT_STREAM_MAX_LIFETIME_MS,
-  MAX_STREAM_IDLE_TIMEOUT_MS,
+  MAX_STREAM_GUARD_TIMEOUT_MS,
   QWEN_STREAM_IDLE_TIMEOUT_MS_ENV,
   QWEN_STREAM_MAX_LIFETIME_MS_ENV,
 } from './constants.js';
@@ -5547,7 +5547,7 @@ describe('ContentGenerationPipeline', () => {
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         gated.stream,
       );
-      const p = buildPipeline(MAX_STREAM_IDLE_TIMEOUT_MS + 1); // oversized config
+      const p = buildPipeline(MAX_STREAM_GUARD_TIMEOUT_MS + 1); // oversized config
       const gen = await p.executeStream(
         streamingRequest(new AbortController().signal),
         'id',
@@ -5565,14 +5565,14 @@ describe('ContentGenerationPipeline', () => {
       expect(settled).toBe(true); // trips at the default (config rejected)
     });
 
-    it('accepts the exact MAX_STREAM_IDLE_TIMEOUT_MS boundary value', async () => {
+    it('accepts the exact MAX_STREAM_GUARD_TIMEOUT_MS boundary value', async () => {
       const gated = gatedStream(); // silent
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         gated.stream,
       );
       // The exact ceiling must be accepted (not rejected as out-of-range).
       // Guards against an off-by-one changing `<=` to `<`.
-      const p = buildPipeline(MAX_STREAM_IDLE_TIMEOUT_MS);
+      const p = buildPipeline(MAX_STREAM_GUARD_TIMEOUT_MS);
       const gen = await p.executeStream(
         streamingRequest(new AbortController().signal),
         'id',
@@ -5597,7 +5597,7 @@ describe('ContentGenerationPipeline', () => {
         gated.stream,
       );
       // Config is oversized → rejected; env = 4000 → used (not default).
-      const p = buildPipeline(MAX_STREAM_IDLE_TIMEOUT_MS + 1);
+      const p = buildPipeline(MAX_STREAM_GUARD_TIMEOUT_MS + 1);
       const gen = await p.executeStream(
         streamingRequest(new AbortController().signal),
         'id',
