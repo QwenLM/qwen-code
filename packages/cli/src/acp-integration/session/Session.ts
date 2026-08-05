@@ -172,6 +172,8 @@ import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/b
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
 // so a rename can't desync caller and answerer into a silent -32601 latch.
 import {
+  ACTIVE_WORK_HEARTBEAT_VERSION,
+  ACTIVE_WORK_NOTIFICATION_METHOD,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   MID_TURN_QUEUE_DRAIN_METHOD,
   isValidTrustedModelPrompt,
@@ -1342,11 +1344,18 @@ export class Session implements SessionContext {
   private notificationProcessing = false;
   private notificationAbortController: AbortController | null = null;
   private notificationCompletion: Promise<void> | null = null;
+  private currentAgentNotification = false;
+  private activeWorkReported: boolean | undefined;
+  private activeWorkSeq = 0;
+  private activeWorkPublishTail: Promise<void> = Promise.resolve();
+  private activeWorkHeartbeat?: ReturnType<typeof setInterval>;
+  private activePromptRequests = 0;
   private readonly persistedBackgroundNotificationTaskIds = new Set<string>();
   private readonly backgroundNotificationAcceptances = new Map<
     string,
     Promise<boolean>
   >();
+  private readonly activeAgentNotificationAcceptances = new Set<string>();
 
   // Set true in dispose(). Guards #drainCronQueue and #drainNotificationQueue
   // against the race where #drainNotificationQueue's finally block kicks off
@@ -1404,6 +1413,7 @@ export class Session implements SessionContext {
     readonly config: Config,
     private readonly client: AgentSideConnection,
     private readonly settings: LoadedSettings,
+    activeWorkHeartbeatIntervalMs?: number,
   ) {
     this.sessionId = id;
     this.runtimeBaseDir = config.storage.getRuntimeBaseDir();
@@ -1433,6 +1443,15 @@ export class Session implements SessionContext {
       .setApprovalRequestCallback((entry, approval, rawArgs, signal) =>
         this.#requestWorkflowApproval(entry.runId, approval, rawArgs, signal),
       );
+    if (activeWorkHeartbeatIntervalMs !== undefined) {
+      this.activeWorkHeartbeat = setInterval(() => {
+        if (!this.disposed && this.#hasActiveWork()) {
+          this.#publishActiveWork(true, true);
+        }
+      }, activeWorkHeartbeatIntervalMs);
+      this.activeWorkHeartbeat.unref?.();
+      this.#publishActiveWork();
+    }
   }
 
   async #requestWorkflowApproval(
@@ -2196,7 +2215,51 @@ export class Session implements SessionContext {
   }
 
   isIdle(): boolean {
-    return !this.closing && !this.#hasActiveTurn();
+    return (
+      !this.closing &&
+      this.activePromptRequests === 0 &&
+      !this.#hasActiveTurn() &&
+      !this.config.getBackgroundTaskRegistry().hasRunningTasks() &&
+      this.activeAgentNotificationAcceptances.size === 0 &&
+      !this.#hasPendingAgentNotification()
+    );
+  }
+
+  #hasPendingAgentNotification(): boolean {
+    return (
+      this.currentAgentNotification ||
+      this.notificationQueue.some((item) => item.kind === 'agent')
+    );
+  }
+
+  #hasActiveWork(): boolean {
+    return (
+      this.pendingPrompt !== null ||
+      this.pendingPromptCompletion !== null ||
+      this.activePromptRequests > 0 ||
+      this.config.getBackgroundTaskRegistry().hasRunningTasks() ||
+      this.activeAgentNotificationAcceptances.size > 0 ||
+      this.#hasPendingAgentNotification()
+    );
+  }
+
+  #publishActiveWork(active?: boolean, heartbeat = false): void {
+    if (!this.activeWorkHeartbeat || this.disposed) return;
+    const nextActive = active ?? this.#hasActiveWork();
+    if (!heartbeat && this.activeWorkReported === nextActive) return;
+    this.activeWorkReported = nextActive;
+    const seq = ++this.activeWorkSeq;
+    this.activeWorkPublishTail = this.activeWorkPublishTail
+      .then(() => {
+        if (this.disposed) return;
+        return this.client.extNotification(ACTIVE_WORK_NOTIFICATION_METHOD, {
+          v: ACTIVE_WORK_HEARTBEAT_VERSION,
+          sessionId: this.sessionId,
+          active: nextActive,
+          seq,
+        });
+      })
+      .catch(() => undefined);
   }
 
   #hasActiveTurn(): boolean {
@@ -2298,6 +2361,10 @@ export class Session implements SessionContext {
   }
 
   dispose(): void {
+    if (this.activeWorkHeartbeat) {
+      clearInterval(this.activeWorkHeartbeat);
+      this.activeWorkHeartbeat = undefined;
+    }
     this.disposed = true;
     this.closing = true;
     this.pendingPrompt?.abort(SESSION_DISPOSE_ABORT_REASON);
@@ -2330,6 +2397,7 @@ export class Session implements SessionContext {
 
     this.config.getBackgroundTaskRegistry().abortAll({ notify: false });
     this.config.getBackgroundTaskRegistry().setNotificationCallback(undefined);
+    this.config.getBackgroundTaskRegistry().setStatusChangeCallback(undefined);
     this.config.getMonitorRegistry().setNotificationCallback(undefined);
     this.config.getBackgroundShellRegistry().setNotificationCallback(undefined);
     this.config.getChatRecordingService()?.setTitleRecordedCallback(undefined);
@@ -2637,6 +2705,7 @@ export class Session implements SessionContext {
     }
     this.notificationQueue = [];
     this.notificationProcessing = false;
+    this.#publishActiveWork();
 
     // Stop scheduler and emit exit summary
     const scheduler = this.config.isCronEnabled()
@@ -2652,6 +2721,27 @@ export class Session implements SessionContext {
   }
 
   async prompt(
+    params: PromptRequest,
+    invocationContext?: InvocationContextV1,
+    admissionCancellation?: AbortSignal,
+    modelPrompt?: string,
+  ): Promise<PromptResponse> {
+    this.activePromptRequests++;
+    this.#publishActiveWork();
+    try {
+      return await this.#runPrompt(
+        params,
+        invocationContext,
+        admissionCancellation,
+        modelPrompt,
+      );
+    } finally {
+      this.activePromptRequests--;
+      this.#publishActiveWork();
+    }
+  }
+
+  async #runPrompt(
     params: PromptRequest,
     invocationContext?: InvocationContextV1,
     admissionCancellation?: AbortSignal,
@@ -2701,10 +2791,12 @@ export class Session implements SessionContext {
       if (admissionCancellation.aborted) cancelPendingSend();
     }
     this.pendingPrompt = pendingSend;
+    this.#publishActiveWork();
     const releasePendingSend = () => {
       admissionCancellation?.removeEventListener('abort', cancelPendingSend);
       if (this.pendingPrompt === pendingSend) {
         this.pendingPrompt = null;
+        this.#publishActiveWork();
       }
     };
 
@@ -2782,6 +2874,7 @@ export class Session implements SessionContext {
     this.pendingPromptCompletion = new Promise<void>((resolve) => {
       resolveCompletion = resolve;
     });
+    this.#publishActiveWork();
 
     try {
       const result = await this.#executePrompt(
@@ -2840,6 +2933,7 @@ export class Session implements SessionContext {
       void this.#startCronSchedulerInRuntime();
       resolveCompletion();
       this.pendingPromptCompletion = null;
+      this.#publishActiveWork();
       await this.#consumeLiveEndInstruction();
     }
   }
@@ -6083,6 +6177,9 @@ export class Session implements SessionContext {
 
   #registerBackgroundNotificationCallbacks(): void {
     const backgroundRegistry = this.config.getBackgroundTaskRegistry();
+    backgroundRegistry.setStatusChangeCallback(() => {
+      this.#publishActiveWork();
+    });
     backgroundRegistry.setNotificationCallback(
       (displayText, modelText, meta) => {
         this.#enqueueBackgroundNotification({
@@ -6207,6 +6304,7 @@ export class Session implements SessionContext {
       );
     }
     this.notificationQueue.push(item);
+    this.#publishActiveWork();
     void this.#drainNotificationQueue();
   }
 
@@ -6221,6 +6319,10 @@ export class Session implements SessionContext {
 
     const acceptance = this.#persistDaemonBackgroundNotification(item);
     this.backgroundNotificationAcceptances.set(item.taskId, acceptance);
+    if (item.kind === 'agent') {
+      this.activeAgentNotificationAcceptances.add(item.taskId);
+      this.#publishActiveWork();
+    }
     try {
       return { accepted: await acceptance };
     } finally {
@@ -6228,6 +6330,10 @@ export class Session implements SessionContext {
         this.backgroundNotificationAcceptances.get(item.taskId) === acceptance
       ) {
         this.backgroundNotificationAcceptances.delete(item.taskId);
+        if (item.kind === 'agent') {
+          this.activeAgentNotificationAcceptances.delete(item.taskId);
+          this.#publishActiveWork();
+        }
       }
     }
   }
@@ -6323,16 +6429,24 @@ export class Session implements SessionContext {
         if (nextIndex < 0) break;
         const [item] = this.notificationQueue.splice(nextIndex, 1);
         if (!item) break;
-        await runWithInvocationContext(undefined, () =>
-          sessionIdContext.run(this.config.getSessionId(), () =>
-            this.#executeBackgroundNotificationPromptInner(item),
-          ),
-        );
+        this.currentAgentNotification = item.kind === 'agent';
+        this.#publishActiveWork();
+        try {
+          await runWithInvocationContext(undefined, () =>
+            sessionIdContext.run(this.config.getSessionId(), () =>
+              this.#executeBackgroundNotificationPromptInner(item),
+            ),
+          );
+        } finally {
+          this.currentAgentNotification = false;
+          this.#publishActiveWork();
+        }
       }
     } finally {
       this.notificationProcessing = false;
       resolveCompletion();
       this.notificationCompletion = null;
+      this.#publishActiveWork();
 
       void this.#drainCronQueue();
 

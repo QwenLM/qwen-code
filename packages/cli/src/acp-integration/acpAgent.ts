@@ -308,6 +308,9 @@ import {
   SESSION_SOURCE_META_KEY,
 } from '@qwen-code/acp-bridge';
 import {
+  ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
+  ACTIVE_WORK_HEARTBEAT_META_KEY,
+  ACTIVE_WORK_HEARTBEAT_VERSION,
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
   CLIENT_MCP_OVER_WS_CONFIG_FLAG,
@@ -3533,6 +3536,7 @@ class QwenAgent implements Agent {
   private readonly initializingConfigs = new Set<Config>();
   private managedShuttingDown = false;
   private clientCapabilities: ClientCapabilities | undefined;
+  private activeWorkHeartbeatIntervalMs: number | undefined;
   private privateParentState:
     | 'uninitialized'
     | 'trusted'
@@ -4519,6 +4523,16 @@ class QwenAgent implements Agent {
       !Array.isArray(requestedProfile) &&
       (requestedProfile as Record<string, unknown>)['v'] ===
         CHANNEL_STARTUP_PROFILE_VERSION;
+    const requestedActiveWork = args._meta?.[ACTIVE_WORK_HEARTBEAT_META_KEY];
+    const activeWorkRequested =
+      requestedActiveWork !== null &&
+      typeof requestedActiveWork === 'object' &&
+      !Array.isArray(requestedActiveWork) &&
+      (requestedActiveWork as Record<string, unknown>)['v'] ===
+        ACTIVE_WORK_HEARTBEAT_VERSION;
+    this.activeWorkHeartbeatIntervalMs = activeWorkRequested
+      ? ACTIVE_WORK_HEARTBEAT_INTERVAL_MS
+      : undefined;
 
     const responseMeta: Record<string, unknown> = {
       ...(this.managedToolInvocationGuard
@@ -4529,6 +4543,14 @@ class QwenAgent implements Agent {
         : {}),
       ...(profileRequested && startupProfile
         ? { [CHANNEL_STARTUP_PROFILE_META_KEY]: startupProfile }
+        : {}),
+      ...(activeWorkRequested
+        ? {
+            [ACTIVE_WORK_HEARTBEAT_META_KEY]: {
+              v: ACTIVE_WORK_HEARTBEAT_VERSION,
+              intervalMs: ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
+            },
+          }
         : {}),
     };
     return Object.keys(responseMeta).length > 0
@@ -11753,7 +11775,13 @@ class QwenAgent implements Agent {
       throw new Error(`Session ${sessionId} is already active.`);
     }
 
-    const session = new Session(sessionId, config, this.connection, settings);
+    const session = new Session(
+      sessionId,
+      config,
+      this.connection,
+      settings,
+      this.activeWorkHeartbeatIntervalMs,
+    );
     this.sessions.set(sessionId, session);
     this.initializingConfigs.delete(config);
     try {

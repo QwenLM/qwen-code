@@ -25,6 +25,8 @@ import type { BridgeEvent, EventBus } from './eventBus.js';
 // so a rename can't silently break the protocol.
 import { MID_TURN_MESSAGE_INJECTED_EVENT } from './daemonEventTypes.js';
 import {
+  ACTIVE_WORK_HEARTBEAT_VERSION,
+  ACTIVE_WORK_NOTIFICATION_METHOD,
   MID_TURN_QUEUE_DRAIN_METHOD,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
 } from './bridgeTypes.js';
@@ -733,6 +735,11 @@ export class BridgeClient implements Client {
      * existing direct BridgeClient constructors remain source-compatible.
      */
     private readonly externalToolGuard?: ExternalToolGuardHandler,
+    private readonly onActiveWork?: (
+      sessionId: string,
+      active: boolean,
+      seq: number,
+    ) => void,
   ) {}
 
   async requestPermission(
@@ -1726,6 +1733,23 @@ export class BridgeClient implements Client {
     method: string,
     params: Record<string, unknown>,
   ): Promise<void> {
+    if (method === ACTIVE_WORK_NOTIFICATION_METHOD) {
+      const sessionId = params['sessionId'];
+      const active = params['active'];
+      const seq = params['seq'];
+      if (
+        params['v'] === ACTIVE_WORK_HEARTBEAT_VERSION &&
+        typeof sessionId === 'string' &&
+        typeof active === 'boolean' &&
+        typeof seq === 'number' &&
+        Number.isSafeInteger(seq) &&
+        seq > 0 &&
+        this.ownsSession(sessionId)
+      ) {
+        this.onActiveWork?.(sessionId, active, seq);
+      }
+      return;
+    }
     if (method === '_qwencode/end_turn') {
       const sessionId = params['sessionId'];
       const reason = params['reason'];

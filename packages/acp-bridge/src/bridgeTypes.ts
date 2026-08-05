@@ -191,7 +191,25 @@ export const REQUESTED_SESSION_ID_META_KEY = 'qwen-code/sessionId';
 export const CHANNEL_STARTUP_PROFILE_META_KEY =
   'qwen.daemon.channelStartupProfile';
 export const CHANNEL_STARTUP_PROFILE_VERSION = 1 as const;
+export const ACTIVE_WORK_HEARTBEAT_META_KEY = 'qwen.daemon.activeWorkHeartbeat';
+export const ACTIVE_WORK_HEARTBEAT_VERSION = 1 as const;
+export const ACTIVE_WORK_HEARTBEAT_INTERVAL_MS = 15_000;
+export const ACTIVE_WORK_HEARTBEAT_TIMEOUT_MS = 45_000;
+export const ACTIVE_WORK_NOTIFICATION_METHOD =
+  'qwen/notify/session/active-work';
 export const WORKTREE_MCP_DEFER_META_KEY = 'qwen.session.deferMcpDiscovery';
+
+export interface ActiveWorkHeartbeatCapabilityV1 {
+  v: typeof ACTIVE_WORK_HEARTBEAT_VERSION;
+  intervalMs: number;
+}
+
+export interface ActiveWorkNotificationV1 {
+  v: typeof ACTIVE_WORK_HEARTBEAT_VERSION;
+  sessionId: string;
+  active: boolean;
+  seq: number;
+}
 
 export interface ChannelStartupProfileV1 {
   v: typeof CHANNEL_STARTUP_PROFILE_VERSION;
@@ -1694,6 +1712,9 @@ export interface AcpSessionBridge {
 
   /** Number of sessions with an active prompt. */
   readonly activePromptCount: number;
+
+  /** Whether a prompt, running Agent, or Agent terminal notification is unsettled. */
+  readonly activeWork: boolean;
 
   /** Queued prompts across all sessions — accepted but not yet dispatched,
    *  excluding the one running per session — i.e. the queue-depth gauge for the

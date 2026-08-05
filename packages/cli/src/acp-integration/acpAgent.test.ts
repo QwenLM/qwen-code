@@ -884,6 +884,9 @@ import {
 } from '../utils/languageUtils.js';
 import { buildAuthMethods } from './authMethods.js';
 import {
+  ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
+  ACTIVE_WORK_HEARTBEAT_META_KEY,
+  ACTIVE_WORK_HEARTBEAT_VERSION,
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
   PROMPT_CANCEL_METHOD,
@@ -2487,6 +2490,52 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       },
     });
     expect(JSON.stringify(response['_meta']).length).toBeLessThan(2048);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('merges active-work negotiation and enables Session reporting', async () => {
+    await setupSessionMocks('active-work-session');
+    initializeAcpStartupProfiler();
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    const response = (await agent.initialize({
+      clientCapabilities: {},
+      _meta: {
+        [CHANNEL_STARTUP_PROFILE_META_KEY]: {
+          v: CHANNEL_STARTUP_PROFILE_VERSION,
+        },
+        [ACTIVE_WORK_HEARTBEAT_META_KEY]: {
+          v: ACTIVE_WORK_HEARTBEAT_VERSION,
+          intervalMs: ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
+        },
+      },
+    })) as { _meta?: Record<string, unknown> };
+
+    expect(response._meta).toMatchObject({
+      [CHANNEL_STARTUP_PROFILE_META_KEY]: {
+        v: CHANNEL_STARTUP_PROFILE_VERSION,
+      },
+      [ACTIVE_WORK_HEARTBEAT_META_KEY]: {
+        v: ACTIVE_WORK_HEARTBEAT_VERSION,
+        intervalMs: ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
+      },
+    });
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    expect(vi.mocked(Session).mock.calls.at(-1)?.[4]).toBe(
+      ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
+    );
 
     mockConnectionState.resolve();
     await agentPromise;

@@ -58,6 +58,10 @@ import {
   collectHistoryReplayUpdates,
   createReplayCumulativeUsage,
 } from './history-replay-page.js';
+import {
+  ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
+  ACTIVE_WORK_NOTIFICATION_METHOD,
+} from '@qwen-code/acp-bridge/bridgeTypes';
 
 const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
 const debugLoggerDebugSpy = vi.hoisted(() => vi.fn());
@@ -408,7 +412,9 @@ describe('Session', () => {
   let mockBackgroundTaskRegistry: {
     abortAll: ReturnType<typeof vi.fn>;
     setNotificationCallback: ReturnType<typeof vi.fn>;
+    setStatusChangeCallback: ReturnType<typeof vi.fn>;
     hasUnfinalizedTasks: ReturnType<typeof vi.fn>;
+    hasRunningTasks: ReturnType<typeof vi.fn>;
     getAll: ReturnType<typeof vi.fn>;
     get: ReturnType<typeof vi.fn>;
   };
@@ -571,7 +577,9 @@ describe('Session', () => {
     mockBackgroundTaskRegistry = {
       abortAll: vi.fn(),
       setNotificationCallback: vi.fn(),
+      setStatusChangeCallback: vi.fn(),
       hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
+      hasRunningTasks: vi.fn().mockReturnValue(false),
       getAll: vi.fn().mockReturnValue([]),
       get: vi.fn().mockImplementation((taskId: string) =>
         (
@@ -825,6 +833,206 @@ describe('Session', () => {
       .mocked(mockClient.sessionUpdate)
       .mock.calls.at(-1)?.[0]?.update;
     expect(replayDelivered).toBe(replayUpdate);
+  });
+
+  describe('active work reporting', () => {
+    function createReportingSession(): void {
+      session.dispose();
+      vi.mocked(mockClient.extNotification).mockClear();
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+        ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
+      );
+    }
+
+    function reportedStates(): boolean[] {
+      return vi
+        .mocked(mockClient.extNotification)
+        .mock.calls.flatMap(([method, params]) =>
+          method === ACTIVE_WORK_NOTIFICATION_METHOD
+            ? [(params as { active: boolean }).active]
+            : [],
+        );
+    }
+
+    it('reports a prompt while it is waiting for turn admission', async () => {
+      let releaseAdmission!: () => void;
+      mockConfig.assertCanStartTurn = vi.fn().mockReturnValue(
+        new Promise<void>((resolve) => {
+          releaseAdmission = resolve;
+        }),
+      );
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      createReportingSession();
+      await vi.waitFor(() => expect(reportedStates()).toEqual([false]));
+
+      const prompt = session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+      await vi.waitFor(() => expect(reportedStates()).toEqual([false, true]));
+      expect(session.isIdle()).toBe(false);
+
+      releaseAdmission();
+      await prompt;
+      await vi.waitFor(() =>
+        expect(reportedStates()).toEqual([false, true, false]),
+      );
+      expect(session.isIdle()).toBe(true);
+      session.dispose();
+    });
+
+    it('reports running background Agents and includes them in isIdle', async () => {
+      createReportingSession();
+      await vi.waitFor(() => expect(reportedStates()).toEqual([false]));
+      const statusChanged =
+        mockBackgroundTaskRegistry.setStatusChangeCallback.mock.calls.at(
+          -1,
+        )?.[0] as (() => void) | undefined;
+
+      mockBackgroundTaskRegistry.hasRunningTasks.mockReturnValue(true);
+      statusChanged?.();
+      await vi.waitFor(() => expect(reportedStates()).toEqual([false, true]));
+      expect(session.isIdle()).toBe(false);
+
+      mockBackgroundTaskRegistry.hasRunningTasks.mockReturnValue(false);
+      statusChanged?.();
+      await vi.waitFor(() =>
+        expect(reportedStates()).toEqual([false, true, false]),
+      );
+
+      session.dispose();
+      expect(
+        mockBackgroundTaskRegistry.setStatusChangeCallback.mock.calls.at(-1),
+      ).toEqual([undefined]);
+    });
+
+    it('stays active while an Agent terminal notification is persisted', async () => {
+      let finishPersistence!: () => void;
+      mockChatRecordingService.recordNotificationStrict.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            finishPersistence = resolve;
+          }),
+      );
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      createReportingSession();
+      await vi.waitFor(() => expect(reportedStates()).toEqual([false]));
+
+      const notification = session.enqueueBackgroundNotification({
+        displayText: 'Agent completed.',
+        modelText: '<task-notification />',
+        taskId: 'agent-persisting',
+        status: 'completed',
+        kind: 'agent',
+      });
+      await vi.waitFor(() => expect(reportedStates()).toEqual([false, true]));
+      expect(session.isIdle()).toBe(false);
+
+      finishPersistence();
+      await expect(notification).resolves.toEqual({ accepted: true });
+      await vi.waitFor(() =>
+        expect(reportedStates()).toEqual([false, true, false]),
+      );
+      expect(session.isIdle()).toBe(true);
+      session.dispose();
+    });
+
+    it('does not report Monitor notification persistence as active work', async () => {
+      let finishPersistence!: () => void;
+      mockChatRecordingService.recordNotificationStrict.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            finishPersistence = resolve;
+          }),
+      );
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      createReportingSession();
+      await vi.waitFor(() => expect(reportedStates()).toEqual([false]));
+
+      const notification = session.enqueueBackgroundNotification({
+        displayText: 'Monitor fired.',
+        modelText: '<task-notification />',
+        taskId: 'monitor-persisting',
+        status: 'completed',
+        kind: 'monitor',
+      });
+      await vi.waitFor(() =>
+        expect(
+          mockChatRecordingService.recordNotificationStrict,
+        ).toHaveBeenCalledOnce(),
+      );
+      expect(reportedStates()).toEqual([false]);
+
+      finishPersistence();
+      await expect(notification).resolves.toEqual({ accepted: true });
+      await vi.waitFor(() =>
+        expect(mockChat.sendMessageStream).toHaveBeenCalledOnce(),
+      );
+      expect(reportedStates()).toEqual([false]);
+      session.dispose();
+    });
+
+    it('keeps active work true through Agent terminal notification handling', async () => {
+      let releaseNotification!: () => void;
+      const notificationGate = new Promise<void>((resolve) => {
+        releaseNotification = resolve;
+      });
+      async function* notificationStream() {
+        yield {
+          type: core.StreamEventType.CHUNK,
+          value: {
+            candidates: [{ content: { parts: [{ text: 'working' }] } }],
+          },
+        };
+        await notificationGate;
+      }
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(notificationStream());
+      createReportingSession();
+      await vi.waitFor(() => expect(reportedStates()).toEqual([false]));
+      const notify =
+        mockBackgroundTaskRegistry.setNotificationCallback.mock.calls.at(
+          -1,
+        )?.[0] as (
+          displayText: string,
+          modelText: string,
+          meta: { agentId: string; status: string },
+        ) => void;
+      const statusChanged =
+        mockBackgroundTaskRegistry.setStatusChangeCallback.mock.calls.at(
+          -1,
+        )?.[0] as (() => void) | undefined;
+
+      notify('Agent completed.', '<task-notification />', {
+        agentId: 'agent-1',
+        status: 'completed',
+      });
+      await vi.waitFor(() => expect(reportedStates()).toEqual([false, true]));
+      expect(session.isIdle()).toBe(false);
+
+      mockBackgroundTaskRegistry.hasRunningTasks.mockReturnValue(false);
+      statusChanged?.();
+      await Promise.resolve();
+      expect(reportedStates()).toEqual([false, true]);
+
+      releaseNotification();
+      await vi.waitFor(() =>
+        expect(reportedStates()).toEqual([false, true, false]),
+      );
+      expect(session.isIdle()).toBe(true);
+      session.dispose();
+    });
   });
 
   it('bridges workflow approvals through ACP permission requests', async () => {

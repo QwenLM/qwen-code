@@ -103,6 +103,10 @@ import {
   SESSION_SOURCE_META_KEY,
 } from './session-source.js';
 import {
+  ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
+  ACTIVE_WORK_HEARTBEAT_META_KEY,
+  ACTIVE_WORK_HEARTBEAT_TIMEOUT_MS,
+  ACTIVE_WORK_HEARTBEAT_VERSION,
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
@@ -476,6 +480,7 @@ interface ChannelInfo {
    * two-bit (alive, dying) state.
    */
   isDying: boolean;
+  activeWorkHeartbeat: boolean;
   handshakeComplete: boolean;
 }
 
@@ -518,6 +523,11 @@ interface SessionEntry {
   promptQueue: Promise<void>;
   /** Accepted prompts that have not settled yet (queued + active). */
   pendingPromptCount: number;
+  pendingAgentNotificationCount: number;
+  childActiveWork: boolean;
+  childActiveWorkSeq: number;
+  childActiveWorkAt: number | null;
+  activeWorkDeadline?: ReturnType<typeof setTimeout>;
   /**
    * Detailed list of prompts accepted into the FIFO queue. Each entry
    * carries its `promptId`, summary, and an `abortController` so the
@@ -1611,6 +1621,53 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     lastActivityTimestamp = Date.now();
   }
 
+  function entryHasActiveWork(entry: SessionEntry): boolean {
+    return (
+      entry.pendingPromptCount > 0 ||
+      entry.pendingAgentNotificationCount > 0 ||
+      entry.childActiveWork
+    );
+  }
+
+  function clearActiveWorkDeadline(entry: SessionEntry): void {
+    if (entry.activeWorkDeadline) {
+      clearTimeout(entry.activeWorkDeadline);
+      entry.activeWorkDeadline = undefined;
+    }
+  }
+
+  function syncActiveWorkDeadline(entry: SessionEntry): void {
+    clearActiveWorkDeadline(entry);
+    const owner = channelInfoForEntry(entry);
+    if (
+      !owner?.activeWorkHeartbeat ||
+      owner.isDying ||
+      (!entry.promptActive && !entry.childActiveWork)
+    ) {
+      return;
+    }
+    entry.activeWorkDeadline = setTimeout(() => {
+      entry.activeWorkDeadline = undefined;
+      const currentOwner = channelInfoForEntry(entry);
+      if (
+        !currentOwner?.activeWorkHeartbeat ||
+        currentOwner.isDying ||
+        (!entry.promptActive && !entry.childActiveWork)
+      ) {
+        return;
+      }
+      const childSilence =
+        entry.childActiveWorkAt === null
+          ? 'no child report received'
+          : `${Date.now() - entry.childActiveWorkAt}ms since last child report`;
+      writeStderrLine(
+        `qwen serve: active-work heartbeat timed out for session ${entry.sessionId} (${childSilence}); recycling channel`,
+      );
+      void killChannelWithLog(currentOwner, 'active-work heartbeat timeout');
+    }, ACTIVE_WORK_HEARTBEAT_TIMEOUT_MS);
+    entry.activeWorkDeadline.unref?.();
+  }
+
   /**
    * Idempotently clear a session's active-prompt bookkeeping, but only if
    * `promptId` still owns it. The ownership gate matters: after a deadline
@@ -1632,6 +1689,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       entry.sessionLastSeenAt = Date.now();
       touchActivity();
     }
+    syncActiveWorkDeadline(entry);
   }
 
   function resolvePositiveFiniteMs(
@@ -1791,7 +1849,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       for (const [id, entry] of byId) {
         // `pendingPromptCount` (not `promptActive`): queued prompts and the
         // FIFO hand-off gap between two prompts must also block the reap.
-        if (entry.pendingPromptCount > 0) continue;
+        if (entryHasActiveWork(entry)) continue;
         if (entry.events.subscriberCount > 0) continue;
         // Note: clientIds.size is NOT checked here. Close-on-last-detach
         // handles the normal path (client sends detach → immediate close).
@@ -2157,7 +2215,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     if (
       entry.spawnOwnerWantedKill &&
       entry.attachCount === 0 &&
-      entry.events.subscriberCount === 0
+      entry.events.subscriberCount === 0 &&
+      !entryHasActiveWork(entry)
     ) {
       await bridgeApi.killSession(entry.sessionId).catch(() => {
         /* best-effort; channel.exited will eventually reap anyway */
@@ -2165,7 +2224,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     } else if (
       entry.clientIds.size === 0 &&
       entry.events.subscriberCount === 0 &&
-      entry.pendingPromptCount === 0
+      !entryHasActiveWork(entry)
     ) {
       await closeSessionImpl(entry.sessionId, undefined, {
         reason: 'last_client_detached',
@@ -2223,6 +2282,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           }),
       );
       const sessionIds = new Set<string>();
+      const infoRef: { current?: ChannelInfo } = {};
       let client: BridgeClient;
       let connection: ClientSideConnection;
       try {
@@ -2336,6 +2396,46 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           () => liveTaskToolRequestHandler,
           () => liveSpeakToUserHandler,
           opts.externalToolGuard,
+          (sessionId, active, seq) => {
+            const currentInfo = infoRef.current;
+            const entry = byId.get(sessionId);
+            if (
+              !currentInfo?.activeWorkHeartbeat ||
+              currentInfo.isDying ||
+              !currentInfo.sessionIds.has(sessionId) ||
+              !entry ||
+              entry.channel !== currentInfo.channel ||
+              seq <= entry.childActiveWorkSeq
+            ) {
+              return;
+            }
+            entry.childActiveWorkSeq = seq;
+            entry.childActiveWorkAt = Date.now();
+            if (entry.childActiveWork !== active) {
+              entry.childActiveWork = active;
+              touchActivity();
+            }
+            syncActiveWorkDeadline(entry);
+            if (
+              !active &&
+              entry.clientIds.size === 0 &&
+              entry.events.subscriberCount === 0 &&
+              !entryHasActiveWork(entry)
+            ) {
+              if (entry.spawnOwnerWantedKill && entry.attachCount === 0) {
+                void bridgeApi.killSession(sessionId).catch(() => undefined);
+              } else {
+                void closeSessionImpl(sessionId, undefined, {
+                  reason: 'last_client_detached',
+                }).catch((err) => {
+                  writeStderrLine(
+                    `qwen serve: deferred close-on-active-work-complete failed for ` +
+                      `${JSON.stringify(sessionId)}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+                  );
+                });
+              }
+            }
+          },
         );
         connection = new ClientSideConnection(() => client, channel.stream);
       } catch (error) {
@@ -2385,8 +2485,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         workspaceMcpAuthenticationTimers: new Map(),
         emptyReapPending: false,
         isDying: false,
+        activeWorkHeartbeat: false,
         handshakeComplete: false,
       };
+      infoRef.current = info;
       aliveChannels.add(info);
       // Belt-and-suspenders leak detection. The set is intentionally
       // multi-entry to cover the `killSession`-then-`spawnOrAttach`
@@ -2475,6 +2577,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         for (const sid of sessions) {
           const sessEntry = byId.get(sid);
           if (!sessEntry) continue;
+          clearActiveWorkDeadline(sessEntry);
           cancelPendingForSession(sid);
           // DAEMON-002/005: every still-pending prompt owes its formal
           // terminal before the bus closes below.
@@ -2536,6 +2639,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               connection.initialize({
                 protocolVersion: PROTOCOL_VERSION,
                 _meta: {
+                  [ACTIVE_WORK_HEARTBEAT_META_KEY]: {
+                    v: ACTIVE_WORK_HEARTBEAT_VERSION,
+                    intervalMs: ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
+                  },
                   [CHANNEL_STARTUP_PROFILE_META_KEY]: {
                     v: CHANNEL_STARTUP_PROFILE_VERSION,
                   },
@@ -2558,6 +2665,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 );
               }
             }
+            const activeWorkCapability = isRecord(response._meta)
+              ? response._meta[ACTIVE_WORK_HEARTBEAT_META_KEY]
+              : undefined;
+            info.activeWorkHeartbeat =
+              isRecord(activeWorkCapability) &&
+              activeWorkCapability['v'] === ACTIVE_WORK_HEARTBEAT_VERSION &&
+              activeWorkCapability['intervalMs'] ===
+                ACTIVE_WORK_HEARTBEAT_INTERVAL_MS;
             try {
               const attributes = getChannelStartupProfileAttributes(
                 response,
@@ -3956,6 +4071,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       cwdChangeQueue: Promise.resolve(),
       promptQueue: Promise.resolve(),
       pendingPromptCount: 0,
+      pendingAgentNotificationCount: 0,
       pendingPromptList: [],
       midTurnMessageQueue: [],
       modelChangeQueue: Promise.resolve(),
@@ -3970,6 +4086,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       attachRefs: new Map(),
       spawnOwnerWantedKill: false,
       promptActive: false,
+      childActiveWork: false,
+      childActiveWorkSeq: 0,
+      childActiveWorkAt: null,
       retryAllowed: false,
     };
     ci.sessionIds.add(entry.sessionId);
@@ -4902,6 +5021,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         let removedRestoreEntry = false;
         const restoreEntry = byId.get(req.sessionId);
         if (restoreEntry?.events === restoreEvents) {
+          clearActiveWorkDeadline(restoreEntry);
           byId.delete(req.sessionId);
           ci?.sessionIds.delete(req.sessionId);
           emitSessionLifecycle({
@@ -5031,6 +5151,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       activePromptCounter--;
       touchActivity();
     }
+    clearActiveWorkDeadline(entry);
     byId.delete(sessionId);
     telemetry.metrics?.sessionLifecycle('close');
     emitSessionLifecycle({
@@ -5176,6 +5297,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
     get activePromptCount() {
       return activePromptCounter;
+    },
+
+    get activeWork() {
+      for (const entry of byId.values()) {
+        if (entryHasActiveWork(entry)) return true;
+      }
+      return false;
     },
 
     get lastActivityAt() {
@@ -5767,6 +5895,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 activePromptCounter++;
                 entry.sessionLastSeenAt = Date.now();
                 touchActivity();
+                syncActiveWorkDeadline(entry);
                 if (originatorClientId === undefined) {
                   delete entry.activePromptOriginatorClientId;
                 } else {
@@ -6037,7 +6166,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           if (
             entry.clientIds.size === 0 &&
             entry.events.subscriberCount === 0 &&
-            entry.pendingPromptCount === 0 &&
+            !entryHasActiveWork(entry) &&
             byId.get(sessionId) === entry
           ) {
             void closeSessionImpl(sessionId, undefined, {
@@ -7927,18 +8056,45 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (!entry) throw new SessionNotFoundError(sessionId);
       const info = channelInfoForEntry(entry);
       if (!info || info.isDying) throw new SessionNotFoundError(sessionId);
-      const response = await Promise.race([
-        withTimeout(
-          entry.connection.extMethod(
+      entry.pendingAgentNotificationCount++;
+      try {
+        const response = await Promise.race([
+          withTimeout(
+            entry.connection.extMethod(
+              SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification,
+              { sessionId, ...notification },
+            ),
+            initTimeoutMs,
             SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification,
-            { sessionId, ...notification },
           ),
-          initTimeoutMs,
-          SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification,
-        ),
-        getTransportClosedReject(entry),
-      ]);
-      return { sessionId, accepted: response['accepted'] === true };
+          getTransportClosedReject(entry),
+        ]);
+        return { sessionId, accepted: response['accepted'] === true };
+      } finally {
+        entry.pendingAgentNotificationCount = Math.max(
+          0,
+          entry.pendingAgentNotificationCount - 1,
+        );
+        if (
+          entry.clientIds.size === 0 &&
+          entry.events.subscriberCount === 0 &&
+          !entryHasActiveWork(entry) &&
+          byId.get(sessionId) === entry
+        ) {
+          if (entry.spawnOwnerWantedKill && entry.attachCount === 0) {
+            void bridgeApi.killSession(sessionId).catch(() => undefined);
+          } else {
+            void closeSessionImpl(sessionId, undefined, {
+              reason: 'last_client_detached',
+            }).catch((err) => {
+              writeStderrLine(
+                `qwen serve: deferred close-on-Agent-notification-complete failed for ` +
+                  `${JSON.stringify(sessionId)}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+              );
+            });
+          }
+        }
+      }
     },
 
     async generateSessionBtw(sessionId, question, signal, _context) {
@@ -8794,6 +8950,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // Remove from the state eagerly so concurrent `spawnOrAttach`
       // can't reattach to a session we're tearing down.
       if (defaultEntry === entry) defaultEntry = undefined;
+      clearActiveWorkDeadline(entry);
       byId.delete(sessionId);
       telemetry.metrics?.sessionLifecycle('die');
       emitSessionLifecycle({
@@ -8891,7 +9048,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (
         entry.spawnOwnerWantedKill &&
         entry.attachCount === 0 &&
-        entry.events.subscriberCount === 0
+        entry.events.subscriberCount === 0 &&
+        !entryHasActiveWork(entry)
       ) {
         // Defer-completed reap. Re-use killSession's logic; pass
         // `requireZeroAttaches: false` (default) because we've
@@ -8902,7 +9060,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       } else if (
         entry.clientIds.size === 0 &&
         entry.events.subscriberCount === 0 &&
-        entry.pendingPromptCount === 0
+        !entryHasActiveWork(entry)
       ) {
         // Last registered client left, no SSE subscribers remain, and
         // no prompt is pending (active OR queued — `pendingPromptCount`
@@ -8940,6 +9098,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const channels = Array.from(aliveChannels);
       const entries = Array.from(byId.values());
       defaultEntry = undefined;
+      for (const entry of entries) clearActiveWorkDeadline(entry);
       byId.clear();
       for (const entry of entries) {
         emitSessionLifecycle({
@@ -9000,6 +9159,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           e.pendingInteractions.clear();
         }
         defaultEntry = undefined;
+        for (const entry of entries) clearActiveWorkDeadline(entry);
         byId.clear();
         // Publish a terminal `session_died` BEFORE closing each bus so SSE
         // subscribers can distinguish "daemon shut down" from a transient

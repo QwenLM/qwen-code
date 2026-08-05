@@ -442,6 +442,9 @@ function makeBridge(
     get activePromptCount() {
       return 0;
     },
+    get activeWork() {
+      return false;
+    },
     get pendingPromptTotal() {
       return 0;
     },

@@ -1804,6 +1804,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     get activePromptCount() {
       return 0;
     },
+    get activeWork() {
+      return false;
+    },
     get lastActivityAt() {
       return null;
     },
@@ -20546,6 +20549,7 @@ describe('createServeApp', () => {
       expect(res.body).toMatchObject({
         status: 'ok',
         activePrompts: 0,
+        activeWork: false,
         connectedClients: 0,
         channelAlive: false,
         lastActivityAt: null,
@@ -20591,6 +20595,7 @@ describe('createServeApp', () => {
         sessionCount: { get: () => 2 },
         pendingPermissionCount: { get: () => 1 },
         activePromptCount: { get: () => 1 },
+        activeWork: { get: () => false },
         lastActivityAt: { get: () => now - 120_000 },
         isChannelLive: { value: () => true },
       });
@@ -20598,6 +20603,7 @@ describe('createServeApp', () => {
         sessionCount: { get: () => 3 },
         pendingPermissionCount: { get: () => 2 },
         activePromptCount: { get: () => 2 },
+        activeWork: { get: () => true },
         lastActivityAt: { get: () => now - 30_000 },
         isChannelLive: { value: () => false },
       });
@@ -20630,6 +20636,7 @@ describe('createServeApp', () => {
           sessions: 5,
           pendingPermissions: 3,
           activePrompts: 3,
+          activeWork: true,
           channelAlive: true,
           lastActivityAt: new Date(now - 30_000).toISOString(),
           idleSinceMs: 30_000,
@@ -20685,11 +20692,11 @@ describe('createServeApp', () => {
     it('does not short-circuit later workspace health getters', async () => {
       const primaryBridge = fakeBridge();
       const secondaryBridge = fakeBridge();
-      Object.defineProperty(primaryBridge, 'isChannelLive', {
-        value: () => true,
+      Object.defineProperty(primaryBridge, 'activeWork', {
+        get: () => true,
       });
-      Object.defineProperty(secondaryBridge, 'isChannelLive', {
-        value: () => {
+      Object.defineProperty(secondaryBridge, 'activeWork', {
+        get: () => {
           throw new Error('secondary bridge wedged');
         },
       });

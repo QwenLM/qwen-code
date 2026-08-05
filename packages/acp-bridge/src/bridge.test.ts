@@ -64,6 +64,11 @@ import { createInMemoryChannel } from './inMemoryChannel.js';
 import { EventBus, type BridgeEvent } from './eventBus.js';
 import { TurnBoundaryCompactionEngine } from './compactionEngine.js';
 import {
+  ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
+  ACTIVE_WORK_HEARTBEAT_META_KEY,
+  ACTIVE_WORK_HEARTBEAT_TIMEOUT_MS,
+  ACTIVE_WORK_HEARTBEAT_VERSION,
+  ACTIVE_WORK_NOTIFICATION_METHOD,
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
   DAEMON_MODEL_PROMPT_META_KEY,
@@ -109,7 +114,247 @@ function deferred<T>(): {
   return { promise, resolve, reject };
 }
 
+function activeWorkInitializeResponse(): InitializeResponse {
+  return {
+    protocolVersion: PROTOCOL_VERSION,
+    agentInfo: { name: 'active-work-agent', version: '0' },
+    authMethods: [],
+    agentCapabilities: {},
+    _meta: {
+      [ACTIVE_WORK_HEARTBEAT_META_KEY]: {
+        v: ACTIVE_WORK_HEARTBEAT_VERSION,
+        intervalMs: ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
+      },
+    },
+  };
+}
+
 describe('createAcpSessionBridge', () => {
+  describe('active work', () => {
+    it('negotiates the capability and tracks accepted prompts', async () => {
+      const prompt = deferred<PromptResponse>();
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        promptImpl: () => prompt.promise,
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      expect(handle.agent.initializeCalls[0]?._meta).toMatchObject({
+        [ACTIVE_WORK_HEARTBEAT_META_KEY]: {
+          v: ACTIVE_WORK_HEARTBEAT_VERSION,
+          intervalMs: ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
+        },
+        [CHANNEL_STARTUP_PROFILE_META_KEY]: {
+          v: CHANNEL_STARTUP_PROFILE_VERSION,
+        },
+      });
+      expect(bridge.activeWork).toBe(false);
+
+      const running = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'start background work' }],
+      });
+      expect(bridge.activeWork).toBe(true);
+      prompt.resolve({ stopReason: 'end_turn' });
+      await running;
+      expect(bridge.activeWork).toBe(false);
+
+      await bridge.shutdown();
+    });
+
+    it('validates child reports and ignores stale or foreign sequences', async () => {
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await handle.agentConnection.extNotification(
+        ACTIVE_WORK_NOTIFICATION_METHOD,
+        {
+          v: ACTIVE_WORK_HEARTBEAT_VERSION,
+          sessionId: 'foreign-session',
+          active: true,
+          seq: 1,
+        },
+      );
+      expect(bridge.activeWork).toBe(false);
+
+      await handle.agentConnection.extNotification(
+        ACTIVE_WORK_NOTIFICATION_METHOD,
+        {
+          v: ACTIVE_WORK_HEARTBEAT_VERSION,
+          sessionId: session.sessionId,
+          active: true,
+          seq: 2,
+        },
+      );
+      expect(bridge.activeWork).toBe(true);
+
+      await handle.agentConnection.extNotification(
+        ACTIVE_WORK_NOTIFICATION_METHOD,
+        {
+          v: ACTIVE_WORK_HEARTBEAT_VERSION,
+          sessionId: session.sessionId,
+          active: false,
+          seq: 1,
+        },
+      );
+      expect(bridge.activeWork).toBe(true);
+
+      await handle.agentConnection.extNotification(
+        ACTIVE_WORK_NOTIFICATION_METHOD,
+        {
+          v: ACTIVE_WORK_HEARTBEAT_VERSION,
+          sessionId: session.sessionId,
+          active: false,
+          seq: 3,
+        },
+      );
+      expect(bridge.activeWork).toBe(false);
+
+      await bridge.shutdown();
+    });
+
+    it('keeps detached sessions until child work settles', async () => {
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 0,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await handle.agentConnection.extNotification(
+        ACTIVE_WORK_NOTIFICATION_METHOD,
+        {
+          v: ACTIVE_WORK_HEARTBEAT_VERSION,
+          sessionId: session.sessionId,
+          active: true,
+          seq: 1,
+        },
+      );
+      await bridge.detachClient(session.sessionId, session.clientId);
+      expect(bridge.sessionCount).toBe(1);
+
+      await handle.agentConnection.extNotification(
+        ACTIVE_WORK_NOTIFICATION_METHOD,
+        {
+          v: ACTIVE_WORK_HEARTBEAT_VERSION,
+          sessionId: session.sessionId,
+          active: false,
+          seq: 2,
+        },
+      );
+      await vi.waitFor(() => expect(bridge.sessionCount).toBe(0));
+
+      await bridge.shutdown();
+    });
+
+    it('expires each Session independently when child heartbeats stop', async () => {
+      vi.useFakeTimers();
+      try {
+        const handle = makeChannel({
+          initializeImpl: () => activeWorkInitializeResponse(),
+          promptImpl: () => new Promise<never>(() => {}),
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+          sessionReapIntervalMs: 0,
+        });
+        const first = await bridge.spawnOrAttach({
+          workspaceCwd: WS_A,
+          sessionScope: 'thread',
+        });
+        const second = await bridge.spawnOrAttach({
+          workspaceCwd: WS_A,
+          sessionScope: 'thread',
+        });
+        const firstPrompt = bridge
+          .sendPrompt(first.sessionId, {
+            sessionId: first.sessionId,
+            prompt: [{ type: 'text', text: 'first' }],
+          })
+          .catch(() => undefined);
+        const secondPrompt = bridge
+          .sendPrompt(second.sessionId, {
+            sessionId: second.sessionId,
+            prompt: [{ type: 'text', text: 'second' }],
+          })
+          .catch(() => undefined);
+        await vi.waitFor(() => {
+          expect(handle.agent.promptCalls).toHaveLength(2);
+        });
+
+        for (const [elapsed, seq] of [
+          [15_000, 1],
+          [30_000, 2],
+          [44_000, 3],
+        ] as const) {
+          await vi.advanceTimersByTimeAsync(
+            elapsed - (seq === 1 ? 0 : seq === 2 ? 15_000 : 30_000),
+          );
+          await handle.agentConnection.extNotification(
+            ACTIVE_WORK_NOTIFICATION_METHOD,
+            {
+              v: ACTIVE_WORK_HEARTBEAT_VERSION,
+              sessionId: first.sessionId,
+              active: true,
+              seq,
+            },
+          );
+          expect(handle.killed).toBe(false);
+        }
+
+        await vi.advanceTimersByTimeAsync(
+          ACTIVE_WORK_HEARTBEAT_TIMEOUT_MS - 44_000,
+        );
+        expect(handle.killed).toBe(true);
+        await Promise.all([firstPrompt, secondPrompt]);
+        await bridge.shutdown();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not enforce heartbeat expiry without negotiation', async () => {
+      vi.useFakeTimers();
+      try {
+        const handle = makeChannel({
+          promptImpl: () => new Promise<never>(() => {}),
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+          sessionReapIntervalMs: 0,
+        });
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const prompt = bridge
+          .sendPrompt(session.sessionId, {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'legacy child' }],
+          })
+          .catch(() => undefined);
+        await vi.waitFor(() => {
+          expect(handle.agent.promptCalls).toHaveLength(1);
+        });
+
+        await vi.advanceTimersByTimeAsync(ACTIVE_WORK_HEARTBEAT_TIMEOUT_MS * 2);
+        expect(handle.killed).toBe(false);
+
+        await bridge.shutdown();
+        await prompt;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
   it('streams workspace content without requiring a session', async () => {
     const completion = deferred<Record<string, unknown>>();
     const handle = makeChannel({
@@ -19194,6 +19439,39 @@ describe('activePromptCount and lastActivityAt', () => {
 });
 
 describe('createAcpSessionBridge — background notifications', () => {
+  it('counts a notification while the child is accepting it', async () => {
+    const acceptance = deferred<Record<string, unknown>>();
+    const handle = makeChannel({
+      extMethodImpl: async (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification
+          ? acceptance.promise
+          : {},
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    const notification = bridge.enqueueBackgroundNotification(
+      session.sessionId,
+      {
+        displayText: 'Worker completed.',
+        modelText: '<task-notification />',
+        taskId: 'worker-persisting',
+        status: 'completed',
+        kind: 'agent',
+      },
+    );
+    expect(bridge.activeWork).toBe(true);
+    await bridge.detachClient(session.sessionId, session.clientId);
+    expect(bridge.sessionCount).toBe(1);
+
+    acceptance.resolve({ sessionId: session.sessionId, accepted: false });
+    await notification;
+    expect(bridge.activeWork).toBe(false);
+    await vi.waitFor(() => expect(bridge.sessionCount).toBe(0));
+
+    await bridge.shutdown();
+  });
+
   it('forwards a daemon-owned worker completion to the live parent session', async () => {
     const handle = makeChannel({
       extMethodImpl: async (method, params) =>

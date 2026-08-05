@@ -107,6 +107,7 @@ export function createHealthDemoRoutes(
       let sessions = 0;
       let pendingPermissions = 0;
       let activePrompts = 0;
+      let activeWork = false;
       let channelAlive = false;
       let lastActivity: number | null = null;
 
@@ -116,12 +117,14 @@ export function createHealthDemoRoutes(
         const runtimeSessions = bridge.sessionCount;
         const runtimePendingPermissions = bridge.pendingPermissionCount;
         const runtimeActivePrompts = bridge.activePromptCount;
+        const runtimeActiveWork = bridge.activeWork;
         const runtimeChannelAlive = bridge.isChannelLive();
         const runtimeLastActivity = bridge.lastActivityAt;
 
         sessions += runtimeSessions;
         pendingPermissions += runtimePendingPermissions;
         activePrompts += runtimeActivePrompts;
+        activeWork = activeWork || runtimeActiveWork;
         channelAlive = channelAlive || runtimeChannelAlive;
         if (
           runtimeLastActivity !== null &&
@@ -140,6 +143,7 @@ export function createHealthDemoRoutes(
         sessions,
         pendingPermissions,
         activePrompts,
+        activeWork,
         connectedClients: getActiveSseCount(),
         channelAlive,
         lastActivityAt:
