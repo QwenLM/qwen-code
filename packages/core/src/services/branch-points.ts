@@ -39,7 +39,11 @@ function nonEmptyString(value: unknown): string | undefined {
 }
 
 function parts(record: BranchPointRecord): readonly Part[] {
-  return record.message?.parts ?? [];
+  // Transcript JSONL can contain null part elements; validation only checks
+  // that parts is an array, so skip non-object entries before dereferencing.
+  return ((record.message?.parts ?? []) as unknown[]).filter(
+    (part): part is Part => part !== null && typeof part === 'object',
+  );
 }
 
 function functionCalls(record: BranchPointRecord): ToolCallIdentity[] {
@@ -117,7 +121,12 @@ function resolveCompletedTurnBranchCandidateInRange(input: {
     startExclusiveRecordUuid,
     pendingCallsAtStart,
   } = input;
-  const pendingCalls = pendingCallsAtStart.map((call) => ({ ...call }));
+  // A dangling call carried in from the pre-boundary prefix (a crashed turn
+  // that never wrote its tool_result) must not permanently disable later
+  // checkpoints; only calls issued inside the interval must close.
+  const pendingCalls: Array<
+    ToolCallIdentity & { carriedFromPrefix?: boolean }
+  > = pendingCallsAtStart.map((call) => ({ ...call, carriedFromPrefix: true }));
   let lastToolResultIndex = startIndex;
   for (let index = startIndex + 1; index <= endIndex; index++) {
     const record = activeChain[index]!;
@@ -130,7 +139,7 @@ function resolveCompletedTurnBranchCandidateInRange(input: {
       if (!closeToolCall(pendingCalls, response)) return undefined;
     }
   }
-  if (pendingCalls.length > 0) return undefined;
+  if (pendingCalls.some((call) => !call.carriedFromPrefix)) return undefined;
 
   let assistantRecordUuid: string | undefined;
   for (let index = lastToolResultIndex + 1; index <= endIndex; index++) {

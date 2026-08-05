@@ -626,6 +626,22 @@ describe('SessionTranscriptReader', () => {
           version: '1.0.0',
           message: { role: 'model', parts: [null, { text: 'answer' }] },
         }),
+        serialize({
+          uuid: 'checkpoint-1',
+          parentUuid: 'a1',
+          sessionId,
+          timestamp: '2026-01-01T00:00:02.000Z',
+          type: 'system',
+          subtype: 'branch_checkpoint',
+          provenance: 'system',
+          cwd: workspaceDir,
+          version: '1.0.0',
+          systemPayload: {
+            v: 1,
+            startExclusiveRecordUuid: null,
+            assistantRecordUuid: 'a1',
+          },
+        }),
       ].join('\n') + '\n',
     );
 
@@ -633,7 +649,74 @@ describe('SessionTranscriptReader', () => {
       sessionId,
     );
 
-    expect(page.records.map((item) => item.uuid)).toEqual(['u1', 'a1']);
+    expect(page.records.map((item) => item.uuid)).toEqual([
+      'u1',
+      'a1',
+      'checkpoint-1',
+    ]);
+    // The visible text after the null element must still project, or the
+    // resolver drops the checkpoint and every fork on it would 409.
+    expect(page.branchPointsByAssistantUuid).toEqual({
+      a1: 'checkpoint-1',
+    });
+  });
+
+  it('does not advertise a checkpoint shadowed by an earlier duplicate record', async () => {
+    const ordinary: ChatRecord = {
+      ...record('dup', 'a1', 'ordinary duplicate'),
+      type: 'assistant',
+    };
+    const checkpoint: ChatRecord = {
+      ...record('dup', 'a1', ''),
+      type: 'system',
+      subtype: 'branch_checkpoint',
+      message: undefined,
+      systemPayload: {
+        v: 1,
+        startExclusiveRecordUuid: null,
+        assistantRecordUuid: 'a1',
+      },
+    };
+    await writeRecords([
+      record('u1', null, 'prompt'),
+      record('a1', 'u1', 'answer'),
+      ordinary,
+      checkpoint,
+    ]);
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+    );
+
+    expect(page.branchPointsByAssistantUuid).toBeUndefined();
+  });
+
+  it('keeps a branch point when its checkpoint line is duplicated', async () => {
+    const checkpoint: ChatRecord = {
+      ...record('checkpoint-1', 'a1', ''),
+      type: 'system',
+      subtype: 'branch_checkpoint',
+      message: undefined,
+      systemPayload: {
+        v: 1,
+        startExclusiveRecordUuid: null,
+        assistantRecordUuid: 'a1',
+      },
+    };
+    await writeRecords([
+      record('u1', null, 'prompt'),
+      record('a1', 'u1', 'answer'),
+      checkpoint,
+      checkpoint,
+    ]);
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+    );
+
+    expect(page.branchPointsByAssistantUuid).toEqual({
+      a1: 'checkpoint-1',
+    });
   });
 
   it('reports a branch point whose checkpoint falls on a later page', async () => {

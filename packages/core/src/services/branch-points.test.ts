@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
+import type { Part } from '@google/genai';
 import type { ChatRecord } from './chatRecordingService.js';
 import {
   resolveBranchPoints,
@@ -214,6 +215,128 @@ describe('branch points', () => {
         endInclusiveRecordUuid: 'a1',
       }),
     ).toBeUndefined();
+  });
+
+  it('tolerates null part elements in raw transcript records', () => {
+    const user = record('u1', null, 'user', [{ text: 'question' }]);
+    const toolCall = record('a-tool', 'u1', 'assistant', [
+      null,
+      { functionCall: { id: 'call-1', name: 'read_file', args: {} } },
+    ] as unknown as Part[]);
+    const toolResult = record('tool', 'a-tool', 'tool_result', [
+      null,
+      {
+        functionResponse: {
+          id: 'call-1',
+          name: 'read_file',
+          response: { output: 'ok' },
+        },
+      },
+    ] as unknown as Part[]);
+    const assistant = record('a1', 'tool', 'assistant', [
+      null,
+      { text: 'answer' },
+    ] as unknown as Part[]);
+    const checkpoint: ChatRecord = {
+      ...record('c1', 'a1', 'system'),
+      subtype: 'branch_checkpoint',
+      systemPayload: {
+        v: 1,
+        startExclusiveRecordUuid: null,
+        assistantRecordUuid: 'a1',
+      },
+    };
+
+    expect(
+      resolveCompletedTurnBranchCandidate({
+        activeChain: [user, toolCall, toolResult, assistant],
+        startExclusiveRecordUuid: null,
+        endInclusiveRecordUuid: 'a1',
+      }),
+    ).toEqual({
+      startExclusiveRecordUuid: null,
+      endInclusiveRecordUuid: 'a1',
+      assistantRecordUuid: 'a1',
+    });
+    expect(
+      resolveBranchPoints([
+        user,
+        toolCall,
+        toolResult,
+        assistant,
+        checkpoint,
+      ]).get('c1'),
+    ).toEqual({
+      startExclusiveRecordUuid: null,
+      endInclusiveRecordUuid: 'a1',
+      assistantRecordUuid: 'a1',
+      checkpointUuid: 'c1',
+    });
+  });
+
+  it('resolves a balanced turn after a dangling pre-boundary tool call', () => {
+    const records = [
+      record('u0', null, 'user', [{ text: 'first' }]),
+      record('a-dangling', 'u0', 'assistant', [
+        { functionCall: { id: 'crashed-call', name: 'read_file', args: {} } },
+      ]),
+      record('u1', 'a-dangling', 'user', [{ text: 'second' }]),
+      record('a1', 'u1', 'assistant', [{ text: 'answer' }]),
+    ];
+
+    expect(
+      resolveCompletedTurnBranchCandidate({
+        activeChain: records,
+        startExclusiveRecordUuid: 'a-dangling',
+        endInclusiveRecordUuid: 'a1',
+      }),
+    ).toEqual({
+      startExclusiveRecordUuid: 'a-dangling',
+      endInclusiveRecordUuid: 'a1',
+      assistantRecordUuid: 'a1',
+    });
+  });
+
+  it('keeps recording checkpoints after a dangling call in earlier history', () => {
+    const chain: ChatRecord[] = [
+      record('u0', null, 'user', [{ text: 'first' }]),
+      record('a-dangling', 'u0', 'assistant', [
+        { functionCall: { id: 'crashed-call', name: 'read_file', args: {} } },
+      ]),
+      record('u1', 'a-dangling', 'user', [{ text: 'second' }]),
+      record('a1', 'u1', 'assistant', [{ text: 'answer' }]),
+      {
+        ...record('checkpoint-1', 'a1', 'system'),
+        subtype: 'branch_checkpoint',
+        systemPayload: {
+          v: 1,
+          startExclusiveRecordUuid: null,
+          assistantRecordUuid: 'a1',
+        },
+      },
+      record('u2', 'checkpoint-1', 'user', [{ text: 'third' }]),
+      record('a2', 'u2', 'assistant', [{ text: 'third answer' }]),
+      {
+        ...record('checkpoint-2', 'a2', 'system'),
+        subtype: 'branch_checkpoint',
+        systemPayload: {
+          v: 1,
+          startExclusiveRecordUuid: 'checkpoint-1',
+          assistantRecordUuid: 'a2',
+        },
+      },
+    ];
+
+    const points = resolveBranchPoints(chain);
+    // The turn that left the call open stays ineligible, but the fully
+    // balanced turn after it must still resolve a checkpoint.
+    expect(points.has('checkpoint-1')).toBe(false);
+    expect(points.get('checkpoint-2')).toEqual({
+      startExclusiveRecordUuid: 'checkpoint-1',
+      endInclusiveRecordUuid: 'a2',
+      assistantRecordUuid: 'a2',
+      checkpointUuid: 'checkpoint-2',
+    });
   });
 
   it('rejects checkpoints on a chain with duplicate record identifiers', () => {

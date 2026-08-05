@@ -3388,6 +3388,61 @@ describe('SessionService', () => {
       ).toBe(true);
     });
 
+    it('forks from a checkpoint when transcript parts contain null elements', async () => {
+      const oldId = '11111111-1111-4111-1111-111111111130';
+      const newId = '22222222-2222-4222-2222-222222222231';
+      const { file, lines } = seedSession(oldId);
+      lines[1]!['message'] = { role: 'model', parts: [null, { text: 'hi' }] };
+      const checkpoint = {
+        uuid: 'checkpoint-null-parts',
+        parentUuid: 'u2',
+        sessionId: oldId,
+        type: 'system',
+        subtype: 'branch_checkpoint',
+        timestamp: '2026-04-22T00:00:02.000Z',
+        cwd,
+        version: 'test',
+        systemPayload: {
+          v: 1,
+          startExclusiveRecordUuid: null,
+          assistantRecordUuid: 'u2',
+        },
+      };
+      const later = {
+        uuid: 'u3',
+        parentUuid: 'checkpoint-null-parts',
+        sessionId: oldId,
+        type: 'user',
+        timestamp: '2026-04-22T00:00:03.000Z',
+        cwd,
+        version: 'test',
+        message: { role: 'user', parts: [{ text: 'later' }] },
+      };
+      fs.writeFileSync(
+        file,
+        [...lines, checkpoint, later]
+          .map((record) => JSON.stringify(record))
+          .join('\n') + '\n',
+      );
+
+      const result = await service.forkSession(oldId, newId, {
+        atRecordId: 'checkpoint-null-parts',
+      });
+
+      expect(result.copiedCount).toBe(3);
+      const written = fs
+        .readFileSync(result.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      expect(written.map((record) => record.uuid)).toEqual([
+        'u1',
+        'u2',
+        'checkpoint-null-parts',
+      ]);
+      expect(written[1].message.parts).toEqual([null, { text: 'hi' }]);
+    });
+
     it('keeps a checkpoint valid when its creation-metadata boundary is filtered', async () => {
       const oldId = '11111111-1111-1111-1111-111111111115';
       const newId = '22222222-2222-2222-2222-222222222226';
