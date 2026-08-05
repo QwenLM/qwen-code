@@ -72,13 +72,6 @@ vi.mock('./MessageItem', async () => {
     },
   };
 });
-vi.mock('./messages/tools/ParallelAgentsGroup', async () => {
-  const React = await import('react');
-  return {
-    ParallelAgentsGroup: () =>
-      React.createElement('div', { 'data-testid': 'parallel-agents' }),
-  };
-});
 vi.mock('./messages/ToolApproval', () => ({ ToolApproval: () => null }));
 vi.mock('./messages/AskUserQuestion', () => ({ AskUserQuestion: () => null }));
 vi.mock('@tanstack/react-virtual', () => ({
@@ -198,12 +191,24 @@ const systemMsg = (id: string): SystemMessage => ({
   variant: 'warning',
   source: 'prompt_cancelled',
 });
-const backgroundNotificationMsg = (id: string): SystemMessage => ({
+const backgroundNotificationMsg = (
+  id: string,
+  toolUseId?: string,
+): SystemMessage => ({
   id,
   role: 'system',
-  content: 'background task completed',
+  content: 'Background agent completed.',
   variant: 'info',
   source: 'background_notification',
+  ...(toolUseId ? { data: { kind: 'agent', toolUseId } } : {}),
+});
+const monitorNotificationMsg = (id: string): SystemMessage => ({
+  id,
+  role: 'system',
+  content: 'Background monitor completed.',
+  variant: 'info',
+  source: 'background_notification',
+  data: { kind: 'monitor' },
 });
 const thinkingMsg = (id: string): ThinkingMessage => ({
   id,
@@ -290,6 +295,44 @@ function mount(
   });
   mounted.push({ root, container });
   return container;
+}
+
+function rerenderMessages(
+  container: HTMLElement,
+  messages: Message[],
+  opts: {
+    loadingTranscript?: boolean;
+    catchingUp?: boolean;
+    isResponding?: boolean;
+  } = {},
+): void {
+  const root = mounted.find((entry) => entry.container === container)?.root;
+  if (!root) throw new Error('Expected mounted MessageList root');
+  act(() => {
+    root.render(
+      <I18nProvider language="en">
+        <WebShellCustomizationProvider value={{}}>
+          <MessageList
+            messages={messages}
+            pendingApproval={null}
+            loadingTranscript={opts.loadingTranscript}
+            catchingUp={opts.catchingUp}
+            isResponding={opts.isResponding}
+          />
+        </WebShellCustomizationProvider>
+      </I18nProvider>,
+    );
+  });
+}
+
+function parallelAgentsSummary(
+  container: HTMLElement,
+): HTMLButtonElement | null {
+  return (
+    Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Parallel agents'),
+    ) ?? null
+  );
 }
 
 function renderInto(
@@ -507,6 +550,71 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('false');
   });
 
+  it('keeps the final answer when active agents are pinned after it', () => {
+    const activeAgent = agentMsg('agent-1');
+    activeAgent.tools[0]!.status = 'pending';
+    const c = mount([
+      userMsg('u1'),
+      activeAgent,
+      agentMsg('agent-2'),
+      asstMsg('a1'),
+    ]);
+
+    expect(
+      c
+        .querySelector('[data-testid="msg-a1"]')
+        ?.getAttribute('data-assistant-actions'),
+    ).toBe('true');
+    click(toggle(c, 'u1'));
+    expect(has(c, 'a1')).toBe(true);
+    expect(parallelAgentsSummary(c)).toBeNull();
+  });
+
+  it('keeps an automatically expanded terminal group mounted until its delay expires', () => {
+    vi.useFakeTimers();
+    const firstAgent = agentMsg('agent-1');
+    const secondAgent = agentMsg('agent-2');
+    firstAgent.tools[0]!.status = 'pending';
+    secondAgent.tools[0]!.status = 'pending';
+    const activeMessages = [
+      userMsg('u1'),
+      firstAgent,
+      secondAgent,
+      asstMsg('answer'),
+    ];
+    const c = mount(activeMessages);
+
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'true',
+    );
+
+    rerenderMessages(c, [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      agentMsg('agent-2'),
+      asstMsg('answer'),
+    ]);
+
+    act(() => vi.advanceTimersByTime(1_499));
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'true',
+    );
+    expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('true');
+
+    act(() => vi.advanceTimersByTime(1));
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'false',
+    );
+    expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('true');
+    expect(parallelAgentsSummary(c)?.hasAttribute('disabled')).toBe(true);
+    click(parallelAgentsSummary(c)!);
+    expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('true');
+
+    act(() => vi.advanceTimersByTime(180));
+    expect(parallelAgentsSummary(c)).toBeNull();
+    expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('false');
+  });
+
   it('collapses a background notification before the final assistant content', () => {
     const c = mount([
       userMsg('u1'),
@@ -520,7 +628,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(has(c, 'bg1')).toBe(true);
   });
 
-  it('keeps a background notification when it is the final content', () => {
+  it('does not reopen an initial history ending in a background notification', () => {
     const c = mount([
       userMsg('u1'),
       asstMsg('a1'),
@@ -531,6 +639,277 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(has(c, 'bg1')).toBe(true);
     click(toggle(c, 'u1'));
     expect(has(c, 'a1')).toBe(true);
+  });
+
+  it('expands active agents from the current turn after catch-up', () => {
+    const firstAgent = agentMsg('agent-1');
+    const secondAgent = agentMsg('agent-2');
+    firstAgent.tools[0]!.status = 'pending';
+    secondAgent.tools[0]!.status = 'pending';
+    const messages = [userMsg('u1'), firstAgent, secondAgent];
+    const c = mount(messages, undefined, {
+      catchingUp: true,
+      isResponding: false,
+    });
+
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'false',
+    );
+    rerenderMessages(c, messages, {
+      catchingUp: false,
+      isResponding: false,
+    });
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'false',
+    );
+    rerenderMessages(c, messages, {
+      catchingUp: false,
+      isResponding: true,
+    });
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'true',
+    );
+  });
+
+  it('does not reopen a background notification loaded with transcript history', () => {
+    const c = mount([], undefined, { loadingTranscript: true });
+
+    rerenderMessages(
+      c,
+      [userMsg('u1'), asstMsg('a1'), backgroundNotificationMsg('bg1')],
+      { loadingTranscript: false },
+    );
+
+    expect(has(c, 'a1')).toBe(false);
+    expect(has(c, 'bg1')).toBe(true);
+  });
+
+  it('does not briefly reopen agent history after an idle empty first render', () => {
+    vi.useFakeTimers();
+    const c = mount([]);
+
+    rerenderMessages(c, [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      agentMsg('agent-2'),
+      asstMsg('a1'),
+      backgroundNotificationMsg('bg1'),
+    ]);
+
+    expect(parallelAgentsSummary(c)).toBeNull();
+    act(() => vi.advanceTimersByTime(3_000));
+    expect(parallelAgentsSummary(c)).toBeNull();
+  });
+
+  it('keeps a newly appended background notification open until assistant content follows', () => {
+    vi.useFakeTimers();
+    const initialMessages = [userMsg('u1'), asstMsg('a1')];
+    const c = mount(initialMessages);
+
+    rerenderMessages(c, [...initialMessages, backgroundNotificationMsg('bg1')]);
+
+    expect(has(c, 'a1')).toBe(true);
+    expect(has(c, 'bg1')).toBe(true);
+
+    act(() => vi.advanceTimersByTime(3_000));
+
+    expect(has(c, 'a1')).toBe(true);
+    expect(has(c, 'bg1')).toBe(true);
+
+    rerenderMessages(c, [
+      ...initialMessages,
+      backgroundNotificationMsg('bg1'),
+      asstMsg('summary'),
+    ]);
+
+    expect(has(c, 'a1')).toBe(false);
+    expect(has(c, 'bg1')).toBe(false);
+    expect(has(c, 'summary')).toBe(true);
+  });
+
+  it('starts collapsing when summary thinking begins', () => {
+    vi.useFakeTimers();
+    const firstAgent = agentMsg('agent-1');
+    const secondAgent = agentMsg('agent-2');
+    const thirdAgent = agentMsg('agent-3');
+    firstAgent.tools[0]!.status = 'pending';
+    secondAgent.tools[0]!.status = 'pending';
+    thirdAgent.tools[0]!.status = 'pending';
+    const c = mount([
+      userMsg('u1'),
+      firstAgent,
+      secondAgent,
+      thirdAgent,
+      asstMsg('launched'),
+    ]);
+    const completedMessages = [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      agentMsg('agent-2'),
+      agentMsg('agent-3'),
+      asstMsg('launched'),
+      backgroundNotificationMsg('bg1'),
+      asstMsg('waiting-2'),
+      backgroundNotificationMsg('bg2'),
+      asstMsg('waiting-1'),
+      backgroundNotificationMsg('bg3'),
+    ];
+
+    rerenderMessages(c, completedMessages.slice(0, 5));
+    act(() => vi.advanceTimersByTime(1_000));
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'true',
+    );
+
+    rerenderMessages(c, completedMessages);
+    act(() => vi.advanceTimersByTime(3_000));
+
+    expect(has(c, 'bg1')).toBe(true);
+    expect(has(c, 'bg2')).toBe(true);
+    expect(has(c, 'bg3')).toBe(true);
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'true',
+    );
+
+    rerenderMessages(
+      c,
+      [...completedMessages, thinkingMsg('summary-thinking')],
+      { isResponding: true },
+    );
+    expect(has(c, 'bg1')).toBe(true);
+    expect(has(c, 'bg2')).toBe(true);
+    expect(has(c, 'bg3')).toBe(true);
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'true',
+    );
+    act(() => vi.advanceTimersByTime(399));
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'true',
+    );
+    act(() => vi.advanceTimersByTime(1));
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'false',
+    );
+    act(() => vi.advanceTimersByTime(180));
+
+    const streamingSummary = { ...asstMsg('summary'), isStreaming: true };
+    rerenderMessages(c, [...completedMessages, streamingSummary], {
+      isResponding: true,
+    });
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'false',
+    );
+
+    rerenderMessages(c, [...completedMessages, asstMsg('summary')]);
+    expect(has(c, 'bg1')).toBe(false);
+    expect(has(c, 'bg2')).toBe(false);
+    expect(has(c, 'bg3')).toBe(false);
+    expect(has(c, 'summary')).toBe(true);
+  });
+
+  it('does not defer a completed agent group for an unrelated new turn', () => {
+    vi.useFakeTimers();
+    const firstAgent = agentMsg('agent-1');
+    const secondAgent = agentMsg('agent-2');
+    firstAgent.tools[0]!.status = 'pending';
+    secondAgent.tools[0]!.status = 'pending';
+    const c = mount([userMsg('u1'), firstAgent, secondAgent]);
+
+    const completedTurn = [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      agentMsg('agent-2'),
+      backgroundNotificationMsg('bg1', 'call-agent-1'),
+      backgroundNotificationMsg('bg2', 'call-agent-2'),
+      asstMsg('u1-summary'),
+    ];
+    rerenderMessages(c, completedTurn);
+    act(() => vi.advanceTimersByTime(1_000));
+
+    rerenderMessages(
+      c,
+      [...completedTurn, userMsg('u2'), thinkingMsg('u2-thinking')],
+      { isResponding: true },
+    );
+    act(() => vi.advanceTimersByTime(500));
+
+    expect(parallelAgentsSummary(c)).toBeNull();
+  });
+
+  it('does not defer an agent group for a non-agent notification', () => {
+    vi.useFakeTimers();
+    const firstAgent = agentMsg('agent-1');
+    const secondAgent = agentMsg('agent-2');
+    firstAgent.tools[0]!.status = 'pending';
+    secondAgent.tools[0]!.status = 'pending';
+    const c = mount([userMsg('u1'), firstAgent, secondAgent]);
+    const completedMessages = [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      agentMsg('agent-2'),
+      backgroundNotificationMsg('bg1', 'call-agent-1'),
+      backgroundNotificationMsg('bg2', 'call-agent-2'),
+      asstMsg('agent-summary'),
+    ];
+
+    rerenderMessages(c, completedMessages);
+    act(() => vi.advanceTimersByTime(1_000));
+    rerenderMessages(
+      c,
+      [...completedMessages, monitorNotificationMsg('monitor')],
+      { isResponding: true },
+    );
+    act(() => vi.advanceTimersByTime(500));
+
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'false',
+    );
+  });
+
+  it('defers an earlier turn agent group that completes in the current turn', () => {
+    vi.useFakeTimers();
+    const firstActiveAgent = agentMsg('agent-1');
+    const secondActiveAgent = agentMsg('agent-2');
+    firstActiveAgent.tools[0]!.status = 'pending';
+    secondActiveAgent.tools[0]!.status = 'pending';
+    const c = mount(
+      [
+        userMsg('u1'),
+        firstActiveAgent,
+        secondActiveAgent,
+        asstMsg('u1-summary'),
+        userMsg('u2'),
+        thinkingMsg('waiting'),
+      ],
+      undefined,
+      { isResponding: true },
+    );
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'true',
+    );
+    const completedMessages = [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      agentMsg('agent-2'),
+      asstMsg('u1-summary'),
+      userMsg('u2'),
+      thinkingMsg('waiting'),
+      backgroundNotificationMsg('bg1', 'call-agent-1'),
+      backgroundNotificationMsg('bg2', 'call-agent-2'),
+    ];
+
+    rerenderMessages(c, completedMessages, { isResponding: true });
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'true',
+    );
+    act(() => vi.advanceTimersByTime(3_000));
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'true',
+    );
+
+    rerenderMessages(c, [...completedMessages, asstMsg('u2-summary')]);
+    act(() => vi.advanceTimersByTime(1_500));
+    expect(parallelAgentsSummary(c)).toBeNull();
   });
 
   it('renders collapse metrics in the standalone turn row', () => {
@@ -1242,10 +1621,8 @@ describe('MessageList — turn collapse (DOM)', () => {
 
     expect(found).toBe(true);
     expect(scrollIntoView).toHaveBeenCalledWith({ block: 'center' });
-    const parallelAgents = c.querySelector('[data-testid="parallel-agents"]');
-    expect(parallelAgents?.parentElement?.className).toContain(
-      flashStyles.flash,
-    );
+    const parallelAgents = parallelAgentsSummary(c);
+    expect(parallelAgents?.closest(`.${flashStyles.flash}`)).not.toBeNull();
     expect(parallelAgents?.closest('[data-index]')?.className).not.toMatch(
       /flash/i,
     );

@@ -269,6 +269,40 @@ describe('transcriptBlocksToDaemonMessages', () => {
     },
   );
 
+  it('projects a replayed user background agent notification onto its tool', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('agent-block', 'agent-call', 'completed', 1, {
+        toolName: 'agent',
+        rawInput: { run_in_background: true },
+        rawOutput: { type: 'task_execution', status: 'background' },
+      }),
+      textBlock(
+        'agent-terminal',
+        'user',
+        'background agent finished',
+        2,
+        false,
+        {
+          meta: {
+            source: 'background_notification',
+            qwenDiscreteMessage: true,
+            backgroundTask: {
+              kind: 'agent',
+              status: 'completed',
+              taskId: 'agent-task',
+              toolUseId: 'agent-call',
+            },
+          },
+        },
+      ),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      role: 'tool_group',
+      tools: [{ callId: 'agent-call', status: 'completed', endTime: 2 }],
+    });
+  });
+
   it('does not apply a non-agent background notification to an agent tool', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('agent-block', 'agent-call', 'completed', 1, {

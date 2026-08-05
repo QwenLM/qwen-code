@@ -26,7 +26,22 @@ import styles from './ParallelAgentsGroup.module.css';
 
 interface ParallelAgentsGroupProps {
   agents: ACPToolCall[];
+  autoManageExpansion?: boolean;
+  automaticCollapseDelayMs?: number;
+  deferAutomaticCollapse?: boolean;
+  expandActiveWhenLive?: boolean;
+  onAutomaticExpansionChange?: (expanded: boolean) => void;
   pendingApproval?: PermissionRequest | null;
+}
+
+const AUTO_COLLAPSE_DELAY_MS = 1_500;
+const AUTO_COLLAPSE_ANIMATION_MS = 180;
+
+function automaticCollapseAnimationMs(): number {
+  return typeof window !== 'undefined' &&
+    window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+    ? 0
+    : AUTO_COLLAPSE_ANIMATION_MS;
 }
 
 function formatDuration(ms: number): string {
@@ -35,76 +50,6 @@ function formatDuration(ms: number): string {
   const min = Math.floor(totalSec / 60);
   const sec = totalSec % 60;
   return sec > 0 ? `${min}m ${sec}s` : `${min}m`;
-}
-
-export interface TimelineRow {
-  leftPct: number;
-  widthPct: number;
-  running: boolean;
-}
-
-export interface TimelineTick {
-  leftPct: number;
-  label: string;
-}
-
-export interface AgentsTimeline {
-  rows: Map<string, TimelineRow>;
-  ticks: TimelineTick[];
-}
-
-/**
- * Geometry for the shared-axis mini timeline: one bar per agent against
- * the group's combined wall-clock span, so overlap and relative duration
- * read at a glance. Returns null when the bars would not be comparable
- * (an agent without a start time) or carry no information (single agent,
- * sub-second span) — the list then renders without a timeline.
- */
-export function computeAgentsTimeline(
-  agents: ACPToolCall[],
-  now: number,
-): AgentsTimeline | null {
-  if (agents.length < 2) return null;
-  const starts: number[] = [];
-  for (const agent of agents) {
-    if (typeof agent.startTime !== 'number') return null;
-    starts.push(agent.startTime);
-  }
-  const ends = agents.map((agent, i) =>
-    isActiveToolStatus(agent.status)
-      ? Math.max(now, starts[i])
-      : Math.max(agent.endTime ?? starts[i], starts[i]),
-  );
-  const t0 = Math.min(...starts);
-  const span = Math.max(...ends) - t0;
-  if (span < 1000) return null;
-
-  const rows = new Map<string, TimelineRow>();
-  agents.forEach((agent, i) => {
-    // Keep a visible sliver for near-instant agents, clamped so it never
-    // overflows the right edge.
-    const width = Math.max((ends[i] - starts[i]) / span, 0.02);
-    const left = Math.min((starts[i] - t0) / span, 1 - width);
-    rows.set(agent.callId, {
-      leftPct: left * 100,
-      widthPct: width * 100,
-      running: isActiveToolStatus(agent.status),
-    });
-  });
-
-  // Ruler at 0 / step / 2·step… with a "nice" step (1-2-5 × 10ᵏ seconds),
-  // stopping short of the right edge so labels don't collide with it.
-  const targetSec = Math.max(span / 1000 / 2.2, 1);
-  const pow = Math.pow(10, Math.floor(Math.log10(targetSec)));
-  const stepSec =
-    [5, 2, 1].map((m) => m * pow).find((s) => s <= targetSec) ?? pow;
-  const ticks: TimelineTick[] = [];
-  for (let m = 0; ticks.length < 4; m++) {
-    const atMs = m * stepSec * 1000;
-    if (atMs > span * 0.92) break;
-    ticks.push({ leftPct: (atMs / span) * 100, label: formatDuration(atMs) });
-  }
-  return { rows, ticks };
 }
 
 function getAgentStats(agent: ACPToolCall, now: number): string {
@@ -161,14 +106,30 @@ function ToolGroupIcon() {
 
 export function ParallelAgentsGroup({
   agents,
+  autoManageExpansion = false,
+  automaticCollapseDelayMs = AUTO_COLLAPSE_DELAY_MS,
+  deferAutomaticCollapse = false,
+  expandActiveWhenLive = false,
+  onAutomaticExpansionChange,
   pendingApproval,
 }: ParallelAgentsGroupProps) {
   const { t } = useI18n();
   const subagentDetails = useSubagentDetails();
   const [groupExpanded, setGroupExpanded] = useState(false);
+  const [automaticCollapseAnimating, setAutomaticCollapseAnimating] =
+    useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const liveStartedAtRef = useRef(Date.now());
+  const expansionOwnerRef = useRef<'none' | 'automatic' | 'manual'>('none');
+  const automaticExpansionChangeRef = useRef(onAutomaticExpansionChange);
+  automaticExpansionChangeRef.current = onAutomaticExpansionChange;
+  const autoCollapseTimerRef = useRef<
+    ReturnType<typeof setTimeout> | undefined
+  >(undefined);
+  const autoCollapseAnimationTimerRef = useRef<
+    ReturnType<typeof setTimeout> | undefined
+  >(undefined);
 
   const hasActive = hasActiveAgents(agents);
   const activeStartedAt = agents.reduce<number | undefined>(
@@ -185,17 +146,147 @@ export function ParallelAgentsGroup({
     },
     undefined,
   );
+  const approvalAgent = pendingApproval?.toolCallId
+    ? agents.find((agent) =>
+        toolContainsCallId(agent, pendingApproval.toolCallId!),
+      )
+    : undefined;
+  const hasApprovalAgent = !!approvalAgent;
+  const approvalAgentRef = useRef(approvalAgent);
+  approvalAgentRef.current = approvalAgent;
 
   const wasActiveRef = useRef(false);
+  const wasAutoManageExpansionRef = useRef(autoManageExpansion);
+  const wasExpandActiveWhenLiveRef = useRef(expandActiveWhenLive);
+  const previousAutomaticCollapseDelayRef = useRef(automaticCollapseDelayMs);
+  const wasDeferringAutomaticCollapseRef = useRef(deferAutomaticCollapse);
   useEffect(() => {
+    const wasActive = wasActiveRef.current;
+    const wasAutoManaging = wasAutoManageExpansionRef.current;
+    const wasExpandActiveWhenLive = wasExpandActiveWhenLiveRef.current;
+    const collapseDelayChanged =
+      previousAutomaticCollapseDelayRef.current !== automaticCollapseDelayMs;
+    const wasDeferringAutomaticCollapse =
+      wasDeferringAutomaticCollapseRef.current;
     // Latch the anchor on the false->true edge: re-anchoring while agents
     // finish would rewind the header clock to a later start time.
-    if (hasActive && !wasActiveRef.current) {
+    if (hasActive && !wasActive) {
       liveStartedAtRef.current = activeStartedAt ?? Date.now();
       setNow(Date.now());
     }
+
+    if (
+      hasActive ||
+      !autoManageExpansion ||
+      deferAutomaticCollapse ||
+      collapseDelayChanged
+    ) {
+      clearTimeout(autoCollapseTimerRef.current);
+      autoCollapseTimerRef.current = undefined;
+    }
+    if (hasActive || !autoManageExpansion || deferAutomaticCollapse) {
+      clearTimeout(autoCollapseAnimationTimerRef.current);
+      autoCollapseAnimationTimerRef.current = undefined;
+      if (
+        automaticCollapseAnimating &&
+        expansionOwnerRef.current === 'automatic'
+      ) {
+        setAutomaticCollapseAnimating(false);
+        setGroupExpanded(true);
+      }
+    }
+    if (
+      hasApprovalAgent &&
+      automaticCollapseAnimating &&
+      expansionOwnerRef.current === 'automatic'
+    ) {
+      clearTimeout(autoCollapseAnimationTimerRef.current);
+      autoCollapseAnimationTimerRef.current = undefined;
+      expansionOwnerRef.current = 'none';
+      setAutomaticCollapseAnimating(false);
+      automaticExpansionChangeRef.current?.(false);
+    }
+    if (autoManageExpansion && expansionOwnerRef.current !== 'manual') {
+      if (
+        hasActive &&
+        (!wasActive ||
+          (expandActiveWhenLive &&
+            (!wasAutoManaging || !wasExpandActiveWhenLive)))
+      ) {
+        expansionOwnerRef.current = 'automatic';
+        setGroupExpanded(true);
+        automaticExpansionChangeRef.current?.(true);
+      } else if (
+        !hasActive &&
+        !automaticCollapseAnimating &&
+        !deferAutomaticCollapse &&
+        (wasActive ||
+          !wasAutoManaging ||
+          wasDeferringAutomaticCollapse ||
+          collapseDelayChanged) &&
+        expansionOwnerRef.current === 'automatic'
+      ) {
+        autoCollapseTimerRef.current = setTimeout(() => {
+          if (
+            !wasActiveRef.current &&
+            expansionOwnerRef.current === 'automatic'
+          ) {
+            setGroupExpanded(false);
+            if (approvalAgentRef.current) {
+              expansionOwnerRef.current = 'none';
+              automaticExpansionChangeRef.current?.(false);
+              return;
+            }
+            const animationMs = automaticCollapseAnimationMs();
+            if (animationMs === 0) {
+              expansionOwnerRef.current = 'none';
+              automaticExpansionChangeRef.current?.(false);
+              return;
+            }
+            setAutomaticCollapseAnimating(true);
+            autoCollapseAnimationTimerRef.current = setTimeout(() => {
+              autoCollapseAnimationTimerRef.current = undefined;
+              if (
+                !wasActiveRef.current &&
+                expansionOwnerRef.current === 'automatic'
+              ) {
+                expansionOwnerRef.current = 'none';
+                setAutomaticCollapseAnimating(false);
+                automaticExpansionChangeRef.current?.(false);
+              }
+            }, animationMs);
+          }
+        }, automaticCollapseDelayMs);
+      }
+    }
     wasActiveRef.current = hasActive;
-  }, [activeStartedAt, hasActive]);
+    wasAutoManageExpansionRef.current = autoManageExpansion;
+    wasExpandActiveWhenLiveRef.current = expandActiveWhenLive;
+    previousAutomaticCollapseDelayRef.current = automaticCollapseDelayMs;
+    wasDeferringAutomaticCollapseRef.current = deferAutomaticCollapse;
+  }, [
+    activeStartedAt,
+    automaticCollapseAnimating,
+    autoManageExpansion,
+    automaticCollapseDelayMs,
+    deferAutomaticCollapse,
+    expandActiveWhenLive,
+    hasApprovalAgent,
+    hasActive,
+  ]);
+
+  useEffect(() => {
+    if (expansionOwnerRef.current === 'automatic') {
+      automaticExpansionChangeRef.current?.(true);
+    }
+    return () => {
+      clearTimeout(autoCollapseTimerRef.current);
+      clearTimeout(autoCollapseAnimationTimerRef.current);
+      if (expansionOwnerRef.current === 'automatic') {
+        automaticExpansionChangeRef.current?.(false);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!hasActive) return;
@@ -211,11 +302,10 @@ export function ParallelAgentsGroup({
   ).length;
   const total = agents.length;
 
-  const approvalAgent = pendingApproval?.toolCallId
-    ? agents.find((a) => toolContainsCallId(a, pendingApproval.toolCallId!))
-    : undefined;
   const showGroup = groupExpanded || !!approvalAgent;
-  const timeline = showGroup ? computeAgentsTimeline(agents, now) : null;
+  const renderGroup = showGroup || automaticCollapseAnimating;
+  const automaticCollapseClosing =
+    automaticCollapseAnimating && !hasApprovalAgent;
   const summaryStatus = agents.some(
     (a) => getAgentDisplayStatus(a) === 'failed',
   )
@@ -229,7 +319,19 @@ export function ParallelAgentsGroup({
       <button
         type="button"
         className={styles.summary}
-        onClick={() => setGroupExpanded((value) => !value)}
+        onClick={() => {
+          clearTimeout(autoCollapseTimerRef.current);
+          autoCollapseTimerRef.current = undefined;
+          clearTimeout(autoCollapseAnimationTimerRef.current);
+          autoCollapseAnimationTimerRef.current = undefined;
+          if (expansionOwnerRef.current === 'automatic') {
+            automaticExpansionChangeRef.current?.(false);
+          }
+          expansionOwnerRef.current = 'manual';
+          setAutomaticCollapseAnimating(false);
+          setGroupExpanded((value) => !value);
+        }}
+        disabled={automaticCollapseClosing}
         aria-expanded={showGroup}
         title={showGroup ? t('tool.collapseHint') : t('tool.expand')}
       >
@@ -259,79 +361,96 @@ export function ParallelAgentsGroup({
           aria-hidden="true"
         />
       </button>
-      {showGroup && (
-        <div className={styles.group}>
-          <div className={styles.list}>
-            {agents.map((agent) => {
-              const agentType = getAgentType(agent);
-              const desc = getAgentDescription(agent);
-              const toolHint = getAgentCurrentToolHint(agent, t);
-              const stats = getAgentStats(agent, now);
-              const status = getAgentDisplayStatus(agent);
-              const isExpanded = expandedId === agent.callId;
-              const track = timeline?.rows.get(agent.callId);
-              return (
-                <div key={agent.callId}>
-                  <button
-                    type="button"
-                    className={styles.row}
-                    aria-expanded={subagentDetails ? undefined : isExpanded}
-                    onClick={() => {
-                      if (subagentDetails) subagentDetails.onOpen(agent);
-                      else setExpandedId(isExpanded ? null : agent.callId);
-                    }}
-                  >
-                    <StatusIcon status={status} />
-                    <span className={styles.rowDesc}>
-                      {truncateText(
-                        desc || localizeAgentTypeName(agentType, t),
-                        50,
-                      )}
-                      {toolHint && (
-                        <span
-                          className={styles.rowTool}
-                        >{` (${toolHint})`}</span>
-                      )}
-                    </span>
-                    {stats && <span className={styles.rowStats}>{stats}</span>}
-                  </button>
-                  {track && (
-                    <div className={styles.track} aria-hidden="true">
-                      <span
+      {renderGroup && (
+        <div
+          ref={(element) => {
+            element?.toggleAttribute('inert', automaticCollapseClosing);
+          }}
+          className={`${styles.groupViewport} ${
+            automaticCollapseClosing ? styles.groupViewportClosing : ''
+          }`}
+          data-agent-collapse-exit={
+            automaticCollapseClosing ? 'true' : undefined
+          }
+          aria-hidden={automaticCollapseClosing || undefined}
+        >
+          <div className={styles.groupViewportInner}>
+            <div className={styles.group}>
+              <div className={styles.list}>
+                {agents.map((agent) => {
+                  const agentType = getAgentType(agent);
+                  const desc = getAgentDescription(agent);
+                  const toolHint = getAgentCurrentToolHint(agent, t);
+                  const stats = getAgentStats(agent, now);
+                  const status = getAgentDisplayStatus(agent);
+                  const rowStatus =
+                    status === 'failed'
+                      ? 'failed'
+                      : isActiveToolStatus(agent.status)
+                        ? 'active'
+                        : 'completed';
+                  const rowStatusLabel =
+                    rowStatus === 'active'
+                      ? t('subagent.running')
+                      : rowStatus === 'failed'
+                        ? t('subagent.failed')
+                        : t('subagent.completed');
+                  const isExpanded = expandedId === agent.callId;
+                  return (
+                    <div key={agent.callId}>
+                      <button
+                        type="button"
                         className={
-                          track.running
-                            ? `${styles.bar} ${styles.barRunning}`
-                            : styles.bar
+                          rowStatus === 'active'
+                            ? `${styles.row} ${styles.rowActive}`
+                            : styles.row
                         }
-                        style={{
-                          left: `${track.leftPct}%`,
-                          width: `${track.widthPct}%`,
+                        data-agent-status={rowStatus}
+                        aria-expanded={subagentDetails ? undefined : isExpanded}
+                        onClick={() => {
+                          if (subagentDetails) subagentDetails.onOpen(agent);
+                          else setExpandedId(isExpanded ? null : agent.callId);
                         }}
-                      />
+                      >
+                        <span
+                          className={styles.rowStatus}
+                          aria-label={rowStatusLabel}
+                          title={rowStatusLabel}
+                        >
+                          {rowStatus === 'active'
+                            ? '●'
+                            : rowStatus === 'failed'
+                              ? '×'
+                              : '✓'}
+                        </span>
+                        <span className={styles.rowText}>
+                          <span className={styles.rowTask}>
+                            {truncateText(
+                              desc || localizeAgentTypeName(agentType, t),
+                              50,
+                            )}
+                          </span>
+                          {toolHint && (
+                            <span
+                              className={styles.rowTool}
+                            >{` · ${toolHint}`}</span>
+                          )}
+                        </span>
+                        {stats && (
+                          <span className={styles.rowStats}>{stats}</span>
+                        )}
+                      </button>
+                      {!subagentDetails && isExpanded && (
+                        <div className={styles.detail}>
+                          <SubAgentPanel tool={agent} hideHeader />
+                        </div>
+                      )}
                     </div>
-                  )}
-                  {!subagentDetails && isExpanded && (
-                    <div className={styles.detail}>
-                      <SubAgentPanel tool={agent} hideHeader />
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-          {timeline && timeline.ticks.length >= 2 && (
-            <div className={styles.ruler} aria-hidden="true">
-              {timeline.ticks.map((tick) => (
-                <span
-                  key={tick.label}
-                  className={styles.tick}
-                  style={{ left: `${tick.leftPct}%` }}
-                >
-                  {tick.label}
-                </span>
-              ))}
+                  );
+                })}
+              </div>
             </div>
-          )}
+          </div>
         </div>
       )}
     </div>

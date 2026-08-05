@@ -1,14 +1,12 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act } from 'react';
+import { act, StrictMode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../../i18n';
-import type { ACPToolCall } from '../../../adapters/types';
+import type { ACPToolCall, PermissionRequest } from '../../../adapters/types';
 import { SubagentDetailsProvider } from '../../../subagentDetailsContext';
 
-const { computeAgentsTimeline, ParallelAgentsGroup } = await import(
-  './ParallelAgentsGroup'
-);
+const { ParallelAgentsGroup } = await import('./ParallelAgentsGroup');
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -32,8 +30,8 @@ afterEach(() => {
   }
 });
 
-// Render the group and expand it (it starts collapsed) so the per-agent
-// timeline is in the DOM.
+// Render the group and expand it (it starts collapsed) so the activity rows
+// are in the DOM.
 function renderExpandedGroup(agents: ACPToolCall[]): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -51,100 +49,547 @@ function renderExpandedGroup(agents: ACPToolCall[]): HTMLElement {
   return container;
 }
 
-describe('computeAgentsTimeline', () => {
-  it('returns null for a single agent or missing start times', () => {
-    expect(
-      computeAgentsTimeline([agent({ startTime: 0, endTime: 5_000 })], 10_000),
-    ).toBeNull();
-    expect(
-      computeAgentsTimeline(
-        [
-          agent({ callId: 'a1', startTime: 0, endTime: 5_000 }),
-          agent({ callId: 'a2' }),
-        ],
-        10_000,
-      ),
-    ).toBeNull();
-  });
+function renderManagedGroup(
+  agents: ACPToolCall[],
+  options: {
+    autoManageExpansion?: boolean;
+    automaticCollapseDelayMs?: number;
+    expandActiveWhenLive?: boolean;
+    onAutomaticExpansionChange?: (expanded: boolean) => void;
+    pendingApproval?: PermissionRequest | null;
+    strictMode?: boolean;
+  } = {},
+) {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  const render = (nextAgents: ACPToolCall[], nextOptions = options) => {
+    act(() => {
+      const group = (
+        <I18nProvider language="en">
+          <ParallelAgentsGroup
+            agents={nextAgents}
+            autoManageExpansion={nextOptions.autoManageExpansion}
+            automaticCollapseDelayMs={nextOptions.automaticCollapseDelayMs}
+            expandActiveWhenLive={nextOptions.expandActiveWhenLive}
+            onAutomaticExpansionChange={nextOptions.onAutomaticExpansionChange}
+            pendingApproval={nextOptions.pendingApproval}
+          />
+        </I18nProvider>
+      );
+      root.render(
+        nextOptions.strictMode ? <StrictMode>{group}</StrictMode> : group,
+      );
+    });
+  };
+  render(agents);
+  mounted.push({ root, container });
+  return { container, render };
+}
 
-  it('returns null for a sub-second span (nothing to compare)', () => {
-    expect(
-      computeAgentsTimeline(
-        [
-          agent({ callId: 'a1', startTime: 0, endTime: 400 }),
-          agent({ callId: 'a2', startTime: 100, endTime: 600 }),
-        ],
-        1_000,
-      ),
-    ).toBeNull();
-  });
+function groupSummary(container: HTMLElement): HTMLButtonElement {
+  return container.querySelector('[aria-expanded]') as HTMLButtonElement;
+}
 
-  it('lays out bars against the combined span, running bars ending at now', () => {
-    const timeline = computeAgentsTimeline(
-      [
-        agent({ callId: 'a1', startTime: 0, endTime: 24_000 }),
-        agent({ callId: 'a2', startTime: 3_000, status: 'in_progress' }),
-      ],
-      15_000,
-    )!;
-    expect(timeline).not.toBeNull();
-
-    const done = timeline.rows.get('a1')!;
-    expect(done.leftPct).toBe(0);
-    expect(done.widthPct).toBe(100);
-    expect(done.running).toBe(false);
-
-    const running = timeline.rows.get('a2')!;
-    expect(running.leftPct).toBeCloseTo(12.5);
-    expect(running.widthPct).toBeCloseTo(50);
-    expect(running.running).toBe(true);
-  });
-
-  it('keeps a visible sliver for near-instant agents, clamped to the edge', () => {
-    const timeline = computeAgentsTimeline(
-      [
-        agent({ callId: 'a1', startTime: 0, endTime: 10_000 }),
-        agent({ callId: 'a2', startTime: 10_000, endTime: 10_000 }),
-      ],
-      10_000,
-    )!;
-    const sliver = timeline.rows.get('a2')!;
-    expect(sliver.widthPct).toBe(2);
-    expect(sliver.leftPct + sliver.widthPct).toBeLessThanOrEqual(100);
-  });
-
-  it('picks nice ruler ticks that stop short of the right edge', () => {
-    const timeline = computeAgentsTimeline(
-      [
-        agent({ callId: 'a1', startTime: 0, endTime: 24_000 }),
-        agent({ callId: 'a2', startTime: 3_000, endTime: 20_000 }),
-      ],
-      24_000,
-    )!;
-    expect(timeline.ticks.map((tick) => tick.label)).toEqual([
-      '0s',
-      '10s',
-      '20s',
+describe('ParallelAgentsGroup activity rendering', () => {
+  it('renders stable active, completed, and failed activity rows without a timeline', () => {
+    const container = renderExpandedGroup([
+      agent({ callId: 'active', status: 'pending' }),
+      agent({ callId: 'done', status: 'completed' }),
+      agent({ callId: 'failed', status: 'failed' }),
     ]);
-    expect(timeline.ticks[2].leftPct).toBeCloseTo((20_000 / 24_000) * 100);
+
+    expect(
+      Array.from(container.querySelectorAll('[data-agent-status]')).map((row) =>
+        row.getAttribute('data-agent-status'),
+      ),
+    ).toEqual(['active', 'completed', 'failed']);
+    expect(container.querySelector('[class*="track"]')).toBeNull();
+    expect(container.querySelector('[class*="ruler"]')).toBeNull();
   });
 
-  it('emits a single tick for a span barely over 1s, so the ruler is dropped', () => {
-    // Only 0s fits before the 92% cutoff; the component gates the ruler on
-    // ticks.length >= 2, so this span renders bars without a ruler.
-    const timeline = computeAgentsTimeline(
+  it('keeps the task and current tool in separate stable fields', () => {
+    const container = renderExpandedGroup([
+      agent({
+        callId: 'active',
+        status: 'in_progress',
+        args: { description: 'Inspect the message list' },
+        subTools: [
+          {
+            callId: 'read',
+            toolName: 'Read',
+            status: 'in_progress',
+            args: { file_path: 'src/MessageList.tsx' },
+          },
+        ],
+      }),
+    ]);
+
+    expect(container.querySelector('[class*="rowTask"]')?.textContent).toBe(
+      'Inspect the message list',
+    );
+    expect(
+      container.querySelector('[class*="rowTool"]')?.textContent,
+    ).toContain('MessageList.tsx');
+  });
+
+  it('auto-expands active agents and collapses 1.5s after completion', () => {
+    vi.useFakeTimers();
+    try {
+      const onAutomaticExpansionChange = vi.fn();
+      const active = [
+        agent({ callId: 'a1', status: 'pending' }),
+        agent({ callId: 'a2', status: 'in_progress' }),
+      ];
+      const { container, render } = renderManagedGroup(active, {
+        autoManageExpansion: true,
+        onAutomaticExpansionChange,
+      });
+
+      expect(onAutomaticExpansionChange).toHaveBeenLastCalledWith(true);
+      expect(groupSummary(container).getAttribute('aria-expanded')).toBe(
+        'true',
+      );
+      render(active.map((item) => ({ ...item, status: 'completed' as const })));
+      act(() => vi.advanceTimersByTime(1_499));
+      expect(groupSummary(container).getAttribute('aria-expanded')).toBe(
+        'true',
+      );
+      act(() => vi.advanceTimersByTime(1));
+      expect(groupSummary(container).getAttribute('aria-expanded')).toBe(
+        'false',
+      );
+      expect(onAutomaticExpansionChange).toHaveBeenLastCalledWith(true);
+      act(() => vi.advanceTimersByTime(180));
+      expect(onAutomaticExpansionChange).toHaveBeenLastCalledWith(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps automatically collapsed details mounted during their exit animation', () => {
+    vi.useFakeTimers();
+    try {
+      const onAutomaticExpansionChange = vi.fn();
+      const active = [
+        agent({ callId: 'a1', status: 'pending' }),
+        agent({ callId: 'a2', status: 'in_progress' }),
+      ];
+      const { container, render } = renderManagedGroup(active, {
+        autoManageExpansion: true,
+        automaticCollapseDelayMs: 400,
+        onAutomaticExpansionChange,
+      });
+
+      render(active.map((item) => ({ ...item, status: 'completed' as const })));
+      act(() => vi.advanceTimersByTime(400));
+
+      expect(groupSummary(container).getAttribute('aria-expanded')).toBe(
+        'false',
+      );
+      expect(
+        container.querySelector('[data-agent-collapse-exit="true"]'),
+      ).not.toBeNull();
+      expect(
+        container
+          .querySelector('[data-agent-collapse-exit="true"]')
+          ?.hasAttribute('inert'),
+      ).toBe(true);
+      expect(groupSummary(container).disabled).toBe(true);
+      expect(container.querySelectorAll('[data-agent-status]')).toHaveLength(2);
+      expect(onAutomaticExpansionChange).toHaveBeenLastCalledWith(true);
+
+      act(() => vi.advanceTimersByTime(179));
+      expect(
+        container.querySelector('[data-agent-collapse-exit="true"]'),
+      ).not.toBeNull();
+      act(() => vi.advanceTimersByTime(1));
+      expect(
+        container.querySelector('[data-agent-collapse-exit="true"]'),
+      ).toBeNull();
+      expect(onAutomaticExpansionChange).toHaveBeenLastCalledWith(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('skips the exit animation when reduced motion is requested', () => {
+    vi.useFakeTimers();
+    const matchMedia = vi.spyOn(window, 'matchMedia').mockImplementation(
+      (query) =>
+        ({
+          matches: query === '(prefers-reduced-motion: reduce)',
+        }) as MediaQueryList,
+    );
+    try {
+      const onAutomaticExpansionChange = vi.fn();
+      const active = [
+        agent({ callId: 'a1', status: 'pending' }),
+        agent({ callId: 'a2', status: 'in_progress' }),
+      ];
+      const { container, render } = renderManagedGroup(active, {
+        autoManageExpansion: true,
+        automaticCollapseDelayMs: 400,
+        onAutomaticExpansionChange,
+      });
+
+      render(active.map((item) => ({ ...item, status: 'completed' as const })));
+      act(() => vi.advanceTimersByTime(400));
+
+      expect(groupSummary(container).getAttribute('aria-expanded')).toBe(
+        'false',
+      );
+      expect(
+        container.querySelector('[data-agent-collapse-exit="true"]'),
+      ).toBeNull();
+      expect(onAutomaticExpansionChange).toHaveBeenLastCalledWith(false);
+    } finally {
+      matchMedia.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancels the exit animation when agent activity resumes', () => {
+    vi.useFakeTimers();
+    try {
+      const onAutomaticExpansionChange = vi.fn();
+      const active = [
+        agent({ callId: 'a1', status: 'pending' }),
+        agent({ callId: 'a2', status: 'in_progress' }),
+      ];
+      const completed = active.map((item) => ({
+        ...item,
+        status: 'completed' as const,
+      }));
+      const { container, render } = renderManagedGroup(active, {
+        autoManageExpansion: true,
+        automaticCollapseDelayMs: 400,
+        onAutomaticExpansionChange,
+      });
+
+      render(completed);
+      act(() => vi.advanceTimersByTime(400));
+      expect(
+        container.querySelector('[data-agent-collapse-exit="true"]'),
+      ).not.toBeNull();
+
+      render(active);
+      expect(groupSummary(container).getAttribute('aria-expanded')).toBe(
+        'true',
+      );
+      expect(
+        container.querySelector('[data-agent-collapse-exit="true"]'),
+      ).toBeNull();
+      act(() => vi.advanceTimersByTime(180));
+      expect(onAutomaticExpansionChange).toHaveBeenLastCalledWith(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('restarts a pending automatic collapse when its delay changes', () => {
+    vi.useFakeTimers();
+    try {
+      const active = [
+        agent({ callId: 'a1', status: 'pending' }),
+        agent({ callId: 'a2', status: 'pending' }),
+      ];
+      const completed = active.map((item) => ({
+        ...item,
+        status: 'completed' as const,
+      }));
+      const { container, render } = renderManagedGroup(active, {
+        autoManageExpansion: true,
+      });
+
+      render(completed, { autoManageExpansion: true });
+      act(() => vi.advanceTimersByTime(500));
+      render(completed, {
+        autoManageExpansion: true,
+        automaticCollapseDelayMs: 400,
+      });
+      act(() => vi.advanceTimersByTime(399));
+      expect(groupSummary(container).getAttribute('aria-expanded')).toBe(
+        'true',
+      );
+      act(() => vi.advanceTimersByTime(1));
+      expect(groupSummary(container).getAttribute('aria-expanded')).toBe(
+        'false',
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not restart a collapse whose exit animation has begun', () => {
+    vi.useFakeTimers();
+    try {
+      const onAutomaticExpansionChange = vi.fn();
+      const active = [
+        agent({ callId: 'a1', status: 'pending' }),
+        agent({ callId: 'a2', status: 'pending' }),
+      ];
+      const completed = active.map((item) => ({
+        ...item,
+        status: 'completed' as const,
+      }));
+      const { container, render } = renderManagedGroup(active, {
+        autoManageExpansion: true,
+        automaticCollapseDelayMs: 400,
+        onAutomaticExpansionChange,
+      });
+
+      render(completed, {
+        autoManageExpansion: true,
+        automaticCollapseDelayMs: 400,
+        onAutomaticExpansionChange,
+      });
+      act(() => vi.advanceTimersByTime(400));
+      render(completed, {
+        autoManageExpansion: true,
+        automaticCollapseDelayMs: 1_500,
+        onAutomaticExpansionChange,
+      });
+
+      expect(groupSummary(container).getAttribute('aria-expanded')).toBe(
+        'false',
+      );
+      expect(
+        container.querySelector('[data-agent-collapse-exit="true"]'),
+      ).not.toBeNull();
+      act(() => vi.advanceTimersByTime(180));
+      expect(
+        container.querySelector('[data-agent-collapse-exit="true"]'),
+      ).toBeNull();
+      expect(onAutomaticExpansionChange).toHaveBeenLastCalledWith(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps automatic expansion registered through StrictMode replay', () => {
+    const onAutomaticExpansionChange = vi.fn();
+    const { container } = renderManagedGroup(
       [
-        agent({ callId: 'a1', startTime: 0, endTime: 1_050 }),
-        agent({ callId: 'a2', startTime: 0, endTime: 1_050 }),
+        agent({ callId: 'a1', status: 'pending' }),
+        agent({ callId: 'a2', status: 'pending' }),
       ],
-      1_050,
-    )!;
-    expect(timeline).not.toBeNull();
-    expect(timeline.ticks.length).toBe(1);
-  });
-});
+      {
+        autoManageExpansion: true,
+        onAutomaticExpansionChange,
+        strictMode: true,
+      },
+    );
 
-describe('ParallelAgentsGroup timeline rendering', () => {
+    expect(groupSummary(container).getAttribute('aria-expanded')).toBe('true');
+    expect(onAutomaticExpansionChange).toHaveBeenLastCalledWith(true);
+  });
+
+  it('stops auto-managing expansion after the user toggles the summary', () => {
+    vi.useFakeTimers();
+    try {
+      const active = [
+        agent({ callId: 'a1', status: 'pending' }),
+        agent({ callId: 'a2', status: 'pending' }),
+      ];
+      const { container, render } = renderManagedGroup(active, {
+        autoManageExpansion: true,
+      });
+
+      act(() => groupSummary(container).click());
+      expect(groupSummary(container).getAttribute('aria-expanded')).toBe(
+        'false',
+      );
+      render(active.map((item) => ({ ...item, status: 'completed' as const })));
+      render(active);
+      expect(groupSummary(container).getAttribute('aria-expanded')).toBe(
+        'false',
+      );
+      act(() => groupSummary(container).click());
+      render(active.map((item) => ({ ...item, status: 'completed' as const })));
+      act(() => vi.advanceTimersByTime(1_500));
+      expect(groupSummary(container).getAttribute('aria-expanded')).toBe(
+        'true',
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('treats active agents seen while auto-management is disabled as baseline', () => {
+    const active = [
+      agent({ callId: 'a1', status: 'pending' }),
+      agent({ callId: 'a2', status: 'pending' }),
+    ];
+    const { container, render } = renderManagedGroup(active, {
+      autoManageExpansion: false,
+    });
+
+    expect(groupSummary(container).getAttribute('aria-expanded')).toBe('false');
+    render(active, { autoManageExpansion: true });
+    expect(groupSummary(container).getAttribute('aria-expanded')).toBe('false');
+    render(
+      active.map((item) => ({ ...item, status: 'completed' as const })),
+      { autoManageExpansion: true },
+    );
+    render(active, { autoManageExpansion: true });
+    expect(groupSummary(container).getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('expands an active group when it becomes live after auto-management is enabled', () => {
+    const active = [
+      agent({ callId: 'a1', status: 'pending' }),
+      agent({ callId: 'a2', status: 'pending' }),
+    ];
+    const { container, render } = renderManagedGroup(active, {
+      autoManageExpansion: false,
+      expandActiveWhenLive: false,
+    });
+
+    expect(groupSummary(container).getAttribute('aria-expanded')).toBe('false');
+    render(active, {
+      autoManageExpansion: true,
+      expandActiveWhenLive: false,
+    });
+    expect(groupSummary(container).getAttribute('aria-expanded')).toBe('false');
+    render(active, {
+      autoManageExpansion: true,
+      expandActiveWhenLive: true,
+    });
+    expect(groupSummary(container).getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('resumes automatic collapse after auto-management is re-enabled', () => {
+    vi.useFakeTimers();
+    try {
+      const active = [
+        agent({ callId: 'a1', status: 'pending' }),
+        agent({ callId: 'a2', status: 'pending' }),
+      ];
+      const completed = active.map((item) => ({
+        ...item,
+        status: 'completed' as const,
+      }));
+      const { container, render } = renderManagedGroup(active, {
+        autoManageExpansion: true,
+      });
+
+      render(active, { autoManageExpansion: false });
+      render(completed, { autoManageExpansion: false });
+      act(() => vi.advanceTimersByTime(1_500));
+      expect(groupSummary(container).getAttribute('aria-expanded')).toBe(
+        'true',
+      );
+      render(completed, { autoManageExpansion: true });
+      act(() => vi.advanceTimersByTime(1_499));
+      expect(groupSummary(container).getAttribute('aria-expanded')).toBe(
+        'true',
+      );
+      act(() => vi.advanceTimersByTime(1));
+      expect(groupSummary(container).getAttribute('aria-expanded')).toBe(
+        'false',
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps a pending approval visible after automatic state collapses', () => {
+    vi.useFakeTimers();
+    try {
+      const active = [
+        agent({ callId: 'a1', status: 'pending' }),
+        agent({ callId: 'a2', status: 'pending' }),
+      ];
+      const approval: PermissionRequest = {
+        id: 'approval',
+        toolCallId: 'a1',
+        content: [],
+        options: [],
+      };
+      const { container, render } = renderManagedGroup(active, {
+        autoManageExpansion: true,
+        pendingApproval: approval,
+      });
+      const completed = active.map((item) => ({
+        ...item,
+        status: 'completed' as const,
+      }));
+
+      render(completed, {
+        autoManageExpansion: true,
+        pendingApproval: approval,
+      });
+      act(() => vi.advanceTimersByTime(1_500));
+      expect(groupSummary(container).getAttribute('aria-expanded')).toBe(
+        'true',
+      );
+      expect(
+        container.querySelector('[data-agent-collapse-exit="true"]'),
+      ).toBeNull();
+      render(completed, {
+        autoManageExpansion: true,
+        pendingApproval: null,
+      });
+      expect(groupSummary(container).getAttribute('aria-expanded')).toBe(
+        'false',
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reveals a pending approval that arrives during the exit animation', () => {
+    vi.useFakeTimers();
+    try {
+      const active = [
+        agent({ callId: 'a1', status: 'pending' }),
+        agent({ callId: 'a2', status: 'pending' }),
+      ];
+      const completed = active.map((item) => ({
+        ...item,
+        status: 'completed' as const,
+      }));
+      const approval: PermissionRequest = {
+        id: 'approval',
+        toolCallId: 'a1',
+        content: [],
+        options: [],
+      };
+      const { container, render } = renderManagedGroup(active, {
+        autoManageExpansion: true,
+        automaticCollapseDelayMs: 400,
+      });
+
+      render(completed, {
+        autoManageExpansion: true,
+        automaticCollapseDelayMs: 400,
+      });
+      act(() => vi.advanceTimersByTime(400));
+      expect(
+        container.querySelector('[data-agent-collapse-exit="true"]'),
+      ).not.toBeNull();
+
+      render(completed, {
+        autoManageExpansion: true,
+        automaticCollapseDelayMs: 400,
+        pendingApproval: approval,
+      });
+      const viewport = container.querySelector('[class*="groupViewport"]');
+      expect(groupSummary(container).getAttribute('aria-expanded')).toBe(
+        'true',
+      );
+      expect(groupSummary(container).disabled).toBe(false);
+      expect(
+        container.querySelector('[data-agent-collapse-exit="true"]'),
+      ).toBeNull();
+      expect(viewport?.hasAttribute('aria-hidden')).toBe(false);
+      expect(viewport?.hasAttribute('inert')).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('shows live progress while background agents are pending', () => {
     vi.useFakeTimers();
     vi.setSystemTime(10_000);
@@ -165,14 +610,11 @@ describe('ParallelAgentsGroup timeline rendering', () => {
       const container = renderExpandedGroup(agents);
 
       // The header clock anchors at the earliest ACTIVE agent's start (2s),
-      // not the latest (4s) nor mount time, and both pending bars reach now.
+      // not the latest (4s) nor mount time.
       expect(container.textContent).toContain('Parallel agents 8s·1/3 done');
-      const timeline = computeAgentsTimeline(agents, 10_000);
-      for (const callId of ['pending-early', 'pending-late']) {
-        const row = timeline?.rows.get(callId);
-        expect(row?.running).toBe(true);
-        expect((row?.leftPct ?? 0) + (row?.widthPct ?? 0)).toBeCloseTo(100);
-      }
+      expect(
+        container.querySelectorAll('[data-agent-status="active"]'),
+      ).toHaveLength(2);
     } finally {
       vi.useRealTimers();
     }
@@ -345,36 +787,5 @@ describe('ParallelAgentsGroup timeline rendering', () => {
     act(() => row.click());
 
     expect(onOpen).toHaveBeenCalledWith(nested);
-  });
-
-  it('renders one bar per agent and a ruler when the span is comparable', () => {
-    const container = renderExpandedGroup([
-      agent({ callId: 'a1', startTime: 0, endTime: 24_000 }),
-      agent({ callId: 'a2', startTime: 3_000, endTime: 20_000 }),
-    ]);
-    // The computed geometry actually reaches the DOM: a bar per agent...
-    expect(container.querySelectorAll('[class*="bar"]').length).toBe(2);
-    // ...and the ruler with its nice ticks.
-    expect(container.querySelector('[class*="ruler"]')).not.toBeNull();
-    expect(container.textContent).toContain('0s');
-    expect(container.textContent).toContain('10s');
-  });
-
-  it('renders the bars but no ruler when the span yields a single tick', () => {
-    const container = renderExpandedGroup([
-      agent({ callId: 'a1', startTime: 0, endTime: 1_050 }),
-      agent({ callId: 'a2', startTime: 0, endTime: 1_050 }),
-    ]);
-    expect(container.querySelectorAll('[class*="bar"]').length).toBe(2);
-    expect(container.querySelector('[class*="ruler"]')).toBeNull();
-  });
-
-  it('renders no timeline at all when bars would not be comparable', () => {
-    // A single agent → computeAgentsTimeline returns null → plain list.
-    const container = renderExpandedGroup([
-      agent({ callId: 'a1', startTime: 0, endTime: 24_000 }),
-    ]);
-    expect(container.querySelector('[class*="track"]')).toBeNull();
-    expect(container.querySelector('[class*="ruler"]')).toBeNull();
   });
 });
