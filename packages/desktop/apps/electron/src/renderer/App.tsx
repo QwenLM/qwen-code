@@ -13,6 +13,7 @@ import { useEventProcessor } from './event-processor'
 import type { AgentEvent, Effect } from './event-processor'
 import { AppShell } from '@/components/app-shell/AppShell'
 import { FilePreviewPanel } from '@/components/app-shell/FilePreviewPanel'
+import { openUrlInBuiltInBrowser } from '@/components/app-shell/open-url-in-built-in-browser'
 import type { AppShellContextType } from '@/context/AppShellContext'
 import { OnboardingWizard, ReauthScreen } from '@/components/onboarding'
 import { WorkspacePicker } from '@/components/workspace'
@@ -66,7 +67,6 @@ import {
 } from '@/atoms/sessions'
 import { sourcesAtom } from '@/atoms/sources'
 import { skillsAtom } from '@/atoms/skills'
-import { DEFAULT_DOCKED_BROWSER_INSTANCE_ID } from '@/atoms/browser-pane'
 import { extractBadges } from '@/lib/mentions'
 import { extractCommandBadges } from '@/lib/slash-command-badges'
 import { contentBadgesToTextElements } from '@craft-agent/core/utils'
@@ -2030,55 +2030,11 @@ export default function App() {
   const handleOpenUrlExternal = linkInterceptor.handleOpenUrl
 
   const handleOpenUrlInBuiltInBrowser = useCallback((url: string) => {
-    const open = async () => {
-      const trimmedUrl = url.trim()
-      const hasExplicitScheme = /^[a-z][a-z0-9+.-]*:/i.test(trimmedUrl)
-      const hasSchemeSeparator = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmedUrl)
-      const hostPattern =
-        /^(localhost|\d{1,3}(?:\.\d{1,3}){3}|[\w-]+(?:\.[\w-]+)+)(?::\d+)?(?:\/|$)/i
-      const looksLikeHost = hostPattern.test(trimmedUrl)
-      const shouldUseBuiltInBrowser = hasSchemeSeparator
-        ? /^https?:\/\//i.test(trimmedUrl)
-        : !hasExplicitScheme || looksLikeHost
-
-      if (!shouldUseBuiltInBrowser) {
-        handleOpenUrlExternal(url)
-        return
-      }
-
-      let instanceId: string | null = null
-      try {
-        const browserPaneApi = window.electronAPI?.browserPane
-        if (!browserPaneApi) {
-          handleOpenUrlExternal(url)
-          return
-        }
-
-        instanceId = await browserPaneApi.create({
-          id: DEFAULT_DOCKED_BROWSER_INSTANCE_ID,
-          show: true,
-          presentation: 'docked',
-        })
-        await browserPaneApi.navigate(instanceId, trimmedUrl)
-        await browserPaneApi.focus(instanceId)
-      } catch (error) {
-        if (instanceId) {
-          console.warn(
-            '[App] Failed to finish opening URL in built-in browser:',
-            error,
-          )
-          return
-        }
-
-        console.warn(
-          '[App] Failed to open URL in built-in browser, falling back to default browser:',
-          error,
-        )
-        handleOpenUrlExternal(url)
-      }
-    }
-
-    void open()
+    void openUrlInBuiltInBrowser(url, {
+      browserPaneApi: window.electronAPI?.browserPane,
+      isChannelAvailable: window.electronAPI?.isChannelAvailable,
+      openExternal: handleOpenUrlExternal,
+    })
   }, [handleOpenUrlExternal])
 
   const handleOpenSettings = useCallback(() => {
