@@ -152,6 +152,49 @@ function createHarness() {
 }
 
 describe('DingtalkInteractionPresenter', () => {
+  it('creates the running card as soon as the run starts', async () => {
+    const { client, presenter } = createHarness();
+
+    presenter.startStatusCard('run-1');
+
+    await vi.waitFor(() => {
+      expect(client.createAndDeliver).toHaveBeenCalledWith(
+        expect.objectContaining({
+          templateId: STATUS_CARD_TEMPLATE_ID,
+          cardParamMap: expect.objectContaining({
+            content: '',
+            flowStatus: 2,
+          }),
+        }),
+      );
+    });
+  });
+
+  it('fails an eagerly created running card before any output is emitted', async () => {
+    const { client, presenter } = createHarness();
+    presenter.startStatusCard('run-1');
+
+    presenter.terminalizeRun(
+      'run-1',
+      'failed',
+      'private failure at /Users/ben/private',
+    );
+
+    await vi.waitFor(() => {
+      expect(client.updateInstance).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          cardParamMap: expect.objectContaining({
+            content: '本次处理失败，请稍后重试。',
+            statusLine: expect.stringMatching(/^Failed · \d+s$/),
+          }),
+        }),
+      );
+    });
+    expect(
+      JSON.stringify(vi.mocked(client.updateInstance).mock.calls),
+    ).not.toContain('/Users/ben/private');
+  });
+
   it('presents a direct question without creating a status card', async () => {
     const { client, presenter } = createHarness();
 
@@ -254,12 +297,7 @@ describe('DingtalkInteractionPresenter', () => {
     ]);
   });
 
-  it.each([
-    'response_boundary',
-    'input_requested',
-    'completed',
-    'failed',
-  ] as const)(
+  it.each(['input_requested', 'completed'] as const)(
     'hides local image paths when output ends with %s',
     async (reason) => {
       const { client, presenter } = createHarness();
@@ -287,6 +325,67 @@ describe('DingtalkInteractionPresenter', () => {
     },
   );
 
+  it('does not expose buffered model text when a run fails', async () => {
+    const { client, presenter } = createHarness();
+    presenter.appendOutput(
+      segment('segment-1'),
+      '我来查看 [IMAGE: /Users/ben/private/image.png]',
+    );
+
+    await presenter.closeOutput('segment-1', '', 'failed');
+
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          content: '本次处理失败，请稍后重试。',
+          statusLine: expect.stringMatching(/^Failed · \d+s$/),
+        }),
+      }),
+    );
+    expect(
+      JSON.stringify(vi.mocked(client.updateInstance).mock.calls),
+    ).not.toContain('/Users/ben/private');
+  });
+
+  it('streams original model text across response boundaries and replaces it with the final answer', async () => {
+    const { client, presenter } = createHarness();
+    presenter.appendOutput(
+      segment('segment-1'),
+      '我来查看 [IMAGE: /Users/ben/private/image.png]',
+    );
+
+    await presenter.closeOutput('segment-1', '', 'response_boundary');
+
+    await vi.waitFor(() => {
+      const payloads = vi
+        .mocked(client.openOrUpdateStream)
+        .mock.calls.map(([request]) => request.content);
+      const latest = payloads.at(-1) ?? '';
+      expect(latest).toContain('我来查看 [Image pending]');
+      expect(JSON.stringify(payloads)).not.toContain('### 处理进度');
+      expect(JSON.stringify(payloads)).not.toContain('/Users/ben/private');
+    });
+
+    presenter.appendOutput(segment('segment-2'), '@衍星\n\n最终答案');
+    await presenter.closeOutput('segment-2', '', 'completed');
+
+    const statusCards = vi
+      .mocked(client.createAndDeliver)
+      .mock.calls.filter(
+        ([request]) => request.templateId === STATUS_CARD_TEMPLATE_ID,
+      );
+    expect(statusCards).toHaveLength(1);
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        outTrackId: statusCards[0]![0].outTrackId,
+        cardParamMap: expect.objectContaining({
+          content: '@衍星\n\n最终答案',
+          statusLine: expect.stringMatching(/^Completed · \d+s$/),
+        }),
+      }),
+    );
+  });
+
   it.each([
     ['cancel_command', 'Stopped'],
     ['steer', 'Cancelled'],
@@ -307,9 +406,10 @@ describe('DingtalkInteractionPresenter', () => {
           .mock.calls.map(([request]) => request.cardParamMap)
           .find((payload) => payload.flowStatus === 3);
         expect(terminalPayload).toMatchObject({
-          blockList: '[{"type":0,"markdown":"before [Image pending] after"}]',
-          content: 'before [Image pending] after',
-          copy_content: 'before [Image pending] after',
+          blockList: `[{"type":0,"markdown":"${reason === 'cancel_command' ? '任务已停止' : '任务已取消'}"}]`,
+          content: reason === 'cancel_command' ? '任务已停止' : '任务已取消',
+          copy_content:
+            reason === 'cancel_command' ? '任务已停止' : '任务已取消',
           statusLine: expect.stringMatching(
             new RegExp(`^${expectedState} · \\d+s$`),
           ),

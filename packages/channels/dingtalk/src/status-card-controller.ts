@@ -34,6 +34,7 @@ interface StatusRecord {
   lastWriteAt: number;
   pendingSnapshot?: string;
   flushTimer?: ReturnType<typeof setTimeout>;
+  statusTimer?: ReturnType<typeof setTimeout>;
   inFlight?: Promise<void>;
   writeChain: Promise<void>;
 }
@@ -59,6 +60,33 @@ export class StatusCardController {
   private readonly terminalSegmentIds = new Set<string>();
 
   constructor(private readonly options: StatusCardControllerOptions) {}
+
+  ensure(
+    segment: ChannelOutputSegmentContext,
+    target: { chatId: string; isGroup: boolean },
+  ): void {
+    if (this.terminalSegmentIds.has(segment.segmentId)) return;
+    if (!this.recordsBySegment.has(segment.segmentId)) {
+      this.createRecord(segment, target);
+    }
+  }
+
+  replace(
+    segment: ChannelOutputSegmentContext,
+    target: { chatId: string; isGroup: boolean },
+    content: string,
+  ): void {
+    if (this.terminalSegmentIds.has(segment.segmentId)) return;
+    let record = this.recordsBySegment.get(segment.segmentId);
+    if (!record) {
+      record = this.createRecord(segment, target);
+    }
+    if (record.terminal) return;
+    record.content = boundContent(content);
+    if (record.streamFailed) return;
+    record.pendingSnapshot = sanitizeStreamingImageMarkers(record.content);
+    this.scheduleFlush(record);
+  }
 
   append(
     segment: ChannelOutputSegmentContext,
@@ -107,6 +135,9 @@ export class StatusCardController {
     segmentIds.add(record.segmentId);
     this.segmentIdsByRun.set(record.runId, segmentIds);
     record.ready = this.create(record, target);
+    void record.ready.then((ready) => {
+      if (ready) this.scheduleStatusRefresh(record);
+    });
     return record;
   }
 
@@ -273,6 +304,8 @@ export class StatusCardController {
     }
     if (record.flushTimer) clearTimeout(record.flushTimer);
     record.flushTimer = undefined;
+    if (record.statusTimer) clearTimeout(record.statusTimer);
+    record.statusTimer = undefined;
     record.pendingSnapshot = undefined;
     try {
       if (!(await record.ready)) return false;
@@ -352,5 +385,20 @@ export class StatusCardController {
     } catch (error) {
       this.options.onError?.('status card metadata', error);
     }
+  }
+
+  private scheduleStatusRefresh(record: StatusRecord): void {
+    if (record.terminal || record.statusTimer) return;
+    const elapsed = Math.max(0, Date.now() - record.startedAt);
+    const delay = Math.max(50, 1000 - (elapsed % 1000));
+    record.statusTimer = setTimeout(() => {
+      record.statusTimer = undefined;
+      if (record.terminal) return;
+      const refresh = record.writeChain.then(() =>
+        this.updateRunningStatus(record),
+      );
+      record.writeChain = refresh;
+      void refresh.finally(() => this.scheduleStatusRefresh(record));
+    }, delay);
   }
 }

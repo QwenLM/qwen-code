@@ -1195,7 +1195,11 @@ export class DingtalkChannel extends ChannelBase {
           event.runId,
           event.owner.id,
           inboundOwner.target,
+          event.sessionId,
+          event.messageId,
+          this.name,
         );
+        this.interactionPresenter?.startStatusCard(event.runId);
       }
       return;
     }

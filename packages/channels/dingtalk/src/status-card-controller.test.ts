@@ -168,7 +168,7 @@ describe('StatusCardController', () => {
     expect(terminalPayload).not.toContain('/Users/ben/private');
   });
 
-  it('shows the configured model and refreshes elapsed time only on text flushes', async () => {
+  it('shows the configured model and refreshes elapsed time while idle', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
     const { client, controller } = createHarness({
@@ -199,9 +199,14 @@ describe('StatusCardController', () => {
     );
 
     vi.mocked(client.updateInstance).mockClear();
-    vi.setSystemTime(10_000);
-    await vi.advanceTimersByTimeAsync(5_000);
-    expect(client.updateInstance).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(client.updateInstance).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cardParamMap: {
+          statusLine: 'Running · qwen3.7-max · 2s',
+        },
+      }),
+    );
   });
 
   it('omits an unconfigured model from running status', async () => {

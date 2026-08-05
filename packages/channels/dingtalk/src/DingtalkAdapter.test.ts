@@ -1565,19 +1565,21 @@ describe('DingtalkChannel status cards', () => {
     ).toBeDefined();
   });
 
-  it('registers only the matching real inbound owner without creating output', () => {
+  it('starts a status card only for the matching real inbound owner', () => {
     const channel = createChannel();
     const registerRun = vi.fn();
+    const startStatusCard = vi.fn();
     const appendOutput = vi.fn();
     (
       channel as unknown as {
         interactionPresenter: {
           registerRun: typeof registerRun;
+          startStatusCard: typeof startStatusCard;
           appendOutput: typeof appendOutput;
         };
         inboundCardOwners: Map<string, unknown>;
       }
-    ).interactionPresenter = { registerRun, appendOutput };
+    ).interactionPresenter = { registerRun, startStatusCard, appendOutput };
     (
       channel as unknown as {
         inboundCardOwners: Map<string, unknown>;
@@ -1597,6 +1599,7 @@ describe('DingtalkChannel status cards', () => {
       owner: { kind: 'channel_user', id: 'other-owner' },
     });
     expect(registerRun).not.toHaveBeenCalled();
+    expect(startStatusCard).not.toHaveBeenCalled();
     expect(appendOutput).not.toHaveBeenCalled();
 
     (
@@ -1618,10 +1621,19 @@ describe('DingtalkChannel status cards', () => {
     });
 
     expect(registerRun).toHaveBeenCalledOnce();
-    expect(registerRun).toHaveBeenCalledWith('run-2', 'owner-1', {
-      chatId: 'cid-1',
-      isGroup: true,
-    });
+    expect(registerRun).toHaveBeenCalledWith(
+      'run-2',
+      'owner-1',
+      {
+        chatId: 'cid-1',
+        isGroup: true,
+      },
+      'session-1',
+      'message-2',
+      'test-dingtalk',
+    );
+    expect(startStatusCard).toHaveBeenCalledOnce();
+    expect(startStatusCard).toHaveBeenCalledWith('run-2');
     expect(appendOutput).not.toHaveBeenCalled();
   });
 

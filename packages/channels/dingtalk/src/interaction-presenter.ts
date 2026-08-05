@@ -9,8 +9,11 @@ import type { QuestionCardController } from './question-card-controller.js';
 import type { StatusCardController } from './status-card-controller.js';
 
 interface RunPresentation {
+  runId: string;
   ownerId: string;
   target: { chatId: string; isGroup: boolean };
+  baseContext: ChannelOutputSegmentContext;
+  statusContext?: ChannelOutputSegmentContext;
   projectionChain: Promise<void>;
   activeSegmentId?: string;
   terminal: boolean;
@@ -39,12 +42,42 @@ export class DingtalkInteractionPresenter {
     runId: string,
     ownerId: string,
     target: { chatId: string; isGroup: boolean },
+    sessionId = '',
+    messageId?: string,
+    channelName = 'dingtalk',
   ): void {
     this.runs.set(runId, {
+      runId,
       ownerId,
       target,
+      baseContext: {
+        channelName,
+        sessionId,
+        runId,
+        segmentId: runId,
+        owner: { kind: 'channel_user', id: ownerId },
+        target: {
+          channelName,
+          chatId: target.chatId,
+          senderId: ownerId,
+          isGroup: target.isGroup,
+        },
+        ...(messageId ? { messageId } : {}),
+      },
       projectionChain: Promise.resolve(),
       terminal: false,
+    });
+  }
+
+  startStatusCard(runId: string): void {
+    const run = this.runs.get(runId);
+    if (!run || run.terminal) return;
+    const statusContext = this.ensureStatusContext(run);
+    void this.enqueue(run, () => {
+      this.options.statusCards?.ensure(
+        statusContext,
+        this.cardTarget(statusContext.target),
+      );
     });
   }
 
@@ -71,11 +104,11 @@ export class DingtalkInteractionPresenter {
     presentation.content = this.boundContent(presentation.content + chunk);
     this.segments.set(segment.segmentId, presentation);
     run.activeSegmentId = segment.segmentId;
-    if (!this.options.statusCards) return;
+    const statusContext = this.ensureStatusContext(run, segment);
     void this.enqueue(run, () => {
       this.options.statusCards?.append(
-        segment,
-        this.cardTarget(segment.target),
+        statusContext,
+        this.cardTarget(statusContext.target),
         chunk,
       );
     });
@@ -100,18 +133,51 @@ export class DingtalkInteractionPresenter {
     if (run.activeSegmentId === segmentId) {
       run.activeSegmentId = undefined;
     }
+    if (reason === 'response_boundary') {
+      return Promise.resolve(true);
+    }
     return this.enqueue(run, async () => {
       const statusCards = this.options.statusCards;
+      const statusContext = this.ensureStatusContext(run, presentation.context);
       if (reason === 'failed') {
-        statusCards?.fail(segmentId, text);
+        statusCards?.ensure(
+          statusContext,
+          this.cardTarget(statusContext.target),
+        );
+        statusCards?.fail(
+          statusContext.segmentId,
+          '本次处理失败，请稍后重试。',
+        );
         return statusCards !== undefined;
       }
       if (reason === 'cancelled') {
         return statusCards !== undefined;
       }
+      if (reason === 'input_requested') {
+        const completed =
+          statusCards !== undefined &&
+          (await statusCards.complete(
+            statusContext.segmentId,
+            text || presentation.content,
+          ));
+        run.statusContext = undefined;
+        if (completed) return true;
+        const fallbackText = text || presentation.content;
+        if (!fallbackText || !this.options.sendFallback) return false;
+        await this.options.sendFallback(
+          presentation.context.target.chatId,
+          fallbackText,
+          presentation.context.sessionId,
+        );
+        return true;
+      }
+      statusCards?.ensure(statusContext, this.cardTarget(statusContext.target));
       const completed =
         statusCards !== undefined &&
-        (await statusCards.complete(segmentId, text));
+        (await statusCards.complete(
+          statusContext.segmentId,
+          text || presentation.content,
+        ));
       if (completed) return true;
       const fallbackText = text || presentation.content;
       if (!fallbackText || !this.options.sendFallback) return false;
@@ -164,15 +230,29 @@ export class DingtalkInteractionPresenter {
       this.addTerminalSegment(activeSegmentId);
     }
     const finalization = this.enqueue(run, async () => {
-      if (terminal === 'failed' && activeSegmentId) {
-        this.options.statusCards?.fail(activeSegmentId, detail);
+      if (terminal === 'failed') {
+        const statusContext = this.ensureStatusContext(run);
+        this.options.statusCards?.ensure(
+          statusContext,
+          this.cardTarget(statusContext.target),
+        );
+        this.options.statusCards?.fail(
+          statusContext.segmentId,
+          '本次处理失败，请稍后重试。',
+        );
       } else if (terminal === 'cancelled') {
+        const statusContext = run.statusContext;
+        if (statusContext) {
+          this.options.statusCards?.replace(
+            statusContext,
+            this.cardTarget(statusContext.target),
+            detail === 'cancel_command' ? '任务已停止' : '任务已取消',
+          );
+        }
         this.options.statusCards?.cancelRun(
           runId,
           detail === 'cancel_command' ? 'cancel_command' : 'dropped',
         );
-      } else if (activeSegmentId) {
-        await this.options.statusCards?.complete(activeSegmentId, detail);
       }
     });
     void finalization.then(
@@ -225,6 +305,17 @@ export class DingtalkInteractionPresenter {
     const marker = '[Earlier output truncated]\n';
     if (content.length <= limit) return content;
     return `${marker}${content.slice(content.length - (limit - marker.length))}`;
+  }
+
+  private ensureStatusContext(
+    run: RunPresentation,
+    segment?: ChannelOutputSegmentContext,
+  ): ChannelOutputSegmentContext {
+    if (run.statusContext) return run.statusContext;
+    run.statusContext = segment
+      ? { ...segment }
+      : { ...run.baseContext, segmentId: run.runId };
+    return run.statusContext;
   }
 
   private cardTarget(target: SessionTarget): {
