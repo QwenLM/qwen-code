@@ -105,7 +105,30 @@ describe('channel registry', () => {
       message: 'Channel field "settings.prototype" cannot use a reserved key.',
     },
     {
-      type: 'duplicate-top-level-field',
+      type: 'invalid-reserved-type-key',
+      fields: [
+        {
+          key: 'type',
+          label: 'Type',
+          kind: 'string',
+        },
+      ],
+      message: 'Channel field "type" cannot use the reserved key "type".',
+    },
+    {
+      type: 'invalid-enum-without-options',
+      fields: [
+        {
+          key: 'mode',
+          label: 'Mode',
+          kind: 'enum',
+          required: true,
+        },
+      ],
+      message: 'Channel field "mode" must declare at least one option.',
+    },
+    {
+      type: 'invalid-duplicate-top-level-field',
       fields: [
         { key: 'token', label: 'Token', kind: 'secret' },
         { key: 'token', label: 'Token', kind: 'string' },
@@ -113,7 +136,7 @@ describe('channel registry', () => {
       message: 'Channel field "token" is declared more than once.',
     },
     {
-      type: 'duplicate-nested-field',
+      type: 'invalid-duplicate-nested-field',
       fields: [
         {
           key: 'settings',
@@ -158,10 +181,50 @@ describe('channel registry', () => {
     },
   );
 
+  it('registers a plugin whose management descriptor lacks a fields array without management metadata', async () => {
+    const plugin = {
+      channelType: 'invalid-missing-fields-array',
+      displayName: 'invalid-missing-fields-array',
+      management: {},
+      createChannel() {
+        throw new Error('not used');
+      },
+    } as unknown as ChannelPlugin;
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+    registerPlugin(plugin);
+
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Invalid management metadata in "invalid-missing-fields-array" channel: Channel management metadata must declare a fields array.',
+      ),
+    );
+    stderr.mockRestore();
+
+    const registered = await getPlugin('invalid-missing-fields-array');
+    expect(registered?.management).toBeUndefined();
+    expect(registered?.createChannel).toBe(plugin.createChannel);
+
+    const entry = (await supportedChannelCatalog()).find(
+      (candidate) => candidate.type === 'invalid-missing-fields-array',
+    );
+    expect(entry).toEqual({
+      type: 'invalid-missing-fields-array',
+      displayName: 'invalid-missing-fields-array',
+      manageable: false,
+      fields: [],
+    });
+  });
+
   it('only marks the manually configurable built-in types as manageable', async () => {
     const catalog = await supportedChannelCatalog();
-    expect(catalog.map((entry) => entry.type)).toEqual(
-      expect.arrayContaining([
+    expect(
+      catalog
+        .map((entry) => entry.type)
+        .filter((type) => !type.startsWith('invalid-'))
+        .sort(),
+    ).toEqual(
+      [
         'telegram',
         'weixin',
         'dingtalk',
@@ -170,7 +233,7 @@ describe('channel registry', () => {
         'qq',
         'github',
         'gitlab',
-      ]),
+      ].sort(),
     );
     expect(
       catalog.filter((entry) => entry.manageable).map((entry) => entry.type),

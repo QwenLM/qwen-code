@@ -153,14 +153,15 @@ export function validateChannelEditorDraft(
   }
   for (const field of descriptor.fields) {
     if (field.kind === 'object') continue;
+    const draftValue = draft.values[field.key];
     if (field.required && isMissingField(field, draft)) {
       errors[field.key] = 'required';
     } else if (
       field.kind === 'number' &&
-      typeof draft.values[field.key] === 'string' &&
-      draft.values[field.key] !== ''
+      typeof draftValue === 'string' &&
+      draftValue.trim() !== ''
     ) {
-      const parsed = Number(draft.values[field.key]);
+      const parsed = Number(draftValue);
       if (
         !Number.isFinite(parsed) ||
         (field.exclusiveMinimum !== undefined &&
@@ -169,10 +170,9 @@ export function validateChannelEditorDraft(
         errors[field.key] = 'number';
       }
     } else if (field.kind === 'string-list' && field.options) {
-      const rawValue = draft.values[field.key];
-      if (typeof rawValue === 'string') {
+      if (typeof draftValue === 'string') {
         const allowed = new Set(field.options.map((option) => option.value));
-        const invalid = rawValue
+        const invalid = draftValue
           .split(',')
           .map((token) => token.trim().toLowerCase())
           .filter((token) => token.length > 0)

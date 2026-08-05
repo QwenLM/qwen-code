@@ -15,6 +15,7 @@ import type {
   DaemonChannelConfigFieldKind,
   DaemonChannelConfigNestedFieldDescriptor,
 } from '@qwen-code/sdk/daemon';
+import { supportedChannelCatalog } from './channel-registry.js';
 
 type MirrorMatches<Source, Target> = [Source] extends [Target]
   ? [Target] extends [Source]
@@ -35,6 +36,55 @@ type NestedFieldDescriptorsMatch = MirrorMatches<
   DaemonChannelConfigNestedFieldDescriptor
 >;
 
+const FIELD_KINDS: readonly ChannelConfigFieldKind[] = [
+  'string',
+  'secret',
+  'boolean',
+  'number',
+  'enum',
+  'string-list',
+  'record',
+  'object',
+];
+
+function assertDescriptorWireShape(
+  descriptor: ChannelConfigFieldDescriptor,
+): void {
+  expect(typeof descriptor.key).toBe('string');
+  expect(typeof descriptor.label).toBe('string');
+  expect(FIELD_KINDS).toContain(descriptor.kind);
+  const allowedKeys = new Set([
+    'key',
+    'label',
+    'kind',
+    'required',
+    'options',
+    'default',
+    'description',
+  ]);
+  if (descriptor.kind === 'object') {
+    allowedKeys.add('properties');
+    expect(descriptor.required ?? false).toBe(false);
+    for (const property of descriptor.properties ?? []) {
+      assertDescriptorWireShape(property);
+    }
+  } else {
+    allowedKeys.add('envResolvable');
+    if (descriptor.kind === 'number') {
+      allowedKeys.add('exclusiveMinimum');
+    }
+    expect((descriptor as { properties?: unknown }).properties).toBeUndefined();
+    if (descriptor.kind !== 'number') {
+      expect(
+        (descriptor as { exclusiveMinimum?: unknown }).exclusiveMinimum,
+      ).toBeUndefined();
+    }
+  }
+  for (const key of Object.keys(descriptor)) {
+    expect(allowedKeys).toContain(key);
+  }
+}
+
 describe('channel descriptor SDK mirror', () => {
   it('keeps the SDK descriptor types assignable to the channel-base contract', () => {
     const fieldKindsMatch: FieldKindsMatch = true;
@@ -44,5 +94,16 @@ describe('channel descriptor SDK mirror', () => {
     expect(
       fieldKindsMatch && fieldDescriptorsMatch && nestedFieldDescriptorsMatch,
     ).toBe(true);
+  });
+
+  it('keeps built-in descriptor values within the daemon wire contract', async () => {
+    const catalog = await supportedChannelCatalog();
+    const manageable = catalog.filter((entry) => entry.manageable);
+    expect(manageable).not.toHaveLength(0);
+    for (const entry of manageable) {
+      for (const field of entry.fields) {
+        assertDescriptorWireShape(field);
+      }
+    }
   });
 });

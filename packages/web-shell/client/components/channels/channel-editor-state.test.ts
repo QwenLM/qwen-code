@@ -228,6 +228,31 @@ describe('Channel editor state', () => {
     expect(validateChannelEditorDraft(descriptor, valid, [])).toEqual({});
   });
 
+  it('treats a whitespace-only number draft as empty instead of invalid', () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      type: 'example',
+      displayName: 'Example',
+      manageable: true,
+      fields: [
+        {
+          key: 'timeoutMs',
+          label: 'Timeout (ms)',
+          kind: 'number',
+          exclusiveMinimum: 0,
+        },
+      ],
+    };
+
+    const draft = createChannelEditorDraft(descriptor);
+    draft.name = 'example';
+    draft.values.timeoutMs = '   ';
+
+    expect(validateChannelEditorDraft(descriptor, draft, [])).toEqual({});
+    expect(
+      buildChannelUpsertRequest(descriptor, draft, 'revision-1').config,
+    ).toEqual({ type: 'example', senderPolicy: 'pairing' });
+  });
+
   it('rejects a non-numeric value for a number field', () => {
     const descriptor: DaemonChannelTypeDescriptor = {
       type: 'example',

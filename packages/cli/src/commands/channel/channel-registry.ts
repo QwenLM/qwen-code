@@ -42,6 +42,11 @@ function assertManagementField(
   if (UNSAFE_OBJECT_KEYS.has(field.key)) {
     throw new Error(`Channel field "${path}" cannot use a reserved key.`);
   }
+  if (!nested && field.key === 'type') {
+    throw new Error(
+      `Channel field "${path}" cannot use the reserved key "type".`,
+    );
+  }
   const envResolvable = field.envResolvable === true;
   const required = field.required === true;
   if (field.kind === 'secret' && nested) {
@@ -50,6 +55,11 @@ function assertManagementField(
   if (envResolvable && nested) {
     throw new Error(
       `Channel field "${path}" cannot resolve environment references.`,
+    );
+  }
+  if (field.kind === 'enum' && (field.options?.length ?? 0) === 0) {
+    throw new Error(
+      `Channel field "${path}" must declare at least one option.`,
     );
   }
   if (field.kind !== 'object') return;
@@ -65,7 +75,12 @@ function assertManagementField(
 }
 
 function assertManagementDescriptor(plugin: ChannelPlugin): void {
-  assertManagementFields(plugin.management?.fields ?? []);
+  const management = plugin.management;
+  if (management === undefined) return;
+  if (!Array.isArray(management.fields)) {
+    throw new Error('Channel management metadata must declare a fields array.');
+  }
+  assertManagementFields(management.fields);
 }
 
 function ensureBuiltins(): Promise<void> {

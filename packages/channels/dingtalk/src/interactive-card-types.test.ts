@@ -20,9 +20,9 @@ describe('interactive card config', () => {
     );
 
     expect(DINGTALK_INTERACTIVE_CARD_TIMEOUT_EXCLUSIVE_MINIMUM).toBe(0);
-    expect(timeout?.exclusiveMinimum).toBe(
-      DINGTALK_INTERACTIVE_CARD_TIMEOUT_EXCLUSIVE_MINIMUM,
-    );
+    expect(
+      timeout?.kind === 'number' ? timeout.exclusiveMinimum : undefined,
+    ).toBe(DINGTALK_INTERACTIVE_CARD_TIMEOUT_EXCLUSIVE_MINIMUM);
     const descriptorAdmittedSamples = [
       {},
       { enabled: false },
@@ -69,6 +69,13 @@ describe('interactive card config', () => {
   });
 
   it('rejects invalid nested values and timeouts', () => {
+    expect(() =>
+      parseDingtalkInteractiveCardConfig({
+        questionCard: {
+          timeoutMs: DINGTALK_INTERACTIVE_CARD_TIMEOUT_EXCLUSIVE_MINIMUM,
+        },
+      }),
+    ).toThrow('questionCard.timeoutMs');
     expect(() =>
       parseDingtalkInteractiveCardConfig({
         questionCard: { timeoutMs: Number.POSITIVE_INFINITY },
