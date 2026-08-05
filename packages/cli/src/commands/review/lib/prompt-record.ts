@@ -63,6 +63,43 @@ export function briefPath(planPath: string, key: string): string {
   return join(promptRecordDir(planPath), `${encodeURIComponent(key)}.brief.md`);
 }
 
+/** Where a round's findings list lives — the file the launch block points at. */
+export function findingsFilePath(planPath: string, key: string): string {
+  return join(
+    promptRecordDir(planPath),
+    `${encodeURIComponent(key)}.findings.md`,
+  );
+}
+
+/**
+ * Write the findings list a verify/reverse-audit launch block points at.
+ *
+ * The list used to be folded verbatim into every printed block — the point was
+ * a record a partial delivery cannot satisfy, and inlining made the findings
+ * part of the recorded prompt. On a 12-14-chunk round that made the orchestrator
+ * re-emit 65-82 KB in ONE assistant message, and the stream generating that
+ * message never completed (issue #8597). So the list goes where the brief already
+ * goes: on disk, named by the same digest that keys the record, read by the
+ * agent. The block carries the pointer; dropping it mismatches the recorded
+ * prompt exactly as dropping the list did, and whether the agent read it is a
+ * fact in the harness's transcript — the same standard the brief already meets.
+ */
+export function writeFindingsFile(
+  planPath: string,
+  key: string,
+  content: string,
+): string {
+  const p = findingsFilePath(planPath, key);
+  try {
+    mkdirSync(promptRecordDir(planPath), { recursive: true });
+    writeFileSync(p, content);
+  } catch {
+    // Same reasoning as writeBrief/recordPrompt: a read-only tmp dir fails at
+    // the delivery check, where a reader can act on it, not here.
+  }
+  return p;
+}
+
 const RULES_MARKER = '## Project rules';
 
 /**

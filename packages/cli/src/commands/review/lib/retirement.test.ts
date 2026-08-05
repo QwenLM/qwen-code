@@ -16,7 +16,11 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { scheduleReverseAuditRound } from './retirement.js';
-import { promptRecordDir, recordPrompt } from './prompt-record.js';
+import {
+  promptRecordDir,
+  recordPrompt,
+  writeFindingsFile,
+} from './prompt-record.js';
 import { REVERSE_AUDIT_EXAMPLE_RECEIPT } from './agent-briefs.js';
 
 // Direct unit coverage for the scheduler's own rules — the classifier's
@@ -715,6 +719,61 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     const r3 = schedule(3, [13]);
     expect(r3.due).toEqual([]);
     expect(r3.skipped.map((s) => s.chunkId)).toEqual([13]);
+  });
+
+  it('quoting a WHOLE entry from the findings FILE is not a yield (post-#8597 shape)', () => {
+    // Since #8597 the cumulative list rides a digest-named `.findings.md`
+    // file the launch prompt points at, not the prompt itself. The echo
+    // guard must read the list back from that file: quoting the whole entry
+    // the auditor was told not to re-report is still not a yield.
+    const quoted =
+      'The list already carries this entry, so it is not re-reported:\n' +
+      '- **File:** src/pay.ts:42\n' +
+      '- **Severity:** Suggestion\n\n' +
+      DRY;
+    for (const r of [1, 2]) {
+      const findingsFile = writeFindingsFile(
+        plan,
+        `reverse-audit--round-${r}--abc123`,
+        '- **File:** src/pay.ts:42 — the double charge\n' +
+          '- **Severity:** Suggestion\n',
+      );
+      const built = record(
+        r,
+        13,
+        `chunk 13 round ${r} territory\n` +
+          `read_file(file_path="${findingsFile}")`,
+      );
+      transcript(built, quoted);
+    }
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([]);
+    expect(r3.skipped.map((s) => s.chunkId)).toEqual([13]);
+  });
+
+  it('a MISSING findings file fails toward auditing — the quotation reads as a yield', () => {
+    // The pointer is there but the list is gone (a cleaned-up record dir):
+    // the guard falls back to the prompt, no entry matches, and the quoted
+    // block keeps the chunk hot — the module's failure direction.
+    const quoted =
+      'The list already carries this entry, so it is not re-reported:\n' +
+      '- **File:** src/pay.ts:42\n' +
+      '- **Severity:** Suggestion\n\n' +
+      DRY;
+    for (const r of [1, 2]) {
+      const built = record(
+        r,
+        13,
+        `chunk 13 round ${r} territory\n` +
+          `read_file(file_path="${join(dir, 'gone.findings.md')}")`,
+      );
+      transcript(built, quoted);
+    }
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.converged).toBe(false);
   });
 
   it('a cold check nobody certified puts the chunk back on the every-round schedule', () => {

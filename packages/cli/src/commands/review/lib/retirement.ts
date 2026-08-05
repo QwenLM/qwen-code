@@ -36,7 +36,7 @@
 // The failure mode of a bug in this file is the old behaviour (audit every
 // territory every round), never a skipped one.
 
-import { statSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { readTranscripts, type AgentRecord } from './transcripts.js';
 import { REVERSE_AUDIT_EXAMPLE_RECEIPT } from './agent-briefs.js';
 import {
@@ -103,13 +103,13 @@ const REVERSE_AUDIT_MARKER = 'reverse-audit';
  * prompt bakes no read, where the bar falls back to "opened the diff at
  * all" — a shape this module's own records never have.
  *
- * The scan is bound to the diff's own path because the record is the FOLDED
- * launch prompt — the cumulative findings list rides inside it, verbatim,
- * above the builder's own text — and findings prose quoting ANY
- * `offset=N, limit=M` pair (a read_file call under discussion, this very
- * file in a diff) would otherwise inject its range into the territory.
+ * The scan is bound to the diff's own path because the prompt carries other
+ * `read_file` lines — the brief, the findings list file — and prose quoting
+ * ANY `offset=N, limit=M` pair (a read_file call under discussion, this very
+ * file in a diff) would otherwise inject its range into the territory. When
+ * the findings list was folded into the prompt verbatim it did exactly that:
  * `openedTheTerritory` passes on ANY overlap with ANY range, so an injected
- * range can only WIDEN the bar: an auditor whose only diff read was lines
+ * range can only WIDEN the bar — an auditor whose only diff read was lines
  * 1-50 would retire a chunk whose territory is 1001-1200 the moment a
  * finding quoted `offset=0, limit=50` — the same range-blind hole the
  * territory check exists to close, reopened by honest findings. Only a read
@@ -140,15 +140,15 @@ const FILE_LINE_RE = /\*\*File:\*\*\s*([^\n]*)/g;
 
 /**
  * The other half of a filed finding. A `**File:**` line alone is not proof
- * the auditor FILED anything: the cumulative list is folded into its launch
- * prompt, and an auditor explaining "already covered, not re-reporting" can
- * echo an entry's file line into its return. Every finding actually filed
- * carries the full block the format mandates — severity included — so the
- * pair is what distinguishes a report from a bare file-line echo; a
- * quotation of a WHOLE entry is caught in `classifyReturn`, where the
- * launch prompt carrying the cumulative list is on hand. Misreading an echo
- * as `yielded` is cost, not corruption (the chunk just stays hot), but it is
- * exactly the cost this module exists to stop paying.
+ * the auditor FILED anything: the auditor was launched against a cumulative
+ * findings list (a `.findings.md` file its prompt points at), and an auditor
+ * explaining "already covered, not re-reporting" can echo an entry's file
+ * line into its return. Every finding actually filed carries the full block
+ * the format mandates — severity included — so the pair is what
+ * distinguishes a report from a bare file-line echo; a quotation of a WHOLE
+ * entry is caught in `classifyReturn`, where the list is on hand. Misreading
+ * an echo as `yielded` is cost, not corruption (the chunk just stays hot),
+ * but it is exactly the cost this module exists to stop paying.
  */
 const SEVERITY_LINE_RE = /\*\*Severity:\*\*/;
 
@@ -237,6 +237,27 @@ function substantiveClause(clause: string): boolean {
 }
 
 /**
+ * The cumulative findings list an auditor was launched against. Since #8597
+ * the list rides a digest-named `.findings.md` file the launch prompt points
+ * at — read it back; a prompt with no pointer predates the file shape (or its
+ * file is gone), and the prompt itself is the fallback, which is where the
+ * list lived before. An unreadable file degrades to the prompt: no entry
+ * matches there, a quotation counts as a yield, and the chunk stays hot —
+ * every failure in this module lands on the audit side.
+ */
+function findingsListOf(launchPrompt: string): string {
+  const m = /read_file\(file_path="([^"]*\.findings\.md)"\)/.exec(launchPrompt);
+  if (m) {
+    try {
+      return readFileSync(m[1], 'utf8');
+    } catch {
+      // Fall through to the prompt.
+    }
+  }
+  return launchPrompt;
+}
+
+/**
  * Classify one auditor's return.
  *
  * `yielded` outranks everything: a return that files a finding against a
@@ -263,15 +284,17 @@ function classifyReturn(
     for (const m of text.matchAll(FILE_LINE_RE)) {
       const file = (m[1] ?? '').trim();
       if (file === '' || /^N\/A\b/i.test(file)) continue;
-      // The cumulative list rides in this agent's own launch prompt,
-      // folded verbatim, and every entry in it is a full block — File
-      // AND Severity. An auditor explaining "already covered, not
-      // re-reporting" can quote one whole, and the quotation must not
-      // read as a filing: an entry whose exact file line is already on
-      // the list cannot be a new finding against it. Skipping costs an
-      // audit at most; counting a quotation re-opens the never-retire
-      // direction on the loop's most common honest return.
-      if (rec.launchPrompt.includes(`**File:** ${file}`)) continue;
+      // The cumulative list is on hand for this agent: since #8597 it rides
+      // a digest-named findings file the launch prompt points at (before, it
+      // was folded into the prompt verbatim), and every entry in it is a full
+      // block — File AND Severity. An auditor explaining "already covered,
+      // not re-reporting" can quote one whole, and the quotation must not
+      // read as a filing: an entry whose exact file line is already on the
+      // list cannot be a new finding against it. Skipping costs an audit at
+      // most; counting a quotation re-opens the never-retire direction on
+      // the loop's most common honest return.
+      if (findingsListOf(rec.launchPrompt).includes(`**File:** ${file}`))
+        continue;
       return 'yielded';
     }
   }
