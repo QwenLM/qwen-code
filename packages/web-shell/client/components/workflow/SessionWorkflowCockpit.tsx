@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
+  ArrowLeft,
   CircleAlert,
   GitBranch,
   LayoutDashboard,
-  MessageSquareText,
 } from 'lucide-react';
 import type {
   DaemonSessionAgentTaskStatus,
@@ -167,53 +167,57 @@ function PlanReview({
   return (
     <div className={styles.reviewShell} data-testid="cockpit-plan-review">
       <header className={styles.reviewTopbar}>
-        <div className={styles.brandLockup}>
-          <span className={styles.brandMark} aria-hidden="true" />
-          <span>Session Cockpit</span>
+        <div className={styles.pageIdentity}>
+          <button
+            className={styles.backButton}
+            aria-label="返回 Chat"
+            onClick={onBackToChat}
+            title="返回 Chat"
+            type="button"
+          >
+            <ArrowLeft aria-hidden="true" />
+          </button>
+          <div>
+            <strong>执行前计划确认</strong>
+            <span>{sessionName || '当前协作任务'}</span>
+          </div>
         </div>
-        <span className={styles.reviewTopTitle}>执行前计划确认</span>
-        <button
-          className={styles.darkButton}
-          onClick={onBackToChat}
-          type="button"
-        >
-          返回 Chat
-        </button>
+        <span className={styles.reviewState}>等待确认</span>
       </header>
       <div className={styles.reviewBody}>
-        <aside className={styles.reviewSteps}>
-          <div className={styles.reviewEyebrow}>PLAN &amp; REVIEW</div>
-          <h1>把目标交给 Agent 团队</h1>
-          <p>确认任务图和执行边界后，系统才会退出 Plan Mode。</p>
-          {[
-            ['01', '描述目标', '目标已进入当前 Session'],
-            ['02', '确认理解', '模型已完成只读分析'],
-            ['03', '预览计划', '检查节点、依赖与并行关系'],
-            ['04', '授权并启动', '确认后才开始执行'],
-          ].map(([number, title, copy], index) => (
-            <div
-              className={`${styles.reviewStep} ${
-                index < completedContextSteps
-                  ? styles.reviewStepDone
-                  : index === completedContextSteps
-                    ? styles.reviewStepActive
-                    : ''
-              } ${index === 3 ? styles.reviewStepLast : ''}`}
-              key={number}
-            >
-              <span>{index < completedContextSteps ? '✓' : number}</span>
-              <div>
-                <strong>{title}</strong>
-                <small>{copy}</small>
-              </div>
-            </div>
-          ))}
-          <div className={styles.reviewTip}>
-            <strong>执行门禁仍由 Plan Mode 提供</strong>
-            驾驶舱只负责解释和确认，不承担调度。
-          </div>
-        </aside>
         <main className={styles.reviewMain}>
+          <section className={styles.reviewSteps}>
+            <div className={styles.reviewStepsIntro}>
+              <div className={styles.reviewEyebrow}>PLAN &amp; REVIEW</div>
+              <strong>从目标到执行</strong>
+              <span>确认计划后才会退出 Plan Mode</span>
+            </div>
+            <div className={styles.reviewStepList}>
+              {[
+                ['01', '描述目标', '目标已进入当前 Session'],
+                ['02', '确认理解', '模型已完成只读分析'],
+                ['03', '预览计划', '检查节点、依赖与并行关系'],
+                ['04', '授权并启动', '确认后才开始执行'],
+              ].map(([number, title, copy], index) => (
+                <div
+                  className={`${styles.reviewStep} ${
+                    index < completedContextSteps
+                      ? styles.reviewStepDone
+                      : index === completedContextSteps
+                        ? styles.reviewStepActive
+                        : ''
+                  }`}
+                  key={number}
+                >
+                  <span>{index < completedContextSteps ? '✓' : number}</span>
+                  <div>
+                    <strong>{title}</strong>
+                    <small>{copy}</small>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
           <div className={styles.reviewHeading}>
             <div>
               <span>STEP 03 · EXECUTION GRAPH</span>
@@ -408,12 +412,24 @@ export function SessionWorkflowCockpit({
     <div className={styles.cockpit} data-testid="session-workflow-cockpit">
       <main className={styles.main}>
         <header className={styles.topbar}>
-          <div className={styles.topbarCrumb}>
-            <span>Session Workflow</span>
-            <i>/</i>
-            <strong>
-              {section === 'task' ? sessionName || '当前 Session' : '待我处理'}
-            </strong>
+          <div className={styles.pageIdentity}>
+            <button
+              className={styles.backButton}
+              aria-label="返回 Chat"
+              onClick={onBackToChat}
+              title="返回 Chat"
+              type="button"
+            >
+              <ArrowLeft aria-hidden="true" />
+            </button>
+            <div>
+              <strong>Session Workflow</strong>
+              <span>
+                {section === 'task'
+                  ? sessionName || '当前 Session'
+                  : '待我处理'}
+              </span>
+            </div>
           </div>
           <nav aria-label="驾驶舱视图" className={styles.cockpitTabs}>
             <button
@@ -446,10 +462,6 @@ export function SessionWorkflowCockpit({
               <i />
               daemon {connected ? 'connected' : 'reconnecting'}
             </span>
-            <button onClick={onBackToChat} type="button">
-              <MessageSquareText aria-hidden="true" />
-              <span>返回 Chat</span>
-            </button>
           </div>
         </header>
 
