@@ -2137,23 +2137,25 @@ describe('qwen-autofix workflow', () => {
       'node "${RUNNER_TEMP}/validate-autofix-verification-outputs.mjs"',
       buildIndex,
     );
+    const contractGateIndex = issueAutofixVerifyJob.indexOf(
+      'bash "${RUNNER_TEMP}/check-autofix-contracts.sh"',
+      outputAuditIndex,
+    );
+    const packageTestsIndex = issueAutofixVerifyJob.indexOf(
+      'npm run test --workspace',
+      contractGateIndex,
+    );
     const finalizeIndex = issueAutofixVerifyJob.indexOf(
       '"${GITHUB_WORKSPACE}" finalize',
+      packageTestsIndex,
     );
     const schemaGateIndex = issueAutofixVerifyJob.indexOf(
       'check-settings-schema.sh',
       finalizeIndex,
     );
-    const contractGateIndex = issueAutofixVerifyJob.indexOf(
-      'check-autofix-contracts.sh',
-      finalizeIndex,
-    );
-    const packageTestsIndex = issueAutofixVerifyJob.indexOf(
-      'npm run test --workspace',
-    );
     const cleanupIndex = issueAutofixVerifyJob.indexOf(
       '"${GITHUB_WORKSPACE}" cleanup',
-      packageTestsIndex,
+      finalizeIndex,
     );
     const finalOutputAuditIndex = issueAutofixVerifyJob.indexOf(
       'node "${RUNNER_TEMP}/validate-autofix-verification-outputs.mjs"',
@@ -2164,11 +2166,20 @@ describe('qwen-autofix workflow', () => {
     expect(dependencySealIndex).toBeGreaterThan(installIndex);
     expect(buildIndex).toBeGreaterThan(dependencySealIndex);
     expect(outputAuditIndex).toBeGreaterThan(buildIndex);
-    expect(finalizeIndex).toBeGreaterThan(outputAuditIndex);
+    // Vitest-based gates run BEFORE the finalize seal: Vite bundles each
+    // package's TypeScript vitest config into a temp file next to the
+    // config, which EACCESes once every directory is read-only for the
+    // verifier UID. Coverage and JUnit reporting are disabled for the same
+    // runs because the ignored artifacts they write would fail the
+    // post-test output audit.
+    expect(contractGateIndex).toBeGreaterThan(outputAuditIndex);
+    expect(packageTestsIndex).toBeGreaterThan(contractGateIndex);
+    expect(issueAutofixVerifyJob).toContain(
+      '--changed "${base_oid}" --passWithNoTests --coverage.enabled=false --reporter=default',
+    );
+    expect(finalizeIndex).toBeGreaterThan(packageTestsIndex);
     expect(schemaGateIndex).toBeGreaterThan(finalizeIndex);
-    expect(contractGateIndex).toBeGreaterThan(finalizeIndex);
-    expect(packageTestsIndex).toBeGreaterThan(finalizeIndex);
-    expect(cleanupIndex).toBeGreaterThan(packageTestsIndex);
+    expect(cleanupIndex).toBeGreaterThan(finalizeIndex);
     expect(finalOutputAuditIndex).toBeGreaterThan(cleanupIndex);
     expect(issueAutofixVerifyJob).toContain(
       'git status --porcelain --untracked-files=normal',
@@ -7223,6 +7234,9 @@ printf '%s\\n' "\${status}"
     expect(autofixContractsScript).toContain(
       'client/components/messages/toolFormatting.drift.test.ts',
     );
+    expect(autofixContractsScript).toContain(
+      '--coverage.enabled=false --reporter=default',
+    );
     expect(autofixContractsScript).toContain('outcome=failed');
     expect(ciWorkflow).toContain("run: 'npm run check-i18n'");
     expect(ciWorkflow).toContain('npm run test:ci');
@@ -7267,7 +7281,7 @@ printf '%s\\n' "\${status}"
       expect(run('packages/core/src/tools/tool-names.ts\n').status).toBe(0);
       expect(readFileSync(npmLog, 'utf8').trim().split('\n')).toEqual([
         'run check-i18n',
-        'run test --workspace packages/web-shell -- client/components/messages/toolFormatting.drift.test.ts',
+        'run test --workspace packages/web-shell -- client/components/messages/toolFormatting.drift.test.ts --coverage.enabled=false --reporter=default',
       ]);
 
       writeFileSync(npmLog, '');

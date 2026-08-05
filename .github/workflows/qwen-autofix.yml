@@ -1486,7 +1486,7 @@ jobs:
             {
               echo 'agent_declined=true'
               echo "agent_detail<<${delim}"
-              head -c 1500 "${WORKDIR}/failure.md" | iconv -f utf-8 -t utf-8 -c
+              head -c 1500 "${WORKDIR}/failure.md" | iconv -f utf-8 -t utf-8 -c || true
               echo
               echo "${delim}"
             } >> "${GITHUB_OUTPUT}"
@@ -1712,11 +1712,17 @@ jobs:
           "${verify_cmd}" "${GITHUB_WORKSPACE}" npm run typecheck
           "${verify_cmd}" "${GITHUB_WORKSPACE}" npm run lint
           node "${RUNNER_TEMP}/validate-autofix-verification-outputs.mjs"
-          "${RUNNER_TEMP}/prepare-autofix-verification-worktree.sh" \
-            "${GITHUB_WORKSPACE}" finalize
-          AUTOFIX_VERIFY_COMMAND="${verify_cmd}" \
-            bash "${RUNNER_TEMP}/check-settings-schema.sh"
           base_oid='${{ steps.candidate.outputs.base_oid }}'
+          # The Vitest-based gates run before the finalize seal: Vite loads
+          # each package's TypeScript vitest config by bundling it into a
+          # `<config>.timestamp-*.mjs` temp file next to the config, which
+          # EACCESes once finalize makes every directory read-only for the
+          # unprivileged verifier UID. Coverage and JUnit reporting are
+          # disabled for these runs because the ignored artifacts they write
+          # would fail the post-test output audit. Tracked files and sealed
+          # dependencies remain non-writable throughout, and the audit
+          # repeated after the seal still fails closed on anything left
+          # behind.
           git diff --name-only "${base_oid}...HEAD" \
             | AUTOFIX_VERIFY_COMMAND="${verify_cmd}" \
               bash "${RUNNER_TEMP}/check-autofix-contracts.sh"
@@ -1732,10 +1738,14 @@ jobs:
               test_script="$(node -e 'const fs = require("node:fs"); const pkg = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(pkg.scripts?.test || "");' "${p}/package.json")"
               if [[ "${test_script}" == *vitest* ]]; then
                 "${verify_cmd}" "${GITHUB_WORKSPACE}" \
-                  npm run test --workspace "${p}" --if-present -- --changed "${base_oid}" --passWithNoTests
+                  npm run test --workspace "${p}" --if-present -- --changed "${base_oid}" --passWithNoTests --coverage.enabled=false --reporter=default
               fi
             done
           fi
+          "${RUNNER_TEMP}/prepare-autofix-verification-worktree.sh" \
+            "${GITHUB_WORKSPACE}" finalize
+          AUTOFIX_VERIFY_COMMAND="${verify_cmd}" \
+            bash "${RUNNER_TEMP}/check-settings-schema.sh"
           "${RUNNER_TEMP}/prepare-autofix-verification-worktree.sh" \
             "${GITHUB_WORKSPACE}" cleanup
           node "${RUNNER_TEMP}/validate-autofix-verification-outputs.mjs"

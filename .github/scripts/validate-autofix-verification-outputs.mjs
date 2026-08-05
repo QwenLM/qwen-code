@@ -42,11 +42,12 @@ export function isProtectedVerificationPath(file) {
     file.endsWith('/package-lock.json') ||
     file.endsWith('/npm-shrinkwrap.json') ||
     /(^|\/)tsconfig(?:\.[^/]+)?\.json$/.test(file) ||
-    /(^|\/)(?:test|tests|__tests__|test-utils|fixtures|__fixtures__|mocks|__mocks__)\//.test(
+    /(^|\/)(?:test|tests|__tests__|test-utils|fixtures|__fixtures__|mocks|__mocks__|acceptance)\//.test(
       file,
     ) ||
     /(^|\/)node_modules(?:\/|$)/.test(file) ||
-    /(^|\/)[^/]+\.(?:test|spec)\.[cm]?[jt]sx?$/.test(file) ||
+    /(^|\/)[^/]+\.(?:test|spec|test-helper)\.[cm]?[jt]sx?$/.test(file) ||
+    /(^|\/)test-utils\.[cm]?[jt]sx?$/.test(file) ||
     /(^|\/)__snapshots__\//.test(file) ||
     /(^|\/)(?:test-setup|setup-tests?)\.[cm]?[jt]sx?$/.test(file) ||
     /(^|\/)(?:build|esbuild)\.(?:[cm]?[jt]s|sh)$/.test(file) ||
