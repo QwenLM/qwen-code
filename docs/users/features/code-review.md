@@ -240,7 +240,7 @@ Maintainers typically point it at the repo under review; anyone else can use a f
 
 For GitHub-triggered reviews (the PR-review workflow), the same variable is wired from a **repository variable** of the same name: with the variable unset the workflow passes an empty value and publishing refuses — nothing changes. A maintainer who sets `QWEN_REVIEW_ASSETS_REPO` in the repository's Actions variables (typically to the repository itself) enables review comments to embed capture PNGs; the branches it writes are cleaned up by the visuals cleanup workflow when the variable points at the same repository, while a fork or scratch destination manages its own retention.
 
-The publishing is gated exactly like posting: no designated repo means no publish, and an unauthorized run (no effective `--comment`) is refused the same way `submit` refuses. Only image types are accepted (SVG is excluded deliberately), with size caps, and a manifest records every file pushed. Without a designation, findings keep their evidence as local file paths in the terminal and saved report — nothing breaks, comments just stay text-only.
+The publishing is gated exactly like posting: no designated repo means no publish, and an unauthorized run (no effective `--comment`) is refused the same way `submit` refuses. Only image types are accepted (SVG is excluded deliberately), with size caps, and each file's bytes must match the format its extension claims — mislabeled or unrecognized content is refused. A manifest records every file pushed. Without a designation, findings keep their evidence as local file paths in the terminal and saved report — nothing breaks, comments just stay text-only.
 
 ## Follow-up Actions
 
@@ -353,6 +353,8 @@ The exit code is the contract a gate should read:
 | `3`  | It completed with `REQUEST_CHANGES` **and** `--fail-on request-changes` was set (opt-in blocking) |
 
 `3` (not `2`) lets a gate distinguish "the review is blocking" from "the tool broke" — yargs already uses `1` for usage errors — without parsing any output. `--timeout-minutes` (default 120, floored at 1) terminates a hung review and exits `1`, and cancelling the command (Ctrl+C / SIGTERM) terminates the review's process group rather than orphaning it.
+
+A time-budgeted run can also export a **soft** deadline so the review stops its open-ended reverse-audit loop while there is still time to verify, compose and post: `QWEN_REVIEW_DEADLINE_EPOCH` is the Unix-seconds moment the run will be killed, and `QWEN_REVIEW_DEADLINE_RESERVE_SECONDS` (default 3600; `0` keeps only the round estimate) is the tail that must remain for the last round's verification, `compose-review` and submission. When the remaining budget no longer fits another round plus that tail, the round builder refuses to build it, and the composed verdict discloses the truncated audit (an otherwise-Approve verdict is capped at Comment). A missing or malformed deadline leaves the review ungated — the outer timeout still bounds the run.
 
 ## Cross-file Impact Analysis
 

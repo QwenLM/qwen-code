@@ -18,6 +18,10 @@ import type {
 import type { OpenAIResponseParsingOptions } from '../responseParsingOptions.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 import { createDebugLogger } from '../../../utils/debugLogger.js';
+import {
+  isQwenFamilyWireModel,
+  isTieredEffortWireModel,
+} from '../../modalityDefaults.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 
 const debugLogger = createDebugLogger('DashScopeOpenAICompatibleProvider');
@@ -234,6 +238,9 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       string,
       unknown
     >;
+    // A request-level reasoning_effort (samplingParams) beats the config
+    // tier: dashscopeExtras is spread after requestWithTokenLimits below, so
+    // without this copy the tier would clobber the request-level override.
     if (
       'reasoning_effort' in requestParams &&
       'reasoning_effort' in qwenEffortConfig
@@ -265,10 +272,11 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       if (hasQwenEffortConfig && 'reasoning' in visionResult) {
         delete visionResult['reasoning'];
       }
-      return {
-        ...visionResult,
-        ...(extraBody ? extraBody : {}),
-      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+      return this.mergeExtraBodyAndResolveKnobs(
+        visionResult,
+        extraBody,
+        request.model,
+      );
     }
 
     // DashScope-exclusive fields not present in the OpenAI SDK types; user
@@ -290,12 +298,39 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     if (hasQwenEffortConfig && 'reasoning' in result) {
       delete result['reasoning'];
     }
-    return {
-      ...result,
-      ...(extraBody ? extraBody : {}),
-    } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+    return this.mergeExtraBodyAndResolveKnobs(result, extraBody, request.model);
   }
 
+  /**
+   * Shared tail for the vision and text branches: merge user extra_body
+   * last, then resolve thinking-knob conflicts against the wire model.
+   */
+  private mergeExtraBodyAndResolveKnobs(
+    result: Record<string, unknown>,
+    extraBody: Record<string, unknown> | undefined,
+    model: string | undefined,
+  ): OpenAI.Chat.ChatCompletionCreateParams {
+    const merged: Record<string, unknown> = {
+      ...result,
+      ...(extraBody ? extraBody : {}),
+    };
+    this.dropConflictingThinkingKnobs(model, merged);
+    return merged as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+  }
+
+  private resolveWireModel(model: string | undefined): string {
+    return (model ?? this.contentGeneratorConfig.model ?? '').toLowerCase();
+  }
+
+  /**
+   * Translate the unified reasoning effort into the wire shape the model
+   * accepts. The qwen3.8-max family takes the tiered `reasoning_effort`
+   * directly; older qwen hybrid models expose only the on/off
+   * `enable_thinking` switch, so the effort ladder collapses to on/off
+   * there. Gated to qwen-family wire models (mirroring the pipeline's
+   * disable gate) so the qwen-specific fields never leak to a non-qwen
+   * model sharing the DashScope endpoint.
+   */
   private buildQwenEffortConfig(
     model: string | undefined,
   ): Record<string, unknown> {
@@ -303,19 +338,87 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     if (!reasoning || reasoning.effort === undefined) {
       return {};
     }
-    const wireModel = (
-      model ??
-      this.contentGeneratorConfig.model ??
-      ''
-    ).toLowerCase();
-    if (wireModel === 'qwen3.8-max' || wireModel === 'qwen3.8-max-preview') {
+    const wireModel = this.resolveWireModel(model);
+    if (isTieredEffortWireModel(wireModel)) {
       return { reasoning_effort: reasoning.effort };
     }
-    if (wireModel.startsWith('qwen') || wireModel === 'coder-model') {
+    if (isQwenFamilyWireModel(wireModel)) {
       return { enable_thinking: true };
     }
     return {};
   }
+
+  /**
+   * Resolve thinking knobs that conflict with a shipping `reasoning_effort`.
+   * Preset extra_body injects `enable_thinking` for models declared with
+   * enableThinking (provider-config.ts), and user extra_body merges last.
+   * Only the qwen3.8-max family reads `reasoning_effort` itself — there the
+   * tier ships alone: an `enable_thinking: true` alongside it is a second
+   * competing knob (the shape the nested-`reasoning` strip in buildRequest
+   * exists to prevent), and DashScope rejects `reasoning_effort` combined
+   * with `thinking_budget`. An explicit `enable_thinking: false` is the
+   * documented extra_body escape hatch winning over the config tier, so it
+   * is honoured as the family's canonical disable (`reasoning_effort:
+   * 'none'`, preserved by the pipeline's disable strip) rather than
+   * silently deleted. Older qwen hybrids read `enable_thinking` /
+   * `thinking_budget`, not `reasoning_effort`, so when an opaque
+   * reasoning_effort override conflicts with a meaningful thinking_budget
+   * the inert field goes and the knobs the model reads survive. Non-qwen
+   * models treat `reasoning_effort` as an opaque sampling override and
+   * keep every knob.
+   */
+  private dropConflictingThinkingKnobs(
+    model: string | undefined,
+    merged: Record<string, unknown>,
+  ): void {
+    const effort = merged['reasoning_effort'];
+    // Value check, not presence: 'none' is an explicit disable that stays on
+    // the wire (same semantics as the pipeline's reasoning_effort guards),
+    // not a tier that overrides the thinking knobs.
+    if (typeof effort !== 'string' || effort === 'none') {
+      return;
+    }
+    const wireModel = this.resolveWireModel(model);
+    if (!isQwenFamilyWireModel(wireModel)) {
+      return;
+    }
+    const dropped: string[] = [];
+    if (isTieredEffortWireModel(wireModel)) {
+      if ('enable_thinking' in merged) {
+        if (merged['enable_thinking'] === false) {
+          merged['reasoning_effort'] = 'none';
+        }
+        dropped.push('enable_thinking');
+      }
+      if ('thinking_budget' in merged) {
+        dropped.push('thinking_budget');
+      }
+    } else if ('thinking_budget' in merged) {
+      dropped.push('reasoning_effort');
+    }
+    if (dropped.length === 0) {
+      return;
+    }
+    for (const key of dropped) {
+      delete merged[key];
+    }
+    // Warn (not debug): this discards keys the user supplied through
+    // extra_body, the documented escape hatch. Once per generator so a
+    // persistent conflict doesn't spam every request.
+    if (!this.conflictingKnobDropWarned) {
+      this.conflictingKnobDropWarned = true;
+      debugLogger.warn(
+        'DashScope: dropped extra_body thinking knobs that conflict with reasoning_effort',
+        {
+          model: wireModel,
+          reasoningEffort: merged['reasoning_effort'],
+          dropped,
+        },
+      );
+    }
+  }
+
+  private conflictingKnobDropWarned = false;
 
   buildMetadata(userPromptId: string): DashScopeRequestMetadata {
     const channel = this.cliConfig.getChannel?.();
