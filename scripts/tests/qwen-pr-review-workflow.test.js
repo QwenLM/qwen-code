@@ -443,6 +443,24 @@ const okTarStub = [
   'printf \'#!/bin/bash\\necho "freeze ${FREEZE_VERSION}"\\n\' > "$dest/freeze_x/freeze"',
   'chmod +x "$dest/freeze_x/freeze"',
 ].join('\n');
+// okTarStub's lying twin: the extracted binary REPORTS whatever version
+// the scenario names. The report probes only the freeze this step installs,
+// so the version-regex boundary coverage must ride in the promoted bytes.
+function lyingVersionTarStub(reportedVersion) {
+  return [
+    'src=""; dest=""; prev=""',
+    'for a in "$@"; do',
+    '  [ "$prev" = "-xzf" ] && src="$a"',
+    '  [ "$prev" = "-C" ] && dest="$a"',
+    '  prev="$a"',
+    'done',
+    '[ -f "$src" ] || exit 1',
+    'mkdir -p "$dest/freeze_x"',
+    `printf '#!/bin/bash\\necho "freeze ${reportedVersion}"\\n' > "$dest/freeze_x/freeze"`,
+    'chmod +x "$dest/freeze_x/freeze"',
+  ].join('\n');
+}
+
 // Extracts "nothing": the tarball checksum passes but the archive holds no
 // freeze binary.
 const noBinTarStub = [
@@ -669,9 +687,12 @@ describe('capture-tools install step (real bash, stubbed binaries)', () => {
     expect(r.calls).toContain('--connect-timeout 10 --max-time 90');
     expect(r.promotedFreezeExists).toBe(false);
     expect(r.cacheFreezeExists).toBe(false);
-    // A freeze whose --version produces nothing is broken, not stale — the
-    // report says so instead of echoing a blank version line.
-    expect(r.stdout).toContain('produced no version output');
+    // Nothing verified installed, and the default stub world keeps a freeze
+    // on PATH — the report names that risk without executing the plant.
+    expect(r.stdout).toContain('no verified freeze installed');
+    // A run that installs nothing must not prepend an empty dir to the
+    // job's PATH.
+    expect(r.ghPath).not.toContain('qwen-review-tools.');
     // A failed download still cleans its scratch dir: cleanup moved inside
     // the success branch leaks it on every dead-network run.
     expect(r.leakedTmpEntries).toStrictEqual([]);
@@ -708,9 +729,10 @@ describe('capture-tools install step (real bash, stubbed binaries)', () => {
     // never run again.
     expect(r.calls).toContain('uname -sm');
     // The full flag set: dropping `-L` leaves curl writing 0 bytes of a 302
-    // redirect, which the checksum stage then blames on the pin/SHA pair.
+    // redirect, which the checksum stage then blames on the pin/SHA pair;
+    // --retry-connrefused covers the refusals --retry alone ignores.
     expect(r.calls).toContain(
-      'curl -fsSL --retry 2 --connect-timeout 10 --max-time 90 -o',
+      'curl -fsSL --retry 2 --retry-connrefused --connect-timeout 10 --max-time 90 -o',
     );
     // The pairing later steps depend on: the executable binary IN the dir
     // GITHUB_PATH names, holding nothing else — one without the other and
@@ -828,42 +850,84 @@ echo "freeze \${FREEZE_VERSION}"
     }
   });
 
-  it('downloads even with a freeze already on PATH, and names a wrong resolved version', () => {
+  it('downloads even with a freeze already on PATH, and warns of it without executing it', () => {
     // PATH presence never satisfies the pin — the checksummed download runs
     // regardless (the removed trust branch accepted a self-reported
-    // version). When the download fails, later steps still resolve the
-    // wrong freeze on PATH — the report must say so.
+    // version). When the download fails, later steps still resolve the PATH
+    // freeze; the report says so WITHOUT executing it — probing --version
+    // is exactly the execution the trust model forbids.
     const r = runCaptureToolsStep({
       stubs: { freeze: 'echo "freeze version 0.0.1"' },
     });
     expect(r.status).toBe(0);
     expect(r.calls).toContain('curl ');
-    expect(r.stdout).toContain('not the pinned');
+    expect(r.stdout).toContain('no verified freeze installed');
+    // The stub's version line reaches stdout only if the report executed
+    // it — absence is the non-execution proof.
+    expect(r.stdout).not.toContain('freeze version 0.0.1');
   });
 
-  it('the report rejects a resolved version that merely CONTAINS the pin', () => {
+  it('the report rejects an installed freeze whose version merely CONTAINS the pin', () => {
     // A downgrade (0.2.20 -> 0.2.2): the newer version contains the older
     // pin as a substring, so an unanchored grep matched it and silently
-    // voided the pin. The digit-bounded regex now guards the report's
-    // warning — a substring match would silence the very degradation the
-    // report exists to surface.
+    // voided the pin. The digit-bounded regex guards the report's warning —
+    // a substring match would silence the very degradation the report
+    // exists to surface. The report probes only the installed freeze, so
+    // the lying version ships in the extracted binary itself.
     const r = runCaptureToolsStep({
-      stubs: { freeze: 'echo "freeze version ${FREEZE_VERSION}0"' },
+      stubs: {
+        curl: okCurlStub,
+        sha256sum: okSha256Stub,
+        tar: lyingVersionTarStub('${FREEZE_VERSION}0'),
+      },
     });
     expect(r.status).toBe(0);
-    expect(r.calls).toContain('curl ');
+    expect(r.promotedFreezeExists).toBe(true);
     expect(r.stdout).toContain('not the pinned');
   });
 
-  it('the report rejects a resolved version extending the pin with a leading digit', () => {
+  it('the report rejects an installed freeze extending the pin with a leading digit', () => {
     // Mirror of the CONTAINS case (pin 0.2.2, resolved 10.2.2): without the
     // LEFT digit boundary the grep matches and the warning is silenced.
     const r = runCaptureToolsStep({
-      stubs: { freeze: 'echo "freeze version 1${FREEZE_VERSION}"' },
+      stubs: {
+        curl: okCurlStub,
+        sha256sum: okSha256Stub,
+        tar: lyingVersionTarStub('1${FREEZE_VERSION}'),
+      },
     });
     expect(r.status).toBe(0);
-    expect(r.calls).toContain('curl ');
+    expect(r.promotedFreezeExists).toBe(true);
     expect(r.stdout).toContain('not the pinned');
+  });
+
+  it('the report names an installed freeze whose --version is silent', () => {
+    // A pinned release whose --version emits nothing is broken, not stale —
+    // the report says so instead of echoing a blank version line. The probe
+    // targets the installed freeze, so the silent binary ships in the
+    // promoted bytes.
+    const silentTarStub = [
+      'src=""; dest=""; prev=""',
+      'for a in "$@"; do',
+      '  [ "$prev" = "-xzf" ] && src="$a"',
+      '  [ "$prev" = "-C" ] && dest="$a"',
+      '  prev="$a"',
+      'done',
+      '[ -f "$src" ] || exit 1',
+      'mkdir -p "$dest/freeze_x"',
+      'printf \'#!/bin/bash\\nexit 0\\n\' > "$dest/freeze_x/freeze"',
+      'chmod +x "$dest/freeze_x/freeze"',
+    ].join('\n');
+    const r = runCaptureToolsStep({
+      stubs: {
+        curl: okCurlStub,
+        sha256sum: okSha256Stub,
+        tar: silentTarStub,
+      },
+    });
+    expect(r.status).toBe(0);
+    expect(r.promotedFreezeExists).toBe(true);
+    expect(r.stdout).toContain('produced no version output');
   });
 
   it('never executes a freeze already on PATH — even one REPORTING the pinned version', () => {
@@ -1066,9 +1130,14 @@ echo "freeze \${FREEZE_VERSION}"
     // The hosted-runner shape: sudo works. The default stubs pin sudo to
     // exit 1, so before this scenario no test ever executed the apt branch
     // and a regression breaking it shipped green while tmux stayed missing.
+    // The sudo stub EXECs what it is given, so apt-get really runs: a sudo
+    // that swallowed its arguments would log success while tmux stayed out.
     const r = runCaptureToolsStep({
       stubs: {
-        sudo: 'exit 0',
+        sudo: ['if [ "${1:-}" = "-n" ]; then shift; fi', 'exec "$@"'].join(
+          '\n',
+        ),
+        'apt-get': 'exit 0',
         curl: okCurlStub,
         sha256sum: okSha256Stub,
         tar: okTarStub,
@@ -1078,6 +1147,9 @@ echo "freeze \${FREEZE_VERSION}"
     expect(r.calls).toContain('sudo apt-get update -qq');
     expect(r.calls).toContain('sudo -n true');
     expect(r.calls).toContain('sudo apt-get install -y -qq tmux');
+    // Anchored without sudo's prefix: proof of the exec passthrough.
+    expect(r.calls).toMatch(/^apt-get update -qq$/m);
+    expect(r.calls).toMatch(/^apt-get install -y -qq tmux$/m);
     expect(r.calls).not.toContain('sudo install');
     expect(r.promotedFreezeExists).toBe(true);
   });
@@ -1085,9 +1157,9 @@ echo "freeze \${FREEZE_VERSION}"
 
 describe('capture-tools step wiring', () => {
   it('installs before the review step its PATH promotion exists for', () => {
-    // GITHUB_PATH entries and in-step PATH exports only reach LATER steps:
-    // moved below 'Run review', the installed freeze is invisible to the
-    // review while the install log still shows success. Above 'Resolve PR
+    // GITHUB_PATH entries only reach LATER steps: moved below 'Run review',
+    // the installed freeze is invisible to the review while the install log
+    // still shows success. Above 'Resolve PR
     // context', the step's if: reads an output that does not exist yet,
     // evaluates false, and the step is silently skipped on every run.
     const install = workflow.indexOf(
@@ -1122,19 +1194,24 @@ describe('capture-tools step wiring', () => {
   it('cleans stale per-run tool dirs before the next run creates one', () => {
     // The install step creates one qwen-review-tools.* dir per run under
     // RUNNER_TEMP and nothing else removes it; RUNNER_TEMP survives across
-    // jobs on the shared pool, so without this line every review run
-    // accumulates one dir + one Go binary on the runner, unbounded.
+    // jobs on the shared pool, so without this sweep every runner
+    // accumulates one dir + one Go binary per review run. The 240-minute
+    // age-gate spares live dirs if a RUNNER_TEMP is ever shared across
+    // concurrent jobs or runners — a sibling sweep deleting this run's
+    // promoted dir would silently degrade its captures.
     const doc = parse(workflow);
     const clean = doc.jobs['review-pr'].steps.find(
       (s) => s.name === 'Clean stale agent state',
     ).run;
-    expect(clean).toContain('rm -rf "$RUNNER_TEMP"/qwen-review-tools.*');
+    expect(clean).toContain(
+      'find "$RUNNER_TEMP" -maxdepth 1 -name \'qwen-review-tools.*\' -mmin +240 -exec rm -rf {} +',
+    );
   });
 
   it('names the download scratch dir for the stale-dir sweep', () => {
     // A step killed mid-download never runs the scratch dir's own cleanup;
-    // the next run's sweep is its only removal, so the mktemp template must
-    // match the sweep's glob in both the parent dir and the name prefix.
+    // the age-gated sweep is its only removal, so the mktemp template must
+    // match the sweep's -name pattern in both the parent dir and the prefix.
     const doc = parse(workflow);
     const install = doc.jobs['review-pr'].steps.find(
       (s) => s.name === 'Install capture tools (tmux + freeze)',
