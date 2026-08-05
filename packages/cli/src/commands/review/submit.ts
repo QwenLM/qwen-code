@@ -59,6 +59,11 @@ import {
   countInlineFindings,
   severityOf,
 } from './lib/inline-counts.js';
+import {
+  REVIEW_FOOTER_RE,
+  footerVersion,
+  reviewFooter,
+} from './lib/review-footer.js';
 
 /** The only events GitHub's Create Review API accepts. */
 const EVENTS = new Set(['APPROVE', 'REQUEST_CHANGES', 'COMMENT']);
@@ -121,6 +126,26 @@ interface ReviewPayload {
   /** Refused if present. The caller was trying to author the verdict. */
   event?: unknown;
   body?: unknown;
+}
+
+function normalizeInlineComments(
+  comments: ReviewComment[],
+  modelId: unknown,
+  cliVersion: string,
+): ReviewComment[] {
+  if (typeof modelId !== 'string' || modelId.trim() === '') return comments;
+  const footer = reviewFooter(modelId, cliVersion);
+  return comments.map((comment) =>
+    // An empty body stays empty: this runs BEFORE the consistency check, and
+    // a footer pasted onto '' would hide the emptiness from the refusal that
+    // names it ('has no body — an empty comment').
+    typeof comment.body === 'string' && comment.body.trim() !== ''
+      ? {
+          ...comment,
+          body: `${comment.body.replace(REVIEW_FOOTER_RE, '')}\n\n${footer}`,
+        }
+      : comment,
+  );
 }
 
 // The severity prefixes and the counting live in `lib/inline-counts.ts`,
@@ -220,6 +245,28 @@ function structuralProblems(payload: ReviewPayload): string[] {
   const problems: string[] = [];
 
   if (!payload.commit_id) problems.push('`commit_id` is missing');
+
+  // The review JSON is a document the model writes, and `comments` reaches
+  // `.map` in the normalisation below — OUTSIDE `compose`'s try/catch. Any
+  // other shape is refused here as the structured refusal the re-compose
+  // loop parses, not a bare TypeError.
+  if (payload.comments !== undefined && !Array.isArray(payload.comments)) {
+    problems.push(
+      '`comments` is not an array — it is the list of findings this post ' +
+        'carries; any other shape is not a list of findings.',
+    );
+  }
+  if (
+    Array.isArray(payload.comments) &&
+    (payload.comments as unknown[]).some(
+      (c) => c === null || typeof c !== 'object',
+    )
+  ) {
+    problems.push(
+      '`comments` entries must each be an object — a finding is a path, ' +
+        'a line and a body; any other shape is not a finding.',
+    );
+  }
 
   // The verdict is not the caller's to write. Refusing is deliberate: silently
   // ignoring a hand-written `event` would let a run believe it had posted the
@@ -400,6 +447,15 @@ export function runSubmit(args: SubmitArgs, cliVersion = 'unknown'): void {
     );
   }
 
+  payload = {
+    ...payload,
+    comments: normalizeInlineComments(
+      payload.comments ?? [],
+      payload.state?.modelId,
+      cliVersion,
+    ),
+  };
+
   // The verdict, computed here. It was never in the payload.
   let event: string;
   let body: string;
@@ -549,6 +605,10 @@ export const submitCommand: CommandModule = {
         describe: 'Check authorisation and payload consistency, then stop.',
       }),
   handler: async (argv) => {
-    runSubmit(argv as unknown as SubmitArgs, await getCliVersion());
+    // Do not use CLI_VERSION here: esbuild replaces it with a build-time value.
+    const cliVersion =
+      footerVersion(process.env['QWEN_CODE_STARTUP_VERSION']) ??
+      (await getCliVersion());
+    runSubmit(argv as unknown as SubmitArgs, cliVersion);
   },
 };
