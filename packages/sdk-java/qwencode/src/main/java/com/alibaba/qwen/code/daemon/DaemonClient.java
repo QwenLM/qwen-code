@@ -11,6 +11,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -204,15 +205,16 @@ public final class DaemonClient implements AutoCloseable {
                 validateClientId(clientId);
                 String sessionId = JsonSupport.requiredString(json, "sessionId",
                         "session");
-                if (request.getSessionId() != null
-                        && !request.getSessionId().toLowerCase(java.util.Locale.ROOT)
-                                .equals(sessionId)) {
+                String requestedSessionId = request.getSessionId() == null
+                        ? null
+                        : request.getSessionId().toLowerCase(Locale.ROOT);
+                if (requestedSessionId != null
+                        && !requestedSessionId.equals(sessionId)) {
                     throw new SessionCreationOutcomeUnknownException(
                             new DaemonProtocolException(
                                     "Daemon returned session \"" + sessionId
                                             + "\" instead of requested session \""
-                                            + request.getSessionId().toLowerCase(java.util.Locale.ROOT)
-                                            + "\""));
+                                            + requestedSessionId + "\""));
                 }
                 DaemonSession session = new DaemonSession(
                         sessionId,

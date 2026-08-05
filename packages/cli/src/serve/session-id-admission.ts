@@ -90,6 +90,14 @@ export interface RequestedSessionIdAdmissionOptions {
   readonly archiveCoordinator: SessionArchiveCoordinator;
   readonly getBridges: () => readonly AcpSessionBridge[];
   readonly getPersistenceTargets: () => readonly RequestedSessionIdPersistenceTarget[];
+  /**
+   * Resolves the registered workspace id for a live bridge, so conflict
+   * responses can name the foreign owner. Absent for bridges whose runtime
+   * is no longer registered (a replaced generation still draining).
+   */
+  readonly getBridgeWorkspaceId?: (
+    bridge: AcpSessionBridge,
+  ) => string | undefined;
 }
 
 export interface RequestedSessionIdAdmission {
@@ -107,15 +115,21 @@ export function createRequestedSessionIdAdmission({
   archiveCoordinator,
   getBridges,
   getPersistenceTargets,
+  getBridgeWorkspaceId,
 }: RequestedSessionIdAdmissionOptions): RequestedSessionIdAdmission {
   const pending = new Map<string, PendingAdmission>();
 
   const liveOwners = (
     sessionId: string,
-  ): Array<{ bridge: AcpSessionBridge; workspaceCwd: string }> => {
+  ): Array<{
+    bridge: AcpSessionBridge;
+    workspaceCwd: string;
+    workspaceId?: string;
+  }> => {
     const owners: Array<{
       bridge: AcpSessionBridge;
       workspaceCwd: string;
+      workspaceId?: string;
     }> = [];
     let bridges: readonly AcpSessionBridge[];
     try {
@@ -131,7 +145,11 @@ export function createRequestedSessionIdAdmission({
     for (const bridge of new Set(bridges)) {
       try {
         const summary = bridge.getSessionSummary(sessionId);
-        owners.push({ bridge, workspaceCwd: summary.workspaceCwd });
+        owners.push({
+          bridge,
+          workspaceCwd: summary.workspaceCwd,
+          workspaceId: getBridgeWorkspaceId?.(bridge),
+        });
       } catch (error) {
         if (error instanceof SessionNotFoundError) continue;
         throw new RequestedSessionIdAdmissionError(
@@ -268,6 +286,7 @@ export function createRequestedSessionIdAdmission({
           target,
           'live',
           foreignLive.workspaceCwd,
+          foreignLive.workspaceId,
         );
       }
 

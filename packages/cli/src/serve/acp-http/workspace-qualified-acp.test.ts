@@ -29,6 +29,8 @@ import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
 import { SessionNotFoundError } from '../acp-session-bridge.js';
+import { SessionArchiveCoordinator } from '../server/session-archive.js';
+import { createRequestedSessionIdAdmission } from '../session-id-admission.js';
 
 const setupGithubMock = vi.hoisted(() => vi.fn());
 
@@ -259,11 +261,28 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
 
     const app = express();
     app.use(express.json());
+    const archiveCoordinator = new SessionArchiveCoordinator();
     handle = mountAcpHttp(app, primaryBridge, {
       boundWorkspace: '/ws',
       workspace: {} as unknown as DaemonWorkspaceService,
       fsFactory: workspaceRegistry.primary.routeFileSystemFactory,
       enabled: true,
+      archiveCoordinator,
+      requestedSessionIdAdmission: createRequestedSessionIdAdmission({
+        archiveCoordinator,
+        getBridges: () =>
+          workspaceRegistry.listManaged().map((runtime) => runtime.bridge),
+        getPersistenceTargets: () =>
+          workspaceRegistry.listManaged().map((runtime) => ({
+            workspaceCwd: runtime.workspaceCwd,
+            runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+          })),
+        getBridgeWorkspaceId: (bridge) =>
+          workspaceRegistry
+            .listEntries()
+            .find((entry) => entry.current?.runtime.bridge === bridge)
+            ?.workspaceId,
+      }),
       daemonEnv: {
         ...process.env,
         HTTPS_PROXY: 'http://primary-proxy.example:8080',
@@ -1243,12 +1262,29 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     ]);
     const app = express();
     app.use(express.json());
+    const archiveCoordinator = new SessionArchiveCoordinator();
     const singleHandle = mountAcpHttp(app, primaryBridge, {
       boundWorkspace: '/ws',
       workspace: {} as DaemonWorkspaceService,
       enabled: true,
       workspaceRegistry: registry,
       workspaceRememberLane: new WorkspaceRememberTaskLane(primaryBridge),
+      archiveCoordinator,
+      requestedSessionIdAdmission: createRequestedSessionIdAdmission({
+        archiveCoordinator,
+        getBridges: () =>
+          registry.listManaged().map((runtime) => runtime.bridge),
+        getPersistenceTargets: () =>
+          registry.listManaged().map((runtime) => ({
+            workspaceCwd: runtime.workspaceCwd,
+            runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+          })),
+        getBridgeWorkspaceId: (bridge) =>
+          registry
+            .listEntries()
+            .find((entry) => entry.current?.runtime.bridge === bridge)
+            ?.workspaceId,
+      }),
     })!;
     const singleServer = await new Promise<Server>((resolve) => {
       const listening = app.listen(0, '127.0.0.1', () => resolve(listening));

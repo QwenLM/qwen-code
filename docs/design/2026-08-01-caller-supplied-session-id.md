@@ -42,11 +42,11 @@ Create performs these steps:
 4. Under the session archive coordinator's shared lock, scan every currently registered workspace with a `SessionService` pinned to that runtime's captured `sessionRuntimeBaseDir`.
 5. Reject active, archived, or worktree-backed persisted history; otherwise return an identity-bound reservation.
 
-Restore performs no disk scan because its purpose is to open existing history. It rejects a live or pending owner on another bridge generation, shares an existing restore claim only when the bridge object, workspace ID, and workspace path are identical, and otherwise installs a new restore claim.
+Restore performs no disk scan because its purpose is to open existing history. It rejects a live or pending owner on another bridge generation, shares an existing restore claim only when it belongs to the same bridge object (the workspace spelling may differ between calls on that bridge), and otherwise installs a new restore claim.
 
 Reservations are idempotent and remove state only when the map still contains the exact state object they captured. This identity check prevents a delayed release from deleting a newer claim for the same ID. Restore references decrement individually and remove the state at zero.
 
-Bridge enumeration errors fail closed with retryable `session_id_admission_unavailable`. A normal `SessionNotFoundError` means only that the bridge does not own the ID. Persistence reads inherit `SessionService`'s fail-closed behavior.
+Bridge enumeration errors fail closed with retryable `session_id_admission_unavailable`. A normal `SessionNotFoundError` means only that the bridge does not own the ID. Persistence read failures do not inherit `SessionService`'s treat-error-as-exists behavior: the scan surfaces them as retryable `503 session_id_admission_unavailable` instead of a `409` conflict. Clients should bound their 503 retries — a permanently unreadable transcript directory keeps returning 503 and never resolves on its own.
 
 ## Runtime replacement and workspace scope
 

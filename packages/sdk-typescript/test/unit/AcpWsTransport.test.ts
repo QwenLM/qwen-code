@@ -129,6 +129,91 @@ describe('AcpWsTransport', () => {
         }
       }
     });
+
+    it('constructs when globalThis.fetch is undefined', () => {
+      const originalFetch = Object.getOwnPropertyDescriptor(
+        globalThis,
+        'fetch',
+      );
+      Reflect.deleteProperty(globalThis, 'fetch');
+      try {
+        expect(() => new AcpWsTransport('ws://host/acp')).not.toThrow();
+      } finally {
+        if (originalFetch) {
+          Object.defineProperty(globalThis, 'fetch', originalFetch);
+        }
+      }
+    });
+
+    it('falls back to the initialize result when a 200 is not a capabilities envelope', async () => {
+      const originalWebSocket = globalThis.WebSocket;
+      const originalFetch = Object.getOwnPropertyDescriptor(
+        globalThis,
+        'fetch',
+      );
+      class FakeWebSocket {
+        onopen: (() => void) | null = null;
+        onmessage: ((event: { data: string }) => void) | null = null;
+        onclose: (() => void) | null = null;
+        onerror: (() => void) | null = null;
+
+        constructor() {
+          queueMicrotask(() => this.onopen?.());
+        }
+
+        send(payload: string) {
+          const request = JSON.parse(payload) as { id: number };
+          queueMicrotask(() =>
+            this.onmessage?.({
+              data: JSON.stringify({
+                jsonrpc: '2.0',
+                id: request.id,
+                result: { protocolVersion: 1, agentCapabilities: {} },
+              }),
+            }),
+          );
+        }
+
+        close() {
+          this.onclose?.();
+        }
+      }
+      Object.defineProperty(globalThis, 'WebSocket', {
+        configurable: true,
+        value: FakeWebSocket,
+      });
+      // A reverse proxy / SPA answering 200 with a body that is not the
+      // daemon capabilities envelope must not be accepted as one.
+      const restFetch = vi.fn(async () =>
+        synthesizeResponse(200, { index: 'spa fallback, no features' }),
+      );
+      Object.defineProperty(globalThis, 'fetch', {
+        configurable: true,
+        value: restFetch,
+      });
+      const transport = new AcpWsTransport('ws://daemon/acp');
+
+      try {
+        const response = await transport.fetch('http://daemon/capabilities', {
+          method: 'GET',
+        });
+        await expect(response.json()).resolves.toMatchObject({
+          protocolVersion: 1,
+        });
+        expect(restFetch).toHaveBeenCalledOnce();
+      } finally {
+        transport.dispose();
+        Object.defineProperty(globalThis, 'WebSocket', {
+          configurable: true,
+          value: originalWebSocket,
+        });
+        if (originalFetch) {
+          Object.defineProperty(globalThis, 'fetch', originalFetch);
+        } else {
+          Reflect.deleteProperty(globalThis, 'fetch');
+        }
+      }
+    });
   });
 
   // ---- dispose() --------------------------------------------------------

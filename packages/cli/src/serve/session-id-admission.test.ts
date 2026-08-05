@@ -278,6 +278,34 @@ describe('RequestedSessionIdAdmission', () => {
       .release();
   });
 
+  it('names the live foreign owner workspace id on restore conflicts', () => {
+    const liveBridge = fakeBridge([SESSION_ID]);
+    const foreignBridge = fakeBridge();
+    const admission = createRequestedSessionIdAdmission({
+      archiveCoordinator: new SessionArchiveCoordinator(),
+      getBridges: () => [liveBridge, foreignBridge],
+      getPersistenceTargets: () => [],
+      getBridgeWorkspaceId: (bridge) =>
+        bridge === liveBridge ? 'live-workspace' : undefined,
+    });
+
+    let error: unknown;
+    try {
+      admission.reserveRestore(SESSION_ID, {
+        bridge: foreignBridge,
+        workspaceCwd: '/two',
+      });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(RequestedSessionIdAdmissionError);
+    expect((error as RequestedSessionIdAdmissionError).details).toMatchObject({
+      conflict: 'live',
+      liveWorkspaceCwd: '/live',
+      liveWorkspaceId: 'live-workspace',
+    });
+  });
+
   it('does not let a stale release remove a newer claim', async () => {
     const bridge = fakeBridge();
     const admission = createRequestedSessionIdAdmission({

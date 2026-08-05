@@ -41,10 +41,7 @@ import { SseStream } from './sse-stream.js';
 import { WsStream } from './ws-stream.js';
 import type { RateLimitTier } from '../rate-limit.js';
 import { SessionArchiveCoordinator } from '../server/session-archive.js';
-import {
-  createRequestedSessionIdAdmission,
-  type RequestedSessionIdAdmission,
-} from '../session-id-admission.js';
+import type { RequestedSessionIdAdmission } from '../session-id-admission.js';
 import {
   RPC,
   error as rpcError,
@@ -395,7 +392,12 @@ export interface MountAcpHttpOptions {
   /** Effective direct session shell policy for ACP initialize/dispatch. */
   sessionShellCommandEnabled?: boolean;
   archiveCoordinator?: SessionArchiveCoordinator;
-  requestedSessionIdAdmission?: RequestedSessionIdAdmission;
+  /**
+   * The daemon-wide session-id admission shared with every other transport.
+   * Required: a mount-local fallback could not see draining generations, so
+   * the host must inject the shared instance (as `createServeApp` does).
+   */
+  requestedSessionIdAdmission: RequestedSessionIdAdmission;
   /** Shared lane for sessionless workspace remember tasks. */
   workspaceRememberLane: WorkspaceRememberTaskLane;
   /** Rate limit checker for WS messages (WS bypasses Express middleware). */
@@ -613,29 +615,7 @@ export function mountAcpHttp(
     Storage.getRuntimeBaseDir();
   const archiveCoordinator =
     opts.archiveCoordinator ?? new SessionArchiveCoordinator();
-  const requestedSessionIdAdmission =
-    opts.requestedSessionIdAdmission ??
-    createRequestedSessionIdAdmission({
-      archiveCoordinator,
-      getBridges: () =>
-        opts.workspaceRegistry
-          ? opts.workspaceRegistry
-              .listManaged()
-              .map((runtime) => runtime.bridge)
-          : [bridge],
-      getPersistenceTargets: () =>
-        opts.workspaceRegistry
-          ? opts.workspaceRegistry.listManaged().map((runtime) => ({
-              workspaceCwd: runtime.workspaceCwd,
-              runtimeBaseDir: runtime.sessionRuntimeBaseDir,
-            }))
-          : [
-              {
-                workspaceCwd: opts.boundWorkspace,
-                runtimeBaseDir: primarySessionRuntimeBaseDir,
-              },
-            ],
-    });
+  const requestedSessionIdAdmission = opts.requestedSessionIdAdmission;
   const getPrimaryEnv = () =>
     opts.workspaceRegistry
       ? runtimeEffectiveEnv(opts.workspaceRegistry.primary, daemonEnv)
@@ -825,12 +805,12 @@ export function mountAcpHttp(
     getPrimaryEnv,
     opts.workspace,
     opts.workspaceRememberLane,
+    requestedSessionIdAdmission,
     opts.fsFactory,
     opts.deviceFlowRegistry,
     opts.sessionShellCommandEnabled === true,
     registry,
     archiveCoordinator,
-    requestedSessionIdAdmission,
     opts.isPrimaryWorkspaceTrusted ??
       (() => {
         const entry = opts.workspaceRegistry?.primaryEntry;
@@ -1328,6 +1308,7 @@ export function mountAcpHttp(
       () => runtimeEffectiveEnv(rt, daemonEnv),
       rt.workspaceService,
       workspaceRememberLane,
+      requestedSessionIdAdmission,
       rt.routeFileSystemFactory,
       // Phase 4: secondary mounts share the daemon-global device-flow registry
       // (single instance per daemon; OAuth credentials are global state). The
@@ -1338,7 +1319,6 @@ export function mountAcpHttp(
       opts.sessionShellCommandEnabled === true,
       secondaryRegistry,
       archiveCoordinator,
-      requestedSessionIdAdmission,
       () => rt.trusted,
       () => (generationGuard ? () => generationGuard.assertOpen() : undefined),
       rt.provenance === 'live-conversation'
