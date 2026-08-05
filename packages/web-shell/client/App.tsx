@@ -5823,21 +5823,27 @@ export function App({
       lastRecapBlockCountRef.current = currentCount;
       const sessionId = connection.sessionId;
       const version = autoRecapVersionRef.current;
+      const userBlockId = getLatestUserBlockId(store.getSnapshot().blocks);
       sessionActions.recapSession().then(
         (result) => {
+          const currentUserBlockId = getLatestUserBlockId(
+            store.getSnapshot().blocks,
+          );
           // result.sessionId only pins the daemon wire contract (the daemon
           // echoes the id back), not a real race; the epoch/connection checks
           // catch those. Kept so it is not simplified away as redundant.
           if (
             autoRecapVersionRef.current !== version ||
             connectionRef.current.sessionId !== sessionId ||
-            result.sessionId !== sessionId
+            result.sessionId !== sessionId ||
+            currentUserBlockId !== userBlockId
           ) {
             console.warn('[auto-recap] discarding stale recap', {
-              captured: { sessionId, version },
+              captured: { sessionId, version, userBlockId },
               current: {
                 sessionId: connectionRef.current.sessionId,
                 version: autoRecapVersionRef.current,
+                userBlockId: currentUserBlockId,
               },
               result: result.sessionId,
             });
