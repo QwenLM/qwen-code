@@ -1950,6 +1950,12 @@ describe('qwen-autofix workflow', () => {
         "needs.route.outputs.do_issue == 'true' && needs.route.outputs.dry_run != 'true' && ",
       ),
     );
+    // Dry runs get run-unique groups above because they never claim — that
+    // invariant rests on these step `if:` gates, which nothing else asserts:
+    // dropping the clause from either gate lets a dry run and a scheduled
+    // real run claim the same issue while every group pin stays green.
+    expect(claimIssueStep).toContain("needs.route.outputs.dry_run != 'true'");
+    expect(publishPrStep).toContain("needs.route.outputs.dry_run != 'true'");
     expect(workflow).toContain(
       '(.labels // []) | map(.name) as $labels | ($labels | index($ready))',
     );
