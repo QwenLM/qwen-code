@@ -77,9 +77,10 @@ export class StatusCardController {
     content: string,
   ): void {
     if (this.terminalSegmentIds.has(segment.segmentId)) return;
-    let record = this.recordsBySegment.get(segment.segmentId);
+    const record = this.recordsBySegment.get(segment.segmentId);
     if (!record) {
-      record = this.createRecord(segment, target);
+      this.createRecord(segment, target, content);
+      return;
     }
     if (record.terminal) return;
     record.content = boundContent(content);
@@ -108,6 +109,7 @@ export class StatusCardController {
   private createRecord(
     segment: ChannelOutputSegmentContext,
     target: { chatId: string; isGroup: boolean },
+    initialContent = '',
   ): StatusRecord {
     const outTrackId = `qwen-status-${randomUUID()}`;
     const record: StatusRecord = {
@@ -117,7 +119,7 @@ export class StatusCardController {
       ownerId: segment.owner.id,
       target,
       outTrackId,
-      content: '',
+      content: boundContent(initialContent),
       startedAt: Date.now(),
       lastStatusSecond: 0,
       ready: Promise.resolve(false),
@@ -202,12 +204,13 @@ export class StatusCardController {
     target: { chatId: string; isGroup: boolean },
   ): Promise<boolean> {
     try {
+      const initialContent = sanitizeStreamingImageMarkers(record.content);
       await this.options.client.createAndDeliver({
         templateId: STATUS_CARD_TEMPLATE_ID,
         outTrackId: record.outTrackId,
         target,
         cardParamMap: {
-          content: '',
+          content: initialContent,
           flowStatus: 2,
           statusLine: this.statusLine(record, 'Running').text,
           hasAction: 'true',
@@ -217,7 +220,7 @@ export class StatusCardController {
       await this.options.client.openOrUpdateStream({
         outTrackId: record.outTrackId,
         key: 'content',
-        content: '',
+        content: initialContent,
         finalize: false,
       });
       return true;

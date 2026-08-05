@@ -170,6 +170,54 @@ describe('DingtalkInteractionPresenter', () => {
     });
   });
 
+  it('adds the group sender only to the final model output', async () => {
+    const { client, presenter } = createHarness();
+    presenter.registerRun(
+      'run-1',
+      'owner-1',
+      target,
+      'session-1',
+      'message-1',
+      'dingtalk',
+      {
+        senderName: '衍*星',
+      },
+    );
+
+    presenter.startStatusCard('run-1');
+    presenter.appendOutput(segment('segment-1'), '正在分析');
+
+    await vi.waitFor(() => {
+      expect(client.createAndDeliver).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cardParamMap: expect.objectContaining({
+            content: '',
+          }),
+        }),
+      );
+      const streamed = vi
+        .mocked(client.openOrUpdateStream)
+        .mock.calls.map(([request]) => request.content)
+        .filter(Boolean)
+        .at(-1);
+      expect(streamed).toBe('正在分析');
+    });
+
+    await presenter.closeOutput(
+      'segment-1',
+      '@衍*星\n\n@衍\\*星\n\n最终答案',
+      'completed',
+    );
+
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          content: '@衍\\*星\n\n最终答案',
+        }),
+      }),
+    );
+  });
+
   it('fails an eagerly created running card before any output is emitted', async () => {
     const { client, presenter } = createHarness();
     presenter.startStatusCard('run-1');
@@ -443,6 +491,34 @@ describe('DingtalkInteractionPresenter', () => {
     expect(client.createAndDeliver).toHaveBeenLastCalledWith(
       expect.objectContaining({ templateId: QUESTION_CARD_TEMPLATE_ID }),
     );
+  });
+
+  it('keeps the card sender prefix out of a non-card fallback', async () => {
+    const { client, presenter, sendFallback } = createHarness();
+    presenter.registerRun(
+      'run-1',
+      'owner-1',
+      target,
+      'session-1',
+      'message-1',
+      'dingtalk',
+      { senderName: 'Alice' },
+    );
+    vi.mocked(client.createAndDeliver).mockImplementation(async (request) => {
+      if (request.templateId === STATUS_CARD_TEMPLATE_ID) {
+        throw new Error('status template unavailable');
+      }
+    });
+    presenter.appendOutput(segment('segment-1'), 'Final answer');
+
+    await presenter.closeOutput('segment-1', '', 'completed');
+
+    expect(sendFallback).toHaveBeenCalledWith(
+      'cid-1',
+      'Final answer',
+      'session-1',
+    );
+    expect(JSON.stringify(sendFallback.mock.calls)).not.toContain('Alice');
   });
 
   it('surfaces a failed text fallback to the shared delivery boundary', async () => {

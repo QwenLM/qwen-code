@@ -99,6 +99,28 @@ describe('StatusCardController', () => {
     );
   });
 
+  it('includes replacement content in the initial card delivery', async () => {
+    const { client, controller } = createHarness();
+
+    controller.replace(segment(), target, '@Alice');
+
+    await vi.waitFor(() =>
+      expect(client.createAndDeliver).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cardParamMap: expect.objectContaining({
+            content: '@Alice',
+          }),
+        }),
+      ),
+    );
+    expect(client.openOrUpdateStream).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: '@Alice',
+        finalize: false,
+      }),
+    );
+  });
+
   it('coalesces bounded full snapshots with one write in flight', async () => {
     vi.useFakeTimers();
     const { client, controller } = createHarness();

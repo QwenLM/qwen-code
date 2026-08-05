@@ -1609,6 +1609,7 @@ describe('DingtalkChannel status cards', () => {
     ).inboundCardOwners.set('message-2', {
       ownerId: 'owner-1',
       target: { chatId: 'cid-1', isGroup: true },
+      sender: { senderName: 'Alice' },
     });
     getLifecycleHook(channel)({
       type: 'started',
@@ -1631,6 +1632,7 @@ describe('DingtalkChannel status cards', () => {
       'session-1',
       'message-2',
       'test-dingtalk',
+      { senderName: 'Alice' },
     );
     expect(startStatusCard).toHaveBeenCalledOnce();
     expect(startStatusCard).toHaveBeenCalledWith('run-2');
@@ -1662,6 +1664,45 @@ describe('DingtalkChannel status cards', () => {
     ).toEqual({
       ownerId: 'owner-1',
       target: { chatId: 'conversation-1', isGroup: false },
+    });
+  });
+
+  it('captures the group sender for card attribution when atSender is enabled', async () => {
+    const channel = createChannel({ atSender: true });
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'message-quote',
+        conversationType: '2',
+        conversationId: 'cid-quote',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        chatbotUserId: 'bot-user',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'owner-1',
+        isInAtList: true,
+        atUsers: [{ dingtalkId: 'bot-user' }, { dingtalkId: 'other-user' }],
+        text: { content: '@qwen-code What changed?' },
+      }),
+      headers: { messageId: 'message-quote' },
+    } as unknown as DWClientDownStream;
+
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+    const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+    await DingtalkChannel.prototype.handleInbound.call(channel, envelope);
+
+    expect(
+      (
+        channel as unknown as {
+          inboundCardOwners: Map<string, unknown>;
+        }
+      ).inboundCardOwners.get('message-quote'),
+    ).toEqual({
+      ownerId: 'staff-1',
+      target: { chatId: 'cid-quote', isGroup: true },
+      sender: { senderName: 'Alice' },
     });
   });
 
@@ -2996,8 +3037,8 @@ describe('DingtalkChannel reply mentions', () => {
         String((fetchSpy.mock.calls[0]![1] as RequestInit).body),
       );
       expect(body).toMatchObject({
-        msgtype: 'text',
-        text: { content: '@staff-1\n\nhello' },
+        msgtype: 'markdown',
+        markdown: { text: '@staff-1\n\nhello' },
         at: { atUserIds: ['staff-1'] },
       });
     } finally {
@@ -3048,8 +3089,8 @@ describe('DingtalkChannel reply mentions', () => {
     expect(
       JSON.parse(String((fetchSpy.mock.calls[0]![1] as RequestInit).body)),
     ).toMatchObject({
-      msgtype: 'text',
-      text: { content: '@staff-1\n\nhello' },
+      msgtype: 'markdown',
+      markdown: { text: '@staff-1\n\nhello' },
       at: { atUserIds: ['staff-1'] },
     });
   });
@@ -3115,7 +3156,7 @@ describe('DingtalkChannel reply mentions', () => {
     expect(body).not.toHaveProperty('at');
   });
 
-  it('reserves the mention prefix within the first text chunk limit', async () => {
+  it('reserves the mention prefix within the first markdown chunk limit', async () => {
     const channel = createChannel({ atSender: true });
     seedWebhook(channel, 'cid123');
     seedMentionTarget(channel, 'm1', 'staff-1');
@@ -3132,18 +3173,18 @@ describe('DingtalkChannel reply mentions', () => {
       JSON.parse(String((init as RequestInit).body)),
     );
     expect(bodies[0]).toMatchObject({
-      msgtype: 'text',
+      msgtype: 'markdown',
       at: { atUserIds: ['staff-1'] },
     });
-    expect(bodies[1]).toMatchObject({ msgtype: 'text' });
+    expect(bodies[1]).toMatchObject({ msgtype: 'markdown' });
     expect(bodies[1]).not.toHaveProperty('at');
-    expect(bodies.map((body) => body.text.content.length)).toEqual([3800, 10]);
+    expect(bodies.map((body) => body.markdown.text.length)).toEqual([3800, 10]);
     expect(
       bodies
         .map((body, index) =>
           index === 0
-            ? body.text.content.slice('@staff-1\n\n'.length)
-            : body.text.content,
+            ? body.markdown.text.slice('@staff-1\n\n'.length)
+            : body.markdown.text,
         )
         .join(''),
     ).toBe(text);
@@ -3164,14 +3205,15 @@ describe('DingtalkChannel reply mentions', () => {
     const contents = fetchSpy.mock.calls.map(([, init], index) => {
       const body = JSON.parse(String((init as RequestInit).body));
       return index === 0
-        ? body.text.content.slice('@staff-1\n\n'.length)
-        : body.text.content;
+        ? body.markdown.text.slice('@staff-1\n\n'.length)
+        : body.markdown.text;
     });
-    expect(contents.join('')).toBe(text);
+    expect(contents[0]).toMatch(/^```/u);
+    expect(contents.at(-1)).toMatch(/```$/u);
     expect(
       fetchSpy.mock.calls.every(([, init]) => {
         const body = JSON.parse(String((init as RequestInit).body));
-        return body.text.content.length <= 3800;
+        return body.markdown.text.length <= 3800;
       }),
     ).toBe(true);
   });
@@ -3192,8 +3234,8 @@ describe('DingtalkChannel reply mentions', () => {
       JSON.parse(String((init as RequestInit).body)),
     );
     expect(bodies[0]).toMatchObject({ at: { atUserIds: ['staff-1'] } });
-    expect(bodies[0].msgtype).toBe('text');
-    expect(bodies[1]).toMatchObject({ msgtype: 'text' });
+    expect(bodies[0].msgtype).toBe('markdown');
+    expect(bodies[1]).toMatchObject({ msgtype: 'markdown' });
     expect(bodies[1]).not.toHaveProperty('at');
   });
 });
@@ -3450,7 +3492,6 @@ describe('DingtalkChannel mention target lifecycle', () => {
     const internals = channel as unknown as {
       mentionTargets: Map<string, string>;
       sessionMentionTargets: Map<string, string>;
-      textReplySessions: Set<string>;
       bufferedMentionTargets: Set<string>;
       bufferedMentionTargetsBySession: Map<string, Set<string>>;
       onPromptBuffered(
@@ -3467,8 +3508,6 @@ describe('DingtalkChannel mention target lifecycle', () => {
     internals.onPromptBuffered('cid-123', 'session-2', 'other-1');
     internals.sessionMentionTargets.set('session-1', 'staff-active');
     internals.sessionMentionTargets.set('session-2', 'staff-other-active');
-    internals.textReplySessions.add('session-1');
-    internals.textReplySessions.add('session-2');
 
     channel.onSessionDied('session-1');
 
@@ -3480,7 +3519,6 @@ describe('DingtalkChannel mention target lifecycle', () => {
       false,
     );
     expect(internals.sessionMentionTargets.has('session-1')).toBe(false);
-    expect(internals.textReplySessions.has('session-1')).toBe(false);
     expect(internals.mentionTargets.get('other-1')).toBe('staff-other');
     expect(internals.bufferedMentionTargets.has('other-1')).toBe(true);
     expect(internals.bufferedMentionTargetsBySession.get('session-2')).toEqual(
@@ -3489,7 +3527,6 @@ describe('DingtalkChannel mention target lifecycle', () => {
     expect(internals.sessionMentionTargets.get('session-2')).toBe(
       'staff-other-active',
     );
-    expect(internals.textReplySessions.has('session-2')).toBe(true);
   });
 });
 

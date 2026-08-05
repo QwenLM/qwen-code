@@ -16,6 +16,8 @@ interface RunPresentation {
   statusContext?: ChannelOutputSegmentContext;
   projectionChain: Promise<void>;
   activeSegmentId?: string;
+  senderPrefix?: string;
+  senderRawPrefix?: string;
   terminal: boolean;
 }
 
@@ -29,6 +31,29 @@ export interface DingtalkInteractionPresenterOptions {
   statusCards?: StatusCardController;
   questionCards?: QuestionCardController;
   sendFallback?(chatId: string, text: string, sessionId: string): Promise<void>;
+}
+
+export interface DingtalkCardSender {
+  senderName: string;
+}
+
+const CARD_CONTENT_LIMIT = 20_000;
+const TRUNCATION_MARKER = '[Earlier output truncated]\n';
+
+function escapeMarkdownText(text: string): string {
+  return text.replace(/([\\`*_[\]{}()#+.!|>~-])/gu, '\\$1');
+}
+
+function formatSenderPrefixes(sender: DingtalkCardSender): {
+  senderPrefix: string;
+  senderRawPrefix: string;
+} {
+  const senderName =
+    sender.senderName.replace(/[\r\n]+/gu, ' ').trim() || '用户';
+  return {
+    senderPrefix: `@${escapeMarkdownText(senderName)}`,
+    senderRawPrefix: `@${senderName}`,
+  };
 }
 
 export class DingtalkInteractionPresenter {
@@ -45,6 +70,7 @@ export class DingtalkInteractionPresenter {
     sessionId = '',
     messageId?: string,
     channelName = 'dingtalk',
+    sender?: DingtalkCardSender,
   ): void {
     this.runs.set(runId, {
       runId,
@@ -65,6 +91,7 @@ export class DingtalkInteractionPresenter {
         ...(messageId ? { messageId } : {}),
       },
       projectionChain: Promise.resolve(),
+      ...(target.isGroup && sender ? formatSenderPrefixes(sender) : {}),
       terminal: false,
     });
   }
@@ -74,10 +101,9 @@ export class DingtalkInteractionPresenter {
     if (!run || run.terminal) return;
     const statusContext = this.ensureStatusContext(run);
     void this.enqueue(run, () => {
-      this.options.statusCards?.ensure(
-        statusContext,
-        this.cardTarget(statusContext.target),
-      );
+      const statusCards = this.options.statusCards;
+      const target = this.cardTarget(statusContext.target);
+      statusCards?.ensure(statusContext, target);
     });
   }
 
@@ -106,10 +132,10 @@ export class DingtalkInteractionPresenter {
     run.activeSegmentId = segment.segmentId;
     const statusContext = this.ensureStatusContext(run, segment);
     void this.enqueue(run, () => {
-      this.options.statusCards?.append(
+      this.options.statusCards?.replace(
         statusContext,
         this.cardTarget(statusContext.target),
-        chunk,
+        presentation.content,
       );
     });
   }
@@ -146,7 +172,7 @@ export class DingtalkInteractionPresenter {
         );
         statusCards?.fail(
           statusContext.segmentId,
-          '本次处理失败，请稍后重试。',
+          this.withSenderPrefix(run, '本次处理失败，请稍后重试。'),
         );
         return statusCards !== undefined;
       }
@@ -158,7 +184,7 @@ export class DingtalkInteractionPresenter {
           statusCards !== undefined &&
           (await statusCards.complete(
             statusContext.segmentId,
-            text || presentation.content,
+            this.withSenderPrefix(run, text || presentation.content),
           ));
         run.statusContext = undefined;
         if (completed) return true;
@@ -176,7 +202,7 @@ export class DingtalkInteractionPresenter {
         statusCards !== undefined &&
         (await statusCards.complete(
           statusContext.segmentId,
-          text || presentation.content,
+          this.withSenderPrefix(run, text || presentation.content),
         ));
       if (completed) return true;
       const fallbackText = text || presentation.content;
@@ -238,7 +264,7 @@ export class DingtalkInteractionPresenter {
         );
         this.options.statusCards?.fail(
           statusContext.segmentId,
-          '本次处理失败，请稍后重试。',
+          this.withSenderPrefix(run, '本次处理失败，请稍后重试。'),
         );
       } else if (terminal === 'cancelled') {
         const statusContext = run.statusContext;
@@ -246,7 +272,10 @@ export class DingtalkInteractionPresenter {
           this.options.statusCards?.replace(
             statusContext,
             this.cardTarget(statusContext.target),
-            detail === 'cancel_command' ? '任务已停止' : '任务已取消',
+            this.withSenderPrefix(
+              run,
+              detail === 'cancel_command' ? '任务已停止' : '任务已取消',
+            ),
           );
         }
         this.options.statusCards?.cancelRun(
@@ -300,11 +329,52 @@ export class DingtalkInteractionPresenter {
     return result;
   }
 
-  private boundContent(content: string): string {
-    const limit = 20_000;
-    const marker = '[Earlier output truncated]\n';
+  private boundContent(content: string, limit = CARD_CONTENT_LIMIT): string {
     if (content.length <= limit) return content;
-    return `${marker}${content.slice(content.length - (limit - marker.length))}`;
+    if (limit === 0) return '';
+    if (limit <= TRUNCATION_MARKER.length) return content.slice(-limit);
+    return `${TRUNCATION_MARKER}${content.slice(
+      content.length - (limit - TRUNCATION_MARKER.length),
+    )}`;
+  }
+
+  private withSenderPrefix(run: RunPresentation, content: string): string {
+    if (!run.senderPrefix) return this.boundContent(content);
+    const body = this.withoutExistingSenderPrefix(run, content);
+    if (!body) return run.senderPrefix;
+    const separator = '\n\n';
+    const bodyLimit = Math.max(
+      0,
+      CARD_CONTENT_LIMIT - run.senderPrefix.length - separator.length,
+    );
+    return `${run.senderPrefix}${separator}${this.boundContent(
+      body,
+      bodyLimit,
+    )}`;
+  }
+
+  private withoutExistingSenderPrefix(
+    run: RunPresentation,
+    content: string,
+  ): string {
+    const prefixes = new Set([run.senderPrefix, run.senderRawPrefix]);
+    let body = content;
+    while (body) {
+      let removed = false;
+      for (const prefix of prefixes) {
+        if (!prefix) continue;
+        if (body === prefix) return '';
+        if (!body.startsWith(prefix)) continue;
+        const remainder = body.slice(prefix.length);
+        if (/^\r?\n/u.test(remainder)) {
+          body = remainder.replace(/^(?:\r?\n){1,2}/u, '');
+          removed = true;
+          break;
+        }
+      }
+      if (!removed) break;
+    }
+    return body;
   }
 
   private ensureStatusContext(
