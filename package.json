@@ -34,6 +34,7 @@
     "dev:daemon": "node scripts/daemon-dev.js",
     "debug": "cross-env DEBUG=1 node --inspect-brk scripts/start.js",
     "generate": "node scripts/generate-git-commit-info.js",
+    "generate:model-modalities": "node scripts/generate-model-modality-snapshot.js",
     "generate:settings-schema": "node --import tsx/esm scripts/generate-settings-schema.ts",
     "build": "cross-env NODE_OPTIONS=\"--max-old-space-size=3072\" node scripts/build.js",
     "build-and-start": "npm run build && npm run start",

@@ -13,6 +13,7 @@ import { findProviderByCredentials } from '../providers/all-providers.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { loadUndici, redactProxyError } from '../utils/runtimeFetchOptions.js';
+import builtInModelModalities from './generated/models-dev-modalities.json' with { type: 'json' };
 
 const MODELS_DEV_URL = 'https://models.dev/api.json';
 const CACHE_TTL_MS = 60 * 60 * 1000;
@@ -21,13 +22,15 @@ const MAX_CATALOG_BYTES = 8 * 1024 * 1024;
 
 const debugLogger = createDebugLogger('MODEL_METADATA_CATALOG');
 
-interface CatalogModel {
+interface CatalogModelMetadata {
   id?: string;
   attachment?: boolean;
   modalities?: {
     input?: string[];
   };
 }
+
+type CatalogModel = CatalogModelMetadata | string[];
 
 interface CatalogProvider {
   api?: string;
@@ -53,7 +56,15 @@ export interface ModelMetadataLookup {
   envKey?: string;
 }
 
-let sharedCatalogPromise: Promise<ModelMetadataCatalog> | undefined;
+interface CatalogState {
+  current?: ModelMetadataCatalog;
+  loading?: Promise<ModelMetadataCatalog>;
+  refresh?: Promise<void>;
+  refreshTimer?: ReturnType<typeof setTimeout>;
+}
+
+const builtInCatalog = builtInModelModalities as ModelMetadataCatalog;
+const catalogStates = new Map<string, CatalogState>();
 
 function getCachePath(): string {
   return path.join(Storage.getGlobalQwenDir(), 'models-dev.json');
@@ -171,10 +182,53 @@ async function fetchAndCache(
   return catalog;
 }
 
-async function loadCatalog(
+function scheduleRefresh(
+  state: CatalogState,
+  cachePath: string,
+  options: LoadModelMetadataCatalogOptions,
+  delayMs: number,
+): void {
+  if (state.refreshTimer) clearTimeout(state.refreshTimer);
+  state.refreshTimer = setTimeout(() => {
+    state.refreshTimer = undefined;
+    refreshCatalog(state, cachePath, options, true);
+  }, delayMs);
+  state.refreshTimer.unref();
+}
+
+function refreshCatalog(
+  state: CatalogState,
+  cachePath: string,
+  options: LoadModelMetadataCatalogOptions,
+  keepFresh: boolean,
+): void {
+  if (state.refresh) return;
+
+  state.refresh = fetchAndCache(cachePath, options)
+    .then((catalog) => {
+      state.current = catalog;
+    })
+    .catch((error) => {
+      debugLogger.debug(
+        'Failed to refresh models.dev catalog:',
+        redactProxyError(error),
+      );
+    })
+    .finally(() => {
+      state.refresh = undefined;
+      if (keepFresh) {
+        scheduleRefresh(state, cachePath, options, CACHE_TTL_MS);
+      }
+    });
+}
+
+async function loadInitialCatalog(
+  state: CatalogState,
+  cachePath: string,
   options: LoadModelMetadataCatalogOptions,
 ): Promise<ModelMetadataCatalog> {
-  const cachePath = options.cachePath ?? getCachePath();
+  const keepFresh =
+    options.cachePath === undefined && options.fetch === undefined;
 
   try {
     const [text, stat] = await Promise.all([
@@ -183,13 +237,12 @@ async function loadCatalog(
     ]);
     const catalog = parseCatalog(text);
     if (catalog && Object.keys(catalog).length > 0) {
-      if (Date.now() - stat.mtimeMs >= CACHE_TTL_MS) {
-        void fetchAndCache(cachePath, options).catch((error) => {
-          debugLogger.debug(
-            'Failed to refresh models.dev catalog:',
-            redactProxyError(error),
-          );
-        });
+      state.current = catalog;
+      const ageMs = Date.now() - stat.mtimeMs;
+      if (ageMs >= CACHE_TTL_MS) {
+        refreshCatalog(state, cachePath, options, keepFresh);
+      } else if (keepFresh) {
+        scheduleRefresh(state, cachePath, options, CACHE_TTL_MS - ageMs);
       }
       return catalog;
     }
@@ -200,27 +253,26 @@ async function loadCatalog(
     );
   }
 
-  try {
-    return await fetchAndCache(cachePath, options);
-  } catch (error) {
-    debugLogger.debug(
-      'Failed to fetch models.dev catalog:',
-      redactProxyError(error),
-    );
-    return {};
-  }
+  state.current = builtInCatalog;
+  refreshCatalog(state, cachePath, options, keepFresh);
+  return builtInCatalog;
 }
 
-/** Load the models.dev catalog with a stale-while-revalidate disk cache. */
+/** Load model modalities immediately and refresh models.dev in the background. */
 export function loadModelMetadataCatalog(
   options: LoadModelMetadataCatalogOptions = {},
 ): Promise<ModelMetadataCatalog> {
-  const useSharedPromise =
-    options.cachePath === undefined && options.fetch === undefined;
-  if (!useSharedPromise) return loadCatalog(options);
+  const cachePath = path.resolve(options.cachePath ?? getCachePath());
+  let state = catalogStates.get(cachePath);
+  if (!state) {
+    state = {};
+    catalogStates.set(cachePath, state);
+  }
 
-  sharedCatalogPromise ??= loadCatalog(options);
-  return sharedCatalogPromise;
+  if (state.current) return Promise.resolve(state.current);
+
+  state.loading ??= loadInitialCatalog(state, cachePath, options);
+  return state.loading;
 }
 
 function normalizeUrl(value: unknown): string | undefined {
@@ -275,9 +327,18 @@ function resolveCatalogProviderId(
     if (envMatches.length === 1) return envMatches[0]?.[0];
   }
 
+  const hasProviderEvidence =
+    normalizedBaseUrl !== undefined || lookup.envKey !== undefined;
   for (const candidate of [lookup.providerId, lookup.authType]) {
     const mapped = mapProviderId(candidate);
-    if (mapped && catalog[mapped]) return mapped;
+    const isProtocolFallback = candidate === lookup.authType;
+    if (
+      mapped &&
+      catalog[mapped] &&
+      (!hasProviderEvidence || !isProtocolFallback)
+    ) {
+      return mapped;
+    }
   }
   return undefined;
 }
@@ -299,7 +360,8 @@ function findCatalogModel(
       model !== null &&
       typeof model === 'object' &&
       (key.toLowerCase() === normalizedId ||
-        (typeof model.id === 'string' &&
+        (!Array.isArray(model) &&
+          typeof model.id === 'string' &&
           model.id.toLowerCase() === normalizedId)),
   )?.[1];
 }
@@ -316,9 +378,11 @@ export function getCatalogModalities(
   const model = findCatalogModel(catalog[providerId]!, lookup.modelId);
   if (!model) return undefined;
 
-  const input = model.modalities?.input;
+  const input = Array.isArray(model) ? model : model.modalities?.input;
   if (!Array.isArray(input)) {
-    return model.attachment ? { image: true } : undefined;
+    return !Array.isArray(model) && model.attachment
+      ? { image: true }
+      : undefined;
   }
 
   const modalities: InputModalities = {};

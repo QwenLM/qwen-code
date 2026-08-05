@@ -355,7 +355,7 @@ describe('ModelRegistry', () => {
       });
     });
 
-    it('normalizes stale MiniMax-M3 provider modalities to image + video', () => {
+    it('preserves explicitly configured MiniMax-M3 modalities', () => {
       const registry = new ModelRegistry({
         openai: [
           {
@@ -373,7 +373,6 @@ describe('ModelRegistry', () => {
       const model = registry.getModel(AuthType.USE_OPENAI, 'MiniMax-M3');
       expect(model?.generationConfig.modalities).toEqual({
         image: true,
-        video: true,
       });
     });
   });

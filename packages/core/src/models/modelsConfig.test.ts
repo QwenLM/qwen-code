@@ -1632,6 +1632,37 @@ describe('ModelsConfig', () => {
     });
   });
 
+  it('uses catalog modalities for an initial manually configured provider', () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig: {
+        openai: [
+          {
+            id: 'vendor/new-model',
+            baseUrl: 'https://openrouter.ai/api/v1',
+            envKey: 'OPENROUTER_API_KEY',
+          },
+        ],
+      },
+      generationConfig: { model: 'vendor/new-model' },
+      modelMetadataCatalog: {
+        openrouter: {
+          api: 'https://openrouter.ai/api/v1',
+          models: {
+            'vendor/new-model': {
+              modalities: { input: ['text', 'image', 'video'] },
+            },
+          },
+        },
+      },
+    });
+
+    expect(modelsConfig.getGenerationConfig().modalities).toEqual({
+      image: true,
+      video: true,
+    });
+  });
+
   it('refreshes model-derived modalities when hot-switching to the default qwen-oauth model', async () => {
     // Start on qwen-oauth with a text-only model so modalities are empty.
     const modelsConfig = new ModelsConfig({
@@ -2376,6 +2407,41 @@ describe('ModelsConfig', () => {
       expect(
         modelsConfig.getAllConfiguredModels().find((m) => m.id === 'gpt-3.5'),
       ).toBeDefined();
+    });
+
+    it('applies catalog modalities to a provider installed at runtime', async () => {
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        modelMetadataCatalog: {
+          openrouter: {
+            api: 'https://openrouter.ai/api/v1',
+            models: {
+              'vendor/installed-model': {
+                modalities: { input: ['text', 'image', 'pdf'] },
+              },
+            },
+          },
+        },
+      });
+
+      modelsConfig.reloadModelProvidersConfig({
+        openai: [
+          {
+            id: 'vendor/installed-model',
+            baseUrl: 'https://openrouter.ai/api/v1',
+            envKey: 'OPENROUTER_API_KEY',
+          },
+        ],
+      });
+      await modelsConfig.switchModel(
+        AuthType.USE_OPENAI,
+        'vendor/installed-model',
+      );
+
+      expect(modelsConfig.getGenerationConfig().modalities).toEqual({
+        image: true,
+        pdf: true,
+      });
     });
 
     it('should preserve current model selection if still available after reload', async () => {

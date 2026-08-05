@@ -8,11 +8,22 @@ aliases remain text-only until the table is updated manually.
 
 ## Design
 
-Load the models.dev catalog during CLI configuration and keep it in memory for
-the session. The catalog is cached at `~/.qwen/models-dev.json`. A disk cache is
-used immediately; when it is older than one hour, it is refreshed in the
-background. A cold start without a cache performs one bounded network request.
-Failures are non-fatal and preserve the existing heuristic behavior.
+Ship a compact snapshot containing only provider identity and input modalities,
+generated from models.dev with `npm run generate:model-modalities`. Load it
+during CLI configuration and cache the full live catalog at
+`~/.qwen/models-dev.json`.
+
+A valid disk cache is used immediately. When no cache exists, startup uses the
+built-in snapshot immediately. Network access is always a background refresh,
+so a cold start never waits for models.dev. The default loader refreshes stale
+data after one hour and continues refreshing hourly while the process remains
+alive. Refresh failures are non-fatal and retain the last usable disk cache or
+built-in snapshot.
+
+A successful refresh replaces the process-wide current catalog. Configurations
+created after that point use the new metadata, including later sessions in a
+long-running daemon. Existing sessions retain the catalog they were created
+with so their capabilities do not change midway through a conversation.
 
 Model modality resolution uses this precedence:
 
@@ -21,17 +32,19 @@ Model modality resolution uses this precedence:
 3. The existing model-id heuristic.
 4. Text-only for an unknown model.
 
-Existing provider-specific canonical overrides, such as MiniMax M3 metadata
-normalization, remain unchanged.
+Model-id rules, including MiniMax M3 defaults, are fallback behavior only and
+never override an explicit user value.
 
 Provider identity is resolved from the configured provider when possible and
 otherwise from its endpoint or credential environment key. The catalog lookup
 is exact and case-insensitive; it does not guess across similarly named models.
+An SDK protocol such as `openai` is not treated as provider identity when an
+unknown custom endpoint or credential key is present.
 
 The loaded catalog is passed to `ModelsConfig` and `ModelRegistry`. This covers
-initial resolution, provider-backed models, runtime model switches, and model
-provider hot reloads without persisting remotely supplied metadata into user
-settings.
+initial resolution, provider-backed models installed through `/auth`, manually
+edited model providers, runtime model switches, and model-provider hot reloads
+without persisting remotely supplied metadata into user settings.
 
 ## Boundaries
 
