@@ -38,6 +38,19 @@ export function initialModelIds(
     : defaultModelIds(provider, baseUrl);
 }
 
+/**
+ * Returns the API key to prefill when opening a provider's connect form,
+ * clearing per-credential-domain drafts so a draft typed for one provider
+ * is never restored into another provider's field under a shared env key.
+ */
+export function initialApiKey(
+  provider: QwenProviderSummary,
+  drafts: Map<string, string>,
+): string {
+  drafts.clear();
+  return provider.existingConfig?.apiKey ?? '';
+}
+
 export function modelIdsAfterBaseUrlChange(
   provider: QwenProviderSummary,
   baseUrl: string,

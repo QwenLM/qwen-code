@@ -33,6 +33,7 @@ import type {
 import {
   apiKeyAfterBaseUrlChange,
   defaultBaseUrl,
+  initialApiKey,
   initialModelIds,
   modelIdsAfterBaseUrlChange,
   parseModelIds,
@@ -179,11 +180,10 @@ export function ProviderConnectForm({
     const existingConfig = provider.existingConfig;
     const contextWindowSize = existingConfig?.advancedConfig?.contextWindowSize;
     const baseUrl = existingConfig?.baseUrl ?? defaultBaseUrl(provider);
-    apiKeyDraftsRef.current.clear();
     setSelectedProviderId(provider.id);
     setProtocol(existingConfig?.protocol ?? defaultProtocol(provider));
     setBaseUrl(baseUrl);
-    setApiKey(existingConfig?.apiKey ?? '');
+    setApiKey(initialApiKey(provider, apiKeyDraftsRef.current));
     setModelIdsText(initialModelIds(provider, baseUrl).join(', '));
     setEnableThinking(existingConfig?.advancedConfig?.enableThinking === true);
     setContextWindowSize(

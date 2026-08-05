@@ -347,7 +347,10 @@ export function resolveBaseUrl(
   return selectedBaseUrl ?? '';
 }
 
-function normalizeBaseUrlForMatching(baseUrl: string | undefined): string {
+/** Strips trailing slashes so `.../v1` and `.../v1/` compare as one endpoint. */
+export function normalizeBaseUrlForMatching(
+  baseUrl: string | undefined,
+): string {
   if (baseUrl === undefined) return '';
   let end = baseUrl.length;
   while (end > 0 && baseUrl.charCodeAt(end - 1) === 47) {

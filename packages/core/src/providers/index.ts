@@ -26,6 +26,7 @@ export {
   findExistingProviderModels,
   getDefaultBaseUrlForProtocol,
   getDefaultModelIds,
+  normalizeBaseUrlForMatching,
   providerMatchesCredentials,
   PROVIDER_METADATA_NS,
   resolveBaseUrl,

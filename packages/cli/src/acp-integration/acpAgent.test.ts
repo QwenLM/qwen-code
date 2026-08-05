@@ -357,6 +357,14 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     return undefined;
   }),
   getDefaultBaseUrlForProtocol: vi.fn(() => 'https://api.openai.com/v1'),
+  normalizeBaseUrlForMatching: vi.fn((baseUrl: string | undefined) => {
+    if (baseUrl === undefined) return '';
+    let end = baseUrl.length;
+    while (end > 0 && baseUrl.charCodeAt(end - 1) === 47) {
+      end--;
+    }
+    return baseUrl.slice(0, end);
+  }),
   getDefaultModelIds: vi.fn(
     (
       provider: {
@@ -10719,6 +10727,101 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     mockConnectionState.resolve();
     await agentPromise;
+  });
+
+  it('qwen/providers/list scopes existing model IDs to the restored endpoint', async () => {
+    const providers = ALL_PROVIDERS as unknown as Array<
+      Record<string, unknown>
+    >;
+    const settings = {
+      ...makeSessionSettings(),
+      merged: {
+        mcpServers: {},
+        env: { FIRST_API_KEY: 'sk-first' },
+        modelProviders: {
+          openai: [
+            {
+              id: 'first-model',
+              baseUrl: 'https://first.example/v1',
+              envKey: 'FIRST_API_KEY',
+            },
+            {
+              id: 'custom-first',
+              baseUrl: 'https://first.example/v1/',
+              envKey: 'FIRST_API_KEY',
+            },
+            {
+              id: 'custom-second',
+              baseUrl: 'https://second.example/v1',
+              envKey: 'SECOND_API_KEY',
+            },
+          ],
+        },
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    try {
+      providers.push({
+        id: 'multi-endpoint',
+        label: 'Multi Endpoint',
+        description: 'Multi endpoint access',
+        protocol: 'openai',
+        baseUrl: [
+          {
+            id: 'first',
+            label: 'First',
+            url: 'https://first.example/v1',
+            models: [{ id: 'first-model' }],
+          },
+          {
+            id: 'second',
+            label: 'Second',
+            url: 'https://second.example/v1',
+            models: [{ id: 'second-model' }],
+          },
+        ],
+        envKey: (_protocol: string, baseUrl: string) =>
+          baseUrl === 'https://first.example/v1'
+            ? 'FIRST_API_KEY'
+            : 'SECOND_API_KEY',
+        models: [{ id: 'first-model' }, { id: 'second-model' }],
+        modelsEditable: true,
+        modelNamePrefix: 'Multi',
+        ownsModel: (model: { envKey?: string }) =>
+          model.envKey === 'FIRST_API_KEY' || model.envKey === 'SECOND_API_KEY',
+        uiGroup: 'third-party',
+      });
+
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+
+      await expect(agent.extMethod('qwen/providers/list', {})).resolves.toEqual(
+        {
+          providers: [
+            expect.objectContaining({ id: 'deepseek' }),
+            expect.objectContaining({
+              id: 'multi-endpoint',
+              existingConfig: {
+                protocol: 'openai',
+                baseUrl: 'https://first.example/v1',
+                hasApiKey: true,
+                modelIds: ['first-model', 'custom-first'],
+              },
+            }),
+          ],
+        },
+      );
+    } finally {
+      providers.pop();
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
   });
 
   it('qwen/skills/install rejects http and non-GitHub source URLs', async () => {

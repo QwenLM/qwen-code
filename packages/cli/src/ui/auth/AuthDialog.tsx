@@ -21,6 +21,7 @@ import {
   findProviderByCredentials,
   findExistingProviderModels,
   getDefaultModelIds,
+  normalizeBaseUrlForMatching,
   customProvider,
   ALIBABA_PROVIDERS,
   THIRD_PARTY_PROVIDERS,
@@ -176,8 +177,16 @@ export function getExistingProviderSetup(
   return {
     initialProtocol: saved?.protocol,
     initialBaseUrl,
+    // The form restores the first saved model's endpoint, so seed only that
+    // endpoint's custom models; siblings belong to their own endpoints and
+    // would be reinstalled under the restored baseUrl/envKey on submit.
     customModelIds:
       saved?.models
+        .filter(
+          (model) =>
+            normalizeBaseUrlForMatching(model.baseUrl) ===
+            normalizeBaseUrlForMatching(initialBaseUrl),
+        )
         .map((model) => model.id)
         .filter((id) => !builtinIds.has(id)) ?? [],
   };

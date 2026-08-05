@@ -88,14 +88,16 @@ describe('useProviderSetupFlow', () => {
     act(() => {
       result.current.start(provider);
       result.current.changeApiKey('typed-key');
-      result.current.changeModelIds('first-model, typed-model');
+      // Drop the built-in so an unguarded recompute (which re-prepends it)
+      // cannot reproduce the edit byte-for-byte.
+      result.current.changeModelIds('typed-model');
     });
     act(() => {
       result.current.selectBaseUrl(url);
     });
 
     expect(result.current.state.apiKey).toBe('typed-key');
-    expect(result.current.state.modelIds).toBe('first-model, typed-model');
+    expect(result.current.state.modelIds).toBe('typed-model');
   });
 
   it('preserves a typed API key when switching endpoints in the same key domain', () => {
@@ -263,6 +265,69 @@ describe('useProviderSetupFlow', () => {
     });
     expect(result.current.state.baseUrl).toBe('');
     expect(result.current.state.apiKey).toBe('');
+  });
+
+  it('does not leak API key drafts into the next provider flow', () => {
+    const aFirstUrl = 'https://a-first.example/v1';
+    const aSecondUrl = 'https://a-second.example/v1';
+    const providerA: ProviderConfig = {
+      id: 'provider-a',
+      label: 'Provider A',
+      description: 'First provider',
+      protocol: AuthType.USE_OPENAI,
+      baseUrl: [
+        { id: 'a-first', label: 'A First', url: aFirstUrl },
+        { id: 'a-second', label: 'A Second', url: aSecondUrl },
+      ],
+      envKey: (_protocol, baseUrl) =>
+        baseUrl === aFirstUrl ? 'A_FIRST_API_KEY' : 'SHARED_API_KEY',
+      modelsEditable: true,
+      modelNamePrefix: 'A',
+    };
+    const bFirstUrl = 'https://b-first.example/v1';
+    const bSecondUrl = 'https://b-second.example/v1';
+    const providerB: ProviderConfig = {
+      id: 'provider-b',
+      label: 'Provider B',
+      description: 'Second provider sharing the env-key domain',
+      protocol: AuthType.USE_OPENAI,
+      baseUrl: [
+        { id: 'b-first', label: 'B First', url: bFirstUrl },
+        { id: 'b-second', label: 'B Second', url: bSecondUrl },
+      ],
+      envKey: (_protocol, baseUrl) =>
+        baseUrl === bFirstUrl ? 'B_FIRST_API_KEY' : 'SHARED_API_KEY',
+      modelsEditable: true,
+      modelNamePrefix: 'B',
+    };
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+
+    act(() => {
+      result.current.start(providerA);
+    });
+    act(() => {
+      result.current.selectBaseUrl(aSecondUrl);
+    });
+    act(() => {
+      result.current.changeApiKey('draft-a');
+    });
+    act(() => {
+      // Switching away stashes 'draft-a' under SHARED_API_KEY.
+      result.current.selectBaseUrl(aFirstUrl);
+    });
+
+    act(() => {
+      result.current.start(providerB, undefined, {
+        SHARED_API_KEY: 'stored-shared',
+      });
+    });
+    expect(result.current.state.apiKey).toBe('');
+
+    act(() => {
+      result.current.selectBaseUrl(bSecondUrl);
+    });
+    // Provider B must see the stored env value, never provider A's draft.
+    expect(result.current.state.apiKey).toBe('stored-shared');
   });
 
   it('starts from a previously installed endpoint', () => {

@@ -13,7 +13,11 @@ import {
 import { LoadedSettings } from '../../config/settings.js';
 import type { Settings } from '../../config/settingsSchema.js';
 import type { Config } from '@qwen-code/qwen-code-core';
-import { AuthType, findProviderById } from '@qwen-code/qwen-code-core';
+import {
+  AuthType,
+  customProvider,
+  findProviderById,
+} from '@qwen-code/qwen-code-core';
 import { renderWithProviders } from '../../test-utils/render.js';
 import { UIStateContext } from '../contexts/UIStateContext.js';
 import { UIActionsContext } from '../contexts/UIActionsContext.js';
@@ -316,7 +320,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
     });
   });
 
-  it('does not migrate sibling endpoint built-ins as custom models', () => {
+  it('scopes restored custom models to the restored endpoint', () => {
     const kimi = findProviderById('kimi');
     expect(kimi).toBeDefined();
 
@@ -325,6 +329,12 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         {
           id: 'k3-256k',
           name: '[Kimi Code] k3-256k',
+          baseUrl: 'https://api.kimi.com/coding/v1',
+          envKey: 'KIMI_CODE_API_KEY',
+        },
+        {
+          id: 'custom-code-model',
+          name: '[Kimi Code] custom-code-model',
           baseUrl: 'https://api.kimi.com/coding/v1',
           envKey: 'KIMI_CODE_API_KEY',
         },
@@ -346,7 +356,35 @@ describe('AuthDialog', { timeout: 15000 }, () => {
     expect(setup).toEqual({
       initialProtocol: AuthType.USE_OPENAI,
       initialBaseUrl: 'https://api.kimi.com/coding/v1',
-      customModelIds: ['custom-kimi-model'],
+      customModelIds: ['custom-code-model'],
+    });
+  });
+
+  it('seeds only the restored custom-provider endpoint, ignoring trailing slashes', () => {
+    const setup = getExistingProviderSetup(customProvider, {
+      [AuthType.USE_OPENAI]: [
+        {
+          id: 'gpt-oss',
+          baseUrl: 'https://y.example/v1',
+          envKey: 'QWEN_CUSTOM_API_KEY_OPENAI_Y',
+        },
+        {
+          id: 'llama',
+          baseUrl: 'https://x.example/v1',
+          envKey: 'QWEN_CUSTOM_API_KEY_OPENAI_X',
+        },
+        {
+          id: 'y-alias',
+          baseUrl: 'https://y.example/v1/',
+          envKey: 'QWEN_CUSTOM_API_KEY_OPENAI_Y',
+        },
+      ],
+    });
+
+    expect(setup).toEqual({
+      initialProtocol: AuthType.USE_OPENAI,
+      initialBaseUrl: 'https://y.example/v1',
+      customModelIds: ['gpt-oss', 'y-alias'],
     });
   });
 

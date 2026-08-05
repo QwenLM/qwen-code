@@ -3,6 +3,7 @@ import type { QwenProviderSummary } from '../../../shared/types';
 import {
   apiKeyAfterBaseUrlChange,
   defaultModelIds,
+  initialApiKey,
   initialModelIds,
   modelIdsAfterBaseUrlChange,
   shouldResetApiKeyAfterBaseUrlChange,
@@ -137,6 +138,21 @@ describe('provider endpoint state', () => {
         drafts,
       ),
     ).toBe('typed-key');
+    expect(drafts.size).toBe(0);
+  });
+
+  it('clears endpoint drafts when seeding a new provider form', () => {
+    const drafts = new Map([['SHARED_API_KEY', 'draft-from-provider-a']]);
+
+    expect(initialApiKey(kimi, drafts)).toBe('');
+    expect(drafts.size).toBe(0);
+
+    const withExistingKey: QwenProviderSummary = {
+      ...kimi,
+      existingConfig: { apiKey: 'sk-existing' },
+    };
+    drafts.set('SHARED_API_KEY', 'draft-from-provider-a');
+    expect(initialApiKey(withExistingKey, drafts)).toBe('sk-existing');
     expect(drafts.size).toBe(0);
   });
 

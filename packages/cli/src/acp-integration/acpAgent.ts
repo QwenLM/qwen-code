@@ -23,6 +23,7 @@ import {
   getUserAutoMemoryRoot,
   getDefaultBaseUrlForProtocol,
   getDefaultModelIds,
+  normalizeBaseUrlForMatching,
   resolveProviderModels,
   getScopedEnvContents,
   QwenOAuth2Event,
@@ -1985,7 +1986,20 @@ function readExistingProviderConfig(
     // Never serialize the raw secret over the ACP wire. Expose only whether a
     // key is stored; the client can omit `apiKey` on connect to keep it.
     ...(apiKey ? { hasApiKey: true } : {}),
-    ...(existing ? { modelIds: existing.models.map((model) => model.id) } : {}),
+    // Scope seeded IDs to the restored endpoint (the first saved model's);
+    // sibling-endpoint models would otherwise be rewritten under the restored
+    // baseUrl/envKey on submit.
+    ...(existing
+      ? {
+          modelIds: existing.models
+            .filter(
+              (model) =>
+                normalizeBaseUrlForMatching(model.baseUrl) ===
+                normalizeBaseUrlForMatching(firstModel?.baseUrl),
+            )
+            .map((model) => model.id),
+        }
+      : {}),
     ...(advancedConfig ? { advancedConfig } : {}),
   };
 }
