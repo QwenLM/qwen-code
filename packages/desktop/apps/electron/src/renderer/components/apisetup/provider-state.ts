@@ -51,23 +51,38 @@ export function initialApiKey(
   return provider.existingConfig?.apiKey ?? '';
 }
 
+/**
+ * Recomputes the models field when switching endpoints.
+ *
+ * `customModelIds` carries the user-owned ids tracked by the form (seeded
+ * saved models that are not the seeded endpoint's defaults, plus typed ids).
+ * They always survive switches; classifying the field against a provider-wide
+ * built-in union instead silently dropped ids colliding with a sibling
+ * endpoint's built-in, and the next submit's prepend-and-remove-owned merge
+ * then deleted those models from settings.
+ */
 export function modelIdsAfterBaseUrlChange(
   provider: QwenProviderSummary,
-  baseUrl: string,
+  previousBaseUrl: string,
+  nextBaseUrl: string,
   currentModelIds: string,
-): string[] {
-  const builtInIds = new Set([
-    ...provider.models.map((model) => model.id),
-    ...(Array.isArray(provider.baseUrl)
-      ? provider.baseUrl.flatMap(
-          (option) => option.models?.map((model) => model.id) ?? [],
-        )
-      : []),
-  ]);
-  const customIds = parseModelIds(currentModelIds).filter(
-    (id) => !builtInIds.has(id),
-  );
-  return [...defaultModelIds(provider, baseUrl), ...customIds];
+  customModelIds: readonly string[] = [],
+): { modelIds: string[]; customModelIds: string[] } {
+  const previousDefaults = new Set(defaultModelIds(provider, previousBaseUrl));
+  const nextDefaults = defaultModelIds(provider, nextBaseUrl);
+  const fieldIds = parseModelIds(currentModelIds);
+  const fieldSet = new Set(fieldIds);
+  const nextCustomModelIds = [
+    ...new Set([
+      // Ids the user deleted from the field stay deleted.
+      ...customModelIds.filter((id) => fieldSet.has(id)),
+      ...fieldIds.filter((id) => !previousDefaults.has(id)),
+    ]),
+  ];
+  return {
+    modelIds: [...new Set([...nextDefaults, ...nextCustomModelIds])],
+    customModelIds: nextCustomModelIds,
+  };
 }
 
 export function selectedBaseUrlEnvKey(

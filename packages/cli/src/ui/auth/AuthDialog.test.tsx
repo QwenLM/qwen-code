@@ -360,6 +360,38 @@ describe('AuthDialog', { timeout: 15000 }, () => {
     });
   });
 
+  it('keeps restored models whose id collides with a sibling endpoint built-in', () => {
+    const kimi = findProviderById('kimi');
+    expect(kimi).toBeDefined();
+
+    const setup = getExistingProviderSetup(kimi!, {
+      [AuthType.USE_OPENAI]: [
+        {
+          id: 'k3-256k',
+          name: '[Kimi Code] k3-256k',
+          baseUrl: 'https://api.kimi.com/coding/v1',
+          envKey: 'KIMI_CODE_API_KEY',
+        },
+        {
+          id: 'kimi-k3',
+          name: '[Kimi Code] kimi-k3',
+          baseUrl: 'https://api.kimi.com/coding/v1',
+          envKey: 'KIMI_CODE_API_KEY',
+        },
+      ],
+    });
+
+    expect(setup).toEqual({
+      initialProtocol: AuthType.USE_OPENAI,
+      initialBaseUrl: 'https://api.kimi.com/coding/v1',
+      // kimi-k3 is a built-in of the *API* endpoints, but this model was saved
+      // under the coding endpoint, so it is user data for the restored
+      // endpoint and must stay in the seed instead of being deleted on the
+      // next no-op resubmit.
+      customModelIds: ['kimi-k3'],
+    });
+  });
+
   it('seeds only the restored custom-provider endpoint, ignoring trailing slashes', () => {
     const setup = getExistingProviderSetup(customProvider, {
       [AuthType.USE_OPENAI]: [

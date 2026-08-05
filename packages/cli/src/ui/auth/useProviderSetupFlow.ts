@@ -243,13 +243,12 @@ export function useProviderSetupFlow(
       if (provider && selectedUrl !== baseUrl) {
         setApiKeyError(null);
         setModelIdsError(null);
+        // Only the source and destination endpoints' defaults are replaceable:
+        // a typed id colliding with some other sibling endpoint's built-in is
+        // user input for the current endpoint and must survive the switch.
         const builtInIds = new Set([
-          ...(provider.models?.map((model) => model.id) ?? []),
-          ...(Array.isArray(provider.baseUrl)
-            ? provider.baseUrl.flatMap(
-                (option) => option.models?.map((model) => model.id) ?? [],
-              )
-            : []),
+          ...getDefaultModelIds(provider, baseUrl),
+          ...getDefaultModelIds(provider, selectedUrl),
         ]);
         const customIds = normalizeModelIds(modelIds).filter(
           (id) => !builtInIds.has(id),

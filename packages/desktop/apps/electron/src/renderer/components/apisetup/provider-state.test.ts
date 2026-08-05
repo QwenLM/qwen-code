@@ -52,10 +52,51 @@ describe('provider endpoint state', () => {
     expect(
       modelIdsAfterBaseUrlChange(
         kimi,
+        'https://api.kimi.com/coding/v1',
         'https://api.moonshot.ai/v1',
         'k3-256k, custom-model',
-      ),
+      ).modelIds,
     ).toEqual(['kimi-k3', 'custom-model']);
+  });
+
+  it('keeps seeded custom models across an endpoint round trip', () => {
+    const codingUrl = 'https://api.kimi.com/coding/v1';
+    const apiUrl = 'https://api.moonshot.ai/v1';
+    // Seeded from existingConfig: k3-256k is a coding default, kimi-k3 is a
+    // saved custom model whose id collides with the API endpoint built-in.
+    const seeded = ['k3-256k', 'kimi-k3'];
+    const seededDefaults = new Set(defaultModelIds(kimi, codingUrl));
+    const customModelIds = seeded.filter((id) => !seededDefaults.has(id));
+
+    const afterSwitchAway = modelIdsAfterBaseUrlChange(
+      kimi,
+      codingUrl,
+      apiUrl,
+      seeded.join(', '),
+      customModelIds,
+    );
+    const afterRoundTrip = modelIdsAfterBaseUrlChange(
+      kimi,
+      apiUrl,
+      codingUrl,
+      afterSwitchAway.modelIds.join(', '),
+      afterSwitchAway.customModelIds,
+    );
+
+    expect(afterRoundTrip.modelIds).toEqual(['k3-256k', 'kimi-k3']);
+    expect(afterRoundTrip.customModelIds).toEqual(['kimi-k3']);
+  });
+
+  it('does not resurrect custom model IDs the user deleted before switching', () => {
+    const { modelIds, customModelIds } = modelIdsAfterBaseUrlChange(
+      kimi,
+      'https://api.kimi.com/coding/v1',
+      'https://api.moonshot.ai/v1',
+      'k3-256k',
+      ['custom-model'],
+    );
+    expect(modelIds).toEqual(['kimi-k3']);
+    expect(customModelIds).toEqual([]);
   });
 
   it('resets API keys only when the endpoint key domain changes', () => {

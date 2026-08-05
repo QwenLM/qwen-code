@@ -63,6 +63,61 @@ describe('useProviderSetupFlow', () => {
     expect(result.current.state.apiKey).toBe('sk-second');
   });
 
+  it('preserves typed ids colliding with a sibling endpoint built-in when switching', () => {
+    const codeUrl = 'https://code.example/v1';
+    const apiCnUrl = 'https://api-cn.example/v1';
+    const apiIntlUrl = 'https://api-intl.example/v1';
+    const provider: ProviderConfig = {
+      id: 'three-endpoint-provider',
+      label: 'Three Endpoint Provider',
+      description: 'Provider with three endpoints',
+      protocol: AuthType.USE_OPENAI,
+      baseUrl: [
+        {
+          id: 'code',
+          label: 'Code',
+          url: codeUrl,
+          models: [{ id: 'code-model' }],
+        },
+        {
+          id: 'api-cn',
+          label: 'API China',
+          url: apiCnUrl,
+          models: [{ id: 'api-model' }],
+        },
+        {
+          id: 'api-intl',
+          label: 'API International',
+          url: apiIntlUrl,
+          models: [{ id: 'api-model' }],
+        },
+      ],
+      envKey: (_protocol, baseUrl) =>
+        baseUrl === codeUrl ? 'CODE_API_KEY' : 'API_KEY',
+      modelsEditable: true,
+      modelNamePrefix: 'Three',
+    };
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+
+    act(() => {
+      result.current.start(provider);
+    });
+    act(() => {
+      result.current.selectBaseUrl(apiCnUrl);
+    });
+    // code-model is a built-in of the Code endpoint only — neither the
+    // source nor the destination of this switch — so it is user input and
+    // must survive the switch.
+    act(() => {
+      result.current.changeModelIds('api-model, code-model');
+    });
+    act(() => {
+      result.current.selectBaseUrl(apiIntlUrl);
+    });
+
+    expect(result.current.state.modelIds).toBe('api-model, code-model');
+  });
+
   it('preserves edited models and API key when reselecting the current endpoint', () => {
     const url = 'https://first.example/v1';
     const provider: ProviderConfig = {

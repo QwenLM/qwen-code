@@ -33,6 +33,7 @@ import type {
 import {
   apiKeyAfterBaseUrlChange,
   defaultBaseUrl,
+  defaultModelIds,
   initialApiKey,
   initialModelIds,
   modelIdsAfterBaseUrlChange,
@@ -118,6 +119,7 @@ export function ProviderConnectForm({
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const apiKeyDraftsRef = useRef(new Map<string, string>());
+  const customModelIdsRef = useRef<string[]>([]);
 
   const groups = useMemo(
     () =>
@@ -184,7 +186,12 @@ export function ProviderConnectForm({
     setProtocol(existingConfig?.protocol ?? defaultProtocol(provider));
     setBaseUrl(baseUrl);
     setApiKey(initialApiKey(provider, apiKeyDraftsRef.current));
-    setModelIdsText(initialModelIds(provider, baseUrl).join(', '));
+    const seededModelIds = initialModelIds(provider, baseUrl);
+    const seededDefaults = new Set(defaultModelIds(provider, baseUrl));
+    customModelIdsRef.current = seededModelIds.filter(
+      (id) => !seededDefaults.has(id),
+    );
+    setModelIdsText(seededModelIds.join(', '));
     setEnableThinking(existingConfig?.advancedConfig?.enableThinking === true);
     setContextWindowSize(
       typeof contextWindowSize === 'number' ? String(contextWindowSize) : '',
@@ -436,13 +443,15 @@ export function ProviderConnectForm({
                         apiKeyDraftsRef.current,
                       ),
                     );
-                    setModelIdsText(
-                      modelIdsAfterBaseUrlChange(
-                        selectedProvider,
-                        value,
-                        modelIdsText,
-                      ).join(', '),
+                    const nextModelIds = modelIdsAfterBaseUrlChange(
+                      selectedProvider,
+                      baseUrl,
+                      value,
+                      modelIdsText,
+                      customModelIdsRef.current,
                     );
+                    customModelIdsRef.current = nextModelIds.customModelIds;
+                    setModelIdsText(nextModelIds.modelIds.join(', '));
                   }
                 }}
                 disabled={submitting}

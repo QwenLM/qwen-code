@@ -21,24 +21,12 @@ function modelIds(provider: DaemonAuthProviderDescriptor | null): string {
 export function baseUrlOptionModelIds(
   option: DaemonAuthProviderBaseUrlOption,
   provider: DaemonAuthProviderDescriptor,
-  currentModelIds = '',
 ): string {
-  const builtInIds = new Set([
-    ...(provider.models?.map((model) => model.id) ?? []),
-    ...(Array.isArray(provider.baseUrl)
-      ? provider.baseUrl.flatMap(
-          (item) => item.models?.map((model) => model.id) ?? [],
-        )
-      : []),
-  ]);
   const defaults =
     option.models?.map((model) => model.id) ??
     provider.models?.map((model) => model.id) ??
     [];
-  const customIds = normalizeModelIds(currentModelIds).filter(
-    (id) => !builtInIds.has(id),
-  );
-  return [...new Set([...defaults, ...customIds])].join(', ');
+  return defaults.join(', ');
 }
 
 export function selectedBaseUrlModelIds(

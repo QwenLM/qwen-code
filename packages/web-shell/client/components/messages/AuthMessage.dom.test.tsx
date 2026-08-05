@@ -84,6 +84,45 @@ const catalog: DaemonAuthProviderCatalog = {
   ],
 };
 
+const providerC: DaemonAuthProviderDescriptor = {
+  id: 'provider-c',
+  label: 'Provider Gamma',
+  description: 'Provider with endpoint-specific models',
+  protocol: 'openai',
+  baseUrl: [
+    {
+      id: 'c-one',
+      label: 'Gamma One',
+      url: 'https://c-one.example/v1',
+      envKey: 'C_SHARED_KEY',
+      models: [{ id: 'gamma-one-default' }],
+    },
+    {
+      id: 'c-two',
+      label: 'Gamma Two',
+      url: 'https://c-two.example/v1',
+      envKey: 'C_SHARED_KEY',
+      models: [{ id: 'gamma-two-default' }, { id: 'gamma-two-extra' }],
+    },
+  ],
+  models: [{ id: 'gamma-one-default' }],
+  steps: ['baseUrl', 'apiKey', 'models'],
+};
+
+const gammaCatalog: DaemonAuthProviderCatalog = {
+  v: 1,
+  workspaceCwd: '/tmp/workspace',
+  providers: [providerC],
+  groups: [
+    {
+      id: 'third-party',
+      label: 'Third-party Providers',
+      description: 'Choose a built-in provider',
+      providerIds: ['provider-c'],
+    },
+  ],
+};
+
 let container: HTMLDivElement | null = null;
 let root: Root | null = null;
 
@@ -187,5 +226,91 @@ describe('AuthMessage draft isolation', () => {
     expect(passwordInput().value).toBe('');
 
     expect(actions.installAuthProvider).not.toHaveBeenCalled();
+  });
+});
+
+function textInput(): HTMLInputElement {
+  const input = document.querySelector('input:not([type="password"])');
+  if (!input) throw new Error('text input not found');
+  return input as HTMLInputElement;
+}
+
+async function renderAuthMessage() {
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  await act(async () => {
+    root!.render(
+      <I18nProvider language="en">
+        <AuthMessage onMessage={vi.fn()} onClose={vi.fn()} />
+      </I18nProvider>,
+    );
+  });
+  await flush();
+}
+
+describe('AuthMessage model field preservation', () => {
+  it('keeps typed model IDs across an endpoint round trip', async () => {
+    actions.getAuthProviders.mockResolvedValue(gammaCatalog);
+    actions.installAuthProvider.mockResolvedValue({
+      v: 1,
+      providerId: 'provider-c',
+      providerLabel: 'Provider Gamma',
+      authType: 'openai',
+      message: 'ok',
+    });
+    await renderAuthMessage();
+
+    click(findButtonContaining('Third-party Providers'));
+    click(findButtonContaining('Provider Gamma'));
+
+    // Gamma Two's defaults seed the untouched field.
+    click(findButtonContaining('Gamma Two'));
+    setInput(passwordInput(), 'sk-test');
+    click(findButtonContaining('next'));
+    expect(textInput().value).toBe('gamma-two-default, gamma-two-extra');
+
+    // Append an id that collides with Gamma One's built-in, then round trip.
+    setInput(
+      textInput(),
+      'gamma-two-default, gamma-two-extra, gamma-one-default',
+    );
+    click(findButtonContaining('previous'));
+    click(findButtonContaining('previous'));
+    click(findButtonContaining('Gamma One'));
+    click(findButtonContaining('next'));
+    click(findButtonContaining('previous'));
+    click(findButtonContaining('previous'));
+    click(findButtonContaining('Gamma Two'));
+    click(findButtonContaining('next'));
+    expect(textInput().value).toBe(
+      'gamma-two-default, gamma-two-extra, gamma-one-default',
+    );
+  });
+
+  it('keeps a narrowed model list when switching endpoints', async () => {
+    actions.getAuthProviders.mockResolvedValue(gammaCatalog);
+    actions.installAuthProvider.mockResolvedValue({
+      v: 1,
+      providerId: 'provider-c',
+      providerLabel: 'Provider Gamma',
+      authType: 'openai',
+      message: 'ok',
+    });
+    await renderAuthMessage();
+
+    click(findButtonContaining('Third-party Providers'));
+    click(findButtonContaining('Provider Gamma'));
+    click(findButtonContaining('Gamma Two'));
+    setInput(passwordInput(), 'sk-test');
+    click(findButtonContaining('next'));
+    expect(textInput().value).toBe('gamma-two-default, gamma-two-extra');
+
+    setInput(textInput(), 'gamma-two-extra');
+    click(findButtonContaining('previous'));
+    click(findButtonContaining('previous'));
+    click(findButtonContaining('Gamma One'));
+    click(findButtonContaining('next'));
+    expect(textInput().value).toBe('gamma-two-extra');
   });
 });

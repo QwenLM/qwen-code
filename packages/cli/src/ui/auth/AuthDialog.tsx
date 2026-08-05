@@ -166,14 +166,13 @@ export function getExistingProviderSetup(
 } {
   const saved = findExistingProviderModels(providerConfig, modelProviders);
   const initialBaseUrl = saved?.models[0]?.baseUrl;
-  const builtinIds = new Set([
-    ...getDefaultModelIds(providerConfig),
-    ...(Array.isArray(providerConfig.baseUrl)
-      ? providerConfig.baseUrl.flatMap((option) =>
-          getDefaultModelIds(providerConfig, option.url),
-        )
-      : []),
-  ]);
+  // Scope built-ins to the restored endpoint: a saved model whose id collides
+  // with a *sibling* endpoint's built-in is user data for this endpoint, and
+  // dropping it here lets the prepend-and-remove-owned merge delete it on the
+  // next no-op resubmit.
+  const builtinIds = new Set(
+    getDefaultModelIds(providerConfig, initialBaseUrl),
+  );
   return {
     initialProtocol: saved?.protocol,
     initialBaseUrl,

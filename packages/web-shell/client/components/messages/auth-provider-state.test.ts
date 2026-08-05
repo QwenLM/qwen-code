@@ -70,12 +70,10 @@ describe('auth provider endpoint state', () => {
     );
   });
 
-  it('replaces endpoint defaults while preserving custom model IDs', () => {
+  it('returns the destination endpoint defaults', () => {
     const api = Array.isArray(kimi.baseUrl) ? kimi.baseUrl[1] : undefined;
     expect(api).toBeDefined();
-    expect(baseUrlOptionModelIds(api!, kimi, 'k3-256k, custom-model')).toBe(
-      'kimi-k3, custom-model',
-    );
+    expect(baseUrlOptionModelIds(api!, kimi)).toBe('kimi-k3');
   });
 
   it('resets API keys only when the endpoint key domain changes', () => {
@@ -187,9 +185,9 @@ describe('auth provider endpoint state', () => {
     expect(selectedBaseUrlModelIds(mimo, 'https://api.xiaomimimo.com/v1')).toBe(
       'mimo-v2.5-pro, mimo-v2.5',
     );
-    expect(
-      baseUrlOptionModelIds(option!, mimo, 'mimo-v2.5, custom-model'),
-    ).toBe('mimo-v2.5-pro, mimo-v2.5, custom-model');
+    expect(baseUrlOptionModelIds(option!, mimo)).toBe(
+      'mimo-v2.5-pro, mimo-v2.5',
+    );
   });
 
   it('falls back to the provider-level env key for options without one', () => {

@@ -109,6 +109,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
   const [baseUrl, setBaseUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [models, setModels] = useState('');
+  const [modelsDirty, setModelsDirty] = useState(false);
   const [thinking, setThinking] = useState(false);
   const [modality, setModality] = useState(false);
   const [modalityImage, setModalityImage] = useState(true);
@@ -207,6 +208,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       if (!Array.isArray(nextProvider.baseUrl)) {
         setModels(selectedBaseUrlModelIds(nextProvider, ''));
       }
+      setModelsDirty(false);
       setThinking(false);
       setModality(false);
       setModalityImage(true);
@@ -448,7 +450,9 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
               apiKeyDraftsRef.current,
             ),
           );
-          setModels(baseUrlOptionModelIds(selected, provider, models));
+          if (!modelsDirty) {
+            setModels(baseUrlOptionModelIds(selected, provider));
+          }
         }
       }
       goNext();
@@ -465,7 +469,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
     goNext,
     groupIndex,
     groups,
-    models,
+    modelsDirty,
     optionIndex,
     protocol,
     provider,
@@ -538,7 +542,9 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
                 apiKeyDraftsRef.current,
               ),
             );
-            setModels(baseUrlOptionModelIds(selected, provider, models));
+            if (!modelsDirty) {
+              setModels(baseUrlOptionModelIds(selected, provider));
+            }
           }
         }
         goNext();
@@ -553,7 +559,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       catalog,
       goNext,
       groups,
-      models,
+      modelsDirty,
       protocol,
       activateAdvancedOption,
       advancedOptionValues,
@@ -702,6 +708,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
             placeholder={defaultIds || t('auth.modelsPlaceholder')}
             onChange={(event) => {
               setModels(event.target.value);
+              setModelsDirty(true);
               setError(null);
             }}
             onKeyDown={(event) => {
