@@ -133,10 +133,13 @@ export function getAgentViewSupervisorSocketPath(
     return primaryPath;
   }
 
-  return path.join(
-    options.runtimeDir ?? os.tmpdir(),
-    `qwen-agent-view-${digest}.sock`,
-  );
+  const fallbackDir =
+    options.runtimeDir ??
+    path.join(
+      os.tmpdir(),
+      `qav-${typeof process.getuid === 'function' ? process.getuid() : 'user'}`,
+    );
+  return path.join(fallbackDir, `${digest}.sock`);
 }
 
 export function getAgentViewSupervisorStaleSocketPath(
@@ -1068,7 +1071,7 @@ class AgentViewSupervisorProcessHandler
         schemaVersion: 1,
         ...getQueuedPromptActivityPatch(text, now),
         lastActivityAt: now,
-        capabilities: [],
+        capabilities: activity?.capabilities ?? [],
       },
       this.store,
     );
@@ -1151,7 +1154,7 @@ class AgentViewSupervisorProcessHandler
           ? getQueuedPromptActivityPatch(text, now)
           : {}),
         lastActivityAt: now,
-        capabilities: [],
+        capabilities: activity?.capabilities ?? [],
       },
       this.store,
     );

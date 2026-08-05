@@ -56,10 +56,21 @@ describe('Agent View supervisor process helpers', () => {
       runtimeDir,
     });
 
-    expect(
-      socketPath.startsWith(path.join(runtimeDir, 'qwen-agent-view-')),
-    ).toBe(true);
-    expect(socketPath.endsWith('.sock')).toBe(true);
+    expect(path.dirname(socketPath)).toBe(runtimeDir);
+    expect(path.basename(socketPath)).toMatch(/^[a-f0-9]{16}\.sock$/);
+    expect(Buffer.byteLength(socketPath)).toBeLessThan(100);
+  });
+
+  it('uses a private runtime fallback directory by default', () => {
+    const socketPath = getAgentViewSupervisorSocketPath({
+      globalDir: path.join(os.tmpdir(), 'a'.repeat(140)),
+      platform: 'linux',
+    });
+    const uid =
+      typeof process.getuid === 'function' ? process.getuid() : 'user';
+
+    expect(path.dirname(socketPath)).toBe(path.join(os.tmpdir(), `qav-${uid}`));
+    expect(path.basename(socketPath)).toMatch(/^[a-f0-9]{16}\.sock$/);
     expect(Buffer.byteLength(socketPath)).toBeLessThan(100);
   });
 
@@ -741,6 +752,7 @@ describe('Agent View supervisor process helpers', () => {
       sessionId: result.sessionId,
       token,
       cwd: globalDir,
+      capabilities: ['reply', 'hibernate'],
     });
 
     await expect(
@@ -769,6 +781,7 @@ describe('Agent View supervisor process helpers', () => {
       summary: 'write tests',
       queuedPromptCount: 1,
       queuedPromptPreview: 'next step',
+      capabilities: ['reply', 'hibernate'],
     });
 
     await handler.workerEvent?.({
@@ -820,6 +833,11 @@ describe('Agent View supervisor process helpers', () => {
     await expect(
       handler.answer?.({ sessionId: result.sessionId, text: 'no' }),
     ).resolves.toEqual({ sessionId: result.sessionId, answered: true });
+    await expect(
+      readAgentViewActivity(result.sessionId, { globalDir }),
+    ).resolves.toMatchObject({
+      capabilities: ['reply', 'hibernate'],
+    });
 
     await fs.rm(globalDir, { recursive: true, force: true });
   }, 20_000);

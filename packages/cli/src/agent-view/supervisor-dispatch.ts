@@ -5,9 +5,11 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
+import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { AGENT_VIEW_PROTOCOL_VERSION } from './protocol.js';
 import {
+  getAgentViewSessionPaths,
   removeAgentViewRosterEntry,
   upsertAgentViewRosterEntry,
   writeAgentViewActivity,
@@ -151,6 +153,15 @@ async function cleanupFailedDispatchCreation(
 
   try {
     await removeAgentViewRosterEntry(sessionId, options);
+  } catch {
+    // Best-effort rollback only.
+  }
+
+  try {
+    await fs.rm(getAgentViewSessionPaths(sessionId, options).sessionDir, {
+      recursive: true,
+      force: true,
+    });
   } catch {
     // Best-effort rollback only.
   }
