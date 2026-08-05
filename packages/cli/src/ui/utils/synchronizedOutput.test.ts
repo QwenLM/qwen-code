@@ -34,12 +34,9 @@ describe('terminalSupportsSynchronizedOutput', () => {
     [{ TERM_PROGRAM: 'iTerm.app' }, true],
     [{ TERM: 'xterm-kitty' }, true],
     [{ KITTY_WINDOW_ID: '1' }, true],
-    [{ WT_SESSION: 'console-12345' }, true],
     [{ TERM_PROGRAM: 'Apple_Terminal' }, false],
     [{ TERM_PROGRAM: 'JetBrains-JediTerm' }, false],
     [{ TERM_PROGRAM: 'WezTerm', TMUX: '/tmp/tmux' }, false],
-    // Multiplexer guard wins over the WT_SESSION detection (#7897):
-    [{ WT_SESSION: 'console-12345', TMUX: '/tmp/tmux' }, false],
     [{ TERM_PROGRAM: 'WezTerm', SSH_TTY: '/dev/pts/1' }, false],
     [{ TERM_PROGRAM: 'WezTerm', SSH_CLIENT: '127.0.0.1 1 2' }, false],
     [{ TERM_PROGRAM: 'WezTerm', QWEN_CODE_SYNCHRONIZED_OUTPUT: '0' }, false],

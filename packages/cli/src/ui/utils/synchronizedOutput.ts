@@ -52,13 +52,6 @@ export function terminalSupportsSynchronizedOutput(
     return false;
   }
 
-  // Windows Terminal supports synchronized output (DEC mode 2026) since
-  // v1.18. Detect via WT_SESSION set by Windows Terminal. #7634.
-  // Note: WT_SESSION is set on the Windows side and is not automatically
-  // propagated into WSL shells unless WSLENV includes it, so this check
-  // primarily covers native Windows Terminal (PowerShell/cmd) sessions.
-  if (env['WT_SESSION']) return true;
-
   const termProgram = env['TERM_PROGRAM'];
   if (termProgram === 'WezTerm' || termProgram === 'iTerm.app') {
     return true;

@@ -135,11 +135,11 @@ export function installTerminalRedrawOptimizer(
   // (Windows Console Pseudo Terminal) processes differently from individual
   // per-line erases — the cursor ends up at the wrong row, and each streaming
   // frame overlaps remnants of the previous one, causing duplicate text.
-  // Skip the optimizer when WSL or Windows Terminal is detected, unless the
-  // user explicitly force-enables it. #7634.
+  // Skip the optimizer on WSL (ConPTY is the default pty there), unless the
+  // user explicitly force-enables it. WT_SESSION is not included - it is not
   if (
     env['QWEN_CODE_LEGACY_ERASE_LINES'] !== '0' &&
-    (env['WSL_DISTRO_NAME'] || env['WSL_INTEROP'] || env['WT_SESSION'])
+    (env['WSL_DISTRO_NAME'] || env['WSL_INTEROP'])
   ) {
     return () => {};
   }
