@@ -151,6 +151,7 @@ export function validateChannelEditorDraft(
     errors['name'] = 'duplicate';
   }
   for (const field of descriptor.fields) {
+    if (field.kind === 'object') continue;
     if (field.required && isMissingField(field, draft)) {
       errors[field.key] = 'required';
     } else if (

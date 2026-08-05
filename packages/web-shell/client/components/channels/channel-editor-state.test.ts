@@ -166,6 +166,27 @@ describe('Channel editor state', () => {
     expect(draft.values).not.toHaveProperty('interactiveCards');
   });
 
+  it('ignores object fields during validation even when marked required', () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      type: 'example',
+      displayName: 'Example',
+      manageable: true,
+      fields: [
+        {
+          key: 'interactiveCards',
+          label: 'Interactive Cards',
+          kind: 'object',
+          required: true,
+        },
+      ] as unknown as DaemonChannelTypeDescriptor['fields'],
+    };
+
+    const draft = createChannelEditorDraft(descriptor);
+    draft.name = 'example';
+
+    expect(validateChannelEditorDraft(descriptor, draft, [])).toEqual({});
+  });
+
   it('rejects number values at or below the exclusive minimum', () => {
     const descriptor: DaemonChannelTypeDescriptor = {
       type: 'example',

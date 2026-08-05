@@ -294,10 +294,13 @@ function assertPreservedUnknownField(
   value: unknown,
   previous: Record<string, unknown>,
 ): void {
+  const fieldPath = path ? `${path}.${key}` : key;
+  if (UNSAFE_OBJECT_KEYS.has(key)) {
+    throw invalidConfig(`Channel field "${fieldPath}" is not manageable.`);
+  }
   if (Object.hasOwn(previous, key) && isDeepStrictEqual(previous[key], value)) {
     return;
   }
-  const fieldPath = path ? `${path}.${key}` : key;
   throw invalidConfig(`Channel field "${fieldPath}" is not manageable.`);
 }
 
