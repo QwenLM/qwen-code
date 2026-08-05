@@ -229,6 +229,14 @@ describe('ACP tool-result text projection', () => {
     ]);
   });
 
+  it('keeps content at exactly the block-count maximum', () => {
+    const content = Array.from({ length: 1_191 }, () => textBlock(''));
+    const update = toolUpdate(content);
+
+    expect(projectAcpToolResultUpdate(update)).toBe(update);
+    expect(contentTexts(update)).toHaveLength(1_191);
+  });
+
   it('collapses content when the minimum marker set cannot fit', () => {
     const content = Array.from({ length: 1_000 }, () =>
       textBlock('x'.repeat(100)),
@@ -293,6 +301,22 @@ describe('ACP tool-result text projection', () => {
     expect(projectAcpToolResultUpdate(update)).toBe(update);
   });
 
+  it('exempts content blocks whose inner text carries extra fields', () => {
+    const content = [
+      {
+        type: 'content',
+        content: {
+          type: 'text',
+          text: 'x'.repeat(100_000),
+          annotations: { audience: ['assistant'] },
+        },
+      },
+    ];
+    const update = toolUpdate(content);
+
+    expect(projectAcpToolResultUpdate(update)).toBe(update);
+  });
+
   it.each([
     [
       'diff',
@@ -338,6 +362,15 @@ describe('ACP tool-result text projection', () => {
     const update = toolUpdate([textBlock(text)], text, {
       toolName: 'present_quality_report',
       serverId: 'dq-A2UI',
+    });
+
+    expect(projectAcpToolResultUpdate(update)).toBe(update);
+  });
+
+  it('exempts legacy A2UI updates identified only by toolName', () => {
+    const text = `[${' '.repeat(100_000)}]`;
+    const update = toolUpdate([textBlock(text)], text, {
+      toolName: 'mcp__ui__present_ui',
     });
 
     expect(projectAcpToolResultUpdate(update)).toBe(update);
