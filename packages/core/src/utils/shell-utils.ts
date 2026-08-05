@@ -1742,6 +1742,8 @@ export function detectCommandSubstitution(command: string): boolean {
             return { nextIndex: i, hasSubstitution: true };
           }
 
+          const wasPendingDollarLineContinuation =
+            pendingDollarLineContinuation;
           pendingDollarLineContinuation = false;
           if (
             newlineLength > 0 &&
@@ -1759,6 +1761,15 @@ export function detectCommandSubstitution(command: string): boolean {
             }
             const isEscapedDollar = backslashCount % 2 === 1;
             pendingDollarLineContinuation = !isEscapedDollar;
+          } else if (
+            wasPendingDollarLineContinuation &&
+            newlineLength > 0 &&
+            effectiveLine === '\\'
+          ) {
+            // A line consisting only of a continuation is itself removed by
+            // bash, so a pending `$\<newline>` stays live and can still join
+            // with a `(` on a later line (#8582).
+            pendingDollarLineContinuation = true;
           }
         }
 
@@ -1779,6 +1790,18 @@ export function detectCommandSubstitution(command: string): boolean {
   let inComment = false;
   const pendingHeredocs: PendingHeredoc[] = [];
   let i = 0;
+
+  // Line-continuation awareness (#8582): bash removes every unescaped
+  // `\<newline>` pair entirely, joining the characters around it. Track the
+  // last significant character (with the quote context it appeared in) so a
+  // `$` / `<` / `>` split from a following `(` by a continuation is still
+  // recognized as substitution. Mirrors the `pendingDollarLineContinuation`
+  // handling in `consumeHeredocBodies`, which the main scanner lacked.
+  let lastSignificantChar = '';
+  let lastSignificantInDoubleQuotes = false;
+  let lastSignificantInSingleQuotes = false;
+  let lastSignificantInBackticks = false;
+  let justAfterContinuation = false;
 
   while (i < command.length) {
     const char = command[i]!;
@@ -1810,7 +1833,16 @@ export function detectCommandSubstitution(command: string): boolean {
     }
 
     if (!inSingleQuotes && !inDoubleQuotes && !inBackticks) {
-      if (!inComment && isCommentStart(i)) {
+      // After a line continuation bash joins the next character onto the
+      // previous word, so `#` opens a comment only when the character
+      // before the continuation was a word boundary (#8582):
+      // `$\<newline>#foo` joins into `$#foo` (mid-word `#`, no comment)
+      // while `echo \<newline># foo` joins into `echo # foo` (comment).
+      const continuationJoinsWord =
+        justAfterContinuation &&
+        lastSignificantChar !== '' &&
+        !isWordBoundary(lastSignificantChar);
+      if (!inComment && !continuationJoinsWord && isCommentStart(i)) {
         inComment = true;
         i++;
         continue;
@@ -1824,8 +1856,49 @@ export function detectCommandSubstitution(command: string): boolean {
 
     // Handle escaping - only works outside single quotes
     if (char === '\\' && !inSingleQuotes) {
+      if (nextChar === '\n') {
+        // `\<newline>` is a line continuation: bash removes both characters,
+        // making the surrounding characters adjacent. Preserve the pending
+        // adjacency so `$`/`<`/`>` + continuation + `(` is still detected;
+        // chained continuations keep re-setting the flag (#8582).
+        justAfterContinuation = true;
+        i += 2;
+        continue;
+      }
+      // A genuinely escaped character cannot start a substitution (`\$(` is
+      // a literal `$` followed by `(`), so make it inert for the
+      // continuation-adjacency check.
+      lastSignificantChar = '';
+      justAfterContinuation = false;
       i += 2; // Skip the escaped character
       continue;
+    }
+
+    // A line continuation joins the characters around it: if the character
+    // after the continuation completes a substitution split across the line
+    // break, flag it (#8582). Quote context must match across the break —
+    // `"$"\<newline>(` is a quoted dollar followed by `(`, not `$(`.
+    if (justAfterContinuation) {
+      justAfterContinuation = false;
+      if (!inSingleQuotes && char === '(') {
+        if (
+          lastSignificantChar === '$' &&
+          !lastSignificantInSingleQuotes &&
+          lastSignificantInDoubleQuotes === inDoubleQuotes
+        ) {
+          return true;
+        }
+        if (
+          (lastSignificantChar === '<' || lastSignificantChar === '>') &&
+          !lastSignificantInSingleQuotes &&
+          !lastSignificantInDoubleQuotes &&
+          !lastSignificantInBackticks &&
+          !inDoubleQuotes &&
+          !inBackticks
+        ) {
+          return true;
+        }
+      }
     }
 
     // Handle quote state changes
@@ -1879,6 +1952,10 @@ export function detectCommandSubstitution(command: string): boolean {
       }
     }
 
+    lastSignificantChar = char;
+    lastSignificantInDoubleQuotes = inDoubleQuotes;
+    lastSignificantInSingleQuotes = inSingleQuotes;
+    lastSignificantInBackticks = inBackticks;
     i++;
   }
 

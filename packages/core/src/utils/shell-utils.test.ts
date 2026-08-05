@@ -10,6 +10,7 @@ import {
   checkArgumentSafety,
   checkCommandPermissions,
   COMMAND_SUBSTITUTION_WARNING,
+  detectCommandSubstitution,
   detectSelfKillCommand,
   escapeShellArg,
   getCommandRoot,
@@ -1311,6 +1312,93 @@ describe('checkArgumentSafety', () => {
       expect(result.dangerousPatterns).toContain('& background operator');
       expect(result.dangerousPatterns).toHaveLength(3);
     });
+  });
+});
+
+// Regression coverage for issue #8582: bash removes `\<newline>` line
+// continuations entirely, joining the surrounding characters, so `$` +
+// continuation + `(` is executed as `$(` — but the scanner's escape handler
+// skipped the backslash AND the newline, which broke the adjacency and let
+// the substitution through undetected. These tests pin the continuation
+// behavior of the main scanner and of unquoted heredoc bodies.
+describe('detectCommandSubstitution line continuations (#8582)', () => {
+  it('detects $(...) split across a line continuation inside double quotes', () => {
+    expect(detectCommandSubstitution('echo "$\\\n(touch /tmp/pwned)"')).toBe(
+      true,
+    );
+  });
+
+  it('detects $(...) split across a line continuation unquoted', () => {
+    expect(detectCommandSubstitution('echo $\\\n(touch /tmp/pwned)')).toBe(
+      true,
+    );
+  });
+
+  it('detects $(...) split across chained line continuations', () => {
+    expect(
+      detectCommandSubstitution('echo "$\\\n\\\n(touch /tmp/pwned)"'),
+    ).toBe(true);
+  });
+
+  it('detects process substitution split across a line continuation', () => {
+    expect(detectCommandSubstitution('diff <\\\n(ls)')).toBe(true);
+    expect(detectCommandSubstitution('diff >\\\n(ls)')).toBe(true);
+  });
+
+  it('does not flag an escaped dollar before the continuation', () => {
+    // `\$` is a literal `$`; the continuation cannot revive it.
+    expect(detectCommandSubstitution('echo "\\$\\\n(touch /tmp/pwned)"')).toBe(
+      false,
+    );
+  });
+
+  it('does not flag an escaped paren after the continuation', () => {
+    expect(detectCommandSubstitution('echo "$\\\n\\(ls)"')).toBe(false);
+  });
+
+  it('does not flag when the quote context changes across the continuation', () => {
+    // `"$"` is a quoted dollar; the `(` after the continuation is unquoted.
+    expect(detectCommandSubstitution('echo "$"\\\n(ls)')).toBe(false);
+  });
+
+  it('does not flag continuations inside single quotes (literal)', () => {
+    expect(detectCommandSubstitution("echo '$\\\n(touch /tmp/pwned)'")).toBe(
+      false,
+    );
+  });
+
+  it('does not flag process-substitution shapes inside double quotes', () => {
+    expect(detectCommandSubstitution('echo "<\\\n(ls)"')).toBe(false);
+  });
+
+  it('does not flag ordinary continuations without substitution', () => {
+    expect(detectCommandSubstitution('grep pattern\\\nfile')).toBe(false);
+    expect(detectCommandSubstitution('echo a \\\n&& echo b')).toBe(false);
+    expect(detectCommandSubstitution('echo $\\\nHOME')).toBe(false);
+  });
+
+  it('does not let a post-continuation comment hide a later substitution', () => {
+    // bash joins this into `echo $#foo$(x)` — the `#` is mid-word, not a
+    // comment, and the `$(x)` runs.
+    expect(detectCommandSubstitution('echo $\\\n#foo$(x)')).toBe(true);
+  });
+
+  it('still treats # after a word-boundary continuation as a comment', () => {
+    // bash joins this into `echo # $(x)` — the `#` follows a space, so it
+    // starts a comment and nothing executes.
+    expect(detectCommandSubstitution('echo \\\n# $(x)')).toBe(false);
+  });
+
+  it('detects continuation-split substitution across pure-continuation heredoc lines', () => {
+    const cmd = ['cat <<EOF', '$\\', '\\', '(touch /tmp/pwned)', 'EOF'].join(
+      '\n',
+    );
+    expect(detectCommandSubstitution(cmd)).toBe(true);
+  });
+
+  it('still allows escaped continuation-split substitution in heredoc bodies', () => {
+    const cmd = ['cat <<EOF', '\\$\\', '(touch /tmp/pwned)', 'EOF'].join('\n');
+    expect(detectCommandSubstitution(cmd)).toBe(false);
   });
 });
 

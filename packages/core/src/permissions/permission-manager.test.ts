@@ -1858,6 +1858,29 @@ describe('PermissionManager', () => {
           }),
         ).toBe('deny');
       });
+
+      // Regression coverage for issue #8582: substitution hidden by a line
+      // continuation is invisible to the AST (tree-sitter emits no
+      // command_substitution node), so resolveDefaultPermission needs the
+      // same pre-AST substitution gate as ShellToolInvocation — otherwise
+      // this path auto-allows the payload.
+      it('returns ask for $(...) hidden by a line continuation (issue #8582)', async () => {
+        expect(
+          await pm.evaluate({
+            toolName: 'run_shell_command',
+            command: 'echo "$\\\n(touch /tmp/pwned)"',
+          }),
+        ).toBe('ask');
+      });
+
+      it('returns ask for ${var@P} prompt expansion (issue #8582)', async () => {
+        expect(
+          await pm.evaluate({
+            toolName: 'run_shell_command',
+            command: 'echo "${one="$"}${two="$one(touch /tmp/pwned)"}${two@P}"',
+          }),
+        ).toBe('ask');
+      });
     });
 
     it('isCommandAllowed delegates to evaluate', async () => {

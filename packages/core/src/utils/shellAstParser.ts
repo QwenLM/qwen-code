@@ -958,13 +958,39 @@ function processSafety(root: string, args: string[]): Safety {
   return 'write';
 }
 
+/**
+ * True for `${parameter@operator}` expansions such as `${var@P}`.
+ * tree-sitter-bash surfaces the transformation operator as a literal `@`
+ * child of the `expansion` node. Array subscripts keep their `@` inside a
+ * `subscript` child (`${arr[@]}` → `subscript` → `word`), so they do not
+ * match here (#8582).
+ */
+function hasParameterTransformation(node: SyntaxNode): boolean {
+  for (let i = 0; i < node.childCount; i++) {
+    if (node.child(i)!.type === '@') return true;
+  }
+  return false;
+}
+
 function evaluateSubstitutions(node: SyntaxNode): ShellCommandSafety {
   const substitutions = collectDescendants(
     node,
     new Set(['command_substitution', 'process_substitution']),
     true,
   );
-  if (substitutions.length === 0) return 'read-only';
+  // `${var@P}` prompt expansion executes command substitution embedded in
+  // the value at expansion time, but tree-sitter produces no
+  // command_substitution node for it. Downgrade any `@`-transformed
+  // parameter expansion to unknown so it requires confirmation (#8582).
+  // Not outermost-only: the operator may sit in a nested expansion
+  // (`${a:-${b@P}}`).
+  const hasTransformedExpansion = collectDescendants(
+    node,
+    new Set(['expansion']),
+  ).some(hasParameterTransformation);
+  if (substitutions.length === 0) {
+    return hasTransformedExpansion ? 'unknown' : 'read-only';
+  }
   return mergeSafety(
     'unknown',
     ...substitutions

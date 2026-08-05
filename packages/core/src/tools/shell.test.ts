@@ -6901,6 +6901,28 @@ describe('ShellTool', () => {
       expect(await invocation.getDefaultPermission()).toBe('ask');
     });
 
+    // Regression coverage for issue #8582: both bypass forms must ask.
+    // Variant 1 is caught by the substitution gate (tree-sitter cannot see
+    // a `$(` split across a line continuation); variant 2 is caught by the
+    // AST classifier downgrading `@`-transformed expansions to unknown.
+    it('asks for $(...) hidden by a line continuation (issue #8582)', async () => {
+      const invocation = shellTool.build({
+        command: 'echo "$\\\n(touch /tmp/pwned)"',
+        is_background: false,
+      });
+
+      expect(await invocation.getDefaultPermission()).toBe('ask');
+    });
+
+    it('asks for ${var@P} prompt expansion (issue #8582)', async () => {
+      const invocation = shellTool.build({
+        command: 'echo "${one="$"}${two="$one(touch /tmp/pwned)"}${two@P}"',
+        is_background: false,
+      });
+
+      expect(await invocation.getDefaultPermission()).toBe('ask');
+    });
+
     it('should request confirmation for a non-read-only command and return details', async () => {
       const params = { command: 'npm install', is_background: false };
       const invocation = shellTool.build(params);

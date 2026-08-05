@@ -509,6 +509,28 @@ describe('MonitorTool', () => {
       await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
     });
 
+    // Regression coverage for issue #8582: the AST cannot see a `$(` split
+    // across a line continuation, so the pre-AST substitution gate must
+    // catch it on the monitor path too.
+    it('asks for $(...) hidden by a line continuation (issue #8582)', async () => {
+      const invocation = createInvocation({
+        command: 'echo "$\\\n(touch /tmp/pwned)"',
+      });
+
+      await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
+    });
+
+    it('asks for ${var@P} prompt expansion when the AST flags it (issue #8582)', async () => {
+      // The real AST downgrades `@`-transformed expansions to unknown
+      // (not read-only); simulate that verdict here.
+      mockIsShellCommandReadOnlyAST.mockResolvedValueOnce(false);
+      const invocation = createInvocation({
+        command: 'echo "${one="$"}${two="$one(touch /tmp/pwned)"}${two@P}"',
+      });
+
+      await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
+    });
+
     it('allows read-only monitor commands by default', async () => {
       mockIsShellCommandReadOnlyAST.mockResolvedValueOnce(true);
       const invocation = createInvocation({

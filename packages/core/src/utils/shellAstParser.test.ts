@@ -365,6 +365,52 @@ describe('isShellCommandReadOnlyAST', () => {
       );
     });
 
+    // Regression coverage for issue #8582: `${var@P}` prompt expansion
+    // executes command substitution embedded in the value, but tree-sitter
+    // produces only an `expansion` node (no command_substitution), so the
+    // classifier used to auto-approve it. Any `@`-transformed parameter
+    // expansion must be unknown. Array subscripts (`${arr[@]}`) keep their
+    // `@` inside a `subscript` node and must stay read-only.
+    it('rejects ${var@P} prompt expansion', async () => {
+      expect(await isShellCommandReadOnlyAST('echo "${two@P}"')).toBe(false);
+      expect(await classifyShellCommandSafety('echo "${two@P}"')).toBe(
+        'unknown',
+      );
+    });
+
+    it('rejects the full ${var@P} payload from issue #8582', async () => {
+      expect(
+        await isShellCommandReadOnlyAST(
+          'echo "${one="$"}${two="$one(touch /tmp/pwned)"}${two@P}"',
+        ),
+      ).toBe(false);
+    });
+
+    it('rejects other @-transformations conservatively', async () => {
+      expect(await isShellCommandReadOnlyAST('echo "${var@Q}"')).toBe(false);
+      expect(await isShellCommandReadOnlyAST('echo "${var@E}"')).toBe(false);
+    });
+
+    it('rejects @-transformation applied to an array subscript', async () => {
+      expect(await isShellCommandReadOnlyAST('echo "${arr[@]@P}"')).toBe(false);
+    });
+
+    it('rejects @-transformation nested in another expansion', async () => {
+      expect(await isShellCommandReadOnlyAST('echo "${a:-${b@P}}"')).toBe(
+        false,
+      );
+    });
+
+    it('still allows plain parameter expansions and array subscripts', async () => {
+      expect(await isShellCommandReadOnlyAST('echo "${var}"')).toBe(true);
+      expect(await isShellCommandReadOnlyAST('echo "${var:-default}"')).toBe(
+        true,
+      );
+      expect(await isShellCommandReadOnlyAST('echo "${!var}"')).toBe(true);
+      expect(await isShellCommandReadOnlyAST('echo "${arr[@]}"')).toBe(true);
+      expect(await isShellCommandReadOnlyAST('echo "${#arr[@]}"')).toBe(true);
+    });
+
     it('allows complex pipeline of read-only commands', async () => {
       expect(
         await isShellCommandReadOnlyAST(
