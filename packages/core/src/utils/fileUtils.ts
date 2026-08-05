@@ -18,6 +18,7 @@ import type { Config } from '../config/config.js';
 import { createDebugLogger } from './debugLogger.js';
 import { getErrorMessage, isAbortError, isNodeError } from './errors.js';
 import type { InputModalities } from '../core/contentGenerator.js';
+import { DEFAULT_MAX_INLINE_MEDIA_BYTES } from '../core/inlineMediaLimit.js';
 import { detectEncodingFromBuffer } from './systemEncoding.js';
 import type { PDFRenderedImage } from './pdf.js';
 import {
@@ -69,8 +70,6 @@ export const DEFAULT_ENCODING: BufferEncoding = 'utf-8';
 // larger ceiling so legitimate large documents can still be sampled.
 const PDF_FULL_TEXT_EXTRACTION_MAX_MB = 100;
 const PDF_PAGED_TEXT_EXTRACTION_MAX_MB = 512;
-// Keep this aligned with the batch voice bridge's decoded-byte ceiling.
-const AUDIO_BRIDGE_MAX_SOURCE_BYTES = 10 * 1024 * 1024;
 
 // --- Unicode BOM detection & decoding helpers --------------------------------
 
@@ -1276,7 +1275,7 @@ export async function processSingleFileContent(
     const bridgeCanAcceptAudio =
       fileType === 'audio' &&
       preserveUnsupportedAudio &&
-      stats.size <= AUDIO_BRIDGE_MAX_SOURCE_BYTES;
+      stats.size <= DEFAULT_MAX_INLINE_MEDIA_BYTES;
     if (
       fileSizeInMB > 9.9 &&
       !willExtractPdfText &&
