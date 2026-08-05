@@ -177,16 +177,22 @@ export class AcpWsTransport implements DaemonTransport {
     if (mapping.method === '_capabilities') {
       try {
         const response = await this.restFetch(url, init);
-        if (response.ok) {
-          const envelope: unknown = await response.json();
+        if (!response.ok) {
+          if (response.status !== 404) return response;
+        } else {
+          const envelope: unknown = await response.clone().json();
           if (isRecord(envelope) && Array.isArray(envelope['features'])) {
-            return synthesizeResponse(200, envelope);
+            return response;
           }
         }
       } catch {
         // ACP-only deployments can still use the initialize fallback.
       }
-      return synthesizeResponse(200, this.initResult ?? { v: 1 });
+      return synthesizeResponse(200, {
+        ...(isRecord(this.initResult) ? this.initResult : {}),
+        v: 1,
+        features: [],
+      });
     }
 
     // For notifications, send and return 204 immediately.

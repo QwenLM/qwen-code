@@ -145,7 +145,7 @@ describe('AcpWsTransport', () => {
       }
     });
 
-    it('falls back to the initialize result when a 200 is not a capabilities envelope', async () => {
+    it('falls back for a malformed 200 and preserves REST errors', async () => {
       const originalWebSocket = globalThis.WebSocket;
       const originalFetch = Object.getOwnPropertyDescriptor(
         globalThis,
@@ -184,9 +184,14 @@ describe('AcpWsTransport', () => {
       });
       // A reverse proxy / SPA answering 200 with a body that is not the
       // daemon capabilities envelope must not be accepted as one.
-      const restFetch = vi.fn(async () =>
-        synthesizeResponse(200, { index: 'spa fallback, no features' }),
-      );
+      const restFetch = vi
+        .fn<typeof globalThis.fetch>()
+        .mockResolvedValueOnce(
+          synthesizeResponse(200, { index: 'spa fallback, no features' }),
+        )
+        .mockResolvedValueOnce(
+          synthesizeResponse(401, { error: 'unauthorized' }),
+        );
       Object.defineProperty(globalThis, 'fetch', {
         configurable: true,
         value: restFetch,
@@ -199,8 +204,14 @@ describe('AcpWsTransport', () => {
         });
         await expect(response.json()).resolves.toMatchObject({
           protocolVersion: 1,
+          features: [],
         });
-        expect(restFetch).toHaveBeenCalledOnce();
+        const unauthorized = await transport.fetch(
+          'http://daemon/capabilities',
+          { method: 'GET' },
+        );
+        expect(unauthorized.status).toBe(401);
+        expect(restFetch).toHaveBeenCalledTimes(2);
       } finally {
         transport.dispose();
         Object.defineProperty(globalThis, 'WebSocket', {
