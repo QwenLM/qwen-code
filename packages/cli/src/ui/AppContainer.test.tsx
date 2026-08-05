@@ -2737,6 +2737,7 @@ describe('AppContainer State Management', () => {
         popAllMessages: mockPopAllMessages,
         drainQueue: vi.fn().mockReturnValue(['queued follow-up']),
         popNextTurn: vi.fn().mockReturnValue({ modelText: 'queued follow-up' }),
+        removeGoalTurns: vi.fn().mockReturnValue([]),
       });
 
       render(
