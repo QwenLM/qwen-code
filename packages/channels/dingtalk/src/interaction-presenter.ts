@@ -1,3 +1,4 @@
+import { sanitizeSenderName } from '@qwen-code/channel-base';
 import type {
   ChannelOutputSegmentContext,
   ChannelOutputSegmentEndReason,
@@ -48,8 +49,7 @@ function formatSenderPrefixes(sender: DingtalkCardSender): {
   senderPrefix: string;
   senderRawPrefix: string;
 } {
-  const senderName =
-    sender.senderName.replace(/[\r\n]+/gu, ' ').trim() || '用户';
+  const senderName = sanitizeSenderName(sender.senderName);
   return {
     senderPrefix: `@${escapeMarkdownText(senderName)}`,
     senderRawPrefix: `@${senderName}`,
@@ -159,9 +159,6 @@ export class DingtalkInteractionPresenter {
     if (run.activeSegmentId === segmentId) {
       run.activeSegmentId = undefined;
     }
-    if (reason === 'response_boundary') {
-      return Promise.resolve(true);
-    }
     return this.enqueue(run, async () => {
       const statusCards = this.options.statusCards;
       const statusContext = this.ensureStatusContext(run, presentation.context);
@@ -178,6 +175,22 @@ export class DingtalkInteractionPresenter {
       }
       if (reason === 'cancelled') {
         return statusCards !== undefined;
+      }
+      if (reason === 'response_boundary') {
+        if (
+          statusCards &&
+          (await statusCards.isCardLive(statusContext.segmentId))
+        ) {
+          return true;
+        }
+        const fallbackText = text || presentation.content;
+        if (!fallbackText || !this.options.sendFallback) return false;
+        await this.options.sendFallback(
+          presentation.context.target.chatId,
+          fallbackText,
+          presentation.context.sessionId,
+        );
+        return true;
       }
       if (reason === 'input_requested') {
         const completed =
@@ -282,6 +295,13 @@ export class DingtalkInteractionPresenter {
           runId,
           detail === 'cancel_command' ? 'cancel_command' : 'dropped',
         );
+      } else {
+        // Completing without a final segment (e.g. an empty response after the
+        // last boundary) leaves the eagerly created card running forever.
+        const statusContext = run.statusContext;
+        if (statusContext) {
+          await this.options.statusCards?.complete(statusContext.segmentId, '');
+        }
       }
     });
     void finalization.then(

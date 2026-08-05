@@ -67,14 +67,11 @@ describe('StatusCardController', () => {
     vi.useRealTimers();
   });
 
-  it('creates and opens a status card only after the first visible chunk', async () => {
+  it('creates and opens a status card on the first content snapshot', async () => {
     const { client, controller } = createHarness();
 
     expect(client.createAndDeliver).not.toHaveBeenCalled();
-    controller.append(segment(), target, '');
-    expect(client.createAndDeliver).not.toHaveBeenCalled();
-
-    controller.append(segment(), target, 'first');
+    controller.replace(segment(), target, 'first');
 
     await vi.waitFor(() =>
       expect(client.createAndDeliver).toHaveBeenCalledOnce(),
@@ -92,7 +89,7 @@ describe('StatusCardController', () => {
     await vi.waitFor(() =>
       expect(client.openOrUpdateStream).toHaveBeenCalledWith(
         expect.objectContaining({
-          content: '',
+          content: 'first',
           finalize: false,
         }),
       ),
@@ -124,11 +121,15 @@ describe('StatusCardController', () => {
   it('coalesces bounded full snapshots with one write in flight', async () => {
     vi.useFakeTimers();
     const { client, controller } = createHarness();
-    controller.append(segment(), target, 'a'.repeat(19_000));
+    controller.replace(segment(), target, 'a'.repeat(19_000));
     await vi.advanceTimersByTimeAsync(0);
     vi.mocked(client.openOrUpdateStream).mockClear();
 
-    controller.append(segment(), target, 'b'.repeat(2_000));
+    controller.replace(
+      segment(),
+      target,
+      'a'.repeat(19_000) + 'b'.repeat(2_000),
+    );
     await vi.advanceTimersByTimeAsync(499);
     expect(client.openOrUpdateStream).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
@@ -141,15 +142,14 @@ describe('StatusCardController', () => {
     expect(content.endsWith('b'.repeat(2_000))).toBe(true);
   });
 
-  it('hides streamed image paths across chunk boundaries', async () => {
+  it('hides streamed image paths in status snapshots', async () => {
     vi.useFakeTimers();
     const { client, controller } = createHarness();
 
-    controller.append(segment(), target, 'before [IMA');
-    controller.append(
+    controller.replace(
       segment(),
       target,
-      'GE: /Users/ben/private/image.png] after',
+      'before [IMAGE: /Users/ben/private/image.png] after',
     );
     await vi.advanceTimersByTimeAsync(500);
 
@@ -163,7 +163,7 @@ describe('StatusCardController', () => {
   it('hides image paths when a streaming card is cancelled', async () => {
     const { client, controller } = createHarness();
 
-    controller.append(
+    controller.replace(
       segment(),
       target,
       'before [IMAGE: /Users/ben/private/image.png] after',
@@ -197,7 +197,7 @@ describe('StatusCardController', () => {
       model: 'qwen3.7-max',
     });
 
-    controller.append(segment(), target, 'first');
+    controller.replace(segment(), target, 'first');
     await vi.advanceTimersByTimeAsync(0);
 
     expect(client.createAndDeliver).toHaveBeenCalledWith(
@@ -210,12 +210,12 @@ describe('StatusCardController', () => {
 
     vi.mocked(client.updateInstance).mockClear();
     vi.setSystemTime(1_200);
-    await vi.advanceTimersByTimeAsync(500);
+    await vi.advanceTimersByTimeAsync(1_000);
 
     expect(client.updateInstance).toHaveBeenCalledWith(
       expect.objectContaining({
         cardParamMap: {
-          statusLine: 'Running · qwen3.7-max · 1s',
+          statusLine: 'Running · qwen3.7-max · 2s',
         },
       }),
     );
@@ -225,7 +225,7 @@ describe('StatusCardController', () => {
     expect(client.updateInstance).toHaveBeenCalledWith(
       expect.objectContaining({
         cardParamMap: {
-          statusLine: 'Running · qwen3.7-max · 2s',
+          statusLine: 'Running · qwen3.7-max · 3s',
         },
       }),
     );
@@ -236,7 +236,7 @@ describe('StatusCardController', () => {
     vi.setSystemTime(0);
     const { client, controller } = createHarness();
 
-    controller.append(segment(), target, 'first');
+    controller.replace(segment(), target, 'first');
     await vi.advanceTimersByTimeAsync(0);
 
     expect(client.createAndDeliver).toHaveBeenCalledWith(
@@ -248,11 +248,11 @@ describe('StatusCardController', () => {
     );
 
     vi.setSystemTime(1_200);
-    await vi.advanceTimersByTimeAsync(500);
+    await vi.advanceTimersByTimeAsync(1_000);
     expect(client.updateInstance).toHaveBeenCalledWith(
       expect.objectContaining({
         cardParamMap: {
-          statusLine: 'Running · 1s',
+          statusLine: 'Running · 2s',
         },
       }),
     );
@@ -266,21 +266,21 @@ describe('StatusCardController', () => {
       model: 'qwen3.7-max',
       onError,
     });
-    controller.append(segment(), target, 'first');
+    controller.replace(segment(), target, 'first');
     await vi.advanceTimersByTimeAsync(0);
 
     vi.mocked(client.updateInstance).mockRejectedValueOnce(
       new Error('metadata failed'),
     );
     vi.setSystemTime(1_200);
-    await vi.advanceTimersByTimeAsync(500);
+    await vi.advanceTimersByTimeAsync(1_000);
     expect(onError).toHaveBeenCalledWith(
       'status card metadata',
       expect.any(Error),
     );
 
     vi.mocked(client.openOrUpdateStream).mockClear();
-    controller.append(segment(), target, 'second');
+    controller.replace(segment(), target, 'firstsecond');
     vi.setSystemTime(2_200);
     await vi.advanceTimersByTimeAsync(500);
     expect(client.openOrUpdateStream).toHaveBeenCalledWith(
@@ -297,7 +297,7 @@ describe('StatusCardController', () => {
     const { client, controller } = createHarness({
       model: 'qwen3.7-max',
     });
-    controller.append(segment(), target, 'answer');
+    controller.replace(segment(), target, 'answer');
     await vi.advanceTimersByTimeAsync(0);
 
     vi.setSystemTime(12_400);
@@ -315,8 +315,8 @@ describe('StatusCardController', () => {
 
   it('keeps two segments from the same run independent', async () => {
     const { client, controller } = createHarness();
-    controller.append(segment('segment-1'), target, 'first answer');
-    controller.append(segment('segment-2'), target, 'second answer');
+    controller.replace(segment('segment-1'), target, 'first answer');
+    controller.replace(segment('segment-2'), target, 'second answer');
 
     await vi.waitFor(() =>
       expect(client.createAndDeliver).toHaveBeenCalledTimes(2),
@@ -353,9 +353,9 @@ describe('StatusCardController', () => {
 
   it('cancels every live segment from the exact run only', async () => {
     const { client, controller } = createHarness();
-    controller.append(segment('segment-1'), target, 'one');
-    controller.append(segment('segment-2'), target, 'two');
-    controller.append(
+    controller.replace(segment('segment-1'), target, 'one');
+    controller.replace(segment('segment-2'), target, 'two');
+    controller.replace(
       segment('other-segment', {
         runId: 'run-2',
         sessionId: 'session-2',
@@ -390,9 +390,9 @@ describe('StatusCardController', () => {
     );
   });
 
-  it('commits final content through V2 instance fields and rejects late chunks', async () => {
+  it('commits final content through V2 instance fields and rejects late snapshots', async () => {
     const { client, controller } = createHarness();
-    controller.append(segment(), target, 'answer');
+    controller.replace(segment(), target, 'answer');
 
     await expect(controller.complete('segment-1', 'answer')).resolves.toBe(
       true,
@@ -417,14 +417,14 @@ describe('StatusCardController', () => {
       }),
     );
 
-    controller.append(segment(), target, 'late');
+    controller.replace(segment(), target, 'late');
     expect(client.createAndDeliver).toHaveBeenCalledOnce();
     expect(client.openOrUpdateStream).toHaveBeenCalledTimes(2);
   });
 
   it('retains streamed content when completion has no response body', async () => {
     const { client, controller } = createHarness();
-    controller.append(segment(), target, 'streamed answer');
+    controller.replace(segment(), target, 'streamed answer');
 
     await expect(controller.complete('segment-1', '')).resolves.toBe(true);
 
@@ -441,7 +441,7 @@ describe('StatusCardController', () => {
 
   it('allows only the owner to stop the exact current run', async () => {
     const { client, cancelRun, controller } = createHarness();
-    controller.append(segment(), target, 'answer');
+    controller.replace(segment(), target, 'answer');
     await vi.waitFor(() =>
       expect(client.createAndDeliver).toHaveBeenCalledOnce(),
     );
@@ -472,7 +472,7 @@ describe('StatusCardController', () => {
 
   it('does not let a completed historical card stop a later run', async () => {
     const { client, cancelRun, controller } = createHarness();
-    controller.append(segment(), target, 'answer');
+    controller.replace(segment(), target, 'answer');
     await vi.waitFor(() =>
       expect(client.createAndDeliver).toHaveBeenCalledOnce(),
     );

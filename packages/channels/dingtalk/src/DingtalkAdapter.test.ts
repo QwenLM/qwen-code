@@ -1706,6 +1706,44 @@ describe('DingtalkChannel status cards', () => {
     });
   });
 
+  it('omits the group sender from card attribution when atSender is disabled', async () => {
+    const channel = createChannel({ atSender: false });
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'message-quote',
+        conversationType: '2',
+        conversationId: 'cid-quote',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        chatbotUserId: 'bot-user',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'owner-1',
+        isInAtList: true,
+        atUsers: [{ dingtalkId: 'bot-user' }, { dingtalkId: 'other-user' }],
+        text: { content: '@qwen-code What changed?' },
+      }),
+      headers: { messageId: 'message-quote' },
+    } as unknown as DWClientDownStream;
+
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+    const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+    await DingtalkChannel.prototype.handleInbound.call(channel, envelope);
+
+    expect(
+      (
+        channel as unknown as {
+          inboundCardOwners: Map<string, unknown>;
+        }
+      ).inboundCardOwners.get('message-quote'),
+    ).toEqual({
+      ownerId: 'staff-1',
+      target: { chatId: 'cid-quote', isGroup: true },
+    });
+  });
+
   it('routes the first visible chunk with its exact segment context', () => {
     const channel = createChannel();
     const appendOutput = vi.fn();
@@ -3210,6 +3248,9 @@ describe('DingtalkChannel reply mentions', () => {
     });
     expect(contents[0]).toMatch(/^```/u);
     expect(contents.at(-1)).toMatch(/```$/u);
+    expect(contents.join('').replace(/[`\n]/gu, '')).toBe(
+      text.replace(/[`\n]/gu, ''),
+    );
     expect(
       fetchSpy.mock.calls.every(([, init]) => {
         const body = JSON.parse(String((init as RequestInit).body));

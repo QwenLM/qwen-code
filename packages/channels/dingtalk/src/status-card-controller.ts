@@ -89,21 +89,15 @@ export class StatusCardController {
     this.scheduleFlush(record);
   }
 
-  append(
-    segment: ChannelOutputSegmentContext,
-    target: { chatId: string; isGroup: boolean },
-    chunk: string,
-  ): void {
-    if (!chunk || this.terminalSegmentIds.has(segment.segmentId)) return;
-    let record = this.recordsBySegment.get(segment.segmentId);
-    if (!record) {
-      record = this.createRecord(segment, target);
-    }
-    if (record.terminal) return;
-    record.content = boundContent(record.content + chunk);
-    if (record.streamFailed) return;
-    record.pendingSnapshot = sanitizeStreamingImageMarkers(record.content);
-    this.scheduleFlush(record);
+  /**
+   * Whether a created, still-running status card is displaying content for
+   * this segment. Awaits the in-flight creation so a boundary decision made
+   * while creation is pending does not race it.
+   */
+  async isCardLive(segmentId: string): Promise<boolean> {
+    const record = this.recordsBySegment.get(segmentId);
+    if (!record || record.terminal) return false;
+    return record.ready;
   }
 
   private createRecord(
