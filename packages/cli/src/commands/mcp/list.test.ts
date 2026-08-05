@@ -187,6 +187,33 @@ describe('mcp list command', () => {
     );
   });
 
+  it('should disconnect when transport startup exceeds the timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      mockedLoadSettings.mockReturnValue({
+        merged: {
+          mcpServers: {
+            'slow-server': { url: 'https://example.com/sse' },
+          },
+        },
+      });
+      mockClient.connect.mockImplementation(() => new Promise(() => {}));
+
+      const listPromise = listMcpServers();
+      await vi.advanceTimersByTimeAsync(5000);
+      await listPromise;
+
+      expect(mockTransport.close).toHaveBeenCalledOnce();
+      expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'slow-server: https://example.com/sse (sse) - Disconnected',
+        ),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('should merge extension servers with config servers', async () => {
     mockedLoadSettings.mockReturnValue({
       merged: {

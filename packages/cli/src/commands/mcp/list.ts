@@ -67,6 +67,7 @@ async function testMCPConnection(
   serverName: string,
   config: MCPServerConfig,
 ): Promise<MCPServerStatus> {
+  const connectTimeoutMs = 5000;
   const client = new Client({
     name: 'mcp-test-client',
     version: '0.0.1',
@@ -82,8 +83,24 @@ async function testMCPConnection(
   }
 
   try {
-    // Attempt actual MCP connection with short timeout
-    await client.connect(transport, { timeout: 5000 }); // 5s timeout
+    // The SDK timeout only covers initialization after transport.start().
+    // Guard the transport startup too so a silent SSE server cannot hang this command.
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        client.connect(transport, { timeout: connectTimeoutMs }),
+        new Promise<never>((_resolve, reject) => {
+          timeoutHandle = setTimeout(
+            () => reject(new Error('MCP connection timed out')),
+            connectTimeoutMs,
+          );
+        }),
+      ]);
+    } finally {
+      if (timeoutHandle !== undefined) {
+        clearTimeout(timeoutHandle);
+      }
+    }
 
     // Test basic MCP protocol by pinging the server
     await client.ping();
