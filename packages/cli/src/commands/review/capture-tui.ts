@@ -75,10 +75,16 @@ interface CaptureTuiArgs {
  * host without `which` would otherwise misdiagnose an installed binary as
  * missing, and the binary answering is the only fact that matters. A clean
  * answer returns its trimmed stdout; anything else returns undefined. */
+/** The availability-probe deadline, a seam like its two belt siblings: a
+ * hanging `tmux -V`/`freeze --help` would otherwise block runCaptureTui
+ * before the refusal contract or any signal handler exists — and without
+ * the seam the belt itself is untestable. */
+export const probeBudget = { timeoutMs: 10_000 };
+
 function probeOutput(bin: string, flag: string): string | undefined {
   const r = spawnSync(bin, [flag], {
     encoding: 'utf8',
-    timeout: 10_000,
+    timeout: probeBudget.timeoutMs,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   return r.status === 0 ? (r.stdout ?? '').trim() : undefined;

@@ -23,6 +23,7 @@ import {
   captureTuiCommand,
   freezeRender,
   MATCH_BUDGET_MS,
+  probeBudget,
   probes,
   REAP_SIGNALS,
   runCaptureTui,
@@ -322,6 +323,50 @@ describe('capture-tui without tmux (probe seam)', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'cuts a HANGING availability probe with the belt — absent, not stuck',
+    async () => {
+      // A tmux -V that hangs would otherwise block before the refusal
+      // contract or any signal handler exists; through the seam the belt is
+      // provable — the hardcoded-timeout mutant hangs past the wall bound.
+      const dir = mkdtempSync(join(tmpdir(), 'capture-tui-hangprobe-'));
+      const binDir = join(dir, 'bin');
+      mkdirSync(binDir, { recursive: true });
+      writeFileSync(join(binDir, 'tmux'), '#!/bin/sh\nsleep 30\n', {
+        mode: 0o755,
+      });
+      const realPath = process.env['PATH'];
+      const realBudget = probeBudget.timeoutMs;
+      process.env['PATH'] = binDir;
+      probeBudget.timeoutMs = 500;
+      const started = Date.now();
+      let stderr = '';
+      try {
+        ({ stderr } = await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: undefined,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: undefined,
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 1000,
+          } as never),
+        ));
+      } finally {
+        probeBudget.timeoutMs = realBudget;
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        rmSync(dir, { recursive: true, force: true });
+      }
+      expect(process.exitCode).toBe(3);
+      expect(stderr).toContain('tmux is not installed');
+      expect(Date.now() - started).toBeLessThan(5_000);
+    },
+  );
 
   it('refuses non-string argv shapes before anything else', async () => {
     // yargs parses duplicated options into arrays and --no-X into booleans;
