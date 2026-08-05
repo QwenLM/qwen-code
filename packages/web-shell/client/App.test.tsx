@@ -6888,6 +6888,22 @@ describe('App session callbacks', () => {
     ]);
   });
 
+  it('discards an automatic recap when the session becomes active without a new user block', async () => {
+    const { recap, rerender } = await triggerAutoRecap();
+    testState.streamingState = 'responding';
+    rerender();
+    await flush();
+
+    await act(async () => {
+      recap.resolve({ sessionId: 'session-1', recap: 'Previous turn recap' });
+      await recap.promise;
+    });
+
+    expect(mockStore.dispatch).not.toHaveBeenCalledWith([
+      expect.objectContaining({ source: 'recap' }),
+    ]);
+  });
+
   it('discards an automatic recap after starting a new session', async () => {
     const { recap, container } = await triggerAutoRecap();
     await act(async () => {

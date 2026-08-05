@@ -5823,6 +5823,8 @@ export function App({
       lastRecapBlockCountRef.current = currentCount;
       const sessionId = connection.sessionId;
       const version = autoRecapVersionRef.current;
+      // Local-only commands also append user blocks. Treat any new visible user
+      // activity as invalidating the recap rather than risk placing it too late.
       const userBlockId = getLatestUserBlockId(store.getSnapshot().blocks);
       sessionActions.recapSession().then(
         (result) => {
@@ -5836,7 +5838,8 @@ export function App({
             autoRecapVersionRef.current !== version ||
             connectionRef.current.sessionId !== sessionId ||
             result.sessionId !== sessionId ||
-            currentUserBlockId !== userBlockId
+            currentUserBlockId !== userBlockId ||
+            streamingStateRef.current !== 'idle'
           ) {
             console.warn('[auto-recap] discarding stale recap', {
               captured: { sessionId, version, userBlockId },
@@ -5844,6 +5847,7 @@ export function App({
                 sessionId: connectionRef.current.sessionId,
                 version: autoRecapVersionRef.current,
                 userBlockId: currentUserBlockId,
+                streamingState: streamingStateRef.current,
               },
               result: result.sessionId,
             });
