@@ -290,6 +290,13 @@ export function registerWorkspaceQualifiedTrustRoutes(
         });
         return;
       }
+      if (runtime.provenance === 'live-conversation') {
+        res.status(409).json({
+          error: 'Live conversation workspace trust cannot be changed',
+          code: 'live_conversation_trust_fixed',
+        });
+        return;
+      }
       const body = safeBody(req);
       const desiredState = body['desiredState'];
       if (desiredState !== 'trusted' && desiredState !== 'untrusted') {
