@@ -200,7 +200,7 @@ Run these from the channel's workspace directory (or pass `--cwd <dir>`) — pai
 
 - Codes are 8 characters, uppercase, using an unambiguous alphabet (no `0`/`O`/`1`/`I`)
 - Codes expire after 1 hour
-- Maximum 3 pending requests per channel at a time, and at most one per sender — additional requests are ignored until one expires or is approved
+- Maximum 3 pending requests per channel at a time, and at most one per sender — additional requests are declined until one expires or is approved
 - Users listed in `allowedUsers` in `settings.json` always skip pairing
 - Approved users are stored per workspace in `~/.qwen/channels/<workspace-scope>/<name>-allowlist.json` — treat this file as sensitive
 
@@ -228,6 +228,11 @@ Group approvals are stored by stable chat ID in the channel's workspace scope.
 An unmentioned message never creates a group pairing request, even when a group
 sets `requireMention` to `false`; after approval, the configured mention policy
 applies normally.
+
+Group pairing requests share the same pending queue as DM pairing requests:
+a channel holds at most 3 pending requests overall, and a sender holds at most
+one pending request across user and group requests (see
+[Pairing Rules](#pairing-rules)).
 
 ### Mention Gating
 

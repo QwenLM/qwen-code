@@ -72,7 +72,7 @@ For GitHub Enterprise Server, set `baseUrl`:
 | `token`                   | (required)               | Classic PAT with `notifications` scope                                                        |
 | `pollInterval`            | `60000`                  | Poll interval in ms                                                                           |
 | `baseUrl`                 | `https://api.github.com` | API base URL (for GHE)                                                                        |
-| `groupPolicy`             | `"disabled"`             | Must be `"open"` for notifications to flow                                                    |
+| `groupPolicy`             | `"disabled"`             | Must be `"open"`, `"allowlist"`, or `"pairing"` for notifications to flow                     |
 | `senderPolicy`            | `"allowlist"`            | Who can trigger the bot                                                                       |
 | `groups.*.requireMention` | `true`                   | Require @mentions for ordinary comments; directed notification reasons still run              |
 | `blockStreaming`          | `"off"`                  | Always forced to `"off"`; intermediate model chunks aren't published; `"on"` is not supported |

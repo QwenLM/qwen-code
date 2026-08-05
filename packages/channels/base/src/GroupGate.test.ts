@@ -143,14 +143,14 @@ describe('GroupGate', () => {
       expect(result).toEqual({
         allowed: false,
         reason: 'pairing_required',
-        pairingCode: null,
+        pairing: { rejected: 'cap_reached' },
       });
     });
 
-    it('returns a null pairing code when constructed without a store', () => {
+    it('returns a cap_reached rejection when constructed without a store', () => {
       const gate = new GroupGate('pairing');
       const result = gate.check(envelope({ isGroup: true, isMentioned: true }));
-      expect(result.pairingCode).toBeNull();
+      expect(result.pairing).toEqual({ rejected: 'cap_reached' });
     });
 
     it('requests pairing after a reply to the bot', () => {
@@ -164,7 +164,7 @@ describe('GroupGate', () => {
 
         expect(result.allowed).toBe(false);
         expect(result.reason).toBe('pairing_required');
-        expect(result.pairingCode).toBeTypeOf('string');
+        expect(result.pairing).toEqual({ code: expect.any(String) });
         expect(store.listPending()).toHaveLength(1);
       });
     });

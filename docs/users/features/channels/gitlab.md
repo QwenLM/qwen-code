@@ -132,6 +132,8 @@ On a **public project**, setting `senderPolicy: "open"` allows **any GitLab user
 
 Always use `senderPolicy: "allowlist"` with explicit `allowedUsers` on public projects.
 
+Note that under `groupPolicy: "pairing"`, access is granted per project: once a project is approved, **any GitLab user** can drive the bot through that project's issues and merge requests. All GitLab traffic is group traffic, so `senderPolicy` and `allowedUsers` do not gate members of an approved project.
+
 ## Mention Detection
 
 The adapter always sets `isMentioned = true` on dispatched envelopes, because GitLab has already determined the mention when creating the todo. The `action_prompt_template` config is the real event filter — only actions with a configured template are processed. The `@bot` mention is stripped from the message text before dispatch via `stripBotMention`.

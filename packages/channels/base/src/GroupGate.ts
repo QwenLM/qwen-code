@@ -1,5 +1,8 @@
 import type { GroupPolicy, GroupConfig, Envelope } from './types.js';
-import type { PairingStore } from './PairingStore.js';
+import type {
+  CreatePairingRequestResult,
+  PairingStore,
+} from './PairingStore.js';
 
 export interface GroupCheckResult {
   allowed: boolean;
@@ -9,7 +12,8 @@ export interface GroupCheckResult {
     | 'mention_required'
     | 'pairing_trigger_required'
     | 'pairing_required';
-  pairingCode?: string | null;
+  /** Set when the pairing policy denies the group. */
+  pairing?: CreatePairingRequestResult;
 }
 
 export class GroupGate {
@@ -72,7 +76,7 @@ export class GroupGate {
       ) {
         return { allowed: false, reason: 'pairing_trigger_required' };
       }
-      const code = this.pairingStore?.createGroupRequest(
+      const result = this.pairingStore?.createGroupRequest(
         envelope.chatId,
         envelope.chatName || envelope.chatId,
         envelope.senderId,
@@ -81,7 +85,7 @@ export class GroupGate {
       return {
         allowed: false,
         reason: 'pairing_required',
-        pairingCode: code ?? null,
+        pairing: result ?? { rejected: 'cap_reached' },
       };
     }
 

@@ -35,6 +35,7 @@ import {
   isChannelProactiveDeliveryError,
 } from './ChannelProactiveDeliveryError.js';
 import { PairingStore } from './PairingStore.js';
+import type { CreatePairingRequestResult } from './PairingStore.js';
 
 // Concrete test implementation
 class TestChannel extends ChannelBase {
@@ -341,6 +342,13 @@ function envelope(overrides: Partial<Envelope> = {}): Envelope {
     isReplyToBot: false,
     ...overrides,
   };
+}
+
+function pairingCodeOf(result: CreatePairingRequestResult): string {
+  if ('code' in result) return result.code;
+  throw new Error(
+    `expected a pairing code, got rejection "${result.rejected}"`,
+  );
 }
 
 function groupHistoryPath(): string {
@@ -2669,13 +2677,13 @@ describe('ChannelBase', () => {
       process.env['QWEN_HOME'] = qwenHome;
       try {
         const store = new PairingStore('test-chan', '/tmp');
-        const code = store.createGroupRequest(
+        const created = store.createGroupRequest(
           'chat1',
           'Release Team',
           'alice',
           'Alice',
         );
-        store.approve(code!);
+        store.approve(pairingCodeOf(created));
         const ch = createChannel(
           {
             groupPolicy: 'pairing',
@@ -2722,13 +2730,13 @@ describe('ChannelBase', () => {
       process.env['QWEN_HOME'] = qwenHome;
       try {
         const store = new PairingStore('test-chan', '/tmp');
-        const code = store.createGroupRequest(
+        const created = store.createGroupRequest(
           'chat1',
           'Release Team',
           'alice',
           'Alice',
         );
-        store.approve(code!);
+        store.approve(pairingCodeOf(created));
         const recoveryState: { current?: Promise<void> } = {};
         const ch = createChannel(
           {
@@ -2914,13 +2922,13 @@ describe('ChannelBase', () => {
         expect(existsSync(historyPath)).toBe(false);
 
         const store = new PairingStore('test-chan', '/tmp');
-        const code = store.createGroupRequest(
+        const created = store.createGroupRequest(
           'group-1',
           'Release Team',
           'alice',
           'Alice',
         );
-        store.approve(code!);
+        store.approve(pairingCodeOf(created));
 
         await ch.handleInbound(
           envelope({
@@ -13550,6 +13558,7 @@ describe('ChannelBase', () => {
         await ch.handleInbound(first);
 
         expect(ch.sent).toHaveLength(1);
+        expect(ch.sent[0]!.chatId).toBe('group-1');
         expect(bridge.prompt).not.toHaveBeenCalled();
         const store = new PairingStore('test-chan', '/tmp');
         const request = store.listPending()[0];
@@ -13703,6 +13712,7 @@ describe('ChannelBase', () => {
         );
 
         expect(threadMessages).toHaveLength(1);
+        expect(threadMessages[0]!.chatId).toBe('group-1');
         expect(threadMessages[0]!.threadId).toBe('issue:42');
         expect(threadMessages[0]!.text).toContain('requires approval');
       } finally {
@@ -13713,16 +13723,25 @@ describe('ChannelBase', () => {
     });
 
     it('still gates DMs by senderPolicy when groupPolicy uses pairing', async () => {
-      const ch = createChannel({
-        groupPolicy: 'pairing',
-        senderPolicy: 'allowlist',
-        allowedUsers: [],
-      });
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const qwenHome = mkdtempSync(join(tmpdir(), 'qwen-group-pairing-'));
+      process.env['QWEN_HOME'] = qwenHome;
+      try {
+        const ch = createChannel({
+          groupPolicy: 'pairing',
+          senderPolicy: 'allowlist',
+          allowedUsers: [],
+        });
 
-      await ch.handleInbound(envelope({ senderId: 'stranger' }));
+        await ch.handleInbound(envelope({ senderId: 'stranger' }));
 
-      expect(bridge.prompt).not.toHaveBeenCalled();
-      expect(ch.sent).toEqual([]);
+        expect(bridge.prompt).not.toHaveBeenCalled();
+        expect(ch.sent).toEqual([]);
+      } finally {
+        if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+        else process.env['QWEN_HOME'] = previousQwenHome;
+        rmSync(qwenHome, { recursive: true, force: true });
+      }
     });
 
     it('keeps DM pairing on the sender flow when groupPolicy uses pairing', async () => {
@@ -13739,7 +13758,83 @@ describe('ChannelBase', () => {
         await ch.handleInbound(envelope({ senderId: 'stranger' }));
 
         expect(ch.sent).toHaveLength(1);
-        expect(ch.sent[0]!.text).toContain('pairing code');
+        expect(ch.sent[0]!.chatId).toBe('chat1');
+        expect(ch.sent[0]!.text).toContain('Your pairing code');
+        expect(bridge.prompt).not.toHaveBeenCalled();
+        expect(
+          new PairingStore('test-chan', '/tmp').listPending()[0]?.subject,
+        ).toEqual({ type: 'user', id: 'stranger', name: 'User 1' });
+      } finally {
+        if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+        else process.env['QWEN_HOME'] = previousQwenHome;
+        rmSync(qwenHome, { recursive: true, force: true });
+      }
+    });
+
+    it('tells a sender with a pending group request their DM cannot pair yet', async () => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const qwenHome = mkdtempSync(join(tmpdir(), 'qwen-group-pairing-'));
+      process.env['QWEN_HOME'] = qwenHome;
+      try {
+        const ch = createChannel({
+          groupPolicy: 'pairing',
+          senderPolicy: 'pairing',
+          allowedUsers: [],
+        });
+
+        await ch.handleInbound(
+          envelope({
+            isGroup: true,
+            isMentioned: true,
+            chatId: 'group-1',
+            chatName: 'Release Team',
+            senderId: 'stranger',
+            senderName: 'User 1',
+          }),
+        );
+        await ch.handleInbound(envelope({ senderId: 'stranger' }));
+
+        expect(ch.sent).toHaveLength(2);
+        expect(ch.sent[1]!.chatId).toBe('chat1');
+        expect(ch.sent[1]!.text).toContain(
+          'You already have a pending pairing request',
+        );
+        expect(bridge.prompt).not.toHaveBeenCalled();
+      } finally {
+        if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+        else process.env['QWEN_HOME'] = previousQwenHome;
+        rmSync(qwenHome, { recursive: true, force: true });
+      }
+    });
+
+    it('tells a group when the mentioning sender already holds a pending request', async () => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const qwenHome = mkdtempSync(join(tmpdir(), 'qwen-group-pairing-'));
+      process.env['QWEN_HOME'] = qwenHome;
+      try {
+        const ch = createChannel({
+          groupPolicy: 'pairing',
+          senderPolicy: 'pairing',
+          allowedUsers: [],
+        });
+
+        await ch.handleInbound(envelope({ senderId: 'stranger' }));
+        await ch.handleInbound(
+          envelope({
+            isGroup: true,
+            isMentioned: true,
+            chatId: 'group-1',
+            chatName: 'Release Team',
+            senderId: 'stranger',
+            senderName: 'User 1',
+          }),
+        );
+
+        expect(ch.sent).toHaveLength(2);
+        expect(ch.sent[1]!.chatId).toBe('group-1');
+        expect(ch.sent[1]!.text).toContain(
+          'You already have a pending pairing request',
+        );
         expect(bridge.prompt).not.toHaveBeenCalled();
       } finally {
         if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
@@ -18723,13 +18818,13 @@ describe('ChannelBase', () => {
       process.env['QWEN_HOME'] = qwenHome;
       try {
         const store = new PairingStore('test-chan', '/tmp');
-        const code = store.createGroupRequest(
+        const created = store.createGroupRequest(
           'group-1',
           'Release Team',
           'alice',
           'Alice',
         );
-        store.approve(code!);
+        store.approve(pairingCodeOf(created));
         const disable = vi.fn().mockResolvedValue(true);
         const ch = createChannel(
           {
@@ -18808,49 +18903,58 @@ describe('ChannelBase', () => {
     });
 
     it('rejects a stored DM job for an unlisted sender when groupPolicy uses pairing', async () => {
-      const disable = vi.fn().mockResolvedValue(true);
-      const ch = createChannel(
-        {
-          groupPolicy: 'pairing',
-          senderPolicy: 'allowlist',
-          allowedUsers: [],
-        },
-        {
-          loopController: {
-            create: vi.fn(),
-            listForTarget: vi.fn(),
-            disable,
-            validateCron: vi.fn(),
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const qwenHome = mkdtempSync(join(tmpdir(), 'qwen-group-pairing-'));
+      process.env['QWEN_HOME'] = qwenHome;
+      try {
+        const disable = vi.fn().mockResolvedValue(true);
+        const ch = createChannel(
+          {
+            groupPolicy: 'pairing',
+            senderPolicy: 'allowlist',
+            allowedUsers: [],
           },
-        },
-      );
-      ch.proactiveSupported = true;
+          {
+            loopController: {
+              create: vi.fn(),
+              listForTarget: vi.fn(),
+              disable,
+              validateCron: vi.fn(),
+            },
+          },
+        );
+        ch.proactiveSupported = true;
 
-      await expect(
-        ch.runLoopPrompt({
-          id: 'job-1',
-          channelName: 'test-chan',
-          target: {
+        await expect(
+          ch.runLoopPrompt({
+            id: 'job-1',
             channelName: 'test-chan',
-            senderId: 'bob',
-            chatId: 'chat1',
-            isGroup: false,
-          },
-          cwd: '/tmp',
-          cron: '0 9 * * *',
-          prompt: 'post summary',
-          label: 'daily summary',
-          recurring: true,
-          enabled: true,
-          createdBy: 'Bob',
-          createdAt: '2026-06-30T01:00:00.000Z',
-          consecutiveFailures: 0,
-          runCount: 0,
-        }),
-      ).rejects.toThrow('no longer authorized');
+            target: {
+              channelName: 'test-chan',
+              senderId: 'bob',
+              chatId: 'chat1',
+              isGroup: false,
+            },
+            cwd: '/tmp',
+            cron: '0 9 * * *',
+            prompt: 'post summary',
+            label: 'daily summary',
+            recurring: true,
+            enabled: true,
+            createdBy: 'Bob',
+            createdAt: '2026-06-30T01:00:00.000Z',
+            consecutiveFailures: 0,
+            runCount: 0,
+          }),
+        ).rejects.toThrow('no longer authorized');
 
-      expect(disable).toHaveBeenCalledWith('job-1');
-      expect(bridge.prompt).not.toHaveBeenCalled();
+        expect(disable).toHaveBeenCalledWith('job-1');
+        expect(bridge.prompt).not.toHaveBeenCalled();
+      } finally {
+        if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+        else process.env['QWEN_HOME'] = previousQwenHome;
+        rmSync(qwenHome, { recursive: true, force: true });
+      }
     });
 
     it('rejects stored threaded jobs unless the adapter supports the target', async () => {

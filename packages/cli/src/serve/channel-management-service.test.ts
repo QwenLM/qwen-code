@@ -8,6 +8,7 @@ import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { PairingStore } from '@qwen-code/channel-base';
+import type { CreatePairingRequestResult } from '@qwen-code/channel-base';
 import { describe, expect, it, vi } from 'vitest';
 import type { ChannelSettingsSnapshot } from './channel-settings-store.js';
 import {
@@ -136,6 +137,13 @@ function setup(options: {
     manager,
   });
   return { service, store, manager, persisted: () => persisted };
+}
+
+function codeOf(result: CreatePairingRequestResult): string {
+  if ('code' in result) return result.code;
+  throw new Error(
+    `expected a pairing code, got rejection "${result.rejected}"`,
+  );
 }
 
 describe('createChannelManagementService', () => {
@@ -338,8 +346,9 @@ describe('createChannelManagementService', () => {
         }),
       });
       const pairing = new PairingStore('bot', WORKSPACE);
-      const code = pairing.createRequest('sender-1', 'Alice');
-      expect(code).toBeTypeOf('string');
+      const created = pairing.createRequest('sender-1', 'Alice');
+      expect(created).toEqual({ code: expect.any(String) });
+      const code = codeOf(created);
 
       await expect(service.pairingRequests('bot')).resolves.toEqual({
         requests: [
@@ -350,7 +359,7 @@ describe('createChannelManagementService', () => {
           }),
         ],
       });
-      await expect(service.approvePairing('bot', code!)).resolves.toEqual({
+      await expect(service.approvePairing('bot', code)).resolves.toEqual({
         approved: expect.objectContaining({ senderId: 'sender-1', code }),
         requests: [],
       });
@@ -404,17 +413,21 @@ describe('createChannelManagementService', () => {
         }),
       });
       const pairing = new PairingStore('bot', WORKSPACE);
-      const code = pairing.createGroupRequest(
-        'group-1',
-        'Release Team',
-        'sender-1',
-        'Alice',
+      const code = codeOf(
+        pairing.createGroupRequest(
+          'group-1',
+          'Release Team',
+          'sender-1',
+          'Alice',
+        ),
       );
-      const secondCode = pairing.createGroupRequest(
-        'group-2',
-        'Platform Team',
-        'sender-2',
-        'Bob',
+      const secondCode = codeOf(
+        pairing.createGroupRequest(
+          'group-2',
+          'Platform Team',
+          'sender-2',
+          'Bob',
+        ),
       );
 
       await expect(service.pairingRequests('bot')).resolves.toEqual({
@@ -437,7 +450,7 @@ describe('createChannelManagementService', () => {
           }),
         ],
       });
-      await expect(service.approvePairing('bot', code!)).resolves.toEqual({
+      await expect(service.approvePairing('bot', code)).resolves.toEqual({
         approved: expect.objectContaining({
           subject: { type: 'group', id: 'group-1', name: 'Release Team' },
         }),
@@ -447,7 +460,7 @@ describe('createChannelManagementService', () => {
           }),
         ],
       });
-      await service.approvePairing('bot', secondCode!);
+      await service.approvePairing('bot', secondCode);
       await expect(service.pairingApprovals('bot')).resolves.toEqual({
         senderIds: [],
         groupIds: ['group-1', 'group-2'],

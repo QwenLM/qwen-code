@@ -3,7 +3,15 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { PairingStore } from './PairingStore.js';
+import type { CreatePairingRequestResult } from './PairingStore.js';
 import { getWorkspaceScopeDirName } from './paths.js';
+
+function codeOf(result: CreatePairingRequestResult): string {
+  if ('code' in result) return result.code;
+  throw new Error(
+    `expected a pairing code, got rejection "${result.rejected}"`,
+  );
+}
 
 describe('PairingStore workspace scoping (#7017)', () => {
   let qwenHome: string;
@@ -36,8 +44,8 @@ describe('PairingStore workspace scoping (#7017)', () => {
     const storeA = new PairingStore('support-bot', workspaceA);
     const storeB = new PairingStore('support-bot', workspaceB);
 
-    const code = storeA.createRequest('sender-1', 'Sender One');
-    expect(code).toBeTruthy();
+    const result = storeA.createRequest('sender-1', 'Sender One');
+    expect(result).toEqual({ code: expect.any(String) });
 
     expect(storeA.listPending()).toHaveLength(1);
     expect(storeB.listPending()).toHaveLength(0);
@@ -47,7 +55,7 @@ describe('PairingStore workspace scoping (#7017)', () => {
     const storeA = new PairingStore('support-bot', workspaceA);
     const storeB = new PairingStore('support-bot', workspaceB);
 
-    const code = storeA.createRequest('sender-1', 'Sender One')!;
+    const code = codeOf(storeA.createRequest('sender-1', 'Sender One'));
     const approved = storeA.approve(code);
     expect(approved?.senderId).toBe('sender-1');
 
@@ -57,14 +65,14 @@ describe('PairingStore workspace scoping (#7017)', () => {
 
   it('approves a group without approving the member who requested it', () => {
     const store = new PairingStore('support-bot', workspaceA);
-    const code = store.createGroupRequest(
+    const result = store.createGroupRequest(
       'group-1',
       'Release Team',
       'sender-1',
       'Alice',
     );
 
-    expect(code).toBeTruthy();
+    expect(result).toEqual({ code: expect.any(String) });
     expect(store.listPending()).toEqual([
       expect.objectContaining({
         senderId: 'sender-1',
@@ -77,7 +85,7 @@ describe('PairingStore workspace scoping (#7017)', () => {
       }),
     ]);
 
-    store.approve(code!);
+    store.approve(codeOf(result));
 
     expect(store.isGroupApproved('group-1')).toBe(true);
     expect(store.isApproved('group-1')).toBe(false);
@@ -101,14 +109,14 @@ describe('PairingStore workspace scoping (#7017)', () => {
       'Bob',
     );
 
-    expect(first).toBeTruthy();
-    expect(second).toBe(first);
+    expect(first).toEqual({ code: expect.any(String) });
+    expect(second).toEqual(first);
     expect(store.listPending()).toEqual([
       expect.objectContaining({
         senderId: 'alice',
         senderName: 'Alice',
         subject: { type: 'group', id: 'group-1', name: 'Release Team' },
-        code: first,
+        code: codeOf(first),
       }),
     ]);
   });
@@ -122,41 +130,48 @@ describe('PairingStore workspace scoping (#7017)', () => {
       'alice',
       'Alice',
     );
-    expect(first).toBeTruthy();
+    expect(first).toEqual({ code: expect.any(String) });
 
     // Same sender, different subjects: no additional slots.
     expect(
       store.createGroupRequest('group-2', 'Platform Team', 'alice', 'Alice'),
-    ).toBeNull();
-    expect(store.createRequest('alice', 'Alice')).toBeNull();
+    ).toEqual({ rejected: 'sender_pending' });
+    expect(store.createRequest('alice', 'Alice')).toEqual({
+      rejected: 'sender_pending',
+    });
 
     // Re-mentioning the same subject still returns its existing code.
     expect(
       store.createGroupRequest('group-1', 'Release Team', 'alice', 'Alice'),
-    ).toBe(first);
+    ).toEqual(first);
 
     // Other senders are unaffected until the shared cap (3) is reached.
     expect(
       store.createGroupRequest('group-2', 'Platform Team', 'bob', 'Bob'),
-    ).toBeTruthy();
-    expect(store.createRequest('carol', 'Carol')).toBeTruthy();
-    expect(store.createRequest('dave', 'Dave')).toBeNull();
+    ).toEqual({ code: expect.any(String) });
+    expect(store.createRequest('carol', 'Carol')).toEqual({
+      code: expect.any(String),
+    });
+    expect(store.createRequest('dave', 'Dave')).toEqual({
+      rejected: 'cap_reached',
+    });
   });
 
   it('frees the sender slot once their pending request is approved', () => {
     const store = new PairingStore('support-bot', workspaceA);
-    const code = store.createGroupRequest(
-      'group-1',
-      'Release Team',
-      'alice',
-      'Alice',
-    )!;
+    const code = codeOf(
+      store.createGroupRequest('group-1', 'Release Team', 'alice', 'Alice'),
+    );
 
-    expect(store.createRequest('alice', 'Alice')).toBeNull();
+    expect(store.createRequest('alice', 'Alice')).toEqual({
+      rejected: 'sender_pending',
+    });
 
     store.approve(code);
 
-    expect(store.createRequest('alice', 'Alice')).toBeTruthy();
+    expect(store.createRequest('alice', 'Alice')).toEqual({
+      code: expect.any(String),
+    });
   });
 
   it('isolates group approvals and revocation by workspace', () => {
@@ -164,13 +179,15 @@ describe('PairingStore workspace scoping (#7017)', () => {
     const storeB = new PairingStore('support-bot', workspaceB);
 
     for (const store of [storeA, storeB]) {
-      const code = store.createGroupRequest(
-        'group-1',
-        'Release Team',
-        'sender-1',
-        'Alice',
+      const code = codeOf(
+        store.createGroupRequest(
+          'group-1',
+          'Release Team',
+          'sender-1',
+          'Alice',
+        ),
       );
-      store.approve(code!);
+      store.approve(code);
     }
 
     expect(storeA.revokeGroup('group-1')).toBe(true);
@@ -181,14 +198,16 @@ describe('PairingStore workspace scoping (#7017)', () => {
   it('keeps group approvals separate from similarly named channel user approvals', () => {
     const groupStore = new PairingStore('support', workspaceA);
     const userStore = new PairingStore('support-group', workspaceA);
-    const code = groupStore.createGroupRequest(
-      'shared-id',
-      'Release Team',
-      'sender-1',
-      'Alice',
+    const code = codeOf(
+      groupStore.createGroupRequest(
+        'shared-id',
+        'Release Team',
+        'sender-1',
+        'Alice',
+      ),
     );
 
-    groupStore.approve(code!);
+    groupStore.approve(code);
 
     expect(groupStore.isGroupApproved('shared-id')).toBe(true);
     expect(userStore.isApproved('shared-id')).toBe(false);
@@ -201,7 +220,7 @@ describe('PairingStore workspace scoping (#7017)', () => {
     const storeB = new PairingStore('support-bot', workspaceB);
 
     for (const store of [storeA, storeB]) {
-      const code = store.createRequest('sender-1', 'Sender One')!;
+      const code = codeOf(store.createRequest('sender-1', 'Sender One'));
       store.approve(code);
     }
 
@@ -215,7 +234,7 @@ describe('PairingStore workspace scoping (#7017)', () => {
     // `../support` climbs out of the scope directory and both workspaces
     // share one file at the channels root — silently undoing the isolation.
     const storeA = new PairingStore('../support', workspaceA);
-    const code = storeA.createRequest('mallory', 'Mallory')!;
+    const code = codeOf(storeA.createRequest('mallory', 'Mallory'));
     storeA.approve(code);
 
     const storeB = new PairingStore('../support', workspaceB);
@@ -235,8 +254,8 @@ describe('PairingStore workspace scoping (#7017)', () => {
       path.join(workspaceA, 'sub', '..'),
     );
 
-    const code = store.createRequest('sender-1', 'Sender One');
-    expect(code).toBeTruthy();
+    const result = store.createRequest('sender-1', 'Sender One');
+    expect(result).toEqual({ code: expect.any(String) });
     expect(sameViaRelativeHop.listPending()).toHaveLength(1);
   });
 
@@ -258,7 +277,7 @@ describe('PairingStore workspace scoping (#7017)', () => {
 
   it('keeps the legacy global layout when no workspace is given', () => {
     const store = new PairingStore('support-bot');
-    const code = store.createRequest('sender-1', 'Sender One')!;
+    const code = codeOf(store.createRequest('sender-1', 'Sender One'));
     store.approve(code);
 
     expect(
@@ -339,7 +358,7 @@ describe('PairingStore workspace scoping (#7017)', () => {
       const storeA = new PairingStore('support-bot', workspaceA);
       const storeB = new PairingStore('support-bot', workspaceB);
 
-      const code = storeA.createRequest('new-sender', 'New Sender')!;
+      const code = codeOf(storeA.createRequest('new-sender', 'New Sender'));
       storeA.approve(code);
 
       expect(storeA.isApproved('new-sender')).toBe(true);
@@ -441,8 +460,8 @@ describe('PairingStore workspace scoping (#7017)', () => {
       });
       const store = new PairingStore('support-bot', workspaceA);
       expect(store.isApproved('anyone')).toBe(false);
-      const code = store.createRequest('new-sender', 'New')!;
-      expect(typeof code).toBe('string');
+      const result = store.createRequest('new-sender', 'New');
+      expect(result).toEqual({ code: expect.any(String) });
     });
 
     it('migrates every channel of a workspace, not only the first one constructed', () => {
@@ -546,7 +565,7 @@ describe('PairingStore workspace scoping (#7017)', () => {
 
     it('never overwrites existing scoped state with legacy content', () => {
       const store = new PairingStore('support-bot', workspaceA);
-      const code = store.createRequest('scoped-sender', 'Scoped')!;
+      const code = codeOf(store.createRequest('scoped-sender', 'Scoped'));
       store.approve(code);
 
       seedLegacy();

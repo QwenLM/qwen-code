@@ -2490,7 +2490,7 @@ const EN: Messages = {
     'GitHub Enterprise API root (e.g. https://ghe.example.com/api/v3). Leave empty for github.com',
   'channels.editor.field.github.groupPolicy': 'Group Policy',
   'channels.editor.field.github.groupPolicy.description':
-    'Must be "Open" for notifications to flow',
+    'Must be "Open", "Allowlist", or "Pairing" for notifications to flow',
   'channels.editor.field.github.senderPolicy': 'Sender Policy',
   'channels.editor.field.github.senderPolicy.description':
     'Use "Allowlist" with allowed users on public repos',
@@ -2509,7 +2509,7 @@ const EN: Messages = {
     'Self-hosted instance URL (e.g. https://gitlab.example.com). Leave empty for gitlab.com',
   'channels.editor.field.gitlab.groupPolicy': 'Group Policy',
   'channels.editor.field.gitlab.groupPolicy.description':
-    'Must be "Open" or "Allowlist" for todos to be processed',
+    'Must be "Open", "Allowlist", or "Pairing" for todos to be processed',
   'channels.editor.field.gitlab.senderPolicy': 'Sender Policy',
   'channels.editor.field.gitlab.senderPolicy.description':
     'Use "Allowlist" with allowed users on public projects',
@@ -5048,7 +5048,7 @@ const ZH: Messages = {
     'GitHub Enterprise API 根地址（如 https://ghe.example.com/api/v3），github.com 留空',
   'channels.editor.field.github.groupPolicy': '群组策略',
   'channels.editor.field.github.groupPolicy.description':
-    '必须设为 "Open" 才能接收通知',
+    '必须设为 "Open"、"Allowlist" 或 "Pairing" 才能接收通知',
   'channels.editor.field.github.senderPolicy': '发送者策略',
   'channels.editor.field.github.senderPolicy.description':
     '公开仓库建议使用 "Allowlist" 并指定允许的用户',
@@ -5066,7 +5066,7 @@ const ZH: Messages = {
     '自托管实例地址（如 https://gitlab.example.com），gitlab.com 留空',
   'channels.editor.field.gitlab.groupPolicy': '群组策略',
   'channels.editor.field.gitlab.groupPolicy.description':
-    '必须设为 "Open" 或 "Allowlist" 才能处理 Todo',
+    '必须设为 "Open"、"Allowlist" 或 "Pairing" 才能处理 Todo',
   'channels.editor.field.gitlab.senderPolicy': '发送者策略',
   'channels.editor.field.gitlab.senderPolicy.description':
     '公开项目建议使用 "Allowlist" 并指定允许的用户',

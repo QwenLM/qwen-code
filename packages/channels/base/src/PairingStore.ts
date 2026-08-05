@@ -23,6 +23,10 @@ export interface PairingSubject {
   name: string;
 }
 
+export type CreatePairingRequestResult =
+  | { code: string }
+  | { rejected: 'sender_pending' | 'cap_reached' };
+
 type StoredPairingRequest = Omit<PairingRequest, 'subject'> & {
   subject?: PairingSubject;
 };
@@ -177,11 +181,15 @@ export class PairingStore {
 
   /**
    * Create a pairing request for an unknown sender.
-   * Returns the code if created, or null if the pending cap is reached or the
-   * sender already holds a pending request for another subject. If the subject
-   * already has a non-expired pending request, returns that code.
+   * Returns the code if created; if the subject already has a non-expired
+   * pending request, returns that code. Rejects with `sender_pending` when
+   * the sender already holds a request for another subject, or
+   * `cap_reached` when the pending cap is reached.
    */
-  createRequest(senderId: string, senderName: string): string | null {
+  createRequest(
+    senderId: string,
+    senderName: string,
+  ): CreatePairingRequestResult {
     return this.createSubjectRequest(
       { type: 'user', id: senderId, name: senderName },
       senderId,
@@ -194,7 +202,7 @@ export class PairingStore {
     groupName: string,
     senderId: string,
     senderName: string,
-  ): string | null {
+  ): CreatePairingRequestResult {
     return this.createSubjectRequest(
       { type: 'group', id: groupId, name: groupName },
       senderId,
@@ -206,7 +214,7 @@ export class PairingStore {
     subject: PairingSubject,
     senderId: string,
     senderName: string,
-  ): string | null {
+  ): CreatePairingRequestResult {
     const pending = this.readPending();
 
     // Purge expired
@@ -220,7 +228,7 @@ export class PairingStore {
         request.subject.id === subject.id,
     );
     if (existing) {
-      return existing.code;
+      return { code: existing.code };
     }
 
     // One sender may hold only one pending request at a time: subject-keyed
@@ -228,18 +236,18 @@ export class PairingStore {
     // limit one sender could occupy every shared slot and block all other
     // pairing requests until expiry.
     if (active.some((request) => request.senderId === senderId)) {
-      return null;
+      return { rejected: 'sender_pending' };
     }
 
     // Cap check
     if (active.length >= MAX_PENDING) {
-      return null;
+      return { rejected: 'cap_reached' };
     }
 
     const code = generateCode();
     active.push({ senderId, senderName, subject, code, createdAt: now });
     this.writePending(active);
-    return code;
+    return { code };
   }
 
   /**

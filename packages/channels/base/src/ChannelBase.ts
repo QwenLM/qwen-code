@@ -37,6 +37,7 @@ import { GroupHistoryStore } from './group-history-store.js';
 import type { GroupHistoryEntry } from './group-history-store.js';
 import { SenderGate } from './SenderGate.js';
 import { PairingStore } from './PairingStore.js';
+import type { CreatePairingRequestResult } from './PairingStore.js';
 import { SessionRouter } from './SessionRouter.js';
 import { getGlobalQwenDir } from './paths.js';
 import {
@@ -4818,11 +4819,11 @@ export abstract class ChannelBase {
   protected preflightInbound(envelope: Envelope): boolean | Promise<boolean> {
     const groupResult = this.groupGate.check(envelope);
     if (!groupResult.allowed) {
-      if (groupResult.pairingCode !== undefined) {
+      if (groupResult.pairing !== undefined) {
         this.logPreflightRejected('group_pairing_required');
         return this.onGroupPairingRequired(
           envelope.chatId,
-          groupResult.pairingCode,
+          groupResult.pairing,
           envelope.threadId,
         )
           .then(() => false)
@@ -4860,11 +4861,11 @@ export abstract class ChannelBase {
 
     const result = this.gate.check(envelope.senderId, envelope.senderName);
     if (!result.allowed) {
-      if (result.pairingCode !== undefined) {
+      if (result.pairing !== undefined) {
         this.logPreflightRejected('sender_pairing_required');
         return this.onPairingRequired(
           envelope.chatId,
-          result.pairingCode,
+          result.pairing,
           envelope.threadId,
         )
           .then(() => false)
@@ -5763,42 +5764,50 @@ export abstract class ChannelBase {
     await current;
   }
 
+  private pairingRejectionMessage(
+    rejected: 'sender_pending' | 'cap_reached',
+  ): string {
+    return rejected === 'sender_pending'
+      ? 'You already have a pending pairing request. It must be approved or expire before another can be created.'
+      : 'Too many pending pairing requests. Please try again later.';
+  }
+
   protected async onPairingRequired(
     chatId: string,
-    code: string | null,
+    result: CreatePairingRequestResult,
     threadId?: string,
   ): Promise<void> {
-    if (code) {
+    if ('code' in result) {
       await this.sendThreadMessage(
         chatId,
         threadId,
-        `Your pairing code is: ${code}\n\nAsk the bot operator to approve you with:\n  qwen channel pairing approve ${this.name} ${code}`,
+        `Your pairing code is: ${result.code}\n\nAsk the bot operator to approve you with:\n  qwen channel pairing approve ${this.name} ${result.code}`,
       );
     } else {
       await this.sendThreadMessage(
         chatId,
         threadId,
-        'Too many pending pairing requests. Please try again later.',
+        this.pairingRejectionMessage(result.rejected),
       );
     }
   }
 
   protected async onGroupPairingRequired(
     chatId: string,
-    code: string | null,
+    result: CreatePairingRequestResult,
     threadId?: string,
   ): Promise<void> {
-    if (code) {
+    if ('code' in result) {
       await this.sendThreadMessage(
         chatId,
         threadId,
-        `This group requires approval. Its pairing code is: ${code}\n\nAsk the bot operator to approve the group with:\n  qwen channel pairing approve ${this.name} ${code}`,
+        `This group requires approval. Its pairing code is: ${result.code}\n\nAsk the bot operator to approve the group with:\n  qwen channel pairing approve ${this.name} ${result.code}`,
       );
     } else {
       await this.sendThreadMessage(
         chatId,
         threadId,
-        'Too many pending pairing requests. Please try again later.',
+        this.pairingRejectionMessage(result.rejected),
       );
     }
   }
