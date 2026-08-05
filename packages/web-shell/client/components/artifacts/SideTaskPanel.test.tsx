@@ -264,6 +264,22 @@ it('renders a restored side task as a full chat pane', () => {
   });
 });
 
+it('threads sessionWorkflowEnabled to its chat pane', () => {
+  connection.sessionId = 'side-session-1';
+  connection.displayName = 'Investigate flaky tests';
+  connection.status = 'connected';
+  transcript.blocks = [{ kind: 'user' }];
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+
+  act(() => {
+    renderSideTask({ sessionWorkflowEnabled: true });
+  });
+
+  expect(latestChatPaneProps.current?.sessionWorkflowEnabled).toBe(true);
+});
+
 it('names a restored empty side task from its first prompt', async () => {
   connection.sessionId = 'side-session-1';
   connection.displayName = 'Side task';

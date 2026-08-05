@@ -1660,7 +1660,11 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     // the dogfooded failure was the orchestrator hand-appending `(round N)` to
     // the identity line because the CLI gave it nowhere else to put it.
     expect(fix).toMatch(/no hand-added round number/);
-    expect(fix).toContain('[--round <k>]');
+    // UNBRACKETED: `agent-prompt` refuses a round-less reverse-audit call, so
+    // a paste-and-run repair that bracketed --round as optional handed the
+    // orchestrator a first attempt the validation rejects.
+    expect(fix).toContain('--round <k>');
+    expect(fix).not.toContain('[--round <k>]');
   });
 
   it('names a rewritten verifier launch as itself too', () => {
@@ -1680,6 +1684,9 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     // told apart by their findings digest, not by that flag.
     expect(fix).toMatch(/no hand-added shard number,/);
     expect(fix).not.toContain('shard number (--round bakes it in)');
+    // For verify the flag stays BRACKETED — only a repeat verification round
+    // passes one, unlike reverse-audit where the CLI refuses without it.
+    expect(fix).toContain('[--round <k>]');
   });
 
   it('flags a reverse audit built but whose agent never opened its brief', () => {
