@@ -35,12 +35,9 @@ Model modality resolution uses this precedence:
 Model-id rules, including MiniMax M3 defaults, are fallback behavior only and
 never override an explicit user value.
 
-Built-in `/auth` modalities are defaults rather than explicit user
-configuration. Catalog metadata replaces them when available, and the
-built-in value remains only as an offline fallback. Coding Plan models whose
-regions differ omit the shared provider default and use the endpoint's catalog
-metadata. Values saved by older Coding Plan templates are still recognized as
-defaults. Explicit modalities edited by the user continue to take precedence.
+Built-in `/auth` templates omit modalities and let the catalog resolve them.
+Modalities selected explicitly in the advanced setup flow continue to take
+precedence. Existing saved configurations are not migrated or rewritten.
 
 Provider identity is resolved from the configured provider when possible and
 otherwise from its endpoint or credential environment key. The catalog lookup

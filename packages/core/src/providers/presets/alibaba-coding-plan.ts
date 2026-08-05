@@ -29,7 +29,6 @@ const MODELSTUDIO_MODELS: ModelSpec[] = [
     description: 'Currently available to Pro subscribers only.',
     contextWindowSize: 1000000,
     enableThinking: true,
-    modalities: { image: true, video: true },
   },
   { id: 'qwen3.7-plus', contextWindowSize: 1000000, enableThinking: true },
   { id: 'glm-5', contextWindowSize: 202752, enableThinking: true },

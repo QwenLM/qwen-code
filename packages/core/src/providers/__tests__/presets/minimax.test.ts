@@ -28,12 +28,12 @@ describe('minimaxProvider', () => {
     expect(urls).toContain('https://api.minimaxi.com/v1');
   });
 
-  it('includes MiniMax-M3 with official model metadata', () => {
+  it('leaves MiniMax-M3 modalities to the model catalog', () => {
     expect(minimaxProvider.models?.[0]).toMatchObject({
       id: 'MiniMax-M3',
       contextWindowSize: 1000000,
-      modalities: { image: true, video: true },
     });
+    expect(minimaxProvider.models?.[0]?.modalities).toBeUndefined();
   });
 
   it('creates an install plan with per-model metadata for known IDs', () => {

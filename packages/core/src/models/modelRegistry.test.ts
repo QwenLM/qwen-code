@@ -311,7 +311,7 @@ describe('ModelRegistry', () => {
       ).toEqual({ pdf: true });
     });
 
-    it('uses catalog metadata ahead of a built-in auth default', () => {
+    it('preserves modalities saved by an older auth template', () => {
       const registry = new ModelRegistry(
         {
           openai: [
@@ -340,8 +340,9 @@ describe('ModelRegistry', () => {
 
       expect(model.generationConfig.modalities).toEqual({
         image: true,
+        video: true,
       });
-      expect(registry.getModalitiesSource(model)).toBe('catalog');
+      expect(registry.getModalitiesSource(model)).toBe('explicit');
     });
 
     it('uses regional catalog metadata for Coding Plan models', () => {
