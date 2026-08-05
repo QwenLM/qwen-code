@@ -520,18 +520,25 @@ describe('package scripts', () => {
   it('skips autofix install-time prepare without disabling dependency scripts', () => {
     const workflow = readWorkflow('.github/workflows/qwen-autofix.yml');
 
-    for (const jobName of ['issue-autofix', 'review-address']) {
+    // review-address restores the shared build-cli bundle instead of
+    // compiling, so its install step is npm ci only; the other two jobs
+    // still build from sources. Husky hooks are re-armed after the
+    // prepare-skip only where git commits happen (build-cli never commits).
+    for (const [jobName, stepName, armsHooks] of [
+      ['issue-autofix', 'Install dependencies and build', true],
+      ['build-cli', 'Install dependencies and build', false],
+      ['review-address', 'Install dependencies', true],
+    ]) {
       const job = getWorkflowJob(workflow, jobName);
-      const installStep = getWorkflowStep(
-        job,
-        'Install dependencies and build',
-      );
+      const installStep = getWorkflowStep(job, stepName);
 
       expect(installStep).toContain("QWEN_SKIP_PREPARE: '1'");
       expect(installStep).toContain(
         'npm ci --prefer-offline --no-audit --progress=false',
       );
-      expect(installStep).toContain('git config core.hooksPath .husky');
+      if (armsHooks) {
+        expect(installStep).toContain('git config core.hooksPath .husky');
+      }
       expect(installStep).not.toContain('--ignore-scripts');
     }
   });
