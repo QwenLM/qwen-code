@@ -485,68 +485,71 @@ describe('generateReleaseNotes', () => {
     expect(result.warnings).toEqual(['Model configuration is unavailable.']);
   });
 
-  it('runs the CLI path with fake gh data and writes fallback notes', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'release-notes-cli-'));
-    try {
-      const gh = join(dir, 'gh');
-      const output = join(dir, 'notes.md');
-      const summaryPath = join(dir, 'summary.md');
-      writeFileSync(
-        gh,
-        [
-          '#!/usr/bin/env node',
-          'const args = process.argv.slice(2);',
-          "if (args[0] === 'api' && args.includes('repos/QwenLM/qwen-code/releases/generate-notes')) {",
-          "  process.stdout.write([\"## What's Changed\", '* feat: add cli path by @alice in https://github.com/QwenLM/qwen-code/pull/1'].join('\\n'));",
-          '  process.exit(0);',
-          '}',
-          "if (args[0] === 'api' && args[1] === 'graphql') {",
-          "  process.stdout.write(JSON.stringify({ data: { repository: { pr0: { number: 1, body: 'Body.', labels: { nodes: [] } } } } }));",
-          '  process.exit(0);',
-          '}',
-          'process.exit(1);',
-        ].join('\n'),
-      );
-      chmodSync(gh, 0o755);
+  it.skipIf(process.platform === 'win32')(
+    'runs the CLI path with fake gh data and writes fallback notes',
+    () => {
+      const dir = mkdtempSync(join(tmpdir(), 'release-notes-cli-'));
+      try {
+        const gh = join(dir, 'gh');
+        const output = join(dir, 'notes.md');
+        const summaryPath = join(dir, 'summary.md');
+        writeFileSync(
+          gh,
+          [
+            '#!/usr/bin/env node',
+            'const args = process.argv.slice(2);',
+            "if (args[0] === 'api' && args.includes('repos/QwenLM/qwen-code/releases/generate-notes')) {",
+            "  process.stdout.write([\"## What's Changed\", '* feat: add cli path by @alice in https://github.com/QwenLM/qwen-code/pull/1'].join('\\n'));",
+            '  process.exit(0);',
+            '}',
+            "if (args[0] === 'api' && args[1] === 'graphql') {",
+            "  process.stdout.write(JSON.stringify({ data: { repository: { pr0: { number: 1, body: 'Body.', labels: { nodes: [] } } } } }));",
+            '  process.exit(0);',
+            '}',
+            'process.exit(1);',
+          ].join('\n'),
+        );
+        chmodSync(gh, 0o755);
 
-      const cli = spawnSync(
-        process.execPath,
-        [
-          'scripts/generate-release-notes.js',
-          '--tag=v1.0.1',
-          '--previous-tag=v1.0.0',
-          `--output=${output}`,
-        ],
-        {
-          encoding: 'utf8',
-          env: {
-            ...process.env,
-            PATH: `${dir}:${process.env.PATH}`,
-            GITHUB_STEP_SUMMARY: summaryPath,
-            GITHUB_REPOSITORY: 'QwenLM/qwen-code',
-            OPENAI_API_KEY: '',
-            OPENAI_BASE_URL: '',
-            OPENAI_MODEL: '',
+        const cli = spawnSync(
+          process.execPath,
+          [
+            'scripts/generate-release-notes.js',
+            '--tag=v1.0.1',
+            '--previous-tag=v1.0.0',
+            `--output=${output}`,
+          ],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              GITHUB_STEP_SUMMARY: summaryPath,
+              GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+              OPENAI_API_KEY: '',
+              OPENAI_BASE_URL: '',
+              OPENAI_MODEL: '',
+            },
           },
-        },
-      );
+        );
 
-      expect(cli.status).toBe(0);
-      expect(cli.stderr).toContain(
-        '::warning::Model configuration is unavailable.',
-      );
-      expect(readFileSync(summaryPath, 'utf8')).toContain(
-        'Release notes: AI generation degraded',
-      );
-      const markdown = readFileSync(output, 'utf8');
-      expect(markdown).toContain('### Features');
-      expect(markdown).toContain(
-        `feat: add cli path ([#1](${PR(1)})) by @alice`,
-      );
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
+        expect(cli.status).toBe(0);
+        expect(cli.stderr).toContain(
+          '::warning::Model configuration is unavailable.',
+        );
+        expect(readFileSync(summaryPath, 'utf8')).toContain(
+          'Release notes: AI generation degraded',
+        );
+        const markdown = readFileSync(output, 'utf8');
+        expect(markdown).toContain('### Features');
+        expect(markdown).toContain(
+          `feat: add cli path ([#1](${PR(1)})) by @alice`,
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('does not duplicate ERROR prefixes for argument failures', () => {
     try {

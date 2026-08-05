@@ -90,6 +90,32 @@ describe('Live Host release workflow', () => {
       'https://github.com/QwenLM/qwen-code/releases/download/live-host-latest',
     );
   });
+
+  it('accepts the repository macOS signing and notarization secrets', () => {
+    for (const secret of [
+      'MAC_CSC_LINK',
+      'MAC_CSC_KEY_PASSWORD',
+      'APPLE_NOTARY_ISSUER_ID',
+      'APPLE_NOTARY_KEY_ID',
+      'APPLE_NOTARY_API_KEY_P8_BASE64',
+      'APPLE_TEAM_ID',
+    ]) {
+      expect(liveHostReleaseWorkflow).toContain(`secrets.${secret}`);
+    }
+    expect(liveHostReleaseWorkflow).toContain(
+      'keychain_password="${KEYCHAIN_PASSWORD:-$(openssl rand -hex 32)}"',
+    );
+    expect(liveHostReleaseWorkflow).toContain(
+      'certificate_data="${certificate_data#*base64,}"',
+    );
+    expect(liveHostReleaseWorkflow).toContain(
+      'printf \'%s\' "$LEGACY_APPLE_API_KEY_P8" | base64 --decode > "$key_path"',
+    );
+    expect(liveHostReleaseWorkflow).toContain('echo "APPLE_API_KEY=$key_path"');
+    expect(liveHostReleaseWorkflow).toContain(
+      'echo "APPLE_API_KEY_ID=$api_key_id"',
+    );
+  });
 });
 
 describe('Live Host CI workflow', () => {
