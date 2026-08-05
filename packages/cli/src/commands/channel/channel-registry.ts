@@ -12,12 +12,32 @@ export interface ChannelTypeDescriptor {
 
 const registry = new Map<string, ChannelPlugin>();
 let builtinsPromise: Promise<void> | null = null;
+const RESERVED_FIELD_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function assertManagementFields(
+  fields: readonly ChannelConfigFieldDescriptor[],
+  parentPath?: string,
+  nested = false,
+): void {
+  const seen = new Set<string>();
+  for (const field of fields) {
+    const path = parentPath ? `${parentPath}.${field.key}` : field.key;
+    if (seen.has(field.key)) {
+      throw new Error(`Channel field "${path}" is declared more than once.`);
+    }
+    seen.add(field.key);
+    assertManagementField(field, path, nested);
+  }
+}
 
 function assertManagementField(
   field: ChannelConfigFieldDescriptor,
   path = field.key,
   nested = false,
 ): void {
+  if (RESERVED_FIELD_KEYS.has(field.key)) {
+    throw new Error(`Channel field "${path}" cannot use a reserved key.`);
+  }
   const envResolvable =
     (field as { envResolvable?: unknown }).envResolvable === true;
   const required = (field as { required?: unknown }).required === true;
@@ -38,15 +58,11 @@ function assertManagementField(
       `Channel field "${path}" cannot resolve environment references.`,
     );
   }
-  for (const property of field.properties ?? []) {
-    assertManagementField(property, `${path}.${property.key}`, true);
-  }
+  assertManagementFields(field.properties ?? [], path, true);
 }
 
 function assertManagementDescriptor(plugin: ChannelPlugin): void {
-  for (const field of plugin.management?.fields ?? []) {
-    assertManagementField(field);
-  }
+  assertManagementFields(plugin.management?.fields ?? []);
 }
 
 function ensureBuiltins(): Promise<void> {
@@ -68,8 +84,14 @@ function ensureBuiltins(): Promise<void> {
       for (let i = 0; i < results.length; i++) {
         const result = results[i]!;
         if (result.status === 'fulfilled') {
-          assertManagementDescriptor(result.value.plugin);
-          registry.set(result.value.plugin.channelType, result.value.plugin);
+          try {
+            assertManagementDescriptor(result.value.plugin);
+            registry.set(result.value.plugin.channelType, result.value.plugin);
+          } catch (error) {
+            process.stderr.write(
+              `[channel-registry] Invalid management metadata in "${labelled[i]!.name}" channel: ${error instanceof Error ? error.message : String(error)}\n`,
+            );
+          }
         } else {
           process.stderr.write(
             `[channel-registry] Failed to load "${labelled[i]!.name}" channel: ${result.reason}\n`,

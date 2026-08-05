@@ -42,11 +42,78 @@ describe('channel registry', () => {
       },
       message: 'Channel field "settings" cannot be a required object.',
     },
+    {
+      type: 'invalid-env-resolvable-object',
+      field: {
+        key: 'settings',
+        label: 'Settings',
+        kind: 'object',
+        envResolvable: true,
+      },
+      message:
+        'Channel field "settings" cannot resolve environment references.',
+    },
+    {
+      type: 'invalid-reserved-field-key',
+      field: {
+        key: 'constructor',
+        label: 'Constructor',
+        kind: 'string',
+      },
+      message: 'Channel field "constructor" cannot use a reserved key.',
+    },
+    {
+      type: 'invalid-reserved-property-key',
+      field: {
+        key: 'settings',
+        label: 'Settings',
+        kind: 'object',
+        properties: [{ key: 'prototype', label: 'Prototype', kind: 'string' }],
+      },
+      message: 'Channel field "settings.prototype" cannot use a reserved key.',
+    },
   ])('rejects $type management metadata', ({ type, field, message }) => {
     const plugin = {
       channelType: type,
       displayName: type,
       management: { fields: [field] },
+      createChannel() {
+        throw new Error('not used');
+      },
+    } as unknown as ChannelPlugin;
+
+    expect(() => registerPlugin(plugin)).toThrow(message);
+  });
+
+  it.each([
+    {
+      type: 'duplicate-top-level-field',
+      fields: [
+        { key: 'token', label: 'Token', kind: 'secret' },
+        { key: 'token', label: 'Token', kind: 'string' },
+      ],
+      message: 'Channel field "token" is declared more than once.',
+    },
+    {
+      type: 'duplicate-nested-field',
+      fields: [
+        {
+          key: 'settings',
+          label: 'Settings',
+          kind: 'object',
+          properties: [
+            { key: 'enabled', label: 'Enabled', kind: 'boolean' },
+            { key: 'enabled', label: 'Enabled', kind: 'boolean' },
+          ],
+        },
+      ],
+      message: 'Channel field "settings.enabled" is declared more than once.',
+    },
+  ])('rejects $type management metadata', ({ type, fields, message }) => {
+    const plugin = {
+      channelType: type,
+      displayName: type,
+      management: { fields },
       createChannel() {
         throw new Error('not used');
       },

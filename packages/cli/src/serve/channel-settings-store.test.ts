@@ -87,12 +87,6 @@ describe('WorkspaceChannelSettingsStore', () => {
                 kind: 'string',
                 required: true,
               },
-              {
-                key: 'constructor',
-                label: 'Prototype-named value',
-                kind: 'string',
-                required: true,
-              },
             ],
           },
         ],
@@ -546,35 +540,13 @@ describe('WorkspaceChannelSettingsStore', () => {
         config: {
           type: 'management-validation-test',
           clientId: 'client-id',
-          nested: { constructor: 'present' },
+          nested: {},
         },
         secrets: { clientSecret: { operation: 'preserve' } },
       }),
     ).rejects.toMatchObject({
       code: 'channel_settings_invalid_config',
       message: 'Channel field "nested.requiredValue" is required.',
-    });
-
-    expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
-  });
-
-  it('rejects an omitted prototype-named required property without writing', async () => {
-    const store = new WorkspaceChannelSettingsStore(workspace);
-    const before = fs.readFileSync(settingsPath, 'utf8');
-
-    await expect(
-      store.upsert('bot', {
-        expectedRevision: store.snapshot().revision,
-        config: {
-          type: 'management-validation-test',
-          clientId: 'client-id',
-          nested: { requiredValue: 'present' },
-        },
-        secrets: { clientSecret: { operation: 'preserve' } },
-      }),
-    ).rejects.toMatchObject({
-      code: 'channel_settings_invalid_config',
-      message: 'Channel field "nested.constructor" is required.',
     });
 
     expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
