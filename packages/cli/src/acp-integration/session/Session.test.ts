@@ -144,6 +144,12 @@ vi.mock('../../services/voice-transcriber.js', async (importOriginal) => {
   return {
     ...actual,
     transcribeVoiceAudio: transcribeVoiceAudioSpy,
+    // The audio bridge pre-flights this once per turn; the Session tests
+    // exercise the post-preflight paths, so resolve it as configured.
+    resolveVoiceTranscriptionConfig: vi.fn(() => ({
+      model: 'qwen3-asr-flash',
+      baseUrl: 'https://asr.example/v1',
+    })),
   };
 });
 
@@ -5201,6 +5207,34 @@ describe('Session', () => {
       expect(agentMessageChunks()).not.toEqual(
         expect.arrayContaining([expect.stringContaining('Audio bridge')]),
       );
+    });
+
+    it('clamps oversized native audio when the bridge skips an audio-capable primary', async () => {
+      mockConfig.getEffectiveInputModalities = vi
+        .fn()
+        .mockReturnValue({ audio: true });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          { type: 'text', text: 'listen to this' },
+          {
+            type: 'audio',
+            mimeType: 'audio/wav',
+            // ~11 MiB decoded: over the 10 MiB inline-media cap the bridge
+            // skip must hand back to.
+            data: 'A'.repeat(Math.ceil((11 * 1024 * 1024 * 4) / 3)),
+          },
+        ],
+      });
+
+      expect(transcribeVoiceAudioSpy).not.toHaveBeenCalled();
+      const sent = firstSentMessage();
+      expect(sent.some((part) => 'inlineData' in part)).toBe(false);
+      expect(textParts(sent).join('\n')).toContain('Media omitted');
     });
 
     it('replaces ACP audio with a fallback when no voice model is configured', async () => {

@@ -792,76 +792,6 @@ describe('useGeminiStream', () => {
     );
   });
 
-  it('feeds audio-converted parts into the vision bridge', async () => {
-    const audioPart = {
-      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
-    };
-    const imagePart = {
-      inlineData: { mimeType: 'image/png', data: 'iVBORw0KGgo=' },
-    };
-    const convertedAudioParts = [
-      { text: 'describe both attachments' },
-      { text: '[audio transcript]' },
-      imagePart,
-    ];
-    const convertedVisionParts = [
-      { text: 'describe both attachments' },
-      { text: '[audio transcript]' },
-      { text: '[vision output]' },
-    ];
-    handleAtCommandSpy.mockResolvedValue({
-      processedQuery: [
-        { text: 'describe both attachments' },
-        audioPart,
-        imagePart,
-      ],
-      shouldProceed: true,
-    } as unknown as Awaited<
-      ReturnType<typeof atCommandProcessor.handleAtCommand>
-    >);
-    mockRunAudioBridge.mockResolvedValue({
-      status: 'ok',
-      parts: convertedAudioParts,
-      audioCount: 1,
-      convertedCount: 1,
-      egressCount: 1,
-      modelId: 'qwen3-asr-flash',
-    });
-    mockRunVisionBridge.mockResolvedValue({
-      applied: true,
-      status: 'ok',
-      parts: convertedVisionParts,
-      transcript: '[vision output]',
-      convertedCount: 1,
-      omittedCount: 0,
-      modelId: 'vision-model',
-    });
-    Object.assign(mockConfig, {
-      getEffectiveInputModalities: vi.fn(() => ({})),
-      getDefaultVisionBridgeModel: vi.fn(() => ({ id: 'vision-model' })),
-    });
-    mockLoadedSettings.merged.voiceModel = 'qwen3-asr-flash';
-    const { result, mockSendMessageStream } = renderTestHook();
-
-    await act(async () => {
-      await result.current.submitQuery(
-        '@recording.wav @image.png describe both attachments',
-      );
-    });
-
-    expect(mockRunVisionBridge).toHaveBeenCalledWith({
-      config: mockConfig,
-      parts: convertedAudioParts,
-      signal: expect.any(AbortSignal),
-    });
-    expect(
-      JSON.stringify(mockRunVisionBridge.mock.calls[0]?.[0]),
-    ).not.toContain('audio/wav');
-    expect(mockSendMessageStream.mock.calls[0]?.[0]).toEqual(
-      convertedVisionParts,
-    );
-  });
-
   it('forwards audio without a bridge notice when conversion is skipped', async () => {
     const audioPart = {
       inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
@@ -880,9 +810,6 @@ describe('useGeminiStream', () => {
       convertedCount: 0,
       egressCount: 0,
     });
-    Object.assign(mockConfig, {
-      getEffectiveInputModalities: vi.fn(() => ({ audio: true })),
-    });
     const { result, mockSendMessageStream } = renderTestHook();
 
     await act(async () => {
@@ -898,8 +825,7 @@ describe('useGeminiStream', () => {
     expect(mockSendMessageStream.mock.calls[0]?.[0]).toEqual(parts);
     expect(mockAddItem).not.toHaveBeenCalledWith(
       expect.objectContaining({
-        type: MessageType.INFO,
-        text: expect.stringContaining('Audio bridge'),
+        text: expect.stringContaining('audio file(s)'),
       }),
       expect.any(Number),
     );
@@ -1194,42 +1120,6 @@ describe('useGeminiStream', () => {
     ]);
   });
 
-  it('suppresses the bridge notice when audio is skipped', async () => {
-    const audioPart = {
-      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
-    };
-    handleAtCommandSpy.mockResolvedValue({
-      processedQuery: [{ text: 'listen' }, audioPart],
-      shouldProceed: true,
-    } as unknown as Awaited<
-      ReturnType<typeof atCommandProcessor.handleAtCommand>
-    >);
-    mockRunAudioBridge.mockResolvedValue({
-      status: 'skipped',
-      parts: [{ text: 'listen' }, audioPart],
-      audioCount: 1,
-      convertedCount: 0,
-      egressCount: 0,
-    });
-    const { result, mockSendMessageStream } = renderTestHook();
-
-    await act(async () => {
-      await result.current.submitQuery('@recording.wav listen');
-    });
-
-    expect(mockRunAudioBridge).toHaveBeenCalled();
-    expect(mockAddItem).not.toHaveBeenCalledWith(
-      expect.objectContaining({
-        text: expect.stringContaining('audio file(s)'),
-      }),
-      expect.any(Number),
-    );
-    expect(mockSendMessageStream.mock.calls[0]?.[0]).toEqual([
-      { text: 'listen' },
-      audioPart,
-    ]);
-  });
-
   it('feeds audio-converted parts into the vision bridge for mixed audio+image prompts', async () => {
     const audioPart = {
       inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
@@ -1292,9 +1182,12 @@ describe('useGeminiStream', () => {
       parts: [{ text: 'listen' }, { text: 'machine transcript' }, imagePart],
       signal: expect.any(AbortSignal),
     });
+    expect(mockSendMessageStream.mock.calls[0]?.[0]).toEqual([
+      { text: 'listen' },
+      { text: 'machine transcript' },
+      { text: 'vision output' },
+    ]);
     const sent = JSON.stringify(mockSendMessageStream.mock.calls[0]?.[0]);
-    expect(sent).toContain('machine transcript');
-    expect(sent).toContain('vision output');
     expect(sent).not.toContain('audio/wav');
     expect(sent).not.toContain('inlineData');
   });
@@ -3783,7 +3676,7 @@ describe('useGeminiStream', () => {
         config: mockConfig,
         onDebugMessage: mockOnDebugMessage,
         signal: expect.any(AbortSignal),
-        preserveUnsupportedAudioForBridge: false,
+        preserveUnsupportedAudioForBridge: true,
       }),
     );
     expect(recordMidTurnUserMessage).toHaveBeenCalledWith(

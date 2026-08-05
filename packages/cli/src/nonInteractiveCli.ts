@@ -95,7 +95,6 @@ import {
   hasAudioParts,
   replaceAudioPartsWithUnavailable,
   runAudioBridge,
-  shouldPreserveUnsupportedAudioForBridge,
 } from './services/audio-bridge-service.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
@@ -1157,8 +1156,9 @@ export async function runNonInteractive(
             onDebugMessage: () => {},
             messageId: Date.now(),
             signal: abortController.signal,
-            preserveUnsupportedAudioForBridge:
-              shouldPreserveUnsupportedAudioForBridge(config, settings),
+            // Unconditional (mirrors ACP): runAudioBridge owns the
+            // fail-closed outcome when no batch voice model can transcribe.
+            preserveUnsupportedAudioForBridge: true,
           });
 
           if (!shouldProceed || !processedQuery) {
@@ -2227,7 +2227,13 @@ export async function runNonInteractive(
           currentPromptId,
           {
             type: sendType,
-            modelOverride,
+            // NUL marks an exact-route selector so the skill target's
+            // modalities resolve (interactive sends do the same); bare ids
+            // would fall back to the session config's modalities.
+            modelOverride:
+              modelOverride === undefined || modelOverride.endsWith('\0')
+                ? modelOverride
+                : `${modelOverride}\0`,
             ...(isFirstTurn &&
               options.notificationDisplayText && {
                 notificationDisplayText: options.notificationDisplayText,
@@ -2544,7 +2550,11 @@ export async function runNonInteractive(
                   type: itemIsFirstTurn
                     ? item.sendMessageType
                     : SendMessageType.ToolResult,
-                  modelOverride: itemModelOverride,
+                  modelOverride:
+                    itemModelOverride === undefined ||
+                    itemModelOverride.endsWith('\0')
+                      ? itemModelOverride
+                      : `${itemModelOverride}\0`,
                   ...(itemIsFirstTurn && {
                     notificationDisplayText: item.displayText,
                     todoWorkChainId: item.todoWorkChainId,

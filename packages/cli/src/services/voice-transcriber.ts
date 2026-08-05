@@ -173,8 +173,35 @@ function readIpv4TranslatedIpv6(host: string): string | undefined {
   ].join('.');
 }
 
-function readNat64Ipv6(host: string): string | undefined {
-  const sections = host.split('::');
+// Decodes the IPv4 embedded under the NAT64/DNS64 translation prefixes.
+// Returns `{ embedded: undefined }` for addresses inside the prefixes whose
+// layout is not recognized — the caller fails those closed, because an
+// embedding the guard cannot decode cannot prove its destination public.
+function readNat64Ipv6(
+  host: string,
+): { embedded: string | undefined } | undefined {
+  let normalized = host;
+  const lastColon = host.lastIndexOf(':');
+  if (lastColon >= 0) {
+    const tail = host.slice(lastColon + 1);
+    if (tail.includes('.')) {
+      const octets = tail.split('.');
+      if (
+        octets.length !== 4 ||
+        octets.some((part) => !/^(0|[1-9]\d{0,2})$/.test(part))
+      ) {
+        return undefined;
+      }
+      const values = octets.map((part) => Number(part));
+      if (values.some((value) => value > 255)) {
+        return undefined;
+      }
+      const dottedHigh = (values[0]! << 8) | values[1]!;
+      const dottedLow = (values[2]! << 8) | values[3]!;
+      normalized = `${host.slice(0, lastColon + 1)}${dottedHigh.toString(16)}:${dottedLow.toString(16)}`;
+    }
+  }
+  const sections = normalized.split('::');
   if (sections.length > 2) return undefined;
   const parseGroups = (section: string): number[] | undefined => {
     if (!section) return [];
@@ -198,34 +225,44 @@ function readNat64Ipv6(host: string): string | undefined {
   if (groups[0] !== 0x0064 || groups[1] !== 0xff9b) return undefined;
   let high: number;
   let low: number;
-  if (groups.slice(2, 6).every((group) => group === 0)) {
-    high = groups[6]!;
-    low = groups[7]!;
-  } else if (
-    groups[2] === 0x0001 &&
-    (groups[4]! & 0xff00) === 0 &&
-    (groups[5]! & 0x00ff) === 0 &&
-    groups[6] === 0 &&
-    groups[7] === 0
-  ) {
-    high = groups[3]!;
-    low = ((groups[4]! & 0xff) << 8) | (groups[5]! >>> 8);
-  } else if (
-    groups[2] === 0x0001 &&
-    groups.slice(3, 6).every((group) => group === 0)
-  ) {
+  if (groups[2] === 0x0001) {
+    // 64:ff9b:1::/48 (RFC 8215) embeds the IPv4 in one of RFC 6052's
+    // contiguous windows; the suffix after the window is zero on generation.
+    if (groups[5] === 0 && groups[6] === 0 && groups[7] === 0) {
+      // PL=48: IPv4 at bits 48-79.
+      high = groups[3]!;
+      low = groups[4]!;
+    } else if (
+      (groups[5]! & 0xff) === 0 &&
+      groups[6] === 0 &&
+      groups[7] === 0
+    ) {
+      // PL=56: IPv4 at bits 56-87.
+      high = ((groups[3]! & 0xff) << 8) | (groups[4]! >>> 8);
+      low = ((groups[4]! & 0xff) << 8) | (groups[5]! >>> 8);
+    } else if (groups[6] === 0 && groups[7] === 0) {
+      // PL=64: IPv4 at bits 64-95.
+      high = groups[4]!;
+      low = groups[5]!;
+    } else {
+      return { embedded: undefined };
+    }
+  } else if (groups.slice(2, 6).every((group) => group === 0)) {
+    // 64:ff9b::/96 well-known prefix: IPv4 at bits 96-127.
     high = groups[6]!;
     low = groups[7]!;
   } else {
-    return undefined;
+    return { embedded: undefined };
   }
   const value = (high << 16) | low;
-  return [
-    (value >>> 24) & 0xff,
-    (value >>> 16) & 0xff,
-    (value >>> 8) & 0xff,
-    value & 0xff,
-  ].join('.');
+  return {
+    embedded: [
+      (value >>> 24) & 0xff,
+      (value >>> 16) & 0xff,
+      (value >>> 8) & 0xff,
+      value & 0xff,
+    ].join('.'),
+  };
 }
 
 // Blocks IP-literal private networks only. Hostname DNS resolution and
@@ -251,9 +288,12 @@ function isPrivateNetworkIp(hostname: string): boolean {
   if (normalizedIpv4Translated) {
     return isPrivateNetworkIp(normalizedIpv4Translated);
   }
-  const normalizedNat64 = readNat64Ipv6(host);
-  if (normalizedNat64) {
-    return isPrivateNetworkIp(normalizedNat64);
+  const nat64 = readNat64Ipv6(host);
+  if (nat64) {
+    // Fail closed for unrecognized translation-prefix layouts: DNS64
+    // synthesizes these from whatever IPv4 the name serves, so an
+    // undecoded embedding may hide a private target.
+    return nat64.embedded === undefined || isPrivateNetworkIp(nat64.embedded);
   }
   if (host.startsWith('::ffff:')) {
     return true;
@@ -594,7 +634,11 @@ function inputAudioFormat(mimeType: string): string {
   const raw = subtype.startsWith('audio/')
     ? subtype.slice('audio/'.length) || 'wav'
     : 'wav';
-  return AUDIO_FORMAT_ALIASES[raw] ?? raw;
+  // hasOwn guard: the subtype is attacker-influenceable (ACP clients supply
+  // mimeType), and inherited prototype keys would otherwise leak as formats.
+  return Object.hasOwn(AUDIO_FORMAT_ALIASES, raw)
+    ? AUDIO_FORMAT_ALIASES[raw]
+    : raw;
 }
 
 // mime/lite resolves `.m4a` to `audio/mp4` (no extension maps to the `x-m4a`

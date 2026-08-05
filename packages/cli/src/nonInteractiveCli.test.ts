@@ -1279,6 +1279,63 @@ describe('runNonInteractive', () => {
     );
   });
 
+  it('emits a stream-json system message for headless audio bridge notices', async () => {
+    setupMetricsMock();
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: vi.fn().mockReturnValue({}),
+    });
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    mockSettings.merged.voiceModel = 'qwen3-asr-flash';
+    const { handleAtCommand } = await import(
+      './ui/hooks/atCommandProcessor.js'
+    );
+    vi.mocked(handleAtCommand).mockResolvedValue({
+      processedQuery: headlessAudioParts,
+      shouldProceed: true,
+    });
+    runAudioBridgeSpy.mockResolvedValue({
+      status: 'ok',
+      parts: [{ text: 'machine transcript' }],
+      audioCount: 1,
+      convertedCount: 1,
+      egressCount: 1,
+      modelId: 'qwen3-asr-flash',
+    });
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+    const writes: string[] = [];
+    processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(
+        typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'),
+      );
+      return true;
+    });
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'listen @recording.wav',
+      'prompt-audio-bridge-json',
+    );
+
+    const systemMessage = writes
+      .join('')
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line))
+      .find(
+        (message) =>
+          message.type === 'system' && message.subtype === 'audio_bridge',
+      );
+    expect(systemMessage).toMatchObject({
+      subtype: 'audio_bridge',
+      data: { notice: expect.stringContaining('Converted 1 audio file(s)') },
+    });
+  });
+
   it('forwards headless audio without a notice when the bridge skips', async () => {
     setupMetricsMock();
     Object.assign(mockConfig, {
@@ -1436,6 +1493,60 @@ describe('runNonInteractive', () => {
     );
   });
 
+  it('fails closed when a slash prompt route resolution rejects', async () => {
+    setupMetricsMock();
+    const mockCommand = {
+      name: 'flaky-model',
+      description: 'submit audio through a flaky route',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: headlessAudioParts,
+        modelOverride: 'flaky-model',
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockCommand]);
+    (mockConfig.getContentGeneratorConfig as Mock).mockReturnValue({
+      authType: AuthType.QWEN_OAUTH,
+    });
+    (
+      mockConfig as unknown as { getAvailableModelsForAuthType: Mock }
+    ).getAvailableModelsForAuthType = vi
+      .fn()
+      .mockReturnValue([{ id: 'flaky-model', authType: AuthType.QWEN_OAUTH }]);
+    const resolveForModel = vi
+      .fn()
+      .mockRejectedValue(new Error('route unavailable'));
+    (mockConfig as unknown as { getBaseLlmClient: Mock }).getBaseLlmClient = vi
+      .fn()
+      .mockReturnValue({ resolveForModel });
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/flaky-model',
+      'prompt-audio-route-rejected',
+    );
+
+    expect(runAudioBridgeSpy).not.toHaveBeenCalled();
+    const sentParts = mockGeminiClient.sendMessageStream.mock.calls[0]?.[0];
+    expect(sentParts).toEqual([
+      { text: 'listen to this audio' },
+      expect.objectContaining({
+        text: expect.stringContaining(
+          'active model override does not support audio',
+        ),
+      }),
+    ]);
+    expect(JSON.stringify(sentParts)).not.toContain('audio/wav');
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Audio was not sent'),
+    );
+  });
+
   it('notices a failed audio bridge that never sent audio anywhere', async () => {
     setupMetricsMock();
     Object.assign(mockConfig, {
@@ -1456,6 +1567,8 @@ describe('runNonInteractive', () => {
       egressCount: 0,
       error: 'no voice model is configured',
     });
+    // No voice model configured: the flag is still unconditional so the
+    // bridge owns the fail-closed marker (pre-fix this computed false).
     mockGeminiClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents(finishedEvents),
     );
@@ -1471,6 +1584,9 @@ describe('runNonInteractive', () => {
       expect.stringContaining(
         'Audio bridge could not transcribe 1 audio file(s): no voice model is configured.',
       ),
+    );
+    expect(handleAtCommand).toHaveBeenCalledWith(
+      expect.objectContaining({ preserveUnsupportedAudioForBridge: true }),
     );
     expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledWith(
       [{ text: 'audio unavailable: no voice model is configured' }],
@@ -3950,6 +4066,50 @@ describe('runNonInteractive', () => {
     );
     expect(processStderrSpy).toHaveBeenCalledWith(
       expect.stringContaining('Routing this image turn to vision-agent'),
+    );
+  });
+
+  it('NUL-suffixes mid-loop skill overrides so exact routes resolve headlessly', async () => {
+    setupMetricsMock();
+    const toolCallEvent: ServerGeminiStreamEvent = {
+      type: GeminiEventType.ToolCallRequest,
+      value: {
+        callId: 'skill-tool-1',
+        name: 'skill',
+        args: {},
+        isClientInitiated: false,
+        prompt_id: 'prompt-skill-override',
+      },
+    };
+    mockCoreExecuteToolCall.mockResolvedValue({
+      responseParts: [{ text: 'skill loaded' }],
+      modelOverride: 'text-skill-model',
+    });
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(createStreamFromEvents([toolCallEvent]))
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'done' },
+          ...finishedEvents,
+        ]),
+      );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'use the skill',
+      'prompt-skill-override',
+    );
+
+    // A bare skill override would fall back to the session modalities during
+    // route resolution; the trailing NUL makes sendMessageStream resolve the
+    // exact route, mirroring interactive sends.
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+      2,
+      [{ text: 'skill loaded' }],
+      expect.any(AbortSignal),
+      'prompt-skill-override',
+      { type: SendMessageType.ToolResult, modelOverride: 'text-skill-model\0' },
     );
   });
 

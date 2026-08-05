@@ -617,9 +617,18 @@ describe('voice-transcriber', () => {
   it.each([
     '64:ff9b::a9fe:a9fe',
     '64:ff9b::a00:1',
-    '64:ff9b:1:a9fe:a9:fe00::',
+    '64:ff9b::169.254.169.254',
+    '64:ff9b:1:a9:fea9:fe00::',
     '64:ff9b:1:a00:0:100::',
+    '64:ff9b:1:a9fe:a9:fe01::',
+    '64:ff9b:1:0:a9fe:a9fe::',
+    // Unrecognized 64:ff9b:1::/48 sub-prefix layouts fail closed.
     '64:ff9b:1::a9fe:a9fe',
+    '64:ff9b:1:a9fe:a9:fe00:0:1',
+    '64:ff9b:1:0:0:1:a9fe:a9fe',
+    '64:ff9b:1:fffe::a9fe:a9fe',
+    '64:ff9b:1:abcd:0:5431:a9fe:a9fe',
+    '64:ff9b:1:1:a9:fea9:fe00::',
   ])('rejects private IPv4 embedded in NAT64 address %s', async (address) => {
     await expect(
       assertVoiceBaseUrlNetworkAllowed(
@@ -632,20 +641,22 @@ describe('voice-transcriber', () => {
     ).rejects.toThrow(/private-network address/);
   });
 
-  it.each(['64:ff9b::808:808', '64:ff9b:1:808:8:800::'])(
-    'allows public IPv4 embedded in NAT64 address %s',
-    async (address) => {
-      await expect(
-        assertVoiceBaseUrlNetworkAllowed(
-          {
-            model: 'qwen3-asr-flash',
-            baseUrl: 'https://asr.example/v1',
-          },
-          vi.fn().mockResolvedValue({ address }),
-        ),
-      ).resolves.toBeUndefined();
-    },
-  );
+  it.each([
+    '64:ff9b::808:808',
+    '64:ff9b::8.8.8.8',
+    '64:ff9b:1:808:8:800::',
+    '64:ff9b:1:8:8:800::',
+  ])('allows public IPv4 embedded in NAT64 address %s', async (address) => {
+    await expect(
+      assertVoiceBaseUrlNetworkAllowed(
+        {
+          model: 'qwen3-asr-flash',
+          baseUrl: 'https://asr.example/v1',
+        },
+        vi.fn().mockResolvedValue({ address }),
+      ),
+    ).resolves.toBeUndefined();
+  });
 
   it('blocks compressed IPv4-mapped IPv6 literals via the blanket rule', async () => {
     await expect(
@@ -942,6 +953,9 @@ describe('voice-transcriber', () => {
     ['audio/x-aiff', 'aiff'],
     ['audio/x-ms-wma', 'wma'],
     ['audio/x-ogg', 'ogg'],
+    // Inherited prototype keys must not resolve as formats (hasOwn guard).
+    ['audio/constructor', 'constructor'],
+    ['audio/__proto__', '__proto__'],
   ])(
     'maps %s to the supported input_audio format %s',
     async (mimeType, format) => {

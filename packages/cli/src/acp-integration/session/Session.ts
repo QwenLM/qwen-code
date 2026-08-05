@@ -9738,9 +9738,10 @@ export class Session implements SessionContext {
             },
           });
         case 'audio':
-          // Audio skips the generic inline-media clamp: runAudioBridge owns
-          // its fail-closed handling (native passthrough, transcription, or
-          // a sized-out marker), mirroring the @-path and resource arms.
+          // Audio skips the clamp here so runAudioBridge can own it:
+          // transcription (with its own size gate) for text-only targets, or
+          // clamped native passthrough in #applyAudioBridgeIfNeeded when the
+          // bridge skips an audio-capable target.
           return {
             inlineData: {
               mimeType: part.mimeType,
@@ -10072,6 +10073,14 @@ export class Session implements SessionContext {
           `audio bridge: failed to emit notice; continuing with bridge result error=${String(error instanceof Error ? error.message : error)}`,
         );
       }
+    }
+    if (result.status === 'skipped') {
+      // The bridge left native audio model-bound; the inline-media cap owns
+      // its sizing again, restoring the clamp these parts skipped on the way
+      // in (the operator-tunable QWEN_CODE_MAX_INLINE_MEDIA_BYTES budget).
+      return result.parts.map((part) =>
+        hasAudioParts([part]) ? clampInlineMediaPart(part) : part,
+      );
     }
     return result.parts;
   }

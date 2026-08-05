@@ -96,6 +96,7 @@ describe('handleAtCommand', () => {
       getUsageStatisticsEnabled: () => false,
       getTruncateToolOutputThreshold: () => 2500,
       getTruncateToolOutputLines: () => 500,
+      getModel: () => 'test-model',
     } as unknown as Config;
   });
 
@@ -198,6 +199,35 @@ describe('handleAtCommand', () => {
       },
     });
   });
+
+  it.each([{ preserveUnsupportedAudioForBridge: false }, {}])(
+    'forwards a non-preserving caller flag as an audio skip (options: %j)',
+    async (options) => {
+      const audioPath = await createTestFile(
+        path.join(testRootDir, 'recording.wav'),
+        'fake wav data',
+      );
+
+      const result = await handleAtCommand({
+        query: `listen to @${audioPath}`,
+        config: mockConfig,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 127,
+        signal: abortController.signal,
+        ...options,
+      });
+
+      const parts = Array.isArray(result.processedQuery)
+        ? result.processedQuery
+        : [result.processedQuery];
+      expect(
+        parts.some(
+          (part) => typeof part !== 'string' && part && 'inlineData' in part,
+        ),
+      ).toBe(false);
+      expect(JSON.stringify(parts)).toContain('Unsupported audio file');
+    },
+  );
 
   it.skipIf(process.platform === 'win32')(
     'reads a file symlink through its canonical target type',

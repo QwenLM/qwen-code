@@ -16,6 +16,7 @@ import { resolveVoiceTransport } from './voice-model.js';
 import { readVoiceModel } from './voice-settings.js';
 import {
   MAX_AUDIO_BYTES,
+  resolveVoiceTranscriptionConfig,
   sanitizeVoiceErrorMessage,
   transcribeVoiceAudio,
   unsupportedAudioFormat,
@@ -53,18 +54,6 @@ function isAudioPart(part: Part): boolean {
 
 export function hasAudioParts(parts: PartListUnion): boolean {
   return normalizeParts(parts).some(isAudioPart);
-}
-
-export function shouldPreserveUnsupportedAudioForBridge(
-  config: Config,
-  settings: LoadedSettings,
-): boolean {
-  if (config.getEffectiveInputModalities?.().audio === true) return false;
-  const voiceModel = readVoiceModel(settings);
-  return (
-    voiceModel !== undefined &&
-    resolveVoiceTransport(voiceModel) === 'qwen-asr-chat'
-  );
 }
 
 function transcriptBlock(modelId: string, transcript: string): string {
@@ -174,6 +163,30 @@ export async function runAudioBridge(params: {
       status: 'failed',
       parts: parts.map((part) =>
         isAudioPart(part) ? { text: unavailableBlock(reason) } : part,
+      ),
+      audioCount,
+      convertedCount: 0,
+      egressCount: 0,
+      error: reason,
+    };
+  }
+
+  try {
+    resolveVoiceTranscriptionConfig({ config, settings, voiceModel });
+  } catch (error) {
+    // Stable configuration errors (missing model entry, missing API key,
+    // non-https baseUrl) are user-actionable; surface them in the notice via
+    // `error` instead of reading/encoding every part just to fail per-part.
+    // The model-facing marker stays generic.
+    const reason = sanitizeVoiceErrorMessage(
+      error instanceof Error ? error.message : String(error),
+    );
+    return {
+      status: 'failed',
+      parts: parts.map((part) =>
+        isAudioPart(part)
+          ? { text: unavailableBlock('transcription was unavailable') }
+          : part,
       ),
       audioCount,
       convertedCount: 0,

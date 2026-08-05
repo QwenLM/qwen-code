@@ -16,11 +16,15 @@ untrusted machine transcript produced by `voiceModel`. Missing configuration,
 oversized audio, empty transcripts, request failures, and cancellation never
 forward raw audio to a text-only primary model.
 
-Interactive and headless `@` resolution preserve unsupported audio only when a
-batch-capable `voiceModel` is selected, then run the shared bridge before the
-existing vision bridge. ACP direct audio blocks use the same service and keep
-their existing agent-message disclosure. A bridge notice identifies the voice
-model whenever audio left the machine, including failed or empty responses.
+Interactive and headless `@` resolution preserve unsupported audio
+unconditionally — mirroring ACP — and run the shared bridge before the
+existing vision bridge; when no batch-capable `voiceModel` is selected, the
+bridge owns the fail-closed outcome (unavailable marker plus notice). ACP
+direct audio blocks use the same service and keep their existing
+agent-message disclosure; when the bridge skips for an audio-capable target,
+the inline-media clamp owns oversized audio again. A bridge notice identifies
+the voice model whenever audio left the machine, including failed or empty
+responses.
 
 The existing `voiceModel` setting and `/model --voice` command remain the sole
 configuration surface. Voice dictation behavior is unchanged.

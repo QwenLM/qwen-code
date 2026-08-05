@@ -5,14 +5,13 @@
  */
 
 import type { Part } from '@google/genai';
-import type { Config } from '@qwen-code/qwen-code-core';
+import { AuthType, type Config } from '@qwen-code/qwen-code-core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { LoadedSettings } from '../config/settings.js';
 import {
   MAX_AUDIO_PARTS_PER_TURN,
   formatAudioBridgeNotice,
   runAudioBridge,
-  shouldPreserveUnsupportedAudioForBridge,
 } from './audio-bridge-service.js';
 
 const transcribeVoiceAudio = vi.hoisted(() => vi.fn());
@@ -23,9 +22,17 @@ vi.mock('./voice-transcriber.js', async (importOriginal) => {
   return { ...actual, transcribeVoiceAudio };
 });
 
-function config(audio = false): Config {
+function config(audio = false, voiceModels?: unknown[]): Config {
   return {
     getEffectiveInputModalities: () => (audio ? { audio: true } : {}),
+    getAllConfiguredModels: () =>
+      voiceModels ?? [
+        {
+          id: 'qwen3-asr-flash',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://asr.example/v1',
+        },
+      ],
   } as unknown as Config;
 }
 
@@ -133,6 +140,28 @@ describe('audio bridge service', () => {
     expect(formatAudioBridgeNotice(result)).toContain(
       'Your audio was sent to that model',
     );
+  });
+
+  it('fails closed with the actionable config error before transcribing', async () => {
+    const result = await runAudioBridge({
+      config: config(false, []),
+      settings: settings('qwen3-asr-flash'),
+      parts: [audio()],
+      signal: new AbortController().signal,
+    });
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      convertedCount: 0,
+      egressCount: 0,
+    });
+    expect(result.error).toContain('is not configured');
+    // The model-facing marker stays generic; only the user-facing notice
+    // carries the actionable reason.
+    expect(result.parts[0]?.text).toContain('transcription was unavailable');
+    expect(result.parts[0]?.text).not.toContain('is not configured');
+    expect(formatAudioBridgeNotice(result)).toContain('is not configured');
+    expect(transcribeVoiceAudio).not.toHaveBeenCalled();
   });
 
   it('fails closed for audio formats the voice model does not accept', async () => {
@@ -289,6 +318,32 @@ describe('audio bridge service', () => {
     expect(transcribeVoiceAudio).not.toHaveBeenCalled();
   });
 
+  it('accepts audio at exactly the documented 10 MiB cap', async () => {
+    transcribeVoiceAudio.mockImplementation(
+      async (_audio: unknown, options: { onEgress?: () => void }) => {
+        options.onEgress?.();
+        return 'transcript';
+      },
+    );
+
+    // Decoded size exactly MAX_AUDIO_BYTES; the trailing `==` padding keeps
+    // the base64-size estimate at exactly the cap.
+    const exactCapData = Buffer.alloc(10 * 1024 * 1024).toString('base64');
+    const result = await runAudioBridge({
+      config: config(),
+      settings: settings('qwen3-asr-flash'),
+      parts: [audio(exactCapData)],
+      signal: new AbortController().signal,
+    });
+
+    expect(result).toMatchObject({
+      status: 'ok',
+      convertedCount: 1,
+      egressCount: 1,
+    });
+    expect(transcribeVoiceAudio).toHaveBeenCalledTimes(1);
+  });
+
   it('caps audio parts per turn and reports the surplus', async () => {
     transcribeVoiceAudio.mockImplementation(
       async (_audio: unknown, options: { onEgress?: () => void }) => {
@@ -387,6 +442,7 @@ describe('audio bridge service', () => {
     expect(result.parts[0]?.text).toContain(
       `[transcript truncated at 10000 characters]`,
     );
+    expect(result.parts[0]?.text).toContain('x'.repeat(10_000));
     expect(result.parts[0]?.text).not.toContain('x'.repeat(10_001));
   });
 
@@ -462,26 +518,5 @@ describe('audio bridge service', () => {
     expect(formatAudioBridgeNotice(result)).not.toContain(
       '2 audio file(s) could not be transcribed',
     );
-  });
-
-  it('preserves unsupported attachments only for a batch voice model', () => {
-    expect(
-      shouldPreserveUnsupportedAudioForBridge(
-        config(),
-        settings('qwen3-asr-flash'),
-      ),
-    ).toBe(true);
-    expect(
-      shouldPreserveUnsupportedAudioForBridge(
-        config(),
-        settings('qwen3-asr-flash-realtime'),
-      ),
-    ).toBe(false);
-    expect(
-      shouldPreserveUnsupportedAudioForBridge(
-        config(true),
-        settings('qwen3-asr-flash'),
-      ),
-    ).toBe(false);
   });
 });

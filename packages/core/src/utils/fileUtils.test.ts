@@ -1607,6 +1607,52 @@ describe('fileUtils', () => {
       expect(result.errorType).toBe(ToolErrorType.FILE_TOO_LARGE);
     });
 
+    it('still applies the read-time gate to flagged audio on audio-capable models', async () => {
+      // preserveUnsupportedAudio is passed unconditionally by ACP/headless;
+      // for a model that natively accepts audio the bridge skips the part,
+      // so the 9.9 MB read-time gate must still own its size.
+      const audioPath = path.join(tempRootDir, 'big-flagged.wav');
+      actualNodeFs.writeFileSync(audioPath, '');
+      actualNodeFs.truncateSync(audioPath, Math.floor(9.95 * 1024 * 1024));
+      mockMimeGetType.mockReturnValue('audio/wav');
+      const audioConfig = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({
+          modalities: { audio: true },
+        }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(audioPath, audioConfig, {
+        preserveUnsupportedAudio: true,
+      });
+
+      expect(result.errorType).toBe(ToolErrorType.FILE_TOO_LARGE);
+      expect(result.llmContent).toContain('File size exceeds the 10MB limit');
+    });
+
+    it('still applies the base64 gate to flagged audio on audio-capable models', async () => {
+      const audioBytes = Buffer.alloc(8 * 1024 * 1024, 7);
+      const audioPath = path.join(tempRootDir, 'long-flagged.wav');
+      actualNodeFs.writeFileSync(audioPath, audioBytes);
+      mockMimeGetType.mockReturnValue('audio/wav');
+      const audioConfig = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({
+          modalities: { audio: true },
+        }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(audioPath, audioConfig, {
+        preserveUnsupportedAudio: true,
+      });
+
+      expect(typeof result.llmContent).toBe('string');
+      expect(result.llmContent).toContain(
+        'File exceeds the 10MB data URI limit after base64 encoding',
+      );
+      expect(result.errorType).toBe(ToolErrorType.FILE_TOO_LARGE);
+    });
+
     it('keeps mime/lite-missing FLAC inline for the audio bridge', async () => {
       const audioBytes = Buffer.from('fake flac data');
       const audioPath = path.join(tempRootDir, 'clip.flac');

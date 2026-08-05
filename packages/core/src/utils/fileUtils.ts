@@ -1272,9 +1272,13 @@ export async function processSingleFileContent(
     }
     // Bridge-bound audio may exceed the inline data-URI budget, but it must
     // still fit the bridge's decoded-byte ceiling before we read or encode it.
+    // `!modalities.audio` keeps model-directed audio on the inline gates: the
+    // bridge skips parts the target natively accepts, so nothing else would
+    // own their size.
     const bridgeCanAcceptAudio =
       fileType === 'audio' &&
       preserveUnsupportedAudio &&
+      !modalities.audio &&
       stats.size <= DEFAULT_MAX_INLINE_MEDIA_BYTES;
     if (
       fileSizeInMB > 9.9 &&

@@ -129,7 +129,6 @@ import {
   hasAudioParts,
   replaceAudioPartsWithUnavailable,
   runAudioBridge,
-  shouldPreserveUnsupportedAudioForBridge,
 } from '../../services/audio-bridge-service.js';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
@@ -1459,8 +1458,9 @@ export const useGeminiStream = (
             messageId: userMessageTimestamp,
             signal: abortSignal,
             addItem,
-            preserveUnsupportedAudioForBridge:
-              shouldPreserveUnsupportedAudioForBridge(config, settings),
+            // Unconditional (mirrors ACP): runAudioBridge owns the
+            // fail-closed outcome when no batch voice model can transcribe.
+            preserveUnsupportedAudioForBridge: true,
           });
 
           if (!atCommandResult.shouldProceed) {
@@ -1501,7 +1501,6 @@ export const useGeminiStream = (
       shellModeActive,
       scheduleToolCalls,
       applyBridgeConversionsIfNeeded,
-      settings,
     ],
   );
 
@@ -2739,8 +2738,7 @@ export const useGeminiStream = (
                   onDebugMessage,
                   messageId: timestamp + index,
                   signal: atCommandSignal,
-                  preserveUnsupportedAudioForBridge:
-                    shouldPreserveUnsupportedAudioForBridge(config, settings),
+                  preserveUnsupportedAudioForBridge: true,
                 }),
             );
             const shouldSkipMessage =
@@ -2877,7 +2875,6 @@ export const useGeminiStream = (
       config,
       handleSlashCommand,
       onDebugMessage,
-      settings,
     ],
   );
 
