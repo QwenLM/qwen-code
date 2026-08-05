@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
   mkdtempSync,
   mkdirSync,
+  readdirSync,
   rmSync,
   utimesSync,
   writeFileSync,
@@ -16,6 +17,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { scheduleReverseAuditRound } from './retirement.js';
 import { promptRecordDir, recordPrompt } from './prompt-record.js';
+import { REVERSE_AUDIT_EXAMPLE_RECEIPT } from './agent-briefs.js';
 
 // Direct unit coverage for the scheduler's own rules — the classifier's
 // thresholds, the outcome merge, the injective guard and the parity rules —
@@ -104,6 +106,8 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     finalText: string,
     calls = 1,
     filePath: string = diff,
+    offset = 0,
+    limit = 100,
   ): void {
     const id = `aud-${++seq}`;
     const base = {
@@ -129,7 +133,7 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
               {
                 functionCall: {
                   name: 'read_file',
-                  args: { file_path: filePath, offset: 0, limit: 100 },
+                  args: { file_path: filePath, offset, limit },
                 },
               },
             ],
@@ -350,9 +354,19 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     const p2 = record(2, 13, 'chunk 13 round 2 territory walk');
     transcript(p1, DRY);
     transcript(p2, DRY);
-    // Move the fence past the transcripts: a new capture rewrote the plan.
-    const now = new Date(Date.now() + 60_000);
-    utimesSync(plan, now, now);
+    // Age every transcript this test wrote to a fixed past (a previous
+    // review in the same session), then move the fence past it. The
+    // records keep their real mtimes and stay fresh, so only the
+    // transcripts age out — unfenced, they would verbatim-match the
+    // records and retire the chunk. Advancing the plan to a FUTURE
+    // instant instead would fence the records out too, and `due` would
+    // pass with zero records regardless of transcripts.
+    const old = new Date(2021, 0, 1);
+    for (const name of readdirSync(join(dir, 'subagents', 'S1'))) {
+      utimesSync(join(dir, 'subagents', 'S1', name), old, old);
+    }
+    const fence = new Date(2022, 0, 1);
+    utimesSync(plan, fence, fence);
 
     expect(schedule(3, [13]).due).toEqual([13]);
   });
@@ -475,6 +489,205 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     const r3 = schedule(3, [13]);
     expect(r3.due).toEqual([]);
     expect(r3.skipped.map((s) => s.chunkId)).toEqual([13]);
+  });
+
+  it('a Chinese receipt separated by a full-width colon is dry', () => {
+    // U+FF1A is the standard zh separator; the receipt's separator class
+    // admits a colon in either width. Probed on the unfixed class: the
+    // byte-identical receipt with an ASCII colon retired while this one
+    // read `unknown` and re-audited every round.
+    const receipt =
+      '未发现问题：重新走查了重连状态机与两个已改导出的全部调用点,' +
+      '每个疑点都已在确认清单中。';
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), receipt);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), receipt);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([]);
+    expect(r3.converged).toBe(true);
+  });
+
+  it("parroting the brief's own example receipt is not dry", () => {
+    // Every reverse auditor is handed this exact sentence as the model
+    // answer; a clause that echoes it names nothing the agent examined
+    // itself, whatever its length.
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), DRY);
+    transcript(
+      record(2, 13, 'chunk 13 round 2 territory walk'),
+      `${REVERSE_AUDIT_EXAMPLE_RECEIPT}.`,
+    );
+
+    expect(schedule(3, [13]).due).toEqual([13]);
+  });
+
+  it('a stray backtick is not a named object — only an enclosed span is', () => {
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), DRY);
+    transcript(
+      record(2, 13, 'chunk 13 round 2 territory walk'),
+      'No new issues found — all good. `',
+    );
+
+    expect(schedule(3, [13]).due).toEqual([13]);
+  });
+
+  it('an enclosed code span still names an object', () => {
+    // Short enough that ONLY the span shortcut can clear it.
+    const receipt = 'No issues found — `retry-cap`.';
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), receipt);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), receipt);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([]);
+    expect(r3.converged).toBe(true);
+  });
+
+  it('the conjunction "and/or" is not a path', () => {
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), DRY);
+    transcript(
+      record(2, 13, 'chunk 13 round 2 territory walk'),
+      'No issues found — and/or cases.',
+    );
+
+    expect(schedule(3, [13]).due).toEqual([13]);
+  });
+
+  it('a real path still names an object — dotted extension, one slash', () => {
+    // Short enough that ONLY the path shortcut can clear it.
+    const receipt = 'No issues found — checked src/pay.ts.';
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), receipt);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), receipt);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([]);
+    expect(r3.converged).toBe(true);
+  });
+
+  it('a diff read outside the baked territory is not dry', () => {
+    // The record bakes the chunk's read; the transcript's only diff read
+    // is elsewhere in the file. The receipt reads `unknown` whatever it
+    // says — an auditor that never opened the territory has no claim on
+    // it, and no other stage re-asks the question.
+    for (const r of [1, 2]) {
+      const built = record(
+        r,
+        13,
+        `chunk 13 round ${r} walk — read_file(offset=1000, limit=200)`,
+      );
+      transcript(built, DRY, 1, diff, 0, 50);
+    }
+
+    expect(schedule(3, [13]).due).toEqual([13]);
+  });
+
+  it('an overlapping read of the baked territory still retires', () => {
+    // Overlap is the bar, not containment: the second audit pages the
+    // territory, and its half-read still lands inside.
+    for (const r of [1, 2]) {
+      const built = record(
+        r,
+        13,
+        `chunk 13 round ${r} walk — read_file(offset=1000, limit=200)`,
+      );
+      transcript(
+        built,
+        DRY,
+        1,
+        diff,
+        r === 1 ? 1000 : 1100,
+        r === 1 ? 200 : 50,
+      );
+    }
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([]);
+    expect(r3.converged).toBe(true);
+  });
+
+  it('quoting a WHOLE cumulative-list entry is not a yield', () => {
+    // The cumulative list rides in the launch prompt as full blocks —
+    // File AND Severity — and an auditor justifying "already covered"
+    // can quote one whole. A file line appearing verbatim in its own
+    // launch prompt marks the quotation; the honest receipt underneath
+    // still retires the chunk.
+    const quoted =
+      'The list already carries this entry, so it is not re-reported:\n' +
+      '- **File:** src/pay.ts:42\n' +
+      '- **Severity:** Suggestion\n\n' +
+      DRY;
+    for (const r of [1, 2]) {
+      const built = record(
+        r,
+        13,
+        `chunk 13 round ${r} territory\n**File:** src/pay.ts:42`,
+      );
+      transcript(built, quoted);
+    }
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([]);
+    expect(r3.skipped.map((s) => s.chunkId)).toEqual([13]);
+  });
+
+  it('a cold check nobody certified puts the chunk back on the every-round schedule', () => {
+    dryTwice([13]);
+    // Round 4 is the cold check — built, but the launch left no certified
+    // transcript. The round still belongs to the history with an empty
+    // outcome set, so the two-most-recent-dry rule breaks and the chunk
+    // is hot again — a refactor skipping empty rounds would retire it
+    // forever over a cold check that produced no evidence.
+    record(4, 13, 'chunk 13 round 4 territory walk');
+
+    const r5 = schedule(5, [13]);
+    expect(r5.due).toEqual([13]);
+    expect(r5.coldChecks).toEqual([]);
+    expect(r5.converged).toBe(false);
+  });
+
+  it('a chunk with no audit history stays due when its neighbour retires', () => {
+    dryTwice([13]);
+    // 16 entered the loop mid-capture (or its records were lost): no
+    // history at all. Retirement needs TWO certificates, and nothing is
+    // not one — the chunk stays hot while 13 skips.
+    const r3 = schedule(3, [13, 16]);
+    expect(r3.due).toEqual([16]);
+    expect(r3.skipped.map((s) => s.chunkId)).toEqual([13]);
+    expect(r3.converged).toBe(false);
+  });
+
+  it('two live records for ONE (chunk, round): any yield keeps it hot', () => {
+    // A --chunk repair re-records the same (chunk, round) under a new
+    // findings digest; both records stay live. The bodies are disjoint so
+    // each transcript certifies exactly its own record, and the merge
+    // must carry BOTH outcomes — one yield proves the territory hot
+    // whichever order the filesystem returns the records in.
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), DRY);
+    transcript(
+      record(2, 13, 'chunk 13 round 2 territory walk', 'aaa111'),
+      YIELD,
+    );
+    transcript(
+      record(2, 13, 'chunk 13 round 2 rules-corrected rebuild walk', 'fff999'),
+      DRY,
+    );
+
+    expect(schedule(3, [13]).due).toEqual([13]);
+  });
+
+  it('the same-round pair still outranks retirement with the digest order flipped', () => {
+    // The twin of the test above with the digests swapped: the two
+    // arrangements flip the filesystem's record order, so a
+    // last-record-wins overwrite cannot pass both.
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), DRY);
+    transcript(
+      record(2, 13, 'chunk 13 round 2 territory walk', 'fff999'),
+      YIELD,
+    );
+    transcript(
+      record(2, 13, 'chunk 13 round 2 rules-corrected rebuild walk', 'aaa111'),
+      DRY,
+    );
+
+    expect(schedule(3, [13]).due).toEqual([13]);
   });
 
   it('an empty chunk list is not convergence', () => {

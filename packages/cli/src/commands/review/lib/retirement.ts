@@ -38,6 +38,7 @@
 
 import { statSync } from 'node:fs';
 import { readTranscripts, type AgentRecord } from './transcripts.js';
+import { REVERSE_AUDIT_EXAMPLE_RECEIPT } from './agent-briefs.js';
 import {
   deliveredVerbatim,
   flattenPrompt,
@@ -84,6 +85,27 @@ const RECORD_KEY_RE = /^reverse-audit--chunk-(\d+)--round-(\d+)--[0-9a-f]+$/;
  */
 const REVERSE_AUDIT_MARKER = 'reverse-audit';
 
+/**
+ * The diff lines a record's prompt points its chunk at, 1-based and
+ * inclusive — the same literal-read recovery `coverage.ts` applies to
+ * launch prompts. Every per-chunk launch this CLI builds bakes exactly
+ * one `read_file(file_path="…", offset=N, limit=M)`; the dry bar
+ * compares what the transcript actually read against it. Empty when the
+ * prompt bakes no read, where the bar falls back to "opened the diff at
+ * all" — a shape this module's own records never have.
+ */
+function bakedRanges(prompt: string): Array<[number, number]> {
+  const out: Array<[number, number]> = [];
+  for (const m of prompt.matchAll(
+    /offset\s*[=:]\s*(\d+)\s*,\s*limit\s*[=:]\s*(\d+)/gi,
+  )) {
+    const offset = Number(m[1]);
+    const limit = Number(m[2]);
+    if (limit > 0) out.push([offset + 1, offset + limit]);
+  }
+  return out;
+}
+
 /** A finding's file line — the shape `FINDING_FORMAT` asks every role for. */
 const FILE_LINE_RE = /\*\*File:\*\*\s*([^\n]*)/g;
 
@@ -93,7 +115,9 @@ const FILE_LINE_RE = /\*\*File:\*\*\s*([^\n]*)/g;
  * prompt, and an auditor explaining "already covered, not re-reporting" can
  * echo an entry's file line into its return. Every finding actually filed
  * carries the full block the format mandates — severity included — so the
- * pair is what distinguishes a report from a quotation. Misreading an echo
+ * pair is what distinguishes a report from a bare file-line echo; a
+ * quotation of a WHOLE entry is caught in `classifyReturn`, where the
+ * launch prompt carrying the cumulative list is on hand. Misreading an echo
  * as `yielded` is cost, not corruption (the chunk just stays hot), but it is
  * exactly the cost this module exists to stop paying.
  */
@@ -129,7 +153,7 @@ const DRY_RECEIPT_RE = new RegExp(
     '|未发现(?:新的?)?(?:问题|发现)' +
     '|无新的?(?:问题|发现)' +
     '|没有(?:发现)?(?:新的?)?问题)' +
-    '\\s*(?:[—–]+|[::]|--+|-+\\s)\\s*' +
+    '\\s*(?:[—–]+|[:：]|--+|-+\\s)\\s*' +
     '([\\s\\S]*)',
   'i',
 );
@@ -138,18 +162,38 @@ const DRY_RECEIPT_RE = new RegExp(
 const CJK_RE = /[一-鿿]/g;
 
 /**
- * Does the clause after the receipt's separator name anything? A quoted
- * symbol or a real path is a named object at any length ("N/A" is not a path
- * — one character on the slash's left). Otherwise ~20 flattened characters,
- * or a handful of ideographs, is the least that can name a territory; "all
- * good." can not. Misjudging here fails the way everything in this module
- * fails — the receipt reads `unknown` and the chunk stays under audit.
+ * The clause the brief's own example receipt leaves AFTER its separator —
+ * extracted with the same regex that parses receipts, so the two cannot
+ * drift. Empty when the example ever stops matching its own parser, which
+ * disables the parrot refusal rather than refuse every clause.
+ */
+const EXAMPLE_RECEIPT_CLAUSE = (
+  DRY_RECEIPT_RE.exec(REVERSE_AUDIT_EXAMPLE_RECEIPT)?.[1] ?? ''
+).trim();
+
+/**
+ * Does the clause after the receipt's separator name anything? An ENCLOSED
+ * code span or a real path is a named object at any length — a stray
+ * backtick is prose punctuation, not a quotation, and "N/A" is not a path
+ * (one character on the slash's left), neither is the conjunction "and/or":
+ * a path has a second slash or a dotted extension. Otherwise ~20 flattened
+ * characters, or a handful of ideographs, is the least that can name a
+ * territory; "all good." can not. The brief's own example receipt is
+ * refused outright: every auditor is handed that sentence, agents parrot
+ * what they are handed, and a clause that echoes the example names nothing
+ * the agent examined itself. Misjudging here fails the way everything in
+ * this module fails — the receipt reads `unknown` and the chunk stays
+ * under audit.
  */
 function substantiveClause(clause: string): boolean {
   const c = clause.replace(/\s+/g, ' ').trim();
   if (c.length === 0) return false;
-  if (c.includes('`')) return true;
-  if (/\w[\w.-]+\/[\w.$/-]*\w/.test(c)) return true;
+  if (EXAMPLE_RECEIPT_CLAUSE.length > 0 && c.includes(EXAMPLE_RECEIPT_CLAUSE)) {
+    return false;
+  }
+  if (/`[^`]+`/.test(c)) return true;
+  if (/\w[\w.-]+\/[\w.$-]+\/\w/.test(c)) return true;
+  if (/\w[\w.-]+\/[\w$-]+\.\w+/.test(c)) return true;
   if ((c.match(CJK_RE) ?? []).length >= 4) return true;
   return c.length >= 20;
 }
@@ -163,27 +207,64 @@ function substantiveClause(clause: string): boolean {
  * that make it believable — an agent that never opened the diff has an
  * opinion about lines it did not read, which is the whiff wearing a costume
  * (measured: 80 of 129 real transcripts made no tool call, and every one
- * still returned confident, specific-sounding prose). Anything else is
+ * still returned confident, specific-sounding prose) — AND the read must
+ * land in the chunk's territory: a successful read of the diff's first
+ * screenful proves nothing about lines a thousand down. Anything else is
  * `unknown`, which the scheduler treats as NOT dry.
+ *
+ * `territory` is the diff lines the record's own prompt bakes for this
+ * chunk (1-based, inclusive); empty when it bakes no read, where the old
+ * bar — any successful diff read — stands.
  */
-function classifyReturn(rec: AgentRecord): AuditOutcome {
+function classifyReturn(
+  rec: AgentRecord,
+  territory: Array<[number, number]>,
+): AuditOutcome {
   const text = rec.finalText.trim();
   if (SEVERITY_LINE_RE.test(text)) {
     for (const m of text.matchAll(FILE_LINE_RE)) {
       const file = (m[1] ?? '').trim();
-      if (file !== '' && !/^N\/A\b/i.test(file)) return 'yielded';
+      if (file === '' || /^N\/A\b/i.test(file)) continue;
+      // The cumulative list rides in this agent's own launch prompt,
+      // folded verbatim, and every entry in it is a full block — File
+      // AND Severity. An auditor explaining "already covered, not
+      // re-reporting" can quote one whole, and the quotation must not
+      // read as a filing: an entry whose exact file line is already on
+      // the list cannot be a new finding against it. Skipping costs an
+      // audit at most; counting a quotation re-opens the never-retire
+      // direction on the loop's most common honest return.
+      if (rec.launchPrompt.includes(`**File:** ${file}`)) continue;
+      return 'yielded';
     }
   }
   const receipt = DRY_RECEIPT_RE.exec(text);
   if (
     rec.successfulToolCalls > 0 &&
     rec.diffToolCalls > 0 &&
+    openedTheTerritory(rec.diffReads, territory) &&
     receipt !== null &&
     substantiveClause(receipt[1] ?? '')
   ) {
     return 'dry';
   }
   return 'unknown';
+}
+
+/**
+ * Whether any of the transcript's reads lands in the chunk's baked
+ * territory. Overlap is the bar, not containment: an honest auditor pages
+ * an oversized chunk, and each page overlaps the territory even though no
+ * single read holds it all. A read with no line range (a `read_file` with
+ * no limit) proves no lines at all and overlaps nothing.
+ */
+function openedTheTerritory(
+  diffReads: Array<[number, number]>,
+  territory: Array<[number, number]>,
+): boolean {
+  if (territory.length === 0) return true;
+  return diffReads.some(([s, e]) =>
+    territory.some(([ts, te]) => s <= te && ts <= e),
+  );
 }
 
 /**
@@ -253,13 +334,23 @@ export function scheduleReverseAuditRound(
   // The prior-round records: one per (chunk, round) prompt this CLI built.
   // Only PRIOR rounds are history — a record of the round being built is a
   // rebuild of it (a repaired delivery), not evidence about the territory.
-  const records: Array<{ chunkId: number; round: number; prompt: string }> = [];
+  const records: Array<{
+    chunkId: number;
+    round: number;
+    prompt: string;
+    territory: Array<[number, number]>;
+  }> = [];
   for (const [key, prompt] of built) {
     const m = RECORD_KEY_RE.exec(key);
     if (!m) continue;
     const r = Number(m[2]);
     if (r >= round) continue;
-    records.push({ chunkId: Number(m[1]), round: r, prompt });
+    records.push({
+      chunkId: Number(m[1]),
+      round: r,
+      prompt,
+      territory: bakedRanges(prompt),
+    });
   }
 
   // Which transcripts certify which record — injectively, in the direction
@@ -301,10 +392,10 @@ export function scheduleReverseAuditRound(
       recordsPerTranscript.set(t, (recordsPerTranscript.get(t) ?? 0) + 1);
     }
   }
-  const outcomesByRecord = matchesByRecord.map((matches) =>
+  const outcomesByRecord = matchesByRecord.map((matches, i) =>
     matches
       .filter((t) => recordsPerTranscript.get(t) === 1)
-      .map(classifyReturn),
+      .map((t) => classifyReturn(t, records[i].territory)),
   );
 
   // chunk id → prior round → every outcome that round's records produced. A

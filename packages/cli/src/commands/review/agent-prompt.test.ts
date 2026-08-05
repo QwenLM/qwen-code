@@ -2634,6 +2634,9 @@ describe('the reverse-audit budget gate — the loop must end by reporting', () 
     // The repair stamps nothing new: the round it repairs carries the
     // admission, and a rebuild's clock must not measure as the round's cost.
     expect(readRoundStamps(plan).filter((s) => s.round === 3)).toHaveLength(1);
+    // And the expired-deadline repair leg writes no budget-stop marker:
+    // the round was admitted, so no truncation disclosure is owed.
+    expect(readBudgetStop(plan)).toBeNull();
   });
 
   it('gates a --chunk build of a round never admitted — no stamp, no exemption', () => {
@@ -2662,6 +2665,65 @@ describe('the reverse-audit budget gate — the loop must end by reporting', () 
     );
   });
 
+  it('the exemption keys on the stamp, not the record — a half-built round stays refused', () => {
+    // Reachable state: an --all-chunks build whose second chunk has an
+    // unusable line range passes requireAuditableChunks (which validates
+    // ids only), records the first chunk's prompt inside the block map,
+    // then throws before the stamp is written. A record without a stamp
+    // is NOT an admitted round: keying the exemption on the recorded
+    // prompts would let every later --chunk build of it past an expired
+    // deadline — the #8368-class bypass this gate closes.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-budget-half-'));
+    dirs.push(dir);
+    const planPath = join(dir, 'plan.json');
+    const halfBroken = {
+      ...PLAN,
+      chunks: [
+        PLAN.chunks[0],
+        { ...PLAN.chunks[1], startLine: null },
+        PLAN.chunks[2],
+      ],
+    };
+    writeFileSync(planPath, JSON.stringify(halfBroken));
+    const findingsPath = join(dir, 'findings.md');
+    writeFileSync(findingsPath, '');
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 7200);
+    expect(() =>
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan: planPath,
+        role: 'reverse-audit',
+        findings: findingsPath,
+        'all-chunks': true,
+        round: 3,
+      }),
+    ).toThrow(/no usable line range/);
+    // One record (chunk 13), zero stamps — exactly the state the probe needs.
+    expect(
+      [...readRecordedPrompts(planPath).keys()].some((k) =>
+        k.includes('--chunk-13--round-3--'),
+      ),
+    ).toBe(true);
+    expect(readRoundStamps(planPath)).toHaveLength(0);
+
+    (writeStdoutLine as unknown as Mock).mockClear();
+    (writeStderrLine as unknown as Mock).mockClear();
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) - 600);
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan: planPath,
+      role: 'reverse-audit',
+      findings: findingsPath,
+      chunk: 13,
+      round: 3,
+    });
+
+    // Refused — the record buys no exemption — with the round's marker.
+    expect(process.exitCode).toBe(4);
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(0);
+    expect(readBudgetStop(planPath)?.entry).toBe(
+      'reverse audit — stopped before round 3 by the review time budget',
+    );
+  });
+
   it('the first --chunk build of an unadmitted round IS its admission', () => {
     // An orchestrator building a round per chunk from the start pays the
     // gate once: the first build stamps the round, the next round's estimate
@@ -2672,6 +2734,10 @@ describe('the reverse-audit budget gate — the loop must end by reporting', () 
     expect(process.exitCode).toBeUndefined();
     expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(1);
     expect(readRoundStamps(plan).some((s) => s.round === 3)).toBe(true);
+    // An admission leaves no budget-stop marker: both consumers key on
+    // presence alone, and a defensive write here would cap every admitted
+    // run's verdict with a false truncation disclosure.
+    expect(readBudgetStop(plan)).toBeNull();
   });
 
   it('a broken plan still throws when the budget is exhausted — reads beat the gate', () => {
@@ -2948,6 +3014,13 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
   ): void {
     const id = `aud-${++seq}`;
     const base = { agentId: id, agentName: 'general-purpose', sessionId: 'S1' };
+    // Read the territory the launch bakes, the way a verbatim delivery
+    // does: the dry bar compares the lines a transcript read against the
+    // record's own baked read, so a synthetic auditor must open the same
+    // window its prompt names.
+    const baked = /offset=(\d+), limit=(\d+)/.exec(launchPrompt);
+    const readOffset = baked ? Number(baked[1]) : 0;
+    const readLimit = baked ? Number(baked[2]) : 100;
     const lines = [
       JSON.stringify({
         ...base,
@@ -2966,7 +3039,11 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
               {
                 functionCall: {
                   name: 'read_file',
-                  args: { file_path: DIFF, offset: 0, limit: 100 },
+                  args: {
+                    file_path: DIFF,
+                    offset: readOffset,
+                    limit: readLimit,
+                  },
                 },
               },
             ],
@@ -3194,6 +3271,58 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     expect(process.exitCode).toBeUndefined();
     expect(out).toContain('3 auditors required this round — one per chunk.');
     expect(keysOf(3)).toHaveLength(3);
+  });
+
+  it('a converged --chunk build exits 5 under deadline pressure — convergence outranks the budget', () => {
+    // The --chunk gate must rule on convergence BEFORE the budget: with a
+    // deadline close enough to refuse, a budget-first ordering would exit
+    // 4 and write a budget-stop marker over an audit that had already
+    // converged, capping the verdict with a false truncation disclosure.
+    answerRound(1, { 13: DRY, 14: DRY, 15: DRY });
+    answerRound(2, { 13: DRY, 14: DRY, 15: DRY });
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 60);
+    (writeStdoutLine as unknown as Mock).mockClear();
+    (writeStderrLine as unknown as Mock).mockClear();
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'reverse-audit',
+      chunk: 13,
+      findings,
+      round: 3,
+    });
+
+    expect(process.exitCode).toBe(5); // CONVERGED, not BUDGET
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(0);
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('CONVERGED');
+    expect(msg).not.toContain('BUDGET:');
+    expect(readBudgetStop(plan)).toBeNull();
+  });
+
+  it('transcripts unavailable: the --chunk gate builds too, degrade before convergence', () => {
+    // The history says "converged" — but without the harness's records it
+    // is unreadable, and the --chunk gate must degrade exactly like the
+    // round builder: build the auditor, never refuse one, and never exit
+    // 5 on a history it cannot read.
+    answerRound(1, { 13: DRY, 14: DRY, 15: DRY });
+    answerRound(2, { 13: DRY, 14: DRY, 15: DRY });
+    delete process.env['QWEN_CODE_PROJECT_DIR'];
+    (writeStdoutLine as unknown as Mock).mockClear();
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'reverse-audit',
+      chunk: 13,
+      findings,
+      round: 3,
+    });
+
+    expect(process.exitCode).toBeUndefined(); // built, not exit 5 CONVERGED
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(1);
+    expect(
+      keysOf(3).some((k) => k.startsWith('reverse-audit--chunk-13--')),
+    ).toBe(true);
   });
 
   it('a converged round outranks the budget gate — done is not truncated', () => {
