@@ -36,7 +36,7 @@ const autofixContractsScript = readFileSync(autofixContractsScriptPath, 'utf8');
 const autofixRunnerScriptPath = '.qwen/skills/autofix/scripts/run-agent.mjs';
 const checkBotCredentialsStep =
   workflow.match(
-    /- name: 'Check bot credentials'[\s\S]*?(?=\n[ ]{6}- name: 'Set up Node.js \(hosted\)')/,
+    /- name: 'Check bot credentials'[\s\S]*?(?=\n[ ]{6}- name: 'Set up Node.js')/,
   )?.[0] ?? '';
 const routeStep =
   workflow.match(
@@ -148,9 +148,8 @@ const installAndBuildSteps =
     /- name: 'Install dependencies and build'[\s\S]*?(?=\n[ ]{6}- name: ')/g,
   ) ?? [];
 const nodeSetupSteps =
-  workflow.match(
-    /- name: 'Set up Node.js \(hosted\)'[\s\S]*?(?=\n[ ]{6}- name: ')/g,
-  ) ?? [];
+  workflow.match(/- name: 'Set up Node.js'[\s\S]*?(?=\n[ ]{6}- name: ')/g) ??
+  [];
 
 function readAutofixSkill() {
   return readFileSync('.qwen/skills/autofix/SKILL.md', 'utf8');
@@ -5061,7 +5060,7 @@ describe('qwen-autofix workflow', () => {
     expect(pushAndReportStep.length).toBeGreaterThan(0);
     expect(withdrawClaimStep.length).toBeGreaterThan(0);
     expect(workflow.indexOf("- name: 'Check bot credentials'")).toBeLessThan(
-      workflow.indexOf("- name: 'Set up Node.js (hosted)'"),
+      workflow.indexOf("- name: 'Set up Node.js'"),
     );
     expect(checkBotCredentialsStep).toContain(
       'GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq \'.login\'',
@@ -5204,12 +5203,31 @@ describe('qwen-autofix workflow', () => {
     );
   });
 
-  it('runs heavy autofix jobs on hosted runners with sandbox images', () => {
+  it('runs heavy autofix jobs on the ECS pool with hosted fallback', () => {
     const workflowAndSkill = `${workflow}\n${readAutofixSkill()}`;
 
-    expect(workflow).toMatch(/issue-autofix:[\s\S]*?runs-on: 'ubuntu-latest'/);
-    expect(workflow).toMatch(/review-address:[\s\S]*?runs-on: 'ubuntu-latest'/);
-    expect(workflow).toMatch(/build-cli:[\s\S]*?runs-on: 'ubuntu-latest'/);
+    // Each heavy job routes to the persistent ECS pool (every target is
+    // live-gated to write+ internal authors and the ECS pool ships docker),
+    // with a hosted fallback for forks of this repo and when ECS routing is
+    // disabled. Pin the exact expression so neither the repository guard nor
+    // the hosted fallback can be dropped silently.
+    const ecsRunsOn =
+      "runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]'') || fromJSON(''[\"ubuntu-latest\"]'') }}'";
+    const heavyJobRunsOn = {
+      'issue-autofix':
+        workflow.match(
+          /\n {2}issue-autofix:[\s\S]*?(?=\n[ ]{2}# ==========)/,
+        )?.[0] ?? '',
+      'build-cli':
+        workflow.match(
+          /\n {2}build-cli:[\s\S]*?(?=\n {2}review-address:)/,
+        )?.[0] ?? '',
+      'review-address':
+        workflow.match(/\n {2}review-address:[\s\S]*$/)?.[0] ?? '',
+    };
+    for (const runsOn of Object.values(heavyJobRunsOn)) {
+      expect(runsOn).toContain(ecsRunsOn);
+    }
     expect(workflow).not.toContain(
       '["self-hosted", "linux", "x64", "autofix"]',
     );

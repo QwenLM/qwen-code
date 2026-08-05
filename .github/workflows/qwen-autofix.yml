@@ -658,7 +658,11 @@ jobs:
         needs.route.outputs.do_issue == 'true' &&
         (github.event_name != 'schedule' || (needs.review-scan.result == 'success' && needs.review-scan.outputs.has_targets != 'true'))
       }}
-    runs-on: 'ubuntu-latest'
+    # Secret-bearing and executes agent-driven code, but the agent runs inside
+    # the docker sandbox image (which the ECS pool ships) and only ever writes a
+    # new branch as the dev-bot - it never executes a foreign author's code.
+    # Forks of this repo (and MAINTAINER_ECS_RUNNER_DISABLED) fall back to hosted.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 180
     concurrency:
       group: 'qwen-autofix-issue-${{ needs.route.outputs.issue_number || github.run_id }}'
@@ -719,16 +723,14 @@ jobs:
           RUNNER_ENVIRONMENT: '${{ runner.environment }}'
         run: |-
           case "${RUNNER_ENVIRONMENT}" in
-            github-hosted) ;;
+            github-hosted|self-hosted) ;;
             *)
               echo "::error::Unsupported runner environment: ${RUNNER_ENVIRONMENT:-unset}."
               exit 1
               ;;
           esac
 
-      - name: 'Set up Node.js (hosted)'
-        if: |-
-          ${{ runner.environment == 'github-hosted' }}
+      - name: 'Set up Node.js'
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '22.x'
@@ -2604,7 +2606,7 @@ jobs:
     needs: ['route', 'review-scan']
     if: |-
       ${{ needs.review-scan.outputs.has_targets == 'true' }}
-    runs-on: 'ubuntu-latest'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 30
     permissions:
       contents: 'read'
@@ -2618,9 +2620,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: 'Set up Node.js (hosted)'
-        if: |-
-          ${{ runner.environment == 'github-hosted' }}
+      - name: 'Set up Node.js'
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '22.x'
@@ -2692,7 +2692,11 @@ jobs:
     needs: ['route', 'review-scan', 'build-cli']
     if: |-
       ${{ needs.review-scan.outputs.has_targets == 'true' }}
-    runs-on: 'ubuntu-latest'
+    # Secret-bearing and executes PR code, but every target is live-gated to
+    # write+ (internal) authors at scan AND address time, and the ECS pool ships
+    # docker for the sandbox image. Forks of this repo (and
+    # MAINTAINER_ECS_RUNNER_DISABLED) fall back to hosted.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 300
     permissions:
       contents: 'read'
@@ -2822,16 +2826,14 @@ jobs:
           RUNNER_ENVIRONMENT: '${{ runner.environment }}'
         run: |-
           case "${RUNNER_ENVIRONMENT}" in
-            github-hosted) ;;
+            github-hosted|self-hosted) ;;
             *)
               echo "::error::Unsupported runner environment: ${RUNNER_ENVIRONMENT:-unset}."
               exit 1
               ;;
           esac
 
-      - name: 'Set up Node.js (hosted)'
-        if: |-
-          ${{ runner.environment == 'github-hosted' }}
+      - name: 'Set up Node.js'
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '22.x'
