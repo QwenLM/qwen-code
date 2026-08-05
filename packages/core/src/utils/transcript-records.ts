@@ -99,6 +99,7 @@ const KNOWN_RECORD_SUBTYPES = new Set([
   'notification',
   'cron',
   'mid_turn_user_message',
+  'realtime_message',
   'custom_title',
   'parent_session',
   'rewind',
