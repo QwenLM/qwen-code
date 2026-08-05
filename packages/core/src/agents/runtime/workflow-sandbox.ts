@@ -877,9 +877,52 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       // those wrappers will produce vm-realm results); reject with a
       // freshly-constructed vm-realm Error so e.constructor.constructor
       // stays in the vm realm.
+      // Dispatch promises are ObservedPromise instances (a vm-realm
+      // Promise subclass). Its then override marks the result consumed
+      // and re-attaches the teardown observer to the derived promise, so
+      // script-derived chains (agent(...).then(...), await, Promise.all
+      // — everything funnels through then) stay observed at every depth.
+      // Without this, a correctly-cancelled run holding a pending derived
+      // chain fired a process-level unhandledRejection even though the
+      // bare dispatch promise was observed.
+      function observeDispatch(promise) {
+        // Direct native-then call: routing through ObservedPromise.then
+        // would mark the promise consumed and recurse the observer.
+        Promise.prototype.then.call(promise, undefined, function (err) {
+          // Un-awaited calls never attach a handler. When a run is
+          // cancelled or settles, abortPending rejects still-queued
+          // dispatches with AbortError; the observer marks that teardown
+          // rejection handled so it cannot surface as a process-level
+          // unhandledRejection alarm on a correctly-cancelled run.
+          // Awaiting callers still receive the rejection through their
+          // own handlers. Non-abort rejections of a result nobody ever
+          // consumed are mirrored into the run log: a dispatch refused
+          // at the entry gate (budget / agent cap) or failing mid-run
+          // reaches no other surface, so the silent drop left no log,
+          // alarm, or telemetry.
+          if (promise.__wfConsumed) return;
+          const msg = String(
+            err && err.message != null ? err.message : err,
+          );
+          if (
+            msg.indexOf('aborted') === -1 &&
+            msg.indexOf('AbortError') === -1
+          ) {
+            __b.pushLog('dispatch failed (result not consumed): ' + msg);
+          }
+        });
+      }
+      class ObservedPromise extends Promise {
+        then(onFulfilled, onRejected) {
+          this.__wfConsumed = true;
+          const derived = super.then(onFulfilled, onRejected);
+          observeDispatch(derived);
+          return derived;
+        }
+      }
       function vmAsync(hostFn) {
         return function (...vmArgs) {
-          const p = new Promise(function (resolve, reject) {
+          const p = new ObservedPromise(function (resolve, reject) {
             try {
               const hostPromise = hostFn.apply(null, vmArgs);
               hostPromise.then(
@@ -898,27 +941,7 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
               reject(new Error(msg));
             }
           });
-          // Fire-and-forget calls never attach a handler. When a run is
-          // cancelled or settles, abortPending rejects still-queued
-          // dispatches with AbortError; without an observer here that
-          // teardown rejection would surface as a process-level
-          // unhandledRejection alarm on a correctly-cancelled run.
-          // Awaiting callers still receive the rejection through their
-          // own handlers. Non-abort rejections are mirrored into the run
-          // log: an un-awaited dispatch refused at the entry gate
-          // (budget / agent cap) or failing mid-run reaches no other
-          // surface, so the silent drop left no log, alarm, or telemetry.
-          p.catch(function (err) {
-            const msg = String(
-              err && err.message != null ? err.message : err,
-            );
-            if (
-              msg.indexOf('aborted') === -1 &&
-              msg.indexOf('AbortError') === -1
-            ) {
-              __b.pushLog('fire-and-forget dispatch failed: ' + msg);
-            }
-          });
+          observeDispatch(p);
           return p;
         };
       }
@@ -1255,7 +1278,7 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
           opts.abortOnTimeout?.abort();
           reject(
             new Error(
-              `Workflow execution timed out after ${maxWallClockMs} ms wall clock. ` +
+              `Workflow execution exceeded ${maxWallClockMs} ms of active time (paused time is not counted). ` +
                 'Override via SandboxOptions.maxWallClockMs or QWEN_CODE_MAX_WORKFLOW_SECONDS env var.',
             ),
           );

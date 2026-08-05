@@ -680,6 +680,36 @@ describe('BackgroundTasksDialog', () => {
     expect(h.cancel).not.toHaveBeenCalled();
   });
 
+  it('clears the armed cancel confirm when auto-fallback exits detail on settlement', () => {
+    // A user-blocking agent armed for the two-step `x` confirm can
+    // complete naturally while viewed in detail. The auto-fallback exit
+    // to list mode must clear the armed state like every key-handler
+    // exit does — otherwise the footer keeps showing "x again to confirm
+    // stop" over the terminal row and the first Esc is swallowed by the
+    // confirm-backout branch instead of closing the dialog.
+    const fg = entry({
+      agentId: 'fg-1',
+      status: 'running',
+      isBackgrounded: false,
+    });
+    const h = setup([fg]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    h.call(() => h.probe.current!.actions.enterDetail());
+
+    h.pressKey({ sequence: 'x' }); // arm the confirm step
+    expect(h.lastFrame()).toContain('x again to confirm stop');
+
+    h.setEntries([{ ...fg, status: 'completed' }]);
+    expect(h.probe.current!.state.dialogMode).toBe('list');
+
+    expect(h.lastFrame()).not.toContain('x again to confirm stop');
+    // Esc closes the dialog outright — a stale arm would swallow it.
+    h.pressKey({ name: 'escape' });
+    expect(h.probe.current!.state.dialogMode).toBe('closed');
+    expect(h.cancel).not.toHaveBeenCalled();
+  });
+
   it('lets ask-user-question approvals own all keyboard input in detail mode', () => {
     const questionApproval: NonNullable<
       AgentDialogEntry['pendingApprovals']

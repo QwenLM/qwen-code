@@ -1581,6 +1581,10 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     // registry — but the entry could disappear if the registry is reset.
     if (!selectedEntryId) {
       initialDetailStatusRef.current = null;
+      // Match every key-handler exit: leaving detail must never carry an
+      // armed confirm step into list mode (stale footer hint + swallowed
+      // first Esc).
+      setPendingCancelEntryId(null);
       exitDetail();
       return;
     }
@@ -1599,6 +1603,10 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
         return;
       }
       initialDetailStatusRef.current = null;
+      // Match every key-handler exit: leaving detail must never carry an
+      // armed confirm step into list mode (stale footer hint + swallowed
+      // first Esc).
+      setPendingCancelEntryId(null);
       exitDetail();
       return;
     }
@@ -1622,6 +1630,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
       selectedStatus === 'failed' ||
       selectedStatus === 'cancelled';
     if (seenWasActive && selectedIsTerminal) {
+      setPendingCancelEntryId(null);
       exitDetail();
     }
   }, [

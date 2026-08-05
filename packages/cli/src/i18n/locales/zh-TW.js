@@ -2116,7 +2116,13 @@ export default {
   'Background agent needs approval': '背景 agent 等待審批',
   'Approve or deny the request above': '請核准或拒絕上方的請求',
   Running: '執行中',
+  Pausing: '暫停中',
   Paused: '已暫停',
+  'Pause is cooperative; in-flight work may finish before the workflow is paused.':
+    '暫停是協作式的；在工作流暫停之前，進行中的工作可能會先完成。',
+  'Paused cooperatively; press p to resume.': '已協作式暫停；按 p 恢復。',
+  'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.':
+    '提示：使用 `/workflows p <runId>`，或在背景任務中按 p 協作暫停/恢復；使用 `/workflows <runId>` 檢視詳情。',
   Completed: '已完成',
   Failed: '失敗',
   Stopped: '已停止',

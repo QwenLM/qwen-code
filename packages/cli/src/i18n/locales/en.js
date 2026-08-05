@@ -2048,7 +2048,14 @@ export default {
   'Background agent needs approval': 'Background agent needs approval',
   'Approve or deny the request above': 'Approve or deny the request above',
   Running: 'Running',
+  Pausing: 'Pausing',
   Paused: 'Paused',
+  'Pause is cooperative; in-flight work may finish before the workflow is paused.':
+    'Pause is cooperative; in-flight work may finish before the workflow is paused.',
+  'Paused cooperatively; press p to resume.':
+    'Paused cooperatively; press p to resume.',
+  'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.':
+    'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.',
   Completed: 'Completed',
   Failed: 'Failed',
   Stopped: 'Stopped',
