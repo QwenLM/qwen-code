@@ -1298,5 +1298,75 @@ describe('SessionTranscriptReader', () => {
       expect(page.records.map((item) => item.uuid)).toEqual(['a1']);
       expect(page.hasMore).toBe(false);
     });
+
+    it('bounds backward pages inside a single long turn and still chains to the start', async () => {
+      // One prompt followed by a single long in-flight turn (the concurrent
+      // /review shape): the only turn start sits at the file head, so the
+      // turn-alignment walk must NOT expand every backward page to the whole
+      // transcript — pages stay bounded near the tail and chaining still
+      // reaches the turn start.
+      const records: ChatRecord[] = [record('u1', null, 'prompt')];
+      for (let i = 1; i <= 300; i++) {
+        records.push(
+          record(`a${i}`, i === 1 ? 'u1' : `a${i - 1}`, `step ${i}`),
+        );
+      }
+      await writeRecords(records);
+
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const first = await reader.readPage(sessionId, {
+        direction: 'backward',
+        limit: 50,
+      });
+
+      expect(first.records.length).toBeLessThanOrEqual(100);
+      expect(first.records.at(-1)?.uuid).toBe('a300');
+      expect(first.records.at(0)?.uuid).toBe('a201');
+      expect(first.hasMore).toBe(true);
+
+      // Chain backward with beforeRecordId anchors (the client's pagination
+      // shape) until the turn start surfaces.
+      const seen = new Set(first.records.map((item) => item.uuid));
+      let boundary: string | undefined = first.records.at(0)?.uuid;
+      let pages = 1;
+      while (boundary !== undefined) {
+        const next = await reader.readPage(sessionId, {
+          beforeRecordId: boundary,
+          limit: 50,
+        });
+        pages += 1;
+        expect(next.records.length).toBeLessThanOrEqual(100);
+        for (const item of next.records) seen.add(item.uuid);
+        boundary = next.hasMore ? next.records.at(0)?.uuid : undefined;
+        expect(pages).toBeLessThan(20);
+      }
+      expect(seen.size).toBe(301);
+      expect(seen.has('u1')).toBe(true);
+    });
+
+    it('bounds backward turn expansion under a byte budget in a single long turn', async () => {
+      const records: ChatRecord[] = [record('u1', null, 'prompt')];
+      for (let i = 1; i <= 150; i++) {
+        records.push(
+          record(`a${i}`, i === 1 ? 'u1' : `a${i - 1}`, `x`.repeat(80)),
+        );
+      }
+      await writeRecords(records);
+
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const page = await reader.readPage(sessionId, {
+        direction: 'backward',
+        limit: 50,
+        maxBytes: 600,
+      });
+
+      // The byte budget stops selection near the tail; the turn-alignment
+      // walk must not drag the page back to the turn start at the file head
+      // (the whole transcript in one page).
+      expect(page.records.at(-1)?.uuid).toBe('a150');
+      expect(page.records.length).toBeLessThanOrEqual(100);
+      expect(page.records.at(0)?.uuid).not.toBe('a1');
+      expect(page.hasMore).toBe(true);
+    });
   });
 });

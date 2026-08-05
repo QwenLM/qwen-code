@@ -498,7 +498,17 @@ function selectBackwardPageUuids(
       break;
     }
   }
-  while (start > 0 && !isReplayTurnStart(index, index.activeUuids[start]!)) {
+  // Turn-boundary alignment may expand the page past the requested window,
+  // but never without bound: a transcript dominated by a single long turn
+  // (e.g. one in-flight prompt with thousands of records) would otherwise
+  // turn EVERY backward page into the whole transcript — ignoring
+  // limit/maxBytes and making anchor-based pagination dead-end at the file
+  // head. Allow at most one extra window (`limit` records) of expansion.
+  const expansionFloor = Math.max(0, position - 2 * limit);
+  while (
+    start > expansionFloor &&
+    !isReplayTurnStart(index, index.activeUuids[start]!)
+  ) {
     start--;
   }
 
@@ -541,7 +551,7 @@ function selectBackwardPageUuids(
     }
   } else if (!alignedToReplayBoundary) {
     while (
-      selectedStart > 0 &&
+      selectedStart > expansionFloor &&
       !isReplayTurnStart(index, index.activeUuids[selectedStart]!)
     ) {
       selectedStart--;
