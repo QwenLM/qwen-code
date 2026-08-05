@@ -6,6 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { renderWithProviders } from '../../../test-utils/render.js';
+import { RenderModeProvider } from '../../contexts/RenderModeContext.js';
 import { AdvisorMessage } from './AdvisorMessage.js';
 
 describe('AdvisorMessage', () => {
@@ -99,5 +100,40 @@ describe('AdvisorMessage', () => {
     const output = lastFrame() ?? '';
     expect(output).toContain('const answer = 42;');
     expect(output).not.toContain('Intro```ts');
+  });
+
+  it('repairs fences inside $$ regions in raw mode (mathFences off)', () => {
+    const { lastFrame } = renderWithProviders(
+      <RenderModeProvider
+        value={{ renderMode: 'raw', setRenderMode: () => {} }}
+      >
+        <AdvisorMessage
+          text={'Intro\n$$\nA```ts\ncode\n```\n$$\nAfter.'}
+          model="m"
+        />
+      </RenderModeProvider>,
+    );
+
+    const output = lastFrame() ?? '';
+    // Raw mode never opens math blocks, so the normalizer must repair the
+    // fence inside the $$ region; skipping it would leave 'A```ts' glued.
+    expect(output).not.toContain('A```ts');
+    expect(output).toContain('code');
+  });
+
+  it('leaves $$ regions intact in render mode (mathFences on)', () => {
+    const { lastFrame } = renderWithProviders(
+      <RenderModeProvider
+        value={{ renderMode: 'render', setRenderMode: () => {} }}
+      >
+        <AdvisorMessage text={'$$\n```\n$$\nLater```ts\nx\n```'} model="m" />
+      </RenderModeProvider>,
+    );
+
+    const output = lastFrame() ?? '';
+    // Render mode honors $$ fences: the region passes through as a math
+    // block and only the fence after it gets its newline.
+    expect(output).not.toContain('Later```ts');
+    expect(output).toContain('Later');
   });
 });

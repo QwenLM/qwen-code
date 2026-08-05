@@ -446,5 +446,75 @@ describe('markdownUtilities', () => {
       const text = '$$ ```ts\ncode\n```\nAfter';
       expect(normalizeCodeFences(text)).toBe(text);
     });
+
+    it('does not promote the closing run of an inline backtick pair', () => {
+      // The raw input parses clean; promoting the pair's closing run would
+      // manufacture an opener that never closes, swallowing the rest of the
+      // document into a code block.
+      const text =
+        'Use ```foo``` sparingly.\n\n## Conclusion\nThe fix is correct.';
+      expect(normalizeCodeFences(text)).toBe(text);
+    });
+
+    it('does not promote any run of a line holding only inline pairs', () => {
+      const text =
+        'Swapped ```old``` for ```new```.\n\n## Conclusion\nMore prose.';
+      expect(normalizeCodeFences(text)).toBe(text);
+    });
+
+    it('does not promote runs of an inline tilde pair', () => {
+      const text = 'See ~~~old~~~ for details.\n\n## Conclusion\nMore.';
+      expect(normalizeCodeFences(text)).toBe(text);
+    });
+
+    it('does not promote a run preceded only by a tab or NBSP', () => {
+      // The parser's space-anchored CODE_FENCE_RE never sees a fence here;
+      // promotion would strip exactly the character that prevented it,
+      // manufacturing an unterminated fence.
+      expect(normalizeCodeFences('Intro line\n\t```\nMore prose.')).toBe(
+        'Intro line\n\t```\nMore prose.',
+      );
+      expect(normalizeCodeFences('\u00A0~~~\nNext')).toBe('\u00A0~~~\nNext');
+    });
+
+    it('keeps a balanced tab-indented pair prose', () => {
+      const text = 'Intro\n\t```\ncode\n\t```\nAfter';
+      expect(normalizeCodeFences(text)).toBe(text);
+    });
+
+    it('does not split an inline pair that ends a code-content line', () => {
+      // The pair's closing run looks like a glued closer, but splitting it
+      // closes the block early and turns the genuine closer into a phantom
+      // opener; the raw input parses clean.
+      const text = '```text\nExample: ```foo```\n```\nAfter';
+      expect(normalizeCodeFences(text)).toBe(text);
+    });
+
+    it('does not split a mid-line run when a line-start closer follows', () => {
+      const text = '```text\nx ```\ny\n```\nAfter';
+      expect(normalizeCodeFences(text)).toBe(text);
+    });
+
+    it('keeps markdown-in-markdown whole when the closer follows', () => {
+      const text =
+        '```markdown\nTo open a block write ``` \nthen content.\n```\nDone.';
+      expect(normalizeCodeFences(text)).toBe(text);
+    });
+
+    it('splits the last glued run when earlier content lines end in runs', () => {
+      // The repair belongs on the LAST glued-shaped run: splitting the
+      // earlier one would close the block mid-content.
+      expect(normalizeCodeFences('```text\nx ```\ny```')).toBe(
+        '```text\nx ```\ny\n```',
+      );
+    });
+
+    it('does not split a glued closer preceded by an odd inline-pair prefix', () => {
+      // The prefix's unpaired run pairs with the candidate, so the run is
+      // the pair's closing half — code content, not a closer. The block
+      // stays open, matching the parser.
+      const text = '```text\nUse ```a then```\n```\nAfter';
+      expect(normalizeCodeFences(text)).toBe(text);
+    });
   });
 });

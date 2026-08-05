@@ -270,15 +270,30 @@ const MATH_FENCE_LINE_RE = /^ *\$\$ *$/;
  * a run only counts as a fence line when the rest of its line is backtick-free
  * (CODE_FENCE_RE), a run closes the open fence only when its delimiter
  * character matches and is at least as long, leading spaces are allowed, and
- * runs inside $$ math blocks are math content, never fences. Delimiter runs
- * inside an already-open block are code content and are left alone, except a
- * closing fence glued to the last code line with only whitespace after it —
- * that one is split off so the parser's line-anchored fence can close the
- * block. Runs in the remainder of a line already consumed as a fence line are
- * part of that line (the parser reads it whole), never independent fences. A
- * run outside any fence that does not already start a line gets a newline
- * inserted — unless the same-line prefix is itself a fence line, which the
- * split would hand to the parser as a second, tracker-undecided fence.
+ * runs inside $$ math blocks are math content, never fences. Runs in the
+ * remainder of a line already consumed as a fence line are part of that line
+ * (the parser reads it whole), never independent fences.
+ *
+ * Runs inside an already-open block are code content and are left alone,
+ * except a closing fence glued to a code line with only whitespace after it —
+ * and only when the block ends there: a later line-start closer or a later
+ * glued-shaped run means the run is code content (the repair belongs on the
+ * LAST such run). The split also stays off when the prefix has no visible
+ * content (a tab/NBSP-only prefix never matches the space-anchored
+ * CODE_FENCE_RE, so the split would manufacture a closer the parser ignores)
+ * or when the same-line prefix holds an odd number of same-delimiter runs:
+ * runs pair left-to-right as inline code, so an odd count leaves the last
+ * prefix run unpaired — it pairs with the candidate, which is therefore the
+ * closing half of an inline pair, not a closer.
+ *
+ * A run outside any fence that does not already start a line gets a newline
+ * inserted — unless the same-line prefix is itself a fence line (the split
+ * would hand the parser a second, tracker-undecided fence), or the run reads
+ * as inline code content rather than a forgotten opener: a whitespace-only
+ * prefix (promotion would strip exactly the characters the parser's space
+ * anchor rejects), an odd same-delimiter prefix run count (the run is an
+ * inline pair's closing half, see above), or a tilde run followed by another
+ * tilde run on the same line.
  *
  * `options.mathFences` must mirror the renderer's `renderVisualBlocks`:
  * MarkdownDisplay only honors $$ fences in render mode, so the tracker may
@@ -303,6 +318,37 @@ export function normalizeCodeFences(
   // line whole, remainder included, so they are never independent fences.
   let consumedLineEnd = 0;
 
+  // Reports whether the block open at `from` ends later in the text: a
+  // line-start closer the parser honors, or a later mid-line run shaped like a
+  // glued closer. Either suppresses a glued-closer split on an earlier run —
+  // the closer (or the repair) lives further down, so the earlier run is code
+  // content.
+  const blockEndsLater = (
+    from: number,
+    char: string,
+    minLength: number,
+  ): boolean => {
+    const scan = /(`{3,}|~{3,})/g;
+    scan.lastIndex = from;
+    for (const m of text.matchAll(scan)) {
+      const mStart = m.index ?? 0;
+      if (m[0][0] !== char || m[0].length < minLength) continue;
+      const mLineStart = text.lastIndexOf('\n', mStart - 1) + 1;
+      const mNextNewline = text.indexOf('\n', mStart);
+      const mLineEnd = mNextNewline === -1 ? text.length : mNextNewline;
+      const mRest = text.slice(mStart + m[0].length, mLineEnd);
+      if (/^ *$/.test(text.slice(mLineStart, mStart))) {
+        // A line-start run closes the block only when its remainder is
+        // backtick-free (CODE_FENCE_RE); otherwise it is content and the
+        // search goes on.
+        if (!mRest.includes('`')) return true;
+        continue;
+      }
+      if (/^[ \t]*\r?$/.test(mRest)) return true;
+    }
+    return false;
+  };
+
   for (const match of text.matchAll(/(`{3,}|~{3,})/g)) {
     const runStart = match.index ?? 0;
     if (runStart < consumedLineEnd) continue;
@@ -310,10 +356,9 @@ export function normalizeCodeFences(
     const lineStart = text.lastIndexOf('\n', runStart - 1) + 1;
     const nextNewline = text.indexOf('\n', runStart);
     const lineEnd = nextNewline === -1 ? text.length : nextNewline;
+    const rest = text.slice(runStart + run.length, lineEnd);
     const startsLine = /^ *$/.test(text.slice(lineStart, runStart));
-    const restBacktickFree = !text
-      .slice(runStart + run.length, lineEnd)
-      .includes('`');
+    const restBacktickFree = !rest.includes('`');
 
     if (trackMathFences && openFence === null) {
       for (const line of text.slice(mathScanPos, lineStart).split(/\r?\n/)) {
@@ -330,6 +375,12 @@ export function normalizeCodeFences(
     // would hand the parser a fence the tracker never decided on, so leave
     // the line untouched.
     const prefix = text.slice(lineStart, runStart);
+    // Same-delimiter runs in the prefix pair left-to-right as inline code;
+    // an even count leaves the candidate unpaired (a fence candidate), an odd
+    // count leaves the last prefix run unpaired and paired with the run
+    // itself (inline code content, never a fence).
+    const prefixRuns = prefix.match(run[0] === '`' ? /`{3,}/g : /~{3,}/g);
+    const prefixRunsPairUp = (prefixRuns?.length ?? 0) % 2 === 0;
     const prefixBecomesFenceLine =
       !startsLine &&
       (CODE_FENCE_RE.test(prefix) ||
@@ -344,23 +395,46 @@ export function normalizeCodeFences(
       // A closing fence glued to the last code line can never match the
       // parser's line-anchored CODE_FENCE_RE, so split it off. Deliberately
       // narrower than the old /btw repair: trailing prose after the run is
-      // left alone. Tabs and a CRLF line ending count as no visible content —
-      // the parser splits lines on \r?\n and its remainder class accepts both.
+      // left alone. Trailing tabs and a CRLF line ending count as no visible
+      // content — the parser splits lines on \r?\n and its remainder class
+      // accepts both; a tab/NBSP-only prefix is likewise invisible, but on
+      // the wrong side: the parser's space anchor never sees the split-off
+      // run as a closer there.
       const closesGlued =
         !prefixBecomesFenceLine &&
         !startsLine &&
+        prefix.trim() !== '' &&
+        prefixRunsPairUp &&
         run[0] === openFence.char &&
         run.length >= openFence.length &&
-        /^[ \t]*\r?$/.test(text.slice(runStart + run.length, lineEnd));
+        /^[ \t]*\r?$/.test(rest) &&
+        !blockEndsLater(lineEnd, openFence.char, openFence.length);
       if (closesAtLineStart || closesGlued) {
         if (closesGlued) result += '\n';
         openFence = null;
         consumedLineEnd = lineEnd;
       }
     } else if (restBacktickFree && !prefixBecomesFenceLine) {
-      if (!startsLine) result += '\n';
-      openFence = { char: run[0], length: run.length };
-      consumedLineEnd = lineEnd;
+      // A mid-line run is promoted onto its own line only when it reads as a
+      // forgotten fence opener, not as inline code content: the prefix must
+      // carry visible content (promoting a tab/NBSP-only prefix would strip
+      // exactly the characters that keep the run out of the parser's
+      // space-anchored CODE_FENCE_RE), the prefix's same-delimiter runs must
+      // pair up (an odd count pairs the last one with this run), and a tilde
+      // run must not have a later tilde run on the same line to pair with
+      // (for backticks, restBacktickFree already rules that out).
+      let promotes = startsLine;
+      if (!promotes) {
+        promotes =
+          prefix.trim() !== '' &&
+          prefixRunsPairUp &&
+          (run[0] === '`' || !/~{3,}/.test(rest));
+      }
+      if (promotes) {
+        if (!startsLine) result += '\n';
+        openFence = { char: run[0], length: run.length };
+        consumedLineEnd = lineEnd;
+      }
     }
     result += run;
     lastIndex = runStart + run.length;

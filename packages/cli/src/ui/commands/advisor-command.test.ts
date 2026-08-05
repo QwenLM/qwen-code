@@ -82,7 +82,10 @@ describe('advisorCommand', () => {
     expect(result).toEqual({
       type: 'message',
       messageType: 'error',
-      content: expect.stringContaining('too long'),
+      // The identity t() mock substitutes {{max}}, so pin the fully
+      // interpolated text: a mismatched parameter name at the call site
+      // would otherwise leave the raw '{{max}}' token invisible here.
+      content: 'Focus too long (max 4096 chars)',
     });
   });
 
