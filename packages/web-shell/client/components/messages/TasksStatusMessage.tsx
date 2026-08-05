@@ -939,9 +939,11 @@ export function MonitorTaskDetail({
 export function ShellTaskDetail({
   task,
   actions: providedActions,
+  onOpenTerminal,
 }: {
   task: DaemonSessionShellTaskStatus;
   actions?: DaemonSessionActions;
+  onOpenTerminal?: (task: DaemonSessionShellTaskStatus) => void;
 }) {
   const { t } = useI18n();
   const contextActions = useActions();
@@ -1025,6 +1027,15 @@ export function ShellTaskDetail({
                 onClick={() => void handleCancel()}
               >
                 {busy ? t('common.loading') : t('tasks.action.stop')}
+              </button>
+            )}
+            {currentTask.terminal && currentTask.status === 'running' && (
+              <button
+                type="button"
+                className={styles.monitorStopButton}
+                onClick={() => onOpenTerminal?.(currentTask)}
+              >
+                {t('terminal.open')}
               </button>
             )}
           </div>

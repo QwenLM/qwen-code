@@ -198,6 +198,18 @@ export interface ShellTask extends TaskBase {
   /** Error message on `failed`. */
   error?: string;
   /**
+   * Present when this shell task is backed by an interactive tmux session
+   * (created by the tmux tool) rather than a spawned child process.
+   * Consumers (daemon terminal endpoint, Web Shell "open terminal") use
+   * this to locate the attachable tmux session.
+   */
+  terminal?: {
+    /** tmux server socket name (`tmux -L <socket>`). */
+    socket: string;
+    /** tmux session name on that socket. */
+    tmuxSession: string;
+  };
+  /**
    * @deprecated Use `outputFile`. Kept as a synonym during the back-compat
    * window; always equals `outputFile`.
    */

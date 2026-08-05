@@ -677,6 +677,17 @@ export interface ServeSessionShellTaskStatus {
   pid?: number;
   exitCode?: number;
   error?: string;
+  /**
+   * Present when the shell task is backed by an interactive tmux session
+   * (created by the tmux tool). The daemon terminal endpoint uses this to
+   * locate the attachable tmux session.
+   */
+  terminal?: {
+    /** tmux server socket name (`tmux -L <socket>`). */
+    socket: string;
+    /** tmux session name on that socket. */
+    tmuxSession: string;
+  };
 }
 
 export interface ServeSessionMonitorTaskStatus {

@@ -2230,6 +2230,17 @@ export interface DaemonSessionShellTaskStatus {
   pid?: number;
   exitCode?: number;
   error?: string;
+  /**
+   * Present when the shell task is backed by an interactive tmux session
+   * (created by the tmux tool). Connect a WebSocket to
+   * `/session/:id/terminal/:taskId` to attach to it live.
+   */
+  terminal?: {
+    /** tmux server socket name (`tmux -L <socket>`). */
+    socket: string;
+    /** tmux session name on that socket. */
+    tmuxSession: string;
+  };
 }
 
 export interface DaemonSessionMonitorTaskStatus {

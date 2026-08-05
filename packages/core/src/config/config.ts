@@ -8255,6 +8255,12 @@ export class Config {
       return new MonitorTool(this);
     });
 
+    // Register tmux (interactive terminal) tool
+    await registerLazy(ToolNames.TMUX, async () => {
+      const { TmuxTool } = await import('../tools/tmux.js');
+      return new TmuxTool(this);
+    });
+
     // apply any pending MCP
     // budget-event callback BEFORE `discoverAllTools` (legacy blocking
     // mode runs MCP discovery synchronously in there) and BEFORE the
