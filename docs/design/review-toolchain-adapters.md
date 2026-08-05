@@ -205,9 +205,12 @@ the Maven branches of the `test-plan`, `base-tree`, and `build-test` suites:
    edges are read from checked-in POMs; property expressions, escaping paths,
    missing child POMs, and shell-active module names fail closed.
 2. Ownership: changed paths map to the deepest owning module; documentation
-   and repository metadata are exempted; out-of-reactor projects fail closed.
-3. One root-cwd wrapper/Maven lifecycle command with `-pl <modules> -am`;
-   reactor-wide inputs disable narrowing.
+   (doc extensions in doc-shaped locations only) and repository metadata are
+   exempted; out-of-reactor projects fail closed.
+3. One root-cwd wrapper/Maven lifecycle command with `-pl <modules> -am`,
+   preceded by a best-effort `dependency:go-offline` warm-up on its own
+   deadline; reactor-wide inputs — and a `-pl` selector past the
+   launch-safe length — disable narrowing.
 4. Fresh Surefire/Failsafe evidence: quote-aware, multi-suite parsing; stale
    XML ignored; a green exit over fresh failing reports — or over framed
    errors Maven did not fail on — is a failure, never a pass.
@@ -283,8 +286,9 @@ It reads only the aggregation structure needed to map paths to module directorie
 
 1. Start at the root `pom.xml`.
 2. Read literal direct children of the root `<project>/<modules>` element,
-   ignoring comments and profile/plugin `<module>` elements, and rejecting
-   unresolved property expressions or paths that escape the reactor root.
+   ignoring comments, unwrapping CDATA, and skipping profile/plugin
+   `<module>` elements, rejecting unresolved property expressions or paths
+   that escape the reactor root.
 3. Recurse through child aggregator POMs using the same direct-child rule.
 4. Assign each changed path to the deepest containing module directory.
 5. Fail closed when a changed path belongs to a Maven project that is outside
@@ -299,8 +303,15 @@ structured unsupported handoff rather than an incomplete green result.
 ### Commands
 
 P1 performs one lifecycle invocation per verification target to avoid paying for
-the reactor twice:
+the reactor twice. When dependency acquisition is enabled (the default), a
+best-effort warm-up runs first on its own deadline:
 
+- Dependency warm-up: `./mvnw --batch-mode --no-transfer-progress [-pl <paths> -am] dependency:go-offline -q`.
+  A review worktree is cold by construction, and without this step the cold
+  resolve shares the single lifecycle deadline with compilation and the tests.
+  The warm-up never blocks the lifecycle run: its known gaps resolve inside the
+  lifecycle command as before, and a partial local repository — unlike a
+  partial `node_modules` — is content-addressed and resumable.
 - Normal verification: `./mvnw --batch-mode --no-transfer-progress [-pl <paths> -am] test`.
 - Build-only base preparation: `./mvnw --batch-mode --no-transfer-progress [-pl <paths> -am] test-compile`.
 - When no checked-in wrapper exists, use `mvn` with the same arguments.
@@ -308,6 +319,11 @@ the reactor twice:
 The command always runs with the reactor root as cwd. P1 does not inject project
 profiles or `clean`; project rules and CI remain responsible for broader JDK,
 OS, profile, integration-test, and packaging matrices.
+
+The `-pl` selector is capped: a mid-level aggregator change closes over every
+aggregation and inheritance descendant, and the comma-joined selector can
+approach cmd.exe's 8191-character command-line limit on the large reactors P1
+targets. Past the cap the run widens to the full reactor and discloses it.
 
 ### Report semantics
 
@@ -319,8 +335,9 @@ Existing fields are generalized without changing their JSON shape:
 - `buildSet`: selectors handed to Maven. It does not pretend to enumerate every
   project Maven adds through `-am`.
 - `widenedWith`: remains npm-specific and is empty for Maven.
-- `install`: remains null for Maven because dependency resolution occurs inside
-  the lifecycle command.
+- `install`: the Maven warm-up command when dependency acquisition is enabled
+  (null when it is not). Whatever the warm-up misses still resolves inside the
+  lifecycle command, whose result is the one the verdicts read.
 - `build`: contains the Maven `test-compile` command in build-only mode.
 - `test`: contains the Maven `test` command in normal mode.
 - `timedOut`, `ok`, and `note`: retain their current cross-toolchain meaning.
@@ -340,8 +357,13 @@ infrastructure outcomes, except when the diff changed the inputs that could
 have caused them: dependency-input changes (POMs, `.mvn/**`, the settings or
 repository locations `.mvn/maven.config` references, and the wrapper file
 this platform executes) suppress the resolution carve-out, and a change to
-the executed wrapper suppresses the launch-failure carve-out, so a PR-caused
-breakage is filed against the PR, not the environment. Timeout and spawn
+the executed wrapper — the script OR its `.mvn/wrapper/**` configuration,
+which names the distribution the script downloads — suppresses the
+launch-failure carve-out, so a PR-caused breakage is filed against the PR,
+not the environment. Unframed launch diagnostics (`mvn: command not found`,
+JAVA_HOME errors) count only in the output preceding the first Maven-framed
+line; once Maven is talking, those words in a test's own stdout cannot
+launder a source failure into infrastructure. Timeout and spawn
 death are always infrastructure — no input exception exists for them — but
 when the interrupted run still produced fresh failing reports, those failures
 stay visible as test evidence instead of being framed as purely

@@ -10,7 +10,11 @@ export interface ToolchainRunArgs {
   root: string;
   changedFiles: string[];
   timeout: number;
-  /** npm only; Maven resolves dependencies inside its lifecycle command. */
+  /**
+   * Gates the dependency-acquisition step: npm's `npm ci` and Maven's
+   * best-effort `dependency:go-offline` warm-up. Maven still resolves
+   * whatever the warm-up misses inside its lifecycle command.
+   */
   install: boolean;
   buildOnly?: boolean;
   exec: (command: string, cwd: string, timeoutMs: number) => CommandResult;
@@ -21,10 +25,23 @@ export interface ReviewToolchainAdapter {
   run(args: ToolchainRunArgs): BuildTestReport;
 }
 
+export interface ToolchainSelection {
+  /** The single adapter that applies, or null when zero or several do. */
+  adapter: ReviewToolchainAdapter | null;
+  /**
+   * Every adapter whose applies() held — walked once here, reused by the
+   * caller for the ambiguity note instead of re-walking the trees.
+   */
+  applicable: readonly ReviewToolchainAdapter[];
+}
+
 export function selectToolchainAdapter(
   root: string,
   adapters: readonly ReviewToolchainAdapter[],
-): ReviewToolchainAdapter | null {
+): ToolchainSelection {
   const applicable = adapters.filter((adapter) => adapter.applies(root));
-  return applicable.length === 1 ? applicable[0] : null;
+  return {
+    adapter: applicable.length === 1 ? applicable[0] : null,
+    applicable,
+  };
 }

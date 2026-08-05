@@ -39,8 +39,8 @@
 
 import type { CommandModule } from 'yargs';
 import { spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   isDependencyFailureLine,
@@ -293,11 +293,48 @@ function changedFilesFrom(planPath: string): string[] {
 export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   const root = resolve(args.worktree);
   const changedFiles = changedFilesFrom(args.plan);
-  const adapter = selectToolchainAdapter(root, toolchainAdapters);
+  const runArgs = {
+    root,
+    changedFiles,
+    timeout: args.timeout,
+    install: args.install,
+    buildOnly: args.buildOnly,
+    exec: args.exec ?? run,
+  };
+  const { adapter, applicable } = selectToolchainAdapter(
+    root,
+    toolchainAdapters,
+  );
   if (!adapter) {
-    const applicable = toolchainAdapters.filter((candidate) =>
-      candidate.applies(root),
-    );
+    if (applicable.length > 1) {
+      return {
+        toolchain: 'unsupported',
+        affected: [],
+        buildSet: [],
+        widenedWith: [],
+        install: null,
+        build: [],
+        test: [],
+        ok: true,
+        timedOut: [],
+        note:
+          'Both npm and Maven apply at the repository root. build-test will not ' +
+          'guess which toolchain owns this diff, so it ran nothing — report the ' +
+          'ambiguity as a handoff instead of substituting ad hoc build or test ' +
+          'commands.',
+      };
+    }
+    // A root package.json marks an npm-shaped repo that npm's own gate refused
+    // (an unmodeled workspace glob, workspaces that resolve to no package, or
+    // no root build/test script). Delegate the handoff to the npm adapter so
+    // the report carries its precise reason instead of the generic one — an
+    // agent told "no npm project here" about a repo that IS one gets a worse
+    // steer than the shape it cannot scope named. run() returns its
+    // unsupported report before executing any command on every root where
+    // applies() is false.
+    if (existsSync(join(root, 'package.json'))) {
+      return npmToolchainAdapter.run(runArgs);
+    }
     return {
       toolchain: 'unsupported',
       affected: [],
@@ -309,24 +346,12 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
       ok: true,
       timedOut: [],
       note:
-        applicable.length > 1
-          ? 'Both npm and Maven apply at the repository root. build-test will not ' +
-            'guess which toolchain owns this diff, so it ran nothing — report the ' +
-            'ambiguity as a handoff instead of substituting ad hoc build or test ' +
-            'commands.'
-          : 'No supported npm or Maven project here to scope. Fall back to the ' +
-            'build/test precedence in your brief — installing dependencies first — ' +
-            'and give each command a deadline it can actually meet.',
+        'No supported npm or Maven project here to scope. Fall back to the ' +
+        'build/test precedence in your brief — installing dependencies first — ' +
+        'and give each command a deadline it can actually meet.',
     };
   }
-  return adapter.run({
-    root,
-    changedFiles,
-    timeout: args.timeout,
-    install: args.install,
-    buildOnly: args.buildOnly,
-    exec: args.exec ?? run,
-  });
+  return adapter.run(runArgs);
 }
 
 export const buildTestCommand: CommandModule = {
@@ -367,8 +392,9 @@ export const buildTestCommand: CommandModule = {
         type: 'boolean',
         default: true,
         describe:
-          'Run `npm ci` first when node_modules is absent (npm toolchain only; ' +
-          'Maven resolves dependencies inside its lifecycle command)',
+          'Fetch dependencies first: `npm ci` when node_modules is absent (npm), ' +
+          'or a best-effort `dependency:go-offline` warm-up with its own deadline ' +
+          '(Maven)',
       })
       .option('build-only', {
         type: 'boolean',

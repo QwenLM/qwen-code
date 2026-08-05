@@ -116,7 +116,12 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
             '(e.g. `**`, an inner `*`, or a `foo-*` prefix), so it cannot safely decide ' +
             'which packages the diff touches. Fall back to the build/test precedence in ' +
             'your brief, and give each command a deadline it can actually meet.'
-        : 'No npm package here to scope (no workspaces, and the root has no build/test ' +
+        : globs.length > 0
+          ? 'This repo declares npm workspaces, but none resolve to a package with a ' +
+            'readable manifest, so there is nothing to scope. Fall back to the ' +
+            'build/test precedence in your brief — installing dependencies first — ' +
+            'and give each command a deadline it can actually meet.'
+          : 'No npm package here to scope (no workspaces, and the root has no build/test ' +
             'script). Fall back to the build/test precedence in your brief — installing ' +
             'dependencies first — and give each command a deadline it can actually meet.',
     );
@@ -473,7 +478,10 @@ export const npmToolchainAdapter: ReviewToolchainAdapter = {
   // `foo-*`) or a zero-package glob used to apply npm anyway, block Maven
   // selection, and drop the repo to the very `unsupported` handoff this guard
   // exists to prevent — even though npm.run would immediately concede
-  // unsupported and mvn.run alone would have succeeded.
+  // unsupported and mvn.run alone would have succeeded. When ZERO adapters
+  // apply at an npm-shaped root, runBuildTest delegates here anyway so the
+  // report carries runNpmToolchain's precise handoff note (the unmodeled-glob
+  // gate below is that diagnostic path, not dead code).
   applies: (root) => {
     const globs = readWorkspaceGlobs(root);
     if (globs.length > 0) {

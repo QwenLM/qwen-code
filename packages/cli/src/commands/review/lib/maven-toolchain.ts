@@ -76,6 +76,17 @@ const MAX_FAILURE_CASE_LINES = 200;
 const MAX_CLEAN_ROLLUP_LINES = 100;
 
 /**
+ * cmd.exe refuses command lines past 8191 characters, and containerized
+ * execve enforces ARG_MAX. A POM change at a mid-level aggregator closes
+ * over every aggregation AND inheritance descendant, and on the 200-400
+ * module reactors this adapter targets the comma-joined `-pl` selector can
+ * approach those limits — a command line the platform refuses to launch is
+ * not a scope. Past the cap the run widens to the full reactor instead.
+ * 4096 leaves headroom for the executable, flags, and environment.
+ */
+const MAX_SELECTOR_CHARS = 4096;
+
+/**
  * Cap evidence files before reading them: Surefire/Failsafe XML is
  * PR-controlled (the PR's own tests can write into `target/surefire-reports/`
  * during the run, and the mtime freshness filter accepts any writer), so an
@@ -98,11 +109,16 @@ function isInside(root: string, path: string): boolean {
 }
 
 /**
- * Strip comments and CDATA in one left-to-right state scan. Order matters in
- * both directions: a `<![CDATA[` INSIDE a comment is literal comment text
- * (pairing it with a later `]]>` swallows real markup between them), and a
- * `-->` inside CDATA (antrun/checkstyle/xml-generation config) is literal
- * too. A missing terminator fails the POM closed.
+ * Strip comments and UNWRAP CDATA in one left-to-right state scan. Order
+ * matters in both directions: a `<![CDATA[` INSIDE a comment is literal
+ * comment text (pairing it with a later `]]>` swallows real markup between
+ * them), and a `-->` inside CDATA (antrun/checkstyle/xml-generation config)
+ * is literal too. A missing terminator fails the POM closed.
+ *
+ * CDATA content is kept, not deleted: deleting silently empties a
+ * CDATA-wrapped `<artifactId>` and drops the inheritance edge that depends
+ * on it — a silent under-approximation. Unwrapped content carrying a `<`
+ * fails the tag tokenizer below instead, which is the fail-closed direction.
  */
 function stripCdataAndComments(pom: string): string | null {
   const chunks: string[] = [];
@@ -121,6 +137,7 @@ function stripCdataAndComments(pom: string): string | null {
       const end = pom.indexOf(']]>', i + 9);
       if (end === -1) return null;
       chunks.push(pom.slice(chunkStart, i));
+      chunks.push(pom.slice(i + 9, end));
       i = end + 3;
       chunkStart = i;
       continue;
@@ -306,10 +323,9 @@ export function readMavenReactor(root: string): MavenReactorResult {
       const modulePath = toPosix(relative(reactorRoot, moduleDir));
       modules.add(modulePath);
       projectDirs.add(modulePath);
-      children.set(aggregatorPath, [
-        ...(children.get(aggregatorPath) ?? []),
-        modulePath,
-      ]);
+      const aggregated = children.get(aggregatorPath);
+      if (aggregated) aggregated.push(modulePath);
+      else children.set(aggregatorPath, [modulePath]);
       const error = visit(childPom);
       if (error) return error;
     }
@@ -346,10 +362,9 @@ export function readMavenReactor(root: string): MavenReactorResult {
     if (parentPath === modulePath) continue;
     const target = structures.get(parentPath);
     if (!target || target.artifactId !== parent.artifactId) continue;
-    inheritors.set(parentPath, [
-      ...(inheritors.get(parentPath) ?? []),
-      modulePath,
-    ]);
+    const inherited = inheritors.get(parentPath);
+    if (inherited) inherited.push(modulePath);
+    else inheritors.set(parentPath, [modulePath]);
   }
 
   return {
@@ -382,17 +397,18 @@ function normalizedChangedPath(
 }
 
 function isDocumentationPath(path: string): boolean {
-  // The `docs?/` prefix alone would skip a compilable file under a module's
-  // `doc/` tree and call the run complete; a documentation path is a
-  // documentation EXTENSION, with or without the prefix.
-  const isDocExtension =
-    !path.startsWith('src/') && /\.(?:md|mdx|adoc|rst|txt)$/i.test(path);
-  return (
-    path === 'README' ||
-    /^README(?:\.|$)/i.test(path) ||
-    (/^docs?\//i.test(path) && isDocExtension) ||
-    isDocExtension
-  );
+  if (path === 'README' || /^README(?:\.|$)/i.test(path)) return true;
+  // The `src/` guard alone would skip a compilable file under a module's
+  // `doc/` tree; a documentation path is a documentation EXTENSION first.
+  if (path.startsWith('src/')) return false;
+  if (!/\.(?:md|mdx|adoc|rst|txt)$/i.test(path)) return false;
+  // Outside `src/`, the extension alone is not enough: a `.txt` can be a
+  // resource wired into the artifact (maven-resources-plugin points at
+  // arbitrary dirs), and skipping the build on it would be a fail-open in an
+  // otherwise fail-closed design. Exempt only doc-shaped locations: a
+  // `docs?/` or `site/` tree, or the module/root top level itself.
+  const dir = dirname(path);
+  return dir === '.' || /^(?:docs?|site)$/i.test(dir.split('/')[0]);
 }
 
 /**
@@ -759,7 +775,9 @@ function appendTestSummaries(
       failing.push(summary);
     } else {
       const project = projectDirOf(summary.report);
-      clean.set(project, [...(clean.get(project) ?? []), summary]);
+      const group = clean.get(project);
+      if (group) group.push(summary);
+      else clean.set(project, [summary]);
     }
   }
 
@@ -873,16 +891,24 @@ function mavenReport(
 /**
  * Shell and JVM launch diagnostics. The runner-missing and JAVA_HOME forms
  * are printed bare by the shell or the mvn launcher — never with Maven
- * framing — so requiring `[ERROR]` there would miss the real thing. `No
- * space left on device` is different: a test exercising a disk-full path can
- * print it in its own stdout, so only Maven's own `[ERROR]`/`[FATAL]` framing
- * tells the outage from test output — the same argument
- * DEPENDENCY_FAILURE_LINE_RE encodes.
+ * framing — so requiring `[ERROR]` there would miss the real thing. The
+ * unframed scan therefore stops at the first Maven-framed line: these
+ * diagnostics precede any Maven output, and once Maven is talking, a test
+ * printing `mvn: command not found` in its own stdout must not launder a
+ * source failure into infrastructure. `No space left on device` is different:
+ * a test exercising a disk-full path can print it in its own stdout at any
+ * point, so only Maven's own `[ERROR]`/`[FATAL]` framing tells the outage
+ * from test output — the same argument DEPENDENCY_FAILURE_LINE_RE encodes.
  */
 function isLaunchFailure(output: string): boolean {
-  return output
-    .split('\n')
-    .some(
+  const lines = output.split('\n');
+  const prelude: string[] = [];
+  for (const line of lines) {
+    if (/^\[(?:INFO|WARNING|ERROR|FATAL)\]/.test(line)) break;
+    prelude.push(line);
+  }
+  return (
+    prelude.some(
       (line) =>
         /(?:mvn|java): (?:command )?not found/i.test(line) ||
         /command not found: (?:mvn|java)(?:\.cmd)?\b/i.test(line) ||
@@ -894,9 +920,12 @@ function isLaunchFailure(output: string): boolean {
         /JAVA_HOME.*(?:not defined|incorrectly|invalid directory)/i.test(
           line,
         ) ||
-        /Unable to locate a Java Runtime/i.test(line) ||
-        /^\[(?:ERROR|FATAL)\].*No space left on device/i.test(line),
-    );
+        /Unable to locate a Java Runtime/i.test(line),
+    ) ||
+    lines.some((line) =>
+      /^\[(?:ERROR|FATAL)\].*No space left on device/i.test(line),
+    )
+  );
 }
 
 /**
@@ -1078,13 +1107,21 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     });
   }
 
-  const affected = ownership.reactorWide ? ['.'] : ownership.modules;
-  const buildSet = ownership.reactorWide ? ['.'] : ownership.modules;
   const executable = mavenExecutable(args.root);
-  const wrapperChanged = args.changedFiles.some((file) => {
+  // The wrapper is the script AND its configuration:
+  // `.mvn/wrapper/maven-wrapper.properties` names the distribution the script
+  // downloads and executes, so a diff touching it controls what `./mvnw`
+  // runs exactly as one touching the script does.
+  const wrapperConfigChanged = args.changedFiles.some((file) => {
     const path = normalizedChangedPath(args.root, file);
-    return path === 'mvnw' || path === 'mvnw.cmd';
+    return path !== null && path.startsWith('.mvn/wrapper/');
   });
+  const wrapperChanged =
+    wrapperConfigChanged ||
+    args.changedFiles.some((file) => {
+      const path = normalizedChangedPath(args.root, file);
+      return path === 'mvnw' || path === 'mvnw.cmd';
+    });
   // Every wrapper repo ships both platform variants, but only ONE is ever
   // executed here: a diff touching only the other platform's wrapper cannot
   // affect this run, so the carve-out suppressions below key on the file
@@ -1097,9 +1134,10 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
         : null;
   const executedWrapperChanged =
     executedWrapper !== null &&
-    args.changedFiles.some(
-      (file) => normalizedChangedPath(args.root, file) === executedWrapper,
-    );
+    (wrapperConfigChanged ||
+      args.changedFiles.some(
+        (file) => normalizedChangedPath(args.root, file) === executedWrapper,
+      ));
   // The platform-preferred wrapper, whether or not it was executed: when the
   // diff deletes it (or drops its executable bit), mavenExecutable falls back
   // to system `mvn`, executedWrapper is null, and the fallback's launch death
@@ -1144,9 +1182,15 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   // was built for, and a run that spends its whole deadline proving nothing
   // is the failure this command exists to avoid — downstream coverage stays
   // the project's CI matrix, as with the npm adapter's scope.
-  const narrowing = ownership.reactorWide
+  const selector = ownership.reactorWide
     ? ''
-    : ` -pl ${shellSelector(ownership.modules)} -am`;
+    : shellSelector(ownership.modules);
+  const selectorOverflow =
+    !ownership.reactorWide && selector.length > MAX_SELECTOR_CHARS;
+  const reactorWide = ownership.reactorWide || selectorOverflow;
+  const affected = reactorWide ? ['.'] : ownership.modules;
+  const buildSet = reactorWide ? ['.'] : ownership.modules;
+  const narrowing = reactorWide ? '' : ` -pl ${selector} -am`;
   const command = `${executable} --batch-mode --no-transfer-progress${narrowing} ${lifecycle}`;
   // Disk preflight, mirroring the npm adapter: Maven resolves plugins and
   // dependencies inside the lifecycle command, and a run that dies on ENOSPC
@@ -1168,6 +1212,27 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
         'command, so nothing could be built or tested. This is an environment ' +
         'issue, not a code finding — report it as informational.',
     });
+  }
+  // Dependency warm-up on its own deadline. A review worktree is cold by
+  // construction, and Maven resolves dependencies and plugins INSIDE the
+  // lifecycle command, sharing the single deadline with compilation and the
+  // tests — a cold resolve on the large reactors this adapter targets can
+  // spend the whole budget downloading and verify nothing, exactly the
+  // timeout-as-infrastructure outcome the command exists to prevent.
+  // `dependency:go-offline` is best-effort: it has known gaps (some plugin
+  // dependencies resolve lazily), and the lifecycle command resolves what it
+  // missed exactly as before. Unlike a partial `node_modules`, a partial
+  // local repository is content-addressed and resumable — never worse than
+  // none — so no warm-up outcome blocks the lifecycle run. Gated on the same
+  // install flag as `npm ci`: `--no-install` means "assume warm, fetch
+  // nothing".
+  let install: CommandResult | null = null;
+  if (args.install) {
+    install = args.exec(
+      `${executable} --batch-mode --no-transfer-progress${narrowing} dependency:go-offline -q`,
+      args.root,
+      args.timeout * 1000,
+    );
   }
   // A build-only run never reads the evidence, so it skips the snapshot too
   // — on a large reactor that is a readdir + statSync sweep of every
@@ -1226,7 +1291,7 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     affected,
     buildSet,
     widenedWith: [],
-    install: null,
+    install,
     build: args.buildOnly ? [recorded] : [],
     test: args.buildOnly ? [] : [recorded],
     ok,
@@ -1251,7 +1316,13 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     report.note =
       `\`${result.command}\` ran out of time (${args.timeout}s). This is an infrastructure result, ` +
       'not a defect in the diff — report it as informational.';
-    if (ownership.reactorWide) {
+    if (selectorOverflow) {
+      report.note +=
+        ' The scope widened to reactor-wide because the changed-module `-pl` selector exceeded ' +
+        `${MAX_SELECTOR_CHARS} characters; on large reactors that scope usually cannot finish ` +
+        'within this deadline, so re-running it at the same scope will spend the same budget ' +
+        'for the same result.';
+    } else if (reactorWide) {
       report.note +=
         ' The scope is reactor-wide because the diff changes inputs every module inherits; ' +
         'on large reactors that scope usually cannot finish within this deadline, so re-running ' +
@@ -1287,11 +1358,11 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
       'fresh module-qualified Surefire/Failsafe summaries are appended when available.';
   } else if (args.buildOnly) {
     report.note =
-      `Maven compiled ${ownership.reactorWide ? 'the full reactor' : ownership.modules.join(', ')}. ` +
+      `Maven compiled ${reactorWide ? 'the full reactor' : ownership.modules.join(', ')}. ` +
       'Tests were not run (build-only).';
   } else if (summaries.length === 0) {
     report.note =
-      `Maven tested ${ownership.reactorWide ? 'the full reactor' : ownership.modules.join(', ')} successfully, ` +
+      `Maven tested ${reactorWide ? 'the full reactor' : ownership.modules.join(', ')} successfully, ` +
       'but produced no fresh Surefire/Failsafe XML (reports written to a non-default directory are not seen here), ' +
       'so test-count evidence is unavailable.';
   } else {
@@ -1300,11 +1371,26 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
       `Maven test passed with fresh reports: ${totals.tests} tests, ${totals.failures} failures, ` +
       `${totals.errors} errors, ${totals.skipped} skipped across ${summaries.length} report(s).`;
   }
-  if (!ownership.reactorWide) {
+  if (!reactorWide) {
     report.note +=
       ' Scope: this run covered the changed modules and their upstream dependencies only ' +
       '(`-pl … -am`); downstream dependents were NOT built — a POM or API change can break ' +
       "modules this run never compiled, and that coverage stays with the project's CI.";
+  } else if (selectorOverflow) {
+    report.note +=
+      ` Scope: the changed-module \`-pl\` selector exceeded ${MAX_SELECTOR_CHARS} characters — ` +
+      'a command line platforms may refuse to launch — so this run covered the full reactor ' +
+      'instead of the changed modules and their upstream dependencies.';
+  }
+  if (install && (install.timedOut || install.exitCode !== 0)) {
+    report.note +=
+      ` Dependency warm-up (\`${install.command}\`) ` +
+      (install.timedOut
+        ? `ran out of time (${args.timeout}s)`
+        : install.exitCode === null
+          ? 'ended without an exit code (a spawn failure or signal outside the deadline)'
+          : `exited ${install.exitCode}`) +
+      ' — it is best-effort, and the lifecycle outcome above stands on its own.';
   }
   if (wrapperChanged && !executedWrapperChanged) {
     report.note +=

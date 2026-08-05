@@ -2183,4 +2183,238 @@ describe('maven toolchain adapter', () => {
       '[maven-test-report] core (1 report(s)): tests=1, failures=0, errors=0, skipped=0',
     );
   });
+
+  it('runs a dependency warm-up with its own deadline when installing', () => {
+    // A review worktree is cold by construction; without the warm-up the
+    // cold resolve shares the single lifecycle deadline with compilation
+    // and the tests. The warm-up runs first, narrowed to the same scope,
+    // and its result is recorded as the report's install.
+    writeReactor();
+    const calls: Array<[string, number]> = [];
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/main/java/example/Core.java'],
+      timeout: 9,
+      install: true,
+      exec: (command, _cwd, timeoutMs) => {
+        calls.push([command, timeoutMs]);
+        return result(command);
+      },
+    });
+
+    expect(calls).toEqual([
+      [
+        'mvn --batch-mode --no-transfer-progress -pl core -am dependency:go-offline -q',
+        9_000,
+      ],
+      ['mvn --batch-mode --no-transfer-progress -pl core -am test', 9_000],
+    ]);
+    expect(report.install?.command).toContain('dependency:go-offline');
+    expect(report.ok).toBe(true);
+    expect(report.note).not.toContain('Dependency warm-up');
+  });
+
+  it('keeps the lifecycle verdict when the warm-up fails or times out', () => {
+    // The warm-up is best-effort: a partial local repository is
+    // content-addressed and resumable (unlike a partial node_modules), so
+    // no warm-up outcome may block the lifecycle run or change its verdict.
+    writeReactor();
+
+    const timedOut = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java'],
+      timeout: 5,
+      install: true,
+      exec: (command) =>
+        command.includes('dependency:go-offline')
+          ? result(command, { exitCode: null, timedOut: true, seconds: 5 })
+          : result(command),
+    });
+    expect(timedOut.ok).toBe(true);
+    expect(timedOut.test).toHaveLength(1);
+    expect(timedOut.timedOut).toEqual([]);
+    expect(timedOut.note).toContain('Dependency warm-up');
+    expect(timedOut.note).toContain('ran out of time (5s)');
+
+    const failed = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java'],
+      timeout: 5,
+      install: true,
+      exec: (command) =>
+        command.includes('dependency:go-offline')
+          ? result(command, { exitCode: 1 })
+          : result(command),
+    });
+    expect(failed.ok).toBe(true);
+    expect(failed.note).toContain('Dependency warm-up');
+    expect(failed.note).toContain('exited 1');
+  });
+
+  it('widens to the full reactor when the -pl selector exceeds the launch-safe length', () => {
+    // A mid-level aggregator change closes over every aggregation
+    // descendant; on large reactors the comma-joined selector approaches
+    // cmd.exe's 8191-character line limit, so past the cap the run widens
+    // to the full reactor instead of shipping a command line the platform
+    // may refuse to launch.
+    const leaves = Array.from(
+      { length: 100 },
+      (_, i) =>
+        `module-with-a-rather-long-directory-name-${String(i).padStart(2, '0')}`,
+    );
+    writeProject('.', ['agg']);
+    writeProject('agg', leaves);
+    for (const leaf of leaves) writeProject(`agg/${leaf}`);
+    const calls: string[] = [];
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['agg/pom.xml'],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        calls.push(command);
+        return result(command);
+      },
+    });
+
+    expect(report.affected).toEqual(['.']);
+    expect(calls).toEqual(['mvn --batch-mode --no-transfer-progress test']);
+    expect(report.note).toContain('selector exceeded 4096 characters');
+    expect(report.note).toContain('full reactor');
+  });
+
+  it('does not launder a test-printed launch diagnostic into infrastructure', () => {
+    // Unframed launch words count only in the prelude before Maven's own
+    // output starts: once a Maven-framed line has appeared, a test printing
+    // `mvn: command not found` in its stdout must not mask a source failure.
+    writeReactor();
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) =>
+        result(command, {
+          exitCode: 1,
+          output: [
+            '[INFO] Scanning for projects...',
+            '[INFO] --- surefire:test ---',
+            'sh: 1: mvn: not found',
+          ].join('\n'),
+        }),
+    });
+
+    expect(report.note).toContain('Correlate compiler or test errors');
+    expect(report.note).not.toContain('infrastructure evidence');
+    expect(report.test[0]?.infrastructure).toBeUndefined();
+  });
+
+  it('treats .mvn/wrapper configuration as part of the wrapper', () => {
+    // maven-wrapper.properties names the distribution ./mvnw downloads and
+    // executes; a diff touching it controls what the wrapper runs exactly
+    // as one touching the script does, so the startup failure is the
+    // diff's to answer for, not the environment's.
+    writeReactor();
+    writeWrapper();
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['.mvn/wrapper/maven-wrapper.properties'],
+      timeout: 5,
+      install: false,
+      exec: (command) =>
+        result(command, {
+          exitCode: 1,
+          output:
+            'Error: The JAVA_HOME environment variable is not defined correctly',
+        }),
+    });
+
+    expect(report.note).toContain('Correlate compiler or test errors');
+    expect(report.note).not.toContain('infrastructure evidence');
+    expect(report.test[0]?.infrastructure).toBeUndefined();
+  });
+
+  it('builds the owning module for resource-like text files outside doc locations', () => {
+    // A .txt is only exempted at doc-shaped locations: a resource wired
+    // into the artifact via maven-resources-plugin (which points at
+    // arbitrary dirs) must keep the build instead of silently skipping it.
+    writeReactor();
+    const calls: string[] = [];
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/config/messages.txt'],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        calls.push(command);
+        return result(command);
+      },
+    });
+
+    expect(report.affected).toEqual(['core']);
+    expect(calls).toEqual([
+      'mvn --batch-mode --no-transfer-progress -pl core -am test',
+    ]);
+  });
+
+  it('still exempts doc-extension files at the module top level and in site/', () => {
+    writeReactor();
+    const calls: string[] = [];
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/notes.txt', 'core/site/index.rst'],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        calls.push(command);
+        return result(command);
+      },
+    });
+
+    expect(report.ok).toBe(true);
+    expect(report.affected).toEqual([]);
+    expect(calls).toEqual([]);
+  });
+
+  it('reads a CDATA-wrapped parent artifactId instead of silently dropping the edge', () => {
+    writeProject('.', ['core']);
+    writeProject('core');
+    writeFileSync(
+      join(root, 'core', 'pom.xml'),
+      pom().replace(
+        '<project>',
+        `<project>
+  <parent>
+    <groupId>example</groupId>
+    <artifactId><![CDATA[fixture]]></artifactId>
+    <version>1</version>
+  </parent>`,
+      ),
+    );
+
+    expect(readMavenReactor(root).reactor?.inheritors).toEqual({
+      '.': ['core'],
+    });
+  });
+
+  it('fails closed when CDATA content carries markup of its own', () => {
+    // Unwrapped CDATA containing `<` cannot be tokenized unambiguously;
+    // failing the whole POM closed beats silently misparsing it.
+    writeFileSync(
+      join(root, 'pom.xml'),
+      pom(['core']).replace(
+        '<modules>',
+        '<build><x><![CDATA[ a < b ]]></x></build>\n  <modules>',
+      ),
+    );
+    writeProject('core');
+
+    expect(readMavenReactor(root).error).toContain('Cannot safely parse');
+  });
 });

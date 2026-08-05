@@ -54,14 +54,18 @@ describe('npm toolchain adapter', () => {
       JSON.stringify({ name: '@x/a', scripts: { build: 'exit 0' } }),
     );
 
-    expect(selectToolchainAdapter(root, [npmToolchainAdapter])).toBe(
-      npmToolchainAdapter,
-    );
+    expect(selectToolchainAdapter(root, [npmToolchainAdapter])).toEqual({
+      adapter: npmToolchainAdapter,
+      applicable: [npmToolchainAdapter],
+    });
     expect(npmToolchainAdapter.applies(root)).toBe(true);
   });
 
   it('does not select the npm adapter for a non-npm repository', () => {
-    expect(selectToolchainAdapter(root, [npmToolchainAdapter])).toBeNull();
+    expect(selectToolchainAdapter(root, [npmToolchainAdapter])).toEqual({
+      adapter: null,
+      applicable: [],
+    });
     expect(npmToolchainAdapter.applies(root)).toBe(false);
   });
 
@@ -72,9 +76,12 @@ describe('npm toolchain adapter', () => {
     );
     const other = { applies: () => true, run: npmToolchainAdapter.run };
 
-    expect(
-      selectToolchainAdapter(root, [npmToolchainAdapter, other]),
-    ).toBeNull();
+    // The applicable list is walked once and returned with the selection, so
+    // the caller's ambiguity note does not re-walk the workspace trees.
+    expect(selectToolchainAdapter(root, [npmToolchainAdapter, other])).toEqual({
+      adapter: null,
+      applicable: [npmToolchainAdapter, other],
+    });
   });
 
   it('returns the unchanged report shape for a supported single-root package', () => {

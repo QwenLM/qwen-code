@@ -138,6 +138,8 @@ describe('runBuildTest', () => {
     // repos with nothing npm can scope. It must not make npm apply — that is
     // what used to collide with a root pom.xml and drop the whole repo to
     // `unsupported` where the Maven adapter could have verified the diff.
+    // The handoff note is still npm's precise one: the repo IS npm-shaped,
+    // and naming why it cannot be scoped beats a generic "no project here".
     writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'r' }));
     writePlan(['src/a.ts']);
     const rep = runBuildTest({
@@ -157,10 +159,28 @@ describe('runBuildTest', () => {
       ok: true,
       timedOut: [],
       note:
-        'No supported npm or Maven project here to scope. Fall back to the ' +
-        'build/test precedence in your brief — installing dependencies first — ' +
-        'and give each command a deadline it can actually meet.',
+        'No npm package here to scope (no workspaces, and the root has no build/test ' +
+        'script). Fall back to the build/test precedence in your brief — installing ' +
+        'dependencies first — and give each command a deadline it can actually meet.',
     });
+  });
+
+  it('surfaces the declared-but-empty workspaces note when no adapter applies', () => {
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    writePlan(['src/a.ts']);
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 5,
+      install: false,
+    });
+    expect(rep.toolchain).toBe('unsupported');
+    expect(rep.note).toContain(
+      'declares npm workspaces, but none resolve to a package',
+    );
   });
 
   it('keeps the complete generic unsupported report when no adapter applies', () => {
@@ -289,10 +309,11 @@ describe('runBuildTest', () => {
       install: false,
     });
     expect(rep.toolchain).toBe('unsupported');
-    // The unscopable npm half no longer applies at selection, so the note
-    // is the generic handoff, not npm's unmodeled-glob wording.
+    // The unscopable npm half no longer applies at selection — but the repo
+    // IS an npm project whose layout cannot be scoped, so the note is npm's
+    // precise unmodeled-glob wording, not the generic "no project here".
     expect(rep.note).toContain(
-      'No supported npm or Maven project here to scope',
+      'uses a workspace glob shape this command does not model',
     );
     expect(rep.note).not.toContain('no package to build');
   });
