@@ -96,7 +96,7 @@ describe('FileReadCache', () => {
       expect(cache.check(makeStats({ ino: 200 })).state).toBe('unknown');
     });
 
-    it('returns unknown for ino 0 even after a read was recorded', () => {
+    it('returns unverifiable for ino 0 even after a read was recorded', () => {
       const cache = new FileReadCache();
       const stats = makeStats({ dev: 7, ino: 0 });
       const entry = cache.recordRead('/x/foo.ts', stats, {
@@ -106,7 +106,7 @@ describe('FileReadCache', () => {
 
       expect(entry.inodeKey).toBe('7:0');
       expect(cache.size()).toBe(0);
-      expect(cache.check(stats).state).toBe('unknown');
+      expect(cache.check(stats).state).toBe('unverifiable');
     });
 
     it('attaches the entry on fresh and stale results', () => {
@@ -139,8 +139,8 @@ describe('FileReadCache', () => {
       cache.recordRead('/x/b.ts', second, { full: true, cacheable: true });
 
       expect(cache.size()).toBe(0);
-      expect(cache.check(first).state).toBe('unknown');
-      expect(cache.check(second).state).toBe('unknown');
+      expect(cache.check(first).state).toBe('unverifiable');
+      expect(cache.check(second).state).toBe('unverifiable');
     });
 
     beforeEach(() => {
@@ -305,7 +305,7 @@ describe('FileReadCache', () => {
 
       expect(entry.lastWriteAt).toBe(Date.now());
       expect(cache.size()).toBe(0);
-      expect(cache.check(stats).state).toBe('unknown');
+      expect(cache.check(stats).state).toBe('unverifiable');
     });
 
     it('seeds read metadata when recording a write on a brand-new entry', () => {

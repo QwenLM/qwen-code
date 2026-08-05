@@ -133,6 +133,7 @@ export interface FileReadEntry {
 export type FileReadCheckResult =
   | { state: 'fresh'; entry: FileReadEntry }
   | { state: 'stale'; entry: FileReadEntry }
+  | { state: 'unverifiable' }
   | { state: 'unknown' };
 
 export class FileReadCache {
@@ -276,6 +277,8 @@ export class FileReadCache {
   /**
    * Compare the cached fingerprint against `stats` for the same inode.
    *
+   *  - `unverifiable` — the filesystem reported `ino === 0`, so the
+   *    file identity cannot be safely compared or cached.
    *  - `unknown` — no entry. The file has never been Read or written in
    *    this session.
    *  - `stale`   — entry exists but mtime or size differs. The file has
@@ -291,7 +294,7 @@ export class FileReadCache {
    */
   check(stats: Stats): FileReadCheckResult {
     if (!FileReadCache.hasVerifiableIdentity(stats)) {
-      return { state: 'unknown' };
+      return { state: 'unverifiable' };
     }
 
     const entry = this.byInode.get(FileReadCache.inodeKey(stats));

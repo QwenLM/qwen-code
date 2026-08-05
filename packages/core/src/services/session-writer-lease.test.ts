@@ -36,6 +36,7 @@ import { SessionService } from './sessionService.js';
 import {
   getSessionWriterLockPath,
   SessionTranscriptChangedError,
+  SessionTranscriptIdentityUnavailableError,
   SessionWriterConflictError,
   SessionWriterLease,
   SessionWriterLostError,
@@ -1354,6 +1355,31 @@ describe('SessionWriterLease', () => {
       SessionTranscriptChangedError,
     );
     await lease.release();
+  });
+
+  it('rejects a transcript with an unverifiable inode before writing', async () => {
+    const fixture = await createFixture();
+    await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+    const seed = '{"seed":true}\n';
+    await fs.writeFile(fixture.transcriptPath, seed);
+    const originalStat = nativeFileHandleStat;
+    const stat = vi
+      .spyOn(fileHandlePrototype, 'stat')
+      .mockImplementation(async function (this: fs.FileHandle, ...args) {
+        const result = await originalStat.apply(this, args);
+        return Object.defineProperty(result, 'ino', { value: 0 });
+      });
+
+    try {
+      await expect(
+        SessionWriterLease.acquire(fixture.options),
+      ).rejects.toBeInstanceOf(SessionTranscriptIdentityUnavailableError);
+      await expect(fs.readFile(fixture.transcriptPath, 'utf8')).resolves.toBe(
+        seed,
+      );
+    } finally {
+      stat.mockRestore();
+    }
   });
 
   it('detects a size change between handle and path stat', async () => {

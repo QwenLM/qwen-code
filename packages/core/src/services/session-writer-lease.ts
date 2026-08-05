@@ -106,13 +106,29 @@ export class SessionTranscriptChangedError extends SessionWriterError {
 }
 
 export class SessionWriterUnavailableError extends SessionWriterError {
-  override readonly name = 'SessionWriterUnavailableError';
+  override readonly name: string = 'SessionWriterUnavailableError';
   readonly rpcCode = SESSION_WRITER_RPC_CODES.session_writer_unavailable;
   readonly errorKind = 'session_writer_unavailable';
   readonly httpStatus = 503;
 
   constructor(options?: ErrorOptions) {
     super('Session write ownership could not be verified.', options);
+  }
+}
+
+export class SessionTranscriptIdentityUnavailableError extends SessionWriterUnavailableError {
+  override readonly name = 'SessionTranscriptIdentityUnavailableError';
+
+  constructor(cause?: Error) {
+    super({
+      cause:
+        cause ??
+        new Error(
+          'The session transcript filesystem does not provide a verifiable inode identity (ino=0).',
+        ),
+    });
+    this.message =
+      'Session transcript identity could not be verified on this filesystem.';
   }
 }
 
@@ -398,6 +414,14 @@ function transcriptFingerprint(stat: Stats): TranscriptFingerprint {
   };
 }
 
+function assertVerifiableTranscriptIdentity(
+  fingerprint: Pick<TranscriptFingerprint, 'ino'>,
+): void {
+  if (fingerprint.ino === 0) {
+    throw new SessionTranscriptIdentityUnavailableError();
+  }
+}
+
 function sameFileIdentity(
   left: TranscriptFingerprint,
   right: TranscriptFingerprint,
@@ -452,10 +476,12 @@ function sameTranscriptState(
 function transcriptStateFromStat(
   stat: Stats,
 ): Extract<TranscriptState, { exists: true }> {
+  const fingerprint = transcriptFingerprint(stat);
+  assertVerifiableTranscriptIdentity(fingerprint);
   return {
     exists: true,
     byteLength: stat.size,
-    fingerprint: transcriptFingerprint(stat),
+    fingerprint,
   };
 }
 
@@ -816,17 +842,10 @@ async function openTranscriptProof(
     ) {
       throw new SessionWriterUnavailableError();
     }
-    const beforeState: TranscriptState = {
-      exists: true,
-      byteLength: beforeStat.size,
-      fingerprint: transcriptFingerprint(beforeStat),
-    };
-    if (
-      !sameFileIdentity(
-        beforeState.fingerprint,
-        transcriptFingerprint(pathStat),
-      )
-    ) {
+    const beforeState = transcriptStateFromStat(beforeStat);
+    const beforePathFingerprint = transcriptFingerprint(pathStat);
+    assertVerifiableTranscriptIdentity(beforePathFingerprint);
+    if (!sameFileIdentity(beforeState.fingerprint, beforePathFingerprint)) {
       throw new SessionTranscriptChangedError();
     }
     if (beforeStat.size > 0) {
@@ -861,19 +880,14 @@ async function openTranscriptProof(
       handle.stat(),
       fs.lstat(filePath),
     ]);
-    const afterState: TranscriptState = {
-      exists: true,
-      byteLength: afterStat.size,
-      fingerprint: transcriptFingerprint(afterStat),
-    };
+    const afterState = transcriptStateFromStat(afterStat);
+    const afterPathFingerprint = transcriptFingerprint(afterPathStat);
+    assertVerifiableTranscriptIdentity(afterPathFingerprint);
     if (
       !sameTranscriptState(beforeState, afterState) ||
       !afterPathStat.isFile() ||
       afterPathStat.isSymbolicLink() ||
-      !sameFileIdentity(
-        afterState.fingerprint,
-        transcriptFingerprint(afterPathStat),
-      )
+      !sameFileIdentity(afterState.fingerprint, afterPathFingerprint)
     ) {
       throw new SessionTranscriptChangedError();
     }
@@ -920,14 +934,12 @@ async function validateOpenTranscriptProof(
     ) {
       throw new SessionWriterUnavailableError();
     }
-    const current: TranscriptState = {
-      exists: true,
-      byteLength: handleStat.size,
-      fingerprint: transcriptFingerprint(handleStat),
-    };
+    const current = transcriptStateFromStat(handleStat);
+    const pathFingerprint = transcriptFingerprint(pathStat);
+    assertVerifiableTranscriptIdentity(pathFingerprint);
     if (
       !sameTranscriptState(current, proof.state) ||
-      !sameFileIdentity(current.fingerprint, transcriptFingerprint(pathStat))
+      !sameFileIdentity(current.fingerprint, pathFingerprint)
     ) {
       throw new SessionTranscriptChangedError();
     }
@@ -1990,6 +2002,7 @@ export class SessionWriterLease {
       candidateHasher.update(bytes);
       const nextByteLength = expectedBefore.byteLength + bytes.byteLength;
       await this.readOwnedLock();
+      assertVerifiableTranscriptIdentity(beforeState.fingerprint);
       await handle.writeFile(bytes);
       await handle.sync();
       const afterStat = await handle.stat();

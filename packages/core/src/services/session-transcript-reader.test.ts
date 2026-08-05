@@ -16,9 +16,27 @@ const { mockDebugLogger } = vi.hoisted(() => ({
   },
 }));
 
+const { statFault } = vi.hoisted(() => ({
+  statFault: { zeroInode: false },
+}));
+
 vi.mock('../utils/debugLogger.js', () => ({
   createDebugLogger: () => mockDebugLogger,
 }));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    stat: async (...args: Parameters<typeof actual.stat>) => {
+      const result = await actual.stat(...args);
+      if (statFault.zeroInode) {
+        Object.defineProperty(result, 'ino', { value: 0 });
+      }
+      return result;
+    },
+  };
+});
 
 import { Storage } from '../config/storage.js';
 import type { ChatRecord } from './chatRecordingService.js';
@@ -52,6 +70,7 @@ describe('SessionTranscriptReader', () => {
   });
 
   afterEach(async () => {
+    statFault.zeroInode = false;
     resetSessionTranscriptIndexCacheForTest();
     Storage.setRuntimeBaseDir(null);
     await fs.rm(runtimeDir, { recursive: true, force: true });
@@ -753,6 +772,23 @@ describe('SessionTranscriptReader', () => {
         }),
       }),
     ).rejects.toBeInstanceOf(SessionTranscriptSnapshotUnavailableError);
+  });
+
+  it('allows the first cursor-less read when the filesystem reports inode zero', async () => {
+    await writeRecords([
+      record('u1', null, 'root'),
+      record('a1', 'u1', 'assistant'),
+    ]);
+    statFault.zeroInode = true;
+    try {
+      const page = await new SessionTranscriptReader(workspaceDir).readPage(
+        sessionId,
+        { limit: 1 },
+      );
+      expect(page.records.map((item) => item.uuid)).toEqual(['u1']);
+    } finally {
+      statFault.zeroInode = false;
+    }
   });
 
   it('accepts a file identity whose inode exceeds 2^53 (Windows file index)', async () => {

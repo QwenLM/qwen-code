@@ -1074,7 +1074,7 @@ export class SessionTranscriptReader {
     const fileIdentity = cursor?.fileIdentity ?? currentIdentity;
     if (
       stats.size < snapshotSize ||
-      !sameFileIdentity(currentIdentity, fileIdentity)
+      (cursor !== undefined && !sameFileIdentity(currentIdentity, fileIdentity))
     ) {
       debugLogger.warn(
         `snapshot unavailable session=${sessionId} ` +
