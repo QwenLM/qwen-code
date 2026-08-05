@@ -13,8 +13,17 @@ export type HighlightToken = {
   type: 'default' | 'command' | 'file';
 };
 
+// The @-ref alternatives must stay in sync with parseAllAtCommands in
+// hooks/atCommandProcessor.ts, or the input box paints a different span than
+// the parser will actually consume. A URL ref (`@https://…`) runs through the
+// full RFC 3986 charset — `%`, `?`, `&`, `=` are structural in a presigned
+// URL — while a filesystem ref keeps the narrower path charset.
 const HIGHLIGHT_REGEX =
-  /(^\/[a-zA-Z][a-zA-Z0-9:_-]*)|((?<=\s)\/[a-zA-Z][a-zA-Z0-9:_-]*)|(@(?:\\ |[a-zA-Z0-9_.:/-])+)/g;
+  /(^\/[a-zA-Z][a-zA-Z0-9:_-]*)|((?<=\s)\/[a-zA-Z][a-zA-Z0-9:_-]*)|(@https?:\/\/[A-Za-z0-9\-._~:/?#[\]@!$&'()*+,;=%]+)|(@(?:\\ |[a-zA-Z0-9_.:/-])+)/g;
+
+// Mirrors the parser's trailing-punctuation trim: '.'/','/';'/':'/'!'/'?' at
+// the very end of a URL are prose, not part of the ref.
+const TRAILING_URL_PUNCTUATION = /[.,;:!?]+$/;
 
 export function parseInputForHighlighting(
   text: string,
@@ -38,8 +47,19 @@ export function parseInputForHighlighting(
 
   HIGHLIGHT_REGEX.lastIndex = 0;
   while ((match = HIGHLIGHT_REGEX.exec(text)) !== null) {
-    const [fullMatch] = match;
+    let [fullMatch] = match;
     const matchIndex = match.index;
+
+    if (match[3] !== undefined) {
+      // URL ref: trailing sentence punctuation is prose (parser trims it the
+      // same way), so paint it default rather than file-colored.
+      const trimmed = fullMatch.replace(TRAILING_URL_PUNCTUATION, '');
+      if (trimmed.length > 1) {
+        fullMatch = trimmed;
+        // Rewind so the trimmed tail is re-scanned as default text.
+        HIGHLIGHT_REGEX.lastIndex = matchIndex + trimmed.length;
+      }
+    }
 
     // Add the text before the match as a default token
     if (matchIndex > lastIndex) {

@@ -67,6 +67,28 @@ describe('parseInputForHighlighting', () => {
     ]);
   });
 
+  // Must stay in sync with parseAllAtCommands: the parser consumes the whole
+  // presigned URL (query string included), so the input box has to paint the
+  // same span — a half-highlighted URL reads as "the rest will be dropped".
+  it('should highlight a URL ref through its full query string', () => {
+    const url =
+      'https://bucket.oss-cn-wulanchabu.aliyuncs.com/dir/%E8%BE%93%E5%87%BA.mp4' +
+      '?x-oss-credential=LTAI%2F20260805%2Foss&x-oss-signature=f1454dcb';
+    const text = `@${url} 这个视频是谁做的`;
+    expect(parseInputForHighlighting(text, 0)).toEqual([
+      { text: `@${url}`, type: 'file' },
+      { text: ' 这个视频是谁做的', type: 'default' },
+    ]);
+  });
+
+  it('should not paint trailing sentence punctuation of a URL ref', () => {
+    const text = '@https://example.com/a.mp4. Explain it';
+    expect(parseInputForHighlighting(text, 0)).toEqual([
+      { text: '@https://example.com/a.mp4', type: 'file' },
+      { text: '. Explain it', type: 'default' },
+    ]);
+  });
+
   it('should highlight a command in the middle when preceded by whitespace', () => {
     const text = 'I need /help with this';
     expect(parseInputForHighlighting(text, 0)).toEqual([
