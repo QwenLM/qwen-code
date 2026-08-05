@@ -8,22 +8,15 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
+import { getWorkflowJob, getWorkflowStep } from './workflow-helpers.js';
+
 const ROOT = path.resolve(import.meta.dirname, '../..');
 const NO_AK_SCRIPT = 'test:integration:no-ak:sandbox:none';
-
-function getWorkflowJob(workflow, jobName) {
-  const marker = `  ${jobName}:`;
-  const start = workflow.indexOf(marker);
-  expect(start).toBeGreaterThanOrEqual(0);
-
-  const afterMarker = workflow.slice(start + marker.length);
-  const nextJob = afterMarker.match(/\n {2}[a-zA-Z0-9_-]+:\n/);
-
-  return workflow.slice(
-    start,
-    nextJob ? start + marker.length + nextJob.index : undefined,
-  );
-}
+const GUARD_ACTION_PATH = '.github/actions/verify-checkout-head/action.yml';
+const CONFIGURE_ACTION_PATH =
+  '.github/actions/configure-windows-runner/action.yml';
+const NODE_ACTION_PATH = '.github/actions/self-hosted-node/action.yml';
+const GUARD_STEP = 'Verify checkout includes expected head commit';
 
 describe('no-AK integration CI wiring', () => {
   it('defines a focused no-AK integration script', () => {
@@ -136,6 +129,7 @@ describe('no-AK integration CI wiring', () => {
     const webShellJob = getWorkflowJob(workflow, 'web_shell_e2e_smoke');
     const macosJob = getWorkflowJob(workflow, 'test_macos');
     const windowsJob = getWorkflowJob(workflow, 'test_windows');
+    const integrationJob = getWorkflowJob(workflow, 'integration_cli');
 
     // On PRs every gate checks out refs/pull/N/head, which is published the
     // instant the branch is pushed, instead of the merge ref that GitHub
@@ -159,17 +153,304 @@ describe('no-AK integration CI wiring', () => {
     );
 
     // The cheap sanity guard stays: fail loud if HEAD lacks the expected head
-    // (PR head, or the merge-queue head once this job also runs on merge_group).
-    expect(ubuntuJob).toContain(
-      "name: 'Verify checkout includes expected head commit'",
+    // (PR head, or the merge-queue head once a job also runs on merge_group).
+    // Its body lives in one composite action so the four gates cannot drift;
+    // each caller keeps its own run condition and expected-SHA expression.
+    const guardAction = readFileSync(
+      path.join(ROOT, GUARD_ACTION_PATH),
+      'utf8',
     );
-    expect(ubuntuJob).toContain('git merge-base --is-ancestor');
-    expect(ubuntuJob).toContain('github.event.pull_request.head.sha');
-    expect(webShellJob).toContain(
-      "name: 'Verify checkout includes expected head commit'",
+    // Pin the reject path as one contiguous block so ordering is part of the
+    // contract: relocating `exit 1` into a never-taken branch would turn the
+    // guard into a pass-through for the stale checkouts it must reject while
+    // every substring pin stayed green.
+    expect(guardAction).toContain(
+      [
+        'if ! git merge-base --is-ancestor "${EXPECTED_SHA}" HEAD; then',
+        '          echo "::error::Checked out ref does not contain expected head ${EXPECTED_SHA}."',
+        '          git log --oneline --decorate -5',
+        '          exit 1',
+        '        fi',
+      ].join('\n'),
     );
-    expect(webShellJob).toContain('git merge-base --is-ancestor');
-    expect(webShellJob).toContain('github.event.pull_request.head.sha');
+    // Pin the input-to-env wiring too: re-binding EXPECTED_SHA to a context
+    // value (e.g. github.sha) would pass for every checkout, including the
+    // stale ones this guard must reject, while the pin above stays green.
+    expect(guardAction).toContain("EXPECTED_SHA: '${{ inputs.expected_sha }}'");
+
+    const guardCalls = {
+      test: getWorkflowStep(ubuntuJob, GUARD_STEP),
+      web_shell_e2e_smoke: getWorkflowStep(webShellJob, GUARD_STEP),
+      test_windows: getWorkflowStep(windowsJob, GUARD_STEP),
+      integration_cli: getWorkflowStep(integrationJob, GUARD_STEP),
+    };
+    for (const [jobName, call] of Object.entries(guardCalls)) {
+      expect(call, `${jobName} guard must use the shared action`).toContain(
+        "uses: './.github/actions/verify-checkout-head'",
+      );
+    }
+    expect(guardCalls.test).toContain(
+      'expected_sha: "${{ github.event_name == \'merge_group\' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"',
+    );
+    expect(guardCalls.web_shell_e2e_smoke).toContain(
+      "expected_sha: '${{ github.event.pull_request.head.sha }}'",
+    );
+    expect(guardCalls.test_windows).toContain(
+      "expected_sha: '${{ github.event.merge_group.head_sha }}'",
+    );
+    expect(guardCalls.integration_cli).toContain(
+      "expected_sha: '${{ github.event.merge_group.head_sha }}'",
+    );
+
+    // The run conditions are part of the guard's contract: scoping a guard to
+    // the wrong runner class or dropping an event would silently disable it.
+    // integration_cli has no step-level if; its job-level merge_group gate
+    // already covers it.
+    expect(guardCalls.test).toContain(
+      "if: \"${{ needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}\"",
+    );
+    expect(guardCalls.web_shell_e2e_smoke).toContain(
+      'if: "${{ github.event_name == \'pull_request\' }}"',
+    );
+    expect(guardCalls.test_windows).toContain(
+      'if: "${{ needs.classify_pr.outputs.skip_ci != \'true\' }}"',
+    );
+    expect(guardCalls.integration_cli).not.toContain('if:');
+  });
+
+  it('pins the Windows gate kill-switch routing, tuning, and Node split', () => {
+    const workflow = readFileSync(
+      path.join(ROOT, '.github/workflows/ci.yml'),
+      'utf8',
+    );
+    const windowsJob = getWorkflowJob(workflow, 'test_windows');
+
+    // The runs-on expression is the Windows gate's escape hatch. Pin the
+    // whole line so a variable typo, a quoting regression in the nested
+    // ''true'' escapes, or an && / || regrouping fails here instead of
+    // surfacing only when the switch is flipped.
+    const windowsRunsOn = windowsJob
+      .split('\n')
+      .find((line) => line.startsWith('    runs-on:'));
+    expect(windowsRunsOn).toBe(
+      `    runs-on: '\${{ vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && fromJSON(''["self-hosted", "Windows", "X64", "ecs-win"]'') || fromJSON(''["windows-2022"]'') }}'`,
+    );
+    expect(windowsJob.split('\n')).toContain('    timeout-minutes: 60');
+
+    // The guard must stay wired to the merge-queue head for this job.
+    const guard = getWorkflowStep(windowsJob, GUARD_STEP);
+    expect(guard).toContain("uses: './.github/actions/verify-checkout-head'");
+    expect(guard).toContain(
+      "expected_sha: '${{ github.event.merge_group.head_sha }}'",
+    );
+
+    // The self-hosted-only tuning comes from the composite action shared with
+    // windows-runner-smoke.yml, and only runs on self-hosted machines.
+    const configure = getWorkflowStep(
+      windowsJob,
+      'Configure self-hosted Windows test environment',
+    );
+    expect(configure).toContain(
+      "if: \"${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' }}\"",
+    );
+    expect(configure).toContain(
+      "uses: './.github/actions/configure-windows-runner'",
+    );
+    const configureAction = readFileSync(
+      path.join(ROOT, CONFIGURE_ACTION_PATH),
+      'utf8',
+    );
+    expect(configureAction).toContain("shell: 'powershell'");
+    const autocrlfStep = getWorkflowStep(
+      windowsJob,
+      'Disable Git CRLF conversion (self-hosted)',
+    );
+    expect(autocrlfStep).toContain(
+      "if: \"${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' }}\"",
+    );
+
+    // Repository-local `./` actions resolve from the job workspace, so the
+    // checkout must precede them or a fresh runner fails before checking out;
+    // autocrlf is turned off before the checkout itself (belt-and-braces
+    // alongside .gitattributes' eol=lf) so even a freshly provisioned machine
+    // checks out LF-only files.
+    const windowsCheckoutIndex = windowsJob.indexOf("name: 'Checkout'");
+    const autocrlfIndex = windowsJob.indexOf(
+      'git config --global core.autocrlf false',
+    );
+    const configureUseIndex = windowsJob.indexOf(
+      "uses: './.github/actions/configure-windows-runner'",
+    );
+    const guardUseIndex = windowsJob.indexOf(
+      "uses: './.github/actions/verify-checkout-head'",
+    );
+    expect(windowsCheckoutIndex).toBeGreaterThanOrEqual(0);
+    expect(autocrlfIndex).toBeGreaterThanOrEqual(0);
+    expect(autocrlfIndex).toBeLessThan(windowsCheckoutIndex);
+    expect(configureUseIndex).toBeGreaterThan(windowsCheckoutIndex);
+    expect(guardUseIndex).toBeGreaterThan(windowsCheckoutIndex);
+    expect(configureUseIndex).toBeLessThan(guardUseIndex);
+    for (const line of [
+      '"TEMP=$env:RUNNER_TEMP"',
+      '"TMP=$env:RUNNER_TEMP"',
+      '"LC_ALL=C.UTF-8"',
+    ]) {
+      expect(configureAction).toContain(
+        `${line} | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append`,
+      );
+    }
+    expect(configureAction).toContain(
+      "$gitBash = 'C:\\Program Files\\Git\\bin'",
+    );
+    expect(configureAction).toContain('Test-Path $gitBash');
+    expect(configureAction).toContain(
+      '$gitBash | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append',
+    );
+    // The runner-validation smoke must consume the same action, or it
+    // validates a different configuration than the gate actually uses.
+    const smokeWorkflow = readFileSync(
+      path.join(ROOT, '.github/workflows/windows-runner-smoke.yml'),
+      'utf8',
+    );
+    expect(smokeWorkflow).toContain(
+      "uses: './.github/actions/configure-windows-runner'",
+    );
+    expect(smokeWorkflow).toContain('npm run test:ci');
+    expect(smokeWorkflow).not.toContain(
+      'npm run test:ci --workspaces --if-present --parallel',
+    );
+    // Same ordering as the gate: autocrlf off before the checkout, the `./`
+    // configure action after it.
+    const smokeCheckoutIndex = smokeWorkflow.indexOf("name: 'Checkout'");
+    const smokeAutocrlfIndex = smokeWorkflow.indexOf(
+      'git config --global core.autocrlf false',
+    );
+    expect(smokeCheckoutIndex).toBeGreaterThanOrEqual(0);
+    expect(smokeAutocrlfIndex).toBeGreaterThanOrEqual(0);
+    expect(smokeAutocrlfIndex).toBeLessThan(smokeCheckoutIndex);
+    expect(
+      smokeWorkflow.indexOf(
+        "uses: './.github/actions/configure-windows-runner'",
+      ),
+    ).toBeGreaterThan(smokeCheckoutIndex);
+    // The smoke runs behind the same caching egress proxy as the gate, so it
+    // takes the same stale-checkout guard, pinned to the dispatched head.
+    expect(
+      smokeWorkflow.indexOf("uses: './.github/actions/verify-checkout-head'"),
+    ).toBeGreaterThan(smokeCheckoutIndex);
+    expect(smokeWorkflow).toContain("expected_sha: '${{ github.sha }}'");
+    // The smoke is self-hosted-only, so it must take the same Node path as
+    // the gate's self-hosted side: the pre-installed Node, never a nodejs.org
+    // download the ECS egress proxy cannot reach.
+    expect(smokeWorkflow).toContain(
+      "uses: './.github/actions/self-hosted-node'",
+    );
+    expect(smokeWorkflow).not.toContain('actions/setup-node');
+    // The gate's run steps inherit ci.yml's workflow-level bash default, so
+    // the smoke must execute these commands under the same shell; a
+    // powershell pin there would validate a shell the gate never runs.
+    const smokeJob = getWorkflowJob(smokeWorkflow, 'validate');
+    for (const stepName of [
+      'Configure persistent npm cache (self-hosted)',
+      'Configure npm for rate limiting',
+      'Install dependencies',
+      'Run tests and generate reports',
+    ]) {
+      expect(getWorkflowStep(smokeJob, stepName)).toContain("shell: 'bash'");
+    }
+    // Both workflows declare the persistent npm cache step; the gate's
+    // self-hosted path exports NPM_CONFIG_CACHE for every later npm command.
+    expect(
+      getWorkflowStep(smokeJob, 'Configure persistent npm cache (self-hosted)'),
+    ).toContain('NPM_CONFIG_CACHE=');
+    const gateNpmCache = getWorkflowStep(
+      windowsJob,
+      'Configure persistent npm cache (self-hosted)',
+    );
+    expect(gateNpmCache).toContain(
+      "if: \"${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' }}\"",
+    );
+    expect(gateNpmCache).toContain('NPM_CONFIG_CACHE=');
+
+    // Node split: hosted runners download Node, self-hosted runners reuse
+    // their pre-installed one: fail loud when Node is missing, warn when the
+    // major is not 22.
+    const hostedSetup = getWorkflowStep(
+      windowsJob,
+      'Set up Node.js 22.x (hosted)',
+    );
+    expect(hostedSetup).toContain(
+      "if: \"${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment != 'self-hosted' }}\"",
+    );
+    const selfHostedNode = getWorkflowStep(
+      windowsJob,
+      'Use pre-installed Node.js (self-hosted)',
+    );
+    expect(selfHostedNode).toContain(
+      "if: \"${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' }}\"",
+    );
+    expect(selfHostedNode).toContain(
+      "uses: './.github/actions/self-hosted-node'",
+    );
+    const nodeAction = readFileSync(path.join(ROOT, NODE_ACTION_PATH), 'utf8');
+    expect(nodeAction).toContain('if ! command -v node >/dev/null 2>&1; then');
+    expect(nodeAction).toContain('exit 1');
+    expect(nodeAction).toContain(
+      'if [[ "$(node -p \'process.versions.node.split(".")[0]\')" != "22" ]]; then',
+    );
+    expect(nodeAction).toContain('::warning::Expected Node 22.x but found');
+  });
+
+  it('keeps install-script.test.js out of the win32 exclude list', () => {
+    // install-script.test.js is the only home of the nine Windows installer
+    // end-to-end cases; excluding it on win32 would silently drop coverage
+    // docs/design/windows-ecs-ci-validation.md declares required.
+    const scriptSuiteConfig = readFileSync(
+      path.join(ROOT, 'scripts/tests/vitest.config.ts'),
+      'utf8',
+    );
+    expect(scriptSuiteConfig).not.toContain(
+      "'scripts/tests/install-script.test.js'",
+    );
+  });
+
+  it('pins the shared Node preflight wiring on the Linux gates', () => {
+    const workflow = readFileSync(
+      path.join(ROOT, '.github/workflows/ci.yml'),
+      'utf8',
+    );
+
+    // The Windows gate and the smoke workflow are pinned above; these three
+    // call sites must be pinned too, or a revert to the inline pre-PR script
+    // keeps the suite green and only surfaces when a self-hosted machine
+    // lacks Node on PATH and runs without the preflight's fail-fast error.
+    const nodeCalls = {
+      test: getWorkflowStep(
+        getWorkflowJob(workflow, 'test'),
+        'Use pre-installed Node.js (self-hosted)',
+      ),
+      web_shell_e2e_smoke: getWorkflowStep(
+        getWorkflowJob(workflow, 'web_shell_e2e_smoke'),
+        'Use pre-installed Node.js (self-hosted)',
+      ),
+      integration_cli: getWorkflowStep(
+        getWorkflowJob(workflow, 'integration_cli'),
+        'Use pre-installed Node.js (self-hosted)',
+      ),
+    };
+    for (const [jobName, call] of Object.entries(nodeCalls)) {
+      expect(call, `${jobName} must use the shared Node preflight`).toContain(
+        "uses: './.github/actions/self-hosted-node'",
+      );
+    }
+    expect(nodeCalls.test).toContain(
+      "if: \"${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}\"",
+    );
+    for (const jobName of ['web_shell_e2e_smoke', 'integration_cli']) {
+      expect(nodeCalls[jobName]).toContain(
+        'if: "${{ runner.environment == \'self-hosted\' }}"',
+      );
+    }
   });
 
   it('keeps the lightweight coverage comment job on the hosted runner', () => {
