@@ -361,15 +361,13 @@ function mapProviderId(
 
 function mapIdealabProvider(modelId: string): string | undefined {
   if (/^qwen.*-dogfooding$/i.test(modelId)) return 'alibaba-cn';
-  switch (modelId.toLowerCase()) {
-    case 'bailian/deepseek-v4-pro':
-    case 'bailian/deepseek-v4-flash':
-      return 'deepseek';
-    case 'bailian/kimi-k2.6':
-      return 'moonshotai';
-    default:
-      return undefined;
-  }
+  const bailianModelId = modelId.match(/^bailian\/(.+)$/i)?.[1];
+  if (!bailianModelId) return undefined;
+  if (/^deepseek(?:[-./]|$)/i.test(bailianModelId)) return 'deepseek';
+  if (/^kimi(?:[-./]|$)/i.test(bailianModelId)) return 'moonshotai';
+  if (/^minimax(?:[-./]|$)/i.test(bailianModelId)) return 'minimax';
+  if (/^qwen(?:\d|[-.]|$)/i.test(bailianModelId)) return 'alibaba-cn';
+  return undefined;
 }
 
 export function getProviderDefaultModalities(

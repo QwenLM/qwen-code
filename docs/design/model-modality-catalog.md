@@ -53,8 +53,8 @@ China and international Alibaba catalogs remain distinct. A missing endpoint
 uses the local provider's default region, while an endpoint that models.dev
 does not list falls back to the model-id heuristic instead of borrowing another
 region's metadata. Idealab's `Qwen*-DogFooding` models and its listed
-DeepSeek/Kimi aliases resolve to the corresponding Alibaba China, DeepSeek, or
-Moonshot model IDs.
+`bailian/` aliases resolve by model family to the corresponding Alibaba China,
+DeepSeek, Moonshot, or MiniMax model IDs.
 
 OpenRouter model variants first use an exact catalog entry. When models.dev
 does not list the variant, the recognized OpenRouter suffixes `:free`,

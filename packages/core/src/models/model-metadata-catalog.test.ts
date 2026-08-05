@@ -256,6 +256,19 @@ describe('getCatalogModalities', () => {
       'kimi-k2.6',
       { image: true, video: true },
     ],
+    ['bailian/kimi-k3', 'moonshotai', 'kimi-k3', { image: true, video: true }],
+    [
+      'bailian/minimax-m3',
+      'minimax',
+      'MiniMax-M3',
+      { image: true, video: true },
+    ],
+    [
+      'bailian/qwen3.8-max',
+      'alibaba-cn',
+      'qwen3.8-max',
+      { image: true, video: true },
+    ],
   ])(
     'resolves the Idealab alias %s through %s model %s',
     (modelId, providerId, officialModelId, expected) => {
@@ -290,7 +303,7 @@ describe('getCatalogModalities', () => {
         {
           deepseek: {
             models: {
-              'deepseek-unlisted': {
+              'deepseek-other': {
                 modalities: { input: ['text', 'image'] },
               },
             },
@@ -299,6 +312,23 @@ describe('getCatalogModalities', () => {
         {
           providerId: 'idealab',
           modelId: 'bailian/deepseek-unlisted',
+        },
+      ),
+    ).toBeUndefined();
+    expect(
+      getCatalogModalities(
+        {
+          minimax: {
+            models: {
+              'vendor-model': {
+                modalities: { input: ['text', 'image'] },
+              },
+            },
+          },
+        },
+        {
+          providerId: 'idealab',
+          modelId: 'bailian/vendor-model',
         },
       ),
     ).toBeUndefined();
