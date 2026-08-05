@@ -15,8 +15,8 @@
  * `checksums.txt` is fetched from the same source order, so whichever source
  * wins controls both the asset and its expected hash. The real second factor
  * on macOS is signing — the binaries are Developer-ID-signed + Apple-notarized
- * by Cua AI, Inc., so they pass Gatekeeper; Linux/Windows have no equivalent
- * signature check.
+ * by the Qwen release identity, so they pass Gatekeeper; Linux/Windows have no
+ * equivalent signature check.
  */
 
 import { createHash } from 'node:crypto';
@@ -94,8 +94,8 @@ async function fetchFirst(
     try {
       // 30s timeout on obtaining the RESPONSE/headers only — a stalled mirror
       // (TCP connects but never responds) fails over in ~30s. Cleared the
-      // moment headers arrive so the body download is NOT capped: a ~20MB
-      // binary over a slow/throttled CN→GitHub link routinely needs more than
+      // moment headers arrive so the body download is NOT capped: a platform
+      // bundle over a slow/throttled CN→GitHub link may need more than
       // 30s, and capping the whole transfer would abort it mid-stream — the
       // exact failure the mirror + fallback exist to avoid. (review round 2)
       const controller = new AbortController();
@@ -142,7 +142,7 @@ export async function ensureInstalled(opts: InstallOptions): Promise<string> {
   if (existing) return existing;
 
   const target = resolveAssetTarget(platform, arch, version);
-  onProgress?.('Downloading Computer Use driver (~20MB, one time)...');
+  onProgress?.('Downloading Qwen CUA driver (one time)...');
 
   // 1. Resolve expected sha256 from checksums.txt (first reachable source).
   const { res: sumRes } = await fetchFirst(
@@ -221,16 +221,16 @@ export async function ensureInstalled(opts: InstallOptions): Promise<string> {
     await chmod(bin, 0o755);
   }
 
-  // 6. macOS: prepare CuaDriver.app for the TCC auto-relaunch path.
+  // 6. macOS: prepare QwenCuaDriver.app for the TCC auto-relaunch path.
   if (platform === 'darwin' && target.hasApp) {
     const extractRoot = join(dir, target.extractDir);
-    const appDir = join(extractRoot, 'CuaDriver.app');
+    const appDir = join(extractRoot, 'QwenCuaDriver.app');
     // Strip quarantine so the notarized app launches without a Gatekeeper
     // prompt (best-effort; notarized binaries pass regardless).
     await stripQuarantine(extractRoot);
-    // Register with LaunchServices so cua-driver's `open -a CuaDriver serve`
+    // Register with LaunchServices so `open -a QwenCuaDriver serve`
     // relaunch resolves THIS copy under ~/.qwen — that relaunch is what makes
-    // TCC attribute Accessibility / Screen Recording to com.trycua.driver
+    // TCC attribute Accessibility / Screen Recording to com.qwencode.cua-driver
     // instead of the launching terminal (iTerm/Terminal/VS Code). Without it
     // the auto-relaunch can't find our app and falls back to the terminal's
     // TCC identity. Best-effort; non-fatal.
@@ -253,7 +253,7 @@ async function registerLaunchServices(appPath: string): Promise<void> {
     await promisify(execFile)(LSREGISTER, ['-f', appPath], { timeout: 15_000 });
   } catch {
     // Non-fatal: if registration fails the relaunch may resolve a different
-    // CuaDriver.app or stay in-process. The driver still works; only the TCC
+    // QwenCuaDriver.app or stay in-process. The driver still works; only the TCC
     // identity attribution is affected.
   }
 }

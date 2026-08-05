@@ -7,9 +7,10 @@
 /**
  * Computer Use bootstrap state machine (cua-driver backend).
  *
- * cua-driver is a persistent daemon (`CuaDriver serve` under com.trycua.driver)
- * fronted by a thin `cua-driver mcp` stdio proxy. Tools only work once the
- * daemon has BOTH macOS grants (Accessibility + Screen Recording).
+ * qwen-cua-driver is a persistent daemon (`QwenCuaDriver serve` under
+ * com.qwencode.cua-driver) fronted by a thin `qwen-cua-driver mcp` stdio proxy.
+ * Tools only work once the daemon has BOTH macOS grants (Accessibility +
+ * Screen Recording).
  *
  * First-use permission flow — driven so the user grants ONE permission at a
  * time, and so we can reliably detect progress (the two problems with the
@@ -18,7 +19,7 @@
  * partial grant is undetectable). Instead:
  *
  *   1. Run a status-only daemon with `serve --no-permissions-gate` (launched
- *      via `open -a CuaDriver` so it carries the com.trycua.driver identity).
+ *      via `open -a QwenCuaDriver` so it carries the Qwen app identity).
  *      With the gate off it SERVES IMMEDIATELY even with no grants, so
  *      `permissions status --json` returns accurate PER-PERMISSION booleans.
  *   2. POLL status every 5s. Open the System Settings pane for whichever
@@ -75,7 +76,7 @@ export interface BootstrapDeps {
   install: (onProgress?: (m: string) => void) => Promise<string>;
   /**
    * Launch a status-only daemon (`serve --no-permissions-gate` via
-   * `open -a CuaDriver`) so `permissions status` returns per-permission
+   * `open -a QwenCuaDriver`) so `permissions status` returns per-permission
    * booleans even before any grant. Returns a handle to tear it down.
    */
   startStatusDaemon: () => StatusDaemon;
@@ -109,13 +110,19 @@ export function parsePermissionsStatus(json: string): PermissionProbeResult {
 }
 
 const SOCKET = () =>
-  join(homedir(), 'Library', 'Caches', 'cua-driver', 'cua-driver.sock');
+  join(
+    homedir(),
+    'Library',
+    'Caches',
+    'qwen-cua-driver',
+    'qwen-cua-driver.sock',
+  );
 
 function killServeDaemons(): void {
   try {
     spawnSync(
       'pkill',
-      ['-f', 'CuaDriver.app/Contents/MacOS/cua-driver serve'],
+      ['-f', 'QwenCuaDriver.app/Contents/MacOS/qwen-cua-driver serve'],
       {
         stdio: 'ignore',
       },
@@ -145,8 +152,8 @@ export async function probePermissionsViaStatus(): Promise<PermissionProbeResult
 }
 
 /**
- * Launch the status-only daemon. `open -a CuaDriver` gives it the
- * com.trycua.driver TCC identity; `--no-permissions-gate` makes it serve
+ * Launch the status-only daemon. `open -a QwenCuaDriver` gives it the
+ * com.qwencode.cua-driver TCC identity; `--no-permissions-gate` makes it serve
  * immediately so status reads work before grants land. Kills any prior daemon
  * first so there is exactly one.
  */
@@ -159,7 +166,7 @@ export function startStatusDaemonProcess(): StatusDaemon {
         '-n',
         '-g',
         '-a',
-        'CuaDriver',
+        'QwenCuaDriver',
         '--args',
         'serve',
         '--no-permissions-gate',
@@ -202,7 +209,7 @@ function defaultDeps(): BootstrapDeps {
       process.stderr.write(
         `\n[Computer Use] First-time setup\n` +
           `  Driver: ${key}\n` +
-          `  This downloads a ~20MB signed + notarized binary into ~/.qwen/computer-use/.\n` +
+          `  This downloads the pinned Qwen CUA bundle into ~/.qwen/computer-use/ (signed + notarized on macOS).\n` +
           `  Computer Use can click, type, and read your desktop apps in the background.\n` +
           `  On macOS you'll be guided through Accessibility and Screen Recording permissions next.\n` +
           `Set QWEN_COMPUTER_USE_AUTO_APPROVE=1 to skip this prompt.\n`,
@@ -230,7 +237,7 @@ export async function runBootstrap(
   // them run again. This MUST precede the install gate and `deps.install()`:
   // a started client implies the binary already exists, and otherwise a unit
   // test that injects a started fake client still triggers the real downloader
-  // (network + ~20MB) and writes install-state into the repo CWD. (review #1)
+  // (network + platform bundle) and writes install-state into the repo CWD.
   if (client.isStarted()) return;
 
   // Step 1: install approval gate (gates the download).
@@ -315,13 +322,13 @@ async function ensurePermissions(
           deps.openPermissionPane('accessibility');
           ctx.updateOutput?.(
             'Step 1/2 — In the System Settings window that opened ' +
-              '(Privacy & Security → Accessibility), turn ON CuaDriver. ' +
+              '(Privacy & Security → Accessibility), turn ON QwenCuaDriver. ' +
               'This continues automatically.',
           );
         } else {
           const elapsed = Math.round((Date.now() - startedAt) / 1000);
           ctx.updateOutput?.(
-            `Waiting for Accessibility… (${elapsed}s) — enable CuaDriver in System Settings.`,
+            `Waiting for Accessibility… (${elapsed}s) — enable QwenCuaDriver in System Settings.`,
           );
         }
         continue;
@@ -334,13 +341,13 @@ async function ensurePermissions(
         ctx.updateOutput?.(
           'Step 2/2 — Accessibility granted. Now in System Settings ' +
             '(Privacy & Security → Screen & System Audio Recording), turn ON ' +
-            'CuaDriver. macOS will ask to restart CuaDriver — allow it; that is ' +
+            'QwenCuaDriver. macOS will ask to restart QwenCuaDriver — allow it; that is ' +
             'expected. This continues automatically.',
         );
       } else {
         const elapsed = Math.round((Date.now() - startedAt) / 1000);
         ctx.updateOutput?.(
-          `Waiting for Screen Recording… (${elapsed}s) — enable CuaDriver in System Settings.`,
+          `Waiting for Screen Recording… (${elapsed}s) — enable QwenCuaDriver in System Settings.`,
         );
       }
     }

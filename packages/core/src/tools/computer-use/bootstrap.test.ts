@@ -15,7 +15,7 @@ import {
   type StatusDaemon,
 } from './bootstrap.js';
 
-const KEY = 'cua-driver-rs@0.5.2';
+const KEY = 'cua-driver-rs@0.17.0';
 
 function makeFakeClient() {
   const start = vi.fn(async () => {});
@@ -41,7 +41,7 @@ describe('runBootstrap', () => {
       approvalKey: KEY,
       platform: 'darwin',
       promptInstallApproval: vi.fn(async () => true),
-      install: vi.fn(async () => '/fake/cua-driver'),
+      install: vi.fn(async () => '/fake/qwen-cua-driver'),
       startStatusDaemon: vi.fn(() => daemon),
       probePermissions: vi.fn(async () => 'ok' as const),
       openPermissionPane: vi.fn(),
@@ -234,7 +234,7 @@ describe('runBootstrap', () => {
     expect(deps.startStatusDaemon).not.toHaveBeenCalled();
     // The warm-client short-circuit must precede the install step: a started
     // client implies the binary is present, so the downloader must NOT run
-    // (otherwise unit tests trigger a real ~20MB download). (review round 1)
+    // (otherwise unit tests trigger a real platform-bundle download).
     expect(deps.install).not.toHaveBeenCalled();
   });
 });
