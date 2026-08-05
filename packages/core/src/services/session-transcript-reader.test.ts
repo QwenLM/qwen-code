@@ -1512,6 +1512,95 @@ describe('SessionTranscriptReader', () => {
       expect(page.hasMore).toBe(true);
     });
 
+    it('extends the page to an owning call several records below the selection', async () => {
+      // One call owning three tool_result records, deep enough below the
+      // natural selection start that a one-record walk budget cannot reach
+      // it: the page must still extend through the whole result run to the
+      // owning call instead of starting mid-pair on a tool_result.
+      const records: ChatRecord[] = [record('u1', null, 'prompt')];
+      records.push(toolCallRecord('ac1', 'u1', 'call-1'));
+      let parent = 'ac1';
+      for (let i = 0; i < 3; i++) {
+        records.push(toolResultRecord(`ar${i}`, parent, 'call-1'));
+        parent = `ar${i}`;
+      }
+      for (let i = 1; i <= 5; i++) {
+        records.push(record(`af${i}`, parent, `filler ${i}`));
+        parent = `af${i}`;
+      }
+      await writeRecords(records);
+
+      // limit 3 lands the natural selection start on the third result
+      // (ar2); the owning call sits three records below it, at the edge of
+      // the one-window pair-extension budget.
+      const page = await new SessionTranscriptReader(workspaceDir).readPage(
+        sessionId,
+        { direction: 'backward', limit: 3 },
+      );
+
+      expect(page.records.map((item) => item.uuid)).toEqual([
+        'ac1',
+        'ar0',
+        'ar1',
+        'ar2',
+        'af1',
+        'af2',
+        'af3',
+        'af4',
+        'af5',
+      ]);
+      expect(page.records.at(0)?.type).not.toBe('tool_result');
+      expect(page.hasMore).toBe(true);
+    });
+
+    it('caps pair extension at the byte budget for a large result batch', async () => {
+      // A long single turn whose tail holds a parallel batch of large
+      // tool_result records owned by one call. The byte budget stops the
+      // selection mid-batch; pair extension toward the owner would absorb
+      // the rest of the batch and balloon the page far past the budget
+      // (toward the route's hard response cap), so the bounded selection
+      // must stand and chaining continues from the mid-batch anchor.
+      const records: ChatRecord[] = [record('u1', null, 'prompt')];
+      let parent = 'u1';
+      for (let i = 1; i <= 150; i++) {
+        records.push(record(`af${i}`, parent, `step ${i}`));
+        parent = `af${i}`;
+      }
+      records.push(toolCallRecord('ac1', parent, 'call-1'));
+      parent = 'ac1';
+      for (let i = 0; i < 50; i++) {
+        const resultUuid = `ar${i}`;
+        records.push({
+          ...toolResultRecord(resultUuid, parent, 'call-1'),
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  name: 'run_shell_command',
+                  id: 'call-1',
+                  response: { output: 'x'.repeat(4000) },
+                },
+              },
+            ],
+          },
+        });
+        parent = resultUuid;
+      }
+      await writeRecords(records);
+
+      const page = await new SessionTranscriptReader(workspaceDir).readPage(
+        sessionId,
+        { direction: 'backward', limit: 100, maxBytes: 10000 },
+      );
+
+      // The budget admits two large results; the 49-record extension to the
+      // owning call does not fit one extra budget, so the page stays at the
+      // bounded selection (a mid-batch boundary) instead of 51 records.
+      expect(page.records.map((item) => item.uuid)).toEqual(['ar48', 'ar49']);
+      expect(page.hasMore).toBe(true);
+    });
+
     it('caps pair extension for a long tool_result run', async () => {
       // One assistant record owning a long contiguous tool_result run (a
       // persisted parallel batch): the walk toward the owning call must

@@ -502,22 +502,45 @@ function isReplayPageStart(index: TranscriptIndex, uuid: string): boolean {
   );
 }
 
-// Walk backward from `from` toward the nearest replay turn start, never below
-// `floor`. The returned index is a turn start only if one exists within the
-// bound; otherwise it is `floor` itself, so callers must re-check the result.
-function findReplayTurnStartAtOrBefore(
+// Walk backward from `from` toward the nearest record matching `isBoundary`,
+// never below `floor`. The returned index is a boundary only if one exists
+// within the bound; otherwise it is `floor` itself, so callers must re-check
+// the result.
+function findReplayBoundaryAtOrBefore(
   index: TranscriptIndex,
   from: number,
   floor: number,
+  isBoundary: (index: TranscriptIndex, uuid: string) => boolean,
 ): number {
   let candidate = from;
   while (
     candidate > floor &&
-    !isReplayTurnStart(index, index.activeUuids[candidate]!)
+    !isBoundary(index, index.activeUuids[candidate]!)
   ) {
     candidate--;
   }
   return candidate;
+}
+
+function replayExtensionFitsByteBudget(
+  index: TranscriptIndex,
+  extensionStart: number,
+  selectedStart: number,
+  selectedBytes: number,
+  maxBytes: number | undefined,
+): boolean {
+  if (maxBytes === undefined) return true;
+  // Mirrors the one-extra-window record bound: the extension may overshoot
+  // the soft byte budget by at most one extra budget, so a large persisted
+  // result batch cannot balloon the page toward the route's hard response
+  // cap, where serialization fails and pagination dead-ends.
+  const ceiling = 2 * maxBytes;
+  let total = selectedBytes;
+  for (let i = selectedStart - 1; i >= extensionStart; i--) {
+    total += recordSegmentBytes(index, index.activeUuids[i]!);
+    if (total > ceiling) return false;
+  }
+  return true;
 }
 
 function selectBackwardPageUuids(
@@ -540,7 +563,12 @@ function selectBackwardPageUuids(
   // and making anchor-based pagination dead-end at the file head. Allow at
   // most one extra window (`limit` records) of expansion.
   const expansionFloor = Math.max(0, position - 2 * limit);
-  start = findReplayTurnStartAtOrBefore(index, start, expansionFloor);
+  start = findReplayBoundaryAtOrBefore(
+    index,
+    start,
+    expansionFloor,
+    isReplayTurnStart,
+  );
 
   let selectedStart = position;
   let selectedBytes = 0;
@@ -569,23 +597,23 @@ function selectBackwardPageUuids(
     }
   }
   if (alignedToReplayBoundary && selectedStart > 0) {
-    let previousTurnStart = selectedStart - 1;
-    while (
-      previousTurnStart >= 0 &&
-      !isReplayTurnStart(index, index.activeUuids[previousTurnStart]!)
-    ) {
-      previousTurnStart--;
-    }
+    const previousTurnStart = findReplayBoundaryAtOrBefore(
+      index,
+      selectedStart - 1,
+      -1,
+      isReplayTurnStart,
+    );
     if (previousTurnStart < 0) {
       selectedStart = 0;
     }
   } else if (!alignedToReplayBoundary) {
     // Expansion only pays off when it reaches a turn boundary; otherwise
     // keep the limit/maxBytes-respecting selection.
-    const candidate = findReplayTurnStartAtOrBefore(
+    const candidate = findReplayBoundaryAtOrBefore(
       index,
       selectedStart,
       expansionFloor,
+      isReplayTurnStart,
     );
     if (isReplayTurnStart(index, index.activeUuids[candidate]!)) {
       selectedStart = candidate;
@@ -600,18 +628,30 @@ function selectBackwardPageUuids(
   // The walk is bounded to one window below the selection: one assistant
   // record can own an arbitrarily long contiguous tool_result run (a
   // persisted parallel batch), and an uncapped walk would balloon the page
-  // far past `limit`/`maxBytes` — reintroducing the unbounded growth this
-  // function exists to cap. An owner beyond that budget keeps the bounded
-  // selection, accepting a mid-pair boundary in that edge.
+  // far past `limit` — reintroducing the unbounded growth this function
+  // exists to cap. The extension is likewise bounded to one extra byte
+  // budget: the selection above already stopped at `maxBytes`, so absorbing
+  // a large result batch unchecked could push the page past the route's
+  // response cap, where serialization fails and backward pagination
+  // dead-ends at this anchor on every retry. An owner beyond either budget
+  // keeps the bounded selection, accepting a mid-pair boundary in that edge.
   const pairFloor = Math.max(0, selectedStart - limit);
-  let pairStart = selectedStart;
-  while (
-    pairStart > pairFloor &&
-    !isReplayPageStart(index, index.activeUuids[pairStart]!)
+  const pairStart = findReplayBoundaryAtOrBefore(
+    index,
+    selectedStart,
+    pairFloor,
+    isReplayPageStart,
+  );
+  if (
+    isReplayPageStart(index, index.activeUuids[pairStart]!) &&
+    replayExtensionFitsByteBudget(
+      index,
+      pairStart,
+      selectedStart,
+      selectedBytes,
+      maxBytes,
+    )
   ) {
-    pairStart--;
-  }
-  if (isReplayPageStart(index, index.activeUuids[pairStart]!)) {
     selectedStart = pairStart;
   }
 
