@@ -120,7 +120,15 @@ export function sniffMediaType(header: Buffer): SniffedType | null {
     if (header.subarray(0, 3).toString('latin1') === 'ID3') {
       return { mimeType: 'audio/mpeg', modality: 'audio', extension: '.mp3' };
     }
-    if (header[0] === 0xff && (header[1]! & 0xe0) === 0xe0) {
+    // 0xFF 0xFE is the UTF-16 LE BOM and also passes the sync mask
+    // (0xFE & 0xE0 === 0xE0); excluding it keeps the "null for non-media"
+    // contract honest for callers without a secondary modality gate. Real
+    // MPEG frames never use 0xFE: bits 4-3 (layer) would be 11, reserved.
+    if (
+      header[0] === 0xff &&
+      header[1] !== 0xfe &&
+      (header[1]! & 0xe0) === 0xe0
+    ) {
       return { mimeType: 'audio/mpeg', modality: 'audio', extension: '.mp3' };
     }
   }

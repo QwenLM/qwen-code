@@ -1692,4 +1692,114 @@ describe('handleAtCommand', () => {
       expect(JSON.stringify(result.processedQuery)).toContain('COLON BODY');
     });
   });
+
+  describe('URL media references (@https://…)', () => {
+    // The omni graph is imported dynamically inside the URL branch, so a
+    // module-registry mock is what intercepts it. Every export the branch
+    // touches is stubbed; the pipeline is exercised end to end from
+    // handleAtCommand down to the fileData part.
+    const omniMocks = vi.hoisted(() => ({
+      isOmniDeliveryActive: vi.fn(),
+      parseHttpUrlRef: vi.fn(),
+      downloadMediaUrl: vi.fn(),
+      processMediaForOmniDelivery: vi.fn(),
+      effectiveMaxDownloadFileBytes: vi.fn(),
+    }));
+
+    vi.mock('@qwen-code/qwen-code-core/omni', () => ({
+      ...omniMocks,
+      OmniObjectStore: class {
+        getOmniRootDir() {
+          return path.join(os.tmpdir(), 'omni-at-test');
+        }
+      },
+    }));
+
+    function omniConfig(enabled: boolean): Config {
+      return {
+        ...mockConfig,
+        isOmniEnabled: () => enabled,
+        storage: { getQwenDir: () => path.join(os.tmpdir(), 'omni-at-test') },
+      } as unknown as Config;
+    }
+
+    beforeEach(async () => {
+      omniMocks.isOmniDeliveryActive.mockReturnValue(true);
+      omniMocks.parseHttpUrlRef.mockImplementation((url: string) => ({ url }));
+      omniMocks.effectiveMaxDownloadFileBytes.mockReturnValue(1024 * 1024);
+      const partPath = path.join(testRootDir, 'downloaded.mp4');
+      await createTestFile(partPath, 'fake media bytes');
+      omniMocks.downloadMediaUrl.mockResolvedValue({ partPath });
+      omniMocks.processMediaForOmniDelivery.mockResolvedValue({
+        fileUri: 'oss://bucket/clip.mp4',
+        mimeType: 'video/mp4',
+        recognized: { modality: 'video', sizeBytes: 2 * 1024 * 1024 },
+      });
+    });
+
+    it('localizes a media URL into a fileData part when omni is active', async () => {
+      const result = await handleAtCommand({
+        query: 'summarize @https://example.com/clip.mp4 please',
+        config: omniConfig(true),
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 700,
+        signal: abortController.signal,
+      });
+
+      expect(result.shouldProceed).toBe(true);
+      expect(omniMocks.downloadMediaUrl).toHaveBeenCalledWith(
+        expect.objectContaining({ url: 'https://example.com/clip.mp4' }),
+      );
+      const parts = result.processedQuery as Array<Record<string, unknown>>;
+      expect(parts).toContainEqual({
+        fileData: {
+          fileUri: 'oss://bucket/clip.mp4',
+          mimeType: 'video/mp4',
+          displayName: 'clip.mp4',
+        },
+      });
+      // The URL stays verbatim in the prompt text so the model can correlate
+      // it with the delivered part.
+      expect(parts[0]!['text']).toContain('https://example.com/clip.mp4');
+      expect(result.toolDisplays![0]).toMatchObject({
+        name: 'Fetch Media URL',
+        status: ToolCallStatus.Success,
+      });
+    });
+
+    it('falls through to text (no download) when omni is disabled', async () => {
+      const query = 'summarize @https://example.com/clip.mp4 please';
+      const result = await handleAtCommand({
+        query,
+        config: omniConfig(false),
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 701,
+        signal: abortController.signal,
+      });
+
+      // Legacy behavior: the URL is left as text, nothing is fetched.
+      expect(omniMocks.downloadMediaUrl).not.toHaveBeenCalled();
+      expect(result.shouldProceed).toBe(true);
+      expect(result.processedQuery).toEqual([{ text: query }]);
+    });
+
+    it('does not hit the no-content early return for a URL-only prompt', async () => {
+      // urlMediaRefs must count as content; otherwise the pipeline runs and
+      // its parts/cards are discarded by the early return.
+      const result = await handleAtCommand({
+        query: '@https://example.com/clip.mp4',
+        config: omniConfig(true),
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 702,
+        signal: abortController.signal,
+      });
+
+      expect(result.shouldProceed).toBe(true);
+      const parts = result.processedQuery as Array<Record<string, unknown>>;
+      expect(parts.some((p) => 'fileData' in p)).toBe(true);
+      expect(mockOnDebugMessage).not.toHaveBeenCalledWith(
+        'No valid file paths found in @ commands to read.',
+      );
+    });
+  });
 });

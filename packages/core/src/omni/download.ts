@@ -10,7 +10,12 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import { isPrivateHost, isPermittedRedirect } from '../utils/fetch.js';
+import {
+  isPrivateHost,
+  isPermittedRedirect,
+  findNonPublicAddress,
+  type HostResolver,
+} from '../utils/fetch.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('omni:download');
@@ -57,7 +62,11 @@ export function parseHttpUrlRef(pathName: string): URL | null {
  *
  * Policy (mirrors utils/fetch.ts fetchWithPolicy, but streaming — that
  * helper buffers whole bodies in memory and is unsuitable for GiB media):
- * - https or http; private/loopback hosts refused (SSRF);
+ * - https or http; private/loopback hosts refused (SSRF), by hostname text
+ *   AND by resolved address — a public-looking name whose A record points at
+ *   127.0.0.1 or 169.254.169.254 is refused too, re-checked at every
+ *   redirect hop (the bytes are uploaded to a third party, so DNS rebinding
+ *   here would exfiltrate internal data);
  * - redirects followed only when same-host/protocol/port (isPermittedRedirect),
  *   bounded by MAX_REDIRECTS;
  * - `maxBytes` enforced against BOTH Content-Length and actual bytes written;
@@ -72,8 +81,10 @@ export async function downloadMediaUrl(params: {
   maxBytes: number;
   signal?: AbortSignal;
   fetchFn?: typeof fetch;
+  /** Test seam for the SSRF address check; production resolves via DNS. */
+  resolver?: HostResolver;
 }): Promise<DownloadedMedia> {
-  const { url, downloadsDir, maxBytes, signal } = params;
+  const { url, downloadsDir, maxBytes, signal, resolver } = params;
   const fetchFn = params.fetchFn ?? fetch;
 
   if (isPrivateHost(url)) {
@@ -91,6 +102,17 @@ export async function downloadMediaUrl(params: {
   let currentUrl = url;
   try {
     for (let redirects = 0; ; redirects++) {
+      // Resolve immediately before each connect, every hop: the text-level
+      // gate above cannot see where a public-looking name actually points,
+      // and a permitted same-host redirect can still re-resolve to a
+      // private address between hops.
+      const nonPublic = await findNonPublicAddress(currentUrl, resolver);
+      if (nonPublic) {
+        throw new OmniDownloadError(
+          `URL host is not publicly routable (refused for safety): ` +
+            `${new URL(currentUrl).hostname} resolves to ${nonPublic}`,
+        );
+      }
       const headerAbort = new AbortController();
       const headerTimer = setTimeout(
         () => headerAbort.abort(new Error('header timeout')),

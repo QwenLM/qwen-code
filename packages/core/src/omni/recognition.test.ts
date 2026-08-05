@@ -12,6 +12,7 @@ import path from 'node:path';
 import {
   extensionForVideoMime,
   hashFileSha256,
+  sniffFileModality,
   sniffVideoMimeType,
 } from './recognition.js';
 
@@ -160,5 +161,67 @@ describe('sniffMediaType (S2 modalities)', async () => {
     expect(sniffMediaType(Buffer.from('<html><body>'))).toBeNull();
     expect(sniffMediaType(Buffer.from('%PDF-1.7'))).toBeNull();
     expect(sniffMediaType(Buffer.alloc(0))).toBeNull();
+  });
+
+  it('does not mistake the UTF-16 LE BOM for an MPEG frame sync', () => {
+    // 0xFF 0xFE passes the naive sync mask (0xFE & 0xE0 === 0xE0), but a
+    // real MPEG frame never uses 0xFE (reserved layer bits). Callers
+    // without a secondary modality gate must not see audio/mpeg here.
+    const utf16le = Buffer.concat([
+      Buffer.from([0xff, 0xfe]),
+      Buffer.from('h\0e\0l\0l\0o\0', 'latin1'),
+    ]);
+    expect(sniffMediaType(utf16le)).toBeNull();
+    // Genuine frame syncs still detect.
+    expect(sniffMediaType(Buffer.from([0xff, 0xfb, 0x90]))).toMatchObject({
+      mimeType: 'audio/mpeg',
+      modality: 'audio',
+    });
+    expect(sniffMediaType(Buffer.from([0xff, 0xf3, 0x00]))).toMatchObject({
+      modality: 'audio',
+    });
+  });
+});
+
+describe('sniffFileModality', () => {
+  it('reports the modality of a recognized media header', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'omni-sniff-'));
+    try {
+      const video = path.join(dir, 'clip.mp4');
+      await fs.writeFile(video, mp4Header('isom'));
+      await expect(sniffFileModality(video)).resolves.toBe('video');
+
+      const audio = path.join(dir, 'song.mp3');
+      await fs.writeFile(audio, Buffer.from('ID3\0\0\0', 'latin1'));
+      await expect(sniffFileModality(audio)).resolves.toBe('audio');
+
+      const image = path.join(dir, 'pic.jpg');
+      await fs.writeFile(image, Buffer.from([0xff, 0xd8, 0xff, 0xe0]));
+      await expect(sniffFileModality(image)).resolves.toBe('image');
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns null for non-media content (legacy path keeps it)', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'omni-sniff-'));
+    try {
+      const text = path.join(dir, 'notes.txt');
+      await fs.writeFile(text, 'just some text, definitely not media');
+      await expect(sniffFileModality(text)).resolves.toBeNull();
+      // Empty file: stat.size 0 → zero-length read, must not throw.
+      const empty = path.join(dir, 'empty.bin');
+      await fs.writeFile(empty, '');
+      await expect(sniffFileModality(empty)).resolves.toBeNull();
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns null (never throws) for an unreadable path', async () => {
+    // The pre-gate must degrade to "not omni", not break the read.
+    await expect(
+      sniffFileModality(path.join(os.tmpdir(), 'omni-absent-xyz.mp4')),
+    ).resolves.toBeNull();
   });
 });

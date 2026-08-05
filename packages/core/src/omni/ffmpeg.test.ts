@@ -15,6 +15,7 @@ import {
   assertOmniRuntimeDependencies,
   isFfmpegAvailable,
   isFfprobeAvailable,
+  probeMediaMetadata,
   probeVideoMetadata,
   resetFfmpegCachesForTests,
 } from './ffmpeg.js';
@@ -178,5 +179,64 @@ describe('probeVideoMetadata', () => {
     await expect(probeVideoMetadata('/v.mp4')).rejects.toThrow(
       /unparseable output/,
     );
+  });
+});
+
+describe('probeMediaMetadata per-modality branches', () => {
+  it("reads the AUDIO stream (not video) for modality 'audio'", async () => {
+    // A file carrying both streams proves the audio branch selects the
+    // audio stream: reading videoStream?.codec_name here would yield 'h264'
+    // and drop sampleRate/channels entirely.
+    mockExecResult(() => ({
+      stdout: JSON.stringify({
+        format: { format_name: 'mov,mp4', duration: '12.5' },
+        streams: [
+          { codec_type: 'video', codec_name: 'h264', width: 640, height: 480 },
+          {
+            codec_type: 'audio',
+            codec_name: 'aac',
+            sample_rate: '44100',
+            channels: 2,
+          },
+        ],
+      }),
+    }));
+    await expect(probeMediaMetadata('/a.m4a', 'audio')).resolves.toEqual({
+      formatName: 'mov,mp4',
+      durationMs: 12_500,
+      codec: 'aac',
+      sampleRateHz: 44_100,
+      channels: 2,
+    });
+  });
+
+  it("reads only dimensions for modality 'image' (no duration)", async () => {
+    mockExecResult(() => ({
+      stdout: JSON.stringify({
+        format: { format_name: 'png_pipe', duration: '0.04' },
+        streams: [
+          { codec_type: 'video', codec_name: 'png', width: 1920, height: 1080 },
+        ],
+      }),
+    }));
+    // Images must not report a duration even when ffprobe invents one.
+    await expect(probeMediaMetadata('/i.png', 'image')).resolves.toEqual({
+      formatName: 'png_pipe',
+      width: 1920,
+      height: 1080,
+      codec: 'png',
+    });
+  });
+
+  it("audio with no audio stream yields undefined codec, not the video's", async () => {
+    mockExecResult(() => ({
+      stdout: JSON.stringify({
+        format: { format_name: 'mp4', duration: '3' },
+        streams: [{ codec_type: 'video', codec_name: 'h264' }],
+      }),
+    }));
+    const result = await probeMediaMetadata('/silent.mp4', 'audio');
+    expect(result.codec).toBeUndefined();
+    expect(result.sampleRateHz).toBeUndefined();
   });
 });

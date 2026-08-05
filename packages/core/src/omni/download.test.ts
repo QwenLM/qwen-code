@@ -11,6 +11,15 @@ import os from 'node:os';
 import path from 'node:path';
 import { downloadMediaUrl, OmniDownloadError } from './download.js';
 
+// Keep the suite hermetic: the SSRF gate resolves hostnames, and tests that
+// do not inject a resolver must not depend on (or wait for) real DNS.
+const dnsLookupMock = vi.hoisted(() =>
+  vi.fn(async () => [{ address: '93.184.216.34', family: 4 }]),
+);
+vi.mock('node:dns/promises', () => ({
+  default: { lookup: dnsLookupMock },
+}));
+
 let downloadsDir: string;
 
 beforeEach(async () => {
@@ -63,6 +72,130 @@ describe('downloadMediaUrl', () => {
     }
     expect(fetchFn).not.toHaveBeenCalled();
     expect(await listParts()).toEqual([]);
+  });
+
+  it('refuses a public-looking host that resolves to a private address', async () => {
+    const fetchFn = vi.fn<typeof fetch>();
+    // DNS rebinding / split horizon: the name is syntactically public, so
+    // the text-level gate passes; only resolution reveals the target.
+    for (const address of ['127.0.0.1', '169.254.169.254', '10.1.2.3']) {
+      await expect(
+        downloadMediaUrl({
+          url: 'https://media.example.com/clip.mp4',
+          downloadsDir,
+          maxBytes: 1_000_000,
+          fetchFn,
+          resolver: async () => [address],
+        }),
+      ).rejects.toThrow(/not publicly routable.*resolves to/);
+    }
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(await listParts()).toEqual([]);
+  });
+
+  it('refuses when ANY resolved address is private (mixed A records)', async () => {
+    const fetchFn = vi.fn<typeof fetch>();
+    await expect(
+      downloadMediaUrl({
+        url: 'https://media.example.com/clip.mp4',
+        downloadsDir,
+        maxBytes: 1_000_000,
+        fetchFn,
+        // The connect may pick either address, so one bad entry is fatal.
+        resolver: async () => ['93.184.216.34', '127.0.0.1'],
+      }),
+    ).rejects.toThrow(/resolves to 127\.0\.0\.1/);
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it('allows a host resolving to public addresses', async () => {
+    const result = await downloadMediaUrl({
+      url: 'https://media.example.com/a.mp4',
+      downloadsDir,
+      maxBytes: 1_000_000,
+      fetchFn: fetchOk(Buffer.from('ok-bytes')),
+      resolver: async () => ['93.184.216.34', '2606:4700:4700::1111'],
+    });
+    expect(result.sizeBytes).toBe(8);
+  });
+
+  it('re-checks resolution at every redirect hop', async () => {
+    // Hop 1 resolves public; the same-host redirect target resolves private
+    // (rebinding between hops) and must be refused before the second fetch.
+    const fetchFn = vi.fn<typeof fetch>(
+      async () =>
+        new Response(null, {
+          status: 302,
+          headers: { location: 'https://media.example.com/real.mp4' },
+        }),
+    );
+    let call = 0;
+    await expect(
+      downloadMediaUrl({
+        url: 'https://media.example.com/a.mp4',
+        downloadsDir,
+        maxBytes: 1_000_000,
+        fetchFn,
+        resolver: async () => (++call === 1 ? ['93.184.216.34'] : ['10.0.0.9']),
+      }),
+    ).rejects.toThrow(/resolves to 10\.0\.0\.9/);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(await listParts()).toEqual([]);
+  });
+
+  it('proceeds when DNS resolution fails (the connect reports it instead)', async () => {
+    // Failing closed here would turn a resolver blip into an unactionable
+    // error; the fetch that follows surfaces the real failure.
+    const result = await downloadMediaUrl({
+      url: 'https://media.example.com/a.mp4',
+      downloadsDir,
+      maxBytes: 1_000_000,
+      fetchFn: fetchOk(Buffer.from('bytes')),
+      resolver: async () => {
+        throw new Error('EAI_AGAIN');
+      },
+    });
+    expect(result.sizeBytes).toBe(5);
+  });
+
+  it('defaults to the global fetch when no fetchFn is injected', async () => {
+    // Guards the `?? fetch` fallback: every other test injects a mock, so
+    // deleting that fallback would otherwise leave the suite green.
+    const globalSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response(Buffer.from('via-global')));
+    try {
+      const result = await downloadMediaUrl({
+        url: 'https://media.example.com/a.mp4',
+        downloadsDir,
+        maxBytes: 1_000_000,
+        resolver: async () => ['93.184.216.34'],
+      });
+      expect(globalSpy).toHaveBeenCalledTimes(1);
+      expect(result.sizeBytes).toBe(10);
+    } finally {
+      globalSpy.mockRestore();
+    }
+  });
+
+  it('resolves via dns.lookup when no resolver is injected', async () => {
+    // The `resolver` param is a test seam; production must go through DNS.
+    // Injecting a resolver in every other test would leave that wiring
+    // (and the {all: true} option the multi-address check depends on)
+    // completely unexercised.
+    dnsLookupMock.mockClear();
+    await expect(
+      downloadMediaUrl({
+        url: 'https://media.example.com/a.mp4',
+        downloadsDir,
+        maxBytes: 1_000_000,
+        fetchFn: fetchOk(Buffer.from('ok')),
+      }),
+    ).resolves.toMatchObject({ sizeBytes: 2 });
+    expect(dnsLookupMock).toHaveBeenCalledWith('media.example.com', {
+      all: true,
+      verbatim: true,
+    });
   });
 
   it('rejects oversized Content-Length before reading the body', async () => {
