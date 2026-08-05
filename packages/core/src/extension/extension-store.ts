@@ -1014,6 +1014,9 @@ export class ExtensionStore {
             maxTimeout: 500,
             randomize: true,
           },
+          onCompromised: (err) => {
+            debugLogger.warn('extension store lock compromised:', err);
+          },
         });
       } catch (error) {
         throw new ExtensionStoreBusyError(this.storeDir, { cause: error });
