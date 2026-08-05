@@ -113,6 +113,10 @@ export default defineConfig({
         __dirname,
         '../acp-bridge/src/workspacePaths.ts',
       ),
+      '@qwen-code/acp-bridge/externalToolGuard': path.resolve(
+        __dirname,
+        '../acp-bridge/src/externalToolGuard.ts',
+      ),
       '@qwen-code/audio-capture': path.resolve(
         __dirname,
         '../audio-capture/src/index.ts',
