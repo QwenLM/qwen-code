@@ -77,7 +77,8 @@ describe('cost-ledger — the spend, from the records already on disk', () => {
     mkdirSync(join(project, 'chats'), { recursive: true });
     mkdirSync(join(project, 'subagents', SESSION), { recursive: true });
     // Recording on, no above-floor records yet. Tests that need calls
-    // overwrite this; tests for a missing chat file remove it.
+    // overwrite this; tests for a missing chat file remove it; tests for
+    // the empty-window refusal use it as-is.
     writeFileSync(join(project, 'chats', `${SESSION}.jsonl`), '');
     const plan = join(project, 'plan.json');
     // A real plan, shape-wise: the ledger validates it before trusting its
@@ -236,7 +237,7 @@ describe('cost-ledger — the spend, from the records already on disk', () => {
     expect(ledger.main?.thoughtsTokens).toBe(100);
   });
 
-  it('coerces negative provider counts to zero instead of corrupting totals', () => {
+  it('coerces broken provider counts instead of corrupting totals', () => {
     const { plan, env, project } = fixture();
     writeFileSync(
       chatFile(project),
@@ -259,13 +260,44 @@ describe('cost-ledger — the spend, from the records already on disk', () => {
             totalTokenCount: -6_000,
           },
         }),
+        // Positive but INVERTED: cached above prompt passes the ≥ 0 check
+        // and would render a 500% share. It is clamped to its own prompt,
+        // so the rendered share and the archived JSON both stay ≤ 100%.
+        JSON.stringify({
+          type: 'assistant',
+          timestamp: '2026-08-03T10:03:00Z',
+          usageMetadata: {
+            promptTokenCount: 100,
+            cachedContentTokenCount: 5_000,
+            candidatesTokenCount: 50,
+            totalTokenCount: 150,
+          },
+        }),
+        // Mixed-sign: prompt negative, total positive. Deriving output as
+        // total − coerced-prompt would bill the call's whole total as
+        // output; it falls back to candidates instead.
+        JSON.stringify({
+          type: 'assistant',
+          timestamp: '2026-08-03T10:04:00Z',
+          usageMetadata: {
+            promptTokenCount: -5_000,
+            candidatesTokenCount: 100,
+            totalTokenCount: 6_000,
+          },
+        }),
       ].join('\n'),
     );
     const ledger = computeLedger(plan, env);
-    expect(ledger.totals.calls).toBe(2);
-    expect(ledger.totals.inputTokens).toBe(1_000);
-    expect(ledger.totals.cachedTokens).toBe(500);
-    expect(ledger.totals.outputTokens).toBe(100);
+    expect(ledger.totals.calls).toBe(4);
+    // 1_000 + 0 + 100 + 0.
+    expect(ledger.totals.inputTokens).toBe(1_100);
+    // 500 + 0 + min(5_000, 100) + 0.
+    expect(ledger.totals.cachedTokens).toBe(600);
+    // 100 + 0 + (150 − 100) + 100 (candidates fallback).
+    expect(ledger.totals.outputTokens).toBe(250);
+    // The clamp keeps the archived share sane: 600 / 1_100 → 55%, never
+    // the 500% the raw counts would render.
+    expect(renderLedger(ledger)).toContain('(55% cached)');
   });
 
   it('renders a one-line summary a reader can act on', () => {
@@ -288,14 +320,16 @@ describe('cost-ledger — the spend, from the records already on disk', () => {
     expect(text).toContain('main loop: 1 call · 1.2M in · 10k out');
   });
 
-  it('reports an empty review as zeros, not a crash', () => {
+  it('refuses an empty window even when no agents ran', () => {
     const { plan, env } = fixture();
-    const ledger = computeLedger(plan, env);
-    expect(ledger.totals.calls).toBe(0);
-    expect(ledger.main).toBeNull();
-    expect(ledger.agents).toEqual([]);
-    expect(renderLedger(ledger)).toContain('0 model calls');
-    expect(renderLedger(ledger)).toContain('0 input (0% cached)');
+    // The recorder pre-creates the chat file and degrades permanently on a
+    // failed first append, while a live review always holds at least one
+    // above-floor main-loop record — the plan itself is a main-loop write.
+    // A zero window is therefore the degraded-recorder fact, with or
+    // without agents — never a cheaper "empty review".
+    expect(() => computeLedger(plan, env)).toThrow(
+      /no main-loop usage records at or after the plan/,
+    );
   });
 
   it('throws TranscriptsUnavailable through to the caller when the env is bare', () => {
@@ -339,7 +373,7 @@ describe('cost-ledger — the spend, from the records already on disk', () => {
   });
 
   it('accepts a degraded diff-less plan — its mtime is still the floor', () => {
-    const { plan, env } = fixture();
+    const { plan, env, project } = fixture();
     // fetch-pr writes diffPathAbsolute: null with chunks: [] on two real
     // paths (unresolvable merge base, the tiling fallback). That file IS the
     // Step 1 plan report, and the ledger needs only its mtime.
@@ -349,7 +383,8 @@ describe('cost-ledger — the spend, from the records already on disk', () => {
     );
     const start = new Date('2026-08-03T10:00:00Z');
     utimesSync(plan, start, start);
-    expect(computeLedger(plan, env).totals.calls).toBe(0);
+    writeMainCall(project);
+    expect(computeLedger(plan, env).totals.calls).toBe(1);
   });
 
   it('refuses to render agents-only totals when the chat transcript is missing', () => {
@@ -394,7 +429,7 @@ describe('cost-ledger — the spend, from the records already on disk', () => {
       event('2026-08-03T09:00:00Z', { input: 1_000, output: 100 }),
     );
     expect(() => computeLedger(plan, env)).toThrow(
-      /no main-loop usage records at or after the plan, while agents ran/,
+      /no main-loop usage records at or after the plan/,
     );
   });
 
@@ -415,6 +450,43 @@ describe('cost-ledger — the spend, from the records already on disk', () => {
     expect(ledger.agents).toHaveLength(1);
     expect(ledger.agents[0].label).toBe('agent ok');
     expect(ledger.agents[0].inputTokens).toBe(1_000);
+  });
+
+  it('ignores the harness sidecar files beside the transcripts', () => {
+    const { plan, env, project } = fixture();
+    writeMainCall(project);
+    writeFileSync(
+      join(project, 'subagents', SESSION, 'agent-role-1.jsonl'),
+      [
+        userRecord('You are review agent `1` — dimension 1.'),
+        event('2026-08-03T10:06:30Z', { input: 1_000, output: 100 }),
+      ].join('\n'),
+    );
+    // The harness writes siblings per agent (agent-transcript.ts): a
+    // `.meta.json` that carries an `agentId`, and a transient
+    // `.jsonl.stream`. Both readers of this dir share one filter
+    // (listAgentTranscriptFiles); admitted here, the meta's `agentId` would
+    // surface as a phantom row and break (×N) folding.
+    writeFileSync(
+      join(project, 'subagents', SESSION, 'agent-role-1.meta.json'),
+      JSON.stringify({
+        agentId: 'role-1',
+        agentType: 'general-purpose',
+        description: 'dimension 1',
+        parentSessionId: SESSION,
+        parentAgentId: null,
+        createdAt: '2026-08-03T10:06:00.000Z',
+        status: 'completed',
+      }),
+    );
+    writeFileSync(
+      join(project, 'subagents', SESSION, 'agent-role-1.jsonl.stream'),
+      'streaming text, not jsonl records',
+    );
+    const ledger = computeLedger(plan, env);
+    expect(ledger.agents).toHaveLength(1);
+    expect(ledger.agents[0].id).toBe('role-1');
+    expect(renderLedger(ledger)).not.toContain('(×2)');
   });
 
   it('surfaces a fault reading the chat file, not a zero ledger', () => {
@@ -551,9 +623,13 @@ describe('cost-ledger — the spend, from the records already on disk', () => {
     expect(ledger.agents[0].label).toBe('chunk 3');
   });
 
-  it('falls back to the chunk label when the prompt names no role', () => {
+  it('labels a free-text chunk mention by the file id, not the quoted chunk', () => {
     const { plan, env, project } = fixture();
     writeMainCall(project);
+    // No identity line at the head: an older harness, or an agent this
+    // review never launched. Its free text names a chunk, but parsing free
+    // text for labels folds it into the real chunk-3 agent's row as a
+    // phantom (×2) relaunch. The file's own id is the one label it owns.
     writeFileSync(
       join(project, 'subagents', SESSION, 'agent-general-purpose-b7.jsonl'),
       [
@@ -562,7 +638,7 @@ describe('cost-ledger — the spend, from the records already on disk', () => {
       ].join('\n'),
     );
     const ledger = computeLedger(plan, env);
-    expect(ledger.agents[0].label).toBe('chunk 3');
+    expect(ledger.agents[0].label).toBe('general-purpose-b7');
   });
 
   it('falls back to the file id when the prompt names neither role nor chunk', () => {
@@ -579,15 +655,17 @@ describe('cost-ledger — the spend, from the records already on disk', () => {
     expect(ledger.agents[0].label).toBe('general-purpose-z0');
   });
 
-  it('distinguishes parallel invariant agents by file, not as a phantom relaunch', () => {
+  it('distinguishes parallel invariant agents by full path, not basename', () => {
     const { plan, env, project } = fixture();
     writeMainCall(project);
-    // Step 3B launches invariant-a once PER heavy file. Folding those runs by
-    // bare role would render one (×2) row — the marker reserved for
-    // relaunches — and lose the per-file cost breakdown.
+    // Step 3B launches invariant-a once PER heavy file, and a monorepo
+    // routinely holds same-basename files in different packages. Folding by
+    // bare role — or by basename — renders one (×2) row, the marker
+    // reserved for relaunches, and erases the per-file breakdown the
+    // distinguisher exists to keep.
     for (const [file, owned] of [
-      ['agent-invariant-x1.jsonl', 'packages/cli/src/commands/a.ts'],
-      ['agent-invariant-x2.jsonl', 'packages/cli/src/commands/b.ts'],
+      ['agent-invariant-x1.jsonl', 'packages/cli/src/config/storage.ts'],
+      ['agent-invariant-x2.jsonl', 'packages/core/src/config/storage.ts'],
     ] as const) {
       writeFileSync(
         join(project, 'subagents', SESSION, file),
@@ -601,8 +679,12 @@ describe('cost-ledger — the spend, from the records already on disk', () => {
       );
     }
     const text = renderLedger(computeLedger(plan, env));
-    expect(text).toContain('agent invariant-a (a.ts):');
-    expect(text).toContain('agent invariant-a (b.ts):');
+    expect(text).toContain(
+      'agent invariant-a (packages/cli/src/config/storage.ts):',
+    );
+    expect(text).toContain(
+      'agent invariant-a (packages/core/src/config/storage.ts):',
+    );
     expect(text).not.toContain('(×2)');
   });
 
@@ -888,6 +970,39 @@ describe('cost-ledger — the spend, from the records already on disk', () => {
     expect(text).not.toContain('(×2)');
   });
 
+  it('labels an auditor from its own brief line, not a quoted audit path', () => {
+    const { plan, env, project } = fixture();
+    writeMainCall(project);
+    // From round 2 on, an auditor's launch carries the folded findings ABOVE
+    // its own brief line, and those findings quote earlier rounds' brief
+    // paths — bare and in read_file shape alike. The label must come from
+    // the agent's OWN brief line, the last brief-shaped read_file in the
+    // launch: the folds always sit above it.
+    writeFileSync(
+      join(project, 'subagents', SESSION, 'agent-ra4.jsonl'),
+      [
+        userRecord(
+          'You are review agent `chunk 5 of 5` — the territory agent.\n' +
+            '\n' +
+            '## Already confirmed — do not re-report these\n' +
+            '\n' +
+            '- misattributed spend: reverse-audit--chunk-3--round-1--ab12cd.brief.md\n' +
+            '- quoted launch block:\n' +
+            '  read_file(file_path="/p/plan-prompts/reverse-audit--chunk-3--round-1--ab12cd.brief.md")\n' +
+            '\n' +
+            '**Your brief is a file. Read it first.**\n' +
+            '\n' +
+            'read_file(file_path="/p/plan-prompts/reverse-audit--chunk-5--round-2--ef56ab.brief.md")',
+        ),
+        event('2026-08-03T10:08:00Z', { input: 30_000, output: 400 }),
+      ].join('\n'),
+    );
+
+    const text = renderLedger(computeLedger(plan, env));
+    expect(text).toContain('audit chunk 5 (round 2):');
+    expect(text).not.toContain('audit chunk 3');
+  });
+
   it('separates rounds by label while shards of one round still fold', () => {
     const { plan, env, project } = fixture();
     writeMainCall(project);
@@ -934,7 +1049,7 @@ describe('cost-ledger — the spend, from the records already on disk', () => {
       [
         userRecord(
           'You are review agent `verify` — Verification.\n' +
-            '- reverse audit — stopped before round 4 by the review time budget\n',
+            '- quoted ledger row: agent verify (round 4): 1 call · 7k in · 80 out\n',
         ),
         event('2026-08-03T10:07:00Z', { input: 7_000, output: 80 }),
       ].join('\n'),
@@ -1056,6 +1171,55 @@ describe('cost-ledger command boundary — informational, never a failure', () =
     expect(stdout).not.toContain('Cost ledger:');
   });
 
+  it('exits 0 when the terminal writes throw — the reader went away', () => {
+    const { plan, project } = fixture();
+    const start = new Date('2026-08-03T10:00:00Z');
+    utimesSync(plan, start, start);
+    setEnv({
+      QWEN_CODE_PROJECT_DIR: project,
+      QWEN_CODE_SESSION_ID: SESSION,
+    } as NodeJS.ProcessEnv);
+    // A pipe whose reader left (`qwen … | head`): the write throws. All
+    // three terminal writes — the unavailable warning, the could-not-write
+    // warning, and the ledger block — must absorb it; the review must never
+    // fail on its own accounting, including the accounting of a reader that
+    // left.
+    const pipeGone = (): boolean => {
+      throw Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+    };
+    const runWithBrokenPipes = (args: Record<string, unknown>): void => {
+      const outSpy = vi
+        .spyOn(process.stdout, 'write')
+        .mockImplementation(pipeGone);
+      const errSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(pipeGone);
+      try {
+        (costLedgerCommand.handler as (a: unknown) => void)(args);
+      } finally {
+        outSpy.mockRestore();
+        errSpy.mockRestore();
+      }
+      expect(process.exitCode ?? 0).toBe(0);
+    };
+    // The unavailable-warning arm: no above-floor records.
+    runWithBrokenPipes({ plan });
+    // The ledger-block arm: a real spend.
+    writeFileSync(
+      join(project, 'chats', `${SESSION}.jsonl`),
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: '2026-08-03T10:01:00Z',
+        usageMetadata: {
+          promptTokenCount: 1_000,
+          candidatesTokenCount: 100,
+          totalTokenCount: 1_100,
+        },
+      }),
+    );
+    runWithBrokenPipes({ plan });
+  });
+
   it('writes --out into a directory it creates, with every stream kept', () => {
     const { plan, project } = fixture();
     // A real spend, so the archive contract is observable: SKILL.md promises
@@ -1122,6 +1286,20 @@ describe('cost-ledger command boundary — informational, never a failure', () =
 
   it('degrades a failed --out write to a warning and still exits 0', () => {
     const { plan, project } = fixture();
+    const start = new Date('2026-08-03T10:00:00Z');
+    utimesSync(plan, start, start);
+    writeFileSync(
+      join(project, 'chats', `${SESSION}.jsonl`),
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: '2026-08-03T10:01:00Z',
+        usageMetadata: {
+          promptTokenCount: 1_000,
+          candidatesTokenCount: 100,
+          totalTokenCount: 1_100,
+        },
+      }),
+    );
     setEnv({
       QWEN_CODE_PROJECT_DIR: project,
       QWEN_CODE_SESSION_ID: SESSION,

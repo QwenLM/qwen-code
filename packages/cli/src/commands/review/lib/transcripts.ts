@@ -124,7 +124,7 @@ export function transcriptDir(env: NodeJS.ProcessEnv = process.env): string {
 }
 
 /** Text out of a record's message parts. */
-function textOf(rec: Record<string, unknown>): string {
+export function textOf(rec: Record<string, unknown>): string {
   const msg = rec['message'] as { parts?: unknown } | undefined;
   const parts = Array.isArray(msg?.parts) ? msg.parts : [];
   return parts

@@ -30,13 +30,17 @@
 
 import type { CommandModule } from 'yargs';
 import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { parseLineTolerant } from '@qwen-code/qwen-code-core';
-import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import {
+  writeStdoutLineSafe,
+  writeStderrLineSafe,
+} from '../../utils/stdioHelpers.js';
 import {
   transcriptPaths,
   listAgentTranscriptFiles,
   TranscriptsUnavailableError,
+  textOf,
 } from './lib/transcripts.js';
 import { CHUNK_RE } from './lib/coverage.js';
 
@@ -74,16 +78,6 @@ interface UsageEvent {
   thoughts: number;
 }
 
-/** Text out of a record's message parts — the shape the harness writes. */
-function textOfRecord(rec: Record<string, unknown>): string {
-  const msg = rec['message'] as { parts?: unknown } | undefined;
-  const parts = Array.isArray(msg?.parts) ? msg.parts : [];
-  return parts
-    .map((p) => (p as { text?: unknown }).text)
-    .filter((t): t is string => typeof t === 'string')
-    .join('');
-}
-
 /**
  * One read of a transcript: its usage-bearing assistant events, floor-filtered,
  * plus the launch prompt the label comes from.
@@ -112,7 +106,7 @@ function readUsage(
     // parses happily (`null`, `42`) only to trip the property reads below.
     for (const rec of parseLineTolerant<Record<string, unknown>>(line, file)) {
       if (launch === '' && rec['type'] === 'user') {
-        launch = textOfRecord(rec);
+        launch = textOf(rec);
       }
       if (rec['type'] !== 'assistant') continue;
       const usage = rec['usageMetadata'];
@@ -127,80 +121,99 @@ function readUsage(
       // conversation to the review. The plan's own mtime marks the review start
       // — the same floor `check-coverage` applies to transcripts.
       if (!Number.isFinite(tsMs) || tsMs < floorMs) continue;
-      // ≥ 0, not merely finite: the main loop coerces broken-proxy usage
+      // Finite ≥ 0, else null: the main loop coerces broken-proxy usage
       // (negative or NaN counts) before recording, but the agent path records
-      // raw provider usage — a negative count here would render >100% cached
-      // shares and negative rows in the archived block.
-      const n = (k: string): number => {
+      // raw provider usage, and each consumer below picks its own fallback
+      // for a count that did not survive the provider.
+      const rawCount = (k: string): number | null => {
         const v = u[k];
-        return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 0;
+        return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null;
       };
-      const prompt = n('promptTokenCount');
-      const total = n('totalTokenCount');
+      const rawPrompt = rawCount('promptTokenCount');
+      const rawTotal = rawCount('totalTokenCount');
+      const prompt = rawPrompt ?? 0;
+      const candidates = rawCount('candidatesTokenCount') ?? 0;
       events.push({
         timestampMs: tsMs,
         timestamp: ts,
         input: prompt,
-        cached: n('cachedContentTokenCount'),
+        // Cached is part of the prompt it is reported with; a broken proxy
+        // can report the pair inverted, and the inversion would otherwise
+        // land in BOTH the rendered share and the archived --out JSON.
+        cached: Math.min(rawCount('cachedContentTokenCount') ?? 0, prompt),
         // `total − prompt` is the output including thinking under BOTH usage
         // conventions — reasoning inside candidates, and thoughts disjoint
         // from them — the same derivation tokenEstimation uses. Candidates
         // alone is the fallback when the provider reported no total; it stays
         // correct for the providers this CLI converts, which clamp thoughts
-        // inside candidates.
-        output: total > prompt ? total - prompt : n('candidatesTokenCount'),
-        thoughts: n('thoughtsTokenCount'),
+        // inside candidates. Derive it only when BOTH operands survived the
+        // provider intact: a mixed-sign record coerces prompt to 0 while
+        // keeping a positive total, and the subtraction would bill the
+        // call's whole total as output.
+        output:
+          rawPrompt !== null && rawTotal !== null && rawTotal > rawPrompt
+            ? rawTotal - rawPrompt
+            : candidates,
+        thoughts: rawCount('thoughtsTokenCount') ?? 0,
       });
     }
   }
   return { events, launch };
 }
 
+/**
+ * An auditor's own brief line, exactly as `buildRoleLaunchPrompt` prints it.
+ * A bare `reverse-audit--chunk-N--round-M--<hex>` path mentioned anywhere is
+ * NOT this: folded findings quote other rounds' brief paths routinely.
+ */
+const AUDIT_BRIEF_RE =
+  /read_file\(file_path="[^"]*reverse-audit--chunk-(\d+)--round-(\d+)--[0-9a-f][^"]*\.brief\.md"\)/g;
+
 /** A role label out of the launch prompt, else the fallback. */
 function labelOf(launch: string, fallback: string): string {
-  // The identity line `agent-prompt` emits, with the role in backticks. A
-  // chunk agent's role is `chunk N of M`; prefixing it with "agent" would
-  // read as a malformed role, so resolve it through the same regex coverage
-  // uses. Distinguishers OUTSIDE the backticks matter too: a reverse-audit
-  // chunk auditor is launched with the same `chunk N of M` identity as the
-  // Step 3B territory finder, and only its brief path carries the stage and
-  // the round — without it, five audit rounds fold into the finder's row and
-  // the ledger reports one agent where six pipeline stages ran. A role
-  // launch's round label sits after the backticks for the same reason.
-  const auditChunk = /reverse-audit--chunk-(\d+)--round-(\d+)--[0-9a-f]/.exec(
-    launch,
-  );
+  // Every identity-based parse stays on the identity LINE, and nothing runs
+  // at all without one at the head. The folded findings below it can quote
+  // budget disclosures' "(round N)", other agents' `Your file:` lines, ledger
+  // rows, and `You are review agent` lines — a whole-launch match would hand
+  // the quoted label to the agent carrying the quote. A prompt with no
+  // identity line is an older harness's, or an agent this review never
+  // launched (the session's transcript dir also holds nested subagents): its
+  // free text can name anything, so keep the one label it owns — the file id.
+  const nl = launch.indexOf('\n');
+  const identity = nl === -1 ? launch : launch.slice(0, nl);
+  if (!identity.startsWith('You are review agent `')) return fallback;
+  // A reverse-audit chunk auditor shares its launch shape with the territory
+  // finder; only its brief path carries the stage and the round — without
+  // it, five audit rounds fold into one row and the ledger reports one agent
+  // where six pipeline stages ran. Match the agent's OWN brief line, never a
+  // quoted mention: the folds sit ABOVE the agent's own brief line
+  // (foldFindings folds them there), so the last brief-shaped read_file in
+  // the launch is the agent's own.
+  let auditChunk: RegExpExecArray | null = null;
+  for (const m of launch.matchAll(AUDIT_BRIEF_RE)) auditChunk = m;
   if (auditChunk) {
     return `audit chunk ${auditChunk[1]} (round ${auditChunk[2]})`;
   }
-  const role = /You are review agent `([^`]+)`/.exec(launch);
-  if (role) {
-    // The round is read from the identity LINE, not the whole launch: the
-    // folded findings below it can quote a budget disclosure's own
-    // "(round N)" and mislabel an unrelated round.
-    const nl = launch.indexOf('\n');
-    const identity = nl === -1 ? launch : launch.slice(0, nl);
-    const round = /\(round (\d+)\)/.exec(identity);
-    const chunk = CHUNK_RE.exec(role[1]);
-    if (chunk) return `chunk ${chunk[1]}`;
-    if (round) {
-      // Shards of one verify round carry the same label and fold; distinct
-      // rounds — verify and reverse-audit alike — are distinct rows.
-      return `agent ${role[1]} (round ${round[1]})`;
-    }
-    // An invariant role launches once PER heavy file. The role alone would
-    // fold those parallel runs into one (×N) row — the marker reserved for
-    // relaunches — and lose the per-file breakdown. The launch prompt names
-    // the owned file right after the identity; that is the distinguisher.
-    const file = /Your file: `([^`]+)`/.exec(launch);
-    if (file) return `agent ${role[1]} (${basename(file[1])})`;
-    return `agent ${role[1]}`;
-  }
-  // No identity line (an older harness): the chunk the prompt text names,
-  // else the file's own id.
-  const chunk = CHUNK_RE.exec(launch);
+  const role = /^You are review agent `([^`]+)`/.exec(identity);
+  if (!role) return fallback;
+  const round = /\(round (\d+)\)/.exec(identity);
+  const chunk = CHUNK_RE.exec(role[1]);
+  // A chunk role is `chunk N of M`; prefixing it with "agent" would read as
+  // a malformed role, so resolve it through the same regex coverage uses.
   if (chunk) return `chunk ${chunk[1]}`;
-  return fallback;
+  if (round) {
+    // Shards of one verify round carry the same label and fold; distinct
+    // rounds — verify and reverse-audit alike — are distinct rows.
+    return `agent ${role[1]} (round ${round[1]})`;
+  }
+  // An invariant role launches once PER heavy file. The role alone would
+  // fold those parallel runs into one (×N) row — the marker reserved for
+  // relaunches — and lose the per-file breakdown. The identity line names
+  // the owned file; the FULL path is the distinguisher, because a monorepo
+  // routinely holds same-basename files in different packages.
+  const file = /Your file: `([^`]+)`/.exec(identity);
+  if (file) return `agent ${role[1]} (${file[1]})`;
+  return `agent ${role[1]}`;
 }
 
 function foldEvents(
@@ -363,16 +376,18 @@ export function computeLedger(
   }
   agents.sort((a, b) => b.inputTokens - a.inputTokens);
 
-  // A present-but-empty chat file is not a lighter version of a missing one.
-  // The recorder pre-creates the file and degrades permanently if its first
-  // append fails, so "exists, yet no above-floor records while agents ran" is
-  // the same infrastructure fact as "unreadable" — and rendering agents-only
-  // totals under the `Cost ledger:` headline is exactly what the catch above
-  // refuses to do.
-  if (mainEvents.length === 0 && agentEvents.length > 0) {
+  // A present-but-empty window is not a lighter version of a missing one.
+  // The recorder pre-creates the chat file and degrades permanently if its
+  // first append fails, so "exists, yet no above-floor records" — with or
+  // without agents — is the same infrastructure fact as "unreadable": a live
+  // review holds at least one above-floor main-loop record, because the plan
+  // itself is a main-loop write. Rendering a zero ledger from this shape
+  // would be diffed against real numbers — exactly the fabrication the
+  // refusal above names.
+  if (mainEvents.length === 0) {
     throw new Error(
       `could not read the chat transcript ${chatFile}: no main-loop usage ` +
-        'records at or after the plan, while agents ran',
+        'records at or after the plan',
     );
   }
 
@@ -472,31 +487,50 @@ export function renderLedger(ledger: Ledger): string {
 }
 
 function runCostLedger(args: CostLedgerArgs): void {
-  let ledger: Ledger;
+  // EPIPE arrives two ways when the reader goes away (`qwen … | head`, a
+  // daemon's closed redirect): a sync throw out of the write, and an async
+  // 'error' event on the pipe. The safe writers catch the first; destroy the
+  // stream on the second — the convention nonInteractiveCli uses — and
+  // detach both listeners on exit. A review must never fail on its own
+  // accounting, including the accounting of a reader that left.
+  const stdoutErrorHandler = (err: NodeJS.ErrnoException): void => {
+    if (err.code === 'EPIPE') process.stdout.destroy();
+  };
+  const stderrErrorHandler = (err: NodeJS.ErrnoException): void => {
+    if (err.code === 'EPIPE') process.stderr.destroy();
+  };
+  process.stdout.on('error', stdoutErrorHandler);
+  process.stderr.on('error', stderrErrorHandler);
   try {
-    ledger = computeLedger(args.plan, process.env);
-  } catch (err) {
-    // Informational, always: a review must never fail on its own accounting.
-    const why =
-      err instanceof TranscriptsUnavailableError
-        ? err.message
-        : (err as Error).message;
-    writeStderrLine(`cost-ledger unavailable — ${why}`);
-    return;
-  }
-  if (args.out !== undefined && args.out.length > 0) {
-    // A failed archive write degrades to a warning: the ledger was computed,
-    // and the exit code must stay 0 either way.
+    let ledger: Ledger;
     try {
-      mkdirSync(dirname(resolve(args.out)), { recursive: true });
-      writeFileSync(args.out, JSON.stringify(ledger, null, 2));
+      ledger = computeLedger(args.plan, process.env);
     } catch (err) {
-      writeStderrLine(
-        `cost-ledger: could not write ${args.out} — ${(err as Error).message}`,
-      );
+      // Informational, always: a review must never fail on its own accounting.
+      const why =
+        err instanceof TranscriptsUnavailableError
+          ? err.message
+          : (err as Error).message;
+      writeStderrLineSafe(`cost-ledger unavailable — ${why}`);
+      return;
     }
+    if (args.out !== undefined && args.out.length > 0) {
+      // A failed archive write degrades to a warning: the ledger was computed,
+      // and the exit code must stay 0 either way.
+      try {
+        mkdirSync(dirname(resolve(args.out)), { recursive: true });
+        writeFileSync(args.out, JSON.stringify(ledger, null, 2));
+      } catch (err) {
+        writeStderrLineSafe(
+          `cost-ledger: could not write ${args.out} — ${(err as Error).message}`,
+        );
+      }
+    }
+    writeStdoutLineSafe(renderLedger(ledger));
+  } finally {
+    process.stdout.removeListener('error', stdoutErrorHandler);
+    process.stderr.removeListener('error', stderrErrorHandler);
   }
-  writeStdoutLine(renderLedger(ledger));
 }
 
 export const costLedgerCommand: CommandModule = {
