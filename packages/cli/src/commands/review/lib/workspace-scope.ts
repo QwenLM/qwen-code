@@ -34,7 +34,9 @@
 //     suite. Docs-classified files are NOT carved out: this repo's own root
 //     AGENTS.md is read and asserted on by packages/cli's load-rules.test.ts,
 //     which is exactly the load-bearing prose the carve-out would certify as
-//     unable to fail anything. When the cost of erring is a sentence of
+//     unable to fail anything. The root `docs/` tree IS carved out — no suite
+//     here reads it, and a caveat that fires on most PRs teaches the reader to
+//     ignore caveats. When the cost of erring is a sentence of
 //     disclosure, not a full-suite run, err toward disclosing.
 //   - A closure past HALF the testable workspaces is not a meaningful
 //     narrowing, and the report should say so.
@@ -66,6 +68,13 @@ import {
 export interface TestScope {
   /** The dirs whose suites the run executes — exactly those with a test script. */
   workspaces: string[];
+  /**
+   * Suites the whole-call budget stopped before they ran, when that happened.
+   * Structural, not just prose: `workspaces` names what ran, `notRun` names
+   * what the budget trimmed — a report must never list a suite as run that
+   * was not.
+   */
+  notRun?: string[];
   /**
    * Present when the scoped set may be incomplete — rendered verbatim into the
    * report so the review can state what it does not cover. Absent means the
@@ -160,10 +169,16 @@ export function resolveTestScope(input: {
   );
   // Files a negation excludes (!packages/desktop — a separate toolchain with
   // its own lockfile) cannot affect any included workspace's tests, so they
-  // earn no caveat either.
+  // earn no caveat either. Nor does the root `docs/` tree: no suite in this
+  // repo reads it, and a caveat that fires on most PRs teaches the reader to
+  // ignore caveats. Root-LEVEL prose (AGENTS.md) stays influential — this
+  // repo's load-rules.test.ts asserts on it.
   const outside = changed.filter((f) => workspaceDirFor(f, globs) === null);
   const influential = outside.filter(
-    (f) => !isInertLicense(f) && !isNegationExcluded(f, globs),
+    (f) =>
+      !isInertLicense(f) &&
+      !f.startsWith('docs/') &&
+      !isNegationExcluded(f, globs),
   );
   if (unmapped.length > 0) {
     caveats.push(
@@ -218,8 +233,7 @@ export function resolveTestScope(input: {
         `the diff's reverse-dependency closure covers ${scoped} of ` +
           `${testable} testable ${
             rootRuns ? 'suites (including the root)' : 'workspaces'
-          } — more than half, so the scoped set is not a meaningful narrowing ` +
-          'of the suite',
+          } — more than half, so the scoped set is not a meaningful narrowing`,
       );
     }
   }

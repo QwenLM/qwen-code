@@ -222,29 +222,34 @@ export function readRootPackage(root: string): WorkspacePackage | null {
 }
 
 /**
- * Does the root's `test` script fan out over every workspace?
+ * Does the root's `script` fan out over every workspace?
  *
- * `npm test --workspaces …` at the root is ONE command that repeats the whole
- * monorepo suite — the exact run that cannot finish inside a single command
- * deadline on a large repo. When the root joins the test scope as a dependent,
- * running `testCommand('.')` would be that command, so the scope must skip it
- * (with a caveat) instead of pretending the scoped run includes it. Detected
- * from the script text: the `--workspaces` flag is the fan-out; other
- * aggregators (turbo, nx, lerna) are not modeled and run as written.
+ * `npm test --workspaces …` (or the same for `build`) at the root is ONE
+ * command that repeats the whole monorepo — the exact run that cannot finish
+ * inside a single command deadline on a large repo. A fan-out root TEST is
+ * skipped by the test scope with a caveat (rather than pretending the scoped
+ * run includes it); a fan-out root BUILD is skipped by the build loop because
+ * an aggregator produces no artifacts of its own — the scoped loop already
+ * builds the members it drives. Detected from the script text: the
+ * `--workspaces` flag (and npm's `-ws`/`--ws` shorthands) is the fan-out;
+ * other aggregators (turbo, nx, lerna) are not modeled and run as written.
  */
-export function rootTestFansOut(root: string): boolean {
+export function rootScriptFansOut(
+  root: string,
+  script: 'build' | 'test',
+): boolean {
   let pkg: ManifestLike | null;
   try {
     pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
   } catch {
     return false;
   }
-  const test = pkg?.scripts?.['test'];
+  const text = pkg?.scripts?.[script];
   // `--workspaces` and npm's `-ws`/`--ws` shorthands fan out; `-w`/`--workspace`
   // (singular, one named workspace) deliberately do NOT match.
   return (
-    typeof test === 'string' &&
-    /(^|\s)(--workspaces\b|--?ws(?=\s|$))/.test(test)
+    typeof text === 'string' &&
+    /(^|\s)(--workspaces\b|--?ws(?=\s|$))/.test(text)
   );
 }
 

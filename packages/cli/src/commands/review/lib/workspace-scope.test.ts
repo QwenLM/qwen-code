@@ -184,6 +184,26 @@ describe('resolveTestScope', () => {
     expect(scope).toEqual({ workspaces: ['packages/i1'] });
   });
 
+  it('carves out the root docs/ tree — a caveat that fires on most PRs gets ignored', () => {
+    // No suite in this repo reads docs/**; root-LEVEL prose (AGENTS.md) keeps
+    // its caveat, but the docs tree does not cry wolf on every docs touch.
+    const scope = resolveTestScope({
+      changed: ['docs/design/review-scoped-tests.md'],
+      globs: GLOBS,
+      packages: PKGS,
+      skipped: [],
+    });
+    expect(scope).toEqual({ workspaces: [] });
+
+    const riding = resolveTestScope({
+      changed: ['docs/guide.md', 'packages/i1/src/a.ts'],
+      globs: GLOBS,
+      packages: PKGS,
+      skipped: [],
+    });
+    expect(riding).toEqual({ workspaces: ['packages/i1'] });
+  });
+
   it('keeps a prose file riding along scoped, but records the caveat', () => {
     const scope = resolveTestScope({
       changed: ['README.md', 'packages/i1/src/a.ts'],

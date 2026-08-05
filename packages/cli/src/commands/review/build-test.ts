@@ -55,7 +55,7 @@ import {
   readRootPackage,
   readWorkspaceGlobs,
   readWorkspacePackages,
-  rootTestFansOut,
+  rootScriptFansOut,
   type WorkspacePackage,
 } from './lib/workspaces.js';
 import { resolveTestScope, type TestScope } from './lib/workspace-scope.js';
@@ -66,7 +66,11 @@ import { resolveTestScope, type TestScope } from './lib/workspace-scope.js';
  * PR-authored input — and POSIX shells expand `$()` and backticks even inside
  * double quotes, so an unescaped name is a command-injection path. Escape the
  * characters that stay live inside double quotes. (Safe names, which is every
- * real one, pass through unchanged.)
+ * real one, pass through unchanged.) POSIX scope only: on Windows `shell:
+ * true` is cmd.exe, where backslash escapes are not honored and `%VAR%`
+ * expands inside double quotes — a `"` cannot appear in a Windows dir name,
+ * so the breakout surface there is narrower, but the escape is not a
+ * cmd.exe-proof seal.
  */
 function shellArg(dir: string): string {
   return `"${dir.replace(/[\\"$`]/g, '\\$&')}"`;
@@ -332,11 +336,14 @@ interface BuildTestArgs {
    */
   buildOnly?: boolean;
   /**
-   * Whole-call wall-clock budget for the test phase, in seconds (default: 2×
-   * `timeout`). The closure's per-command deadlines SUM, and a large one sums
-   * past the tool timeout the brief welds onto the call — whose outer kill
-   * discards the report. The test loop stops before a command whose deadline
-   * would cross this budget and discloses the suites that did not run.
+   * Whole-call wall-clock budget in seconds (default: 2× `timeout` − 30s of
+   * headroom for process startup and the report write, floored at one
+   * per-command deadline). Measured from the top of the call — install and
+   * build time count against it. The closure's per-command deadlines SUM, and
+   * a large one sums past the tool timeout the brief welds onto the call —
+   * whose outer kill discards the report. The test loop stops before a
+   * command whose deadline would cross this budget and discloses the suites
+   * that did not run.
    */
   budget?: number;
   /**
@@ -376,10 +383,15 @@ function changedFilesFrom(planPath: string): string[] {
 export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   const root = resolve(args.worktree);
   const perCommandMs = args.timeout * 1000;
-  // The whole-call wall-clock budget for the test loop, in milliseconds.
-  // Defaults to two per-command deadlines — matching the 600-second tool
-  // timeout the brief welds onto the whole call at the default 300s.
-  const callBudgetMs = (args.budget ?? args.timeout * 2) * 1000;
+  // The whole-call wall-clock budget for the call, in milliseconds — measured
+  // from the TOP of the run, so install and build time count against it. The
+  // default keeps 30s of headroom under the 600-second tool timeout the brief
+  // welds onto the call: the clock outside starts before node does, and the
+  // report write must still fit. The floor is one command deadline: a tiny
+  // --timeout must not turn the headroom into a negative budget that starves
+  // every suite.
+  const callBudgetMs =
+    (args.budget ?? Math.max(args.timeout, args.timeout * 2 - 30)) * 1000;
   const runStarted = Date.now();
   const exec = args.exec ?? run;
   const changed = changedFilesFrom(args.plan);
@@ -472,7 +484,7 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
           skipped,
           rootPackage: rootPkg,
           rootTestFansOut: rootPkg?.scripts.includes('test')
-            ? rootTestFansOut(root)
+            ? rootScriptFansOut(root, 'test')
             : false,
         });
   // The SAME graph feeds the build set, so the built set and the tested set
@@ -693,6 +705,14 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   let set = buildSetFor(affected, scopeGraph);
   const built = new Set<string>();
   const widened = new Set<string>();
+  // A root build that fans out over the workspaces (`npm run build
+  // --workspaces`) is an aggregator: it produces no artifacts of its own, the
+  // scoped loop already builds the members it drives, and as one bare command
+  // it is exactly the whole-monorepo build this module exists to stop
+  // running. Only a NON-fan-out root build — one that compiles the root's own
+  // sources — is worth its deadline.
+  const rootBuildRuns =
+    !!rootPkg?.scripts.includes('build') && !rootScriptFansOut(root, 'build');
 
   // Build, and let the compiler correct the set. Three widenings is generous: each
   // one is a package the graph could not have known about, and a fourth would mean
@@ -705,6 +725,13 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
       const pkg = byDir.get(dir);
       if (!pkg?.scripts.includes('build')) {
         built.add(dir); // Nothing to build is not a failure to build.
+        continue;
+      }
+      if (dir === '.' && !singleRoot && !rootBuildRuns) {
+        // Fan-out aggregator root: the members it drives are built by this
+        // very loop; the bare `npm run build` would re-build all of them
+        // inside one deadline (see above).
+        built.add(dir);
         continue;
       }
       const r = exec(buildCommand(dir), root, perCommandMs);
@@ -807,9 +834,18 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     : !testScope
       ? affected // single root: its one package, exactly as before scoping
       : testScope.workspaces;
-  const runnableDirs = testDirs.filter((dir) =>
-    dir === '.' ? rootHasTest : !!byDir.get(dir)?.scripts.includes('test'),
-  );
+  const runnable = (dir: string): boolean =>
+    dir === '.' ? rootHasTest : !!byDir.get(dir)?.scripts.includes('test');
+  // Affected first: the changed workspace's own suite is the highest-value
+  // one and must be unstarvable — the dependents are the widening, and the
+  // widening is what a budget should trim. (The closure is alphabetical, so
+  // without this a `zebra` change would run `alpha`'s suite and starve its
+  // own.)
+  const affectedSet = new Set(affected);
+  const runnableDirs = [
+    ...testDirs.filter((d) => affectedSet.has(d) && runnable(d)),
+    ...testDirs.filter((d) => !affectedSet.has(d) && runnable(d)),
+  ];
   const notRun: string[] = [];
   for (let i = 0; i < runnableDirs.length; i++) {
     if (Date.now() - runStarted + perCommandMs > callBudgetMs) {
@@ -822,9 +858,9 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     if (r.exitCode !== 0) results.ok = false;
   }
 
-  // A budget-stopped run discloses the suites it did not reach — through the
-  // scope's caveat when there is one, and appended to the note when there is
-  // not (single-root repos carry no testScope).
+  // A budget stop is STRUCTURAL, not just prose: `testScope.workspaces` is
+  // documented (and quoted by the agent's brief) as exactly the suites that
+  // ran, so the trimmed suites leave it, and `notRun` names them.
   const partialNote =
     notRun.length > 0
       ? `the whole-call budget (${Math.round(callBudgetMs / 1000)}s) was ` +
@@ -832,8 +868,10 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
         notRun.join(', ')
       : undefined;
   if (testScope && partialNote) {
+    const ran = testScope.workspaces.filter((d) => !notRun.includes(d));
     testScope = {
-      ...testScope,
+      workspaces: ran,
+      notRun,
       caveat: testScope.caveat
         ? `${testScope.caveat}; ${partialNote}`
         : partialNote,
@@ -841,7 +879,9 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   }
 
   // The scope was executed — only now may the report carry it. Every return
-  // above ran zero test commands and must not claim a scoping decision.
+  // between the initializer and here ran zero test commands and must not
+  // claim a scoping decision; the one exception, the nothing-to-run answer
+  // above, carries the scope precisely because the empty scope IS the answer.
   if (testScope) results.testScope = testScope;
 
   if (!results.note) {
@@ -868,8 +908,9 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
             ? ', but the package defines no test script, so no tests ran.'
             : ' and ran the tests of the changed ones. Everything passed.';
       } else if (testScope.workspaces.length === 0) {
-        testsClause =
-          ', but no workspace in scope defines a test script, so no tests ran.';
+        testsClause = testScope.notRun?.length
+          ? ', but the whole-call budget was spent before any suite could run.'
+          : ', but no workspace in scope defines a test script, so no tests ran.';
       } else {
         // The scoped list is filtered to dependents WITH a test script; a
         // build-only dependent is built but never tested, so the note must
@@ -883,9 +924,10 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
       // The root is not a workspace: count it separately, or a 22-member repo
       // reports "of 23" — a number in a report whose thesis is honest numbers.
       const builtWorkspaces = results.buildSet.filter((d) => d !== '.').length;
-      const rootSuffix = results.buildSet.includes('.')
-        ? ' (plus the root package)'
-        : '';
+      const rootSuffix =
+        results.buildSet.includes('.') && rootBuildRuns
+          ? ' (plus the root package)'
+          : '';
       results.note =
         `Built ${builtWorkspaces} of ${packages.length} workspaces${rootSuffix} (the ${affected.length} the ` +
         `diff changes, plus what they compile against${
@@ -905,6 +947,13 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
           ? ' (Commands that timed out are infrastructure, not findings.)'
           : '');
     }
+  }
+
+  // A failure note must carry the caveat too — the note is what the brief
+  // renders first, and "a test failed AND the budget dropped suites" must not
+  // read as a plain failure. (The ok branch already appended it above.)
+  if (results.testScope?.caveat && !results.note.includes('Caveat:')) {
+    results.note += ` Caveat: ${results.testScope.caveat}.`;
   }
 
   // Single-root repos carry no testScope, so a budget stop is disclosed on
@@ -968,11 +1017,12 @@ export const buildTestCommand: CommandModule = {
       .option('budget', {
         type: 'number',
         describe:
-          'Whole-call wall-clock budget for the test phase in seconds (default: ' +
-          '2× --timeout, matching the 600s tool timeout the brief welds on). The ' +
-          'test loop stops before a command whose deadline would cross it and ' +
-          'names the suites that did not run — a partial report survives where ' +
-          'the outer shell kill would discard the whole one.',
+          'Whole-call wall-clock budget in seconds, measured from the top of ' +
+          'the call — install and build time count against it (default: 2× ' +
+          '--timeout minus 30s of headroom for process startup and the report ' +
+          'write). The test loop stops before a command whose deadline would ' +
+          'cross it and names the suites that did not run — a partial report ' +
+          'survives where the outer shell kill would discard the whole one.',
       })
       .option('install', {
         type: 'boolean',
