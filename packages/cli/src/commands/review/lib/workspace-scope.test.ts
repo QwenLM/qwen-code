@@ -232,8 +232,8 @@ describe('resolveTestScope', () => {
   });
 
   it('does not count test-script-less members in the half cap', () => {
-    // core plus one dependent is 2 of the 3 TESTABLE suites (the build-only
-    // island does not narrow anything) — past half, so caveat.
+    // core plus one dependent is 2 of the 2 TESTABLE suites (the build-only
+    // island is not a suite at all) — past half, so caveat.
     const mixed: WorkspacePackage[] = [
       p('packages/core', '@x/core'),
       p('packages/a', '@x/a', ['@x/core']),
@@ -359,6 +359,92 @@ describe('resolveTestScope', () => {
       '3 of 5 testable suites (including the root)',
     );
     expect(scope.caveat).toContain('more than half');
+  });
+
+  it('skips a fan-out root suite with a caveat instead of running the whole monorepo as one command', () => {
+    // The root's `test` is `npm test --workspaces …`: running it as `npm test`
+    // at the root would repeat the ENTIRE suite inside one command deadline —
+    // the fallback this module refuses. The root stays in the graph (docs is
+    // still reached through it) but leaves the executed set, disclosed.
+    const root = p('.', 'root', ['@x/core'], ['test']);
+    const scope = resolveTestScope({
+      changed: ['packages/core/src/a.ts'],
+      globs: GLOBS,
+      packages: PKGS,
+      skipped: [],
+      rootPackage: root,
+      rootTestFansOut: true,
+    });
+    expect(scope.workspaces).toEqual([
+      'packages/core',
+      'packages/mid',
+      'packages/top',
+    ]);
+    expect(scope.caveat).toContain('fans out');
+    expect(scope.caveat).toContain('did not run');
+  });
+
+  it('does not count a fan-out root in the half-cap denominator', () => {
+    // A root suite that cannot run is not a suite the scoped set narrows
+    // against: counting it would give 3 of 6 (exactly half, no caveat) while
+    // the runnable truth is 3 of 5 — strictly past half, so the cap fires.
+    const five: WorkspacePackage[] = [
+      p('packages/core', '@x/core'),
+      p('packages/a', '@x/a', ['@x/core']),
+      p('packages/b', '@x/b', ['@x/core']),
+      p('packages/i1', '@x/i1'),
+      p('packages/i2', '@x/i2'),
+    ];
+    const scope = resolveTestScope({
+      changed: ['packages/core/src/a.ts'],
+      globs: GLOBS,
+      packages: five,
+      skipped: [],
+      rootPackage: p('.', 'root', ['@x/core'], ['test']),
+      rootTestFansOut: true,
+    });
+    expect(scope.workspaces).toEqual([
+      'packages/a',
+      'packages/b',
+      'packages/core',
+    ]);
+    expect(scope.caveat).toContain('3 of 5 testable workspaces');
+    expect(scope.caveat).toContain('fans out');
+  });
+
+  it('reaches dependents THROUGH a build-only root, without running or counting it', () => {
+    // The root has a build script but no test script: it is still a graph
+    // node, or every dependent reached through its name is silently dropped.
+    // It contributes no suite — not to the run list, not to the half cap.
+    const root = p('.', 'root', ['@x/core'], ['build']);
+    const small: WorkspacePackage[] = [
+      p('packages/core', '@x/core'),
+      p('packages/docs', '@x/docs', ['root']),
+      p('packages/i1', '@x/i1'),
+      p('packages/i2', '@x/i2'),
+      p('packages/i3', '@x/i3'),
+    ];
+    const scope = resolveTestScope({
+      changed: ['packages/core/src/a.ts'],
+      globs: GLOBS,
+      packages: small,
+      skipped: [],
+      rootPackage: root,
+    });
+    expect(scope.workspaces).toEqual(['packages/core', 'packages/docs']);
+    // 2 of 5 testable — the build-only root must not inflate the denominator.
+    expect(scope.caveat).toBeUndefined();
+  });
+
+  it('names the glob-shadowed shape in the broken-graph caveat', () => {
+    const scope = resolveTestScope({
+      changed: ['packages/i1/src/a.ts'],
+      globs: GLOBS,
+      packages: PKGS,
+      skipped: ['packages/foo/nested'],
+    });
+    expect(scope.caveat).toContain('packages/foo/nested');
+    expect(scope.caveat).toContain('shadowed by a later workspace glob');
   });
 
   it('keeps the broken-graph caveat ahead of the half-cap one — trust order', () => {

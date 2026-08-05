@@ -72,6 +72,29 @@ describe('workspaceDirFor', () => {
     );
   });
 
+  it('falls back to the surviving OUTER member when a negation excludes a nested one', () => {
+    // npm keeps packages/desktop in the graph — only src is excluded — and
+    // desktop's test runner collects src/**, so the file is felt by the outer
+    // member's suite. Declaring it felt by NOTHING would certify "a complete
+    // answer" over a suite that can fail.
+    const globs = ['packages/*', 'packages/desktop/*', '!packages/desktop/src'];
+    expect(workspaceDirFor('packages/desktop/src/x.test.ts', globs)).toBe(
+      'packages/desktop',
+    );
+    expect(isNegationExcluded('packages/desktop/src/x.test.ts', globs)).toBe(
+      false,
+    );
+  });
+
+  it('treats a ./-prefixed glob like its bare form', () => {
+    // npm accepts `./packages/*`; the walker stripped `./` from FILE paths
+    // only, so the glob form matched nothing and every member was dropped.
+    expect(workspaceDirFor('packages/cli/src/a.ts', ['./packages/*'])).toBe(
+      'packages/cli',
+    );
+    expect(hasUnmodeledWorkspaceGlob(['./packages/*'])).toBe(false);
+  });
+
   it('returns null for a file inside no workspace', () => {
     expect(workspaceDirFor('README.md', GLOBS)).toBeNull();
     expect(workspaceDirFor('integration-tests/foo.test.ts', GLOBS)).toBeNull();
@@ -323,6 +346,40 @@ describe('readWorkspacePackages', () => {
     write('integrations/ctx', '{ not json');
     const { skipped } = readWorkspacePackages(root);
     expect(skipped).toEqual(['integrations/ctx']);
+    teardown();
+  });
+
+  it('reports a literal member shadowed by a LATER star glob as skipped', () => {
+    // npm expands both entry orders to the same member set, but this walker's
+    // last-match-wins ownership gives the literal member's files to the star —
+    // the graph cannot represent it, so it is disclosed, not silently dropped.
+    setup(['packages/foo/nested', 'packages/*']);
+    write('packages/foo', { name: '@x/foo' });
+    write('packages/foo/nested', { name: '@x/nested' });
+    const { packages, skipped } = readWorkspacePackages(root);
+    expect(packages.map((p) => p.dir)).toEqual(['packages/foo']);
+    expect(skipped).toEqual(['packages/foo/nested']);
+    teardown();
+  });
+
+  it('keeps the same literal member when the star comes FIRST', () => {
+    setup(['packages/*', 'packages/foo/nested']);
+    write('packages/foo', { name: '@x/foo' });
+    write('packages/foo/nested', { name: '@x/nested' });
+    const { packages, skipped } = readWorkspacePackages(root);
+    expect(packages.map((p) => p.dir)).toEqual([
+      'packages/foo',
+      'packages/foo/nested',
+    ]);
+    expect(skipped).toEqual([]);
+    teardown();
+  });
+
+  it('expands ./-prefixed globs like their bare form', () => {
+    setup(['./packages/*']);
+    write('packages/good', { name: '@x/good' });
+    const { packages } = readWorkspacePackages(root);
+    expect(packages.map((p) => p.dir)).toEqual(['packages/good']);
     teardown();
   });
 

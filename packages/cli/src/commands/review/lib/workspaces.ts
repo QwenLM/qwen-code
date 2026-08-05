@@ -78,10 +78,18 @@ export function workspaceDirFor(
 ): string | null {
   const norm = filePath.replace(/^\.\//, '');
   let owner: string | null = null;
+  // The owners that came before the current one — where a negation falls back
+  // TO. When a negation excludes a NESTED member (`packages/desktop/*` claimed
+  // `packages/desktop/src`, then `!packages/desktop/src` excluded it), the
+  // still-included outer member keeps owning the file: npm keeps
+  // `packages/desktop` in the graph, and its test runner collects `src/**`.
+  // Falling back to the previous owner is what lets that suite feel the
+  // change instead of the file being declared felt by nothing.
+  const previous: Array<string | null> = [];
 
   for (const glob of workspaceGlobs) {
     const negated = glob.startsWith('!');
-    const g = glob.replace(/^!/, '').replace(/\/$/, '');
+    const g = glob.replace(/^!/, '').replace(/^\.\//, '').replace(/\/$/, '');
 
     let dir: string | null = null;
     if (g.endsWith('/*')) {
@@ -97,26 +105,35 @@ export function workspaceDirFor(
 
     if (dir === null) continue;
     if (!negated) {
-      owner = dir;
+      if (dir !== owner) {
+        previous.push(owner);
+        owner = dir;
+      }
     } else if (dir === owner) {
       // A negation only excludes the file when it excludes the member that
       // currently owns it. `!packages/desktop/*` matches a deeper pseudo-dir
       // than `packages/*` does, and npm keeps the member itself in the graph
       // (a glob with a subpath cannot match a dir with no subpath), so the
-      // member's suite can still feel a change there.
-      owner = null;
+      // member's suite can still feel a change there. When the negation DOES
+      // exclude the owner, ownership falls back to the previous, outer member
+      // — only a negation of THAT one leaves the file owned by nothing.
+      owner = previous.pop() ?? null;
     }
   }
   return owner;
 }
 
 /**
- * True when a positive glob claims `filePath` but a negation excludes it.
+ * True when a positive glob claims `filePath` but a negation excludes it from
+ * every member.
  *
  * Such a file belongs to a workspace the npm graph does not contain — this
  * repo's `!packages/desktop` is a separate bun workspace with its own
  * lockfile — so no included workspace's tests can feel a change to it, and it
- * must not earn the incomplete-scope caveat a genuinely outside file does.
+ * must not earn the incomplete-scope caveat a genuinely outside file does. A
+ * file whose nested member is negated while an OUTER member survives
+ * (`!packages/desktop/src` under `packages/desktop`) is NOT excluded here:
+ * `workspaceDirFor` falls back to the outer member, whose suite collects it.
  */
 export function isNegationExcluded(
   filePath: string,
@@ -141,7 +158,7 @@ export function isNegationExcluded(
  */
 export function hasUnmodeledWorkspaceGlob(globs: string[]): boolean {
   return globs.some((glob) => {
-    const g = glob.replace(/^!/, '');
+    const g = glob.replace(/^!/, '').replace(/^\.\//, '');
     if (!g.includes('*')) return false; // a literal path — fully modeled
     // The one modeled star shape: a single trailing `/*` and no other star.
     return !/^[^*]+\/\*$/.test(g);
@@ -200,6 +217,28 @@ export function readRootPackage(root: string): WorkspacePackage | null {
   };
 }
 
+/**
+ * Does the root's `test` script fan out over every workspace?
+ *
+ * `npm test --workspaces …` at the root is ONE command that repeats the whole
+ * monorepo suite — the exact run that cannot finish inside a single command
+ * deadline on a large repo. When the root joins the test scope as a dependent,
+ * running `testCommand('.')` would be that command, so the scope must skip it
+ * (with a caveat) instead of pretending the scoped run includes it. Detected
+ * from the script text: the `--workspaces` flag is the fan-out; other
+ * aggregators (turbo, nx, lerna) are not modeled and run as written.
+ */
+export function rootTestFansOut(root: string): boolean {
+  let pkg: ManifestLike | null;
+  try {
+    pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+  } catch {
+    return false;
+  }
+  const test = pkg?.scripts?.['test'];
+  return typeof test === 'string' && /--workspaces\b/.test(test);
+}
+
 /** The manifest fields this module reads. */
 interface ManifestLike {
   name?: unknown;
@@ -240,7 +279,7 @@ export function workspaceDirCandidates(
   const dirs = new Set<string>();
   for (const glob of globs) {
     if (glob.startsWith('!')) continue; // negations are applied by workspaceDirFor
-    const g = glob.replace(/\/$/, '');
+    const g = glob.replace(/^\.\//, '').replace(/\/$/, '');
     if (g.endsWith('/*')) {
       const base = g.slice(0, -2);
       let entries: string[];
@@ -273,15 +312,18 @@ export interface WorkspaceGraph {
   packages: WorkspacePackage[];
   /**
    * Dirs npm treats as workspaces but the graph cannot see: the manifest
-   * exists yet does not parse, or parses to no usable `name` (missing, empty,
-   * not a string, or the JSON literal `null`). The two shapes fail
-   * differently, but both leave a dependent the closure may miss. A manifest
-   * that parses to no usable `name` is still linked by npm — under its
-   * directory name — so its reverse edges are real edges the graph cannot
-   * see. A manifest that does not parse fails `npm install` outright
-   * (EJSONPARSE) on a cold tree, but on a pre-installed tree the install is
-   * skipped and the graph is still blind to it. Either way the test scope
-   * treats a non-empty list as "the graph cannot be trusted".
+   * exists yet does not parse, parses to no usable `name` (missing, empty,
+   * not a string, or the JSON literal `null`), or sits under a glob ordering
+   * the ownership walk cannot model (a literal member listed before a `*`
+   * that claims its parent segment — npm includes it, the walker attributes
+   * its files to the star's dir). The shapes fail differently, but all leave
+   * a dependent the closure may miss. A manifest that parses to no usable
+   * `name` is still linked by npm — under its directory name — so its reverse
+   * edges are real edges the graph cannot see. A manifest that does not parse
+   * fails `npm install` outright (EJSONPARSE) on a cold tree, but on a
+   * pre-installed tree the install is skipped and the graph is still blind to
+   * it. Either way the test scope treats a non-empty list as "the graph
+   * cannot be trusted".
    */
   skipped: string[];
 }
@@ -293,12 +335,26 @@ export function readWorkspacePackages(root: string): WorkspaceGraph {
   const packages: WorkspacePackage[] = [];
   const skipped: string[] = [];
   for (const dir of workspaceDirCandidates(root, globs)) {
-    // A directory a negation excludes is not a workspace, and its own
-    // `package.json` says nothing about that — `packages/desktop` is a separate
-    // bun workspace with its own lockfile, and building it from here fails.
-    if (workspaceDirFor(`${dir}/package.json`, globs) !== dir) continue;
     const manifest = join(root, dir, 'package.json');
     if (!existsSync(manifest)) continue;
+    if (workspaceDirFor(`${dir}/package.json`, globs) !== dir) {
+      // A directory a negation excludes is not a workspace, and its own
+      // `package.json` says nothing about that — `packages/desktop` is a
+      // separate bun workspace with its own lockfile, and building it from
+      // here fails. The tell: the POSITIVE globs alone still make the dir its
+      // own owner, so a negation is what took the ownership away.
+      const positives = globs.filter((g) => !g.startsWith('!'));
+      if (workspaceDirFor(`${dir}/package.json`, positives) === dir) continue;
+      // A later POSITIVE glob took the ownership instead — a literal member
+      // listed before a `*` that also claims its parent segment
+      // (`['packages/foo/nested', 'packages/*']`). npm includes the member
+      // under either entry order, but this walker's last-match-wins model
+      // attributes its files to the star's dir, so the graph cannot represent
+      // it: disclose the dir as unreadable-by-the-graph rather than silently
+      // drop a dependent the closure may need.
+      skipped.push(dir);
+      continue;
+    }
     let pkg: ManifestLike;
     try {
       pkg = JSON.parse(readFileSync(manifest, 'utf8'));

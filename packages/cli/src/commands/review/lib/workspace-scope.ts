@@ -22,7 +22,9 @@
 //   - A workspace whose `package.json` does not parse (or has no usable `name`)
 //     is invisible to the dependency graph, so its reverse edges are missing
 //     and the closure may be silently too small — the confident false green
-//     this pipeline exists to prevent.
+//     this pipeline exists to prevent. The same holds for a member a glob
+//     ORDERING hides from the graph (a literal entry listed before a `*` that
+//     claims its parent segment): npm includes it, the walker cannot.
 //   - A changed file OUTSIDE every workspace can affect any package: the test
 //     scripts themselves live in the root `package.json`, and `scripts/` is
 //     imported by whatever chooses to. No per-workspace subset covers that.
@@ -34,6 +36,10 @@
 //     disclosure, not a full-suite run, err toward disclosing.
 //   - A closure past HALF the testable workspaces is not a meaningful
 //     narrowing, and the report should say so.
+//   - A root suite that fans out over every workspace (`npm test
+//     --workspaces`) cannot run as one scoped command — it would repeat the
+//     whole suite inside a single deadline — so it does not run, and that is
+//     disclosed the same way.
 //
 // None of these fall back to the repo's root test command. That command — one
 // `npm test` over every workspace — is exactly what cannot finish inside a
@@ -101,12 +107,23 @@ export function resolveTestScope(input: {
   /** From `readWorkspacePackages` — dirs the graph cannot see. */
   skipped: string[];
   /**
-   * The root package when it defines a test script. A root suite that declares
-   * a dependency on a changed workspace is a dependent like any other — the
-   * closure must see it, or it silently never runs while the report claims
-   * every dependent was covered.
+   * The root package as a graph node, whenever the root manifest is a package
+   * with a build or test script. Its declared dependencies are reverse edges
+   * the closure cannot do without — a root that depends on a changed
+   * workspace is a dependent like any other, and a dependent reached THROUGH
+   * the root's name is dropped when the root is absent. Whether the root's
+   * own scripts RUN is decided separately (a build-only root joins the graph
+   * but no test list; a fan-out root test joins neither — see below).
    */
   rootPackage?: WorkspacePackage | null;
+  /**
+   * True when the root's `test` script fans out over every workspace
+   * (`npm test --workspaces …`). Such a suite cannot run as one scoped
+   * command — it would repeat the ENTIRE suite inside a single command
+   * deadline, the fallback this module exists to refuse — so the root is
+   * dropped from the executed set and the non-run is disclosed as a caveat.
+   */
+  rootTestFansOut?: boolean;
 }): TestScope {
   const { changed, globs, packages, skipped } = input;
 
@@ -119,8 +136,8 @@ export function resolveTestScope(input: {
     caveat =
       `the workspace graph could not be fully computed: ${skipped.join(', ')} ` +
       `${skipped.length === 1 ? 'has' : 'have'} a package.json that does not ` +
-      'parse or has no usable `name`, so a reverse dependency may be missing ' +
-      'from the scoped set';
+      'parse, has no usable `name`, or is shadowed by a later workspace glob, ' +
+      'so a reverse dependency may be missing from the scoped set';
   } else {
     // A dir a positive glob claims but no manifest populates hosts no suite
     // the scoped set can run, and its reverse edges are invisible to the
@@ -152,14 +169,34 @@ export function resolveTestScope(input: {
   const closure = reverseDependencyClosure(affected, graph);
   // Exactly the suites the run executes: the closure, minus members that
   // define no test script — naming those would claim coverage nothing can run.
-  const workspaces = closure.filter((d) => scriptsOf.get(d)?.includes('test'));
+  let workspaces = closure.filter((d) => scriptsOf.get(d)?.includes('test'));
+
+  // A root suite that fans out over every workspace (`npm test --workspaces`)
+  // is one command that repeats the ENTIRE suite — the run that cannot finish
+  // inside a command deadline, which this module exists to refuse. The root
+  // stays in the graph (its edges matter) but leaves the executed set, and
+  // the non-run is disclosed rather than dressed up as coverage. Unlike the
+  // graph caveats above, this COMPOSES with the half-cap one: both are facts
+  // about what ran.
+  let fanOutCaveat: string | undefined;
+  if (input.rootTestFansOut && workspaces.includes('.')) {
+    workspaces = workspaces.filter((d) => d !== '.');
+    fanOutCaveat =
+      "the root's `test` script fans out over every workspace " +
+      '(`--workspaces`), so the root suite did not run — it cannot finish ' +
+      'inside one command deadline; the scoped member suites are the coverage';
+  }
 
   // Testable-to-testable: a closure past half the suites that CAN run is not a
   // meaningful narrowing, and counting script-less members would overstate it.
   // The root suite counts on BOTH sides when it participates — with a running
-  // root the executed set is larger than workspace-only arithmetic models.
+  // root the executed set is larger than workspace-only arithmetic models. A
+  // build-only root has no suite to count; a fan-out root cannot run.
   if (!caveat) {
-    const rootRuns = input.rootPackage ? 1 : 0;
+    const rootRuns =
+      input.rootPackage?.scripts.includes('test') && !input.rootTestFansOut
+        ? 1
+        : 0;
     const testable =
       packages.filter((p) => p.scripts.includes('test')).length + rootRuns;
     const scoped = workspaces.length;
@@ -173,5 +210,6 @@ export function resolveTestScope(input: {
     }
   }
 
-  return caveat ? { workspaces, caveat } : { workspaces };
+  const combined = [caveat, fanOutCaveat].filter(Boolean).join('; ');
+  return combined ? { workspaces, caveat: combined } : { workspaces };
 }

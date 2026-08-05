@@ -55,6 +55,7 @@ import {
   readRootPackage,
   readWorkspaceGlobs,
   readWorkspacePackages,
+  rootTestFansOut,
   type WorkspacePackage,
 } from './lib/workspaces.js';
 import { resolveTestScope, type TestScope } from './lib/workspace-scope.js';
@@ -427,12 +428,14 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   // is its full suite, and its report must not change shape — and for a
   // build-only call: the merge-base probe runs no tests, and a testScope it
   // never executed would claim a decision the run did not make.
-  // The root joins the test graph when it defines a test suite: a root that
-  // declares a dependency on a changed workspace is a dependent the closure
-  // must see. The build set below is computed over the SAME graph, so a member
-  // that depends on the root's name is built as well as tested — one
-  // definition, so the built set and the tested set cannot drift apart.
-  const rootPackage = rootPkg?.scripts.includes('test') ? rootPkg : null;
+  // The root joins the graph whenever it is a package with a build or test
+  // script — not only when it has a TEST suite. Its declared dependencies are
+  // edges either way: a member that names the root as a dependency is reached
+  // THROUGH the root, and a build-only root dropped from the graph takes every
+  // such transitive dependent with it, silently. Which of the root's own
+  // scripts run is decided separately (build loop: its `build`; test scope:
+  // its `test`, unless it fans out over every workspace — see below).
+  const rootPackage = rootPkg;
   const testScope =
     singleRoot || args.buildOnly
       ? undefined
@@ -442,11 +445,16 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
           packages,
           skipped,
           rootPackage,
+          rootTestFansOut: rootPackage?.scripts.includes('test')
+            ? rootTestFansOut(root)
+            : false,
         });
+  // The SAME graph feeds the build set, so the built set and the tested set
+  // cannot drift apart — and it is the same graph for a build-only probe as
+  // for the full run, or the merge-base probe measures a different tree than
+  // the run it is the baseline for ("same set, same commands, same verdict").
   const scopeGraph =
-    !singleRoot && !args.buildOnly && rootPackage
-      ? [...packages, rootPackage]
-      : packages;
+    !singleRoot && rootPackage ? [...packages, rootPackage] : packages;
 
   // With no affected workspace there is nothing to run at all. Three diffs land
   // here: an empty one; a build-only call (the merge-base probe), which measures
@@ -481,7 +489,12 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     };
   }
 
-  const byDir = new Map(packages.map((p) => [p.dir, p]));
+  // The dir→package map is built from the SCOPE GRAPH, not the workspace list
+  // alone: when the root joins the graph, a member that names it as a
+  // dependency puts `.` in the build set, and the root's own `build` must run
+  // like any other package's — skipping it would compile dependents against
+  // artifacts of the root that were never produced.
+  const byDir = new Map(scopeGraph.map((p) => [p.dir, p]));
 
   // A changed dir the walker mapped to something that is NOT a package (a nested
   // package listed before a `*` that also claims its parent segment; a loose file
@@ -813,7 +826,7 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
       }
       if (testScope?.caveat) testsClause += ` Caveat: ${testScope.caveat}.`;
       results.note =
-        `Built ${results.buildSet.length} of ${packages.length} workspaces (the ${affected.length} the ` +
+        `Built ${results.buildSet.length} of ${byDir.size} workspaces (the ${affected.length} the ` +
         `diff changes, plus what they compile against${
           widened.size
             ? `, plus ${[...widened].join(', ')} the compiler asked for`

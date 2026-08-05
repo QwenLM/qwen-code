@@ -416,12 +416,22 @@ describe('runBuildTest', () => {
       JSON.stringify({ name: 'solo', scripts: { build: 'exit 0' } }),
     );
     writePlan(['src/index.ts']);
+    const calls: string[] = [];
     const rep = runBuildTest({
       plan: planPath,
       worktree: root,
       timeout: 60,
       install: false,
-      exec: okExec,
+      exec: (command) => {
+        calls.push(command);
+        return {
+          command,
+          exitCode: 0,
+          seconds: 1,
+          timedOut: false,
+          output: '',
+        };
+      },
     });
     expect(rep.toolchain).toBe('npm');
     expect(rep.ok).toBe(true);
@@ -429,6 +439,9 @@ describe('runBuildTest', () => {
     expect(rep.testScope).toBeUndefined();
     expect(rep.note).toContain('no tests ran');
     expect(rep.note).not.toContain('Everything passed');
+    // The comment above claims the build runs — so witness it, not just the
+    // note's wording: exactly the root's build, and nothing else, executed.
+    expect(calls).toEqual(['npm run build']);
   });
 
   it('is `unsupported` for a single-package repo with no build/test script', () => {
@@ -944,8 +957,8 @@ describe('runBuildTest', () => {
     // The root declares a dependency on the changed member but defines NO test
     // script: it joins the closure only as '.', the script filter drops it, and
     // — because it is not a testable suite — it must not inflate the half-cap
-    // denominator either. The gate passing `rootPackage` only for a root with a
-    // test is what guarantees both; this pins the resulting scope.
+    // denominator either. The script filter and the rootRuns gate are what
+    // guarantee both; this pins the resulting scope.
     writeFileSync(
       join(root, 'package.json'),
       JSON.stringify({
@@ -1023,16 +1036,117 @@ describe('runBuildTest', () => {
       exec: okExec,
     });
     expect(rep.testScope?.workspaces).toContain('packages/docs');
-    // docs is built (the drift R2-23 fixed); the root itself is not a
-    // buildable workspace and stays out of the reported set.
+    // docs is built (the drift R2-23 fixed) — and so is the root: docs names
+    // the root as a dependency, so the root joins the graph and its own
+    // `build` runs like any other package's, dependencies-first.
     expect(rep.buildSet).toContain('packages/docs');
     expect(rep.buildSet).toContain('packages/core');
-    expect(rep.buildSet).not.toContain('.');
+    expect(rep.buildSet).toContain('.');
+    expect(rep.build.map((b) => b.command)).toEqual([
+      'npm run build --workspace="packages/core"',
+      'npm run build',
+      'npm run build --workspace="packages/docs"',
+    ]);
     expect(rep.test.map((t) => t.command)).toEqual([
       'npm test',
       'npm test --workspace="packages/core"',
       'npm test --workspace="packages/docs"',
     ]);
+    expect(rep.ok).toBe(true);
+  });
+
+  it('buildOnly measures the SAME set as the full run in the root-bridge case', () => {
+    // The merge-base probe is the baseline an A/B verdict is computed against:
+    // if its build set excluded the root bridge (and docs behind it), base
+    // would run docs's suite against artifacts the full run compiles —
+    // manufacturing a behavioural difference out of thin air.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'r',
+        workspaces: ['packages/*'],
+        scripts: { build: 'exit 0', test: 'exit 0' },
+        dependencies: { '@x/core': '*' },
+      }),
+    );
+    pkg('packages/core', {
+      name: '@x/core',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/docs', {
+      name: '@x/docs',
+      dependencies: { r: '*' },
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    writePlan(['packages/core/src/a.ts']);
+
+    const args = {
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec,
+    };
+    const withTests = runBuildTest(args);
+    const buildOnly = runBuildTest({ ...args, buildOnly: true });
+
+    expect(withTests.buildSet).toContain('.');
+    expect(buildOnly.buildSet).toEqual(withTests.buildSet);
+    expect(buildOnly.build.map((b) => b.command)).toEqual(
+      withTests.build.map((b) => b.command),
+    );
+    expect(buildOnly.test).toEqual([]);
+    expect(buildOnly.ok).toBe(true);
+  });
+
+  it('skips a fan-out root suite — the scoped member suites are the coverage', () => {
+    // The root's `test` fans out over every workspace: running it as bare
+    // `npm test` would repeat the ENTIRE suite inside one command deadline,
+    // the fallback this command refuses. It must not appear among the test
+    // commands, and the caveat must say why.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'r',
+        workspaces: ['packages/*'],
+        scripts: {
+          build: 'exit 0',
+          test: 'npm run test --workspaces --if-present',
+        },
+        dependencies: { '@x/core': '*' },
+      }),
+    );
+    pkg('packages/core', {
+      name: '@x/core',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/docs', {
+      name: '@x/docs',
+      dependencies: { r: '*' },
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    for (const island of ['i1', 'i2', 'i3', 'i4']) {
+      pkg(`packages/${island}`, {
+        name: `@x/${island}`,
+        scripts: { test: 'exit 0' },
+      });
+    }
+    writePlan(['packages/core/src/a.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec,
+    });
+    expect(rep.test.map((t) => t.command)).toEqual([
+      'npm test --workspace="packages/core"',
+      'npm test --workspace="packages/docs"',
+    ]);
+    expect(rep.testScope?.workspaces).not.toContain('.');
+    expect(rep.testScope?.caveat).toContain('fans out');
+    expect(rep.note).toContain('fans out');
     expect(rep.ok).toBe(true);
   });
 
