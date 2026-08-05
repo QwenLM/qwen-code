@@ -103,6 +103,11 @@ export interface WorkspaceRuntimeRemovalController {
 
 export interface WorkspaceManagementHandle {
   sealAndWait(): Promise<void>;
+  publishOwnedRuntime(
+    canonicalCwd: string,
+    provenance: Exclude<WorkspaceRuntimeProvenance, 'existing'>,
+    validate: (runtime: WorkspaceRuntime) => void | Promise<void>,
+  ): Promise<WorkspaceRuntime>;
 }
 
 export function registerWorkspaceManagementRoutes(
@@ -195,6 +200,124 @@ export function registerWorkspaceManagementRoutes(
       if (operation === 'addition') cwdSet.add(cwd);
     }
     return cwdSet.size + pendingScratchCreations;
+  };
+
+  const conflictsWithRegisteredWorkspace = (canonical: string): boolean =>
+    workspaceRegistry.listManaged().some((runtime) => {
+      if (runtime.workspaceCwd === canonical) return false;
+      if (isWithinRoot(canonical, runtime.workspaceCwd)) return true;
+      return (
+        runtime.provenance !== 'live-conversation' &&
+        isWithinRoot(runtime.workspaceCwd, canonical)
+      );
+    });
+
+  const assertOwnedRuntimeAdmission = (
+    canonical: string,
+    provenance: Exclude<WorkspaceRuntimeProvenance, 'existing'>,
+  ): void => {
+    if (sealed) throw new Error('Daemon is shutting down');
+    if (inFlight.has(canonical)) {
+      throw new Error('Workspace registration is already in progress');
+    }
+    if (workspaceRegistry.getManagedByWorkspaceCwd(canonical)) {
+      throw new Error('Workspace is already registered');
+    }
+    const nestingConflict = [
+      ...workspaceRegistry.listManaged().map((runtime) => runtime.workspaceCwd),
+      ...[...inFlight].flatMap(([cwd, operation]) =>
+        operation === 'addition' ? [cwd] : [],
+      ),
+    ].some((cwd) => {
+      if (cwd === canonical) return false;
+      if (isWithinRoot(cwd, canonical)) return true;
+      return provenance !== 'live-conversation' && isWithinRoot(canonical, cwd);
+    });
+    // Live uses one fixed, daemon-owned root and every request resolves its
+    // runtime exactly; user-selected and scratch runtimes keep the strict
+    // no-nesting boundary.
+    if (nestingConflict) {
+      throw new Error('Workspace path nests with an existing workspace');
+    }
+    if (projectedWorkspaceCount() >= MAX_REGISTERED_WORKSPACES) {
+      throw new Error('Workspace registration limit reached');
+    }
+  };
+
+  const publishOwnedRuntime = async (
+    canonicalCwd: string,
+    provenance: Exclude<WorkspaceRuntimeProvenance, 'existing'>,
+    validate: (runtime: WorkspaceRuntime) => void | Promise<void>,
+  ): Promise<WorkspaceRuntime> => {
+    if (!createWorkspaceRuntime || !runtimeRemoval) {
+      throw new Error('Managed workspace runtime publication is unavailable');
+    }
+    assertOwnedRuntimeAdmission(canonicalCwd, provenance);
+    inFlight.set(canonicalCwd, 'addition');
+    operationStarted();
+    let runtime: WorkspaceRuntime | undefined;
+    let registered = false;
+    try {
+      runtime = await createWorkspaceRuntime(canonicalCwd, { provenance });
+      await validate(runtime);
+      const publish = async () => {
+        if (sealed) throw new Error('Daemon is shutting down');
+        if (workspaceRegistry.getManagedByWorkspaceCwd(canonicalCwd)) {
+          throw new Error('Workspace is already registered');
+        }
+        const nestingConflict = workspaceRegistry
+          .listManaged()
+          .some((entry) => {
+            if (entry.workspaceCwd === canonicalCwd) return false;
+            if (isWithinRoot(entry.workspaceCwd, canonicalCwd)) return true;
+            return (
+              provenance !== 'live-conversation' &&
+              isWithinRoot(canonicalCwd, entry.workspaceCwd)
+            );
+          });
+        if (nestingConflict) {
+          throw new Error('Workspace path nests with an existing workspace');
+        }
+        if (projectedWorkspaceCount() >= MAX_REGISTERED_WORKSPACES) {
+          throw new Error('Workspace registration limit reached');
+        }
+        workspaceRegistry.add(runtime!);
+        registered = true;
+        try {
+          await runtimeRemoval.runtimeAdded?.(runtime!);
+        } catch (error) {
+          try {
+            writeStderrLine(
+              `qwen serve: workspace runtime adapter notification failed after registry add: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          } catch {
+            // The runtime is registered; diagnostics are best-effort.
+          }
+        }
+      };
+      if (runWorkspaceTrustOperation) {
+        await runWorkspaceTrustOperation(publish);
+      } else {
+        await publish();
+      }
+      return runtime;
+    } finally {
+      if (runtime && !registered) {
+        await runtimeRemoval
+          .disposeRuntime(runtime, 'workspace_removed')
+          .catch(() => {
+            try {
+              runtime?.bridge.killAllSync();
+            } catch {
+              // Preserve the publication failure.
+            }
+          });
+      }
+      inFlight.delete(canonicalCwd);
+      operationFinished();
+    }
   };
 
   /** Creates and registers one trusted, process-local daemon-owned workspace. */
@@ -663,19 +786,14 @@ export function registerWorkspaceManagementRoutes(
           });
           return;
         }
-        const nested = [
-          ...workspaceRegistry
-            .listManaged()
-            .map((runtime) => runtime.workspaceCwd),
-          ...[...inFlight].flatMap(([cwd, operation]) =>
-            operation === 'addition' || operation === 'promotion' ? [cwd] : [],
-          ),
-        ].some(
-          (boundCwd) =>
-            boundCwd !== canonical &&
-            (isWithinRoot(canonical, boundCwd) ||
-              isWithinRoot(boundCwd, canonical)),
-        );
+        const nested =
+          conflictsWithRegisteredWorkspace(canonical) ||
+          [...inFlight].some(
+            ([cwd, operation]) =>
+              cwd !== canonical &&
+              (operation === 'addition' || operation === 'promotion') &&
+              (isWithinRoot(canonical, cwd) || isWithinRoot(cwd, canonical)),
+          );
         if (nested) {
           res.status(409).json({
             error: 'Workspace path nests with an existing workspace',
@@ -814,24 +932,20 @@ export function registerWorkspaceManagementRoutes(
       // Nesting guard checks registered workspaces AND in-flight registrations,
       // so two concurrent POSTs for parent/child paths (e.g. /project and
       // /project/sub) can't both pass while neither is in the registry yet.
-      const boundCwds = [
-        ...workspaceRegistry.listManaged().map((r) => r.workspaceCwd),
-        ...[...inFlight].flatMap(([cwd, operation]) =>
-          operation === 'addition' ? [cwd] : [],
-        ),
-      ];
-      for (const existing of boundCwds) {
-        if (
-          existing !== canonical &&
-          (isWithinRoot(canonical, existing) ||
-            isWithinRoot(existing, canonical))
-        ) {
-          res.status(409).json({
-            error: 'Workspace path nests with an existing workspace',
-            code: 'workspace_nested',
-          });
-          return;
-        }
+      const nested =
+        conflictsWithRegisteredWorkspace(canonical) ||
+        [...inFlight].some(
+          ([cwd, operation]) =>
+            cwd !== canonical &&
+            operation === 'addition' &&
+            (isWithinRoot(canonical, cwd) || isWithinRoot(cwd, canonical)),
+        );
+      if (nested) {
+        res.status(409).json({
+          error: 'Workspace path nests with an existing workspace',
+          code: 'workspace_nested',
+        });
+        return;
       }
 
       if (projectedWorkspaceCount() >= MAX_REGISTERED_WORKSPACES) {
@@ -1606,6 +1720,7 @@ export function registerWorkspaceManagementRoutes(
   );
 
   return {
+    publishOwnedRuntime,
     async sealAndWait() {
       sealed = true;
       if (activeOperations === 0) return;
