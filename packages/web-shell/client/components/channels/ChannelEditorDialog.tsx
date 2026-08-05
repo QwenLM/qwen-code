@@ -74,6 +74,7 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
   },
   github: {
     token: 'channels.editor.field.github.token',
+    useLocalGh: 'channels.editor.field.github.useLocalGh',
     baseUrl: 'channels.editor.field.github.baseUrl',
     groupPolicy: 'channels.editor.field.github.groupPolicy',
     senderPolicy: 'channels.editor.field.github.senderPolicy',
@@ -224,6 +225,8 @@ export function ChannelEditorDialog({
     code: ChannelEditorValidationCode,
   ) => {
     if (code === 'duplicate') return t('channels.editor.validation.duplicate');
+    if (code === 'credential')
+      return t('channels.editor.validation.credential');
     if (code === 'invalid') return t('channels.editor.validation.invalidName');
     if (code === 'invalidOption')
       return t('channels.editor.validation.invalidOption');

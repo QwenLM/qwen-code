@@ -34,6 +34,8 @@ export interface DaemonWorkspaceCapability {
   trusted: boolean;
   /** Whether this runtime can be removed without restarting the daemon. */
   removable?: boolean;
+  /** Daemon-owned Live conversation runtime. */
+  kind?: 'live';
 }
 
 export interface DaemonWorkspaceUpdate {
@@ -790,7 +792,10 @@ export interface DaemonBranchInfo {
 /** Returned from `POST /session`. */
 export interface DaemonSession {
   sessionId: string;
+  /** Immutable runtime ownership root used for daemon routing. */
   workspaceCwd: string;
+  /** Current agent cwd when it differs from `workspaceCwd`. */
+  currentCwd?: string;
   /** True when an existing session was reused under sessionScope:single. */
   attached: boolean;
   /**
@@ -2601,6 +2606,115 @@ export interface DaemonWorkspaceVoiceTranscriptionResult {
   text: string;
   model: string;
   transport: DaemonVoiceTransport;
+}
+
+export type DaemonLiveState =
+  | 'unavailable'
+  | 'idle'
+  | 'starting'
+  | 'listening'
+  | 'thinking'
+  | 'speaking'
+  | 'stopping'
+  | 'error';
+
+export type DaemonLiveBlocker =
+  | 'host_missing'
+  | 'host_disconnected'
+  | 'host_version'
+  | 'microphone_permission'
+  | 'accessibility_permission'
+  | 'screen_recording_permission'
+  | 'audio_input'
+  | 'audio_output'
+  | 'global_shortcut'
+  | 'appshot'
+  | 'provider_config'
+  | 'provider_unreachable';
+
+export type DaemonLiveRequirementState =
+  | 'ready'
+  | 'missing'
+  | 'denied'
+  | 'unavailable'
+  | 'checking';
+
+/** Process-global Live Voice state. It never contains provider credentials. */
+export interface DaemonLiveStatus {
+  v: 1;
+  available: boolean;
+  state: DaemonLiveState;
+  shortcut: string;
+  blocker?: DaemonLiveBlocker;
+  message?: string;
+  callId?: string;
+  inputMuted?: boolean;
+  outputMuted?: boolean;
+  transcript?: string;
+  caption?: string;
+  statusText?: string;
+  requirements?: Partial<
+    Record<
+      | 'host'
+      | 'microphone'
+      | 'accessibility'
+      | 'screenRecording'
+      | 'audioInput'
+      | 'audioOutput'
+      | 'globalShortcut'
+      | 'appshot'
+      | 'provider',
+      DaemonLiveRequirementState
+    >
+  >;
+  host?: {
+    version?: string;
+    protocolVersion?: number;
+  };
+}
+
+export type DaemonLiveHostInstallState =
+  | 'missing'
+  | 'checking'
+  | 'downloading'
+  | 'verifying'
+  | 'installing'
+  | 'launching'
+  | 'installed'
+  | 'error';
+
+export interface DaemonLiveHostInstallStatus {
+  state: DaemonLiveHostInstallState;
+  version?: string;
+  progress?: number;
+  message?: string;
+  retryable?: boolean;
+}
+
+/** WebShell-only Live onboarding state. Provider credentials are never returned. */
+export interface DaemonLiveSetupStatus {
+  v: 1;
+  enabled: boolean;
+  keyConfigured: boolean;
+  model: string;
+  shortcut: string;
+  install: DaemonLiveHostInstallStatus;
+  live: DaemonLiveStatus;
+}
+
+export type DaemonLiveSetupApiKeyMutation =
+  | { operation: 'replace'; value: string }
+  | { operation: 'clear' };
+
+export interface DaemonLiveSetupUpdate {
+  enabled?: boolean;
+  shortcut?: string;
+  apiKey?: DaemonLiveSetupApiKeyMutation;
+}
+
+export interface DaemonLiveMuteUpdate {
+  inputMuted?: boolean;
+  outputMuted?: boolean;
 }
 
 export type DaemonWorkspaceTrustState = 'trusted' | 'untrusted' | 'unknown';
