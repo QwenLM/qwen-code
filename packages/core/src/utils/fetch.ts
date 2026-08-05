@@ -7,8 +7,6 @@
 import { getErrorMessage } from './errors.js';
 import { delay } from './retry.js';
 import { isTlsVerificationDisabled } from './runtimeFetchOptions.js';
-import dns from 'node:dns/promises';
-import net from 'node:net';
 import { URL } from 'node:url';
 
 const PRIVATE_IP_RANGES = [
@@ -104,10 +102,14 @@ function mappedIpv4(hostname: string): string | undefined {
 }
 
 /**
- * Classify a bare IP address (not a URL) against the private ranges. Used
- * both for URL hostnames and for the addresses a hostname resolves to.
+ * Classify a bare IP address (not a URL) against the private ranges.
+ *
+ * Hostname *text* only — a public-looking name whose A record points at a
+ * private address is not caught here. Callers that hand fetched bytes to a
+ * third party must resolve and pin the connection instead; see
+ * `resolveNetworkTarget` in extension/network-policy.ts.
  */
-export function isPrivateAddress(address: string): boolean {
+function isPrivateAddress(address: string): boolean {
   // The URL API brackets IPv6 hostnames ([::1]); strip them so the IPv6
   // ranges above can actually match.
   const bare = address.replace(/^\[|\]$/g, '');
@@ -149,68 +151,6 @@ export function isPrivateHost(url: string): boolean {
 }
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
-
-/** Injectable resolver seam (tests supply a fake; production uses DNS). */
-export type HostResolver = (hostname: string) => Promise<string[]>;
-
-/**
- * Reject a URL whose host is not publicly routable, resolving hostnames
- * through DNS rather than trusting their spelling.
- *
- * `isPrivateHost` classifies hostname *text* and IP literals, so a
- * public-looking name (`media.example.com`) passes even when its A/AAAA
- * record points at 127.0.0.1, 169.254.169.254 (cloud metadata) or an
- * RFC1918 address — the DNS-rebinding and split-horizon cases. Callers that
- * hand the fetched bytes to a third party must resolve first and reject if
- * ANY returned address is non-public (all of them, since the connect may
- * pick any).
- *
- * Deliberately NOT wired into `fetchWithPolicy`: WebFetch intentionally
- * supports intranet FQDNs that resolve to private addresses. This gate is
- * for paths where the response leaves the machine.
- *
- * Returns the offending address, or null when every address is public.
- * DNS failures return null — the connect that follows will fail anyway, and
- * failing closed here would turn a transient resolver blip into an error
- * the user cannot act on.
- *
- * A check-then-connect race remains: `fetch` resolves the name again, so a
- * record that flips between the two lookups is not caught. Closing it fully
- * needs a custom agent that pins the connect to a vetted address, which
- * undici does not expose portably. Calling this immediately before each
- * connect — and again on every redirect hop — shrinks the window to the
- * width of one syscall pair and blocks the practical attack (a low-TTL
- * record answering public once, then private).
- */
-export async function findNonPublicAddress(
-  url: string,
-  resolver?: HostResolver,
-): Promise<string | null> {
-  let hostname: string;
-  try {
-    hostname = new URL(url).hostname;
-  } catch {
-    return null;
-  }
-  // IP literals need no resolution — isPrivateAddress is the whole check.
-  const bare = hostname.replace(/^\[|\]$/g, '');
-  if (net.isIP(bare) !== 0) {
-    return isPrivateAddress(bare) ? bare : null;
-  }
-  let addresses: string[];
-  try {
-    const resolve =
-      resolver ??
-      (async (h: string) =>
-        (await dns.lookup(h, { all: true, verbatim: true })).map(
-          (entry) => entry.address,
-        ));
-    addresses = await resolve(hostname);
-  } catch {
-    return null;
-  }
-  return addresses.find((address) => isPrivateAddress(address)) ?? null;
-}
 
 /**
  * A redirect is followed silently only when it stays on the same host

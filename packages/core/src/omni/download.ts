@@ -10,12 +10,12 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import { isPrivateHost, isPermittedRedirect } from '../utils/fetch.js';
 import {
-  isPrivateHost,
-  isPermittedRedirect,
-  findNonPublicAddress,
-  type HostResolver,
-} from '../utils/fetch.js';
+  resolveNetworkTarget,
+  type ResolvedNetworkTarget,
+} from '../extension/network-policy.js';
+import { loadUndici, detectRuntime } from '../utils/runtimeFetchOptions.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('omni:download');
@@ -47,7 +47,14 @@ const HEADER_TIMEOUT_MS = 30_000;
 const IDLE_TIMEOUT_MS = 60_000;
 const MAX_REDIRECTS = 5;
 
-/** Test whether an @-path is a downloadable http(s) URL. */
+/**
+ * Test whether an @-path is a downloadable http(s) URL.
+ *
+ * Deliberately still matches `http://` even though `downloadMediaUrl` refuses
+ * plaintext: recognizing it yields an explicit "must be https" error, whereas
+ * failing to recognize it would let the ref fall through to filesystem
+ * resolution, where the ENOENT skip drops it with no message at all.
+ */
 export function parseHttpUrlRef(pathName: string): URL | null {
   if (!/^https?:\/\//i.test(pathName)) return null;
   try {
@@ -62,11 +69,21 @@ export function parseHttpUrlRef(pathName: string): URL | null {
  *
  * Policy (mirrors utils/fetch.ts fetchWithPolicy, but streaming — that
  * helper buffers whole bodies in memory and is unsuitable for GiB media):
- * - https or http; private/loopback hosts refused (SSRF), by hostname text
- *   AND by resolved address — a public-looking name whose A record points at
- *   127.0.0.1 or 169.254.169.254 is refused too, re-checked at every
- *   redirect hop (the bytes are uploaded to a third party, so DNS rebinding
- *   here would exfiltrate internal data);
+ * - https only (plaintext is refused: media swapped in flight would be
+ *   uploaded to a third party under the user's account); private/loopback
+ *   hosts refused (SSRF), by hostname text
+ *   AND by resolved address — and the vetted address is then PINNED to the
+ *   connection via an undici agent whose `connect.lookup` returns only that
+ *   address, so the client cannot re-resolve the name after validation. A
+ *   preflight check alone is check-then-connect: `fetch` resolves again, and a
+ *   low-TTL record answering public once then private would still be
+ *   connected to. Validation failure (including a name that will not resolve)
+ *   fails closed — these bytes are uploaded to a third party, so an
+ *   unverifiable host must not be fetched at all;
+ * - re-validated and re-pinned at every redirect hop (a permitted same-host
+ *   redirect can still re-resolve elsewhere between hops);
+ * - Node only: refused outright on runtimes that accept the pinning agent and
+ *   ignore it (Bun), since there the pin is unenforceable;
  * - redirects followed only when same-host/protocol/port (isPermittedRedirect),
  *   bounded by MAX_REDIRECTS;
  * - `maxBytes` enforced against BOTH Content-Length and actual bytes written;
@@ -81,15 +98,67 @@ export async function downloadMediaUrl(params: {
   maxBytes: number;
   signal?: AbortSignal;
   fetchFn?: typeof fetch;
-  /** Test seam for the SSRF address check; production resolves via DNS. */
-  resolver?: HostResolver;
+  /**
+   * Test seam for the SSRF resolve-and-pin step; production resolves via DNS
+   * and pins the answer (see resolveNetworkTarget). Tests inject a fake so
+   * they neither touch real DNS nor need a listening socket.
+   */
+  resolveTarget?: (url: string) => Promise<ResolvedNetworkTarget>;
 }): Promise<DownloadedMedia> {
-  const { url, downloadsDir, maxBytes, signal, resolver } = params;
-  const fetchFn = params.fetchFn ?? fetch;
+  const { url, downloadsDir, maxBytes, signal } = params;
+  // `'public'` is what turns on resolution + address vetting + pinning; the
+  // helper is a no-op passthrough for any other policy.
+  const resolveTarget =
+    params.resolveTarget ??
+    ((target: string) => resolveNetworkTarget(target, 'public', signal));
 
   if (isPrivateHost(url)) {
     throw new OmniDownloadError(
       `URL host is not publicly routable (refused for safety): ${new URL(url).hostname}`,
+    );
+  }
+
+  // https only, checked here so the message names the real reason: the
+  // resolve-and-pin step below refuses plaintext (its error would just say
+  // "could not be verified"). Media fetched over http can be swapped in
+  // flight, and these bytes are uploaded to a third party under the user's
+  // account — a URL whose contents cannot be attributed to the named host has
+  // no business being delivered to the model.
+  const parsed = new URL(url);
+  if (parsed.protocol !== 'https:') {
+    throw new OmniDownloadError(
+      `URL media must be https (refused for safety): ` +
+        `${parsed.protocol}//${parsed.hostname}`,
+    );
+  }
+
+  // Credentials in the URL are refused explicitly. `resolveNetworkTarget`
+  // would also reject them, but its message says "extension network requests"
+  // (that helper's original caller), which misattributes the reason here. The
+  // check is deliberately silent about the values themselves: OmniDownloadError
+  // messages reach the UI and the debug log.
+  if (parsed.username || parsed.password) {
+    throw new OmniDownloadError(
+      `URL media must not embed credentials (refused for safety): ` +
+        `${parsed.hostname}`,
+    );
+  }
+
+  // Refuse outright on runtimes that cannot bind the connection. Bun accepts
+  // `dispatcher` and silently ignores it (its `fetch` is a native
+  // implementation, and it shims the `undici` module too, so neither the
+  // global nor undici's own `fetch` routes through the agent) — the request
+  // would resolve the name itself and connect wherever it landed, with the
+  // pinned lookup never called. Since this path uploads the fetched bytes to a
+  // third party, an unenforceable pin must be a refusal rather than a claim we
+  // cannot keep. The same runtime fact is merely a missed optimization for
+  // utils/apiPreconnect.ts, which skips non-Node runtimes for this reason.
+  const runtime = detectRuntime();
+  if (runtime !== 'node') {
+    throw new OmniDownloadError(
+      `URL media requires the Node runtime to verify the connection target ` +
+        `(refused for safety on ${runtime}): use a local file path instead of ` +
+        `a URL, or run under Node.`,
     );
   }
 
@@ -100,19 +169,54 @@ export async function downloadMediaUrl(params: {
   );
 
   let currentUrl = url;
+  // Kept outside the loop: the pinned agent must stay open for the whole
+  // streaming read, and each redirect hop replaces it with one pinned to that
+  // hop's freshly vetted address.
+  let dispatcher: import('undici').Dispatcher | undefined;
   try {
     for (let redirects = 0; ; redirects++) {
-      // Resolve immediately before each connect, every hop: the text-level
+      // Resolve, vet, and PIN before each connect, every hop. The text-level
       // gate above cannot see where a public-looking name actually points,
-      // and a permitted same-host redirect can still re-resolve to a
-      // private address between hops.
-      const nonPublic = await findNonPublicAddress(currentUrl, resolver);
-      if (nonPublic) {
+      // and validating without pinning would only be check-then-connect —
+      // `fetch` would resolve the name a second time and could still be
+      // handed a private address.
+      let target: ResolvedNetworkTarget;
+      try {
+        target = await resolveTarget(currentUrl);
+      } catch (err) {
+        if (signal?.aborted) throw err;
+        // Fail closed: unlike the general web-fetch path, these bytes are
+        // uploaded to a third party, so "could not verify" must mean "do not
+        // fetch" rather than "connect and hope".
         throw new OmniDownloadError(
-          `URL host is not publicly routable (refused for safety): ` +
-            `${new URL(currentUrl).hostname} resolves to ${nonPublic}`,
+          `URL host is not publicly routable or could not be verified ` +
+            `(refused for safety): ${new URL(currentUrl).hostname}: ` +
+            `${err instanceof Error ? err.message : String(err)}`,
         );
       }
+      if (!target.lookup) {
+        // No pinned lookup means the connection cannot be bound to the vetted
+        // address, so DNS-rebinding protection would be a claim we cannot
+        // keep. Refuse instead of fetching unpinned.
+        throw new OmniDownloadError(
+          `URL host cannot be safely bound to a verified address ` +
+            `(refused for safety): ${new URL(currentUrl).hostname}`,
+        );
+      }
+      const undici = await loadUndici();
+      // Default to undici's OWN fetch, not the global one. The dispatcher below
+      // comes from the bundled undici, and Node's built-in fetch may ship a
+      // different major version whose handler-interface check rejects it
+      // (`invalid onError method`) — see runtimeFetchOptions.ts, which pins
+      // undiciFetch for exactly this reason. Here the stakes are higher than a
+      // failed request: if the dispatcher were ever dropped rather than
+      // rejected, the pin would silently not apply, so fetch and Agent must
+      // come from one version.
+      const fetchFn = params.fetchFn ?? (undici.fetch as typeof fetch);
+      // Replace (not accumulate) the previous hop's agent.
+      const previousDispatcher = dispatcher;
+      dispatcher = new undici.Agent({ connect: { lookup: target.lookup } });
+      await previousDispatcher?.close().catch(() => {});
       const headerAbort = new AbortController();
       const headerTimer = setTimeout(
         () => headerAbort.abort(new Error('header timeout')),
@@ -126,7 +230,10 @@ export async function downloadMediaUrl(params: {
         res = await fetchFn(currentUrl, {
           redirect: 'manual',
           signal: combined,
-        });
+          // Not in the DOM RequestInit type; undici reads it (same cast as
+          // services/image-generation-service.ts).
+          dispatcher,
+        } as RequestInit);
       } catch (err) {
         if (signal?.aborted) throw err;
         throw new OmniDownloadError(
@@ -238,5 +345,9 @@ export async function downloadMediaUrl(params: {
   } catch (err) {
     await fs.rm(partPath, { force: true });
     throw err;
+  } finally {
+    // The agent owns a live connection pool; the streaming read above needs it
+    // open until the body is fully consumed, so it can only be closed here.
+    await dispatcher?.close().catch(() => {});
   }
 }
