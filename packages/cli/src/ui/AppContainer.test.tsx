@@ -2689,14 +2689,7 @@ describe('AppContainer State Management', () => {
       await Promise.resolve();
       await Promise.resolve();
 
-      const handleKeypress = mockedUseKeypress.mock.calls
-        .map((call) => call[0])
-        .reverse()
-        .find(
-          (handler): handler is (key: Key) => void =>
-            typeof handler === 'function' &&
-            handler.toString().includes('handleExit'),
-        ) as ((key: Key) => void) | undefined;
+      const handleKeypress = getGlobalKeypress();
       expect(handleKeypress).toBeDefined();
 
       handleKeypress!(escKey);
