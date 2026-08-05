@@ -16,6 +16,7 @@ import {
   ExtensionStore,
   ExtensionStoreCorruptError,
 } from './extension-store.js';
+import { mockCompromisedLock } from '../test-utils/mock-compromised-lock.js';
 
 describe('ExtensionStore', () => {
   let root: string;
@@ -267,6 +268,21 @@ describe('ExtensionStore', () => {
         [identity.id]: { defaultActivation: 'disabled' },
       },
     });
+  });
+
+  it('registers a lock-compromised handler and completes when the store lock is compromised', async () => {
+    const store = makeStore();
+    const identity = { id: 'd4'.repeat(32), name: 'demo' };
+    const { lockSpy, getOnCompromised } = mockCompromisedLock();
+
+    try {
+      await expect(store.ensureInitialized([identity])).resolves.toMatchObject({
+        generation: 0,
+      });
+      expect(getOnCompromised()).toBeTypeOf('function');
+    } finally {
+      lockSpy.mockRestore();
+    }
   });
 
   it('serializes mutations from two Node processes sharing QWEN_HOME', async () => {
