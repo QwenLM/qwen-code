@@ -36,8 +36,16 @@ const VISUAL_PIXELS_PER_TOKEN = 32 * 32 * 2;
  * - video → frameCount from ceil(duration × frameRate); audio track of a
  *   video is NOT separately estimated in v1 (the visual term dominates and
  *   the raw formula is already a conservative upper bound)
- * - any required field missing → status 'unavailable'
+ * - any required field missing OR degenerate (zero/negative/non-finite) →
+ *   status 'unavailable'. `'ok'` means a real estimate: a truncated capture
+ *   probing as duration 0 must not produce a 0-token 'ok' that sails under
+ *   the transport guard.
  */
+
+/** Positive, finite number — rejects 0, negatives, NaN and Infinity. */
+function usable(value: number | undefined): value is number {
+  return value !== undefined && Number.isFinite(value) && value > 0;
+}
 export function estimateRawResourceTokens(
   media: RecognizedMedia,
 ): OmniTokenEstimate {
@@ -50,7 +58,7 @@ export function estimateRawResourceTokens(
   switch (media.modality) {
     case 'audio': {
       const durationMs = media.metadata.durationMs;
-      if (durationMs === undefined) return unavailable;
+      if (!usable(durationMs)) return unavailable;
       return {
         estimatedTokenCount: Math.ceil(
           (durationMs / 1000) * AUDIO_TOKENS_PER_SECOND,
@@ -61,7 +69,7 @@ export function estimateRawResourceTokens(
     }
     case 'image': {
       const { width, height } = media.metadata;
-      if (width === undefined || height === undefined) return unavailable;
+      if (!usable(width) || !usable(height)) return unavailable;
       return {
         estimatedTokenCount: Math.ceil(
           (width * height) / VISUAL_PIXELS_PER_TOKEN,
@@ -73,10 +81,10 @@ export function estimateRawResourceTokens(
     case 'video': {
       const { width, height, durationMs, frameRate } = media.metadata;
       if (
-        width === undefined ||
-        height === undefined ||
-        durationMs === undefined ||
-        frameRate === undefined
+        !usable(width) ||
+        !usable(height) ||
+        !usable(durationMs) ||
+        !usable(frameRate)
       ) {
         return unavailable;
       }

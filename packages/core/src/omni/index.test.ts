@@ -11,6 +11,7 @@ import path from 'node:path';
 import type { Config } from '../config/config.js';
 import { AuthType } from '../core/contentGenerator.js';
 import { isOmniVideoDeliveryActive } from './index.js';
+import { effectiveMaxDownloadFileBytes } from './index.js';
 
 function stubConfig(overrides: {
   omniEnabled?: boolean;
@@ -32,6 +33,25 @@ const DASHSCOPE_CGC = {
 
 afterEach(() => {
   delete process.env['QWEN_CODE_ENABLE_OMNI'];
+});
+
+describe('effectiveMaxDownloadFileBytes', () => {
+  const capsConfig = (download?: number, upload?: number): Config =>
+    ({
+      getOmniDownloadMaxFileBytes: () => download,
+      getOmniUploadMaxFileBytes: () => upload,
+    }) as unknown as Config;
+
+  it('never exceeds the upload cap, even when configured higher', () => {
+    // Downloading more than the upload channel can deliver is pure waste:
+    // the bytes would be fetched, then rejected by the byte guard.
+    expect(effectiveMaxDownloadFileBytes(capsConfig(2_000, 1_000))).toBe(1_000);
+    expect(effectiveMaxDownloadFileBytes(capsConfig(500, 1_000))).toBe(500);
+    expect(effectiveMaxDownloadFileBytes(capsConfig(undefined, 1_000))).toBe(
+      1_000,
+    );
+    expect(effectiveMaxDownloadFileBytes(capsConfig(0, 1_000))).toBe(1_000);
+  });
 });
 
 describe('isOmniVideoDeliveryActive', () => {
@@ -303,5 +323,38 @@ describe('readMediaViaOmniDelivery result shape', () => {
 
     expect(result.error).toMatch(/Omni media delivery failed/);
     expect(result.llmContent).toContain('ffmpeg/ffprobe not available');
+  });
+
+  it('never leaks the absolute path through error or llmContent on failure', async () => {
+    // Both fields reach the model: llmContent on success paths, `error` via
+    // the scheduler's functionResponse on READ_CONTENT_FAILURE. The paths
+    // here are the regex-hostile shapes from review: CJK segments, a
+    // `~`-prefixed basename, parens/apostrophe, and a Windows drive path —
+    // exact replacement of the known filePath must scrub all of them.
+    vi.doMock('./ffmpeg.js', () => ({
+      isFfmpegAvailable: vi.fn().mockResolvedValue(true),
+      isFfprobeAvailable: vi.fn().mockResolvedValue(true),
+    }));
+    const { readMediaViaOmniDelivery } = await import('./index.js');
+
+    for (const [filePath, parentFragment] of [
+      ['/Users/张三/视频/clip.mp4', '/Users/张三'],
+      ['/Users/a/videos/~draft.mp4', '/Users/a/videos'],
+      ["/Users/a/it's (v2)+final@x/clip.mp4", "it's (v2)+final@x"],
+      ['C:\\Users\\björn\\clip.mp4', 'C:\\Users'],
+    ] as const) {
+      const result = await readMediaViaOmniDelivery({
+        filePath,
+        config: deliveryConfig(),
+        displayName: 'clip.mp4',
+        relativePathForDisplay: 'clip.mp4',
+        expectedModality: 'video',
+      });
+      // The stat fails (files don't exist) and the fs error embeds the path.
+      expect(result.error).toMatch(/Omni media delivery failed/);
+      for (const field of [result.error, result.llmContent]) {
+        expect(String(field)).not.toContain(parentFragment);
+      }
+    }
   });
 });

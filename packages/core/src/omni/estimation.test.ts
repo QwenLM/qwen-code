@@ -71,4 +71,27 @@ describe('estimateRawResourceTokens (raw-resource-v1)', () => {
       ).status,
     ).toBe('unavailable');
   });
+
+  it('degenerate present values → unavailable, never a 0-token ok', () => {
+    // A truncated/still-being-written capture can probe as duration 0 —
+    // an 'ok' 0-token estimate would sail under the transport guard while
+    // violating the invariant that 'ok' means a real estimate.
+    for (const metadata of [
+      { width: 100, height: 100, durationMs: 0, frameRate: 30 },
+      { width: 0, height: 100, durationMs: 1000, frameRate: 30 },
+      { width: 100, height: 100, durationMs: 1000, frameRate: NaN },
+      { width: 100, height: -1, durationMs: 1000, frameRate: 30 },
+    ]) {
+      expect(estimateRawResourceTokens(media('video', metadata)).status).toBe(
+        'unavailable',
+      );
+    }
+    expect(
+      estimateRawResourceTokens(media('audio', { durationMs: 0 })).status,
+    ).toBe('unavailable');
+    expect(
+      estimateRawResourceTokens(media('image', { width: 0, height: 50 }))
+        .status,
+    ).toBe('unavailable');
+  });
 });

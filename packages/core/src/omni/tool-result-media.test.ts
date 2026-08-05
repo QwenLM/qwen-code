@@ -134,4 +134,30 @@ describe('processToolResultOmniMedia', () => {
     expect(result[0]!.inlineData).toBeDefined();
     expect(result[1]!.fileData?.fileUri).toBe('oss://bucket/key2');
   });
+
+  it('keeps the part inline when staging-dir setup itself fails', async () => {
+    // ~/.qwen/omni existing as a regular FILE makes mkdir fail with ENOTDIR.
+    // That failure must degrade THIS part to inline like any other delivery
+    // failure — not reject the whole call, which would report a tool that
+    // succeeded as failed.
+    const os = await import('node:os');
+    const nodePath = await import('node:path');
+    const fs = await import('node:fs/promises');
+    const qwenDir = await fs.mkdtemp(nodePath.join(os.tmpdir(), 'omni-trm-'));
+    // OmniObjectStore roots at <qwenDir>/omni; make that path a plain file.
+    await fs.writeFile(nodePath.join(qwenDir, 'omni'), 'not a directory');
+    try {
+      const config = {
+        isOmniEnabled: () => true,
+        getContentGeneratorConfig: () => ({ modalities: { image: true } }),
+        storage: { getQwenDir: () => qwenDir },
+      } as unknown as Config;
+      const parts = [inlinePart('image/png', PNG_BYTES)];
+      const result = await processToolResultOmniMedia(parts, config, signal);
+      expect(result).toBe(parts);
+      expect(deliverMock).not.toHaveBeenCalled();
+    } finally {
+      await fs.rm(qwenDir, { recursive: true, force: true });
+    }
+  });
 });

@@ -79,14 +79,19 @@ export async function processToolResultOmniMedia(
       return part;
     }
 
+    // Everything from staging-dir setup onward sits inside the try: mkdir
+    // itself can fail (ENOSPC, EACCES on ~/.qwen, ~/.qwen/omni existing as a
+    // regular file → ENOTDIR), and the contract is that failure of any single
+    // part leaves THAT part inline — not that the whole tool result rejects,
+    // which would report a tool that succeeded as failed.
     const store = new OmniObjectStore(config.storage.getQwenDir());
     const stagingDir = path.join(store.getOmniRootDir(), 'downloads');
-    await fs.mkdir(stagingDir, { recursive: true, mode: 0o700 });
     const tempPath = path.join(
       stagingDir,
       `${randomBytes(8).toString('hex')}.part`,
     );
     try {
+      await fs.mkdir(stagingDir, { recursive: true, mode: 0o700 });
       await fs.writeFile(tempPath, bytes, { mode: 0o600 });
       const delivery = await processMediaForOmniDelivery(tempPath, config, {
         expectedModality: sniffed.modality,

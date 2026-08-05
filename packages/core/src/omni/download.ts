@@ -236,6 +236,16 @@ export async function downloadMediaUrl(params: {
         } as RequestInit);
       } catch (err) {
         if (signal?.aborted) throw err;
+        // Name the watchdog explicitly: the abort surfaces as a generic
+        // AbortError ("This operation was aborted") with the real reason on
+        // `cause`, so reading err.message alone would make a timeout
+        // indistinguishable from any other failed request.
+        if (headerAbort.signal.aborted) {
+          throw new OmniDownloadError(
+            `Download timed out waiting for response headers from ` +
+              `${new URL(currentUrl).hostname} (${HEADER_TIMEOUT_MS / 1000}s)`,
+          );
+        }
         throw new OmniDownloadError(
           `Download request failed for ${new URL(currentUrl).hostname}: ${
             err instanceof Error ? err.message : String(err)
@@ -253,7 +263,17 @@ export async function downloadMediaUrl(params: {
             `Too many or invalid redirects downloading from ${new URL(currentUrl).hostname}`,
           );
         }
-        const redirectUrl = new URL(location, currentUrl).toString();
+        let redirectUrl: string;
+        try {
+          redirectUrl = new URL(location, currentUrl).toString();
+        } catch {
+          // A malformed Location must surface as a download error, not a
+          // raw TypeError; the header value itself stays out of the message
+          // (server-controlled, and OmniDownloadError reaches the UI).
+          throw new OmniDownloadError(
+            `Redirect with a malformed Location header from ${new URL(currentUrl).hostname}`,
+          );
+        }
         if (!isPermittedRedirect(currentUrl, redirectUrl)) {
           throw new OmniDownloadError(
             `Cross-origin redirect refused: ${new URL(currentUrl).hostname} → ${new URL(redirectUrl).hostname}`,
@@ -322,6 +342,14 @@ export async function downloadMediaUrl(params: {
       } catch (err) {
         if (signal?.aborted) throw err;
         if (err instanceof OmniDownloadError) throw err;
+        // Same identifiability rule as the header path: the idle abort
+        // reaches here as an AbortError whose message hides the reason.
+        if (idleAbort.signal.aborted) {
+          throw new OmniDownloadError(
+            `Download stalled from ${new URL(currentUrl).hostname}: no data ` +
+              `for ${IDLE_TIMEOUT_MS / 1000}s`,
+          );
+        }
         throw new OmniDownloadError(
           `Download interrupted from ${new URL(currentUrl).hostname}: ${
             err instanceof Error ? err.message : String(err)

@@ -121,9 +121,13 @@ export function sniffMediaType(header: Buffer): SniffedType | null {
       return { mimeType: 'audio/mpeg', modality: 'audio', extension: '.mp3' };
     }
     // 0xFF 0xFE is the UTF-16 LE BOM and also passes the sync mask
-    // (0xFE & 0xE0 === 0xE0); excluding it keeps the "null for non-media"
-    // contract honest for callers without a secondary modality gate. Real
-    // MPEG frames never use 0xFE: bits 4-3 (layer) would be 11, reserved.
+    // (0xFE & 0xE0 === 0xE0). Per the MPEG audio header 0xFF 0xFE is
+    // technically VALID (version bits 11 = MPEG-1, layer bits 11 = Layer I,
+    // CRC-protected) — the reserved encodings are version 01 and layer 00 —
+    // so this exclusion deliberately trades away that rare shape
+    // (CRC-protected Layer I) to keep UTF-16 LE text files from sniffing as
+    // audio, preserving the "null for non-media" contract for callers
+    // without a secondary modality gate.
     if (
       header[0] === 0xff &&
       header[1] !== 0xfe &&

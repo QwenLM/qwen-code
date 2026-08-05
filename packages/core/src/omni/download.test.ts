@@ -141,6 +141,42 @@ describe('downloadMediaUrl', () => {
     expect(await listParts()).toEqual([]);
   });
 
+  it('refuses a public-looking host that resolves to a private IPv6 address', async () => {
+    const fetchFn = vi.fn<typeof fetch>();
+    // Without these the suite would stay green under a classifier that fails
+    // open on IPv6: loopback, link-local (incl. the fe80 metadata analogue),
+    // ULA, and the IPv4-mapped form of a private IPv4.
+    for (const address of ['::1', 'fe80::1', 'fd00::2', '::ffff:10.0.0.5']) {
+      dnsLookupMock.mockResolvedValueOnce([{ address, family: 6 }]);
+      await expect(
+        downloadMediaUrl({
+          url: 'https://media.example.com/clip.mp4',
+          downloadsDir,
+          maxBytes: 1_000_000,
+          fetchFn,
+        }),
+      ).rejects.toThrow(/refused for safety/);
+    }
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(await listParts()).toEqual([]);
+  });
+
+  it('accepts a host resolving to a public IPv6 address', async () => {
+    // The acceptance counterpart: proves the IPv6 refusals above come from
+    // classification rather than from IPv6 being rejected wholesale.
+    const bytes = Buffer.from('v6-ok');
+    dnsLookupMock.mockResolvedValueOnce([
+      { address: '2606:4700:4700::1111', family: 6 },
+    ]);
+    const result = await downloadMediaUrl({
+      url: 'https://media.example.com/clip.mp4',
+      downloadsDir,
+      maxBytes: 1_000_000,
+      fetchFn: fetchOk(bytes),
+    });
+    expect(result.sizeBytes).toBe(bytes.length);
+  });
+
   it('refuses when ANY resolved address is private (mixed A records)', async () => {
     const fetchFn = vi.fn<typeof fetch>();
     // The connect may pick either address, so one bad entry is fatal.
@@ -524,6 +560,27 @@ describe('downloadMediaUrl', () => {
         fetchFn: crossOrigin,
       }),
     ).rejects.toThrow(/Cross-origin redirect refused/);
+  });
+
+  it('surfaces a malformed redirect Location as a named download error', async () => {
+    // `new URL('http://[', base)` throws a raw TypeError; that must become an
+    // OmniDownloadError (and not echo the server-controlled header value).
+    const fetchFn = vi.fn(
+      async () =>
+        new Response(null, {
+          status: 302,
+          headers: { location: 'http://[' },
+        }),
+    ) as unknown as typeof fetch;
+    await expect(
+      downloadMediaUrl({
+        url: 'https://m.example.com/a.mp4',
+        downloadsDir,
+        maxBytes: 1000,
+        fetchFn,
+      }),
+    ).rejects.toThrow(/malformed Location header from m\.example\.com/);
+    expect(await listParts()).toEqual([]);
   });
 
   it('propagates user aborts and cleans up', async () => {

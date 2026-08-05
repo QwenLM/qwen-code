@@ -67,14 +67,31 @@ export { processToolResultOmniMedia } from './tool-result-media.js';
 const debugLogger = createDebugLogger('omni');
 
 /**
- * Scrub absolute POSIX path segments out of an error message, keeping the
+ * Scrub absolute path segments out of an error message, keeping the
  * basename — fs errors embed full paths (`ENOENT: … stat '/Users/x/…'`)
  * and several wraps below flow into model-visible llmContent, which must
  * never carry real paths.
+ *
+ * `knownPaths` are replaced EXACTLY (split/join) before the pattern pass:
+ * a regex can never enumerate every path shape (CJK segments, `~`-prefixed
+ * or special-character basenames, Windows drives), but the pipeline always
+ * knows which file it was working on, and exact replacement of that path is
+ * immune to all of them. The pattern pass then catches other embedded paths
+ * (e.g. the object-store destination) with separator-based — not
+ * ASCII-word-based — segment classes, so non-ASCII segments still match.
  */
-function sanitizeErrorMessage(err: unknown): string {
-  const msg = err instanceof Error ? err.message : String(err);
-  return msg.replace(/(?:\/[\w~. -]+)+\/([\w. -]+)/g, '$1');
+function sanitizeErrorMessage(err: unknown, knownPaths: string[] = []): string {
+  let msg = err instanceof Error ? err.message : String(err);
+  for (const known of knownPaths) {
+    if (known) msg = msg.split(known).join(path.basename(known));
+  }
+  return (
+    msg
+      // POSIX: two or more segments then a basename → keep the basename.
+      .replace(/(?:\/[^/\s'"]+)+\/([^/\s'"]+)/g, '$1')
+      // Windows: optional drive letter, backslash segments.
+      .replace(/(?:[A-Za-z]:)?(?:\\[^\\\s'"]+)+\\([^\\\s'"]+)/g, '$1')
+  );
 }
 
 /**
@@ -199,7 +216,7 @@ export async function processMediaForOmniDelivery(
   // must not stream through SHA-256 only to be rejected.
   const stat = await fs.stat(filePath).catch((err) => {
     throw new OmniDeliveryError(
-      `Cannot stat media file ${displayName}: ${sanitizeErrorMessage(err)}`,
+      `Cannot stat media file ${displayName}: ${sanitizeErrorMessage(err, [filePath])}`,
       { cause: err },
     );
   });
@@ -214,7 +231,7 @@ export async function processMediaForOmniDelivery(
   } catch (err) {
     if (signal?.aborted) throw err;
     throw new OmniDeliveryError(
-      `Media recognition failed for ${displayName}: ${sanitizeErrorMessage(err)}`,
+      `Media recognition failed for ${displayName}: ${sanitizeErrorMessage(err, [filePath])}`,
       { cause: err },
     );
   }
@@ -238,7 +255,7 @@ export async function processMediaForOmniDelivery(
   } catch (err) {
     if (signal?.aborted) throw err;
     throw new OmniDeliveryError(
-      `Failed to store media in the omni object store: ${sanitizeErrorMessage(err)}`,
+      `Failed to store media in the omni object store: ${sanitizeErrorMessage(err, [filePath])}`,
       { cause: err },
     );
   }
@@ -377,11 +394,17 @@ export async function readMediaViaOmniDelivery(params: {
     // Fail closed: no silent fallback to inline base64 — a fallback would
     // resurrect the 10MB cap surprise and mislead the user into thinking
     // the model saw the original media.
-    const message = err instanceof Error ? err.message : String(err);
+    //
+    // Both llmContent AND error are model-visible: on READ_CONTENT_FAILURE
+    // the scheduler puts `error` (not the sanitized llmContent) into the
+    // functionResponse, so an unsanitized message here would leak the
+    // absolute path on every failed read_file. Sanitize once, use twice,
+    // and name the file by displayName rather than its real path.
+    const message = sanitizeErrorMessage(err, [filePath]);
     return {
       llmContent: `[Omni media delivery failed for ${displayName}: ${message}]`,
       returnDisplay: `Failed to deliver media via omni upload: ${relativePathForDisplay}`,
-      error: `Omni media delivery failed: ${filePath}: ${message}`,
+      error: `Omni media delivery failed: ${displayName}: ${message}`,
       errorType: ToolErrorType.READ_CONTENT_FAILURE,
     };
   }
@@ -398,10 +421,14 @@ export async function readVideoViaOmniDelivery(params: {
   return readMediaViaOmniDelivery({ ...params, expectedModality: 'video' });
 }
 
-/** Effective download byte ceiling — aligned with the upload channel cap
- * (downloading more than can be delivered is pointless). */
+/** Effective download byte ceiling — never above the upload channel cap
+ * (downloading more than can be delivered is pointless), including when
+ * `omni.download.maxFileBytes` is explicitly configured higher. */
 export function effectiveMaxDownloadFileBytes(config: Config): number {
+  const uploadCap = effectiveMaxUploadFileBytes(config);
   const configured = config.getOmniDownloadMaxFileBytes?.();
-  if (configured !== undefined && configured > 0) return configured;
-  return effectiveMaxUploadFileBytes(config);
+  if (configured !== undefined && configured > 0) {
+    return Math.min(configured, uploadCap);
+  }
+  return uploadCap;
 }

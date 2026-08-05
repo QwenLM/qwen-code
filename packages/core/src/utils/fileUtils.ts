@@ -1252,14 +1252,6 @@ export async function processSingleFileContent(
         };
       }
     }
-    if (shouldRenderImageOverview && stats.size > IMAGE_MAX_SOURCE_BYTES) {
-      return {
-        llmContent: 'Image file exceeds the 100 MB source limit.',
-        returnDisplay: 'Image file exceeds the 100 MB source limit.',
-        error: `Image file exceeds the 100 MB source limit: ${filePath}`,
-        errorType: ToolErrorType.FILE_TOO_LARGE,
-      };
-    }
     // Omni experiment: when active, local media files (image/audio/video)
     // are delivered via the DashScope upload channel instead of inline
     // base64, with a 1 GiB per-file ceiling replacing the 10MB inline cap
@@ -1294,6 +1286,25 @@ export async function processSingleFileContent(
           omniModule = omni;
         }
       }
+    }
+
+    // 100 MB source cap protects the overview DECODER, so it only applies
+    // when the overview will actually decode — i.e. when omni is not taking
+    // this file. The omni path uploads original bytes without decoding and
+    // enforces its own omni.upload.maxFileBytes ceiling (1 GiB default);
+    // gating it here too would reject a 150 MB PNG while delivering a
+    // 500 MB GIF, purely on whether the format has an overview renderer.
+    if (
+      shouldRenderImageOverview &&
+      omniModule === undefined &&
+      stats.size > IMAGE_MAX_SOURCE_BYTES
+    ) {
+      return {
+        llmContent: 'Image file exceeds the 100 MB source limit.',
+        returnDisplay: 'Image file exceeds the 100 MB source limit.',
+        error: `Image file exceeds the 100 MB source limit: ${filePath}`,
+        errorType: ToolErrorType.FILE_TOO_LARGE,
+      };
     }
 
     if (
