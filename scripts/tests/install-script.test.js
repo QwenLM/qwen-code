@@ -45,23 +45,20 @@ const releaseScriptUtilsUrl = pathToFileURL(
 // Windows batch behavior has separate Windows-only E2E coverage below.
 const itOnUnix = process.platform === 'win32' ? it.skip : it;
 const itOnWindows = process.platform === 'win32' ? it : it.skip;
-// The win-x64 packaging paths (and the traversal fixture) shell out to the
-// POSIX zip/unzip binaries on non-Windows hosts; some self-hosted runners
-// ship neither, so skip there instead of failing red.
-const hasZipTooling =
+// The POSIX fixture helpers shell out to the `zip` and `unzip` binaries.
+// Local minimal images may omit them, but CI must keep the archive-safety
+// cases active.
+const zipAvailable =
   process.platform === 'win32' ||
-  (spawnSync('zip', ['-v'], { stdio: 'ignore' }).status === 0 &&
-    spawnSync('unzip', ['-v'], { stdio: 'ignore' }).status === 0);
-const itWithZipTooling = hasZipTooling ? it : it.skip;
-const itOnUnixWithZipTooling = hasZipTooling ? itOnUnix : it.skip;
-if (!hasZipTooling) {
-  // Loud, not silent: these skips drop the packaging tests INCLUDING the
-  // zip path-traversal case, and a skip is invisible in a green run.
-  console.warn(
-    '[install-script.test] zip/unzip missing on this runner: packaging ' +
-      'tests (including the path-traversal case) will SKIP.',
+  (spawnSync('zip', ['--version']).error === undefined &&
+    spawnSync('unzip', ['-v']).error === undefined);
+if (process.env.CI && process.platform !== 'win32' && !zipAvailable) {
+  throw new Error(
+    '`zip`/`unzip` missing on a CI host; archive tests would skip.',
   );
 }
+const itWithZip = zipAvailable ? it : it.skip;
+const itOnUnixWithZip = zipAvailable ? itOnUnix : it.skip;
 
 vi.setConfig({ testTimeout: 30_000 });
 
@@ -1696,7 +1693,7 @@ describe('standalone release packaging', () => {
     }
   });
 
-  itWithZipTooling('requires the standalone cli-entry wrapper in dist', () => {
+  itWithZip('requires the standalone cli-entry wrapper in dist', () => {
     const createdDist = ensureMinimalDist({ includeCliEntry: false });
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
 
@@ -1726,7 +1723,7 @@ describe('standalone release packaging', () => {
     }
   });
 
-  itWithZipTooling(
+  itWithZip(
     'packages a win-x64 standalone archive',
     () => {
       const createdDist = ensureMinimalDist();
@@ -1786,7 +1783,7 @@ describe('standalone release packaging', () => {
     30_000,
   );
 
-  itWithZipTooling(
+  itWithZip(
     'skips npm-only artifacts staged in dist',
     () => {
       const createdDist = ensureMinimalDist({
@@ -2166,12 +2163,7 @@ describe('standalone release packaging', () => {
     }
   });
 
-  // The fixture (createFakeWindowsNodeArchive → createZipForTest) shells
-  // out to zip BEFORE the packaging script runs, so this test is
-  // zip-dependent too — gate it like its siblings (probe-verified: on a
-  // zip-less PATH the fixture throws ENOENT inside the toThrow wrapper and
-  // the mismatched message fails red while the gated siblings skip).
-  itWithZipTooling('rejects unexpected dist assets', () => {
+  itWithZip('rejects unexpected dist assets', () => {
     const createdDist = ensureMinimalDist();
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
 
@@ -3598,7 +3590,7 @@ describe('Linux/macOS installer end-to-end', { timeout: 15000 }, () => {
     }
   });
 
-  itOnUnixWithZipTooling(
+  itOnUnixWithZip(
     'rejects standalone archives containing path traversal entries',
     () => {
       const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));

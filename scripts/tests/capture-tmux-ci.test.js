@@ -34,9 +34,9 @@ describe('ci.yml capture tooling', () => {
     expect(steps[install].run).toMatch(
       /sudo apt-get install -y -qq[^\n]* tmux/,
     );
-    // The install-script packaging suite has the same skip-shape with
-    // zip/unzip on self-hosted lanes: the tooling rides this same advisory
-    // step so the Linux lane runs those tests too.
+    // The install-script packaging suite needs zip/unzip the same way
+    // (and throws on a CI host missing them): the tooling rides this same
+    // advisory step so the Linux lane actually runs those tests.
     expect(steps[install].run).toMatch(/apt-get install[^\n]* zip unzip/);
   });
 
@@ -71,9 +71,10 @@ describe('ci.yml capture tooling', () => {
     for (const line of logicalLines) {
       if (line.includes("echo '")) {
         // EVERY echo statement is a ::warning:: annotation naming the
-        // skip — a lane where the install PERMANENTLY fails skips the
-        // suites forever, and a plain echo hides that as one line in a
-        // multi-thousand-line log while the check UI stays clean.
+        // outcome — a lane where the install PERMANENTLY fails loses the
+        // real-tmux coverage forever (the zip suite throws on its own),
+        // and a plain echo hides that as one line in a multi-thousand-line
+        // log while the check UI stays clean.
         expect(line, line).toContain('::warning::');
         expect(line, line).toContain('will be skipped');
       }
