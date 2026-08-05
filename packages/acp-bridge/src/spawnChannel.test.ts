@@ -69,6 +69,7 @@ describe('createSpawnChannelFactory env policy', () => {
   const originalArgv1 = process.argv[1];
   let originalSimple: string | undefined;
   let originalServerToken: string | undefined;
+  let originalGuardToken: string | undefined;
   let originalCliEntry: string | undefined;
   let originalRuntimeOnlyForTest: string | undefined;
 
@@ -76,11 +77,13 @@ describe('createSpawnChannelFactory env policy', () => {
     mockSpawn.mockReset();
     originalSimple = process.env['QWEN_CODE_SIMPLE'];
     originalServerToken = process.env['QWEN_SERVER_TOKEN'];
+    originalGuardToken = process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'];
     originalCliEntry = process.env['QWEN_CLI_ENTRY'];
     originalRuntimeOnlyForTest = process.env['RUNTIME_ONLY_FOR_TEST'];
     process.argv[1] = '/tmp/qwen.js';
     process.env['QWEN_CODE_SIMPLE'] = '1';
     process.env['QWEN_SERVER_TOKEN'] = 'secret';
+    process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'] = 'guard-secret';
   });
 
   afterEach(() => {
@@ -94,6 +97,11 @@ describe('createSpawnChannelFactory env policy', () => {
       delete process.env['QWEN_SERVER_TOKEN'];
     } else {
       process.env['QWEN_SERVER_TOKEN'] = originalServerToken;
+    }
+    if (originalGuardToken === undefined) {
+      delete process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'];
+    } else {
+      process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'] = originalGuardToken;
     }
     if (originalCliEntry === undefined) {
       delete process.env['QWEN_CLI_ENTRY'];
@@ -114,6 +122,7 @@ describe('createSpawnChannelFactory env policy', () => {
     await factory('/tmp/project', {
       QWEN_CODE_SIMPLE: '1',
       QWEN_SERVER_TOKEN: 'override-secret',
+      QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN: 'override-guard-secret',
     });
 
     const spawnOptions = mockSpawn.mock.calls[0]?.[2] as
@@ -121,6 +130,9 @@ describe('createSpawnChannelFactory env policy', () => {
       | undefined;
     expect(spawnOptions?.env).not.toHaveProperty('QWEN_CODE_SIMPLE');
     expect(spawnOptions?.env).not.toHaveProperty('QWEN_SERVER_TOKEN');
+    expect(spawnOptions?.env).not.toHaveProperty(
+      'QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN',
+    );
     expect(spawnOptions?.env?.['QWEN_CODE_NO_RELAUNCH']).toBe('true');
   });
 
@@ -146,6 +158,7 @@ describe('createSpawnChannelFactory env policy', () => {
         QWEN_CLI_ENTRY: '/runtime/qwen.js',
         RUNTIME_ONLY_FOR_TEST: 'from-runtime',
         QWEN_SERVER_TOKEN: 'runtime-secret',
+        QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN: 'runtime-guard-secret',
       },
     });
     await factory('/tmp/project');
@@ -158,6 +171,9 @@ describe('createSpawnChannelFactory env policy', () => {
     expect(args).not.toContain('/process/qwen.js');
     expect(spawnOptions?.env?.['RUNTIME_ONLY_FOR_TEST']).toBe('from-runtime');
     expect(spawnOptions?.env).not.toHaveProperty('QWEN_SERVER_TOKEN');
+    expect(spawnOptions?.env).not.toHaveProperty(
+      'QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN',
+    );
   });
 
   it('threads NDJSON pipe hooks through daemon-side spawned channels', async () => {
@@ -376,7 +392,11 @@ describe('createStderrForwarder', () => {
 // of any current production denylist. The multi-key test below
 // forward-guards expansion when a future sandboxed-agent mode grows
 // the production set per the WARNING on `SCRUBBED_CHILD_ENV_KEYS`.
-const SCRUBBED = new Set<string>(['QWEN_SERVER_TOKEN', 'QWEN_CODE_SIMPLE']);
+const SCRUBBED = new Set<string>([
+  'QWEN_SERVER_TOKEN',
+  'QWEN_CODE_SIMPLE',
+  'QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN',
+]);
 
 describe('scrubChildEnv (defaultSpawnChannelFactory env policy)', () => {
   it('shallow-clones source — never aliases into the live process.env', () => {
