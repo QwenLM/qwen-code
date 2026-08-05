@@ -172,9 +172,15 @@ section; the benefit is that neither document lies about its flow.
 **Lifts as-is:** the findings schema and the budget machinery's shape (a
 plan-derived size→work mapping; `plan-files` supplies the line counts).
 Both land in `packages/core/src/utils/` — the shared home the Output
-section's check-ignore consolidation also lands in, and for the same
-dependency reason: one consumer lives in `packages/core`, which cannot
-import from `packages/cli`. The schema lift carries one bound from the
+section's check-ignore consolidation also lands in — but the lift is a
+co-location choice, not a dependency-direction requirement: every
+consumer of `findings.ts` and of the budget machinery lives in
+`packages/cli`, so the dependency arrow that forces the check-ignore
+consolidation (a `packages/core` consumer that cannot import from
+`packages/cli`) does not exist for these two pieces; they sit beside
+the shared helper by choice, recorded here so no later reader invents
+the core consumer that forced them. The schema lift carries one bound
+from the
 file's own in-code contract: `findings.ts`'s four exported const lists
 have a second consumer — the Web Shell review renderer keeps its own
 copy and fails closed on any value it does not know, so a value added
@@ -292,8 +298,9 @@ cross-round findings ledger does not lift into v1 — see Open questions.
 - Event/lifecycle modules are detected by call patterns and get 1c's
   event-coverage brief; the detection outcome rides into the report header.
 
-`/audit <path>` resolves a directory (or file set) and runs a new
-subcommand, `qwen audit plan-files <path>`, which plays the role
+`/audit <path>` resolves exactly one directory (a multi-path
+invocation is the sub-path rule: one bounded run per path) and runs a
+new subcommand, `qwen audit plan-files <path>`, which plays the role
 `plan-diff` plays for diffs:
 
 - enumerates the files under the path with a filesystem walk — not
@@ -393,7 +400,43 @@ subcommand, `qwen audit plan-files <path>`, which plays the role
   them in the header's walks record as uncoverable subjects — otherwise
   a one-line 100 KB minified bundle counts as one gate line, receipts as
   fully walked, and hides a payload in its unread tail — the security
-  case this design cites — with no flag;
+  case this design cites — with no flag. The provision's action extends
+  to the test corpus for the same reason it exists: an over-cap or
+  binary file classified as `test` was never in the walked subject set,
+  so the exclusion there is a no-op — it counts toward the test arm and
+  Agent 5's read truncates at the read cap, leaving the same unread
+  tail unflagged while the walks receipt the corpus as fully read. An
+  uncoverable test file is excluded from Agent 5's corpus and recorded
+  in the walks record as an uncoverable test file — counted toward the
+  test arm and receipted the way uncoverable subjects are — and a
+  corpus whose every file is uncoverable skips Agent 5 with that
+  reason, in the same shape as the zero-test-files skip, so "walks
+  completed" cannot read as "tests audited". Detection also stats each
+  entry rather than only reading it, because two further classes fail
+  at the open, not the read: symlinks and non-regular files. A symlink
+  under the audited path — whose flagship target is hostile vendored
+  code — otherwise lets enumeration, the walkers, the sidecar content
+  copies, and the drift content-hash snapshots read files outside the
+  path, contradicting the path-bounded enumeration: the link is
+  enumerated, opened, classified, line-counted into the gate, handed to
+  every dimension agent, quoted into findings and the report,
+  content-copied into the sidecar, and re-read at every drift
+  checkpoint. The walk therefore lstats each entry and never follows
+  links: a symlink — file or directory — and any entry resolving
+  outside the audited path is an uncoverable subject, recorded by name
+  only, never content-read; directory symlinks are never descended, so
+  a self-link cannot hang a walk and no cycle rule is needed. The rule
+  inherits everywhere content is read: the sidecar capture records the
+  link's name without a content copy, and the content-hash snapshots
+  hash the entry itself, never through it. A non-regular file — a
+  FIFO, socket, or device — is the same class by the same test: a
+  read-open on a writer-less FIFO blocks indefinitely (probe-verified
+  on this platform), and no deadline covers enumeration reads
+  otherwise, so a FIFO planted as source under a vendored module hangs
+  `plan-files` at enumeration — before any consent gate — and re-hangs
+  every retry; non-regular files are recorded as uncoverable subjects
+  without being opened, and enumeration reads carry a deadline in the
+  same register as the git check-ignore probe's;
 - counts lines and applies the topology gate as a hard bound — two arms, in
   `/review`'s shape (its gate is `src ≤ 500 AND total ≤ 3200`): subject
   lines — every classified kind except `test` — ≤ a `plan-files` constant
@@ -507,10 +550,11 @@ read, or a read-only verification as an executed one.
 - Verification shards are not counted against the agent bound — the finding
   count is unknowable at plan time. High-tier round auditors are not counted
   either: the bound is a roster bound, and their plan-time bound —
-  roster + file-group count × the 5-round cap × 2 (the whiff relaunch
-  every auditor may receive), computed from `plan-files` output — is
-  disclosed at the confirmation instead, with the header
-  recording the actual agent count.
+  (roster + file-group count × the 5-round cap) × 2, the doubling
+  covering the whiff relaunch every roster agent and every auditor may
+  receive, computed from `plan-files` output — is disclosed at the
+  confirmation instead, with the header recording the actual agent
+  count.
 - A plan over the token cap refuses and asks for a narrower path or a lower
   tier;
   overshoot is made visible in the report header, not prevented.
@@ -572,14 +616,15 @@ the product — so it ships with a stated bound, not an open tab:
   the forward bound of the deferred above-gate branch. It is a roster bound,
   not a run bound, naming both classes it does not count: verification shards,
   which scale with the finding count, unknowable at plan time; and high-tier
-  round auditors, which are plan-time-predictable — the bound is roster +
-  file-group count × the 5-round cap × 2 (the whiff relaunch every auditor
-  may receive), computed from `plan-files` output — and disclosed as such
+  round auditors, which are plan-time-predictable — the bound is
+  (roster + file-group count × the 5-round cap) × 2, the doubling
+  covering the whiff relaunch every roster agent and every auditor may
+  receive, computed from `plan-files` output — and disclosed as such
   at the confirmation. A run that finds much exceeds it, and
   a high run near the gate reaches
   ~6× of it (a ~9,000-subject module tiles into ~23 groups at the
-  400-line group constant — ~11 roster + up to 5 rounds × ~23 auditors,
-  doubled for whiff relaunches, + shards). The overshoot is made visible
+  400-line group constant — (~11 roster + up to 5 rounds × ~23
+  auditors) × 2 for whiff relaunches, + shards). The overshoot is made visible
   rather than prevented — the report header records the run's actual token
   consumption against the estimate, split between the priced core and the
   unpriced additions (6a, verification, high-tier personas, high-tier
@@ -913,16 +958,17 @@ capped accordingly, the reason recorded in the header.
   `.qwen/audits/<YYYY-MM-DD>-<HHMMSS>-<path-slug>.md` — findings
   clustered by theme, local-only, never in version control, no verdict.
 - The report opens with a run-metadata header — audited commit SHA,
-  model id, dirty/clean state with a path-scoped sidecar on dirty runs
-  — plus the consumption record and the walks record.
+  model id, dirty/clean state with a path-scoped sidecar captured
+  unconditionally at run start — plus the consumption record and the
+  walks record.
 - Drift stops the run only when the drifted file is already walked — or
   deep-read, for 1c's out-of-path callers — and carries anchored
   findings; any other drift marks the file uncoverable and the run
   continues.
 - The check-ignore probe consolidates the two existing copies into one
   shared helper in `packages/core`, checked at plan time and re-checked
-  at write time, with the outside-repo fallback as the relocation
-  target.
+  at the drift checkpoints and at write time, with the outside-repo
+  fallback as the relocation target.
 - The terminal gets a short summary; the report is for acting on.
 
 - **The artifact:** a markdown report at
@@ -953,10 +999,15 @@ capped accordingly, the reason recorded in the header.
   and the dirty/clean state of the checkout. File:line
   anchors drift with HEAD, so a re-audit after fixes must be alignable
   with the run it follows — a promise the SHA keeps only when the
-  checkout was clean. On a dirty run `/audit` therefore captures the
-  dirty content at run start — after the opted-in baseline suite, when
-  it runs — scoped to the audited path, next to the report wherever
-  the report lands (`.qwen/audits/` or the outside-repo fallback):
+  checkout was clean. `/audit` therefore captures the dirty content at
+  run start — unconditionally, not gated on a dirty/clean
+  determination: `git status` and `git diff HEAD` never show the
+  gitignored-untracked class this capture exists for (the raw-listing
+  passage below records it), so any status-shaped determination
+  classifies the flagship target clean and vacates exactly the arm
+  that covers it — after the opted-in baseline suite, when it runs —
+  scoped to the audited path, next to the report wherever the report
+  lands (`.qwen/audits/` or the outside-repo fallback):
   `git diff HEAD -- <audited path>` for tracked and staged changes —
   path-scoped like the rest of this machinery, so the sidecar never
   carries unrelated dirty content from elsewhere in the repository — and,
@@ -982,9 +1033,17 @@ capped accordingly, the reason recorded in the header.
   cannot catch (excluded directories contribute zero subject lines) and
   re-comparing them at every drift checkpoint — plus a content copy of
   each remaining listed file, because names alone cannot keep anchors
-  resolvable once a file is edited or deleted. The header names which
-  dirt classes
-  were captured. Outside any git worktree there is no SHA or dirty
+  resolvable once a file is edited or deleted. The sidecar's content
+  copies extend past the audited path for exactly one class: the
+  registered deep-read callers — anchor resolution deliberately widens
+  to them because the headline cross-file findings anchor in callers
+  outside the audited path, and the registration-time content hash the
+  drift arm stores cannot restore content for alignment. Each caller's
+  content is copied at registration — the deep-read itself — alongside
+  that hash, bounded by construction (the set exists because 1c
+  registers every caller it deep-reads) and landed with the sidecar
+  wherever the report lands. The header names which dirt classes were
+  captured. Outside any git worktree there is no SHA or dirty
   state to record; the header says so — "no VCS — anchors not
   alignable" — and names the content-hash snapshot below as the run's
   only alignment mechanism, rather than silently shipping a report
@@ -1020,10 +1079,15 @@ capped accordingly, the reason recorded in the header.
   baseline suite completes, when it runs, so the suite's write set is
   part of the baseline the checkpoints compare against rather than drift
   against it; the audit's own mutations are otherwise excluded from the
-  comparison: probe scratch copies carry the reserved scratch-name
-  prefix and are cleaned up on the error path as well as the success
-  path; the header distinguishes a self-caused
-  state change from user drift when it records one. Drift stops the run
+  comparison — keyed by identity, the set of scratch paths this run
+  created, not by the reserved prefix alone: kept residue files from a
+  prior killed run carry the same prefix yet stay walked subjects that
+  can carry anchored findings (the residue rule above), and a
+  prefix-keyed exclusion would exempt user edits to them from every
+  checkpoint, shipping findings anchored in content never re-validated.
+  Probe scratch copies are cleaned up on the error path as well as the
+  success path; the header distinguishes a self-caused state change
+  from user drift when it records one. Drift stops the run
   only when it invalidates something the run already produced, and
   degrades-and-flags otherwise: the two use cases that dominate v1 —
   pre-refactor assessment, taking over unfamiliar code — put the user
@@ -1068,7 +1132,9 @@ capped accordingly, the reason recorded in the header.
   in v1 — and the detection outcome rides into the header.
 - **The walks record:** the effort tier, and the walks completed,
   skipped with reason, or uncoverable (over-cap lines, non-text files,
-  drifted files) — a partially failed run (1c budget-exhausted,
+  symlinks and other non-regular files, drifted files — and, for the
+  test corpus, uncoverable test files) — a partially failed run (1c
+  budget-exhausted,
   security agent errored) must be distinguishable from a full one,
   because "0 security findings" on a run whose security agent never
   completed is not "safe" (`/review` solves this with
@@ -1105,9 +1171,22 @@ capped accordingly, the reason recorded in the header.
   that class under `.qwen/tmp/` (`prompt-record.ts` derives the record
   directory from the plan path), and agent returns quote the module verbatim,
   so the class carries the same exploitable content as the report; the
-  dirty-run sidecar is the same class with a cross-run purpose — the
+  run-start sidecar is the same class with a cross-run purpose — the
   re-audit alignment the header advertises — and shares the report's
-  flip-time fate below. The
+  flip-time fate below. The probe scratch copies are the same class
+  with a different shape: a sibling copy of the probed file lands in
+  the probed file's own directory — inside the audited path, outside
+  the `.qwen/` directories the probes below examine — so the
+  committability reasoning covers the audited path too, not only
+  `.qwen/`. The sibling is transient by construction — created for the
+  probe, deleted on both probe outcomes — and its exposure is the
+  short-lived window the Dedup section names, where a concurrent
+  `git add -A` in another terminal can pick it up and the reserved
+  prefix makes the pickup legible; where a killed shard leaves it
+  behind, the residue rule surfaces it at the next plan time on the
+  same path with a deletion confirmation — and a path that is never
+  re-audited gets no later surfacing, so for this class the property
+  rests on the bounded window plus that surfacing, not on a probe. The
   agent-output cache (`.qwen/review-cache/`) is the same class where it exists;
   v1 writes none, because the incremental cache keys on re-audit, an open
   question. The property holds only when the project ignores
@@ -1116,9 +1195,11 @@ capped accordingly, the reason recorded in the header.
   files under `.qwen/`, and `/audit` runs in arbitrary repositories where
   `.qwen/` may not be ignored at all. So `plan-files` checks at plan time,
   alongside the other plan-time refusals, with two probes, run for every
-  directory the run writes module-derived content to — `.qwen/audits/`
-  (the report and its sidecar) and `.qwen/tmp/` (the plan file and the
-  per-agent prompt records): `git check-ignore` on
+  directory the run writes durable module-derived content to —
+  `.qwen/audits/` (the report and its sidecar) and `.qwen/tmp/` (the
+  plan file and the per-agent prompt records), the transient scratch
+  siblings inside the audited path being the named exception above:
+  `git check-ignore` on
   the directory, checking a representative file path rather than the directory
   itself for the same re-include reason; and an index probe —
   `git ls-files -- <dir>/` — because `check-ignore` evaluates ignore rules
@@ -1190,16 +1271,25 @@ capped accordingly, the reason recorded in the header.
   answer "ignored" — because a user must not spend a 40M-token medium run and
   meet this refusal only at write time, and a remedy that does not take
   effect is caught at plan time, not after the spend. The same probe
-  re-runs immediately before the report is written, because the ignore
-  state can move during a hours-long run — a rule edit, a branch switch,
-  an upstream merge — and a flipped answer relocates the report to the
-  outside-repo fallback; the plan-time check keeps its rationale, and the
-  write-time re-check keeps the property. The intermediates are run-scoped and
-  deleted when the run ends; the report and its sidecar are the only durable
-  artifacts — the alignment promise requires the sidecar to survive the run,
-  so a flip that relocates the report relocates the sidecar with it rather
-  than deleting it, and deletes the intermediates, leaving no module-derived
-  content in a repository whose ignore state no longer covers them.
+  re-runs at the drift checkpoints — before verification and before
+  each high-tier round, the checkpoint list the drift protection above
+  names — and immediately before the report is written, because the
+  ignore state can move during a hours-long run — a rule edit, a branch
+  switch, an upstream merge. A flipped answer acts at once rather than
+  waiting for write time: the intermediates are run-scoped and
+  regenerable, so a checkpoint flip relocates them to the outside-repo
+  fallback immediately — leaving them in `.qwen/tmp/` would keep them
+  committable for the rest of the run — and a flip at write time
+  relocates the report to the outside-repo fallback as before. The
+  plan-time check keeps its rationale; the checkpoint re-runs bound the
+  intermediates' exposure to the window before the first re-check, and
+  the write-time re-check is the last of the re-runs, not the only one.
+  Intermediates are deleted when the run ends; the report and its
+  sidecar are the only durable artifacts — the alignment promise requires
+  the sidecar to survive the run, so a flip that relocates the report
+  relocates the sidecar with it rather than deleting it, and deletes the
+  intermediates, leaving no module-derived content in a repository whose
+  ignore state no longer covers them.
   The outside-repo fallback
   root resolves through the `Storage` hub — a new state-dir helper
   honoring the `QWEN_HOME` / `QWEN_RUNTIME_DIR` overrides the hub
@@ -1318,9 +1408,10 @@ The tiers, in detail:
   rather than as convergence. Reverse-audit findings route through the
   same dedup and verification as fan-out findings, and each round's
   confirmed results merge into the cumulative list before the next round
-  begins. The confirmation quotes the plan-time agent bound — roster +
-  file-group count × the 5-round cap, doubled for the whiff relaunch every
-  auditor may receive — alongside the estimate range, and
+  begins. The confirmation quotes the plan-time agent bound — (roster +
+  file-group count × the 5-round cap) × 2, the doubling covering the
+  whiff relaunch every roster agent and every auditor may receive —
+  alongside the estimate range, and
   the header records the actual agent count against the forward bound (Budget
   ceiling). Unmeasured; flagged as extrapolation in the report header
   until replicated — alongside any twice-whiffed scopes, since `/audit`
@@ -1430,7 +1521,14 @@ capped, sold as triage — as above.)
   `vendor/` itself stays a subject), the submodule refusal (a gitlink
   at or under the audited path refuses with a named reason), the vendor
   override (test-shaped paths under `vendor/` classify as `test`), and
-  the uncoverable-subject exclusion (over-cap lines, non-text files);
+  the uncoverable-subject exclusion (over-cap lines, non-text files,
+  symlinks and entries resolving outside the audited path — recorded
+  by name only, never content-read, directory symlinks never descended
+  — non-regular files never opened, and enumeration reads under the
+  same deadline register as the git probe; plus the corpus-side action
+  — an over-cap or binary file classified `test` excluded from Agent
+  5's corpus and recorded as an uncoverable test file, and a
+  fully-uncoverable corpus skipping Agent 5 with that reason);
   the topology gates (the subject arm at every tier, the test arm at
   the tiers that run Agent 5, the empty-subject-set refusal, and its
   uncoverable-only sibling — "only uncoverable subjects under <path>"
@@ -1474,11 +1572,25 @@ capped, sold as triage — as above.)
   caller-side), the flip's consequence (an ignore state that flips
   between plan time and write time relocates the report and its sidecar
   together to the outside-repo fallback, deletes the intermediates, and
-  leaves no module-derived path in the repo), and the vacuous pass
+  leaves no module-derived path in the repo), the checkpoint re-runs
+  alongside it (the probe re-asked at the drift checkpoints — before
+  verification and before each high-tier round — a mid-run flip
+  relocating the intermediates immediately, their exposure bounded by
+  the window before the first re-check), and the vacuous pass
   outside any worktree; the
   drift predicates — the path-scoped diff, the subtree hash, the
-  audit-owned exclusion (scratch prefix, run-start capture after the
-  opted-in baseline suite), the registered-caller arm (a caller's
+  audit-owned exclusion (the run's own scratch paths by identity, not
+  prefix — a kept residue file carrying the reserved prefix stays
+  under the stop predicate — and run-start capture after the opted-in
+  baseline suite), the sidecar capture shape (the raw
+  `git ls-files --others` listing without `--exclude-standard` — the
+  gitignored-untracked class stays listed — filtered to the
+  `plan-files` enumeration, subjects and test corpus alike, so the
+  capture inherits the directory-name exclusions; names-only for
+  uncoverable subjects; a content copy for every remaining listed file
+  and for every registered deep-read caller outside the audited path;
+  the captures unconditional at run start, not gated on a dirty/clean
+  determination), the registered-caller arm (a caller's
   baseline content-hash taken at registration — the deep-read — and
   retaken at the checkpoints; drift in a deep-read out-of-path caller
   follows the same per-file stop/degrade predicate), the
