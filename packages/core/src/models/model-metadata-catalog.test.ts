@@ -191,6 +191,96 @@ describe('getCatalogModalities', () => {
   });
 
   it.each([
+    ['MiniMax-M3', 'minimax', 'MiniMax-M3'],
+    ['kimi-k3', 'moonshotai', 'kimi-k3'],
+    ['deepseek-v4-pro', 'deepseek', 'deepseek-v4-pro'],
+    ['glm-5.2', 'zai', 'glm-5.2'],
+  ])(
+    'borrows %s metadata from the %s catalog when Alibaba does not list it',
+    (modelId, providerId, officialModelId) => {
+      expect(
+        getCatalogModalities(
+          {
+            'alibaba-cn': {
+              api: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              models: {
+                'qwen-model': { modalities: { input: ['text'] } },
+              },
+            },
+            [providerId]: {
+              models: {
+                [officialModelId]: {
+                  modalities: { input: ['text', 'image', 'video'] },
+                },
+              },
+            },
+          },
+          {
+            providerId: 'openai',
+            modelId,
+            baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+            envKey: 'DASHSCOPE_API_KEY',
+          },
+        ),
+      ).toEqual({ image: true, video: true });
+    },
+  );
+
+  it('prefers Alibaba metadata over the original provider catalog', () => {
+    expect(
+      getCatalogModalities(
+        {
+          'alibaba-cn': {
+            api: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+            models: {
+              'deepseek-v4-pro': { modalities: { input: ['text'] } },
+            },
+          },
+          deepseek: {
+            models: {
+              'deepseek-v4-pro': {
+                modalities: { input: ['text', 'image'] },
+              },
+            },
+          },
+        },
+        {
+          providerId: 'openai',
+          modelId: 'deepseek-v4-pro',
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          envKey: 'DASHSCOPE_API_KEY',
+        },
+      ),
+    ).toEqual({});
+  });
+
+  it('does not borrow an unrelated provider model for Alibaba', () => {
+    expect(
+      getCatalogModalities(
+        {
+          'alibaba-cn': {
+            api: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+            models: {
+              'qwen-model': { modalities: { input: ['text'] } },
+            },
+          },
+          minimax: {
+            models: {
+              'vendor-model': { modalities: { input: ['text', 'image'] } },
+            },
+          },
+        },
+        {
+          providerId: 'openai',
+          modelId: 'vendor-model',
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          envKey: 'DASHSCOPE_API_KEY',
+        },
+      ),
+    ).toBeUndefined();
+  });
+
+  it.each([
     'vendor/base-model:free',
     'vendor/base-model:extended',
     'vendor/base-model:thinking',

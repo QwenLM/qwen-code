@@ -402,6 +402,43 @@ describe('ModelRegistry', () => {
       }
     });
 
+    it('uses original provider metadata for an Alibaba proxy model', () => {
+      const registry = new ModelRegistry(
+        {
+          openai: [
+            {
+              id: 'MiniMax-M3',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+          ],
+        },
+        undefined,
+        {
+          'alibaba-cn': {
+            api: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+            models: {
+              'qwen-model': { modalities: { input: ['text'] } },
+            },
+          },
+          minimax: {
+            models: {
+              'MiniMax-M3': {
+                modalities: { input: ['text', 'image', 'video'] },
+              },
+            },
+          },
+        },
+      );
+      const model = registry.getModel(AuthType.USE_OPENAI, 'MiniMax-M3')!;
+
+      expect(model.generationConfig.modalities).toEqual({
+        image: true,
+        video: true,
+      });
+      expect(registry.getModalitiesSource(model)).toBe('catalog');
+    });
+
     it('returns text-only ({}) for models with no multimodal default', () => {
       const registry = new ModelRegistry({
         openai: [

@@ -359,15 +359,35 @@ function mapProviderId(
   }
 }
 
+function mapModelFamilyProvider(modelId: string): string | undefined {
+  if (/^deepseek(?:[-./]|$)/i.test(modelId)) return 'deepseek';
+  if (/^kimi(?:[-./]|$)/i.test(modelId)) return 'moonshotai';
+  if (/^minimax(?:[-./]|$)/i.test(modelId)) return 'minimax';
+  if (/^glm(?:[-./]|$)/i.test(modelId)) return 'zai';
+  return undefined;
+}
+
 function mapIdealabProvider(modelId: string): string | undefined {
   if (/^qwen.*-dogfooding$/i.test(modelId)) return 'alibaba-cn';
   const bailianModelId = modelId.match(/^bailian\/(.+)$/i)?.[1];
   if (!bailianModelId) return undefined;
-  if (/^deepseek(?:[-./]|$)/i.test(bailianModelId)) return 'deepseek';
-  if (/^kimi(?:[-./]|$)/i.test(bailianModelId)) return 'moonshotai';
-  if (/^minimax(?:[-./]|$)/i.test(bailianModelId)) return 'minimax';
   if (/^qwen(?:\d|[-.]|$)/i.test(bailianModelId)) return 'alibaba-cn';
-  return undefined;
+  return mapModelFamilyProvider(bailianModelId);
+}
+
+function findAlibabaProxyModel(
+  catalog: ModelMetadataCatalog,
+  modelId: string,
+  sourceProviderId: string | undefined,
+): CatalogModel | undefined {
+  const providerId = mapModelFamilyProvider(modelId);
+  const provider = providerId ? catalog[providerId] : undefined;
+  if (!provider || !providerId) return undefined;
+  return findCatalogModel(provider, providerId, sourceProviderId, modelId);
+}
+
+function isAlibabaCatalogProvider(providerId: string): boolean {
+  return providerId === 'alibaba' || providerId.startsWith('alibaba-');
 }
 
 export function getProviderDefaultModalities(
@@ -500,12 +520,17 @@ export function getCatalogModalities(
     findProviderByCredentials(lookup.baseUrl, lookup.envKey)?.id ??
     lookup.providerId;
 
-  const model = findCatalogModel(
+  const providerModel = findCatalogModel(
     catalog[providerId]!,
     providerId,
     sourceProviderId,
     lookup.modelId,
   );
+  const model =
+    providerModel ??
+    (isAlibabaCatalogProvider(providerId)
+      ? findAlibabaProxyModel(catalog, lookup.modelId, sourceProviderId)
+      : undefined);
   if (!model) return undefined;
 
   const input = Array.isArray(model) ? model : model.modalities?.input;
