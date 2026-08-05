@@ -19,10 +19,7 @@
  */
 
 import { AuthType } from '../core/contentGenerator.js';
-import type {
-  ContentGeneratorConfig,
-  InputModalities,
-} from '../core/contentGenerator.js';
+import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
 import { knownTokenLimit } from '../core/tokenLimits.js';
@@ -47,10 +44,6 @@ import {
   MODEL_GENERATION_CONFIG_FIELDS,
 } from './constants.js';
 import type { ModelConfig as ModelProviderConfig } from './types.js';
-import {
-  areModalitiesEqual,
-  getProviderDefaultModalities,
-} from './model-metadata-catalog.js';
 export {
   validateModelConfig,
   type ModelConfigValidationResult,
@@ -282,14 +275,6 @@ export function resolveModelConfig(
     authType,
     modelProvider?.id ?? modelResult.value,
     sources,
-    modelProvider
-      ? getProviderDefaultModalities({
-          authType,
-          modelId: modelProvider.id,
-          baseUrl: modelProvider.baseUrl,
-          envKey: modelProvider.envKey,
-        })
-      : undefined,
   );
 
   // ---- Env override: QWEN_CODE_API_TIMEOUT_MS ----
@@ -396,26 +381,14 @@ function resolveGenerationConfig(
   authType: AuthType | undefined,
   modelId: string | undefined,
   sources: ConfigSources,
-  providerDefaultModalities?: InputModalities,
 ): Partial<ContentGeneratorConfig> {
   const result: Partial<ContentGeneratorConfig> = {};
 
   for (const field of MODEL_GENERATION_CONFIG_FIELDS) {
-    // User-edited provider values take priority over settings. Values copied
-    // unchanged from a built-in /auth preset are defaults, so settings win.
-    const providerValueIsDefault =
-      field === 'modalities' &&
-      providerDefaultModalities !== undefined &&
-      modelProviderConfig?.modalities !== undefined &&
-      areModalitiesEqual(
-        modelProviderConfig.modalities,
-        providerDefaultModalities,
-      );
     if (
       authType &&
       modelProviderConfig &&
-      field in modelProviderConfig &&
-      !(providerValueIsDefault && settingsConfig && field in settingsConfig)
+      field in modelProviderConfig
     ) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (result as any)[field] = modelProviderConfig[field];

@@ -9,10 +9,7 @@ import * as path from 'node:path';
 
 import type { InputModalities } from '../core/contentGenerator.js';
 import { Storage } from '../config/storage.js';
-import {
-  findProviderByCredentials,
-  findProviderById,
-} from '../providers/all-providers.js';
+import { findProviderByCredentials } from '../providers/all-providers.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { loadUndici, redactProxyError } from '../utils/runtimeFetchOptions.js';
@@ -64,20 +61,7 @@ export interface ModelMetadataLookup {
 export type ModelModalitiesSource =
   | 'explicit'
   | 'catalog'
-  | 'provider-default'
   | 'heuristic';
-
-export function areModalitiesEqual(
-  a: InputModalities,
-  b: InputModalities,
-): boolean {
-  return (
-    Boolean(a.image) === Boolean(b.image) &&
-    Boolean(a.pdf) === Boolean(b.pdf) &&
-    Boolean(a.audio) === Boolean(b.audio) &&
-    Boolean(a.video) === Boolean(b.video)
-  );
-}
 
 interface CatalogState {
   current?: ModelMetadataCatalog;
@@ -386,28 +370,6 @@ function findOriginalProviderModel(
   const provider = providerId ? catalog[providerId] : undefined;
   if (!provider || !providerId) return undefined;
   return findCatalogModel(provider, providerId, sourceProviderId, modelId);
-}
-
-export function getProviderDefaultModalities(
-  lookup: ModelMetadataLookup,
-): InputModalities | undefined {
-  const provider =
-    findProviderByCredentials(lookup.baseUrl, lookup.envKey) ??
-    (lookup.providerId ? findProviderById(lookup.providerId) : undefined);
-  const model = provider?.models?.find(
-    (candidate) => candidate.id.toLowerCase() === lookup.modelId.toLowerCase(),
-  );
-  if (model?.modalities) return { ...model.modalities };
-
-  // Recognize values persisted by older Coding Plan templates so catalog
-  // metadata can replace them without treating them as user overrides.
-  if (
-    provider?.id === 'coding-plan' &&
-    /^(?:qwen3\.5-plus|kimi-k2\.5)$/i.test(lookup.modelId)
-  ) {
-    return { image: true, video: true };
-  }
-  return undefined;
 }
 
 function resolveCatalogProviderId(

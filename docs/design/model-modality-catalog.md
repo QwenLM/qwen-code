@@ -38,6 +38,7 @@ never override an explicit user value.
 Built-in `/auth` templates omit modalities and let the catalog resolve them.
 Modalities selected explicitly in the advanced setup flow continue to take
 precedence. Existing saved configurations are not migrated or rewritten.
+Their modalities remain explicit and take precedence over catalog metadata.
 
 Provider identity is resolved from the configured provider when possible and
 otherwise from its endpoint or credential environment key. The catalog lookup

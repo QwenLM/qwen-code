@@ -316,9 +316,9 @@ describe('ModelRegistry', () => {
         {
           openai: [
             {
-              id: 'MiniMax-M3',
-              baseUrl: 'https://api.minimax.io/v1',
-              envKey: 'MINIMAX_API_KEY',
+              id: 'qwen3.5-plus',
+              baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
+              envKey: 'ALIBABA_CODING_PLAN_API_KEY',
               generationConfig: {
                 modalities: { image: true, video: true },
               },
@@ -327,16 +327,17 @@ describe('ModelRegistry', () => {
         },
         undefined,
         {
-          minimax: {
+          'alibaba-coding-plan-cn': {
+            api: 'https://coding.dashscope.aliyuncs.com/v1',
             models: {
-              'MiniMax-M3': {
+              'qwen3.5-plus': {
                 modalities: { input: ['text', 'image'] },
               },
             },
           },
         },
       );
-      const model = registry.getModel(AuthType.USE_OPENAI, 'MiniMax-M3')!;
+      const model = registry.getModel(AuthType.USE_OPENAI, 'qwen3.5-plus')!;
 
       expect(model.generationConfig.modalities).toEqual({
         image: true,
@@ -385,9 +386,6 @@ describe('ModelRegistry', () => {
               id,
               baseUrl,
               envKey: 'BAILIAN_CODING_PLAN_API_KEY',
-              generationConfig: {
-                modalities: { image: true, video: true },
-              },
             })),
           },
           undefined,

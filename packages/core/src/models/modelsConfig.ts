@@ -1001,9 +1001,7 @@ export class ModelsConfig {
               detail:
                 modalitiesSource === 'catalog'
                   ? 'loaded from models.dev catalog'
-                  : modalitiesSource === 'provider-default'
-                    ? 'loaded from built-in provider metadata'
-                    : 'auto-detected from model',
+                  : 'auto-detected from model',
             }
           : {
               kind: 'modelProviders',

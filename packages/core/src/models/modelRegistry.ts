@@ -19,9 +19,7 @@ import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { QWEN_OAUTH_MODELS } from './constants.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
-  areModalitiesEqual,
   getCatalogModalities,
-  getProviderDefaultModalities,
   type ModelModalitiesSource,
   type ModelMetadataCatalog,
 } from './model-metadata-catalog.js';
@@ -335,7 +333,6 @@ export class ModelRegistry {
       this.modelMetadataCatalog,
       lookup,
     );
-    const providerDefaultModalities = getProviderDefaultModalities(lookup);
     let modalitiesSource: ModelModalitiesSource = 'explicit';
     // Auto-fill modalities from the model name when the provider didn't set
     // them explicitly. Without this, downstream consumers that read straight
@@ -345,16 +342,6 @@ export class ModelRegistry {
       generationConfig.modalities =
         catalogModalities ?? defaultModalities(config.id);
       modalitiesSource = catalogModalities ? 'catalog' : 'heuristic';
-    } else if (
-      providerDefaultModalities &&
-      areModalitiesEqual(generationConfig.modalities, providerDefaultModalities)
-    ) {
-      if (catalogModalities) {
-        generationConfig.modalities = catalogModalities;
-        modalitiesSource = 'catalog';
-      } else {
-        modalitiesSource = 'provider-default';
-      }
     }
 
     const resolved: ResolvedModelConfig = {
