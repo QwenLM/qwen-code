@@ -14,11 +14,13 @@ import type {
   ToolResultDisplay,
   SlashCommandRecordPayload,
   AtCommandRecordPayload,
+  GoalSnapshotV2,
   HistoryGap,
   UserPromptRecordPayload,
 } from '@qwen-code/qwen-code-core';
 import {
   getToolResponseDisplayText,
+  isGoalCheckpointBookkeepingTransition,
   parseGoalStateRecordPayloadV2,
   stripTrailingUserPromptSubmitContextPart,
 } from '@qwen-code/qwen-code-core';
@@ -204,6 +206,7 @@ function convertToHistoryItems(
   const gapByChildUuid = indexGapsByChild(historyGaps);
   const pendingAtCommands: AtCommandRecordPayload[] = [];
   let atCommandCounter = 0;
+  let lastDisplayedGoalSnapshot: GoalSnapshotV2 | undefined;
 
   // Track pending tool calls for grouping with results
   const pendingToolCalls = new Map<
@@ -300,15 +303,22 @@ function convertToHistoryItems(
       if (record.subtype === 'goal_state') {
         const payload = parseGoalStateRecordPayloadV2(record.systemPayload);
         if (payload && shouldDisplayGoalStateCause(payload.cause)) {
-          if (currentToolGroup.length > 0) {
-            items.push({ type: 'tool_group', tools: [...currentToolGroup] });
-            currentToolGroup = [];
+          const bookkeepingOnly = isGoalCheckpointBookkeepingTransition(
+            lastDisplayedGoalSnapshot,
+            payload.snapshot,
+          );
+          lastDisplayedGoalSnapshot = payload.snapshot;
+          if (!bookkeepingOnly) {
+            if (currentToolGroup.length > 0) {
+              items.push({ type: 'tool_group', tools: [...currentToolGroup] });
+              currentToolGroup = [];
+            }
+            items.push({
+              type: 'goal_state',
+              snapshot: payload.snapshot,
+              cause: payload.cause,
+            });
           }
-          items.push({
-            type: 'goal_state',
-            snapshot: payload.snapshot,
-            cause: payload.cause,
-          });
         }
         continue;
       }

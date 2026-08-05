@@ -10,6 +10,7 @@ import {
   materializeGoalEvidenceCheckpoint,
   type GoalCheckpointVerificationResult,
 } from './goal-checkpoint.js';
+import { GOAL_CHECKPOINT_CLAIM_MAX_BYTES } from './goal-protocol.js';
 
 const evidence = [
   {
@@ -81,5 +82,19 @@ describe('materializeGoalEvidenceCheckpoint', () => {
         ],
       }),
     ).toThrow(/changes the proof kind/i);
+  });
+
+  it('rejects cumulative claims that exceed the byte budget', () => {
+    expect(() =>
+      materialize({
+        claims: Array.from({ length: 16 }, (_unused, index) => ({
+          proofKind: 'delivered_output' as const,
+          claim: `Claim ${index}: ${'x'.repeat(1_900)}`,
+          sourceRefs: ['assistant-1'],
+        })),
+      }),
+    ).toThrow(
+      new RegExp(`exceeds the ${GOAL_CHECKPOINT_CLAIM_MAX_BYTES}-byte`),
+    );
   });
 });

@@ -15,6 +15,7 @@ import type {
 } from './goal-checkpoint.js';
 import {
   GOAL_CHECKPOINT_CLAIM_LIMIT,
+  GOAL_CHECKPOINT_CLAIM_MAX_BYTES,
   GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS,
   GOAL_CHECKPOINT_SOURCE_REFERENCE_LIMIT,
 } from './goal-protocol.js';
@@ -62,7 +63,7 @@ const GOAL_CHECKPOINT_VERIFIER_SYSTEM_PROMPT = `You are an independent Goal Evid
 
 Each output claim must cite one or more input IDs in sourceRefs. Preserve evidence semantics exactly: never change a source proofKind, and do not combine sources with different proofKind values into one claim. "delivered_output" proves only that content was delivered, "external_fact" supports external facts, and "user_input" supports what the user actually said or authorized.
 
-previousClaims are already verified checkpoint claims. evidence contains the current bounded transcript evidence. Produce a cumulative checkpoint that retains every still-relevant fact needed to judge the Goal objective or a later terminal proposal. Omission may make the Goal impossible to verify, so preserve material progress, decisions, user constraints, external results, and delivered outputs. Do not make a terminal decision.
+previousClaims are already verified checkpoint claims. evidence contains the current bounded transcript evidence. Produce a cumulative checkpoint that retains every still-relevant fact needed to judge the Goal objective or a later terminal proposal. Omission may make the Goal impossible to verify, so preserve material progress, decisions, user constraints, external results, and delivered outputs. The combined UTF-8 size of all output claims must stay within ${GOAL_CHECKPOINT_CLAIM_MAX_BYTES} bytes, so compress the sources into dense claims. Do not make a terminal decision.
 
 Return exactly one JSON object with a non-empty claims array. Each claim must contain exactly proofKind, claim, and sourceRefs. Include no markdown fence, preamble, extra key, or commentary.`;
 

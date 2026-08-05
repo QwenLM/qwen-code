@@ -16,6 +16,7 @@ import type {
   TranscriptReplayGapInput,
 } from '@qwen-code/qwen-code-core/transcriptRecords';
 import {
+  isGoalCheckpointBookkeepingTransition,
   parseGoalSnapshotV2,
   parseGoalStateRecordPayloadV2,
   projectGoalStateToLegacy,
@@ -865,11 +866,16 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         );
         return;
       }
+      const bookkeepingOnly = isGoalCheckpointBookkeepingTransition(
+        this.goalState,
+        payload.snapshot,
+      );
       const projection = projectGoalStateToLegacy(
         payload,
         this.goalState?.goal ?? null,
       );
       this.goalState = payload.snapshot;
+      if (bookkeepingOnly) return;
       const { type: _type, ...goalStatus } = projection.goalStatus;
       yield emit(
         createTranscriptMessageUpdate({

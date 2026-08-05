@@ -51,7 +51,10 @@ export type {
   GoalTurnFinishedTransition,
 } from './goal-reducer.js';
 export * from './goal-persistence.js';
-export { projectGoalStateToLegacy } from './goal-legacy-projection.js';
+export {
+  isGoalCheckpointBookkeepingTransition,
+  projectGoalStateToLegacy,
+} from './goal-legacy-projection.js';
 export type {
   LegacyActiveGoal,
   LegacyGoalProjection,

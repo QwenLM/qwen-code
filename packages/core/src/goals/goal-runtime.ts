@@ -741,7 +741,8 @@ export function createGoalRuntime(
       if (!isCurrentCheckpointAttempt(attempt) || !snapshot.goal) return;
       checkpointAttempt = undefined;
       continuationQueued = false;
-      nextVerifierFeedback = undefined;
+      // Keep nextVerifierFeedback: a rejection committed before this
+      // checkpoint failure must still reach the resumed continuation.
       currentTurnFeedback = undefined;
       snapshot = structuredClone(limitedSnapshot);
       broadcast('usage_limited');

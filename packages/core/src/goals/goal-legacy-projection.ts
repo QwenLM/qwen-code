@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { GoalRecord, GoalStateRecordPayloadV2 } from './goal-protocol.js';
+import type {
+  GoalRecord,
+  GoalSnapshotV2,
+  GoalStateRecordPayloadV2,
+} from './goal-protocol.js';
 
 export type LegacyGoalStatusKind =
   | 'set'
@@ -97,6 +101,26 @@ export function projectGoalStateToLegacy(
           }
         : null,
   };
+}
+
+// Checkpoint bookkeeping records differ from their predecessor only in
+// evidence bookkeeping fields, so display paths suppress them as duplicates.
+export function isGoalCheckpointBookkeepingTransition(
+  previous: GoalSnapshotV2 | undefined,
+  next: GoalSnapshotV2,
+): boolean {
+  const previousGoal = previous?.goal;
+  const nextGoal = next.goal;
+  if (!previousGoal || !nextGoal) return false;
+  return (
+    previousGoal.goalId === nextGoal.goalId &&
+    previousGoal.revision === nextGoal.revision &&
+    previousGoal.objective === nextGoal.objective &&
+    previousGoal.status === nextGoal.status &&
+    previousGoal.turnCount === nextGoal.turnCount &&
+    previousGoal.createdAt === nextGoal.createdAt &&
+    previousGoal.lastReason === nextGoal.lastReason
+  );
 }
 
 function legacyStatusKind(

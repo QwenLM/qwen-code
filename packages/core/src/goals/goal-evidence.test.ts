@@ -236,28 +236,43 @@ describe('Goal evidence catalog', () => {
   it('requests a checkpoint before the catalog reaches its byte limit', () => {
     const records = [
       record('cursor', 'system'),
-      ...Array.from({ length: 60 }, (_, index) =>
-        record(`evidence-${index}`, 'assistant', {
+      record('tool-0', 'tool_result', {
+        provenance: 'tool_result',
+        turnId: 'turn-3',
+        toolResponse: { output: 'y'.repeat(500), exitCode: 0 },
+      }),
+      ...Array.from({ length: 59 }, (_, index) =>
+        record(`evidence-${index + 1}`, 'assistant', {
           provenance: 'assistant_output',
           turnId: 'turn-3',
-          text: 'x'.repeat(240),
+          text: 'x'.repeat(300),
         }),
       ),
     ];
 
-    expect(
-      buildGoalEvidenceCheckpointWindow({
-        records,
-        goal: goal(),
-        permit: permit(),
-      }),
-    ).toMatchObject({
+    const window = buildGoalEvidenceCheckpointWindow({
+      records,
+      goal: goal(),
+      permit: permit(),
+    });
+
+    expect(window).toMatchObject({
       truncated: false,
       shouldCheckpoint: true,
-      evidence: expect.arrayContaining([
-        expect.objectContaining({ uuid: 'evidence-59' }),
-      ]),
     });
+    expect(window.evidence).toHaveLength(60);
+    expect(window.evidence).toContainEqual(
+      expect.objectContaining({
+        uuid: 'evidence-59',
+        preview: 'x'.repeat(240),
+        content: 'x'.repeat(300),
+      }),
+    );
+    const toolEntry = window.evidence.find(({ uuid }) => uuid === 'tool-0');
+    expect(toolEntry?.content).toContain('y'.repeat(500));
+    expect(toolEntry!.content.length).toBeGreaterThan(
+      toolEntry!.preview.length,
+    );
   });
 
   it('does not expand raw evidence below the checkpoint threshold', () => {
@@ -286,6 +301,7 @@ describe('Goal evidence catalog', () => {
     expect(buildGoalEvidenceCheckpointWindow(input)).toMatchObject({
       shouldCheckpoint: false,
       truncated: false,
+      evidence: [],
     });
     expect(fullPayloadReads).toBe(0);
   });
@@ -620,6 +636,85 @@ describe('Goal evidence lineage and blockers', () => {
       ).toMatchObject({ proofKind: 'user_input' });
       expect(() =>
         validate(records, blocked(blockerKind, ['user'])),
+      ).toThrowError(
+        expect.objectContaining({
+          code: 'immediate_blocker_newer_evidence_required',
+        }),
+      );
+    },
+  );
+
+  it.each(['authority', 'external'] as const)(
+    'gates an immediate %s blocker on checkpoint claims like raw evidence',
+    (blockerKind) => {
+      const checkpointGoal: GoalRecord = {
+        ...goal('checkpoint-1'),
+        evidenceCheckpoint: {
+          checkpointId: 'checkpoint-1',
+          createdAt: 42,
+          claims: [
+            {
+              id: 'checkpoint-1:1',
+              proofKind: 'user_input',
+              claim: 'The user withheld deploy authority.',
+              sourceRefs: ['user-old'],
+            },
+            {
+              id: 'checkpoint-1:2',
+              proofKind: 'delivered_output',
+              claim: 'The change was delivered.',
+              sourceRefs: ['assistant-old'],
+            },
+          ],
+        },
+      };
+      const records = [
+        record('checkpoint-1', 'system', {
+          provenance: 'goal_control',
+          subtype: 'goal_state',
+        }),
+        record('assistant-new', 'assistant', {
+          provenance: 'assistant_output',
+          turnId: 'turn-3',
+          text: 'new output',
+        }),
+      ];
+
+      expect(
+        validate(
+          records,
+          blocked(blockerKind, [
+            'checkpoint-1:1',
+            'checkpoint-1:2',
+            'assistant-new',
+          ]),
+          permit(),
+          checkpointGoal,
+        ).citedRecords[0],
+      ).toMatchObject({
+        uuid: 'checkpoint-1:1',
+        proofKind: 'user_input',
+        content: 'The user withheld deploy authority.',
+      });
+      expect(() =>
+        validate(
+          records,
+          blocked(blockerKind, ['checkpoint-1:2', 'assistant-new']),
+          permit(),
+          checkpointGoal,
+        ),
+      ).toThrowError(
+        expect.objectContaining({
+          code: 'immediate_blocker_external_evidence_required',
+        }),
+      );
+      expect(() =>
+        validate(
+          records,
+          blocked(blockerKind, ['checkpoint-1:1', 'checkpoint-1:2']),
+          permit(),
+          checkpointGoal,
+        ),
       ).toThrowError(
         expect.objectContaining({
           code: 'immediate_blocker_newer_evidence_required',

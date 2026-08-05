@@ -132,6 +132,78 @@ describe('createTranscriptReplayMachine', () => {
     });
   });
 
+  it('skips checkpoint bookkeeping goal_state records during replay', () => {
+    const machine = createTranscriptReplayMachine();
+
+    expect(
+      updates(machine, goalStateRecord('goal-create', 'create', GOAL)),
+    ).toHaveLength(1);
+
+    const turned: GoalRecord = {
+      ...GOAL,
+      turnCount: GOAL.turnCount + 1,
+      activeTimeMs: 2100,
+      updatedAt: 300,
+    };
+    expect(
+      updates(machine, goalStateRecord('goal-turn', 'turn_finished', turned)),
+    ).toHaveLength(1);
+
+    const checkpointed: GoalRecord = {
+      ...turned,
+      evidenceCursor: { recordId: 'checkpoint-1' },
+      evidenceCheckpoint: {
+        checkpointId: 'checkpoint-1',
+        createdAt: 350,
+        claims: [
+          {
+            id: 'checkpoint-1:1',
+            proofKind: 'delivered_output',
+            claim: 'The result was delivered.',
+            sourceRefs: ['assistant-1'],
+          },
+        ],
+      },
+      activeTimeMs: 2500,
+      updatedAt: 400,
+    };
+    expect(
+      updates(
+        machine,
+        goalStateRecord('goal-checkpoint', 'checkpoint', checkpointed),
+      ),
+    ).toEqual([]);
+
+    const rejected: GoalRecord = {
+      ...checkpointed,
+      lastReason: 'More work remains',
+    };
+    expect(
+      updates(
+        machine,
+        goalStateRecord('goal-reject', 'verifier_reject', rejected),
+      ),
+    ).toHaveLength(1);
+
+    const recommitted: GoalRecord = {
+      ...rejected,
+      activeTimeMs: 2900,
+      updatedAt: 500,
+    };
+    expect(
+      updates(
+        machine,
+        goalStateRecord(
+          'goal-reject-checkpoint',
+          'verifier_reject',
+          recommitted,
+        ),
+      ),
+    ).toEqual([]);
+
+    expect(machine.snapshot().goalState?.goal).toEqual(recommitted);
+  });
+
   it('reports and skips a malformed goal_state record', () => {
     const onDiagnostic = vi.fn();
     const machine = createTranscriptReplayMachine({ onDiagnostic });
