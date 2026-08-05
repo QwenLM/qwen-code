@@ -32,6 +32,48 @@ describe('extractAtPathCommands', () => {
     expect(extractAtPathCommands('@foo')).toEqual(['foo']);
     expect(extractAtPathCommands('@foo @bar')).toEqual(['foo', 'bar']);
   });
+
+  // The punctuation terminators exist to stop a filesystem path at a sentence
+  // boundary, but `?`/`&`/`,`/`;` are structural in a URL. A presigned
+  // OSS/S3 link carries its signature in the query string, so truncating at
+  // `?` produced a request that failed with HTTP 403 — and the truncation was
+  // invisible in the error, which named only the host.
+  it('keeps the whole query string of a URL ref', () => {
+    const presigned =
+      'https://bucket.oss-cn-wulanchabu.aliyuncs.com/dir/movie.mkv' +
+      '?x-oss-credential=LTAI%2F20260805%2Fcn-wulanchabu%2Foss%2Faliyun_v4_request' +
+      '&x-oss-date=20260805T064817Z&x-oss-expires=32400' +
+      '&x-oss-signature-version=OSS4-HMAC-SHA256&x-oss-signature=f1454dcb';
+    expect(extractAtPathCommands(`@${presigned} 视频里有什么`)).toEqual([
+      presigned,
+    ]);
+  });
+
+  it('does not let URL punctuation leak into filesystem path parsing', () => {
+    // The same characters must still terminate a plain path.
+    expect(extractAtPathCommands('Look at @src/a.ts, then @src/b.ts;')).toEqual(
+      ['src/a.ts', 'src/b.ts'],
+    );
+  });
+
+  it('strips trailing sentence punctuation from a URL ref', () => {
+    const url = 'https://example.com/clip.mp4';
+    // ASCII and CJK terminators, and the query-string case where `?` is
+    // structural but the final `。` is prose.
+    expect(extractAtPathCommands(`@${url}. Explain it`)).toEqual([url]);
+    expect(extractAtPathCommands(`@${url}。分析一下`)).toEqual([url]);
+    expect(extractAtPathCommands(`@${url}?v=2， 这是什么`)).toEqual([
+      `${url}?v=2`,
+    ]);
+  });
+
+  it('keeps whitespace as the delimiter between a URL ref and the prompt', () => {
+    const url = 'https://example.com/a.mp4?token=x&sig=y';
+    expect(extractAtPathCommands(`@${url} @src/notes.md`)).toEqual([
+      url,
+      'src/notes.md',
+    ]);
+  });
 });
 
 describe('handleAtCommand', () => {

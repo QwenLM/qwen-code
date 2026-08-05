@@ -121,14 +121,31 @@ function parseAllAtCommands(query: string): AtCommandPart[] {
     }
 
     // Parse @path
+    //
+    // A URL ref (`@https://…`) is delimited differently from a filesystem
+    // path. The punctuation terminators below exist to stop a path at a
+    // sentence boundary ("see file.txt, then…"), but `?`, `&`, `,` and `;`
+    // are structural in a URL — a presigned OSS/S3 link carries its signature
+    // in the query string, so terminating at `?` would silently drop it and
+    // the request would fail with HTTP 403.
+    //
+    // Instead a URL runs to the first character RFC 3986 does not permit
+    // unencoded. That covers whitespace and also CJK prose written with no
+    // space ("@https://host/a.mp4。分析一下"), which a whitespace-only rule
+    // would swallow into the URL.
+    const isUrlRef = /^https?:\/\//i.test(query.slice(atIndex + 1));
+    // unreserved / gen-delims / sub-delims / pct-encoding, per RFC 3986.
+    const NON_URL_CHAR = /[^A-Za-z0-9\-._~:/?#[\]@!$&'()*+,;=%]/;
     let pathEndIndex = atIndex + 1;
     let inEscape = false;
     while (pathEndIndex < query.length) {
-      const char = query[pathEndIndex];
+      const char = query[pathEndIndex]!;
       if (inEscape) {
         inEscape = false;
       } else if (char === '\\') {
         inEscape = true;
+      } else if (isUrlRef) {
+        if (NON_URL_CHAR.test(char)) break;
       } else if (/[,\s;!?()[\]{}]/.test(char)) {
         // Path ends at first whitespace or punctuation not escaped
         break;
@@ -143,7 +160,18 @@ function parseAllAtCommands(query: string): AtCommandPart[] {
       }
       pathEndIndex++;
     }
-    const rawAtPath = query.substring(atIndex, pathEndIndex);
+    let rawAtPath = query.substring(atIndex, pathEndIndex);
+    if (isUrlRef) {
+      // `.`/`,`/`;`/`!`/`?` are legal URL characters but are usually prose
+      // when they land at the very end ("@https://host/a.mp4. Explain it").
+      // Trimmed after the scan rather than treated as terminators, so they
+      // can never cut a URL short mid-query. Brackets and parens are left
+      // alone: they appear balanced inside real URLs, and a wrapped URL still
+      // yields a named error rather than a silently mangled request.
+      const trimmed = rawAtPath.replace(/[.,;:!?]+$/, '');
+      pathEndIndex = atIndex + trimmed.length;
+      rawAtPath = trimmed;
+    }
     // unescapePath expects the @ symbol to be present, and will handle it.
     const atPath = unescapePath(rawAtPath);
     parts.push({ type: 'atPath', content: atPath });
