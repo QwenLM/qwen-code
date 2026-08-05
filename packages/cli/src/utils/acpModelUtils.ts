@@ -179,24 +179,28 @@ export function sanitizeProviderBaseUrl(baseUrl: string): string {
 
   try {
     const parsed = new URL(baseUrl);
-    if (parsed.username || parsed.password) {
-      return authorityAtIndex >= authorityStart
-        ? stripAt(authorityAtIndex)
-        : baseUrl;
+    if (!(parsed.username || parsed.password)) {
+      return baseUrl;
     }
-    return baseUrl;
+    if (authorityAtIndex >= authorityStart) {
+      return stripAt(authorityAtIndex);
+    }
+    // WHATWG accepts spaces in userinfo (encoded as %20), but our authority
+    // span stops at raw whitespace — so `@` can sit past authorityEnd for a
+    // password that contains a space. Fall through to the same recovery used
+    // when parsing fails.
   } catch {
     if (authorityAtIndex >= authorityStart) {
       return stripAt(authorityAtIndex);
     }
-
-    const fallbackAt = findUnescapedUserInfoFallbackAt(
-      baseUrl,
-      authorityStart,
-      authorityEnd,
-    );
-    return fallbackAt === -1 ? baseUrl : stripAt(fallbackAt);
   }
+
+  const fallbackAt = findUnescapedUserInfoFallbackAt(
+    baseUrl,
+    authorityStart,
+    authorityEnd,
+  );
+  return fallbackAt === -1 ? baseUrl : stripAt(fallbackAt);
 }
 
 function findUnescapedUserInfoFallbackAt(
@@ -226,6 +230,14 @@ function findAuthorityEnd(baseUrl: string, authorityStart: number): number {
   if (slash !== -1) end = Math.min(end, slash);
   if (query !== -1) end = Math.min(end, query);
   if (hash !== -1) end = Math.min(end, hash);
+  // Raw whitespace is never valid in a URL authority. Treat it as a terminator
+  // so a pathless URL followed by prose (e.g. a contact email) does not pull
+  // the trailing text into the authority span.
+  for (let i = authorityStart; i < end; i++) {
+    if (/\s/.test(baseUrl.charAt(i))) {
+      return i;
+    }
+  }
   return end;
 }
 

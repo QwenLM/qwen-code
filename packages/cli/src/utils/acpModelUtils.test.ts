@@ -249,6 +249,18 @@ describe('acpModelUtils', () => {
     ['https://user:p?x@api.example/v1', 'https://api.example/v1'],
     ['https://user:p#x@api.example/v1', 'https://api.example/v1'],
     ['https://user:secret@api.example', 'https://api.example'],
+    [
+      'https://api.example — contact admin@example.com',
+      'https://api.example — contact admin@example.com',
+    ],
+    [
+      'https://user:pass@host.io please contact admin@corp.io',
+      'https://host.io please contact admin@corp.io',
+    ],
+    [
+      'https://host bad:x/v1 — contact admin@corp.io',
+      'https://host bad:x/v1 — contact admin@corp.io',
+    ],
   ])('sanitizes provider base URL credentials for %s', (input, expected) => {
     expect(sanitizeProviderBaseUrl(input)).toBe(expected);
   });

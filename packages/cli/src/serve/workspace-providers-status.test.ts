@@ -578,6 +578,16 @@ describe('createWorkspaceProvidersStatusProvider', () => {
       'Cannot reach https://api.example:8443/v1',
       'Cannot reach https://api.example:8443/v1',
     ],
+    [
+      'keeps a pathless URL and later email unchanged',
+      'Cannot reach https://api.example — contact admin@example.com',
+      'Cannot reach https://api.example — contact admin@example.com',
+    ],
+    [
+      'strips credentials from a pathless URL before trailing prose',
+      'Cannot reach https://user:pass@host.io please contact admin@corp.io',
+      'Cannot reach https://host.io please contact admin@corp.io',
+    ],
   ])('%s', async (_name, message, expected) => {
     coreMock.throwModelsConfigError = true;
     coreMock.modelsConfigErrorMessage = message;
