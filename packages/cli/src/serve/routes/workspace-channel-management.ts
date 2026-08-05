@@ -261,6 +261,14 @@ async function resolveTarget(
 > {
   const runtime = resolveRuntime(req, res);
   if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+  if (runtime.provenance === 'live-conversation' && req.method !== 'GET') {
+    res.status(400).json({
+      error:
+        'Channel configuration and lifecycle operations are unavailable in the Conversations workspace.',
+      code: 'live_channel_management_reserved',
+    });
+    return;
+  }
   try {
     const service = await resolveService(runtime);
     if (!service) {
