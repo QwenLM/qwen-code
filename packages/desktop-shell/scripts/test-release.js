@@ -112,9 +112,7 @@ function testDesktopReleaseSigningWorkflow() {
     'Unsigned Windows installers are only allowed when no signing config exists',
   );
   assert.ok(
-    workflow.includes(
-      "--entitlements src-tauri/Entitlements.plist {} +",
-    ),
+    workflow.includes('--entitlements src-tauri/Entitlements.plist {} +'),
     'ripgrep codesign failures must fail the signing step',
   );
   assert.match(
