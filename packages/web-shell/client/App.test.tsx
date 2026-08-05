@@ -4,8 +4,10 @@ import { act, createRef, type CSSProperties, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type {
   DaemonInputAnnotation,
+  DaemonSessionContextUsageStatus,
   DaemonSessionMonitorTaskStatus,
   DaemonSessionShellTaskStatus,
+  DaemonSessionStatsStatus,
   DaemonSettingDescriptor,
   DaemonWorkspaceGitStatus,
 } from '@qwen-code/sdk/daemon';
@@ -16,6 +18,9 @@ import type {
   VoiceWorkspaceTarget,
 } from './voice/voice-workspace-target';
 import type { WebShellComposerToolbarRenderInfo } from './customization';
+import { serializeContextUsageMessage } from './components/messages/ContextUsageMessage';
+import { serializeStatsMessage } from './components/messages/StatsMessage';
+import { serializeStatusMessage } from './components/messages/StatusMessage';
 import { loadSplitSessions, saveSplitSessions } from './utils/splitUrl';
 
 type StreamingState = 'idle' | 'responding';
@@ -64,7 +69,13 @@ type ChatEditorTestProps = {
   voiceTarget?: VoiceWorkspaceTarget;
   voiceStatusRevision?: VoiceStatusRevision;
   placeholderText?: string;
-  workspaces?: Array<{ id: string; cwd: string }>;
+  workspaces?: Array<{
+    id: string;
+    cwd: string;
+    label: string;
+    primary: boolean;
+    trusted: boolean;
+  }>;
   atWorkspaceCwd?: string;
   selectedWorkspaceCwd?: string;
   onSelectWorkspace?: (cwd: string | undefined) => void;
@@ -119,6 +130,7 @@ function sessionWorkflowSetting(): DaemonSettingDescriptor {
 }
 
 const {
+  mockCollectSystemInfo,
   mockConnection,
   mockSessionActions,
   mockWorkspace,
@@ -186,7 +198,9 @@ const {
     listWorkspaceSessions: vi.fn(() => Promise.resolve([])),
   };
   const settingsSetValue = vi.fn().mockResolvedValue(undefined);
+  const mockCollectSystemInfo = vi.fn();
   return {
+    mockCollectSystemInfo,
     mockConnection: connection,
     mockSessionActions: {
       sendPrompt: vi.fn().mockResolvedValue(undefined),
@@ -211,6 +225,7 @@ const {
       sendShellCommand: vi.fn().mockResolvedValue(undefined),
       cancel: vi.fn().mockResolvedValue(undefined),
       getStats: vi.fn().mockResolvedValue({}),
+      getContextUsage: vi.fn().mockResolvedValue({}),
       getTasks: vi.fn().mockResolvedValue({
         v: 1,
         sessionId: 'session-1',
@@ -441,6 +456,10 @@ vi.mock('./hooks/useQueuedPrompts', () => ({
     editLastQueuedPrompt,
     clearQueuedPrompts,
   }),
+}));
+
+vi.mock('./utils/systemInfo', () => ({
+  collectSystemInfo: mockCollectSystemInfo,
 }));
 
 vi.mock('./components/ChatEditor', async () => {
@@ -2348,6 +2367,7 @@ beforeEach(() => {
   mockSessionActions.sendShellCommand.mockResolvedValue(undefined);
   mockSessionActions.cancel.mockResolvedValue(undefined);
   mockSessionActions.getStats.mockResolvedValue({});
+  mockSessionActions.getContextUsage.mockResolvedValue({});
   mockSessionActions.getTasks.mockResolvedValue({
     v: 1,
     sessionId: 'session-1',
@@ -2362,6 +2382,16 @@ beforeEach(() => {
   mockWorkspaceActions.loadProviders.mockResolvedValue({ current: null });
   mockWorkspaceActions.loadPreflight.mockResolvedValue(null);
   mockWorkspaceActions.loadEnv.mockResolvedValue(null);
+  mockCollectSystemInfo.mockImplementation(() => ({
+    nodeVersion: '',
+    npmVersion: '',
+    authSource: '',
+    platform: '',
+    arch: '',
+    sandbox: '',
+    proxy: '',
+    memoryUsage: '',
+  }));
   mockWorkspaceActions.loadMcpStatus.mockResolvedValue({ servers: [] });
   mockWorkspaceActions.loadMcpTools.mockResolvedValue([]);
   mockWorkspaceActions.loadMcpResources.mockResolvedValue([]);
@@ -3912,6 +3942,296 @@ describe('App shell command queueing', () => {
 
     expect(mockSessionActions.sendShellCommand).not.toHaveBeenCalled();
     expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+  });
+});
+
+describe('App read-only local commands mid-turn', () => {
+  it('runs /stats immediately while streaming and skips the echo', async () => {
+    const statsFixture: DaemonSessionStatsStatus = {
+      v: 1,
+      sessionId: 'session-1',
+      workspaceCwd: '/tmp/project',
+      sessionStartTimeMs: 1000,
+      durationMs: 42000,
+      promptCount: 2,
+      models: {},
+      tools: {
+        totalCalls: 1,
+        totalSuccess: 1,
+        totalFail: 0,
+        totalDurationMs: 120,
+        byName: {},
+      },
+      files: { totalLinesAdded: 3, totalLinesRemoved: 1 },
+    };
+    mockSessionActions.getStats.mockResolvedValue(statsFixture);
+    const { rerender } = renderApp({});
+    await flush();
+
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({});
+    });
+
+    let accepted: boolean | void;
+    await act(async () => {
+      accepted = testState.latestChatEditorProps?.onSubmit('/stats');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.getStats).toHaveBeenCalled();
+      });
+    });
+
+    expect(accepted).toBe(true);
+    expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalled();
+    expect(mockStore.dispatch).toHaveBeenCalledWith([
+      expect.objectContaining({
+        type: 'status',
+        clearActiveText: false,
+        text: serializeStatsMessage(statsFixture, 'overview'),
+      }),
+    ]);
+  });
+
+  it('echoes /stats when idle', async () => {
+    renderApp({});
+    await flush();
+
+    let accepted: boolean | void;
+    await act(async () => {
+      accepted = testState.latestChatEditorProps?.onSubmit('/stats');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.getStats).toHaveBeenCalled();
+      });
+    });
+
+    expect(accepted).toBe(true);
+    expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith('/stats');
+  });
+
+  it('runs /about immediately while streaming and skips the echo', async () => {
+    const { rerender } = renderApp({});
+    await flush();
+
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({});
+    });
+
+    let accepted: boolean | void;
+    await act(async () => {
+      accepted = testState.latestChatEditorProps?.onSubmit('/about');
+      await vi.waitFor(() => {
+        expect(mockWorkspaceActions.loadPreflight).toHaveBeenCalled();
+      });
+    });
+
+    expect(accepted).toBe(true);
+    expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalled();
+    expect(mockStore.dispatch).toHaveBeenCalledWith([
+      expect.objectContaining({
+        type: 'status',
+        clearActiveText: false,
+        text: serializeStatusMessage({
+          cliVersion: '1.2.3',
+          runtime: '',
+          platform: '',
+          auth: '',
+          baseUrl: '',
+          model: 'qwen',
+          fastModel: 'qwen',
+          sessionId: 'session-1',
+          sandbox: '',
+          proxy: '',
+          memoryUsage: '',
+        }),
+      }),
+    ]);
+  });
+
+  it('echoes /about when idle', async () => {
+    renderApp({});
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/about');
+      await vi.waitFor(() => {
+        expect(mockWorkspaceActions.loadPreflight).toHaveBeenCalled();
+      });
+    });
+
+    expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith('/about');
+  });
+
+  it('runs /status immediately while streaming and skips the echo', async () => {
+    const { rerender } = renderApp({});
+    await flush();
+
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({});
+    });
+
+    let accepted: boolean | void;
+    await act(async () => {
+      accepted = testState.latestChatEditorProps?.onSubmit('/status');
+      await vi.waitFor(() => {
+        expect(mockWorkspaceActions.loadPreflight).toHaveBeenCalled();
+      });
+    });
+
+    expect(accepted).toBe(true);
+    expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalled();
+    expect(mockStore.dispatch).toHaveBeenCalledWith([
+      expect.objectContaining({
+        type: 'status',
+        clearActiveText: false,
+        text: serializeStatusMessage({
+          cliVersion: '1.2.3',
+          runtime: '',
+          platform: '',
+          auth: '',
+          baseUrl: '',
+          model: 'qwen',
+          fastModel: 'qwen',
+          sessionId: 'session-1',
+          sandbox: '',
+          proxy: '',
+          memoryUsage: '',
+        }),
+      }),
+    ]);
+  });
+
+  it('echoes /status when idle', async () => {
+    renderApp({});
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/status');
+      await vi.waitFor(() => {
+        expect(mockWorkspaceActions.loadPreflight).toHaveBeenCalled();
+      });
+    });
+
+    expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith('/status');
+  });
+
+  it('runs /context immediately while streaming and skips the echo', async () => {
+    const contextFixture: DaemonSessionContextUsageStatus = {
+      v: 1,
+      sessionId: 'session-1',
+      workspaceCwd: '/tmp/project',
+      usage: {
+        modelName: 'qwen',
+        totalTokens: 1234,
+        contextWindowSize: 131072,
+        breakdown: {
+          systemPrompt: 500,
+          builtinTools: 200,
+          mcpTools: 0,
+          memoryFiles: 50,
+          skills: 0,
+          messages: 584,
+          freeSpace: 129738,
+          autocompactBuffer: 0,
+        },
+        builtinTools: [{ name: 'read_file', tokens: 120 }],
+        mcpTools: [],
+        memoryFiles: [{ path: 'QWEN.md', tokens: 50 }],
+        skills: [],
+      },
+      formattedText: 'Context usage: 1.2k / 131k tokens',
+    };
+    mockSessionActions.getContextUsage.mockResolvedValue(contextFixture);
+    const { rerender } = renderApp({});
+    await flush();
+
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({});
+    });
+
+    let accepted: boolean | void;
+    await act(async () => {
+      accepted = testState.latestChatEditorProps?.onSubmit('/context');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.getContextUsage).toHaveBeenCalled();
+      });
+    });
+
+    expect(accepted).toBe(true);
+    expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalled();
+    expect(mockStore.dispatch).toHaveBeenCalledWith([
+      expect.objectContaining({
+        type: 'status',
+        clearActiveText: false,
+        text: serializeContextUsageMessage(contextFixture),
+      }),
+    ]);
+  });
+
+  it('echoes /context when idle', async () => {
+    renderApp({});
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/context');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.getContextUsage).toHaveBeenCalled();
+      });
+    });
+
+    expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith('/context');
+  });
+
+  it('reports /stats load failures instead of swallowing them', async () => {
+    renderApp({});
+    await flush();
+
+    mockSessionActions.getStats.mockRejectedValueOnce(
+      new Error('stats unavailable'),
+    );
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/stats');
+      await vi.waitFor(() => {
+        expect(consoleError).toHaveBeenCalledWith(
+          '[web-shell]',
+          expect.stringContaining('stats unavailable'),
+          expect.anything(),
+        );
+      });
+    });
+
+    consoleError.mockRestore();
+  });
+
+  it('reports /about load failures instead of swallowing them', async () => {
+    renderApp({});
+    await flush();
+
+    mockCollectSystemInfo.mockImplementationOnce(() => {
+      throw new Error('status unavailable');
+    });
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/about');
+      await vi.waitFor(() => {
+        expect(consoleError).toHaveBeenCalledWith(
+          '[web-shell]',
+          expect.stringContaining('status unavailable'),
+          expect.anything(),
+        );
+      });
+    });
+
+    consoleError.mockRestore();
   });
 });
 
@@ -6241,6 +6561,41 @@ describe('App session callbacks', () => {
     );
   });
 
+  it('labels the Live composer workspace without exposing its backing name', async () => {
+    mockWorkspace.capabilities = {
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'live',
+          cwd: '/Users/test/Documents/Qwen Code/Conversations',
+          displayName: 'Conversations',
+          primary: false,
+          trusted: true,
+          kind: 'live',
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+
+    renderApp();
+    await flush();
+
+    expect(
+      testState.latestChatEditorProps?.workspaces?.find(
+        (entry) => entry.id === 'live',
+      ),
+    ).toMatchObject({ label: 'Live' });
+    expect(
+      testState.latestChatEditorProps?.workspaces?.some(
+        (entry) => entry.label === 'Conversations',
+      ),
+    ).toBe(false);
+  });
+
   it('keeps composer git status stable across an equivalent refresh', async () => {
     const workspaceGit = vi
       .fn()
@@ -7034,6 +7389,30 @@ describe('App session callbacks', () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(editorFocus).toHaveBeenCalledOnce();
+  });
+
+  it('opens a Live session in its owning Conversations workspace', async () => {
+    renderApp();
+    await flush();
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('qwen:open-session', {
+          detail: {
+            sessionId: 'live-coordinator',
+            workspaceCwd: '/Users/test/Documents/Qwen Code/Conversations',
+          },
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.loadSession).toHaveBeenCalledWith(
+      'live-coordinator',
+      {
+        workspaceCwd: '/Users/test/Documents/Qwen Code/Conversations',
+      },
+    );
   });
 
   it('does not steal focus when an approval appears before deferred session focus', async () => {
