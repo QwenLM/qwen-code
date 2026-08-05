@@ -48,7 +48,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { join, resolve, sep } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { gitOpt } from './lib/git.js';
 import {
@@ -58,9 +58,15 @@ import {
   readRootPackage,
   readWorkspaceGlobs,
   readWorkspacePackages,
+  workspaceDirFor,
   type WorkspacePackage,
 } from './lib/workspaces.js';
-import { affectedMavenModules, readMavenLayout } from './lib/maven.js';
+import {
+  affectedMavenModules,
+  mavenModuleFor,
+  modulesInheritingFrom,
+  readMavenLayout,
+} from './lib/maven.js';
 
 /** The build command for a dir: the root package takes no `--workspace`. */
 function buildCommand(dir: string): string {
@@ -348,15 +354,96 @@ function changedFilesFrom(planPath: string): string[] {
 }
 
 /**
+ * A layout build-test can scope from: workspace globs, a root package with a
+ * build/test script, or a pom.
+ */
+function hasScopableLayout(dir: string): boolean {
+  return (
+    readWorkspaceGlobs(dir).length > 0 ||
+    readRootPackage(dir) !== null ||
+    existsSync(join(dir, 'pom.xml'))
+  );
+}
+
+/**
+ * The nearest npm project strictly INSIDE the repo root that owns
+ * `filePath` — a directory with its own package.json carrying a build/test
+ * script. Such a project runs its own build; neither the root npm scope nor
+ * `mvn -pl` executes it, so a diff inside it must not be certified by
+ * either toolchain.
+ */
+function nestedNpmProjectOf(root: string, filePath: string): string | null {
+  let dir = dirname(filePath.replace(/^\.\//, ''));
+  while (dir !== '.' && dir !== '') {
+    if (readRootPackage(join(root, dir))) return dir;
+    dir = dirname(dir);
+  }
+  return null;
+}
+
+/**
+ * True when some directory strictly between `filePath` and the repo root
+ * holds a pom.xml — a Maven project the root layout does not model.
+ */
+function hasNestedAncestorPom(root: string, filePath: string): boolean {
+  let dir = dirname(filePath.replace(/^\.\//, ''));
+  while (dir !== '.' && dir !== '') {
+    if (existsSync(join(root, dir, 'pom.xml'))) return true;
+    dir = dirname(dir);
+  }
+  return false;
+}
+
+/**
+ * True when `filePath` sits under a pom.xml strictly BELOW the module that
+ * owns it (or below the repo root when no module owns it) — a nested
+ * project the reactor walk does not model, whose own build `mvn -pl` never
+ * runs.
+ */
+function hasUnmodeledNestedPom(
+  root: string,
+  filePath: string,
+  modules: string[],
+): boolean {
+  const owner = mavenModuleFor(filePath, modules);
+  let dir = dirname(filePath.replace(/^\.\//, ''));
+  while (dir !== '.' && dir !== '' && dir !== owner) {
+    if (existsSync(join(root, dir, 'pom.xml'))) return true;
+    dir = dirname(dir);
+  }
+  return false;
+}
+
+/**
+ * Does the Maven model claim this file — a pom, a reactor-global build
+ * input (`mvnw`, `mvnw.cmd`, `.mvn/` config), or a path inside a modeled
+ * module?
+ */
+function isMavenOwnedFile(f: string, modules: string[]): boolean {
+  const norm = f.replace(/^\.\//, '');
+  return (
+    norm === 'pom.xml' ||
+    norm.endsWith('/pom.xml') ||
+    norm === 'mvnw' ||
+    norm === 'mvnw.cmd' ||
+    norm.startsWith('.mvn/') ||
+    mavenModuleFor(norm, modules) !== null
+  );
+}
+
+/**
  * The tree to actually build in. A local review's `--worktree` is the agent's
  * cwd, and on monorepos the workspace is often a SUBDIRECTORY of the repo —
  * while the plan's file paths are repo-root-relative (`capture-local` labels
  * from the repo root). Scoping from the subdirectory matches nothing and
  * reports a confident "nothing to build" for a diff that changes real modules
  * — the false green this command exists to prevent. Re-anchor to the repo
- * root when the tree sits strictly inside one. A PR worktree IS its own repo
- * root (`rev-parse --show-toplevel` in a linked worktree returns the
- * worktree), so this never moves a PR review; non-git trees stay as given.
+ * root when the tree sits strictly inside one AND the root itself carries a
+ * scopable layout; a standalone project nested in a repo whose root has none
+ * keeps its own root and the deterministic single-package build it always
+ * had. A PR worktree IS its own repo root (`rev-parse --show-toplevel` in a
+ * linked worktree returns the worktree), so this never moves a PR review;
+ * non-git trees stay as given.
  */
 export function rebaseToRepoRoot(worktree: string): string {
   const root = resolve(worktree);
@@ -365,7 +452,9 @@ export function rebaseToRepoRoot(worktree: string): string {
   try {
     const top = realpathSync(resolve(topLevel));
     const here = realpathSync(root);
-    if (here !== top && here.startsWith(top + sep)) return top;
+    if (here !== top && here.startsWith(top + sep) && hasScopableLayout(top)) {
+      return top;
+    }
   } catch {
     // An unreadable path keeps the tree as given.
   }
@@ -423,15 +512,14 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     (!singleRoot && (globs.length === 0 || packages.length === 0))
   ) {
     // A Maven multi-module repo gets its own scoping when npm is entirely
-    // absent — no workspaces and no single root package. A repo that declares
-    // npm workspaces keeps the npm path (and its failure modes) even if a
-    // `pom.xml` also lives in it.
-    if (
-      !unmodeled &&
-      !singleRoot &&
-      globs.length === 0 &&
-      existsSync(join(root, 'pom.xml'))
-    ) {
+    // absent. The outer condition is the only way here, and
+    // `globs.length === 0` is the load-bearing invariant: it rules out
+    // `unmodeled` (which requires workspace globs) and every workspace repo,
+    // declared-or-not — and `singleRoot` implies it too, so a root package
+    // with build/test scripts keeps the npm path via the outer `!singleRoot`
+    // before this line. A repo that declares npm workspaces keeps the npm
+    // path (and its failure modes) even if a `pom.xml` also lives in it.
+    if (globs.length === 0 && existsSync(join(root, 'pom.xml'))) {
       return runMavenBuildTest(args, changed, root, perCommandMs, exec);
     }
     return unsupportedReport(
@@ -454,6 +542,40 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
       : []
     : affectedWorkspaces(changed, globs);
   if (affected.length === 0) {
+    // Nothing npm owns changed. Before certifying "nothing to build", ask
+    // whether a Maven layout or a nested project claims a file the npm build
+    // would never compile: certifying here is the polyglot false green this
+    // command exists to prevent.
+    if (changed.length > 0) {
+      if (existsSync(join(root, 'pom.xml'))) {
+        const layout = readMavenLayout(root);
+        if (
+          !layout.unmodeled &&
+          affectedMavenModules(changed, layout.modules).length > 0
+        ) {
+          return runMavenBuildTest(args, changed, root, perCommandMs, exec);
+        }
+        return unsupportedReport(
+          'A root pom.xml is present, but the diff maps to no workspace and to no ' +
+            'Maven module this command can safely scope — a Maven layout also ' +
+            'claims this repo (or cannot be ruled out). Fall back to the ' +
+            'build/test precedence in your brief, and give each command a ' +
+            'deadline it can actually meet.',
+        );
+      }
+      const stray = changed.find(
+        (f) =>
+          nestedNpmProjectOf(root, f) !== null || hasNestedAncestorPom(root, f),
+      );
+      if (stray !== undefined) {
+        return unsupportedReport(
+          `The diff touches ${stray} under a nested project no workspace builds ` +
+            '(it carries its own package.json or pom.xml). Fall back to the ' +
+            'build/test precedence in your brief, and give each command a ' +
+            'deadline it can actually meet.',
+        );
+      }
+    }
     return {
       toolchain: 'npm',
       affected: [],
@@ -469,6 +591,37 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
         '(docs, root config, CI). There is no package to build and no test to run — ' +
         'this is a complete answer, not a skipped step.',
     };
+  }
+
+  // The empty-affected gate's twin for diffs that ALSO change workspace
+  // files: files no workspace owns are invisible to the npm build below, so
+  // certifying the npm half alone is the same polyglot false green. One
+  // toolchain runs per call — hand the mixed diff off.
+  if (!singleRoot) {
+    const unclaimed = changed.filter((f) => workspaceDirFor(f, globs) === null);
+    if (unclaimed.length > 0) {
+      if (existsSync(join(root, 'pom.xml'))) {
+        return unsupportedReport(
+          'The diff mixes workspace files and files no workspace owns, and a root ' +
+            'pom.xml is present — this command runs one toolchain per call, so the ' +
+            'npm build below would certify green without compiling the Maven side. ' +
+            'Fall back to the build/test precedence in your brief — building both ' +
+            'halves — and give each command a deadline it can actually meet.',
+        );
+      }
+      const stray = unclaimed.find(
+        (f) =>
+          nestedNpmProjectOf(root, f) !== null || hasNestedAncestorPom(root, f),
+      );
+      if (stray !== undefined) {
+        return unsupportedReport(
+          `The diff mixes workspace files and ${stray}, which belongs to a ` +
+            'nested project no workspace builds (its own package.json or pom.xml). ' +
+            'Fall back to the build/test precedence in your brief, and give each ' +
+            'command a deadline it can actually meet.',
+        );
+      }
+    }
   }
 
   const byDir = new Map(packages.map((p) => [p.dir, p]));
@@ -489,6 +642,56 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
         'build/test precedence in your brief — installing dependencies first — rather ' +
         'than trust a scoped build that would silently skip it.',
     );
+  }
+
+  if (singleRoot) {
+    // The root package claims every file by containment, but polyglot repos
+    // can carry a root pom.xml too, and a nested project of either toolchain
+    // builds itself. The root npm build would certify green while compiling
+    // none of that code: route a diff only Maven owns to the Maven branch,
+    // and hand off a mixed diff or one a nested project claims.
+    if (existsSync(join(root, 'pom.xml'))) {
+      const layout = readMavenLayout(root);
+      const claimed = changed.filter((f) =>
+        isMavenOwnedFile(f, layout.modules),
+      );
+      if (claimed.length > 0) {
+        if (!layout.unmodeled && claimed.length === changed.length) {
+          return runMavenBuildTest(args, changed, root, perCommandMs, exec);
+        }
+        return unsupportedReport(
+          'Both an npm root package and a Maven layout claim parts of this diff ' +
+            '(or the Maven layout cannot be safely modeled), and this command ' +
+            'runs one toolchain per call. Fall back to the build/test precedence ' +
+            'in your brief — building both halves — and give each command a ' +
+            'deadline it can actually meet.',
+        );
+      }
+      const strayPom = changed.find((f) =>
+        hasUnmodeledNestedPom(root, f, layout.modules),
+      );
+      if (strayPom !== undefined) {
+        return unsupportedReport(
+          `The diff touches ${strayPom} under a nested pom.xml the reactor model ` +
+            'does not place, so the root npm build would certify green without ' +
+            'compiling it. Fall back to the build/test precedence in your brief, ' +
+            'and give each command a deadline it can actually meet.',
+        );
+      }
+    } else {
+      const stray = changed.find(
+        (f) =>
+          nestedNpmProjectOf(root, f) !== null || hasNestedAncestorPom(root, f),
+      );
+      if (stray !== undefined) {
+        return unsupportedReport(
+          `The diff touches ${stray} under a nested project the root package ` +
+            'does not build (its own package.json or pom.xml). Fall back to the ' +
+            'build/test precedence in your brief, and give each command a ' +
+            'deadline it can actually meet.',
+        );
+      }
+    }
   }
 
   const results: BuildTestReport = {
@@ -830,6 +1033,34 @@ function runMavenBuildTest(
     );
   }
 
+  // The gate that routes here looks at the ROOT layout only — it never asks
+  // whether the diff itself is Maven. A changed file inside a nested npm
+  // project, or under a pom.xml the reactor walk does not model, would be
+  // certified green by an `mvn -pl` scope that never builds it. Hand the
+  // repo to the fallback whenever a changed file sits inside such a project.
+  const nestedClaim = changed.find((f) => {
+    if (nestedNpmProjectOf(root, f) !== null) return true;
+    // A changed pom.xml is the widening logic's own input — its dir is
+    // modeled there (descendants, inheritors, or the unplaceable-pom
+    // fallback) — so only non-pom files can belong to an unmodeled nested
+    // project here.
+    const norm = f.replace(/^\.\//, '');
+    return (
+      norm !== 'pom.xml' &&
+      !norm.endsWith('/pom.xml') &&
+      hasUnmodeledNestedPom(root, f, layout.modules)
+    );
+  });
+  if (nestedClaim !== undefined) {
+    return unsupportedMaven(
+      `The diff touches ${nestedClaim}, which belongs to a nested project this ` +
+        'Maven scope does not build (its own package.json, or a pom.xml the ' +
+        'reactor walk does not model). mvn would certify green without ever ' +
+        'building it. Fall back to the build/test precedence in your brief, and ' +
+        'give each command a deadline it can actually meet.',
+    );
+  }
+
   // The wrapper pins the Maven version the repo expects. On POSIX prefer it
   // only when it is ALSO executable: one committed without the exec bit
   // (common in repos authored on Windows) exits every command 126 Permission
@@ -849,41 +1080,57 @@ function runMavenBuildTest(
     }
   }
 
-  // The root pom (dependencyManagement, plugin config) can change what EVERY
-  // module compiles, so a change to it disables scoping — the npm root-package
-  // analogue. A NESTED aggregator pom is the same case for its subtree: `-pl`
-  // on the aggregator alone would compile nothing (packaging pom, no sources)
-  // while `-am` pulls only UPSTREAM — the children that inherit the change
-  // would never build, a confident false green. Widen to every module under
-  // it instead. A zero-module pom is a single-module project: any change is
-  // the whole project. A file under no module is the Maven docs/root-config
-  // case and builds nothing.
-  let rootPomChanged = false;
+  // The root pom (dependencyManagement, plugin config) and the wrapper and
+  // `.mvn/` config beside it (arg files, JVM flags, extensions) can change
+  // what EVERY module compiles, so a change to any of them disables scoping —
+  // the npm root-package analogue. A NESTED pom is the same case for the
+  // modules under it AND the modules inheriting from it: `-pl` on an
+  // aggregator alone would compile nothing (packaging pom, no sources) while
+  // `-am` pulls only UPSTREAM — the modules that inherit the change would
+  // never build, a confident false green. Widen to every module under it and
+  // every module naming it as `<parent>`. A nested pom the model cannot
+  // place — not itself a module, nothing under it, nothing inheriting it —
+  // disables scoping entirely: an inheritance chain through it is invisible
+  // to the walk, and guessing green is what this command exists to prevent.
+  // A zero-module pom is a single-module project: any change is the whole
+  // project. A file under no module is the Maven docs/root-config case and
+  // builds nothing.
+  const isReactorGlobalInput = (norm: string): boolean =>
+    norm === 'pom.xml' ||
+    norm === 'mvnw' ||
+    norm === 'mvnw.cmd' ||
+    norm.startsWith('.mvn/');
+  let reactorGlobalChanged = false;
   for (const f of changed) {
-    if (f.replace(/^\.\//, '') === 'pom.xml') {
-      rootPomChanged = true;
+    if (isReactorGlobalInput(f.replace(/^\.\//, ''))) {
+      reactorGlobalChanged = true;
       break;
     }
   }
-  // A separate pass, and only when the root pom did not already take the
-  // whole reactor: collecting in the same loop that `break`s on the root pom
-  // would leave the set partially populated.
+  // A separate pass, and only when a reactor-global input did not already
+  // take the whole reactor: collecting in the same loop that `break`s would
+  // leave the set partially populated.
   const pomWidened = new Set<string>();
-  if (!rootPomChanged) {
+  let unplaceablePom = false;
+  if (!reactorGlobalChanged) {
     for (const f of changed) {
       const norm = f.replace(/^\.\//, '');
-      if (norm.endsWith('/pom.xml')) {
-        const dir = norm.slice(0, -'/pom.xml'.length);
-        for (const m of layout.modules) {
-          if (m.startsWith(`${dir}/`)) pomWidened.add(m);
-        }
+      if (!norm.endsWith('/pom.xml')) continue;
+      const dir = norm.slice(0, -'/pom.xml'.length);
+      const isModule = layout.modules.includes(dir);
+      const descendants = layout.modules.filter((m) => m.startsWith(`${dir}/`));
+      const inheritors = modulesInheritingFrom(layout, dir);
+      if (!isModule && descendants.length === 0 && inheritors.length === 0) {
+        unplaceablePom = true;
+        break;
       }
+      for (const m of [...descendants, ...inheritors]) pomWidened.add(m);
     }
   }
   let affected: string[];
   if (layout.modules.length === 0) {
     affected = changed.length > 0 ? ['.'] : [];
-  } else if (rootPomChanged) {
+  } else if (reactorGlobalChanged || unplaceablePom) {
     affected = ['.'];
   } else {
     affected = affectedMavenModules(changed, layout.modules);
@@ -984,8 +1231,10 @@ function runMavenBuildTest(
         ? `Scoped the build to ${affected.length} of ${layout.modules.length} Maven ` +
           `module(s) — ${affected.join(', ')} — with \`-am\` adding what they compile ` +
           `against.${testClause}`
-        : `The diff changes the root pom (or the repo is one Maven module), so the ` +
-          `whole reactor built.${testClause}`;
+        : `The diff changes a reactor-global build input (the root pom, the mvnw ` +
+          `wrapper, or .mvn config), a pom this command cannot place in the ` +
+          `module graph, or the repo is one Maven module — so the whole reactor ` +
+          `built.${testClause}`;
     } else if (realFailures.length === 0) {
       results.note =
         `${failed.length} command(s) ran out of time (${args.timeout}s). A timeout is an ` +

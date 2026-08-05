@@ -12,6 +12,7 @@ import {
   declaredModulesOf,
   readMavenLayout,
   mavenModuleFor,
+  modulesInheritingFrom,
   affectedMavenModules,
 } from './maven.js';
 
@@ -125,6 +126,53 @@ describe('declaredModulesOf', () => {
     const pom = '<modules><module>\n  spaced\n</module></modules>';
     expect(declaredModulesOf(pom).dirs).toEqual(['spaced']);
   });
+
+  it('flags content the comment-strip cannot trust — CDATA or `<!--` in an attribute', () => {
+    // `<!--` inside CDATA or an attribute value is NOT an XML comment, but
+    // the strip matches it as one; a strip spanning a real `</modules>`
+    // physically deletes entries, and every recount then runs on the
+    // corrupted string — hidden modules would vanish with `unmodeled: false`.
+    for (const pom of [
+      '<foo><![CDATA[ x <!-- y ]]></foo><modules><module>a</module></modules>' +
+        '<bar><![CDATA[ z --> w ]]></bar>',
+      '<bar a="<!--"><modules><module>a</module></modules></bar>',
+      "<bar b='<!--'><modules><module>a</module></modules></bar>",
+    ]) {
+      expect(declaredModulesOf(pom).unmodeled).toBe(true);
+    }
+  });
+
+  it('treats a self-closing <modules/> as an empty block, not a hidden one', () => {
+    // A placeholder `<modules/>` declares zero modules; the opener recount
+    // must not read it as a block the capture regex missed (which would flag
+    // a valid single-module pom unmodeled and lose the deterministic build).
+    for (const pom of [
+      '<project><modules/></project>',
+      '<project><modules /></project>',
+    ]) {
+      expect(declaredModulesOf(pom)).toEqual({ dirs: [], unmodeled: false });
+    }
+  });
+
+  it('strips comments over the WHOLE pom before block extraction and recount', () => {
+    // A `</modules>` inside a comment must not terminate the lazy block
+    // match — module `b` would vanish from capture and raw-token recount
+    // alike, a false green for diffs under it.
+    expect(
+      declaredModulesOf(
+        '<modules><module>a</module><!-- </modules> -->' +
+          '<module>b</module></modules>',
+      ),
+    ).toEqual({ dirs: ['a', 'b'], unmodeled: false });
+    // A commented-out block outside any real one must not count as a phantom
+    // `<modules` opener (a false `unmodeled`).
+    expect(
+      declaredModulesOf(
+        '<!-- <modules><module>ghost</module></modules> -->' +
+          '<modules><module>real</module></modules>',
+      ),
+    ).toEqual({ dirs: ['real'], unmodeled: false });
+  });
 });
 
 describe('readMavenLayout', () => {
@@ -185,6 +233,107 @@ describe('readMavenLayout', () => {
     expect(layout.modules).toEqual(['a']);
   });
 
+  it('flags a UTF-16 nested pom instead of silently dropping its subtree', () => {
+    // UTF-16 (legal to Maven via BOM; PowerShell's default encoding) decodes
+    // to NUL-riddled text under utf8 that the regexes read as "declares no
+    // modules" — the agg/core subtree would vanish with `unmodeled: false`,
+    // and `-pl agg -am` would never put agg/core in the reactor.
+    pom('', '<modules><module>agg</module></modules>');
+    mkdirSync(join(root, 'agg'), { recursive: true });
+    writeFileSync(
+      join(root, 'agg', 'pom.xml'),
+      Buffer.from('\uFEFF<modules><module>core</module></modules>', 'utf16le'),
+    );
+    pom('agg/core', '<project/>');
+
+    expect(readMavenLayout(root).unmodeled).toBe(true);
+  });
+
+  it('strips a UTF-8 BOM and parses normally', () => {
+    writeFileSync(
+      join(root, 'pom.xml'),
+      Buffer.concat([
+        Buffer.from([0xef, 0xbb, 0xbf]),
+        Buffer.from('<modules><module>common</module></modules>', 'utf8'),
+      ]),
+    );
+    pom('common', '<project/>');
+
+    const layout = readMavenLayout(root);
+    expect(layout.unmodeled).toBe(false);
+    expect(layout.modules).toEqual(['common']);
+  });
+
+  it('propagates a bad-entries flag from a NESTED pom, not just the root', () => {
+    // A nested aggregator declaring an outside-the-basedir module used to be
+    // flaggable only if the malformation sat at the root; the flag must
+    // propagate from every depth.
+    pom('', '<modules><module>agg</module></modules>');
+    pom('agg', '<modules><module>../outside</module></modules>');
+    expect(readMavenLayout(root).unmodeled).toBe(true);
+  });
+
+  it('degrades to unmodeled on a moditect-shaped <modules> in plugin config — deliberately', () => {
+    // The block regex cannot tell a plugin-configuration `<modules>` wrapper
+    // from the real reactor block; the captured fake dirs do not exist, so
+    // the layout hands off rather than scope over a model it cannot verify.
+    pom(
+      '',
+      '<project><modules><module>real</module></modules>' +
+        '<build><plugins><plugin><artifactId>moditect-maven-plugin</artifactId>' +
+        '<configuration><modules><module>java.sql</module></modules>' +
+        '</configuration></plugin></plugins></build></project>',
+    );
+    pom('real', '<project/>');
+
+    expect(readMavenLayout(root).unmodeled).toBe(true);
+  });
+
+  it('walks a clean chain to the depth cap without flagging', () => {
+    // The cap exists to bound malformed poms, not to clip real reactors: a
+    // clean chain at exactly MAX_MODULE_DEPTH must stay modeled.
+    let prev = '';
+    for (let i = 0; i < 10; i++) {
+      const name = `m${i}`;
+      pom(prev, `<modules><module>${name}</module></modules>`);
+      prev = prev ? `${prev}/${name}` : name;
+    }
+    pom(prev, '<project/>');
+
+    const layout = readMavenLayout(root);
+    expect(layout.unmodeled).toBe(false);
+    expect(layout.modules).toHaveLength(10);
+    expect(layout.modules).toContain('m0/m1/m2/m3/m4/m5/m6/m7/m8/m9');
+  });
+
+  it("records each module's parent dir — relativePath resolved, default applied", () => {
+    pom(
+      '',
+      '<modules><module>parent</module><module>app</module>' +
+        '<module>agg</module><module>standalone</module></modules>',
+    );
+    pom('parent', '<project/>');
+    pom(
+      'app',
+      '<project><parent><groupId>g</groupId><artifactId>parent</artifactId>' +
+        '<relativePath>../parent</relativePath></parent></project>',
+    );
+    // No <relativePath> element: Maven's default is ../pom.xml — the ROOT.
+    pom(
+      'agg',
+      '<project><parent><artifactId>root</artifactId></parent></project>',
+    );
+    // An explicitly empty <relativePath/> means "resolve from the repository,
+    // not the tree" — no local edge.
+    pom('standalone', '<project><parent><relativePath/></parent></project>');
+
+    const layout = readMavenLayout(root);
+    expect(layout.unmodeled).toBe(false);
+    expect(layout.parentOf.get('app')).toBe('parent');
+    expect(layout.parentOf.get('agg')).toBe('');
+    expect(layout.parentOf.get('standalone')).toBeNull();
+  });
+
   it('flags unmodeled when the nesting outruns the depth cap — never a silent drop', () => {
     // A chain deeper than MAX_MODULE_DEPTH: dropping the excess silently
     // would map files in the deep modules to nothing and report a false
@@ -201,6 +350,51 @@ describe('readMavenLayout', () => {
     expect(layout.unmodeled).toBe(true);
     // The shallow end of the chain is still discovered.
     expect(layout.modules).toContain('m0');
+  });
+});
+
+describe('modulesInheritingFrom', () => {
+  let root: string;
+
+  const pom = (dir: string, body: string): void => {
+    mkdirSync(join(root, dir), { recursive: true });
+    writeFileSync(join(root, dir, 'pom.xml'), body);
+  };
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'mvn-inh-'));
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('widens along direct and transitive inheritance edges', () => {
+    // `app` inherits ../parent; `app-impl` inherits ../app — a change to
+    // parent/pom.xml reaches BOTH through the inheritance chain, and `-pl`
+    // on parent alone would build neither.
+    pom(
+      '',
+      '<modules><module>parent</module><module>app</module>' +
+        '<module>app-impl</module></modules>',
+    );
+    pom('parent', '<project/>');
+    pom(
+      'app',
+      '<project><parent><relativePath>../parent</relativePath></parent></project>',
+    );
+    pom(
+      'app-impl',
+      '<project><parent><relativePath>../app</relativePath></parent></project>',
+    );
+
+    const layout = readMavenLayout(root);
+    expect(modulesInheritingFrom(layout, 'parent')).toEqual([
+      'app',
+      'app-impl',
+    ]);
+    expect(modulesInheritingFrom(layout, 'app')).toEqual(['app-impl']);
+    expect(modulesInheritingFrom(layout, 'app-impl')).toEqual([]);
   });
 });
 

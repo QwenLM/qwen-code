@@ -1535,18 +1535,24 @@ describe('runBuildTest (Maven)', () => {
 
   it('falls back to `unsupported` when a declared module dir has no pom.xml', () => {
     // Files under `ghost/` would map to no module and report a false green,
-    // so the scoping hands off instead of guessing.
+    // so the scoping hands off instead of guessing. The injected exec pins
+    // that the handoff happens BEFORE any command: a regression of the guard
+    // would otherwise spawn a real `mvn` on the host before the assertion
+    // could fail.
     pom('', '<modules><module>common</module><module>ghost</module></modules>');
     pom('common', '<project/>');
     writePlan(['common/src/A.java']);
 
+    const calls: string[] = [];
     const rep = runBuildTest({
       plan: planPath,
       worktree: root,
       timeout: 60,
       install: false,
+      exec: okExec(calls),
     });
 
+    expect(calls).toEqual([]);
     expect(rep.toolchain).toBe('unsupported');
     expect(rep.note).toContain('cannot model');
   });
@@ -1717,6 +1723,324 @@ describe('runBuildTest (Maven)', () => {
     expect(rep.note).toContain('Insufficient disk space');
   });
 
+  it('widens a changed parent pom along INHERITANCE edges, not just directory ones', () => {
+    // False green confirmed by probe: root declares `parent` + `app`; `app`
+    // inherits `../parent`; a diff changing only `parent/pom.xml` used to
+    // scope `mvn -pl parent -am` — the packaging-pom module compiles
+    // nothing, `-am` pulls only upstream, and `app` (the module that
+    // inherits the change) is never built while the report says green.
+    pom(
+      '',
+      '<project><modules><module>parent</module>' +
+        '<module>app</module></modules></project>',
+    );
+    pom('parent', '<project/>');
+    pom(
+      'app',
+      '<project><parent><relativePath>../parent</relativePath></parent></project>',
+    );
+    writePlan(['parent/pom.xml']);
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec(calls),
+    });
+
+    expect(rep.affected).toEqual(['app', 'parent']);
+    expect(calls[0]).toBe('mvn -B -pl app,parent -am compile');
+  });
+
+  it('widens to inheritors when the changed parent pom is NOT a declared module', () => {
+    pom('', '<project><modules><module>app</module></modules></project>');
+    pom('parent', '<project/>');
+    pom(
+      'app',
+      '<project><parent><relativePath>../parent</relativePath></parent></project>',
+    );
+    writePlan(['parent/pom.xml']);
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec(calls),
+    });
+
+    expect(rep.affected).toEqual(['app']);
+    expect(calls[0]).toBe('mvn -B -pl app -am compile');
+  });
+
+  it('keeps a changed leaf-module pom scoped to that module', () => {
+    // The unplaceable-pom fallback must not fire for the common case: a
+    // module's OWN pom changed — the file mapping already names the module.
+    mavenRepo();
+    writePlan(['common/pom.xml']);
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec(calls),
+    });
+
+    expect(rep.affected).toEqual(['common']);
+    expect(calls[0]).toBe('mvn -B -pl common -am compile');
+  });
+
+  it('builds the whole reactor for a pom the module model cannot place', () => {
+    // Not a module, nothing under it, nothing inheriting it: an inheritance
+    // chain through it is invisible to the walk, so scoping cannot be
+    // trusted — the whole reactor is the safe answer.
+    mavenRepo();
+    pom('stray', '<project/>');
+    writePlan(['stray/pom.xml']);
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec(calls),
+    });
+
+    expect(rep.affected).toEqual(['.']);
+    expect(calls).toEqual(['mvn -B compile', 'mvn -B test']);
+  });
+
+  it('builds the whole reactor when a reactor-global build input changed', () => {
+    // `mvnw`, `mvnw.cmd`, and `.mvn/` config (arg files, JVM flags,
+    // extensions) change what EVERY module compiles, exactly like the root
+    // pom. Such a diff maps to no module and used to report "nothing to
+    // build — a complete answer" with zero commands run.
+    mavenRepo();
+    for (const f of [
+      'mvnw',
+      'mvnw.cmd',
+      '.mvn/maven.config',
+      '.mvn/jvm.config',
+    ]) {
+      writePlan([f]);
+      const calls: string[] = [];
+      const rep = runBuildTest({
+        plan: planPath,
+        worktree: root,
+        timeout: 60,
+        install: false,
+        exec: okExec(calls),
+      });
+      expect(rep.affected).toEqual(['.']);
+      expect(calls).toEqual(['mvn -B compile', 'mvn -B test']);
+    }
+  });
+
+  it('does not treat a wrapper INSIDE a module as reactor-global', () => {
+    mavenRepo();
+    writePlan(['common/mvnw']);
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec(calls),
+    });
+
+    expect(rep.affected).toEqual(['common']);
+    expect(calls[0]).toBe('mvn -B -pl common -am compile');
+  });
+
+  it('pins the exact affected set when no pom changed — no spurious widening', () => {
+    mavenRepo();
+    writePlan(['common/src/A.java', 'libs/dqc-all/dqc-core/src/B.java']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec([]),
+    });
+
+    // Exactly what affectedMavenModules computed — content AND order. The
+    // aggregator libs/dqc-all is NOT dragged in; a regression that always
+    // merged or re-widened `pomWidened` would change this array.
+    expect(rep.affected).toEqual(['common', 'libs/dqc-all/dqc-core']);
+  });
+
+  it('routes to Maven when a stub root package.json has no build/test scripts', () => {
+    // Renovate/prettier stub manifests in Maven monorepos: package.json
+    // EXISTS, so a gate "simplified" to existence would misroute the repo
+    // out of runMavenBuildTest. readRootPackage returns null (no scripts),
+    // which is load-bearing here.
+    writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'stub' }));
+    mavenRepo();
+    writePlan(['common/src/A.java']);
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec(calls),
+    });
+
+    expect(rep.toolchain).toBe('maven');
+    expect(calls[0]).toBe('mvn -B -pl common -am compile');
+  });
+
+  it('proceeds when statfs itself is unavailable — the Maven preflight must not invent failures', () => {
+    // `freeDiskBytes` returns null wherever statfsSync throws; JS coerces
+    // `null < floor` to true, so an unwitnessed guard drop would skip every
+    // Maven build on such a host with "Insufficient disk space (0.0G free)".
+    mavenRepo();
+    writePlan(['common/src/A.java']);
+    statfsSyncMock.mockImplementation(() => {
+      throw new Error('ENOSYS: statfs not supported');
+    });
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec(calls),
+    });
+
+    expect(calls).toEqual([
+      'mvn -B -pl common -am compile',
+      'mvn -B -pl common -am test',
+    ]);
+    expect(rep.ok).toBe(true);
+  });
+
+  it('never picks the POSIX wrapper on win32 when only mvnw exists', () => {
+    // `./mvnw` is a shell script cmd cannot run; selection must fall through
+    // to `mvn`. Pins the win32 side of wrapper platform exclusivity.
+    mavenRepo();
+    writeFileSync(join(root, 'mvnw'), '#!/bin/sh\n');
+    writePlan(['common/src/A.java']);
+
+    const platform = vi
+      .spyOn(process, 'platform', 'get')
+      .mockReturnValue('win32');
+    try {
+      const calls: string[] = [];
+      runBuildTest({
+        plan: planPath,
+        worktree: root,
+        timeout: 60,
+        install: false,
+        exec: okExec(calls),
+      });
+      expect(calls[0]).toBe('mvn -B -pl common -am compile');
+    } finally {
+      platform.mockRestore();
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'falls back to mvn on POSIX when only mvnw.cmd exists',
+    () => {
+      // The wrong-platform wrapper exits non-zero instantly — not a timeout,
+      // no reactor-selection text — which would be framed as a Critical for
+      // the PR instead of infrastructure.
+      mavenRepo();
+      writeFileSync(join(root, 'mvnw.cmd'), '@echo off\r\n');
+      writePlan(['common/src/A.java']);
+
+      const calls: string[] = [];
+      runBuildTest({
+        plan: planPath,
+        worktree: root,
+        timeout: 60,
+        install: false,
+        exec: okExec(calls),
+      });
+      expect(calls[0]).toBe('mvn -B -pl common -am compile');
+    },
+  );
+
+  it('hands off a diff that only touches a nested npm project', () => {
+    // The Maven gate routes on ROOT layout; it must not certify green for a
+    // diff mvn never compiles — the npm project's own build/test is the one
+    // the change can break.
+    mavenRepo();
+    mkdirSync(join(root, 'tools', 'web-console', 'src'), { recursive: true });
+    writeFileSync(
+      join(root, 'tools', 'web-console', 'package.json'),
+      JSON.stringify({ name: 'web', scripts: { build: 'x', test: 'x' } }),
+    );
+    writePlan(['tools/web-console/src/index.ts']);
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec(calls),
+    });
+
+    expect(rep.toolchain).toBe('unsupported');
+    expect(calls).toEqual([]);
+    expect(rep.note).toContain('tools/web-console');
+  });
+
+  it('hands off when the npm project is nested UNDER a module dir', () => {
+    // The file maps to a module, so mvn would run green over the Java code
+    // while the npm project's own build/test never runs.
+    mavenRepo();
+    mkdirSync(join(root, 'common', 'console'), { recursive: true });
+    writeFileSync(
+      join(root, 'common', 'console', 'package.json'),
+      JSON.stringify({ name: 'c', scripts: { build: 'x', test: 'x' } }),
+    );
+    writePlan(['common/console/src/index.ts']);
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec(calls),
+    });
+
+    expect(rep.toolchain).toBe('unsupported');
+    expect(calls).toEqual([]);
+  });
+
+  it('still certifies a docs-only diff in a Maven repo', () => {
+    mavenRepo();
+    writePlan(['README.md']);
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec(calls),
+    });
+
+    expect(rep.toolchain).toBe('maven');
+    expect(rep.ok).toBe(true);
+    expect(calls).toEqual([]);
+    expect(rep.note).toContain('nothing to build');
+  });
+
   it('keeps the npm path for a repo that has BOTH npm and Maven layouts', () => {
     // npm owns a repo that declares it; the Maven branch only takes repos
     // npm is entirely absent from.
@@ -1747,10 +2071,11 @@ describe('runBuildTest (Maven)', () => {
   });
 
   it('keeps the npm-UNMODELED handoff even when a pom.xml exists', () => {
-    // Deleting the `!unmodeled` guard would hand a `packages/**` repo to the
-    // Maven branch: the changed workspace file maps to no Maven module, and
-    // the report would say "nothing to build" — a false green replacing the
-    // safe handoff to the brief's fallback.
+    // The Maven gate's invariant is `globs.length === 0`: a repo that
+    // DECLARES workspaces keeps the npm handoff even when the globs are
+    // unmodeled and a pom.xml exists. Without it, the changed workspace file
+    // maps to no Maven module and the report would say "nothing to build" —
+    // a false green replacing the safe handoff to the brief's fallback.
     writeFileSync(
       join(root, 'package.json'),
       JSON.stringify({ name: 'r', workspaces: ['packages/**'] }),
@@ -1759,13 +2084,16 @@ describe('runBuildTest (Maven)', () => {
     mkdirSync(join(root, 'packages', 'a'), { recursive: true });
     writePlan(['packages/a/src/x.ts']);
 
+    const calls: string[] = [];
     const rep = runBuildTest({
       plan: planPath,
       worktree: root,
       timeout: 5,
       install: false,
+      exec: okExec(calls),
     });
 
+    expect(calls).toEqual([]);
     expect(rep.toolchain).toBe('unsupported');
     expect(rep.note).toContain('does not model');
   });
@@ -1780,15 +2108,159 @@ describe('runBuildTest (Maven)', () => {
     pom('', '<project/>');
     writePlan(['packages/a/src/x.ts']);
 
+    const calls: string[] = [];
     const rep = runBuildTest({
       plan: planPath,
       worktree: root,
       timeout: 5,
       install: false,
+      exec: okExec(calls),
+    });
+
+    expect(calls).toEqual([]);
+    expect(rep.toolchain).toBe('unsupported');
+    expect(rep.note).toContain('No npm package here to scope');
+  });
+
+  it('routes a Maven-only diff to Maven when the ROOT is an npm workspace repo', () => {
+    // Polyglot false green: workspaces at the root, a Maven project that is
+    // NOT a workspace; the java file mapped to no workspace and the report
+    // certified "nothing to build" with zero commands.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    mkdirSync(join(root, 'packages', 'web'), { recursive: true });
+    writeFileSync(
+      join(root, 'packages', 'web', 'package.json'),
+      JSON.stringify({ name: '@x/web', scripts: { build: 'exit 0' } }),
+    );
+    pom('', '<project><modules><module>backend</module></modules></project>');
+    pom('backend', '<project/>');
+    writePlan(['backend/src/Main.java']);
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec(calls),
+    });
+
+    expect(rep.toolchain).toBe('maven');
+    expect(calls[0]).toBe('mvn -B -pl backend -am compile');
+  });
+
+  it('hands off a MIXED workspace+Maven diff — one toolchain per call', () => {
+    // The empty-affected gate's twin: the npm build would certify green
+    // while the Maven side of the diff never compiles.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    mkdirSync(join(root, 'packages', 'web'), { recursive: true });
+    writeFileSync(
+      join(root, 'packages', 'web', 'package.json'),
+      JSON.stringify({ name: '@x/web', scripts: { build: 'exit 0' } }),
+    );
+    pom('', '<project><modules><module>backend</module></modules></project>');
+    pom('backend', '<project/>');
+    writePlan(['packages/web/src/a.ts', 'backend/src/Main.java']);
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec(calls),
     });
 
     expect(rep.toolchain).toBe('unsupported');
-    expect(rep.note).toContain('No npm package here to scope');
+    expect(calls).toEqual([]);
+  });
+
+  it('routes a Maven-only diff to Maven when the ROOT is a single npm package', () => {
+    // The single-root npm build used to certify green here: affected ['.'],
+    // the root build passes, the changed Java code is never compiled.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'r',
+        scripts: { build: 'exit 0', test: 'exit 0' },
+      }),
+    );
+    pom('', '<project><modules><module>backend</module></modules></project>');
+    pom('backend', '<project/>');
+    writePlan(['backend/src/Main.java']);
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec(calls),
+    });
+
+    expect(rep.toolchain).toBe('maven');
+    expect(calls[0]).toBe('mvn -B -pl backend -am compile');
+  });
+
+  it('hands off a MIXED npm+Maven diff under a single root package', () => {
+    // One toolchain per call: certifying either half alone would report
+    // green while the other half's code never compiles.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'r',
+        scripts: { build: 'exit 0', test: 'exit 0' },
+      }),
+    );
+    pom('', '<project><modules><module>backend</module></modules></project>');
+    pom('backend', '<project/>');
+    writePlan(['backend/src/Main.java', 'src/a.ts']);
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec(calls),
+    });
+
+    expect(rep.toolchain).toBe('unsupported');
+    expect(calls).toEqual([]);
+  });
+
+  it('hands off an empty-affected diff claimed by a NESTED project (no root pom)', () => {
+    // The nested Maven project is found by walking the changed files'
+    // ancestors — there is no root pom.xml for the layout to read.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    mkdirSync(join(root, 'packages', 'web'), { recursive: true });
+    writeFileSync(
+      join(root, 'packages', 'web', 'package.json'),
+      JSON.stringify({ name: '@x/web', scripts: { build: 'exit 0' } }),
+    );
+    pom('backend', '<project/>');
+    writePlan(['backend/src/Main.java']);
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec(calls),
+    });
+
+    expect(rep.toolchain).toBe('unsupported');
+    expect(calls).toEqual([]);
   });
 });
 
@@ -1928,5 +2400,154 @@ describe('runBuildTest (workspace in a repo subdirectory)', () => {
     const linked = join(repo, 'linked-wt');
     git('worktree', 'add', '--detach', '-q', linked, 'HEAD');
     expect(rebaseToRepoRoot(linked)).toBe(linked);
+  });
+});
+
+describe('runBuildTest (npm workspace in a repo subdirectory)', () => {
+  // rebaseToRepoRoot is load-bearing for the npm path too: a monorepo
+  // developer's cwd is the workspace subdir, the plan's paths are
+  // repo-root-relative, and the lockfile sits at the root. A mutant moving
+  // the re-anchor into the Maven branch shipped every test green — these pin
+  // the npm semantics, plus the standalone-project case the re-anchor must
+  // NOT swallow.
+  let repo: string;
+  let home: string;
+  let planPath: string;
+  let savedEnv: NodeJS.ProcessEnv;
+
+  const git = (...args: string[]) =>
+    execFileSync('git', args, { cwd: repo, encoding: 'utf8' });
+
+  beforeEach(() => {
+    repo = mkdtempSync(join(tmpdir(), 'bt-sub-npm-'));
+    home = mkdtempSync(join(tmpdir(), 'bt-sub-npm-home-'));
+    writeFileSync(join(home, '.gitconfig'), '');
+    // Isolate from the developer's git environment — the same pattern as the
+    // Maven subdir suite above.
+    savedEnv = { ...process.env };
+    process.env['GIT_CONFIG_NOSYSTEM'] = '1';
+    process.env['GIT_CONFIG_GLOBAL'] = join(home, '.gitconfig');
+    process.env['HOME'] = home;
+
+    git('init', '-q', '--template=', '.');
+    git('config', 'user.email', 'a@b');
+    git('config', 'user.name', 'a');
+    git('config', 'commit.gpgsign', 'false');
+    git('config', 'core.hooksPath', join(repo, '.no-such-hooks'));
+
+    writeFileSync(
+      join(repo, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    writeFileSync(join(repo, 'package-lock.json'), '{}');
+    mkdirSync(join(repo, 'packages', 'a', 'src'), { recursive: true });
+    writeFileSync(
+      join(repo, 'packages', 'a', 'package.json'),
+      JSON.stringify({
+        name: '@x/a',
+        scripts: { build: 'exit 0', test: 'exit 0' },
+      }),
+    );
+    // npm completeness markers, so the install is skipped.
+    mkdirSync(join(repo, 'node_modules'), { recursive: true });
+    writeFileSync(join(repo, 'node_modules', '.package-lock.json'), '{}');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'init');
+
+    planPath = join(repo, 'plan.json');
+  });
+
+  afterEach(() => {
+    process.env = savedEnv;
+    rmSync(repo, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it('re-anchors a workspace subdir to the repo root and scopes the workspace', () => {
+    writeFileSync(join(repo, 'packages', 'a', 'src', 'x.ts'), 'export {}');
+    writeFileSync(
+      planPath,
+      JSON.stringify({
+        files: [{ path: 'packages/a/src/x.ts', kind: 'source' }],
+      }),
+    );
+
+    const calls: string[] = [];
+    const cwds: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: join(repo, 'packages', 'a'),
+      timeout: 60,
+      install: false,
+      exec: (command, cwd) => {
+        calls.push(command);
+        cwds.push(cwd);
+        return {
+          command,
+          exitCode: 0,
+          seconds: 1,
+          timedOut: false,
+          output: '',
+        };
+      },
+    });
+
+    expect(rep.toolchain).toBe('npm');
+    expect(rep.affected).toEqual(['packages/a']);
+    expect(calls).toContain('npm run build --workspace="packages/a"');
+    // Commands ran in the repo root, not the subdirectory worktree
+    // (realpath: macOS tmp paths carry a /private prefix once resolved).
+    const repoReal = realpathSync(repo);
+    expect(cwds.every((c) => c === repoReal)).toBe(true);
+  });
+
+  it('keeps a standalone nested project on its own root when the repo root has no layout', () => {
+    // The unconditional re-anchor dropped this deterministic build: scoping
+    // moved to a root with no package.json and the report degraded to the
+    // prose fallback ("No npm package here to scope").
+    rmSync(join(repo, 'package.json'));
+    rmSync(join(repo, 'package-lock.json'));
+    rmSync(join(repo, 'node_modules'), { recursive: true, force: true });
+    mkdirSync(join(repo, 'sub', 'project', 'src'), { recursive: true });
+    writeFileSync(
+      join(repo, 'sub', 'project', 'package.json'),
+      JSON.stringify({
+        name: 'p',
+        scripts: { build: 'exit 0', test: 'exit 0' },
+      }),
+    );
+    writeFileSync(join(repo, 'sub', 'project', 'src', 'x.ts'), 'export {}');
+    writeFileSync(
+      planPath,
+      JSON.stringify({
+        files: [{ path: 'sub/project/src/x.ts', kind: 'source' }],
+      }),
+    );
+
+    const calls: string[] = [];
+    const cwds: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: join(repo, 'sub', 'project'),
+      timeout: 60,
+      install: false,
+      exec: (command, cwd) => {
+        calls.push(command);
+        cwds.push(cwd);
+        return {
+          command,
+          exitCode: 0,
+          seconds: 1,
+          timedOut: false,
+          output: '',
+        };
+      },
+    });
+
+    expect(rep.toolchain).toBe('npm');
+    expect(rep.affected).toEqual(['.']);
+    expect(calls).toContain('npm run build');
+    const projReal = realpathSync(join(repo, 'sub', 'project'));
+    expect(cwds.every((c) => c === projReal)).toBe(true);
   });
 });

@@ -39,6 +39,11 @@ const MAX_MODULE_DEPTH = 10;
  */
 const SEGMENT_RE = /^[A-Za-z0-9._-]+$/;
 
+/** XML comments are stripped before any structural regex runs. */
+function stripComments(pomXml: string): string {
+  return pomXml.replace(/<!--[\s\S]*?-->/g, '');
+}
+
 /**
  * A raw `<module>` entry as a repo-relative directory.
  *
@@ -81,12 +86,19 @@ function normalizeModuleDir(raw: string): string | null {
  * instead. The same goes for an entry the capture regex cannot see at all
  * (an attribute on the element, CDATA content, a space in the closing tag):
  * the raw-token count at the end catches what the loop never matched.
+ *
+ * A `<modules>` wrapper inside a plugin `<configuration>` — the shape
+ * moditect-maven-plugin uses — is one the block regex cannot tell from the
+ * real reactor block, so its entries are captured too and the layout
+ * degrades to `unmodeled` when the fake dirs do not exist. That degrade is
+ * deliberate: regex cannot reliably distinguish the shapes, and losing `-pl`
+ * scoping to a whole-reactor fallback is the safe direction.
  */
 export function declaredModulesOf(pomXml: string): {
   dirs: string[];
   unmodeled: boolean;
 } {
-  const withoutComments = pomXml.replace(/<!--[\s\S]*?-->/g, '');
+  const withoutComments = stripComments(pomXml);
   const dirs: string[] = [];
   let unmodeled = false;
   let matched = 0;
@@ -116,9 +128,90 @@ export function declaredModulesOf(pomXml: string): {
   // A `<modules` opener the block regex cannot see (an attribute on the
   // element) hides every entry inside it; files under those modules would
   // map to nothing and report a false green, so flag instead of guessing.
+  // Self-closing `<modules/>` placeholders are openers that carry no entries
+  // and match no block — subtracted, not flagged.
   const modulesOpeners = withoutComments.match(/<modules[\s/>]/g) ?? [];
-  if (modulesOpeners.length > blockCount) unmodeled = true;
+  const selfClosingModules = withoutComments.match(/<modules\s*\/>/g) ?? [];
+  if (modulesOpeners.length - selfClosingModules.length > blockCount) {
+    unmodeled = true;
+  }
+  // The strip above trusts every `<!--`…`-->` pair to be an XML comment.
+  // Inside CDATA or an attribute value it is NOT, and a strip that spans a
+  // real `</modules>` physically deletes entries — every recount then runs on
+  // the corrupted string and hidden modules vanish with `unmodeled: false`.
+  // A pom is PR-controlled in a PR review, so flag the layout instead of
+  // trusting a parse the strip could have sabotaged.
+  if (/<!\[CDATA\[/.test(pomXml) || /=["'][^"']*<!--/.test(pomXml)) {
+    unmodeled = true;
+  }
   return { dirs, unmodeled };
+}
+
+/**
+ * The `<parent>` reference one pom declares, before resolution.
+ *
+ * `ref` is the `<relativePath>` text when present, Maven's `../pom.xml`
+ * default when the element is absent, and null when there is no local edge —
+ * no `<parent>` block at all, or an explicitly empty `<relativePath/>`
+ * ("resolve from the repository, not the tree"). `untrusted` is true when a
+ * `<parent>` token exists the block regex cannot see (an attribute on the
+ * element, a second block): the inheritance edge cannot be established, and
+ * missing one maps the inheriting module's files to nothing that builds the
+ * change — the false green the caller exists to prevent.
+ */
+function declaredParentRef(pomXml: string): {
+  ref: string | null;
+  untrusted: boolean;
+} {
+  const clean = stripComments(pomXml);
+  const openers = clean.match(/<parent[\s/>]/g) ?? [];
+  if (openers.length === 0) return { ref: null, untrusted: false };
+  const blocks = /<parent>([\s\S]*?)<\/parent>/g;
+  let body: string | null = null;
+  let count = 0;
+  let m: RegExpExecArray | null;
+  while ((m = blocks.exec(clean)) !== null) {
+    count++;
+    body = m[1] ?? '';
+  }
+  if (count !== openers.length || body === null) {
+    return { ref: null, untrusted: true };
+  }
+  if (/<relativePath\s*\/>/.test(body)) return { ref: null, untrusted: false };
+  const rel = body.match(/<relativePath>\s*([^<]*?)\s*<\/relativePath>/);
+  const raw = rel ? (rel[1] ?? '').trim() : '../pom.xml';
+  return { ref: raw === '' ? null : raw, untrusted: false };
+}
+
+/**
+ * Resolve a `<relativePath>` against the module's dir, as a repo-relative
+ * dir of the parent pom. Null when the parent is not in the repo — an
+ * absolute path, a `..` chain that leaves the root, or a segment outside the
+ * modeled charset: such a parent cannot be touched by a repo-relative diff,
+ * so there is no local inheritance edge to widen along. The value is only
+ * ever COMPARED against changed-pom dirs, never interpolated into a command,
+ * but the charset gate keeps the comparison space and the module space alike.
+ */
+function resolveParentRef(moduleDir: string, ref: string): string | null {
+  const path = ref.replace(/\\/g, '/');
+  if (path.startsWith('/')) return null;
+  const stack = moduleDir === '' ? [] : moduleDir.split('/');
+  const segs = path.split('/');
+  // A trailing `pom.xml` names the file; its directory is the parent.
+  if (segs[segs.length - 1] === 'pom.xml' || segs[segs.length - 1] === '') {
+    segs.pop();
+  }
+  for (const seg of segs) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') {
+      if (stack.length === 0) return null;
+      stack.pop();
+      continue;
+    }
+    if (!SEGMENT_RE.test(seg)) return null;
+    stack.push(seg);
+  }
+  return stack.join('/');
 }
 
 /** The reactor module layout a root pom describes. */
@@ -138,6 +231,13 @@ export interface MavenLayout {
    * caller hands the repo to the brief's fallback instead of scoping it.
    */
   unmodeled: boolean;
+  /**
+   * Each modeled module dir → the repo-relative dir of the pom it inherits
+   * via `<parent>` (`<relativePath>` resolved, Maven's `../pom.xml` default
+   * applied), or null when the edge is absent, empty, or leaves the repo.
+   * Comparison data for inheritance widening — never reaches a shell.
+   */
+  parentOf: Map<string, string | null>;
 }
 
 /**
@@ -148,9 +248,17 @@ export interface MavenLayout {
  * files under it to no module and report a green that compiled nothing.
  * The seen set terminates cycles (a pom listing itself or its ancestor);
  * the depth cap bounds a chain of nested aggregators.
+ *
+ * Poms are read as bytes first: a UTF-16 pom (legal to Maven via BOM, and
+ * what PowerShell writes by default) decodes to NUL-riddled text under utf8
+ * that the regexes silently read as "declares no modules" — dropping a nested
+ * aggregator's whole subtree with `unmodeled: false`, the false green this
+ * walker exists to prevent. A UTF-16 BOM or NUL chars flag the layout
+ * unmodeled; a UTF-8 BOM is stripped and parsed.
  */
 export function readMavenLayout(root: string): MavenLayout {
   const modules: string[] = [];
+  const parentOf = new Map<string, string | null>();
   let unmodeled = false;
   const seen = new Set<string>();
 
@@ -162,7 +270,20 @@ export function readMavenLayout(root: string): MavenLayout {
     const pomPath = join(root, parentDir, 'pom.xml');
     let pomXml: string;
     try {
-      pomXml = readFileSync(pomPath, 'utf8');
+      const raw = readFileSync(pomPath);
+      if (
+        (raw[0] === 0xff && raw[1] === 0xfe) ||
+        (raw[0] === 0xfe && raw[1] === 0xff)
+      ) {
+        unmodeled = true;
+        return;
+      }
+      pomXml = raw.toString('utf8');
+      if (pomXml.startsWith('\uFEFF')) pomXml = pomXml.slice(1);
+      if (pomXml.includes('\u0000')) {
+        unmodeled = true;
+        return;
+      }
     } catch {
       // The root call only happens after an existence check; a nested pom
       // that vanished between listing and reading ends its subtree.
@@ -170,6 +291,14 @@ export function readMavenLayout(root: string): MavenLayout {
     }
     const { dirs: entries, unmodeled: badEntries } = declaredModulesOf(pomXml);
     if (badEntries) unmodeled = true;
+    if (parentDir !== '') {
+      const { ref, untrusted } = declaredParentRef(pomXml);
+      if (untrusted) unmodeled = true;
+      parentOf.set(
+        parentDir,
+        ref === null ? null : resolveParentRef(parentDir, ref),
+      );
+    }
     for (const entry of entries) {
       const dir = parentDir ? `${parentDir}/${entry}` : entry;
       if (seen.has(dir)) continue;
@@ -184,7 +313,7 @@ export function readMavenLayout(root: string): MavenLayout {
   };
 
   walk('', 0);
-  return { modules: modules.sort(), unmodeled };
+  return { modules: modules.sort(), unmodeled, parentOf };
 }
 
 /**
@@ -219,4 +348,39 @@ export function affectedMavenModules(
     if (d) dirs.add(d);
   }
   return [...dirs].sort();
+}
+
+/**
+ * Every module that inherits from the pom in `dir`, transitively.
+ *
+ * A changed parent pom reaches every module naming it as `<parent>`, and —
+ * through them — every module naming THEM: Maven flattens the inheritance
+ * chain into each effective pom, so the change compiles into grandchildren
+ * too. `-pl` on the changed pom's own module alone would compile nothing
+ * (packaging pom, no sources) while `-am` pulls only UPSTREAM — the
+ * inheriting modules would never build, a confident false green — so the
+ * caller widens the scope to this set.
+ */
+export function modulesInheritingFrom(
+  layout: MavenLayout,
+  dir: string,
+): string[] {
+  const childrenOf = new Map<string, string[]>();
+  for (const [mod, parent] of layout.parentOf) {
+    if (parent === null) continue;
+    const list = childrenOf.get(parent) ?? [];
+    list.push(mod);
+    childrenOf.set(parent, list);
+  }
+  const out = new Set<string>();
+  const queue = [dir];
+  while (queue.length > 0) {
+    const d = queue.pop() as string;
+    for (const child of childrenOf.get(d) ?? []) {
+      if (out.has(child)) continue;
+      out.add(child);
+      queue.push(child);
+    }
+  }
+  return [...out].sort();
 }
