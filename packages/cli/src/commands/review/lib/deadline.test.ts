@@ -112,7 +112,7 @@ describe('reverseAuditBudgetExhausted — the round must fit, and its tail', () 
   it('honours the reserve-0 escape hatch — only the round itself must fit', () => {
     // `r >= 0` (not `> 0`) is the documented escape hatch: reserve 0 keeps
     // only the refusal of a round that cannot finish before the deadline.
-    // An edit to `> 0` would silently fall back to the 3600s default and
+    // An edit to `> 0` would silently fall back to the 4800s default and
     // refuse the next round a full hour before the operator's deadline.
     const env = {
       [DEADLINE_ENV]: String(NOW_S + DEFAULT_ROUND_SECONDS + 60),
@@ -190,13 +190,26 @@ describe('the round-cost estimate — measured when it can be', () => {
     expect(expectedRoundSeconds(p, 2, NOW_MS)).toBe(2400);
   });
 
-  it('measures the NEWEST previous round when several are on file', () => {
+  it('prices from the COSTLIEST measured round, not the newest', () => {
     const p = plan();
     stampRound(p, 1, NOW_MS - 3_000_000); // round 1 admitted 50 min ago
     stampRound(p, 2, NOW_MS - 1_200_000); // round 2 admitted 20 min ago
-    // Scanning oldest-first would report 3000; the loop's cost trend is the
-    // newest admission's.
-    expect(expectedRoundSeconds(p, 3, NOW_MS)).toBe(1200);
+    // Round 1's span (admission to admission) is 30 minutes; round 2's
+    // still-open span is 20. The reserve is the terminal round's only
+    // cover, so the gate holds the worst case the run has proved — a
+    // repair relaunch makes one round the expensive one, and a newest-only
+    // estimate nets it away the round after it lands.
+    expect(expectedRoundSeconds(p, 3, NOW_MS)).toBe(1800);
+  });
+
+  it('the costliest span can be a MIDDLE round', () => {
+    const p = plan();
+    stampRound(p, 1, NOW_MS - 4_000_000);
+    stampRound(p, 2, NOW_MS - 2_000_000); // round 1's span: 33 min
+    stampRound(p, 3, NOW_MS - 1_500_000); // round 2's span: 8 min
+    // Round 3's open span is 25 min; the max is round 1's 33-minute span —
+    // neither the first nor the newest span measured from `now` alone.
+    expect(expectedRoundSeconds(p, 4, NOW_MS)).toBe(2000);
   });
 
   it('ignores a stamp of the SAME round — a rebuild is not a round', () => {
@@ -377,7 +390,7 @@ describe('the CI wiring contract', () => {
     expect(workflow).toContain(
       `${DEADLINE_ENV}="$(( $(date +%s) + attempt_timeout ))"`,
     );
-    expect(workflow).toContain(`${RESERVE_ENV}="$(( attempt_timeout / 4 ))"`);
+    expect(workflow).toContain(`${RESERVE_ENV}="$(( attempt_timeout / 3 ))"`);
     // The workflow's reserve cap documents itself as mirroring
     // DEFAULT_RESERVE_SECONDS ("keep the two in sync") — enforce the mirror,
     // so a one-sided bump diverges a test instead of the CI tail.

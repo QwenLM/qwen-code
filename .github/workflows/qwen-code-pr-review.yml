@@ -830,18 +830,22 @@ jobs:
             # The budget itself is chosen outside this file — repository
             # variable, workflow input, or a /review --timeout=N comment — so
             # the reserve scales with whatever arrived instead of assuming a
-            # size: a quarter of the attempt, floored at 10 minutes (a tiny
+            # size: a third of the attempt, floored at 10 minutes (a tiny
             # explicit budget degrades to skipping the audit loop, correctly)
-            # and capped at 60 (the verify+compose+post tail does not grow
-            # just because the budget did). The 3600 cap mirrors
+            # and capped at 80 (the verify+compose+post tail does not grow
+            # just because the budget did). Under the pipelined loop the
+            # reserve is the terminal round's ONLY cover, and the only tail
+            # ever measured (#8368) was past 30 minutes and still running
+            # when the kill arrived — so the third is insurance until
+            # pipelined runs measure their tails. The 4800 cap mirrors
             # DEFAULT_RESERVE_SECONDS in packages/cli/src/commands/review/
             # lib/deadline.ts (the CLI's fallback when this var is absent) —
             # keep the two in sync.
-            QWEN_REVIEW_DEADLINE_RESERVE_SECONDS="$(( attempt_timeout / 4 ))"
+            QWEN_REVIEW_DEADLINE_RESERVE_SECONDS="$(( attempt_timeout / 3 ))"
             if [ "$QWEN_REVIEW_DEADLINE_RESERVE_SECONDS" -lt 600 ]; then
               QWEN_REVIEW_DEADLINE_RESERVE_SECONDS=600
-            elif [ "$QWEN_REVIEW_DEADLINE_RESERVE_SECONDS" -gt 3600 ]; then
-              QWEN_REVIEW_DEADLINE_RESERVE_SECONDS=3600
+            elif [ "$QWEN_REVIEW_DEADLINE_RESERVE_SECONDS" -gt 4800 ]; then
+              QWEN_REVIEW_DEADLINE_RESERVE_SECONDS=4800
             fi
             export QWEN_REVIEW_DEADLINE_RESERVE_SECONDS
             set +e

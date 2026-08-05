@@ -92,6 +92,9 @@ export function registerCapabilitiesRoutes(
         trusted:
           entry.state === 'active' && entry.current?.runtime.trusted === true,
         ...(runtimeRemoval ? { removable: entry.removable } : {}),
+        ...(entry.current?.runtime.provenance === 'live-conversation'
+          ? { kind: 'live' as const }
+          : {}),
       })),
       supportedLanguages: deps.languageCodes,
     };

@@ -408,6 +408,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // would make the envelope depend on the user's home config). `modes`
   // enumerates the two transcription paths (realtime vs. on-stop batch).
   voice_transcribe: { since: 'v1', modes: ['streaming', 'batch'] },
+  // Process-global Live Voice control plane. Advertisement requires a macOS
+  // WebShell daemon with native Host integration and the hot-applied enabled
+  // gate. `/live/status` remains the dynamic readiness surface for the Host,
+  // permissions, self-checks, and provider reachability.
+  realtime_voice: { since: 'v1' },
 } as const satisfies Record<string, ServeCapabilityDescriptor>;
 
 export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;
@@ -465,6 +470,7 @@ export interface AdvertiseFeatureToggles {
    * QWEN_SERVE_ACP_HTTP=0). Workspace-qualified ACP is only advertised when on.
    */
   acpHttpEnabled?: boolean;
+  realtimeVoiceEnabled?: boolean;
   workspaceTrustHotReloadAvailable?: boolean;
 }
 
@@ -626,6 +632,11 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     // upgrade listener verifies (see acp-http/index.ts).
     'voice_transcribe',
     (toggles) => toggles.voiceWsAvailable !== false,
+  ],
+  [
+    'realtime_voice',
+    (toggles) =>
+      toggles.acpHttpEnabled === true && toggles.realtimeVoiceEnabled === true,
   ],
 ]);
 

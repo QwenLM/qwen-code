@@ -64,7 +64,13 @@ type ChatEditorTestProps = {
   voiceTarget?: VoiceWorkspaceTarget;
   voiceStatusRevision?: VoiceStatusRevision;
   placeholderText?: string;
-  workspaces?: Array<{ id: string; cwd: string }>;
+  workspaces?: Array<{
+    id: string;
+    cwd: string;
+    label: string;
+    primary: boolean;
+    trusted: boolean;
+  }>;
   atWorkspaceCwd?: string;
   selectedWorkspaceCwd?: string;
   onSelectWorkspace?: (cwd: string | undefined) => void;
@@ -6240,6 +6246,41 @@ describe('App session callbacks', () => {
     );
   });
 
+  it('labels the Live composer workspace without exposing its backing name', async () => {
+    mockWorkspace.capabilities = {
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'live',
+          cwd: '/Users/test/Documents/Qwen Code/Conversations',
+          displayName: 'Conversations',
+          primary: false,
+          trusted: true,
+          kind: 'live',
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+
+    renderApp();
+    await flush();
+
+    expect(
+      testState.latestChatEditorProps?.workspaces?.find(
+        (entry) => entry.id === 'live',
+      ),
+    ).toMatchObject({ label: 'Live' });
+    expect(
+      testState.latestChatEditorProps?.workspaces?.some(
+        (entry) => entry.label === 'Conversations',
+      ),
+    ).toBe(false);
+  });
+
   it('keeps composer git status stable across an equivalent refresh', async () => {
     const workspaceGit = vi
       .fn()
@@ -6994,6 +7035,30 @@ describe('App session callbacks', () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(editorFocus).toHaveBeenCalledOnce();
+  });
+
+  it('opens a Live session in its owning Conversations workspace', async () => {
+    renderApp();
+    await flush();
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('qwen:open-session', {
+          detail: {
+            sessionId: 'live-coordinator',
+            workspaceCwd: '/Users/test/Documents/Qwen Code/Conversations',
+          },
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.loadSession).toHaveBeenCalledWith(
+      'live-coordinator',
+      {
+        workspaceCwd: '/Users/test/Documents/Qwen Code/Conversations',
+      },
+    );
   });
 
   it('does not steal focus when an approval appears before deferred session focus', async () => {
