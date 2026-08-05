@@ -1348,7 +1348,7 @@ describe('SessionTranscriptReader', () => {
       const records: ChatRecord[] = [record('u1', null, 'prompt')];
       for (let i = 1; i <= 150; i++) {
         records.push(
-          record(`a${i}`, i === 1 ? 'u1' : `a${i - 1}`, `x`.repeat(80)),
+          record(`a${i}`, i === 1 ? 'u1' : `a${i - 1}`, `x`.repeat(2000)),
         );
       }
       await writeRecords(records);
@@ -1357,15 +1357,13 @@ describe('SessionTranscriptReader', () => {
       const page = await reader.readPage(sessionId, {
         direction: 'backward',
         limit: 50,
-        maxBytes: 600,
+        maxBytes: 5000,
       });
 
-      // The byte budget stops selection near the tail; the turn-alignment
-      // walk must not drag the page back to the turn start at the file head
-      // (the whole transcript in one page).
-      expect(page.records.at(-1)?.uuid).toBe('a150');
-      expect(page.records.length).toBeLessThanOrEqual(100);
-      expect(page.records.at(0)?.uuid).not.toBe('a1');
+      // The byte budget stops selection two records from the tail; the
+      // turn-alignment walk must not drag the page back toward the file
+      // head once alignment proves unreachable within the expansion budget.
+      expect(page.records.map((item) => item.uuid)).toEqual(['a149', 'a150']);
       expect(page.hasMore).toBe(true);
     });
   });
