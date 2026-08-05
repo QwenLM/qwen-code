@@ -491,6 +491,29 @@ describe('resolveDesktopVoiceConfig', () => {
     ).rejects.toThrow('Voice dictation needs Qwen credentials')
   })
 
+  it('skips prototype-pollution keys when merging trusted settings like the CLI', async () => {
+    // customDeepMerge drops __proto__/constructor/prototype keys at every
+    // level; the desktop merge must too so one settings file resolves
+    // identically on both surfaces (object spread keeps those own JSON keys).
+    const settings = JSON.parse(
+      '{"env":{"VOICE_KEY":"settings-key"},' +
+        '"security":{"allowedInsecureVoiceBaseUrls":["http://voice.region-a.internal.example/v1"]},' +
+        '"modelProviders":{' +
+        '"__proto__":[{"id":"qwen3-asr-flash","baseUrl":"http://voice.region-a.internal.example/v1","envKey":"VOICE_KEY"}],' +
+        '"constructor":[{"id":"qwen3-asr-flash","baseUrl":"http://voice.region-a.internal.example/v1","envKey":"VOICE_KEY"}]}}',
+    )
+    await expect(
+      resolveDesktopVoiceConfig({
+        getVoiceModel: () => 'qwen3-asr-flash',
+        env: {},
+        readQwenJson: async <T,>(file: string) =>
+          (file === 'settings.json' ? settings : undefined) as T | undefined,
+        readSystemJson: async () => undefined,
+        readHomeEnvFile: async () => undefined,
+      }),
+    ).rejects.toThrow('Voice dictation needs Qwen credentials')
+  })
+
   it('lets a System-scope empty allowlist revoke a User-scope entry', async () => {
     const baseUrl = 'http://voice.user.internal.example/v1'
     await expect(
@@ -1497,6 +1520,34 @@ describe('resolveDesktopVoiceConfig', () => {
     )
   })
 
+  it('skips a legacy DashScope fallback whose baseUrl is not a string', async () => {
+    // Hand-edited settings can carry an array baseUrl; the legacy fallback
+    // must skip it like a missing baseUrl instead of crashing on raw.trim().
+    await expect(
+      resolveDesktopVoiceConfig({
+        getVoiceModel: () => 'qwen3-asr-flash',
+        env: { VOICE_KEY: 'env-key' },
+        readQwenJson: async <T,>(file: string) =>
+          (file === 'settings.json'
+            ? {
+                modelProviders: {
+                  dashscope: [
+                    {
+                      baseUrl: [
+                        'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                      ],
+                      envKey: 'VOICE_KEY',
+                    },
+                  ],
+                },
+              }
+            : undefined) as T | undefined,
+        readSystemJson: async () => undefined,
+        readHomeEnvFile: async () => undefined,
+      }),
+    ).rejects.toThrow('Voice dictation needs Qwen credentials')
+  })
+
   it('reports a non-string provider baseUrl with the remediation error', async () => {
     await expect(
       resolveDesktopVoiceConfig({
@@ -1549,6 +1600,29 @@ describe('resolveDesktopVoiceConfig', () => {
     )
   })
 
+  it('reports a missing key instead of crashing when envKey names an Object.prototype member', async () => {
+    const baseUrl = 'http://voice.region-a.internal.example/v1'
+    for (const envKey of ['constructor', 'toString', '__proto__']) {
+      await expect(
+        resolveDesktopVoiceConfig({
+          getVoiceModel: () => 'qwen3-asr-flash',
+          env: {},
+          readQwenJson: async <T,>(file: string) =>
+            (file === 'settings.json'
+              ? {
+                  security: { allowedInsecureVoiceBaseUrls: [baseUrl] },
+                  modelProviders: {
+                    openai: [{ id: 'qwen3-asr-flash', baseUrl, envKey }],
+                  },
+                }
+              : undefined) as T | undefined,
+          readSystemJson: async () => undefined,
+          readHomeEnvFile: async () => undefined,
+        }),
+      ).rejects.toThrow(`Voice model 'qwen3-asr-flash' requires ${envKey}.`)
+    }
+  })
+
   it('reports a missing key instead of crashing on a non-string settings env value', async () => {
     const baseUrl = 'http://voice.region-a.internal.example/v1'
     await expect(
@@ -1573,10 +1647,61 @@ describe('resolveDesktopVoiceConfig', () => {
     ).rejects.toThrow("Voice model 'qwen3-asr-flash' requires VOICE_KEY.")
   })
 
+  it('names the accepted loopback spellings for a non-canonical loopback exact provider', async () => {
+    const baseUrl = 'http://127.0.0.5/v1'
+    await expect(
+      resolveDesktopVoiceConfig({
+        getVoiceModel: () => 'qwen3-asr-flash',
+        env: {},
+        readQwenJson: async <T,>(file: string) =>
+          (file === 'settings.json'
+            ? {
+                env: { VOICE_KEY: 'settings-key' },
+                security: { allowedInsecureVoiceBaseUrls: [baseUrl] },
+                modelProviders: {
+                  openai: [
+                    { id: 'qwen3-asr-flash', baseUrl, envKey: 'VOICE_KEY' },
+                  ],
+                },
+              }
+            : undefined) as T | undefined,
+        readSystemJson: async () => undefined,
+        readHomeEnvFile: async () => undefined,
+      }),
+    ).rejects.toThrow(
+      "Voice model 'qwen3-asr-flash' uses a loopback address outside the accepted spellings. To use a local ASR endpoint, set the baseUrl to http://localhost, http://127.0.0.1, or http://[::1]. Remove or complete this provider entry to fall back to your Qwen sign-in.",
+    )
+  })
+
+  it('names the accepted loopback spellings for non-canonical loopback environment base URLs', async () => {
+    // Mapped and non-canonical loopback literals stay blocked (fail closed),
+    // but the error must point at the three accepted spellings instead of
+    // mislabeling them as private-network addresses.
+    for (const baseUrl of [
+      'http://127.0.0.5:8000',
+      'http://[::ffff:127.0.0.1]:8000',
+    ]) {
+      await expect(
+        resolveDesktopVoiceConfig({
+          getVoiceModel: () => 'qwen3-asr-flash',
+          env: { OPENAI_API_KEY: 'env-key', OPENAI_BASE_URL: baseUrl },
+          readQwenJson: async () => undefined,
+          readSystemJson: async () => undefined,
+          readHomeEnvFile: async () => undefined,
+        }),
+      ).rejects.toThrow(
+        'Voice endpoint uses a loopback address outside the accepted spellings. To use a local ASR endpoint, set the baseUrl to http://localhost, http://127.0.0.1, or http://[::1].',
+      )
+    }
+  })
+
   it('matches the DashScope-compatible allowlist on the final post-/v1 URL', async () => {
     // Split-horizon deployments can serve the official DashScope hostname
     // over cleartext. The allowlist must converge on a single string: the
     // final post-/v1 URL that the top-level recheck also matches against.
+    // The CLI voice resolver performs no /v1 inference, so CLI parity
+    // requires the /v1-suffixed provider baseUrl; see
+    // docs/design/trusted-private-voice-base-urls.md.
     const config = await resolveDesktopVoiceConfig({
       getVoiceModel: () => 'qwen3-asr-flash',
       env: {},

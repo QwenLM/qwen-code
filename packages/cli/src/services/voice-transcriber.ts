@@ -400,7 +400,9 @@ export async function assertVoiceBaseUrlNetworkAllowed(
       (!voiceConfig.allowInsecureBaseUrl && isPrivateNetworkIp(hostname))
     ) {
       throw new Error(
-        `Voice model '${voiceConfig.model}' resolved to a private-network address.`,
+        isLoopbackVoiceAddress(hostname)
+          ? `Voice model '${voiceConfig.model}' uses a loopback address outside the accepted spellings. To use a local ASR endpoint, set the baseUrl to http://localhost, http://127.0.0.1, or http://[::1].`
+          : `Voice model '${voiceConfig.model}' resolved to a private-network address.`,
       );
     }
     return;
@@ -445,7 +447,7 @@ export async function assertVoiceBaseUrlNetworkAllowed(
   ) {
     throw new Error(
       records.some((record) => isLoopbackVoiceAddress(record.address))
-        ? `Voice model '${voiceConfig.model}' resolved to a loopback address. Loopback DNS results are always blocked; to use a local ASR endpoint, configure an explicit loopback baseUrl such as http://localhost.`
+        ? `Voice model '${voiceConfig.model}' resolved to a loopback address. Loopback DNS results are always blocked; to use a local ASR endpoint, configure an explicit loopback baseUrl: http://localhost, http://127.0.0.1, or http://[::1].`
         : voiceConfig.allowInsecureBaseUrl &&
             records.some((record) =>
               isAlwaysBlockedVoiceAddress(record.address),
@@ -466,7 +468,12 @@ function readApiKey(
     return undefined;
   }
   const envKey = model.envKey ?? DEFAULT_OPENAI_API_KEY;
-  const envValue = (env ?? process.env)[envKey];
+  const envSource = env ?? process.env;
+  // Object.hasOwn keeps an envKey naming an inherited Object.prototype member
+  // (e.g. "constructor") from reaching .trim() as a function.
+  const envValue = Object.hasOwn(envSource, envKey)
+    ? envSource[envKey]
+    : undefined;
   if (envValue && envValue.trim().length > 0) {
     return envValue.trim();
   }
@@ -529,7 +536,9 @@ export function resolveVoiceTranscriptionConfig({
   }
   if (!isLocalhost && isAlwaysBlockedVoiceAddress(parsedBaseUrl.hostname)) {
     throw new Error(
-      `Voice model '${voiceModel}' must not use a private-network baseUrl.`,
+      isLoopbackVoiceAddress(parsedBaseUrl.hostname)
+        ? `Voice model '${voiceModel}' uses a loopback address outside the accepted spellings. To use a local ASR endpoint, set the baseUrl to http://localhost, http://127.0.0.1, or http://[::1].`
+        : `Voice model '${voiceModel}' must not use a private-network baseUrl.`,
     );
   }
   if (

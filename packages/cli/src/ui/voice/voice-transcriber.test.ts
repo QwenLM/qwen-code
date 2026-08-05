@@ -110,6 +110,30 @@ describe('voice-transcriber', () => {
     });
   });
 
+  it('reports a missing envKey instead of crashing when it names an Object.prototype member', () => {
+    // Object.hasOwn keeps inherited prototype members (an envKey like
+    // "constructor") from reaching .trim() as a function.
+    for (const envKey of ['constructor', 'toString', '__proto__']) {
+      const config = createConfig([
+        {
+          id: 'qwen3-asr-flash',
+          label: 'Qwen ASR',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://dashscope.example/v1',
+          envKey,
+        },
+      ]);
+
+      expect(() =>
+        resolveVoiceTranscriptionConfig({
+          config,
+          settings: createSettings(),
+          voiceModel: 'qwen3-asr-flash',
+        }),
+      ).toThrow(`Voice model 'qwen3-asr-flash' requires ${envKey}.`);
+    }
+  });
+
   it('routes known voice models by model id instead of user protocol', () => {
     expect(resolveVoiceTransport('qwen3-asr-flash')).toBe('qwen-asr-chat');
     expect(resolveVoiceTransport('qwen3-asr-flash-2026-02-10')).toBe(
@@ -797,9 +821,6 @@ describe('voice-transcriber', () => {
       'http://169.254.169.254/v1',
       'http://100.100.100.200/v1',
       'http://[::]/v1',
-      'http://[::ffff:127.0.0.1]/v1',
-      'http://[::ffff:7f00:1]/v1',
-      'http://[64:ff9b::7f00:1]/v1',
       'http://[64:ff9b::a9fe:a9fe]/v1',
       'http://[64:ff9b::6464:64c8]/v1',
       'http://[64:ff9b::]/v1',
@@ -830,6 +851,52 @@ describe('voice-transcriber', () => {
           voiceModel: 'qwen3-asr-flash',
         }),
       ).toThrow(/private-network baseUrl/);
+    }
+  });
+
+  it('names the accepted loopback spellings for non-canonical loopback literals', () => {
+    // Loopback-range literals outside localhost/127.0.0.1/[::1] stay blocked
+    // (even when allowlisted), but the error must point at the accepted
+    // spellings instead of mislabeling them as private-network addresses.
+    for (const baseUrl of [
+      'http://127.0.0.5/v1',
+      'http://[::ffff:127.0.0.1]/v1',
+      'http://[64:ff9b::7f00:1]/v1',
+    ]) {
+      const config = createConfig([
+        {
+          id: 'qwen3-asr-flash',
+          label: 'Loopback ASR',
+          authType: AuthType.USE_OPENAI,
+          baseUrl,
+        },
+      ]);
+
+      expect(() =>
+        resolveVoiceTranscriptionConfig({
+          config,
+          settings: createSettings({}, undefined, [baseUrl]),
+          voiceModel: 'qwen3-asr-flash',
+        }),
+      ).toThrow(
+        "Voice model 'qwen3-asr-flash' uses a loopback address outside the accepted spellings. To use a local ASR endpoint, set the baseUrl to http://localhost, http://127.0.0.1, or http://[::1].",
+      );
+    }
+  });
+
+  it('names the accepted loopback spellings when a network check sees a loopback literal', async () => {
+    for (const baseUrl of [
+      'http://127.0.0.5/v1',
+      'http://[::ffff:127.0.0.1]/v1',
+    ]) {
+      await expect(
+        assertVoiceBaseUrlNetworkAllowed({
+          model: 'qwen3-asr-flash',
+          baseUrl,
+        }),
+      ).rejects.toThrow(
+        /uses a loopback address outside the accepted spellings/,
+      );
     }
   });
 
@@ -983,6 +1050,70 @@ describe('voice-transcriber', () => {
         voiceModel: 'qwen3-asr-flash',
       }),
     ).not.toThrow();
+  });
+
+  it('reaches the batch transport for an allowlisted private IP-literal gateway', async () => {
+    // Default-wiring pin: the allowlist opt-in resolved by the config
+    // resolver must travel into the network guard, so an allowlisted private
+    // gateway reaches fetch instead of failing the guard.
+    const baseUrl = 'http://10.0.0.8/v1';
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: true,
+      json: vi
+        .fn()
+        .mockResolvedValue({ choices: [{ message: { content: 'ok' } }] }),
+    });
+
+    const text = await transcribeVoiceAudio(
+      { data: new Uint8Array([1, 2, 3]), mimeType: 'audio/wav' },
+      {
+        config: createConfig([
+          {
+            id: 'qwen3-asr-flash',
+            label: 'Private Qwen ASR',
+            authType: AuthType.USE_OPENAI,
+            baseUrl,
+          },
+        ]),
+        settings: createSettings({}, undefined, [baseUrl]),
+        voiceModel: 'qwen3-asr-flash',
+        fetchFn,
+      },
+    );
+
+    expect(text).toBe('ok');
+    expect(fetchFn).toHaveBeenCalledOnce();
+    expect(fetchFn.mock.calls[0][0]).toBe(`${baseUrl}/chat/completions`);
+  });
+
+  it('reaches the batch transport for an allowlisted host resolving privately', async () => {
+    const baseUrl = 'http://voice.region-a.internal.example/v1';
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: true,
+      json: vi
+        .fn()
+        .mockResolvedValue({ choices: [{ message: { content: 'ok' } }] }),
+    });
+
+    await transcribeVoiceAudio(
+      { data: new Uint8Array([1, 2, 3]), mimeType: 'audio/wav' },
+      {
+        config: createConfig([
+          {
+            id: 'qwen3-asr-flash',
+            label: 'Private Qwen ASR',
+            authType: AuthType.USE_OPENAI,
+            baseUrl,
+          },
+        ]),
+        settings: createSettings({}, undefined, [baseUrl]),
+        voiceModel: 'qwen3-asr-flash',
+        lookupHost: vi.fn().mockResolvedValue({ address: '10.0.0.8' }),
+        fetchFn,
+      },
+    );
+
+    expect(fetchFn).toHaveBeenCalledOnce();
   });
 
   it('rejects voice model hosts that resolve to private-network IPs', async () => {

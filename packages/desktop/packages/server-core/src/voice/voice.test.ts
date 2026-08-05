@@ -361,11 +361,8 @@ describe('assertVoiceBaseUrlNetworkAllowed', () => {
       '[::6464:64c8]',
       '[::]',
       '[::5db8]',
-      '[::ffff:127.0.0.1]',
-      '[::ffff:7f00:1]',
       '[::ffff:a9fe:a9fe]',
       '[::a9fe:a9fe]',
-      '[64:ff9b::7f00:1]',
       '[64:ff9b::a9fe:a9fe]',
       '[64:ff9b::6464:64c8]',
       '[64:ff9b::]',
@@ -387,6 +384,25 @@ describe('assertVoiceBaseUrlNetworkAllowed', () => {
           allowInsecureBaseUrl: true,
         }),
       ).rejects.toThrow(/private-network/)
+    }
+
+    // Loopback-range literals outside the three accepted spellings stay
+    // blocked but get the spelling remedy instead of the private-network label.
+    for (const address of [
+      '127.0.0.5',
+      '[::ffff:127.0.0.1]',
+      '[::ffff:7f00:1]',
+      '[64:ff9b::7f00:1]',
+    ]) {
+      await expect(
+        assertVoiceBaseUrlNetworkAllowed({
+          baseUrl: `http://${address}/v1`,
+          model: 'm',
+          allowInsecureBaseUrl: true,
+        }),
+      ).rejects.toThrow(
+        'uses a loopback address outside the accepted spellings. To use a local ASR endpoint, set the baseUrl to http://localhost, http://127.0.0.1, or http://[::1].',
+      )
     }
 
     await expect(

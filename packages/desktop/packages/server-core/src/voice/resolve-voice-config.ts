@@ -29,6 +29,7 @@ import { CONSOLE_LOGGER, createScopedLogger } from '../runtime/platform';
 import {
   isAlwaysBlockedVoiceAddress,
   isLoopbackHost,
+  isLoopbackVoiceAddress,
   isPrivateNetworkIp,
 } from './net-guard';
 import type { VoiceConfig } from './transcribe';
@@ -37,6 +38,7 @@ const DEFAULT_DASHSCOPE_BASE_URL =
   'https://dashscope.aliyuncs.com/compatible-mode/v1';
 const NO_CREDENTIALS_ERROR =
   'Voice dictation needs Qwen credentials. Sign in to Qwen Code (or set a DashScope API key), then try again.';
+const LOOPBACK_SPELLINGS = 'http://localhost, http://127.0.0.1, or http://[::1]';
 const voiceConfigLogger = createScopedLogger(CONSOLE_LOGGER, 'VOICE_CONFIG');
 
 interface ResolvedCredentials {
@@ -354,6 +356,30 @@ function unwrapWrappedProviderConfigs(
   return unwrapped ?? modelProviders;
 }
 
+// The CLI's customDeepMerge skips these keys at every merge level; object
+// spread would keep them as own properties (JSON.parse defines them as own),
+// so drop them to keep one settings file resolving identically on both
+// surfaces.
+const UNSAFE_SETTINGS_KEYS = ['__proto__', 'constructor', 'prototype'];
+
+function omitUnsafeKeys<V>(
+  source: Record<string, V> | undefined,
+): Record<string, V> | undefined {
+  if (!source) {
+    return source;
+  }
+  if (!UNSAFE_SETTINGS_KEYS.some((key) => Object.hasOwn(source, key))) {
+    return source;
+  }
+  const filtered: Record<string, V> = {};
+  for (const key of Object.keys(source)) {
+    if (!UNSAFE_SETTINGS_KEYS.includes(key)) {
+      filtered[key] = source[key]!;
+    }
+  }
+  return filtered;
+}
+
 // The CLI's customDeepMerge has no REPLACE branch — two plain objects always
 // recurse — so the CLI deep-merges modelProviders per provider-group key: the
 // same key takes the highest scope's array, and disjoint keys all survive.
@@ -366,7 +392,7 @@ function mergeModelProviders(
 ): Record<string, QwenProvider[]> | undefined {
   let merged: Record<string, QwenProvider[]> | undefined;
   for (const scope of scopes) {
-    const unwrapped = unwrapWrappedProviderConfigs(scope);
+    const unwrapped = unwrapWrappedProviderConfigs(omitUnsafeKeys(scope));
     if (!unwrapped) continue;
     merged = { ...(merged ?? {}), ...unwrapped };
   }
@@ -380,9 +406,9 @@ function mergeTrustedQwenSettings(
 ): QwenSettings {
   return {
     env: {
-      ...(systemDefaults?.env ?? {}),
-      ...(user?.env ?? {}),
-      ...(system?.env ?? {}),
+      ...(omitUnsafeKeys(systemDefaults?.env) ?? {}),
+      ...(omitUnsafeKeys(user?.env) ?? {}),
+      ...(omitUnsafeKeys(system?.env) ?? {}),
     },
     modelProviders: mergeModelProviders(
       systemDefaults?.modelProviders,
@@ -390,9 +416,9 @@ function mergeTrustedQwenSettings(
       system?.modelProviders,
     ),
     security: {
-      ...(systemDefaults?.security ?? {}),
-      ...(user?.security ?? {}),
-      ...(system?.security ?? {}),
+      ...(omitUnsafeKeys(systemDefaults?.security) ?? {}),
+      ...(omitUnsafeKeys(user?.security) ?? {}),
+      ...(omitUnsafeKeys(system?.security) ?? {}),
     },
   };
 }
@@ -446,8 +472,13 @@ function readProviderApiKey(
   const envKey = provider.envKey.trim();
   if (!envKey) return undefined;
   const settingsEnvValue = settings?.env?.[envKey];
+  // Object.hasOwn keeps an envKey naming an inherited Object.prototype member
+  // (e.g. "constructor") from reaching .trim() as a function.
+  const envValue = Object.hasOwn(envSource, envKey)
+    ? envSource[envKey]
+    : undefined;
   return (
-    envSource[envKey]?.trim() ||
+    envValue?.trim() ||
     (typeof settingsEnvValue === 'string'
       ? settingsEnvValue.trim()
       : undefined) ||
@@ -555,7 +586,9 @@ function fromExactModelProvider(
   }
   if (!isLoopback && isAlwaysBlockedVoiceAddress(parsedBaseUrl.hostname)) {
     throw new Error(
-      `Voice model '${voiceModel}' must not use a private-network baseUrl. ${PROVIDER_ENTRY_REMEDY}`,
+      isLoopbackVoiceAddress(parsedBaseUrl.hostname)
+        ? `Voice model '${voiceModel}' uses a loopback address outside the accepted spellings. To use a local ASR endpoint, set the baseUrl to ${LOOPBACK_SPELLINGS}. ${PROVIDER_ENTRY_REMEDY}`
+        : `Voice model '${voiceModel}' must not use a private-network baseUrl. ${PROVIDER_ENTRY_REMEDY}`,
     );
   }
   if (
@@ -612,7 +645,9 @@ function fromLegacyDashscopeProvider(
     if (
       fallback !== null &&
       typeof fallback === 'object' &&
-      fallback.baseUrl &&
+      // A non-string baseUrl (hand-edited settings) must fall through like a
+      // missing one instead of crashing normalizeBaseUrl on raw.trim().
+      typeof fallback.baseUrl === 'string' &&
       isDashscopeCompatible(fallback.baseUrl)
     ) {
       const apiKey = readProviderApiKey(fallback, settings, envSource);
@@ -734,7 +769,11 @@ export async function resolveDesktopVoiceConfig(
     !isLoopbackHost(parsed.hostname) &&
     isAlwaysBlockedVoiceAddress(parsed.hostname)
   ) {
-    throw new Error('Voice endpoint must not use a private-network baseUrl.');
+    throw new Error(
+      isLoopbackVoiceAddress(parsed.hostname)
+        ? `Voice endpoint uses a loopback address outside the accepted spellings. To use a local ASR endpoint, set the baseUrl to ${LOOPBACK_SPELLINGS}.`
+        : 'Voice endpoint must not use a private-network baseUrl.',
+    );
   }
   if (
     parsed.protocol === 'http:' &&
