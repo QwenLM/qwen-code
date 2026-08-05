@@ -124,8 +124,8 @@ export function installTerminalRedrawOptimizer(
 ): () => void {
   // QWEN_CODE_LEGACY_ERASE_LINES:
   //   '1' — force-disable the optimizer (existing escape hatch)
-  //   '0' — force-enable even on WSL/Windows Terminal, for terminals that
-  //         handle ConPTY's batched cursor moves correctly (new in #7897)
+  //   '0' — force-enable even on WSL, for terminals that handle ConPTY's
+  //         batched cursor moves correctly (new in #7897)
   //   unset/anything else — use platform defaults below
   if (env['QWEN_CODE_LEGACY_ERASE_LINES'] === '1') {
     return () => {};
@@ -133,10 +133,12 @@ export function installTerminalRedrawOptimizer(
 
   // The batching optimizer emits cursor-up sequences in bulk, which ConPTY
   // (Windows Console Pseudo Terminal) processes differently from individual
-  // per-line erases — the cursor ends up at the wrong row, and each streaming
+  // per-line erases - the cursor ends up at the wrong row, and each streaming
   // frame overlaps remnants of the previous one, causing duplicate text.
   // Skip the optimizer on WSL (ConPTY is the default pty there), unless the
-  // user explicitly force-enables it. WT_SESSION is not included - it is not
+  // user explicitly force-enables it. WT_SESSION is deliberately NOT included:
+  // it is set on the Windows side and is not propagated into WSL shells
+  // without WSLENV, so it can never be the variable that fires for #7634.
   if (
     env['QWEN_CODE_LEGACY_ERASE_LINES'] !== '0' &&
     (env['WSL_DISTRO_NAME'] || env['WSL_INTEROP'])

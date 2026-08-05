@@ -57,10 +57,12 @@ describe('optimizeMultilineEraseLines', () => {
 
 describe('installTerminalRedrawOptimizer', () => {
   beforeEach(() => {
-    // Clear WSL env vars so existing tests expecting the optimizer to be
-    // active are not silently skipped when run in WSL. #7634
+    // Clear WSL + flag env vars so existing tests expecting the optimizer to
+    // be active are not silently skipped when run in WSL or with the flag set
+    // on the host. #7634
     vi.stubEnv('WSL_DISTRO_NAME', '');
     vi.stubEnv('WSL_INTEROP', '');
+    vi.stubEnv('QWEN_CODE_LEGACY_ERASE_LINES', '');
   });
 
   afterEach(() => {
@@ -142,6 +144,20 @@ describe('installTerminalRedrawOptimizer', () => {
     const restore = installTerminalRedrawOptimizer(stdout, env);
 
     expect(stdout.write).toBe(write);
+    restore();
+    expect(stdout.write).toBe(write);
+  });
+
+  it('is NOT skipped for WT_SESSION alone (#7634)', () => {
+    // WT_SESSION is set on the Windows side and is not propagated into WSL
+    // shells without WSLENV, so it must not trigger the skip. Pins the
+    // deliberate exclusion from the skip condition (per maintainer review).
+    const env = { WT_SESSION: 'console-12345' };
+    const write = vi.fn(() => true);
+    const stdout = { write } as unknown as NodeJS.WriteStream;
+    const restore = installTerminalRedrawOptimizer(stdout, env);
+
+    expect(stdout.write).not.toBe(write);
     restore();
     expect(stdout.write).toBe(write);
   });

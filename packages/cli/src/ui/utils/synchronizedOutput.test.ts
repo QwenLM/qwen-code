@@ -146,8 +146,8 @@ describe('installSynchronizedOutput', () => {
       return true;
     }) as NodeJS.WriteStream['write'];
     const stdout = createStdout(write);
-    // Pass an empty env so WSL/Windows Terminal detection does not skip
-    // the optimizer when the test itself runs on WSL (#7897).
+    // Pass an empty env so WSL detection does not skip the optimizer when
+    // the test itself runs on WSL (#7897).
     const restoreRedrawOptimizer = installTerminalRedrawOptimizer(stdout, {});
     const restoreSynchronizedOutput = installSynchronizedOutput(stdout, {
       TERM_PROGRAM: 'WezTerm',
