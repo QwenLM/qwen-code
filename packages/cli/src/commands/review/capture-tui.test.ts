@@ -1428,6 +1428,25 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(readFileSync(join(dir, 'cc.ans'), 'utf8')).toContain('^C');
   });
 
+  it('survives a C-c AFTER a one-shot command exits — the hold is a loop', async () => {
+    // The trap protects only while the command is in the foreground: once
+    // a render-and-exit command is done, a --keys C-c landing in the hold
+    // killed a single sleep and ended the script — pane, session, server
+    // gone (measured 5/5 with the single-sleep hold). The loop re-enters
+    // sleep and the pane survives; a single-sleep mutant dies here.
+    await run({
+      command: 'printf "CCLOOP\\n"; exit 0',
+      until: undefined,
+      settleMs: 800,
+      keys: ['C-c'],
+      out: join(dir, 'ccloop'),
+    });
+    expect(process.exitCode).toBeUndefined();
+    expect(existsSync(join(dir, 'ccloop.ans'))).toBe(true);
+    const manifest = JSON.parse(readFileSync(join(dir, 'ccloop.json'), 'utf8'));
+    expect(manifest.keysSent).toBe(true);
+  });
+
   it('refuses --until/--ready patterns that would MATCH a blank pane', async () => {
     // The blank pane's logical capture is rows of newlines, not the empty
     // string — `.?`, `x*`, `\s` and `\n` all pass an empty-string-only

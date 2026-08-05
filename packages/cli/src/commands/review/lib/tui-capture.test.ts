@@ -219,6 +219,30 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
     );
   });
 
+  it('quote-escapes a user-derived readyFile through BOTH holder layers', () => {
+    // --out is user-derived (verify briefs build it from target/branch
+    // names; git refs may carry an apostrophe), and the holder shell
+    // re-parses the sentinel line — so the path needs its OWN esc():
+    // unescaped, an apostrophe broke the quoting and burned the full
+    // sentinel deadline blaming tmux (measured: exit 3 at ~10s).
+    const readyFile = "/evidence/ca'p/ready";
+    const p = tmuxPlan({
+      server: 'srv',
+      session: 'cap',
+      cols: 80,
+      rows: 24,
+      command: 'node cli.js',
+      cwd: '/work',
+      readyFile,
+    });
+    const esc = (v: string): string => v.replaceAll("'", "'\\''");
+    const inner = `sh -c '${esc('node cli.js')}'`;
+    const held = p.start[p.start.length - 1];
+    expect(held).toBe(
+      `sh -c '${esc(`trap : INT\n: > '${esc(readyFile)}'\n${inner}\nwhile :; do sleep 3600; done`)}'`,
+    );
+  });
+
   it('matches --until on a joined, escape-free view while .ans stays physical', () => {
     // -J joins wraps and no -e keeps escapes out: a marker spanning a wrap
     // boundary or an SGR change can never match the physical frame
