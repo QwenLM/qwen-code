@@ -183,8 +183,20 @@ describe('planTestEfficacy', () => {
 describe('findVitestBin', () => {
   it('names the search root when vitest cannot be resolved', () => {
     const worktree = mkdtempSync(join(tmpdir(), 'no-vitest-'));
+    // A bare tmpdir answers "not found" only when nothing up-tree happens to
+    // provide vitest — a node_modules above the runner's TMPDIR (observed on
+    // self-hosted CI) would resolve one and the throw never fires. Inject the
+    // MODULE_NOT_FOUND itself so the test asks the same question on every
+    // host instead of depending on the ambient filesystem.
+    const vitestNotInstalled = () => {
+      const err = new Error(
+        "Cannot find module 'vitest/package.json'",
+      ) as NodeJS.ErrnoException;
+      err.code = 'MODULE_NOT_FOUND';
+      throw err;
+    };
 
-    expect(() => findVitestBin(worktree)).toThrow(
+    expect(() => findVitestBin(worktree, vitestNotInstalled)).toThrow(
       `vitest not found searching up from ${worktree}`,
     );
   });
@@ -314,11 +326,26 @@ describe('runControlMutant', () => {
     try {
       const original = 'import { it } from "vitest";\nit("t", () => {});\n';
       writeFileSync(join(dir, 'a.test.ts'), original);
-      // No vitest resolvable from this tmpdir, so the run THROWS out of the
-      // suite helper — which is the point: the restore lives in a `finally`
-      // and has to survive that path, or the control leaves an injected
+      // The control throws only when the vitest run never starts. A bare
+      // tmpdir has no vitest only when nothing up-tree provides one — a
+      // node_modules above the runner's TMPDIR (observed on self-hosted CI)
+      // would resolve vitest and the run would actually execute. Plant a
+      // shadow vitest whose `exports` hides its package.json: the innermost
+      // node_modules wins resolution on every host, so findVitestBin surfaces
+      // the ERR_PACKAGE_PATH_NOT_EXPORTED and the restore's `finally` has to
+      // survive exactly that path — or the control leaves an injected
       // always-failing test behind in a file every later mutant run uses.
       // (The caller's outer catch is what turns the throw into inconclusive.)
+      const vitestDir = join(dir, 'node_modules', 'vitest');
+      mkdirSync(vitestDir, { recursive: true });
+      writeFileSync(
+        join(vitestDir, 'package.json'),
+        JSON.stringify({
+          name: 'vitest',
+          exports: { '.': './index.js' },
+        }),
+      );
+      writeFileSync(join(vitestDir, 'index.js'), '');
       expect(() => runControlMutant(dir, 'a.test.ts')).toThrow();
       expect(readFileSync(join(dir, 'a.test.ts'), 'utf8')).toBe(original);
     } finally {

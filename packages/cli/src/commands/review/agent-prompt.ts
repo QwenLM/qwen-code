@@ -41,13 +41,26 @@ import type { CommandModule } from 'yargs';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { writeStdoutLine } from '../../utils/stdioHelpers.js';
+import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import {
+  expectedRoundSeconds,
+  readRoundStamps,
+  reverseAuditBudgetExhausted,
+  reverseAuditBudgetMessage,
+  stampRound,
+  writeBudgetStop,
+} from './lib/deadline.js';
 import {
   READ_FILE_CHAR_CAP,
   chunkIdsProblem,
   type DiffChunk,
 } from './lib/diff-plan.js';
 import { recordPrompt, writeBrief } from './lib/prompt-record.js';
+import {
+  REVERSE_AUDIT_MAX_ROUNDS,
+  scheduleReverseAuditRound,
+  type RoundSchedule,
+} from './lib/retirement.js';
 import { BRIEFS, type RoleId } from './lib/agent-briefs.js';
 import { pathRulesFor } from './lib/path-rules.js';
 import {
@@ -1372,24 +1385,25 @@ function runRoster(report: PlanReport, planPath: string, rules?: string): void {
  * as `--roster`: one call, labelled numbered blocks, an end marker, and nothing
  * left to reconstruct.
  */
-function runAllChunks(
-  report: PlanReport,
-  planPath: string,
-  role: RoleId,
-  findingsContent: string,
-  rules?: string,
-  round?: number,
-): void {
+/**
+ * The structural floor an --all-chunks round stands on, refused as its OWN
+ * error. The same refusal coverage makes (`readPlan`), made BEFORE any
+ * brief, record or block is written. Filtering the unusable ids out instead
+ * shrank the round: `[13, "x", 15]` printed a complete-looking two-auditor
+ * round with one territory silently gone, and a duplicated id resolved both
+ * blocks to the first matching chunk and keyed them to one record — the
+ * second territory never audited, under an end marker that says the round
+ * is whole. Called ahead of the retirement schedule and the budget gate: a
+ * plan no round could ever be built from must get this diagnosis whatever
+ * the clock says — refusing it as a budget stop would write a marker over
+ * a corrupt plan, say "proceed to Step 6", and preempt the one actionable
+ * repair.
+ */
+function requireAuditableChunks(report: PlanReport): DiffChunk[] {
   if (!Array.isArray(report.chunks) || report.chunks.length === 0) {
     throw new Error('agent-prompt: the plan has no `chunks[]`.');
   }
   const chunks = report.chunks as DiffChunk[];
-  // The same refusal coverage makes (`readPlan`), made BEFORE any brief,
-  // record or block is written. Filtering the unusable ids out instead shrank
-  // the round: `[13, "x", 15]` printed a complete-looking two-auditor round
-  // with one territory silently gone, and a duplicated id resolved both blocks
-  // to the first matching chunk and keyed them to one record — the second
-  // territory never audited, under an end marker that says the round is whole.
   const problem = chunkIdsProblem(chunks.map((c) => c?.id));
   if (problem) {
     throw new Error(
@@ -1398,9 +1412,121 @@ function runAllChunks(
         'Re-run the Step 1 capture; do not hand-edit the plan.',
     );
   }
+  return chunks;
+}
+
+/**
+ * Gate one reverse-audit admission. Every part of the refusal — the marker
+ * `compose-review` synthesizes the verdict-capping disclosure from, the
+ * stderr termination rule, exit 4 — happens here, so the three admission
+ * paths (the chunkless single build, an --all-chunks round, a --chunk build
+ * of a round never admitted) cannot drift apart. Returns false when the
+ * round was refused: the caller builds nothing. The admission STAMP is not
+ * written here — it lands after the build succeeds, in each build path: the
+ * stamp is what the next round's gate measures cost from, and a build that
+ * throws must not leave one behind.
+ */
+function admitReverseAuditRound(
+  planPath: string,
+  round: number | undefined,
+): boolean {
+  const spent = reverseAuditBudgetExhausted(
+    process.env,
+    expectedRoundSeconds(planPath, round),
+  );
+  if (spent !== null) {
+    writeBudgetStop(planPath, spent, round);
+    writeStderrLine(reverseAuditBudgetMessage(spent, round));
+    process.exitCode = 4;
+    return false;
+  }
+  return true;
+}
+
+/**
+ * The loop's OTHER termination rule: every territory has proven itself cold
+ * twice over, so another round would audit nothing the history has not
+ * already answered. Not an error and not a gap — no record, no stamp, no
+ * disclosure owed; a round that builds nothing was never admitted.
+ */
+function refuseConverged(): void {
+  writeStderrLine(
+    'CONVERGED: every chunk holds two consecutive substantive dry audits; ' +
+      'the reverse audit has converged — stop the loop and proceed to ' +
+      'Step 6. This is a clean convergence, not a gap: no ' +
+      'unreviewedDimensions entry is owed.',
+  );
+  process.exitCode = 5;
+}
+
+function runAllChunks(
+  report: PlanReport,
+  planPath: string,
+  role: RoleId,
+  findingsContent: string,
+  rules?: string,
+  round?: number,
+): void {
+  const chunks = requireAuditableChunks(report);
+
+  // Which chunks this round actually owes an auditor. Rounds 1 and 2 always
+  // fan out to every chunk — they establish each chunk's record — and from
+  // round 3 the schedule reads the audit history (the CLI's own prompt
+  // records against the harness's transcripts, the same pair every delivery
+  // check trusts) and retires the territories that have twice in a row
+  // returned a substantive all-clear. Measured on a real 3B run (6 chunks ×
+  // 5 rounds, ~95 minutes), two chunks were dry in all five rounds while
+  // three yielded in most: the loop earns its keep in the hot territories,
+  // and the cold ones were a third of its bill.
+  let schedule: RoundSchedule | null = null;
+  if (role === 'reverse-audit' && round !== undefined && round >= 3) {
+    try {
+      schedule = scheduleReverseAuditRound(
+        planPath,
+        chunks.map((c) => c.id),
+        round,
+        process.env,
+        typeof report.diffPathAbsolute === 'string'
+          ? report.diffPathAbsolute
+          : undefined,
+      );
+    } catch {
+      // Transcripts unavailable, an unreadable plan stat, anything: the
+      // schedule is an optimization, and a broken optimizer must degrade to
+      // today's behaviour — every territory audited — never to fewer
+      // auditors. `null` below means "everything is due".
+      schedule = null;
+    }
+  }
+
+  if (schedule !== null && schedule.converged) {
+    refuseConverged();
+    return;
+  }
+
+  // The budget gate, deferred here from the single-build path for
+  // --all-chunks rounds so the convergence check above runs FIRST: a
+  // converged audit is done — it owes no round, and refusing it would cap a
+  // clean verdict with a truncation it never earned. A round still due is
+  // refused exactly as the single-build path refuses one — nothing built,
+  // nothing recorded, exit 4 with the marker. The admission stamp lands
+  // AFTER the build below succeeds, never here: a cold-check-only round
+  // that builds is an admission and stamps like any other; the converged
+  // round above built nothing and stamps nothing; a build that throws
+  // leaves no stamp for the next round's gate to misprice.
+  if (role === 'reverse-audit' && !admitReverseAuditRound(planPath, round)) {
+    return;
+  }
+
+  const dueSet = schedule === null ? null : new Set(schedule.due);
+  const dueChunks =
+    dueSet === null ? chunks : chunks.filter((c) => dueSet.has(c.id));
+  const coldSet = new Set(schedule?.coldChecks ?? []);
+  const skipped = schedule?.skipped ?? [];
+
   const digest = findingsDigest(findingsContent, rules);
   const roundPart = round !== undefined ? `--round-${round}` : '';
-  const blocks = chunks.map((c, i) => {
+  const blocks = dueChunks.map((c, i) => {
     const key = `${role}--chunk-${c.id}${roundPart}--${digest}`;
     const { prompt } = buildLaunch(
       report,
@@ -1410,27 +1536,69 @@ function runAllChunks(
     );
     const printed = foldFindings(role, findingsContent, prompt);
     recordPrompt(planPath, key, printed);
+    // The cold-check tag lives in the SEPARATOR label, never in the prompt:
+    // separators are display, and the delivery check compares prompts.
+    const cold = coldSet.has(c.id) ? ' (cold check)' : '';
     return (
-      `───── auditor ${i + 1} of ${chunks.length} — chunk ${c.id} ─────\n\n` +
+      `───── auditor ${i + 1} of ${dueChunks.length} — chunk ${c.id}${cold} ─────\n\n` +
       printed
     );
   });
+  // The scope clause names the retirement when there is one, so the reader
+  // learns the round shrank from the header and not from a diff of block
+  // counts; when nothing is retired the sentence is byte-identical to what
+  // it always said.
+  const scope =
+    skipped.length === 0
+      ? 'one per chunk'
+      : `one per chunk still under audit (${skipped.length} retired ` +
+        `chunk(s) skipped; the retirement note after the end-of-round line ` +
+        `says which — relay it to the terminal)`;
+  const retirementNote =
+    skipped.length === 0
+      ? []
+      : [
+          `retirement: a chunk whose two most recent audits are substantive ` +
+            `dry receipts is cold-checked on alternating rounds instead of ` +
+            `audited on every one; a cold check that yields returns it to ` +
+            `every-round auditing. Skipped this round:\n` +
+            skipped
+              .map(
+                (s) =>
+                  `chunk ${s.chunkId} — retired: dry in rounds ` +
+                  `${s.dryRounds[0]} and ${s.dryRounds[1]}, ` +
+                  (s.nextColdCheck > REVERSE_AUDIT_MAX_ROUNDS
+                    ? `certificate final — the ` +
+                      `${REVERSE_AUDIT_MAX_ROUNDS}-round hard cap leaves ` +
+                      `the loop no round for a cold check`
+                    : `next cold check round ${s.nextColdCheck}`),
+              )
+              .join('\n'),
+        ];
   writeStdoutLine(
     [
-      `${chunks.length} auditors required this round — one per chunk. Launch ` +
+      `${dueChunks.length} auditors required this round — ${scope}. Launch ` +
         `one agent per block below, passing its block VERBATIM — copy, do not ` +
         `retype, and NEVER sample this output (no \`| head\`): the text IS the ` +
         `deliverable, and a launch reconstructed from a sample matches no ` +
-        `record. Blocks are numbered \`auditor k of ${chunks.length}\` and the ` +
-        `output ends with an end-of-round line — if either is missing, the ` +
-        `output was truncated in transit; rebuild just the missing chunks with ` +
-        `--chunk <id>. Write each Agent call's \`description\` (the task ` +
+        `record. Blocks are numbered \`auditor k of ${dueChunks.length}\`, and ` +
+        `the output ends with an end-of-round line — followed by the ` +
+        `retirement note, when there is one. If either the numbering or the ` +
+        `end-of-round line is missing, the output was truncated in transit; ` +
+        `rebuild just the missing chunks with --chunk <id>. Write each ` +
+        `Agent call's \`description\` (the task ` +
         `name the user watches) in your output language, translating the ` +
         `separator label — display only; the prompt stays the block VERBATIM.`,
       ...blocks,
-      `───── end of round — ${chunks.length} auditors ─────`,
+      `───── end of round — ${dueChunks.length} auditors ─────`,
+      ...retirementNote,
     ].join('\n\n'),
   );
+  // Admitted AND built: stamp now, so the next round's gate can measure
+  // this one — see the gate comment above for why never at admission.
+  if (role === 'reverse-audit') {
+    stampRound(planPath, round);
+  }
 }
 
 function runAgentPrompt(args: AgentPromptArgs): void {
@@ -1575,6 +1743,19 @@ function runAgentPrompt(args: AgentPromptArgs): void {
         );
       }
     }
+    // The Step 5 loop's clock keys on the round label — the record key's
+    // round part, the identity line, and the budget gate's per-round stamps
+    // all read it, and SKILL.md's Step 5 calls always pass it. A round-less
+    // call would stamp an unlabeled admission no later estimate can
+    // attribute, so it gets its own error here with every other malformed
+    // call.
+    if (role === 'reverse-audit' && !hasRound) {
+      bad(
+        '--role reverse-audit builds one round of the Step 5 loop and ' +
+          'requires --round <k>: the label keys the record and the budget ' +
+          "gate's per-round accounting.",
+      );
+    }
   } else if (hasFindings) {
     // `--findings` with no role: it has no prompt to fold into. A territory chunk
     // agent reviews the diff, not a findings list. Name the roles it needs from the
@@ -1703,6 +1884,88 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     }
   }
 
+  // The budget gate — after every validation and every file read, because a
+  // malformed call or a broken plan deserves its own error (refusing here
+  // would record a budget stop against a plan that cannot even parse) —
+  // before any build or record: a refused round must leave no prompt on
+  // disk for a later check to expect an agent for.
+  // Reverse-audit only: the loop is the one open-ended stage, and the
+  // reserve this gate protects exists precisely to let verify/compose run.
+  // What must fit is the round being admitted PLUS the tail — a gate that
+  // admits on the reserve alone hands the terminal round a start right at
+  // the boundary, which is the killed-mid-verification failure one round
+  // wide. The round's cost is the previous round's, measured admission to
+  // admission. The admission is stamped AFTER the build succeeds (below),
+  // never here: the stamp is what the next round's gate measures cost from,
+  // and a build that throws must not leave one behind — priced from a
+  // failed build, the next round would be floored to the 600s minimum,
+  // widening admission in exactly the unsafe direction.
+  // This is the chunkless single build's gate (the 3A round). An
+  // --all-chunks round gates inside the round builder instead, AFTER its
+  // convergence check — a converged audit is done and owes no round, and
+  // refusing it here would cap a clean verdict with a truncation it never
+  // earned. A --chunk build is ruled on below, keyed on the round's stamp.
+  if (
+    args.role === 'reverse-audit' &&
+    !hasChunk &&
+    !args.allChunks &&
+    !admitReverseAuditRound(args.plan, args.round)
+  ) {
+    return;
+  }
+
+  // The reverse-audit gate for a --chunk build, placed after the plan read
+  // because its convergence half reads the plan's chunk list. A round
+  // holding an admission stamp is being REPAIRED — a truncated delivery,
+  // rebuilt per chunk — and bypasses everything: its cost and its schedule
+  // were ruled on when the round was admitted, and refusing the repair
+  // leaves the truncation unrepairable (the auditor never launched,
+  // nothing writing the unreviewedDimensions entry for it) under a
+  // disclosure that names the wrong round. A round with NO stamp reached
+  // with --chunk is not a repair; it is the round being built one auditor
+  // at a time — measured: an expired deadline refused `--all-chunks
+  // --round 4` and wrote the "stopped before round 4" marker, then N
+  // per-chunk builds of round 4 each exited 0, and the round ran past the
+  // deadline while the disclosure said it never started. So an unadmitted
+  // round answers to the same sequence --all-chunks answers to: convergence
+  // first (a done audit is not truncated), then the budget — the first
+  // chunk build IS the round's admission (its stamp lands after the build
+  // below), and the ones after it are repairs of it. A chunk merely
+  // retired inside a live round is still buildable: refusing it could only
+  // spare an audit, and sparing audits is never this file's failure
+  // direction.
+  if (
+    args.role === 'reverse-audit' &&
+    hasChunk &&
+    !readRoundStamps(args.plan).some((s) => s.round === (args.round ?? null))
+  ) {
+    if (args.round !== undefined) {
+      let schedule: RoundSchedule | null = null;
+      try {
+        schedule = scheduleReverseAuditRound(
+          args.plan,
+          (Array.isArray(report.chunks) ? (report.chunks as DiffChunk[]) : [])
+            .map((c) => c?.id)
+            .filter((id): id is number => typeof id === 'number'),
+          args.round,
+          process.env,
+          typeof report.diffPathAbsolute === 'string'
+            ? report.diffPathAbsolute
+            : undefined,
+        );
+      } catch {
+        // Same degradation as the round builder: an unreadable history must
+        // fall back to building the auditor, never to refusing it.
+        schedule = null;
+      }
+      if (schedule !== null && schedule.converged) {
+        refuseConverged();
+        return;
+      }
+    }
+    if (!admitReverseAuditRound(args.plan, args.round)) return;
+  }
+
   if (args.allChunks && args.role && findingsContent !== undefined) {
     runAllChunks(
       report,
@@ -1769,6 +2032,14 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       : prompt;
   recordPrompt(args.plan, key, printed);
   writeStdoutLine(printed);
+  // Admitted AND built — the single-build twin of the all-chunks stamp in
+  // `runAllChunks`. A `--chunk <id>` build lands here too: the first chunk
+  // build of an unadmitted round writes its admission stamp, and the
+  // rebuilds after it are repairs the one-per-round guard in `stampRound`
+  // keeps from shrinking the round's observed cost.
+  if (args.role === 'reverse-audit') {
+    stampRound(args.plan, args.round);
+  }
 }
 
 export const agentPromptCommand: CommandModule = {
@@ -1776,7 +2047,12 @@ export const agentPromptCommand: CommandModule = {
   describe:
     "Build a review agent's launch prompt from the plan (the diff path, its line " +
     "ranges and the agent's own brief are welded in, not left to the caller to " +
-    'remember)',
+    'remember). Exit codes: 0 built; 4 the review time budget refused another ' +
+    'reverse-audit round (a termination rule, not an error — see the BUDGET line ' +
+    'on stderr); 5 the reverse audit CONVERGED — every chunk holds two ' +
+    'consecutive substantive dry audits and none is due a cold check, so stop ' +
+    'the loop and proceed to Step 6 (also a termination rule, and a clean one: ' +
+    'no disclosure is owed); anything else is a bad call or a broken plan.',
   builder: (yargs) =>
     yargs
       .option('plan', {
@@ -1795,7 +2071,12 @@ export const agentPromptCommand: CommandModule = {
       })
       .option('chunk', {
         type: 'number',
-        describe: 'Which chunk id this agent owns (a Step 3B territory agent)',
+        describe:
+          'Which chunk id this agent owns (a Step 3B territory agent). With ' +
+          '--role reverse-audit --round N it rebuilds ONE auditor of that ' +
+          'round: a round already admitted is repaired without gates; a ' +
+          'round never admitted answers to the same convergence and budget ' +
+          'gates as --all-chunks.',
       })
       .option('file', {
         type: 'string',
@@ -1808,7 +2089,12 @@ export const agentPromptCommand: CommandModule = {
         describe:
           'With --role reverse-audit --findings: build one block per chunk ' +
           'in one call, labelled and separated (Step 5, 3B). Never sample ' +
-          'the output; each block is pasted verbatim to its own agent.',
+          'the output; each block is pasted verbatim to its own agent. From ' +
+          '--round 3 on, a chunk whose two most recent audits were both ' +
+          'substantive dry receipts is retired to alternating-round cold ' +
+          'checks (the retirement note after the end-of-round line says ' +
+          'which); a round where every chunk is retired and none is due ' +
+          'exits 5 — the audit has converged.',
       })
       .option('roster', {
         type: 'boolean',
