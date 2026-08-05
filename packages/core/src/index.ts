@@ -338,6 +338,7 @@ export {
   TERMINAL_CSI_REGEX,
   TERMINAL_SHIFT_DCS_REGEX,
 } from './utils/terminalSafe.js';
+export { escapeXml } from './utils/xml.js';
 export * from './services/shellExecutionService.js';
 export * from './services/monitorRegistry.js';
 export * from './services/backgroundShellRegistry.js';
