@@ -175,8 +175,8 @@ unsafe extern "C" fn push_frame_cb(ctx: *mut c_void) {
 }
 
 unsafe extern "C" fn shutdown_cb(_ctx: *mut c_void) {
-    use objc2::runtime::AnyObject;
     use objc2::msg_send;
+    use objc2::runtime::AnyObject;
 
     let handles = HANDLES.lock().unwrap().take();
     if let Some(h) = handles {
@@ -190,7 +190,7 @@ unsafe extern "C" fn shutdown_cb(_ctx: *mut c_void) {
 
 // ── AppKit main loop helper for Serve mode ───────────────────────────────
 
-/// Park the main thread in `NSApplication.run()`. Used by `cua-driver
+/// Park the main thread in `NSApplication.run()`. Used by `qwen-cua-driver
 /// serve --experimental-pip` so the dispatch_async_f → main queue
 /// path PiP frames go through can be drained. Mirrors the cursor
 /// overlay's `run_appkit` startup (Accessory activation policy →

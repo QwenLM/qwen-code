@@ -239,6 +239,17 @@ export interface ServeOptions {
    */
   daemonMemoryBudget?: DaemonMemoryBudget;
   /**
+   * Required external pre-execution policy for managed ACP tools. Omitted
+   * means fully off. The token remains daemon-local and is never forwarded to
+   * the ACP child or any executor environment.
+   */
+  externalToolGuard?: {
+    mode: 'required';
+    endpoint: string;
+    token: string;
+    timeoutMs?: number;
+  };
+  /**
    * Cross-origin allowlist for browser webui
    * deployments.
    */
@@ -370,6 +381,7 @@ export interface CapabilitiesEnvelope {
     primary: boolean;
     trusted: boolean;
     removable?: boolean;
+    kind?: 'live';
   }>;
   /**
    * Transport families this daemon supports. Always includes `'rest'`;
