@@ -37,6 +37,19 @@ const MANIFEST_PATH = '.qwen/review-context.json';
  * like every other manifest error.
  */
 export const MAX_GLOB_CANDIDATES = 16384;
+/**
+ * Matching-work ceiling for one expansion. The visited-entry cap bounds a
+ * COUNT; the per-candidate matching work is a separate dimension — one
+ * memoised `**` match explores O(pattern segments x path segments) states,
+ * and in an untrusted repository an attacker controls both factors within
+ * their schema maxima. Every attempted pattern match charges that product
+ * against this budget, so a matching burst fails closed with the scan limit
+ * instead of stalling the step. Calibrated so a schema-max scan (every
+ * visited entry tested against every pattern at realistic depths) stays far
+ * below it, while a maximal-shape adversarial evaluation exhausts it within
+ * the first few dozen candidates.
+ */
+const MAX_MATCH_WORK = MAX_GLOB_CANDIDATES * MAX_GLOB_CANDIDATES;
 const MAX_RULES = 128;
 const MANIFEST_PREFIX = 'repository context manifest ';
 
@@ -140,6 +153,14 @@ function validateGlob(pattern: string, field: string): void {
   ) {
     throw new Error(
       `repository context manifest ${field} contains unsafe glob`,
+    );
+  }
+  // The never-descend invariant below is enforced for entries discovered
+  // during recursion; a pattern rooted inside a skipped tree would bypass
+  // it through the scan roots, so such patterns are rejected here too.
+  if (segments.some((segment) => SKIPPED_DIRECTORIES.has(segment))) {
+    throw new Error(
+      `repository context manifest ${field} enters a skipped directory`,
     );
   }
 }
@@ -385,6 +406,22 @@ function expandRelatedPaths(
 ): string[] {
   const matches = new Set<string>();
   let candidates = 0;
+  const patternSegments = patterns.map((pattern) => pattern.split('/').length);
+  let matchWork = 0;
+
+  const anyPatternMatches = (path: string): boolean => {
+    const pathSegmentCount = path.split('/').length;
+    for (let index = 0; index < patterns.length; index++) {
+      matchWork += patternSegments[index] * pathSegmentCount;
+      if (matchWork > MAX_MATCH_WORK) {
+        throw new Error(
+          'repository context manifest relatedPaths scan exceeds limit',
+        );
+      }
+      if (globMatches(patterns[index], path)) return true;
+    }
+    return false;
+  };
 
   const visit = (directory: string): void => {
     let entries;
@@ -401,8 +438,8 @@ function expandRelatedPaths(
         const path = directory;
         if (
           !changedPaths.has(path) &&
-          patterns.some((pattern) => globMatches(pattern, path)) &&
-          isContainedFile(worktree, path)
+          isContainedFile(worktree, path) &&
+          anyPatternMatches(path)
         ) {
           matches.add(path);
           if (matches.size > MAX_ARRAY_ITEMS) {
@@ -441,13 +478,16 @@ function expandRelatedPaths(
       }
       // Disk names can carry POSIX-legal bytes the wire format rejects (a
       // backslash, control characters); skip them like changedPaths does
-      // instead of failing the whole review over one odd filename.
+      // instead of failing the whole review over one odd filename. The
+      // shape gates run before matching: an over-long path can never reach
+      // the wire format, so it can never match, and the cheap checks keep
+      // the memoised matcher away from disk garbage.
       if (
         !entry.isFile() ||
         changedPaths.has(path) ||
-        !patterns.some((pattern) => globMatches(pattern, path)) ||
+        !isSafeRepositoryRelativePath(path) ||
         !isContainedFile(worktree, path) ||
-        !isSafeRepositoryRelativePath(path)
+        !anyPatternMatches(path)
       ) {
         continue;
       }
@@ -471,12 +511,16 @@ function sortedUnique(values: Iterable<string>): string[] {
 /**
  * The merge of all matching rules can outgrow the wire bound even when every
  * single rule honors it; cap it here so the error names the manifest instead
- * of surfacing later as a shape error from the wire validator.
+ * of surfacing later as a shape error from the wire validator. `subject`
+ * distinguishes the merged PATTERN list of `relatedPaths` from the
+ * resolved-files cap in the expansion, which reports the same field name —
+ * an operator diagnosing a fail-closed step must be able to tell whether to
+ * trim the manifest's glob list or narrow the globs' reach.
  */
-function cappedSortedUnique(values: string[], field: string): string[] {
+function cappedSortedUnique(values: string[], subject: string): string[] {
   const merged = sortedUnique(values);
   if (merged.length > MAX_ARRAY_ITEMS) {
-    throw new Error(`${MANIFEST_PREFIX}${field} exceeds limit`);
+    throw new Error(`${MANIFEST_PREFIX}${subject} exceeds limit`);
   }
   return merged;
 }
@@ -506,7 +550,7 @@ export const manifestRepositoryContextProvider: RepositoryContextProvider = {
         input.worktree,
         cappedSortedUnique(
           matched.flatMap((rule) => rule.relatedPaths),
-          'relatedPaths',
+          'relatedPaths glob list',
         ),
         changedPaths,
       ),

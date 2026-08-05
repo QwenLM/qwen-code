@@ -11,13 +11,14 @@ import {
   mkdtempSync,
   readFileSync,
   realpathSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RepositoryContextProvider } from './lib/repository-context.js';
 import { repoContextCommand, runRepoContext } from './repo-context.js';
 
@@ -34,10 +35,40 @@ function readJson(path: string): unknown {
   return JSON.parse(readFileSync(path, 'utf8'));
 }
 
+// Isolate the fixture from the developer's git environment, exactly like
+// the sibling review-pipeline git fixtures: a global `commit.gpgsign=true`
+// fails the suite for want of a key, and a global `core.hooksPath` runs the
+// developer's hooks inside the test commits (`git worktree add` fires
+// post-checkout too). The wrappers under test read `process.env` per call.
+let savedEnv: NodeJS.ProcessEnv;
+let gitHome: string;
+
+beforeEach(() => {
+  gitHome = mkdtempSync(join(tmpdir(), 'repo-context-home-'));
+  writeFileSync(join(gitHome, '.gitconfig'), '');
+  savedEnv = { ...process.env };
+  process.env['GIT_CONFIG_NOSYSTEM'] = '1';
+  process.env['GIT_CONFIG_GLOBAL'] = join(gitHome, '.gitconfig');
+  process.env['HOME'] = gitHome;
+});
+
+afterEach(() => {
+  process.env = savedEnv;
+  rmSync(gitHome, { recursive: true, force: true });
+});
+
 function initGit(root: string): void {
-  execFileSync('git', ['init', '-q', root]);
+  execFileSync('git', ['init', '-q', '--template=', root]);
   execFileSync('git', ['-C', root, 'config', 'user.email', 'test@example.com']);
   execFileSync('git', ['-C', root, 'config', 'user.name', 'Test']);
+  execFileSync('git', ['-C', root, 'config', 'commit.gpgsign', 'false']);
+  execFileSync('git', [
+    '-C',
+    root,
+    'config',
+    'core.hooksPath',
+    join(root, '.no-such-hooks'),
+  ]);
 }
 
 function commitAll(root: string): string {
@@ -207,21 +238,23 @@ describe('repo-context providers and trust boundary', () => {
     // keyed on HEAD would return 'head' and fail the assertion.
     write(join(worktree, '.review', 'identity'), 'head\n');
     commitAll(worktree);
-    const provider: RepositoryContextProvider = {
-      provide(input) {
-        expect(input.readIdentityFile('.review/identity')).toBe('base');
-        return context();
-      },
-    };
-    run(
+    const provide = vi.fn<RepositoryContextProvider['provide']>((input) => {
+      expect(input.readIdentityFile('.review/identity')).toBe('base');
+      return context();
+    });
+    const { outPath } = run(
       root,
       worktree,
       {
         files: [{ path: 'src/change.ts' }],
         mergeBaseSha: base,
       },
-      [provider],
+      [{ provide }],
     );
+    // The provider MUST have run: an early return or a swallowed provider
+    // error would otherwise keep every inner expect unexecuted and green.
+    expect(provide).toHaveBeenCalledOnce();
+    expect(readJson(outPath)).toEqual(context());
   });
 
   it('does not let the current tree opt in or opt out of base identity', () => {
@@ -358,6 +391,34 @@ describe('repo-context providers and trust boundary', () => {
     },
   );
 
+  it.skipIf(process.platform === 'win32')(
+    'fails closed when the base identity symlink chain exceeds the hop ceiling',
+    () => {
+      // A committed symlink cycle is the only shape the hop counter guards
+      // against; without the counter and the final throw it loops forever.
+      const root = temp();
+      const worktree = join(root, 'repository');
+      initGit(worktree);
+      mkdirSync(join(worktree, '.qwen'), { recursive: true });
+      symlinkSync(
+        'loop-b.json',
+        join(worktree, '.qwen', 'review-context.json'),
+      );
+      symlinkSync(
+        'review-context.json',
+        join(worktree, '.qwen', 'loop-b.json'),
+      );
+      write(join(worktree, 'src', 'change.ts'), 'base\n');
+      const base = commitAll(worktree);
+      expect(() =>
+        run(join(root, 'cycle'), worktree, {
+          files: [{ path: 'src/change.ts' }],
+          mergeBaseSha: base,
+        }),
+      ).toThrow('identity symlink chain is too deep');
+    },
+  );
+
   it('degrades to a null artifact when the base fetch failed', () => {
     // merge-base documents the state as not fatal, fetch-pr warns and
     // continues, base-tree refuses the possibly stale sha — repo-context
@@ -461,15 +522,16 @@ describe('repo-context providers and trust boundary', () => {
     const root = temp();
     const worktree = join(root, 'worktree');
     write(join(worktree, '.review', 'identity'), 'token\r\n');
-    const localProvider: RepositoryContextProvider = {
-      provide(input) {
+    const localProvide = vi.fn<RepositoryContextProvider['provide']>(
+      (input) => {
         expect(input.readIdentityFile('.review/identity')).toBe('token');
         return context();
       },
-    };
+    );
     run(root, worktree, { files: [{ path: 'src/change.ts' }] }, [
-      localProvider,
+      { provide: localProvide },
     ]);
+    expect(localProvide).toHaveBeenCalledOnce();
 
     const repository = join(root, 'repository');
     initGit(repository);
@@ -477,18 +539,17 @@ describe('repo-context providers and trust boundary', () => {
     write(join(repository, '.review', 'identity'), 'token\r\n');
     write(join(repository, 'src', 'change.ts'), 'base\n');
     const base = commitAll(repository);
-    const prProvider: RepositoryContextProvider = {
-      provide(input) {
-        expect(input.readIdentityFile('.review/identity')).toBe('token');
-        return context();
-      },
-    };
+    const prProvide = vi.fn<RepositoryContextProvider['provide']>((input) => {
+      expect(input.readIdentityFile('.review/identity')).toBe('token');
+      return context();
+    });
     run(
       root,
       repository,
       { files: [{ path: 'src/change.ts' }], mergeBaseSha: base },
-      [prProvider],
+      [{ provide: prProvide }],
     );
+    expect(prProvide).toHaveBeenCalledOnce();
   });
 
   it('treats an identity path resolving to the worktree root as absent', () => {
@@ -496,13 +557,12 @@ describe('repo-context providers and trust boundary', () => {
     const worktree = join(root, 'worktree');
     mkdirSync(worktree);
     symlinkSync(worktree, join(worktree, 'root-link'));
-    const provider: RepositoryContextProvider = {
-      provide(input) {
-        expect(input.readIdentityFile('root-link')).toBeNull();
-        return context();
-      },
-    };
-    run(root, worktree, { files: [{ path: 'src/change.ts' }] }, [provider]);
+    const provide = vi.fn<RepositoryContextProvider['provide']>((input) => {
+      expect(input.readIdentityFile('root-link')).toBeNull();
+      return context();
+    });
+    run(root, worktree, { files: [{ path: 'src/change.ts' }] }, [{ provide }]);
+    expect(provide).toHaveBeenCalledOnce();
   });
 
   // Permission-based failure injection is meaningless to root, and chmod(0)
@@ -573,16 +633,93 @@ describe('repo-context providers and trust boundary', () => {
     commitAll(repository);
     const linked = join(root, 'linked');
     execFileSync('git', ['-C', repository, 'worktree', 'add', '-q', linked]);
-    run(
+    const provide = vi.fn<RepositoryContextProvider['provide']>((input) => {
+      // The provider must receive the LINKED worktree, not the main
+      // repository root the plan's --git-common-dir resolves to.
+      expect(input.worktree).toBe(realpathSync(linked));
+      return context();
+    });
+    const { planPath, outPath } = run(
       root,
       linked,
       {
         files: [{ path: 'src/change.ts' }],
         worktreePath: '../linked',
       },
-      [{ provide: () => context() }],
+      [{ provide }],
     );
+    expect(provide).toHaveBeenCalledOnce();
+    expect(readJson(outPath)).toEqual(context());
+    expect(readJson(planPath)).toHaveProperty('repositoryContext', context());
   });
+
+  it('rejects a recorded worktree path that matches no checkout', () => {
+    // The guard's rejection branch: a plan recorded for one checkout must
+    // not be served identity reads from a different worktree.
+    const root = temp();
+    const worktree = join(root, 'worktree');
+    mkdirSync(worktree);
+    expect(() =>
+      run(root, worktree, {
+        files: [{ path: 'src/change.ts' }],
+        worktreePath: '../somewhere-else',
+      }),
+    ).toThrow('does not match plan.worktreePath');
+  });
+
+  it('degrades to a null artifact when the base identity path is a directory', () => {
+    // `git show <base>:<dir>` exits 0 with the tree listing; the guard must
+    // map a directory at the identity path to null — worktree mode's
+    // `isFile() === false` — instead of feeding the listing to the parser,
+    // whose throw would fail the whole review closed over a clean degrade.
+    const root = temp();
+    const worktree = join(root, 'repository');
+    initGit(worktree);
+    write(join(worktree, '.qwen', 'review-context.json', 'inner.txt'), '{}\n');
+    write(join(worktree, 'src', 'change.ts'), 'base\n');
+    const base = commitAll(worktree);
+    const { outPath } = run(root, worktree, {
+      files: [{ path: 'src/change.ts' }],
+      mergeBaseSha: base,
+    });
+    expect(readJson(outPath)).toBeNull();
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'reads a broken trailing-slash identity symlink as absent in both modes',
+    () => {
+      // A target ending in `/` that resolves to a regular file fails
+      // ENOTDIR on disk (local mode); base mode must degrade the same way
+      // instead of dropping the empty segment and returning content.
+      const root = temp();
+      const worktree = join(root, 'repository');
+      initGit(worktree);
+      write(
+        join(worktree, '.qwen', 'manifest.json'),
+        JSON.stringify({
+          version: 1,
+          label: 'Manifest project',
+          rules: [{ paths: ['src/**'], domains: ['runtime'] }],
+        }),
+      );
+      symlinkSync(
+        'manifest.json/',
+        join(worktree, '.qwen', 'review-context.json'),
+      );
+      write(join(worktree, 'src', 'change.ts'), 'base\n');
+      const base = commitAll(worktree);
+
+      const pr = run(join(root, 'pr'), worktree, {
+        files: [{ path: 'src/change.ts' }],
+        mergeBaseSha: base,
+      });
+      expect(readJson(pr.outPath)).toBeNull();
+      const local = run(join(root, 'local'), worktree, {
+        files: [{ path: 'src/change.ts' }],
+      });
+      expect(readJson(local.outPath)).toBeNull();
+    },
+  );
 
   it('rejects identity traversal and symlink escapes', () => {
     const root = temp();
@@ -691,10 +828,18 @@ describe('repo-context providers and trust boundary', () => {
       option,
     });
     expect(built).toBeDefined();
-    expect(option.mock.calls.map(([name]) => name)).toEqual([
-      'plan',
-      'worktree',
-      'out',
+    // Names AND the `demandOption` flags — the flags are what makes the
+    // options required; without them the handler dies on a raw TypeError
+    // instead of yargs' clean missing-argument usage error.
+    expect(
+      option.mock.calls.map(([name, config]) => [
+        name,
+        (config as { demandOption?: boolean }).demandOption,
+      ]),
+    ).toEqual([
+      ['plan', true],
+      ['worktree', true],
+      ['out', true],
     ]);
 
     const root = temp();

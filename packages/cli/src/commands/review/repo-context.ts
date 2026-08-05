@@ -194,12 +194,17 @@ function resolveTreeSymlinkTarget(
 const MAX_IDENTITY_SYMLINK_HOPS = 16;
 
 /**
- * The base-mode identity read, mirroring the worktree branch entry by entry:
+ * The base-mode identity read, mirroring the worktree branch where git can:
  * `ls-tree` mode stands in for `lstat`/`statSync` (`cat-file -e` would
  * happily "exist" for a tree or symlink entry and hand a provider content
  * the worktree branch can never produce), committed symlinks are followed
  * under the same containment rule `realpathSync` enforces on disk, and a
- * directory yields `null` exactly like `isFile() === false`.
+ * directory yields `null` exactly like `isFile() === false`. One known
+ * divergence: `ls-tree` never descends through a symlinked intermediate
+ * path COMPONENT, so an identity below one reads `null` here while the
+ * worktree branch follows it. The direction is fail-safe — base mode reads
+ * strictly less, never more — so the gap degrades to "no context", not a
+ * trust hole.
  */
 function readBaseIdentity(
   worktree: string,
@@ -207,11 +212,16 @@ function readBaseIdentity(
   relativePath: string,
 ): string | null {
   let path = relativePath;
+  // A symlink target ending in `/` requires the finally resolved entry to
+  // be a directory, exactly the way realpathSync fails ENOTDIR on disk —
+  // without this the two modes diverge on a broken trailing-slash link.
+  let requireDirectory = false;
   for (let hop = 0; hop < MAX_IDENTITY_SYMLINK_HOPS; hop++) {
     const entry = baseTreeEntry(worktree, mergeBase, path);
     if (entry === null) return null;
     if (entry.mode === '120000') {
       const target = readBaseBlob(worktree, mergeBase, path);
+      if (target.endsWith('/')) requireDirectory = true;
       const resolved = resolveTreeSymlinkTarget(path, target);
       if (resolved === null) {
         throw new Error(
@@ -224,6 +234,7 @@ function readBaseIdentity(
       continue;
     }
     if (entry.type !== 'blob') return null;
+    if (requireDirectory) return null;
     return normalizeIdentityContent(readBaseBlob(worktree, mergeBase, path));
   }
   throw new Error(

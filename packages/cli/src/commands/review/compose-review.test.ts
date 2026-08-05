@@ -572,6 +572,64 @@ describe('repository context proof boundary', () => {
     );
   });
 
+  it('keeps the disclosure on a REQUEST_CHANGES body', () => {
+    // The RC render site is a separate code path from APPROVE; deleting the
+    // block there must fail the suite, not ship green.
+    const planPath = coveredPlan(undefined, {
+      repositoryContext: {
+        version: 1,
+        provider: 'fake-provider',
+        label: 'Example project',
+        domains: [],
+        relatedPaths: [],
+        recommendedTests: [],
+        requiredConfigurations: [],
+        requiredAgents: [],
+        unverifiedDimensions: ['Alternate runtime was not exercised'],
+        verificationNotes: [],
+      },
+    });
+    const result = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      bodyCriticals: ['whole-PR blocker X'],
+    });
+    expect(result.event).toBe('REQUEST_CHANGES');
+    expect(result.body).toContain('Repository proof boundary (not a blocker)');
+    expect(result.body).toContain('Alternate runtime was not exercised');
+  });
+
+  it('keeps the disclosure when a cap downgrades the verdict to COMMENT', () => {
+    // An APPROVE capped at COMMENT renders through the COMMENT clause
+    // composer — the third render site — and the disclosure must survive
+    // exactly the verdicts where the reader most needs the boundary.
+    const planPath = coveredPlan(undefined, {
+      repositoryContext: {
+        version: 1,
+        provider: 'fake-provider',
+        label: 'Example project',
+        domains: [],
+        relatedPaths: [],
+        recommendedTests: [],
+        requiredConfigurations: [],
+        requiredAgents: [],
+        unverifiedDimensions: ['Alternate runtime was not exercised'],
+        verificationNotes: [],
+      },
+    });
+    const result = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      cannotTellCriticals: ['SKILL.md:35 — full text unfetchable'],
+    });
+    expect(result.event).toBe('COMMENT');
+    expect(result.cappedBy).toContain('cannot-tell-existing-critical');
+    expect(result.body).toContain('Repository proof boundary (not a blocker)');
+    expect(result.body).toContain('Alternate runtime was not exercised');
+  });
+
   it('discloses repository proof boundaries without permanently capping approval', () => {
     const planPath = coveredPlan(undefined, {
       repositoryContext: {

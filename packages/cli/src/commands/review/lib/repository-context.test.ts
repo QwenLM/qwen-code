@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { REPOSITORY_CONTEXT_ROLES } from './agent-briefs.js';
 import {
   repositoryContextOf,
   validateRepositoryContext,
@@ -76,7 +77,22 @@ describe('repository context validation', () => {
     expect(() =>
       validateRepositoryContext({ ...valid, provider: '../provider' }),
     ).toThrow('provider is invalid');
-    for (const separator of ['\n', '\u0085', '\u2028', '\u2029']) {
+    // isControlFree rejects all of 0x00-0x1F, 0x7F-0x9F and U+2028/2029;
+    // probing range ends plus interior points pins the range, not a
+    // four-separator regex (under which `label: 'X\r## heading'`
+    // validates and CR-overwrites the rendered heading).
+    for (const separator of [
+      '\u0000',
+      '\u0005',
+      '\r',
+      '\u001f',
+      '\n',
+      '\u007f',
+      '\u0085',
+      '\u009f',
+      '\u2028',
+      '\u2029',
+    ]) {
       expect(() =>
         validateRepositoryContext({
           ...valid,
@@ -102,6 +118,14 @@ describe('repository context validation', () => {
     // The manifest provider pre-sorts today; a future provider or a
     // hand-edited plan would not, so the wire check is pinned per field.
     const probes: Record<string, [unsorted: string[], duplicated: string[]]> = {
+      recommendedTests: [
+        ['test:runtime', 'test:compiler'],
+        ['test:compiler', 'test:compiler'],
+      ],
+      requiredConfigurations: [
+        ['linux-x64', 'debug'],
+        ['debug', 'debug'],
+      ],
       relatedPaths: [
         ['src/runtime.ts', 'src/compiler.ts'],
         ['src/compiler.ts', 'src/compiler.ts'],
@@ -175,6 +199,46 @@ describe('repository context validation', () => {
     ).toThrow('requiredConfigurations is invalid');
   });
 
+  it('accepts the item-count bound exactly', () => {
+    // The reject side pins 129 items; this accept pin sits exactly at
+    // MAX_ARRAY_ITEMS, where a `>` → `>=` regression would reject the
+    // maximum valid manifest at the documented bound.
+    const atBound = {
+      ...valid,
+      domains: Array.from(
+        { length: 128 },
+        (_, index) => `d-${String(index).padStart(3, '0')}`,
+      ),
+    };
+    expect(validateRepositoryContext(atBound)).toEqual(atBound);
+  });
+
+  it('accepts every role the allow-list admits', () => {
+    // Hardcoded, not spread from the constant: the accept side must pin
+    // all 13 roles, or dropping one from REPOSITORY_CONTEXT_ROLES ships
+    // green (`satisfies readonly RoleId[]` still compiles, the type
+    // narrows silently) and every consumer fails closed on a valid
+    // manifest's required agent.
+    const allRoles = [
+      '1a',
+      '1b',
+      '1c',
+      '2',
+      '3a',
+      '3b',
+      '3c',
+      '4',
+      '5',
+      '6a',
+      '6b',
+      '6c',
+      'test-matrix',
+    ];
+    expect([...REPOSITORY_CONTEXT_ROLES]).toEqual(allRoles);
+    const context = { ...valid, requiredAgents: allRoles };
+    expect(validateRepositoryContext(context)).toEqual(context);
+  });
+
   it('rejects control characters inside array items', () => {
     for (const field of [
       'domains',
@@ -182,7 +246,18 @@ describe('repository context validation', () => {
       'unverifiedDimensions',
       'verificationNotes',
     ] as const) {
-      for (const separator of ['\n', '\u0085', '\u2028', '\u2029']) {
+      for (const separator of [
+        '\u0000',
+        '\u0005',
+        '\r',
+        '\u001f',
+        '\n',
+        '\u007f',
+        '\u0085',
+        '\u009f',
+        '\u2028',
+        '\u2029',
+      ]) {
         expect(() =>
           validateRepositoryContext({
             ...valid,
@@ -200,6 +275,9 @@ describe('repository context validation', () => {
       'C:',
       'C:relative',
       'C:/absolute',
+      'd:relative',
+      'a//b',
+      'a/./b',
       'a\\b',
       'a/../b',
     ]) {

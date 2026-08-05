@@ -146,6 +146,20 @@ describe('manifest repository context provider', () => {
     expect(() => provide(temp(), ['src/change.ts'], content)).toThrow();
   });
 
+  it('fails closed when the rule count exceeds the parse bound', () => {
+    // MAX_RULES is the parse-time/memory bound protecting the step from
+    // adversarial manifests. Nothing else compensates: `paths: []` passes
+    // the array validator and contributes nothing to the total-`paths` cap,
+    // so an unbounded rule count would walk the full per-rule loop.
+    expect(() =>
+      provide(
+        temp(),
+        ['src/change.ts'],
+        manifest({ rules: Array.from({ length: 129 }, () => ({ paths: [] })) }),
+      ),
+    ).toThrow('rules is invalid');
+  });
+
   it('fails closed when the total paths globs outgrow the matching bound', () => {
     // The rule filter tests every changed path against every `paths` glob,
     // so the total across rules — not each rule's array — is capped.
@@ -203,30 +217,64 @@ describe('manifest repository context provider', () => {
     ).toThrow('verificationNotes exceeds limit');
     // The merged `relatedPaths` pattern list is capped BEFORE any scan, or a
     // max-cardinality manifest stalls expansion for minutes.
+    expect(
+      () =>
+        provide(
+          worktree,
+          ['src/change.ts'],
+          manifest({
+            rules: [
+              {
+                paths: ['src/**'],
+                relatedPaths: Array.from(
+                  { length: 128 },
+                  (_, index) => `p-a/${index}.ts`,
+                ),
+              },
+              {
+                paths: ['src/**'],
+                relatedPaths: Array.from(
+                  { length: 128 },
+                  (_, index) => `p-b/${index}.ts`,
+                ),
+              },
+            ],
+          }),
+        ),
+      // Distinct from the resolved-files cap in the expansion: the operator
+      // must be able to tell whether to trim the glob list or the globs.
+    ).toThrow('relatedPaths glob list exceeds limit');
+  });
+
+  it('rejects globs that enter dependency or build-output trees', () => {
+    // The never-descend invariant is enforced for entries found during
+    // recursion; without rejecting these at validation, a pattern ROOTED
+    // below a skipped tree bypasses it through the scan roots (and can
+    // exhaust the entry ceiling mid-scan on an installed checkout).
+    const worktree = temp();
+    const content = (paths: string[], relatedPaths: string[]) =>
+      manifest({ rules: [{ paths, relatedPaths }] });
     expect(() =>
       provide(
         worktree,
         ['src/change.ts'],
-        manifest({
-          rules: [
-            {
-              paths: ['src/**'],
-              relatedPaths: Array.from(
-                { length: 128 },
-                (_, index) => `p-a/${index}.ts`,
-              ),
-            },
-            {
-              paths: ['src/**'],
-              relatedPaths: Array.from(
-                { length: 128 },
-                (_, index) => `p-b/${index}.ts`,
-              ),
-            },
-          ],
-        }),
+        content(['src/**'], ['coverage/**']),
       ),
-    ).toThrow('relatedPaths exceeds limit');
+    ).toThrow('relatedPaths enters a skipped directory');
+    expect(() =>
+      provide(
+        worktree,
+        ['src/change.ts'],
+        content(['src/**'], ['src/dist/**']),
+      ),
+    ).toThrow('relatedPaths enters a skipped directory');
+    expect(() =>
+      provide(
+        worktree,
+        ['src/change.ts'],
+        content(['node_modules/vendor/**/*.ts'], ['src/**']),
+      ),
+    ).toThrow('paths enters a skipped directory');
   });
 
   it('excludes related file and directory symlink escapes', () => {
@@ -269,17 +317,83 @@ describe('manifest repository context provider', () => {
     },
   );
 
-  it('never descends into dependency or build-output trees', () => {
-    // Without the skip this installed-shape tree exceeds the visited-entry
-    // ceiling mid-scan; with it, only source entries count.
+  it.each([
+    '.git',
+    '.next',
+    '.turbo',
+    'coverage',
+    'dist',
+    'node_modules',
+    'out',
+    'target',
+  ])(
+    'never descends into %s',
+    (name) => {
+      // Without the skip this installed-shape tree exceeds the visited-entry
+      // ceiling mid-scan; with it, only source entries count. Every member of
+      // the skip set is pinned, or removing any single one ships green.
+      const worktree = temp();
+      write(join(worktree, 'src', 'keep.ts'));
+      const skipped = join(worktree, 'src', name);
+      mkdirSync(skipped, { recursive: true });
+      for (let index = 0; index < MAX_GLOB_CANDIDATES; index++) {
+        writeFileSync(
+          join(skipped, `${String(index).padStart(6, '0')}.js`),
+          '',
+        );
+      }
+      expect(
+        provide(
+          worktree,
+          ['src/change.ts'],
+          manifest({
+            rules: [{ paths: ['src/**'], relatedPaths: ['src/**'] }],
+          }),
+        )?.relatedPaths,
+      ).toEqual(['src/keep.ts']);
+    },
+    30_000,
+  );
+
+  it('accepts a scan sitting exactly at the resolved-file bound', () => {
+    // The reject side pins 129 matches; this accept pin sits exactly at
+    // 128, where a `>` → `>=` regression would fail a legal manifest
+    // closed at the source's own calibration point. 127 wildcard matches
+    // plus one static entry also exercise the cap check in BOTH branches.
     const worktree = temp();
-    write(join(worktree, 'src', 'keep.ts'));
-    write(join(worktree, 'src', 'dist', 'built.js'));
-    const deps = join(worktree, 'src', 'node_modules');
-    mkdirSync(deps, { recursive: true });
-    for (let index = 0; index < MAX_GLOB_CANDIDATES; index++) {
-      writeFileSync(join(deps, `${String(index).padStart(6, '0')}.js`), '');
+    const source = join(worktree, 'src');
+    mkdirSync(source);
+    for (let index = 0; index < 127; index++) {
+      writeFileSync(join(source, `${String(index).padStart(3, '0')}.ts`), '');
     }
+    write(join(worktree, 'zz', 'extra.ts'));
+    expect(
+      provide(
+        worktree,
+        ['src/change.ts'],
+        manifest({
+          rules: [
+            {
+              paths: ['src/**'],
+              relatedPaths: ['src/**', 'zz/extra.ts'],
+            },
+          ],
+        }),
+      )?.relatedPaths,
+    ).toHaveLength(128);
+  });
+
+  it('accepts a scan visiting exactly the visited-entry ceiling', () => {
+    // The reject side pins 16,385 entries; this accept pin visits exactly
+    // MAX_GLOB_CANDIDATES. Empty directories count as entries too; the
+    // scan root itself does not.
+    const worktree = temp();
+    const source = join(worktree, 'src');
+    mkdirSync(source);
+    for (let index = 0; index < MAX_GLOB_CANDIDATES - 1; index++) {
+      mkdirSync(join(source, `d-${String(index).padStart(5, '0')}`));
+    }
+    writeFileSync(join(source, 'keep.ts'), '');
     expect(
       provide(
         worktree,
@@ -289,7 +403,7 @@ describe('manifest repository context provider', () => {
         }),
       )?.relatedPaths,
     ).toEqual(['src/keep.ts']);
-  }, 30_000);
+  }, 60_000);
 
   it('fails closed as soon as related matches exceed the bound', () => {
     const worktree = temp();
@@ -306,7 +420,7 @@ describe('manifest repository context provider', () => {
           rules: [{ paths: ['src/**'], relatedPaths: ['src/**'] }],
         }),
       ),
-    ).toThrow('exceeds limit');
+    ).toThrow('relatedPaths exceeds limit');
   });
 
   it('fails closed on the static branch when merged matches exceed the bound', () => {
@@ -426,19 +540,66 @@ describe('manifest repository context provider', () => {
     expect(context?.relatedPaths).toEqual(['src/b.ts']);
   });
 
-  it('deduplicates related patterns before applying the scan bound', () => {
+  it('deduplicates related patterns before applying the merge bound', () => {
+    // 128 rules each contribute the same two patterns: 256 pre-dedup
+    // (OVER the cap) and 2 post-dedup (under it). A cap-before-dedup
+    // regression throws here; under it, two matching rules sharing one
+    // 100-pattern list would reject a legal, human-authored manifest.
     const worktree = temp();
-    for (let index = 0; index < 9; index++) {
+    for (let index = 0; index < 5; index++) {
       write(join(worktree, 'src', `${index}.ts`));
+    }
+    for (let index = 0; index < 4; index++) {
+      write(join(worktree, 'docs', `${index}.ts`));
     }
     const rules = Array.from({ length: 128 }, () => ({
       paths: ['src/**'],
-      relatedPaths: ['src/**'],
+      relatedPaths: ['src/**', 'docs/**'],
     }));
     expect(
       provide(worktree, ['src/change.ts'], manifest({ rules }))?.relatedPaths,
     ).toHaveLength(9);
   });
+
+  it('fails closed when cumulative matching work exceeds the budget', () => {
+    // The visited-entry cap bounds a COUNT; the per-candidate matching
+    // work is a separate dimension (O(pattern segments x path segments)
+    // per memoised attempt). Deep literal chains keep each attempt cheap
+    // to run but maximal in charged segments, so the budget trips — with
+    // the scan-limit wording — long before the entry cap does, pinning
+    // the accounting without a minutes-long memo explosion.
+    const worktree = temp();
+    let directory = join(worktree, 'x');
+    for (let level = 0; level < 198; level++) {
+      directory = join(directory, 'a');
+    }
+    directory = join(directory, 'z');
+    mkdirSync(directory, { recursive: true });
+    for (let index = 0; index < 60; index++) {
+      writeFileSync(
+        join(directory, `leaf-${String(index).padStart(4, '0')}.ts`),
+        '',
+      );
+    }
+    const stem = `x/${'a/'.repeat(198)}*/`;
+    expect(() =>
+      provide(
+        worktree,
+        ['x/change.ts'],
+        manifest({
+          rules: [
+            {
+              paths: ['x/**'],
+              relatedPaths: Array.from(
+                { length: 128 },
+                (_, index) => `${stem}b${index}`,
+              ),
+            },
+          ],
+        }),
+      ),
+    ).toThrow('scan exceeds limit');
+  }, 30_000);
 
   it('expands static related paths as their own files', () => {
     const worktree = temp();

@@ -229,6 +229,14 @@ describe('requiredAgents — Step 3A', () => {
     };
     expect(keys(light)).not.toContain('1c');
 
+    // test-matrix is a fan-out role: a manifest cannot require it into a
+    // whole-diff (Step 3A) review, whose flow is not built around it — the
+    // denial half of the gate, which a `return fanOut` → `return true`
+    // regression would silently drop.
+    expect(
+      keys({ ...PR, repositoryContext: context(['test-matrix']) }),
+    ).not.toContain('test-matrix');
+
     // A Step 3B fan-out keeps its topology: whole-diff dimension walkers and
     // the high-effort personas stay out, while 3B's own roles are honoured.
     const big = { ...PR, srcDiffLines: 5000, diffLines: 6000 };

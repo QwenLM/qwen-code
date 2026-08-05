@@ -1847,6 +1847,27 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
       },
     };
 
+    // Negative pins: roles outside the code-reviewing set and outside the
+    // manifest's required agents get nothing. A `brief.reviewsCode ||` →
+    // `true ||` regression would hand Agent 0 (issue fidelity, not code
+    // review) the full block on every context-bearing plan, and would give
+    // it to a role the manifest did not require, with the suite green.
+    expect(buildRoleBrief(contextPlan, '0')).not.toContain(
+      'Example project repository context',
+    );
+    expect(
+      buildRoleBrief(
+        {
+          ...contextPlan,
+          repositoryContext: {
+            ...contextPlan.repositoryContext,
+            requiredAgents: [],
+          },
+        },
+        'test-matrix',
+      ),
+    ).not.toContain('Example project repository context');
+
     const reviewerBrief = buildRoleBrief(contextPlan, '1a');
     expect(reviewerBrief).toContain('Example project repository context');
     expect(reviewerBrief).toContain('compiler, runtime');
