@@ -906,6 +906,14 @@
     overflow: hidden;
   }
 
+  /* Override chatViewWrap's relative positioning so the absolute footer
+     anchors to chatPane. The wrap remains a flex item, so its inherited
+     z-index: 1 still applies under static positioning and keeps the welcome
+     content and composer above the dot field. */
+  .appChatEmpty .chatViewWithMobileComposerBottom {
+    position: static;
+  }
+
   .appChatEmpty .chatViewWithMobileComposerBottom .footer {
     position: absolute;
     right: 0;

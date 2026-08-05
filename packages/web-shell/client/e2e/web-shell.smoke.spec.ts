@@ -17,6 +17,10 @@ import {
   type MockDaemonController,
   type WebShellDaemonScenario,
 } from './utils/mockDaemon';
+import {
+  emptyMobileComposerLayout,
+  gotoEmptyMobileWelcomeHarness,
+} from './utils/emptyMobileComposer';
 
 const COMPOSER_VIEWPORT_HEIGHTS = [1000, 800, 600] as const;
 
@@ -457,6 +461,75 @@ test('loads Voice status from the active secondary workspace @smoke', async ({
         request.method === 'GET' && request.path === '/workspace/voice',
     ),
   ).toBe(false);
+});
+
+test('anchors the empty mobile composer to the chat pane across the breakpoint @smoke', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 760, height: 900 });
+  const scenario = createWebShellDaemonScenario();
+  await installScenario(page, scenario, testInfo);
+
+  await gotoEmptyMobileWelcomeHarness(page);
+  const composer = page.locator('[data-web-shell-composer-surface]');
+  const editor = page.locator('[data-web-shell-composer-editor] .cm-content');
+  const welcomeHeader = page.locator('[data-e2e-mobile-welcome-header]');
+  const welcomeFooter = page.locator(
+    '[data-e2e-mobile-welcome-footer]:visible',
+  );
+  const dotField = page.locator('[data-web-shell-new-session-dot-field]');
+
+  await expect(composer).toBeVisible();
+  await expect(welcomeHeader).toBeVisible();
+  await expect(welcomeFooter).toBeVisible();
+  await expect(dotField.locator('canvas')).toBeVisible();
+
+  const narrowLayout = await emptyMobileComposerLayout(page);
+  expect(narrowLayout.footerPosition).toBe('absolute');
+  expect(
+    Math.abs(narrowLayout.footerBottom - narrowLayout.chatPaneBottom),
+  ).toBeLessThanOrEqual(1);
+  expect(narrowLayout.welcomeHeaderBottom).toBeLessThanOrEqual(
+    narrowLayout.welcomeFooterTop,
+  );
+  expect(narrowLayout.welcomeFooterBottom).toBeLessThanOrEqual(
+    narrowLayout.composerTop,
+  );
+  expect(narrowLayout.chatViewPosition).toBe('static');
+  expect(narrowLayout.chatViewZIndex).toBe('1');
+  expect(narrowLayout.dotFieldCoversChatPane).toBe(true);
+  expect(narrowLayout.dotFieldPointerEvents).toBe('none');
+
+  await editor.click();
+  await page.keyboard.type('Composer remains interactive');
+  await expect(editor).toContainText('Composer remains interactive');
+
+  await page.setViewportSize({ width: 761, height: 900 });
+  await expect
+    .poll(() => emptyMobileComposerLayout(page))
+    .toMatchObject({
+      chatViewPosition: 'relative',
+      footerPosition: 'relative',
+    });
+  const wideLayout = await emptyMobileComposerLayout(page);
+  expect(wideLayout.welcomeFooterBottom).toBeGreaterThan(
+    wideLayout.welcomeFooterTop,
+  );
+
+  await page.setViewportSize({ width: 760, height: 900 });
+  await expect
+    .poll(() => emptyMobileComposerLayout(page))
+    .toMatchObject({
+      chatViewPosition: 'static',
+      footerPosition: 'absolute',
+    });
+  const narrowLayoutAfterResize = await emptyMobileComposerLayout(page);
+  expect(
+    Math.abs(
+      narrowLayoutAfterResize.footerBottom -
+        narrowLayoutAfterResize.chatPaneBottom,
+    ),
+  ).toBeLessThanOrEqual(1);
 });
 
 for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {

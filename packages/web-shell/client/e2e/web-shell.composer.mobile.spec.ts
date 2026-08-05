@@ -19,6 +19,10 @@ import {
   type MockDaemonController,
   type WebShellDaemonScenario,
 } from './utils/mockDaemon';
+import {
+  emptyMobileComposerLayout,
+  gotoEmptyMobileWelcomeHarness,
+} from './utils/emptyMobileComposer';
 
 const COMPOSER_TEXTAREA = 'textarea[data-web-shell-composer-editor]';
 
@@ -35,6 +39,49 @@ test('renders the textarea backend instead of CodeMirror on touch devices', asyn
   await expect(
     page.locator('[data-web-shell-composer-typewriter]'),
   ).toHaveCount(0);
+});
+
+test('anchors the empty mobile composer with the textarea backend', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  await installScenario(page, scenario, testInfo);
+
+  await gotoEmptyMobileWelcomeHarness(page);
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  const composer = page.locator('[data-web-shell-composer-surface]');
+  const welcomeHeader = page.locator('[data-e2e-mobile-welcome-header]');
+  const welcomeFooter = page.locator(
+    '[data-e2e-mobile-welcome-footer]:visible',
+  );
+  const dotField = page.locator('[data-web-shell-new-session-dot-field]');
+
+  await expect(textarea).toBeVisible();
+  await expect(page.locator('.cm-editor')).toHaveCount(0);
+  await expect(composer).toBeVisible();
+  await expect(welcomeHeader).toBeVisible();
+  await expect(welcomeFooter).toBeVisible();
+  await expect(dotField.locator('canvas')).toBeVisible();
+
+  const layout = await emptyMobileComposerLayout(page);
+  expect(layout.footerPosition).toBe('absolute');
+  expect(
+    Math.abs(layout.footerBottom - layout.chatPaneBottom),
+  ).toBeLessThanOrEqual(1);
+  expect(layout.welcomeHeaderBottom).toBeLessThanOrEqual(
+    layout.welcomeFooterTop,
+  );
+  expect(layout.welcomeFooterBottom).toBeLessThanOrEqual(layout.composerTop);
+  expect(layout.chatViewPosition).toBe('static');
+  expect(layout.chatViewZIndex).toBe('1');
+  expect(layout.dotFieldCoversChatPane).toBe(true);
+  expect(layout.dotFieldPointerEvents).toBe('none');
+
+  await textarea.tap();
+  await textarea.fill('Composer remains interactive on touch devices');
+  await expect(textarea).toHaveValue(
+    'Composer remains interactive on touch devices',
+  );
 });
 
 test('keeps the composer usable after WebGL context loss', async ({
