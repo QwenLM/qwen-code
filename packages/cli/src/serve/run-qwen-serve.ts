@@ -1420,7 +1420,7 @@ const RUNTIME_STARTUP_STARTING_ENVELOPE = {
   code: 'daemon_runtime_starting',
 } as const;
 
-function runtimeStartupFailureEnvelope(runtimeError: string | undefined) {
+function runtimeStartupEnvelope(runtimeError: string | undefined) {
   return runtimeError
     ? RUNTIME_STARTUP_FAILED_ENVELOPE
     : RUNTIME_STARTUP_STARTING_ENVELOPE;
@@ -1508,7 +1508,7 @@ function createBootstrapServeApp(input: {
       if (runtimeError === undefined) {
         res.setHeader('Retry-After', '1');
       }
-      res.status(503).json(runtimeStartupFailureEnvelope(runtimeError));
+      res.status(503).json(runtimeStartupEnvelope(runtimeError));
       return;
     }
     res.status(200).json(
@@ -1687,7 +1687,7 @@ function createBootstrapServeApp(input: {
   });
 
   app.use((_req: Request, res: Response): void => {
-    res.status(503).json(runtimeStartupFailureEnvelope(getRuntimeError()));
+    res.status(503).json(runtimeStartupEnvelope(getRuntimeError()));
   });
 
   return app;

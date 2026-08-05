@@ -5191,6 +5191,31 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
+  it('serves query-carrying session deep links during the deferred window', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-query-')),
+    );
+    writeWebShellFixture(tmpDir);
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir);
+
+    try {
+      // First request to a cold daemon, with a query string (a real
+      // deep-link refresh shape). The predicate matches on `req.path`, which
+      // strips the query — pinning the gate against a mutation to `req.url`
+      // that would 401 the refresh.
+      const queryRes = await fetch(`${handle.url}/session/abc/?ref=1`, {
+        headers: { accept: 'text/html' },
+      });
+      expect(queryRes.status).toBe(200);
+      expect(queryRes.headers.get('content-type')).toContain('text/html');
+      expect(await queryRes.text()).toContain('<div id="root">');
+      expect(createBridge).toHaveBeenCalledTimes(1);
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('keeps JSON and API-subpath requests gated during the deferred runtime window', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-webshell-gate-')),
