@@ -749,6 +749,7 @@ describe('GithubChannel', () => {
     it('reports when the selected gh host is not authenticated', async () => {
       vi.stubEnv('GH_CONFIG_DIR', '');
       vi.stubEnv('XDG_CONFIG_HOME', '');
+      vi.stubEnv('APPDATA', '');
       vi.stubEnv('HOME', '/home/test-user');
       mockExecFile.mockImplementation(
         (
@@ -820,6 +821,7 @@ describe('GithubChannel', () => {
     it('reports an unknown gh config dir when no config source is available', async () => {
       vi.stubEnv('GH_CONFIG_DIR', '');
       vi.stubEnv('XDG_CONFIG_HOME', '');
+      vi.stubEnv('APPDATA', '');
       vi.stubEnv('HOME', '');
       mockExecFile.mockImplementation(
         (
@@ -836,6 +838,67 @@ describe('GithubChannel', () => {
       );
 
       await expect(channel.connect()).rejects.toThrow('gh config dir: unknown');
+    });
+
+    it('prefers the Windows AppData gh config dir on win32', async () => {
+      vi.stubEnv('GH_CONFIG_DIR', '');
+      vi.stubEnv('XDG_CONFIG_HOME', '');
+      vi.stubEnv('APPDATA', 'C:\\Users\\test\\AppData\\Roaming');
+      mockExecFile.mockImplementation(
+        (
+          _file: string,
+          _args: string[],
+          _options: unknown,
+          callback: (error: Error & { code: number }, stdout: string) => void,
+        ) => callback(Object.assign(new Error('exit 1'), { code: 1 }), ''),
+      );
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ token: '', useLocalGh: true }),
+        makeBridge(),
+      );
+      const platform = vi
+        .spyOn(process, 'platform', 'get')
+        .mockReturnValue('win32');
+
+      try {
+        await expect(channel.connect()).rejects.toThrow(
+          'gh config dir: C:\\Users\\test\\AppData\\Roaming\\GitHub CLI',
+        );
+      } finally {
+        platform.mockRestore();
+      }
+    });
+
+    it('falls back to HOME when APPDATA is unset on win32', async () => {
+      vi.stubEnv('GH_CONFIG_DIR', '');
+      vi.stubEnv('XDG_CONFIG_HOME', '');
+      vi.stubEnv('APPDATA', '');
+      vi.stubEnv('HOME', '/home/test-user');
+      mockExecFile.mockImplementation(
+        (
+          _file: string,
+          _args: string[],
+          _options: unknown,
+          callback: (error: Error & { code: number }, stdout: string) => void,
+        ) => callback(Object.assign(new Error('exit 1'), { code: 1 }), ''),
+      );
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ token: '', useLocalGh: true }),
+        makeBridge(),
+      );
+      const platform = vi
+        .spyOn(process, 'platform', 'get')
+        .mockReturnValue('win32');
+
+      try {
+        await expect(channel.connect()).rejects.toThrow(
+          'gh config dir: /home/test-user/.config/gh',
+        );
+      } finally {
+        platform.mockRestore();
+      }
     });
 
     it('surfaces bounded gh stderr in the authentication failure', async () => {
@@ -4357,6 +4420,37 @@ describe('GithubChannel', () => {
       expect(tokenField).toMatchObject({ kind: 'secret' });
       expect(tokenField).not.toHaveProperty('required');
       expect(localGhField).toMatchObject({ kind: 'boolean' });
+    });
+
+    it.each([
+      { label: 'no credential fields', config: {} },
+      { label: 'explicit opt-out', config: { useLocalGh: false } },
+      { label: 'blank token', config: { token: '   ' } },
+      {
+        label: 'cleared token with opt-out',
+        config: { token: '', useLocalGh: false },
+      },
+    ])('rejects a managed config with $label', async ({ config }) => {
+      const { plugin } = await import('./index.js');
+      expect(plugin.management?.validateConfig?.(config)).toBe(
+        'Channel requires a token or local GitHub CLI authentication (useLocalGh).',
+      );
+    });
+
+    it.each([
+      { label: 'literal token', config: { token: 'ghp_token' } },
+      {
+        label: 'environment reference token',
+        config: { token: '$GITHUB_TOKEN' },
+      },
+      { label: 'local gh opt-in', config: { useLocalGh: true } },
+      {
+        label: 'token and local gh opt-in',
+        config: { token: 'ghp_token', useLocalGh: true },
+      },
+    ])('accepts a managed config with $label', async ({ config }) => {
+      const { plugin } = await import('./index.js');
+      expect(plugin.management?.validateConfig?.(config)).toBeUndefined();
     });
   });
 

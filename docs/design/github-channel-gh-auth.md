@@ -22,7 +22,7 @@ The separate Web Shell pull-request integration already relies on the daemon hos
 
 ### GitHub Channel plugin
 
-Make the managed `token` secret optional, remove it from startup-required fields, and add a `useLocalGh` boolean. Update the descriptions to explain that an explicit classic PAT overrides local GitHub CLI authentication.
+Make the managed `token` secret optional, remove it from startup-required fields, and add a `useLocalGh` boolean. Update the descriptions to explain that an explicit classic PAT overrides local GitHub CLI authentication. The plugin's management descriptor validates the resolved configuration during managed upserts and rejects one that provides neither a token nor the opt-in, so the daemon mutation boundary keeps the immediate save-time rejection the required token provided before, while `connect()` still rejects configurations whose runtime credential cannot be resolved.
 
 ### GitHub Channel adapter
 

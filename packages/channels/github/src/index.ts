@@ -96,6 +96,14 @@ export const plugin: ChannelPlugin = {
         ],
       },
     ],
+    validateConfig: (config) => {
+      const token =
+        typeof config['token'] === 'string' ? config['token'].trim() : '';
+      if (!token && config['useLocalGh'] !== true) {
+        return 'Channel requires a token or local GitHub CLI authentication (useLocalGh).';
+      }
+      return undefined;
+    },
   },
   createChannel: (name, config, bridge, options) =>
     new GithubChannel(name, config, bridge, options),

@@ -103,13 +103,17 @@ function resolveGhAuthToken(
             // with a numeric code, so this must precede the exit-code branch.
             message = `GitHub CLI authentication lookup for ${hostname} timed out after ${GH_AUTH_TIMEOUT_MS / 1000} seconds.`;
           } else if (typeof code === 'number') {
+            // Matches go-gh's ConfigDir precedence: GH_CONFIG_DIR,
+            // XDG_CONFIG_HOME, %AppData%\GitHub CLI (Windows only), HOME.
             message = `No GitHub CLI authentication is available for ${hostname}. Run \`gh auth login --hostname ${hostname}\` on the daemon host. gh config dir: ${
               env['GH_CONFIG_DIR'] ||
               (env['XDG_CONFIG_HOME']
                 ? `${env['XDG_CONFIG_HOME']}/gh`
-                : env['HOME']
-                  ? `${env['HOME']}/.config/gh`
-                  : 'unknown')
+                : process.platform === 'win32' && env['APPDATA']
+                  ? `${env['APPDATA']}\\GitHub CLI`
+                  : env['HOME']
+                    ? `${env['HOME']}/.config/gh`
+                    : 'unknown')
             }`;
           } else {
             message = `GitHub CLI authentication lookup for ${hostname} failed to execute.`;
