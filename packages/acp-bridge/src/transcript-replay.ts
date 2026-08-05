@@ -424,6 +424,14 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     const meta = {
       timestamp: record.timestamp,
       sourceRecordIds: [record.uuid],
+      ...(record.subtype === 'realtime_message'
+        ? {
+            extra: {
+              source: 'realtime_voice',
+              qwenDiscreteMessage: true,
+            },
+          }
+        : {}),
     };
 
     const gap = this.gapByChild.get(record.uuid);
