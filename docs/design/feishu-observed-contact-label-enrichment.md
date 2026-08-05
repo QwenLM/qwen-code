@@ -30,7 +30,7 @@ ID 发起后台查询：
 
 ### 顺序与访问控制
 
-只有现有 preflight 和首次观测落盘成功后，才开始名称补全。重复事件、被
+只有现有 preflight 通过且首次观测落盘尝试完成后，才开始名称补全。重复事件、被
 适配器丢弃的空消息，以及未通过发送者或群策略的消息都不会触发查询。
 后台查询不会被 `handleInbound` 或 Agent prompt 主链路等待。
 
@@ -80,10 +80,11 @@ lookup leaves the first ID-based observation intact.
 
 ### Ordering and access control
 
-Enrichment starts only after the existing inbound preflight and initial
-observation succeed. Duplicate events, empty messages rejected by the adapter,
-and messages rejected by sender or group policy do not trigger lookups. The
-background lookup is not awaited by `handleInbound` or the agent prompt path.
+Enrichment starts only after the existing inbound preflight succeeds and the
+initial observation attempt completes. Duplicate events, empty messages
+rejected by the adapter, and messages rejected by sender or group policy do not
+trigger lookups. The background lookup is not awaited by `handleInbound` or the
+agent prompt path.
 
 ### Permissions
 

@@ -20,6 +20,7 @@ vi.mock('@larksuiteoapi/node-sdk', async (importOriginal) => {
 import { FeishuChannel } from './FeishuAdapter.js';
 import type {
   ChannelAgentBridge,
+  ChannelBaseOptions,
   ChannelConfig,
   ChannelProactiveDeliveryError,
   ChannelTaskLifecycleEvent,
@@ -75,6 +76,61 @@ function createTestableChannel(
   const config = createConfig(configOverrides);
   const bridge = createMockBridge();
   return new TestableFeishuChannel('test', config, bridge);
+}
+
+class ObservedContactFeishuChannel extends FeishuChannel {
+  protected override onPromptStart(): void {}
+
+  protected override onPromptEnd(): Promise<void> {
+    return Promise.resolve();
+  }
+}
+
+function createObservedContactChannel(
+  observe: NonNullable<ChannelBaseOptions['observedContacts']>['observe'],
+): {
+  channel: ObservedContactFeishuChannel;
+  bridge: ChannelAgentBridge;
+} {
+  const bridge = createMockBridge();
+  const channel = new ObservedContactFeishuChannel(
+    'test',
+    createConfig({
+      blockStreaming: 'on',
+      groupPolicy: 'open',
+      groups: { '*': { requireMention: false } },
+    }),
+    bridge,
+    { observedContacts: { observe } },
+  );
+  Object.assign(channel as unknown as Record<string, unknown>, {
+    tokenCache: {
+      token: 'test_token',
+      expiresAt: Date.now() + 3_600_000,
+    },
+  });
+  return { channel, bridge };
+}
+
+function feishuGroupMessage(messageId: string): Record<string, unknown> {
+  return {
+    message: {
+      message_id: messageId,
+      chat_id: 'oc_group',
+      chat_type: 'group',
+      message_type: 'text',
+      content: JSON.stringify({ text: 'hello' }),
+    },
+    sender: {
+      sender_id: {
+        union_id: 'on_user',
+        user_id: 'user_1',
+        open_id: 'ou_user',
+      },
+      sender_type: 'user',
+      tenant_key: 'tenant_1',
+    },
+  };
 }
 
 // Access private methods for unit testing
@@ -256,6 +312,129 @@ describe('FeishuChannel', () => {
     it('handles empty content', () => {
       const result = extractContent('text', JSON.stringify({}));
       expect(result.text).toBe('');
+    });
+  });
+
+  describe('observed contact enrichment', () => {
+    it('resolves labels once and reuses them on later observations', async () => {
+      const observe = vi.fn();
+      const { channel } = createObservedContactChannel(observe);
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockImplementation(async (input) => {
+          const url = String(input);
+          if (url.includes('/contact/v3/users/basic_batch')) {
+            return new Response(
+              JSON.stringify({
+                code: 0,
+                msg: 'success',
+                data: {
+                  users: [{ user_id: 'ou_user', name: 'Alice' }],
+                },
+              }),
+              { status: 200 },
+            );
+          }
+          if (url.includes('/im/v1/chats/oc_group')) {
+            return new Response(
+              JSON.stringify({
+                code: 0,
+                msg: 'success',
+                data: { name: 'Project Group' },
+              }),
+              { status: 200 },
+            );
+          }
+          throw new Error(`Unexpected request: ${url}`);
+        });
+      const onMessage = getPrivateMethod<(data: unknown) => void>(
+        channel,
+        'onMessage',
+      ).bind(channel);
+
+      try {
+        onMessage(feishuGroupMessage('message_1'));
+
+        await vi.waitFor(() => expect(observe).toHaveBeenCalledTimes(2));
+        expect(observe).toHaveBeenNthCalledWith(1, 'test', {
+          user: { id: 'ou_user', label: 'ou_user' },
+          group: { id: 'oc_group', label: 'oc_group' },
+        });
+        expect(observe).toHaveBeenNthCalledWith(2, 'test', {
+          user: { id: 'ou_user', label: 'Alice' },
+          group: { id: 'oc_group', label: 'Project Group' },
+        });
+        expect(fetchSpy).toHaveBeenCalledWith(
+          expect.stringContaining('user_id_type=open_id'),
+          expect.objectContaining({
+            method: 'POST',
+            body: JSON.stringify({ user_ids: ['ou_user'] }),
+          }),
+        );
+        expect(fetchSpy).toHaveBeenCalledWith(
+          expect.stringContaining('/im/v1/chats/oc_group'),
+          expect.objectContaining({
+            headers: expect.objectContaining({
+              Authorization: 'Bearer test_token',
+            }),
+          }),
+        );
+
+        onMessage(feishuGroupMessage('message_2'));
+
+        await vi.waitFor(() => expect(observe).toHaveBeenCalledTimes(3));
+        expect(observe).toHaveBeenNthCalledWith(3, 'test', {
+          user: { id: 'ou_user', label: 'Alice' },
+          group: { id: 'oc_group', label: 'Project Group' },
+        });
+        expect(fetchSpy).toHaveBeenCalledTimes(2);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('does not block inbound processing and silently caches lookup failures', async () => {
+      const observe = vi.fn();
+      const { channel, bridge } = createObservedContactChannel(observe);
+      let rejectLookup: (reason: Error) => void = () => {};
+      const lookup = new Promise<Response>((_resolve, reject) => {
+        rejectLookup = reject;
+      });
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockImplementation(() => lookup);
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const onMessage = getPrivateMethod<(data: unknown) => void>(
+        channel,
+        'onMessage',
+      ).bind(channel);
+
+      try {
+        onMessage(feishuGroupMessage('message_1'));
+
+        await vi.waitFor(() => {
+          expect(observe).toHaveBeenCalledTimes(1);
+          expect(bridge.prompt).toHaveBeenCalledTimes(1);
+        });
+        expect(fetchSpy).toHaveBeenCalledTimes(2);
+
+        rejectLookup(new Error('private lookup failure'));
+        await new Promise<void>((resolve) => setImmediate(resolve));
+
+        onMessage(feishuGroupMessage('message_2'));
+        await vi.waitFor(() => {
+          expect(observe).toHaveBeenCalledTimes(2);
+          expect(bridge.prompt).toHaveBeenCalledTimes(2);
+        });
+
+        expect(fetchSpy).toHaveBeenCalledTimes(2);
+        expect(stderrSpy).not.toHaveBeenCalled();
+      } finally {
+        fetchSpy.mockRestore();
+        stderrSpy.mockRestore();
+      }
     });
   });
 

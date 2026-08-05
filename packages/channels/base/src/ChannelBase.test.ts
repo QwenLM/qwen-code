@@ -907,6 +907,32 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).toHaveBeenCalled();
     });
 
+    it('notifies the adapter after an approved contact is persisted', async () => {
+      const order: string[] = [];
+      class ObservedHookChannel extends TestChannel {
+        readonly observedEnvelopes: Envelope[] = [];
+
+        protected override onObservedContact(envelope: Envelope): void {
+          order.push('hook');
+          this.observedEnvelopes.push(envelope);
+        }
+      }
+
+      const observe = vi.fn(() => {
+        order.push('persisted');
+      });
+      const ch = new ObservedHookChannel('test-chan', defaultConfig(), bridge, {
+        observedContacts: { observe },
+      });
+      const message = envelope();
+
+      await ch.handleInbound(message);
+
+      expect(order).toEqual(['persisted', 'hook']);
+      expect(ch.observedEnvelopes).toEqual([message]);
+      expect(bridge.prompt).toHaveBeenCalled();
+    });
+
     it('falls back to the complete sender ID for an unusable label', async () => {
       const observe = vi.fn();
       const ch = createChannel({}, { observedContacts: { observe } });

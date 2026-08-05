@@ -4876,7 +4876,7 @@ export abstract class ChannelBase {
     await this.processInbound(envelope);
   }
 
-  private async recordObservedContact(envelope: Envelope): Promise<void> {
+  protected async recordObservedContact(envelope: Envelope): Promise<void> {
     if (!this.observedContacts) return;
     const sanitizedSenderName = envelope.senderName
       ? sanitizeSenderName(envelope.senderName)
@@ -4917,6 +4917,8 @@ export abstract class ChannelBase {
     }
   }
 
+  protected onObservedContact(_envelope: Envelope): void {}
+
   protected markPreflighted(envelope: Envelope): void {
     this.preflightedEnvelopes.add(envelope);
   }
@@ -4949,6 +4951,7 @@ export abstract class ChannelBase {
     if (this.observedContacts && !this.observedContactEnvelopes.has(envelope)) {
       this.observedContactEnvelopes.add(envelope);
       await this.recordObservedContact(envelope);
+      this.onObservedContact(envelope);
     }
 
     let memoryIntent: ResolvedChannelMemoryIntent | null =

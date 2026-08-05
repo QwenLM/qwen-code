@@ -142,6 +142,16 @@ export class FeishuChannel extends ChannelBase {
   private botOpenId?: string;
   private tokenCache?: { token: string; expiresAt: number };
   private tokenRefreshPromise?: Promise<string | undefined>;
+  private readonly observedUserNames = new Map<string, string>();
+  private readonly observedChatNames = new Map<string, string>();
+  private readonly observedUserLookups = new Map<
+    string,
+    Promise<string | undefined>
+  >();
+  private readonly observedChatLookups = new Map<
+    string,
+    Promise<string | undefined>
+  >();
 
   private collapsible: boolean;
   private collapsibleThreshold: number;
@@ -674,6 +684,109 @@ export class FeishuChannel extends ChannelBase {
       );
       return undefined;
     }
+  }
+
+  private observedUserName(userId: string): Promise<string | undefined> {
+    const existing = this.observedUserLookups.get(userId);
+    if (existing) return existing;
+
+    const lookup = (async () => {
+      try {
+        const token = await this.getTenantAccessToken();
+        if (!token) return undefined;
+
+        const userIdType = userId.startsWith('ou_')
+          ? 'open_id'
+          : userId.startsWith('on_')
+            ? 'union_id'
+            : 'user_id';
+        const response = await fetch(
+          `${BASE_URL}/contact/v3/users/basic_batch?user_id_type=${userIdType}`,
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${token}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ user_ids: [userId] }),
+            signal: AbortSignal.timeout(15_000),
+          },
+        );
+        if (!response.ok) return undefined;
+
+        const body = (await response.json()) as {
+          code?: number;
+          data?: { users?: Array<{ name?: string }> };
+        };
+        const name = body.data?.users?.[0]?.name?.trim();
+        if (body.code !== 0 || !name) return undefined;
+        this.observedUserNames.set(userId, name);
+        return name;
+      } catch {
+        return undefined;
+      }
+    })();
+    this.observedUserLookups.set(userId, lookup);
+    return lookup;
+  }
+
+  private observedChatName(chatId: string): Promise<string | undefined> {
+    const existing = this.observedChatLookups.get(chatId);
+    if (existing) return existing;
+
+    const lookup = (async () => {
+      try {
+        const token = await this.getTenantAccessToken();
+        if (!token) return undefined;
+
+        const response = await fetch(
+          `${BASE_URL}/im/v1/chats/${encodeURIComponent(chatId)}`,
+          {
+            headers: { Authorization: `Bearer ${token}` },
+            signal: AbortSignal.timeout(15_000),
+          },
+        );
+        if (!response.ok) return undefined;
+
+        const body = (await response.json()) as {
+          code?: number;
+          data?: { name?: string };
+        };
+        const name = body.data?.name?.trim();
+        if (body.code !== 0 || !name) return undefined;
+        this.observedChatNames.set(chatId, name);
+        return name;
+      } catch {
+        return undefined;
+      }
+    })();
+    this.observedChatLookups.set(chatId, lookup);
+    return lookup;
+  }
+
+  protected override onObservedContact(envelope: Envelope): void {
+    void this.enrichObservedContact(envelope).catch(() => {});
+  }
+
+  private async enrichObservedContact(envelope: Envelope): Promise<void> {
+    const userAttempted = this.observedUserLookups.has(envelope.senderId);
+    const chatAttempted =
+      !envelope.isGroup || this.observedChatLookups.has(envelope.chatId);
+    if (userAttempted && chatAttempted) return;
+
+    const [senderName, chatName] = await Promise.all([
+      this.observedUserName(envelope.senderId),
+      envelope.isGroup
+        ? this.observedChatName(envelope.chatId)
+        : Promise.resolve(undefined),
+    ]);
+    if (!senderName && !chatName) return;
+
+    await this.recordObservedContact({
+      ...envelope,
+      ...(senderName ? { senderName } : {}),
+      ...(chatName ? { chatName } : {}),
+    });
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
@@ -1951,6 +2064,8 @@ export class FeishuChannel extends ChannelBase {
         sender.sender_id?.user_id ||
         sender.sender_id?.union_id ||
         '';
+      const senderName = this.observedUserNames.get(senderId) || senderId;
+      const chatName = isGroup ? this.observedChatNames.get(chatId) : undefined;
 
       // Parse message content
       const content = this.extractContent(msg.message_type, msg.content);
@@ -1995,8 +2110,9 @@ export class FeishuChannel extends ChannelBase {
       const envelope: Envelope = {
         channelName: this.name,
         senderId,
-        senderName: senderId,
+        senderName,
         chatId,
+        ...(chatName ? { chatName } : {}),
         text: cleanText,
         messageId: msgId,
         threadId: msg.root_id || undefined,
