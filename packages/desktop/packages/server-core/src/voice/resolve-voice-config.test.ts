@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'bun:test'
+import { afterEach, describe, expect, it, spyOn } from 'bun:test'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -1413,6 +1413,95 @@ describe('resolveDesktopVoiceConfig', () => {
                       id: 'qwen3-asr-flash',
                       baseUrl: secondUrl,
                       envKey: 'SECOND_KEY',
+                    },
+                  ],
+                },
+              }
+            : undefined) as T | undefined,
+        readHomeEnvFile: async () => undefined,
+      }),
+    ).rejects.toThrow("Voice model 'qwen3-asr-flash' is ambiguous")
+  })
+
+  it('keeps the legacy fall-through for duplicate public HTTPS providers with valid OAuth', async () => {
+    // Regression: ambiguity must be decided after classification. Two public
+    // HTTPS entries need no policy decision, so they must not break dictation
+    // for configs that resolved through OAuth before the allowlist existed.
+    const config = await resolveDesktopVoiceConfig({
+      getVoiceModel: () => 'qwen3-asr-flash',
+      now: () => 1_700_000_000_000,
+      env: {},
+      readQwenJson: async <T,>(file: string) => {
+        if (file === 'oauth_creds.json') {
+          return {
+            access_token: 'oauth-token',
+            resource_url: 'dashscope.aliyuncs.com/compatible-mode',
+            expiry_date: future,
+          } as T
+        }
+        if (file === 'settings.json') {
+          return {
+            modelProviders: {
+              openai: [
+                {
+                  id: 'qwen3-asr-flash',
+                  baseUrl:
+                    'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                  envKey: 'DASHSCOPE_API_KEY',
+                },
+              ],
+              dashscope: [
+                {
+                  id: 'qwen3-asr-flash',
+                  baseUrl:
+                    'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+                  envKey: 'DASHSCOPE_API_KEY',
+                },
+              ],
+            },
+          } as T
+        }
+        return undefined
+      },
+      readSystemJson: async () => undefined,
+      readHomeEnvFile: async () => undefined,
+    })
+
+    expect(config).toEqual({
+      model: 'qwen3-asr-flash',
+      baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      apiKey: 'oauth-token',
+    })
+  })
+
+  it('still treats duplicates as ambiguous when any entry needs a policy decision', async () => {
+    const publicUrl = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
+    const privateUrl = 'http://voice.region-a.internal.example/v1'
+    await expect(
+      resolveDesktopVoiceConfig({
+        getVoiceModel: () => 'qwen3-asr-flash',
+        env: {},
+        readSystemJson: async () => undefined,
+        readQwenJson: async <T,>(file: string) =>
+          (file === 'settings.json'
+            ? {
+                env: { VOICE_KEY: 'settings-key' },
+                security: {
+                  allowedInsecureVoiceBaseUrls: [privateUrl],
+                },
+                modelProviders: {
+                  openai: [
+                    {
+                      id: 'qwen3-asr-flash',
+                      baseUrl: publicUrl,
+                      envKey: 'VOICE_KEY',
+                    },
+                  ],
+                  custom: [
+                    {
+                      id: 'qwen3-asr-flash',
+                      baseUrl: privateUrl,
+                      envKey: 'VOICE_KEY',
                     },
                   ],
                 },

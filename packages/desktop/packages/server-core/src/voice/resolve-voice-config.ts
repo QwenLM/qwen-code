@@ -491,51 +491,27 @@ function readProviderApiKey(
 const PROVIDER_ENTRY_REMEDY =
   'Remove or complete this provider entry to fall back to your Qwen sign-in.';
 
+interface ClassifiedVoiceProviderEntry {
+  provider: QwenProvider;
+  parsedBaseUrl: URL;
+  baseUrl: string;
+  allowInsecureBaseUrl: boolean;
+  isLoopback: boolean;
+  isPublicHttps: boolean;
+}
+
 /**
- * 1) The provider whose `id` matches the selected voice model.
- *
- * Authoritative only when the entry needs a network-policy decision — an
- * allowlisted, cleartext, private-network, or loopback baseUrl. Those resolve
- * before OAuth so a managed gateway wins for OAuth-signed-in users, and fail
- * closed when incomplete or unlisted instead of silently falling back to a
- * different endpoint or region. Public HTTPS entries keep the legacy
- * fall-through (OAuth → DashScope provider → environment), preserving the
- * pre-allowlist credential precedence for existing installs.
+ * Validate and classify one id-matching provider entry. Malformed entries
+ * (non-string baseUrl, embedded credentials) throw and fail closed no matter
+ * what other entries exist; entries too incomplete to classify (missing or
+ * unparseable baseUrl) are ignored with a warning and keep the legacy
+ * fall-through.
  */
-function fromExactModelProvider(
-  settings: QwenSettings | undefined,
-  envSource: NodeJS.ProcessEnv,
+function classifyVoiceProviderEntry(
+  provider: QwenProvider,
+  settings: QwenSettings,
   voiceModel: string,
-): ResolvedCredentials | undefined {
-  if (!settings) return undefined;
-  const providers = Object.values(settings.modelProviders ?? {}).flat();
-  // Trusted settings are hand-editable JSON; ignore elements that are not
-  // provider objects instead of crashing on their missing shape.
-  const matches = providers.filter(
-    (provider): provider is QwenProvider =>
-      provider !== null &&
-      typeof provider === 'object' &&
-      provider.id === voiceModel,
-  );
-  // The CLI registry keys models by (id, baseUrl) and keeps the first
-  // registration of a duplicate — even when envKey differs, matching the
-  // registry's warn-and-skip (envKey is not part of the composite key); only
-  // differing baseUrls conflict. (An empty baseUrl folds into the bare-id
-  // key, as in modelRegistryKey.)
-  const distinct: QwenProvider[] = [];
-  for (const match of matches) {
-    const matchKey = match.baseUrl || '';
-    if (!distinct.some((kept) => (kept.baseUrl || '') === matchKey)) {
-      distinct.push(match);
-    }
-  }
-  if (distinct.length > 1) {
-    throw new Error(
-      `Voice model '${voiceModel}' is ambiguous. ${PROVIDER_ENTRY_REMEDY}`,
-    );
-  }
-  const provider = distinct[0];
-  if (!provider) return undefined;
+): ClassifiedVoiceProviderEntry | undefined {
   if (provider.baseUrl != null && typeof provider.baseUrl !== 'string') {
     throw new Error(
       `Voice model '${voiceModel}' baseUrl must be a string. ${PROVIDER_ENTRY_REMEDY}`,
@@ -578,11 +554,87 @@ function fromExactModelProvider(
     !isLoopback &&
     !isAlwaysBlockedVoiceAddress(parsedBaseUrl.hostname) &&
     !isPrivateNetworkIp(parsedBaseUrl.hostname);
-  // A public HTTPS entry needs no policy decision; leave it to the legacy
-  // chain unless the operator explicitly allowlisted its exact URL.
-  if (isPublicHttps && !allowInsecureBaseUrl) {
+  return {
+    provider,
+    parsedBaseUrl,
+    baseUrl,
+    allowInsecureBaseUrl,
+    isLoopback,
+    isPublicHttps,
+  };
+}
+
+// A public HTTPS entry needs no policy decision; leave it to the legacy
+// chain unless the operator explicitly allowlisted its exact URL.
+function needsVoicePolicyDecision(
+  entry: ClassifiedVoiceProviderEntry,
+): boolean {
+  return !(entry.isPublicHttps && !entry.allowInsecureBaseUrl);
+}
+
+/**
+ * 1) The provider whose `id` matches the selected voice model.
+ *
+ * Authoritative only when the entry needs a network-policy decision — an
+ * allowlisted, cleartext, private-network, or loopback baseUrl. Those resolve
+ * before OAuth so a managed gateway wins for OAuth-signed-in users, and fail
+ * closed when incomplete or unlisted instead of silently falling back to a
+ * different endpoint or region. Public HTTPS entries keep the legacy
+ * fall-through (OAuth → DashScope provider → environment), preserving the
+ * pre-allowlist credential precedence for existing installs — including
+ * duplicates: a set of same-ID matches is ambiguous only when at least one
+ * entry needs a policy decision, so duplicate public HTTPS entries fall
+ * through exactly like a single one.
+ */
+function fromExactModelProvider(
+  settings: QwenSettings | undefined,
+  envSource: NodeJS.ProcessEnv,
+  voiceModel: string,
+): ResolvedCredentials | undefined {
+  if (!settings) return undefined;
+  const providers = Object.values(settings.modelProviders ?? {}).flat();
+  // Trusted settings are hand-editable JSON; ignore elements that are not
+  // provider objects instead of crashing on their missing shape.
+  const matches = providers.filter(
+    (provider): provider is QwenProvider =>
+      provider !== null &&
+      typeof provider === 'object' &&
+      provider.id === voiceModel,
+  );
+  // The CLI registry keys models by (id, baseUrl) and keeps the first
+  // registration of a duplicate — even when envKey differs, matching the
+  // registry's warn-and-skip (envKey is not part of the composite key); only
+  // differing baseUrls conflict. (An empty baseUrl folds into the bare-id
+  // key, as in modelRegistryKey.)
+  const distinct: QwenProvider[] = [];
+  for (const match of matches) {
+    const matchKey = match.baseUrl || '';
+    if (!distinct.some((kept) => (kept.baseUrl || '') === matchKey)) {
+      distinct.push(match);
+    }
+  }
+  const classified = distinct
+    .map((provider) =>
+      classifyVoiceProviderEntry(provider, settings, voiceModel),
+    )
+    .filter(
+      (entry): entry is ClassifiedVoiceProviderEntry => entry !== undefined,
+    );
+  if (classified.length === 0) return undefined;
+  // Classify before deciding: duplicates that all keep the legacy
+  // fall-through need no policy decision and must not break configs that
+  // resolved through the legacy chain before the allowlist existed.
+  if (classified.length > 1 && classified.some(needsVoicePolicyDecision)) {
+    throw new Error(
+      `Voice model '${voiceModel}' is ambiguous. ${PROVIDER_ENTRY_REMEDY}`,
+    );
+  }
+  const entry = classified[0]!;
+  if (!needsVoicePolicyDecision(entry)) {
     return undefined;
   }
+  const { provider, parsedBaseUrl, baseUrl, allowInsecureBaseUrl, isLoopback } =
+    entry;
   if (
     parsedBaseUrl.protocol !== 'http:' &&
     parsedBaseUrl.protocol !== 'https:'
