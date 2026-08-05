@@ -500,6 +500,13 @@ describe('qwen-triage tmux workflow', () => {
     // PATCH only a comment this run owns: its claim embeds this run's URL,
     // while a previous run's terminal wording shares the same marker.
     expect(finalizeStep).toContain('contains($runurl)');
+    // Ownership couples the two steps' RUN_URL definitions; pin both so drift
+    // cannot silently classify this run's own claim as foreign.
+    for (const s of [statusStep, finalizeStep]) {
+      expect(s).toContain(
+        "RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'",
+      );
+    }
     expect(finalizeStep).toContain('--method PATCH');
     expect(finalizeStep).toContain('Qwen Triage finished');
     expect(finalizeStep).toContain('ended early');
@@ -604,6 +611,7 @@ describe('qwen-triage tmux workflow', () => {
               expect(body, JSON.stringify(env)).toContain(zh);
             } else {
               expect(body, JSON.stringify(env)).not.toContain(en);
+              expect(body, JSON.stringify(env)).not.toContain(zh);
             }
           }
         }

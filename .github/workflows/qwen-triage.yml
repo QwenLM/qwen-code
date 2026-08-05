@@ -995,6 +995,12 @@ jobs:
             # PATCH only a comment this run owns — its claim embeds $RUN_URL.
             # A cancel landing before the claim posts would otherwise clobber
             # a previous run's terminal wording, which shares this marker.
+            # Known lane race: qwen-triage-finalize.yml's update_status also
+            # PATCHes this marker with its own run link. If one of its writes
+            # lands between this run's claim and finalize, the comment is
+            # foreign here and this run's terminal wording is dropped —
+            # accepted: the comment then shows the other lane's live status,
+            # never a stale "running" claim.
             case "$EXISTING_ID" in
               '')
                 gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
