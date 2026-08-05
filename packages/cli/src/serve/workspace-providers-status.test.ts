@@ -22,6 +22,7 @@ const coreMock = vi.hoisted(() => ({
     isEnabled: vi.fn(() => false),
     warn: vi.fn(),
   },
+  loadModelMetadataCatalog: vi.fn(async () => ({})),
 }));
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
@@ -38,6 +39,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   return {
     ...actual,
     createDebugLogger: () => coreMock.debugLogger,
+    loadModelMetadataCatalog: coreMock.loadModelMetadataCatalog,
     ModelsConfig: TestModelsConfig,
   };
 });
@@ -71,6 +73,7 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     coreMock.modelsConfigErrorMessage =
       'Failed loading provider https://user:secret@broken.example/v1';
     coreMock.debugLogger.warn.mockClear();
+    coreMock.loadModelMetadataCatalog.mockClear();
     resetHomeEnvBootstrapForTesting();
   });
 

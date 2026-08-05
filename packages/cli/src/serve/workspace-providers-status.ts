@@ -81,9 +81,9 @@ async function buildWorkspaceProvidersStatus(
     const env = options.env ?? snapshotProcessEnv();
     const modelMetadataCatalog =
       options.modelMetadataCatalog ??
-      (process.env['NODE_ENV'] === 'test' ||
-      process.env['VITEST'] !== undefined ||
-      process.env['VITEST_WORKER_ID'] !== undefined
+      (env['NODE_ENV'] === 'test' ||
+      env['VITEST'] !== undefined ||
+      env['VITEST_WORKER_ID'] !== undefined
         ? {}
         : await loadModelMetadataCatalog({
             proxyUrl:
