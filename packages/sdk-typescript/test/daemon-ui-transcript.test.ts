@@ -125,3 +125,28 @@ describe('status event while an assistant block is streaming', () => {
     ).toEqual(['/stats', 'stats output', 'fix the bug']);
   });
 });
+
+describe('status event while a thought block is streaming', () => {
+  it('keeps the thought block active when clearActiveText is false', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        { type: 'user.text.delta', text: 'question' },
+        { type: 'thought.text.delta', text: 'thinking' },
+        { type: 'status', text: 'mid-stream status', clearActiveText: false },
+        { type: 'thought.text.delta', text: ' more' },
+        { type: 'assistant.done' },
+      ],
+      { now: 1 },
+    );
+
+    expect(state.blocks.map((block) => block.kind)).toEqual([
+      'user',
+      'thought',
+      'status',
+    ]);
+    const thought = state.blocks[1];
+    if (thought.kind !== 'thought') throw new Error('expected thought');
+    expect(thought.text).toBe('thinking more');
+  });
+});

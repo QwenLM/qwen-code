@@ -4,8 +4,10 @@ import { act, createRef, type CSSProperties, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type {
   DaemonInputAnnotation,
+  DaemonSessionContextUsageStatus,
   DaemonSessionMonitorTaskStatus,
   DaemonSessionShellTaskStatus,
+  DaemonSessionStatsStatus,
   DaemonSettingDescriptor,
   DaemonWorkspaceGitStatus,
 } from '@qwen-code/sdk/daemon';
@@ -16,6 +18,9 @@ import type {
   VoiceWorkspaceTarget,
 } from './voice/voice-workspace-target';
 import type { WebShellComposerToolbarRenderInfo } from './customization';
+import { serializeContextUsageMessage } from './components/messages/ContextUsageMessage';
+import { serializeStatsMessage } from './components/messages/StatsMessage';
+import { serializeStatusMessage } from './components/messages/StatusMessage';
 import { loadSplitSessions, saveSplitSessions } from './utils/splitUrl';
 
 type StreamingState = 'idle' | 'responding';
@@ -3935,6 +3940,24 @@ describe('App shell command queueing', () => {
 
 describe('App read-only local commands mid-turn', () => {
   it('runs /stats immediately while streaming and skips the echo', async () => {
+    const statsFixture: DaemonSessionStatsStatus = {
+      v: 1,
+      sessionId: 'session-1',
+      workspaceCwd: '/tmp/project',
+      sessionStartTimeMs: 1000,
+      durationMs: 42000,
+      promptCount: 2,
+      models: {},
+      tools: {
+        totalCalls: 1,
+        totalSuccess: 1,
+        totalFail: 0,
+        totalDurationMs: 120,
+        byName: {},
+      },
+      files: { totalLinesAdded: 3, totalLinesRemoved: 1 },
+    };
+    mockSessionActions.getStats.mockResolvedValue(statsFixture);
     const { rerender } = renderApp({});
     await flush();
 
@@ -3954,7 +3977,11 @@ describe('App read-only local commands mid-turn', () => {
     expect(accepted).toBe(true);
     expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalled();
     expect(mockStore.dispatch).toHaveBeenCalledWith([
-      expect.objectContaining({ type: 'status', clearActiveText: false }),
+      expect.objectContaining({
+        type: 'status',
+        clearActiveText: false,
+        text: serializeStatsMessage(statsFixture, 'overview'),
+      }),
     ]);
   });
 
@@ -3994,7 +4021,23 @@ describe('App read-only local commands mid-turn', () => {
     expect(accepted).toBe(true);
     expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalled();
     expect(mockStore.dispatch).toHaveBeenCalledWith([
-      expect.objectContaining({ type: 'status', clearActiveText: false }),
+      expect.objectContaining({
+        type: 'status',
+        clearActiveText: false,
+        text: serializeStatusMessage({
+          cliVersion: '1.2.3',
+          runtime: '',
+          platform: '',
+          auth: '',
+          baseUrl: '',
+          model: 'qwen',
+          fastModel: 'qwen',
+          sessionId: 'session-1',
+          sandbox: '',
+          proxy: '',
+          memoryUsage: '',
+        }),
+      }),
     ]);
   });
 
@@ -4013,6 +4056,32 @@ describe('App read-only local commands mid-turn', () => {
   });
 
   it('runs /context immediately while streaming and skips the echo', async () => {
+    const contextFixture: DaemonSessionContextUsageStatus = {
+      v: 1,
+      sessionId: 'session-1',
+      workspaceCwd: '/tmp/project',
+      usage: {
+        modelName: 'qwen',
+        totalTokens: 1234,
+        contextWindowSize: 131072,
+        breakdown: {
+          systemPrompt: 500,
+          builtinTools: 200,
+          mcpTools: 0,
+          memoryFiles: 50,
+          skills: 0,
+          messages: 584,
+          freeSpace: 129738,
+          autocompactBuffer: 0,
+        },
+        builtinTools: [{ name: 'read_file', tokens: 120 }],
+        mcpTools: [],
+        memoryFiles: [{ path: 'QWEN.md', tokens: 50 }],
+        skills: [],
+      },
+      formattedText: 'Context usage: 1.2k / 131k tokens',
+    };
+    mockSessionActions.getContextUsage.mockResolvedValue(contextFixture);
     const { rerender } = renderApp({});
     await flush();
 
@@ -4032,7 +4101,11 @@ describe('App read-only local commands mid-turn', () => {
     expect(accepted).toBe(true);
     expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalled();
     expect(mockStore.dispatch).toHaveBeenCalledWith([
-      expect.objectContaining({ type: 'status', clearActiveText: false }),
+      expect.objectContaining({
+        type: 'status',
+        clearActiveText: false,
+        text: serializeContextUsageMessage(contextFixture),
+      }),
     ]);
   });
 
