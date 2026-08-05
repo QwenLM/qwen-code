@@ -69,6 +69,15 @@ export interface RoundSchedule {
 }
 
 /**
+ * The loop's hard cap, mirroring SKILL.md's Step 5 ("Stop after 5 rounds
+ * regardless"). Enforcing it is the orchestrator's — the builder will build
+ * a sixth round if asked — but the retirement note is the orchestrator's
+ * only word about a skipped chunk, and it must not promise a cold check the
+ * cap has already forbidden.
+ */
+export const REVERSE_AUDIT_MAX_ROUNDS = 5;
+
+/**
  * The round part of a per-chunk reverse-audit record key, as `runAllChunks`
  * and the single-chunk rebuild path both spell it. The digest tail is matched
  * loosely on purpose: its width is the digest function's business, and a key
@@ -87,20 +96,39 @@ const REVERSE_AUDIT_MARKER = 'reverse-audit';
 
 /**
  * The diff lines a record's prompt points its chunk at, 1-based and
- * inclusive — the same literal-read recovery `coverage.ts` applies to
- * launch prompts. Every per-chunk launch this CLI builds bakes exactly
- * one `read_file(file_path="…", offset=N, limit=M)`; the dry bar
- * compares what the transcript actually read against it. Empty when the
+ * inclusive. Every per-chunk launch this CLI builds bakes exactly one
+ * `read_file(file_path="…", offset=N, limit=M)` aimed at the diff; the dry
+ * bar compares what the transcript actually read against it. Empty when the
  * prompt bakes no read, where the bar falls back to "opened the diff at
  * all" — a shape this module's own records never have.
+ *
+ * The scan is bound to the diff's own path because the record is the FOLDED
+ * launch prompt — the cumulative findings list rides inside it, verbatim,
+ * above the builder's own text — and findings prose quoting ANY
+ * `offset=N, limit=M` pair (a read_file call under discussion, this very
+ * file in a diff) would otherwise inject its range into the territory.
+ * `openedTheTerritory` passes on ANY overlap with ANY range, so an injected
+ * range can only WIDEN the bar: an auditor whose only diff read was lines
+ * 1-50 would retire a chunk whose territory is 1001-1200 the moment a
+ * finding quoted `offset=0, limit=50` — the same range-blind hole the
+ * territory check exists to close, reopened by honest findings. Only a read
+ * aimed at the diff is territory. An unknown diff path reads as no
+ * territory: the transcripts side then marks no call a diff read, every
+ * transcript classifies `unknown`, and no chunk retires — the territory is
+ * never consulted.
  */
-function bakedRanges(prompt: string): Array<[number, number]> {
+function bakedRanges(
+  prompt: string,
+  diffPath: string | undefined,
+): Array<[number, number]> {
   const out: Array<[number, number]> = [];
+  if (diffPath === undefined) return out;
   for (const m of prompt.matchAll(
-    /offset\s*[=:]\s*(\d+)\s*,\s*limit\s*[=:]\s*(\d+)/gi,
+    /read_file\(\s*file_path="([^"]*)",\s*offset=(\d+),\s*limit=(\d+)/gi,
   )) {
-    const offset = Number(m[1]);
-    const limit = Number(m[2]);
+    if (m[1] !== diffPath) continue;
+    const offset = Number(m[2]);
+    const limit = Number(m[3]);
     if (limit > 0) out.push([offset + 1, offset + limit]);
   }
   return out;
@@ -349,7 +377,7 @@ export function scheduleReverseAuditRound(
       chunkId: Number(m[1]),
       round: r,
       prompt,
-      territory: bakedRanges(prompt),
+      territory: bakedRanges(prompt, diffPath),
     });
   }
 
@@ -449,7 +477,9 @@ export function scheduleReverseAuditRound(
         chunkId,
         dryRounds: [lastTwo[0].round, lastTwo[1].round],
         // The next even round — this branch only runs on odd rounds, so
-        // that is always round + 1.
+        // that is always round + 1. Whether the cap allows it is the note
+        // composer's question, not the schedule's (see
+        // REVERSE_AUDIT_MAX_ROUNDS).
         nextColdCheck: round + 1,
       });
     }

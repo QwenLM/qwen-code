@@ -3135,6 +3135,45 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     expect(readRoundStamps(plan).some((s) => s.round === 3)).toBe(true);
   });
 
+  it('findings quoting a read window cannot widen a territory', () => {
+    // The record is the FOLDED prompt — the cumulative findings list rides
+    // inside it verbatim. Prose quoting a read window used to inject the
+    // range into the baked territory, and any-overlap-passes meant an
+    // auditor that read only the diff's head could retire a chunk whose
+    // territory is thousands of lines below — the hole the territory check
+    // closed, reopened by honest findings. Chunk 13's territory is
+    // 3808-4024; the injected `offset=0, limit=50` is exactly the window
+    // the auditors below read.
+    writeFileSync(
+      findings,
+      '- **File:** packages/cli/src/x.ts:12 — the earlier read used ' +
+        'offset=0, limit=50 — **Severity:** Suggestion\n',
+    );
+    answerRound(1, { 13: DRY, 14: YIELD, 15: YIELD });
+    answerRound(2, { 13: DRY, 14: YIELD, 15: YIELD });
+
+    const out = runRound(3);
+    expect(out).toContain('3 auditors required this round');
+    expect(out).not.toContain('retirement:');
+  });
+
+  it('a round-5 skip names the certificate final — the cap forbids round 6', () => {
+    // 13 yields in rounds 1,2 (hot), then goes dry in 3,4 — retiring at
+    // round 5, whose next cold check would be round 6: past the 5-round
+    // hard cap. The note is the orchestrator's only word about the chunk;
+    // it must not promise an audit the cap forbids.
+    answerRound(1, { 13: YIELD, 14: YIELD, 15: YIELD });
+    answerRound(2, { 13: YIELD, 14: YIELD, 15: YIELD });
+    answerRound(3, { 13: DRY, 14: YIELD, 15: YIELD });
+    answerRound(4, { 13: DRY, 14: YIELD, 15: YIELD });
+
+    const out = runRound(5);
+    expect(out).toContain('2 auditors required this round');
+    expect(out).toContain('chunk 13 — retired: dry in rounds 3 and 4');
+    expect(out).toContain('certificate final');
+    expect(out).not.toContain('next cold check round 6');
+  });
+
   it('the cold check comes due on parity — the retired chunk is built again', () => {
     answerRound(1, { 13: DRY, 14: YIELD, 15: YIELD });
     answerRound(2, { 13: DRY, 14: YIELD, 15: YIELD });

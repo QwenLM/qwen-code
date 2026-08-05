@@ -57,6 +57,7 @@ import {
 } from './lib/diff-plan.js';
 import { recordPrompt, writeBrief } from './lib/prompt-record.js';
 import {
+  REVERSE_AUDIT_MAX_ROUNDS,
   scheduleReverseAuditRound,
   type RoundSchedule,
 } from './lib/retirement.js';
@@ -1565,8 +1566,12 @@ function runAllChunks(
               .map(
                 (s) =>
                   `chunk ${s.chunkId} — retired: dry in rounds ` +
-                  `${s.dryRounds[0]} and ${s.dryRounds[1]}, next cold check ` +
-                  `round ${s.nextColdCheck}`,
+                  `${s.dryRounds[0]} and ${s.dryRounds[1]}, ` +
+                  (s.nextColdCheck > REVERSE_AUDIT_MAX_ROUNDS
+                    ? `certificate final — the ` +
+                      `${REVERSE_AUDIT_MAX_ROUNDS}-round hard cap leaves ` +
+                      `the loop no round for a cold check`
+                    : `next cold check round ${s.nextColdCheck}`),
               )
               .join('\n'),
         ];

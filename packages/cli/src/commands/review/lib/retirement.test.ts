@@ -571,7 +571,8 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
       const built = record(
         r,
         13,
-        `chunk 13 round ${r} walk — read_file(offset=1000, limit=200)`,
+        `chunk 13 round ${r} walk — ` +
+          `read_file(file_path="${diff}", offset=1000, limit=200)`,
       );
       transcript(built, DRY, 1, diff, 0, 50);
     }
@@ -586,7 +587,8 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
       const built = record(
         r,
         13,
-        `chunk 13 round ${r} walk — read_file(offset=1000, limit=200)`,
+        `chunk 13 round ${r} walk — ` +
+          `read_file(file_path="${diff}", offset=1000, limit=200)`,
       );
       transcript(
         built,
@@ -596,6 +598,50 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
         r === 1 ? 1000 : 1100,
         r === 1 ? 200 : 50,
       );
+    }
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([]);
+    expect(r3.converged).toBe(true);
+  });
+
+  it('findings prose quoting a read window cannot widen the territory', () => {
+    // The record is the FOLDED launch prompt — the cumulative findings
+    // list rides inside it, verbatim. Prose quoting ANY `offset=N,
+    // limit=M` pair (a read_file call under discussion; this PR's own
+    // review threads do) used to inject the range into the territory, and
+    // any-overlap-with-any-range passes: an auditor whose only diff read
+    // was lines 1-50 retired a chunk whose territory is 1001-1200 the
+    // moment a finding quoted `offset=0, limit=50`. Only the read aimed
+    // at the diff is territory.
+    for (const r of [1, 2]) {
+      const built = record(
+        r,
+        13,
+        `chunk 13 round ${r} walk\n` +
+          '## Already confirmed — do not re-report these\n' +
+          'the earlier read used read_file(offset=0, limit=50)\n' +
+          `read_file(file_path="${diff}", offset=1000, limit=200)`,
+      );
+      transcript(built, DRY, 1, diff, 0, 50);
+    }
+
+    expect(schedule(3, [13]).due).toEqual([13]);
+  });
+
+  it('the real baked read still retires beside noisy findings', () => {
+    // The positive control for the bound scan: the same findings noise,
+    // and the auditor opens the territory itself.
+    for (const r of [1, 2]) {
+      const built = record(
+        r,
+        13,
+        `chunk 13 round ${r} walk\n` +
+          '## Already confirmed — do not re-report these\n' +
+          'the earlier read used read_file(offset=0, limit=50)\n' +
+          `read_file(file_path="${diff}", offset=1000, limit=200)`,
+      );
+      transcript(built, DRY, 1, diff, 1000, 200);
     }
 
     const r3 = schedule(3, [13]);

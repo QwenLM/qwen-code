@@ -59,13 +59,15 @@ export const RESERVE_ENV = 'QWEN_REVIEW_DEADLINE_RESERVE_SECONDS';
  * contains no verification pass, and the terminal round's verification has
  * exactly one cover: this reserve. That makes the reserve's sizing the
  * whole margin, not a top-up on an overlap the measurement already
- * carried, and the two error directions are still not symmetric: round
- * costs trend UP (each round re-reads the diff against a longer findings
- * list, and repair relaunches land mid-loop), so the previous round's
- * measurement under-predicts the next in exactly the runs that end near
- * the boundary. Over-reserving ends the loop at most one round early,
- * disclosed as a budget stop; under-reserving is #8368 — killed
- * mid-verification, holding every confirmed finding.
+ * carried — so the estimate refuses to be optimistic too: it prices the
+ * round from the COSTLIEST span the run has measured (see
+ * `expectedRoundSeconds`), because round costs do not climb smoothly —
+ * each round re-reads the diff against a longer findings list, and a
+ * repair relaunch lands mid-loop and makes one round the expensive one —
+ * and the newest span alone under-predicts the next in exactly the runs
+ * that end near the boundary. Over-reserving ends the loop at most one
+ * round early, disclosed as a budget stop; under-reserving is #8368 —
+ * killed mid-verification, holding every confirmed finding.
  *
  * This is only the fallback: the budget itself is
  * chosen outside the CLI (a repository variable, a workflow input, a
@@ -179,28 +181,37 @@ export function stampRound(
 
 /**
  * What the round about to be admitted is expected to cost, in seconds: the
- * observed cost of the previous round (admission-to-admission — its audit
+ * COSTLIEST round the run has measured (admission-to-admission — its audit
  * fan-out and the orchestration around it; under the pipelined loop a
  * round's verification overlaps the NEXT round instead of sitting between
  * admissions, so it is not in this measure, and the terminal round's
  * verification is exactly what the deadline's reserve covers) when a stamp
- * exists, else the conservative constant. A stamp of the SAME round is
- * ignored — that is a rebuild, and measuring it would report a round as
- * cheap because its prompts were built twice quickly.
+ * exists, else the conservative constant. The costliest, not the newest:
+ * the reserve is the terminal round's only cover, and the run's own worst
+ * span is the evidence of what a round can cost — a newest-only estimate
+ * nets a mid-loop repair relaunch away the round after it lands, in
+ * exactly the runs that end near the boundary. A stamp of the SAME round
+ * is ignored — that is a rebuild, and measuring it would report a round
+ * as cheap because its prompts were built twice quickly.
  */
 export function expectedRoundSeconds(
   planPath: string,
   round: number | undefined,
   nowMs: number = Date.now(),
 ): number {
-  const stamps = readRoundStamps(planPath);
-  for (let i = stamps.length - 1; i >= 0; i--) {
-    const s = stamps[i];
-    if (round !== undefined && s.round === round) continue;
-    const observed = Math.round((nowMs - s.atMs) / 1000);
-    return Math.max(MIN_OBSERVED_ROUND_SECONDS, observed);
+  const stamps = readRoundStamps(planPath).filter(
+    (s) => round === undefined || s.round !== round,
+  );
+  if (stamps.length === 0) return DEFAULT_ROUND_SECONDS;
+  let maxSeconds = 0;
+  for (let i = 0; i < stamps.length; i++) {
+    const end = i + 1 < stamps.length ? stamps[i + 1].atMs : nowMs;
+    maxSeconds = Math.max(
+      maxSeconds,
+      Math.round((end - stamps[i].atMs) / 1000),
+    );
   }
-  return DEFAULT_ROUND_SECONDS;
+  return Math.max(MIN_OBSERVED_ROUND_SECONDS, maxSeconds);
 }
 
 export interface BudgetExhausted {
