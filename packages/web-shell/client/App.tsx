@@ -225,6 +225,7 @@ import {
   type SerializedTasksMessage,
 } from './components/messages/TasksStatusMessage';
 import { PlanExecutionView } from './components/messages/PlanExecutionView';
+import { SessionWorkflowCockpit } from './components/workflow/SessionWorkflowCockpit';
 import { serializeContextUsageMessage } from './components/messages/ContextUsageMessage';
 import {
   serializeStatsMessage,
@@ -806,6 +807,13 @@ const DEFAULT_ENVIRONMENT_PANEL_ITEMS: readonly WebShellEnvironmentPanelItem[] =
 const BOTTOM_PANEL_GAP_PX = 6;
 const BOTTOM_PANEL_FALLBACK_INSET_PX = 40;
 type ChatWidthMode = `${typeof DEFAULT_CHAT_MAX_WIDTH}` | 'wide';
+type MainView =
+  | 'chat'
+  | 'cockpit'
+  | 'workflow'
+  | 'scheduledTasks'
+  | 'goals'
+  | 'split';
 
 const CHAT_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-chat-width';
 const CHAT_SHELL_HORIZONTAL_PADDING = 40;
@@ -944,6 +952,23 @@ function getInitialLanguage(): WebShellLanguage {
   return normalizeLanguage(
     params.get('language') ?? params.get('lang') ?? navigator.language,
   );
+}
+
+function cockpitViewRequested(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    new URLSearchParams(window.location.search).get('view') === 'cockpit'
+  );
+}
+
+function updateCockpitLocation(open: boolean, replace = false): void {
+  const url = new URL(window.location.href);
+  if (open) {
+    url.searchParams.set('view', 'cockpit');
+  } else {
+    url.searchParams.delete('view');
+  }
+  window.history[replace ? 'replaceState' : 'pushState'](null, '', url);
 }
 
 function formatError(error: unknown, fallback: string): string {
@@ -3297,6 +3322,16 @@ export function App({
         todo.blockedBy ?? [],
       ]),
   );
+  const sessionWorkflowGoal = useMemo(() => {
+    const message = messages.find(
+      (candidate) =>
+        candidate.role === 'user' &&
+        candidate.source !== 'background_notification',
+    );
+    return message?.role === 'user' && message.content.trim()
+      ? message.content
+      : undefined;
+  }, [messages]);
   const floatingTodosAllCompleted = floatingTodosState.allCompleted;
   const [todoPanelMode, setTodoPanelMode] = useState<'hidden' | 'active'>(
     'hidden',
@@ -3649,13 +3684,14 @@ export function App({
   // (not a modal overlay), mirroring the reference design; creating or opening
   // a chat returns to 'chat'. (Daemon Status is no longer a boolean dialog — it
   // is one of the activePanel values below.)
-  const [mainView, setMainView] = useState<
-    'chat' | 'workflow' | 'scheduledTasks' | 'goals' | 'split'
-  >('chat');
+  const [mainView, setMainView] = useState<MainView>(() =>
+    cockpitViewRequested() ? 'cockpit' : 'chat',
+  );
   const mainViewRef = useRef(mainView);
   const workflowBackRef = useRef<HTMLButtonElement>(null);
+  const workflowReturnViewRef = useRef<'chat' | 'cockpit'>('chat');
   const useFloatingArtifactPanel =
-    !canDockArtifactPanel || mainView === 'split';
+    !canDockArtifactPanel || mainView === 'split' || mainView === 'cockpit';
   // Sessions to seed the split view with (e.g. the selection from the overview).
   const [splitSessionIds, setSplitSessionIds] = useState<string[]>([]);
   // Latest pane list, readable from the shrink-close effect without making it a
@@ -3999,14 +4035,15 @@ export function App({
     // the same reason. The split view is deliberately NOT dismissed: each pane
     // owns and renders its own session's approval, so an approval on the (outer)
     // main session must not yank the user out of the panes they are working in.
-    const workflowCanShowApproval =
-      mainView === 'workflow' &&
+    const pageCanShowApproval =
+      (mainView === 'workflow' || mainView === 'cockpit') &&
       isExitPlanApprovalRequest(pendingToolApproval) &&
       approvalPlanTodos.length > 0;
     if (
       mainView === 'scheduledTasks' ||
       mainView === 'goals' ||
-      (mainView === 'workflow' && !workflowCanShowApproval)
+      ((mainView === 'workflow' || mainView === 'cockpit') &&
+        !pageCanShowApproval)
     ) {
       setMainView('chat');
     }
@@ -4137,7 +4174,7 @@ export function App({
     if (tasksDialogMessage) {
       return getAgentToolsForPlan(messages, floatingTodosState);
     }
-    if (mainView === 'workflow') {
+    if (mainView === 'workflow' || mainView === 'cockpit') {
       return getAgentToolsForPlan(messages, sessionWorkflowTodosState);
     }
     return [];
@@ -6700,39 +6737,85 @@ export function App({
   }, [reportError, requireActiveSessionForLocalCommand, sessionActions]);
   const openWorkflow = useCallback(() => {
     if (!requireActiveSessionForLocalCommand()) return;
+    workflowReturnViewRef.current =
+      mainViewRef.current === 'cockpit' ? 'cockpit' : 'chat';
+    if (cockpitViewRequested()) updateCockpitLocation(false);
     setActivePanel(null);
     setTasksDialogMessage(null);
     setMainView('workflow');
   }, [requireActiveSessionForLocalCommand]);
+  const openCockpit = useCallback(() => {
+    if (!requireActiveSessionForLocalCommand()) return;
+    if (!cockpitViewRequested()) updateCockpitLocation(true);
+    setActivePanel(null);
+    setTasksDialogMessage(null);
+    setMainView('cockpit');
+  }, [requireActiveSessionForLocalCommand]);
+  const closeCockpit = useCallback(() => {
+    if (cockpitViewRequested()) updateCockpitLocation(false);
+    setMainView('chat');
+  }, []);
+  const closeWorkflow = useCallback(() => {
+    if (workflowReturnViewRef.current === 'cockpit') {
+      openCockpit();
+      return;
+    }
+    setMainView('chat');
+  }, [openCockpit]);
   const workflowApprovalRequest =
     sessionWorkflowEnabled &&
     isExitPlanApprovalRequest(pendingToolApproval) &&
     approvalPlanTodos.length > 0
       ? pendingToolApproval
       : null;
-  const autoOpenedWorkflowApprovalRef = useRef<string | null>(null);
+  const autoOpenedCockpitApprovalRef = useRef<string | null>(null);
   useEffect(() => {
     if (!workflowApprovalRequest) {
-      autoOpenedWorkflowApprovalRef.current = null;
+      autoOpenedCockpitApprovalRef.current = null;
       return;
     }
     if (mainView === 'split') return;
-    if (autoOpenedWorkflowApprovalRef.current === workflowApprovalRequest.id) {
+    if (autoOpenedCockpitApprovalRef.current === workflowApprovalRequest.id) {
       return;
     }
-    autoOpenedWorkflowApprovalRef.current = workflowApprovalRequest.id;
-    openWorkflow();
-  }, [mainView, openWorkflow, workflowApprovalRequest]);
+    autoOpenedCockpitApprovalRef.current = workflowApprovalRequest.id;
+    openCockpit();
+  }, [mainView, openCockpit, workflowApprovalRequest]);
   useEffect(() => {
-    if (mainView === 'workflow' && !sessionWorkflowEnabled) {
+    if (
+      (mainView === 'workflow' || mainView === 'cockpit') &&
+      workspaceSettingsState.status &&
+      !sessionWorkflowEnabled
+    ) {
+      if (mainView === 'cockpit' && cockpitViewRequested()) {
+        updateCockpitLocation(false, true);
+      }
       setMainView('chat');
     }
-  }, [mainView, sessionWorkflowEnabled]);
+  }, [mainView, sessionWorkflowEnabled, workspaceSettingsState.status]);
   useEffect(() => {
     if (mainView === 'workflow' && !workflowApprovalRequest) {
       workflowBackRef.current?.focus();
     }
   }, [mainView, workflowApprovalRequest]);
+  useEffect(() => {
+    const handlePopState = () => {
+      if (cockpitViewRequested()) {
+        setMainView('cockpit');
+      } else if (mainViewRef.current === 'cockpit') {
+        setMainView('chat');
+      }
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+  useEffect(() => {
+    if (mainView === 'cockpit' && !cockpitViewRequested()) {
+      updateCockpitLocation(true, true);
+    } else if (mainView !== 'cockpit' && cockpitViewRequested()) {
+      updateCockpitLocation(false, true);
+    }
+  }, [mainView]);
   const openEnvironmentTasksPanel = useCallback(() => {
     if (!requireActiveSessionForLocalCommand()) return;
     setEnvironmentPanelOpen(true);
@@ -9321,17 +9404,28 @@ export function App({
                   )}
                   {sessionWorkflowEnabled &&
                     sessionWorkflowTodos.length > 0 && (
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      className="mr-3"
-                      onClick={openWorkflow}
-                      data-testid="open-workflow"
-                    >
-                      {t('workflow.title')}
-                    </Button>
-                  )}
+                      <>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={openCockpit}
+                          data-testid="open-cockpit"
+                        >
+                          驾驶舱
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="mr-3"
+                          onClick={openWorkflow}
+                          data-testid="open-workflow"
+                        >
+                          {t('workflow.title')}
+                        </Button>
+                      </>
+                    )}
                 </div>
               )}
               <div
@@ -9773,6 +9867,38 @@ export function App({
                   </div>
                 </div>
               )}
+              {mainView === 'cockpit' && (
+                <div className={styles.fullPage} data-testid="cockpit-page">
+                  <SessionWorkflowCockpit
+                    sessionId={connection.sessionId ?? ''}
+                    connected={connected}
+                    todos={sessionWorkflowTodos}
+                    tools={planAgentTools}
+                    tasks={sessionTasks}
+                    onBackToChat={closeCockpit}
+                    onOpenWorkflow={openWorkflow}
+                    onOpenSubagent={openSubagentPanel}
+                    {...(sessionDisplayName
+                      ? { sessionName: sessionDisplayName }
+                      : {})}
+                    {...(connection.workspaceCwd
+                      ? { workspaceCwd: connection.workspaceCwd }
+                      : {})}
+                    {...(sessionWorkflowGoal
+                      ? { goal: sessionWorkflowGoal }
+                      : {})}
+                    {...(workflowApprovalRequest
+                      ? {
+                          approval: {
+                            request: workflowApprovalRequest,
+                            todos: approvalPlanTodos,
+                            onConfirm: handleConfirm,
+                          },
+                        }
+                      : {})}
+                  />
+                </div>
+              )}
               {mainView === 'workflow' && (
                 <div className={styles.fullPage} data-testid="workflow-page">
                   <div className={styles.fullPageHeader}>
@@ -9780,7 +9906,7 @@ export function App({
                       ref={workflowBackRef}
                       type="button"
                       className={styles.fullPageBack}
-                      onClick={() => setMainView('chat')}
+                      onClick={closeWorkflow}
                       aria-label={t('common.back')}
                       title={t('common.back')}
                     >
