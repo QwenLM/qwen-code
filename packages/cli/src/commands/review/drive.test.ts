@@ -96,77 +96,80 @@ describe('the sentinel', () => {
   });
 });
 
-describe('the wrapper, driven for real', () => {
-  // Four ways a script can leave, all of which a reviewer's drive script uses.
-  // These run real bash — the harness tests above cannot see a shell semantic —
-  // and read the verdict from the sentinel FILE, the channel that has to
-  // survive a bounded log.
-  const realExit = (script: string): number | null => {
-    const rc = join(mkdtempSync(join(tmpdir(), 'drv-')), 'drive.rc');
-    spawnSync('bash', ['-c', wrapScript(script, rc)], { encoding: 'utf8' });
-    return existsSync(rc) ? sentinelExitCode(readFileSync(rc, 'utf8')) : null;
-  };
+describe.skipIf(process.platform === 'win32')(
+  'the wrapper, driven for real',
+  () => {
+    // Four ways a script can leave, all of which a reviewer's drive script uses.
+    // These run real bash — the harness tests above cannot see a shell semantic —
+    // and read the verdict from the sentinel FILE, the channel that has to
+    // survive a bounded log.
+    const realExit = (script: string): number | null => {
+      const rc = join(mkdtempSync(join(tmpdir(), 'drv-')), 'drive.rc');
+      spawnSync('bash', ['-c', wrapScript(script, rc)], { encoding: 'utf8' });
+      return existsSync(rc) ? sentinelExitCode(readFileSync(rc, 'utf8')) : null;
+    };
 
-  it('reports the code for every exit path', () => {
-    expect(realExit('echo ok')).toBe(0);
-    expect(realExit('echo failing; exit 17')).toBe(17);
-    expect(realExit('set -e; false; echo unreachable')).toBe(1);
-    expect(realExit('exit 0')).toBe(0);
-  });
-
-  it('keeps the script output on stdout and the verdict in its own file', () => {
-    // Two channels on purpose. The log is bounded; the verdict must not be
-    // bounded with it, and the next test shows what happens when it is.
-    const rc = join(mkdtempSync(join(tmpdir(), 'drv-')), 'drive.rc');
-    const r = spawnSync('bash', ['-c', wrapScript('echo hello-there', rc)], {
-      encoding: 'utf8',
+    it('reports the code for every exit path', () => {
+      expect(realExit('echo ok')).toBe(0);
+      expect(realExit('echo failing; exit 17')).toBe(17);
+      expect(realExit('set -e; false; echo unreachable')).toBe(1);
+      expect(realExit('exit 0')).toBe(0);
     });
-    expect(r.stdout).toContain('hello-there');
-    expect(r.stdout).not.toContain(DRIVE_SENTINEL);
-    expect(sentinelExitCode(readFileSync(rc, 'utf8'))).toBe(0);
-  });
 
-  it('capping the STREAM never yields the true exit code — measured, not assumed', () => {
-    // Why the log is bounded by watching its size rather than by `head -c`.
-    // Piping the drive through `head` kills the writer with SIGPIPE mid-loop,
-    // and what survives is bash-version-dependent — measured, per version:
-    //   - bash 5.2 (CI's ubuntu): the EXIT trap fires with `$?` from the last
-    //     successful echo — rc=0, a FABRICATED clean pass;
-    //   - bash 5.3 (homebrew macOS): the trap's redirect creates the sentinel
-    //     file but the write is LOST — an empty file, no verdict;
-    //   - bash 3.2 (stock macOS): the trap records the echo's EPIPE write
-    //     error — rc=1, a fabricated FAILURE code, with a stray padding line
-    //     leaked into the sentinel file for good measure.
-    // Three shells, three different wrong answers — which is why the
-    // assertion pins the one invariant they share instead of any version's
-    // flavor of wrong: the script's real `exit 5` NEVER survives the cap.
-    // (The first draft of this fix enumerated the wrong answers and was
-    // immediately falsified by running it on a fourth shell; the enumeration
-    // is a moving target, the invariant is not.)
-    const dir = mkdtempSync(join(tmpdir(), 'drv-'));
-    const rc = join(dir, 'drive.rc');
-    const sh = join(dir, 's.sh');
-    writeFileSync(
-      sh,
-      wrapScript(
-        'for i in $(seq 1 20000); do echo padding-line-$i-aaaaaaaaaaaaaaaaaaaa; done; exit 5',
-        rc,
-      ),
-    );
-    spawnSync(
-      'bash',
-      ['-c', `bash ${sh} 2>&1 | head -c 4096 > ${join(dir, 'log')}`],
-      { encoding: 'utf8' },
-    );
-    const reported = existsSync(rc)
-      ? sentinelExitCode(readFileSync(rc, 'utf8'))
-      : null;
-    // Fabricated (0, 1, …) or lost (null) — any of them is an untrustworthy
-    // verdict, and all prove the design point. What must never appear is the
-    // truth.
-    expect(reported).not.toBe(5);
-  });
-});
+    it('keeps the script output on stdout and the verdict in its own file', () => {
+      // Two channels on purpose. The log is bounded; the verdict must not be
+      // bounded with it, and the next test shows what happens when it is.
+      const rc = join(mkdtempSync(join(tmpdir(), 'drv-')), 'drive.rc');
+      const r = spawnSync('bash', ['-c', wrapScript('echo hello-there', rc)], {
+        encoding: 'utf8',
+      });
+      expect(r.stdout).toContain('hello-there');
+      expect(r.stdout).not.toContain(DRIVE_SENTINEL);
+      expect(sentinelExitCode(readFileSync(rc, 'utf8'))).toBe(0);
+    });
+
+    it('capping the STREAM never yields the true exit code — measured, not assumed', () => {
+      // Why the log is bounded by watching its size rather than by `head -c`.
+      // Piping the drive through `head` kills the writer with SIGPIPE mid-loop,
+      // and what survives is bash-version-dependent — measured, per version:
+      //   - bash 5.2 (CI's ubuntu): the EXIT trap fires with `$?` from the last
+      //     successful echo — rc=0, a FABRICATED clean pass;
+      //   - bash 5.3 (homebrew macOS): the trap's redirect creates the sentinel
+      //     file but the write is LOST — an empty file, no verdict;
+      //   - bash 3.2 (stock macOS): the trap records the echo's EPIPE write
+      //     error — rc=1, a fabricated FAILURE code, with a stray padding line
+      //     leaked into the sentinel file for good measure.
+      // Three shells, three different wrong answers — which is why the
+      // assertion pins the one invariant they share instead of any version's
+      // flavor of wrong: the script's real `exit 5` NEVER survives the cap.
+      // (The first draft of this fix enumerated the wrong answers and was
+      // immediately falsified by running it on a fourth shell; the enumeration
+      // is a moving target, the invariant is not.)
+      const dir = mkdtempSync(join(tmpdir(), 'drv-'));
+      const rc = join(dir, 'drive.rc');
+      const sh = join(dir, 's.sh');
+      writeFileSync(
+        sh,
+        wrapScript(
+          'for i in $(seq 1 20000); do echo padding-line-$i-aaaaaaaaaaaaaaaaaaaa; done; exit 5',
+          rc,
+        ),
+      );
+      spawnSync(
+        'bash',
+        ['-c', `bash ${sh} 2>&1 | head -c 4096 > ${join(dir, 'log')}`],
+        { encoding: 'utf8' },
+      );
+      const reported = existsSync(rc)
+        ? sentinelExitCode(readFileSync(rc, 'utf8'))
+        : null;
+      // Fabricated (0, 1, …) or lost (null) — any of them is an untrustworthy
+      // verdict, and all prove the design point. What must never appear is the
+      // truth.
+      expect(reported).not.toBe(5);
+    });
+  },
+);
 
 describe('the capture', () => {
   it('keeps the TAIL when it must trim, and says that it trimmed', () => {
