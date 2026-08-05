@@ -320,6 +320,37 @@ describe('Agent View PTY host process server', () => {
         platform: 'win32',
       }),
     ).toMatch(/^\\\\\.\\pipe\\qwen-agent-pty-[a-f0-9]{16}$/);
+
+    const fallbackPath = getAgentViewPtyHostSocketPath('session-1', {
+      globalDir: path.join(os.tmpdir(), 'qwen-agent-view-test'.repeat(10)),
+      platform: 'linux',
+    });
+    const uid =
+      typeof process.getuid === 'function' ? process.getuid() : 'user';
+    expect(path.dirname(fallbackPath)).toBe(
+      path.join(os.tmpdir(), `qwen-agent-pty-${uid}`),
+    );
+    expect(path.basename(fallbackPath)).toMatch(/^[a-f0-9]{16}\.sock$/);
+  });
+
+  it('rejects oversized PTY host responses', async () => {
+    const socketPath = shortSocketPath();
+    const server = net.createServer((socket) => {
+      socket.on('error', () => {});
+      socket.write('x'.repeat(1024 * 1024 + 1));
+    });
+    await listenServer(server, socketPath);
+    try {
+      await expect(
+        connectAgentViewPtyHostProcess(
+          createLaunch('session-oversized-response'),
+          socketPath,
+        ),
+      ).rejects.toThrow('Agent View PTY host response line is too large.');
+    } finally {
+      server.close();
+      await fs.unlink(socketPath).catch(() => {});
+    }
   });
 
   it('fails quickly when the spawned PTY host exits before ready', async () => {
@@ -513,6 +544,19 @@ async function requestHost(
   return response['result'];
 }
 
+async function listenServer(
+  server: net.Server,
+  socketPath: string,
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(socketPath, () => {
+      server.off('error', reject);
+      resolve();
+    });
+  });
+}
+
 async function createStatusServer(socketPath: string): Promise<net.Server> {
   await fs.mkdir(path.dirname(socketPath), { recursive: true });
   const server = net.createServer((socket) => {
@@ -538,13 +582,7 @@ async function createStatusServer(socketPath: string): Promise<net.Server> {
       );
     });
   });
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(socketPath, () => {
-      server.off('error', reject);
-      resolve();
-    });
-  });
+  await listenServer(server, socketPath);
   return server;
 }
 
