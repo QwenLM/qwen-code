@@ -601,16 +601,25 @@ describe('parse-args warns when the bundle is not built from these sources', () 
     fsReal.mkdirSync(join(repo, 'dist'), { recursive: true });
     argv1 = join(repo, 'dist', 'cli.js');
     fsReal.writeFileSync(argv1, 'bundle');
-    const reviewDir = join(
-      repo,
-      'packages',
-      'cli',
-      'src',
-      'commands',
-      'review',
-    );
+    const commands = join(repo, 'packages', 'cli', 'src', 'commands');
+    const reviewDir = join(commands, 'review');
     fsReal.mkdirSync(reviewDir, { recursive: true });
     fsReal.writeFileSync(join(reviewDir, 'drive.ts'), 'the built behaviour');
+    // The fixture holds all THREE roots, the shape of a real checkout: a
+    // tree holding only some of them is a partial checkout, and the check
+    // answers that case with 'could not check' rather than a verdict.
+    fsReal.writeFileSync(join(commands, 'review.ts'), 'registers');
+    const skillDir = join(
+      repo,
+      'packages',
+      'core',
+      'src',
+      'skills',
+      'bundled',
+      'review',
+    );
+    fsReal.mkdirSync(skillDir, { recursive: true });
+    fsReal.writeFileSync(join(skillDir, 'SKILL.md'), '# skill');
     vi.mocked(writeStderrLineSafe).mockClear();
     vi.mocked(writeStdoutLine).mockClear();
   });
@@ -753,7 +762,9 @@ describe('parse-args warns when the bundle is not built from these sources', () 
   it('names the cause when the roots hold nothing the digest admits', () => {
     // A root that exists but holds only test files measures zero digested
     // files. That is "nothing found", not "something unreadable", and the
-    // docstring promises each unmeasurable case names itself.
+    // docstring promises each unmeasurable case names itself. The other two
+    // roots come out of the fixture too, so the zero is complete, not the
+    // partial-checkout case.
     stamp(foreignDigest);
     const reviewDir = join(
       repo,
@@ -765,6 +776,13 @@ describe('parse-args warns when the bundle is not built from these sources', () 
     );
     fsReal.rmSync(join(reviewDir, 'drive.ts'));
     fsReal.writeFileSync(join(reviewDir, 'only.test.ts'), 'a test');
+    fsReal.rmSync(
+      join(repo, 'packages', 'cli', 'src', 'commands', 'review.ts'),
+    );
+    fsReal.rmSync(join(repo, 'packages', 'core'), {
+      recursive: true,
+      force: true,
+    });
     run();
     expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
       'no review sources were found to compare',
@@ -787,6 +805,29 @@ describe('parse-args warns when the bundle is not built from these sources', () 
       process.argv[1] = original;
     }
     expect(writeStderrLineSafe).not.toHaveBeenCalled();
+  });
+
+  it('says it could not check when only some of the roots are materialized', () => {
+    // A sparse checkout narrows a full tree without touching `dist/`: the
+    // stamp was made from every root, the tree now holds the rest of them,
+    // and comparing the survivors would accuse a bundle that may be
+    // byte-for-byte correct. The silence of an installed package is the
+    // other end of the same spectrum — zero roots present — and stays.
+    stamp(reviewSourcesDigest(repo, reviewSourceRoots(repo))!);
+    fsReal.rmSync(join(repo, 'packages', 'core'), {
+      recursive: true,
+      force: true,
+    });
+    run();
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+      'could not check whether the bundle is current',
+    );
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+      'only some of the review sources are present',
+    );
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).not.toContain(
+      'NOT built from the review sources',
+    );
   });
 
   it('stays silent for an installed package, which has no sources either', () => {

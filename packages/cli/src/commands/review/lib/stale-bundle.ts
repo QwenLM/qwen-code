@@ -183,6 +183,15 @@ interface SourceMeasurement {
   digest: string | undefined;
   /** A file could not be read, or a directory could not be listed. */
   incomplete: boolean;
+  /**
+   * Some roots were measured and others were never there — a partial tree,
+   * such as a sparse checkout that did not materialize every root. Not
+   * `incomplete` (a root that IS there but cannot be read) and not the
+   * installed package (no root at all): the digest covers the present roots
+   * only, where the stamp was made from every root, so comparing them would
+   * accuse a build that may be exactly correct.
+   */
+  partial: boolean;
 }
 
 /**
@@ -195,11 +204,15 @@ function measureReviewSources(
   repoRoot: string,
   roots: readonly ReviewSourceRoot[],
 ): SourceMeasurement {
-  const state = { incomplete: false };
+  const state = { incomplete: false, absentRoots: 0 };
   const files: string[] = [];
   for (const root of roots) files.push(...sourceFilesUnder(root, state, false));
+  // Some-but-not-all: every root absent is an installed package with nothing
+  // to say, and every root present is the tree the stamp was made from —
+  // only between the two does a comparison measure less than it claims.
+  const partial = state.absentRoots > 0 && state.absentRoots < roots.length;
   if (state.incomplete || files.length === 0) {
-    return { digest: undefined, incomplete: state.incomplete };
+    return { digest: undefined, incomplete: state.incomplete, partial };
   }
 
   const hash = createHash('sha256');
@@ -210,14 +223,14 @@ function measureReviewSources(
     } catch {
       // Vanished between listing and reading. Nothing can be said about a tree
       // that is changing underneath the check.
-      return { digest: undefined, incomplete: true };
+      return { digest: undefined, incomplete: true, partial };
     }
     hash.update(relative(repoRoot, file).split(sep).join('/'));
     hash.update('\0');
     hash.update(content);
     hash.update('\0');
   }
-  return { digest: hash.digest('hex'), incomplete: false };
+  return { digest: hash.digest('hex'), incomplete: false, partial };
 }
 
 /**
@@ -258,7 +271,7 @@ export function bundleStaleness(
  */
 function* sourceFilesUnder(
   root: ReviewSourceRoot,
-  state: { incomplete: boolean },
+  state: { incomplete: boolean; absentRoots: number },
   listed: boolean,
 ): Generator<string> {
   const { kind } = root;
@@ -273,9 +286,12 @@ function* sourceFilesUnder(
       // A root that was never there is silent only on ENOENT: EACCES/EPERM is
       // a tree that IS there but cannot be measured — a permission-corrupted
       // checkout — and silence there would drive a review against an
-      // arbitrarily stale bundle with no line at all.
+      // arbitrarily stale bundle with no line at all. The ENOENT count is how
+      // `measureReviewSources` tells a partial checkout from an installed
+      // package.
       if (listed || (err as NodeJS.ErrnoException).code !== 'ENOENT')
         state.incomplete = true;
+      else state.absentRoots += 1;
       return;
     }
     if (stats.isDirectory()) {
@@ -395,6 +411,19 @@ export function bundleStalenessNotices(
     const roots = reviewSourceRoots(repoRoot);
     const measured = measureReviewSources(repoRoot, roots);
     const current = measured.digest;
+    if (stamped && current && measured.partial) {
+      // A sparse or partial checkout holds only some of the roots the stamp
+      // was made from, so the digest computed here covers less than the
+      // stamped tree — a mismatch would accuse a build that may be
+      // byte-for-byte correct. Name the case; accuse nothing.
+      return [
+        `review: could not check whether the bundle is current — ` +
+          `only some of the review sources are present` +
+          (brief
+            ? ' (a partial checkout).'
+            : ' (a sparse or partial checkout). The stamp covers the whole tree; materialize the missing sources to compare again.'),
+      ];
+    }
     const staleness = bundleStaleness(stamped, current);
 
     const warning = staleBundleWarning(staleness, brief);

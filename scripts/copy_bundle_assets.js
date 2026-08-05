@@ -126,9 +126,18 @@ export function reviewSourceDigestForBuild(root) {
       let stats;
       try {
         stats = fs.statSync(dir);
-      } catch {
+      } catch (error) {
         if (listed) {
           throw new Error(`${dir} vanished while being walked`);
+        }
+        // A root that was never there is silent only on ENOENT — EACCES/EPERM
+        // is a tree that IS there but cannot be measured, and skipping it
+        // would stamp a digest over the surviving roots, which the runtime
+        // twin (`sourceFilesUnder` in stale-bundle.ts) marks incomplete: a
+        // parity gap that would accuse a byte-for-byte correct bundle once
+        // the tree becomes readable again.
+        if (error?.code !== 'ENOENT') {
+          throw new Error(`${dir} could not be measured`);
         }
         return;
       }
@@ -172,7 +181,18 @@ function stampReviewSourceDigest(root, distDir) {
   // stamp beside a newer bundle is a weaker form of the misdescription the
   // refusal exists to avoid, and `unmeasured` is the state each refusal means.
   const refuse = (why) => {
-    fs.rmSync(stampPath, { recursive: true, force: true });
+    try {
+      fs.rmSync(stampPath, { recursive: true, force: true });
+    } catch (error) {
+      // `force` swallows only ENOENT; a permission or lock error on the old
+      // stamp must not kill the bundle step after every asset is in place.
+      // Leaving it is the lesser outcome: at worst a later "stale" notice
+      // whose rebuild advice is still correct.
+      console.warn(
+        `Could not remove the stale source digest at ${stampPath}: ` +
+          (error instanceof Error ? error.message : error),
+      );
+    }
     // `warn`, not `log`: the runtime message sends its reader back to this
     // build's output, and a refusal hidden among plain logs is not what they
     // are being sent to find.

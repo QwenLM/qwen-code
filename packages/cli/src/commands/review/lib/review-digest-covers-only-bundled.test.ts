@@ -20,8 +20,15 @@
 // The walk is over the real working tree, so it needs a full checkout: a
 // sparse or partial clone fails this test without anything being wrong.
 
-import { describe, expect, it } from 'vitest';
-import { readFileSync, readdirSync } from 'node:fs';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import {
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import {
   basename,
   dirname,
@@ -65,6 +72,31 @@ function* allFiles(dir: string): Generator<string> {
   }
 }
 
+/**
+ * Whether a static `import`/`export … from` clause binds no value, so esbuild
+ * erases the whole statement under this repo's `verbatimModuleSyntax`: either
+ * the leading `type` keyword, or a named clause with no default or namespace
+ * part whose every specifier carries its own `type` prefix. Counting such a
+ * clause as an edge would fold a never-bundled module into what production
+ * imports — a file the digest hashes but the bundle cannot contain passing
+ * the guard that exists to reject it.
+ */
+function isTypeOnlyClause(clause: string): boolean {
+  if (/^\s*type\b/.test(clause)) return true;
+  const brace = clause.match(/\{[^}]*\}/);
+  if (!brace) return false;
+  if (clause.replace(brace[0], '').trim() !== '') return false;
+  const specifiers = brace[0]
+    .slice(1, -1)
+    .split(',')
+    .map((spec) => spec.trim())
+    .filter((spec) => spec !== '');
+  return (
+    specifiers.length > 0 &&
+    specifiers.every((spec) => /^type\s+[A-Za-z_$]/.test(spec))
+  );
+}
+
 const isTest = (f: string) => NOT_BUNDLED_RE.test(basename(f));
 const isFixture = (f: string) =>
   relative(reviewDir, f)
@@ -80,11 +112,12 @@ function localImports(f: string): string[] {
   // invisible here — and bare `import '…'`, which esbuild bundles for its
   // side effects. Type-only statements are the opposite gap: esbuild erases
   // them, so counting one folds a never-bundled file into what production
-  // imports.
+  // imports — in both forms: the leading `type` keyword AND a named clause
+  // whose every specifier is individually `type`-prefixed.
   for (const m of src.matchAll(
     /\b(import|export)\b([^;'"]*)\bfrom\s+'(\.[^']+)'/g,
   )) {
-    if (!/^\s*type\b/.test(m[2])) specs.push(m[3]);
+    if (!isTypeOnlyClause(m[2])) specs.push(m[3]);
   }
   for (const m of src.matchAll(/\bimport\s*\(\s*'(\.[^']+)'\s*\)/g))
     specs.push(m[1]);
@@ -170,6 +203,37 @@ describe('the staleness digest covers only what the bundle can contain', () => {
       unreachable.map((f) => relative(repoRoot, f)),
       'an unimported file here is either test-only support or a scratch file — production code reaches the bundle only through an import',
     ).toEqual([]);
+  });
+
+  describe('the clause classifier reads imports the way esbuild does', () => {
+    // The classifier is the oracle for what the bundle reaches; a clause
+    // esbuild erases must not count as an edge, and one it keeps must.
+    let dir: string;
+    beforeEach(() => {
+      dir = mkdtempSync(join(tmpdir(), 'digest-guard-'));
+      writeFileSync(join(dir, 'b.ts'), 'export const v = 1;\n');
+    });
+    afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+    const edgesOf = (statement: string): string[] => {
+      const importer = join(dir, 'a.ts');
+      writeFileSync(importer, `${statement} from './b.js';\n`);
+      return localImports(importer);
+    };
+
+    it('drops the clauses esbuild erases wholesale', () => {
+      expect(edgesOf('import type { T }')).toEqual([]);
+      expect(edgesOf('import { type T }')).toEqual([]);
+      expect(edgesOf('import { type T, type U }')).toEqual([]);
+      expect(edgesOf('export type { T }')).toEqual([]);
+    });
+
+    it('keeps the clauses that still bind a value', () => {
+      const b = join(dir, 'b.ts');
+      expect(edgesOf('import { type T, v }')).toEqual([b]);
+      expect(edgesOf('import D, { type T }')).toEqual([b]);
+      expect(edgesOf('import { v }')).toEqual([b]);
+    });
   });
 
   it('leaves out nothing production imports', () => {

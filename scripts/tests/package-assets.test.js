@@ -23,6 +23,7 @@ import fs from 'node:fs';
 const realReadFileSync = fs.readFileSync;
 const realReaddirSync = fs.readdirSync;
 const realStatSync = fs.statSync;
+const realRmSync = fs.rmSync;
 import {
   copyBundleAssets,
   reviewSourceDigestForBuild,
@@ -135,6 +136,48 @@ describe('package asset scripts', () => {
     expect(
       existsSync(path.join(rootDir, 'dist', 'review-sources.sha256')),
     ).toBe(false);
+  });
+
+  it('keeps refusing by name when the old stamp cannot be removed', () => {
+    // `force` swallows only ENOENT; a permission or lock error on the old
+    // stamp (an antivirus holding a just-written file, a stamp owned by
+    // another user on a shared volume) must not turn the named refusal into
+    // an unhandled crash after every asset is already in place. Leaving the
+    // unremovable stamp is the lesser outcome: at worst a later "stale"
+    // notice whose rebuild advice is still correct.
+    const rootDir = createFixtureRoot();
+    writeFile(rootDir, 'dist/cli.js', 'the bundle\n');
+    writeFile(rootDir, 'dist/review-sources.sha256', 'a'.repeat(64));
+    writeFile(
+      rootDir,
+      'packages/cli/src/commands/review/drive.ts',
+      'export const drive = 1;\n',
+    );
+    const later = new Date(Date.now() + 3_600_000);
+    utimesSync(
+      path.join(rootDir, 'packages/cli/src/commands/review/drive.ts'),
+      later,
+      later,
+    );
+    stubConsole();
+    const stampPath = path.join(rootDir, 'dist', 'review-sources.sha256');
+    vi.spyOn(fs, 'rmSync').mockImplementation((target, ...rest) => {
+      if (String(target) === stampPath) {
+        throw Object.assign(new Error('EACCES: permission denied'), {
+          code: 'EACCES',
+        });
+      }
+      return realRmSync(target, ...rest);
+    });
+
+    expect(() => copyBundleAssets({ root: rootDir })).not.toThrow();
+    expect(existsSync(stampPath)).toBe(true);
+    expect(console.warn).toHaveBeenCalledWith(
+      expect.stringContaining('Could not remove the stale source digest'),
+    );
+    expect(console.warn).toHaveBeenCalledWith(
+      expect.stringContaining('newer than'),
+    );
   });
 
   it('does not stamp a tree with no review sources', () => {
@@ -296,6 +339,44 @@ describe('package asset scripts', () => {
     });
     vi.spyOn(fs, 'statSync').mockImplementation((target, ...rest) => {
       if (String(target) === libDir) throw vanished;
+      return realStatSync(target, ...rest);
+    });
+
+    expect(() => copyBundleAssets({ root: rootDir })).not.toThrow();
+    expect(
+      existsSync(path.join(rootDir, 'dist', 'review-sources.sha256')),
+    ).toBe(false);
+  });
+
+  it('does not fail the bundle when a digest root cannot be measured', () => {
+    // Root-level twin of the unlistable-directory case, for the failure the
+    // `listed` flag cannot cover: both the listing and the stat fail with a
+    // non-ENOENT error (an ancestor transiently without search permission).
+    // Skipping the root would stamp a digest over the surviving roots — the
+    // runtime twin (`sourceFilesUnder`) marks the same case incomplete, so a
+    // skip here is a parity gap that would accuse a byte-for-byte correct
+    // bundle once the tree becomes readable again. `review.ts` is the
+    // survivor OUTSIDE the failing root: without it a skip mutant finds one
+    // file fewer and the partial digest is harder to tell from a refusal.
+    const rootDir = createFixtureRoot();
+    writeFile(
+      rootDir,
+      'packages/cli/src/commands/review/drive.ts',
+      'export const drive = 1;\n',
+    );
+    writeFile(rootDir, 'packages/cli/src/commands/review.ts', 'registers\n');
+    writeFile(rootDir, 'dist/cli.js', 'the bundle\n');
+    stubConsole();
+    const reviewDir = path.join(rootDir, 'packages/cli/src/commands/review');
+    const denied = Object.assign(new Error('EACCES: permission denied'), {
+      code: 'EACCES',
+    });
+    vi.spyOn(fs, 'readdirSync').mockImplementation((target, ...rest) => {
+      if (String(target) === reviewDir) throw denied;
+      return realReaddirSync(target, ...rest);
+    });
+    vi.spyOn(fs, 'statSync').mockImplementation((target, ...rest) => {
+      if (String(target) === reviewDir) throw denied;
       return realStatSync(target, ...rest);
     });
 

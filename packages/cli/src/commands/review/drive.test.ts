@@ -538,16 +538,24 @@ describe('drive warns when the bundle is not built from these sources', () => {
     mkdirSync(join(repo, 'dist'), { recursive: true });
     argv1 = join(repo, 'dist', 'cli.js');
     writeFileSync(argv1, 'bundle');
-    const reviewDir = join(
-      repo,
-      'packages',
-      'cli',
-      'src',
-      'commands',
-      'review',
-    );
+    const commands = join(repo, 'packages', 'cli', 'src', 'commands');
+    const reviewDir = join(commands, 'review');
     mkdirSync(reviewDir, { recursive: true });
     writeFileSync(join(reviewDir, 'drive.ts'), 'the built behaviour');
+    // All three roots, the shape of a real checkout: with only some of them
+    // present the check answers 'could not check' instead of a verdict.
+    writeFileSync(join(commands, 'review.ts'), 'registers');
+    const skillDir = join(
+      repo,
+      'packages',
+      'core',
+      'src',
+      'skills',
+      'bundled',
+      'review',
+    );
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(join(skillDir, 'SKILL.md'), '# skill');
     vi.mocked(writeStderrLineSafe).mockClear();
     vi.mocked(writeStdoutLine).mockClear();
   });
