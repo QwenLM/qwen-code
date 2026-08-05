@@ -106,6 +106,11 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
       expect(i).toBeGreaterThan(-1);
       expect(argv[i + 1]).toBe('srv');
     }
+    // POSITION is load-bearing in start, not just presence: tmux requires
+    // global flags BEFORE the first command name, so a -L displaced past
+    // the `;` separator dies "no server running" on real tmux while every
+    // indexOf probe above stays green.
+    expect(plan.start.slice(2, 4)).toEqual(['-L', 'srv']);
   });
 
   it('starts CONFIG-FREE with a POSIX pane shell, in ONE client invocation', () => {
@@ -197,7 +202,7 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
       rows: 24,
       command: `printf '%s' "it's"`,
       cwd: '/work',
-    readyFile: '/ready',
+      readyFile: '/ready',
     });
     // A single quote in the command must not close either layer's quoting.
     // The expectation is COMPOSED with the same POSIX escaping rule stated
