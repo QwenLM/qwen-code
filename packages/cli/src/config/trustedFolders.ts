@@ -9,6 +9,7 @@ import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
 import {
   atomicWriteFileSync,
+  createDebugLogger,
   FatalConfigError,
   getErrorMessage,
   ideContextStore,
@@ -22,6 +23,8 @@ import {
   getPathComparisonVariants,
   isWithinRoot,
 } from './path-comparison.js';
+
+const debugLogger = createDebugLogger('TRUSTED_FOLDERS');
 
 export const TRUSTED_FOLDERS_FILENAME = 'trustedFolders.json';
 
@@ -255,6 +258,9 @@ function writeTrustedFolders(
   const release = lockfile.lockSync(filePath, {
     realpath: false,
     stale: 10_000,
+    onCompromised: (err) => {
+      debugLogger.warn('trusted folders lock compromised:', err);
+    },
   });
   try {
     let originalContent = '{}';
