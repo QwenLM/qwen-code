@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { DaemonSessionClient } from '@qwen-code/sdk/daemon';
+import {
+  DaemonHttpError,
+  type DaemonSessionClient,
+} from '@qwen-code/sdk/daemon';
 import {
   createDaemonSessionActions,
   getConnectionAfterSessionClear,
@@ -371,14 +374,39 @@ describe('createDaemonSessionActions', () => {
 
   it('keeps the reload abort signal with the pending load', () => {
     const controller = new AbortController();
+    const clearLiveJournalRepair = vi.fn();
     const { actions, pendingSessionLoadRef } = createActionsHarness({
+      clearLiveJournalRepair,
+      connection: { status: 'connected', sessionId: 'session-a' },
+      session: createMockSession('session-a'),
+    });
+
+    void actions
+      .reloadSession(controller.signal, { replaySource: 'memory' })
+      .catch(() => undefined);
+
+    expect(pendingSessionLoadRef.current?.signal).toBe(controller.signal);
+    expect(pendingSessionLoadRef.current?.replaySource).toBe('memory');
+    expect(clearLiveJournalRepair).not.toHaveBeenCalled();
+    clearTimeout(pendingSessionLoadRef.current?.timeout);
+    pendingSessionLoadRef.current?.reject(
+      new DOMException('Test cleanup', 'AbortError'),
+    );
+    pendingSessionLoadRef.current = undefined;
+  });
+
+  it('clears live journal repair state for a configured reload', () => {
+    const controller = new AbortController();
+    const clearLiveJournalRepair = vi.fn();
+    const { actions, pendingSessionLoadRef } = createActionsHarness({
+      clearLiveJournalRepair,
       connection: { status: 'connected', sessionId: 'session-a' },
       session: createMockSession('session-a'),
     });
 
     void actions.reloadSession(controller.signal).catch(() => undefined);
 
-    expect(pendingSessionLoadRef.current?.signal).toBe(controller.signal);
+    expect(clearLiveJournalRepair).toHaveBeenCalledOnce();
     clearTimeout(pendingSessionLoadRef.current?.timeout);
     pendingSessionLoadRef.current?.reject(
       new DOMException('Test cleanup', 'AbortError'),
@@ -518,6 +546,164 @@ describe('createDaemonSessionActions', () => {
     );
   });
 
+  it('reports getTasks failures by default', async () => {
+    const session = createMockSession('session-a');
+    const addNotice = vi.fn((notice) => notice);
+    session.tasks.mockRejectedValueOnce(new Error('Failed to fetch'));
+    const { actions } = createActionsHarness({ addNotice, session });
+
+    await expect(actions.getTasks()).rejects.toThrow('Failed to fetch');
+
+    expect(addNotice).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'daemon.load_tasks.failed',
+        message: 'Get tasks failed: Failed to fetch',
+        operation: 'load_tasks',
+      }),
+    );
+  });
+
+  it('suppresses notices for silent transient getTasks failures', async () => {
+    const session = createMockSession('session-a');
+    const addNotice = vi.fn((notice) => notice);
+    session.tasks.mockRejectedValueOnce(new Error('Failed to fetch'));
+    const { actions } = createActionsHarness({ addNotice, session });
+
+    await expect(actions.getTasks({ silent: true })).rejects.toThrow(
+      'Failed to fetch',
+    );
+
+    expect(addNotice).not.toHaveBeenCalled();
+  });
+
+  it.each(['Request timed out', 'Network error', 'NetworkError'])(
+    'suppresses notices for silent %s getTasks failures',
+    async (message) => {
+      const session = createMockSession('session-a');
+      const addNotice = vi.fn((notice) => notice);
+      session.tasks.mockRejectedValueOnce(new Error(message));
+      const { actions } = createActionsHarness({ addNotice, session });
+
+      await expect(actions.getTasks({ silent: true })).rejects.toThrow(message);
+
+      expect(addNotice).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([500, 408, 429])(
+    'suppresses notices for silent retryable HTTP %i getTasks failures',
+    async (status) => {
+      const session = createMockSession('session-a');
+      const addNotice = vi.fn((notice) => notice);
+      session.tasks.mockRejectedValueOnce(
+        new DaemonHttpError(status, undefined, 'Retryable failure'),
+      );
+      const { actions } = createActionsHarness({ addNotice, session });
+
+      await expect(actions.getTasks({ silent: true })).rejects.toBeInstanceOf(
+        DaemonHttpError,
+      );
+
+      expect(addNotice).not.toHaveBeenCalled();
+    },
+  );
+
+  it('suppresses notices for silent abort getTasks failures', async () => {
+    const session = createMockSession('session-a');
+    const addNotice = vi.fn((notice) => notice);
+    session.tasks.mockRejectedValueOnce(
+      new DOMException('Aborted', 'AbortError'),
+    );
+    const { actions } = createActionsHarness({ addNotice, session });
+
+    await expect(actions.getTasks({ silent: true })).rejects.toMatchObject({
+      name: 'AbortError',
+    });
+
+    expect(addNotice).not.toHaveBeenCalled();
+  });
+
+  it('reports silent hard HTTP getTasks failures once', async () => {
+    const session = createMockSession('session-a');
+    const addNotice = vi.fn((notice) => notice);
+    session.tasks.mockRejectedValueOnce(
+      new DaemonHttpError(403, undefined, 'Forbidden'),
+    );
+    const { actions } = createActionsHarness({ addNotice, session });
+
+    await expect(actions.getTasks({ silent: true })).rejects.toBeInstanceOf(
+      DaemonHttpError,
+    );
+
+    expect(addNotice).toHaveBeenCalledOnce();
+    expect(addNotice).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'daemon.load_tasks.failed',
+        message: 'Get tasks failed: Forbidden',
+        operation: 'load_tasks',
+      }),
+    );
+  });
+
+  it('reports silent hard getTasks failures once', async () => {
+    const session = createMockSession('session-a');
+    const addNotice = vi.fn((notice) => notice);
+    session.tasks.mockRejectedValue(new Error('Malformed response'));
+    const { actions } = createActionsHarness({ addNotice, session });
+
+    await expect(actions.getTasks({ silent: true })).rejects.toThrow(
+      'Malformed response',
+    );
+    await expect(actions.getTasks({ silent: true })).rejects.toThrow(
+      'Malformed response',
+    );
+
+    expect(addNotice).toHaveBeenCalledOnce();
+    expect(addNotice).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'daemon.load_tasks.failed',
+        message: 'Get tasks failed: Malformed response',
+        operation: 'load_tasks',
+      }),
+    );
+  });
+
+  it('resets silent hard getTasks failure dedupe when clearing the session', async () => {
+    const sessionA = createMockSession('session-a');
+    const sessionB = createMockSession('session-b');
+    const addNotice = vi.fn((notice) => notice);
+    sessionA.tasks.mockRejectedValue(new Error('Malformed response'));
+    sessionB.tasks.mockRejectedValue(new Error('Malformed response'));
+    const { actions, sessionRef } = createActionsHarness({
+      addNotice,
+      session: sessionA,
+    });
+
+    await expect(actions.getTasks({ silent: true })).rejects.toThrow(
+      'Malformed response',
+    );
+    await expect(actions.getTasks({ silent: true })).rejects.toThrow(
+      'Malformed response',
+    );
+    await actions.clearSession();
+    sessionRef.current = sessionB as unknown as DaemonSessionClient;
+    await expect(actions.getTasks({ silent: true })).rejects.toThrow(
+      'Malformed response',
+    );
+
+    expect(addNotice).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects getTasks silently when no session exists', async () => {
+    const addNotice = vi.fn();
+    const { actions } = createActionsHarness({ addNotice });
+
+    await expect(actions.getTasks()).rejects.toThrow(
+      'Daemon session is not connected',
+    );
+    expect(addNotice).not.toHaveBeenCalled();
+  });
+
   it('aborts active prompts and rejects pending session loads when clearing', async () => {
     const controller = new AbortController();
     const session = createMockSession('session-a');
@@ -590,6 +776,7 @@ function createActionsHarness(
   opts: {
     activePrompts?: Map<string, ActivePrompt>;
     addNotice?: ReturnType<typeof vi.fn>;
+    clearLiveJournalRepair?: ReturnType<typeof vi.fn>;
     connection?: DaemonConnectionState;
     createDetachedSession?: ReturnType<typeof vi.fn>;
     manualSessionClearRef?: { current: boolean };
@@ -644,6 +831,7 @@ function createActionsHarness(
     resetCurrentSessionActivePrompt: vi.fn(),
     restartEventStream: opts.restartEventStream ?? vi.fn(),
     addNotice: opts.addNotice ?? vi.fn(),
+    clearLiveJournalRepair: opts.clearLiveJournalRepair,
     setConnection: (update) => {
       connection = typeof update === 'function' ? update(connection) : update;
     },
@@ -679,6 +867,7 @@ function createMockSession(sessionId: string) {
     cancel: vi.fn(async () => undefined),
     detach: vi.fn(async () => undefined),
     submitPrompt: vi.fn(async () => ({ promptId: 'prompt-1' })),
+    tasks: vi.fn(async () => ({ v: 1 as const, sessionId, tasks: [] })),
   };
 }
 

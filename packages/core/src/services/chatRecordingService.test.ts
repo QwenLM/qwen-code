@@ -24,9 +24,10 @@ import {
   serializeSnapshot,
   type FileHistorySnapshot,
 } from './fileHistoryService.js';
-import type {
+import {
+  SessionTranscriptChangedError,
   SessionWriterUnavailableError,
-  SessionWriterLease,
+  type SessionWriterLease,
 } from './session-writer-lease.js';
 import type {
   GoalStateRecordPayloadV2,
@@ -110,6 +111,7 @@ describe('ChatRecordingService', () => {
       ),
       assertOwnedAndUnchanged: vi.fn().mockResolvedValue(undefined),
       release: vi.fn().mockResolvedValue(undefined),
+      sealForHandoff: vi.fn().mockResolvedValue(undefined),
     } as unknown as SessionWriterLease;
     chatRecordingService = activateRecording(
       new ChatRecordingService(mockConfig),
@@ -155,6 +157,32 @@ describe('ChatRecordingService', () => {
       expect(record.version).toBe('1.0.0');
       expect(record.gitBranch).toBe('main');
       expect(record.provenance).toBe('real_user');
+    });
+
+    it('stores hook display provenance in systemPayload only when provided', async () => {
+      const taggedParts: Part[] = [
+        { text: 'my prompt' },
+        {
+          text: '<qwen:user-prompt-submit-context>\nextra\n</qwen:user-prompt-submit-context>',
+        },
+      ];
+      chatRecordingService.recordUserMessage(taggedParts, undefined, {
+        displayText: 'my prompt',
+      });
+      chatRecordingService.recordUserMessage([{ text: 'plain prompt' }]);
+      await chatRecordingService.flush();
+
+      const calls = vi.mocked(jsonl.writeLine).mock.calls;
+      const augmented = calls[0][1] as ChatRecord;
+      const plain = calls[1][1] as ChatRecord;
+
+      // The model-bound parts are stored verbatim; the user-authored
+      // projection travels separately in the payload.
+      expect(augmented.message).toEqual({ role: 'user', parts: taggedParts });
+      expect(augmented.systemPayload).toEqual({
+        displayText: 'my prompt',
+      });
+      expect(plain.systemPayload).toBeUndefined();
     });
 
     it('blocks later turns after a generic durable write failure', async () => {
@@ -543,6 +571,52 @@ describe('ChatRecordingService', () => {
         chatRecordingService.readActiveTranscriptChain(),
       ).resolves.toEqual(activeChain);
       expect(order).toEqual(['flush', 'load']);
+    });
+  });
+
+  describe('recordNotificationStrict', () => {
+    it('resolves only after the notification is durably appended', async () => {
+      const pending = chatRecordingService.recordNotificationStrict(
+        [{ text: '<task-notification />' }],
+        'Worker completed.',
+        {
+          taskId: 'worker-1',
+          status: 'completed',
+          kind: 'agent',
+        },
+      );
+
+      await expect(pending).resolves.toBeUndefined();
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record).toMatchObject({
+        type: 'user',
+        subtype: 'notification',
+        systemPayload: {
+          displayText: 'Worker completed.',
+          backgroundTask: {
+            taskId: 'worker-1',
+            status: 'completed',
+            kind: 'agent',
+          },
+        },
+      });
+    });
+
+    it('rejects instead of acknowledging an inactive recorder', async () => {
+      const inactive = new ChatRecordingService(mockConfig);
+
+      await expect(
+        inactive.recordNotificationStrict(
+          [{ text: '<task-notification />' }],
+          'Worker completed.',
+          {
+            taskId: 'worker-1',
+            status: 'completed',
+            kind: 'agent',
+          },
+        ),
+      ).rejects.toMatchObject({ name: 'SessionWriterUnavailableError' });
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
     });
   });
 
@@ -1035,6 +1109,37 @@ describe('ChatRecordingService', () => {
 
       expect(record.message).toBeUndefined();
       expect(record.usageMetadata?.totalTokenCount).toBe(30);
+    });
+  });
+
+  describe('recordRealtimeConversation', () => {
+    it('durably records direct Realtime dialogue as non-model history', async () => {
+      await chatRecordingService.recordRealtimeConversation(
+        [
+          { role: 'user', text: '你好' },
+          { role: 'assistant', text: '你好！' },
+        ],
+        'qwen3.5-omni-plus-realtime',
+      );
+
+      const records = vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.map((call) => call[1] as ChatRecord);
+      expect(records).toHaveLength(2);
+      expect(records[0]).toMatchObject({
+        type: 'user',
+        subtype: 'realtime_message',
+        provenance: 'real_user',
+        message: { role: 'user', parts: [{ text: '你好' }] },
+      });
+      expect(records[1]).toMatchObject({
+        type: 'assistant',
+        subtype: 'realtime_message',
+        provenance: 'assistant_output',
+        model: 'qwen3.5-omni-plus-realtime',
+        message: { role: 'model', parts: [{ text: '你好！' }] },
+      });
+      expect(records[1]?.parentUuid).toBe(records[0]?.uuid);
     });
   });
 
@@ -1561,6 +1666,17 @@ describe('ChatRecordingService', () => {
   });
 
   describe('legacy recorder', () => {
+    it('uses the effective session writer lease gate by default', async () => {
+      mockConfig.getExperimentalZedIntegration = vi.fn().mockReturnValue(true);
+      mockConfig.isSessionWriterLeaseEnabled = vi.fn().mockReturnValue(false);
+      const service = new ChatRecordingService(mockConfig);
+
+      service.recordUserMessage([{ text: 'legacy' }]);
+      await service.flush();
+
+      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+    });
+
     it('retries directory setup after a synchronous failure', async () => {
       const mkdirSpy = vi.spyOn(fs, 'mkdirSync');
       mkdirSpy.mockImplementationOnce(() => {
@@ -1864,6 +1980,91 @@ describe('ChatRecordingService', () => {
       expect(artifact.parentUuid).toBe(before.uuid);
       expect(after.parentUuid).toBe(before.uuid);
       expect(after.parentUuid).not.toBe(artifact.uuid);
+    });
+  });
+
+  describe('close', () => {
+    it('seals instead of releasing after a successful handoff drain', async () => {
+      chatRecordingService.recordUserMessage([{ text: 'durable' }]);
+
+      await expect(
+        chatRecordingService.close({ handoff: true }),
+      ).resolves.toBeUndefined();
+      expect(mockLease.sealForHandoff).toHaveBeenCalledOnce();
+      expect(mockLease.release).not.toHaveBeenCalled();
+      expect(chatRecordingService.hasWriteOwnership()).toBe(false);
+    });
+
+    it('retains ownership when a handoff drain fails', async () => {
+      const failure = new SessionTranscriptChangedError();
+      vi.mocked(mockLease.appendJsonLine).mockRejectedValueOnce(failure);
+      chatRecordingService.recordUserMessage([{ text: 'not durable' }]);
+
+      await expect(chatRecordingService.close({ handoff: true })).rejects.toBe(
+        failure,
+      );
+      expect(mockLease.sealForHandoff).not.toHaveBeenCalled();
+      expect(mockLease.release).not.toHaveBeenCalled();
+      expect(chatRecordingService.hasWriteOwnership()).toBe(true);
+    });
+
+    it('releases the writer lease before reporting a flush failure', async () => {
+      const failure = new SessionTranscriptChangedError();
+      vi.mocked(mockLease.appendJsonLine).mockRejectedValueOnce(failure);
+
+      chatRecordingService.recordUserMessage([{ text: 'not durable' }]);
+
+      await expect(chatRecordingService.close()).rejects.toBe(failure);
+      expect(mockLease.release).toHaveBeenCalledOnce();
+      expect(chatRecordingService.hasWriteOwnership()).toBe(false);
+    });
+
+    it('cuts off new writes synchronously and closes single-flight', async () => {
+      let finishWrite!: () => void;
+      vi.mocked(mockLease.appendJsonLine).mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            finishWrite = resolve;
+          }),
+      );
+      chatRecordingService.recordUserMessage([{ text: 'accepted' }]);
+
+      const first = chatRecordingService.close();
+      const second = chatRecordingService.close();
+      chatRecordingService.recordUserMessage([{ text: 'too late' }]);
+      await Promise.resolve();
+      finishWrite();
+
+      await expect(Promise.all([first, second])).resolves.toEqual([
+        undefined,
+        undefined,
+      ]);
+      expect(mockLease.appendJsonLine).toHaveBeenCalledTimes(1);
+      expect(mockLease.release).toHaveBeenCalledTimes(1);
+      expect(chatRecordingService.hasWriteOwnership()).toBe(false);
+    });
+
+    it('drains a write barrier admitted before the close cutoff', async () => {
+      const operation = vi.fn().mockResolvedValue('snapshot');
+      const barrier = chatRecordingService.runWithWriteBarrier(operation);
+
+      const close = chatRecordingService.close();
+
+      await expect(barrier).resolves.toBe('snapshot');
+      await expect(close).resolves.toBeUndefined();
+      expect(operation).toHaveBeenCalledOnce();
+    });
+
+    it('clears ownership after an error that follows the release commit', async () => {
+      const cleanupFailure = new SessionWriterUnavailableError();
+      Object.defineProperty(mockLease, 'isReleased', {
+        configurable: true,
+        get: () => true,
+      });
+      vi.mocked(mockLease.release).mockRejectedValueOnce(cleanupFailure);
+
+      await expect(chatRecordingService.close()).rejects.toBe(cleanupFailure);
+      expect(chatRecordingService.hasWriteOwnership()).toBe(false);
     });
   });
 

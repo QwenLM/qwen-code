@@ -1,3 +1,4 @@
+import type { RequestPermissionResponse } from '@agentclientprotocol/sdk';
 import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
 import type { ChannelBase, ChannelBaseOptions } from './ChannelBase.js';
 import type { ChannelWebhookConfig } from './ChannelWebhookTask.js';
@@ -179,6 +180,66 @@ export interface ObservedChannelContactGraph {
   groups: ObservedChannelGroup[];
 }
 
+export interface ChannelPromptOwner {
+  kind: 'channel_user';
+  id: string;
+}
+
+export type UserInputPresentationResult =
+  | { kind: 'presented' }
+  | { kind: 'handled' }
+  | { kind: 'unsupported' };
+
+export type UserInputSettlementReason =
+  | 'resolved_outside_presenter'
+  | 'cancelled'
+  | 'run_cancelled';
+
+export type ChannelUserInputResponse = RequestPermissionResponse & {
+  answers?: Record<string, string>;
+};
+
+export interface ChannelUserQuestion {
+  answerKey: string;
+  header: string;
+  question: string;
+  options: Array<{
+    label: string;
+    description: string;
+  }>;
+  multiSelect: boolean;
+}
+
+export interface ChannelUserInputRequestContext {
+  requestId: string;
+  sessionId: string;
+  runId: string;
+  owner: ChannelPromptOwner;
+  target: SessionTarget;
+  precedingSegmentId?: string;
+  questions: ChannelUserQuestion[];
+  submitOptionId: string;
+  onSettled(listener: (reason: UserInputSettlementReason) => void): () => void;
+  respond(response: ChannelUserInputResponse): Promise<boolean>;
+}
+
+export interface ChannelOutputSegmentContext {
+  channelName: string;
+  sessionId: string;
+  runId: string;
+  segmentId: string;
+  owner: ChannelPromptOwner;
+  target: SessionTarget;
+  messageId?: string;
+}
+
+export type ChannelOutputSegmentEndReason =
+  | 'response_boundary'
+  | 'input_requested'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
 export interface ChannelProactiveTarget {
   channelName: string;
   type: 'user' | 'chat';
@@ -190,6 +251,8 @@ export interface ChannelTaskLifecycleBase {
   chatId: string;
   sessionId: string;
   messageId?: string;
+  runId?: string;
+  owner?: ChannelPromptOwner;
   identity: ChannelRuntimeIdentity;
   memoryScope: ChannelRuntimeMemoryScope;
 }
@@ -321,7 +384,9 @@ export type ChannelConfigFieldKind =
   | 'secret'
   | 'boolean'
   | 'number'
-  | 'enum';
+  | 'enum'
+  | 'string-list'
+  | 'record';
 
 export interface ChannelConfigFieldDescriptor {
   key: string;
@@ -330,6 +395,7 @@ export interface ChannelConfigFieldDescriptor {
   required?: boolean;
   envResolvable?: boolean;
   options?: ReadonlyArray<{ value: string; label: string }>;
+  default?: string;
   description?: string;
 }
 

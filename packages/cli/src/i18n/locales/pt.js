@@ -54,7 +54,7 @@ export default {
   'to search history': 'para pesquisar no histórico',
   'to paste images': 'para colar imagens',
   'for external editor': 'para editor externo',
-  'to view transcript': 'para ver a transcrição',
+  'to expand details': 'para expandir os detalhes',
   'Jump through words in the input': 'Pular palavras na entrada',
   'Close dialogs, cancel requests, or quit application':
     'Fechar diálogos, cancelar solicitações ou sair do aplicativo',
@@ -248,9 +248,6 @@ export default {
   'Unknown Step': 'Etapa Desconhecida',
   'Esc to close': 'Esc para fechar',
   Transcript: 'Transcrição',
-  'to close': 'para fechar',
-  'to scroll': 'para rolar',
-  'Failed to render transcript.': 'Falha ao renderizar a transcrição.',
   'Read {{count}} file': 'Leu {{count}} arquivo',
   'Read {{count}} files': 'Leu {{count}} arquivos',
   'Reading {{count}} file': 'Lendo {{count}} arquivo',
@@ -1000,6 +997,14 @@ export default {
     'Já gerando resumo, aguarde a conclusão da solicitação anterior',
   'No conversation found to summarize.':
     'Nenhuma conversa encontrada para resumir.',
+  'Summary path already exists and is not a generated summary: {{path}}':
+    'O caminho do resumo já existe e não é um resumo gerado: {{path}}',
+  'Summary path must be within the project root.':
+    'O caminho do resumo deve estar dentro da raiz do projeto.',
+  'Summary path resolves to an existing directory: {{path}}':
+    'O caminho do resumo resolve para um diretório existente: {{path}}',
+  'Summary path ends with a separator but is an existing file: {{path}}':
+    'O caminho do resumo termina com um separador, mas é um arquivo existente: {{path}}',
   'Failed to generate project context summary: {{error}}':
     'Falha ao gerar resumo do contexto do projeto: {{error}}',
   'Saved project summary to {{filePathForDisplay}}.':
@@ -2227,4 +2232,63 @@ export default {
     'A gravação da sessão foi interrompida após uma falha de escrita. As novas mensagens da sessão afetada não serão salvas. Verifique o espaço em disco e as permissões e inicie uma nova sessão para retomar a gravação. Consulte o log de depuração para obter detalhes.',
   'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
     'A gravação da sessão foi interrompida após uma falha de escrita. As novas mensagens da sessão afetada não serão salvas. Verifique o espaço em disco e as permissões e execute `/clear` para iniciar uma nova sessão gravada. Consulte o log de depuração para obter detalhes.',
+
+  // ==========================================================================
+  // Auto-skill curator (/curator command)
+  // ==========================================================================
+  'Maintain project auto-skills based on recent use.':
+    'Gerenciar as habilidades automáticas do projeto com base no uso recente.',
+  'Show project auto-skill lifecycle status.':
+    'Mostrar o status do ciclo de vida das habilidades automáticas do projeto.',
+  'Run project auto-skill lifecycle maintenance.':
+    'Executar a manutenção do ciclo de vida das habilidades automáticas do projeto.',
+  'Restore an archived project auto-skill.':
+    'Restaurar uma habilidade automática arquivada do projeto.',
+  'Auto-skill curator': 'Gerenciador de habilidades automáticas',
+  'Last run: {{time}}': 'Última execução: {{time}}',
+  'Active: {{count}}': 'Ativas: {{count}}',
+  'Stale: {{count}}': 'Inativas: {{count}}',
+  'Archived: {{count}}': 'Arquivadas: {{count}}',
+  'Stale skills:': 'Habilidades inativas:',
+  'Pinned skills:': 'Habilidades fixadas:',
+  'Archived skills:': 'Habilidades arquivadas:',
+  'Dry run complete.': 'Simulação concluída.',
+  'Curator run complete.': 'Execução do gerenciador concluída.',
+  'Checked: {{count}}': 'Verificadas: {{count}}',
+  'First observed: {{count}}': 'Observadas pela primeira vez: {{count}}',
+  'Marked stale: {{count}}': 'Marcadas como inativas: {{count}}',
+  'Reactivated: {{count}}': 'Reativadas: {{count}}',
+  'Skipped archive collisions: {{count}}':
+    'Colisões de arquivamento ignoradas: {{count}}',
+  'Archive candidates:': 'Candidatas ao arquivamento:',
+  'Skipped archive collisions:': 'Colisões de arquivamento ignoradas:',
+  'Skipped rename errors: {{count}}':
+    'Erros de renomeação ignorados: {{count}}',
+  'Skipped rename errors:': 'Erros de renomeação ignorados:',
+  '{{verb}}: {{count}}': '{{verb}}: {{count}}',
+  'Would archive': 'Seriam arquivadas',
+  Archived: 'Arquivadas',
+  'Failed to read auto-skill curator status: {{message}}':
+    'Falha ao ler o status do gerenciador de habilidades automáticas: {{message}}',
+  'Usage: /curator run [--dry-run]': 'Uso: /curator run [--dry-run]',
+  'Failed to run auto-skill curator: {{message}}':
+    'Falha ao executar o gerenciador de habilidades automáticas: {{message}}',
+  'Usage: /curator restore <directory>': 'Uso: /curator restore <diretório>',
+  'Restored auto-skill: {{name}}': 'Habilidade automática restaurada: {{name}}',
+  'Failed to restore auto-skill: {{message}}':
+    'Falha ao restaurar a habilidade automática: {{message}}',
+  'Exclude an auto-skill from automatic maintenance.':
+    'Excluir uma habilidade automática da manutenção automática.',
+  'Return a pinned auto-skill to automatic maintenance.':
+    'Retornar uma habilidade automática fixada à manutenção automática.',
+  'Usage: /curator pin <directory>': 'Uso: /curator pin <diretório>',
+  'Usage: /curator unpin <directory>': 'Uso: /curator unpin <diretório>',
+  'Pinned auto-skill: {{name}}': 'Habilidade automática fixada: {{name}}',
+  'Unpinned auto-skill: {{name}}': 'Habilidade automática desafixada: {{name}}',
+  'Failed to update auto-skill pin: {{message}}':
+    'Falha ao atualizar a fixação da habilidade automática: {{message}}',
+  'Auto-skill curator changes are disabled in safe mode.':
+    'As alterações do gerenciador de habilidades automáticas estão desativadas no modo seguro.',
+  'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
+    'As alterações do gerenciador de habilidades automáticas estão disponíveis apenas em espaços de trabalho confiáveis. Marque esta pasta como confiável usando `/trust` e tente novamente.',
 };

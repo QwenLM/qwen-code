@@ -21,10 +21,26 @@ export interface ExternalContextItem {
   updatedAt?: string;
 }
 
-export interface ExternalContextConfig {
+export interface ExternalContextConfigV1 {
   version: 1;
   timeoutMs: number;
   provider: ProviderConfig;
+}
+
+export interface ExternalContextConfigV2 {
+  version: 2;
+  timeoutMs: number;
+  autoRecall: AutoRecallConfig;
+  provider: ProviderConfig;
+}
+
+export type ExternalContextConfig =
+  | ExternalContextConfigV1
+  | ExternalContextConfigV2;
+
+export interface AutoRecallConfig {
+  repositoryRoot: string;
+  timeoutMs: number;
 }
 
 export type ProviderConfig = Mem0ProviderConfig | GenericHttpProviderConfig;

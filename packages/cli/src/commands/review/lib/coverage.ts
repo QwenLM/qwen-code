@@ -71,6 +71,7 @@ import {
 } from './roster.js';
 import { BRIEFS } from './agent-briefs.js';
 import { chunkIdsProblem } from './diff-plan.js';
+import { readBudgetStop } from './deadline.js';
 import { shellQuotePath } from './shell-quote.js';
 
 export interface CoverageFromTranscripts {
@@ -108,6 +109,20 @@ export interface CoverageFromTranscripts {
    * rules with a three-sentence summary of its own.
    */
   rewrittenPrompts: string[];
+  /**
+   * Launches whose prompt drifted from the built block while the payload
+   * provably arrived anyway: the transcript shows the agent opened the brief
+   * the block points at and did the work (a chunk agent also opened the
+   * diff). The brief is where the method, the severity bar and the project
+   * rules live — the launch prompt is a pointer to it — so a drifted pointer
+   * with a proven brief-read is a NOTE, never a failure and never a
+   * relaunch. Measured: a model asked to copy twelve blocks normalized one
+   * word in every block's tail ("you" → "it"), every role failed the
+   * verbatim match, and the run relaunched all twelve agents — the most
+   * expensive repair in the pipeline, spent redelivering text the agents had
+   * already acted on.
+   */
+  driftedLaunches: string[];
   /**
    * Agents the plan requires that this review did not launch.
    *
@@ -220,7 +235,7 @@ function readPlan(path: string): { plan: Plan; mtimeMs: number } {
 }
 
 /** `chunk 13 of 25` — written into the prompt by `agent-prompt`, in code. */
-const CHUNK_RE = /\bchunk\s+(\d+)\s+of\s+\d+\b/i;
+export const CHUNK_RE = /\bchunk\s+(\d+)\s+of\s+\d+\b/i;
 
 /** The chunk this agent owns, when it was launched to own one. */
 function assignedChunk(rec: AgentRecord): number | null {
@@ -359,6 +374,17 @@ export function coverageFromTranscripts(
   const idleAgents: string[] = [];
   const unopenedAgents: string[] = [];
   const rewrittenPrompts: string[] = [];
+  const driftedLaunches: string[] = [];
+  // Did this record's agent open the brief recorded under `key`? Compared as a
+  // whole JSON string value (`successfulCallArgs` are serialized args), so a
+  // `${brief}.bak` cannot be credited for the brief — the same trap
+  // `parseTranscript` avoids for the diff path. Used by the verbatim-drift
+  // rescue in both the chunk loop and the roster walk, and by the roster's
+  // matching seed below.
+  const openedBriefOf = (rec: AgentRecord, key: string): boolean => {
+    const needle = JSON.stringify(briefPath(planPath, key));
+    return rec.successfulCallArgs.some((a) => a.includes(needle));
+  };
   const disclosures: CoverageFromTranscripts['disclosures'] = [];
   // The one source for both registers: the structural entry feeds the posted
   // body (compose-review), and the returned prose feeds the stderr arrays —
@@ -511,15 +537,29 @@ export function coverageFromTranscripts(
           );
         }
       } else if (!wasDeliveredVerbatim(rec.launchPrompt, b)) {
-        rewrittenThisRecord = true;
-        if (!superseded(rec, chunk)) {
-          rewrittenPrompts.push(
-            disclose(
-              name,
-              'launched with a prompt that is not the one the CLI built',
-              { reasonZh: '启动时使用的 prompt 不是 CLI 构建的那一份' },
-            ),
-          );
+        // Drifted launch, payload proven: the agent opened this chunk's brief
+        // and opened the diff. The brief carries the method and the rules —
+        // the launch prompt only points at it — so this is a NOTE, not a
+        // relaunch. Not pushed through `disclose()`: the posted body caps on
+        // disclosures, and a delivery that demonstrably arrived caps nothing.
+        if (openedBriefOf(rec, `chunk-${chunk}`) && rec.diffToolCalls > 0) {
+          if (!superseded(rec, chunk)) {
+            driftedLaunches.push(
+              `${name} — launched with a near-verbatim prompt; its brief was ` +
+                'opened and the diff was read, so the delivery stands',
+            );
+          }
+        } else {
+          rewrittenThisRecord = true;
+          if (!superseded(rec, chunk)) {
+            rewrittenPrompts.push(
+              disclose(
+                name,
+                'launched with a prompt that is not the one the CLI built',
+                { reasonZh: '启动时使用的 prompt 不是 CLI 构建的那一份' },
+              ),
+            );
+          }
         }
       }
     }
@@ -631,16 +671,12 @@ export function coverageFromTranscripts(
   // where the transcript also opened the requirement's brief, then extended over
   // all verbatim edges.
   const buildable = roster.filter((r) => builtOf(r.key) !== undefined);
-  const openedBrief = (rec: AgentRecord, key: string): boolean => {
-    const needle = JSON.stringify(briefPath(planPath, key));
-    return rec.successfulCallArgs.some((a) => a.includes(needle));
-  };
   const candidatesOf = buildable.map((req) => {
     const b = builtOf(req.key) as string;
     return records.filter((r) => wasDeliveredVerbatim(r.launchPrompt, b));
   });
   const openedOfReq = buildable.map((req, i) =>
-    candidatesOf[i].filter((r) => openedBrief(r, req.key)),
+    candidatesOf[i].filter((r) => openedBriefOf(r, req.key)),
   );
   const matchedRec = new Map<AgentRecord, number>();
   const augment = (
@@ -670,6 +706,10 @@ export function coverageFromTranscripts(
   const assignment = new Map<number, AgentRecord>();
   for (const [rec, i] of matchedRec) assignment.set(i, rec);
 
+  // Transcripts claimed by the drift rescue below — one role per transcript,
+  // exactly like the verbatim matching, or a single curious agent that opened
+  // every brief in the record dir would certify the whole roster.
+  const rescued = new Set<AgentRecord>();
   let buildableIdx = -1;
   for (const req of roster) {
     const b = builtOf(req.key);
@@ -699,6 +739,45 @@ export function coverageFromTranscripts(
       // Not assignable even under a MAXIMUM matching — so this is provably a
       // shortage of transcripts, not an artifact of claim order.
       const anyMatch = candidatesOf[buildableIdx].length > 0;
+      // The drift rescue: no launch contains this block verbatim, but some
+      // agent opened THIS role's brief and did real work. The brief-open is a
+      // tool call the harness recorded — not prose, not something a
+      // paraphrasing orchestrator can fabricate — and the brief is where the
+      // dimension, the severity bar and the project rules live. Injective like
+      // the matching above: a transcript already credited with a verbatim
+      // block, or already rescued for another role, cannot certify a second
+      // one. Only for `anyMatch === false`: when a verbatim launch exists but
+      // was spent elsewhere, the one-agent-many-blocks diagnosis below is the
+      // truer one.
+      if (!anyMatch) {
+        // A role whose brief says it reads the diff must also show a diff
+        // read — a drifted launch that dropped the read list is not rescued
+        // on brief-open alone. Roles that legitimately never open the diff
+        // (Build & Test, Issue Fidelity) are exempt by their own brief's
+        // `readsDiff`; an unknown role fails safe and requires the read.
+        const needsDiff = req.role === 'chunk' || BRIEFS[req.role].readsDiff;
+        const rescue = records.find(
+          (r) =>
+            !matchedRec.has(r) &&
+            !rescued.has(r) &&
+            r.successfulToolCalls > 0 &&
+            (!needsDiff || r.diffToolCalls > 0) &&
+            openedBriefOf(r, req.key),
+        );
+        if (rescue !== undefined) {
+          rescued.add(rescue);
+          // A chunk requirement rescued here was already noted by the chunk
+          // loop above, which flags the same record — one NOTE per agent.
+          if (req.role !== 'chunk') {
+            driftedLaunches.push(
+              `${roleLabel(req)} — no launch matched its block verbatim, ` +
+                "but an agent opened this role's brief and did the work, so " +
+                'the delivery stands',
+            );
+          }
+          continue;
+        }
+      }
       missingRoles.push(
         disclose(
           roleLabel(req),
@@ -789,6 +868,7 @@ export function coverageFromTranscripts(
     idleAgents,
     unopenedAgents,
     rewrittenPrompts,
+    driftedLaunches,
     missingRoles,
     missingRoleSelectors,
     disclosures,
@@ -859,7 +939,13 @@ type GapText = Record<Exclude<Delivery, 'ok'>, GapEntry>;
 const rebuildFix = (role: 'verify' | 'reverse-audit', noun: string): string =>
   `build the prompt with \`"\${QWEN_CODE_CLI:-qwen}" review agent-prompt ` +
   `--plan <plan> --role ${role} --findings <file> [--rules <rules file>] ` +
-  `[--round <k>]\` ` +
+  // --round is MANDATORY for a reverse-audit build (`agent-prompt` refuses a
+  // round-less call — the label keys the record and the budget gate's
+  // accounting), so the paste-and-run repair must not bracket it as optional:
+  // an orchestrator honouring the bracket convention would have its first
+  // repair attempt rejected. Verify genuinely takes it or not (only a repeat
+  // verification round passes one), so its brackets stay.
+  (role === 'reverse-audit' ? `--round <k>\` ` : `[--round <k>]\` `) +
   (role === 'reverse-audit'
     ? `(an early round with nothing confirmed passes an empty file; `
     : `(pass the shard's findings, never an empty file — a verifier that sees ` +
@@ -1170,8 +1256,23 @@ export function verificationGaps(
     (k) => k === 'reverse-audit' || k.startsWith('reverse-audit--'),
   );
   const reverse = bestDelivery(reverseKeys);
+  // A budget-stop marker means the round builder itself refused the reverse
+  // audit on the run's time budget. Exactly ONE gap shape is then by design:
+  // `not-built` — the refusal writes no record, so an audit with no records
+  // is the audit the gate stopped, and the gap's FIX (rebuild the round)
+  // would be refused by the very gate that stopped it — exit 4,
+  // deterministically, time only moves forward. compose-review synthesizes
+  // the marker's own disclosure instead: it names the stop honestly and caps
+  // the verdict. Every OTHER shape describes a round that predates the
+  // refusal — a built round nobody launched, a launch the orchestrator
+  // rewrote, a brief never opened — and those disclosures are still owed: a
+  // hand-written round-1 launch is exactly as undelivered when round 3 later
+  // hits the budget, and suppressing it would let "stopped before round 3"
+  // imply the rounds that did run were faithful.
+  const budgetStopped = readBudgetStop(planPath) !== null;
+  const reverseByDesign = budgetStopped && reverse === 'not-built';
   // A repairable reverse-audit gap only at high: medium is complete without it.
-  const reverseGap = !balancedMedium && reverse !== 'ok';
+  const reverseGap = !balancedMedium && !reverseByDesign && reverse !== 'ok';
   if (reverseGap) {
     // The fix template carries `--plan <plan>`; a literal `<plan>` pasted into a
     // POSIX shell parses as input redirection, so the one repair round Step 6

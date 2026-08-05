@@ -12,7 +12,7 @@ import {
   normalizeSearchQuery,
   renderExternalContext,
 } from './context.js';
-import { loadConfig } from './config.js';
+import { ConfigurationError, loadConfig } from './config.js';
 import { createProvider } from './providers.js';
 import type {
   ExternalContextConfig,
@@ -82,6 +82,11 @@ export function createExternalContextMcpServer(
 
 export async function runMcp(): Promise<void> {
   const config = await loadConfig();
+  if (config.version !== 1) {
+    throw new ConfigurationError(
+      'External context MCP server requires a version 1 configuration.',
+    );
+  }
   const provider = createProvider(config.provider);
   const server = createExternalContextMcpServer({ config, provider });
   await server.connect(new StdioServerTransport());

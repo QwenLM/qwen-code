@@ -37,6 +37,8 @@ Each discovered MCP tool is wrapped in a `DiscoveredMCPTool` instance that:
 - **Processes responses** for both the LLM context and user display
 - **Maintains connection state** and handles timeouts
 
+After a connection loss, the current invocation is replayed only for a trusted server in a trusted workspace when the tool explicitly declares `idempotentHint: true`, or declares `readOnlyHint: true` without a conflicting `destructiveHint: true` or `idempotentHint: false`. Missing or conflicting annotations, and annotations from an untrusted server or workspace, are treated as unsafe because the server may have completed a side effect before the response was lost. Tool authors should publish accurate MCP annotations; administrators should still verify them before enabling server trust.
+
 ### Transport Mechanisms
 
 The CLI supports three MCP transport types:
@@ -114,7 +116,7 @@ Each server configuration supports the following properties:
 - **`env`** (object): Environment variables for the server process. Values can reference environment variables using `$VAR_NAME` or `${VAR_NAME}` syntax
 - **`cwd`** (string): Working directory for Stdio transport
 - **`timeout`** (number): Request timeout in milliseconds (default: 600,000ms = 10 minutes)
-- **`trust`** (boolean): When `true`, bypasses all tool call confirmations for this server (default: `false`)
+- **`trust`** (boolean): When `true`, bypasses tool call confirmations for this server in a trusted workspace (default: `false`)
 - **`includeTools`** (string[]): List of tool names to include from this MCP server. When specified, only the tools listed here will be available from this server (allowlist behavior). If not specified, all tools from the server are enabled by default.
 - **`excludeTools`** (string[]): List of tool names to exclude from this MCP server. Tools listed here will not be available to the model, even if they are exposed by the server. **Note:** `excludeTools` takes precedence over `includeTools` - if a tool is in both lists, it will be excluded.
 - **`targetAudience`** (string): The OAuth Client ID allowlisted on the IAP-protected application you are trying to access. Used with `authProviderType: 'service_account_impersonation'`.
@@ -446,9 +448,10 @@ Each `DiscoveredMCPTool` implements sophisticated confirmation logic:
 #### Trust-based Bypass
 
 ```typescript
-if (this.trust) {
-  return false; // No confirmation needed
+if (this.trust === true && this.cliConfig?.isTrustedFolder()) {
+  return 'allow';
 }
+return 'ask';
 ```
 
 #### Dynamic Allow-listing
@@ -618,7 +621,7 @@ The MCP integration tracks several states:
 
 ### Security Considerations
 
-- **Trust settings:** The `trust` option bypasses all confirmation dialogs. Use cautiously and only for servers you completely control
+- **Trust settings:** The `trust` option bypasses tool confirmation dialogs only in a trusted workspace. Use cautiously and only for servers you completely control
 - **Access tokens:** Be security-aware when configuring environment variables containing API keys or tokens
 - **Sandbox compatibility:** When using sandboxing, ensure MCP servers are available within the sandbox environment
 - **Private data:** Using broadly scoped personal access tokens can lead to information leakage between repositories
@@ -789,7 +792,7 @@ qwen mcp add [options] <name> <commandOrUrl> [args...]
 - `-e, --env`: Set environment variables (e.g. -e KEY=value).
 - `-H, --header`: Set HTTP headers for SSE and HTTP transports (e.g. -H "X-Api-Key: abc123" -H "Authorization: Bearer abc123").
 - `--timeout`: Set connection timeout in milliseconds.
-- `--trust`: Trust the server (bypass all tool call confirmation prompts).
+- `--trust`: Trust the server (bypass its tool call confirmations in a trusted workspace).
 - `--description`: Set the description for the server.
 - `--include-tools`: A comma-separated list of tools to include.
 - `--exclude-tools`: A comma-separated list of tools to exclude.

@@ -31,7 +31,6 @@ import {
   resetSessionTranscriptIndexCacheForTest,
   setSessionTranscriptIndexCacheMaxBytesForTest,
   SessionTranscriptCursorCodec,
-  SessionTranscriptPageTooLargeError,
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptReader,
 } from './session-transcript-reader.js';
@@ -178,7 +177,7 @@ describe('SessionTranscriptReader', () => {
     expect(page.records.map((item) => item.uuid)).toEqual(['u1']);
   });
 
-  it.each([0, -1, SESSION_TRANSCRIPT_MAX_LIMIT + 1, 1.5])(
+  it.each([0, -1, NaN, Infinity, SESSION_TRANSCRIPT_MAX_LIMIT + 1, 1.5])(
     'rejects invalid page limit %s',
     async (limit) => {
       await expect(
@@ -229,7 +228,7 @@ describe('SessionTranscriptReader', () => {
     expect(second.hasMore).toBe(false);
   });
 
-  it('rejects a single aggregate record over the page byte budget', async () => {
+  it('returns a single aggregate record that exceeds the page byte budget', async () => {
     const first = record('u1', null, 'first');
     const second = record('u1', null, 'second fragment');
     await writeRecords([first, second, record('a1', 'u1', 'reply')]);
@@ -237,17 +236,17 @@ describe('SessionTranscriptReader', () => {
       Buffer.byteLength(JSON.stringify(first)) +
       Buffer.byteLength(JSON.stringify(second));
 
-    await expect(
-      new SessionTranscriptReader(workspaceDir).readPage(sessionId, {
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+      {
         limit: 1,
         maxBytes: aggregateBytes - 1,
-      }),
-    ).rejects.toMatchObject({
-      name: 'SessionTranscriptPageTooLargeError',
-      sessionId,
-      pageBytes: aggregateBytes,
-      maxBytes: aggregateBytes - 1,
-    } satisfies Partial<SessionTranscriptPageTooLargeError>);
+      },
+    );
+
+    // An indivisible record rides over budget rather than dead-ending the page.
+    expect(page.records.map((item) => item.uuid)).toEqual(['u1']);
+    expect(page.hasMore).toBe(true);
   });
 
   it('pages only the active parentUuid chain and skips abandoned branches', async () => {
@@ -291,7 +290,7 @@ describe('SessionTranscriptReader', () => {
       limit: 2,
     });
     const second = await reader.readPage(sessionId, {
-      cursor: encodeCursor(first.nextCursorState!),
+      beforeRecordId: first.records[0]!.uuid,
       limit: 2,
     });
 
@@ -494,6 +493,51 @@ describe('SessionTranscriptReader', () => {
     expect(page.nextCursorState).toBeUndefined();
   });
 
+  it('does not page into inherited side-task context', async () => {
+    const inheritedUser = {
+      ...record('parent-u1', 'source', 'parent prompt'),
+      forkedFrom: {
+        sessionId: 'parent-session',
+        messageUuid: 'parent-u1',
+      },
+    };
+    const inheritedAssistant = {
+      ...record('parent-a1', 'parent-u1', 'parent answer'),
+      forkedFrom: {
+        sessionId: 'parent-session',
+        messageUuid: 'parent-a1',
+      },
+    };
+    const sessionSource = {
+      ...record('source', null, 'session source'),
+      type: 'system' as const,
+      subtype: 'session_source' as const,
+      systemPayload: {
+        sourceType: 'side_task',
+        sourceId: 'parent-session',
+      },
+    };
+    await writeRecords([
+      sessionSource,
+      inheritedUser,
+      inheritedAssistant,
+      record('side-u1', 'parent-a1', 'side prompt'),
+      record('side-a1', 'side-u1', 'side answer'),
+    ]);
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+      { direction: 'backward', limit: 100 },
+    );
+
+    expect(page.records.map((item) => item.uuid)).toEqual([
+      'source',
+      'side-u1',
+      'side-a1',
+    ]);
+    expect(page.hasMore).toBe(false);
+  });
+
   it('keeps backward pages within a normal user turn boundary', async () => {
     const toolCall = record('a-tool', 'u1', 'call tool');
     const toolResult = {
@@ -550,7 +594,7 @@ describe('SessionTranscriptReader', () => {
     expect(page.hasMore).toBe(false);
   });
 
-  it('rejects a backward turn that exceeds maxBytes after alignment', async () => {
+  it('returns a backward turn that exceeds maxBytes after alignment', async () => {
     const toolCall = record('a-tool', 'u1', 'call tool');
     const toolResult = {
       ...record('t1', 'a-tool', 'tool result'),
@@ -565,13 +609,23 @@ describe('SessionTranscriptReader', () => {
       record('u2', 'a-final', 'next prompt'),
     ]);
 
-    await expect(
-      new SessionTranscriptReader(workspaceDir).readPage(sessionId, {
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+      {
         beforeRecordId: 'u2',
         limit: 2,
         maxBytes: Buffer.byteLength(JSON.stringify(finalAnswer)),
-      }),
-    ).rejects.toBeInstanceOf(SessionTranscriptPageTooLargeError);
+      },
+    );
+
+    // The turn cannot be split across pages, so it rides over budget whole.
+    expect(page.records.map((item) => item.uuid)).toEqual([
+      'u1',
+      'a-tool',
+      't1',
+      'a-final',
+    ]);
+    expect(page.hasMore).toBe(false);
   });
 
   it('rejects a backward boundary outside the active chain', async () => {
@@ -685,6 +739,54 @@ describe('SessionTranscriptReader', () => {
         }),
       }),
     ).rejects.toBeInstanceOf(SessionTranscriptSnapshotUnavailableError);
+  });
+
+  it('accepts a file identity whose inode exceeds 2^53 (Windows file index)', async () => {
+    await writeRecords([
+      record('u1', null, 'root'),
+      record('a1', 'u1', 'assistant'),
+    ]);
+
+    const reader = new SessionTranscriptReader(workspaceDir);
+    const first = await reader.readPage(sessionId, { limit: 1 });
+    // Windows derives Stats.ino from a 64-bit file index that exceeds 2^53, so
+    // a safe-integer gate would reject every cursor there. The large inode must
+    // survive shape validation and reach the identity match (which then fails
+    // against the real file), rather than being rejected as a non-safe integer.
+    const bigIno = 2 ** 53 + 2;
+    expect(Number.isSafeInteger(bigIno)).toBe(false);
+
+    await expect(
+      reader.readPage(sessionId, {
+        cursor: encodeCursor({
+          ...first.nextCursorState!,
+          fileIdentity: { dev: 1, ino: bigIno },
+        }),
+      }),
+    ).rejects.toBeInstanceOf(SessionTranscriptSnapshotUnavailableError);
+  });
+
+  it('still rejects a non-safe-integer byte offset in a cursor', async () => {
+    await writeRecords([
+      record('u1', null, 'root'),
+      record('a1', 'u1', 'assistant'),
+    ]);
+
+    const reader = new SessionTranscriptReader(workspaceDir);
+    const first = await reader.readPage(sessionId, { limit: 1 });
+    // snapshotSize/position are arithmetic operands and stay safe-integer even
+    // though dev/ino were relaxed for Windows.
+    const unsafeOffset = 2 ** 53 + 2;
+    expect(Number.isSafeInteger(unsafeOffset)).toBe(false);
+
+    await expect(
+      reader.readPage(sessionId, {
+        cursor: encodeCursor({
+          ...first.nextCursorState!,
+          snapshotSize: unsafeOffset,
+        }),
+      }),
+    ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
   });
 
   it('rejects cursors whose position is past the active chain', async () => {
@@ -916,12 +1018,15 @@ describe('SessionTranscriptReader', () => {
       `${gluedLine}\n${JSON.stringify(record('a1', 'u1', 'reply'))}\n`,
     );
 
-    await expect(
-      new SessionTranscriptReader(workspaceDir).readPage(sessionId, {
-        limit: 1,
-        maxBytes: Buffer.byteLength(gluedLine) * 2 - 1,
-      }),
-    ).rejects.toBeInstanceOf(SessionTranscriptPageTooLargeError);
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+      { limit: 2, maxBytes: Buffer.byteLength(gluedLine) * 2 },
+    );
+
+    // Conservative per-fragment counting spends the whole budget on the glued
+    // aggregate, so the next record must wait for the following page.
+    expect(page.records.map((item) => item.uuid)).toEqual(['u1']);
+    expect(page.hasMore).toBe(true);
   });
 
   it('skips non-ChatRecord JSON lines while indexing', async () => {
@@ -1136,5 +1241,62 @@ describe('SessionTranscriptReader', () => {
         (r) => r.uuid,
       ),
     ).toEqual(['33333333', '44444444']);
+  });
+
+  describe('boundary and turn-start edge cases', () => {
+    it('makes exact turn-boundary cuts when limit aligns perfectly', async () => {
+      await writeRecords([
+        record('u1', null, 'first prompt'),
+        record('a1', 'u1', 'first answer'),
+        record('u2', 'a1', 'second prompt'),
+        record('a2', 'u2', 'second answer'),
+      ]);
+
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const first = await reader.readPage(sessionId, {
+        beforeRecordId: 'u2',
+        limit: 2,
+      });
+
+      expect(first.records.map((item) => item.uuid)).toEqual(['u1', 'a1']);
+      expect(first.hasMore).toBe(false);
+      expect(first.nextCursorState).toBeUndefined();
+    });
+
+    it('discovers backward boundary when beforeRecordId is an assistant record', async () => {
+      await writeRecords([
+        record('u1', null, 'first prompt'),
+        record('a1', 'u1', 'first answer'),
+        record('u2', 'a1', 'second prompt'),
+        record('a2', 'u2', 'second answer'),
+      ]);
+
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const page = await reader.readPage(sessionId, {
+        beforeRecordId: 'a2',
+        limit: 2,
+      });
+
+      expect(page.records.map((item) => item.uuid)).toEqual(['u2']);
+      expect(page.direction).toBe('backward');
+      expect(page.hasMore).toBe(true);
+    });
+
+    it('pages backward through records without a normal user turn start', async () => {
+      await writeRecords([
+        record('a1', null, 'orphan assistant reply'),
+        record('u1', 'a1', 'second prompt'),
+        record('a2', 'u1', 'second answer'),
+      ]);
+
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const page = await reader.readPage(sessionId, {
+        beforeRecordId: 'u1',
+        limit: 5,
+      });
+
+      expect(page.records.map((item) => item.uuid)).toEqual(['a1']);
+      expect(page.hasMore).toBe(false);
+    });
   });
 });

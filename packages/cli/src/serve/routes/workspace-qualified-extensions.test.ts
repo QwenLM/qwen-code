@@ -96,6 +96,7 @@ function makeRuntime(
   return {
     workspaceId: opts.workspaceId,
     workspaceCwd,
+    sessionRuntimeBaseDir: path.join(workspaceCwd, '.runtime'),
     primary: opts.primary,
     trusted: opts.trusted,
     env: { mode: 'parent-process', overlayKeys: [] },

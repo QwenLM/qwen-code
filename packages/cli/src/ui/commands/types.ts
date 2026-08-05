@@ -8,6 +8,8 @@ import type { MutableRefObject, ReactNode } from 'react';
 import type { Content, PartListUnion } from '@google/genai';
 import type {
   Config,
+  GoalStateResponse,
+  GoalStateCause,
   Logger,
   SessionListItem,
 } from '@qwen-code/qwen-code-core';
@@ -139,6 +141,21 @@ export interface MessageActionReturn {
   content: string;
 }
 
+export type GoalCommandOperation =
+  | { kind: 'status' }
+  | { kind: 'set'; objective: string }
+  | { kind: 'edit'; objective: string }
+  | { kind: 'pause' }
+  | { kind: 'resume' }
+  | { kind: 'clear' };
+
+export interface GoalControlActionReturn {
+  type: 'goal_control';
+  operation: GoalCommandOperation;
+  response: GoalStateResponse;
+  cause?: GoalStateCause;
+}
+
 /**
  * The return type for a command action that streams multiple messages.
  * Used for long-running operations that need to send progress updates.
@@ -189,6 +206,7 @@ export interface OpenDialogActionReturn {
     | 'fast-model'
     | 'voice-model'
     | 'vision-model'
+    | 'compaction-model'
     | 'image-model'
     | 'subagent_create'
     | 'subagent_list'
@@ -268,6 +286,7 @@ export type SlashCommandActionReturn =
   | OpenDialogActionReturn
   | LoadHistoryActionReturn
   | SubmitPromptActionReturn
+  | GoalControlActionReturn
   | ConfirmShellCommandsActionReturn
   | ConfirmActionReturn;
 
@@ -365,6 +384,13 @@ export interface SlashCommand {
    * See getEffectiveSupportedModes() in commandUtils.ts for the full logic.
    */
   supportedModes?: ExecutionMode[];
+
+  /**
+   * Whether the interactive UI may execute this command immediately while a
+   * model response is streaming. Commands opt in only when they do not submit
+   * a model turn or mutate conversation state owned by the active turn.
+   */
+  canRunDuringStreaming?: boolean;
 
   // ── Phase 1: visibility ────────────────────────────────────────────────
   /**

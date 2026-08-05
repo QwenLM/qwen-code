@@ -184,6 +184,7 @@ export default {
   'toolDisplayName.Agent': 'Agent',
   'toolDisplayName.Artifact': '制品',
   'toolDisplayName.RecordArtifact': '记录制品',
+  'toolDisplayName.DisplayImage': '显示图片',
   'toolDisplayName.Skill': '技能',
   'toolDisplayName.EnterPlanMode': '进入计划模式',
   'toolDisplayName.ExitPlanMode': '退出计划模式',
@@ -266,7 +267,7 @@ export default {
   'to search history': '搜索历史',
   'to paste images': '粘贴图片',
   'for external editor': '外部编辑器',
-  'to view transcript': '查看完整记录',
+  'to expand details': '展开详情',
   'Jump through words in the input': '在输入中按单词跳转',
   'Close dialogs, cancel requests, or quit application':
     '关闭对话框、取消请求或退出应用程序',
@@ -489,9 +490,6 @@ export default {
   'Unknown Step': '未知步骤',
   'Esc to close': '按 Esc 关闭',
   Transcript: '完整记录',
-  'to close': '关闭',
-  'to scroll': '滚动',
-  'Failed to render transcript.': '无法渲染完整记录。',
   'Read {{count}} file': '读取了 {{count}} 个文件',
   'Read {{count}} files': '读取了 {{count}} 个文件',
   'Reading {{count}} file': '正在读取 {{count}} 个文件',
@@ -1412,6 +1410,13 @@ export default {
   'Already generating summary, wait for previous request to complete':
     '正在生成摘要，请等待上一个请求完成',
   'No conversation found to summarize.': '未找到要总结的对话',
+  'Summary path already exists and is not a generated summary: {{path}}':
+    '摘要路径已存在且不是生成的摘要：{{path}}',
+  'Summary path must be within the project root.': '摘要路径必须在项目根目录内',
+  'Summary path resolves to an existing directory: {{path}}':
+    '摘要路径解析为一个已存在的目录：{{path}}',
+  'Summary path ends with a separator but is an existing file: {{path}}':
+    '摘要路径以分隔符结尾，但是一个已存在的文件：{{path}}',
   'Failed to generate project context summary: {{error}}':
     '生成项目上下文摘要失败：{{error}}',
   'Saved project summary to {{filePathForDisplay}}.':
@@ -1434,8 +1439,8 @@ export default {
     '切换此会话的模型（--fast 可设置建议模型，--voice 可设置语音转写模型，[model-id] 可立即切换）',
   'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
     '切换此会话的模型（--fast 建议模型，--voice 语音转写模型，--vision 视觉桥接模型，--project 持久化到项目设置，--global 持久化到用户设置，[model-id] 立即切换，或用 [model-id] [prompt] 在另一个模型上运行一次性提示；内联提示按原文发送，不展开 @file）',
-  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --image for the image generation model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
-    '切换此会话的模型（--fast 建议模型，--voice 语音转写模型，--vision 视觉桥接模型，--image 图像生成模型，--project 持久化到项目设置，--global 持久化到用户设置，[model-id] 立即切换，或用 [model-id] [prompt] 在另一个模型上运行一次性提示；内联提示按原文发送，不展开 @file）',
+  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --compaction for chat compression model, --image for the image generation model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
+    '切换此会话的模型（--fast 建议模型，--voice 语音转写模型，--vision 视觉桥接模型，--compaction 聊天压缩模型，--image 图像生成模型，--project 持久化到项目设置，--global 持久化到用户设置，[model-id] 立即切换，或用 [model-id] [prompt] 在另一个模型上运行一次性提示；内联提示按原文发送，不展开 @file）',
   "Inline one-shot override isn't supported in this mode — run '/model {{model}}' first, then send your prompt.":
     "此模式不支持内联一次性覆盖——请先运行 '/model {{model}}'，再发送你的提示。",
   "Inline one-shot override can't switch providers. '{{model}}' belongs to a different provider — run '/model {{model}}' first, then send your prompt.":
@@ -1449,6 +1454,8 @@ export default {
   'Set the image-capable model used to transcribe images for a text-only main model':
     '设置用于为纯文本主模型转写图像的图像能力模型',
   'Set the model used to generate images': '设置用于生成图像的模型',
+  'Set the model used for chat compression (auto-compaction)':
+    '设置用于聊天压缩（自动压缩）的模型',
   'Persist the model selection to the project settings (workspace scope)':
     '将模型选择持久化到项目设置（工作区）',
   'Persist the model selection to the user settings (global scope)':
@@ -1456,9 +1463,14 @@ export default {
   'Select Fast Model': '选择快速模型',
   'Select Vision Model': '选择视觉模型',
   'Select Image Model': '选择图像模型',
+  'Select Compaction Model': '选择压缩模型',
   'Select Voice Model': '选择语音模型',
   'Vision Model': '视觉模型',
   'Image Model': '图像模型',
+  'Compaction Model': '压缩模型',
+  'Selected compaction model is unavailable.': '所选压缩模型不可用。',
+  'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /auth to configure or switch providers, or run /model --compaction without a model to choose from configured models.':
+    '在 settings.modelProviders 中配置模型并确保设置了所需的环境变量。在交互模式下，运行 /auth 配置或切换 provider，或运行 /model --compaction（不带模型参数）从已配置的模型中选择。',
   'Voice Model': '语音模型',
   'Selected voice model is unavailable.': '所选语音模型不可用。',
   'Selected image model is unavailable.': '所选图像模型不可用。',
@@ -1691,12 +1703,16 @@ export default {
   audio: '音频',
   video: '视频',
   'not set': '未设置',
+  'not set (falls back to the main model)': '未设置（回退到主模型）',
   'Current voice model: {{voiceModel}}\nUse "/model --voice <model-id>" to set voice model.':
     '当前语音模型：{{voiceModel}}\n使用 "/model --voice <model-id>" 设置语音模型。',
   'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.':
     '当前视觉模型：{{visionModel}}\n使用 "/model --vision <model-id>" 设置视觉桥接模型。',
   'Current image model: {{imageModel}}\nUse "/model --image <model-id>" to set the image generation model.':
     '当前图像模型：{{imageModel}}\n使用 "/model --image <model-id>" 设置图像生成模型。',
+  'Compaction model override cleared': '压缩模型覆盖已清除',
+  'Current compaction model: {{compactionModel}}\nUse "/model --compaction <model-id>" to set compaction model, or "/model --compaction clear" to clear the override.':
+    '当前压缩模型：{{compactionModel}}\n使用 "/model --compaction <model-id>" 设置压缩模型，或使用 "/model --compaction clear" 清除覆盖设置。',
   "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.":
     "语音模型 '{{modelName}}' 不唯一。请先配置唯一的模型 ID，再使用 /model --voice。",
   "Image model '{{modelName}}' matches multiple configured endpoints. Run /model --image without an argument and choose the exact endpoint.":
@@ -2208,6 +2224,7 @@ export default {
     '设置具备推理能力的模型思考的强度（{{tiers}}）；按各提供方进行映射与钳制。',
   'Set a goal — keep working until the condition is met':
     '设定目标 — 持续工作直到条件满足',
+  'Set or control a session goal': '设定或控制会话目标',
   'Exited plan mode. Previous approval mode restored.':
     '已退出计划模式，已恢复之前的审批模式。',
   'Enabled plan mode. The agent will analyze and plan without executing tools.':
@@ -2530,4 +2547,55 @@ export default {
     '会话录制因写入失败而停止。受影响会话中的新消息将不会被保存。请检查磁盘空间和权限，然后创建一个新会话以恢复录制。详情请查看调试日志。',
   'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
     '会话录制因写入失败而停止。受影响会话中的新消息将不会被保存。请检查磁盘空间和权限，然后运行 `/clear` 创建一个新的可录制会话。详情请查看调试日志。',
+  'Maintain project auto-skills based on recent use.':
+    '根据最近的使用情况维护项目自动技能。',
+  'Show project auto-skill lifecycle status.':
+    '显示项目自动技能的生命周期状态。',
+  'Run project auto-skill lifecycle maintenance.':
+    '运行项目自动技能的生命周期维护。',
+  'Restore an archived project auto-skill.': '恢复已归档的项目自动技能。',
+  'Auto-skill curator': '自动技能管理器',
+  'Last run: {{time}}': '上次运行：{{time}}',
+  'Active: {{count}}': '活跃：{{count}}',
+  'Stale: {{count}}': '陈旧：{{count}}',
+  'Archived: {{count}}': '已归档：{{count}}',
+  'Stale skills:': '陈旧技能：',
+  'Pinned skills:': '固定技能：',
+  'Archived skills:': '已归档技能：',
+  'Dry run complete.': '试运行完成。',
+  'Curator run complete.': '维护运行完成。',
+  'Checked: {{count}}': '已检查：{{count}}',
+  'First observed: {{count}}': '首次发现：{{count}}',
+  'Marked stale: {{count}}': '已标记为陈旧：{{count}}',
+  'Reactivated: {{count}}': '已重新激活：{{count}}',
+  'Skipped archive collisions: {{count}}': '已跳过归档冲突：{{count}}',
+  'Archive candidates:': '待归档技能：',
+  'Skipped archive collisions:': '已跳过的归档冲突：',
+  'Skipped rename errors: {{count}}': '已跳过重命名错误：{{count}}',
+  'Skipped rename errors:': '已跳过的重命名错误：',
+  '{{verb}}: {{count}}': '{{verb}}：{{count}}',
+  'Would archive': '将归档',
+  Archived: '已归档',
+  'Failed to read auto-skill curator status: {{message}}':
+    '读取自动技能管理器状态失败：{{message}}',
+  'Usage: /curator run [--dry-run]': '用法：/curator run [--dry-run]',
+  'Failed to run auto-skill curator: {{message}}':
+    '运行自动技能管理器失败：{{message}}',
+  'Usage: /curator restore <directory>': '用法：/curator restore <directory>',
+  'Restored auto-skill: {{name}}': '已恢复自动技能：{{name}}',
+  'Failed to restore auto-skill: {{message}}': '恢复自动技能失败：{{message}}',
+  'Exclude an auto-skill from automatic maintenance.':
+    '将自动技能排除在自动维护之外。',
+  'Return a pinned auto-skill to automatic maintenance.':
+    '恢复对固定自动技能的自动维护。',
+  'Usage: /curator pin <directory>': '用法：/curator pin <directory>',
+  'Usage: /curator unpin <directory>': '用法：/curator unpin <directory>',
+  'Pinned auto-skill: {{name}}': '已固定自动技能：{{name}}',
+  'Unpinned auto-skill: {{name}}': '已取消固定自动技能：{{name}}',
+  'Failed to update auto-skill pin: {{message}}':
+    '更新自动技能固定状态失败：{{message}}',
+  'Auto-skill curator changes are disabled in safe mode.':
+    '安全模式下禁止更改自动技能管理器。',
+  'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
+    '仅受信任的工作区可以更改自动技能管理器。请通过 `/trust` 信任此文件夹后重试。',
 };

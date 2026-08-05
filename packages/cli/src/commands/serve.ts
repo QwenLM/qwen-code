@@ -19,12 +19,19 @@ import {
   DEFAULT_MAX_JOURNAL_BYTES,
   DEFAULT_MAX_JOURNAL_EVENTS,
 } from '@qwen-code/acp-bridge/replayWindowLimits';
+import { EXTERNAL_TOOL_GUARD_TOKEN_ENV } from '@qwen-code/acp-bridge/externalToolGuard';
+import {
+  isValidMemoryBudgetMb,
+  memoryBudgetRangeError,
+} from '@qwen-code/acp-bridge/daemonMemoryBudget';
 import {
   ApprovalMode,
   MCP_BUDGET_WARN_FRACTION,
+  MEMORY_PROJECT_SCOPES,
   openBrowserSecurely,
   parsePositiveIntegerEnv,
   shouldLaunchBrowser,
+  type MemoryProjectScope,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../config/settings.js';
 import { HEADLESS_YOLO_NO_SANDBOX_WARNING } from '../utils/headlessSafetyWarnings.js';
@@ -109,6 +116,7 @@ interface ServeArgs {
   'max-journal-events': number;
   'max-journal-bytes': number;
   workspace?: string | string[];
+  'memory-project-scope'?: MemoryProjectScope;
   'require-auth': boolean;
   'enable-session-shell': boolean;
   'tls-cert'?: string;
@@ -120,6 +128,7 @@ interface ServeArgs {
   // handler reads `argv['http-bridge']` directly.
   'http-bridge': boolean;
   'mcp-client-budget'?: number;
+  'memory-budget-mb'?: number;
   'mcp-budget-mode'?: 'enforce' | 'warn' | 'off';
   'allow-origin'?: string[];
   'allow-private-auth-base-url': boolean;
@@ -130,6 +139,9 @@ interface ServeArgs {
   'session-reap-interval-ms'?: number;
   'session-idle-timeout-ms'?: number;
   'permission-response-timeout-ms'?: number;
+  'external-tool-guard-mode': 'off' | 'required';
+  'external-tool-guard-endpoint'?: string;
+  'external-tool-guard-timeout-ms'?: number;
   'rate-limit'?: boolean;
   'rate-limit-prompt'?: number;
   'rate-limit-mutation'?: number;
@@ -170,7 +182,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       })
       .option('max-sessions', {
         type: 'number',
-        default: 20,
+        default: 32,
         description:
           'Cap on concurrent live sessions. New spawn requests beyond this return 503; ' +
           'attach to existing sessions still works. Set to 0 to disable.',
@@ -197,6 +209,14 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'POST /session requests with a mismatched cwd return 400 workspace_mismatch. ' +
           'Defaults to process.cwd() when omitted. ' +
           'Repeat to register isolated workspace runtimes; the first is primary.',
+      })
+      .option('memory-project-scope', {
+        type: 'string',
+        choices: MEMORY_PROJECT_SCOPES,
+        description:
+          'Choose how project memory is partitioned. ' +
+          '"git-root" preserves the legacy shared scope; "workspace" keeps each daemon workspace isolated. ' +
+          'Overrides QWEN_CODE_MEMORY_PROJECT_SCOPE when provided.',
       })
       .option('max-connections', {
         type: 'number',
@@ -307,6 +327,16 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'secondaries start one on demand. Stage 2 native in-process mode is ' +
           'not yet implemented; this flag will become opt-in then.',
       })
+      .option('memory-budget-mb', {
+        type: 'number',
+        description:
+          'Total memory budget in MB for the daemon process tree. When unset, ' +
+          'derived as 50% of cgroup-constrained ' +
+          'or host memory, and capped at the resolved available memory either ' +
+          'way. Currently observed and reported under `limits.memory` in daemon ' +
+          'status; it does not yet size any child process. Must be an integer ' +
+          'in [1024, 1048576].',
+      })
       .option('mcp-client-budget', {
         type: 'number',
         description:
@@ -381,6 +411,22 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Wall-clock timeout for a single human permission / ' +
           'ask_user_question response in daemon (ACP) mode (ms). ' +
           '0 = disabled (wait forever). Default: 300000 (5 min).',
+      })
+      .option('external-tool-guard-mode', {
+        choices: ['off', 'required'] as const,
+        default: 'off' as const,
+        description:
+          'Managed ACP pre-execution policy mode. Default off preserves current CLI and daemon behavior. Required fails startup unless a compatible loopback provider is available.',
+      })
+      .option('external-tool-guard-endpoint', {
+        type: 'string',
+        description:
+          'Origin-only loopback HTTP(S) endpoint for required external tool guarding, for example http://127.0.0.1:8787.',
+      })
+      .option('external-tool-guard-timeout-ms', {
+        type: 'number',
+        description:
+          'Per-handshake/prepare external tool guard timeout in milliseconds. Default: 3000.',
       })
       .option('rate-limit', {
         type: 'boolean',
@@ -466,6 +512,14 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
     }
     const resolvedMcpMode: 'enforce' | 'warn' | 'off' =
       mcpBudgetMode ?? (mcpClientBudget !== undefined ? 'warn' : 'off');
+    const memoryBudgetMb = argv['memory-budget-mb'];
+    if (
+      memoryBudgetMb !== undefined &&
+      !isValidMemoryBudgetMb(memoryBudgetMb)
+    ) {
+      writeStderrLine(memoryBudgetRangeError());
+      process.exit(1);
+    }
     const maxPendingPromptsPerSession = argv['max-pending-prompts-per-session'];
     if (
       maxPendingPromptsPerSession !== Number.POSITIVE_INFINITY &&
@@ -577,6 +631,10 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       }
     }
 
+    const externalToolGuardToken =
+      process.env[EXTERNAL_TOOL_GUARD_TOKEN_ENV] ?? '';
+    delete process.env[EXTERNAL_TOOL_GUARD_TOKEN_ENV];
+
     // Lazy-load the slim serve runner so the yargs fallback path does not pull
     // the public serve barrel, which also exports REST/ACP runtime modules.
     const { runQwenServe } = await import('../serve/run-qwen-serve.js');
@@ -597,6 +655,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         maxJournalEvents: argv['max-journal-events'],
         maxJournalBytes: argv['max-journal-bytes'],
         workspace: argv.workspace,
+        ...(argv['memory-project-scope'] !== undefined
+          ? { memoryProjectScope: argv['memory-project-scope'] }
+          : {}),
         requireAuth: argv['require-auth'],
         enableSessionShell: argv['enable-session-shell'],
         serveWebShell: argv.web,
@@ -607,6 +668,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         allowPrivateAuthBaseUrl: argv['allow-private-auth-base-url'],
         mcpClientBudget,
         mcpBudgetMode: resolvedMcpMode,
+        ...(memoryBudgetMb !== undefined ? { memoryBudgetMb } : {}),
         ...(argv['allow-origin'] && argv['allow-origin'].length > 0
           ? { allowOrigins: argv['allow-origin'] }
           : {}),
@@ -632,6 +694,20 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           ? {
               permissionResponseTimeoutMs:
                 argv['permission-response-timeout-ms'],
+            }
+          : {}),
+        ...(argv['external-tool-guard-mode'] === 'required'
+          ? {
+              externalToolGuard: {
+                mode: 'required' as const,
+                endpoint: argv['external-tool-guard-endpoint'] ?? '',
+                token: externalToolGuardToken,
+                ...(argv['external-tool-guard-timeout-ms'] !== undefined
+                  ? {
+                      timeoutMs: argv['external-tool-guard-timeout-ms'],
+                    }
+                  : {}),
+              },
             }
           : {}),
         ...(rateLimit ? { rateLimit: true } : {}),

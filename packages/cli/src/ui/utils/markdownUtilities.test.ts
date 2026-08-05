@@ -135,8 +135,41 @@ describe('markdownUtilities', () => {
       const splitPoint = 40; // mid-line hard split inside the fence
       const { before, after } = splitFencedMarkdown(content, splitPoint);
       expect(before).toBe(content.slice(0, 40) + '\n```\n');
-      expect(after).toBe('```ts qwen-code:start-line=2\n' + content.slice(40));
+      // The block holds a single content line and the split lands inside it,
+      // so the tail is the remainder of line 1 and its gutter must still say
+      // 1. This previously read `start-line=2`, counting the unfinished line
+      // as though it had been completed in the head.
+      expect(after).toBe('```ts qwen-code:start-line=1\n' + content.slice(40));
     });
+
+    it('keeps the tail on the same source line when split mid-line', () => {
+      const content = '```js\naaa\nbbb\nccc\n```';
+      // Lands inside `bbb`: the head ends `bb`, the tail begins `b`.
+      const { before, after } = splitFencedMarkdown(content, 12);
+
+      expect(before).toBe('```js\naaa\nbb\n```\n');
+      expect(after).toBe('```js qwen-code:start-line=2\nb\nccc\n```');
+    });
+
+    // Guards against over-correcting. Splits that land on a line boundary were
+    // already right and must stay put; these pass before and after.
+    it.each([
+      [6, 1],
+      [10, 2],
+      [14, 3],
+      [18, 4],
+    ])(
+      'splitting at %d (a line boundary) starts the tail at line %d',
+      (splitPoint, expectedStartLine) => {
+        const content = '```js\naaa\nbbb\nccc\n```';
+        const { after } = splitFencedMarkdown(content, splitPoint);
+        expect(
+          after.startsWith(
+            `\`\`\`js qwen-code:start-line=${expectedStartLine}\n`,
+          ),
+        ).toBe(true);
+      },
+    );
 
     it('accumulates the start line when a re-opened tail is split again', () => {
       // Simulate the tail produced by a prior split (already carries a directive).

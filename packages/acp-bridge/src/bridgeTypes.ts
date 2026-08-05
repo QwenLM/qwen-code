@@ -98,11 +98,25 @@ export interface BridgeSpawnRequest {
   worktree?: { slug: string; path: string; branch: string };
   /** Branch metadata, set by the daemon route before spawn. */
   branch?: { name: string; baseBranch: string };
+  /**
+   * Optional caller-supplied session id. When provided, the agent uses this
+   * id instead of generating a random UUID. Must be validated at the route
+   * boundary since the core Config constructor uses it verbatim. Passed
+   * through ACP `_meta` since the protocol's NewSessionRequest has no native
+   * sessionId field.
+   */
+  sessionId?: string;
 }
 
 export interface BridgeSession {
   sessionId: string;
+  /**
+   * Runtime ownership root used for routing and persisted-session lookup.
+   * This does not change when the agent session changes cwd.
+   */
   workspaceCwd: string;
+  /** Current agent cwd when it differs from {@link workspaceCwd}. */
+  currentCwd?: string;
   /** True if this attach reused an existing session under `sessionScope: 'single'`. */
   attached: boolean;
   /**
@@ -147,6 +161,8 @@ export interface BridgeRestoreSessionRequest {
   historyReplay?: 'stream' | 'response';
   /** Optional newest persisted-record page requested for response replay. */
   historyPageSize?: number;
+  /** Keep inherited fork records as model context without replaying them. */
+  hideInheritedHistory?: boolean;
   approvalMode?: ApprovalMode;
   /**
    * Persisted parent lineage recovered from the transcript by the caller (the
@@ -165,12 +181,17 @@ export interface BridgeRestoreSessionRequest {
 export const LOAD_REPLAY_MODE_META_KEY = 'qwen.session.loadReplayMode';
 export const LOAD_REPLAY_META_KEY = 'qwen.session.loadReplay';
 export const LOAD_REPLAY_PAGE_SIZE_META_KEY = 'qwen.session.loadReplayPageSize';
+export const LOAD_REPLAY_HIDE_INHERITED_META_KEY =
+  'qwen.session.loadReplayHideInherited';
 export const LOAD_REPLAY_BULK_MODE = 'bulk';
 export const LOAD_REPLAY_VERSION = 1 as const;
+
+export const REQUESTED_SESSION_ID_META_KEY = 'qwen-code/sessionId';
 
 export const CHANNEL_STARTUP_PROFILE_META_KEY =
   'qwen.daemon.channelStartupProfile';
 export const CHANNEL_STARTUP_PROFILE_VERSION = 1 as const;
+export const WORKTREE_MCP_DEFER_META_KEY = 'qwen.session.deferMcpDiscovery';
 
 export interface ChannelStartupProfileV1 {
   v: typeof CHANNEL_STARTUP_PROFILE_VERSION;
@@ -234,6 +255,16 @@ export interface BridgeRestoredSession extends BridgeSession {
   liveJournal?: BridgeEvent[];
   /** True when persisted records exist before the returned replay page. */
   historyHasMore?: boolean;
+  /**
+   * Fallback pagination anchor: the oldest recordId in the last
+   * persisted transcript page, read when the replay snapshot's
+   * `history_truncated` marker carries none (live session whose
+   * in-flight turn capped the journal
+   * before any turn boundary). Clients use it as `beforeRecordId` when
+   * no recordId is available in the retained window. Absent when no
+   * anchor was needed or none could be read.
+   */
+  historyAnchorRecordId?: string;
   /** High-water mark event ID — client uses this as initial SSE cursor. */
   lastEventId?: number;
   /**
@@ -274,11 +305,23 @@ export interface BridgeSessionTranscriptPage {
 
 export interface BridgeBranchSessionRequest {
   name?: string;
+  sourceType?: string;
+  sourceId?: string;
+  replayInheritedHistory?: boolean;
 }
 
 export interface BridgeBranchedSession extends BridgeRestoredSession {
   displayName: string;
   forkedFrom: { sessionId: string; displayName: string };
+}
+
+export interface BridgeSideTaskSessionRequest {
+  name?: string;
+}
+
+export interface BridgeSideTaskSession extends BridgeRestoredSession {
+  displayName: string;
+  parentSessionId: string;
 }
 
 export interface BridgeForkAgentResult {
@@ -292,11 +335,17 @@ export interface ChangeSessionCwdRequest {
   /**
    * Server-controlled containment roots. When present, the agent-side
    * sessionCd handler verifies (after its own realpath) that the
-   * canonical target is under one of these roots. Only set by the
-   * daemon's worktree create/restore paths; direct user cd omits this
-   * field, preserving existing behavior.
+   * canonical target is under one of these roots. Only set by daemon-owned
+   * relocation paths; direct user cd omits this field, preserving existing
+   * behavior.
    */
   allowedRoots?: string[];
+  /**
+   * Private daemon capability for a Live conversation directory. The ACP
+   * child validates the authenticated parent, private root, and direct child
+   * before this may bypass the independent global folder-trust registry.
+   */
+  managedRelocation?: 'live-conversation';
 }
 
 export interface ChangeSessionCwdResult {
@@ -499,6 +548,18 @@ export interface BridgeClientRequestContext {
    * SSE event to the pending HTTP 202 request.
    */
   promptId?: string;
+  /**
+   * Internal synchronous admission signal. The bridge invokes it only after
+   * the prompt owns a pending-queue slot. Transport routes never populate it
+   * from request input.
+   */
+  onPromptAdmitted?: () => void;
+  /**
+   * Internal model input that replaces the public prompt only inside the
+   * trusted ACP child. The bridge still echoes and persists `PromptRequest`
+   * unchanged. HTTP routes never populate this from request input.
+   */
+  modelPrompt?: string;
   /** Trusted Channel delivery correlation injected by the daemon prompt
    * route. Never populated from caller-controlled ACP metadata. */
   channelDelivery?: {
@@ -524,6 +585,17 @@ export interface BridgeClientRequestContext {
    * REST prompt route from `resolvePromptDeadlineMs(serverMs, requestMs)`.
    */
   deadlineMs?: number;
+}
+
+export const DAEMON_MODEL_PROMPT_META_KEY = 'qwen.daemon.modelPrompt';
+export const MAX_TRUSTED_MODEL_PROMPT_CHARS = 64 * 1024;
+
+export function isValidTrustedModelPrompt(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.trim().length > 0 &&
+    value.length <= MAX_TRUSTED_MODEL_PROMPT_CHARS
+  );
 }
 
 export const DAEMON_CHANNEL_DELIVERY_META_KEY = 'qwen.daemon.channelDelivery';
@@ -568,6 +640,24 @@ export interface BridgeHeartbeatState {
 export const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
 
 /**
+ * Child-to-parent request that atomically assigns the next Todo Stop Guard
+ * model send to the current daemon FIFO owner. `promptId`, when present, is
+ * the trusted bridge invocation id rather than the provider-facing prompt id.
+ */
+export const TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD =
+  'craft/claimTodoStopGuardContinuation';
+
+export interface TodoStopGuardContinuationClaimRequest {
+  sessionId: string;
+  promptId?: string;
+}
+
+export interface TodoStopGuardContinuationClaimResponse {
+  claimed: boolean;
+  hasQueuedPrompt: boolean;
+}
+
+/**
  * Parent-to-agent request reporting that the daemon FIFO no longer contains the
  * complete prompt an active Todo Stop Guard yielded to. The child clears the
  * old guard instead of letting background work revive it or leaving unrelated
@@ -575,6 +665,11 @@ export const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
  */
 export const TODO_STOP_GUARD_QUEUE_RELEASE_METHOD =
   'craft/todoStopGuardQueueReleased';
+
+export interface TodoStopGuardQueueReleasedRequest {
+  sessionId: string;
+  promptId: string;
+}
 
 /** Parent-to-agent request that acknowledges prompt cancellation handling. */
 export const PROMPT_CANCEL_METHOD = 'craft/cancelPendingPrompt';
@@ -611,6 +706,7 @@ export type ClientMcpOverWsRuntimeConfig = Record<string, unknown> & {
  * same session must not dedupe a message it did not queue.
  */
 export interface MidTurnQueueEntry {
+  messageId: string;
   text: string;
   originatorClientId?: string;
 }
@@ -782,6 +878,16 @@ export type BridgeWorkspaceGenerationNotificationEvent = Exclude<
   { type: 'done' }
 >;
 
+/** A daemon-owned worker completion injected into its parent session. */
+export interface BridgeBackgroundNotification {
+  displayText: string;
+  modelText: string;
+  taskId: string;
+  status: 'completed' | 'failed' | 'cancelled';
+  kind: 'agent';
+  toolUseId?: string;
+}
+
 export type RuntimeMcpServerAddResult =
   | {
       name: string;
@@ -809,6 +915,29 @@ export type RuntimeMcpServerRemoveResult =
 export interface AcpSessionBridge {
   /** Read-only daemon diagnostics for status endpoints. */
   getDaemonStatusSnapshot(): BridgeDaemonStatusSnapshot;
+
+  /**
+   * Installs the daemon-owned capture handler used by the dedicated Live
+   * `capture_screen_context` tool. Undefined disables the child-to-daemon
+   * route. The bridge authenticates the caller session before invoking it.
+   */
+  setLiveScreenContextCaptureHandler?(
+    handler:
+      | import('./bridgeOptions.js').LiveScreenContextCaptureHandler
+      | undefined,
+  ): void;
+
+  /** Installs the daemon-owned handler for the five Codex-parity Live task tools. */
+  setLiveTaskToolRequestHandler?(
+    handler:
+      | import('./bridgeOptions.js').LiveTaskToolRequestHandler
+      | undefined,
+  ): void;
+
+  /** Installs the daemon-owned handler for the backend-only Live speech tool. */
+  setLiveSpeakToUserHandler?(
+    handler: import('./bridgeOptions.js').LiveSpeakToUserHandler | undefined,
+  ): void;
 
   /**
    * Create a new session, or — under `sessionScope: 'single'` — attach to an
@@ -841,6 +970,13 @@ export interface AcpSessionBridge {
     req: BridgeBranchSessionRequest,
     context?: BridgeClientRequestContext,
   ): Promise<BridgeBranchedSession>;
+
+  /** Create a persisted side task with a snapshot of the parent's context. */
+  createSideTaskSession(
+    sessionId: string,
+    req: BridgeSideTaskSessionRequest,
+    context?: BridgeClientRequestContext,
+  ): Promise<BridgeSideTaskSession>;
 
   /**
    * Change the working directory of a live session. The session must be
@@ -1287,6 +1423,22 @@ export interface AcpSessionBridge {
     refreshed: boolean;
   }>;
 
+  /** Apply Codex's realtime-active world-state transition to one session. */
+  setSessionLiveConversationActive(
+    sessionId: string,
+    active: boolean,
+  ): Promise<void>;
+
+  /** Persist Realtime-owned dialogue without starting a backend model turn. */
+  appendSessionLiveTranscript(
+    sessionId: string,
+    entries: ReadonlyArray<{
+      role: 'user' | 'assistant';
+      text: string;
+    }>,
+    model: string,
+  ): Promise<void>;
+
   /**
    * Change the approval mode of a live session and broadcast an
    * `approval_mode_changed` event. `opts.persist === true` also writes
@@ -1371,7 +1523,24 @@ export interface AcpSessionBridge {
     sessionId: string,
     message: string,
     context?: BridgeClientRequestContext,
-  ): { accepted: boolean };
+  ): { accepted: boolean; messageId?: string };
+
+  /** Remove a message that has not yet been drained into the running turn. */
+  removeMidTurnMessage(
+    sessionId: string,
+    messageId: string,
+    context?: BridgeClientRequestContext,
+  ): { removed: boolean };
+
+  /**
+   * Queue a daemon-owned worker completion in its live parent session. The
+   * session records the notification and runs its normal automatic follow-up
+   * turn, matching the return path used by in-process background agents.
+   */
+  enqueueBackgroundNotification(
+    sessionId: string,
+    notification: BridgeBackgroundNotification,
+  ): Promise<{ sessionId: string; accepted: boolean }>;
 
   /**
    * Execute a shell command directly on the daemon (no LLM involvement).

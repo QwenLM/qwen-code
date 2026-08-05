@@ -35,6 +35,10 @@ export interface TranscriptRecordInput {
   readonly usageMetadata?: unknown;
   readonly toolCallResult?: unknown;
   readonly systemPayload?: unknown;
+  readonly forkedFrom?: {
+    readonly sessionId: string;
+    readonly messageUuid: string;
+  };
 }
 
 export interface TranscriptReplayGapInput {
@@ -95,6 +99,7 @@ const KNOWN_RECORD_SUBTYPES = new Set([
   'notification',
   'cron',
   'mid_turn_user_message',
+  'realtime_message',
   'custom_title',
   'parent_session',
   'rewind',

@@ -13,6 +13,7 @@ import type {
   TodoItem,
 } from '../../adapters/types';
 import {
+  hasActiveAgents,
   isBackgroundSubAgentToolCall,
   isSubAgentToolCall,
 } from '../../adapters/toolClassification';
@@ -52,8 +53,10 @@ import {
   getToolSummaryDescription,
   getToolResultSummary,
   isAskUserQuestionToolName,
+  isActiveToolStatus,
   isSkillToolName,
   isShellToolName,
+  localizeAgentTypeName,
   toolContainsCallId,
 } from './toolFormatting';
 import { useI18n } from '../../i18n';
@@ -577,14 +580,6 @@ function isDescriptionExpandable(description: string): boolean {
   );
 }
 
-export function isActiveToolStatus(
-  status: ACPToolCall['status'] | string,
-): boolean {
-  return (
-    status === 'in_progress' || status === 'pending' || status === 'running'
-  );
-}
-
 export function getActiveTool(tools: ACPToolCall[]): ACPToolCall {
   return (
     tools.find((tool) => isActiveToolStatus(tool.status)) ??
@@ -597,7 +592,7 @@ export function formatToolGroupSummary(
   t: ReturnType<typeof useI18n>['t'],
   duration?: string,
 ): string {
-  if (hasActiveTool(tools)) {
+  if (hasActiveAgents(tools)) {
     const foregroundActiveTool = tools.find(
       (tool) =>
         isActiveToolStatus(tool.status) && !isBackgroundSubAgentToolCall(tool),
@@ -777,10 +772,6 @@ function getAskUserQuestionCount(tool: ACPToolCall): number {
   return Array.isArray(questions) && questions.length > 0
     ? questions.length
     : 1;
-}
-
-export function hasActiveTool(tools: ACPToolCall[]): boolean {
-  return tools.some((tool) => isActiveToolStatus(tool.status));
 }
 
 function PencilIcon() {
@@ -1199,7 +1190,7 @@ export const ToolLine = memo(function ToolLine({
   if (isAgent) {
     const info = getAgentDisplayInfo(tool, now);
     const displayName = info.explicitAgentType
-      ? `${t('agent.label')} (${info.explicitAgentType})`
+      ? `${t('agent.label')} (${localizeAgentTypeName(info.explicitAgentType, t)})`
       : t('agent.label');
     const isComplete = tool.status === 'completed' || tool.status === 'failed';
     const isBackground = isBackgroundSubAgentToolCall(tool);
@@ -1534,7 +1525,7 @@ export const ToolGroup = memo(function ToolGroup({
     useState(false);
   const [chatExpanded, setChatExpanded] = useState(false);
   const monitorDetailsRequestRef = useRef<object | null>(null);
-  const hasRunningTool = hasActiveTool(tools);
+  const hasRunningTool = hasActiveAgents(tools);
   const hasFailedTool = tools.some((tool) => tool.status === 'failed');
   const activeTool = tools.length > 0 ? getActiveTool(tools) : undefined;
   const singleTool = tools.length === 1 ? tools[0] : undefined;
