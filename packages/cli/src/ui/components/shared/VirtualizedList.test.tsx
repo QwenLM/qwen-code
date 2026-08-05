@@ -4,11 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useRef } from 'react';
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useRef,
+  useState,
+} from 'react';
 import { describe, it, expect } from 'vitest';
 import { render } from 'ink-testing-library';
 import { act } from '@testing-library/react';
-import { Text } from 'ink';
+import { Box, Text } from 'ink';
 import {
   VirtualizedList,
   type VirtualizedListRef,
@@ -166,6 +172,82 @@ describe('<VirtualizedList />', () => {
       'item-3',
       'item-4',
     ]);
+  });
+
+  it('reports zero-height shrink so collapsed items leave no blank gap', async () => {
+    // Mirrors VP thought groups: the head renders a 1-line summary when
+    // collapsed while continuations render nothing (zero height). The zero
+    // height must be reported, otherwise the cached expanded height keeps
+    // inflating totalHeight and the viewport shows a blank gap.
+    const ExpandedContext = createContext({ expanded: true });
+
+    const BodyWhenExpanded = () => {
+      const { expanded } = useContext(ExpandedContext);
+      if (!expanded) return null;
+      return (
+        <Box flexDirection="column">
+          {Array.from({ length: 30 }, (_, i) => (
+            <Text key={i}>{`thinking line ${i}`}</Text>
+          ))}
+        </Box>
+      );
+    };
+
+    type ToggleItem = { id: number; kind: 'head' | 'body' };
+    const items: ToggleItem[] = [
+      { id: 0, kind: 'head' },
+      { id: 1, kind: 'body' },
+    ];
+
+    let setExpanded: (v: boolean) => void = () => {};
+
+    function Wrapper() {
+      const [expanded, setState] = useState(true);
+      setExpanded = setState;
+      const renderItem = useCallback(
+        ({ item }: { item: ToggleItem }) =>
+          item.kind === 'head' ? (
+            <Text>thought head</Text>
+          ) : (
+            <BodyWhenExpanded />
+          ),
+        [],
+      );
+      return (
+        <ExpandedContext.Provider value={{ expanded }}>
+          <Box flexDirection="column">
+            <VirtualizedList<ToggleItem>
+              data={items}
+              renderItem={renderItem}
+              estimatedItemHeight={() => 3}
+              keyExtractor={(item) => `t-${item.id}`}
+              initialScrollIndex={SCROLL_TO_ITEM_END}
+              isStaticItem={() => true}
+              containerHeight={40}
+              width={40}
+              showScrollbar={false}
+            />
+            <Text>FOOTER</Text>
+          </Box>
+        </ExpandedContext.Provider>
+      );
+    }
+
+    const { lastFrame, rerender } = render(<Wrapper />);
+    await act(async () => {});
+
+    const expandedFrame = lastFrame() ?? '';
+    expect(expandedFrame).toContain('thinking line 29');
+
+    act(() => setExpanded(false));
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    const lines = (lastFrame() ?? '').split('\n');
+    const headIdx = lines.findIndex((l) => l.includes('thought head'));
+    const footerIdx = lines.findIndex((l) => l.includes('FOOTER'));
+    expect(headIdx).toBeGreaterThan(-1);
+    expect(footerIdx - headIdx).toBeLessThanOrEqual(2);
   });
 
   it('targetScrollIndex anchors to that index on first usable render', () => {

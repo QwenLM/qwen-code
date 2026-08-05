@@ -117,7 +117,10 @@ const VirtualizedListItem = memo(
     onHeightChangeRef.current = onHeightChange;
 
     useLayoutEffect(() => {
-      if (hasMeasured && height > 0) {
+      // Report zero heights too: a collapsed thought continuation renders
+      // nothing (height 0), and skipping the report would leave the cached
+      // expanded height in `heights`, inflating totalHeight with a blank gap.
+      if (hasMeasured) {
         onHeightChangeRef.current(itemKey, height);
       }
     }, [itemKey, height, hasMeasured]);
