@@ -14,6 +14,7 @@ import type {
   CreateSessionRequest,
   DaemonForkSessionResult,
   DaemonMidTurnMessageResult,
+  DaemonRemoveMidTurnMessageResult,
   DaemonPendingPromptSummary,
   DaemonRewindResult,
   DaemonSessionRecapResult,
@@ -32,7 +33,10 @@ import {
   withActionTimeout,
   type TimerRef,
 } from '../timing.js';
-import { persistStableClientId } from './clientLifecycle.js';
+import {
+  getPersistedClientId,
+  persistStableClientId,
+} from './clientLifecycle.js';
 import type {
   ActivePrompt,
   AddDaemonSessionNotice,
@@ -80,6 +84,7 @@ export interface CreateDaemonSessionActionsArgs {
   setRestoreSessionNonce: Dispatch<SetStateAction<number>>;
   setAttachSessionNonce: Dispatch<SetStateAction<number>>;
   setNewSessionNonce: Dispatch<SetStateAction<number>>;
+  clearLiveJournalRepair?: () => void;
 }
 
 export function getConnectionAfterSessionClear(
@@ -144,10 +149,12 @@ export function createDaemonSessionActions({
   setRestoreSessionNonce,
   setAttachSessionNonce,
   setNewSessionNonce,
+  clearLiveJournalRepair = () => undefined,
 }: CreateDaemonSessionActionsArgs): DaemonSessionActions {
   const silentHardFailureNoticeKeys = new Set<string>();
 
   function clearActiveSessionState() {
+    clearLiveJournalRepair();
     silentHardFailureNoticeKeys.clear();
     for (const [, active] of activePromptsRef.current) {
       active.controller.abort();
@@ -178,6 +185,7 @@ export function createDaemonSessionActions({
     sessionId: string,
     mode: PendingSessionLoad['mode'],
     signal?: AbortSignal,
+    replaySource?: PendingSessionLoad['replaySource'],
   ): Promise<void> {
     const loadId = pendingSessionLoadIdRef.current + 1;
     pendingSessionLoadIdRef.current = loadId;
@@ -212,6 +220,7 @@ export function createDaemonSessionActions({
         resolve,
         reject,
         ...(signal ? { signal } : {}),
+        ...(replaySource ? { replaySource } : {}),
       };
     });
     return loadPromise;
@@ -222,14 +231,23 @@ export function createDaemonSessionActions({
     mode: 'load' | 'resume',
     workspaceCwd?: string,
     signal?: AbortSignal,
+    replaySource?: PendingSessionLoad['replaySource'],
   ): Promise<void> {
+    if (replaySource !== 'memory') {
+      clearLiveJournalRepair();
+    }
     if (signal?.aborted) {
       return Promise.reject(
         new DOMException('Session load cancelled', 'AbortError'),
       );
     }
     manualSessionClearRef.current = false;
-    const loadPromise = startPendingSessionLoad(sessionId, mode, signal);
+    const loadPromise = startPendingSessionLoad(
+      sessionId,
+      mode,
+      signal,
+      replaySource,
+    );
     const currentSession = sessionRef.current;
     const currentSessionId = currentSession?.sessionId;
     const activePrompt = currentSessionId
@@ -637,7 +655,7 @@ export function createDaemonSessionActions({
       return startSessionSwitch(sessionId, 'load', options?.workspaceCwd);
     },
 
-    async reloadSession(signal) {
+    async reloadSession(signal, options) {
       const session = requireSessionForAction(
         addNotice,
         sessionRef.current,
@@ -649,6 +667,7 @@ export function createDaemonSessionActions({
         'load',
         session.workspaceCwd,
         signal,
+        options?.replaySource,
       );
     },
 
@@ -1073,6 +1092,35 @@ export function createDaemonSessionActions({
         }
         return { accepted: false };
       }
+    },
+
+    async removeMidTurnMessage(
+      messageId: string,
+      opts,
+    ): Promise<DaemonRemoveMidTurnMessageResult> {
+      const session = sessionRef.current;
+      if (!session) return { removed: false };
+      if (opts?.sessionId && session.sessionId !== opts.sessionId) {
+        // The bridge removes a mid-turn message only on an exact originator
+        // match. The originator is the client id that was attached to the
+        // TARGET session when the message was queued — with per-session client
+        // ids that differs from the currently selected session's id, so
+        // forwarding our own id would resolve to a foreign originator and the
+        // bridge would reject a valid removal after a session switch. Prefer
+        // the target session's persisted id; fall back to our own when nothing
+        // is persisted (a shared caller-provided client id covers every
+        // session).
+        const targetClientId =
+          getPersistedClientId(opts.sessionId) ?? session.clientId;
+        return await session.client.removeMidTurnMessage(
+          opts.sessionId,
+          messageId,
+          {
+            ...(targetClientId ? { clientId: targetClientId } : {}),
+          },
+        );
+      }
+      return await session.removeMidTurnMessage(messageId);
     },
 
     async getPendingPrompts(opts) {

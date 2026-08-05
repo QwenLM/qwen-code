@@ -6,11 +6,53 @@
 
 import type { Content } from '@google/genai';
 import { describe, expect, it } from 'vitest';
+import { ToolNames } from '../tool-names.js';
 import {
+  buildForkedMessages,
+  FORK_PLACEHOLDER_RESULT,
   normalizeForkTurns,
+  resolveForkExecutionAllowedTools,
   selectForkHistory,
   validateForkToolList,
 } from './fork-subagent.js';
+
+describe('resolveForkExecutionAllowedTools', () => {
+  const parentTools = [
+    ToolNames.READ_FILE,
+    ToolNames.DISPLAY_IMAGE,
+    ToolNames.EDIT,
+  ];
+
+  it('preserves unrestricted execution when display_image is not advertised', () => {
+    expect(
+      resolveForkExecutionAllowedTools([ToolNames.READ_FILE], undefined),
+    ).toBeUndefined();
+  });
+
+  it('filters display_image from an explicit allowlist', () => {
+    expect(
+      resolveForkExecutionAllowedTools(parentTools, [
+        ...parentTools,
+        ToolNames.GLOB,
+      ]),
+    ).toEqual([ToolNames.READ_FILE, ToolNames.EDIT, ToolNames.GLOB]);
+  });
+
+  it('cannot re-enable display_image through fork_tools', () => {
+    expect(
+      resolveForkExecutionAllowedTools(parentTools, [
+        ToolNames.DISPLAY_IMAGE,
+        ToolNames.READ_FILE,
+      ]),
+    ).toEqual([ToolNames.READ_FILE]);
+  });
+
+  it('fails closed when display_image is advertised without an allowlist', () => {
+    expect(resolveForkExecutionAllowedTools(parentTools, undefined)).toEqual(
+      [],
+    );
+  });
+});
 
 describe('validateForkToolList', () => {
   it('accepts the inline fork tool contract, including deny-all', () => {
@@ -209,5 +251,89 @@ describe('selectForkHistory', () => {
 
     expect(inheritedNestedImage).toEqual(nestedImage);
     expect(inheritedNestedImage).not.toBe(nestedImage);
+  });
+});
+
+describe('buildForkedMessages', () => {
+  // A model launching several forks in one response: the last model message
+  // carries one functionCall per sibling fork, each with its own directive in
+  // `args.prompt`.
+  const launch: Content = {
+    role: 'model',
+    parts: [
+      { text: 'Launching two forks.' },
+      {
+        functionCall: {
+          id: 'call-a',
+          name: 'agent',
+          args: {
+            subagent_type: 'fork',
+            prompt: 'ALPHA_DIRECTIVE',
+            description: 'task a',
+          },
+        },
+      },
+      {
+        functionCall: {
+          id: 'call-b',
+          name: 'agent',
+          args: {
+            subagent_type: 'fork',
+            prompt: 'BETA_DIRECTIVE',
+            description: 'task b',
+          },
+        },
+      },
+    ],
+  };
+
+  it('does not leak sibling fork directives into the forked history', () => {
+    const messages = buildForkedMessages('ALPHA_DIRECTIVE', launch);
+
+    // Fork A must not see fork B's directive anywhere in its seed history.
+    expect(JSON.stringify(messages)).not.toContain('BETA_DIRECTIVE');
+
+    // The replayed model message carries no directive text at all — the fork's
+    // own directive is delivered separately, so no `args.prompt` should survive.
+    const [assistant] = messages;
+    expect(JSON.stringify(assistant)).not.toContain('ALPHA_DIRECTIVE');
+  });
+
+  it('preserves function-call pairing and delivers the own directive once', () => {
+    const [assistant, toolResult] = buildForkedMessages(
+      'ALPHA_DIRECTIVE',
+      launch,
+    );
+
+    // Non-functionCall parts pass through unchanged.
+    expect(assistant.parts?.[0]?.text).toBe('Launching two forks.');
+
+    // Both calls are retained by id + name so the API can pair the responses.
+    const calls = assistant.parts
+      ?.filter((part) => part.functionCall)
+      .map((part) => part.functionCall);
+    expect(calls?.map((call) => call?.id)).toEqual(['call-a', 'call-b']);
+    expect(calls?.map((call) => call?.name)).toEqual(['agent', 'agent']);
+
+    // Every retained call has a matching placeholder response.
+    const responses = toolResult.parts
+      ?.filter((part) => part.functionResponse)
+      .map((part) => part.functionResponse);
+    expect(responses?.map((response) => response?.id)).toEqual([
+      'call-a',
+      'call-b',
+    ]);
+    expect(
+      responses?.every(
+        (response) =>
+          response?.response?.['output'] === FORK_PLACEHOLDER_RESULT,
+      ),
+    ).toBe(true);
+
+    // The fork's own directive is still delivered, exactly once, via the text.
+    const directiveText =
+      toolResult.parts?.find((part) => typeof part.text === 'string')?.text ??
+      '';
+    expect(directiveText).toContain('Directive: ALPHA_DIRECTIVE');
   });
 });

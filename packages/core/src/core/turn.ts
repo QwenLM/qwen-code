@@ -139,15 +139,23 @@ export interface ToolCallRequestInfo {
   goalContext?: GoalTurnPermit;
 }
 
+export type ToolExecutionStatus =
+  | 'not_started'
+  | 'success'
+  | 'error'
+  | 'cancelled';
+
 export interface ToolCallResponseInfo {
   callId: string;
   responseParts: Part[];
   resultDisplay: ToolResultDisplay | undefined;
   error: Error | undefined;
   errorType: ToolErrorType | undefined;
+  executionStatus?: ToolExecutionStatus;
   contentLength?: number;
   persistedOutputFiles?: string[];
   modelOverride?: string;
+  terminateTurn?: boolean;
   visionBridgeNotice?: string;
   artifacts?: ToolArtifact[];
 }
@@ -232,6 +240,7 @@ export function createDuplicateProviderToolCallResponse(
     resultDisplay: message,
     error: new Error(message),
     errorType: ToolErrorType.EXECUTION_FAILED,
+    executionStatus: 'not_started',
   };
 }
 
@@ -355,6 +364,8 @@ export interface ChatCompressionInfo {
   newTokenCount: number;
   compressionStatus: CompressionStatus;
   triggerReason?: CompactionTriggerReason;
+  /** Set when the compaction model was swapped for the main model at runtime. */
+  warning?: string;
 }
 
 export type ServerGeminiChatCompressedEvent = {

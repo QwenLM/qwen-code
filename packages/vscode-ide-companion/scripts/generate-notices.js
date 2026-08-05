@@ -162,11 +162,8 @@ function collectDependencies(
   packageLock,
   dependenciesMap,
   resolveFrom,
+  visitedKeys,
 ) {
-  if (dependenciesMap.has(packageName)) {
-    return;
-  }
-
   const resolved = resolveInLockfile(
     packageName,
     packageLock.packages,
@@ -181,26 +178,52 @@ function collectDependencies(
 
   const { info: packageInfo, key: resolvedKey } = resolved;
 
+  // Traversal guard: skip if this exact lockfile path was already visited.
+  // Keyed by resolved path (not package name) so different installed versions
+  // of the same package are each traversed once.
+  if (visitedKeys.has(resolvedKey)) {
+    return;
+  }
+  visitedKeys.add(resolvedKey);
+
   // Workspace-linked packages: follow resolved pointer to collect their third-party deps
   if (packageInfo.link) {
     const realInfo = packageLock.packages[packageInfo.resolved];
     if (realInfo?.dependencies) {
       for (const depName of Object.keys(realInfo.dependencies)) {
-        collectDependencies(depName, packageLock, dependenciesMap, resolveFrom);
+        collectDependencies(
+          depName,
+          packageLock,
+          dependenciesMap,
+          resolveFrom,
+          visitedKeys,
+        );
       }
     }
     return;
   }
 
-  dependenciesMap.set(packageName, {
-    version: packageInfo.version,
-    resolvedKey,
-  });
+  // Output dedup: emit each (name, version) pair once, even when the same
+  // version is installed at multiple paths.
+  const outputKey = `${packageName}@${packageInfo.version}`;
+  if (!dependenciesMap.has(outputKey)) {
+    dependenciesMap.set(outputKey, {
+      name: packageName,
+      version: packageInfo.version,
+      resolvedKey,
+    });
+  }
 
   if (packageInfo.dependencies) {
     for (const depName of Object.keys(packageInfo.dependencies)) {
       // Resolve transitive deps from THIS package's location
-      collectDependencies(depName, packageLock, dependenciesMap, resolvedKey);
+      collectDependencies(
+        depName,
+        packageLock,
+        dependenciesMap,
+        resolvedKey,
+        visitedKeys,
+      );
     }
   }
 }
@@ -219,6 +242,7 @@ async function main() {
     const packageLockJson = JSON.parse(packageLockJsonContent);
 
     const allDependencies = new Map();
+    const visitedKeys = new Set();
     const directDependencies = Object.keys(packageJson.dependencies);
     const workspacePrefix = path.relative(projectRoot, packagePath);
 
@@ -228,14 +252,15 @@ async function main() {
         packageLockJson,
         allDependencies,
         workspacePrefix,
+        visitedKeys,
       );
     }
 
-    const dependencyEntries = Array.from(allDependencies.entries());
+    const dependencyEntries = Array.from(allDependencies.values());
 
     const licensePromises = dependencyEntries.map(
-      ([depName, { version, resolvedKey }]) =>
-        getDependencyLicense(depName, version, resolvedKey),
+      ({ name, version, resolvedKey }) =>
+        getDependencyLicense(name, version, resolvedKey),
     );
 
     const dependencyLicenses = await Promise.all(licensePromises);

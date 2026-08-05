@@ -54,6 +54,10 @@ import {
   SERVE_CONTROL_EXT_METHODS,
   SERVE_STATUS_EXT_METHODS,
 } from './status.js';
+import {
+  EXTERNAL_TOOL_GUARD_READY_META_KEY,
+  EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+} from './externalToolGuard.js';
 import type { ChannelFactory } from './channel.js';
 import type { BridgeTelemetry } from './bridgeOptions.js';
 import { createInMemoryChannel } from './inMemoryChannel.js';
@@ -62,6 +66,7 @@ import { TurnBoundaryCompactionEngine } from './compactionEngine.js';
 import {
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
+  DAEMON_MODEL_PROMPT_META_KEY,
   WORKTREE_MCP_DEFER_META_KEY,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
 } from './bridgeTypes.js';
@@ -649,6 +654,53 @@ describe('createAcpSessionBridge', () => {
       },
     ]);
 
+    await bridge.shutdown();
+  });
+
+  it('forwards the Live managed relocation capability to the ACP child', async () => {
+    const target = path.join(WS_A, 'conversation-managed');
+    const sessionCdCalls: unknown[] = [];
+    const handle = makeChannel({
+      extMethodImpl: async (method, params) => {
+        if (method === SERVE_CONTROL_EXT_METHODS.sessionCd) {
+          sessionCdCalls.push(params);
+          return {
+            previousCwd: WS_A,
+            newCwd: target,
+            warnings: [],
+          };
+        }
+        return {};
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: vi.fn().mockResolvedValue(handle.channel),
+    });
+
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await bridge.changeSessionCwd(session.sessionId, {
+      path: target,
+      allowedRoots: [WS_A],
+      managedRelocation: 'live-conversation',
+    });
+    const attached = await bridge.resumeSession({
+      sessionId: session.sessionId,
+      workspaceCwd: WS_A,
+    });
+
+    expect(sessionCdCalls).toEqual([
+      {
+        sessionId: session.sessionId,
+        path: target,
+        allowedRoots: [WS_A],
+        managedRelocation: 'live-conversation',
+      },
+    ]);
+    expect(attached).toMatchObject({
+      workspaceCwd: WS_A,
+      currentCwd: target,
+      attached: true,
+    });
     await bridge.shutdown();
   });
 
@@ -1259,6 +1311,45 @@ describe('createAcpSessionBridge', () => {
     ).toBe(capabilities[1]);
     await bridge1.shutdown();
     await bridge2.shutdown();
+  });
+
+  it('rejects a required Guard channel whose child does not acknowledge enforcement', async () => {
+    const handle = makeChannel();
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      externalToolGuard: async () => ({ allowed: true }),
+    });
+
+    await expect(bridge.spawnOrAttach({ workspaceCwd: WS_A })).rejects.toThrow(
+      'did not acknowledge',
+    );
+    expect(handle.agent.newSessionCalls).toHaveLength(0);
+    await bridge.shutdown();
+  });
+
+  it('accepts a required Guard channel only after the child acknowledges enforcement', async () => {
+    const handle = makeChannel({
+      initializeImpl: async () => ({
+        protocolVersion: PROTOCOL_VERSION,
+        agentInfo: { name: 'guard-aware-agent', version: '0' },
+        authMethods: [],
+        agentCapabilities: {},
+        _meta: {
+          [EXTERNAL_TOOL_GUARD_READY_META_KEY]:
+            EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+        },
+      }),
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      externalToolGuard: async () => ({ allowed: true }),
+    });
+
+    await expect(
+      bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+    ).resolves.toMatchObject({ sessionId: SESS_A });
+    expect(handle.agent.newSessionCalls).toHaveLength(1);
+    await bridge.shutdown();
   });
 
   it('spawns a session and returns the agent-assigned id', async () => {
@@ -3570,6 +3661,115 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('attributes live journal markers across queued prompts to the active prompt', async () => {
+    const firstPromptGate = deferred<void>();
+    const secondPromptGate = deferred<void>();
+    const handle = makeChannel({
+      promptImpl: async (req) => {
+        const text = (req.prompt[0] as { text?: string } | undefined)?.text;
+        await (text === 'first turn'
+          ? firstPromptGate.promise
+          : secondPromptGate.promise);
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      maxJournalEvents: 2,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const firstPrompt = bridge.sendPrompt(
+      session.sessionId,
+      {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'first turn' }],
+      },
+      undefined,
+      { clientId: session.clientId, promptId: 'prompt-first' },
+    );
+    const secondPrompt = bridge.sendPrompt(
+      session.sessionId,
+      {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'second turn' }],
+      },
+      undefined,
+      { clientId: session.clientId, promptId: 'prompt-second' },
+    );
+    await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+    for (const text of ['first-a', 'first-b', 'first-c']) {
+      await handle.agentConnection.sessionUpdate({
+        sessionId: session.sessionId,
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text },
+        },
+      });
+    }
+
+    const duringTurn = await bridge.loadSession({
+      sessionId: session.sessionId,
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+    });
+    expect(
+      duringTurn.liveJournal?.find(
+        (event) => event.type === 'history_truncated',
+      ),
+    ).toMatchObject({
+      promptId: 'prompt-first',
+      data: { scope: 'live_journal' },
+    });
+
+    firstPromptGate.resolve();
+    await firstPrompt;
+    await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(2));
+    for (const text of ['second-a', 'second-b', 'second-c']) {
+      await handle.agentConnection.sessionUpdate({
+        sessionId: session.sessionId,
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text },
+        },
+      });
+    }
+    const duringSecondTurn = await bridge.loadSession({
+      sessionId: session.sessionId,
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+    });
+    expect(
+      duringSecondTurn.liveJournal?.find(
+        (event) => event.type === 'history_truncated',
+      ),
+    ).toMatchObject({
+      promptId: 'prompt-second',
+      data: { scope: 'live_journal' },
+    });
+
+    secondPromptGate.resolve();
+    await secondPrompt;
+    const afterTurn = await bridge.loadSession({
+      sessionId: session.sessionId,
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+    });
+    expect(afterTurn.liveJournal).not.toContainEqual(
+      expect.objectContaining({ type: 'history_truncated' }),
+    );
+    expect(afterTurn.compactedReplay).not.toContainEqual(
+      expect.objectContaining({ type: 'history_truncated' }),
+    );
+    expect(JSON.stringify(afterTurn.compactedReplay)).toContain(
+      'first-afirst-bfirst-c',
+    );
+    expect(JSON.stringify(afterTurn.compactedReplay)).toContain(
+      'second-asecond-bsecond-c',
+    );
+
+    await bridge.shutdown();
+  });
+
   it('backfills historyAnchorRecordId from the transcript when the truncation marker carries no recordId', async () => {
     // Live-session regression: recordId is only stamped during replay of
     // the persisted transcript, never on the live stream. A seeded replay
@@ -5617,6 +5817,8 @@ describe('createAcpSessionBridge', () => {
         promptId: 'forged-prompt',
         originatorClientId: 'forged-client',
       };
+      const forgedModelPrompt = 'forged model-only prompt';
+      const trustedModelPrompt = 'trusted model-only prompt';
 
       expect(() =>
         bridge.sendPrompt(
@@ -5632,6 +5834,19 @@ describe('createAcpSessionBridge', () => {
       ).toThrow(InvalidClientIdError);
       expect(handle.agent.promptCalls).toHaveLength(0);
 
+      expect(() =>
+        bridge.sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'invalid internal prompt' }],
+          },
+          undefined,
+          { clientId: session.clientId, modelPrompt: '   ' },
+        ),
+      ).toThrow('Bridge modelPrompt must be a non-empty bounded string');
+      expect(handle.agent.promptCalls).toHaveLength(0);
+
       await bridge.sendPrompt(
         session.sessionId,
         {
@@ -5641,10 +5856,15 @@ describe('createAcpSessionBridge', () => {
             keep: true,
             'qwen-code/invocation': forgedInvocation,
             'qwen-code/private-parent-capability': 'forged-capability',
+            [DAEMON_MODEL_PROMPT_META_KEY]: forgedModelPrompt,
           },
         },
         undefined,
-        { clientId: session.clientId, promptId: 'server-prompt' },
+        {
+          clientId: session.clientId,
+          promptId: 'server-prompt',
+          modelPrompt: trustedModelPrompt,
+        },
       );
 
       expect(handle.agent.promptCalls[0]?._meta).toMatchObject({
@@ -5655,11 +5875,29 @@ describe('createAcpSessionBridge', () => {
           promptId: 'server-prompt',
           originatorClientId: session.clientId,
         },
+        [DAEMON_MODEL_PROMPT_META_KEY]: trustedModelPrompt,
       });
+      expect(handle.agent.promptCalls[0]?.prompt).toEqual([
+        { type: 'text', text: 'accepted' },
+      ]);
       expect(
         handle.agent.promptCalls[0]?._meta?.[
           'qwen-code/private-parent-capability'
         ],
+      ).toBeUndefined();
+
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'spoof-only' }],
+          _meta: { [DAEMON_MODEL_PROMPT_META_KEY]: forgedModelPrompt },
+        },
+        undefined,
+        { clientId: session.clientId, promptId: 'spoof-only-prompt' },
+      );
+      expect(
+        handle.agent.promptCalls[1]?._meta?.[DAEMON_MODEL_PROMPT_META_KEY],
       ).toBeUndefined();
 
       await bridge.shutdown();
@@ -6144,7 +6382,11 @@ describe('createAcpSessionBridge', () => {
           _meta: { inputAnnotations, privateRequestId: 'hidden' },
         },
         undefined,
-        { clientId: session.clientId, promptId: 'prompt-echo' },
+        {
+          clientId: session.clientId,
+          promptId: 'prompt-echo',
+          modelPrompt: 'hidden internal prompt',
+        },
       );
 
       const [aChunk, bChunk] = await Promise.all([aPromise, bPromise]);
@@ -6642,6 +6884,39 @@ describe('createAcpSessionBridge', () => {
       expect(handles[0]?.agent.promptCalls[0]?.sessionId).toBe(
         session.sessionId,
       );
+
+      await bridge.shutdown();
+    });
+
+    it('signals prompt admission only after the pending queue owns the prompt', async () => {
+      const factory: ChannelFactory = async () => makeChannel().channel;
+      const bridge = makeBridge({ channelFactory: factory });
+      const admitted = vi.fn();
+
+      await expect(
+        bridge.sendPrompt(
+          'missing-session',
+          {
+            sessionId: 'missing-session',
+            prompt: [{ type: 'text', text: 'not admitted' }],
+          },
+          undefined,
+          { onPromptAdmitted: admitted },
+        ),
+      ).rejects.toBeInstanceOf(SessionNotFoundError);
+      expect(admitted).not.toHaveBeenCalled();
+
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'admitted' }],
+        },
+        undefined,
+        { onPromptAdmitted: admitted },
+      );
+      expect(admitted).toHaveBeenCalledOnce();
 
       await bridge.shutdown();
     });
@@ -11030,6 +11305,66 @@ describe('createAcpSessionBridge', () => {
         sourceId: 'task-1',
       });
 
+      await bridge.shutdown();
+    });
+
+    it('passes source metadata in the resume request without a second control call', async () => {
+      const handle = makeChannel({
+        resumeSessionImpl: () => ({}),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+
+      await bridge.resumeSession({
+        sessionId: 'persisted-live-session',
+        workspaceCwd: WS_A,
+        sourceType: 'default',
+        sourceId: 'realtime_voice:p1:h1:a1:call-1',
+      });
+
+      expect(handle.agent.extMethodCalls).not.toContainEqual(
+        expect.objectContaining({
+          method: SERVE_CONTROL_EXT_METHODS.sessionSource,
+        }),
+      );
+      expect(handle.agent.resumeSessionCalls[0]?._meta).toEqual({
+        [SESSION_SOURCE_META_KEY]: {
+          sourceType: 'default',
+          sourceId: 'realtime_voice:p1:h1:a1:call-1',
+        },
+      });
+      await bridge.shutdown();
+    });
+  });
+
+  describe('Live transcript persistence', () => {
+    it('forwards direct dialogue to the owning ACP child', async () => {
+      const handle = makeChannel();
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const entries = [
+        { role: 'user' as const, text: '你好' },
+        { role: 'assistant' as const, text: '你好！' },
+      ];
+
+      await bridge.appendSessionLiveTranscript(
+        session.sessionId,
+        entries,
+        'qwen3.5-omni-plus-realtime',
+      );
+
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionLiveTranscript,
+        params: {
+          sessionId: session.sessionId,
+          entries,
+          model: 'qwen3.5-omni-plus-realtime',
+        },
+      });
       await bridge.shutdown();
     });
   });
@@ -18858,6 +19193,81 @@ describe('activePromptCount and lastActivityAt', () => {
   });
 });
 
+describe('createAcpSessionBridge — background notifications', () => {
+  it('forwards a daemon-owned worker completion to the live parent session', async () => {
+    const handle = makeChannel({
+      extMethodImpl: async (method, params) =>
+        method === SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification
+          ? { sessionId: params['sessionId'], accepted: true }
+          : {},
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await expect(
+      bridge.enqueueBackgroundNotification(session.sessionId, {
+        displayText: 'Worker completed.',
+        modelText: '<task-notification />',
+        taskId: 'worker-1',
+        status: 'completed',
+        kind: 'agent',
+      }),
+    ).resolves.toEqual({ sessionId: session.sessionId, accepted: true });
+
+    expect(handle.agent.extMethodCalls).toContainEqual({
+      method: SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification,
+      params: {
+        sessionId: session.sessionId,
+        displayText: 'Worker completed.',
+        modelText: '<task-notification />',
+        taskId: 'worker-1',
+        status: 'completed',
+        kind: 'agent',
+      },
+    });
+    await bridge.shutdown();
+  });
+
+  it('propagates a parent that did not accept the completion', async () => {
+    const handle = makeChannel({
+      extMethodImpl: async (method, params) =>
+        method === SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification
+          ? { sessionId: params['sessionId'], accepted: false }
+          : {},
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await expect(
+      bridge.enqueueBackgroundNotification(session.sessionId, {
+        displayText: 'Worker completed.',
+        modelText: '<task-notification />',
+        taskId: 'worker-1',
+        status: 'completed',
+        kind: 'agent',
+      }),
+    ).resolves.toEqual({ sessionId: session.sessionId, accepted: false });
+
+    await bridge.shutdown();
+  });
+
+  it('rejects a worker completion for an unknown parent session', async () => {
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+    });
+    await expect(
+      bridge.enqueueBackgroundNotification('missing', {
+        displayText: 'Worker completed.',
+        modelText: '<task-notification />',
+        taskId: 'worker-1',
+        status: 'completed',
+        kind: 'agent',
+      }),
+    ).rejects.toBeInstanceOf(SessionNotFoundError);
+    await bridge.shutdown();
+  });
+});
+
 /**
  * `enqueueMidTurnMessage` backs the web-shell mid-turn drain: the browser
  * pushes a message typed during a turn, the ACP child drains it via
@@ -18915,7 +19325,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await new Promise((r) => setTimeout(r, 10));
     expect(
       bridge.enqueueMidTurnMessage(session.sessionId, 'also check tests'),
-    ).toEqual({ accepted: true });
+    ).toEqual({ accepted: true, messageId: expect.any(String) });
 
     // Settle the turn → the queue flips back to idle and the undrained copy is
     // dropped server-side (the browser resends it as the next turn).
@@ -18958,6 +19368,105 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     expect(() => bridge.enqueueMidTurnMessage('nope', 'hi')).toThrow(
       SessionNotFoundError,
     );
+    await bridge.shutdown();
+  });
+
+  it('removes an undrained message only for its originating client', async () => {
+    const { factory, release } = hangingPromptFactory();
+    const bridge = makeBridge({ channelFactory: factory });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const promptPromise = bridge
+      .sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'go' }],
+        },
+        undefined,
+        { clientId: session.clientId },
+      )
+      .catch(() => {});
+    await new Promise((r) => setTimeout(r, 10));
+
+    const admission = bridge.enqueueMidTurnMessage(
+      session.sessionId,
+      'remove me',
+      { clientId: session.clientId },
+    );
+    expect(admission).toEqual({
+      accepted: true,
+      messageId: expect.any(String),
+    });
+    expect(
+      bridge.removeMidTurnMessage(session.sessionId, admission.messageId!),
+    ).toEqual({ removed: false });
+    expect(
+      bridge.removeMidTurnMessage(session.sessionId, admission.messageId!, {
+        clientId: session.clientId,
+      }),
+    ).toEqual({ removed: true });
+    expect(
+      bridge.removeMidTurnMessage(session.sessionId, admission.messageId!, {
+        clientId: session.clientId,
+      }),
+    ).toEqual({ removed: false });
+
+    release();
+    await promptPromise;
+    await bridge.shutdown();
+  });
+
+  it('mints distinct stable ids so two same-text messages remove independently', async () => {
+    const { factory, release } = hangingPromptFactory();
+    const bridge = makeBridge({ channelFactory: factory });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const promptPromise = bridge
+      .sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'go' }],
+        },
+        undefined,
+        { clientId: session.clientId },
+      )
+      .catch(() => {});
+    await new Promise((r) => setTimeout(r, 10));
+
+    const first = bridge.enqueueMidTurnMessage(session.sessionId, 'same text', {
+      clientId: session.clientId,
+    });
+    const second = bridge.enqueueMidTurnMessage(
+      session.sessionId,
+      'same text',
+      { clientId: session.clientId },
+    );
+    expect(first.messageId).toEqual(expect.any(String));
+    expect(second.messageId).toEqual(expect.any(String));
+    // A reused or unstable id would couple the two entries; each admission must
+    // mint its own so a removal addresses exactly one of them.
+    expect(first.messageId).not.toBe(second.messageId);
+
+    expect(
+      bridge.removeMidTurnMessage(session.sessionId, second.messageId!, {
+        clientId: session.clientId,
+      }),
+    ).toEqual({ removed: true });
+    // The first entry survives its sibling's removal and is independently
+    // removable by its own id.
+    expect(
+      bridge.removeMidTurnMessage(session.sessionId, first.messageId!, {
+        clientId: session.clientId,
+      }),
+    ).toEqual({ removed: true });
+    expect(
+      bridge.removeMidTurnMessage(session.sessionId, first.messageId!, {
+        clientId: session.clientId,
+      }),
+    ).toEqual({ removed: false });
+
+    release();
+    await promptPromise;
     await bridge.shutdown();
   });
 
@@ -19041,9 +19550,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     const t1 = send('t1');
     await new Promise((r) => setTimeout(r, 10));
     expect(bridge.enqueueMidTurnMessage(session.sessionId, 'leftover')).toEqual(
-      {
-        accepted: true,
-      },
+      { accepted: true, messageId: expect.any(String) },
     );
     releases[0]!();
     await t1;
@@ -19106,6 +19613,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     ).toEqual({ messages: [], hasQueuedPrompt: true });
     expect(bridge.enqueueMidTurnMessage(session.sessionId, 'x')).toEqual({
       accepted: true,
+      messageId: expect.any(String),
     });
 
     releases[0]!(); // settle p1 — session still busy (p2 pending), so NOT idle
@@ -19259,11 +19767,13 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       .catch(() => {});
     await new Promise((r) => setTimeout(r, 10));
 
-    expect(
-      bridge.enqueueMidTurnMessage(session.sessionId, 'hi', {
-        clientId: session.clientId,
-      }),
-    ).toEqual({ accepted: true });
+    const admission = bridge.enqueueMidTurnMessage(session.sessionId, 'hi', {
+      clientId: session.clientId,
+    });
+    expect(admission).toEqual({
+      accepted: true,
+      messageId: expect.any(String),
+    });
 
     // Subscribe before the drain so the live injection frame is captured. The
     // hanging prompt publishes nothing in between, so it is the first frame.
@@ -19282,7 +19792,15 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     expect(next.value?.type).toBe('mid_turn_message_injected');
     expect(next.value?.promptId).toBe('prompt-mid-turn');
     expect(next.value?.originatorClientId).toBe(session.clientId);
-    expect(next.value?.data).toMatchObject({ messages: ['hi'] });
+    expect(next.value?.data).toMatchObject({
+      messages: ['hi'],
+      messageIds: [admission.messageId],
+    });
+    expect(
+      bridge.removeMidTurnMessage(session.sessionId, admission.messageId!, {
+        clientId: session.clientId,
+      }),
+    ).toEqual({ removed: false });
 
     abort.abort();
     release?.();
@@ -19311,6 +19829,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     for (let i = 0; i < 20; i++) {
       expect(bridge.enqueueMidTurnMessage(session.sessionId, `m${i}`)).toEqual({
         accepted: true,
+        messageId: expect.any(String),
       });
     }
     expect(bridge.enqueueMidTurnMessage(session.sessionId, 'overflow')).toEqual(
@@ -19349,7 +19868,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
 
     expect(
       bridge.enqueueMidTurnMessage(session.sessionId, '   hello   '),
-    ).toEqual({ accepted: true });
+    ).toEqual({ accepted: true, messageId: expect.any(String) });
     const drained = await handle.agentConnection.extMethod(
       'craft/drainMidTurnQueue',
       { sessionId: session.sessionId },

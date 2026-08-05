@@ -1117,6 +1117,14 @@ export default {
     "Ja s'està generant el resum, espereu que acabi la sol·licitud anterior",
   'No conversation found to summarize.':
     "No s'ha trobat cap conversa per resumir.",
+  'Summary path already exists and is not a generated summary: {{path}}':
+    'El camí del resum ja existeix i no és un resum generat: {{path}}',
+  'Summary path must be within the project root.':
+    'El camí del resum ha de ser dins de la arrel del projecte.',
+  'Summary path resolves to an existing directory: {{path}}':
+    'El camí del resum es resol a un directori existent: {{path}}',
+  'Summary path ends with a separator but is an existing file: {{path}}':
+    'El camí del resum acaba amb un separador però és un fitxer existent: {{path}}',
   'Failed to generate project context summary: {{error}}':
     'Error en generar el resum del context del projecte: {{error}}',
   'Saved project summary to {{filePathForDisplay}}.':
@@ -2758,4 +2766,63 @@ export default {
     'Executant aquesta tasca programada en una sessió nova: {{link}}',
   'This scheduled run could not be started: {{error}}':
     "Aquesta execució programada no s'ha pogut iniciar: {{error}}",
+
+  // ==========================================================================
+  // Auto-skill curator (/curator command)
+  // ==========================================================================
+  'Maintain project auto-skills based on recent use.':
+    "Gestiona les habilitats automàtiques del projecte segons l'ús recent.",
+  'Show project auto-skill lifecycle status.':
+    'Mostra l’estat del cicle de vida de les habilitats automàtiques del projecte.',
+  'Run project auto-skill lifecycle maintenance.':
+    'Executa el manteniment del cicle de vida de les habilitats automàtiques del projecte.',
+  'Restore an archived project auto-skill.':
+    'Restaura una habilitat automàtica del projecte arxivada.',
+  'Auto-skill curator': "Gestor d'habilitats automàtiques",
+  'Last run: {{time}}': 'Última execució: {{time}}',
+  'Active: {{count}}': 'Actives: {{count}}',
+  'Stale: {{count}}': 'Obsoletes: {{count}}',
+  'Archived: {{count}}': 'Arxivades: {{count}}',
+  'Stale skills:': 'Habilitats obsoletes:',
+  'Pinned skills:': 'Habilitats fixades:',
+  'Archived skills:': 'Habilitats arxivades:',
+  'Dry run complete.': 'Simulació completada.',
+  'Curator run complete.': 'Execució del gestor completada.',
+  'Checked: {{count}}': 'Comprovades: {{count}}',
+  'First observed: {{count}}': 'Observades per primera vegada: {{count}}',
+  'Marked stale: {{count}}': 'Marcades com a obsoletes: {{count}}',
+  'Reactivated: {{count}}': 'Reactivades: {{count}}',
+  'Skipped archive collisions: {{count}}':
+    "Col·lisions d'arxivament omeses: {{count}}",
+  'Archive candidates:': "Candidates a l'arxivament:",
+  'Skipped archive collisions:': "Col·lisions d'arxivament omeses:",
+  'Skipped rename errors: {{count}}':
+    'Errors de canvi de nom omesos: {{count}}',
+  'Skipped rename errors:': 'Errors de canvi de nom omesos:',
+  '{{verb}}: {{count}}': '{{verb}}: {{count}}',
+  'Would archive': "S'arxivarien",
+  Archived: 'Arxivades',
+  'Failed to read auto-skill curator status: {{message}}':
+    "No s'ha pogut llegir l'estat del gestor d'habilitats automàtiques: {{message}}",
+  'Usage: /curator run [--dry-run]': 'Ús: /curator run [--dry-run]',
+  'Failed to run auto-skill curator: {{message}}':
+    "No s'ha pogut executar el gestor d'habilitats automàtiques: {{message}}",
+  'Usage: /curator restore <directory>': 'Ús: /curator restore <directori>',
+  'Restored auto-skill: {{name}}': 'Habilitat automàtica restaurada: {{name}}',
+  'Failed to restore auto-skill: {{message}}':
+    "No s'ha pogut restaurar l'habilitat automàtica: {{message}}",
+  'Exclude an auto-skill from automatic maintenance.':
+    'Exclou una habilitat automàtica del manteniment automàtic.',
+  'Return a pinned auto-skill to automatic maintenance.':
+    'Retorna una habilitat automàtica fixada al manteniment automàtic.',
+  'Usage: /curator pin <directory>': 'Ús: /curator pin <directori>',
+  'Usage: /curator unpin <directory>': 'Ús: /curator unpin <directori>',
+  'Pinned auto-skill: {{name}}': 'Habilitat automàtica fixada: {{name}}',
+  'Unpinned auto-skill: {{name}}': 'Habilitat automàtica desfixada: {{name}}',
+  'Failed to update auto-skill pin: {{message}}':
+    "No s'ha pogut actualitzar la fixació de l'habilitat automàtica: {{message}}",
+  'Auto-skill curator changes are disabled in safe mode.':
+    "Els canvis del gestor d'habilitats automàtiques estan desactivats en mode segur.",
+  'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
+    "Els canvis del gestor d'habilitats automàtiques només estan disponibles en espais de treball de confiança. Marca aquesta carpeta com a fiable amb `/trust` i torna-ho a provar.",
 };

@@ -23,6 +23,7 @@ import {
 import * as fs from 'node:fs';
 import stripJsonComments from 'strip-json-comments';
 import * as path from 'node:path';
+import lockfile from 'proper-lockfile';
 import * as jsoncEditor from '../utils/jsonc-editor.js';
 import {
   loadTrustedFolders,
@@ -333,6 +334,29 @@ describe('Trusted Folders Loading', () => {
     expect(writtenContent).not.toContain('// keep this one');
     expect(writtenContent).not.toContain('"/keep/path": "TRUST_FOLDER"');
     expect(writtenContent).toContain('"/new/path": "TRUST_FOLDER"');
+  });
+
+  it('saveTrustedFolders registers a lock-compromised handler', () => {
+    const userPath = getTrustedFoldersPath();
+    const dirPath = path.dirname(userPath);
+
+    (mockFsExistsSync as Mock).mockImplementation(
+      (p) => p === userPath || p === dirPath,
+    );
+    (fs.readFileSync as Mock).mockReturnValue('{}');
+
+    saveTrustedFolders({
+      path: userPath,
+      config: {
+        '/new/path': TrustLevel.TRUST_FOLDER,
+      },
+    });
+
+    const options = vi.mocked(lockfile.lockSync).mock.calls.at(-1)?.[1];
+    expect(options?.onCompromised).toBeTypeOf('function');
+    expect(() =>
+      options?.onCompromised?.(new Error('lock lost')),
+    ).not.toThrow();
   });
 
   it('saveTrustedFolders should reject malformed input without overwriting it', () => {
