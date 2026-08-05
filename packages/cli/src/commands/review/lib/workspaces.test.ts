@@ -24,6 +24,7 @@ import {
   readWorkspaceGlobs,
   readRootPackage,
   readWorkspacePackages,
+  rootTestFansOut,
   type WorkspacePackage,
 } from './workspaces.js';
 
@@ -403,6 +404,52 @@ describe('readWorkspacePackages', () => {
     expect(linked?.name).toBe('@x/linked');
     expect(linked?.deps).toEqual(['@x/core']);
     teardown();
+  });
+});
+
+describe('rootTestFansOut', () => {
+  const withRootTest = (test: unknown): string => {
+    const root = mkdtempSync(join(tmpdir(), 'ws-fanout-'));
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', scripts: { test } }),
+    );
+    return root;
+  };
+
+  it('detects --workspaces and the -ws/--ws shorthands', () => {
+    for (const script of [
+      'npm run test --workspaces --if-present',
+      'npm test -ws',
+      'npm test --ws',
+    ]) {
+      const root = withRootTest(script);
+      expect(rootTestFansOut(root)).toBe(true);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('does not fire on -w/--workspace (singular) or a plain suite', () => {
+    for (const script of [
+      'vitest',
+      'npm test --workspace=packages/cli',
+      'npm test -w packages/cli',
+    ]) {
+      const root = withRootTest(script);
+      expect(rootTestFansOut(root)).toBe(false);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('is false when the manifest is missing or the script is not a string', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ws-fanout-'));
+    expect(rootTestFansOut(root)).toBe(false);
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', scripts: { test: 42 } }),
+    );
+    expect(rootTestFansOut(root)).toBe(false);
+    rmSync(root, { recursive: true, force: true });
   });
 });
 

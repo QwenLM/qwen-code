@@ -15,9 +15,11 @@
 // closure of the diff: the changed workspaces plus everything that depends on
 // them, computed from the same declared graph the build set uses.
 //
-// Every input that makes the scoped set possibly incomplete is DISCLOSED, in
-// trust order, as a `caveat` on the scope — a fallback the report does not
-// disclose is a claim ("these tests were run") the review cannot honestly make:
+// Every input that makes the scoped set possibly incomplete is DISCLOSED as a
+// `caveat` on the scope — a fallback the report does not disclose is a claim
+// ("these tests were run") the review cannot honestly make. Every caveat that
+// applies is reported, strongest first: "nothing is silent" means composing
+// the disclosures, not letting the first one hide the rest:
 //
 //   - A workspace whose `package.json` does not parse (or has no usable `name`)
 //     is invisible to the dependency graph, so its reverse edges are missing
@@ -97,8 +99,9 @@ export function isInertLicense(path: string): boolean {
 
 /**
  * Decide the test scope for a workspace monorepo. Pure given its inputs; the
- * caveat checks run in trust order — a graph that cannot be computed makes the
- * later, graph-derived answers the least of the report's worries.
+ * caveats are DISCLOSED in trust order — every one that applies, strongest
+ * first, because "nothing is silent" means composing the disclosures, not
+ * letting the first one hide the rest.
  */
 export function resolveTestScope(input: {
   changed: string[];
@@ -128,42 +131,54 @@ export function resolveTestScope(input: {
   const { changed, globs, packages, skipped } = input;
 
   const affected = affectedWorkspaces(changed, globs);
-  const graph = input.rootPackage ? [...packages, input.rootPackage] : packages;
+  // The root goes FIRST: on a name collision a member must win — this very
+  // repo's root and packages/cli share the name `@qwen-code/qwen-code`, and
+  // last-write-wins would resolve a dependent of the CLI package to the root,
+  // silently dropping the member's dependents from the closure.
+  const graph = input.rootPackage ? [input.rootPackage, ...packages] : packages;
   const scriptsOf = new Map(graph.map((p) => [p.dir, p.scripts]));
 
-  let caveat: string | undefined;
+  // Every caveat that applies is disclosed, strongest first. The graph
+  // caveat leads: a graph that cannot be computed makes the later,
+  // graph-derived answers the least of the report's worries.
+  const caveats: string[] = [];
   if (skipped.length > 0) {
-    caveat =
+    caveats.push(
       `the workspace graph could not be fully computed: ${skipped.join(', ')} ` +
-      `${skipped.length === 1 ? 'has' : 'have'} a package.json that does not ` +
-      'parse, has no usable `name`, or is shadowed by a later workspace glob, ' +
-      'so a reverse dependency may be missing from the scoped set';
-  } else {
-    // A dir a positive glob claims but no manifest populates hosts no suite
-    // the scoped set can run, and its reverse edges are invisible to the
-    // closure — an empty scoped set there must not read as a complete answer.
-    // (build-test's unmapped guard reaches the same conclusion; the scope
-    // discloses it itself so the invariant does not rest on one call site.)
-    const unmapped = affected.filter((d) => d !== '.' && !scriptsOf.has(d));
-    // Files a negation excludes (!packages/desktop — a separate toolchain with
-    // its own lockfile) cannot affect any included workspace's tests, so they
-    // earn no caveat either.
-    const outside = changed.filter((f) => workspaceDirFor(f, globs) === null);
-    const influential = outside.filter(
-      (f) => !isInertLicense(f) && !isNegationExcluded(f, globs),
+        `${skipped.length === 1 ? 'has' : 'have'} a package.json that does not ` +
+        'parse, has no usable `name`, or is shadowed by a later workspace glob, ' +
+        'so a reverse dependency may be missing from the scoped set',
     );
-    if (unmapped.length > 0) {
-      caveat =
-        `the workspace globs claim ${unmapped.join(', ')}, but no readable ` +
+  }
+  // A dir a positive glob claims but no manifest populates hosts no suite
+  // the scoped set can run, and its reverse edges are invisible to the
+  // closure — an empty scoped set there must not read as a complete answer.
+  // (build-test's unmapped guard reaches the same conclusion; the scope
+  // discloses it itself so the invariant does not rest on one call site.)
+  const unmapped = affected.filter(
+    (d) => d !== '.' && !scriptsOf.has(d) && !skipped.includes(d),
+  );
+  // Files a negation excludes (!packages/desktop — a separate toolchain with
+  // its own lockfile) cannot affect any included workspace's tests, so they
+  // earn no caveat either.
+  const outside = changed.filter((f) => workspaceDirFor(f, globs) === null);
+  const influential = outside.filter(
+    (f) => !isInertLicense(f) && !isNegationExcluded(f, globs),
+  );
+  if (unmapped.length > 0) {
+    caveats.push(
+      `the workspace globs claim ${unmapped.join(', ')}, but no readable ` +
         'package.json there makes a graph member — no suite covers a change ' +
-        'inside, and a dependent of the diff may be missing from the scoped set';
-    } else if (influential.length > 0) {
-      caveat =
-        `${influential.length} changed file(s) sit outside every workspace and ` +
-        `are not inert (e.g. ${influential.slice(0, 3).join(', ')}); a root ` +
-        "script or config can affect any package's tests, and the scoped set " +
-        'cannot cover them';
-    }
+        'inside, and a dependent of the diff may be missing from the scoped set',
+    );
+  }
+  if (influential.length > 0) {
+    caveats.push(
+      `${influential.length} changed file(s) sit outside every workspace ` +
+        `and are not inert (e.g. ${influential.slice(0, 3).join(', ')}); a ` +
+        "root script or config can affect any package's tests, and the " +
+        'scoped set cannot cover them',
+    );
   }
 
   const closure = reverseDependencyClosure(affected, graph);
@@ -175,9 +190,7 @@ export function resolveTestScope(input: {
   // is one command that repeats the ENTIRE suite — the run that cannot finish
   // inside a command deadline, which this module exists to refuse. The root
   // stays in the graph (its edges matter) but leaves the executed set, and
-  // the non-run is disclosed rather than dressed up as coverage. Unlike the
-  // graph caveats above, this COMPOSES with the half-cap one: both are facts
-  // about what ran.
+  // the non-run is disclosed rather than dressed up as coverage.
   let fanOutCaveat: string | undefined;
   if (input.rootTestFansOut && workspaces.includes('.')) {
     workspaces = workspaces.filter((d) => d !== '.');
@@ -192,7 +205,7 @@ export function resolveTestScope(input: {
   // The root suite counts on BOTH sides when it participates — with a running
   // root the executed set is larger than workspace-only arithmetic models. A
   // build-only root has no suite to count; a fan-out root cannot run.
-  if (!caveat) {
+  {
     const rootRuns =
       input.rootPackage?.scripts.includes('test') && !input.rootTestFansOut
         ? 1
@@ -201,15 +214,18 @@ export function resolveTestScope(input: {
       packages.filter((p) => p.scripts.includes('test')).length + rootRuns;
     const scoped = workspaces.length;
     if (scoped * 2 > testable) {
-      caveat =
+      caveats.push(
         `the diff's reverse-dependency closure covers ${scoped} of ` +
-        `${testable} testable ${
-          rootRuns ? 'suites (including the root)' : 'workspaces'
-        } — more than half, so the scoped set is not a meaningful narrowing ` +
-        'of the suite';
+          `${testable} testable ${
+            rootRuns ? 'suites (including the root)' : 'workspaces'
+          } — more than half, so the scoped set is not a meaningful narrowing ` +
+          'of the suite',
+      );
     }
   }
+  if (fanOutCaveat) caveats.push(fanOutCaveat);
 
-  const combined = [caveat, fanOutCaveat].filter(Boolean).join('; ');
-  return combined ? { workspaces, caveat: combined } : { workspaces };
+  return caveats.length > 0
+    ? { workspaces, caveat: caveats.join('; ') }
+    : { workspaces };
 }

@@ -116,7 +116,11 @@ export function workspaceDirFor(
       // (a glob with a subpath cannot match a dir with no subpath), so the
       // member's suite can still feel a change there. When the negation DOES
       // exclude the owner, ownership falls back to the previous, outer member
-      // — only a negation of THAT one leaves the file owned by nothing.
+      // — only a negation of THAT one leaves the file owned by nothing. (The
+      // pop does not re-check the popped owner against negations already
+      // walked past: a contrived ordering like `!packages/desktop` BEFORE
+      // `!packages/desktop/src` can resurrect an excluded owner. Realistic
+      // orderings — the outer negation written last — are exact.)
       owner = previous.pop() ?? null;
     }
   }
@@ -236,7 +240,12 @@ export function rootTestFansOut(root: string): boolean {
     return false;
   }
   const test = pkg?.scripts?.['test'];
-  return typeof test === 'string' && /--workspaces\b/.test(test);
+  // `--workspaces` and npm's `-ws`/`--ws` shorthands fan out; `-w`/`--workspace`
+  // (singular, one named workspace) deliberately do NOT match.
+  return (
+    typeof test === 'string' &&
+    /(^|\s)(--workspaces\b|--?ws(?=\s|$))/.test(test)
+  );
 }
 
 /** The manifest fields this module reads. */
@@ -272,10 +281,7 @@ function declaredDeps(pkg: ManifestLike): string[] {
  * package for and the dirs it reports as skipped both come from this list, so
  * a dir one of them saw and the other did not cannot exist.
  */
-export function workspaceDirCandidates(
-  root: string,
-  globs: string[],
-): string[] {
+function workspaceDirCandidates(root: string, globs: string[]): string[] {
   const dirs = new Set<string>();
   for (const glob of globs) {
     if (glob.startsWith('!')) continue; // negations are applied by workspaceDirFor

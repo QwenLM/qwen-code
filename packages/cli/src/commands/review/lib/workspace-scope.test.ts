@@ -298,9 +298,10 @@ describe('resolveTestScope', () => {
     });
   });
 
-  it('records the broken-graph caveat when a manifest was skipped — before any other answer', () => {
-    // The outside-file answer is graph-derived; a graph missing a package
-    // makes it the least of the report's worries, so the skipped check wins.
+  it('names the broken graph FIRST when caveats compose — nothing is silent', () => {
+    // A skipped manifest and an influential outside file both apply; the
+    // report carries both, the graph caveat leading — a graph that cannot be
+    // computed makes the graph-derived answers the least of its worries.
     const scope = resolveTestScope({
       changed: ['scripts/x.js', 'packages/i1/src/a.ts'],
       globs: GLOBS,
@@ -310,7 +311,10 @@ describe('resolveTestScope', () => {
     expect(scope.workspaces).toEqual(['packages/i1']);
     expect(scope.caveat).toContain('packages/broken');
     expect(scope.caveat).toContain('does not parse');
-    expect(scope.caveat).not.toContain('scripts/x.js');
+    expect(scope.caveat).toContain('scripts/x.js');
+    expect(scope.caveat!.indexOf('packages/broken')).toBeLessThan(
+      scope.caveat!.indexOf('scripts/x.js'),
+    );
   });
 
   it('treats the root suite as a dependent when it declares a workspace dependency', () => {
@@ -447,10 +451,38 @@ describe('resolveTestScope', () => {
     expect(scope.caveat).toContain('shadowed by a later workspace glob');
   });
 
-  it('keeps the broken-graph caveat ahead of the half-cap one — trust order', () => {
-    // The same input that trips the half cap also carries a skipped manifest;
-    // "the graph could not be computed" is the stronger disclosure and must
-    // win, not be replaced by the narrower half-cap sentence.
+  it('lets a MEMBER win a name collision with the root', () => {
+    // This very repo: the root and packages/cli share the name
+    // `@qwen-code/qwen-code`. Last-write-wins on the name map would resolve a
+    // dependent of the CLI package to the ROOT, silently dropping the
+    // member's own dependents from the closure.
+    const root = p('.', '@x/cli', ['@x/core'], ['test']);
+    const colliding: WorkspacePackage[] = [
+      p('packages/cli', '@x/cli', ['@x/core']),
+      p('packages/core', '@x/core'),
+      p('packages/app', '@x/app', ['@x/cli']),
+      p('packages/i1', '@x/i1'),
+      p('packages/i2', '@x/i2'),
+      p('packages/i3', '@x/i3'),
+      p('packages/i4', '@x/i4'),
+    ];
+    const scope = resolveTestScope({
+      changed: ['packages/core/src/a.ts'],
+      globs: GLOBS,
+      packages: colliding,
+      skipped: [],
+      rootPackage: root,
+    });
+    // app depends on the cli NAME — it must resolve to the member, so app's
+    // suite is in the closure. (The root is in too: it depends on core.)
+    expect(scope.workspaces).toContain('packages/app');
+    expect(scope.workspaces).toContain('packages/cli');
+  });
+
+  it('keeps the broken-graph caveat ahead of the half-cap one when both apply', () => {
+    // The same input trips the half cap and carries a skipped manifest; both
+    // are disclosed — composing, not truncating — with the stronger graph
+    // disclosure first.
     const hub: WorkspacePackage[] = [
       p('packages/core', '@x/core'),
       p('packages/a', '@x/a', ['@x/core']),
@@ -465,7 +497,10 @@ describe('resolveTestScope', () => {
     });
     expect(scope.caveat).toContain('does not parse');
     expect(scope.caveat).toContain('packages/broken');
-    expect(scope.caveat).not.toContain('more than half');
+    expect(scope.caveat).toContain('more than half');
+    expect(scope.caveat!.indexOf('does not parse')).toBeLessThan(
+      scope.caveat!.indexOf('more than half'),
+    );
   });
 
   it('discloses an affected dir the globs claim but no manifest populates', () => {

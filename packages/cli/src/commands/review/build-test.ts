@@ -60,13 +60,27 @@ import {
 } from './lib/workspaces.js';
 import { resolveTestScope, type TestScope } from './lib/workspace-scope.js';
 
+/**
+ * A workspace dir is interpolated into a shell command line inside double
+ * quotes. The dirs come from the REVIEWED repo's tree and root manifest —
+ * PR-authored input — and POSIX shells expand `$()` and backticks even inside
+ * double quotes, so an unescaped name is a command-injection path. Escape the
+ * characters that stay live inside double quotes. (Safe names, which is every
+ * real one, pass through unchanged.)
+ */
+function shellArg(dir: string): string {
+  return `"${dir.replace(/[\\"$`]/g, '\\$&')}"`;
+}
+
 /** The build command for a dir: the root package takes no `--workspace`. */
 function buildCommand(dir: string): string {
-  return dir === '.' ? 'npm run build' : `npm run build --workspace="${dir}"`;
+  return dir === '.'
+    ? 'npm run build'
+    : `npm run build --workspace=${shellArg(dir)}`;
 }
 /** The test command for a dir: the root package takes no `--workspace`. */
 function testCommand(dir: string): string {
-  return dir === '.' ? 'npm test' : `npm test --workspace="${dir}"`;
+  return dir === '.' ? 'npm test' : `npm test --workspace=${shellArg(dir)}`;
 }
 
 /** A command this run actually executed, and what it did. */
@@ -318,6 +332,14 @@ interface BuildTestArgs {
    */
   buildOnly?: boolean;
   /**
+   * Whole-call wall-clock budget for the test phase, in seconds (default: 2×
+   * `timeout`). The closure's per-command deadlines SUM, and a large one sums
+   * past the tool timeout the brief welds onto the call — whose outer kill
+   * discards the report. The test loop stops before a command whose deadline
+   * would cross this budget and discloses the suites that did not run.
+   */
+  budget?: number;
+  /**
    * How to run a command. Injectable so the tests can build the states that are
    * hard to force out of real npm — chiefly the one that cost a live review: an
    * install that exits non-zero and leaves a working `node_modules` behind.
@@ -354,6 +376,11 @@ function changedFilesFrom(planPath: string): string[] {
 export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   const root = resolve(args.worktree);
   const perCommandMs = args.timeout * 1000;
+  // The whole-call wall-clock budget for the test loop, in milliseconds.
+  // Defaults to two per-command deadlines — matching the 600-second tool
+  // timeout the brief welds onto the whole call at the default 300s.
+  const callBudgetMs = (args.budget ?? args.timeout * 2) * 1000;
+  const runStarted = Date.now();
   const exec = args.exec ?? run;
   const changed = changedFilesFrom(args.plan);
 
@@ -435,8 +462,7 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   // such transitive dependent with it, silently. Which of the root's own
   // scripts run is decided separately (build loop: its `build`; test scope:
   // its `test`, unless it fans out over every workspace — see below).
-  const rootPackage = rootPkg;
-  const testScope =
+  let testScope =
     singleRoot || args.buildOnly
       ? undefined
       : resolveTestScope({
@@ -444,8 +470,8 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
           globs,
           packages,
           skipped,
-          rootPackage,
-          rootTestFansOut: rootPackage?.scripts.includes('test')
+          rootPackage: rootPkg,
+          rootTestFansOut: rootPkg?.scripts.includes('test')
             ? rootTestFansOut(root)
             : false,
         });
@@ -453,8 +479,9 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   // cannot drift apart — and it is the same graph for a build-only probe as
   // for the full run, or the merge-base probe measures a different tree than
   // the run it is the baseline for ("same set, same commands, same verdict").
-  const scopeGraph =
-    !singleRoot && rootPackage ? [...packages, rootPackage] : packages;
+  // The root goes FIRST: on a name collision a member must win (this repo's
+  // root and packages/cli share the name `@qwen-code/qwen-code`).
+  const scopeGraph = !singleRoot && rootPkg ? [rootPkg, ...packages] : packages;
 
   // With no affected workspace there is nothing to run at all. Three diffs land
   // here: an empty one; a build-only call (the merge-base probe), which measures
@@ -721,7 +748,7 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
         : `\`${failure.command}\` failed. Correlate the errors below with the diff: a ` +
           'compile error in a file the PR changed is a Critical; one in a file it did not ' +
           'touch is a pre-existing failure, and belongs in the terminal, not on the PR.';
-      results.buildSet = set.filter((d) => byDir.has(d));
+      results.buildSet = set;
       results.widenedWith = [...widened];
       return results;
     }
@@ -746,7 +773,7 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     set = buildSetFor(affected, scopeGraph, alsoBuild);
   }
 
-  results.buildSet = set.filter((d) => byDir.has(d));
+  results.buildSet = set;
   results.widenedWith = [...widened];
 
   // Test what the diff can break: the changed workspaces plus their
@@ -765,24 +792,52 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   // repo's suite took 31 minutes in CI against a 300-second deadline, and a
   // third of recent diffs would have hit the fallback), so the fallback would
   // only ever report a timeout — zero signal framed as a failure. The scoped
-  // set is the run that covers the diff — each command keeps its own deadline,
-  // and whether a large closure's deadlines sum past the caller's ceiling is
-  // the separate, acknowledged follow-up named on the `timeout` option. The
-  // caveat is the honesty.
+  // set is the run that covers the diff — each command keeps its own deadline.
+  //
+  // Those per-command deadlines SUM, though, and a large closure can sum past
+  // the whole-call ceiling the brief welds on (600s by default) — the outer
+  // shell kill then discards the report entirely. So the loop below runs
+  // against a whole-call budget: when the next command's deadline would cross
+  // it, the loop stops and names the suites that did not run. A partial
+  // report is signal; a discarded one is the "71 timeouts, nothing verified"
+  // failure this command exists to end.
   const rootHasTest = !!rootPkg?.scripts.includes('test');
   const testDirs = args.buildOnly
     ? []
     : !testScope
       ? affected // single root: its one package, exactly as before scoping
       : testScope.workspaces;
-  for (const dir of testDirs) {
-    const runnable =
-      dir === '.' ? rootHasTest : !!byDir.get(dir)?.scripts.includes('test');
-    if (!runnable) continue;
-    const r = exec(testCommand(dir), root, perCommandMs);
+  const runnableDirs = testDirs.filter((dir) =>
+    dir === '.' ? rootHasTest : !!byDir.get(dir)?.scripts.includes('test'),
+  );
+  const notRun: string[] = [];
+  for (let i = 0; i < runnableDirs.length; i++) {
+    if (Date.now() - runStarted + perCommandMs > callBudgetMs) {
+      notRun.push(...runnableDirs.slice(i));
+      break;
+    }
+    const r = exec(testCommand(runnableDirs[i]), root, perCommandMs);
     results.test.push(r);
     if (r.timedOut) results.timedOut.push(r.command);
     if (r.exitCode !== 0) results.ok = false;
+  }
+
+  // A budget-stopped run discloses the suites it did not reach — through the
+  // scope's caveat when there is one, and appended to the note when there is
+  // not (single-root repos carry no testScope).
+  const partialNote =
+    notRun.length > 0
+      ? `the whole-call budget (${Math.round(callBudgetMs / 1000)}s) was ` +
+        `spent with ${notRun.length} suite(s) still to run — not run: ` +
+        notRun.join(', ')
+      : undefined;
+  if (testScope && partialNote) {
+    testScope = {
+      ...testScope,
+      caveat: testScope.caveat
+        ? `${testScope.caveat}; ${partialNote}`
+        : partialNote,
+    };
   }
 
   // The scope was executed — only now may the report carry it. Every return
@@ -825,8 +880,14 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
           'them that defines a test script. Everything passed.';
       }
       if (testScope?.caveat) testsClause += ` Caveat: ${testScope.caveat}.`;
+      // The root is not a workspace: count it separately, or a 22-member repo
+      // reports "of 23" — a number in a report whose thesis is honest numbers.
+      const builtWorkspaces = results.buildSet.filter((d) => d !== '.').length;
+      const rootSuffix = results.buildSet.includes('.')
+        ? ' (plus the root package)'
+        : '';
       results.note =
-        `Built ${results.buildSet.length} of ${byDir.size} workspaces (the ${affected.length} the ` +
+        `Built ${builtWorkspaces} of ${packages.length} workspaces${rootSuffix} (the ${affected.length} the ` +
         `diff changes, plus what they compile against${
           widened.size
             ? `, plus ${[...widened].join(', ')} the compiler asked for`
@@ -844,6 +905,14 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
           ? ' (Commands that timed out are infrastructure, not findings.)'
           : '');
     }
+  }
+
+  // Single-root repos carry no testScope, so a budget stop is disclosed on
+  // the note itself. (With a scope, the caveat above already says it.)
+  if (partialNote && !results.testScope) {
+    results.note = results.note
+      ? `${results.note} ${partialNote}.`
+      : partialNote;
   }
 
   // The install exited non-zero but left a usable tree, so the run went ahead. Say
@@ -893,8 +962,17 @@ export const buildTestCommand: CommandModule = {
           'Per-command deadline in seconds. Kept strictly below the 600s (600000ms) ' +
           "tool timeout the agent's brief welds onto the whole call, so a single hung " +
           "command's own deadline fires — and build-test reports it as data — before " +
-          'the outer shell kill would discard the report. (A giant PR whose commands ' +
-          'sum past the tool ceiling is a separate, acknowledged follow-up.)',
+          'the outer shell kill would discard the report. Commands that would SUM ' +
+          'past the whole call are stopped and disclosed instead — see --budget.',
+      })
+      .option('budget', {
+        type: 'number',
+        describe:
+          'Whole-call wall-clock budget for the test phase in seconds (default: ' +
+          '2× --timeout, matching the 600s tool timeout the brief welds on). The ' +
+          'test loop stops before a command whose deadline would cross it and ' +
+          'names the suites that did not run — a partial report survives where ' +
+          'the outer shell kill would discard the whole one.',
       })
       .option('install', {
         type: 'boolean',

@@ -1150,6 +1150,78 @@ describe('runBuildTest', () => {
     expect(rep.ok).toBe(true);
   });
 
+  it('stops at the whole-call budget and names the suites that did not run', () => {
+    // Two suites in the closure and a budget smaller than one deadline: the
+    // loop must stop BEFORE the first test command rather than let the outer
+    // shell kill discard the report — and name what did not run.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/core', {
+      name: '@x/core',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/leaf', {
+      name: '@x/leaf',
+      dependencies: { '@x/core': '*' },
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    for (const island of ['i1', 'i2', 'i3']) {
+      pkg(`packages/${island}`, {
+        name: `@x/${island}`,
+        scripts: { test: 'exit 0' },
+      });
+    }
+    writePlan(['packages/core/src/a.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      budget: 1,
+      install: false,
+      exec: okExec,
+    });
+    // The builds ran (each inside its own deadline); no 60s test deadline can
+    // fit inside a 1s whole-call budget, so the loop stopped first.
+    expect(rep.build.length).toBeGreaterThan(0);
+    expect(rep.test).toEqual([]);
+    expect(rep.testScope?.caveat).toContain(
+      'not run: packages/core, packages/leaf',
+    );
+    expect(rep.testScope?.caveat).toContain('whole-call budget');
+    expect(rep.note).toContain('whole-call budget');
+    expect(rep.ok).toBe(true);
+  });
+
+  it('shell-escapes a workspace dir name — the tree is PR-authored input', () => {
+    // A dir named `$(touch pwned)` would execute inside double quotes on a
+    // POSIX shell: `$()` and backticks stay live there. The command line must
+    // escape it.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/$(touch pwned)', {
+      name: '@x/evil',
+      scripts: { test: 'exit 0' },
+    });
+    pkg('packages/island', { name: '@x/island', scripts: { test: 'exit 0' } });
+    writePlan(['packages/$(touch pwned)/src/a.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec,
+    });
+    expect(rep.test.map((t) => t.command)).toEqual([
+      'npm test --workspace="packages/\\$(touch pwned)"',
+    ]);
+  });
+
   it('certifies nothing to run for an outside-only diff, and names the caveat — never a complete answer', () => {
     writeFileSync(
       join(root, 'package.json'),
