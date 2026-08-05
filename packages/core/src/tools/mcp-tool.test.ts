@@ -2490,6 +2490,73 @@ describe('DiscoveredMCPTool', () => {
       expect(result.llmContent).toEqual([{ text: 'OK' }]);
     });
 
+    it.each<{ name: string; status: MCPServerStatus }>([
+      { name: 'CONNECTED', status: MCPServerStatus.CONNECTED },
+      { name: 'DISCONNECTED', status: MCPServerStatus.DISCONNECTED },
+    ])(
+      'still gates a rejection whose message only contains the pre-send wording when the server is $name',
+      async ({ status }) => {
+        const params = { param: 'test' };
+        // The carve-out exact-matches the SDK's pre-send rejection. A
+        // delivered call whose handler merely echoes the wording (e.g. a
+        // database error) must stay gated: loosening the match to
+        // .includes() would classify it as never delivered and auto-replay
+        // it — the double execution the gate exists to prevent.
+        const deadClient: McpDirectClient = {
+          callTool: vi
+            .fn()
+            .mockRejectedValueOnce(new Error('Not connected to database')),
+        };
+        const liveClient: McpDirectClient = {
+          callTool: vi.fn().mockResolvedValue({
+            content: [{ type: 'text', text: 'REPLAYED' }],
+          }),
+        };
+        const newTool = new DiscoveredMCPTool(
+          mockCallableToolInstance,
+          serverName,
+          serverToolName,
+          baseDescription,
+          inputSchema,
+          undefined, // untrusted
+          undefined,
+          undefined,
+          liveClient, // unannotated
+        );
+        const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+        const mockConfig = {
+          isTrustedFolder: () => true,
+          getToolRegistry: () => ({
+            discoverToolsForServer,
+            ensureTool: vi.fn().mockResolvedValue(newTool),
+          }),
+          getTruncateToolOutputThreshold: () => 0,
+          getTruncateToolOutputLines: () => 0,
+        };
+
+        updateMCPServerStatus(serverName, status);
+
+        const reconnectTool = new DiscoveredMCPTool(
+          mockCallableToolInstance,
+          serverName,
+          serverToolName,
+          baseDescription,
+          inputSchema,
+          undefined, // untrusted
+          undefined,
+          mockConfig as any,
+          deadClient, // unannotated
+        );
+
+        await expect(
+          reconnectTool.build(params).execute(new AbortController().signal),
+        ).rejects.toThrow(unsafeReplayErrorMessage);
+
+        expect(discoverToolsForServer).not.toHaveBeenCalled();
+        expect(liveClient.callTool).not.toHaveBeenCalled();
+      },
+    );
+
     it('still gates a call that dies mid-flight on the recovered connection', async () => {
       const params = { param: 'test' };
       // The first attempt is provably undelivered (pre-send rejection), so
