@@ -5379,11 +5379,16 @@ describe('qwen-autofix workflow', () => {
       addressJob.indexOf("- name: 'Checkout trusted base'"),
     );
 
-    // The artifact is the repo-root dist/ only — copy_bundle_assets.js
-    // already gathers every runtime asset under it; packages/*/dist would
-    // triple the size and is rebuilt from branch sources by the verify gate.
+    // The artifact is the repo-root dist/ plus packages/core/dist —
+    // copy_bundle_assets.js already gathers every runtime asset under the
+    // root dist/, and the remaining packages/*/dist would triple the size
+    // and are rebuilt from branch sources by the verify gate. core's dist
+    // is the exception: the verify gate's settings-schema and i18n checks
+    // run BEFORE any build (on every path, including no-action) and their
+    // tsx-transpiled cli sources import '@qwen-code/qwen-code-core', which
+    // resolves through the workspace symlink to core's dist entry point.
     expect(buildCliJob).toContain(
-      'tar -czf "${RUNNER_TEMP}/qwen-cli-dist.tar.gz" dist',
+      'tar -czf "${RUNNER_TEMP}/qwen-cli-dist.tar.gz" dist packages/core/dist',
     );
     expect(buildCliJob).toContain("name: 'qwen-autofix-cli-dist'");
     expect(buildCliJob).toContain('retention-days: 1');
@@ -5394,6 +5399,9 @@ describe('qwen-autofix workflow', () => {
       'tar -xzf "${RUNNER_TEMP}/cli-dist/qwen-cli-dist.tar.gz"',
     );
     expect(restoreStep).toContain('test -f dist/cli.js');
+    // A bundle without core's dist entry point makes every pre-build gate
+    // crash with ERR_MODULE_NOT_FOUND — pin the restore-side assertion.
+    expect(restoreStep).toContain('test -f packages/core/dist/index.js');
     const downloadStep = stepOf(addressJob, 'Download CLI bundle');
     expect(downloadStep).toContain("name: 'qwen-autofix-cli-dist'");
     // Download directory and restore extract path are one contract — pin
