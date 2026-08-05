@@ -50,6 +50,13 @@ const reviewScanJob =
 const issueAutofixJob =
   workflow.match(/\n {2}issue-autofix:[\s\S]*?(?=\n[ ]{2}# ==========)/)?.[0] ??
   '';
+const buildCliJob =
+  workflow.match(/\n {2}build-cli:[\s\S]*?(?=\n {2}review-address:)/)?.[0] ??
+  '';
+// review-address is the last job in the file, so there is no trailing
+// `# ====` separator to anchor on — match to EOF.
+const reviewAddressJob =
+  workflow.match(/\n {2}review-address:[\s\S]*$/)?.[0] ?? '';
 const publishPrStep =
   workflow.match(
     /- name: 'Publish PR'[\s\S]*?(?=\n[ ]{6}- name: 'Withdraw claim on failure')/,
@@ -1285,12 +1292,8 @@ describe('qwen-autofix workflow', () => {
     // raising it to the target budget, both let one backlog open every agent
     // run at once — which is the thing the cap exists to prevent, and neither
     // would fail any other test.
-    // review-address is the last job in the file, so there is no trailing
-    // `# ====` separator to anchor on — match to EOF.
-    const addressJob =
-      workflow.match(/\n {2}review-address:[\s\S]*$/)?.[0] ?? '';
-    expect(addressJob).toContain('matrix:');
-    const parallel = Number(addressJob.match(/max-parallel: (\d+)/)?.[1]);
+    expect(reviewAddressJob).toContain('matrix:');
+    const parallel = Number(reviewAddressJob.match(/max-parallel: (\d+)/)?.[1]);
     const targetBudget = Number(
       workflow.match(/MAX_TARGETS_PER_SCAN: '(\d+)'/)?.[1],
     );
@@ -5209,25 +5212,30 @@ describe('qwen-autofix workflow', () => {
     // Each heavy job routes to the persistent ECS pool (every target is
     // live-gated to write+ internal authors and the ECS pool ships docker),
     // with a hosted fallback for forks of this repo and when ECS routing is
-    // disabled. Pin the exact expression so neither the repository guard nor
-    // the hosted fallback can be dropped silently.
+    // disabled. PR-family events additionally need a same-repo head or a
+    // write+ author — the fleet's ECS routing guard (ci.yml's classify_pr).
+    // Pin the exact expression so neither the repository guard nor the
+    // hosted fallback can be dropped silently.
     const ecsRunsOn =
-      "runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]'') || fromJSON(''[\"ubuntu-latest\"]'') }}'";
+      "runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''[\"OWNER\",\"MEMBER\",\"COLLABORATOR\"]''), github.event.pull_request.author_association))) && fromJSON(''[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]'') || fromJSON(''[\"ubuntu-latest\"]'') }}'";
     const heavyJobRunsOn = {
-      'issue-autofix':
-        workflow.match(
-          /\n {2}issue-autofix:[\s\S]*?(?=\n[ ]{2}# ==========)/,
-        )?.[0] ?? '',
-      'build-cli':
-        workflow.match(
-          /\n {2}build-cli:[\s\S]*?(?=\n {2}review-address:)/,
-        )?.[0] ?? '',
-      'review-address':
-        workflow.match(/\n {2}review-address:[\s\S]*$/)?.[0] ?? '',
+      'issue-autofix': issueAutofixJob,
+      'build-cli': buildCliJob,
+      'review-address': reviewAddressJob,
     };
     for (const runsOn of Object.values(heavyJobRunsOn)) {
       expect(runsOn).toContain(ecsRunsOn);
     }
+    // The widened runner-environment guard is what lets ECS-routed runs pass
+    // 'Check runner environment' at all — pin the accepted set in both jobs
+    // that carry it (build-cli has no such step): reverting either to the
+    // hosted-only pattern kills every ECS-routed run at that step while the
+    // rest of this suite stays green.
+    expect(
+      workflow.match(
+        /case "\$\{RUNNER_ENVIRONMENT\}" in\n\s+github-hosted\|self-hosted\) ;;/g,
+      ),
+    ).toHaveLength(2);
     expect(workflow).not.toContain(
       '["self-hosted", "linux", "x64", "autofix"]',
     );
@@ -5326,6 +5334,10 @@ describe('qwen-autofix workflow', () => {
     // Node bump applied to two of the three jobs) must not ship green.
     expect(nodeSetupSteps).toHaveLength(3);
     for (const step of nodeSetupSteps) {
+      // Unconditional: re-adding the hosted-only `if` skips setup-node on
+      // every ECS-routed run and leaves the job on whatever Node the pool
+      // image happens to ship, while every recipe assertion stays green.
+      expect(step).not.toContain("runner.environment == 'github-hosted'");
       expect(step).toContain(
         'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e',
       );
@@ -5341,21 +5353,15 @@ describe('qwen-autofix workflow', () => {
     // per scan) before the agent could start. The legs download the shared
     // artifact instead; only their npm ci remains (the agent and the verify
     // gate still need node_modules against the PR branch).
-    const buildCliJob =
-      workflow.match(
-        /\n {2}build-cli:[\s\S]*?(?=\n {2}review-address:)/,
-      )?.[0] ?? '';
-    const addressJob =
-      workflow.match(/\n {2}review-address:[\s\S]*$/)?.[0] ?? '';
     const stepOf = (job, name) =>
       job.match(
         new RegExp(`- name: '${name}'[\\s\\S]*?(?=\\n[ ]{6}- name: |$)`),
       )?.[0] ?? '';
     expect(buildCliJob).toBeTruthy();
-    expect(addressJob).toBeTruthy();
+    expect(reviewAddressJob).toBeTruthy();
 
     expect(buildCliJob).toContain("needs: ['route', 'review-scan']");
-    expect(addressJob).toContain(
+    expect(reviewAddressJob).toContain(
       "needs: ['route', 'review-scan', 'build-cli']",
     );
     // An idle tick (no review targets) must not spend a build; the issue
@@ -5379,13 +5385,13 @@ describe('qwen-autofix workflow', () => {
     // steps.meta.outputs.base_sha resolves to '' at runtime and every leg
     // silently checks out the event-default ref.
     expect(stepOf(buildCliJob, 'Upload CLI bundle')).toContain("id: 'meta'");
-    expect(stepOf(addressJob, 'Checkout trusted base')).toContain(
+    expect(stepOf(reviewAddressJob, 'Checkout trusted base')).toContain(
       "ref: '${{ needs.build-cli.outputs.base_sha }}'",
     );
     // The guard must fail the leg LOUD before the checkout: an empty ref
     // makes actions/checkout fall back to the event default — on
     // pull_request_review triggers the PR merge ref.
-    const validateShaStep = stepOf(addressJob, 'Validate bundle SHA');
+    const validateShaStep = stepOf(reviewAddressJob, 'Validate bundle SHA');
     expect(validateShaStep).toContain(
       "BASE_SHA: '${{ needs.build-cli.outputs.base_sha }}'",
     );
@@ -5393,9 +5399,9 @@ describe('qwen-autofix workflow', () => {
       'if [[ ! "${BASE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then',
     );
     expect(validateShaStep).toContain('exit 1');
-    expect(addressJob.indexOf("- name: 'Validate bundle SHA'")).toBeLessThan(
-      addressJob.indexOf("- name: 'Checkout trusted base'"),
-    );
+    expect(
+      reviewAddressJob.indexOf("- name: 'Validate bundle SHA'"),
+    ).toBeLessThan(reviewAddressJob.indexOf("- name: 'Checkout trusted base'"));
 
     // The artifact is the repo-root dist/ only — copy_bundle_assets.js
     // already gathers every runtime asset under it; packages/*/dist would
@@ -5407,12 +5413,12 @@ describe('qwen-autofix workflow', () => {
     expect(buildCliJob).toContain('retention-days: 1');
     expect(buildCliJob).toContain("if-no-files-found: 'error'");
 
-    const restoreStep = stepOf(addressJob, 'Restore CLI bundle');
+    const restoreStep = stepOf(reviewAddressJob, 'Restore CLI bundle');
     expect(restoreStep).toContain(
       'tar -xzf "${RUNNER_TEMP}/cli-dist/qwen-cli-dist.tar.gz"',
     );
     expect(restoreStep).toContain('test -f dist/cli.js');
-    const downloadStep = stepOf(addressJob, 'Download CLI bundle');
+    const downloadStep = stepOf(reviewAddressJob, 'Download CLI bundle');
     expect(downloadStep).toContain("name: 'qwen-autofix-cli-dist'");
     // Download directory and restore extract path are one contract — pin
     // both sides so a rename of either fails this suite.
@@ -5420,7 +5426,7 @@ describe('qwen-autofix workflow', () => {
 
     // The leg itself never rebuilds the base bundle — that is the entire
     // point of the fan-out.
-    const legInstall = stepOf(addressJob, 'Install dependencies');
+    const legInstall = stepOf(reviewAddressJob, 'Install dependencies');
     expect(legInstall).toContain('npm ci --prefer-offline');
     expect(legInstall).not.toContain('npm run build');
     expect(legInstall).not.toContain('npm run bundle');
@@ -5463,7 +5469,11 @@ describe('qwen-autofix workflow', () => {
 
   it('clears persistent autofix workdirs before agent steps run', () => {
     expect(resetAutofixWorkspaceSteps).toHaveLength(2);
-    expect(workflow).toContain("WORKDIR: '/tmp/autofix'");
+    // Per-run private dir: pool registrations share one /tmp and issue-phase
+    // runs never serialize against each other. The artifact upload reads the
+    // same per-run path — pin both sides so neither is left behind.
+    expect(workflow).toContain("WORKDIR: '/tmp/autofix-${{ github.run_id }}'");
+    expect(workflow).toContain("path: '/tmp/autofix-${{ github.run_id }}/'");
     expect(workflow).toContain(
       "WORKDIR: '/tmp/autofix-review-${{ matrix.target.pr }}'",
     );
@@ -6366,7 +6376,14 @@ describe('qwen-autofix workflow', () => {
     // force flag; long options (--no-verify) start with -- and are exempt.
     expect(workflow).not.toMatch(/\bgit push\b[^\n]* -[a-zA-Z]*f\b/);
     expect(workflow).not.toMatch(/\bgit push\b[^\n]* \+\S/);
-    expect(publishPrStep).toContain('git push --no-verify origin "${BRANCH}"');
+    expect(publishPrStep).toContain(
+      'git push --no-verify "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git" "${BRANCH}"',
+    );
+    // Neither PAT push may persist the token into the reused workspace's
+    // .git/config — a `git remote set-url` carrying the PAT survives the job
+    // on the shared pool. Both authenticate transiently (URL on the command).
+    expect(publishPrStep).not.toContain('git remote set-url');
+    expect(pushAndReportStep).not.toContain('git remote set-url');
     expect(pushAndReportStep).toContain(
       'git push --no-verify "${PUSH_URL}" HEAD:"${BRANCH}"',
     );
