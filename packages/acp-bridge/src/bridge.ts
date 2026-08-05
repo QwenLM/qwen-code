@@ -4800,27 +4800,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           ...(req.sourceId !== undefined ? { sourceId: req.sourceId } : {}),
         },
       );
-      // Source metadata can activate source-scoped child capabilities, so a
-      // fresh ACP child must receive it again after loading the transcript.
-      if (entry.sourceType) {
-        await Promise.race([
-          withTimeout(
-            entry.connection.extMethod(
-              SERVE_CONTROL_EXT_METHODS.sessionSource,
-              {
-                sessionId: entry.sessionId,
-                sourceType: entry.sourceType,
-                ...(entry.sourceId !== undefined
-                  ? { sourceId: entry.sourceId }
-                  : {}),
-              },
-            ),
-            initTimeoutMs,
-            'sessionSource',
-          ),
-          transportClosed,
-        ]);
-      }
       releaseAdmissionOnce();
       const restoredArtifactSnapshot = restoredArtifactSnapshotFromState(state);
       const publicState = publicRestoreState(state);

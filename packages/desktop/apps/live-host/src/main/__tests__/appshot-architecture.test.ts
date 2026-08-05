@@ -56,4 +56,20 @@ describe('built-in Appshot architecture', () => {
     );
     assert.doesNotMatch(builderConfig, /from:\s*['"][^'"]+\.app['"]/u);
   });
+
+  it('locks down Electron runtime escape hatches in packaged builds', async () => {
+    const builderConfig = await readFile(BUILDER_CONFIG, 'utf8');
+
+    assert.match(builderConfig, /runAsNode:\s*false/u);
+    assert.match(
+      builderConfig,
+      /enableNodeOptionsEnvironmentVariable:\s*false/u,
+    );
+    assert.match(builderConfig, /enableNodeCliInspectArguments:\s*false/u);
+    assert.match(builderConfig, /onlyLoadAppFromAsar:\s*true/u);
+    assert.match(
+      builderConfig,
+      /enableEmbeddedAsarIntegrityValidation:\s*true/u,
+    );
+  });
 });

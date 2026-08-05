@@ -32,4 +32,13 @@ describe('Live Host audio architecture', () => {
   it('fully releases the device-clock playback context when output is cleared', () => {
     assert.match(audioEngine, /context\?\.close\(\)/);
   });
+
+  it('monitors both initial and replacement input tracks for device loss', () => {
+    assert.match(audioEngine, /private monitorInputTracks\(/);
+    assert.equal(audioEngine.match(/this\.monitorInputTracks\(/gu)?.length, 2);
+    assert.match(
+      audioEngine,
+      /private async refreshCaptureInput\(\)[\s\S]*const generation = \+\+this\.captureGeneration/u,
+    );
+  });
 });

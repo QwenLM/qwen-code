@@ -11199,7 +11199,7 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
-    it('reasserts source metadata when a fresh child resumes a session', async () => {
+    it('passes source metadata in the resume request without a second control call', async () => {
       const handle = makeChannel({
         resumeSessionImpl: () => ({}),
       });
@@ -11214,14 +11214,11 @@ describe('createAcpSessionBridge', () => {
         sourceId: 'realtime_voice:p1:h1:a1:call-1',
       });
 
-      expect(handle.agent.extMethodCalls).toContainEqual({
-        method: SERVE_CONTROL_EXT_METHODS.sessionSource,
-        params: {
-          sessionId: 'persisted-live-session',
-          sourceType: 'default',
-          sourceId: 'realtime_voice:p1:h1:a1:call-1',
-        },
-      });
+      expect(handle.agent.extMethodCalls).not.toContainEqual(
+        expect.objectContaining({
+          method: SERVE_CONTROL_EXT_METHODS.sessionSource,
+        }),
+      );
       expect(handle.agent.resumeSessionCalls[0]?._meta).toEqual({
         [SESSION_SOURCE_META_KEY]: {
           sourceType: 'default',

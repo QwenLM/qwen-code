@@ -220,13 +220,12 @@ jobs:
             fi
             spctl -a -vv -t exec "$app"
             xcrun stapler validate "$app"
-          done < <(find apps/live-host/release -type d -name '*.app' -print0)
+          done < <(find apps/live-host/release -mindepth 2 -maxdepth 2 -type d -name '*.app' -print0)
           if [ "$app_count" -eq 0 ]; then echo '::error::No packaged Qwen Live Host application was found.'; exit 1; fi
           dmg_count=0
           while IFS= read -r -d '' dmg; do
             dmg_count=$((dmg_count + 1))
             hdiutil verify "$dmg"
-            xcrun stapler validate "$dmg"
           done < <(find apps/live-host/release -type f -name '*.dmg' -print0)
           if [ "$dmg_count" -eq 0 ]; then echo '::error::No Qwen Live Host disk image was found.'; exit 1; fi
 

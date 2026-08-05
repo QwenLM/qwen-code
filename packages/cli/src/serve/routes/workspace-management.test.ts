@@ -749,6 +749,53 @@ describe('POST /workspaces', () => {
     });
   });
 
+  it('does not expose the hidden Live runtime to workspace nesting checks', async () => {
+    const parent = await mkdtemp(join(REAL_DIR, 'qws-live-parent-'));
+    const liveRoot = join(parent, 'Documents', 'Qwen Code', 'Conversations');
+    try {
+      const { app } = createApp({
+        workspaceRegistry: createMockRegistry([
+          makeRuntime('/some-other-dir', { primary: true }),
+          makeRuntime(liveRoot, {
+            provenance: 'live-conversation',
+            removable: false,
+          }),
+        ]),
+      });
+
+      const res = await request(app).post('/workspaces').send({ cwd: parent });
+
+      expect(res.status).toBe(201);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('still blocks a user workspace inside the hidden Live runtime', async () => {
+    const parent = await mkdtemp(join(REAL_DIR, 'qws-live-parent-'));
+    const liveRoot = join(parent, 'Documents', 'Qwen Code', 'Conversations');
+    const child = join(liveRoot, 'conversation');
+    try {
+      await mkdir(child, { recursive: true });
+      const { app } = createApp({
+        workspaceRegistry: createMockRegistry([
+          makeRuntime('/some-other-dir', { primary: true }),
+          makeRuntime(liveRoot, {
+            provenance: 'live-conversation',
+            removable: false,
+          }),
+        ]),
+      });
+
+      const res = await request(app).post('/workspaces').send({ cwd: child });
+
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('workspace_nested');
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
   it('sets a display name on a process-local registration', async () => {
     const runtime = makeRuntime(REAL_DIR);
     const registry = createMockRegistry([makeRuntime('/some-other-dir')]);
@@ -1194,6 +1241,37 @@ describe('POST /workspaces', () => {
     expect(res.status).toBe(200);
     expect(res.body.persisted).toBe(true);
     expect(add).toHaveBeenCalledWith(REAL_DIR);
+  });
+
+  it('promotes a workspace that contains the hidden Live runtime', async () => {
+    const parent = await mkdtemp(join(REAL_DIR, 'qws-live-parent-'));
+    const liveRoot = join(parent, 'Documents', 'Qwen Code', 'Conversations');
+    const add = vi.fn().mockResolvedValue(true);
+    try {
+      const { app } = createApp({
+        workspaceRegistry: createMockRegistry([
+          makeRuntime('/some-other-dir', { primary: true }),
+          makeRuntime(parent),
+          makeRuntime(liveRoot, {
+            provenance: 'live-conversation',
+            removable: false,
+          }),
+        ]),
+        workspaceRegistrationStore: {
+          add,
+          read: vi.fn().mockResolvedValue({ workspaces: [] }),
+        } as unknown as WorkspaceRegistrationStore,
+      });
+
+      const res = await request(app)
+        .post('/workspaces')
+        .send({ cwd: parent, persist: true });
+
+      expect(res.status).toBe(200);
+      expect(add).toHaveBeenCalledWith(parent);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
   });
 
   it('rejects persistence for the primary workspace', async () => {

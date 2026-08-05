@@ -202,6 +202,16 @@ export function registerWorkspaceManagementRoutes(
     return cwdSet.size + pendingScratchCreations;
   };
 
+  const conflictsWithRegisteredWorkspace = (canonical: string): boolean =>
+    workspaceRegistry.listManaged().some((runtime) => {
+      if (runtime.workspaceCwd === canonical) return false;
+      if (isWithinRoot(canonical, runtime.workspaceCwd)) return true;
+      return (
+        runtime.provenance !== 'live-conversation' &&
+        isWithinRoot(runtime.workspaceCwd, canonical)
+      );
+    });
+
   const assertOwnedRuntimeAdmission = (
     canonical: string,
     provenance: Exclude<WorkspaceRuntimeProvenance, 'existing'>,
@@ -776,19 +786,14 @@ export function registerWorkspaceManagementRoutes(
           });
           return;
         }
-        const nested = [
-          ...workspaceRegistry
-            .listManaged()
-            .map((runtime) => runtime.workspaceCwd),
-          ...[...inFlight].flatMap(([cwd, operation]) =>
-            operation === 'addition' || operation === 'promotion' ? [cwd] : [],
-          ),
-        ].some(
-          (boundCwd) =>
-            boundCwd !== canonical &&
-            (isWithinRoot(canonical, boundCwd) ||
-              isWithinRoot(boundCwd, canonical)),
-        );
+        const nested =
+          conflictsWithRegisteredWorkspace(canonical) ||
+          [...inFlight].some(
+            ([cwd, operation]) =>
+              cwd !== canonical &&
+              (operation === 'addition' || operation === 'promotion') &&
+              (isWithinRoot(canonical, cwd) || isWithinRoot(cwd, canonical)),
+          );
         if (nested) {
           res.status(409).json({
             error: 'Workspace path nests with an existing workspace',
@@ -927,24 +932,20 @@ export function registerWorkspaceManagementRoutes(
       // Nesting guard checks registered workspaces AND in-flight registrations,
       // so two concurrent POSTs for parent/child paths (e.g. /project and
       // /project/sub) can't both pass while neither is in the registry yet.
-      const boundCwds = [
-        ...workspaceRegistry.listManaged().map((r) => r.workspaceCwd),
-        ...[...inFlight].flatMap(([cwd, operation]) =>
-          operation === 'addition' ? [cwd] : [],
-        ),
-      ];
-      for (const existing of boundCwds) {
-        if (
-          existing !== canonical &&
-          (isWithinRoot(canonical, existing) ||
-            isWithinRoot(existing, canonical))
-        ) {
-          res.status(409).json({
-            error: 'Workspace path nests with an existing workspace',
-            code: 'workspace_nested',
-          });
-          return;
-        }
+      const nested =
+        conflictsWithRegisteredWorkspace(canonical) ||
+        [...inFlight].some(
+          ([cwd, operation]) =>
+            cwd !== canonical &&
+            operation === 'addition' &&
+            (isWithinRoot(canonical, cwd) || isWithinRoot(cwd, canonical)),
+        );
+      if (nested) {
+        res.status(409).json({
+          error: 'Workspace path nests with an existing workspace',
+          code: 'workspace_nested',
+        });
+        return;
       }
 
       if (projectedWorkspaceCount() >= MAX_REGISTERED_WORKSPACES) {

@@ -4750,6 +4750,9 @@ class QwenAgent implements Agent {
       await this.ensureAuthenticated(config);
       this.setupFileSystem(config);
       await this.createAndStoreSession(config, settings, sessionData, {
+        enableLiveScreenContext: isCompatibleLiveSessionSource(
+          sessionSource ?? {},
+        ),
         ...(bulkReplay ? { replayHistory: false } : {}),
         beforeStartPostReplayServices: async (createdSession) => {
           if (bulkReplay) {
@@ -4886,6 +4889,9 @@ class QwenAgent implements Agent {
         settings,
         config.getResumedSessionData(),
         {
+          enableLiveScreenContext: isCompatibleLiveSessionSource(
+            sessionSource ?? {},
+          ),
           replayHistory: false,
           beforeStartPostReplayServices: async (createdSession) => {
             await this.#restoreWorktreeOnResume(config, createdSession);
@@ -11729,6 +11735,7 @@ class QwenAgent implements Agent {
     sessionData?: ResumedSessionData,
     options: {
       replayHistory?: boolean;
+      enableLiveScreenContext?: boolean;
       beforeStartPostReplayServices?: (session: Session) => Promise<void>;
     } = {},
   ): Promise<Session> {
@@ -11750,6 +11757,10 @@ class QwenAgent implements Agent {
     this.sessions.set(sessionId, session);
     this.initializingConfigs.delete(config);
     try {
+      if (options.enableLiveScreenContext) {
+        await session.enableLiveScreenContext();
+      }
+
       if (sessionData?.fileHistorySnapshots?.length) {
         config
           .getFileHistoryService()

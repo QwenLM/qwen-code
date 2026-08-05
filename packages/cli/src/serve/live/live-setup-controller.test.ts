@@ -10,16 +10,17 @@ import { LiveHostCoordinator } from './live-host-coordinator.js';
 import { LiveHostInstaller } from './live-host-installer.js';
 import { LiveSetupController } from './live-setup-controller.js';
 
-function createHarness() {
+function createHarness(options: { initiallyEnabled?: boolean } = {}) {
+  const initiallyEnabled = options.initiallyEnabled ?? false;
   let settings = {
     experimental: {
       liveVoice: {
-        enabled: false,
+        enabled: initiallyEnabled,
         shortcut: 'Command+E',
       },
     },
   } as Settings;
-  let enabled = false;
+  let enabled = initiallyEnabled;
   const persistSettings = vi.fn(async (writes) => {
     const liveVoice = { ...settings.experimental?.liveVoice };
     for (const write of writes) {
@@ -69,6 +70,15 @@ function createHarness() {
 }
 
 describe('LiveSetupController', () => {
+  it('does not install the Host while reading an enabled setup', async () => {
+    const harness = createHarness({ initiallyEnabled: true });
+
+    await harness.controller.getStatus();
+    await Promise.resolve();
+
+    expect(harness.installLatest).not.toHaveBeenCalled();
+  });
+
   it('validates, persists, hot-enables, and starts installation', async () => {
     const harness = createHarness();
     const status = await harness.controller.update({

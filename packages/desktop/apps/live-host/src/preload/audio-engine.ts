@@ -420,14 +420,7 @@ export class HostAudioEngine {
       this.captureContext = context;
       this.captureNode = worklet;
       this.setCaptureMuted(this.inputMuted);
-      for (const track of stream.getAudioTracks()) {
-        const handleUnavailable = (): void => {
-          if (generation === this.captureGeneration) {
-            void this.recheck('audio_input_track_unavailable');
-          }
-        };
-        track.addEventListener('ended', handleUnavailable, { once: true });
-      }
+      this.monitorInputTracks(stream, generation);
       if (context.state === 'suspended') await context.resume();
     } catch (error) {
       for (const track of stream.getTracks()) track.stop();
@@ -459,7 +452,7 @@ export class HostAudioEngine {
     const context = this.captureContext;
     const worklet = this.captureNode;
     if (!context || !worklet || !this.captureRequested) return;
-    const generation = this.captureGeneration;
+    const generation = ++this.captureGeneration;
     const stream = await this.openInputStream();
     if (
       generation !== this.captureGeneration ||
@@ -475,12 +468,24 @@ export class HostAudioEngine {
     }
     const source = context.createMediaStreamSource(stream);
     source.connect(worklet);
+    this.monitorInputTracks(stream, generation);
     const previousSource = this.captureSource;
     const previousStream = this.captureStream;
     this.captureSource = source;
     this.captureStream = stream;
     previousSource?.disconnect();
     for (const track of previousStream?.getTracks() ?? []) track.stop();
+  }
+
+  private monitorInputTracks(stream: MediaStream, generation: number): void {
+    for (const track of stream.getAudioTracks()) {
+      const handleUnavailable = (): void => {
+        if (generation === this.captureGeneration) {
+          void this.recheck('audio_input_track_unavailable');
+        }
+      };
+      track.addEventListener('ended', handleUnavailable, { once: true });
+    }
   }
 
   private setCaptureMuted(muted: boolean): void {

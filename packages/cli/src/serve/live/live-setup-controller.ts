@@ -114,12 +114,7 @@ export class LiveSetupController {
   async getStatus(): Promise<LiveSetupStatus> {
     if (!this.installerScanned) {
       this.installerScanned = true;
-      const settings = this.deps.loadSettings();
-      if (readLiveVoiceConfiguration(settings).enabled) {
-        void this.deps.installer.ensureInstalled();
-      } else {
-        await this.deps.installer.refresh();
-      }
+      void this.deps.installer.refresh();
     }
     const settings = this.deps.loadSettings();
     const live = readLiveVoiceConfiguration(settings);

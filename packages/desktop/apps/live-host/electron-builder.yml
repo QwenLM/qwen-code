@@ -19,6 +19,13 @@ extraMetadata:
 
 asar: true
 
+electronFuses:
+  runAsNode: false
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  onlyLoadAppFromAsar: true
+  enableEmbeddedAsarIntegrityValidation: true
+
 afterPack: 'scripts/after-pack.cjs'
 
 mac:
