@@ -932,9 +932,15 @@ export class SubagentManager {
         // hooks — and any future or unset level requires trust too.
         // 'session' agents are supplied by the embedding host (SDK
         // `agents` option or the control protocol), never loaded from
-        // repository files, so they sit on the same footing as 'user'.
+        // repository files, so they sit on the same footing as 'user' —
+        // except when the project root IS the home directory: listing
+        // skips 'project' there, so repository-committed agent files
+        // surface at 'user' level and require trust too.
+        const homeIsProjectRoot =
+          path.resolve(runtimeContext.getProjectRoot()) ===
+          path.resolve(os.homedir());
         const trustedAgentLevel =
-          config.level === 'user' ||
+          (config.level === 'user' && !homeIsProjectRoot) ||
           config.level === 'builtin' ||
           config.level === 'extension' ||
           config.level === 'session';

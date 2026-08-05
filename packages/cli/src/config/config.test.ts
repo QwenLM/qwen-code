@@ -3346,6 +3346,37 @@ describe('loadCliConfig allowedHttpHookUrls', () => {
     expect(config.getAllowedHttpHookUrls()).toEqual([]);
   });
 
+  it('should warn that a malformed allowedHttpHookUrls leaves HTTP hooks unrestricted', async () => {
+    process.argv = ['node', 'script.js'];
+    // The coercion to [] reads as "allow all" in the UrlValidator; the
+    // user's attempted restriction vanishes, so it must be surfaced.
+    const settings: Settings = {
+      security: {
+        allowedHttpHookUrls: 'https://hooks.corp.com/*' as unknown as string[],
+      },
+    };
+    const argv = await parseArguments();
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getAllowedHttpHookUrls()).toEqual([]);
+    expect(
+      config.getWarnings().some((w) => w.includes('allowedHttpHookUrls')),
+    ).toBe(true);
+  });
+
+  it('should not warn about allowedHttpHookUrls when the value is a valid list', async () => {
+    process.argv = ['node', 'script.js'];
+    const settings: Settings = {
+      security: {
+        allowedHttpHookUrls: ['https://hooks.corp.com/*'],
+      },
+    };
+    const argv = await parseArguments();
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(
+      config.getWarnings().some((w) => w.includes('allowedHttpHookUrls')),
+    ).toBe(false);
+  });
+
   it('should drop non-string allowedHttpHookUrls entries', async () => {
     process.argv = ['node', 'script.js'];
     const settings: Settings = {

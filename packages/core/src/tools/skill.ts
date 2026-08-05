@@ -20,6 +20,7 @@ import {
   SkillLaunchEvent,
 } from '../telemetry/index.js';
 import path from 'path';
+import * as os from 'os';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { registerSkillHooks } from '../hooks/registerSkillHooks.js';
 import { recordAutoSkillUsage } from '../skills/skill-curator.js';
@@ -373,8 +374,16 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
    * later invocation once the folder becomes trusted.
    */
   private applySkillSideEffects(skill: SkillConfig): boolean {
+    // 'user' skills live in ~/.qwen — except when the project root IS the
+    // home directory: SkillManager skips the 'project' level there, so
+    // repository-committed skills surface at 'user' level and must be
+    // gated like project skills.
+    const homeIsProjectRoot =
+      path.resolve(this.config.getProjectRoot()) === path.resolve(os.homedir());
     const sideEffectsGated =
-      !isTrustedSkillLevel(skill.level) && !this.config.isTrustedFolder();
+      (!isTrustedSkillLevel(skill.level) ||
+        (skill.level === 'user' && homeIsProjectRoot)) &&
+      !this.config.isTrustedFolder();
 
     if (sideEffectsGated) {
       if (skill.allowedTools?.length) {

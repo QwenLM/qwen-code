@@ -11,7 +11,7 @@ import {
 } from './SkillCommandLoader.js';
 import { skillArgsPath } from './skill-args-file.js';
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import * as os from 'node:os';
 import { join } from 'node:path';
 import { CommandKind, type CommandContext } from '../ui/commands/types.js';
 import {
@@ -291,7 +291,7 @@ describe('SkillCommandLoader', () => {
   it('should append raw invocation when args are provided', async () => {
     // The args file is written relative to the process's directory; without a
     // temp cwd this suite would write into the real repository.
-    const dir = mkdtempSync(join(tmpdir(), 'skill-cmd-args-'));
+    const dir = mkdtempSync(join(os.tmpdir(), 'skill-cmd-args-'));
     const cwd = process.cwd();
     process.chdir(dir);
     try {
@@ -602,6 +602,63 @@ describe('SkillCommandLoader', () => {
       await commands[0].action?.({} as CommandContext, '');
 
       expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not grant allowedTools for a user-level skill when the project root is the home directory', async () => {
+      // SkillManager skips the 'project' level when the project root IS
+      // the home directory, so repository-committed skills surface at
+      // 'user' level there and must stay gated on folder trust.
+      (mockConfig.getProjectRoot as ReturnType<typeof vi.fn>).mockReturnValue(
+        os.homedir(),
+      );
+      (mockConfig.isTrustedFolder as ReturnType<typeof vi.fn>).mockReturnValue(
+        false,
+      );
+      const skill = makeSkill({
+        level: 'user',
+        allowedTools: ['Bash(git *)', 'Edit'],
+      });
+      mockSkillManager.listSkills.mockImplementation(
+        ({ level }: { level: string }) =>
+          Promise.resolve(level === 'user' ? [skill] : []),
+      );
+
+      const loader = new SkillCommandLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+      await commands[0].action?.({} as CommandContext, '');
+
+      expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+    });
+
+    it('re-reads folder trust at invocation time, not load time', async () => {
+      // Workspace trust can flip mid-session without a restart in IDE
+      // mode (Config.isTrustedFolder() live-reads the IDE context). The
+      // gate must re-read trust inside the action closure — hoisting the
+      // read into loadCommands scope would freeze the untrusted verdict
+      // and silently diverge from the SkillTool path.
+      (mockConfig.isTrustedFolder as ReturnType<typeof vi.fn>).mockReturnValue(
+        false,
+      );
+      const skill = makeSkill({
+        level: 'project',
+        allowedTools: ['Bash(git *)', 'Edit'],
+      });
+      mockSkillManager.listSkills.mockImplementation(
+        ({ level }: { level: string }) =>
+          Promise.resolve(level === 'project' ? [skill] : []),
+      );
+
+      const loader = new SkillCommandLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+
+      (mockConfig.isTrustedFolder as ReturnType<typeof vi.fn>).mockReturnValue(
+        true,
+      );
+      await commands[0].action?.({} as CommandContext, '');
+
+      expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
+      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(1, 'Bash(git *)');
+      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(2, 'Edit');
     });
   });
 

@@ -2286,6 +2286,14 @@ export async function loadCliConfig(
       // reduce it to a valid list before it reaches the UrlValidator, which
       // maps over it and would abort startup on a non-array.
       const hookUrls = settings.security?.allowedHttpHookUrls;
+      if (hookUrls !== undefined && !Array.isArray(hookUrls)) {
+        // The coercion to [] reads as "allow all" in the UrlValidator, so
+        // surface the lost restriction instead of silently starting
+        // unrestricted.
+        resolvedCliConfig.warnings.push(
+          'Warning: security.allowedHttpHookUrls is not a list and was ignored; HTTP hooks are unrestricted apart from SSRF protection.',
+        );
+      }
       return Array.isArray(hookUrls)
         ? hookUrls.filter((entry): entry is string => typeof entry === 'string')
         : [];

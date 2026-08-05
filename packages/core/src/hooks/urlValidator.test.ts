@@ -248,6 +248,33 @@ describe('hookUrlPatternCovers', () => {
     ).toBe(true);
   });
 
+  it('fails closed on non-ASCII patterns whose case folding diverges at runtime', () => {
+    // toLowerCase() folds ẞ (U+1E9E) to ß (U+00DF), equating these
+    // hosts, but the runtime's non-Unicode /i regex never matches the two
+    // across — a "covers" verdict would let the inner entry survive the
+    // merge while its runtime regex admits a host the outer pattern
+    // rejects. Hook URLs are realistically ASCII, so anything else is
+    // unprovable and dropped.
+    expect(
+      hookUrlPatternCovers(
+        'https://fuß.example.com/*',
+        'https://fuẞ.example.com/*',
+      ),
+    ).toBe(false);
+    // Identical non-ASCII patterns fail closed too — the runtime matching
+    // relation is unprovable for them regardless of spelling.
+    expect(
+      hookUrlPatternCovers(
+        'https://bücher.example.com/*',
+        'https://bücher.example.com/*',
+      ),
+    ).toBe(false);
+    // Why this must fail closed: the runtime regex compiled from the
+    // outer pattern rejects the host that toLowerCase() calls equal.
+    const runtime = new UrlValidator(['https://fuß.example.com/*']);
+    expect(runtime.isAllowed('https://fuẞ.example.com/hook')).toBe(false);
+  });
+
   it('treats pre-escaped and unescaped spellings as equivalent', () => {
     expect(
       hookUrlPatternCovers(

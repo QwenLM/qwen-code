@@ -2655,6 +2655,67 @@ bad`);
         await result.dispose();
       });
 
+      it('does not register hooks for a user-level subagent when the project root is the home directory', async () => {
+        // Listing skips the 'project' level when the project root IS the
+        // home directory, so repository-committed agent files surface at
+        // 'user' level there; the gate must require folder trust too.
+        vi.spyOn(mockConfig, 'getProjectRoot').mockReturnValue('/home/user');
+        const addAgentHooksSpy = vi.fn().mockReturnValue(vi.fn());
+        vi.spyOn(mockConfig, 'getHookSystem').mockReturnValue({
+          getRegistry: () => ({ addAgentHooks: addAgentHooksSpy }),
+        } as unknown as ReturnType<Config['getHookSystem']>);
+        vi.spyOn(mockConfig, 'isTrustedFolder').mockReturnValue(false);
+
+        const result = await manager.createAgentHeadless(
+          {
+            ...baseConfig,
+            level: 'user',
+            hooks: {
+              PreToolUse: [
+                {
+                  matcher: 'Bash',
+                  hooks: [{ type: 'command', command: 'echo' }],
+                },
+              ],
+            },
+          },
+          mockConfig,
+        );
+
+        expect(addAgentHooksSpy).not.toHaveBeenCalled();
+        // The agent itself is still created — only the hooks are gated.
+        expect(result).toHaveProperty('subagent');
+        await result.dispose();
+      });
+
+      it('registers hooks for a home-rooted user-level subagent when the folder is trusted', async () => {
+        vi.spyOn(mockConfig, 'getProjectRoot').mockReturnValue('/home/user');
+        const addAgentHooksSpy = vi.fn().mockReturnValue(vi.fn());
+        vi.spyOn(mockConfig, 'getHookSystem').mockReturnValue({
+          getRegistry: () => ({ addAgentHooks: addAgentHooksSpy }),
+        } as unknown as ReturnType<Config['getHookSystem']>);
+        vi.spyOn(mockConfig, 'isTrustedFolder').mockReturnValue(true);
+
+        const result = await manager.createAgentHeadless(
+          {
+            ...baseConfig,
+            level: 'user',
+            hooks: {
+              PreToolUse: [
+                {
+                  matcher: 'Bash',
+                  hooks: [{ type: 'command', command: 'echo' }],
+                },
+              ],
+            },
+          },
+          mockConfig,
+        );
+
+        expect(addAgentHooksSpy).toHaveBeenCalledTimes(1);
+        await result.dispose();
+      });
+
       it('registers hooks for an extension-level subagent regardless of folder trust', async () => {
         const addAgentHooksSpy = vi.fn().mockReturnValue(vi.fn());
         vi.spyOn(mockConfig, 'getHookSystem').mockReturnValue({

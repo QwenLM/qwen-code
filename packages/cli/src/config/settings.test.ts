@@ -3487,6 +3487,40 @@ describe('Settings Loading and Merging', () => {
       ]);
     });
 
+    it('should judge workspace coverage by the user whitelist when both user and systemDefaults set one', () => {
+      // Pins the User-before-SystemDefaults precedence of the
+      // narrowing `??` chain: the workspace entry is covered only by
+      // the systemDefaults pattern, so it must be judged against the
+      // USER list, dropped, and the user's whitelist must stand.
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              security: { allowedHttpHookUrls: ['https://hooks.corp.com/*'] },
+            });
+          if (p === getSystemDefaultsPath())
+            return JSON.stringify({
+              security: {
+                allowedHttpHookUrls: ['https://managed.example.com/*'],
+              },
+            });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              security: {
+                allowedHttpHookUrls: ['https://managed.example.com/ci/*'],
+              },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.security?.allowedHttpHookUrls).toEqual([
+        'https://hooks.corp.com/*',
+      ]);
+    });
+
     it('should survive a malformed workspace allowedHttpHookUrls and keep the user whitelist', () => {
       (mockFsExistsSync as Mock).mockReturnValue(true);
       (fs.readFileSync as Mock).mockImplementation(

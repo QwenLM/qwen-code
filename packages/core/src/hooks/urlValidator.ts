@@ -201,6 +201,10 @@ export function createUrlValidator(
  * coverage unprovable (the pre-escaped `compilePattern` branch would read
  * it as raw regex — including a bare `.` that survives the unescaping,
  * which acts as a wildcard), so such patterns fail closed (return false).
+ * Non-ASCII patterns fail closed too: the runtime's non-Unicode `/i` case
+ * folding diverges from the `toLowerCase()` used here for some of them, so
+ * coverage is unprovable (hook URLs are realistically ASCII — punycode and
+ * percent-encoded forms are unaffected).
  *
  * The comparison is a linear chunk scan — split `outer` on `*` and require
  * the chunks in `inner` in order, anchored at both ends — never a regex
@@ -212,6 +216,18 @@ export function hookUrlPatternCovers(
   innerPattern: string,
 ): boolean {
   const unescape = (pattern: string) => pattern.replace(/\\\./g, '.');
+  // The runtime matches with `compilePattern`'s non-Unicode `/i` RegExp,
+  // whose case folding is a different equivalence relation from
+  // toLowerCase() for some non-ASCII characters (e.g. ẞ U+1E9E lowers
+  // to ß U+00DF, so the two hosts fold equal here, but the runtime regex
+  // never matches them across). A covers verdict built on toLowerCase()
+  // would let such an inner entry survive the merge while its runtime
+  // regex admits hosts the outer pattern rejects, so fail closed on any
+  // non-ASCII input.
+  const nonAscii = /[\u0080-\uFFFF]/;
+  if (nonAscii.test(outerPattern) || nonAscii.test(innerPattern)) {
+    return false;
+  }
   const outer = unescape(outerPattern).toLowerCase();
   const inner = unescape(innerPattern).toLowerCase();
   // `compilePattern` treats everything but `*` as raw regex once a pattern

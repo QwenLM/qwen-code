@@ -13,7 +13,8 @@ import {
   isTrustedSkillLevel,
   recordAutoSkillUsage,
 } from '@qwen-code/qwen-code-core';
-import { dirname } from 'node:path';
+import * as os from 'node:os';
+import { dirname, resolve } from 'node:path';
 import type { ICommandLoader } from './types.js';
 import {
   writeSkillArgs,
@@ -156,9 +157,16 @@ export class SkillCommandLoader implements ICommandLoader {
             // is submitted — never for repo-supplied skills in an untrusted
             // folder, where frontmatter would otherwise grant session-wide
             // permission auto-approvals. Same fail-closed gate as SkillTool:
-            // only levels that cannot originate from the repository skip it.
+            // only levels that cannot originate from the repository skip it,
+            // and when the project root IS the home directory, listing skips
+            // 'project' and repository-committed skills surface at 'user'
+            // level, so that combination is gated too.
+            const homeIsProjectRoot =
+              this.config !== null &&
+              resolve(this.config.getProjectRoot()) === resolve(os.homedir());
             if (
-              isTrustedSkillLevel(skill.level) ||
+              (isTrustedSkillLevel(skill.level) &&
+                !(skill.level === 'user' && homeIsProjectRoot)) ||
               this.config?.isTrustedFolder()
             ) {
               applySkillAllowedTools(

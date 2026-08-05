@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import * as os from 'os';
 import { logSkillLaunch, recordSkillInvocation } from '../telemetry/index.js';
 import { SkillTool, type SkillParams } from './skill.js';
 import type { PartListUnion } from '@google/genai';
@@ -587,6 +588,51 @@ describe('SkillTool', () => {
 
     it('registers hooks for a user-level skill regardless of folder trust', async () => {
       vi.mocked(config.isTrustedFolder).mockReturnValue(false);
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue({
+        ...hookedSkill,
+        level: 'user',
+      });
+      const getSessionHooksManager = vi.fn().mockReturnValue({});
+      vi.mocked(config.getHookSystem).mockReturnValue({
+        getSessionHooksManager,
+      } as unknown as ReturnType<Config['getHookSystem']>);
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'hooked' });
+      await invocation.execute();
+
+      expect(registerSkillHooks).toHaveBeenCalledTimes(1);
+    });
+
+    it('gates hooks for a user-level skill when the project root is the home directory', async () => {
+      // SkillManager skips the 'project' level when the project root IS
+      // the home directory, so repository-committed skills surface at
+      // 'user' level there; the gate must treat them as repo-supplied.
+      vi.mocked(config.getProjectRoot).mockReturnValue(os.homedir());
+      vi.mocked(config.isTrustedFolder).mockReturnValue(false);
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue({
+        ...hookedSkill,
+        level: 'user',
+      });
+      const getSessionHooksManager = vi.fn();
+      vi.mocked(config.getHookSystem).mockReturnValue({
+        getSessionHooksManager,
+      } as unknown as ReturnType<Config['getHookSystem']>);
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'hooked' });
+      const result = await invocation.execute();
+
+      expect(registerSkillHooks).not.toHaveBeenCalled();
+      // The skill itself still loads — only the hooks are gated.
+      expect(partToString(result.llmContent)).toContain('Body.');
+    });
+
+    it('registers hooks for a home-rooted user-level skill once the folder is trusted', async () => {
+      vi.mocked(config.getProjectRoot).mockReturnValue(os.homedir());
+      vi.mocked(config.isTrustedFolder).mockReturnValue(true);
       vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue({
         ...hookedSkill,
         level: 'user',
