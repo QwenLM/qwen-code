@@ -1,0 +1,281 @@
+import { describe, expect, it } from 'vitest';
+import type {
+  ChannelUserInputRequestContext,
+  ChannelUserQuestion,
+} from '@qwen-code/channel-base';
+import {
+  buildQuestionCard,
+  buildQuestionTerminalCard,
+  parseQuestionAction,
+  parseQuestionAnswers,
+} from './question-card.js';
+
+interface CardElement {
+  tag: string;
+  name?: string;
+  value?: Record<string, unknown>;
+  options?: Array<{ value: string }>;
+  elements?: CardElement[];
+  content?: string;
+  form_action_type?: string;
+  text_size?: string;
+}
+
+interface QuestionCard {
+  schema: string;
+  body: { elements: CardElement[] };
+}
+
+const questions: ChannelUserQuestion[] = [
+  {
+    answerKey: 'region',
+    header: 'Region',
+    question: 'Which region should I use?',
+    options: [
+      { label: 'Beijing', description: 'Use the Beijing region.' },
+      { label: 'Shanghai', description: 'Use the Shanghai region.' },
+    ],
+    multiSelect: false,
+  },
+  {
+    answerKey: 'sources',
+    header: 'Sources',
+    question: 'Which sources should I inspect?',
+    options: [
+      { label: 'Logs', description: 'Inspect application logs.' },
+      { label: 'Metrics', description: 'Inspect service metrics.' },
+    ],
+    multiSelect: true,
+  },
+];
+
+const context: Pick<ChannelUserInputRequestContext, 'requestId' | 'questions'> =
+  {
+    requestId: 'request-1',
+    questions,
+  };
+
+function form(card: Record<string, unknown>): CardElement {
+  const elements = (card as unknown as QuestionCard).body.elements;
+  expect(elements).toHaveLength(1);
+  expect(elements[0]?.tag).toBe('form');
+  return elements[0]!;
+}
+
+describe('Feishu question cards', () => {
+  it('projects all questions into one Card V2 form', () => {
+    const card = buildQuestionCard(context);
+    const questionForm = form(card);
+    const elements = questionForm.elements!;
+
+    const selects = elements.filter((element) =>
+      ['select_static', 'multi_select_static'].includes(element.tag),
+    );
+
+    expect((card as unknown as QuestionCard).schema).toBe('2.0');
+    expect(questionForm.name).toBe('qwen_ask_form');
+    expect(selects).toMatchObject([
+      {
+        tag: 'select_static',
+        name: 'region',
+        options: [{ value: 'Beijing' }, { value: 'Shanghai' }],
+      },
+      {
+        tag: 'multi_select_static',
+        name: 'sources',
+        options: [{ value: 'Logs' }, { value: 'Metrics' }],
+      },
+    ]);
+  });
+
+  it('includes correlated submit and cancel actions', () => {
+    const elements = form(buildQuestionCard(context)).elements!;
+
+    const submit = elements.find(
+      (element) => element.name === 'qwen_ask_submit_request-1',
+    );
+    const cancel = elements.find(
+      (element) => element.value?.['action'] === 'qwen_ask_cancel',
+    );
+
+    expect(submit).toMatchObject({
+      tag: 'button',
+      name: 'qwen_ask_submit_request-1',
+      value: {
+        action: 'qwen_ask_submit',
+        operation_id: 'request-1',
+      },
+      form_action_type: 'submit',
+    });
+    expect(cancel).toMatchObject({
+      tag: 'button',
+      value: {
+        action: 'qwen_ask_cancel',
+        operation_id: 'request-1',
+      },
+    });
+  });
+
+  it('renders option descriptions as Markdown notes', () => {
+    const elements = form(buildQuestionCard(context)).elements!;
+    const markdown = elements
+      .filter((element) => element.tag === 'markdown')
+      .map((element) => element.content)
+      .join('\n');
+
+    expect(markdown).toContain('Use the Beijing region.');
+    expect(markdown).toContain('Inspect service metrics.');
+    expect(
+      elements.find((element) => element.tag === 'markdown'),
+    ).toMatchObject({ text_size: 'notation' });
+  });
+
+  it('makes terminal cards non-interactive', () => {
+    const card = buildQuestionTerminalCard(questions, 'submitted', {
+      region: 'Beijing',
+      sources: 'Logs, Metrics',
+    });
+    const elements = (card as unknown as QuestionCard).body.elements;
+
+    expect((card as unknown as QuestionCard).schema).toBe('2.0');
+    expect(elements.some((element) => element.tag === 'form')).toBe(false);
+    expect(elements.some((element) => element.tag === 'button')).toBe(false);
+  });
+
+  it('parses a submitted form with top-level message context', () => {
+    expect(
+      parseQuestionAction({
+        open_chat_id: 'oc_1',
+        open_message_id: 'om_1',
+        operator: { open_id: 'ou_1' },
+        action: {
+          name: 'qwen_ask_submit_request-1',
+          value: {
+            action: 'qwen_ask_submit',
+            operation_id: 'request-1',
+          },
+          form_value: { region: 'Beijing' },
+        },
+      }),
+    ).toEqual({
+      kind: 'submit',
+      requestId: 'request-1',
+      operatorId: 'ou_1',
+      chatId: 'oc_1',
+      messageId: 'om_1',
+      formValue: { region: 'Beijing' },
+    });
+  });
+
+  it('recovers a form submission when Feishu omits the button value', () => {
+    expect(
+      parseQuestionAction({
+        context: { open_chat_id: 'oc_1', open_message_id: 'om_1' },
+        operator: { open_id: 'ou_1' },
+        action: {
+          name: 'qwen_ask_submit_request-1',
+          form_value: { region: 'Beijing' },
+        },
+      }),
+    ).toEqual({
+      kind: 'submit',
+      requestId: 'request-1',
+      operatorId: 'ou_1',
+      chatId: 'oc_1',
+      messageId: 'om_1',
+      formValue: { region: 'Beijing' },
+    });
+  });
+
+  it('parses cancellation with nested message context', () => {
+    expect(
+      parseQuestionAction({
+        open_chat_id: 'oc_fallback',
+        open_message_id: 'om_fallback',
+        context: { open_chat_id: 'oc_1', open_message_id: 'om_1' },
+        operator: { open_id: 'ou_1' },
+        action: {
+          name: 'qwen_ask_cancel_request-1',
+          value: {
+            action: 'qwen_ask_cancel',
+            operation_id: 'request-1',
+          },
+        },
+      }),
+    ).toEqual({
+      kind: 'cancel',
+      requestId: 'request-1',
+      operatorId: 'ou_1',
+      chatId: 'oc_1',
+      messageId: 'om_1',
+    });
+  });
+
+  it('parses an action without optional correlation or operator fields', () => {
+    expect(
+      parseQuestionAction({
+        operator: { open_id: '' },
+        action: {
+          name: 'qwen_ask_cancel_request-1',
+          value: {
+            action: 'qwen_ask_cancel',
+            operation_id: 'request-1',
+          },
+        },
+      }),
+    ).toEqual({ kind: 'cancel', requestId: 'request-1' });
+  });
+
+  it.each([
+    {
+      action: {
+        name: 'qwen_ask_submit_request-1',
+        value: { action: 'qwen_ask_submit' },
+      },
+    },
+    {
+      action: {
+        name: 'qwen_ask_submit_wrong-request',
+        value: {
+          action: 'qwen_ask_submit',
+          operation_id: 'request-1',
+        },
+      },
+    },
+    {
+      action: {
+        name: 'qwen_ask_cancel_request-1',
+        value: { action: 'stop', operation_id: 'request-1' },
+      },
+    },
+  ])('does not claim unrelated or malformed actions', (data) => {
+    expect(parseQuestionAction(data)).toEqual({ kind: 'unhandled' });
+  });
+
+  it('normalizes single and multi-select answers', () => {
+    expect(
+      parseQuestionAnswers(questions, {
+        region: 'Beijing',
+        sources: ['Logs', 'Metrics'],
+      }),
+    ).toEqual({ region: 'Beijing', sources: 'Logs, Metrics' });
+    expect(
+      parseQuestionAnswers(questions, {
+        region: 'Shanghai',
+        sources: '["Metrics", "Logs"]',
+      }),
+    ).toEqual({ region: 'Shanghai', sources: 'Metrics, Logs' });
+  });
+
+  it.each([
+    undefined,
+    { region: 'Beijing' },
+    { region: 'Unknown', sources: ['Logs'] },
+    { region: ['Beijing'], sources: ['Logs'] },
+    { region: ['Beijing', 'Beijing'], sources: ['Logs'] },
+    { region: 'Beijing', sources: ['Logs', 'Logs'] },
+    { region: 'Beijing', sources: ['Logs'], extra: 'value' },
+  ])('rejects incomplete or invalid form values', (formValue) => {
+    expect(parseQuestionAnswers(questions, formValue)).toBeUndefined();
+  });
+});

@@ -22,7 +22,10 @@ import type {
   ChannelAgentBridge,
   ChannelConfig,
   ChannelProactiveDeliveryError,
+  ChannelOutputSegmentContext,
+  ChannelOutputSegmentEndReason,
   ChannelTaskLifecycleEvent,
+  ChannelUserInputRequestContext,
   SessionTarget,
 } from '@qwen-code/channel-base';
 
@@ -155,6 +158,133 @@ describe('FeishuChannel', () => {
       expect(logDebugPayload).toHaveBeenCalledWith('Feishu', payload);
       expect(onCardAction).toHaveBeenCalledWith(payload);
       expect(result).toEqual({ toast: { type: 'info', content: '已停止' } });
+    });
+
+    it('routes handled question actions before Stop and executes asynchronously', async () => {
+      const channel = createChannel();
+      const response = {
+        toast: { type: 'success', content: '答案已提交，正在处理。' },
+      };
+      const execute = vi.fn().mockResolvedValue(undefined);
+      const claim = vi.fn().mockReturnValue({
+        kind: 'handled',
+        response,
+        execute,
+      });
+      const onCardAction = vi.fn().mockReturnValue(true);
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        questionCardController: { claim },
+        onCardAction,
+      });
+      const handler = getPrivateMethod<
+        () => Record<string, (data: unknown) => unknown>
+      >(channel, 'buildHandlerMap').call(channel)['card.action.trigger'];
+      const payload = {
+        action: {
+          value: {
+            action: 'qwen_ask_submit',
+            operation_id: 'request-1',
+          },
+        },
+      };
+
+      expect(handler?.(payload)).toBe(response);
+      expect(execute).not.toHaveBeenCalled();
+      expect(onCardAction).not.toHaveBeenCalled();
+      await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce());
+    });
+
+    it('falls through unhandled question actions to Stop handling', () => {
+      const channel = createChannel();
+      const onCardAction = vi.fn().mockReturnValue(true);
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        questionCardController: {
+          claim: vi.fn().mockReturnValue({ kind: 'unhandled' }),
+        },
+        onCardAction,
+      });
+      const handler = getPrivateMethod<
+        () => Record<string, (data: unknown) => unknown>
+      >(channel, 'buildHandlerMap').call(channel)['card.action.trigger'];
+      const payload = { action: { value: { action: 'stop' } } };
+
+      expect(handler?.(payload)).toEqual({
+        toast: { type: 'info', content: '已停止' },
+      });
+      expect(onCardAction).toHaveBeenCalledWith(payload);
+    });
+
+    it('delegates user input presentation to the question controller', async () => {
+      const channel = createChannel();
+      const result = { kind: 'presented' } as const;
+      const present = vi.fn().mockResolvedValue(result);
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        questionCardController: { present },
+      });
+      const context = {
+        requestId: 'request-1',
+      } as ChannelUserInputRequestContext;
+
+      await expect(
+        getPrivateMethod<
+          (request: ChannelUserInputRequestContext) => Promise<{ kind: string }>
+        >(channel, 'presentUserInputRequest').call(channel, context),
+      ).resolves.toBe(result);
+      expect(present).toHaveBeenCalledWith(context);
+    });
+
+    it('does not send an extra terminal message after a direct question', async () => {
+      const channel = createChannel();
+      const present = vi.fn().mockResolvedValue({ kind: 'presented' });
+      const cancelRun = vi.fn();
+      const sendMessage = vi.fn().mockResolvedValue(undefined);
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        questionCardController: { present, cancelRun },
+        sendMessage,
+      });
+      getPrivateMethod<Map<string, string>>(channel, 'msgToQuestion').set(
+        'inbound_1',
+        'question?',
+      );
+      getPrivateMethod<
+        (chatId: string, sessionId: string, messageId?: string) => void
+      >(channel, 'onPromptStart').call(
+        channel,
+        'oc_chat_id',
+        'session_1',
+        'inbound_1',
+      );
+      const context = {
+        requestId: 'request-direct',
+        sessionId: 'session_1',
+      } as ChannelUserInputRequestContext;
+
+      await getPrivateMethod<
+        (request: ChannelUserInputRequestContext) => Promise<{ kind: string }>
+      >(channel, 'presentUserInputRequest').call(channel, context);
+      getPrivateMethod<(event: ChannelTaskLifecycleEvent) => void>(
+        channel,
+        'onTaskLifecycle',
+      ).call(channel, {
+        channelName: 'feishu',
+        chatId: 'oc_chat_id',
+        sessionId: 'session_1',
+        runId: 'run-1',
+        type: 'completed',
+        identity: { id: 'channel:feishu', displayName: 'feishu' },
+        memoryScope: { namespace: 'channel:feishu', mode: 'metadata-only' },
+      });
+      await getPrivateMethod<
+        (chatId: string, sessionId: string, messageId?: string) => Promise<void>
+      >(channel, 'onPromptEnd').call(
+        channel,
+        'oc_chat_id',
+        'session_1',
+        'inbound_1',
+      );
+
+      expect(present).toHaveBeenCalledWith(context);
+      expect(sendMessage).not.toHaveBeenCalled();
     });
   });
 
@@ -637,6 +767,298 @@ describe('FeishuChannel', () => {
       expect(removeReaction).not.toHaveBeenCalled();
       expect(createStreamingCard).not.toHaveBeenCalled();
     });
+
+    it('waits for the first response chunk before creating a card', async () => {
+      vi.useFakeTimers();
+      try {
+        const channel = createChannel();
+        const createStreamingCard = vi.fn().mockResolvedValue({
+          success: true,
+          messageId: 'om_first_output',
+        });
+        const addReaction = vi.fn().mockResolvedValue(undefined);
+        Object.assign(channel as unknown as Record<string, unknown>, {
+          createStreamingCard,
+          addReaction,
+        });
+        getPrivateMethod<Map<string, string>>(channel, 'msgToQuestion').set(
+          'inbound_1',
+          'question?',
+        );
+
+        getPrivateMethod<
+          (chatId: string, sessionId: string, messageId?: string) => void
+        >(channel, 'onPromptStart').call(
+          channel,
+          'oc_chat_id',
+          'session_1',
+          'inbound_1',
+        );
+
+        expect(addReaction).toHaveBeenCalledWith('inbound_1', 'OnIt');
+        expect(
+          getPrivateMethod<Map<string, string>>(
+            channel,
+            'sessionToInboundMsg',
+          ).get('session_1'),
+        ).toBe('inbound_1');
+        expect(createStreamingCard).not.toHaveBeenCalled();
+
+        getPrivateMethod<
+          (chatId: string, chunk: string, sessionId: string) => void
+        >(channel, 'onResponseChunk').call(
+          channel,
+          'oc_chat_id',
+          'first visible answer',
+          'session_1',
+        );
+        await vi.runAllTimersAsync();
+
+        expect(createStreamingCard).toHaveBeenCalledOnce();
+        expect(createStreamingCard.mock.calls[0]?.[1]).toContain(
+          'first visible answer',
+        );
+        expect(createStreamingCard.mock.calls[0]?.[1]).not.toContain('思考中');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('releases only output-card state at an input request and creates a second card later', async () => {
+      vi.useFakeTimers();
+      try {
+        const channel = createChannel();
+        const updateCard = vi.fn().mockResolvedValue(true);
+        const createStreamingCard = vi.fn().mockResolvedValue({
+          success: true,
+          messageId: 'om_second_output',
+        });
+        Object.assign(channel as unknown as Record<string, unknown>, {
+          updateCard,
+          createStreamingCard,
+        });
+        const cardSessions = getPrivateMethod<
+          Map<string, Record<string, unknown>>
+        >(channel, 'cardSessions');
+        const sessionToInboundMsg = getPrivateMethod<Map<string, string>>(
+          channel,
+          'sessionToInboundMsg',
+        );
+        const msgToQuestion = getPrivateMethod<Map<string, string>>(
+          channel,
+          'msgToQuestion',
+        );
+        const msgToSenderName = getPrivateMethod<Map<string, string>>(
+          channel,
+          'msgToSenderName',
+        );
+        const msgToSenderId = getPrivateMethod<Map<string, string>>(
+          channel,
+          'msgToSenderId',
+        );
+        cardSessions.set('inbound_1', {
+          messageId: 'om_first_output',
+          created: true,
+          creating: false,
+          stopped: false,
+          accumulatedText: 'before question',
+          lastUpdateAt: Date.now(),
+        });
+        sessionToInboundMsg.set('session_1', 'inbound_1');
+        msgToQuestion.set('inbound_1', 'question?');
+        msgToSenderName.set('inbound_1', '@sender');
+        msgToSenderId.set('inbound_1', 'owner-1');
+        const segment: ChannelOutputSegmentContext = {
+          channelName: 'test',
+          sessionId: 'session_1',
+          runId: 'run-1',
+          segmentId: 'segment-1',
+          owner: { kind: 'channel_user', id: 'owner-1' },
+          target: {
+            channelName: 'test',
+            chatId: 'oc_chat_id',
+            senderId: 'owner-1',
+            isGroup: false,
+          },
+          messageId: 'inbound_1',
+        };
+
+        await getPrivateMethod<
+          (
+            chatId: string,
+            sessionId: string,
+            segment: ChannelOutputSegmentContext,
+            reason: ChannelOutputSegmentEndReason,
+          ) => void | Promise<void>
+        >(channel, 'onOutputSegmentEnd').call(
+          channel,
+          'oc_chat_id',
+          'session_1',
+          segment,
+          'input_requested',
+        );
+
+        expect(updateCard).toHaveBeenCalledWith(
+          'om_first_output',
+          '@sender\n\nbefore question',
+          true,
+          'inbound_1',
+          '已完成',
+        );
+        expect(cardSessions.has('inbound_1')).toBe(false);
+        expect(sessionToInboundMsg.get('session_1')).toBe('inbound_1');
+        expect(msgToQuestion.get('inbound_1')).toBe('question?');
+        expect(msgToSenderName.get('inbound_1')).toBe('@sender');
+        expect(msgToSenderId.get('inbound_1')).toBe('owner-1');
+
+        getPrivateMethod<
+          (chatId: string, chunk: string, sessionId: string) => void
+        >(channel, 'onResponseChunk').call(
+          channel,
+          'oc_chat_id',
+          'after answer',
+          'session_1',
+        );
+        await vi.runAllTimersAsync();
+
+        expect(createStreamingCard).toHaveBeenCalledOnce();
+        expect(createStreamingCard.mock.calls[0]?.[1]).toContain(
+          'after answer',
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it.each([
+      ['returns false', false],
+      ['throws', new Error('patch failed')],
+    ])(
+      'compensates when input-request card finalization %s',
+      async (_name, result) => {
+        const channel = createChannel();
+        const updateCard = vi.fn();
+        if (result instanceof Error) {
+          updateCard.mockRejectedValue(result);
+        } else {
+          updateCard.mockResolvedValue(result);
+        }
+        const deleteCard = vi.fn().mockResolvedValue(true);
+        const sendMessage = vi.fn().mockResolvedValue(undefined);
+        Object.assign(channel as unknown as Record<string, unknown>, {
+          updateCard,
+          deleteCard,
+          sendMessage,
+        });
+        getPrivateMethod<Map<string, Record<string, unknown>>>(
+          channel,
+          'cardSessions',
+        ).set('inbound_1', {
+          messageId: 'om_first_output',
+          created: true,
+          creating: false,
+          stopped: false,
+          accumulatedText: 'before question',
+          lastUpdateAt: Date.now(),
+        });
+        getPrivateMethod<Map<string, string>>(
+          channel,
+          'sessionToInboundMsg',
+        ).set('session_1', 'inbound_1');
+        getPrivateMethod<Map<string, string>>(channel, 'msgToSenderName').set(
+          'inbound_1',
+          '@sender',
+        );
+
+        await getPrivateMethod<
+          (
+            chatId: string,
+            sessionId: string,
+            segment: ChannelOutputSegmentContext,
+            reason: ChannelOutputSegmentEndReason,
+          ) => void | Promise<void>
+        >(channel, 'onOutputSegmentEnd').call(
+          channel,
+          'oc_chat_id',
+          'session_1',
+          {} as ChannelOutputSegmentContext,
+          'input_requested',
+        );
+
+        expect(deleteCard).toHaveBeenCalledWith('om_first_output');
+        expect(sendMessage).toHaveBeenCalledWith(
+          'oc_chat_id',
+          '@sender\n\nbefore question',
+        );
+        expect(
+          getPrivateMethod<Map<string, unknown>>(channel, 'cardSessions').has(
+            'inbound_1',
+          ),
+        ).toBe(false);
+        expect(
+          getPrivateMethod<Map<string, string>>(
+            channel,
+            'sessionToInboundMsg',
+          ).get('session_1'),
+        ).toBe('inbound_1');
+      },
+    );
+
+    it.each([
+      ['while card creation is in flight', { creating: true }],
+      ['after card creation failed', { cardCreationFailed: true }],
+    ])('preserves pre-question text %s', async (_name, state) => {
+      const channel = createChannel();
+      const sendMessage = vi.fn().mockResolvedValue(undefined);
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        sendMessage,
+      });
+      getPrivateMethod<Map<string, Record<string, unknown>>>(
+        channel,
+        'cardSessions',
+      ).set('inbound_1', {
+        messageId: '',
+        created: false,
+        creating: false,
+        stopped: false,
+        accumulatedText: 'before question',
+        lastUpdateAt: Date.now(),
+        ...state,
+      });
+      getPrivateMethod<Map<string, string>>(channel, 'sessionToInboundMsg').set(
+        'session_1',
+        'inbound_1',
+      );
+      getPrivateMethod<Map<string, string>>(channel, 'msgToSenderName').set(
+        'inbound_1',
+        '@sender',
+      );
+
+      await getPrivateMethod<
+        (
+          chatId: string,
+          sessionId: string,
+          segment: ChannelOutputSegmentContext,
+          reason: ChannelOutputSegmentEndReason,
+        ) => void | Promise<void>
+      >(channel, 'onOutputSegmentEnd').call(
+        channel,
+        'oc_chat_id',
+        'session_1',
+        {} as ChannelOutputSegmentContext,
+        'input_requested',
+      );
+
+      expect(sendMessage).toHaveBeenCalledWith(
+        'oc_chat_id',
+        '@sender\n\nbefore question',
+      );
+      expect(
+        getPrivateMethod<Map<string, unknown>>(channel, 'cardSessions').has(
+          'inbound_1',
+        ),
+      ).toBe(false);
+    });
   });
 
   describe('state machine: stop button during card creation', () => {
@@ -958,6 +1380,18 @@ describe('FeishuChannel', () => {
       clearIntervalSpy.mockRestore();
       clearInterval(timer);
     });
+
+    it('disposes pending question cards on disconnect', () => {
+      const channel = createChannel();
+      const dispose = vi.fn();
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        questionCardController: { dispose },
+      });
+
+      channel.disconnect();
+
+      expect(dispose).toHaveBeenCalledOnce();
+    });
   });
 
   describe('extractContent: post at-node mentions', () => {
@@ -1224,6 +1658,150 @@ describe('FeishuChannel', () => {
     });
   });
 
+  describe('question card native helpers', () => {
+    it('sends an arbitrary interactive card and returns its message id', async () => {
+      const channel = createChannel();
+      (channel as unknown as Record<string, unknown>)['tokenCache'] = {
+        token: 'tenant-token',
+        expiresAt: Date.now() + 3600_000,
+      };
+      const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(
+        new Response(JSON.stringify({ data: { message_id: 'om_question' } }), {
+          status: 200,
+        }),
+      );
+      const card = { schema: '2.0', body: { elements: [] } };
+
+      await expect(
+        getPrivateMethod<
+          (chatId: string, content: Record<string, unknown>) => Promise<string>
+        >(channel, 'sendInteractiveCard').call(channel, 'oc_chat', card),
+      ).resolves.toBe('om_question');
+      expect(fetchSpy).toHaveBeenCalledWith(
+        expect.stringContaining('/im/v1/messages?receive_id_type=chat_id'),
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({
+            receive_id: 'oc_chat',
+            msg_type: 'interactive',
+            content: JSON.stringify(card),
+          }),
+        }),
+      );
+    });
+
+    it('rejects interactive-card delivery without an access token', async () => {
+      const channel = createChannel();
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        getTenantAccessToken: vi.fn().mockResolvedValue(undefined),
+      });
+
+      await expect(
+        getPrivateMethod<
+          (chatId: string, card: Record<string, unknown>) => Promise<string>
+        >(channel, 'sendInteractiveCard').call(channel, 'oc_chat', {}),
+      ).rejects.toThrow('no access token');
+    });
+
+    it('rejects HTTP failures and clears a rejected cached token', async () => {
+      const channel = createChannel();
+      (channel as unknown as Record<string, unknown>)['tokenCache'] = {
+        token: 'stale-token',
+        expiresAt: Date.now() + 3600_000,
+      };
+      vi.spyOn(global, 'fetch').mockResolvedValue(
+        new Response('unauthorized', { status: 401 }),
+      );
+
+      await expect(
+        getPrivateMethod<
+          (chatId: string, card: Record<string, unknown>) => Promise<string>
+        >(channel, 'sendInteractiveCard').call(channel, 'oc_chat', {}),
+      ).rejects.toThrow('HTTP 401');
+      expect(
+        (channel as unknown as Record<string, unknown>)['tokenCache'],
+      ).toBeUndefined();
+    });
+
+    it('rejects a successful response without a message id', async () => {
+      const channel = createChannel();
+      (channel as unknown as Record<string, unknown>)['tokenCache'] = {
+        token: 'tenant-token',
+        expiresAt: Date.now() + 3600_000,
+      };
+      vi.spyOn(global, 'fetch').mockResolvedValue(
+        new Response(JSON.stringify({ data: {} }), { status: 200 }),
+      );
+
+      await expect(
+        getPrivateMethod<
+          (chatId: string, card: Record<string, unknown>) => Promise<string>
+        >(channel, 'sendInteractiveCard').call(channel, 'oc_chat', {}),
+      ).rejects.toThrow('no message id');
+    });
+
+    it('keeps streaming cards on the generic send and patch paths', async () => {
+      const channel = createChannel();
+      const sendInteractiveCard = vi.fn().mockResolvedValue('om_stream');
+      const patchInteractiveCard = vi.fn().mockResolvedValue(true);
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        sendInteractiveCard,
+        patchInteractiveCard,
+      });
+
+      await expect(
+        getPrivateMethod<
+          (
+            chatId: string,
+            text: string,
+          ) => Promise<{ messageId: string; success: boolean }>
+        >(channel, 'createStreamingCard').call(channel, 'oc_chat', 'answer'),
+      ).resolves.toEqual({ messageId: 'om_stream', success: true });
+      await expect(
+        getPrivateMethod<(messageId: string, text: string) => Promise<boolean>>(
+          channel,
+          'updateCard',
+        ).call(channel, 'om_stream', 'updated'),
+      ).resolves.toBe(true);
+      expect(sendInteractiveCard).toHaveBeenCalledWith(
+        'oc_chat',
+        expect.objectContaining({ schema: '2.0' }),
+      );
+      expect(patchInteractiveCard).toHaveBeenCalledWith(
+        'om_stream',
+        expect.objectContaining({ schema: '2.0' }),
+      );
+    });
+
+    it('preserves streaming-card failure reporting around the rejecting helper', async () => {
+      const channel = createChannel();
+      (channel as unknown as Record<string, unknown>)['tokenCache'] = {
+        token: 'tenant-token',
+        expiresAt: Date.now() + 3600_000,
+      };
+      vi.spyOn(global, 'fetch').mockResolvedValue(
+        new Response('server down', { status: 500 }),
+      );
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      await expect(
+        getPrivateMethod<
+          (
+            chatId: string,
+            text: string,
+          ) => Promise<{ messageId: string; success: boolean }>
+        >(channel, 'createStreamingCard').call(channel, 'oc_chat', 'answer'),
+      ).resolves.toEqual({ messageId: '', success: false });
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'createStreamingCard failed: HTTP 500 server down',
+        ),
+      );
+    });
+  });
+
   describe('sendMessage: token failure logging', () => {
     it('logs and returns early when token is unavailable', async () => {
       const channel = createChannel();
@@ -1427,6 +2005,85 @@ describe('FeishuChannel', () => {
   });
 
   describe('onPromptEnd: error recovery branches', () => {
+    it('cancels question cards for the exact terminal run even without output-card state', () => {
+      const channel = createChannel();
+      const cancelRun = vi.fn();
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        questionCardController: { cancelRun },
+      });
+      const onTaskLifecycle = getPrivateMethod<
+        (event: ChannelTaskLifecycleEvent) => void
+      >(channel, 'onTaskLifecycle').bind(channel);
+      const baseEvent = {
+        channelName: 'feishu',
+        chatId: 'oc_chat_id',
+        sessionId: 'session_without_card',
+        identity: { id: 'channel:feishu', displayName: 'feishu' },
+        memoryScope: { namespace: 'channel:feishu', mode: 'metadata-only' },
+      } as const;
+
+      onTaskLifecycle({
+        ...baseEvent,
+        type: 'completed',
+        runId: 'run-exact',
+      });
+      onTaskLifecycle({ ...baseEvent, type: 'completed' });
+      onTaskLifecycle({
+        ...baseEvent,
+        type: 'started',
+        runId: 'run-nonterminal',
+      });
+
+      expect(cancelRun).toHaveBeenCalledOnce();
+      expect(cancelRun).toHaveBeenCalledWith('run-exact');
+    });
+
+    it('keeps a local card state so failures before the first chunk stay visible', async () => {
+      const channel = createChannel();
+      const sendMessage = vi.fn().mockResolvedValue(undefined);
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        sendMessage,
+      });
+      getPrivateMethod<Map<string, string>>(channel, 'msgToQuestion').set(
+        'inbound_1',
+        'question?',
+      );
+
+      getPrivateMethod<
+        (chatId: string, sessionId: string, messageId?: string) => void
+      >(channel, 'onPromptStart').call(
+        channel,
+        'oc_chat_id',
+        'session_1',
+        'inbound_1',
+      );
+      getPrivateMethod<(event: ChannelTaskLifecycleEvent) => void>(
+        channel,
+        'onTaskLifecycle',
+      ).call(channel, {
+        channelName: 'feishu',
+        chatId: 'oc_chat_id',
+        sessionId: 'session_1',
+        runId: 'run-1',
+        type: 'failed',
+        identity: { id: 'channel:feishu', displayName: 'feishu' },
+        memoryScope: { namespace: 'channel:feishu', mode: 'metadata-only' },
+      });
+      await getPrivateMethod<
+        (chatId: string, sessionId: string, messageId?: string) => Promise<void>
+      >(channel, 'onPromptEnd').call(
+        channel,
+        'oc_chat_id',
+        'session_1',
+        'inbound_1',
+      );
+
+      expect(sendMessage).toHaveBeenCalledWith(
+        'oc_chat_id',
+        expect.stringContaining('已失败'),
+      );
+    });
+
     it('sends error fallback when card creation failed and no accumulated text', async () => {
       const channel = createChannel();
       (channel as unknown as Record<string, unknown>)['botOpenId'] = 'bot_123';
@@ -1850,6 +2507,16 @@ describe('FeishuChannel', () => {
         'inbound_1',
       );
 
+      getPrivateMethod<
+        (chatId: string, chunk: string, sessionId: string) => void
+      >(channel, 'onResponseChunk').call(
+        channel,
+        'oc_chat_id',
+        'partial answer',
+        'session_1',
+      );
+      await vi.waitFor(() => expect(createStreamingCard).toHaveBeenCalled());
+
       getPrivateMethod<(event: ChannelTaskLifecycleEvent) => void>(
         channel,
         'onTaskLifecycle',
@@ -1929,6 +2596,16 @@ describe('FeishuChannel', () => {
         'inbound_1',
       );
 
+      getPrivateMethod<
+        (chatId: string, chunk: string, sessionId: string) => void
+      >(channel, 'onResponseChunk').call(
+        channel,
+        'oc_chat_id',
+        'partial answer',
+        'session_1',
+      );
+      await vi.waitFor(() => expect(createStreamingCard).toHaveBeenCalled());
+
       getPrivateMethod<(event: ChannelTaskLifecycleEvent) => void>(
         channel,
         'onTaskLifecycle',
@@ -2007,6 +2684,16 @@ describe('FeishuChannel', () => {
         'session_1',
         'inbound_1',
       );
+
+      getPrivateMethod<
+        (chatId: string, chunk: string, sessionId: string) => void
+      >(channel, 'onResponseChunk').call(
+        channel,
+        'oc_chat_id',
+        'partial answer',
+        'session_1',
+      );
+      await vi.waitFor(() => expect(createStreamingCard).toHaveBeenCalled());
 
       getPrivateMethod<(event: ChannelTaskLifecycleEvent) => void>(
         channel,
