@@ -499,7 +499,7 @@ describe('qwen-triage tmux workflow', () => {
     expect(finalizeStep).not.toContain('contains($m)');
     // PATCH only a comment this run owns: its claim embeds this run's URL,
     // while a previous run's terminal wording shares the same marker.
-    expect(finalizeStep).toContain('contains($runurl)');
+    expect(finalizeStep).toContain('contains($runurl + ")")');
     // Ownership couples the two steps' RUN_URL definitions; pin both so drift
     // cannot silently classify this run's own claim as foreign.
     for (const s of [statusStep, finalizeStep]) {
@@ -507,6 +507,10 @@ describe('qwen-triage tmux workflow', () => {
         "RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'",
       );
     }
+    // The claim body must also embed that URL — finalize's
+    // contains($runurl + ")") keys on exactly this embedding.
+    expect(statusStep).toContain('[watch live progress]($RUN_URL)');
+    expect(statusStep).toContain('[查看实时进度]($RUN_URL)');
     expect(finalizeStep).toContain('--method PATCH');
     expect(finalizeStep).toContain('Qwen Triage finished');
     expect(finalizeStep).toContain('ended early');
@@ -635,6 +639,26 @@ describe('qwen-triage tmux workflow', () => {
         });
         expect(foreign.body).toBe(null);
         expect(foreign.call).toBe(null);
+
+        // A marker embedding a run ID that is a decimal superstring of this
+        // run's (runs/778 vs runs/77) is foreign: only the match bounded by
+        // the link's closing ')' tells the two URLs apart.
+        writeFileSync(
+          commentsFile,
+          JSON.stringify([
+            {
+              id: 44,
+              user: { login: 'qwen-code-ci-bot' },
+              body: '<!-- qwen-triage lifecycle -->\n\n🚫 earlier cancel [view run](https://github.com/QwenLM/qwen-code/actions/runs/778)',
+            },
+          ]),
+        );
+        const prefixed = run({
+          TRIAGE_OUTCOME: 'skipped',
+          JOB_STATUS: 'cancelled',
+        });
+        expect(prefixed.body).toBe(null);
+        expect(prefixed.call).toBe(null);
 
         // Both a prior run's terminal comment and this run's claim present:
         // `last` must select the own claim, not classify the older foreign

@@ -989,10 +989,12 @@ jobs:
                 jq -rs --arg m "$MARKER" --arg legacy "$LEGACY_MARKER" --arg bot "$BOT_LOGIN" --arg runurl "$RUN_URL" \
                   '[.[][] | select(.user.login == $bot) | select((.body | startswith($m)) or (.body | startswith($legacy)))] | last
                    | if . == null then empty
-                     elif (.body | contains($runurl)) then .id
+                     elif (.body | contains($runurl + ")")) then .id
                      else "foreign" end'
             )" || EXISTING_ID=''
             # PATCH only a comment this run owns — its claim embeds $RUN_URL.
+            # The match is bounded by the link's closing ')' so a run ID that
+            # is a decimal prefix of another run's ID cannot collide.
             # A cancel landing before the claim posts would otherwise clobber
             # a previous run's terminal wording, which shares this marker.
             # Known lane race: qwen-triage-finalize.yml's update_status also
