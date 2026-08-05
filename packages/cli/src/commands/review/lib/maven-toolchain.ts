@@ -447,6 +447,7 @@ export function detectMavenOwnership(
   root: string,
   changedFiles: readonly string[],
   reactor: MavenReactor,
+  platform: string = process.platform,
 ): MavenOwnership {
   const modules = new Set<string>();
   const inactiveProjects = new Set<string>();
@@ -454,10 +455,17 @@ export function detectMavenOwnership(
   const deepestFirst = [...reactor.modules].sort(
     (a, b) => b.split('/').length - a.split('/').length || b.length - a.length,
   );
+  // Every wrapper repo ships both platform variants, but only one is ever
+  // executed: a change confined to the OTHER platform's wrapper cannot affect
+  // this platform's run, so it neither escalates to reactor-wide nor falls
+  // into the unowned catch-all (which would run the whole reactor to verify
+  // nothing).
+  const otherPlatformWrapper = platform === 'win32' ? 'mvnw' : 'mvnw.cmd';
 
   for (const changedFile of changedFiles) {
     const path = normalizedChangedPath(root, changedFile);
     if (path === null) continue;
+    if (path === otherPlatformWrapper) continue;
     if (REACTOR_WIDE_FILES.has(path) || path.startsWith('.mvn/')) {
       reactorWide = true;
       continue;
@@ -768,28 +776,35 @@ function appendTestSummaries(
       line:
         `[maven-test-report] ${project} (${group.length} report(s)): ` +
         `tests=${totals.tests}, failures=0, errors=0, skipped=${totals.skipped}`,
-      totals,
+      // The group's per-report clamped passed total — what the omission
+      // marker aggregates (see below).
+      clampedPassed: group.reduce(
+        (sum, item) => sum + Math.max(0, item.tests - item.skipped),
+        0,
+      ),
     };
   });
   const cleanLines = cleanGroups.map((group) => group.line);
   // One line per project dir: bounded by module count, but a 300-module
   // reactor still appends 300 lines AFTER the command output was trimmed, so
   // cap it like the failing-report and case blocks. The marker carries the
-  // omitted totals so count adjudication still sees the whole run — a
+  // omitted counts so count adjudication still sees the whole run — a
   // truncated total once "corrected" a right author count to a wrong one.
+  // They are per-report CLAMPED passed totals: the parser clamps per parsed
+  // line, and clamping the marker's aggregated raw totals instead would let
+  // one anomalous report (Surefire does not guarantee tests >= skipped)
+  // cancel the passed counts of its batchmates — the exact cancellation the
+  // per-report clamp prevents.
   if (cleanGroups.length > MAX_CLEAN_ROLLUP_LINES) {
     const omittedGroups = cleanGroups.slice(MAX_CLEAN_ROLLUP_LINES);
     cleanLines.length = MAX_CLEAN_ROLLUP_LINES;
-    const totals = omittedGroups.reduce(
-      (sum, group) => ({
-        tests: sum.tests + group.totals.tests,
-        skipped: sum.skipped + group.totals.skipped,
-      }),
-      { tests: 0, skipped: 0 },
+    const passed = omittedGroups.reduce(
+      (sum, group) => sum + group.clampedPassed,
+      0,
     );
     cleanLines.push(
       `[maven-test-report] ${omittedGroups.length} more clean project rollup(s) omitted: ` +
-        `tests=${totals.tests}, failures=0, errors=0, skipped=${totals.skipped}`,
+        `tests=${passed}, failures=0, errors=0, skipped=0`,
     );
   }
   lines.push(...cleanLines);
@@ -802,10 +817,17 @@ function appendTestSummaries(
   if (reportLines.length > MAX_FAILING_REPORT_LINES) {
     const omittedSummaries = failing.slice(MAX_FAILING_REPORT_LINES);
     reportLines.length = MAX_FAILING_REPORT_LINES;
-    const totals = summaryTotals(omittedSummaries);
+    // Per-report clamped passed totals, for the same reason as the clean
+    // marker above.
+    const passed = omittedSummaries.reduce(
+      (sum, item) =>
+        sum +
+        Math.max(0, item.tests - item.failures - item.errors - item.skipped),
+      0,
+    );
     reportLines.push(
       `[maven-test-report] ${omittedSummaries.length} more failing report(s) omitted: ` +
-        `tests=${totals.tests}, failures=${totals.failures}, errors=${totals.errors}, skipped=${totals.skipped}`,
+        `tests=${passed}, failures=0, errors=0, skipped=0`,
     );
   }
   lines.push(...reportLines);
@@ -869,7 +891,9 @@ function isLaunchFailure(output: string): boolean {
         ) ||
         /The term '?(?:mvn|java)'? is not recognized/i.test(line) ||
         /Unknown command: (?:mvn|java)\b/i.test(line) ||
-        /JAVA_HOME.*(?:not defined|incorrectly)/i.test(line) ||
+        /JAVA_HOME.*(?:not defined|incorrectly|invalid directory)/i.test(
+          line,
+        ) ||
         /Unable to locate a Java Runtime/i.test(line) ||
         /^\[(?:ERROR|FATAL)\].*No space left on device/i.test(line),
     );
@@ -1076,6 +1100,14 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     args.changedFiles.some(
       (file) => normalizedChangedPath(args.root, file) === executedWrapper,
     );
+  // The platform-preferred wrapper, whether or not it was executed: when the
+  // diff deletes it (or drops its executable bit), mavenExecutable falls back
+  // to system `mvn`, executedWrapper is null, and the fallback's launch death
+  // is the diff's own doing, not an environmental result.
+  const platformWrapper = process.platform === 'win32' ? 'mvnw.cmd' : 'mvnw';
+  const platformWrapperChanged = args.changedFiles.some(
+    (file) => normalizedChangedPath(args.root, file) === platformWrapper,
+  );
   // The dependency carve-out below must not file a PR-caused breakage as
   // environmental: when the diff changed POMs, `.mvn/**`, the settings or
   // repository locations `.mvn/maven.config` references, or the executed
@@ -1177,7 +1209,9 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     !freshFailures &&
     !isSourceFailure(result.output) &&
     result.exitCode !== null &&
-    ((isLaunchFailure(result.output) && !executedWrapperChanged) ||
+    ((isLaunchFailure(result.output) &&
+      !executedWrapperChanged &&
+      !(executable === 'mvn' && platformWrapperChanged)) ||
       (isDependencyFailure(result.output) && !dependencyInputsChanged) ||
       (executable === './mvnw' &&
         !executedWrapperChanged &&

@@ -434,6 +434,15 @@ describe('observedTestCounts', () => {
           output:
             '[maven-test-report] core (7 report(s)): tests=7, failures=0, errors=0, skipped=0',
         },
+        {
+          command: 'mvn -fn test',
+          exitCode: 0,
+          seconds: 3,
+          timedOut: false,
+          swallowedFailure: true,
+          output:
+            '[maven-test-report] core (500 report(s)): tests=500, failures=0, errors=0, skipped=0',
+        },
       ],
     } as unknown as BuildTestReport;
     expect(observedTestCounts(interrupted)).toEqual([]);
@@ -953,15 +962,24 @@ describe('runTestPlan', () => {
     it('recognizes Maven wrapper command spellings', () => {
       for (const command of [
         'mvn test',
+        // The spelling Windows `cmd.exe` users type for system Maven, and
+        // parent-dir wrapper invocations — silently never extracted before.
+        'mvn.cmd test',
         'mvnw test',
         'mvnw.cmd test',
         './mvnw test',
         './mvnw.cmd test',
         '.\\mvnw test',
         '.\\mvnw.cmd test',
+        '../mvnw test',
+        '..\\mvnw test',
       ]) {
         const claims = extractClaims(`## Test Plan\n\nRan \`${command}\``);
         expect(claims.some((claim) => claim.text === command)).toBe(true);
+        // The runner token is a command, not a path claim about the tree.
+        expect(
+          claims.filter((c) => c.kind === 'path' && c.text === command),
+        ).toEqual([]);
       }
     });
 
@@ -1276,6 +1294,184 @@ describe('runTestPlan', () => {
         'mvn -rf :core test',
         'mvn -N test',
         'mvn -f other/pom.xml test',
+      ]) {
+        const r = run(`## Test Plan\n\nRan \`${command}\``, [], bt);
+        expect(verdictOf(r.claims, command)).toBe('unchecked');
+      }
+    });
+
+    it('does not settle long-form-scoped claims from differently scoped runs', () => {
+      // The long forms of -P/-D/-rf/-N scope a claim exactly like the short
+      // forms; -amd/--also-make-dependents' downstream closure is an
+      // uncomparable scope too.
+      const bt = {
+        build: [],
+        test: [
+          {
+            command:
+              './mvnw --batch-mode --no-transfer-progress -pl core -am test',
+            exitCode: 0,
+            seconds: 3,
+            timedOut: false,
+            output: '',
+          },
+        ],
+      } as unknown as BuildTestReport;
+
+      for (const command of [
+        './mvnw --non-recursive test',
+        './mvnw --activate-profiles jdk25 test',
+        './mvnw --define foo=bar test',
+        './mvnw --resume-from :core test',
+        './mvnw -pl core -amd test',
+        './mvnw -pl core --also-make-dependents test',
+      ]) {
+        const r = run(`## Test Plan\n\nRan \`${command}\``, [], bt);
+        expect(verdictOf(r.claims, command)).toBe('unchecked');
+      }
+
+      // The flip direction too: a FAILED recorded run must not contradict a
+      // claim whose extra scope that run never exercised.
+      const failed = {
+        build: [],
+        test: [
+          {
+            command:
+              './mvnw --batch-mode --no-transfer-progress -pl core -am test',
+            exitCode: 1,
+            seconds: 3,
+            timedOut: false,
+            output: '[ERROR] Tests failed',
+          },
+        ],
+      } as unknown as BuildTestReport;
+      const flip = run(
+        '## Test Plan\n\nRan `./mvnw -pl core -amd test`',
+        [],
+        failed,
+      );
+      expect(verdictOf(flip.claims, './mvnw -pl core -amd test')).toBe(
+        'unchecked',
+      );
+    });
+
+    it('settles multi-module -pl claims on the same module set, in any order', () => {
+      const withRecorded = (command: string) =>
+        ({
+          build: [],
+          test: [
+            { command, exitCode: 0, seconds: 3, timedOut: false, output: '' },
+          ],
+        }) as unknown as BuildTestReport;
+
+      // Order independence and cardinality: the adapter records multi-module
+      // selectors (`-pl core,app -am test`).
+      const same = run(
+        '## Test Plan\n\nRan `./mvnw -pl app,core test`',
+        [],
+        withRecorded(
+          './mvnw --batch-mode --no-transfer-progress -pl core,app -am test',
+        ),
+      );
+      expect(verdictOf(same.claims, './mvnw -pl app,core test')).toBe(
+        'reproduces',
+      );
+
+      // A recorded run with FEWER modules never tested the extra one.
+      const fewer = run(
+        '## Test Plan\n\nRan `./mvnw -pl core,app test`',
+        [],
+        withRecorded(
+          './mvnw --batch-mode --no-transfer-progress -pl core -am test',
+        ),
+      );
+      expect(verdictOf(fewer.claims, './mvnw -pl core,app test')).toBe(
+        'unchecked',
+      );
+    });
+
+    it('reads -pl= and --projects selector spellings in both directions', () => {
+      const withRecorded = (command: string) =>
+        ({
+          build: [],
+          test: [
+            { command, exitCode: 0, seconds: 3, timedOut: false, output: '' },
+          ],
+        }) as unknown as BuildTestReport;
+      const canonical =
+        './mvnw --batch-mode --no-transfer-progress -pl core -am test';
+
+      for (const claim of [
+        './mvnw -pl=core test',
+        './mvnw --projects core test',
+        './mvnw --projects=core test',
+      ]) {
+        const r = run(
+          `## Test Plan\n\nRan \`${claim}\``,
+          [],
+          withRecorded(canonical),
+        );
+        expect(verdictOf(r.claims, claim)).toBe('reproduces');
+      }
+
+      for (const recorded of [
+        './mvnw --batch-mode --no-transfer-progress -pl=core -am test',
+        './mvnw --batch-mode --no-transfer-progress --projects core -am test',
+      ]) {
+        const r = run(
+          '## Test Plan\n\nRan `./mvnw -pl core test`',
+          [],
+          withRecorded(recorded),
+        );
+        expect(verdictOf(r.claims, './mvnw -pl core test')).toBe('reproduces');
+      }
+    });
+
+    it('settles a test-compile claim on the recorded build-only run', () => {
+      // --build-only records `test-compile`; disavowing the phase would say
+      // the review never ran what it did.
+      const bt = {
+        build: [
+          {
+            command:
+              './mvnw --batch-mode --no-transfer-progress -pl core -am test-compile',
+            exitCode: 0,
+            seconds: 3,
+            timedOut: false,
+            output: '',
+          },
+        ],
+        test: [],
+      } as unknown as BuildTestReport;
+      const r = run('## Test Plan\n\nRan `./mvnw test-compile`', [], bt);
+      const claim = r.claims.find((c) => c.text === './mvnw test-compile');
+      expect(claim?.verdict).toBe('reproduces');
+      expect(claim?.note).toContain('module-scoped');
+    });
+
+    it('does not settle a -pl claim combined with other scopes from a same-module run', () => {
+      // `-pl core -Pjdk25` is profile-scoped AS WELL AS module-scoped; the
+      // same-module recorded run never activated that profile.
+      const bt = {
+        build: [],
+        test: [
+          {
+            command:
+              './mvnw --batch-mode --no-transfer-progress -pl core -am test',
+            exitCode: 0,
+            seconds: 3,
+            timedOut: false,
+            output: '',
+          },
+        ],
+      } as unknown as BuildTestReport;
+
+      for (const command of [
+        './mvnw -pl core -Pjdk25 test',
+        './mvnw -pl core -Dfoo=bar test',
+        './mvnw -pl core -rf :core test',
+        './mvnw -pl core -N test',
+        './mvnw -pl core -f other/pom.xml test',
       ]) {
         const r = run(`## Test Plan\n\nRan \`${command}\``, [], bt);
         expect(verdictOf(r.claims, command)).toBe('unchecked');

@@ -191,10 +191,13 @@ export function extractTestPlanSection(
 
 /** Runners whose presence makes a backticked span a command, not prose. */
 const RUNNER_RE =
-  /^(?:npm|npx|yarn|pnpm|bun|make|node|go|cargo|python3?|pytest)\b|^(?:mvn|mvnw(?:\.cmd)?|\.\/mvnw(?:\.cmd)?|\.\\mvnw(?:\.cmd)?)(?=\s|$)/;
+  /^(?:npm|npx|yarn|pnpm|bun|make|node|go|cargo|python3?|pytest)\b|^(?:mvn(?:\.cmd)?|mvnw(?:\.cmd)?|\.\/mvnw(?:\.cmd)?|\.\\mvnw(?:\.cmd)?|\.\.\/mvnw(?:\.cmd)?|\.\.\\mvnw(?:\.cmd)?)(?=\s|$)/;
 
+// `mvn.cmd` is the spelling Windows `cmd.exe` users type for system Maven, and
+// `../mvnw` a parent-dir wrapper invocation; without them such claims are
+// silently never extracted and never ruled.
 const MAVEN_RUNNER_RE =
-  /^(?:mvn|mvnw(?:\.cmd)?|\.\/mvnw(?:\.cmd)?|\.\\mvnw(?:\.cmd)?)(?=\s|$)/;
+  /^(?:mvn(?:\.cmd)?|mvnw(?:\.cmd)?|\.\/mvnw(?:\.cmd)?|\.\\mvnw(?:\.cmd)?|\.\.\/mvnw(?:\.cmd)?|\.\.\\mvnw(?:\.cmd)?)(?=\s|$)/;
 
 /** `foo/bar.ts`, `packages/cli/src/x.tsx:42` — a path, not a sentence. */
 const PATH_RE = /^[\w.@-]+(?:\/[\w.@-]+)+\/?(?::\d+(?::\d+)?)?$/;
@@ -434,8 +437,16 @@ export function observedTestCounts(report: BuildTestReport | null): number[] {
   for (const cmd of report.test ?? []) {
     // The same exclusion that ruleCommand's finished() applies to command claims:
     // an interrupted or infrastructure-classified run is not a completed
-    // suite, and its partial counts must not adjudicate a count claim.
-    if (cmd.timedOut || cmd.exitCode === null || cmd.infrastructure) continue;
+    // suite, and its partial counts must not adjudicate a count claim. A
+    // fail-never run that swallowed failures is the same — the field's
+    // contract forbids ruling any claim reproduced against it.
+    if (
+      cmd.timedOut ||
+      cmd.exitCode === null ||
+      cmd.infrastructure ||
+      cmd.swallowedFailure
+    )
+      continue;
     // vitest: `Tests  472 passed (472)`. jest: `Tests:  12 passed, 12 total`.
     let total = 0;
     let saw = false;
@@ -612,7 +623,7 @@ function bareMavenLifecycle(command: string): string | null {
   const trimmed = command.trim();
   if (!MAVEN_RUNNER_RE.test(trimmed)) return null;
   return (
-    /^(?:mvn|mvnw(?:\.cmd)?|\.\/mvnw(?:\.cmd)?|\.\\mvnw(?:\.cmd)?)\s+(clean|validate|compile|test-compile|test|package|verify|install)$/.exec(
+    /^(?:mvn(?:\.cmd)?|mvnw(?:\.cmd)?|\.\/mvnw(?:\.cmd)?|\.\\mvnw(?:\.cmd)?|\.\.\/mvnw(?:\.cmd)?|\.\.\\mvnw(?:\.cmd)?)\s+(clean|validate|compile|test-compile|test|package|verify|install)$/.exec(
       trimmed,
     )?.[1] ?? null
   );
@@ -675,13 +686,22 @@ function ruleCommand(
   const scopesNonPl = (token: string): boolean =>
     token.startsWith('-P') ||
     token.startsWith('-D') ||
+    token === '--activate-profiles' ||
+    token.startsWith('--activate-profiles=') ||
+    token === '--define' ||
+    token.startsWith('--define=') ||
     token === '-rf' ||
     token.startsWith('-rf=') ||
+    token === '--resume-from' ||
+    token.startsWith('--resume-from=') ||
     token === '-N' ||
+    token === '--non-recursive' ||
     token === '-f' ||
     token.startsWith('-f=') ||
     token === '--file' ||
-    token.startsWith('--file=');
+    token.startsWith('--file=') ||
+    token === '-amd' ||
+    token === '--also-make-dependents';
   const claimTokens = claimed.split(/\s+/);
   const claimScopesItself = claimTokens.some(
     (token) =>

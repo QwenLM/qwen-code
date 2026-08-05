@@ -60,6 +60,10 @@ import {
   type SweepResult,
 } from './lib/worktree.js';
 import { runBuildTest, type BuildTestReport } from './build-test.js';
+import {
+  hasUnmodeledWorkspaceGlob,
+  workspaceDirFor,
+} from './lib/workspaces.js';
 
 export interface BaseTreeReport {
   /**
@@ -124,24 +128,41 @@ function gitBlob(cwd: string, sha: string, path: string): string | null {
 }
 
 /**
- * A root package.json the npm adapter would actually apply to: workspaces,
- * or a root build/test script. A husky/lint-config/docs-tooling-only
- * manifest applies to nothing, so suppressing the nested-pom probe for it
+ * A root package.json the npm adapter would actually apply to — mirroring
+ * `npmToolchainAdapter.applies` against the BASE tree: MODELED workspace
+ * globs that resolve to at least one package there, or a root build/test
+ * script. A husky/lint-config/docs-tooling-only manifest applies to nothing,
+ * and an unmodeled glob (`packages/**`, `foo-*`) or a zero-package glob
+ * scopes nothing either, so suppressing the nested-pom probe for any of them
  * would let a standalone-module Maven base pay the cold checkout this gate
  * exists to prevent.
  */
-function blobIsNpmProject(blob: string): boolean {
+function blobIsNpmProject(blob: string, cwd: string, sha: string): boolean {
   try {
     const pkg = JSON.parse(blob) as {
       workspaces?: unknown;
       scripts?: Record<string, unknown>;
     };
-    if (Array.isArray(pkg.workspaces) && pkg.workspaces.length > 0) {
-      return true;
+    const ws = pkg.workspaces;
+    const globs = (
+      Array.isArray(ws)
+        ? ws
+        : Array.isArray((ws as { packages?: unknown } | undefined)?.packages)
+          ? ((ws as { packages: unknown[] }).packages as unknown[])
+          : []
+    ).filter((g): g is string => typeof g === 'string');
+    if (globs.length > 0) {
+      return (
+        !hasUnmodeledWorkspaceGlob(globs) &&
+        workspaceDirsAt(cwd, sha, globs).some(
+          (dir) =>
+            // A directory a negation excludes is not a workspace — the same
+            // check readWorkspacePackages applies on disk.
+            workspaceDirFor(`${dir}/package.json`, globs) === dir &&
+            gitHasPath(cwd, sha, `${dir}/package.json`),
+        )
+      );
     }
-    const packages = (pkg.workspaces as { packages?: unknown } | undefined)
-      ?.packages;
-    if (Array.isArray(packages) && packages.length > 0) return true;
     return (
       typeof pkg.scripts === 'object' &&
       pkg.scripts !== null &&
@@ -150,6 +171,52 @@ function blobIsNpmProject(blob: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * The dirs the workspace globs expand to in the tree at `sha` — the base-tree
+ * twin of readWorkspacePackages' on-disk expansion (negations excluded there,
+ * as here, by the caller's workspaceDirFor check).
+ */
+function workspaceDirsAt(cwd: string, sha: string, globs: string[]): string[] {
+  const dirs = new Set<string>();
+  for (const glob of globs) {
+    if (glob.startsWith('!')) continue;
+    const g = glob.replace(/\/$/, '');
+    if (g.endsWith('/*')) {
+      const base = g.slice(0, -2);
+      for (const child of gitTreeChildDirs(cwd, sha, base)) {
+        dirs.add(base ? `${base}/${child}` : child);
+      }
+    } else {
+      dirs.add(g);
+    }
+  }
+  return [...dirs];
+}
+
+/** Direct children (mode 040000) of `dir` in the tree at `sha` — all of them
+ * when `dir` is empty. */
+function gitTreeChildDirs(cwd: string, sha: string, dir: string): string[] {
+  // `sha:dir` lists the CHILDREN of dir with bare names (a pathspec without
+  // the colon lists dir itself); `sha:` alone lists the root tree.
+  const r = spawnSync('git', ['ls-tree', '-z', `${sha}:${dir}`], {
+    cwd,
+    encoding: 'utf8',
+  });
+  if (r.error || r.status !== 0) return [];
+  const dirs: string[] = [];
+  // `-z` output is NUL-delimited and NEVER C-quoted, so names with non-ASCII
+  // bytes, quotes, tabs, backslashes — or line terminators — survive. Parse
+  // structurally, not with a regex: `.` cannot span a line terminator, and a
+  // `\n` in a name is the standard core.quotePath escape. The first tab ends
+  // the OID: an object id is hex and contains no tab.
+  for (const entry of (r.stdout ?? '').split('\0')) {
+    if (!entry.startsWith('040000 tree ')) continue;
+    const tab = entry.indexOf('\t');
+    if (tab >= 0) dirs.push(entry.slice(tab + 1));
+  }
+  return dirs;
 }
 
 /**
@@ -162,20 +229,11 @@ function blobIsNpmProject(blob: string): boolean {
  * disable A/B attribution for a repo that merely ships one.
  */
 function gitTreeHasNestedPom(cwd: string, sha: string): boolean {
-  // `-z` output is NUL-delimited and NEVER C-quoted, so directory names with
-  // non-ASCII bytes, quotes, tabs, or backslashes survive the round-trip
-  // into `cat-file` (the quoted `ls-tree` spelling resolves to nothing).
   // Only mode 040000 entries are probed: file, symlink, and gitlink entries
   // cannot hold a child pom.xml.
-  const r = spawnSync('git', ['ls-tree', '-z', sha], {
-    cwd,
-    encoding: 'utf8',
-  });
-  if (r.error || r.status !== 0) return false;
-  return (r.stdout ?? '').split('\0').some((entry) => {
-    const dir = /^040000 tree [0-9a-f]+\t(.+)$/.exec(entry)?.[1];
-    return dir ? gitHasPath(cwd, sha, `${dir}/pom.xml`) : false;
-  });
+  return gitTreeChildDirs(cwd, sha, '').some((dir) =>
+    gitHasPath(cwd, sha, `${dir}/pom.xml`),
+  );
 }
 
 export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
@@ -286,7 +344,7 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
   const npmAtBase = (() => {
     if (!gitHasPath(worktree, baseSha, 'package.json')) return false;
     const blob = gitBlob(worktree, baseSha, 'package.json');
-    return blob !== null && blobIsNpmProject(blob);
+    return blob !== null && blobIsNpmProject(blob, worktree, baseSha);
   })();
   if (
     gitHasPath(worktree, baseSha, 'pom.xml') ||

@@ -16,6 +16,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { CommandResult } from '../build-test.js';
+import { observedTestCounts } from '../test-plan.js';
 import {
   detectMavenOwnership,
   mavenExecutable,
@@ -717,6 +718,10 @@ describe('maven toolchain adapter', () => {
       1,
     ],
     ['Error: The JAVA_HOME environment variable is not defined correctly', 1],
+    // mvn.cmd/mvnw.cmd on Windows, when JAVA_HOME points at an invalid
+    // directory — the only JAVA_HOME failure wording the Windows launcher
+    // emits for it.
+    ['ERROR: JAVA_HOME is set to an invalid directory: C:\\old\\jdk', 1],
     ['Unable to locate a Java Runtime', 1],
   ])(
     'classifies unchanged Maven startup failures as infrastructure',
@@ -830,8 +835,12 @@ describe('maven toolchain adapter', () => {
 
     // No executable wrapper exists on disk, so the run used the system
     // `mvn`: a wrapper file this run never executed cannot have caused its
-    // resolution failure, so the carve-out stays — with a disclosure.
-    for (const changed of ['mvnw', 'mvnw.cmd']) {
+    // resolution failure, so the carve-out stays — with a disclosure. Only
+    // this platform's wrapper is exercised: a change confined to the OTHER
+    // platform's wrapper leaves no Maven target to run at all (see the
+    // other-platform-wrapper test below).
+    const platformWrapper = process.platform === 'win32' ? 'mvnw.cmd' : 'mvnw';
+    for (const changed of [platformWrapper]) {
       const report = mavenToolchainAdapter.run({
         root,
         changedFiles: [changed],
@@ -1139,10 +1148,85 @@ describe('maven toolchain adapter', () => {
     expect(output).not.toContain('TEST-Clean0.xml');
     // Failing reports keep per-report identity, capped.
     expect(output).toContain('TEST-Fail0.xml');
+    // The marker carries per-report CLAMPED passed totals (each omitted
+    // report here passed zero), so one anomalous report inside the batch
+    // cannot cancel its batchmates' counts at parse time.
     expect(output).toContain(
       '[maven-test-report] 20 more failing report(s) omitted: ' +
-        'tests=20, failures=20, errors=0, skipped=0',
+        'tests=0, failures=0, errors=0, skipped=0',
     );
+  });
+
+  it('carries clamped passed totals in the clean omission marker', () => {
+    // An anomalous report (Surefire does not guarantee tests >= skipped)
+    // inside the omitted batch must not cancel the passed counts of its
+    // batchmates — clamp the aggregated totals and it cancels two.
+    const modules = Array.from({ length: 120 }, (_, i) => `mod${i}`);
+    writeProject('.', modules);
+    for (const module of modules) writeProject(module);
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['mod0/src/main/java/Main.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        for (const module of modules) {
+          const dir = join(root, module, 'target', 'surefire-reports');
+          mkdirSync(dir, { recursive: true });
+          writeFileSync(
+            join(dir, 'TEST-Clean.xml'),
+            // mod99 sorts into the omitted tail of the per-project rollups.
+            module === 'mod99'
+              ? '<testsuite tests="1" failures="0" errors="0" skipped="3"/>'
+              : '<testsuite tests="1" failures="0" errors="0" skipped="0"/>',
+          );
+        }
+        return result(command);
+      },
+    });
+
+    const output = report.test[0]?.output ?? '';
+    expect(output).toContain(
+      '[maven-test-report] 20 more clean project rollup(s) omitted: ' +
+        'tests=19, failures=0, errors=0, skipped=0',
+    );
+    // 100 kept rollup lines pass one test each; the omitted batch passes 19.
+    expect(observedTestCounts(report)).toEqual([119]);
+  });
+
+  it('carries clamped passed totals in the failing omission marker', () => {
+    writeReactor();
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        for (let i = 0; i < 103; i++) {
+          writeFileSync(
+            join(dir, `TEST-Fail${i}.xml`),
+            // Fail99 sorts into the omitted tail and passes zero despite
+            // recording a test; its batchmates each pass one.
+            i === 99
+              ? '<testsuite tests="1" failures="5" errors="0" skipped="0"><testcase classname="example.T" name="fails"><failure/></testcase></testsuite>'
+              : '<testsuite tests="2" failures="1" errors="0" skipped="0"><testcase classname="example.T" name="fails"><failure/></testcase></testsuite>',
+          );
+        }
+        return result(command, { exitCode: 1, output: '[ERROR] Tests failed' });
+      },
+    });
+
+    const output = report.test[0]?.output ?? '';
+    expect(output).toContain(
+      '[maven-test-report] 3 more failing report(s) omitted: ' +
+        'tests=2, failures=0, errors=0, skipped=0',
+    );
+    // 100 kept failing-report lines pass one test each; the batch passes 2.
+    expect(observedTestCounts(report)).toEqual([102]);
   });
 
   it('caps the clean per-project rollup lines', () => {
@@ -1492,6 +1576,32 @@ describe('maven toolchain adapter', () => {
     expect(report.note).not.toContain('infrastructure evidence');
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'does not launder a PR-caused fallback launch failure into infrastructure',
+    () => {
+      // The diff drops the wrapper's executable bit; mavenExecutable falls
+      // back to system mvn, executedWrapper is null, and a runner without
+      // system Maven dies 127. That death is the diff's own doing — filing
+      // it as infrastructure would let a PR that broke the build ship with
+      // no finding.
+      writeReactor();
+      writeFileSync(join(root, 'mvnw'), '#!/bin/sh\n'); // no executable bit
+
+      const report = mavenToolchainAdapter.run({
+        root,
+        changedFiles: ['mvnw'],
+        timeout: 5,
+        install: false,
+        exec: (command) =>
+          result(command, { exitCode: 127, output: 'sh: 1: mvn: not found' }),
+      });
+
+      expect(report.note).toContain('Correlate compiler or test errors');
+      expect(report.note).not.toContain('infrastructure evidence');
+      expect(report.test[0]?.infrastructure).toBeUndefined();
+    },
+  );
+
   it('discloses when a changed wrapper falls back to the system mvn', () => {
     // No executable bit: mavenExecutable falls back to system mvn, so the
     // wrapper the diff changes is never executed — the run must say so.
@@ -1734,6 +1844,32 @@ describe('maven toolchain adapter', () => {
     expect(report.note).toContain('fail-never');
   });
 
+  it('keeps a fail-never dependency failure PR-attributed when the inputs changed', () => {
+    // The exit-0 half of the dependency carve-out exception: with resolution
+    // inputs changed, the swallowed failure stays a failed run — not green,
+    // and not laundered into an environmental result.
+    writeReactor();
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/pom.xml'],
+      timeout: 5,
+      install: false,
+      exec: (command) =>
+        result(command, {
+          exitCode: 0,
+          output:
+            '[ERROR] Could not resolve dependencies for project example:core',
+        }),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.infrastructure).toBeUndefined();
+    expect(report.test[0]?.swallowedFailure).toBe(true);
+    expect(report.note).toContain('fail-never');
+    expect(report.note).not.toContain('infrastructure evidence');
+  });
+
   it('keeps Kotlin compile failures source-attributed beside dependency words', () => {
     writeReactor();
 
@@ -1973,35 +2109,52 @@ describe('maven toolchain adapter', () => {
     expect(report.note).not.toContain('infrastructure evidence');
   });
 
-  it.skipIf(process.platform === 'win32')(
-    'keeps the carve-out when only the other platform wrapper changed',
-    () => {
-      // POSIX executes ./mvnw; a changed mvnw.cmd cannot affect the run.
-      writeReactor();
-      writeWrapper();
-      writeFileSync(join(root, 'mvnw.cmd'), '@echo off\n');
-      const calls: string[] = [];
+  it('leaves no Maven target when only the other platform wrapper changed', () => {
+    // POSIX executes ./mvnw, win32 mvnw.cmd; a change confined to the other
+    // platform's wrapper cannot affect this platform's run, so no reactor-wide
+    // run burns the deadline verifying nothing.
+    writeReactor();
+    const win32 = process.platform === 'win32';
+    const executed = win32 ? 'mvnw.cmd' : 'mvnw';
+    const other = win32 ? 'mvnw' : 'mvnw.cmd';
+    writeFileSync(join(root, executed), win32 ? '@echo off\n' : '#!/bin/sh\n');
+    if (!win32) chmodSync(join(root, executed), 0o755);
+    writeFileSync(join(root, other), win32 ? '#!/bin/sh\n' : '@echo off\n');
+    const calls: string[] = [];
 
-      const report = mavenToolchainAdapter.run({
-        root,
-        changedFiles: ['mvnw.cmd'],
-        timeout: 5,
-        install: false,
-        exec: (command) => {
-          calls.push(command);
-          return result(command, {
-            exitCode: 1,
-            output:
-              '[ERROR] Could not resolve dependencies for project example:core',
-          });
-        },
-      });
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: [other],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        calls.push(command);
+        return result(command);
+      },
+    });
 
-      expect(calls[0]).toContain('./mvnw');
-      expect(report.note).toContain('infrastructure evidence');
-      expect(report.note).toContain('wrapper change itself was not exercised');
-    },
-  );
+    expect(calls).toEqual([]);
+    expect(report.ok).toBe(true);
+    expect(report.note).toContain('no Maven target');
+
+    // The carve-out itself still holds in its reachable shape: when the diff
+    // ALSO changes module sources, the other platform's wrapper is not a
+    // resolution input and cannot suppress the dependency carve-out.
+    const mixed = mavenToolchainAdapter.run({
+      root,
+      changedFiles: [other, 'core/src/Main.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) =>
+        result(command, {
+          exitCode: 1,
+          output:
+            '[ERROR] Could not resolve dependencies for project example:core',
+        }),
+    });
+    expect(mixed.note).toContain('infrastructure evidence');
+    expect(mixed.note).toContain('wrapper change itself was not exercised');
+  });
 
   it('clamps negative report counts to zero', () => {
     // A malformed failures="-3" must not cancel legitimate counts when

@@ -416,6 +416,139 @@ describe('runBaseTree', () => {
     expect(r.available).toBe(true);
   });
 
+  it('does NOT treat an unmodeled workspace glob as npm-applicable', () => {
+    // `packages/**` scopes nothing the npm adapter can model (applies()
+    // declines it); suppressing the nested-pom probe for the blob would make
+    // a standalone-module Maven base pay the cold checkout this gate exists
+    // to prevent.
+    mkdirSync(join(repo, 'app'), { recursive: true });
+    writeFileSync(join(repo, 'app', 'pom.xml'), '<project/>');
+    writeFileSync(
+      join(repo, 'package.json'),
+      JSON.stringify({ workspaces: ['packages/**'] }),
+    );
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-qam', 'unmodeled glob + nested maven');
+    const sha = git(repo, 'rev-parse', 'HEAD');
+
+    const plan = join(repo, 'plan.json');
+    writeFileSync(plan, JSON.stringify({ mergeBaseSha: sha, files: [] }));
+    const builds: string[] = [];
+    const r = runBaseTree({
+      plan,
+      worktree,
+      timeout: 60,
+      install: false,
+      build: (w) => {
+        builds.push(w);
+        return okBuild;
+      },
+    });
+
+    expect(r.available).toBe(false);
+    expect(builds).toEqual([]);
+    expect(r.note).toContain('Maven');
+    expect(existsSync(baseWorktreePath(worktree))).toBe(false);
+  });
+
+  it('does NOT treat a zero-package workspace glob as npm-applicable', () => {
+    // A modeled glob resolving to NO package at the base scopes nothing
+    // either — the nested-pom probe must still run.
+    mkdirSync(join(repo, 'java'), { recursive: true });
+    writeFileSync(join(repo, 'java', 'pom.xml'), '<project/>');
+    writeFileSync(
+      join(repo, 'package.json'),
+      JSON.stringify({ workspaces: ['packages/*'] }),
+    );
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-qam', 'empty glob + nested maven');
+    const sha = git(repo, 'rev-parse', 'HEAD');
+
+    const plan = join(repo, 'plan.json');
+    writeFileSync(plan, JSON.stringify({ mergeBaseSha: sha, files: [] }));
+    const builds: string[] = [];
+    const r = runBaseTree({
+      plan,
+      worktree,
+      timeout: 60,
+      install: false,
+      build: (w) => {
+        builds.push(w);
+        return okBuild;
+      },
+    });
+
+    expect(r.available).toBe(false);
+    expect(builds).toEqual([]);
+    expect(r.note).toContain('Maven');
+  });
+
+  it('suppresses the nested-pom probe when a modeled glob resolves to a base package', () => {
+    // The positive control for the two tests above: a modeled glob with at
+    // least one member package at the base IS npm-applicable, so the probe
+    // stays home even beside a nested pom, and the build decides.
+    mkdirSync(join(repo, 'packages', 'app'), { recursive: true });
+    writeFileSync(
+      join(repo, 'packages', 'app', 'package.json'),
+      JSON.stringify({ name: '@x/app', scripts: { build: 'tsc' } }),
+    );
+    mkdirSync(join(repo, 'java'), { recursive: true });
+    writeFileSync(join(repo, 'java', 'pom.xml'), '<project/>');
+    writeFileSync(
+      join(repo, 'package.json'),
+      JSON.stringify({ workspaces: ['packages/*'] }),
+    );
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-qam', 'workspace + nested maven');
+    const sha = git(repo, 'rev-parse', 'HEAD');
+
+    const plan = join(repo, 'plan.json');
+    writeFileSync(plan, JSON.stringify({ mergeBaseSha: sha, files: [] }));
+    const builds: string[] = [];
+    const r = runBaseTree({
+      plan,
+      worktree,
+      timeout: 60,
+      install: false,
+      build: (w) => {
+        builds.push(w);
+        return okBuild;
+      },
+    });
+
+    expect(builds).toHaveLength(1);
+    expect(r.available).toBe(true);
+  });
+
+  it('still detects a nested pom under a directory named with a line terminator', () => {
+    // A regex `.` cannot span `\n`, and a `\n` in a name is a standard
+    // core.quotePath escape — the probe parses the NUL-delimited entries
+    // structurally, or this base slips past the gate.
+    mkdirSync(join(repo, 'bad\ndir'), { recursive: true });
+    writeFileSync(join(repo, 'bad\ndir', 'pom.xml'), '<project/>');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-qam', 'newline-dir nested maven base');
+    const sha = git(repo, 'rev-parse', 'HEAD');
+
+    const plan = join(repo, 'plan.json');
+    writeFileSync(plan, JSON.stringify({ mergeBaseSha: sha, files: [] }));
+    const builds: string[] = [];
+    const r = runBaseTree({
+      plan,
+      worktree,
+      timeout: 60,
+      install: false,
+      build: (w) => {
+        builds.push(w);
+        return okBuild;
+      },
+    });
+
+    expect(r.available).toBe(false);
+    expect(builds).toEqual([]);
+    expect(r.note).toContain('Maven');
+  });
+
   it('is NOT available for a Maven build report the delta machinery cannot consume', () => {
     const mavenBuild = {
       ok: true,

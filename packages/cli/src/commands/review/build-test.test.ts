@@ -15,7 +15,10 @@ import {
   buildRunEnv,
 } from './build-test.js';
 import { mavenToolchainAdapter } from './lib/maven-toolchain.js';
-import { npmToolchainAdapter } from './lib/npm-toolchain.js';
+import {
+  npmToolchainAdapter,
+  unresolvedWorkspaceDeps as toolchainUnresolvedWorkspaceDeps,
+} from './lib/npm-toolchain.js';
 import type { WorkspacePackage } from './lib/workspaces.js';
 
 const statfsSyncMock = vi.hoisted(() => vi.fn());
@@ -37,6 +40,13 @@ const PKGS: WorkspacePackage[] = [
 ];
 
 describe('unresolvedWorkspaceDeps', () => {
+  it('re-exports the npm-toolchain implementation', () => {
+    // Pins the module boundary this PR establishes (npm specifics live in
+    // lib/npm-toolchain.ts): reverting the re-export to an inline copy ships
+    // green unless this identity is asserted.
+    expect(unresolvedWorkspaceDeps).toBe(toolchainUnresolvedWorkspaceDeps);
+  });
+
   it('finds the workspace package a TS2307 names', () => {
     const out =
       "src/a.ts(23,8): error TS2307: Cannot find module '@x/webui' or its " +
@@ -670,6 +680,16 @@ describe('runBuildTest', () => {
     );
     expect(trimmed).toContain(line);
     expect(trimmed).toContain('dependency failures');
+    // The colored form a `-Dstyle.color=always` reactor delivers — the SGR
+    // strip is what the predicate runs on, and the rescued line keeps its
+    // original bytes.
+    const colored =
+      '\x1b[1;31m[ERROR]\x1b[m Could not resolve dependencies for project example:core:jar:1';
+    expect(
+      trimOutput(
+        'h\n' + 'x'.repeat(3000) + `\n${colored}\n` + 'y'.repeat(9000),
+      ),
+    ).toContain(colored);
   });
 
   it('rescues Maven source-failure lines from a trimmed middle', () => {
@@ -681,6 +701,14 @@ describe('runBuildTest', () => {
     );
     expect(trimmed).toContain(line);
     expect(trimmed).toContain('source failures');
+    // The colored form too — losing the SGR strip here would drop the marker
+    // that keeps a compile failure from laundering into infrastructure.
+    const colored = '\x1b[1;31m[ERROR]\x1b[m COMPILATION ERROR :';
+    expect(
+      trimOutput(
+        'h\n' + 'x'.repeat(3000) + `\n${colored}\n` + 'y'.repeat(9000),
+      ),
+    ).toContain(colored);
   });
 
   it('caps the rescue so hostile prose cannot void the trim', () => {
