@@ -993,7 +993,7 @@ describe('modelConfigResolver', () => {
       expect(result.sources['modalities'].kind).toBe('settings');
     });
 
-    it('keeps settings modalities ahead of built-in auth defaults', () => {
+    it('preserves modalities saved by an older auth template', () => {
       const result = resolveModelConfig({
         authType: AuthType.USE_OPENAI,
         cli: {},
@@ -1011,8 +1011,11 @@ describe('modelConfigResolver', () => {
         },
       });
 
-      expect(result.config.modalities).toEqual({ audio: true });
-      expect(result.sources['modalities'].kind).toBe('settings');
+      expect(result.config.modalities).toEqual({
+        image: true,
+        video: true,
+      });
+      expect(result.sources['modalities'].kind).toBe('modelProviders');
     });
   });
 
