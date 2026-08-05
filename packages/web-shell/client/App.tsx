@@ -2399,6 +2399,7 @@ export function App({
   const [artifactPanelWidth, setArtifactPanelWidth] = useState(
     DEFAULT_REVIEW_PANEL_WIDTH,
   );
+  const [artifactPanelFullscreen, setArtifactPanelFullscreen] = useState(false);
   const artifactPanelResizeCleanupRef = useRef<(() => void) | null>(null);
   const artifactPanelSessionStateRef = useRef<ArtifactPanelSessionState | null>(
     null,
@@ -2453,6 +2454,7 @@ export function App({
       setArtifactPanelExtraArtifacts([]);
       setPaneArtifactSnapshots(new Map());
       setArtifactPanelWidth(DEFAULT_REVIEW_PANEL_WIDTH);
+      setArtifactPanelFullscreen(false);
       return;
     }
 
@@ -2464,6 +2466,7 @@ export function App({
     setArtifactPanelExtraArtifacts(savedState.extraArtifacts);
     setPaneArtifactSnapshots(new Map());
     setArtifactPanelWidth(savedState.width);
+    setArtifactPanelFullscreen(false);
   }, [connection.sessionId]);
   const sideTasksAvailable =
     Boolean(connection.sessionId && connection.workspaceCwd) &&
@@ -3096,6 +3099,12 @@ export function App({
       catalog.items.length === 0 ? { ...catalog, loaded: false } : catalog,
     );
   }, []);
+  const toggleArtifactPanelFullscreen = useCallback(() => {
+    setArtifactPanelFullscreen((value) => !value);
+  }, []);
+  useEffect(() => {
+    if (!artifactPanelOpen) setArtifactPanelFullscreen(false);
+  }, [artifactPanelOpen]);
   useLayoutEffect(() => {
     if (!artifactPanelOpen) return;
     const clampWidth = () => {
@@ -8047,6 +8056,7 @@ export function App({
     closePanel,
     handleCancel,
     handleCycleMode,
+    artifactPanelFullscreen,
   });
   escLiveRef.current = {
     streamingState,
@@ -8056,6 +8066,7 @@ export function App({
     closePanel,
     handleCancel,
     handleCycleMode,
+    artifactPanelFullscreen,
   };
 
   // Clear a half-armed two-press whenever the streaming/idle boundary flips — the
@@ -8082,6 +8093,16 @@ export function App({
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.defaultPrevented || e.isComposing) return;
       const live = escLiveRef.current;
+
+      // The fullscreen right panel (artifacts/subagents) is the topmost
+      // surface; Escape shrinks it back to its dock/drawer. Modals opened on
+      // top are DialogShells, whose own handler stops Escape before this
+      // listener, so this only fires when the panel itself is topmost.
+      if (e.key === 'Escape' && live.artifactPanelFullscreen) {
+        e.preventDefault();
+        setArtifactPanelFullscreen(false);
+        return;
+      }
 
       // A full-view panel (Settings / Daemon Status) replaces the chat rather
       // than overlaying it; Escape returns to the chat. Any modal opened on top
@@ -10405,7 +10426,41 @@ export function App({
                 onDismiss={dismissEnvironmentPanel}
               />
             )}
-            {artifactPanelOpen && useFloatingArtifactPanel ? (
+            {artifactPanelOpen && artifactPanelFullscreen ? (
+              <div className={styles.artifactPanelFullscreen}>
+                <ArtifactPanel
+                  artifacts={artifactPanelArtifacts}
+                  tabs={artifactPanelTabs}
+                  activeTabId={activeArtifactPanelTabId}
+                  reviewChanges={reviewChanges}
+                  selectedReviewPath={selectedReviewPath}
+                  workspaceCwd={connection.workspaceCwd || ''}
+                  loading={artifactsLoading}
+                  error={artifactsError}
+                  onSelectTab={setActiveArtifactPanelTabId}
+                  onCloseTab={closeArtifactPanelTab}
+                  onOpenFilePreview={openFilePreview}
+                  latestReviewAvailable={latestReviewChanges.length > 0}
+                  onOpenLatestReview={openLatestReviewPanel}
+                  items={rightPanelItems}
+                  sideTaskAvailable={sideTasksAvailable}
+                  sideTasks={visibleSideTasks}
+                  sideTasksLoading={sideTasksLoading}
+                  onCreateSideTask={createEmptySideTask}
+                  onOpenSideTask={openSideTask}
+                  onCreateSideTaskSession={createSideTaskSession}
+                  onSideTaskCreated={handleSideTaskCreated}
+                  onSideTaskTitleChange={handleSideTaskTitleChange}
+                  onNestedRightPanelOpen={handleTurnOutputOpen}
+                  onNestedArtifactsChange={handlePaneArtifactsChange}
+                  onError={reportError}
+                  sessionWorkflowEnabled={sessionWorkflowEnabled}
+                  onClose={closeArtifactPanel}
+                  fullscreen
+                  onToggleFullscreen={toggleArtifactPanelFullscreen}
+                />
+              </div>
+            ) : artifactPanelOpen && useFloatingArtifactPanel ? (
               <Drawer
                 open
                 direction="right"
@@ -10444,6 +10499,7 @@ export function App({
                     onError={reportError}
                     sessionWorkflowEnabled={sessionWorkflowEnabled}
                     onClose={closeArtifactPanel}
+                    onToggleFullscreen={toggleArtifactPanelFullscreen}
                     variant="drawer"
                   />
                 </DrawerContent>
@@ -10451,7 +10507,9 @@ export function App({
             ) : null}
               </div>
             </div>
-            {artifactPanelOpen && !useFloatingArtifactPanel && (
+            {artifactPanelOpen &&
+              !useFloatingArtifactPanel &&
+              !artifactPanelFullscreen && (
               <div
                 className={styles.artifactPanelDock}
                 style={
@@ -10499,6 +10557,7 @@ export function App({
                     onError={reportError}
                     sessionWorkflowEnabled={sessionWorkflowEnabled}
                     onClose={closeArtifactPanel}
+                    onToggleFullscreen={toggleArtifactPanelFullscreen}
                   />
                 </div>
               </div>

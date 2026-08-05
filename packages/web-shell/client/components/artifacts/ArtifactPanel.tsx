@@ -230,6 +230,8 @@ interface ArtifactPanelProps {
   sessionWorkflowEnabled?: boolean;
   onClose: () => void;
   variant?: 'docked' | 'drawer';
+  fullscreen?: boolean;
+  onToggleFullscreen?: () => void;
 }
 
 export function ArtifactPanel({
@@ -262,6 +264,8 @@ export function ArtifactPanel({
   sessionWorkflowEnabled,
   onClose,
   variant = 'docked',
+  fullscreen = false,
+  onToggleFullscreen,
 }: ArtifactPanelProps) {
   const { t } = useI18n();
   const [sideTaskMenuOpen, setSideTaskMenuOpen] = useState(false);
@@ -309,9 +313,9 @@ export function ArtifactPanel({
 
   return (
     <aside
-      className={`${styles.panel} ${variant === 'drawer' ? styles.panelDrawer : ''}`}
+      className={`${styles.panel} ${variant === 'drawer' ? styles.panelDrawer : ''} ${fullscreen ? styles.panelFullscreen : ''}`}
       style={
-        variant === 'docked' && panelWidth
+        variant === 'docked' && panelWidth && !fullscreen
           ? { flexBasis: panelWidth, width: panelWidth }
           : undefined
       }
@@ -424,6 +428,22 @@ export function ArtifactPanel({
                 )}
               </DropdownMenuContent>
             </DropdownMenu>
+          )}
+          {onToggleFullscreen && (
+            <button
+              type="button"
+              className={`${styles.iconButton} ${fullscreen ? styles.iconButtonActive : ''}`}
+              onClick={onToggleFullscreen}
+              aria-label={t(
+                fullscreen ? 'common.exitFullscreen' : 'common.fullscreen',
+              )}
+              aria-pressed={fullscreen}
+              title={t(
+                fullscreen ? 'common.exitFullscreen' : 'common.fullscreen',
+              )}
+            >
+              {fullscreen ? <ExitFullscreenIcon /> : <FullscreenIcon />}
+            </button>
           )}
           <button
             type="button"
@@ -701,6 +721,46 @@ function CloseIcon() {
         stroke="currentColor"
         strokeWidth="1.7"
         strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function FullscreenIcon() {
+  return (
+    <svg
+      className={styles.toolbarIcon}
+      viewBox="0 0 24 24"
+      fill="none"
+      focusable="false"
+      aria-hidden="true"
+    >
+      <path
+        d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function ExitFullscreenIcon() {
+  return (
+    <svg
+      className={styles.toolbarIcon}
+      viewBox="0 0 24 24"
+      fill="none"
+      focusable="false"
+      aria-hidden="true"
+    >
+      <path
+        d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+        strokeLinejoin="round"
       />
     </svg>
   );

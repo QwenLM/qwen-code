@@ -1495,6 +1495,108 @@ describe('task activity key', () => {
     ).not.toBeNull();
   });
 
+  it('expands the right panel to fullscreen and exits with Escape', async () => {
+    const originalMatchMedia = window.matchMedia;
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: query.includes('min-width'),
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    });
+    try {
+      const task: DaemonSessionMonitorTaskStatus = {
+        kind: 'monitor',
+        id: 'monitor-1',
+        label: 'monitor-label',
+        description: 'watch server log',
+        status: 'running',
+        startTime: 1_000,
+        runtimeMs: 5_000,
+        command: 'tail -f server.log',
+        eventCount: 3,
+        lastEventTime: 5_000,
+        droppedLines: 0,
+        toolUseId: 'monitor-call',
+      };
+      mockSessionActions.getTasks.mockResolvedValue({
+        v: 1,
+        sessionId: 'session-1',
+        now: 6_000,
+        tasks: [task],
+      });
+      mockConnection.capabilities.features = [
+        'session_monitor_tool_correlation',
+      ];
+      const { container } = renderApp();
+      await flush();
+      expect(testState.latestMonitorDetailsOnOpen).toBeTypeOf('function');
+
+      await act(async () => {
+        await testState.latestMonitorDetailsOnOpen?.({
+          callId: 'monitor-call',
+          toolName: 'monitor',
+          status: 'completed',
+        });
+        await Promise.resolve();
+      });
+      await flush();
+
+      expect(
+        container.querySelector('button[title="watch server log"]'),
+      ).not.toBeNull();
+      expect(
+        container.querySelector('[class*="artifactPanelFullscreen"]'),
+      ).toBeNull();
+
+      const enterFullscreen = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Fullscreen"]',
+      );
+      expect(enterFullscreen).not.toBeNull();
+      await act(async () => {
+        enterFullscreen?.click();
+        await Promise.resolve();
+      });
+
+      const fullscreenOverlay = container.querySelector(
+        '[class*="artifactPanelFullscreen"]',
+      );
+      expect(fullscreenOverlay).not.toBeNull();
+      const fullscreenAside = fullscreenOverlay?.querySelector('aside');
+      expect(fullscreenAside?.className).toContain('panelFullscreen');
+      expect(
+        fullscreenAside?.querySelector('button[aria-label="Exit fullscreen"]'),
+      ).not.toBeNull();
+      expect(container.querySelector('[role="separator"]')).toBeNull();
+
+      await act(async () => {
+        window.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'Escape',
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+        await Promise.resolve();
+      });
+
+      expect(
+        container.querySelector('[class*="artifactPanelFullscreen"]'),
+      ).toBeNull();
+      expect(container.querySelector('[role="separator"]')).not.toBeNull();
+      expect(
+        container.querySelector('button[title="watch server log"]'),
+      ).not.toBeNull();
+    } finally {
+      Object.defineProperty(window, 'matchMedia', {
+        configurable: true,
+        value: originalMatchMedia,
+      });
+    }
+  });
+
   it('merges a reopened monitor into its existing tab', async () => {
     const stopped: DaemonSessionMonitorTaskStatus = {
       kind: 'monitor',
