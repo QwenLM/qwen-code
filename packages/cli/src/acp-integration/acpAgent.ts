@@ -243,6 +243,7 @@ import {
   writeOutputLanguageAndRegisterPath,
 } from '../utils/languageUtils.js';
 import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
+import { ACP_ERROR_CODES } from './errorCodes.js';
 import { runExitCleanup } from '../utils/cleanup.js';
 import { appEvents, AppEvent } from '../utils/events.js';
 import {
@@ -4705,7 +4706,7 @@ class QwenAgent implements Agent {
       this.startingSessionIds.has(sessionId)
     ) {
       throw new RequestError(
-        -32602,
+        ACP_ERROR_CODES.INVALID_PARAMS,
         `Session ${sessionId} is already active or starting.`,
         { errorKind: 'session_id_conflict', sessionId },
       );
@@ -4726,7 +4727,7 @@ class QwenAgent implements Agent {
     );
     if (parsedSessionId.kind === 'invalid') {
       throw new RequestError(
-        -32602,
+        ACP_ERROR_CODES.INVALID_PARAMS,
         `\`_meta["${REQUESTED_SESSION_ID_META_KEY}"]\` must be an RFC UUID v1-v5`,
         { errorKind: 'invalid_session_id', httpStatus: 400 },
       );
@@ -11622,7 +11623,7 @@ class QwenAgent implements Agent {
       });
     } catch (error) {
       if (error instanceof SessionIdConflictError) {
-        throw new RequestError(-32602, error.message, {
+        throw new RequestError(ACP_ERROR_CODES.INVALID_PARAMS, error.message, {
           errorKind: 'session_id_conflict',
           sessionId: error.sessionId,
         });
@@ -11958,7 +11959,7 @@ class QwenAgent implements Agent {
 
     if (this.sessions.has(sessionId)) {
       throw new RequestError(
-        -32602,
+        ACP_ERROR_CODES.INVALID_PARAMS,
         `Session ${sessionId} is already active.`,
         { errorKind: 'session_id_conflict', sessionId },
       );

@@ -119,7 +119,10 @@ export class AcpWsTransport implements DaemonTransport {
   ) {
     this.wsUrl = wsUrl;
     this.token = token;
-    this.restFetch = restFetch ?? globalThis.fetch.bind(globalThis);
+    // Resolve globalThis.fetch lazily so the transport still constructs in
+    // environments where fetch only exists later (or is injected per call).
+    this.restFetch =
+      restFetch ?? ((input, init) => globalThis.fetch(input, init));
   }
 
   get connected(): boolean {
@@ -167,10 +170,19 @@ export class AcpWsTransport implements DaemonTransport {
     // capabilities envelope. Prefer the REST discovery response when this
     // transport was constructed with a REST fetch (as negotiateTransport
     // does), and retain the initialize result only as an ACP-only fallback.
+    // The envelope must actually carry a `features` array: a reverse proxy
+    // or SPA can answer 200 with HTML for unknown paths, and accepting that
+    // body would resurface the very `caps.features` TypeError this path
+    // exists to avoid.
     if (mapping.method === '_capabilities') {
       try {
         const response = await this.restFetch(url, init);
-        if (response.ok) return response;
+        if (response.ok) {
+          const envelope: unknown = await response.json();
+          if (isRecord(envelope) && Array.isArray(envelope['features'])) {
+            return synthesizeResponse(200, envelope);
+          }
+        }
       } catch {
         // ACP-only deployments can still use the initialize fallback.
       }

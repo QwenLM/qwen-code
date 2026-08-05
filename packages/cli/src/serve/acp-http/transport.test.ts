@@ -76,6 +76,8 @@ import {
   type WorkspaceGenerationGuard,
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
+import { SessionArchiveCoordinator } from '../server/session-archive.js';
+import { createRequestedSessionIdAdmission } from '../session-id-admission.js';
 import {
   MAX_TRUST_REASON_LENGTH,
   MAX_VOICE_MODEL_LENGTH,
@@ -901,11 +903,23 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         return raw as Record<string, unknown>;
       },
     });
+    const archiveCoordinator = new SessionArchiveCoordinator();
     acpHandle = mountAcpHttp(app, bridge as unknown as HttpAcpBridge, {
       boundWorkspace,
       workspace: fakeWorkspace,
       enabled: true,
       workspaceRememberLane,
+      archiveCoordinator,
+      requestedSessionIdAdmission: createRequestedSessionIdAdmission({
+        archiveCoordinator,
+        getBridges: () => [bridge as unknown as HttpAcpBridge],
+        getPersistenceTargets: () => [
+          {
+            workspaceCwd: boundWorkspace,
+            runtimeBaseDir: Storage.getRuntimeBaseDir(),
+          },
+        ],
+      }),
     });
     await new Promise<void>((resolve) => {
       server = app.listen(0, '127.0.0.1', () => resolve());
@@ -959,6 +973,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           generationGuard: opts.generationGuard,
         })
       : undefined;
+    const archiveCoordinator = new SessionArchiveCoordinator();
     mountAcpHttp(app, bridge as unknown as HttpAcpBridge, {
       boundWorkspace,
       workspace: fakeWorkspace,
@@ -971,6 +986,26 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       workspaceRememberLane: new WorkspaceRememberTaskLane(
         bridge as unknown as HttpAcpBridge,
       ),
+      archiveCoordinator,
+      requestedSessionIdAdmission: createRequestedSessionIdAdmission({
+        archiveCoordinator,
+        getBridges: () =>
+          workspaceRegistry
+            ? workspaceRegistry.listManaged().map((runtime) => runtime.bridge)
+            : [bridge as unknown as HttpAcpBridge],
+        getPersistenceTargets: () =>
+          workspaceRegistry
+            ? workspaceRegistry.listManaged().map((runtime) => ({
+                workspaceCwd: runtime.workspaceCwd,
+                runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+              }))
+            : [
+                {
+                  workspaceCwd: boundWorkspace,
+                  runtimeBaseDir: Storage.getRuntimeBaseDir(),
+                },
+              ],
+      }),
     });
     await new Promise<void>((resolve) => {
       server = app.listen(0, '127.0.0.1', () => resolve());
@@ -4978,6 +5013,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   it('connection cap → 503 on initialize', async () => {
     const app2 = express();
     app2.use(express.json());
+    const archiveCoordinator = new SessionArchiveCoordinator();
     mountAcpHttp(app2, bridge as unknown as HttpAcpBridge, {
       boundWorkspace: TEST_WORKSPACE,
       workspace: fakeWorkspace,
@@ -4986,6 +5022,17 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       workspaceRememberLane: new WorkspaceRememberTaskLane(
         bridge as unknown as HttpAcpBridge,
       ),
+      archiveCoordinator,
+      requestedSessionIdAdmission: createRequestedSessionIdAdmission({
+        archiveCoordinator,
+        getBridges: () => [bridge as unknown as HttpAcpBridge],
+        getPersistenceTargets: () => [
+          {
+            workspaceCwd: TEST_WORKSPACE,
+            runtimeBaseDir: Storage.getRuntimeBaseDir(),
+          },
+        ],
+      }),
     });
     const srv = app2.listen(0, '127.0.0.1');
     await new Promise((r) => srv.once('listening', r));
@@ -8732,6 +8779,7 @@ describe('ACP WebSocket transport security', () => {
       bridge = new FakeBridge();
       const app = express();
       app.use(express.json());
+      const archiveCoordinator = new SessionArchiveCoordinator();
       const handle = mountAcpHttp(app, bridge as unknown as HttpAcpBridge, {
         boundWorkspace: TEST_WORKSPACE,
         workspace: fakeWorkspace,
@@ -8742,6 +8790,17 @@ describe('ACP WebSocket transport security', () => {
         workspaceRememberLane: new WorkspaceRememberTaskLane(
           bridge as unknown as HttpAcpBridge,
         ),
+        archiveCoordinator,
+        requestedSessionIdAdmission: createRequestedSessionIdAdmission({
+          archiveCoordinator,
+          getBridges: () => [bridge as unknown as HttpAcpBridge],
+          getPersistenceTargets: () => [
+            {
+              workspaceCwd: TEST_WORKSPACE,
+              runtimeBaseDir: Storage.getRuntimeBaseDir(),
+            },
+          ],
+        }),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         checkRate: opts.checkRate as any,
         ...(opts.cdpTunnelOverWs

@@ -11656,6 +11656,7 @@ describe('createServeApp', () => {
         sessionId: 'live-primary',
         workspaceCwd: WS_DIFFERENT,
         liveWorkspaceCwd: WS_BOUND,
+        liveWorkspaceId: 'ws-primary',
       });
       expect(secondaryBridge.loadCalls).toHaveLength(0);
     });

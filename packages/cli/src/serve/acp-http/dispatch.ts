@@ -881,12 +881,12 @@ export class AcpDispatcher {
     private readonly getEnv: () => Readonly<NodeJS.ProcessEnv>,
     private readonly workspace: DaemonWorkspaceService,
     private readonly workspaceRememberLane: WorkspaceRememberTaskLane,
+    private readonly requestedSessionIdAdmission: RequestedSessionIdAdmission,
     private readonly fsFactory?: WorkspaceFileSystemFactory,
     private readonly deviceFlowRegistry?: DeviceFlowRegistry,
     private readonly sessionShellCommandEnabled: boolean = false,
     private readonly registry?: ConnectionRegistry,
     private readonly archiveCoordinator: SessionArchiveCoordinator = new SessionArchiveCoordinator(),
-    private readonly requestedSessionIdAdmission?: RequestedSessionIdAdmission,
     private readonly isWorkspaceTrusted: () => boolean = () => true,
     private readonly captureGenerationAssertion: () =>
       | (() => void)
@@ -1454,7 +1454,7 @@ export class AcpDispatcher {
             return;
           }
           const reservation = requestedSessionId
-            ? await this.requestedSessionIdAdmission?.reserveCreate(
+            ? await this.requestedSessionIdAdmission.reserveCreate(
                 requestedSessionId,
                 {
                   bridge: sessionRuntime.bridge,
@@ -1465,14 +1465,6 @@ export class AcpDispatcher {
                 },
               )
             : undefined;
-          if (requestedSessionId && !reservation) {
-            throw new RequestedSessionIdAdmissionError(
-              'session_id_admission_unavailable',
-              requestedSessionId,
-              'Caller-supplied session IDs are unavailable on this ACP mount.',
-              { retryable: true },
-            );
-          }
           try {
             assertGenerationOpen?.();
             // ACP standard: session/new MUST create a new isolated session.
@@ -1595,7 +1587,7 @@ export class AcpDispatcher {
           }
           const cwd = this.parseSessionWorkspaceCwd(params);
           const sessionRuntime = this.getSessionRuntimeContext();
-          const reservation = this.requestedSessionIdAdmission?.reserveRestore(
+          const reservation = this.requestedSessionIdAdmission.reserveRestore(
             sessionId,
             {
               bridge: sessionRuntime.bridge,
@@ -1605,14 +1597,6 @@ export class AcpDispatcher {
                 : {}),
             },
           );
-          if (!reservation) {
-            throw new RequestedSessionIdAdmissionError(
-              'session_id_admission_unavailable',
-              sessionId,
-              'Session restore admission is unavailable on this ACP mount.',
-              { retryable: true },
-            );
-          }
           try {
             const restored = await this.archiveCoordinator.runSharedMany(
               [sessionId],

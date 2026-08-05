@@ -1161,6 +1161,10 @@ export function createServeApp(
         workspaceCwd: runtime.workspaceCwd,
         runtimeBaseDir: runtime.sessionRuntimeBaseDir,
       })),
+    getBridgeWorkspaceId: (bridge) =>
+      workspaceRegistry
+        .listEntries()
+        .find((entry) => entry.current?.runtime.bridge === bridge)?.workspaceId,
   });
   primaryTrustRegistry = workspaceRegistry;
   const primaryRuntime = createLiveWorkspaceDelegate(

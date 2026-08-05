@@ -399,19 +399,6 @@ function shouldPreserveTranscriptResolutionError(err: unknown): boolean {
   );
 }
 
-function sendRequestedSessionIdAdmissionError(
-  res: Response,
-  error: RequestedSessionIdAdmissionError,
-): void {
-  const status = error.code === 'session_id_admission_unavailable' ? 503 : 409;
-  res.status(status).json({
-    error: error.message,
-    code: error.code,
-    sessionId: error.sessionId,
-    ...error.details,
-  });
-}
-
 function parseOptionalApprovalMode(
   body: Record<string, unknown>,
   res: Response,
@@ -461,6 +448,11 @@ export function registerSessionRoutes(
           workspaceCwd: runtime.workspaceCwd,
           runtimeBaseDir: runtime.sessionRuntimeBaseDir,
         })),
+      getBridgeWorkspaceId: (bridge) =>
+        workspaceRegistry
+          .listEntries()
+          .find((entry) => entry.current?.runtime.bridge === bridge)
+          ?.workspaceId,
     });
   const captureRuntimeGenerationAssertion = (
     runtime: WorkspaceRuntime,
@@ -582,6 +574,25 @@ export function registerSessionRoutes(
       route,
       resolutionKind,
       ...details,
+    });
+  };
+
+  const sendRequestedSessionIdAdmissionError = (
+    res: Response,
+    error: RequestedSessionIdAdmissionError,
+    route: string,
+  ): void => {
+    logSessionRoutingFailure(route, error.code, {
+      sessionId: error.sessionId,
+      ...error.details,
+    });
+    const status =
+      error.code === 'session_id_admission_unavailable' ? 503 : 409;
+    res.status(status).json({
+      error: error.message,
+      code: error.code,
+      sessionId: error.sessionId,
+      ...error.details,
     });
   };
 
@@ -1361,7 +1372,7 @@ export function registerSessionRoutes(
         );
       } catch (error) {
         if (error instanceof RequestedSessionIdAdmissionError) {
-          sendRequestedSessionIdAdmissionError(res, error);
+          sendRequestedSessionIdAdmissionError(res, error, 'POST /session');
           return;
         }
         throw error;
@@ -2076,7 +2087,7 @@ export function registerSessionRoutes(
         );
       } catch (error) {
         if (error instanceof RequestedSessionIdAdmissionError) {
-          sendRequestedSessionIdAdmissionError(res, error);
+          sendRequestedSessionIdAdmissionError(res, error, route);
           return;
         }
         throw error;
