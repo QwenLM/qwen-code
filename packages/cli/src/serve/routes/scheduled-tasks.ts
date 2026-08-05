@@ -1245,6 +1245,18 @@ export function registerWorkspaceQualifiedScheduledTasksRoutes(
       );
       if (!runtime) return null;
       if (!requireTrustedWorkspaceRuntime(runtime, res)) return null;
+      if (
+        runtime.provenance === 'live-conversation' &&
+        req.method === 'POST' &&
+        req.params['id'] === undefined
+      ) {
+        res.status(400).json({
+          error:
+            'Generic scheduled tasks cannot create sessions in the Conversations workspace.',
+          code: 'live_session_creation_reserved',
+        });
+        return null;
+      }
       return {
         workspaceCwd: runtime.workspaceCwd,
         runtimeBaseDir: runtime.sessionRuntimeBaseDir,
