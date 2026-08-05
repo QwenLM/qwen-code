@@ -19,6 +19,8 @@ const MODELS_DEV_URL = 'https://models.dev/api.json';
 const CACHE_TTL_MS = 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 10_000;
 const MAX_CATALOG_BYTES = 8 * 1024 * 1024;
+const OPENROUTER_VARIANT_SUFFIX =
+  /:(?:free|extended|thinking|online|nitro|floor|exacto)$/i;
 
 const debugLogger = createDebugLogger('MODEL_METADATA_CATALOG');
 
@@ -280,11 +282,17 @@ function normalizeUrl(value: unknown): string | undefined {
   return value.replace(/\/+$/, '').toLowerCase();
 }
 
-function mapProviderId(providerId: string | undefined): string | undefined {
+function mapProviderId(
+  providerId: string | undefined,
+  hasBaseUrl = false,
+): string | undefined {
   switch (providerId) {
     case 'coding-plan':
+      return hasBaseUrl ? undefined : 'alibaba-coding-plan-cn';
     case 'token-plan':
+      return hasBaseUrl ? undefined : 'alibaba-token-plan-cn';
     case 'alibabaStandard':
+      return hasBaseUrl ? undefined : 'alibaba-cn';
     case 'qwen-oauth':
       return 'alibaba';
     case 'grok':
@@ -300,17 +308,23 @@ function mapProviderId(providerId: string | undefined): string | undefined {
   }
 }
 
+function mapIdealabProvider(modelId: string): string | undefined {
+  if (/^qwen.*-dogfooding$/i.test(modelId)) return 'alibaba-cn';
+  switch (modelId.toLowerCase()) {
+    case 'bailian/deepseek-v4-pro':
+    case 'bailian/deepseek-v4-flash':
+      return 'deepseek';
+    case 'bailian/kimi-k2.6':
+      return 'moonshotai';
+    default:
+      return undefined;
+  }
+}
+
 function resolveCatalogProviderId(
   catalog: ModelMetadataCatalog,
   lookup: ModelMetadataLookup,
 ): string | undefined {
-  const configuredProvider = findProviderByCredentials(
-    lookup.baseUrl,
-    lookup.envKey,
-  );
-  const configuredId = mapProviderId(configuredProvider?.id);
-  if (configuredId && catalog[configuredId]) return configuredId;
-
   const normalizedBaseUrl = normalizeUrl(lookup.baseUrl);
   if (normalizedBaseUrl) {
     const endpointMatch = Object.entries(catalog).find(
@@ -318,6 +332,23 @@ function resolveCatalogProviderId(
     );
     if (endpointMatch) return endpointMatch[0];
   }
+
+  const configuredProvider = findProviderByCredentials(
+    lookup.baseUrl,
+    lookup.envKey,
+  );
+  const sourceProviderId = configuredProvider?.id ?? lookup.providerId;
+  if (sourceProviderId === 'idealab') {
+    const idealabProviderId = mapIdealabProvider(lookup.modelId);
+    if (idealabProviderId && catalog[idealabProviderId]) {
+      return idealabProviderId;
+    }
+  }
+  const configuredId = mapProviderId(
+    configuredProvider?.id,
+    normalizedBaseUrl !== undefined,
+  );
+  if (configuredId && catalog[configuredId]) return configuredId;
 
   const envKey = lookup.envKey;
   if (envKey) {
@@ -330,7 +361,7 @@ function resolveCatalogProviderId(
   const hasProviderEvidence =
     normalizedBaseUrl !== undefined || lookup.envKey !== undefined;
   for (const candidate of [lookup.providerId, lookup.authType]) {
-    const mapped = mapProviderId(candidate);
+    const mapped = mapProviderId(candidate, normalizedBaseUrl !== undefined);
     const isProtocolFallback = candidate === lookup.authType;
     if (
       mapped &&
@@ -345,25 +376,44 @@ function resolveCatalogProviderId(
 
 function findCatalogModel(
   provider: CatalogProvider,
+  catalogProviderId: string,
+  sourceProviderId: string | undefined,
   modelId: string,
 ): CatalogModel | undefined {
   const models = provider.models;
   if (!models || typeof models !== 'object' || Array.isArray(models)) {
     return undefined;
   }
-  const exact = models[modelId];
-  if (exact && typeof exact === 'object') return exact;
+  const candidates = [modelId];
+  if (catalogProviderId === 'openrouter') {
+    const baseModelId = modelId.replace(OPENROUTER_VARIANT_SUFFIX, '');
+    if (baseModelId !== modelId) candidates.push(baseModelId);
+  }
+  if (sourceProviderId === 'idealab') {
+    if (/^qwen.*-dogfooding$/i.test(modelId)) {
+      candidates.push(modelId.replace(/-dogfooding$/i, ''));
+    } else if (/^bailian\//i.test(modelId)) {
+      candidates.push(modelId.replace(/^bailian\//i, ''));
+    }
+  }
 
-  const normalizedId = modelId.toLowerCase();
-  return Object.entries(models).find(
-    ([key, model]) =>
-      model !== null &&
-      typeof model === 'object' &&
-      (key.toLowerCase() === normalizedId ||
-        (!Array.isArray(model) &&
-          typeof model.id === 'string' &&
-          model.id.toLowerCase() === normalizedId)),
-  )?.[1];
+  for (const candidate of candidates) {
+    const exact = models[candidate];
+    if (exact && typeof exact === 'object') return exact;
+
+    const normalizedId = candidate.toLowerCase();
+    const caseInsensitive = Object.entries(models).find(
+      ([key, model]) =>
+        model !== null &&
+        typeof model === 'object' &&
+        (key.toLowerCase() === normalizedId ||
+          (!Array.isArray(model) &&
+            typeof model.id === 'string' &&
+            model.id.toLowerCase() === normalizedId)),
+    )?.[1];
+    if (caseInsensitive) return caseInsensitive;
+  }
+  return undefined;
 }
 
 /** Return exact catalog input modalities, or undefined when metadata is absent. */
@@ -375,7 +425,16 @@ export function getCatalogModalities(
   const providerId = resolveCatalogProviderId(catalog, lookup);
   if (!providerId) return undefined;
 
-  const model = findCatalogModel(catalog[providerId]!, lookup.modelId);
+  const sourceProviderId =
+    findProviderByCredentials(lookup.baseUrl, lookup.envKey)?.id ??
+    lookup.providerId;
+
+  const model = findCatalogModel(
+    catalog[providerId]!,
+    providerId,
+    sourceProviderId,
+    lookup.modelId,
+  );
   if (!model) return undefined;
 
   const input = Array.isArray(model) ? model : model.modalities?.input;

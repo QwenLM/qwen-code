@@ -102,6 +102,207 @@ describe('getCatalogModalities', () => {
       ),
     ).toBeUndefined();
   });
+
+  it.each([
+    ['https://coding.dashscope.aliyuncs.com/v1/', 'alibaba-coding-plan-cn'],
+    ['https://coding-intl.dashscope.aliyuncs.com/v1', 'alibaba-coding-plan'],
+    [
+      'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+      'alibaba-token-plan-cn',
+    ],
+    [
+      'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
+      'alibaba-token-plan',
+    ],
+    ['https://dashscope.aliyuncs.com/compatible-mode/v1', 'alibaba-cn'],
+    ['https://dashscope-intl.aliyuncs.com/compatible-mode/v1', 'alibaba'],
+  ])('prefers the Alibaba endpoint catalog for %s', (baseUrl, expected) => {
+    const endpoints = {
+      alibaba: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+      'alibaba-cn': 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      'alibaba-coding-plan': 'https://coding-intl.dashscope.aliyuncs.com/v1',
+      'alibaba-coding-plan-cn': 'https://coding.dashscope.aliyuncs.com/v1',
+      'alibaba-token-plan':
+        'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
+      'alibaba-token-plan-cn':
+        'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+    };
+    const alibabaCatalog = Object.fromEntries(
+      Object.entries(endpoints).map(([providerId, api]) => [
+        providerId,
+        {
+          api,
+          models: {
+            'shared-model': {
+              modalities: {
+                input: providerId === expected ? ['text', 'image'] : ['text'],
+              },
+            },
+          },
+        },
+      ]),
+    );
+
+    expect(
+      getCatalogModalities(alibabaCatalog, {
+        authType: 'openai',
+        modelId: 'shared-model',
+        baseUrl,
+      }),
+    ).toEqual({ image: true });
+  });
+
+  it('uses region-specific Alibaba defaults when no endpoint is configured', () => {
+    expect(
+      getCatalogModalities(
+        {
+          'alibaba-coding-plan-cn': {
+            models: {
+              'shared-model': { modalities: { input: ['text', 'image'] } },
+            },
+          },
+        },
+        {
+          providerId: 'coding-plan',
+          modelId: 'shared-model',
+        },
+      ),
+    ).toEqual({ image: true });
+  });
+
+  it('does not borrow Alibaba metadata for an unlisted regional endpoint', () => {
+    expect(
+      getCatalogModalities(
+        {
+          'alibaba-cn': {
+            models: {
+              'shared-model': { modalities: { input: ['text', 'image'] } },
+            },
+          },
+        },
+        {
+          providerId: 'alibabaStandard',
+          modelId: 'shared-model',
+          baseUrl: 'https://dashscope-us.aliyuncs.com/compatible-mode/v1',
+          envKey: 'DASHSCOPE_API_KEY',
+        },
+      ),
+    ).toBeUndefined();
+  });
+
+  it.each([
+    'vendor/base-model:free',
+    'vendor/base-model:extended',
+    'vendor/base-model:thinking',
+    'vendor/base-model:online',
+    'vendor/base-model:nitro',
+    'vendor/base-model:floor',
+    'vendor/base-model:exacto',
+  ])('falls back from OpenRouter variant %s to the base model', (modelId) => {
+    expect(
+      getCatalogModalities(
+        {
+          openrouter: {
+            models: {
+              'vendor/base-model': {
+                modalities: { input: ['text', 'image'] },
+              },
+            },
+          },
+        },
+        { providerId: 'openrouter', modelId },
+      ),
+    ).toEqual({ image: true });
+  });
+
+  it('prefers exact OpenRouter variant metadata and preserves unknown suffixes', () => {
+    const variantCatalog: ModelMetadataCatalog = {
+      openrouter: {
+        models: {
+          'vendor/base-model': {
+            modalities: { input: ['text', 'image'] },
+          },
+          'vendor/base-model:free': { modalities: { input: ['text'] } },
+        },
+      },
+    };
+
+    expect(
+      getCatalogModalities(variantCatalog, {
+        providerId: 'openrouter',
+        modelId: 'vendor/base-model:free',
+      }),
+    ).toEqual({});
+    expect(
+      getCatalogModalities(variantCatalog, {
+        providerId: 'openrouter',
+        modelId: 'vendor/base-model:unknown',
+      }),
+    ).toBeUndefined();
+  });
+
+  it.each([
+    [
+      'Qwen3.6-Plus-DogFooding',
+      'alibaba-cn',
+      'qwen3.6-plus',
+      { image: true, video: true },
+    ],
+    ['bailian/deepseek-v4-pro', 'deepseek', 'deepseek-v4-pro', {}],
+    ['bailian/deepseek-v4-flash', 'deepseek', 'deepseek-v4-flash', {}],
+    [
+      'bailian/kimi-k2.6',
+      'moonshotai',
+      'kimi-k2.6',
+      { image: true, video: true },
+    ],
+  ])(
+    'resolves the Idealab alias %s through %s model %s',
+    (modelId, providerId, officialModelId, expected) => {
+      expect(
+        getCatalogModalities(
+          {
+            [providerId]: {
+              models: {
+                [officialModelId]: {
+                  modalities: {
+                    input:
+                      Object.keys(expected).length > 0
+                        ? ['text', 'image', 'video']
+                        : ['text'],
+                  },
+                },
+              },
+            },
+          },
+          {
+            providerId: 'idealab',
+            modelId,
+          },
+        ),
+      ).toEqual(expected);
+    },
+  );
+
+  it('leaves an unknown Idealab alias to the local fallback', () => {
+    expect(
+      getCatalogModalities(
+        {
+          deepseek: {
+            models: {
+              'deepseek-unlisted': {
+                modalities: { input: ['text', 'image'] },
+              },
+            },
+          },
+        },
+        {
+          providerId: 'idealab',
+          modelId: 'bailian/deepseek-unlisted',
+        },
+      ),
+    ).toBeUndefined();
+  });
 });
 
 describe('loadModelMetadataCatalog', () => {
@@ -136,6 +337,37 @@ describe('loadModelMetadataCatalog', () => {
         modelId: 'gpt-4o',
       }),
     ).toEqual({ image: true, pdf: true });
+    expect(
+      getCatalogModalities(loaded, {
+        providerId: 'coding-plan',
+        modelId: 'glm-5',
+        baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
+      }),
+    ).toEqual({});
+    expect(
+      getCatalogModalities(loaded, {
+        providerId: 'openrouter',
+        modelId: 'openai/gpt-oss-120b:free',
+      }),
+    ).toEqual({});
+    expect(
+      getCatalogModalities(loaded, {
+        providerId: 'idealab',
+        modelId: 'Qwen3.6-Plus-DogFooding',
+      }),
+    ).toEqual({ image: true, video: true });
+    expect(
+      getCatalogModalities(loaded, {
+        providerId: 'idealab',
+        modelId: 'bailian/deepseek-v4-pro',
+      }),
+    ).toEqual({});
+    expect(
+      getCatalogModalities(loaded, {
+        providerId: 'idealab',
+        modelId: 'bailian/kimi-k2.6',
+      }),
+    ).toEqual({ image: true, video: true });
     expect(fetchMock).toHaveBeenCalledWith(
       'https://models.dev/api.json',
       expect.objectContaining({ signal: expect.any(AbortSignal) }),

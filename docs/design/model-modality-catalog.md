@@ -41,6 +41,19 @@ is exact and case-insensitive; it does not guess across similarly named models.
 An SDK protocol such as `openai` is not treated as provider identity when an
 unknown custom endpoint or credential key is present.
 
+Exact provider endpoints take precedence over local provider aliases so the
+China and international Alibaba catalogs remain distinct. A missing endpoint
+uses the local provider's default region, while an endpoint that models.dev
+does not list falls back to the model-id heuristic instead of borrowing another
+region's metadata. Idealab's `Qwen*-DogFooding` models and its listed
+DeepSeek/Kimi aliases resolve to the corresponding Alibaba China, DeepSeek, or
+Moonshot model IDs.
+
+OpenRouter model variants first use an exact catalog entry. When models.dev
+does not list the variant, the recognized OpenRouter suffixes `:free`,
+`:extended`, `:thinking`, `:online`, `:nitro`, `:floor`, and `:exacto` fall
+back to the base model. Unknown suffixes remain unmatched.
+
 The loaded catalog is passed to `ModelsConfig` and `ModelRegistry`. This covers
 initial resolution, provider-backed models installed through `/auth`, manually
 edited model providers, runtime model switches, and model-provider hot reloads
