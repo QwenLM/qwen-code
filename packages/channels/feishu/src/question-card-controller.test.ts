@@ -138,13 +138,57 @@ describe('FeishuQuestionCardController presentation', () => {
     });
     expect(sendFallback).toHaveBeenCalledWith(
       'oc_1',
-      expect.stringContaining('could not be delivered'),
+      expect.stringContaining('互动问题卡片投递失败'),
+    );
+    expect(sendFallback).toHaveBeenCalledWith(
+      'oc_1',
+      expect.stringContaining('Which region?'),
     );
     expect(respond).toHaveBeenCalledWith({ outcome: { outcome: 'cancelled' } });
     expect(onError).toHaveBeenCalledWith(
       'question card delivery',
       expect.any(Error),
     );
+
+    sendCard.mockResolvedValue('om_retry');
+    await expect(
+      controller.present(createContext('request-retry').context),
+    ).resolves.toEqual({ kind: 'presented' });
+  });
+
+  it('keeps a synchronously settled request from falling back on delivery failure', async () => {
+    const delivery = deferred<string>();
+    const { controller, sendCard, sendFallback } = createHarness();
+    sendCard.mockReturnValue(delivery.promise);
+    const { context, respond, settle } = createContext('request-sync-settled');
+
+    const presenting = controller.present(context);
+    settle('run_cancelled');
+    delivery.reject(new Error('delivery failed'));
+
+    await expect(presenting).resolves.toEqual({ kind: 'presented' });
+    expect(sendFallback).not.toHaveBeenCalled();
+    expect(respond).not.toHaveBeenCalled();
+  });
+
+  it('rejects a second same-scope request while the first delivery is in flight', async () => {
+    const delivery = deferred<string>();
+    const { controller, sendCard } = createHarness();
+    sendCard.mockReturnValue(delivery.promise);
+    const first = createContext('first-in-flight');
+
+    const presenting = controller.present(first.context);
+    await expect(
+      controller.present(createContext('second-in-flight').context),
+    ).resolves.toEqual({ kind: 'unsupported' });
+    delivery.resolve('om_first');
+    await expect(presenting).resolves.toEqual({ kind: 'presented' });
+
+    expect(
+      controller.claim(
+        validCancel('first-in-flight', { messageId: 'om_first' }),
+      ),
+    ).toMatchObject({ kind: 'handled', execute: expect.any(Function) });
   });
 
   it('returns unsupported for a second live request in the same session and owner scope', async () => {
@@ -201,9 +245,11 @@ describe('FeishuQuestionCardController callbacks', () => {
       },
     });
     expect(respond).not.toHaveBeenCalled();
-    expect(controller.claim(validCancel('request-submit'))).toMatchObject({
+    expect(controller.claim(validCancel('request-submit'))).toEqual({
       kind: 'handled',
-      response: { toast: expect.any(Object) },
+      response: {
+        toast: { type: 'warning', content: '该问题已过期或已处理。' },
+      },
     });
 
     if (claimed.kind !== 'handled' || !claimed.execute) {
@@ -222,6 +268,13 @@ describe('FeishuQuestionCardController callbacks', () => {
     expect(JSON.stringify(patchCard.mock.calls.at(-1)?.[1])).toContain(
       'Logs, Metrics',
     );
+    expect(JSON.stringify(patchCard.mock.calls.at(-1)?.[1])).toContain(
+      '已提交',
+    );
+
+    await expect(
+      controller.present(createContext('request-after-submit').context),
+    ).resolves.toEqual({ kind: 'presented' });
   });
 
   it('claims a valid owner cancellation and responds from execute', async () => {
@@ -240,12 +293,16 @@ describe('FeishuQuestionCardController callbacks', () => {
         },
       },
     });
+    expect(respond).not.toHaveBeenCalled();
     if (claimed.kind !== 'handled' || !claimed.execute) {
       throw new Error('Expected claimed callback execution');
     }
     await claimed.execute();
 
     expect(respond).toHaveBeenCalledWith({ outcome: { outcome: 'cancelled' } });
+    await expect(
+      controller.present(createContext('request-after-cancel').context),
+    ).resolves.toEqual({ kind: 'presented' });
   });
 
   it('correlates callbacks with the chat id captured at delivery time', async () => {
@@ -272,17 +329,36 @@ describe('FeishuQuestionCardController callbacks', () => {
     ['wrong chat', validCancel('request-1', { chatId: 'oc_other' })],
     ['missing message', validCancel('request-1', { messageId: undefined })],
     ['wrong message', validCancel('request-1', { messageId: 'om_other' })],
+    [
+      'submit with missing operator',
+      submit('request-1', { '0': 'Beijing' }, { operatorId: undefined }),
+    ],
+    [
+      'submit with foreign operator',
+      submit('request-1', { '0': 'Beijing' }, { operatorId: 'other-user' }),
+    ],
+    [
+      'submit from wrong chat',
+      submit('request-1', { '0': 'Beijing' }, { chatId: 'oc_other' }),
+    ],
+    [
+      'submit with wrong message',
+      submit('request-1', { '0': 'Beijing' }, { messageId: 'om_other' }),
+    ],
   ])(
     'fails closed for %s without claiming the request',
     async (_name, data) => {
-      const { controller } = createHarness();
+      const { controller, patchCard } = createHarness();
       const { context, respond } = createContext();
       await controller.present(context);
 
-      expect(controller.claim(data)).toMatchObject({
+      expect(controller.claim(data)).toEqual({
         kind: 'handled',
-        response: { toast: expect.any(Object) },
+        response: {
+          toast: { type: 'warning', content: '该问题已过期或已处理。' },
+        },
       });
+      expect(patchCard).not.toHaveBeenCalled();
       expect(respond).not.toHaveBeenCalled();
       const claimed = controller.claim(validCancel());
       expect(claimed).toMatchObject({
@@ -293,16 +369,17 @@ describe('FeishuQuestionCardController callbacks', () => {
   );
 
   it('keeps a malformed form pending for a later valid owner submission', async () => {
-    const { controller } = createHarness();
+    const { controller, patchCard } = createHarness();
     const { context } = createContext();
     await controller.present(context);
 
-    expect(
-      controller.claim(submit('request-1', { '0': 'Unknown' })),
-    ).toMatchObject({
+    expect(controller.claim(submit('request-1', { '0': 'Unknown' }))).toEqual({
       kind: 'handled',
-      response: { toast: expect.any(Object) },
+      response: {
+        toast: { type: 'warning', content: '请完整选择有效答案。' },
+      },
     });
+    expect(patchCard).not.toHaveBeenCalled();
     expect(
       controller.claim(submit('request-1', { '0': 'Beijing' })),
     ).toMatchObject({
@@ -326,7 +403,7 @@ describe('FeishuQuestionCardController callbacks', () => {
   ])(
     'terminalizes as expired when the responder %s',
     async (_name, respond) => {
-      const { controller, patchCard } = createHarness();
+      const { controller, onError, patchCard } = createHarness();
       const { context } = createContext('request-failed', { respond });
       await controller.present(context);
       const claimed = controller.claim(validCancel('request-failed'));
@@ -340,6 +417,13 @@ describe('FeishuQuestionCardController callbacks', () => {
         'om_1',
         expect.objectContaining({ schema: '2.0' }),
       );
+      expect(JSON.stringify(patchCard.mock.calls.at(-1)?.[1])).toContain(
+        '已过期',
+      );
+      expect(onError).toHaveBeenCalledWith(
+        'question response',
+        expect.any(Error),
+      );
       expect(controller.claim(validCancel('request-failed'))).toMatchObject({
         kind: 'handled',
         response: { toast: expect.any(Object) },
@@ -348,7 +432,7 @@ describe('FeishuQuestionCardController callbacks', () => {
   );
 
   it('does not reopen an accepted response when its terminal patch fails', async () => {
-    const { controller, onError, patchCard } = createHarness();
+    const { controller, onError, patchCard, sendFallback } = createHarness();
     patchCard.mockResolvedValue(false);
     const { context, respond } = createContext('request-patch');
     await controller.present(context);
@@ -363,6 +447,14 @@ describe('FeishuQuestionCardController callbacks', () => {
     expect(onError).toHaveBeenCalledWith(
       'question card finalization',
       expect.any(Error),
+    );
+    expect(sendFallback).toHaveBeenCalledWith(
+      'oc_1',
+      expect.stringContaining('已取消'),
+    );
+    expect(sendFallback).toHaveBeenCalledWith(
+      'oc_1',
+      expect.stringContaining('Region: Which region?'),
     );
     expect(controller.claim(validCancel('request-patch'))).toMatchObject({
       kind: 'handled',
@@ -394,10 +486,12 @@ describe('FeishuQuestionCardController callbacks', () => {
 
   it('keeps concurrent sessions and owners independent', async () => {
     const { controller, sendCard } = createHarness();
-    sendCard.mockResolvedValueOnce('om_one').mockResolvedValueOnce('om_two');
+    sendCard
+      .mockResolvedValueOnce('om_one')
+      .mockResolvedValueOnce('om_two')
+      .mockResolvedValueOnce('om_three');
     const first = createContext('request-one');
     const second = createContext('request-two', {
-      sessionId: 'session-2',
       owner: { kind: 'channel_user', id: 'owner-2' },
       target: {
         channelName: 'feishu',
@@ -406,8 +500,18 @@ describe('FeishuQuestionCardController callbacks', () => {
         isGroup: true,
       },
     });
+    const third = createContext('request-three', {
+      sessionId: 'session-2',
+      target: {
+        channelName: 'feishu',
+        chatId: 'oc_3',
+        senderId: 'owner-1',
+        isGroup: true,
+      },
+    });
     await controller.present(first.context);
     await controller.present(second.context);
+    await controller.present(third.context);
 
     expect(
       controller.claim(validCancel('request-one', { messageId: 'om_one' })),
@@ -418,6 +522,14 @@ describe('FeishuQuestionCardController callbacks', () => {
           operatorId: 'owner-2',
           chatId: 'oc_2',
           messageId: 'om_two',
+        }),
+      ),
+    ).toMatchObject({ kind: 'handled', execute: expect.any(Function) });
+    expect(
+      controller.claim(
+        validCancel('request-three', {
+          chatId: 'oc_3',
+          messageId: 'om_three',
         }),
       ),
     ).toMatchObject({ kind: 'handled', execute: expect.any(Function) });
@@ -445,15 +557,25 @@ describe('FeishuQuestionCardController terminal cleanup', () => {
     await vi.advanceTimersByTimeAsync(270_000);
 
     expect(events).toEqual(['patch', 'respond']);
+    expect(JSON.stringify(patchCard.mock.calls[0]?.[1])).toContain('已过期');
     expect(respond).toHaveBeenCalledWith({ outcome: { outcome: 'cancelled' } });
     expect(controller.claim(validCancel('request-timeout'))).toMatchObject({
       kind: 'handled',
       response: { toast: expect.any(Object) },
     });
+    expect(
+      (controller as unknown as { byRequest: Map<string, unknown> }).byRequest
+        .size,
+    ).toBe(0);
+    expect(
+      (controller as unknown as { activeByScope: Map<string, unknown> })
+        .activeByScope.size,
+    ).toBe(0);
   });
 
   it('cancels every live request for a run exactly once', async () => {
-    const { controller, patchCard } = createHarness();
+    const { controller, patchCard, sendCard } = createHarness();
+    sendCard.mockResolvedValueOnce('om_one').mockResolvedValueOnce('om_two');
     const first = createContext('request-run-one');
     const second = createContext('request-run-two', {
       sessionId: 'session-2',
@@ -465,14 +587,44 @@ describe('FeishuQuestionCardController terminal cleanup', () => {
         isGroup: true,
       },
     });
+    const otherRun = createContext('request-run-other', {
+      runId: 'run-2',
+      sessionId: 'session-3',
+      owner: { kind: 'channel_user', id: 'owner-3' },
+      target: {
+        channelName: 'feishu',
+        chatId: 'oc_3',
+        senderId: 'owner-3',
+        isGroup: true,
+      },
+    });
     await controller.present(first.context);
     await controller.present(second.context);
+    await controller.present(otherRun.context);
 
     controller.cancelRun('run-1');
     await vi.waitFor(() => expect(patchCard).toHaveBeenCalledTimes(2));
     controller.cancelRun('run-1');
+    await Promise.resolve();
+    await Promise.resolve();
 
     expect(patchCard).toHaveBeenCalledTimes(2);
+    expect(patchCard).toHaveBeenCalledWith(
+      'om_one',
+      expect.objectContaining({ schema: '2.0' }),
+    );
+    expect(patchCard).toHaveBeenCalledWith(
+      'om_two',
+      expect.objectContaining({ schema: '2.0' }),
+    );
+    expect(
+      controller.claim(
+        validCancel('request-run-other', {
+          operatorId: 'owner-3',
+          chatId: 'oc_3',
+        }),
+      ),
+    ).toMatchObject({ kind: 'handled', execute: expect.any(Function) });
     expect(controller.claim(validCancel('request-run-one'))).toMatchObject({
       kind: 'handled',
       response: { toast: expect.any(Object) },
@@ -656,10 +808,28 @@ function validCancel(
   };
 }
 
-function submit(requestId: string, formValue: Record<string, unknown>) {
+function submit(
+  requestId: string,
+  formValue: Record<string, unknown>,
+  options: { operatorId?: string; chatId?: string; messageId?: string } = {},
+) {
+  const operatorId = Object.hasOwn(options, 'operatorId')
+    ? options.operatorId
+    : 'owner-1';
+  const chatId = Object.hasOwn(options, 'chatId') ? options.chatId : 'oc_1';
+  const messageId = Object.hasOwn(options, 'messageId')
+    ? options.messageId
+    : 'om_1';
   return {
-    operator: { open_id: 'owner-1' },
-    context: { open_chat_id: 'oc_1', open_message_id: 'om_1' },
+    ...(operatorId ? { operator: { open_id: operatorId } } : {}),
+    ...(chatId || messageId
+      ? {
+          context: {
+            ...(chatId ? { open_chat_id: chatId } : {}),
+            ...(messageId ? { open_message_id: messageId } : {}),
+          },
+        }
+      : {}),
     action: {
       name: `qwen_ask_submit_${requestId}`,
       value: { action: 'qwen_ask_submit', operation_id: requestId },

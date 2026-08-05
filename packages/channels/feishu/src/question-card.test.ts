@@ -14,7 +14,7 @@ interface CardElement {
   tag: string;
   name?: string;
   value?: Record<string, unknown>;
-  options?: Array<{ value: string }>;
+  options?: Array<{ value: string; text?: { content?: string } }>;
   elements?: CardElement[];
   content?: string;
   form_action_type?: string;
@@ -74,16 +74,30 @@ describe('Feishu question cards', () => {
 
     expect((card as unknown as QuestionCard).schema).toBe('2.0');
     expect(questionForm.name).toBe('qwen_ask_form');
+    expect(elements).toMatchObject([
+      { tag: 'markdown' },
+      { tag: 'select_static', name: 'region' },
+      { tag: 'markdown' },
+      { tag: 'multi_select_static', name: 'sources' },
+      { tag: 'button' },
+      { tag: 'button' },
+    ]);
     expect(selects).toMatchObject([
       {
         tag: 'select_static',
         name: 'region',
-        options: [{ value: 'Beijing' }, { value: 'Shanghai' }],
+        options: [
+          { value: 'Beijing', text: { content: 'Beijing' } },
+          { value: 'Shanghai', text: { content: 'Shanghai' } },
+        ],
       },
       {
         tag: 'multi_select_static',
         name: 'sources',
-        options: [{ value: 'Logs' }, { value: 'Metrics' }],
+        options: [
+          { value: 'Logs', text: { content: 'Logs' } },
+          { value: 'Metrics', text: { content: 'Metrics' } },
+        ],
       },
     ]);
   });
@@ -109,11 +123,13 @@ describe('Feishu question cards', () => {
     });
     expect(cancel).toMatchObject({
       tag: 'button',
+      name: 'qwen_ask_cancel_request-1',
       value: {
         action: 'qwen_ask_cancel',
         operation_id: 'request-1',
       },
     });
+    expect(cancel?.form_action_type).toBeUndefined();
   });
 
   it('renders option descriptions as Markdown notes', () => {
@@ -125,6 +141,10 @@ describe('Feishu question cards', () => {
 
     expect(markdown).toContain('Use the Beijing region.');
     expect(markdown).toContain('Inspect service metrics.');
+    expect(markdown).toContain('**Region**');
+    expect(markdown).toContain('Which region should I use?');
+    expect(markdown).toContain('**Sources**');
+    expect(markdown).toContain('Which sources should I inspect?');
     expect(
       elements.find((element) => element.tag === 'markdown'),
     ).toMatchObject({ text_size: 'notation' });

@@ -76,6 +76,9 @@ interface CardSessionState {
   creationTimer?: ReturnType<typeof setTimeout>;
   /** Set when busy-wait timeout abandons in-flight card creation. */
   abandoned?: boolean;
+  /** Pre-boundary text snapshot so an input-request finalization can still
+   *  render the card content after the boundary cleared accumulatedText. */
+  boundaryText?: string;
   /** Set by onResponseComplete to distinguish completed from cancelled in onPromptEnd. */
   completed?: boolean;
   /** Set synchronously in onCardAction so .then() callbacks can detect stop intent
@@ -175,7 +178,8 @@ export class FeishuChannel extends ChannelBase {
       sendCard: (chatId, card) => this.sendInteractiveCard(chatId, card),
       patchCard: (messageId, card) =>
         this.patchInteractiveCard(messageId, card),
-      sendFallback: (chatId, text) => this.sendMessage(chatId, text),
+      sendFallback: (chatId, text) =>
+        this.sendMessageInternal(chatId, text, true),
       onError: (operation, error) => {
         process.stderr.write(
           `[Feishu:${this.name}] ${operation} error: ${error instanceof Error ? error.message : error}\n`,
@@ -978,14 +982,15 @@ export class FeishuChannel extends ChannelBase {
       const cardState = inboundMsgId
         ? this.cardSessions.get(inboundMsgId)
         : undefined;
-      if (
-        inboundMsgId &&
-        cardState &&
-        !cardState.created &&
-        !cardState.creating &&
-        !cardState.accumulatedText
-      ) {
-        this.releaseOutputCard(inboundMsgId);
+      if (inboundMsgId && cardState) {
+        // Production bridges emit response_boundary synchronously before the
+        // permission request, so the segment is already closed and no
+        // input_requested segment end runs — end the output presentation here.
+        await this.endOutputCardBeforeInputRequest(
+          context.target.chatId,
+          inboundMsgId,
+          cardState,
+        );
       }
     }
     return this.questionCardController.present(context);
@@ -1054,6 +1059,7 @@ export class FeishuChannel extends ChannelBase {
 
     if (cardState.stopped) return;
 
+    cardState.boundaryText = undefined;
     const MAX_ACCUMULATE = 25_000;
     cardState.accumulatedText += chunk;
     if (cardState.accumulatedText.length > MAX_ACCUMULATE) {
@@ -1072,7 +1078,9 @@ export class FeishuChannel extends ChannelBase {
         try {
           if (cs.stopped || this.stoppedMessages.has(inboundMsgId)) {
             cs.creating = false;
-            this.cleanupCard(inboundMsgId);
+            // An abandoned stop belongs to a pending-question release that
+            // intentionally kept the auxiliary maps — cleanup would wipe them.
+            if (!cs.abandoned) this.cleanupCard(inboundMsgId);
             return;
           }
           // Note: don't check cancelling here — let the card creation proceed.
@@ -1144,20 +1152,12 @@ export class FeishuChannel extends ChannelBase {
         if (cs.stopped || cs.finalizing) return;
         cs.lastUpdateAt = Date.now();
         try {
-          const MAX_CARD_CHARS = 20_000;
           const atPrefix = this.msgToSenderName.get(inboundMsgId);
-          let displayContent = atPrefix
-            ? `${atPrefix}\n\n${cs.accumulatedText}`
-            : cs.accumulatedText;
-          if (displayContent.length > MAX_CARD_CHARS) {
-            const marker = '\n\n_(内容过长，已截断早期内容)_';
-            displayContent =
-              displayContent.slice(-(MAX_CARD_CHARS - marker.length)) + marker;
-            // Re-balance code fences after truncation
-            if (this.countFences(displayContent) % 2 === 1) {
-              displayContent = '```\n' + displayContent;
-            }
-          }
+          const displayContent = this.truncateCardText(
+            atPrefix
+              ? `${atPrefix}\n\n${cs.accumulatedText}`
+              : cs.accumulatedText,
+          );
           const ok = await this.updateCard(
             cs.messageId,
             displayContent,
@@ -1191,17 +1191,20 @@ export class FeishuChannel extends ChannelBase {
       clearTimeout(cardState.pendingUpdateTimer);
       cardState.pendingUpdateTimer = undefined;
     }
+    if (cardState.accumulatedText) {
+      cardState.boundaryText = cardState.accumulatedText;
+    }
     cardState.accumulatedText = '';
   }
 
   protected override async onOutputSegmentEnd(
-    _chatId: string,
+    chatId: string,
     sessionId: string,
     _segment: ChannelOutputSegmentContext,
     reason: ChannelOutputSegmentEndReason,
   ): Promise<void> {
     if (reason === 'response_boundary') {
-      this.onResponseBoundary(_chatId, sessionId);
+      this.onResponseBoundary(chatId, sessionId);
       return;
     }
     if (reason !== 'input_requested' || this.config.blockStreaming === 'on') {
@@ -1212,20 +1215,36 @@ export class FeishuChannel extends ChannelBase {
     if (!inboundMsgId) return;
     const cardState = this.cardSessions.get(inboundMsgId);
     if (!cardState) return;
+    await this.endOutputCardBeforeInputRequest(chatId, inboundMsgId, cardState);
+  }
+
+  private async endOutputCardBeforeInputRequest(
+    chatId: string,
+    inboundMsgId: string,
+    cardState: CardSessionState,
+  ): Promise<void> {
     const atPrefix = this.msgToSenderName.get(inboundMsgId);
+    const text = cardState.accumulatedText || cardState.boundaryText || '';
     const displayText = atPrefix
-      ? cardState.accumulatedText
-        ? `${atPrefix}\n\n${cardState.accumulatedText}`
+      ? text
+        ? `${atPrefix}\n\n${text}`
         : atPrefix
-      : cardState.accumulatedText;
+      : text;
 
     try {
       if (cardState.created && cardState.messageId && !cardState.stopped) {
+        // Mirror onResponseComplete: block the throttled update path before
+        // the final patch so it cannot race a concurrent streaming PATCH.
+        cardState.finalizing = true;
+        if (cardState.pendingUpdateTimer) {
+          clearTimeout(cardState.pendingUpdateTimer);
+          cardState.pendingUpdateTimer = undefined;
+        }
         let updated = false;
         try {
           updated = await this.updateCard(
             cardState.messageId,
-            displayText,
+            this.truncateCardText(displayText),
             true,
             inboundMsgId,
             this.statusLabelFor('completed'),
@@ -1237,15 +1256,15 @@ export class FeishuChannel extends ChannelBase {
         }
         if (!updated) {
           await this.deleteCard(cardState.messageId);
-          if (displayText) await this.sendMessage(_chatId, displayText);
+          if (displayText) await this.sendMessage(chatId, displayText);
         }
       } else {
         if (cardState.creating) {
           cardState.stopped = true;
           cardState.abandoned = true;
         }
-        if (cardState.accumulatedText) {
-          await this.sendMessage(_chatId, displayText);
+        if (text) {
+          await this.sendMessage(chatId, displayText);
         }
       }
     } finally {
@@ -1625,9 +1644,10 @@ export class FeishuChannel extends ChannelBase {
               ? `${atPrefix}\n\n${cs.accumulatedText}`
               : cs.accumulatedText;
             this.sendMessage(_chatId, fallbackText).catch(() => {});
-          } else {
-            // No accumulated text (e.g. immediate LLM error before first chunk)
-            // — send a generic error so the user isn't left without feedback.
+          } else if (cs.terminalStatus !== 'completed') {
+            // No accumulated text (e.g. a failure before the first chunk, or a
+            // post-answer failure after the output card was released for a
+            // question). A completed turn with no output ends silently.
             const atPrefix = this.msgToSenderName.get(inboundMsgId) || '';
             const fallbackLabel = cs.terminalStatus
               ? this.statusLabelFor(cs.terminalStatus)
@@ -1973,6 +1993,19 @@ export class FeishuChannel extends ChannelBase {
     return result.join('\n');
   }
 
+  /** Truncate card content to the Feishu card size limit, keeping the tail. */
+  private truncateCardText(text: string): string {
+    const MAX_CARD_CHARS = 20_000;
+    if (text.length <= MAX_CARD_CHARS) return text;
+    const marker = '\n\n_(内容过长，已截断早期内容)_';
+    let truncated = text.slice(-(MAX_CARD_CHARS - marker.length)) + marker;
+    // Re-balance code fences after truncation
+    if (this.countFences(truncated) % 2 === 1) {
+      truncated = '```\n' + truncated;
+    }
+    return truncated;
+  }
+
   private cleanupCard(inboundMsgId: string): void {
     const cardState = this.cardSessions.get(inboundMsgId);
     if (cardState?.pendingUpdateTimer) {
@@ -1998,13 +2031,23 @@ export class FeishuChannel extends ChannelBase {
 
   private releaseOutputCard(inboundMsgId: string): void {
     const cardState = this.cardSessions.get(inboundMsgId);
-    if (cardState?.pendingUpdateTimer) {
+    if (!cardState) return;
+    if (cardState.pendingUpdateTimer) {
       clearTimeout(cardState.pendingUpdateTimer);
     }
-    if (cardState?.creationTimer) {
+    if (cardState.creationTimer) {
       clearTimeout(cardState.creationTimer);
     }
-    this.cardSessions.delete(inboundMsgId);
+    // Keep an inert entry while the question is pending: the orphan sweep and
+    // the terminal-feedback paths both key on card-session presence.
+    this.cardSessions.set(inboundMsgId, {
+      messageId: '',
+      created: false,
+      creating: false,
+      stopped: false,
+      accumulatedText: '',
+      lastUpdateAt: Date.now(),
+    });
   }
 
   // ----- Message handling -----

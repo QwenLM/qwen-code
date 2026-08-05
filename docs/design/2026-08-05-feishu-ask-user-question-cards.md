@@ -20,6 +20,9 @@ The current Feishu output card is created eagerly from `onPromptStart`. A prompt
 - Keep callback acknowledgement synchronous and permission settlement asynchronous.
 - Patch the same question card to a non-interactive terminal state.
 - Preserve Feishu streaming, Stop, block-streaming, and proactive delivery.
+  Stop follows the first visible chunk because output-card creation is lazy;
+  the eager placeholder card is intentionally not restored (see Output-card
+  ordering).
 - Keep all Feishu card schemas and native handles inside the Feishu package.
 
 ## Non-goals
@@ -71,7 +74,7 @@ The parser requires an explicit request ID and never falls back to the latest qu
 reserved -> pending -> claimed -> terminal
 ```
 
-The live record captures the original `ChannelUserInputRequestContext`, Feishu message ID, exact scope, timer, and settlement subscription. It is indexed by request ID and native message ID. The active scope is `sessionId + owner.id`; one run may have only one native pending question in that scope. A second request in the same run returns `unsupported` so `ChannelBase` retains its text fallback. Different sessions and users remain independent.
+The live record captures the original `ChannelUserInputRequestContext`, Feishu message ID, exact scope, timer, and settlement subscription. It is indexed by request ID and by active scope (`sessionId + owner.id`); the captured native message ID is validated against every callback rather than used as a lookup key. The active scope is `sessionId + owner.id`; one run may have only one native pending question in that scope. A second request in the same run returns `unsupported` so `ChannelBase` retains its text fallback. Different sessions and users remain independent.
 
 The record is reserved before awaiting native delivery so an external settlement or cancellation cannot race with delivery and reactivate it. The local expiry is 270 seconds, shorter than the current five-minute bridge permission timeout.
 
@@ -106,11 +109,11 @@ The existing status-card update method delegates its HTTP PATCH to the same gene
 
 ## Output-card ordering
 
-`onPromptStart` retains inbound/session correlation, the working reaction, and an in-memory output state, but no longer sends a streaming card. Keeping the empty state preserves the existing visible error fallback when a run fails before its first chunk. The existing `onResponseChunk` fallback path sends the card on the first visible chunk.
+`onPromptStart` retains inbound/session correlation, the working reaction, and an in-memory output state, but no longer sends a streaming card. Keeping the empty state preserves the existing visible error fallback when a run fails before its first chunk. The existing `onResponseChunk` fallback path sends the card on the first visible chunk. Tradeoff: the eager 思考中... placeholder card is gone, so the card Stop button — Feishu's only cancellation affordance — is only available from the first visible chunk, not from prompt start; a pending question's own Cancel button is unaffected.
 
-For a direct question with no preceding output segment, `presentUserInputRequest` releases that still-empty output state before presenting the native form. The prompt can therefore finish without emitting an extra terminal status message, and later visible output can still create a fresh card through the preserved session correlation.
+For a direct question with no preceding output segment, `presentUserInputRequest` releases that still-empty output state before presenting the native form. The release resets the session to an inert in-memory entry instead of deleting it, so the periodic orphan sweep and the terminal-feedback paths still see the pending turn; the prompt can therefore finish without emitting an extra terminal status message, and later visible output can still create a fresh card through the preserved session correlation. A turn that fails after the answer still surfaces the failed terminal label through that entry; a completed turn with no further output ends silently.
 
-When `ChannelBase` closes an existing segment with `input_requested`, Feishu finalizes the current output card before presenting the form. If the native update returns false or throws, Feishu deletes the stale interactive card best-effort and sends the same content as a static fallback message. It then removes only the current output-card state while retaining the session-to-inbound correlation. Text emitted after the answer can therefore create a fresh output card in the same run. Final prompt cleanup still removes all auxiliary state.
+When `ChannelBase` closes an existing segment with `input_requested`, Feishu finalizes the current output card before presenting the form. Production bridges emit the response boundary synchronously before the permission request, which closes the segment first; `presentUserInputRequest` therefore performs the same finalization whenever no preceding segment id is carried, using the pre-boundary text snapshot. If the native update returns false or throws, Feishu deletes the stale interactive card best-effort and sends the same content as a static fallback message. It then resets only the current output-card state while retaining the session-to-inbound correlation. Text emitted after the answer can therefore create a fresh output card in the same run. Final prompt cleanup still removes all auxiliary state.
 
 This is the minimum segment-boundary change required for Ask. Full migration of every Feishu output card to `segmentId` ownership is separate work.
 
@@ -125,7 +128,7 @@ This is the minimum segment-boundary change required for Ask. Full migration of 
 | Callback is duplicate or stale          | Return expired/already-handled toast; make no state change.                |
 | Responder accepts                       | Terminalize as submitted or cancelled, then patch the card.                |
 | Responder returns false or throws       | Terminalize as expired/unavailable and do not reopen.                      |
-| Terminal patch fails                    | Log it; keep the permission outcome and terminal state.                    |
+| Terminal patch fails                    | Log it, send a plain-text terminal summary; keep the permission outcome.   |
 | Local timeout                           | Mark expired first, then cancel the original request.                      |
 | External settlement or run cancellation | Terminalize once from `onSettled` or lifecycle notification.               |
 | Process restart                         | Old callbacks are treated as expired; no persistence in this change.       |
@@ -138,7 +141,7 @@ Controller tests cover reservation-before-delivery, valid submit, cancel, foreig
 
 Adapter tests cover callback routing, Stop compatibility, lazy output-card creation, `input_requested` output finalization, presenter delegation, lifecycle cancellation, disconnect cleanup, and post-answer continuation state.
 
-Focused verification runs from `packages/channels/feishu`, followed by repository build and typecheck. Real-device verification covers direct question, multiple questions, multi-select, foreign-user rejection, duplicate submit, expiry/cancel, and continued output after submission.
+Focused verification runs from `packages/channels/feishu`, followed by repository build and typecheck. Real-device verification covers the WebSocket connection, a real inbound direct message, a direct two-question card settled by a real callback, original-run continuation at the transport/API level, and a text-before-question flow. Foreign-user rejection, duplicate submit, cancel, and expiry remain covered only by automated tests; model-driven live generation was not verified because the supplied model credential returned HTTP 401, so the live run injected the same canonical permission event through the normal channel contract.
 
 ## Acceptance criteria
 

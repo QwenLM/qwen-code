@@ -27,7 +27,7 @@ export type FeishuQuestionAction =
     }
   | { kind: 'unhandled' };
 
-const terminalLabels: Record<FeishuQuestionTerminalState, string> = {
+export const terminalLabels: Record<FeishuQuestionTerminalState, string> = {
   processing: '正在处理...',
   submitted: '已提交',
   cancelled: '已取消',

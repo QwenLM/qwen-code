@@ -7,6 +7,7 @@ import {
   buildQuestionTerminalCard,
   parseQuestionAction,
   parseQuestionAnswers,
+  terminalLabels,
 } from './question-card.js';
 
 type QuestionState = 'reserved' | 'pending' | 'claimed' | 'terminal';
@@ -105,7 +106,10 @@ export class FeishuQuestionCardController {
       this.options.onError?.('question card delivery', error);
       await this.finalize(record, 'cancelled');
       try {
-        await this.options.sendFallback(record.chatId, this.fallbackText());
+        await this.options.sendFallback(
+          record.chatId,
+          this.fallbackText(record.context),
+        );
       } catch (fallbackError) {
         this.options.onError?.('question fallback delivery', fallbackError);
       }
@@ -282,15 +286,18 @@ export class FeishuQuestionCardController {
     messageId = record.messageId,
   ): Promise<void> {
     if (!messageId || !record.terminalState) return Promise.resolve();
+    const terminalState = record.terminalState;
+    const answers = record.terminalAnswers;
     const card = buildQuestionTerminalCard(
       record.context.questions,
-      record.terminalState,
-      record.terminalAnswers,
+      terminalState,
+      answers,
     );
     const projection = (record.projection ?? Promise.resolve()).then(
       async () => {
+        let patched = false;
         try {
-          const patched = await this.options.patchCard(messageId, card);
+          patched = await this.options.patchCard(messageId, card);
           if (!patched) {
             this.options.onError?.(
               'question card finalization',
@@ -299,6 +306,25 @@ export class FeishuQuestionCardController {
           }
         } catch (error) {
           this.options.onError?.('question card finalization', error);
+        }
+        if (!patched) {
+          const details = record.context.questions
+            .map((question) => {
+              const answer = answers?.[question.answerKey];
+              return `${question.header}: ${answer ?? question.question}`;
+            })
+            .join('\n');
+          try {
+            await this.options.sendFallback(
+              record.chatId,
+              `${terminalLabels[terminalState]}\n${details}`,
+            );
+          } catch (fallbackError) {
+            this.options.onError?.(
+              'question terminal fallback delivery',
+              fallbackError,
+            );
+          }
         }
       },
     );
@@ -325,7 +351,15 @@ export class FeishuQuestionCardController {
     return `${context.sessionId}\0${context.owner.id}`;
   }
 
-  private fallbackText(): string {
-    return 'The interactive question could not be delivered, so the request was cancelled. Please retry.';
+  private fallbackText(context: ChannelUserInputRequestContext): string {
+    const questions = context.questions
+      .map(
+        (question) =>
+          `- ${question.question}: ${question.options
+            .map((option) => option.label)
+            .join(', ')}`,
+      )
+      .join('\n');
+    return `互动问题卡片投递失败，该请求已取消，请重试。\n${questions}`;
   }
 }
