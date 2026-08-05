@@ -38,12 +38,19 @@ export interface ChildHeapPolicySnapshot {
    * Children the pool could host concurrently under the modeled partition.
    * **0** when the pool cannot cover even one child at `minChildHeapMb` — a
    * real state on a small host, and not the same as 1.
+   *
+   * `null` under `off`, which models nothing. That is a different statement
+   * from `0`: zero is a computed answer meaning "this pool hosts no child",
+   * while null means no partition was computed at all. Collapsing them would
+   * make an operator who disabled the model read it as a host too small to
+   * run anything.
    */
-  maxConcurrentChildren: number;
+  maxConcurrentChildren: number | null;
   /**
    * The ceiling every child would receive. `null` when no child is
-   * admissible, never 0: `--max-old-space-size=0` means *V8's default heap*,
-   * so emitting a zero here would authorise gigabytes against an empty pool.
+   * admissible and under `off`, never 0: `--max-old-space-size=0` means
+   * *V8's default heap*, so emitting a zero here would authorise gigabytes
+   * against an empty pool.
    */
   perChildCeilingMb: number | null;
   /**
@@ -107,12 +114,18 @@ export function createChildHeapPolicy(options: {
     },
 
     snapshot() {
+      // `off` publishes no partition. The figures are computed above either
+      // way — the arithmetic is free and the code stays branchless — but
+      // reporting them under a mode documented as "do not model it" would
+      // hand an operator a 7-child / 526 MB partition they switched off, with
+      // nothing on the wire saying it is inert.
+      const modeled = mode !== 'off';
       return {
         mode,
         childPoolMb: budget.childPoolMb,
         minChildHeapMb: MIN_CHILD_HEAP_MB,
-        maxConcurrentChildren,
-        perChildCeilingMb,
+        maxConcurrentChildren: modeled ? maxConcurrentChildren : null,
+        perChildCeilingMb: modeled ? perChildCeilingMb : null,
         refusals,
       };
     },

@@ -270,7 +270,8 @@ describe('createSpawnChannelFactory child-heap observation', () => {
       processRegistry: registry,
       childHeapPolicy: policy,
     });
-    const limit = policy.snapshot().maxConcurrentChildren;
+    // Non-null because the mode is `observe`; `off` publishes no limit.
+    const limit = policy.snapshot().maxConcurrentChildren!;
 
     for (let i = 0; i < limit + 2; i++) await factory(`/tmp/w${i}`);
     const observed = mockSpawn.mock.calls.at(-1)?.[1] as string[];

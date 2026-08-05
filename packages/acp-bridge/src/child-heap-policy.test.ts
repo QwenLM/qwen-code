@@ -23,9 +23,14 @@ describe('createChildHeapPolicy', () => {
       const { maxConcurrentChildren, perChildCeilingMb } =
         createChildHeapPolicy({ budget: b, mode: 'observe' }).snapshot();
 
-      expect(maxConcurrentChildren).toBeGreaterThan(0);
-      expect(perChildCeilingMb).toBeGreaterThanOrEqual(MIN_CHILD_HEAP_MB);
-      expect(maxConcurrentChildren * perChildCeilingMb!).toBeLessThanOrEqual(
+      // `observe` always models, so both are numbers here — `off` has its own
+      // test. Assert that before the `!`s, so a regression that nulled them
+      // fails on a named assertion instead of on NaN arithmetic below.
+      expect(maxConcurrentChildren).not.toBeNull();
+      expect(perChildCeilingMb).not.toBeNull();
+      expect(maxConcurrentChildren!).toBeGreaterThan(0);
+      expect(perChildCeilingMb!).toBeGreaterThanOrEqual(MIN_CHILD_HEAP_MB);
+      expect(maxConcurrentChildren! * perChildCeilingMb!).toBeLessThanOrEqual(
         b.childPoolMb,
       );
     },
@@ -79,7 +84,8 @@ describe('createChildHeapPolicy', () => {
   it('counts spawns past the modeled limit', () => {
     const b = resolveDaemonMemoryBudget({ availableMemoryMb: 8_192 });
     const policy = createChildHeapPolicy({ budget: b, mode: 'observe' });
-    const limit = policy.snapshot().maxConcurrentChildren;
+    // Non-null because the mode is `observe`; `off` publishes no limit.
+    const limit = policy.snapshot().maxConcurrentChildren!;
 
     expect(policy.decide(1).refuse).toBe(false);
     expect(policy.decide(limit).refuse).toBe(false);
@@ -99,5 +105,26 @@ describe('createChildHeapPolicy', () => {
     // a daemon that modelled nothing.
     expect(off.decide(9_999).refuse).toBe(false);
     expect(off.snapshot().refusals).toBe(0);
+
+    // And it must publish no partition. `null`, not `0` — this same 8 GB
+    // budget models 7 children at 526 MB under `observe`, so reporting those
+    // figures here would hand an operator a partition they switched off with
+    // nothing on the wire marking it inert. Zero is a different claim: it is
+    // the computed answer for a pool too small to host one child.
+    expect(off.snapshot().maxConcurrentChildren).toBeNull();
+    expect(off.snapshot().perChildCeilingMb).toBeNull();
+  });
+
+  it('models the partition under observe on the same budget', () => {
+    // The other half of the assertion above: without this, nulling the
+    // figures unconditionally would satisfy the `off` test and lose the
+    // feature.
+    const observe = createChildHeapPolicy({
+      budget: resolveDaemonMemoryBudget({ availableMemoryMb: 8_192 }),
+      mode: 'observe',
+    }).snapshot();
+
+    expect(observe.maxConcurrentChildren).toBe(7);
+    expect(observe.perChildCeilingMb).toBe(526);
   });
 });

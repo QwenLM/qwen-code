@@ -170,6 +170,30 @@ describe('buildDaemonStatusResponse', () => {
     });
   });
 
+  it('reports an off policy as present but modeling nothing', async () => {
+    // The third state, and the reason the two above are not enough: a policy
+    // exists and its mode is visible, but it published no partition. On this
+    // same budget `observe` reports 7 children at 526 MB, so carrying those
+    // figures here would show an operator a partition they turned off.
+    const options = makeOptions();
+    const budget = resolveDaemonMemoryBudget({ availableMemoryMb: 8_192 });
+    options.opts.daemonMemoryBudget = budget;
+    const policy = createChildHeapPolicy({ budget, mode: 'off' });
+    options.getChildHeapPolicySnapshot = () => policy.snapshot();
+
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    expect(response.limits.memory).toMatchObject({
+      enforced: false,
+      childHeap: {
+        mode: 'off',
+        maxConcurrentChildren: null,
+        perChildCeilingMb: null,
+        refusals: 0,
+      },
+    });
+  });
+
   it('reports the resolved memory budget in daemon status limits', () => {
     const options = makeOptions();
     options.opts.daemonMemoryBudget = resolveDaemonMemoryBudget({

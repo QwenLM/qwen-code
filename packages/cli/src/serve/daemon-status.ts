@@ -205,9 +205,16 @@ export interface DaemonStatusMemoryLimits {
    */
   childHeap: {
     mode: 'off' | 'observe';
-    /** Children the pool could host at once. 0 when it cannot host one. */
-    maxConcurrentChildren: number;
-    /** What each would receive. `null` when none is admissible — never 0. */
+    /**
+     * Children the pool could host at once. 0 when it cannot host one,
+     * `null` under `off` — which models nothing, and so is not the same
+     * claim as a pool that hosts zero children.
+     */
+    maxConcurrentChildren: number | null;
+    /**
+     * What each would receive. `null` when none is admissible and under
+     * `off` — never 0.
+     */
     perChildCeilingMb: number | null;
     /**
      * Spawns that would have exceeded `maxConcurrentChildren`. Admission

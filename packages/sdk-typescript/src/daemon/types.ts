@@ -629,7 +629,6 @@ export interface DaemonStatusReport {
      * none.
      */
     memory?: {
-      /** Always false: nothing in this section is applied to a process. */
       /** False, and required: nothing in this section is applied to a process. */
       enforced: false;
       /**
@@ -638,8 +637,12 @@ export interface DaemonStatusReport {
        */
       childHeap?: {
         mode: 'off' | 'observe';
-        maxConcurrentChildren: number;
-        /** `null` when no child is admissible — never 0. */
+        /**
+         * `null` under `off`, which models nothing — distinct from `0`,
+         * a computed answer meaning the pool hosts no child.
+         */
+        maxConcurrentChildren: number | null;
+        /** `null` when no child is admissible and under `off` — never 0. */
         perChildCeilingMb: number | null;
         /**
          * Admission pressure only. 0 does not mean the partition is safe to
