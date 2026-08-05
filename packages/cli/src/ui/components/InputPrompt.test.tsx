@@ -7,6 +7,7 @@
 import { renderWithProviders } from '../../test-utils/render.js';
 import { waitFor, act } from '@testing-library/react';
 import type { InputPromptProps } from './InputPrompt.js';
+import type { Key } from '../hooks/useKeypress.js';
 import {
   InputPrompt,
   classifyPastedImagePaths,
@@ -2760,11 +2761,17 @@ describe('InputPrompt', () => {
     await wait();
 
     expect(switchCategory).toHaveBeenCalledWith(1);
+    // The arrow must be fully consumed: switching categories must not also
+    // reach the buffer and drift the caret.
+    expect(mockBuffer.move).not.toHaveBeenCalled();
+    expect(mockBuffer.handleInput).not.toHaveBeenCalled();
 
     stdin.write('\x1b[D'); // plain left arrow
     await wait();
 
     expect(switchCategory).toHaveBeenCalledWith(-1);
+    expect(mockBuffer.move).not.toHaveBeenCalled();
+    expect(mockBuffer.handleInput).not.toHaveBeenCalled();
     unmount();
   });
 
@@ -2834,6 +2841,51 @@ describe('InputPrompt', () => {
     unmount();
   });
 
+  it('should keep Ctrl+Tab switching categories when Vim consumes the bare arrows', async () => {
+    const switchCategory = vi.fn();
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      completionMode: CompletionMode.AT,
+      showSuggestions: true,
+      suggestions: [
+        { label: 'file.ts', value: 'file.ts', category: 'file' },
+        { label: 'sess', value: 'sess', category: 'session' },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: false,
+      availableCategories: ['all', 'file', 'session'],
+      switchCategory,
+    });
+    props.buffer.setText('@');
+    // Mirrors vim.ts insert mode: bare arrows are consumed there, tab keys
+    // pass through. vimHandleInput runs before completion handling, so this
+    // is the chain Vim users rely on to switch categories (#8069).
+    props.vimHandleInput = vi.fn(
+      (key: Key) => key.name === 'left' || key.name === 'right',
+    );
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\x1b[C'); // right arrow — consumed by Vim
+    await wait();
+    stdin.write('\x1b[D'); // left arrow — consumed by Vim
+    await wait();
+
+    expect(switchCategory).not.toHaveBeenCalled();
+
+    stdin.write('\x1b[9;5u'); // Ctrl+Tab passes through Vim insert mode
+    await wait();
+
+    expect(switchCategory).toHaveBeenCalledWith(1);
+
+    stdin.write('\x1b[9;6u'); // Ctrl+Shift+Tab
+    await wait();
+
+    expect(switchCategory).toHaveBeenCalledWith(-1);
+    unmount();
+  });
+
   it('should NOT switch category on bare arrows while command search is active', async () => {
     props.shellModeActive = false;
     const switchCategory = vi.fn();
@@ -2870,7 +2922,43 @@ describe('InputPrompt', () => {
     unmount();
   });
 
-  it('should NOT switch category on bare arrows while in attachment mode', async () => {
+  it('should NOT accept the suggestion on Ctrl+Tab while command search is active', async () => {
+    props.shellModeActive = false;
+    const switchCategory = vi.fn();
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      completionMode: CompletionMode.AT,
+      // Completion stays "open" under command search (its reset effect only
+      // reacts to shell reverse search), but the search hides its UI.
+      showSuggestions: true,
+      suggestions: [
+        { label: 'file.ts', value: 'file.ts', category: 'file' },
+        { label: 'sess', value: 'sess', category: 'session' },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: false,
+      availableCategories: ['all', 'file', 'session'],
+      switchCategory,
+    });
+    props.buffer.setText('@ses');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\x12'); // Ctrl+R enters command search
+    await wait();
+    stdin.write('\x1b[9;5u'); // Ctrl+Tab
+    await wait();
+
+    // The completion branch is skipped entirely under command search: the
+    // modifier-agnostic ACCEPT_SUGGESTION tab binding must not silently
+    // accept the still-open completion into the search query buffer.
+    expect(mockCommandCompletion.handleAutocomplete).not.toHaveBeenCalled();
+    expect(switchCategory).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('should keep Ctrl+Tab switching but not bare arrows while in attachment mode', async () => {
     const isWindows = process.platform === 'win32';
     vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(true);
     vi.mocked(clipboardUtils.saveClipboardImage).mockResolvedValue(
@@ -2910,6 +2998,19 @@ describe('InputPrompt', () => {
     // In attachment mode the arrows navigate the attachment chips, so they
     // must not switch the (still-rendered) category tab bar.
     expect(switchCategory).not.toHaveBeenCalled();
+
+    // Ctrl+Tab / Ctrl+Shift+Tab still switch: the tab bar stays rendered and
+    // the bare arrows are busy with chips, so the alternatives must remain
+    // reachable (pre-PR, Ctrl+Tab switched categories in this state).
+    stdin.write('\x1b[9;5u'); // Ctrl+Tab
+    await wait();
+
+    expect(switchCategory).toHaveBeenCalledWith(1);
+
+    stdin.write('\x1b[9;6u'); // Ctrl+Shift+Tab
+    await wait();
+
+    expect(switchCategory).toHaveBeenCalledWith(-1);
     unmount();
   });
 

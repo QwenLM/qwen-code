@@ -205,11 +205,11 @@ export const defaultKeyBindings: KeyBindingConfig = {
   // handling runs, but tab keys pass through Vim insert mode, so these keep
   // a keyboard path to switch categories for Vim users.
   [Command.COMPLETION_TAB_LEFT]: [
-    { key: 'left', shift: false, ctrl: false, command: false, meta: false },
+    { key: 'left', shift: false, ctrl: false, meta: false },
     { key: 'tab', shift: true, ctrl: true, command: false },
   ],
   [Command.COMPLETION_TAB_RIGHT]: [
-    { key: 'right', shift: false, ctrl: false, command: false, meta: false },
+    { key: 'right', shift: false, ctrl: false, meta: false },
     { key: 'tab', shift: false, ctrl: true, command: false },
   ],
 

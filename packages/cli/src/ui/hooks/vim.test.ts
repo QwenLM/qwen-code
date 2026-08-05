@@ -1385,6 +1385,37 @@ describe('useVim hook', () => {
     });
   });
 
+  describe('INSERT mode completion key pass-through (#8069)', () => {
+    it('should pass through tab and Ctrl+Tab in INSERT mode', () => {
+      // Completion handling owns the tab keys; InputPrompt relies on this
+      // pass-through so Ctrl+Tab can switch completion categories.
+      mockVimContext.vimMode = 'INSERT';
+      const { result } = renderVimHook();
+
+      expect(result.current.handleInput(makeKey('\t', 'tab'))).toBe(false);
+      expect(
+        result.current.handleInput({ ...makeKey('\t', 'tab'), ctrl: true }),
+      ).toBe(false);
+    });
+
+    it('should consume bare left/right arrows in INSERT mode', () => {
+      // The bare arrows belong to buffer editing here, which keeps them away
+      // from completion category switching in InputPrompt.
+      mockVimContext.vimMode = 'INSERT';
+      const { result } = renderVimHook();
+
+      let handled = false;
+      act(() => {
+        handled = result.current.handleInput(makeKey('\x1b[C', 'right'));
+      });
+      expect(handled).toBe(true);
+      act(() => {
+        handled = result.current.handleInput(makeKey('\x1b[D', 'left'));
+      });
+      expect(handled).toBe(true);
+    });
+  });
+
   // Line operations (dd, cc) are tested in text-buffer.test.ts
 
   describe('Reducer-based integration tests', () => {
