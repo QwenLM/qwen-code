@@ -1314,7 +1314,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       if (onlyMentioned && !hasMention) continue;
 
       const senderId = (comment.user?.login || 'unknown').toLowerCase();
-      const allowed = this.gate.isAllowed(senderId);
+      // Approved paired groups bypass the sender gate in preflight, so the
+      // directed lane must mirror that or follow-ups fail mention gating.
+      const allowed =
+        this.gate.isAllowed(senderId) ||
+        (directed &&
+          this.config.groupPolicy === 'pairing' &&
+          this.groupGate.isGroupApproved(ctx.chatId));
       const envelope: Envelope = {
         channelName: this.name,
         senderId,
@@ -1339,7 +1345,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       }
       if (allowed) {
         this.recordDispatchedComment(key);
-        if (hasMention) dispatched = true;
+      }
+      // A mention under group pairing has a visible effect (dispatch or a
+      // pairing code comment) even when the sender gate rejects the sender;
+      // suppress the first-contact body feed so the same intent cannot be
+      // dispatched twice.
+      if (hasMention && (allowed || this.config.groupPolicy === 'pairing')) {
+        dispatched = true;
       }
     }
 
@@ -1389,7 +1401,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   private async processAggregateLane(ctx: NotificationContext): Promise<void> {
-    if (this.config.senderPolicy === 'pairing') {
+    if (
+      this.config.senderPolicy === 'pairing' ||
+      this.config.groupPolicy === 'pairing'
+    ) {
       await this.processCommentLane(ctx, false, true);
       return;
     }

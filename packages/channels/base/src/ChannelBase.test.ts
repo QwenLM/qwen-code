@@ -13608,6 +13608,47 @@ describe('ChannelBase', () => {
       }
     });
 
+    it('lets an approved paired group talk without mentions when requireMention is false', async () => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const qwenHome = mkdtempSync(join(tmpdir(), 'qwen-group-pairing-'));
+      process.env['QWEN_HOME'] = qwenHome;
+      try {
+        const store = new PairingStore('test-chan', '/tmp');
+        const created = store.createGroupRequest(
+          'chat1',
+          'Release Team',
+          'alice',
+          'Alice',
+        );
+        store.approve(pairingCodeOf(created));
+        const ch = createChannel({
+          groupPolicy: 'pairing',
+          senderPolicy: 'allowlist',
+          allowedUsers: [],
+          groups: { '*': { requireMention: false } },
+        });
+
+        await ch.handleInbound(
+          envelope({
+            isGroup: true,
+            chatId: 'chat1',
+            senderId: 'bob',
+            senderName: 'Bob',
+            text: 'ambient message',
+          }),
+        );
+
+        expect(bridge.prompt).toHaveBeenCalledOnce();
+        expect(
+          ch.sent.some((message) => message.text.includes('pairing code')),
+        ).toBe(false);
+      } finally {
+        if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+        else process.env['QWEN_HOME'] = previousQwenHome;
+        rmSync(qwenHome, { recursive: true, force: true });
+      }
+    });
+
     it('tells a group when the pending pairing cap is reached', async () => {
       const previousQwenHome = process.env['QWEN_HOME'];
       const qwenHome = mkdtempSync(join(tmpdir(), 'qwen-group-pairing-'));

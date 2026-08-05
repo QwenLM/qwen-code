@@ -12,7 +12,7 @@ export interface GroupCheckResult {
     | 'mention_required'
     | 'pairing_trigger_required'
     | 'pairing_required';
-  /** Set when the pairing policy denies the group. */
+  /** Set when the check denies with `pairing_required` (a pairing request was created or reused). */
   pairing?: CreatePairingRequestResult;
 }
 

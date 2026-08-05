@@ -132,7 +132,7 @@ On a **public project**, setting `senderPolicy: "open"` allows **any GitLab user
 
 Always use `senderPolicy: "allowlist"` with explicit `allowedUsers` on public projects.
 
-Note that under `groupPolicy: "pairing"`, access is granted per project: once a project is approved, **any GitLab user** can drive the bot through that project's issues and merge requests. All GitLab traffic is group traffic, so `senderPolicy` and `allowedUsers` do not gate members of an approved project.
+Note that under `groupPolicy: "pairing"`, access is granted per project: once a project is approved, **any GitLab user** can drive the bot through that project's issues and merge requests. All GitLab traffic is group traffic, so `senderPolicy` and `allowedUsers` do not gate members of an approved project. Approvals are keyed by the project path (`owner/repo`), which changes on rename or transfer — revoke stale group approvals after any project rename, transfer, or deletion.
 
 ## Mention Detection
 

@@ -77,7 +77,7 @@ Custom channels automatically support everything built-in channels do:
 - **Sender policies** — `allowlist`, `pairing`, and `open` access control
 - **Group policies** — Per-group settings with optional @mention gating
 - **Session routing** — Per-user, per-thread, or single shared sessions
-- **DM pairing** — Full pairing code flow for unknown users
+- **DM and group pairing** — Full pairing code flow for unknown users and groups
 - **Slash commands** — `/help`, `/clear`, `/status` work out of the box
 - **Custom instructions** — Prepended to the first message in each session
 - **Crash recovery** — Automatic restart with session preservation

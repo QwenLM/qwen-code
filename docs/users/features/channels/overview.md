@@ -224,7 +224,7 @@ request identifies the group and the member who initiated it:
 qwen channel pairing approve my-channel <CODE>
 ```
 
-Group approvals are stored by stable chat ID in the channel's workspace scope.
+Group approvals are stored by the group's chat ID in the channel's workspace scope. On GitHub and GitLab the chat ID is the repository/project path, so a rename or transfer detaches the stored approval — re-approve the group after renaming.
 An unmentioned message never creates a group pairing request, even when a group
 sets `requireMention` to `false`; after approval, the configured mention policy
 applies normally.
