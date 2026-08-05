@@ -159,8 +159,9 @@ section; the benefit is that neither document lies about its flow.
   certifying path stay untouched — no in-place target-kind branches in
   the files `/review`'s coverage gate recomputes.
 - Reuse is the TypeScript layer only, in two grades: the findings schema
-  and the budget machinery's shape lift as-is into a shared home in
-  `packages/core`; the roster, briefs, coverage check, and anchor
+  lifts as-is into `packages/cli/src/utils/` — the CLI-level shared home
+  (`safeTarget()` joins it there at the Output section's naming); the
+  budget machinery, the roster, briefs, coverage check, and anchor
   validation are re-expressed against the target kind in `/audit`-owned
   code.
 - `/audit` imports nothing across command groups from
@@ -169,29 +170,29 @@ section; the benefit is that neither document lies about its flow.
 - The cross-round findings ledger does not lift into v1 (Open
   questions).
 
-**Lifts as-is:** the findings schema and the budget machinery's shape (a
-plan-derived size→work mapping; `plan-files` supplies the line counts).
-Both land in `packages/core/src/utils/` — the shared home the Output
-section's check-ignore consolidation also lands in — but the lift is a
-co-location choice, not a dependency-direction requirement: every
-consumer of `findings.ts` and of the budget machinery lives in
-`packages/cli`, so the dependency arrow that forces the check-ignore
-consolidation (a `packages/core` consumer that cannot import from
-`packages/cli`) does not exist for these two pieces; they sit beside
-the shared helper by choice, recorded here so no later reader invents
-the core consumer that forced them. The schema lift carries one bound
-from the
-file's own in-code contract: `findings.ts`'s four exported const lists
+**Lifts as-is:** the findings schema — the one lifted piece with no
+target-kind branch in it. It lands in `packages/cli/src/utils/`, the
+established CLI-level shared home: every consumer of `findings.ts`
+lives in `packages/cli`, so nothing forces the lift into
+`packages/core` — whose `src/**` sits behind AGENTS.md's
+maintainer-only triage gate while `packages/cli/src/utils/` does not,
+and `/audit`'s planned schema evolution (the evidence tier, the
+independent-discovery count, the unverified label) would otherwise land
+every first-cut edit inside that gate. The dependency arrow that forces
+`packages/core` exists for exactly one piece — the check-ignore
+consolidation's `packages/core` consumer that cannot import from
+`packages/cli` (Output) — and only that helper lands there. The schema
+lift carries one bound from the file's own in-code contract:
+`findings.ts`'s four exported const lists
 have a second consumer — the Web Shell review renderer keeps its own
 copy and fails closed on any value it does not know, so a value added
 to them breaks rendering of every saved review artifact that carries
 one. The lift therefore keeps those lists frozen, and `/audit`'s extra
 fields — the evidence tier, the independent-discovery count, the
 unverified label — live outside them. `/audit` does not import across
-command groups from `commands/review/` — where these pieces live today,
-`budget.ts` under `lib/` and `findings.ts` at the command root — and
-`/review`'s certifying files import the lifted pieces from their new
-home.
+command groups from `commands/review/` — where the schema lives today,
+`findings.ts` at the command root — and `/review`'s certifying files
+import the lifted schema from its new home.
 **Re-expressed against the target kind, in `/audit`-owned code**, every
 machinery that keys on the diff:
 
@@ -230,6 +231,17 @@ machinery that keys on the diff:
   skipped), so the roster collapses to `[test-matrix]` rather than
   misreporting fan-out. The re-expression must therefore supply the
   gate's inputs too, not only `hasDeletions`/`reviewMode`/effort.
+- The budget machinery (`lib/budget.ts`) keys on diff metrics end to
+  end — its inputs are `srcDiffLines`/`diffLines` with a diff-justified
+  docs-dilution branch, `MIN_INLINE_ANGLES = 3` counts the
+  removed-behaviour angle `/audit` drops as angle B, and
+  `specialistCap` bounds the Agent 8 `/audit` drops — so it re-expresses
+  rather than lifts: `/audit` keeps the shape — a plan-recorded
+  size→work mapping, the angle floor, the sweep flag, the verification
+  shard width — keyed to `plan-files`' line counts; the re-anchored
+  constants the Effort tiers section names stay `/audit`-owned until
+  measured, by the same rule the Rejected alternatives section applies
+  to the roster predicates.
 - `check-coverage`'s core predicate is "the agent was pointed at diff
   lines AND opened the diff file", and an audit has no diff file, so
   it must be re-expressed as "opened file F".
@@ -250,11 +262,12 @@ machinery that keys on the diff:
   anchor that `/review` would surface at posting would otherwise ship
   silently.
 
-The re-expression lands in new `/audit`-owned plan→roster/brief/coverage/
-anchor functions, not in in-place target-kind branches inside `/review`'s
-certifying files — `agent-prompt.ts` (the three `requireDiffPath()`
-sites), `lib/roster.ts` (`requiredAgents()`'s effort clause and topology
-gate), `check-coverage`/`lib/coverage.ts` (which recomputes
+The re-expression lands in new `/audit`-owned
+plan→roster/brief/budget/coverage/anchor functions, not in in-place
+target-kind branches inside `/review`'s certifying files —
+`agent-prompt.ts` (the three `requireDiffPath()` sites),
+`lib/roster.ts` (`requiredAgents()`'s effort clause and topology gate),
+`check-coverage`/`lib/coverage.ts` (which recomputes
 `requiredAgents(plan)` and exit-3s on a missing required agent), and
 `resolve-anchors.ts` — all on `/review`'s certifying path. `/audit`'s
 tier semantics are explicitly unmeasured first cuts, and in-place
@@ -292,8 +305,8 @@ cross-round findings ledger does not lift into v1 — see Open questions.
   on the tiers that run Agent 5 — test lines ≤ 18,000; over either arm
   refuses at plan time. An empty subject set refuses at every tier, as
   does a subject set whose every subject is uncoverable; a submodule at
-  or under the audited path refuses at plan time in v1 (the drift arms
-  have no coverage inside it).
+  or under the audited path — or the audited path inside one — refuses
+  at plan time in v1 (the drift arms have no coverage inside it).
 - Larger subsystems are audited as coherent sub-paths, one bounded run each.
 - Event/lifecycle modules are detected by call patterns and get 1c's
   event-coverage brief; the detection outcome rides into the report header.
@@ -507,15 +520,20 @@ probed file's own directory, created for the probe and deleted when it
 lands or when the probe errors, so its relative imports resolve exactly as
 the original's do while the checkout's copy is never mutated — deletion has
 no third handler, so a killed shard (SIGKILL, OOM, force-timeout, user
-abort) may leave the sibling behind, and `plan-files` treats
-reserved-prefix files as audit-owned residue: surfaced at plan time —
-named as residue from a prior killed run, not framed as routine
-cleanup — with a deletion confirmation, but never removed from scope by
-name alone. The prefix is stable and documented — it must be, to
-recognize residue — so a hostile vendored module could name a payload
-with it and escape every walker that excluded the name; the rule
-therefore keeps a residue file a walked subject unless the user
-confirms the deletion, and records both outcomes in the header's walks
+abort) may leave the sibling behind. `plan-files` surfaces a
+reserved-prefix file at plan time as what the plan can verify — a file
+matching the audit's reserved scratch-name prefix, which a killed prior
+run would leave and a hostile module could ship, with no record kept
+across runs to tell the two apart — never as the provenance claim
+"residue from a prior killed run", which the plan cannot establish;
+keep-as-subject is the explicit default, and deletion is offered only
+on affirmative evidence — an mtime consistent with a recorded prior
+audit run on this path — behind a deletion confirmation, so nothing is
+removed from scope by name alone. The prefix is stable and documented —
+it must be, to recognize residue — so a hostile vendored module could
+name a payload with it and escape every walker that excluded the name;
+the rule therefore keeps a residue file a walked subject unless the
+user confirms the deletion, and records both outcomes in the header's walks
 record — deleted at plan time, or walked as residue — so no
 reserved-prefix file is invisible to the walks and no report reads
 "every walk completed" over a file no walker saw — and the
@@ -524,12 +542,16 @@ run (Open questions) executes the module's own tests. Audited-module code
 may be vendored or third-party, and execution is consent-gated, not
 disclose-after: the pre-launch confirmation (Budget ceiling) names the two
 execution classes, and nothing executes unless the user confirms it. Both
-classes are separate opt-ins at that confirmation, because both are
-execution of the audited code with the user's full privileges — the
-baseline test run runs the module's own suite, and the verification probes
-run module code on scratch copies — and the confirmation names the
-categories, not the individual probes, which do not exist until
-verification generates them mid-run. The header states what the run
+classes are separate opt-ins at that confirmation, because both execute
+code with the user's full privileges under exposure to module content —
+the baseline test run runs the module's own suite, and the verification
+probes are agent-authored programs, written mid-run from inputs that
+quote the module, that exercise scratch copies through the module's own
+runtime — not module code itself. The confirmation says exactly that:
+it names the categories and what runs in each — the module's own suite;
+agent-authored probe code produced under exposure to module content —
+not the individual probes, which do not exist until verification
+generates them mid-run. The header states what the run
 executed and what was opted out, so the report never frames execution as a
 read, or a read-only verification as an executed one.
 
@@ -555,9 +577,12 @@ read, or a read-only verification as an executed one.
   receive, computed from `plan-files` output — is disclosed at the
   confirmation instead, with the header recording the actual agent
   count.
-- A plan over the token cap refuses and asks for a narrower path or a lower
-  tier;
-  overshoot is made visible in the report header, not prevented.
+- A plan over the token cap refuses and asks for a narrower path —
+  coherent sub-paths, one bounded run each. No tier change is the
+  remedy: the priced cost is a function of line counts alone, and the
+  only cheaper tier refuses every plan that can reach the cap check
+  (Ceiling). Overshoot is made visible in the report header, not
+  prevented.
 
 The default tier is the expensive one by construction — fan-out recall is
 the product — so it ships with a stated bound, not an open tab:
@@ -630,8 +655,12 @@ the product — so it ships with a stated bound, not an open tab:
   unpriced additions (6a, verification, high-tier personas, high-tier
   rounds) so the delta can feed the per-line rate uncontaminated, and the
   actual agent count against the 40 bound — and a plan
-  whose priced part is over the token cap refuses and asks for a narrower path
-  or a lower tier. Both constants are unmeasured first cuts
+  whose priced part is over the token cap refuses and asks for a narrower
+  path, naming why no tier change is the remedy: the priced cost is a
+  function of subject and test line counts alone — identical at medium and
+  high — and the only cheaper tier (low) refuses every plan that can reach
+  the cap check at its own 2,000-line gate, the cap-refusal region starting
+  above ~7,600 subject lines. Both constants are unmeasured first cuts
   — 60M is ~1.3× the larger measured arm — and they ride into the report
   header with the other unexercised-machinery flags. The token cap
   carries no independent information beyond that measured arm, and that
@@ -929,7 +958,19 @@ brief must name both cases.
 **What the scratch-copy probe can and cannot prove.** The probe flips
 under the implied fix on a scratch copy of the probed file, and nothing
 else in the module imports the scratch copy — so the probe exercises the
-fixed file in isolation. Every cross-file failure scenario — precisely
+fixed file in isolation. One edge of the mechanism is constrained by
+construction, not only by the consent: the shard authors the probe file
+alone, and the invocation is a fixed command shape — the module's own
+runtime or test entry point executing the probe, the scratch path its
+only module-derived argument — never free-form shell authored by the
+shard. A shard is a consumer of module content under the preamble, and
+the measured redundancy of independent finders does not exist at probe
+authorship — one shard generates and runs its own cluster's probe — so
+the invocation must not be whatever that shard can write. The probe
+file itself stays agent-authored code produced under exposure to module
+content; that is what the consent names (Target resolution), and the
+fixed shape closes the command line, not the authorship. Every
+cross-file failure scenario — precisely
 the class 1c produces, and the headline "found the two Criticals nobody
 else could" findings that required assembling a three-file chain — is
 unreachable by this mechanism, and cross-file findings therefore cap at
@@ -990,11 +1031,22 @@ capped accordingly, the reason recorded in the header.
   verification did not complete (a drift stop, an abort) — so they never
   print identically to verified ones. `<path-slug>` is produced by
   lifting `safeTarget()` out of the review family's `lib/paths.ts` into
-  the shared `packages/core` home the check-ignore consolidation below
-  names — the traversal-safe slug whose doc comment records the exact
-  lesson (a crafted `../../evil` escaped `.qwen/tmp` once) — so both
-  skills import one hardened slug from core instead of `/audit`
-  re-deriving one or importing across command groups.
+  the `packages/cli/src/utils/` home the findings schema lifts to above
+  — the traversal-safe slug whose doc comment records the exact lesson
+  (a crafted `../../evil` escaped `.qwen/tmp` once) — so both skills
+  import one hardened slug from the CLI-level shared home instead of
+  `/audit` re-deriving one or importing across command groups. It is
+  not the codebase's only traversal-safe sanitizer:
+  `sanitizeFilenameComponent` in
+  `packages/core/src/agents/agent-transcript.ts` answers the same
+  question for transcript and monitor names and already differs — it
+  flattens dots, which `safeTarget()` preserves, because review and
+  audit slugs name artifacts after dotted paths (`src/foo.ts` included)
+  while transcript names are ids, where a dot is just another byte to
+  strip — and it carries no empty-input fallback. The two stay separate
+  on that deliberate output difference, named here so a later hardening
+  — length caps, Windows reserved device names, which neither handles
+  today — lands in both rather than silently in one.
 - **The run-metadata header:** the audited commit SHA, the model id,
   and the dirty/clean state of the checkout. File:line
   anchors drift with HEAD, so a re-audit after fixes must be alignable
@@ -1033,8 +1085,15 @@ capped accordingly, the reason recorded in the header.
   cannot catch (excluded directories contribute zero subject lines) and
   re-comparing them at every drift checkpoint — plus a content copy of
   each remaining listed file, because names alone cannot keep anchors
-  resolvable once a file is edited or deleted. The sidecar's content
-  copies extend past the audited path for exactly one class: the
+  resolvable once a file is edited or deleted. A collapsed trailing-`/`
+  entry in the raw listing is a nested git repository — git never
+  enumerates files inside one, probe-verified — and matches no
+  enumerated file, so the filter would capture nothing inside it; the
+  capture expands such an entry against the enumerated files under it,
+  so a nested repo's subjects are content-captured like any other
+  untracked content and stay covered by the drift arms below. The
+  sidecar's content copies extend past the audited path for exactly one
+  class: the
   registered deep-read callers — anchor resolution deliberately widens
   to them because the headline cross-file findings anchor in callers
   outside the audited path, and the registration-time content hash the
@@ -1068,19 +1127,25 @@ capped accordingly, the reason recorded in the header.
   case, which arrives uncommitted and gitignored — the subtree-hash arm
   is vacuous, the header records the absence, and drift rests on the
   arms below; the untracked classes against the run-start content
-  copies; and, outside
-  any git worktree, a per-file content-hash snapshot of the audited path
-  (the same hash the incremental re-audit item names) taken at run start
-  with the other run-start captures and retaken at the same checkpoints
-  — a checkpoint-only arm would take its first snapshot at a medium
-  run's first checkpoint, before verification, absorbing any fan-out
-  edit into the baseline while the identical edit inside a git checkout
-  stops the run. The run-start captures are taken after the opted-in
-  baseline suite completes, when it runs, so the suite's write set is
-  part of the baseline the checkpoints compare against rather than drift
-  against it; the audit's own mutations are otherwise excluded from the
-  comparison — keyed by identity, the set of scratch paths this run
-  created, not by the reserved prefix alone: kept residue files from a
+  copies; and — for the walked files a worktree's index tracks, and for
+  every walked file outside any git worktree — a per-file content-hash
+  snapshot of those walked subject and test sets (the same hash the
+  incremental re-audit item names), uncoverable files name-recorded and
+  never hashed by the same exclusion the sidecar applies — an
+  uncoverable file is never walked, carries no anchored findings, and
+  its drift can never trigger the stop predicate, so hashing it at
+  every checkpoint would be pure cost — taken at run start with the
+  other run-start captures and retaken at the same checkpoints. The
+  content-hash arms exist because a checkpoint-only arm would take its
+  first snapshot at a medium run's first checkpoint, before
+  verification, absorbing any fan-out edit into the baseline while the
+  identical edit inside a git checkout stops the run. The run-start
+  captures are taken after the opted-in baseline suite completes, when
+  it runs, so the suite's write set is part of the baseline the
+  checkpoints compare against rather than drift against it; the audit's
+  own mutations are otherwise excluded from the comparison — keyed by
+  identity, the set of scratch paths this run created, not by the
+  reserved prefix alone: kept residue files from a
   prior killed run carry the same prefix yet stay walked subjects that
   can carry anchored findings (the residue rule above), and a
   prefix-keyed exclusion would exempt user edits to them from every
@@ -1093,7 +1158,16 @@ capped accordingly, the reason recorded in the header.
   pre-refactor assessment, taking over unfamiliar code — put the user
   actively in the module under audit, and a medium run costs 32–60M
   tokens over hours, so one stray save must not discard the whole run.
-  The predicate is per file. Drift in a file already walked _and_
+  The predicate is per file, and it keys on content, not git state: the
+  content-hash arms above are its arbiter — a file whose content is
+  unchanged is not drifted, whatever HEAD did, because anchored
+  findings refer to content; the commit of the run-start dirty state
+  mid-run — the user actively in the module under audit, the
+  dominant-workflow case this section names — fires the git-state arms
+  and stops nothing, where a state-keyed predicate would discard a
+  32–60M-token run whose every finding still refers to the tree on
+  disk. Content change is what attributes drift per file. Drift in a
+  file already walked _and_
   carrying anchored findings stops the run — those findings no longer
   refer to the tree on disk, and a run that continued would walk,
   verify, and flip probes against a tree that is no longer the one its
@@ -1118,18 +1192,32 @@ capped accordingly, the reason recorded in the header.
   would hash a caller edited mid-fan-out after the edit — absorbing
   exactly the drift the arm exists to catch on a medium run, whose
   first checkpoint comes after that window.
-  Submodules are the one class no drift arm covers: they sit inside a
-  git worktree, so the content-hash fallback does not apply, and the
-  git arms see only the gitlink — probe-verified, `git diff HEAD`
+  Submodules are the one class no drift arm covers: their files sit
+  inside a git worktree but are opaque to its index and untracked
+  listing alike — the content-hash arms hash what the index tracks, the
+  sidecar covers the untracked classes, and a submodule is neither —
+  and the git arms see only the gitlink — probe-verified, `git diff HEAD`
   emits the gitlink line and no per-file hunks for uncommitted edits
   inside, the untracked listing enumerates nothing inside, the subtree
   hash does not move, and a submodule dirty at run start reports
   identical at every later checkpoint even as its files change,
-  freezing even the coarse `-dirty` marker. v1 therefore refuses at
-  plan time when a gitlink sits at or under the audited path —
-  detected by the gitlink entries `git ls-files -s` reports for it,
-  the refusal naming the reason: no drift coverage inside submodules
-  in v1 — and the detection outcome rides into the header.
+  freezing even the coarse `-dirty` marker. The geometry runs both
+  ways, probe-verified: an audited path strictly inside a submodule
+  reports no gitlink of its own — `git ls-files -s` matches only the
+  gitlink's own path and below — keeps the untracked listing empty even
+  for a fresh file inside, holds `git diff HEAD -- <path>` empty even
+  for the coarse marker, and has no subtree-hash entry to read; every
+  arm misses it alike. v1 therefore refuses at plan time when a gitlink
+  sits at or under the audited path or the audited path resolves inside
+  a submodule — detected by the gitlink entries `git ls-files -s`
+  reports, checked for the path and each ancestor to the repository
+  toplevel, or by the path's git-dir resolving under the repository's
+  `.git/modules/` — the refusal naming the reason: no drift coverage
+  inside submodules in v1 — and the detection outcome rides into the
+  header. A nested git repository with no gitlink — a vendored clone,
+  untracked and typically gitignored — is not this class: it is an
+  untracked class, and the sidecar's expansion of the collapsed listing
+  entry above gives the drift arms their content to compare.
 - **The walks record:** the effort tier, and the walks completed,
   skipped with reason, or uncoverable (over-cap lines, non-text files,
   symlinks and other non-regular files, drifted files — and, for the
@@ -1145,12 +1233,13 @@ capped accordingly, the reason recorded in the header.
   returned after opening each file once satisfies it, and at medium a
   whiffed security agent would ship "walks completed: security" with 0
   findings, which a reader takes as "safe" — precisely the misreading
-  the header must prevent. Every fan-out agent therefore gets the
-  substantive-return check `/review`'s Step 3 applies to its own
-  receipt-less whole-walk agents: a bare return with no evidence of what
-  the agent re-examined is a whiff, relaunched once, and a second bare
-  return records the dimension as not audited in the walks-skipped flags
-  above.
+  the header must prevent. Every fan-out agent — and the low tier's
+  single reader, the one module-content walker below the fan-out —
+  therefore gets the substantive-return check `/review`'s Step 3
+  applies to its own receipt-less whole-walk agents: a bare return with
+  no evidence of what the agent re-examined is a whiff, relaunched
+  once, and a second bare return records the dimension as not audited
+  in the walks-skipped flags above (at low, the read itself).
 - **Unexercised machinery:** the header carries every flag this design
   attaches to unexercised machinery — in one "Unmeasured / unexercised
   in this run" subsection, not a flat list, ordered by what each
@@ -1172,8 +1261,9 @@ capped accordingly, the reason recorded in the header.
   directory from the plan path), and agent returns quote the module verbatim,
   so the class carries the same exploitable content as the report; the
   run-start sidecar is the same class with a cross-run purpose — the
-  re-audit alignment the header advertises — and shares the report's
-  flip-time fate below. The probe scratch copies are the same class
+  re-audit alignment the header advertises — and moves at the same
+  flips below: at a checkpoint flip with the intermediates, at write
+  time with the report. The probe scratch copies are the same class
   with a different shape: a sibling copy of the probed file lands in
   the probed file's own directory — inside the audited path, outside
   the `.qwen/` directories the probes below examine — so the
@@ -1213,7 +1303,18 @@ capped accordingly, the reason recorded in the header.
   `isTeamFileGitIgnored` in `team-memory-git-status.ts`
   (`packages/core`), and `packages/core` cannot import from
   `packages/cli`, so exporting the review copy as the shared helper
-  would invert the dependency. All three call sites consume the shared
+  would invert the dependency. A fourth answer already lives in
+  `packages/core/src/utils/` and is deliberately not the consolidation
+  target: `GitIgnoreParser` (`gitIgnoreParser.ts`), the in-process
+  ignore matcher `FileDiscoveryService` consumes, reads the ignore
+  files itself with gaps the guard cannot carry — a linked worktree's
+  `.git` is a gitfile, so the literal `.git/info/exclude` join never
+  resolves, and `core.excludesFile` and the global excludes stay unread
+  — and a negation living in one of those unread sources flips the
+  parser to "ignored" where git answers "not ignored", the dangerous
+  direction for a guard whose whole property is git's own answer; the
+  parser stays the discovery answer, where a missed exclude costs a
+  refusal at worst. All three call sites consume the shared
   helper: `test-plan.ts`, `team-memory-git-status.ts`, and
   `plan-files`. The merge is explicit because the two copies encode
   different lessons, and lifting either one as-is silently drops the
@@ -1250,11 +1351,15 @@ capped accordingly, the reason recorded in the header.
   re-includes only the directory, leaving the files beneath it exposed
   to an exclude entry — probe-verified both ways: (a) where nothing
   ignores a module-derived directory, the plan offers to add its ignore
-  rule to `.git/info/exclude`
-  rather than the tracked `.gitignore`, so the
-  remedy does not dirty the checkout with its own edit and stamp the
-  run's header dirty on a repo the user had clean (with the user's
-  confirmation) — and in a fresh repository that has never used
+  rule to the exclude file `git rev-parse --git-common-dir` resolves —
+  `.git/info/exclude` in a plain checkout; in a linked worktree `.git`
+  is a gitdir pointer and the literal path does not exist, while the
+  common-dir exclude still answers — rather than the tracked
+  `.gitignore`, so the remedy does not dirty the checkout with its own
+  edit and stamp the run's header dirty on a repo the user had clean
+  (with the user's confirmation, which also discloses that a common-dir
+  exclude entry applies to every worktree of the repository, not only
+  the current one) — and in a fresh repository that has never used
   qwen-code, that offer is the default first-run experience; (b) where a
   tracked pattern re-includes the audits path, the probe's answer decides
   the remedy: where the re-include leaves the representative file exposed
@@ -1277,19 +1382,25 @@ capped accordingly, the reason recorded in the header.
   ignore state can move during a hours-long run — a rule edit, a branch
   switch, an upstream merge. A flipped answer acts at once rather than
   waiting for write time: the intermediates are run-scoped and
-  regenerable, so a checkpoint flip relocates them to the outside-repo
-  fallback immediately — leaving them in `.qwen/tmp/` would keep them
-  committable for the rest of the run — and a flip at write time
-  relocates the report to the outside-repo fallback as before. The
-  plan-time check keeps its rationale; the checkpoint re-runs bound the
-  intermediates' exposure to the window before the first re-check, and
-  the write-time re-check is the last of the re-runs, not the only one.
+  regenerable, so a checkpoint flip relocates them — and the run-start
+  sidecar beside them — to the outside-repo fallback immediately:
+  leaving them in-repo would keep full content copies of the audited
+  module committable through the verification phase, the longest window
+  of the run, and the fallback root is already resolved at that point,
+  so the write-time writer can follow the sidecar's relocated landing.
+  A flip at write time relocates the report to the outside-repo
+  fallback as before. The plan-time check keeps its rationale; the
+  checkpoint re-runs bound their exposure to the window before the
+  first re-check, and the write-time re-check is the last of the
+  re-runs, not the only one.
   Intermediates are deleted when the run ends; the report and its
   sidecar are the only durable artifacts — the alignment promise requires
   the sidecar to survive the run, so a flip that relocates the report
-  relocates the sidecar with it rather than deleting it, and deletes the
-  intermediates, leaving no module-derived content in a repository whose
-  ignore state no longer covers them.
+  lands it beside the sidecar — already relocated at a checkpoint flip,
+  or moved with the report when the flip comes only at write time —
+  rather than deleting it, and deletes the intermediates, leaving no
+  module-derived content in a repository whose ignore state no longer
+  covers them.
   The outside-repo fallback
   root resolves through the `Storage` hub — a new state-dir helper
   honoring the `QWEN_HOME` / `QWEN_RUNTIME_DIR` overrides the hub
@@ -1344,10 +1455,22 @@ The tiers, in detail:
   candidate list — which still carries verbatim `anchor` snippets, one
   of the three paths verbatim module content reaches that session
   (Roster) — and the unverified label and 10-finding cap below bound
-  what it does with them. The gate prices subject lines only —
+  what it does with them. The reader's return gets the same
+  substantive-return check the fan-out agents get (Output, the whiff
+  check): a bare return with no evidence of what it examined is a
+  whiff, relaunched once, and a second bare return records the read as
+  not completed in the walks record — the suppression directive the
+  Roster section names lands on exactly this shape, one reader with no
+  redundancy, at the tier that is vendored code's entry point by
+  design. The gate prices subject lines only —
   tests route to Agent 5 and low runs no Agent 5, so the topology
   gate's test arm does not apply at this tier — and the
-  empty-subject-set refusal applies here as at every tier. Low
+  empty-subject-set refusal applies here as at every tier. When
+  enumeration finds test files at low, the walks record names the test
+  corpus as not examined at this tier — the same shape as the
+  zero-test-files and fully-uncoverable-corpus skip reasons — so
+  "walks completed" cannot read as "tests audited" on a tier that never
+  opens a test file. Low
   confirms on the size gate alone: the priced
   estimate is the fan-out rate, which would overquote a single-context
   inline read by roughly an order of magnitude, and neither execution
@@ -1356,8 +1479,8 @@ The tiers, in detail:
   (removed behaviour — merged code has no deletions; the same absence that
   dropped agent 1b), with the surviving angles re-anchored from diff to
   module by the Roster section's mechanical change — B is the only outright
-  removal. The sweep lifts with the angles, re-anchored the same way: after
-  the angle passes, one further pass in the same context as a fresh
+  removal. The sweep re-expresses with the angles, re-anchored the same way:
+  after the angle passes, one further pass in the same context as a fresh
   reviewer handed the candidates so far, hunting only what is not already
   on the list — moved-or-extracted code that dropped a guard, second-tier
   footguns, setup/teardown asymmetry, flipped config defaults — up to 6
@@ -1366,7 +1489,7 @@ The tiers, in detail:
   `plan-diff` computes it from diff size. The D/E/F unlock ("one per 60
   subject lines", re-anchored from diff to module) saturates on arrival at
   any realistic module size, so low effectively always walks all five
-  surviving angles, and the lifted
+  surviving angles, and the re-expressed
   three-angle floor rebased to A and C — two angles at the floor, disclosed
   in the header, since a silent shrink would land on exactly the small
   triage targets the floor exists for — bites only on sub-60-line
@@ -1519,7 +1642,9 @@ capped, sold as triage — as above.)
   class — `dist/`, `build/` — excluded everywhere except under
   `vendor/`, where vendored packages' shipped code stays a subject;
   `vendor/` itself stays a subject), the submodule refusal (a gitlink
-  at or under the audited path refuses with a named reason), the vendor
+  at or under the audited path refuses with a named reason, and the
+  containing geometry — the audited path strictly inside a submodule —
+  refuses alike), the vendor
   override (test-shaped paths under `vendor/` classify as `test`), and
   the uncoverable-subject exclusion (over-cap lines, non-text files,
   symlinks and entries resolving outside the audited path — recorded
@@ -1542,16 +1667,22 @@ capped, sold as triage — as above.)
   fail its admission); the name-exclusion visibility (excluded directories
   recorded in the walks record, and the refusal names the exclusion when it
   empties the subject set); the reserved-prefix residue rule (a
-  reserved-prefix file is surfaced at plan time as residue from a prior
-  killed run and deleted only on user confirmation; otherwise it stays
-  a walked subject; both outcomes land in the walks record — no name
-  pattern removes a file from scope silently), the residue lifecycle
+  reserved-prefix file is surfaced at plan time as a prefix match whose
+  provenance the plan cannot verify — never as a provenance claim —
+  with keep-as-subject the explicit default and deletion offered only
+  on affirmative evidence, behind a user confirmation; both outcomes
+  land in the walks record — no name pattern removes a file from scope
+  silently), the residue lifecycle
   alongside it (the scratch sibling is deleted on probe success and on
   probe error; the reserved prefix does not match representative
   project test-glob shapes; a read-only audited path fails scratch
   creation and degrades the evidence tiers rather than erroring the
   run); the non-interactive refusal (a start without
-  an interactive terminal refuses); the local-only guard — asserted
+  an interactive terminal refuses); the confirmation gate itself (an
+  interactive decline launches no agents, performs no execution, writes
+  no artifacts; the accept path starts the run and records the two
+  execution opt-ins, taken or declined, in the header); the local-only
+  guard — asserted
   for each module-derived directory, `.qwen/audits/` and `.qwen/tmp/`:
   `plan-files`'s `git check-ignore` probe on a representative file
   path (not the directory) plus the index probe (a non-empty
@@ -1565,20 +1696,27 @@ capped, sold as triage — as above.)
   directory-only re-include leaves the representative file exposed, and
   an unconditional exclude entry fails where the full dir+`**`
   re-include matches the file (the case that routes to the outside-repo
-  fallback or negation removal) — the probe's freshness alongside them
+  fallback or negation removal), the exclude entry landing where
+  `git rev-parse --git-common-dir` resolves it — a plain checkout and a
+  linked worktree alike — with the all-worktrees scope disclosed — the
+  probe's freshness alongside them
   (the remedy re-run and the write-time re-check re-ask the same key in
   the same process and must receive a fresh answer, which is why the
   shared helper stays fresh-by-default and the review-side memo stays
-  caller-side), the flip's consequence (an ignore state that flips
-  between plan time and write time relocates the report and its sidecar
-  together to the outside-repo fallback, deletes the intermediates, and
-  leaves no module-derived path in the repo), the checkpoint re-runs
-  alongside it (the probe re-asked at the drift checkpoints — before
-  verification and before each high-tier round — a mid-run flip
-  relocating the intermediates immediately, their exposure bounded by
-  the window before the first re-check), and the vacuous pass
+  caller-side), the flip's consequence (a checkpoint flip relocates the
+  intermediates and the sidecar to the outside-repo fallback
+  immediately; a flip still open at write time lands the report beside
+  them, deletes the intermediates, and leaves no module-derived path in
+  the repo), the checkpoint re-runs alongside it (the probe re-asked at
+  the drift checkpoints — before verification and before each high-tier
+  round — a mid-run flip relocating the intermediates and the sidecar
+  immediately, their exposure bounded by the window before the first
+  re-check), and the vacuous pass
   outside any worktree; the
   drift predicates — the path-scoped diff, the subtree hash, the
+  per-file content hashes for the walked subject and test sets (the
+  walked files a worktree's index tracks, every walked file outside any
+  worktree), the
   audit-owned exclusion (the run's own scratch paths by identity, not
   prefix — a kept residue file carrying the reserved prefix stays
   under the stop predicate — and run-start capture after the opted-in
@@ -1586,19 +1724,25 @@ capped, sold as triage — as above.)
   `git ls-files --others` listing without `--exclude-standard` — the
   gitignored-untracked class stays listed — filtered to the
   `plan-files` enumeration, subjects and test corpus alike, so the
-  capture inherits the directory-name exclusions; names-only for
-  uncoverable subjects; a content copy for every remaining listed file
+  capture inherits the directory-name exclusions; a collapsed
+  trailing-`/` entry — a nested git repository — expanded against the
+  enumerated files under it; names-only for uncoverable subjects; a
+  content copy for every remaining listed file
   and for every registered deep-read caller outside the audited path;
   the captures unconditional at run start, not gated on a dirty/clean
   determination), the registered-caller arm (a caller's
   baseline content-hash taken at registration — the deep-read — and
   retaken at the checkpoints; drift in a deep-read out-of-path caller
   follows the same per-file stop/degrade predicate), the
-  per-file stop/degrade rule (drift in a walked file with anchored
-  findings stops the run; drift elsewhere marks the file uncoverable
-  and continues), the write-time re-check, and the content-hash
-  predicate outside any git worktree (run-start capture with the other
-  run-start captures, retaken at the checkpoints); roster selection per
+  per-file stop/degrade rule, content-keyed (a content-preserving HEAD
+  move — the run-start dirty state committed mid-run — fires the
+  git-state arms and is no drift; content change attributes drift per
+  file; drift in a walked file with anchored findings stops the run;
+  drift elsewhere marks the file uncoverable and continues), the
+  write-time re-check, and the content-hash predicate outside any git
+  worktree (run-start capture with the other run-start captures, retaken
+  at the checkpoints — covering the walked subject and test sets only,
+  uncoverable files name-recorded and never hashed); roster selection per
   tier — including the four misfire corners the re-expression names (1c
   present at medium and high despite the diff-only mode resolution; 6a
   present at medium despite the effort clause; 1b absent, because the
@@ -1607,15 +1751,23 @@ capped, sold as triage — as above.)
   and low-tier angle selection (angle B absent; the floor rebased to
   exactly A and C below 60 subject lines, with the header disclosure;
   the D/E/F unlock re-anchored to module size; the sweep flag computed
-  from module size);
+  from module size; the walks-record flag naming a found-but-unexamined
+  test corpus at low);
+  the 1c per-node depth quotas (deep-read stops at N = 10 callers per
+  export and N = 10 call sites per event, the remaining callers
+  registered by name, and the binding disclosed in the header — which
+  exports or events hit the cap and which callers were name-registered
+  only);
   write-time anchor resolution — synthetic findings whose snippets
   resolve uniquely, resolve ambiguously, and do not resolve against the
   audited fixtures and the registered deep-read caller fixtures,
   asserting the refuse/downgrade behavior at write time and the header
   record of refusals; the whiff machinery and dry-round predicate —
   whiff classification (a bare return vs an evidence-bearing receipt),
-  relaunch-once-then-record-not-audited on a second bare return, and the
-  stop rule (a twice-whiffed auditor makes its round not dry; stop only
+  relaunch-once-then-record-not-audited on a second bare return —
+  applied to the low tier's single reader as to the fan-out agents and
+  round auditors — and the stop rule (a twice-whiffed auditor makes its
+  round not dry; stop only
   on two consecutive dry rounds; the 5-round cap reported as a cap, not
   convergence); the output-marking rules — the unverified label on
   low-tier findings and on the findings of a run whose verification did
