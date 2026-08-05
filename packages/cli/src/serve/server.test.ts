@@ -12632,6 +12632,9 @@ describe('createServeApp', () => {
           nextCursor: 1,
           hasMore: true,
         });
+      // 50,001 rows would otherwise trigger 50,001 real readWorktreeSession
+      // sidecar reads; this test only exercises the truncation contract.
+      mockWt.readSidecar = () => Promise.resolve(null);
 
       try {
         const bridge = fakeBridge();
@@ -12651,6 +12654,7 @@ describe('createServeApp', () => {
         expect(res.body.truncated).toBe(true);
       } finally {
         listSessionsSpy.mockRestore();
+        mockWt.readSidecar = undefined;
       }
     });
 

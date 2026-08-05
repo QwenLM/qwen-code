@@ -15,6 +15,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { SessionUpdate } from '@agentclientprotocol/sdk';
 import type { TranscriptReplayStateV1 } from '@qwen-code/acp-bridge/transcriptReplay';
+import { projectAcpToolResultUpdate } from './acp-tool-result-text-projection.js';
 import { HistoryReplayer } from './history-replayer.js';
 import type { PendingReplayToolCall } from './history-replayer.js';
 import type { CumulativeUsage, SessionEmitterContext } from './types.js';
@@ -158,11 +159,12 @@ function replayContext(
   return {
     sessionId,
     sendUpdate: async (update) => {
+      const projectedUpdate = projectAcpToolResultUpdate(update);
       if (activeRecordId === null) {
-        updates.push(update);
+        updates.push(projectedUpdate);
         return;
       }
-      const record = update as unknown as Record<string, unknown>;
+      const record = projectedUpdate as unknown as Record<string, unknown>;
       const meta = isObjectRecord(record['_meta']) ? record['_meta'] : {};
       updates.push({
         ...record,
