@@ -2584,7 +2584,7 @@ describe('AppContainer State Management', () => {
     // Shared ESC key fixture for the Cancel Handler describe block.
     const escKey: Key = {
       name: 'escape',
-      sequence: '',
+      sequence: '\u001b',
       ctrl: false,
       meta: false,
       shift: false,
