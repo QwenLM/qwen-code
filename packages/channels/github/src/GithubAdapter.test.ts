@@ -485,35 +485,43 @@ describe('GithubChannel', () => {
         makeBridge(),
       );
       mockOctokit.paginate.mockResolvedValue([]);
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
 
-      await channel.connect();
+      try {
+        await channel.connect();
 
-      expect(mockExecFile).toHaveBeenCalledWith(
-        'gh',
-        ['auth', 'token', '--hostname', 'github.com'],
-        expect.objectContaining({
-          encoding: 'utf8',
-          maxBuffer: 64 * 1024,
-          timeout: 10_000,
-          windowsHide: true,
-          env: expect.objectContaining({
-            GH_CONFIG_DIR: '/tmp/test-gh-config',
+        expect(mockExecFile).toHaveBeenCalledWith(
+          'gh',
+          ['auth', 'token', '--hostname', 'github.com'],
+          expect.objectContaining({
+            encoding: 'utf8',
+            maxBuffer: 64 * 1024,
+            timeout: 10_000,
+            windowsHide: true,
+            env: expect.objectContaining({
+              GH_CONFIG_DIR: '/tmp/test-gh-config',
+            }),
           }),
-        }),
-        expect.any(Function),
-      );
-      const options = mockExecFile.mock.calls[0]?.[2] as {
-        env: NodeJS.ProcessEnv;
-      };
-      expect(options.env).not.toHaveProperty('GH_TOKEN');
-      expect(options.env).not.toHaveProperty('GITHUB_TOKEN');
-      expect(options.env).not.toHaveProperty('GH_ENTERPRISE_TOKEN');
-      expect(options.env).not.toHaveProperty('GITHUB_ENTERPRISE_TOKEN');
-      expect(options.env['PATH']).toBe(process.env['PATH']);
-      expect(mockOctokitConstructor).toHaveBeenCalledWith(
-        expect.objectContaining({ auth: 'local-gh-token' }),
-      );
-      channel.disconnect();
+          expect.any(Function),
+        );
+        const options = mockExecFile.mock.calls[0]?.[2] as {
+          env: NodeJS.ProcessEnv;
+        };
+        expect(options.env).not.toHaveProperty('GH_TOKEN');
+        expect(options.env).not.toHaveProperty('GITHUB_TOKEN');
+        expect(options.env).not.toHaveProperty('GH_ENTERPRISE_TOKEN');
+        expect(options.env).not.toHaveProperty('GITHUB_ENTERPRISE_TOKEN');
+        expect(options.env['PATH']).toBe(process.env['PATH']);
+        expect(mockOctokitConstructor).toHaveBeenCalledWith(
+          expect.objectContaining({ auth: 'local-gh-token' }),
+        );
+        expect(stderr).not.toHaveBeenCalledWith(
+          expect.stringContaining('local-gh-token'),
+        );
+      } finally {
+        channel.disconnect();
+        stderr.mockRestore();
+      }
     });
 
     it('uses the enterprise host for local gh authentication', async () => {
@@ -548,6 +556,9 @@ describe('GithubChannel', () => {
         );
         expect(stderr).toHaveBeenCalledWith(
           '[Channel:test-github] using local gh credential for ghe.example.com\n',
+        );
+        expect(stderr).not.toHaveBeenCalledWith(
+          expect.stringContaining('enterprise-token'),
         );
       } finally {
         channel.disconnect();

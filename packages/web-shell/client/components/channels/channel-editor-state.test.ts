@@ -307,6 +307,25 @@ describe('Descriptor-driven senderPolicy', () => {
     expect(request.secrets).toEqual({ token: { operation: 'clear' } });
   });
 
+  it('round-trips useLocalGh from an existing channel draft', () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'my-bot',
+      config: {
+        type: 'github',
+        useLocalGh: true,
+        groupPolicy: 'open',
+        senderPolicy: 'allowlist',
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(GITHUB, instance);
+    expect(draft.values.useLocalGh).toBe(true);
+    const request = buildChannelUpsertRequest(GITHUB, draft, 'rev-1', instance);
+    expect(request.config).toMatchObject({ useLocalGh: true });
+  });
+
   it('clears an existing optional secret from a blank replacement', () => {
     const instance: DaemonChannelInstanceSnapshot = {
       name: 'my-bot',
