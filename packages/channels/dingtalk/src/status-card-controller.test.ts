@@ -291,6 +291,48 @@ describe('StatusCardController', () => {
     );
   });
 
+  it('stops status refreshes after repeated metadata failures', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const onError = vi.fn();
+    const { client, controller } = createHarness({ onError });
+    controller.replace(segment(), target, 'first');
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.updateInstance).mockRejectedValue(
+      new Error('metadata down'),
+    );
+
+    await vi.advanceTimersByTimeAsync(3_000);
+
+    expect(client.updateInstance).toHaveBeenCalledTimes(3);
+    expect(onError).toHaveBeenCalledTimes(3);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(client.updateInstance).toHaveBeenCalledTimes(3);
+  });
+
+  it('resumes status refreshes once metadata updates recover', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const { client, controller } = createHarness();
+    controller.replace(segment(), target, 'first');
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.updateInstance).mockRejectedValue(
+      new Error('metadata down'),
+    );
+    await vi.advanceTimersByTimeAsync(3_000);
+    vi.mocked(client.updateInstance).mockResolvedValue(undefined);
+    vi.mocked(client.updateInstance).mockClear();
+
+    controller.replace(segment(), target, 'first more');
+    await vi.advanceTimersByTimeAsync(500);
+    expect(client.updateInstance).toHaveBeenCalledTimes(1);
+
+    vi.mocked(client.updateInstance).mockClear();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(client.updateInstance).toHaveBeenCalled();
+  });
+
   it('writes the exact elapsed second with a stopped terminal state', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);

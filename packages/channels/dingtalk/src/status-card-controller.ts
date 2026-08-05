@@ -11,6 +11,7 @@ import type { DingtalkCardCallbackResult } from './interactive-card-types.js';
 import { sanitizeStreamingImageMarkers } from './outbound-image.js';
 
 const FLUSH_INTERVAL_MS = 500;
+const MAX_CONSECUTIVE_STATUS_FAILURES = 3;
 const CONTENT_LIMIT = 20_000;
 const TRUNCATION_MARKER = '[Earlier output truncated]\n';
 
@@ -29,6 +30,7 @@ interface StatusRecord {
   ready: Promise<boolean>;
   terminal: boolean;
   streamFailed: boolean;
+  consecutiveStatusFailures: number;
   stopClaimed: boolean;
   forbiddenActors: Set<string>;
   lastWriteAt: number;
@@ -92,12 +94,34 @@ export class StatusCardController {
   /**
    * Whether a created, still-running status card is displaying content for
    * this segment. Awaits the in-flight creation so a boundary decision made
-   * while creation is pending does not race it.
+   * while creation is pending does not race it. A latched stream failure
+   * means the card can never show further content, so it is not live.
    */
   async isCardLive(segmentId: string): Promise<boolean> {
     const record = this.recordsBySegment.get(segmentId);
-    if (!record || record.terminal) return false;
+    if (!record || record.terminal || record.streamFailed) return false;
     return record.ready;
+  }
+
+  /**
+   * Drain any pending snapshot so callers can treat the card's current
+   * content as delivered. Returns false when there is no live record or the
+   * stream failed during the drain, so the caller can fall back instead of
+   * claiming delivery.
+   */
+  async flushPending(segmentId: string): Promise<boolean> {
+    const record = this.recordsBySegment.get(segmentId);
+    if (!record || record.terminal) return false;
+    while (!record.terminal && !record.streamFailed) {
+      if (record.flushTimer) {
+        clearTimeout(record.flushTimer);
+        record.flushTimer = undefined;
+      }
+      this.flush(record);
+      await record.writeChain;
+      if (record.pendingSnapshot === undefined) break;
+    }
+    return !record.terminal && !record.streamFailed;
   }
 
   private createRecord(
@@ -119,6 +143,7 @@ export class StatusCardController {
       ready: Promise.resolve(false),
       terminal: false,
       streamFailed: false,
+      consecutiveStatusFailures: 0,
       stopClaimed: false,
       forbiddenActors: new Set(),
       lastWriteAt: Date.now(),
@@ -137,8 +162,18 @@ export class StatusCardController {
     return record;
   }
 
-  complete(segmentId: string, text: string): Promise<boolean> {
-    return this.finalize(segmentId, boundContent(text), 'Completed', false);
+  complete(
+    segmentId: string,
+    text: string,
+    retainedContent?: (content: string) => string,
+  ): Promise<boolean> {
+    return this.finalize(
+      segmentId,
+      boundContent(text),
+      'Completed',
+      false,
+      retainedContent,
+    );
   }
 
   fail(segmentId: string, error: string): void {
@@ -289,6 +324,7 @@ export class StatusCardController {
     content: string,
     state: Exclude<StatusState, 'Running'>,
     isError: boolean,
+    retainedContent?: (content: string) => string,
   ): Promise<boolean> {
     const record = this.recordsBySegment.get(segmentId);
     if (!record || record.terminal) return false;
@@ -307,8 +343,11 @@ export class StatusCardController {
     try {
       if (!(await record.ready)) return false;
       await record.writeChain;
+      const retained =
+        content ||
+        (retainedContent ? retainedContent(record.content) : record.content);
       const finalContent = boundContent(
-        sanitizeStreamingImageMarkers(content || record.content),
+        sanitizeStreamingImageMarkers(retained),
       );
       await this.options.client.openOrUpdateStream({
         outTrackId: record.outTrackId,
@@ -379,7 +418,10 @@ export class StatusCardController {
         cardParamMap: { statusLine: status.text },
       });
       record.lastStatusSecond = status.second;
+      record.consecutiveStatusFailures = 0;
+      this.scheduleStatusRefresh(record);
     } catch (error) {
+      record.consecutiveStatusFailures++;
       this.options.onError?.('status card metadata', error);
     }
   }
@@ -395,7 +437,14 @@ export class StatusCardController {
         this.updateRunningStatus(record),
       );
       record.writeChain = refresh;
-      void refresh.finally(() => this.scheduleStatusRefresh(record));
+      void refresh.finally(() => {
+        if (
+          record.consecutiveStatusFailures >= MAX_CONSECUTIVE_STATUS_FAILURES
+        ) {
+          return;
+        }
+        this.scheduleStatusRefresh(record);
+      });
     }, delay);
   }
 }

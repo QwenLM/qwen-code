@@ -1630,12 +1630,13 @@ describe('DingtalkChannel status cards', () => {
         isGroup: true,
       },
       'session-1',
-      'message-2',
-      'test-dingtalk',
       { senderName: 'Alice' },
     );
     expect(startStatusCard).toHaveBeenCalledOnce();
     expect(startStatusCard).toHaveBeenCalledWith('run-2');
+    expect(startStatusCard.mock.invocationCallOrder[0]).toBeGreaterThan(
+      registerRun.mock.invocationCallOrder[0],
+    );
     expect(appendOutput).not.toHaveBeenCalled();
   });
 
@@ -3278,6 +3279,42 @@ describe('DingtalkChannel reply mentions', () => {
     expect(bodies[0].msgtype).toBe('markdown');
     expect(bodies[1]).toMatchObject({ msgtype: 'markdown' });
     expect(bodies[1]).not.toHaveProperty('at');
+  });
+
+  it('keeps the mention available to the final reply after a mid-run fallback', async () => {
+    const channel = createChannel({ atSender: true });
+    seedWebhook(channel, 'cid123');
+    seedMentionTarget(channel, 'm1', 'staff-1');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+
+    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1', 'm1');
+    await (
+      channel as unknown as {
+        sendFallbackReply(
+          chatId: string,
+          text: string,
+          sessionId: string,
+        ): Promise<void>;
+      }
+    ).sendFallbackReply('cid123', 'intermediate result', 'session-1');
+    await getResponseHook(channel)('cid123', 'final answer', 'session-1');
+
+    const bodies = fetchSpy.mock.calls.map(([, init]) =>
+      JSON.parse(String((init as RequestInit).body)),
+    );
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]).toMatchObject({
+      msgtype: 'markdown',
+      markdown: { text: '@staff-1\n\nintermediate result' },
+      at: { atUserIds: ['staff-1'] },
+    });
+    expect(bodies[1]).toMatchObject({
+      msgtype: 'markdown',
+      markdown: { text: '@staff-1\n\nfinal answer' },
+      at: { atUserIds: ['staff-1'] },
+    });
   });
 });
 

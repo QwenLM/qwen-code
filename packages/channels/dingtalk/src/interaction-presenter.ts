@@ -6,6 +6,7 @@ import type {
   SessionTarget,
   UserInputPresentationResult,
 } from '@qwen-code/channel-base';
+import { stripPartialImageMarker } from './outbound-image.js';
 import type { QuestionCardController } from './question-card-controller.js';
 import type { StatusCardController } from './status-card-controller.js';
 
@@ -68,8 +69,6 @@ export class DingtalkInteractionPresenter {
     ownerId: string,
     target: { chatId: string; isGroup: boolean },
     sessionId = '',
-    messageId?: string,
-    channelName = 'dingtalk',
     sender?: DingtalkCardSender,
   ): void {
     this.runs.set(runId, {
@@ -77,18 +76,17 @@ export class DingtalkInteractionPresenter {
       ownerId,
       target,
       baseContext: {
-        channelName,
+        channelName: 'dingtalk',
         sessionId,
         runId,
         segmentId: runId,
         owner: { kind: 'channel_user', id: ownerId },
         target: {
-          channelName,
+          channelName: 'dingtalk',
           chatId: target.chatId,
           senderId: ownerId,
           isGroup: target.isGroup,
         },
-        ...(messageId ? { messageId } : {}),
       },
       projectionChain: Promise.resolve(),
       ...(target.isGroup && sender ? formatSenderPrefixes(sender) : {}),
@@ -177,13 +175,14 @@ export class DingtalkInteractionPresenter {
         return statusCards !== undefined;
       }
       if (reason === 'response_boundary') {
-        if (
-          statusCards &&
-          (await statusCards.isCardLive(statusContext.segmentId))
-        ) {
-          return true;
-        }
-        const fallbackText = text || presentation.content;
+        const deliveredViaCard =
+          statusCards !== undefined &&
+          (await statusCards.isCardLive(statusContext.segmentId)) &&
+          (await statusCards.flushPending(statusContext.segmentId));
+        if (deliveredViaCard) return true;
+        const fallbackText = stripPartialImageMarker(
+          text || presentation.content,
+        );
         if (!fallbackText || !this.options.sendFallback) return false;
         await this.options.sendFallback(
           presentation.context.target.chatId,
@@ -201,7 +200,9 @@ export class DingtalkInteractionPresenter {
           ));
         run.statusContext = undefined;
         if (completed) return true;
-        const fallbackText = text || presentation.content;
+        const fallbackText = stripPartialImageMarker(
+          text || presentation.content,
+        );
         if (!fallbackText || !this.options.sendFallback) return false;
         await this.options.sendFallback(
           presentation.context.target.chatId,
@@ -218,7 +219,9 @@ export class DingtalkInteractionPresenter {
           this.withSenderPrefix(run, text || presentation.content),
         ));
       if (completed) return true;
-      const fallbackText = text || presentation.content;
+      const fallbackText = stripPartialImageMarker(
+        text || presentation.content,
+      );
       if (!fallbackText || !this.options.sendFallback) return false;
       await this.options.sendFallback(
         presentation.context.target.chatId,
@@ -300,7 +303,12 @@ export class DingtalkInteractionPresenter {
         // last boundary) leaves the eagerly created card running forever.
         const statusContext = run.statusContext;
         if (statusContext) {
-          await this.options.statusCards?.complete(statusContext.segmentId, '');
+          await this.options.statusCards?.complete(
+            statusContext.segmentId,
+            '',
+            (retained) =>
+              retained ? this.withSenderPrefix(run, retained) : retained,
+          );
         }
       }
     });

@@ -328,7 +328,7 @@ export class DingtalkChannel extends ChannelBase {
                   chatId: string,
                   text: string,
                   sessionId: string,
-                ) => this.sendResponseMessage(chatId, text, sessionId),
+                ) => this.sendFallbackReply(chatId, text, sessionId),
               }
             : {}),
         });
@@ -1137,8 +1137,6 @@ export class DingtalkChannel extends ChannelBase {
           event.owner.id,
           inboundOwner.target,
           event.sessionId,
-          event.messageId,
-          this.name,
           inboundOwner.sender,
         );
         this.interactionPresenter?.startStatusCard(event.runId);
@@ -1304,6 +1302,19 @@ export class DingtalkChannel extends ChannelBase {
       ? this.sessionMentionTargets.get(sessionId)
       : undefined;
     if (atUserId) this.sessionMentionTargets.delete(sessionId);
+    await this.sendReply(chatId, text, atUserId);
+  }
+
+  private async sendFallbackReply(
+    chatId: string,
+    text: string,
+    sessionId: string,
+  ): Promise<void> {
+    // Mid-run fallbacks must not consume the prompt's mention target: the
+    // final answer of the same run still needs it.
+    const atUserId = this.atSender
+      ? this.sessionMentionTargets.get(sessionId)
+      : undefined;
     await this.sendReply(chatId, text, atUserId);
   }
 
