@@ -129,6 +129,29 @@ test('rejects symbolic links even below allowed output paths', () => {
   });
 });
 
+test('fails closed on output names that are not valid UTF-8', () => {
+  withRepository((workspace) => {
+    mkdirSync(join(workspace, 'dist'), { recursive: true });
+    // A symlink whose NAME carries invalid UTF-8 bytes used to slip
+    // through: the lossy decode mangled the name just enough for lstat to
+    // miss it while the mangled name still satisfied the dist/ allowlist.
+    // The audit must fail closed like listProtectedCandidateChanges does.
+    symlinkSync(
+      '/etc/passwd',
+      Buffer.concat([
+        Buffer.from(join(workspace, 'dist', 'link-'), 'utf8'),
+        Buffer.from([0xff]),
+        Buffer.from('.txt', 'utf8'),
+      ]),
+    );
+
+    assert.throws(
+      () => listUnexpectedVerificationOutputs(workspace),
+      /not valid UTF-8/,
+    );
+  });
+});
+
 test('fails closed on a malformed sealed dependency manifest', () => {
   withRepository((workspace) => {
     writeFileSync(

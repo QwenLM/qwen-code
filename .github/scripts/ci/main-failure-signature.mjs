@@ -503,8 +503,8 @@ export function renderIssueBody({
   ].join('\n');
 }
 
-function publicIssueAnalysis(analysis) {
-  if (!isAutofixEligible(analysis) || !analysis.tests.length) return analysis;
+function publicIssueAnalysis(analysis, redact = isAutofixEligible(analysis)) {
+  if (!redact || !analysis.tests.length) return analysis;
   const tests = analysis.tests.map((test) => ({
     ...test,
     id: `case ${test.key}`,
@@ -603,8 +603,16 @@ export function runCli(argv) {
       runAttempt: options['run-attempt'],
       at: options.at,
     };
-    const issueAnalysis = publicIssueAnalysis(analysis);
-    const publicExistingBody = isAutofixEligible(analysis)
+    // A merge must keep the redaction state of the issue it updates: an
+    // ineligible recurrence merged into a machine-redacted eligible issue
+    // must not re-inject raw log-sourced identifiers under the redaction
+    // note (and void the recorded approval digest), so key the redaction
+    // on the existing body as well as the current run.
+    const redactMerge =
+      isAutofixEligible(analysis) ||
+      existingBody.includes(AUTOFIX_REDACTION_NOTE);
+    const issueAnalysis = publicIssueAnalysis(analysis, redactMerge);
+    const publicExistingBody = redactMerge
       ? publicMachineMarkers(existingBody, options.repository ?? '')
       : existingBody;
     process.stdout.write(
@@ -614,7 +622,7 @@ export function runCli(argv) {
           analysis: issueAnalysis,
           existingBody: publicExistingBody,
           occurrence,
-          autofixEligible: isAutofixEligible(analysis),
+          autofixEligible: redactMerge,
         }),
         searchMarkers: analysis.tests.length
           ? analysis.searchMarkers

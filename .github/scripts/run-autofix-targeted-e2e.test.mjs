@@ -432,6 +432,38 @@ test('rejects protected paths containing Git quoting characters', () => {
   });
 });
 
+test('rejects renaming a protected test to an unprotected name', () => {
+  withWorkspace((workspace) => {
+    // The protected test exists at the source commit; the candidate
+    // renames it away. With rename detection, git diff lists only the NEW
+    // (unprotected) path and the removal of the protected test vanishes
+    // from the scope check — --no-renames is what keeps it visible.
+    const protectedPath = join('packages', 'core', 'src', 'config.test.ts');
+    mkdirSync(join(workspace, 'packages', 'core', 'src'), { recursive: true });
+    writeFileSync(join(workspace, protectedPath), 'v1');
+    initRepository(workspace);
+    commit(workspace, 'source');
+    const sourceSha = headSha(workspace);
+
+    execFileSync(
+      'git',
+      ['mv', protectedPath, join('packages', 'core', 'src', 'renamed.ts')],
+      { cwd: workspace },
+    );
+    commit(workspace, 'rename the protected test away');
+
+    assert.throws(
+      () =>
+        validateCandidateScope(
+          { source: { headSha: sourceSha } },
+          sourceSha,
+          workspace,
+        ),
+      /Candidate changes trusted targeted E2E inputs: packages\/core\/src\/config\.test\.ts/,
+    );
+  });
+});
+
 function withRunMocks(workspace, sourceSha, run) {
   const home = mkdtempSync(join(tmpdir(), 'targeted-e2e-run-test-'));
   const reportRoot = mkdtempSync(join(tmpdir(), 'targeted-e2e-reports-'));

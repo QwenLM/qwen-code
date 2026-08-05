@@ -126,6 +126,21 @@ test('revalidates the referenced source run against immutable fields', () => {
     () => validateSourceRun({ ...run, head_sha: 'b'.repeat(40) }, metadata),
     /SHA mismatch/,
   );
+  // The workflow-identity checks are enforced against LIVE, re-fetched run
+  // data (not artifact-controlled content); dropping them would let a run
+  // that is not the E2E Tests push-to-main back an autofix claim.
+  assert.throws(
+    () => validateSourceRun({ ...run, name: 'Something Else' }, metadata),
+    /workflow mismatch/,
+  );
+  assert.throws(
+    () => validateSourceRun({ ...run, event: 'workflow_dispatch' }, metadata),
+    /event mismatch/,
+  );
+  assert.throws(
+    () => validateSourceRun({ ...run, head_branch: 'not-main' }, metadata),
+    /branch mismatch/,
+  );
 });
 
 test('chooses the latest trusted source recurrence, not the newest artifact', () => {
@@ -273,17 +288,23 @@ test('uses immutable producer identity to break equal-source ties', () => {
   }
 });
 
-test('stops enumerating producer runs older than the artifact retention window', () => {
+test('brackets the producer-run lookback on the artifact retention window', () => {
   const directory = mkdtempSync(join(tmpdir(), 'load-e2e-cutoff-test-'));
   const bin = join(directory, 'bin');
   const output = join(directory, 'metadata.json');
   const calls = join(directory, 'calls.log');
   const originalPath = process.env['PATH'];
+  // Bracket the real 30-day retention tightly: a run at 20 days MUST
+  // still be enumerated (its artifacts can be live), and a run at 40 days
+  // MUST NOT be. Wide brackets (2d/60d) passed with the lookback drifted
+  // anywhere between them — including BELOW retention, where live-artifact
+  // runs stop being enumerated and neutralize consumes approvals
+  // prematurely on 'No live artifact with prefix'.
   const recentIso = new Date(
-    Date.now() - 2 * 24 * 60 * 60 * 1000,
+    Date.now() - 20 * 24 * 60 * 60 * 1000,
   ).toISOString();
   const staleIso = new Date(
-    Date.now() - 60 * 24 * 60 * 60 * 1000,
+    Date.now() - 40 * 24 * 60 * 60 * 1000,
   ).toISOString();
   const encoded = Buffer.from(JSON.stringify(metadata)).toString('base64');
   try {

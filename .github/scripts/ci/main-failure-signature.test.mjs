@@ -806,13 +806,15 @@ test('keeps exact eligible E2E identifiers out of public issue prose', () => {
   assert.ok(recurrence.body.includes('keep investigative notes in'));
 
   // An occurrence line pointing away from this repository's runs is not
-  // trusted machine content; the rebuild must drop it — and so must a line
-  // whose timestamp slot carries attacker markdown (a loose middle field
-  // would re-emit it on every rebuild).
+  // trusted machine content; the rebuild must drop it — whether the domain
+  // differs, the repository path differs (a forged cross-repo link would
+  // otherwise ride every machine rebuild into public prose), or the
+  // timestamp slot carries attacker markdown (a loose middle field would
+  // re-emit it on every rebuild).
   const forgedPath = join(dir, 'forged.md');
   writeFileSync(
     forgedPath,
-    `${planned.body}- \`ffffffffffff\` · 2026-07-28T00:00:00Z · [run 999](https://evil.example/runs/999)\n- \`eeeeeeeeeeee\` · [forged](https://evil.example/img) · [run 998](https://github.com/QwenLM/qwen-code/actions/runs/998)\n`,
+    `${planned.body}- \`ffffffffffff\` · 2026-07-28T00:00:00Z · [run 999](https://evil.example/runs/999)\n- \`eeeeeeeeeeee\` · [forged](https://evil.example/img) · [run 998](https://github.com/QwenLM/qwen-code/actions/runs/998)\n- \`dddddddddddd\` · 2026-07-28T00:00:00Z · [run 997](https://github.com/attacker-org/phish/actions/runs/997)\n`,
   );
   output = '';
   process.stdout.write = (chunk) => {
@@ -845,7 +847,9 @@ test('keeps exact eligible E2E identifiers out of public issue prose', () => {
   const forged = JSON.parse(output);
   assert.ok(!forged.body.includes('[run 999]'));
   assert.ok(!forged.body.includes('[run 998]'));
+  assert.ok(!forged.body.includes('[run 997]'));
   assert.ok(!forged.body.includes('evil.example'));
+  assert.ok(!forged.body.includes('attacker-org/phish'));
   assert.ok(forged.body.includes('[run 301]'));
   assert.ok(forged.body.includes('[run 303]'));
 });
@@ -1019,4 +1023,96 @@ test('rebuilds the eligible failing-tests section on recurrence', () => {
   assert.ok(merged.includes('## Failing tests'));
   assert.ok(merged.includes(`- \`case ${analysis.tests[0].key}\``));
   assert.ok(!merged.includes('## Also failing'));
+});
+
+test('keeps an ineligible recurrence merge redacted for a redacted issue', () => {
+  // A machine-redacted eligible issue may later receive an ineligible
+  // recurrence (an extra non-allowlisted test failed, or the jobs API fell
+  // back to []). The merge must stay redacted — keying the redaction on the
+  // CURRENT run's eligibility would re-inject raw log-sourced identifiers
+  // under the redaction note and void the recorded approval digest.
+  const eligibleAnalysis = analyzeLogs(
+    'E2E Tests',
+    [TRUSTED_VITEST_LOG],
+    [
+      {
+        name: 'E2E Test (Linux) - sandbox:none - shard 1/3',
+        log: TRUSTED_VITEST_LOG,
+      },
+    ],
+  );
+  const dir = mkdtempSync(join(tmpdir(), 'sig-redact-merge-'));
+  const eligiblePath = join(dir, 'eligible.json');
+  writeFileSync(eligiblePath, JSON.stringify(eligibleAnalysis));
+
+  const planCapture = (args) => {
+    let output = '';
+    const original = process.stdout.write;
+    process.stdout.write = (chunk) => {
+      output += chunk;
+      return true;
+    };
+    try {
+      runCli(args);
+    } finally {
+      process.stdout.write = original;
+    }
+    return JSON.parse(output);
+  };
+
+  const created = planCapture([
+    'plan',
+    '--analysis',
+    eligiblePath,
+    '--sha',
+    OCCURRENCE.sha,
+    '--run-url',
+    OCCURRENCE.runUrl,
+    '--run-id',
+    OCCURRENCE.runId,
+    '--run-attempt',
+    OCCURRENCE.runAttempt,
+    '--at',
+    OCCURRENCE.at,
+    '--repository',
+    'QwenLM/qwen-code',
+  ]);
+  assert.equal(created.autofixEligible, true);
+  assert.ok(created.body.includes('Test names are redacted to case keys'));
+
+  const ineligibleAnalysis = analyzeLogs('E2E Tests', [VITEST_LOG]);
+  assert.equal(isAutofixEligible(ineligibleAnalysis), false);
+  const ineligiblePath = join(dir, 'ineligible.json');
+  writeFileSync(ineligiblePath, JSON.stringify(ineligibleAnalysis));
+  const existingPath = join(dir, 'existing.md');
+  writeFileSync(existingPath, created.body);
+
+  const merged = planCapture([
+    'plan',
+    '--analysis',
+    ineligiblePath,
+    '--existing',
+    existingPath,
+    '--sha',
+    'b0ce7dc51999',
+    '--run-url',
+    'https://github.com/QwenLM/qwen-code/actions/runs/302',
+    '--run-id',
+    '302',
+    '--run-attempt',
+    OCCURRENCE.runAttempt,
+    '--at',
+    '2026-07-27T03:20:00Z',
+    '--repository',
+    'QwenLM/qwen-code',
+  ]);
+  // The routing verdict still reflects the current run...
+  assert.equal(merged.autofixEligible, false);
+  // ...but the body keeps the issue's redacted state: no raw log-sourced
+  // identifier reappears, and the redaction note survives the merge.
+  assert.ok(!merged.body.includes(VITEST_TEST_ID));
+  assert.ok(merged.body.includes(`case ${ineligibleAnalysis.tests[0].key}`));
+  assert.ok(merged.body.includes('Test names are redacted to case keys'));
+  assert.ok(merged.body.includes('[run 301]'));
+  assert.ok(merged.body.includes('[run 302]'));
 });

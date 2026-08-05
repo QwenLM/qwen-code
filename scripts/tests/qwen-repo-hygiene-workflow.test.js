@@ -286,7 +286,12 @@ describe('repo-hygiene workflow structure', () => {
     );
     // The resolver reads NUL-delimited input; dropping -z makes its
     // while-read loop exit immediately and CHANGED_PKGS silently empty.
-    expect(verify).toMatch(/git diff --name-only -z origin\/main\.\.\.HEAD/);
+    // Bind -z to the RESOLVER pipe specifically: the step carries a second
+    // plain diff pipe (to check-autofix-contracts.sh) one line above, so
+    // an existence match would survive moving -z onto the wrong pipe.
+    expect(verify).toMatch(
+      /git diff --name-only -z origin\/main\.\.\.HEAD \\\n\s*\| docker run .*resolve-owning-packages\.sh/,
+    );
     // WORKDIR holds the PR title/body and findings.json the publish and issue
     // steps consume after verification, so it is mounted read-only: sandboxed
     // code must not rewrite the prose the bot later publishes. HOME and the npm

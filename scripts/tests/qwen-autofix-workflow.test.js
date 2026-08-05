@@ -276,6 +276,17 @@ describe('qwen-autofix workflow', () => {
     expect(findCandidateIssuesStep.replace(/\s+/g, ' ')).toContain(
       'select(((.assignees // []) | length > 0 and all(.login == $bot)) and ((.closedByPullRequestsReferences // []) | length == 0))',
     );
+    // The select's data contract: dropping assignees or
+    // closedByPullRequestsReferences from the --json list makes the select
+    // match nothing ((.assignees // []) yields []), silently returning zero
+    // candidates on every cron tick; without --arg bot, jq exits 3 ($bot
+    // undefined) and the warning path emits an empty list on every tick.
+    expect(findCandidateIssuesStep).toContain(
+      '--limit 30 --json number,title,body,labels,assignees,closedByPullRequestsReferences,createdAt,url,updatedAt',
+    );
+    expect(findCandidateIssuesStep).toContain(
+      'jq -c --arg bot "${AUTOFIX_BOT}"',
+    );
     // Collision-free negative pin: reintroducing no:assignee anywhere in the
     // excludes silently drops unassigned approved issues from every scan.
     expect(workflow).not.toContain('no:assignee');
@@ -1838,6 +1849,22 @@ describe('qwen-autofix workflow', () => {
     expect(run).toContain('--clear-groups');
     expect(run).toContain('--no-new-privs');
     expect(run).toContain('env -i');
+    // Pin the privilege DROP itself, not only its accessories: deleting
+    // the setpriv prefixes runs the candidate command as the runner user
+    // (passwordless sudo), which bypasses every seal this test pins while
+    // leaving all accessory substrings green.
+    expect(run).toContain("user='qwen-autofix-verify'");
+    expect(run).toContain('--reuid="${uid}"');
+    expect(run).toContain('--regid="${gid}"');
+    // Two invocations: the preflight proving the drop took, and the
+    // candidate command itself.
+    expect(
+      run.match(/sudo setpriv "\$\{setpriv_args\[@\]\}" env -i/g),
+    ).toHaveLength(2);
+    expect(run).toContain('[[ "$(id -u)" != "0" ]]');
+    expect(
+      run.indexOf('sudo setpriv "${setpriv_args[@]}" env -i'),
+    ).toBeLessThan(run.indexOf('command_pid=$!'));
     expect(run).toContain('sudo pgrep -u "${uid}"');
     expect(run).toContain('sudo pkill -TERM -u "${uid}"');
     expect(run).toContain('sudo pkill -KILL -u "${uid}"');
@@ -1909,6 +1936,21 @@ describe('qwen-autofix workflow', () => {
     // so a maintainer must re-apply it before autofix proceeds.
     expect(neutralizeE2eRequirementStep).toContain(
       '--remove-label "${AUTOFIX_APPROVED_LABEL}"',
+    );
+    // The approval must be consumed BEFORE the requirement label is
+    // removed: once the requirement label is gone, `Load targeted E2E
+    // requirement` reports required=false forever and the neutralize step
+    // never re-fires, so a transient approval-removal failure in the old
+    // order left the issue approved-but-not-required with no later run to
+    // repair it. In this order every partial state fails closed.
+    expect(
+      neutralizeE2eRequirementStep.indexOf(
+        '--remove-label "${AUTOFIX_APPROVED_LABEL}"',
+      ),
+    ).toBeLessThan(
+      neutralizeE2eRequirementStep.indexOf(
+        '--remove-label "${E2E_REQUIRED_LABEL}"',
+      ),
     );
     expect(neutralizeE2eRequirementStep).toContain('label was also consumed');
     expect(neutralizeE2eRequirementStep).toContain(
@@ -2049,6 +2091,16 @@ describe('qwen-autofix workflow', () => {
     );
     expect(issueAutofixPublishJob).toContain(
       '[[ "$(git rev-parse HEAD^{commit})" == "${TRUSTED_BASE_OID}" ]]',
+    );
+    // The manifest candidate-oid file and the bundle come from the same
+    // artifact (self-consistent by construction), so the verify job's
+    // output is the only INDEPENDENT witness that the restored commit is
+    // the exact verified candidate — pin both cross-checks.
+    expect(issueAutofixTargetedE2eJob).toContain(
+      '"${expected_oid}" != "${VERIFIED_CANDIDATE_OID}"',
+    );
+    expect(issueAutofixPublishJob).toContain(
+      '[[ "${expected_oid}" == "${VERIFIED_CANDIDATE_OID}" ]]',
     );
     expect(issueAutofixVerifyJob).toContain('"${candidate_dir}/base-oid"');
     expect(issueAutofixVerifyJob).toContain(
@@ -2432,6 +2484,16 @@ describe('qwen-autofix workflow', () => {
     expect(publishPrStep).toContain(
       'Autofix PR was published, but its claim ref could not be released.',
     );
+    // A transient failure of the final release must not orphan the claim
+    // ref: withdraw never fires after a successful publication and no
+    // sweep exists yet, so the release is retried before warning.
+    expect(publishPrStep).toContain('for attempt in 1 2 3; do');
+    expect(publishPrStep).toContain('sleep $((attempt * 5))');
+    expect(publishPrStep.indexOf('for attempt in 1 2 3; do')).toBeLessThan(
+      publishPrStep.indexOf(
+        'Autofix PR was published, but its claim ref could not be released.',
+      ),
+    );
   });
 
   it('distinguishes verified PR mismatch from API or schema uncertainty', () => {
@@ -2692,10 +2754,32 @@ printf '%s\\n' "\${status}"
     expect(recordApprovedIssueProseStep).toContain(
       "github.event_name == 'issues' && needs.route.outputs.do_issue == 'true'",
     );
-    expect(recordApprovedIssueProseStep).not.toContain(
-      'github.event.label.name',
+    // Recording stays ungated by the approval label event (the pair is
+    // often completed by a different event), but a stale marker — a bot
+    // marker whose digest matches the current prose no longer — proves a
+    // post-approval edit, and only re-applying the approval label may
+    // record a fresh marker; every other event fails closed.
+    expect(recordApprovedIssueProseStep).toContain(
+      "EVENT_ACTION: '${{ github.event.action }}'",
     );
-    expect(recordApprovedIssueProseStep).not.toContain('github.event.action');
+    expect(recordApprovedIssueProseStep).toContain(
+      "ISSUE_LABEL: '${{ github.event.label.name }}'",
+    );
+    expect(recordApprovedIssueProseStep).toContain(
+      'test("^<!-- autofix-approved-prose-sha256:[0-9a-f]{64} -->$")',
+    );
+    expect(recordApprovedIssueProseStep).toContain(
+      '[[ "${EVENT_ACTION}" != \'labeled\' || "${ISSUE_LABEL}" != "${AUTOFIX_APPROVED_LABEL}" ]]',
+    );
+    expect(recordApprovedIssueProseStep).toContain(
+      'prose changed after its recorded approval; re-apply',
+    );
+    // The marker record must be read fail-closed: a transient comments-API
+    // failure must not skip the stale-marker check and post a fresh marker
+    // for prose no maintainer approved.
+    expect(recordApprovedIssueProseStep).toContain(
+      'refusing to record an approval',
+    );
     // Follow-up trigger events for the same approval must not duplicate it.
     expect(recordApprovedIssueProseStep).toContain(
       'already carries its approval marker; nothing to record.',
@@ -5912,6 +5996,16 @@ printf '%s\\n' "\${status}"
     expect(readDecisionStep.replace(/\s+/g, ' ')).toContain(
       '(.labels // [] | map(.name)) as $labels | (($labels | index($ready)) and ($labels | index($approved)) and (($labels | index($routing)) == null)) and ((.assignees // []) | length > 0 and all(.login == $bot)) and ((.closedByPullRequestsReferences // []) | length == 0)',
     );
+    // The program's variable bindings are part of the gate: dropping
+    // --arg routing makes jq exit 3 ($routing undefined), `if ! jq -e`
+    // reads that as a failed re-validation, and scheduled autofix silently
+    // skips every issue forever.
+    expect(readDecisionStep).toContain(
+      '--arg routing "${AUTOFIX_ROUTING_LABEL}"',
+    );
+    expect(issueAutofixJob).toContain(
+      "AUTOFIX_ROUTING_LABEL: 'autofix/routing'",
+    );
     expect(readDecisionStep).toContain(
       '::warning::Failed to re-validate live labels for issue #${GO}; skipping due to API error',
     );
@@ -6014,6 +6108,12 @@ printf '%s\\n' "\${status}"
     // retryable instead of permanently skipping the issue.
     expect(issueAutofixJob).toContain('! -f "${WORKDIR}/agent-timeout"');
     expect(issueAutofixJob).toContain('! -f "${WORKDIR}/agent-api-error"');
+    // The decline is gated on a NON-EMPTY agent failure.md too: a
+    // sentinel-less failure (e.g. a missing AUTOFIX_OPENAI_API_KEY exits
+    // before run-agent.mjs writes failure.md) must not record a decline,
+    // or withdraw would add autofix/skip and permanently skip the issue
+    // for a transient/config failure.
+    expect(issueAutofixJob).toContain('-s "${WORKDIR}/failure.md"');
     // Byte-truncation can split a multi-byte UTF-8 sequence; the tail must
     // be dropped rather than emitting invalid UTF-8 into the issue comment.
     expect(issueAutofixJob).toContain(
@@ -6270,6 +6370,28 @@ printf '%s\\n' "\${status}"
     expect(agentResultIndex).toBeGreaterThan(-1);
     expect(verifyResultIndex).toBeGreaterThan(agentResultIndex);
     expect(targetedResultIndex).toBeGreaterThan(verifyResultIndex);
+    // ...and each condition must pair with ITS OWN message: transposing
+    // two DETAIL strings keeps every presence pin green while the withdraw
+    // comment blames a job that never ran, sending the responder to empty
+    // logs.
+    const agentDetail = withdrawClaimStep.indexOf(
+      'The agent stage failed before a candidate could be verified.',
+    );
+    const verifyDetail = withdrawClaimStep.indexOf(
+      'Deterministic verification of the candidate failed.',
+    );
+    const targetedDetail = withdrawClaimStep.indexOf(
+      'Isolated targeted E2E verification failed.',
+    );
+    const publishDetail = withdrawClaimStep.indexOf(
+      'The publication stage failed after verification.',
+    );
+    expect(agentDetail).toBeGreaterThan(agentResultIndex);
+    expect(agentDetail).toBeLessThan(verifyResultIndex);
+    expect(verifyDetail).toBeGreaterThan(verifyResultIndex);
+    expect(verifyDetail).toBeLessThan(targetedResultIndex);
+    expect(targetedDetail).toBeGreaterThan(targetedResultIndex);
+    expect(targetedDetail).toBeLessThan(publishDetail);
     expect(withdrawClaimStep).toContain(
       'Visible issue ownership was withdrawn, but the claim ref could not be released.',
     );

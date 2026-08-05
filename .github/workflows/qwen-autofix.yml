@@ -819,22 +819,44 @@ jobs:
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           ISSUE: '${{ needs.route.outputs.issue_number || github.event.issue.number }}'
+          EVENT_ACTION: '${{ github.event.action }}'
+          ISSUE_LABEL: '${{ github.event.label.name }}'
         run: |-
           approved_prose="$(jq -c '[.issue.title // "", .issue.body // ""]' \
             "${GITHUB_EVENT_PATH}")"
           approval_digest="$(printf '%s\n' "${approved_prose}" | sha256sum | cut -d ' ' -f 1)"
           [[ "${approval_digest}" =~ ^[0-9a-f]{64}$ ]]
           approval_marker="<!-- autofix-approved-prose-sha256:${approval_digest} -->"
+          if ! approval_comments="$(gh api --paginate \
+            "repos/${REPO}/issues/${ISSUE}/comments?per_page=100" --slurp)"; then
+            echo "::error::Failed to read the approval marker record for issue #${ISSUE}; refusing to record an approval."
+            exit 1
+          fi
           # Follow-up trigger events for the same approval (the second
           # label, the bot assignment, a late non-trigger label) re-enter
           # this step; skip re-recording an already-present marker.
-          if approval_comments="$(gh api --paginate \
-            "repos/${REPO}/issues/${ISSUE}/comments?per_page=100" --slurp)" &&
-            jq -e --arg bot "${AUTOFIX_BOT}" --arg marker "${approval_marker}" \
-              'any(.[].[]; .user.login == $bot and (.body // "") == $marker)' \
-              <<< "${approval_comments}" > /dev/null; then
+          if jq -e --arg bot "${AUTOFIX_BOT}" --arg marker "${approval_marker}" \
+            'any(.[].[]; .user.login == $bot and (.body // "") == $marker)' \
+            <<< "${approval_comments}" > /dev/null; then
             echo "Issue #${ISSUE} already carries its approval marker; nothing to record."
             exit 0
+          fi
+          # A bot marker for a DIFFERENT digest proves the prose was edited
+          # after its approval was recorded. Any later trusted issues event
+          # (a late non-trigger label, the second required label, a bot
+          # assignment) routes here; recording a fresh marker there would
+          # silently re-approve text no maintainer ever approved — issue
+          # authors can always edit their own prose, and nothing removes the
+          # approval label on edit. Only re-applying the approval label,
+          # which a maintainer performs against the visible current prose,
+          # grants a fresh approval. Fail closed on every other event.
+          if jq -e --arg bot "${AUTOFIX_BOT}" \
+            'any(.[].[]; .user.login == $bot and ((.body // "") | test("^<!-- autofix-approved-prose-sha256:[0-9a-f]{64} -->$")))' \
+            <<< "${approval_comments}" > /dev/null; then
+            if [[ "${EVENT_ACTION}" != 'labeled' || "${ISSUE_LABEL}" != "${AUTOFIX_APPROVED_LABEL}" ]]; then
+              echo "::error::Issue #${ISSUE} prose changed after its recorded approval; re-apply ${AUTOFIX_APPROVED_LABEL} to approve the current text."
+              exit 1
+            fi
           fi
           issue_json="$(gh issue view "${ISSUE}" --repo "${REPO}" \
             --json state,title,body,labels)"
@@ -1238,22 +1260,32 @@ jobs:
             echo "Issue #${ISSUE} no longer carries ${E2E_REQUIRED_LABEL}; nothing to neutralize."
             exit 0
           fi
-          if ! gh issue edit "${ISSUE}" --repo "${REPO}" \
-            --remove-label "${E2E_REQUIRED_LABEL}"; then
-            echo '::error::Failed to remove the expired targeted E2E requirement label.'
-            exit 1
-          fi
           # Removing only the requirement label would silently degrade this
           # issue to deterministic-gate-only publication — the pre-PR gate —
           # although it may be one the bot auto-approved without human
           # review. Consume the approval too so a maintainer must re-apply
           # it (re-recording the approval marker) before autofix proceeds.
+          # The approval is consumed FIRST so every partial state fails
+          # closed: once the requirement label is gone, `Load targeted E2E
+          # requirement` reports required=false forever and this step never
+          # re-fires, so a transient failure of the approval removal AFTER
+          # the requirement removal would leave the issue approved-but-not-
+          # required with no later run to repair it. In this order a failed
+          # approval removal keeps the requirement label in place so the
+          # next run re-enters this step, and a failed requirement removal
+          # leaves an unapproved, still-required issue the next run
+          # neutralizes again.
           if jq -e --arg label "${AUTOFIX_APPROVED_LABEL}" \
             '(.labels // []) | map(.name) | index($label) != null' \
             <<< "${live_issue_json}" > /dev/null &&
             ! gh issue edit "${ISSUE}" --repo "${REPO}" \
               --remove-label "${AUTOFIX_APPROVED_LABEL}"; then
             echo '::error::Failed to consume the approval for the expired targeted E2E requirement.'
+            exit 1
+          fi
+          if ! gh issue edit "${ISSUE}" --repo "${REPO}" \
+            --remove-label "${E2E_REQUIRED_LABEL}"; then
+            echo '::error::Failed to remove the expired targeted E2E requirement label.'
             exit 1
           fi
           gh issue comment "${ISSUE}" --repo "${REPO}" \
@@ -2340,9 +2372,21 @@ jobs:
             echo '::error::Could not confirm Autofix issue and PR bindings after PR creation; preserving the PR and branch for recovery.'
             exit 1
           fi
-          if ! remove_claim_ref; then
-            echo '::warning::Autofix PR was published, but its claim ref could not be released.'
-          fi
+          # A transient failure on this final call would orphan the claim
+          # ref: the step exits 0, withdraw does not fire after a
+          # successful publication, and no sweep exists yet — the orphaned
+          # ref then wedges every future claim of this issue (create-only
+          # lease rejected) until manual deletion. Retry with backoff.
+          for attempt in 1 2 3; do
+            if remove_claim_ref; then
+              break
+            fi
+            if [[ "${attempt}" == '3' ]]; then
+              echo '::warning::Autofix PR was published, but its claim ref could not be released.'
+              break
+            fi
+            sleep $((attempt * 5))
+          done
 
       - name: 'Withdraw claim on failure'
         if: |-

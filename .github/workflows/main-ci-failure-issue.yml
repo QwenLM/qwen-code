@@ -185,6 +185,9 @@ jobs:
           AUTOFIX_ELIGIBLE: '${{ needs.analyze.outputs.autofix_eligible }}'
           TARGETED_E2E: '${{ needs.analyze.outputs.targeted_e2e }}'
           SEARCH_MARKERS: '${{ needs.analyze.outputs.search_markers }}'
+          RECURRENCE_RUN_ID: '${{ github.event.workflow_run.id }}'
+          RECURRENCE_RUN_URL: '${{ github.event.workflow_run.html_url }}'
+          RECURRENCE_HEAD_SHA: '${{ github.event.workflow_run.head_sha }}'
           AUTOFIX_APPROVED_LABEL: 'autofix/approved'
           READY_FOR_AGENT_LABEL: 'status/ready-for-agent'
           AUTOFIX_ROUTING_LABEL: 'autofix/routing'
@@ -245,10 +248,38 @@ jobs:
           if [[ -n "${EXISTING_ISSUE}" ]]; then
             if [[ "${AUTOFIX_ELIGIBLE}" != 'true' ]]; then
               if [[ "${concurrent_reuse}" != 'true' ]]; then
-                gh issue edit "${EXISTING_ISSUE}" \
-                  --repo "${REPO}" \
-                  --body-file "${body_file}"
-                echo "Recorded this run on issue #${EXISTING_ISSUE}."
+                # An approved+routed issue body is machine-redacted and
+                # bound to a recorded approval digest; overwriting it with
+                # an ineligible merge would re-inject raw log-sourced
+                # identifiers under the redaction note and silently void
+                # the digest. Record the recurrence as a comment instead
+                # and leave the body unchanged. Fail closed: an unreadable
+                # label state also preserves the body.
+                preserve_body='false'
+                if ! existing_labels_json="$(gh issue view "${EXISTING_ISSUE}" \
+                  --repo "${REPO}" --json labels)"; then
+                  echo "::warning::Failed to read labels of issue #${EXISTING_ISSUE}; leaving its body unchanged."
+                  preserve_body='true'
+                elif jq -e \
+                  --arg ready "${READY_FOR_AGENT_LABEL}" \
+                  --arg approved "${AUTOFIX_APPROVED_LABEL}" '
+                    (.labels // []) | map(.name) |
+                    index($ready) != null and index($approved) != null
+                  ' <<< "${existing_labels_json}" > /dev/null; then
+                  preserve_body='true'
+                fi
+                if [[ "${preserve_body}" == 'true' ]]; then
+                  gh issue comment "${EXISTING_ISSUE}" \
+                    --repo "${REPO}" \
+                    --body "🤖 This failure recurred in [run ${RECURRENCE_RUN_ID}](${RECURRENCE_RUN_URL}) (commit \`${RECURRENCE_HEAD_SHA}\`) with a failure set that is not eligible for Autofix. Because this issue is approved for Autofix routing, its machine-redacted body and recorded approval were left unchanged instead of merging the ineligible recurrence; the linked source run shows the exact failing tests." \
+                    || echo "::warning::Failed to record the recurrence comment on issue #${EXISTING_ISSUE}."
+                  echo "Recorded this ineligible recurrence as a comment on issue #${EXISTING_ISSUE}; its approved body was left unchanged."
+                else
+                  gh issue edit "${EXISTING_ISSUE}" \
+                    --repo "${REPO}" \
+                    --body-file "${body_file}"
+                  echo "Recorded this run on issue #${EXISTING_ISSUE}."
+                fi
               fi
               echo "Issue #${EXISTING_ISSUE} already tracks this failure; leaving its routing unchanged."
               echo "number=${EXISTING_ISSUE}" >> "${GITHUB_OUTPUT}"

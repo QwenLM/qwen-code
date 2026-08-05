@@ -151,11 +151,18 @@ export function listUnexpectedVerificationOutputs(workspace = process.cwd()) {
     '.',
     ...dependencyPathspecs,
   ];
+  // Read raw bytes and round-trip validate like
+  // listProtectedCandidateChanges: a silent UTF-8 replacement would
+  // mangle a symlink name just enough for lstat to miss it while the
+  // mangled name still satisfies the output allowlist.
   const ignored = execFileSync('git', args, {
     cwd: workspace,
-    encoding: 'utf8',
     maxBuffer: MAX_GIT_OUTPUT_BYTES,
   });
+  const ignoredText = ignored.toString('utf8');
+  if (!Buffer.from(ignoredText).equals(ignored)) {
+    throw new Error('Verification output path is not valid UTF-8');
+  }
   const untracked = execFileSync(
     'git',
     [
@@ -169,11 +176,16 @@ export function listUnexpectedVerificationOutputs(workspace = process.cwd()) {
     ],
     {
       cwd: workspace,
-      encoding: 'utf8',
       maxBuffer: MAX_GIT_OUTPUT_BYTES,
     },
   );
-  return [...new Set(`${ignored}${untracked}`.split('\0').filter(Boolean))]
+  const untrackedText = untracked.toString('utf8');
+  if (!Buffer.from(untrackedText).equals(untracked)) {
+    throw new Error('Verification output path is not valid UTF-8');
+  }
+  return [
+    ...new Set(`${ignoredText}${untrackedText}`.split('\0').filter(Boolean)),
+  ]
     .filter(
       (file) =>
         isSymbolicLink(file, workspace) || !isAllowedVerificationOutput(file),

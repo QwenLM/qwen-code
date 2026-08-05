@@ -71,6 +71,10 @@ describe('main CI failure issue workflow', () => {
     );
     expect(workflow).toContain("if-no-files-found: 'error'");
     expect(workflow).not.toContain('overwrite: true');
+    // The loader assumes the producer artifact survives the 30-day
+    // retention; lowering it here would let a late claim find no live
+    // artifact, neutralizing the E2E requirement prematurely.
+    expect(workflow).toContain('retention-days: 30');
     expect(workflow).toContain(
       "steps.issue.outputs.route_allowed == 'true' && needs.analyze.outputs.autofix_eligible == 'true' && needs.analyze.outputs.targeted_e2e != 'null'",
     );
@@ -108,6 +112,15 @@ describe('main CI failure issue workflow', () => {
     expect(
       workflow.indexOf("- name: 'Upload targeted E2E metadata'"),
     ).toBeLessThan(requiredLabelIndex);
+    // The live-ownership re-check must precede the required-label add: a
+    // maintainer reclaim between the re-check and the route step exits
+    // with 'changed during publication', and labels from the aborted
+    // transaction must not already be applied to a human-owned issue.
+    const liveStateIndex = workflow.indexOf(
+      'live_state="$(gh issue view "${ISSUE}"',
+    );
+    expect(liveStateIndex).toBeGreaterThan(-1);
+    expect(liveStateIndex).toBeLessThan(requiredLabelIndex);
     const approvalMarkerIndex = workflow.indexOf(
       'autofix-approved-prose-sha256:${approval_digest}',
     );
@@ -245,6 +258,20 @@ describe('main CI failure issue workflow', () => {
       'actions/runs/${WORKFLOW_RUN_ID}/attempts/${WORKFLOW_RUN_ATTEMPT}/jobs',
     );
     expect(workflow).toContain('--run-attempt "${WORKFLOW_RUN_ATTEMPT}"');
+    // The references above are dead without their env bindings (one per
+    // analyze step): the jobs API path degenerates to `attempts//jobs`, gh
+    // fails, the [] fallback makes every recurrence ineligible, and the
+    // plan records an empty run attempt. Pin both bindings in both steps.
+    expect(
+      workflow.match(
+        /WORKFLOW_RUN_ID: '\$\{\{ github\.event\.workflow_run\.id \}\}'/g,
+      ),
+    ).toHaveLength(2);
+    expect(
+      workflow.match(
+        /WORKFLOW_RUN_ATTEMPT: '\$\{\{ github\.event\.workflow_run\.run_attempt \}\}'/g,
+      ),
+    ).toHaveLength(2);
     expect(workflow).toContain('actions/jobs/${job_id}/logs');
     expect(workflow).toContain('gh issue list');
     expect(workflow).toContain('--state all');
@@ -303,6 +330,56 @@ describe('main CI failure issue workflow', () => {
     expect(workflow).toContain(
       'if [[ "${concurrent_reuse}" != \'true\' ]]; then',
     );
+    // The guard must wrap THIS branch's body update, not only its copy in
+    // the eligible branch: a concurrent reuse must never be overwritten by
+    // a plan built without the first run's recorded occurrence.
+    const concurrentGuard = workflow.indexOf(
+      'if [[ "${concurrent_reuse}" != \'true\' ]]; then',
+      notEligible,
+    );
+    expect(concurrentGuard).toBeGreaterThan(notEligible);
+    expect(concurrentGuard).toBeLessThan(bodyUpdate);
+  });
+
+  it('preserves an approved issue body when an ineligible failure recurs', () => {
+    // An approved+routed issue body is machine-redacted and bound to a
+    // recorded approval digest; an ineligible recurrence must not
+    // overwrite it (that would re-inject raw log-sourced identifiers and
+    // silently void the digest) — the recurrence is recorded as a comment
+    // instead, and an unreadable label state fails closed the same way.
+    const notEligible = workflow.indexOf(
+      'if [[ "${AUTOFIX_ELIGIBLE}" != \'true\' ]]; then',
+    );
+    const routingUnchanged = workflow.indexOf(
+      'leaving its routing unchanged.',
+      notEligible,
+    );
+    const preserveBody = workflow.indexOf("preserve_body='false'");
+    expect(preserveBody).toBeGreaterThan(notEligible);
+    expect(preserveBody).toBeLessThan(routingUnchanged);
+    expect(workflow).toContain("preserve_body='true'");
+    expect(workflow).toContain(
+      "RECURRENCE_RUN_ID: '${{ github.event.workflow_run.id }}'",
+    );
+    expect(workflow).toContain(
+      "RECURRENCE_RUN_URL: '${{ github.event.workflow_run.html_url }}'",
+    );
+    expect(workflow).toContain(
+      "RECURRENCE_HEAD_SHA: '${{ github.event.workflow_run.head_sha }}'",
+    );
+    expect(workflow).toContain(
+      'Failed to read labels of issue #${EXISTING_ISSUE}; leaving its body unchanged.',
+    );
+    expect(workflow).toContain(
+      'its machine-redacted body and recorded approval were left unchanged',
+    );
+    // The body edit stays behind the preserve_body decision; it must not
+    // run ahead of it on the ineligible branch.
+    const bodyUpdate = workflow.indexOf(
+      '--body-file "${body_file}"',
+      notEligible,
+    );
+    expect(preserveBody).toBeLessThan(bodyUpdate);
   });
 
   it('uses a random heredoc delimiter for the multiline body output', () => {
