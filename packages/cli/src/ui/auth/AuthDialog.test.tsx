@@ -316,6 +316,40 @@ describe('AuthDialog', { timeout: 15000 }, () => {
     });
   });
 
+  it('does not migrate sibling endpoint built-ins as custom models', () => {
+    const kimi = findProviderById('kimi');
+    expect(kimi).toBeDefined();
+
+    const setup = getExistingProviderSetup(kimi!, {
+      [AuthType.USE_OPENAI]: [
+        {
+          id: 'k3-256k',
+          name: '[Kimi Code] k3-256k',
+          baseUrl: 'https://api.kimi.com/coding/v1',
+          envKey: 'KIMI_CODE_API_KEY',
+        },
+        {
+          id: 'kimi-k3',
+          name: '[Kimi API] kimi-k3',
+          baseUrl: 'https://api.moonshot.ai/v1',
+          envKey: 'MOONSHOT_API_KEY',
+        },
+        {
+          id: 'custom-kimi-model',
+          name: '[Kimi API] custom-kimi-model',
+          baseUrl: 'https://api.moonshot.ai/v1',
+          envKey: 'MOONSHOT_API_KEY',
+        },
+      ],
+    });
+
+    expect(setup).toEqual({
+      initialProtocol: AuthType.USE_OPENAI,
+      initialBaseUrl: 'https://api.kimi.com/coding/v1',
+      customModelIds: ['custom-kimi-model'],
+    });
+  });
+
   const wait = (ms = 50) => new Promise((resolve) => setTimeout(resolve, ms));
 
   let originalEnv: NodeJS.ProcessEnv;

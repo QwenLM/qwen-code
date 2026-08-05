@@ -165,9 +165,14 @@ export function getExistingProviderSetup(
 } {
   const saved = findExistingProviderModels(providerConfig, modelProviders);
   const initialBaseUrl = saved?.models[0]?.baseUrl;
-  const builtinIds = new Set(
-    getDefaultModelIds(providerConfig, initialBaseUrl),
-  );
+  const builtinIds = new Set([
+    ...getDefaultModelIds(providerConfig),
+    ...(Array.isArray(providerConfig.baseUrl)
+      ? providerConfig.baseUrl.flatMap((option) =>
+          getDefaultModelIds(providerConfig, option.url),
+        )
+      : []),
+  ]);
   return {
     initialProtocol: saved?.protocol,
     initialBaseUrl,
