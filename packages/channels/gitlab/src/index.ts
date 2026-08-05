@@ -37,6 +37,7 @@ export const plugin: ChannelPlugin = {
         options: [
           { value: 'open', label: 'Open' },
           { value: 'allowlist', label: 'Allowlist' },
+          { value: 'pairing', label: 'Pairing' },
           { value: 'disabled', label: 'Disabled' },
         ],
       },

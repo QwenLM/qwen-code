@@ -118,6 +118,10 @@ export class PairingStore {
           path.join(channelsRoot, `${channelName}-allowlist.json`),
           this.allowlistPath,
         ],
+        [
+          path.join(channelsRoot, `${channelName}-groups.json`),
+          this.groupAllowlistPath,
+        ],
       ];
       this.ensureDir();
       let allSucceeded = true;

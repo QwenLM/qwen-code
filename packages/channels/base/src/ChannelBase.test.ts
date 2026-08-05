@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type {
@@ -2882,6 +2882,66 @@ describe('ChannelBase', () => {
         .calls[0][1] as string;
       expect(prompt).not.toContain('rejected background');
       expect(prompt).toBe('[User 1] @bot current');
+    });
+
+    it('does not record ambient messages from unapproved pairing groups', async () => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const qwenHome = mkdtempSync(join(tmpdir(), 'qwen-group-pairing-'));
+      process.env['QWEN_HOME'] = qwenHome;
+      const historyPath = groupHistoryPath();
+      try {
+        const ch = createChannel(
+          {
+            groupPolicy: 'pairing',
+            senderPolicy: 'allowlist',
+            allowedUsers: [],
+            groupHistoryLimit: 10,
+            groups: { '*': { requireMention: true } },
+          },
+          { groupHistoryPath: historyPath },
+        );
+
+        await ch.handleInbound(
+          envelope({
+            isGroup: true,
+            chatId: 'group-1',
+            senderId: 'bob',
+            senderName: 'Bob',
+            text: 'pre-approval chatter',
+          }),
+        );
+
+        expect(existsSync(historyPath)).toBe(false);
+
+        const store = new PairingStore('test-chan', '/tmp');
+        const code = store.createGroupRequest(
+          'group-1',
+          'Release Team',
+          'alice',
+          'Alice',
+        );
+        store.approve(code!);
+
+        await ch.handleInbound(
+          envelope({
+            isGroup: true,
+            chatId: 'group-1',
+            isMentioned: true,
+            senderId: 'carol',
+            senderName: 'Carol',
+            text: '@bot summarize',
+          }),
+        );
+
+        const prompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+          .calls[0][1] as string;
+        expect(prompt).not.toContain('pre-approval chatter');
+        expect(prompt).toContain('[Carol] @bot summarize');
+      } finally {
+        if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+        else process.env['QWEN_HOME'] = previousQwenHome;
+        rmSync(qwenHome, { recursive: true, force: true });
+      }
     });
 
     it('uses group-level groupHistoryLimit over channel-level limit', async () => {
@@ -13498,6 +13558,10 @@ describe('ChannelBase', () => {
           id: 'group-1',
           name: 'Release Team',
         });
+        expect(request?.senderId).toBe('alice');
+        expect(request?.senderName).toBe('Alice');
+        expect(ch.sent[0]!.text).toContain(request!.code);
+        expect(ch.sent[0]!.text).toContain('pairing approve');
         store.approve(request!.code);
 
         await ch.handleInbound({
@@ -13528,6 +13592,155 @@ describe('ChannelBase', () => {
         expect(ch.sent).toEqual([]);
         expect(bridge.prompt).not.toHaveBeenCalled();
         expect(new PairingStore('test-chan', '/tmp').listPending()).toEqual([]);
+      } finally {
+        if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+        else process.env['QWEN_HOME'] = previousQwenHome;
+        rmSync(qwenHome, { recursive: true, force: true });
+      }
+    });
+
+    it('tells a group when the pending pairing cap is reached', async () => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const qwenHome = mkdtempSync(join(tmpdir(), 'qwen-group-pairing-'));
+      process.env['QWEN_HOME'] = qwenHome;
+      try {
+        const store = new PairingStore('test-chan', '/tmp');
+        for (let index = 1; index <= 3; index++) {
+          store.createGroupRequest(
+            `group-${index}`,
+            `Group ${index}`,
+            'alice',
+            'Alice',
+          );
+        }
+        const ch = createChannel({ groupPolicy: 'pairing' });
+
+        await ch.handleInbound(
+          envelope({
+            isGroup: true,
+            isMentioned: true,
+            chatId: 'group-4',
+            senderId: 'bob',
+            senderName: 'Bob',
+          }),
+        );
+
+        expect(ch.sent).toHaveLength(1);
+        expect(ch.sent[0]!.text).toContain('Too many pending pairing requests');
+        expect(bridge.prompt).not.toHaveBeenCalled();
+      } finally {
+        if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+        else process.env['QWEN_HOME'] = previousQwenHome;
+        rmSync(qwenHome, { recursive: true, force: true });
+      }
+    });
+
+    it('treats group pairing notification failures as preflight rejection', async () => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const qwenHome = mkdtempSync(join(tmpdir(), 'qwen-group-pairing-'));
+      process.env['QWEN_HOME'] = qwenHome;
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        class GroupPairingFailureChannel extends TestChannel {
+          override async sendMessage(): Promise<void> {
+            throw new Error('send failed');
+          }
+        }
+        const ch = new GroupPairingFailureChannel(
+          'test-chan',
+          defaultConfig({ groupPolicy: 'pairing' }),
+          bridge,
+        );
+
+        await expect(
+          ch.handleInbound(
+            envelope({ isGroup: true, isMentioned: true, chatId: 'group-1' }),
+          ),
+        ).resolves.toBeUndefined();
+
+        expect(bridge.prompt).not.toHaveBeenCalled();
+        expect(stderr).toHaveBeenCalledWith(
+          expect.stringContaining('group pairing notification failed'),
+        );
+      } finally {
+        stderr.mockRestore();
+        if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+        else process.env['QWEN_HOME'] = previousQwenHome;
+        rmSync(qwenHome, { recursive: true, force: true });
+      }
+    });
+
+    it('passes threadId through to group pairing notifications', async () => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const qwenHome = mkdtempSync(join(tmpdir(), 'qwen-group-pairing-'));
+      process.env['QWEN_HOME'] = qwenHome;
+      try {
+        const ch = createChannel({ groupPolicy: 'pairing' });
+        const threadMessages: Array<{
+          chatId: string;
+          threadId?: string;
+          text: string;
+        }> = [];
+        vi.spyOn(ch as never, 'sendThreadMessage').mockImplementation(
+          async (
+            chatId: string,
+            threadId: string | undefined,
+            text: string,
+          ) => {
+            threadMessages.push({ chatId, threadId, text });
+          },
+        );
+
+        await ch.handleInbound(
+          envelope({
+            isGroup: true,
+            isMentioned: true,
+            chatId: 'group-1',
+            threadId: 'issue:42',
+          }),
+        );
+
+        expect(threadMessages).toHaveLength(1);
+        expect(threadMessages[0]!.threadId).toBe('issue:42');
+        expect(threadMessages[0]!.text).toContain('requires approval');
+      } finally {
+        if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+        else process.env['QWEN_HOME'] = previousQwenHome;
+        rmSync(qwenHome, { recursive: true, force: true });
+      }
+    });
+
+    it('still gates DMs by senderPolicy when groupPolicy uses pairing', async () => {
+      const ch = createChannel({
+        groupPolicy: 'pairing',
+        senderPolicy: 'allowlist',
+        allowedUsers: [],
+      });
+
+      await ch.handleInbound(envelope({ senderId: 'stranger' }));
+
+      expect(bridge.prompt).not.toHaveBeenCalled();
+      expect(ch.sent).toEqual([]);
+    });
+
+    it('keeps DM pairing on the sender flow when groupPolicy uses pairing', async () => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const qwenHome = mkdtempSync(join(tmpdir(), 'qwen-group-pairing-'));
+      process.env['QWEN_HOME'] = qwenHome;
+      try {
+        const ch = createChannel({
+          groupPolicy: 'pairing',
+          senderPolicy: 'pairing',
+          allowedUsers: [],
+        });
+
+        await ch.handleInbound(envelope({ senderId: 'stranger' }));
+
+        expect(ch.sent).toHaveLength(1);
+        expect(ch.sent[0]!.text).toContain('pairing code');
+        expect(bridge.prompt).not.toHaveBeenCalled();
       } finally {
         if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
         else process.env['QWEN_HOME'] = previousQwenHome;
@@ -18592,6 +18805,52 @@ describe('ChannelBase', () => {
         else process.env['QWEN_HOME'] = previousQwenHome;
         rmSync(qwenHome, { recursive: true, force: true });
       }
+    });
+
+    it('rejects a stored DM job for an unlisted sender when groupPolicy uses pairing', async () => {
+      const disable = vi.fn().mockResolvedValue(true);
+      const ch = createChannel(
+        {
+          groupPolicy: 'pairing',
+          senderPolicy: 'allowlist',
+          allowedUsers: [],
+        },
+        {
+          loopController: {
+            create: vi.fn(),
+            listForTarget: vi.fn(),
+            disable,
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+
+      await expect(
+        ch.runLoopPrompt({
+          id: 'job-1',
+          channelName: 'test-chan',
+          target: {
+            channelName: 'test-chan',
+            senderId: 'bob',
+            chatId: 'chat1',
+            isGroup: false,
+          },
+          cwd: '/tmp',
+          cron: '0 9 * * *',
+          prompt: 'post summary',
+          label: 'daily summary',
+          recurring: true,
+          enabled: true,
+          createdBy: 'Bob',
+          createdAt: '2026-06-30T01:00:00.000Z',
+          consecutiveFailures: 0,
+          runCount: 0,
+        }),
+      ).rejects.toThrow('no longer authorized');
+
+      expect(disable).toHaveBeenCalledWith('job-1');
+      expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
     it('rejects stored threaded jobs unless the adapter supports the target', async () => {

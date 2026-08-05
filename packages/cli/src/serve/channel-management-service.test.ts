@@ -410,6 +410,12 @@ describe('createChannelManagementService', () => {
         'sender-1',
         'Alice',
       );
+      const secondCode = pairing.createGroupRequest(
+        'group-2',
+        'Platform Team',
+        'sender-2',
+        'Bob',
+      );
 
       await expect(service.pairingRequests('bot')).resolves.toEqual({
         requests: [
@@ -421,12 +427,30 @@ describe('createChannelManagementService', () => {
               name: 'Release Team',
             },
           }),
+          expect.objectContaining({
+            senderId: 'sender-2',
+            subject: {
+              type: 'group',
+              id: 'group-2',
+              name: 'Platform Team',
+            },
+          }),
         ],
       });
-      await service.approvePairing('bot', code!);
+      await expect(service.approvePairing('bot', code!)).resolves.toEqual({
+        approved: expect.objectContaining({
+          subject: { type: 'group', id: 'group-1', name: 'Release Team' },
+        }),
+        requests: [
+          expect.objectContaining({
+            subject: { type: 'group', id: 'group-2', name: 'Platform Team' },
+          }),
+        ],
+      });
+      await service.approvePairing('bot', secondCode!);
       await expect(service.pairingApprovals('bot')).resolves.toEqual({
         senderIds: [],
-        groupIds: ['group-1'],
+        groupIds: ['group-1', 'group-2'],
       });
       await expect(
         service.revokePairingApproval('bot', {
@@ -436,7 +460,15 @@ describe('createChannelManagementService', () => {
       ).resolves.toEqual({
         revoked: 'group-1',
         senderIds: [],
-        groupIds: [],
+        groupIds: ['group-2'],
+      });
+      await expect(
+        service.revokePairingApproval('bot', {
+          type: 'group',
+          id: 'group-1',
+        }),
+      ).rejects.toMatchObject({
+        code: 'channel_pairing_approval_not_found',
       });
     } finally {
       if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
@@ -900,28 +932,34 @@ describe('createChannelManagementService', () => {
   });
 
   it('rejects pairing operations on a channel without pairing mode', async () => {
-    const { service } = setup({
-      snapshot: settingsSnapshot({
-        channels: {
-          bot: { type: 'dingtalk', senderPolicy: 'open' },
-        },
-      }),
-    });
+    for (const config of [
+      { type: 'dingtalk', senderPolicy: 'open' },
+      { type: 'dingtalk', senderPolicy: 'open', groupPolicy: 'allowlist' },
+      { type: 'dingtalk', senderPolicy: 'open', groupPolicy: 'disabled' },
+    ]) {
+      const { service } = setup({
+        snapshot: settingsSnapshot({
+          channels: {
+            bot: config,
+          },
+        }),
+      });
 
-    await expect(service.pairingRequests('bot')).rejects.toMatchObject({
-      code: 'channel_pairing_not_enabled',
-    });
-    await expect(
-      service.approvePairing('bot', 'ABCDEFGH'),
-    ).rejects.toMatchObject({ code: 'channel_pairing_not_enabled' });
-    await expect(service.pairingApprovals('bot')).rejects.toMatchObject({
-      code: 'channel_pairing_not_enabled',
-    });
-    await expect(
-      service.revokePairingApproval('bot', {
-        type: 'user',
-        id: 'sender-1',
-      }),
-    ).rejects.toMatchObject({ code: 'channel_pairing_not_enabled' });
+      await expect(service.pairingRequests('bot')).rejects.toMatchObject({
+        code: 'channel_pairing_not_enabled',
+      });
+      await expect(
+        service.approvePairing('bot', 'ABCDEFGH'),
+      ).rejects.toMatchObject({ code: 'channel_pairing_not_enabled' });
+      await expect(service.pairingApprovals('bot')).rejects.toMatchObject({
+        code: 'channel_pairing_not_enabled',
+      });
+      await expect(
+        service.revokePairingApproval('bot', {
+          type: 'user',
+          id: 'sender-1',
+        }),
+      ).rejects.toMatchObject({ code: 'channel_pairing_not_enabled' });
+    }
   });
 });

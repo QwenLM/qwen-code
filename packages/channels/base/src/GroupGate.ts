@@ -28,14 +28,19 @@ export class GroupGate {
   }
 
   /**
-   * Full group check: policy + allowlist + mention gating.
+   * Full group check: policy + allowlist + pairing + mention gating.
    * Evaluation order:
    *   1. groupPolicy (disabled → drop)
    *   2. group allowlist (allowlist mode, no match → drop)
-   *   3. mention gating (requireMention + not mentioned → drop silently)
+   *   3. group pairing (pairing mode, group not approved → drop; an explicit
+   *      mention or reply creates or returns a pending pairing request unless
+   *      `options.createPairingRequest` is false)
+   *   4. mention gating (requireMention + not mentioned → drop silently)
    *
-   * Mention gating runs before sender gate so that unmentioned messages
-   * in groups don't trigger pairing flows.
+   * Under the pairing policy the pairing step itself drops ambient
+   * (unmentioned, non-reply) messages before any request is created. Mention
+   * gating then runs before the sender gate so unmentioned messages in
+   * approved groups don't trigger sender pairing flows.
    */
   check(
     envelope: Envelope,

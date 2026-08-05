@@ -85,6 +85,34 @@ describe('PairingStore workspace scoping (#7017)', () => {
     expect(store.isApproved('sender-1')).toBe(false);
   });
 
+  it('reuses one pending request per group regardless of the initiating sender', () => {
+    const store = new PairingStore('support-bot', workspaceA);
+
+    const first = store.createGroupRequest(
+      'group-1',
+      'Release Team',
+      'alice',
+      'Alice',
+    );
+    const second = store.createGroupRequest(
+      'group-1',
+      'Release Team',
+      'bob',
+      'Bob',
+    );
+
+    expect(first).toBeTruthy();
+    expect(second).toBe(first);
+    expect(store.listPending()).toEqual([
+      expect.objectContaining({
+        senderId: 'alice',
+        senderName: 'Alice',
+        subject: { type: 'group', id: 'group-1', name: 'Release Team' },
+        code: first,
+      }),
+    ]);
+  });
+
   it('isolates group approvals and revocation by workspace', () => {
     const storeA = new PairingStore('support-bot', workspaceA);
     const storeB = new PairingStore('support-bot', workspaceB);
@@ -211,6 +239,17 @@ describe('PairingStore workspace scoping (#7017)', () => {
         ]),
       );
     };
+
+    it('copies the legacy group allowlist into the scoped store', () => {
+      fs.mkdirSync(channelsRoot(), { recursive: true });
+      fs.writeFileSync(
+        path.join(channelsRoot(), 'support-bot-groups.json'),
+        JSON.stringify(['legacy-group']),
+      );
+      const store = new PairingStore('support-bot', workspaceA);
+
+      expect(store.isGroupApproved('legacy-group')).toBe(true);
+    });
 
     it('copies legacy global state into the scoped store once', () => {
       seedLegacy();

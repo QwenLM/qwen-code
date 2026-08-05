@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, expectTypeOf, vi, afterEach } from 'vitest';
 import {
   DaemonClient,
   DaemonHttpError,
@@ -22,6 +22,7 @@ import {
 } from '../../src/daemon/types.js';
 import type {
   DaemonCapabilities,
+  DaemonChannelPairingRevocationRequest,
   DaemonSessionContextStatus,
   DaemonSessionLspStatus,
   DaemonSessionOrganizationResult,
@@ -7439,6 +7440,19 @@ describe('DaemonClient', () => {
       });
 
       expect(JSON.parse(calls[0]!.body!)).toEqual({ groupId: 'group-1' });
+    });
+
+    it('pins the revocation request union at the type level', () => {
+      expectTypeOf<{
+        senderId: string;
+      }>().toMatchTypeOf<DaemonChannelPairingRevocationRequest>();
+      expectTypeOf<{
+        groupId: string;
+      }>().toMatchTypeOf<DaemonChannelPairingRevocationRequest>();
+      expectTypeOf<{
+        senderId: string;
+        groupId: string;
+      }>().not.toMatchTypeOf<DaemonChannelPairingRevocationRequest>();
     });
   });
 });

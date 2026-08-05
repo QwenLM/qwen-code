@@ -298,12 +298,32 @@ describe('workspace Channel management routes', () => {
 
     expect(pairingRequests.status).toBe(200);
     expect(pairingRequests.headers['cache-control']).toBe('no-store');
+    expect(pairingRequests.body).toEqual({ requests: [] });
     expect(approval.status).toBe(200);
     expect(approval.headers['cache-control']).toBe('no-store');
+    expect(approval.body).toEqual({
+      approved: {
+        senderId: 'sender-1',
+        senderName: 'Alice',
+        subject: { type: 'user', id: 'sender-1', name: 'Alice' },
+        code: 'ABCDEFGH',
+        createdAt: 1,
+      },
+      requests: [],
+    });
     expect(approvals.status).toBe(200);
     expect(approvals.headers['cache-control']).toBe('no-store');
+    expect(approvals.body).toEqual({
+      senderIds: ['sender-1'],
+      groupIds: ['group-1'],
+    });
     expect(revocation.status).toBe(200);
     expect(revocation.headers['cache-control']).toBe('no-store');
+    expect(revocation.body).toEqual({
+      revoked: 'sender-1',
+      senderIds: [],
+      groupIds: [],
+    });
     expect(secondaryService.pairingRequests).toHaveBeenCalledWith('bot');
     expect(secondaryService.approvePairing).toHaveBeenCalledWith(
       'bot',
@@ -334,6 +354,11 @@ describe('workspace Channel management routes', () => {
     );
 
     expect(response.status).toBe(200);
+    expect(response.body).toEqual({
+      revoked: 'group-1',
+      senderIds: [],
+      groupIds: [],
+    });
     expect(secondaryService.revokePairingApproval).toHaveBeenCalledWith('bot', {
       type: 'group',
       id: 'group-1',
@@ -485,6 +510,9 @@ describe('workspace Channel management routes', () => {
         .delete('/workspace/channels/bot/pairing-approvals')
         .send({ senderId: 'sender-1', groupId: 'group-1' }),
     );
+    const missingSubject = await auth(
+      request(app).delete('/workspace/channels/bot/pairing-approvals').send({}),
+    );
 
     expect(invalidName.body.code).toBe('invalid_channel_instance_name');
     expect(unsafeName.status).toBe(400);
@@ -497,6 +525,8 @@ describe('workspace Channel management routes', () => {
     expect(invalidSenderId.body.code).toBe('invalid_channel_pairing_sender_id');
     expect(invalidGroupId.body.code).toBe('invalid_channel_pairing_group_id');
     expect(ambiguousSubject.body.code).toBe('invalid_channel_pairing_subject');
+    expect(missingSubject.status).toBe(400);
+    expect(missingSubject.body.code).toBe('invalid_channel_pairing_subject');
     expect(primaryService.upsert).toHaveBeenCalledOnce();
     expect(primaryService.start).not.toHaveBeenCalled();
     expect(primaryService.approvePairing).not.toHaveBeenCalled();

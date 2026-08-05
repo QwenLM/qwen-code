@@ -281,9 +281,9 @@ constructor(policy: SenderPolicy, allowedUsers?: string[], pairingStore?: Pairin
 constructor(policy?: GroupPolicy, groups?: Record<string, GroupConfig>, pairingStore?: PairingStore)
 ```
 
-| Method            | Description                                                    |
-| ----------------- | -------------------------------------------------------------- |
-| `check(envelope)` | Returns the group policy decision and an optional pairing code |
+| Method                      | Description                                                                                                                                                                                                                          |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `check(envelope, options?)` | Returns the group policy decision and an optional pairing code. Under `pairing`, a mention/reply from an unapproved group creates (or reuses) a pending pairing request; pass `{ createPairingRequest: false }` for read-only probes |
 
 **Policy behavior:**
 
