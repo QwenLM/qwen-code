@@ -207,34 +207,34 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     return;
   }
   const outBase = resolve(args.out);
-  // resolve('.') and resolve('./') are the cwd itself — the same shape the
-  // empty guard above refuses — and any existing directory sails through:
-  // artifacts would land as <dir>.ans/.png/.json NEXT TO the directory,
-  // silently clobbering whatever holds those names. Refuse before the
-  // stale-artifact clear so this refusal stays side-effect-free too.
-  let outIsDirectory = false;
-  try {
-    outIsDirectory = statSync(outBase).isDirectory();
-  } catch {
-    // A nonexistent out base is the normal shape.
-  }
-  if (outIsDirectory) {
-    refuse(`--out must not name an existing directory: ${outBase}`);
-    return;
-  }
   const ansPath = `${outBase}.ans`;
   const pngPath = `${outBase}.png`;
   const manifestPath = `${outBase}.json`;
   const holderReadyPath = `${outBase}.holder-ready`;
   try {
-    // Clears FIRST — before even mkdir: under fd exhaustion (EMFILE,
-    // measured on macOS) mkdirSync itself can throw, and the refusal must
-    // still leave no stale evidence; unlink needs no descriptor. Every exit
-    // path must leave THIS run's artifacts or nothing.
-    rmSync(ansPath, { force: true });
-    rmSync(pngPath, { force: true });
-    rmSync(manifestPath, { force: true });
-    rmSync(holderReadyPath, { force: true });
+    // Clears FIRST — before even mkdir and before the directory-shaped
+    // --out refusal below: under fd exhaustion (EMFILE, measured on macOS)
+    // mkdirSync itself can throw, and EVERY nameable refusal must leave no
+    // stale evidence ("only an --out we cannot even name refuses without
+    // clearing"). unlink needs no descriptor, and recursive matches the
+    // later failure cleanups — an externally-created DIRECTORY at an
+    // artifact path made a plain rmSync throw EISDIR mid-clear (measured),
+    // aborting the clear with the stale evidence still there.
+    // Plain unlink first (no descriptor needed — survives EMFILE), the
+    // recursive form only as the EISDIR fallback for an externally-created
+    // DIRECTORY at an artifact path (recursive rm opens the dir, which
+    // needs a descriptor and would itself die under fd exhaustion).
+    const clearArtifact = (path: string): void => {
+      try {
+        rmSync(path, { force: true });
+      } catch {
+        rmSync(path, { recursive: true, force: true });
+      }
+    };
+    clearArtifact(ansPath);
+    clearArtifact(pngPath);
+    clearArtifact(manifestPath);
+    clearArtifact(holderReadyPath);
     mkdirSync(dirname(outBase), { recursive: true });
     // Probe the actual write target BEFORE any process starts: mkdirSync
     // with `recursive` does no permission check on a directory that already
@@ -251,6 +251,21 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     refuse(
       `--out is not writable: ${e instanceof Error ? e.message : String(e)}`,
     );
+    return;
+  }
+  // resolve('.') and resolve('./') are the cwd itself — the same shape the
+  // empty guard above refuses — and any existing directory sails through:
+  // artifacts would land as <dir>.ans/.png/.json NEXT TO the directory,
+  // silently clobbering whatever holds those names. AFTER the clears, like
+  // every other nameable refusal.
+  let outIsDirectory = false;
+  try {
+    outIsDirectory = statSync(outBase).isDirectory();
+  } catch {
+    // A nonexistent out base is the normal shape.
+  }
+  if (outIsDirectory) {
+    refuse(`--out must not name an existing directory: ${outBase}`);
     return;
   }
   // Remaining shape guards: yargs parses a DUPLICATED string option into an
@@ -483,6 +498,17 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   const releaseSignals = (): void => {
     for (const s of REAP_SIGNALS) process.removeListener(s, onSignal);
   };
+  // The success tail after the reap is synchronous (freeze render up to its
+  // belt, two writes): a signal landing there is QUEUED, and removing the
+  // listeners before the loop turns swallows it — the process then exits 0
+  // as if nothing happened (measured on the bundled runtime: SIGTERM during
+  // a fake render → exit 0, handler never ran). One turn of the loop lets
+  // the queued signal dispatch to the handler — which reaps (a no-op by
+  // then) and re-raises — BEFORE the listeners go away.
+  const drainSignalsThenRelease = async (): Promise<void> => {
+    await sleep(0);
+    releaseSignals();
+  };
   function onSignal(sig: NodeJS.Signals): void {
     reap();
     releaseSignals();
@@ -605,14 +631,15 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // where dispatch works. On the success path they stay installed through
     // the freeze render below, which can block up to its belt.
     reap();
+    // The sentinel is plumbing, not evidence — removed on EVERY exit path
+    // (a mid-capture refusal after the holder wrote it used to leave it
+    // stranded next to where evidence should be, measured).
+    try {
+      rmSync(holderReadyPath, { force: true });
+    } catch {
+      // Litter is cosmetic.
+    }
     if (captureFailed) releaseSignals();
-  }
-
-  // The sentinel is plumbing, not evidence — never left next to artifacts.
-  try {
-    rmSync(holderReadyPath, { force: true });
-  } catch {
-    // Litter is cosmetic.
   }
 
   try {
@@ -628,7 +655,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     } catch {
       // The refusal reason below is the primary signal either way.
     }
-    releaseSignals();
+    await drainSignalsThenRelease();
     refuse(
       `cannot write capture output: ${e instanceof Error ? e.message : String(e)}`,
     );
@@ -778,13 +805,13 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     } catch {
       // The refusal reason below is the primary signal either way.
     }
-    releaseSignals();
+    await drainSignalsThenRelease();
     refuse(
       `cannot write capture manifest: ${e instanceof Error ? e.message : String(e)}`,
     );
     return;
   }
-  releaseSignals();
+  await drainSignalsThenRelease();
 
   writeStderrLine(
     `capture-tui: ${manifest.evidence} at ${args.cols}x${args.rows} ` +

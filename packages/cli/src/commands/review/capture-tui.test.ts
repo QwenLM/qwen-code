@@ -222,7 +222,10 @@ describe('capture-tui without tmux (probe seam)', () => {
     // The clear must precede every gate, not just the mid-capture ones: a
     // refactor moving it below the validation chain leaves the previous
     // run's png-claiming manifest next to a typo'd-flag refusal.
-    probes.tmux = () => undefined;
+    // A REAL-looking probe so the run reaches the --until compile gate its
+    // title claims (with the probe undefined, the no-tmux refusal fired
+    // first and every later gate stayed unpinned for the clear).
+    probes.tmux = () => 'tmux 3.9';
     const dir = mkdtempSync(join(tmpdir(), 'capture-tui-staleearly-'));
     try {
       writeFileSync(join(dir, 'cap.ans'), 'old run');
@@ -481,9 +484,15 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(manifest.keysSent).toBeUndefined();
     expect(manifest.settleMs).toBeUndefined();
     if (hasFreeze) {
-      expect(manifest.evidence).toBe('png');
-      expect(manifest.pngPath).toBe(join(dir, 'cap.png'));
-      expect(existsSync(join(dir, 'cap.png'))).toBe(true);
+      // A present-but-broken freeze (--help exits 0, render dies) degrades
+      // to ans-only BY CONTRACT — that is a designed rung, not a failure.
+      expect(['png', 'ans-only']).toContain(manifest.evidence);
+      if (manifest.evidence === 'png') {
+        expect(manifest.pngPath).toBe(join(dir, 'cap.png'));
+        expect(existsSync(join(dir, 'cap.png'))).toBe(true);
+      } else {
+        expect(manifest.degradedBecause).toContain('freeze');
+      }
     } else {
       expect(manifest.degradedBecause).toContain('freeze');
     }
@@ -665,6 +674,10 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     }
     expect(process.exitCode).toBe(3);
     expect(stderr).toContain('tmux failed mid-capture');
+    // The DIAGNOSTIC rides the reason (stderr tail first): with the ||
+    // operands swapped the reason degrades to the failed argv line and the
+    // real cause is lost to the consumer.
+    expect(stderr).toContain('fake tmux: refusing');
     // The start that threw created no server: reap() must stay silent — a
     // kill-server warning here would send an operator hunting a socket that
     // was never created.
@@ -730,9 +743,15 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     mkdirSync(binDir, { recursive: true });
     writeFileSync(
       join(binDir, 'tmux'),
-      `#!/bin/sh\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\nfor a in "$@"; do [ "$a" = "kill-server" ] && { echo "wedged" >&2; exit 1; }; done\nfor a in "$@"; do [ "$a" = "new-session" ] && : > "${join(dir, 'cap.holder-ready')}"; done\necho ""\nexit 0\n`,
+      `#!/bin/sh\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\nfor a in "$@"; do [ "$a" = "kill-server" ] && { sleep 5; echo "wedged" >&2; exit 1; }; done\nfor a in "$@"; do [ "$a" = "new-session" ] && : > "${join(dir, 'cap.holder-ready')}"; done\necho ""\nexit 0\n`,
       { mode: 0o755 },
     );
+    // The control-call belt through its SEAM: the fake kill HANGS (sleep 5)
+    // and the shortened belt must cut it — a hardcoded-timeout mutant waits
+    // out both 5s hangs and blows the wall bound.
+    const realBelt = tmuxControl.timeoutMs;
+    tmuxControl.timeoutMs = 500;
+    const started = Date.now();
     const realPath = process.env['PATH'];
     process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
     let stdout = '';
@@ -744,7 +763,9 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     } finally {
       if (realPath === undefined) delete process.env['PATH'];
       else process.env['PATH'] = realPath;
+      tmuxControl.timeoutMs = realBelt;
     }
+    expect(Date.now() - started).toBeLessThan(8_000);
     expect(stderr).toContain('WARNING');
     expect(stderr).toContain('kill-server failed twice');
     // The other half of "never an unqualified success": a wedged reap is a
@@ -758,6 +779,85 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(JSON.parse(stdout.trim().split('\n').at(-1) ?? '')).toMatchObject({
       captured: true,
     });
+    // The sentinel is plumbing — removed on every exit path, including this
+    // degraded one whose fixture is the only one that creates it.
+    expect(existsSync(join(dir, 'cap.holder-ready'))).toBe(false);
+  });
+
+  it('refuses when the holder never initializes — and sends NO key into the void', async () => {
+    // A fake tmux that succeeds every command but whose new-session writes
+    // no sentinel models a pane that died at startup: the 10s holder
+    // deadline must refuse (not hang, not fire keys at an unknown screen).
+    const binDir = join(dir, 'fakebin');
+    mkdirSync(binDir, { recursive: true });
+    const callLog = join(dir, 'tmux-calls');
+    writeFileSync(
+      join(binDir, 'tmux'),
+      `#!/bin/sh\necho "$*" >> "${callLog}"\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\necho ""\nexit 0\n`,
+      { mode: 0o755 },
+    );
+    const realPath = process.env['PATH'];
+    process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
+    let stderr = '';
+    try {
+      ({ stderr } = await withStdio(() =>
+        run({ keys: ['C-c'], until: undefined, settleMs: 0 }),
+      ));
+    } finally {
+      if (realPath === undefined) delete process.env['PATH'];
+      else process.env['PATH'] = realPath;
+    }
+    expect(process.exitCode).toBe(3);
+    expect(stderr).toContain('never initialized');
+    // No key was fired into the uninitialized pane.
+    expect(readFileSync(callLog, 'utf8')).not.toContain('send-keys');
+  }, 20_000);
+
+  it('treats a kill answering "no server running" as the goal state — no WARNING', async () => {
+    // A server dying between the last capture and the reap is success, not
+    // a wedge: the always-false regex mutant printed a false WARNING that
+    // sends an operator hunting a server that does not exist.
+    const binDir = join(dir, 'fakebin');
+    mkdirSync(binDir, { recursive: true });
+    writeFileSync(
+      join(binDir, 'tmux'),
+      `#!/bin/sh\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\nfor a in "$@"; do [ "$a" = "kill-server" ] && { echo "no server running on /tmp/x" >&2; exit 1; }; done\nfor a in "$@"; do [ "$a" = "new-session" ] && : > "${join(dir, 'cap.holder-ready')}"; done\necho ""\nexit 0\n`,
+      { mode: 0o755 },
+    );
+    const realPath = process.env['PATH'];
+    process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
+    let stderr = '';
+    try {
+      ({ stderr } = await withStdio(() =>
+        run({ until: undefined, settleMs: 0 }),
+      ));
+    } finally {
+      if (realPath === undefined) delete process.env['PATH'];
+      else process.env['PATH'] = realPath;
+    }
+    expect(process.exitCode).toBeUndefined();
+    expect(stderr).not.toContain('WARNING');
+    expect(existsSync(join(dir, 'cap.json'))).toBe(true);
+  });
+
+  it('records the LAUNCHER cwd when --cwd is omitted', async () => {
+    // Every other success capture passes an explicit cwd; the default
+    // branch feeds both new-session -c and the manifest — a mutant default
+    // would make the capture's only record name a directory the command
+    // never ran in.
+    await runCaptureTui({
+      command: 'printf "CWDLESS\\n"; sleep 30',
+      cwd: undefined,
+      cols: 80,
+      rows: 24,
+      settleMs: 0,
+      until: 'CWDLESS',
+      keys: undefined,
+      out: join(dir, 'nocwd'),
+      timeoutMs: 10_000,
+    } as never);
+    const manifest = JSON.parse(readFileSync(join(dir, 'nocwd.json'), 'utf8'));
+    expect(manifest.cwd).toBe(process.cwd());
   });
 
   it('settles by regex when --until matches, and says so', async () => {
@@ -1307,9 +1407,13 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     // the refusal side was pinned before.
     const { stdout } = await withStdio(() => run());
     const line = stdout.trim().split('\n').at(-1) ?? '';
+    // hasFreeze only proves --help answers; a broken render degrades to
+    // ans-only by contract, so the evidence field is shape-checked.
     expect(JSON.parse(line)).toEqual({
       captured: true,
-      evidence: hasFreeze ? 'png' : 'ans-only',
+      evidence: hasFreeze
+        ? expect.stringMatching(/^(png|ans-only)$/)
+        : 'ans-only',
       manifest: join(dir, 'cap.json'),
     });
   });

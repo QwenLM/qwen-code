@@ -69,7 +69,10 @@ describe('ci.yml capture tooling', () => {
       return acc;
     }, []);
     for (const line of logicalLines) {
-      if (line.includes("echo '")) {
+      // Any echo STATEMENT, whatever its quoting: the single-quote-only
+      // match let a re-quoted `|| echo "..."` skip both assertions and
+      // regress a permanent install failure to one plain log line.
+      if (/(^|&&|\|\||;)\s*echo\b/.test(line)) {
         // EVERY echo statement is a ::warning:: annotation naming the
         // outcome — a lane where the install PERMANENTLY fails loses the
         // real-tmux coverage forever (the zip suite throws on its own),

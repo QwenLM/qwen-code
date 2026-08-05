@@ -190,7 +190,7 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
     // neither the holder nor the server (measured: untrapped, pane →
     // session → server died before the capture).
     expect(plan.start[plan.start.length - 1]).toBe(
-      `sh -c 'trap : INT\n: > '\\''/ready'\\''\nsh -c '\\''node cli.js'\\''\nsleep 7200'`,
+      `sh -c 'trap : INT\n: > '\\''/ready'\\''\nsh -c '\\''node cli.js'\\''\nwhile :; do sleep 3600; done'`,
     );
   });
 
@@ -215,7 +215,7 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
     const inner = `sh -c '${esc(cmd)}'`;
     const held = p.start[p.start.length - 1];
     expect(held).toBe(
-      `sh -c '${esc(`trap : INT\n: > '/ready'\n${inner}\nsleep 7200`)}'`,
+      `sh -c '${esc(`trap : INT\n: > '${esc('/ready')}'\n${inner}\nwhile :; do sleep 3600; done`)}'`,
     );
   });
 

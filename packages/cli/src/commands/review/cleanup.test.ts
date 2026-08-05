@@ -182,7 +182,10 @@ describe('runCleanup', () => {
           // The foreign socket comes FIRST: a continue→break mutant stops the
           // sweep at the first non-matching name (typically the user's own
           // socket), leaving every orphan after it alive.
-          p === dir ? ['some-other-socket', orphan, orphan2, live] : [],
+          // Live socket BEFORE the orphans: an `if (alive) continue` →
+          // `break` mutant would stop at the first live socket and leave
+          // every orphan after it holding its 2h pane.
+          p === dir ? ['some-other-socket', live, orphan, orphan2] : [],
         );
         mocks.execFileSync.mockReturnValue(Buffer.from(''));
       });
@@ -299,6 +302,33 @@ describe('runCleanup', () => {
         );
         expect(mocks.writeStderrLine).not.toHaveBeenCalledWith(
           expect.stringContaining('could not reap'),
+        );
+      });
+
+      it('an ONLY-unreapable-orphan run is a failure, not "Nothing to clean"', () => {
+        // With a second reapable orphan in the fixture, removedAny masks
+        // the sweep.failed propagation — deleting it shipped green. Here
+        // the sole capture socket is unreapable: stdout must not claim
+        // nothing needed cleaning while stderr says the reap failed.
+        mocks.readdirSync.mockImplementation((p: string) =>
+          p === dir ? [orphan] : [],
+        );
+        mocks.execFileSync.mockImplementation((bin: string) => {
+          if (bin === 'tmux') {
+            throw Object.assign(new Error('wedged'), {
+              stderr: 'tmux: server is wedged',
+            });
+          }
+          return Buffer.from('');
+        });
+
+        runCleanup('local');
+
+        expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining('could not reap'),
+        );
+        expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+          expect.stringContaining('Nothing to clean'),
         );
       });
     },
@@ -462,6 +492,7 @@ describe('runCleanup — bypass-write audit', () => {
     mocks.readFileSync.mockImplementation(() => {
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
     });
+
     mocks.currentUser.mockReturnValue('reviewer');
     mocks.ghApiAll.mockReturnValue([]);
   });

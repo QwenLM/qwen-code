@@ -175,7 +175,14 @@ export function tmuxPlan(opts: {
   // every layer, so no shell parses its text adjacent to the hold
   // (probe-verified with odd-run shapes on this exact plan).
   const inner = `sh -c '${esc(opts.command)}'`;
-  const held = `sh -c '${esc(`trap : INT\n: > '${opts.readyFile}'\n${inner}\nsleep 7200`)}'`;
+  // readyFile is user-derived (--out) and re-parsed by the holder shell —
+  // it gets its own esc() (an apostrophe in --out broke the quoting and
+  // burned the full sentinel deadline, measured). And the hold is a LOOP,
+  // not one sleep: after a one-shot command exits, a --keys C-c kills the
+  // running sleep; the trap runs and a single-sleep script would simply
+  // end — pane, session and server gone (measured 5/5). The loop re-enters
+  // sleep and the pane survives.
+  const held = `sh -c '${esc(`trap : INT\n: > '${esc(opts.readyFile)}'\n${inner}\nwhile :; do sleep 3600; done`)}'`;
   return {
     // ONE client invocation, three properties:
     // - `-f /dev/null` starts the server CONFIG-FREE: without it the
