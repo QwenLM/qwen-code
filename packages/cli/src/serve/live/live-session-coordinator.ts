@@ -182,7 +182,6 @@ interface LiveCallContext {
   activeHandoff?: ActiveHandoff;
   flushBackendContext?: () => void;
   completedInputTranscripts: Map<string, string>;
-  admittedInputItemIds: Set<string>;
   partialInputTranscripts: Map<string, string>;
   activePartialInputItemId?: string;
   responseInFlight: boolean;
@@ -484,7 +483,6 @@ export class LiveSessionCoordinator {
       delegatesInFlight: 0,
       delegateAdmissions: new Map(),
       completedInputTranscripts: new Map(),
-      admittedInputItemIds: new Set(),
       partialInputTranscripts: new Map(),
       responseInFlight: false,
       speechInProgress: false,
@@ -741,7 +739,6 @@ export class LiveSessionCoordinator {
         context.delegatesInFlight += 1;
         const markPromptAdmitted = () => {
           admission.state = 'admitted';
-          context.admittedInputItemIds.add(trackedInputItemId);
           this.resolveCommittedInput(context, trackedInputItemId);
           admission.settle(true);
           this.maybeFinishGracefulStop(context);
@@ -778,6 +775,11 @@ export class LiveSessionCoordinator {
                 0,
                 context.delegatesInFlight - 1,
               );
+              if (
+                context.delegateAdmissions.get(trackedInputItemId) === admission
+              ) {
+                context.delegateAdmissions.delete(trackedInputItemId);
+              }
               this.maybeFinishGracefulStop(context);
             });
           return;
@@ -824,6 +826,11 @@ export class LiveSessionCoordinator {
               0,
               context.delegatesInFlight - 1,
             );
+            if (
+              context.delegateAdmissions.get(trackedInputItemId) === admission
+            ) {
+              context.delegateAdmissions.delete(trackedInputItemId);
+            }
             this.maybeFinishGracefulStop(context);
           });
       },
@@ -918,6 +925,9 @@ export class LiveSessionCoordinator {
         if (diagnosticResponseId !== responseId) {
           diagnostic('response_done_stale', { responseId, status });
           this.resolveCommittedInput(context, inputItemId);
+          if (inputItemId) {
+            context.completedInputTranscripts.delete(inputItemId);
+          }
           this.maybeFinishGracefulStop(context);
           return;
         }
@@ -939,6 +949,9 @@ export class LiveSessionCoordinator {
         context.responseInFlight = false;
         context.inputAwaitingResponse = false;
         this.resolveCommittedInput(context, inputItemId);
+        if (inputItemId) {
+          context.completedInputTranscripts.delete(inputItemId);
+        }
         if (!context.stopping && context.delegatesInFlight === 0) {
           this.options.host.setStatusText(context.epoch);
           this.options.host.setCallState(context.epoch, 'listening');
@@ -1010,7 +1023,6 @@ export class LiveSessionCoordinator {
     context.outputCaptionSource = undefined;
     context.partialInputTranscripts.clear();
     context.completedInputTranscripts.clear();
-    context.admittedInputItemIds.clear();
     context.delegateAdmissions.clear();
     context.pendingCommittedInputItemIds.clear();
     context.unattributedCommittedInputCount = 0;

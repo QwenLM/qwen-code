@@ -404,6 +404,55 @@ describe('LiveSessionCoordinator', () => {
     expect(harness.bridge.sendPrompt).not.toHaveBeenCalled();
   });
 
+  it('releases completed input and delegation tracking during a long call', async () => {
+    const harness = makeHarness();
+    await harness.coordinator.start({
+      epoch: 1,
+      callId: 'call-1',
+      mode: 'new',
+    });
+    const active = (
+      harness.coordinator as unknown as {
+        active?: {
+          completedInputTranscripts: Map<string, string>;
+          delegateAdmissions: Map<string, unknown>;
+        };
+      }
+    ).active;
+
+    harness.callbacks.onInputTranscriptDone?.({
+      callEpoch: 1,
+      itemId: 'input-direct',
+      text: '直接回答这个问题',
+    });
+    harness.callbacks.onResponseCreated?.({
+      callEpoch: 1,
+      responseId: 'response-direct',
+      inputItemId: 'input-direct',
+      authority: 'direct',
+    });
+    harness.callbacks.onResponseDone?.({
+      callEpoch: 1,
+      responseId: 'response-direct',
+      inputItemId: 'input-direct',
+      status: 'completed',
+    });
+
+    expect(active?.completedInputTranscripts.size).toBe(0);
+
+    harness.callbacks.onDelegateCall?.({
+      callEpoch: 1,
+      responseId: 'response-handoff',
+      inputItemId: 'input-handoff',
+      callId: 'handoff-1',
+      request: '检查仓库',
+      activeTranscript: [{ role: 'user', text: '检查仓库' }],
+    });
+    await waitFor(() => expect(harness.pendingTurns).toHaveLength(1));
+    await harness.finishTurn(0, [{ type: 'message', text: '检查完成。' }]);
+    await waitFor(() => expect(active?.delegateAdmissions.size).toBe(0));
+  });
+
   it('ignores completion from an interrupted response after its replacement starts', async () => {
     const harness = makeHarness();
     await harness.coordinator.start({
