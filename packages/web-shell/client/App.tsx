@@ -9423,7 +9423,7 @@ export function App({
                           value="cockpit"
                           data-testid="open-cockpit"
                         >
-                          驾驶舱
+                          {t('workflow.cockpitTitle')}
                         </ToggleGroupItem>
                         {sessionWorkflowTodos.length > 0 && (
                           <ToggleGroupItem

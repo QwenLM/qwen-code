@@ -1,6 +1,19 @@
 .cockpit,
 .reviewShell,
 .emptyCockpit {
+  /* Local token patch: the radius scale reuses the app's --radius-sm/md/lg/xl
+   * tokens (see globals.css); these three are cockpit-only because nothing
+   * else in the app needs a tint scale or a shared "text on accent fill"
+   * color yet. Consolidating here keeps every card/badge/glow in this view
+   * drawing from the same handful of values instead of one-off numbers. */
+  --cockpit-tint-weak: 8%;
+  --cockpit-tint-ring: 14%;
+  --cockpit-tint-strong: 24%;
+  --cockpit-mono:
+    ui-monospace, 'SF Mono', 'SFMono-Regular', Menlo, Consolas, monospace;
+  --cockpit-on-accent: #fff;
+  --cockpit-shadow: 0 8px 28px
+    color-mix(in srgb, var(--foreground) 6%, transparent);
   color: var(--foreground);
   background: var(--background);
   font-family: inherit;
@@ -16,7 +29,8 @@
 .cockpit button:focus-visible,
 .reviewShell button:focus-visible,
 .emptyCockpit button:focus-visible {
-  outline: 3px solid color-mix(in srgb, var(--agent-blue-500) 24%, transparent);
+  outline: 3px solid
+    color-mix(in srgb, var(--agent-blue-500) var(--cockpit-tint-strong), transparent);
   outline-offset: 2px;
 }
 
@@ -36,8 +50,11 @@
     background 160ms ease;
 }
 
-.primaryButton {
-  color: #fff !important;
+/* Qualified with the root scopes + `button` (not just `.primaryButton`) so
+ * this naturally outranks the `.cockpit button { color: inherit }` reset
+ * above on specificity instead of needing `!important`. */
+:is(.cockpit, .reviewShell, .emptyCockpit) button.primaryButton {
+  color: var(--cockpit-on-accent);
   border-color: var(--agent-blue-500);
   background: var(--agent-blue-500);
 }
@@ -78,7 +95,7 @@
   gap: 3px;
   padding: 3px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--muted);
 }
 
@@ -89,7 +106,7 @@
   gap: 6px;
   padding: 0 10px;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--muted-foreground);
   background: transparent;
   cursor: pointer;
@@ -119,7 +136,7 @@
   min-width: 17px;
   height: 17px;
   place-items: center;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--warning-color);
   background: var(--warning-bg);
   font-size: 11px;
@@ -131,10 +148,10 @@
   gap: 8px;
   padding: 8px 11px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   color: var(--muted-foreground);
   background: var(--background);
-  font-family: monospace;
+  font-family: var(--cockpit-mono);
   font-size: 12px;
 }
 
@@ -182,7 +199,7 @@
   align-items: center;
   gap: 6px;
   padding: 6px 9px;
-  border-radius: 7px;
+  border-radius: var(--radius-sm);
   color: var(--success-color);
   background: var(--success-bg);
   font-size: 12px;
@@ -217,9 +234,9 @@
   grid-template-columns: 1.55fr repeat(4, 1fr);
   overflow: hidden;
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: var(--radius-xl);
   background: var(--card);
-  box-shadow: 0 7px 26px color-mix(in srgb, var(--foreground) 5%, transparent);
+  box-shadow: var(--cockpit-shadow);
 }
 
 .stats > div {
@@ -250,9 +267,11 @@
   color: var(--warning-color);
 }
 
-.progressStat {
+/* `.stats > div.progressStat` outranks `.stats > div`'s padding on
+ * specificity, so this wins without `!important`. */
+.stats > div.progressStat {
   gap: 11px;
-  padding: 15px 19px !important;
+  padding: 15px 19px;
 }
 
 .progressStat > div:first-child {
@@ -270,7 +289,7 @@
 .progressTrack {
   height: 7px;
   overflow: hidden;
-  border-radius: 5px;
+  border-radius: 999px;
   background: var(--muted);
 }
 
@@ -278,11 +297,11 @@
   display: block;
   height: 100%;
   border-radius: inherit;
-  background: linear-gradient(
-    90deg,
-    var(--agent-blue-500),
-    var(--agent-blue-400)
-  );
+  /* Success-color, not agent-blue: this bar tracks completion, and every
+   * other "done" signal in the cockpit (phase checkmarks, PASS badges, the
+   * review banner) already reads as success-color. Matches the equivalent
+   * bar in the sibling PlanExecutionView. */
+  background: var(--success-color);
   transition: width 300ms ease;
 }
 
@@ -300,9 +319,9 @@
   min-width: 0;
   overflow: hidden;
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: var(--radius-xl);
   background: var(--card);
-  box-shadow: 0 8px 28px color-mix(in srgb, var(--foreground) 5%, transparent);
+  box-shadow: var(--cockpit-shadow);
 }
 
 .panelHeader {
@@ -354,7 +373,7 @@
   width: 100%;
   padding: 10px 9px;
   border: 0;
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   background: transparent;
   cursor: pointer;
   text-align: left;
@@ -365,7 +384,7 @@
 }
 
 .phaseActive {
-  background: color-mix(in srgb, var(--agent-blue-500) 10%, var(--card));
+  background: color-mix(in srgb, var(--agent-blue-500) var(--cockpit-tint-weak), var(--card));
   box-shadow: inset 3px 0 var(--agent-blue-500);
 }
 
@@ -375,10 +394,10 @@
   height: 24px;
   place-items: center;
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: var(--radius-sm);
   color: var(--muted-foreground);
   background: var(--card);
-  font-family: monospace;
+  font-family: var(--cockpit-mono);
   font-size: 11px;
   font-style: normal;
   font-weight: 700;
@@ -387,7 +406,7 @@
 .phase[data-status='completed'] > i,
 .phase[data-status='running'] > i,
 .phase[data-status='in_progress'] > i {
-  color: #fff;
+  color: var(--cockpit-on-accent);
   border-color: var(--success-color);
   background: var(--success-color);
 }
@@ -397,12 +416,12 @@
   border-color: var(--agent-blue-500);
   background: var(--agent-blue-500);
   box-shadow: 0 0 0 4px
-    color-mix(in srgb, var(--agent-blue-500) 10%, transparent);
+    color-mix(in srgb, var(--agent-blue-500) var(--cockpit-tint-ring), transparent);
 }
 
 .phase[data-status='blocked'] > i,
 .phase[data-status='paused'] > i {
-  color: #fff;
+  color: var(--cockpit-on-accent);
   border-color: var(--warning-color);
   background: var(--warning-color);
 }
@@ -431,7 +450,7 @@
 
 .phase > em {
   color: var(--muted-foreground);
-  font-family: monospace;
+  font-family: var(--cockpit-mono);
   font-size: 10px;
   font-style: normal;
 }
@@ -458,9 +477,11 @@
   font-size: 12px;
 }
 
-.stageTabActive {
-  color: var(--foreground) !important;
-  font-weight: 800 !important;
+/* `.stageTabs button.stageTabActive` outranks `.stageTabs button` on
+ * specificity, so this wins without `!important`. */
+.stageTabs button.stageTabActive {
+  color: var(--foreground);
+  font-weight: 800;
 }
 
 .stageTabActive::after {
@@ -479,7 +500,7 @@
   gap: 8px;
   margin-left: auto;
   color: var(--success-color);
-  font-family: monospace;
+  font-family: var(--cockpit-mono);
   font-size: 10px;
   font-weight: 700;
 }
@@ -508,7 +529,10 @@
 .railLine > i {
   display: block;
   height: 100%;
-  background: var(--agent-blue-500);
+  /* Same `progress` value as .progressTrack i above (steps completed /
+   * total) — success-color for the same reason: it tracks completion, and
+   * the current-step marker below is already the accent that reads "here". */
+  background: var(--success-color);
 }
 
 .executionRail > button {
@@ -531,17 +555,20 @@
   border-radius: 50%;
   color: var(--muted-foreground);
   background: var(--card);
-  font-family: monospace;
+  font-family: var(--cockpit-mono);
   font-size: 10px;
   font-style: normal;
   font-weight: 700;
 }
 
-.railCurrent > i {
-  color: var(--agent-blue-500) !important;
-  border-color: var(--agent-blue-500) !important;
+/* `.executionRail > button.railCurrent > i` outranks
+ * `.executionRail > button > i` on specificity, so this wins without
+ * `!important`. */
+.executionRail > button.railCurrent > i {
+  color: var(--agent-blue-500);
+  border-color: var(--agent-blue-500);
   box-shadow: 0 0 0 6px
-    color-mix(in srgb, var(--agent-blue-500) 11%, transparent);
+    color-mix(in srgb, var(--agent-blue-500) var(--cockpit-tint-ring), transparent);
 }
 
 .workDetail {
@@ -561,17 +588,17 @@
   width: 40px;
   height: 40px;
   place-items: center;
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   color: var(--agent-blue-500);
-  background: color-mix(in srgb, var(--agent-blue-500) 10%, var(--card));
-  font-family: monospace;
+  background: color-mix(in srgb, var(--agent-blue-500) var(--cockpit-tint-weak), var(--card));
+  font-family: var(--cockpit-mono);
   font-size: 12px;
   font-weight: 900;
 }
 
 .workIdentity small {
   color: var(--muted-foreground);
-  font-family: monospace;
+  font-family: var(--cockpit-mono);
   font-size: 10px;
 }
 
@@ -596,7 +623,7 @@
 }
 
 .runtime strong {
-  font-family: monospace;
+  font-family: var(--cockpit-mono);
   font-size: 13px;
 }
 
@@ -610,7 +637,7 @@
   margin-top: 16px;
   padding: 12px 14px;
   border-left: 3px solid var(--agent-blue-500);
-  border-radius: 0 8px 8px 0;
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
   color: var(--muted-foreground);
   background: var(--muted);
 }
@@ -636,7 +663,7 @@
 .dependencyCards > div {
   padding: 11px;
   border: 1px solid var(--border);
-  border-radius: 9px;
+  border-radius: var(--radius-md);
 }
 
 .dependencyCards span,
@@ -669,7 +696,7 @@
   width: 100%;
   padding: 10px;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   background: var(--card);
   cursor: pointer;
   text-align: left;
@@ -677,7 +704,7 @@
 
 .agentCards button:hover {
   border-color: color-mix(in srgb, var(--agent-blue-500) 38%, var(--border));
-  background: color-mix(in srgb, var(--agent-blue-500) 7%, var(--card));
+  background: color-mix(in srgb, var(--agent-blue-500) var(--cockpit-tint-weak), var(--card));
 }
 
 .agentCards button > span {
@@ -725,7 +752,7 @@
 .activityRow time,
 .logRows time {
   color: var(--muted-foreground);
-  font-family: monospace;
+  font-family: var(--cockpit-mono);
   font-size: 10px;
 }
 
@@ -735,10 +762,10 @@
   width: 25px;
   height: 25px;
   place-items: center;
-  border-radius: 7px;
+  border-radius: var(--radius-sm);
   color: var(--agent-blue-500);
-  background: color-mix(in srgb, var(--agent-blue-500) 10%, var(--card));
-  font-family: monospace;
+  background: color-mix(in srgb, var(--agent-blue-500) var(--cockpit-tint-weak), var(--card));
+  font-family: var(--cockpit-mono);
   font-size: 10px;
   font-weight: 800;
 }
@@ -781,7 +808,7 @@
   margin: 12px;
   padding: 13px;
   border: 1px solid color-mix(in srgb, var(--success-color) 30%, var(--border));
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   color: var(--success-color);
   background: var(--success-bg);
 }
@@ -820,8 +847,8 @@
   width: 18px;
   height: 18px;
   place-items: center;
-  border-radius: 6px;
-  color: #fff;
+  border-radius: var(--radius-sm);
+  color: var(--cockpit-on-accent);
   background: var(--success-color);
   font-size: 11px;
   font-style: normal;
@@ -850,10 +877,10 @@
 
 .checkList em {
   padding: 4px 6px;
-  border-radius: 5px;
+  border-radius: 999px;
   color: var(--success-color);
   background: var(--success-bg);
-  font-family: monospace;
+  font-family: var(--cockpit-mono);
   font-size: 10px;
   font-style: normal;
   font-weight: 700;
@@ -865,14 +892,14 @@
   gap: 6px;
   margin: 12px;
   padding: 10px;
-  border-radius: 9px;
+  border-radius: var(--radius-md);
   background: var(--muted);
 }
 
 .evidenceGrid > div {
   padding: 8px;
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: var(--radius-sm);
   background: var(--card);
 }
 
@@ -954,7 +981,7 @@
   min-width: 0;
   padding: 10px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
 }
 
 .deliverables section strong,
@@ -985,7 +1012,7 @@
 .reviewEyebrow,
 .permissionKicker {
   color: var(--agent-blue-500);
-  font-family: monospace;
+  font-family: var(--cockpit-mono);
   font-size: 10px;
   font-weight: 800;
   letter-spacing: 0.13em;
@@ -996,7 +1023,7 @@
   grid-template-columns: repeat(4, 1fr);
   overflow: hidden;
   border: 1px solid var(--border);
-  border-radius: 13px;
+  border-radius: var(--radius-xl);
   background: var(--card);
 }
 
@@ -1037,7 +1064,7 @@
   min-height: 470px;
   overflow: hidden;
   border: 1px solid var(--border);
-  border-radius: 13px;
+  border-radius: var(--radius-xl);
   background: var(--card);
 }
 
@@ -1070,12 +1097,11 @@
   text-align: left;
 }
 
-.attentionActive {
-  background: color-mix(
-    in srgb,
-    var(--agent-blue-500) 9%,
-    var(--card)
-  ) !important;
+/* `.attentionList > button.attentionActive` outranks
+ * `.attentionList > button` on specificity, so this wins without
+ * `!important`. */
+.attentionList > button.attentionActive {
+  background: color-mix(in srgb, var(--agent-blue-500) var(--cockpit-tint-weak), var(--card));
   box-shadow: inset 3px 0 var(--agent-blue-500);
 }
 
@@ -1084,8 +1110,8 @@
   width: 29px;
   height: 29px;
   place-items: center;
-  border-radius: 8px;
-  color: #fff;
+  border-radius: var(--radius-md);
+  color: var(--cockpit-on-accent);
   background: var(--error-color);
   font-weight: 800;
 }
@@ -1102,7 +1128,7 @@
 .attentionList small {
   margin-top: 4px;
   color: var(--muted-foreground);
-  font-family: monospace;
+  font-family: var(--cockpit-mono);
   font-size: 10px;
 }
 
@@ -1130,7 +1156,7 @@
   align-content: center;
   margin-top: 13px;
   border: 1px solid var(--border);
-  border-radius: 13px;
+  border-radius: var(--radius-xl);
   background: var(--card);
   text-align: center;
 }
@@ -1140,8 +1166,10 @@
   width: 52px;
   height: 52px;
   place-items: center;
+  /* Bespoke, not on the --radius-* scale on purpose: this and .emptyMark are
+   * the page's two hero icon marks, rounder than the card system by design. */
   border-radius: 15px;
-  color: #fff;
+  color: var(--cockpit-on-accent);
   background: var(--success-color);
   font-size: 22px;
 }
@@ -1175,7 +1203,7 @@
   margin-bottom: 24px;
   padding: 16px 18px;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   background: var(--card);
 }
 
@@ -1216,10 +1244,10 @@
   height: 29px;
   place-items: center;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   color: var(--muted-foreground);
   background: var(--background);
-  font-family: monospace;
+  font-family: var(--cockpit-mono);
   font-size: 10px;
   font-weight: 700;
 }
@@ -1245,7 +1273,7 @@
 }
 
 .reviewStepDone > span {
-  color: #fff;
+  color: var(--cockpit-on-accent);
   border-color: var(--success-color);
   background: var(--success-color);
 }
@@ -1255,11 +1283,11 @@
 }
 
 .reviewStepActive > span {
-  color: #fff;
+  color: var(--cockpit-on-accent);
   border-color: var(--agent-blue-500);
   background: var(--agent-blue-500);
   box-shadow: 0 0 0 4px
-    color-mix(in srgb, var(--agent-blue-500) 14%, transparent);
+    color-mix(in srgb, var(--agent-blue-500) var(--cockpit-tint-ring), transparent);
 }
 
 .reviewMain {
@@ -1278,7 +1306,7 @@
 
 .reviewHeading > div:first-child > span {
   color: var(--agent-blue-500);
-  font-family: monospace;
+  font-family: var(--cockpit-mono);
   font-size: 10px;
   font-weight: 800;
   letter-spacing: 0.13em;
@@ -1305,7 +1333,7 @@
   display: flex;
   overflow: hidden;
   border: 1px solid var(--border);
-  border-radius: 11px;
+  border-radius: var(--radius-lg);
   background: var(--card);
 }
 
@@ -1346,9 +1374,9 @@
   min-width: 0;
   padding: 20px;
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: var(--radius-xl);
   background: var(--card);
-  box-shadow: 0 10px 30px color-mix(in srgb, var(--foreground) 6%, transparent);
+  box-shadow: var(--cockpit-shadow);
 }
 
 .reviewGraphCard > section {
@@ -1389,7 +1417,7 @@
   margin-bottom: 16px;
   place-items: center;
   border-radius: 17px;
-  color: #fff;
+  color: var(--cockpit-on-accent);
   background: linear-gradient(
     145deg,
     var(--agent-blue-400),
@@ -1398,7 +1426,7 @@
   font-size: 22px;
   font-weight: 900;
   box-shadow: 0 16px 32px
-    color-mix(in srgb, var(--agent-blue-500) 22%, transparent);
+    color-mix(in srgb, var(--agent-blue-500) var(--cockpit-tint-strong), transparent);
 }
 
 .emptyCockpit h1 {
