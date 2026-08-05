@@ -235,7 +235,7 @@ function readPlan(path: string): { plan: Plan; mtimeMs: number } {
 }
 
 /** `chunk 13 of 25` — written into the prompt by `agent-prompt`, in code. */
-const CHUNK_RE = /\bchunk\s+(\d+)\s+of\s+\d+\b/i;
+export const CHUNK_RE = /\bchunk\s+(\d+)\s+of\s+\d+\b/i;
 
 /** The chunk this agent owns, when it was launched to own one. */
 function assignedChunk(rec: AgentRecord): number | null {

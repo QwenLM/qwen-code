@@ -79,7 +79,7 @@ const LOCK_OPTIONS: lockfile.LockOptions = {
   },
   stale: 5000,
   onCompromised: (err) => {
-    debug.warn('task lock compromised:', err?.message ?? err);
+    debug.warn('task lock compromised:', err);
   },
 };
 
@@ -132,7 +132,11 @@ async function withTaskFileLock<T>(
     try {
       return await fn();
     } finally {
-      await release();
+      try {
+        await release();
+      } catch (error) {
+        debug.warn('Failed to release task lock:', error);
+      }
     }
   });
 }
