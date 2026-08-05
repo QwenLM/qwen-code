@@ -21,12 +21,14 @@ function runtime(
   workspaceId: string,
   workspaceCwd: string,
   trusted = true,
+  provenance?: WorkspaceRuntime['provenance'],
 ): WorkspaceRuntime {
   return {
     workspaceId,
     workspaceCwd,
     primary: workspaceId === 'primary',
     trusted,
+    provenance,
     bridge: {},
   } as WorkspaceRuntime;
 }
@@ -219,6 +221,39 @@ describe('workspace Channel management routes', () => {
 
     expect(secondaryService.setStartup).toHaveBeenCalledOnce();
     expect(primaryService.setStartup).not.toHaveBeenCalled();
+  });
+
+  it('rejects qualified channel mutations for the Conversations runtime', async () => {
+    const primary = runtime('primary', '/work/primary');
+    const live = runtime(
+      'conversations',
+      '/work/Conversations',
+      true,
+      'live-conversation',
+    );
+    const liveService = service();
+    const resolveService = vi.fn((target: WorkspaceRuntime) =>
+      target === live ? liveService : service(),
+    );
+    const app = express();
+    app.use(express.json());
+    registerWorkspaceChannelManagementRoutes(app, {
+      primaryRuntime: primary,
+      workspaceRegistry: createWorkspaceRegistry([primary, live]),
+      resolveService,
+      mutate: () => (_req, _res, next) => next(),
+      safeBody: (req) => (req.body ?? {}) as Record<string, unknown>,
+      parseAndValidateClientId: () => undefined,
+    });
+
+    const response = await request(app)
+      .put('/workspaces/conversations/channels/bot')
+      .send({ expectedRevision: 'r1', config: { type: 'dingtalk' } });
+
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe('live_channel_management_reserved');
+    expect(resolveService).not.toHaveBeenCalled();
+    expect(liveService.upsert).not.toHaveBeenCalled();
   });
 
   it('fails closed for an untrusted secondary workspace', async () => {

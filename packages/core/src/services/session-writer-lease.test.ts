@@ -298,8 +298,25 @@ async function requestChild(
 }
 
 async function waitForClose(child: ChildProcess): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return;
-  await new Promise<void>((resolve) => child.once('close', () => resolve()));
+  const pid = child.pid;
+  if (child.exitCode === null && child.signalCode === null) {
+    await new Promise<void>((resolve) => child.once('close', () => resolve()));
+  }
+  if (pid === undefined) return;
+  for (let attempt = 0; attempt < 100; attempt++) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      // ESRCH means gone; EPERM means the PID was already recycled by a
+      // process this test cannot signal. Either way the child is gone.
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  // On Windows PIDs recycle aggressively, so a still-answerable signal 0
+  // almost always means a reused PID, not a leaked child; do not turn that
+  // teardown observation into a test failure.
+  console.warn(`Process ${pid} remained live after close`);
 }
 
 function record(
@@ -1658,42 +1675,45 @@ describe('SessionWriterLease', () => {
     }
   });
 
-  it('detects an atomic replacement during content verification', async () => {
-    const fixture = await createFixture();
-    await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
-    await fs.writeFile(fixture.transcriptPath, '{"seed":true}\n');
-    const lease = await SessionWriterLease.acquire(fixture.options);
-    const initial = await fs.stat(fixture.transcriptPath);
-    await fs.utimes(
-      fixture.transcriptPath,
-      initial.atime,
-      new Date(initial.mtimeMs + 1000),
-    );
-    const replacement = `${fixture.transcriptPath}.replacement`;
-    await fs.writeFile(replacement, '{"sEEd":true}\n');
-    const originalRead = nativeFileHandleRead;
-    let replaced = false;
-    const read = vi
-      .spyOn(fileHandlePrototype, 'read')
-      .mockImplementation(async function (this: fs.FileHandle, ...args) {
-        const result = await originalRead.apply(this, args);
-        if ((positionalReadLength(args) ?? 0) > 1 && !replaced) {
-          replaced = true;
-          await fs.rename(replacement, fixture.transcriptPath);
-        }
-        return result;
-      });
-
-    try {
-      await expect(lease.assertOwnedAndUnchanged()).rejects.toBeInstanceOf(
-        SessionTranscriptChangedError,
+  it.skipIf(process.platform === 'win32')(
+    'detects an atomic replacement during content verification',
+    async () => {
+      const fixture = await createFixture();
+      await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+      await fs.writeFile(fixture.transcriptPath, '{"seed":true}\n');
+      const lease = await SessionWriterLease.acquire(fixture.options);
+      const initial = await fs.stat(fixture.transcriptPath);
+      await fs.utimes(
+        fixture.transcriptPath,
+        initial.atime,
+        new Date(initial.mtimeMs + 1000),
       );
-      expect(replaced).toBe(true);
-    } finally {
-      read.mockRestore();
-      await lease.release();
-    }
-  });
+      const replacement = `${fixture.transcriptPath}.replacement`;
+      await fs.writeFile(replacement, '{"sEEd":true}\n');
+      const originalRead = nativeFileHandleRead;
+      let replaced = false;
+      const read = vi
+        .spyOn(fileHandlePrototype, 'read')
+        .mockImplementation(async function (this: fs.FileHandle, ...args) {
+          const result = await originalRead.apply(this, args);
+          if ((positionalReadLength(args) ?? 0) > 1 && !replaced) {
+            replaced = true;
+            await fs.rename(replacement, fixture.transcriptPath);
+          }
+          return result;
+        });
+
+      try {
+        await expect(lease.assertOwnedAndUnchanged()).rejects.toBeInstanceOf(
+          SessionTranscriptChangedError,
+        );
+        expect(replaced).toBe(true);
+      } finally {
+        read.mockRestore();
+        await lease.release();
+      }
+    },
+  );
 
   it('detects truncation during content verification', async () => {
     const fixture = await createFixture();

@@ -3331,6 +3331,42 @@
       "description": "Settings to enable experimental features.",
       "type": "object",
       "properties": {
+        "liveVoice": {
+          "description": "Experimental realtime voice conversations through Qwen Live Host on macOS WebShell.",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "description": "Enable experimental realtime voice conversations on macOS WebShell.",
+              "type": "boolean",
+              "default": false
+            },
+            "apiKey": {
+              "description": "Dedicated DashScope API key for qwen3.5-omni-plus-realtime.",
+              "type": "string",
+              "default": ""
+            },
+            "model": {
+              "description": "Upstream Realtime model used for Live Voice.",
+              "type": "string",
+              "default": "qwen3.5-omni-plus-realtime"
+            },
+            "endpoint": {
+              "description": "Advanced override for the DashScope Realtime WebSocket endpoint.",
+              "type": "string",
+              "default": "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
+            },
+            "voice": {
+              "description": "Voice used for Realtime model audio output.",
+              "type": "string",
+              "default": "Tina"
+            },
+            "shortcut": {
+              "description": "Electron accelerator registered globally by Qwen Live Host.",
+              "type": "string",
+              "default": "Command+E"
+            }
+          }
+        },
         "sessionWorkflow": {
           "description": "Enable the daemon Web Shell Session Workflow DAG and present Plan mode as Plan & Review. Disabled by default and does not change ordinary Todo or execution behavior.",
           "type": "boolean",
