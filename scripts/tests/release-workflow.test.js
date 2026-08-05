@@ -30,9 +30,12 @@ describe('release workflow', () => {
 
   it('fails the release when the review source stamp did not land', () => {
     // The runtime staleness check degrades to "could not check" without the
-    // stamp this step is guarding, and no release job runs the scripts suite —
-    // so a future change that removes the stamp step or this guard must fail
-    // here instead of shipping a release that silently lost its digest.
+    // stamp this step is guarding. The publish job itself does not re-run
+    // the scripts suite — the quality job that gates it does (`npm run
+    // test:release` ends with `npm run test:scripts`), but
+    // `force_skip_tests: 'true'` skips that job entirely — so a future
+    // change that removes the stamp step or this guard must fail here
+    // instead of shipping a release that silently lost its digest.
     expect(workflow).toContain(
       'npm run bundle\n' +
         '          # The review staleness check degrades to "could not check" without\n' +

@@ -48,6 +48,7 @@ import {
   existsSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   statSync,
   type Stats,
 } from 'node:fs';
@@ -69,8 +70,8 @@ export const DIGEST_FILE = 'review-sources.sha256';
  *
  * esbuild follows imports from the CLI entry, and no test is reachable that
  * way — so folding tests into the digest would fire the warning for an edit
- * that cannot change a single byte of the bundle. That is the false positive
- * this module already rejected once, in the timestamp version.
+ * to a file the bundle cannot contain. That is the false positive this
+ * module already rejected once, in the timestamp version.
  */
 export const NOT_BUNDLED_RE = /\.(?:test|spec)\.(?:d\.)?[cm]?[jt]sx?$/;
 
@@ -380,9 +381,22 @@ export function bundleStalenessNotices(
   // sites.
   try {
     if (!entryPath) return [];
+    // `realpath` before deriving anything: node hands a symlinked entry over
+    // unresolved, so an alias of the bundle (`ln -s dist/cli.js ~/bin/qwen`)
+    // would hand `distDir` a directory with no stamp beside it and turn the
+    // check off — even though the stamp and the sources are one `realpath`
+    // away. A real file resolves to itself, so installed layouts behave
+    // exactly as before; a vanished entry keeps the unresolved path and the
+    // layout check below decides the case.
+    let entry = entryPath;
+    try {
+      entry = realpathSync(entryPath);
+    } catch {
+      // Leave the path unresolved; `resolve` below still makes it absolute.
+    }
     // `resolve`, because `argv[1]` can be relative (`node dist/cli.js`), and a
     // `repoRoot` derived from it must stay printable and absolute.
-    const distDir = dirname(resolve(entryPath));
+    const distDir = dirname(resolve(entry));
     // Only a `<root>/dist/cli.js` layout carries a stamp. A dev launcher runs
     // `node <root>/packages/cli`, where node sets argv[1] to the DIRECTORY —
     // measured — so the derivation would find sources under `<root>` and no

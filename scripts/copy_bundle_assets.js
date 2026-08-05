@@ -53,8 +53,8 @@ export const BUNDLED_SKILL_TEST_FILE_RE =
  * is what holds the two equal; nothing here is imported from there.
  *
  * Tests and fixtures are excluded on both sides: esbuild follows imports from
- * the CLI entry, neither is reachable that way, and a warning fired by an edit
- * that cannot change a byte of the bundle is the false positive this check
+ * the CLI entry, neither is reachable that way, and a warning fired by an
+ * edit to a file the bundle cannot contain is the false positive this check
  * exists not to produce. DESIGN.md is excluded for the same reason: the
  * copier below deliberately does not ship it.
  */
@@ -218,12 +218,17 @@ function stampReviewSourceDigest(root, distDir) {
     return;
   }
   // The digest describes the tree as the COPIER sees it, and the copier runs
-  // after esbuild — so a source edited in between, or this script run on its
-  // own, would stamp a `cli.js` built from something else. That is the only
-  // direction where silence is affirmatively wrong instead of merely
-  // uninformative: every other gap here degrades to `unmeasured`. Timestamps
-  // are the wrong tool for judging staleness and the right one for judging
-  // whether this stamp can be honest at all, so refuse rather than stamp.
+  // after esbuild — so a source edited after the bundle was written, or this
+  // script run on its own, would stamp a `cli.js` built from something else.
+  // That is the only direction where silence is affirmatively wrong instead
+  // of merely uninformative: every other gap here degrades to `unmeasured`.
+  // Timestamps are the wrong tool for judging staleness and the right one for
+  // judging whether this stamp can be honest at all, so refuse rather than
+  // stamp. The anchor is the bundle's WRITE time, not the build's start:
+  // esbuild reads the sources during the graph walk, before it writes, so an
+  // edit landing while the build is in flight is older than this anchor,
+  // passes the gate, and is what the copier digests — a stamp honest about
+  // the tree and not about the bundle. That window is not covered here.
   const bundlePath = join(distDir, 'cli.js');
   let builtAt;
   try {

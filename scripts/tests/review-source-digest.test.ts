@@ -6,7 +6,8 @@
 
 // The review source digest is computed twice: once by the build, which stamps
 // it beside the bundle, and once by the review commands (`parse-args`, and
-// `drive` for a resumed run), which re-derive it from the tree and compare.
+// `drive`, which agents can reach directly without `parse-args` ever running
+// first), which re-derive it from the tree and compare.
 // A rule stated twice is a rule that will be true in one
 // place, and the two cannot share code — the build script runs before the
 // package it would import has been built. So this is the test that keeps them
@@ -157,9 +158,13 @@ describe('the build stamp and the staleness check agree', () => {
       // escapes exclusion, because `.ts` admits it and `test.d.ts` breaks
       // the plain match.
       writeFileSync(join(cli, 'review', 'drive.test.d.ts'), 'export {};');
-      // The NOT_BUNDLED_FILE entry and a snapshot dir, pinned on both sides:
-      // neither exists in the repo tree, so only a synthetic one can catch a
-      // one-sided edit to either.
+      // The NOT_BUNDLED_FILE entry and a snapshot dir, pinned on both sides.
+      // The snapshot half exists only here: no `__snapshots__` directory
+      // lives in the repo tree, so this synthetic one is the only pin. The
+      // NOT_BUNDLED_FILE half is different — `lib/test-utils.ts` is a real
+      // file in the tree, so the repo-level parity case above pins that rule
+      // too; deleting the real file would silently drop that second pin and
+      // leave only this synthetic one.
       writeFileSync(join(cli, 'review', 'lib', 'test-utils.ts'), 'test help');
       writeFileSync(join(cli, 'review', '.DS_Store'), 'finder droppings');
       mkdirSync(join(cli, 'review', '__snapshots__'), { recursive: true });
@@ -192,8 +197,9 @@ describe('the build stamp and the staleness check agree', () => {
   });
 
   // chmod is the only lever this case has: on Windows it is a no-op, and a
-  // root user reads through it, so the branch under test is unreachable there
-  // and the case skips instead of passing on the other branch.
+  // root user reads through it, so the branch under test is unreachable
+  // there. The case skips rather than measuring a readable tree and failing
+  // red against the throw-and-nothing-measured assertions.
   it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
     'neither side measures a tree whose subdirectory cannot be listed',
     () => {

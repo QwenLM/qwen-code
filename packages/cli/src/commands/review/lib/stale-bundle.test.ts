@@ -8,12 +8,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   symlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 // One listed file can be made unreadable, and one listed directory
 // unlistable, to reach the branches where the tree changes underneath the
@@ -22,6 +23,7 @@ const unreadable = vi.hoisted(() => ({
   path: '',
   dir: '',
   dirCode: 'EACCES',
+  reverse: false,
 }));
 vi.mock('node:fs', async (importOriginal) => {
   const real = (await importOriginal()) as typeof import('node:fs');
@@ -38,7 +40,15 @@ vi.mock('node:fs', async (importOriginal) => {
     if (unreadable.dir && String(p) === unreadable.dir) {
       fault(unreadable.dirCode, 'cannot list directory');
     }
-    return (real.readdirSync as (...a: unknown[]) => unknown)(p, ...rest);
+    const entries = (real.readdirSync as (...a: unknown[]) => unknown)(
+      p,
+      ...rest,
+    );
+    // Enumeration order is a property of the filesystem; reversing it on
+    // request lets a case pin the digest's independence from it.
+    return unreadable.reverse && Array.isArray(entries)
+      ? [...entries].reverse()
+      : entries;
   }) as typeof real.readdirSync;
   const statSync = ((p: unknown, ...rest: unknown[]) => {
     // A directory that vanished mid-walk fails the stat too; an unreadable
@@ -63,6 +73,7 @@ vi.mock('node:fs', async (importOriginal) => {
 
 import {
   bundleStaleness,
+  bundleStalenessNotices,
   reviewSourceRoots,
   reviewSourcesDigest,
   staleBundleWarning,
@@ -162,10 +173,12 @@ describe('reviewSourcesDigest', () => {
     expect(reviewSourcesDigest(root, [code(lone)])).not.toBe(before);
   });
 
-  it('does not depend on the order the files are found in', () => {
-    // `readdir` order is a property of the filesystem, so without the sort a
-    // bundle built in CI and a tree cloned locally hash the same source
-    // differently — and the check calls a correct bundle stale.
+  it('does not depend on the order the roots are passed in', () => {
+    // A caller hands over roots in whatever order it lists them; the fold
+    // must not care. Two single-file roots in opposite order still exercise
+    // `files.sort()` — dropping the sort reddens this — but a mutant that
+    // sorts the roots as well survives it, which the enumeration case below
+    // pins on top.
     const a = join(dir, 'a.ts');
     const b = join(dir, 'b.ts');
     writeFileSync(a, 'x');
@@ -173,6 +186,24 @@ describe('reviewSourcesDigest', () => {
     expect(reviewSourcesDigest(root, [code(a), code(b)])).toBe(
       reviewSourcesDigest(root, [code(b), code(a)]),
     );
+  });
+
+  it('does not depend on the order a directory lists its files in', () => {
+    // `readdir` order is a property of the filesystem, so without the sort a
+    // bundle built in CI and a tree cloned locally hash the same source
+    // differently — and the check calls a correct bundle stale. The roots
+    // case above cannot see a mutant that drops `files.sort()` and sorts the
+    // roots too, so the mock enumerates this multi-file directory backwards
+    // and the digest must not move.
+    writeFileSync(join(dir, 'a.ts'), 'x');
+    writeFileSync(join(dir, 'b.ts'), 'y');
+    const forward = reviewSourcesDigest(root, [code(dir)]);
+    unreadable.reverse = true;
+    try {
+      expect(reviewSourcesDigest(root, [code(dir)])).toBe(forward);
+    } finally {
+      unreadable.reverse = false;
+    }
   });
 
   it('ignores test files, which the bundle never contains', () => {
@@ -240,9 +271,12 @@ describe('reviewSourcesDigest', () => {
     // EACCES one level down: hashing the survivors would differ from the
     // stamp and accuse a bundle that is byte-for-byte correct, the exact
     // false positive the file-level read avoids. The honest answer is that
-    // nothing was measured — and a tree with one more file than the
-    // unreadable-file case above, so survivors-only and nothing-measured are
-    // different answers here.
+    // nothing was measured. The fixture is deliberately the SAME shape as
+    // the unreadable-file case above — a two-file tree whose survivor is a
+    // byte-identical `a.ts`, so a survivors-only walk would hash the same
+    // digest in both. What differs is where the walk fails (reading a
+    // listed file vs listing a directory that is still there), and each
+    // must answer `undefined` instead of that digest.
     writeFileSync(join(dir, 'a.ts'), 'x');
     const sub = join(dir, 'lib');
     mkdirSync(sub, { recursive: true });
@@ -388,6 +422,78 @@ describe('staleBundleWarning', () => {
 
   it('says nothing when nothing is wrong', () => {
     expect(staleBundleWarning({ stale: false })).toBeUndefined();
+  });
+});
+
+// The bundled skill conditions its stop-and-relay on the literal lines this
+// module prints; nothing else pins those quotes to the emitters. The
+// staleness check cannot catch the drift by construction — a rebuilt bundle
+// is current, so its re-stamp keeps the check quiet while the agent matches
+// nothing and never stops.
+const repoRoot = resolve(
+  import.meta.dirname,
+  '..',
+  '..',
+  '..',
+  '..',
+  '..',
+  '..',
+);
+
+describe('the bundled skill stops on what this module prints', () => {
+  it('every `review: \u2026` quote in SKILL.md is a prefix of a live notice', () => {
+    const skillPath = join(
+      repoRoot,
+      'packages',
+      'core',
+      'src',
+      'skills',
+      'bundled',
+      'review',
+      'SKILL.md',
+    );
+    const quotes = [
+      ...readFileSync(skillPath, 'utf8').matchAll(/`(review: [^`]*)`/g),
+    ].map((m) => m[1]);
+    expect(quotes.length).toBeGreaterThan(0);
+
+    const root = mkdtempSync(join(tmpdir(), 'skill-parity-'));
+    try {
+      // Sources present, no stamp beside the bundle: the 'could not check'
+      // notice. The two warning forms come straight from `staleBundleWarning`.
+      const distDir = join(root, 'dist');
+      mkdirSync(distDir, { recursive: true });
+      writeFileSync(join(distDir, 'cli.js'), 'bundle');
+      const commands = join(root, 'packages', 'cli', 'src', 'commands');
+      mkdirSync(join(commands, 'review'), { recursive: true });
+      writeFileSync(join(commands, 'review', 'drive.ts'), 'x');
+      writeFileSync(join(commands, 'review.ts'), 'registers');
+      const skillDir = join(
+        root,
+        'packages',
+        'core',
+        'src',
+        'skills',
+        'bundled',
+        'review',
+      );
+      mkdirSync(skillDir, { recursive: true });
+      writeFileSync(join(skillDir, 'SKILL.md'), '# skill');
+      const lines = [
+        staleBundleWarning({ stale: true })!,
+        staleBundleWarning({ stale: true }, true)!,
+        ...bundleStalenessNotices(join(distDir, 'cli.js')),
+      ];
+      expect(lines.length).toBeGreaterThan(2);
+      for (const quote of quotes) {
+        expect(
+          lines.some((line) => line.startsWith(quote)),
+          `SKILL.md quotes \`${quote}\`, but no notice this module prints begins with it`,
+        ).toBe(true);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

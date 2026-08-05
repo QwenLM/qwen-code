@@ -10,8 +10,8 @@
 // then `__fixtures__/`, then `lib/test-utils.ts` (test support with a
 // production-looking name), then `.DS_Store`. Each was found by a reviewer
 // after it shipped, and each produced the same failure — a warning that a
-// review command changed, fired by an edit that cannot change a byte of the
-// bundle, which is the one thing this check must never do.
+// review command changed, fired by an edit to a file the bundle cannot
+// contain, which is the one thing this check must never do.
 //
 // So the rule stops being a list somebody remembers to extend. This asserts
 // the property the list is trying to approximate: every file the digest folds
@@ -73,28 +73,19 @@ function* allFiles(dir: string): Generator<string> {
 }
 
 /**
- * Whether a static `import`/`export … from` clause binds no value, so esbuild
- * erases the whole statement under this repo's `verbatimModuleSyntax`: either
- * the leading `type` keyword, or a named clause with no default or namespace
- * part whose every specifier carries its own `type` prefix. Counting such a
- * clause as an edge would fold a never-bundled module into what production
- * imports — a file the digest hashes but the bundle cannot contain passing
- * the guard that exists to reject it.
+ * Whether a static `import`/`export … from` clause is a statement-level
+ * type-only form esbuild erases wholesale: a leading `type` with a clause of
+ * type-import shape — `type {…}`, `type *…`, or `type` plus exactly one
+ * identifier. Under this repo's `verbatimModuleSyntax` a specifier-level
+ * `type` prefix is NOT that form: esbuild erases only the specifier and keeps
+ * the statement as a side-effect import, so `import { type T } from './b.js'`
+ * still puts `b.js` in the bundle, and every named clause is an edge.
+ * Counting an erased statement as an edge would fold a never-bundled module
+ * into what production imports — a file the digest hashes but the bundle
+ * cannot contain passing the guard that exists to reject it.
  */
 function isTypeOnlyClause(clause: string): boolean {
-  if (/^\s*type\b/.test(clause)) return true;
-  const brace = clause.match(/\{[^}]*\}/);
-  if (!brace) return false;
-  if (clause.replace(brace[0], '').trim() !== '') return false;
-  const specifiers = brace[0]
-    .slice(1, -1)
-    .split(',')
-    .map((spec) => spec.trim())
-    .filter((spec) => spec !== '');
-  return (
-    specifiers.length > 0 &&
-    specifiers.every((spec) => /^type\s+[A-Za-z_$]/.test(spec))
-  );
+  return /^\s*type\s+(?:[{*]|[A-Za-z_$][\w$]*\s*$)/.test(clause);
 }
 
 const isTest = (f: string) => NOT_BUNDLED_RE.test(basename(f));
@@ -110,10 +101,11 @@ function localImports(f: string): string[] {
   // `from '…'` / `export … from '…'`, `await import('…')` — the directory
   // has nine dynamic edges, and a helper reached only that way would be
   // invisible here — and bare `import '…'`, which esbuild bundles for its
-  // side effects. Type-only statements are the opposite gap: esbuild erases
-  // them, so counting one folds a never-bundled file into what production
-  // imports — in both forms: the leading `type` keyword AND a named clause
-  // whose every specifier is individually `type`-prefixed.
+  // side effects. Statement-level type-only forms (`import type …`,
+  // `export type …`) are the opposite gap: esbuild erases them wholesale, so
+  // counting one folds a never-bundled file into what production imports.
+  // Specifier-level `type` prefixes are edges, not that gap — see
+  // `isTypeOnlyClause`.
   for (const m of src.matchAll(
     /\b(import|export)\b([^;'"]*)\bfrom\s+'(\.[^']+)'/g,
   )) {
@@ -222,14 +214,29 @@ describe('the staleness digest covers only what the bundle can contain', () => {
     };
 
     it('drops the clauses esbuild erases wholesale', () => {
+      // Statement-level forms only — `import type …` / `export type …`.
       expect(edgesOf('import type { T }')).toEqual([]);
-      expect(edgesOf('import { type T }')).toEqual([]);
-      expect(edgesOf('import { type T, type U }')).toEqual([]);
+      expect(edgesOf('import type D')).toEqual([]);
+      expect(edgesOf('import type * as ns')).toEqual([]);
       expect(edgesOf('export type { T }')).toEqual([]);
     });
 
-    it('keeps the clauses that still bind a value', () => {
+    it('keeps the clauses esbuild does not erase', () => {
       const b = join(dir, 'b.ts');
+      // A specifier-level `type` prefix erases only the specifier under
+      // `verbatimModuleSyntax`; the statement survives as a side-effect
+      // import, so the module IS in the bundle. Pinning the opposite
+      // accused a future production module reached only through such a
+      // clause of being test-only scratch — and blocked the classifier fix.
+      expect(edgesOf('import { type T }')).toEqual([b]);
+      expect(edgesOf('import { type T, type U }')).toEqual([b]);
+      expect(edgesOf('export { type T }')).toEqual([b]);
+      // `type` is an identifier here, not the modifier: `type` followed by
+      // `as` is an import OF an export named `type`, and a bare `type`
+      // before `from` (or before `, {`) is a default import named `type`.
+      expect(edgesOf('import { type as v }')).toEqual([b]);
+      expect(edgesOf('import type')).toEqual([b]);
+      expect(edgesOf('import type, { v }')).toEqual([b]);
       expect(edgesOf('import { type T, v }')).toEqual([b]);
       expect(edgesOf('import D, { type T }')).toEqual([b]);
       expect(edgesOf('import { v }')).toEqual([b]);

@@ -226,9 +226,11 @@ describe('package asset scripts', () => {
       later,
       later,
     );
-    // The field directly, not only its consequence: with the newest file
-    // sorting middle, a keep-first or keep-last mutant still refuses, by the
-    // wrong file.
+    // The field directly, not only its consequence: keep-first and keep-last
+    // mutants stamp by an older file here — the no-stamp assertion below is
+    // what catches them. The complementary class tracks the right mtime but
+    // attributes it to the wrong path: it still refuses, by the wrong file,
+    // and only this field assertion catches it.
     expect(reviewSourceDigestForBuild(rootDir).newest?.file).toBe(
       path.join(rootDir, 'packages/cli/src/commands/review/m-newest.ts'),
     );
@@ -429,7 +431,9 @@ describe('package asset scripts', () => {
 
   // chmod is the only lever this case has: on Windows it is a no-op, and a
   // root user reads through it, so the branch under test is unreachable
-  // there and the case skips instead of passing on the other branch.
+  // there. The case skips rather than running into the other branch — a
+  // readable tree, stamped as usual — and failing red against the no-stamp
+  // assertion.
   it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
     'refuses when a digest root exists but cannot be listed',
     () => {

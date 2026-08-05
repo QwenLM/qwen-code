@@ -668,6 +668,29 @@ describe('parse-args warns when the bundle is not built from these sources', () 
     expect(writeStderrLineSafe).not.toHaveBeenCalled();
   });
 
+  it('warns through a symlinked alias of the bundle', () => {
+    // node hands `argv[1]` over unresolved, so a dogfooding alias like
+    // `ln -s dist/cli.js ~/bin/qwen` must resolve back to the bundle before
+    // the layout guard derives `dist/` from it — otherwise the check is
+    // silently off for every symlinked entry.
+    stamp(foreignDigest);
+    const alias = join(repo, 'qwen-alias');
+    fsReal.symlinkSync(argv1, alias);
+    const original = process.argv[1];
+    process.argv[1] = alias;
+    try {
+      (parseArgsCommand.handler as (a: unknown) => void)({
+        raw: '8368',
+        _: ['review', 'parse-args'],
+      });
+    } finally {
+      process.argv[1] = original;
+    }
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+      'NOT built from the review sources',
+    );
+  });
+
   it('says it could not check when sources exist but the stamp does not', () => {
     // A checkout whose dist predates the stamp is genuinely stale and
     // unmeasurable — the state of every existing tree the moment this ships.
@@ -696,9 +719,10 @@ describe('parse-args warns when the bundle is not built from these sources', () 
   });
 
   // chmod is the only lever this case has: on Windows it is a no-op, and a
-  // root user reads through it, so the branch under test is unreachable there
-  // and the case skips instead of passing on the OTHER branch (a readable
-  // tree, whose digest merely differs).
+  // root user reads through it, so the branch under test is unreachable
+  // there. The case skips rather than running into the OTHER branch — a
+  // readable tree, whose digest merely differs — and failing red against
+  // assertions that match only the unmeasured message.
   it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
     'says it could not check when a source cannot be read',
     () => {
