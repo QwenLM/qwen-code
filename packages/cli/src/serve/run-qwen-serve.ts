@@ -1411,6 +1411,21 @@ const BOOTSTRAP_SERVE_PATHS = new Set([
   BOOTSTRAP_DAEMON_STATUS_PATH,
 ]);
 
+const RUNTIME_STARTUP_FAILED_ENVELOPE = {
+  error: 'Daemon runtime failed to start',
+  code: 'daemon_runtime_failed',
+} as const;
+const RUNTIME_STARTUP_STARTING_ENVELOPE = {
+  error: 'Daemon runtime is still starting',
+  code: 'daemon_runtime_starting',
+} as const;
+
+function runtimeStartupFailureEnvelope(runtimeError: string | undefined) {
+  return runtimeError
+    ? RUNTIME_STARTUP_FAILED_ENVELOPE
+    : RUNTIME_STARTUP_STARTING_ENVELOPE;
+}
+
 function createBootstrapServeApp(input: {
   opts: ServeOptions;
   getPort: () => number;
@@ -1493,14 +1508,7 @@ function createBootstrapServeApp(input: {
       if (runtimeError === undefined) {
         res.setHeader('Retry-After', '1');
       }
-      res.status(503).json({
-        error: runtimeError
-          ? 'Daemon runtime failed to start'
-          : 'Daemon runtime is still starting',
-        code: runtimeError
-          ? 'daemon_runtime_failed'
-          : 'daemon_runtime_starting',
-      });
+      res.status(503).json(runtimeStartupFailureEnvelope(runtimeError));
       return;
     }
     res.status(200).json(
@@ -1679,13 +1687,7 @@ function createBootstrapServeApp(input: {
   });
 
   app.use((_req: Request, res: Response): void => {
-    const runtimeError = getRuntimeError();
-    res.status(503).json({
-      error: runtimeError
-        ? 'Daemon runtime failed to start'
-        : 'Daemon runtime is still starting',
-      code: runtimeError ? 'daemon_runtime_failed' : 'daemon_runtime_starting',
-    });
+    res.status(503).json(runtimeStartupFailureEnvelope(getRuntimeError()));
   });
 
   return app;
@@ -1744,10 +1746,7 @@ function createDelegatingServeApp(
             // The bootstrap app serves the failure envelope only behind its
             // bearer gate, which a pre-auth navigation cannot pass — answer
             // here so the browser sees the startup failure, not a 401.
-            res.status(503).json({
-              error: 'Daemon runtime failed to start',
-              code: 'daemon_runtime_failed',
-            });
+            res.status(503).json(RUNTIME_STARTUP_FAILED_ENVELOPE);
             return;
           }
           // Fall through to the bootstrap app so it can report the startup error.

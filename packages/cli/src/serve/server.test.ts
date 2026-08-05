@@ -3076,6 +3076,23 @@ describe('createServeApp', () => {
       expect(trailingSlash.text).toContain('<div id="root">');
     });
 
+    it('serves the shell for /session/:id on a sec-fetch-only navigation signal', async () => {
+      // A refresh navigates with `Sec-Fetch-Mode: navigate` and no HTML
+      // Accept prefix; the pre-auth route must honor the full
+      // isDocumentNavigation signal or this exact flow falls through to
+      // bearerAuth and 401s.
+      const app = createServeApp({ ...baseOpts, token: 'secret' }, undefined, {
+        webShellDir,
+      });
+      const res = await request(app)
+        .get('/session/abc123')
+        .set('Host', host)
+        .set('Accept', '*/*')
+        .set('Sec-Fetch-Mode', 'navigate');
+      expect(res.status).toBe(200);
+      expect(res.text).toContain('<div id="root">');
+    });
+
     it('401s /session/:id for JSON requests', async () => {
       const app = createServeApp({ ...baseOpts, token: 'secret' }, undefined, {
         webShellDir,

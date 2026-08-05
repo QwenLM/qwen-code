@@ -463,6 +463,51 @@ function makeRuntimeBridge(): HttpAcpBridge {
   } as unknown as HttpAcpBridge;
 }
 
+function writeWebShellFixture(workspaceDir: string): string {
+  const shellDir = path.join(workspaceDir, 'web-shell');
+  fs.mkdirSync(path.join(shellDir, 'assets'), { recursive: true });
+  fs.writeFileSync(
+    path.join(shellDir, 'index.html'),
+    '<!doctype html><body><div id="root"></div></body>',
+  );
+  vi.spyOn(webShellResolver, 'resolveWebShellDir').mockReturnValue(shellDir);
+  return shellDir;
+}
+
+async function startDeferredDaemon(
+  workspace: string,
+  overrides: {
+    serveOptions?: Partial<Parameters<typeof runQwenServe>[0]>;
+    createBridge?: () => HttpAcpBridge;
+  } = {},
+) {
+  const createBridge = vi
+    .spyOn(acpBridge, 'createAcpSessionBridge')
+    .mockImplementation(() => {
+      const bridge = overrides.createBridge
+        ? overrides.createBridge()
+        : makeRuntimeBridge();
+      return bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>;
+    });
+  const handle = await runQwenServe(
+    {
+      port: 0,
+      hostname: '127.0.0.1',
+      mode: 'http-bridge',
+      workspace,
+      maxSessions: 1,
+      token: 'secret-token',
+      ...overrides.serveOptions,
+    },
+    {
+      resolveOnListen: true,
+      deferRuntimeUntilFirstHealth: true,
+      runtimeStartupTimeoutMs: 0,
+    },
+  );
+  return { handle, createBridge };
+}
+
 const mockCreateSpawnChannelFactoryOptions = vi.hoisted(
   () => [] as Array<Record<string, unknown>>,
 );
@@ -5024,35 +5069,8 @@ describe('runQwenServe runtime startup failures', () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-webshell-')),
     );
-    const shellDir = path.join(tmpDir, 'web-shell');
-    fs.mkdirSync(path.join(shellDir, 'assets'), { recursive: true });
-    fs.writeFileSync(
-      path.join(shellDir, 'index.html'),
-      '<!doctype html><body><div id="root"></div></body>',
-    );
-    vi.spyOn(webShellResolver, 'resolveWebShellDir').mockReturnValue(shellDir);
-    const bridge = makeRuntimeBridge();
-    const createBridge = vi
-      .spyOn(acpBridge, 'createAcpSessionBridge')
-      .mockReturnValue(
-        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
-      );
-
-    const handle = await runQwenServe(
-      {
-        port: 0,
-        hostname: '127.0.0.1',
-        mode: 'http-bridge',
-        workspace: tmpDir,
-        maxSessions: 1,
-        token: 'secret-token',
-      },
-      {
-        resolveOnListen: true,
-        deferRuntimeUntilFirstHealth: true,
-        runtimeStartupTimeoutMs: 0,
-      },
-    );
+    writeWebShellFixture(tmpDir);
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir);
 
     try {
       // HEAD goes first so the cold deferred gate's pre-auth exemption is
@@ -5084,35 +5102,8 @@ describe('runQwenServe runtime startup failures', () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-root-')),
     );
-    const shellDir = path.join(tmpDir, 'web-shell');
-    fs.mkdirSync(path.join(shellDir, 'assets'), { recursive: true });
-    fs.writeFileSync(
-      path.join(shellDir, 'index.html'),
-      '<!doctype html><body><div id="root"></div></body>',
-    );
-    vi.spyOn(webShellResolver, 'resolveWebShellDir').mockReturnValue(shellDir);
-    const bridge = makeRuntimeBridge();
-    const createBridge = vi
-      .spyOn(acpBridge, 'createAcpSessionBridge')
-      .mockReturnValue(
-        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
-      );
-
-    const handle = await runQwenServe(
-      {
-        port: 0,
-        hostname: '127.0.0.1',
-        mode: 'http-bridge',
-        workspace: tmpDir,
-        maxSessions: 1,
-        token: 'secret-token',
-      },
-      {
-        resolveOnListen: true,
-        deferRuntimeUntilFirstHealth: true,
-        runtimeStartupTimeoutMs: 0,
-      },
-    );
+    writeWebShellFixture(tmpDir);
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir);
 
     try {
       // First request to a cold daemon, so the `/` exemption is exercised at
@@ -5132,39 +5123,12 @@ describe('runQwenServe runtime startup failures', () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-assets-')),
     );
-    const shellDir = path.join(tmpDir, 'web-shell');
-    fs.mkdirSync(path.join(shellDir, 'assets'), { recursive: true });
-    fs.writeFileSync(
-      path.join(shellDir, 'index.html'),
-      '<!doctype html><body><div id="root"></div></body>',
-    );
+    const shellDir = writeWebShellFixture(tmpDir);
     fs.writeFileSync(
       path.join(shellDir, 'assets', 'fixture.js'),
       'console.log("fixture");',
     );
-    vi.spyOn(webShellResolver, 'resolveWebShellDir').mockReturnValue(shellDir);
-    const bridge = makeRuntimeBridge();
-    const createBridge = vi
-      .spyOn(acpBridge, 'createAcpSessionBridge')
-      .mockReturnValue(
-        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
-      );
-
-    const handle = await runQwenServe(
-      {
-        port: 0,
-        hostname: '127.0.0.1',
-        mode: 'http-bridge',
-        workspace: tmpDir,
-        maxSessions: 1,
-        token: 'secret-token',
-      },
-      {
-        resolveOnListen: true,
-        deferRuntimeUntilFirstHealth: true,
-        runtimeStartupTimeoutMs: 0,
-      },
-    );
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir);
 
     try {
       // First request to a cold daemon, so only the predicate's `/assets/`
@@ -5183,35 +5147,8 @@ describe('runQwenServe runtime startup failures', () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-assets-bare-')),
     );
-    const shellDir = path.join(tmpDir, 'web-shell');
-    fs.mkdirSync(path.join(shellDir, 'assets'), { recursive: true });
-    fs.writeFileSync(
-      path.join(shellDir, 'index.html'),
-      '<!doctype html><body><div id="root"></div></body>',
-    );
-    vi.spyOn(webShellResolver, 'resolveWebShellDir').mockReturnValue(shellDir);
-    const bridge = makeRuntimeBridge();
-    const createBridge = vi
-      .spyOn(acpBridge, 'createAcpSessionBridge')
-      .mockReturnValue(
-        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
-      );
-
-    const handle = await runQwenServe(
-      {
-        port: 0,
-        hostname: '127.0.0.1',
-        mode: 'http-bridge',
-        workspace: tmpDir,
-        maxSessions: 1,
-        token: 'secret-token',
-      },
-      {
-        resolveOnListen: true,
-        deferRuntimeUntilFirstHealth: true,
-        runtimeStartupTimeoutMs: 0,
-      },
-    );
+    writeWebShellFixture(tmpDir);
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir);
 
     try {
       // First request to a cold daemon. Express 5's `app.use('/assets', ...)`
@@ -5234,35 +5171,8 @@ describe('runQwenServe runtime startup failures', () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-shapes-')),
     );
-    const shellDir = path.join(tmpDir, 'web-shell');
-    fs.mkdirSync(path.join(shellDir, 'assets'), { recursive: true });
-    fs.writeFileSync(
-      path.join(shellDir, 'index.html'),
-      '<!doctype html><body><div id="root"></div></body>',
-    );
-    vi.spyOn(webShellResolver, 'resolveWebShellDir').mockReturnValue(shellDir);
-    const bridge = makeRuntimeBridge();
-    const createBridge = vi
-      .spyOn(acpBridge, 'createAcpSessionBridge')
-      .mockReturnValue(
-        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
-      );
-
-    const handle = await runQwenServe(
-      {
-        port: 0,
-        hostname: '127.0.0.1',
-        mode: 'http-bridge',
-        workspace: tmpDir,
-        maxSessions: 1,
-        token: 'secret-token',
-      },
-      {
-        resolveOnListen: true,
-        deferRuntimeUntilFirstHealth: true,
-        runtimeStartupTimeoutMs: 0,
-      },
-    );
+    writeWebShellFixture(tmpDir);
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir);
 
     try {
       // The warm app serves this shape pre-auth (Express matches routes
@@ -5285,35 +5195,8 @@ describe('runQwenServe runtime startup failures', () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-webshell-gate-')),
     );
-    const shellDir = path.join(tmpDir, 'web-shell');
-    fs.mkdirSync(path.join(shellDir, 'assets'), { recursive: true });
-    fs.writeFileSync(
-      path.join(shellDir, 'index.html'),
-      '<!doctype html><body><div id="root"></div></body>',
-    );
-    vi.spyOn(webShellResolver, 'resolveWebShellDir').mockReturnValue(shellDir);
-    const bridge = makeRuntimeBridge();
-    const createBridge = vi
-      .spyOn(acpBridge, 'createAcpSessionBridge')
-      .mockReturnValue(
-        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
-      );
-
-    const handle = await runQwenServe(
-      {
-        port: 0,
-        hostname: '127.0.0.1',
-        mode: 'http-bridge',
-        workspace: tmpDir,
-        maxSessions: 1,
-        token: 'secret-token',
-      },
-      {
-        resolveOnListen: true,
-        deferRuntimeUntilFirstHealth: true,
-        runtimeStartupTimeoutMs: 0,
-      },
-    );
+    writeWebShellFixture(tmpDir);
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir);
 
     try {
       const jsonRes = await fetch(`${handle.url}/session/abc`, {
@@ -5336,29 +5219,9 @@ describe('runQwenServe runtime startup failures', () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-noweb-')),
     );
-    const bridge = makeRuntimeBridge();
-    const createBridge = vi
-      .spyOn(acpBridge, 'createAcpSessionBridge')
-      .mockReturnValue(
-        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
-      );
-
-    const handle = await runQwenServe(
-      {
-        port: 0,
-        hostname: '127.0.0.1',
-        mode: 'http-bridge',
-        workspace: tmpDir,
-        maxSessions: 1,
-        serveWebShell: false,
-        token: 'secret-token',
-      },
-      {
-        resolveOnListen: true,
-        deferRuntimeUntilFirstHealth: true,
-        runtimeStartupTimeoutMs: 0,
-      },
-    );
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir, {
+      serveOptions: { serveWebShell: false },
+    });
 
     try {
       const navRes = await fetch(`${handle.url}/session/abc`, {
@@ -5375,38 +5238,16 @@ describe('runQwenServe runtime startup failures', () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-webshell-fail-')),
     );
-    const shellDir = path.join(tmpDir, 'web-shell');
-    fs.mkdirSync(path.join(shellDir, 'assets'), { recursive: true });
-    fs.writeFileSync(
-      path.join(shellDir, 'index.html'),
-      '<!doctype html><body><div id="root"></div></body>',
-    );
-    vi.spyOn(webShellResolver, 'resolveWebShellDir').mockReturnValue(shellDir);
+    writeWebShellFixture(tmpDir);
     vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
       enabled: false,
       sensitiveSpanAttributeMaxLength: 1024 * 1024,
     });
-    const createBridge = vi
-      .spyOn(acpBridge, 'createAcpSessionBridge')
-      .mockImplementation(() => {
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir, {
+      createBridge: () => {
         throw new Error('runtime boom');
-      });
-
-    const handle = await runQwenServe(
-      {
-        port: 0,
-        hostname: '127.0.0.1',
-        mode: 'http-bridge',
-        workspace: tmpDir,
-        maxSessions: 1,
-        token: 'secret-token',
       },
-      {
-        resolveOnListen: true,
-        deferRuntimeUntilFirstHealth: true,
-        runtimeStartupTimeoutMs: 0,
-      },
-    );
+    });
 
     try {
       // These paths are declared pre-auth, so on a startup failure they must
