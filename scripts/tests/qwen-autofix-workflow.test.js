@@ -3372,6 +3372,36 @@ exit 1
         'A later scheduled scan will retry',
       );
 
+      writeFileSync(callsFile, '');
+      const authorPermissionReporter = runReporter(
+        {},
+        'author_permission_read',
+      );
+      expect(authorPermissionReporter.status).toBe(0);
+      const authorPermissionCalls = readFileSync(callsFile, 'utf8');
+      expect(authorPermissionCalls).toContain(
+        'Grant the fork author write access',
+      );
+      expect(authorPermissionCalls).toContain(
+        'remove the autofix/takeover label',
+      );
+      expect(authorPermissionCalls).not.toContain(
+        'A later scheduled scan will retry',
+      );
+
+      writeFileSync(callsFile, '');
+      const botManagedMeta = JSON.stringify({
+        ...JSON.parse(meta),
+        author: { login: 'qwen-code-dev-bot' },
+        labels: [],
+      });
+      const botManagedReporter = runReporter(
+        { META: botManagedMeta },
+        'maintainer_edits_disabled',
+      );
+      expect(botManagedReporter.status).toBe(0);
+      expect(readFileSync(callsFile, 'utf8')).toContain('AutoFix blocked');
+
       const failedReporter = runReporter({ FAIL_STATUS_LOOKUP: 'true' });
       expect(failedReporter.status).toBe(1);
       expect(failedReporter.stdout).toContain('(attempt 3/3)');

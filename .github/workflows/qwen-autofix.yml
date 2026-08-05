@@ -1771,7 +1771,9 @@ jobs:
           report_forced_takeover_blocked() {
             local reason="$1" actor status_ids status_id body attempt status_lookup_ok next_en next_zh
             [[ "${DRY_RUN}" == 'true' ]] && return 0
-            [[ "$(jq -r --arg take "${TAKEOVER_LABEL}" '[.labels[]?.name] | index($take) != null' <<< "${META}")" == 'true' ]] || return 0
+            [[ "$(jq -r --arg ab "${AUTOFIX_BOT}" --arg take "${TAKEOVER_LABEL}" '
+              ((.author.login // "") == $ab) or ([.labels[]?.name] | index($take) != null)
+            ' <<< "${META}")" == 'true' ]] || return 0
             case "${reason}" in
               permission_lookup_failed|author_permission_*|maintainer_edits_disabled|cross_repo_state_missing) ;;
               *) return 0 ;;
@@ -1791,6 +1793,9 @@ jobs:
             if [[ "${reason}" == 'maintainer_edits_disabled' ]]; then
               next_en='Re-enable maintainer edits on the fork PR to resume takeover.'
               next_zh='请在 fork PR 上重新允许 maintainer edits，以恢复 takeover。'
+            elif [[ "${reason}" == author_permission_* ]]; then
+              next_en='Grant the fork author write access, or remove the autofix/takeover label, to resume takeover.'
+              next_zh='请授予 fork 作者 write 权限，或移除 autofix/takeover 标签，以恢复 takeover。'
             else
               next_en='A later scheduled scan will retry without advancing the feedback watermark.'
               next_zh='后续定时扫描会重试，本次不会推进反馈水位。'
