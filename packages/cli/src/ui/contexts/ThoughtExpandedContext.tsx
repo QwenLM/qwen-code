@@ -13,6 +13,15 @@ import { createContext, useContext } from 'react';
  * thought commits (see `settlePendingExpansion` below). Negative so it can
  * never collide with a real committed head id, which is always a large
  * positive `baseTimestamp + counter` value.
+ *
+ * Accepted race: a press→release straddling the thought's commit can
+ * dead-click or toggle this stale sentinel, because commit remounts the row
+ * (pending key → committed key, plus the VP live→static wrapper change in
+ * VirtualizedListItem) and the press record dies with the old instance;
+ * pre-allocating the committed id would still remount at the live→static
+ * flip. The window is one click in VP mouse mode; re-click or keyboard
+ * recovers, and settle(null) at the next thought start drops any stray
+ * sentinel.
  */
 export const PENDING_THOUGHT_HEAD_ID = -1;
 
