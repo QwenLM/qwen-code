@@ -200,7 +200,7 @@ Run these from the channel's workspace directory (or pass `--cwd <dir>`) — pai
 
 - Codes are 8 characters, uppercase, using an unambiguous alphabet (no `0`/`O`/`1`/`I`)
 - Codes expire after 1 hour
-- Maximum 3 pending requests per channel at a time — additional requests are ignored until one expires or is approved
+- Maximum 3 pending requests per channel at a time, and at most one per sender — additional requests are ignored until one expires or is approved
 - Users listed in `allowedUsers` in `settings.json` always skip pairing
 - Approved users are stored per workspace in `~/.qwen/channels/<workspace-scope>/<name>-allowlist.json` — treat this file as sensitive
 

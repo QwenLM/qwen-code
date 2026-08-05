@@ -32,7 +32,8 @@ export const plugin: ChannelPlugin = {
         label: 'Group Policy',
         kind: 'enum',
         required: true,
-        description: 'Must be "Open" or "Allowlist" for todos to be processed',
+        description:
+          'Must be "Open", "Allowlist", or "Pairing" for todos to be processed',
         default: 'open',
         options: [
           { value: 'open', label: 'Open' },

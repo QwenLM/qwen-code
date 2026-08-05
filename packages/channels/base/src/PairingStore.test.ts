@@ -113,6 +113,52 @@ describe('PairingStore workspace scoping (#7017)', () => {
     ]);
   });
 
+  it('limits each sender to one pending request across subjects', () => {
+    const store = new PairingStore('support-bot', workspaceA);
+
+    const first = store.createGroupRequest(
+      'group-1',
+      'Release Team',
+      'alice',
+      'Alice',
+    );
+    expect(first).toBeTruthy();
+
+    // Same sender, different subjects: no additional slots.
+    expect(
+      store.createGroupRequest('group-2', 'Platform Team', 'alice', 'Alice'),
+    ).toBeNull();
+    expect(store.createRequest('alice', 'Alice')).toBeNull();
+
+    // Re-mentioning the same subject still returns its existing code.
+    expect(
+      store.createGroupRequest('group-1', 'Release Team', 'alice', 'Alice'),
+    ).toBe(first);
+
+    // Other senders are unaffected until the shared cap (3) is reached.
+    expect(
+      store.createGroupRequest('group-2', 'Platform Team', 'bob', 'Bob'),
+    ).toBeTruthy();
+    expect(store.createRequest('carol', 'Carol')).toBeTruthy();
+    expect(store.createRequest('dave', 'Dave')).toBeNull();
+  });
+
+  it('frees the sender slot once their pending request is approved', () => {
+    const store = new PairingStore('support-bot', workspaceA);
+    const code = store.createGroupRequest(
+      'group-1',
+      'Release Team',
+      'alice',
+      'Alice',
+    )!;
+
+    expect(store.createRequest('alice', 'Alice')).toBeNull();
+
+    store.approve(code);
+
+    expect(store.createRequest('alice', 'Alice')).toBeTruthy();
+  });
+
   it('isolates group approvals and revocation by workspace', () => {
     const storeA = new PairingStore('support-bot', workspaceA);
     const storeB = new PairingStore('support-bot', workspaceB);

@@ -304,18 +304,18 @@ constructor(channelName: string, workspaceCwd?: string)
 
 Persists pending pairing state to `{channelName}-pairing.json`, user approvals to `{channelName}-allowlist.json`, and group approvals to `{channelName}-groups.json`. With `workspaceCwd` (what `ChannelBase` passes — the channel's `cwd`), the files live under the workspace-scoped directory `~/.qwen/channels/<workspace-scope>/` so two workspaces reusing the same channel name never share pairing requests or allowlist entries. Without it, the legacy global `~/.qwen/channels/` layout is used. The first time a given (workspace, channel) pair is constructed, existing legacy global files are copied in once (grandfathering) so already-approved senders stay approved; a per-channel `<channel>.migrated` sentinel in the scope directory marks that decision, after which legacy files are never consulted again for that channel. Channel names are URI-encoded in file names, so a name containing path separators cannot escape the scope directory. `revoke(senderId)` removes the sender only from this store's allowlist and never mutates the legacy global baseline.
 
-| Method                                | Description                                                                                               |
-| ------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `createRequest(senderId, senderName)` | Generate an 8-char pairing code (or return existing). Returns `null` if 3 pending requests already exist. |
-| `createGroupRequest(...)`             | Generate a request keyed by stable group ID and record its initiating sender.                             |
-| `approve(code)`                       | Approve a user or group request and update its corresponding allowlist.                                   |
-| `isApproved(senderId)`                | Check if sender is in the approved allowlist                                                              |
-| `isGroupApproved(groupId)`            | Check if a group is approved                                                                              |
-| `listPending()`                       | Get active (non-expired) pending requests                                                                 |
-| `getAllowlist()`                      | Get approved sender IDs                                                                                   |
-| `getGroupAllowlist()`                 | Get approved group IDs                                                                                    |
-| `revoke(senderId)`                    | Remove an approved sender. Returns whether the sender was present.                                        |
-| `revokeGroup(groupId)`                | Remove an approved group. Returns whether the group was present.                                          |
+| Method                                | Description                                                                                                                               |
+| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `createRequest(senderId, senderName)` | Generate an 8-char pairing code (or return existing). Returns `null` if 3 pending requests already exist or the sender already holds one. |
+| `createGroupRequest(...)`             | Generate a request keyed by stable group ID and record its initiating sender.                                                             |
+| `approve(code)`                       | Approve a user or group request and update its corresponding allowlist.                                                                   |
+| `isApproved(senderId)`                | Check if sender is in the approved allowlist                                                                                              |
+| `isGroupApproved(groupId)`            | Check if a group is approved                                                                                                              |
+| `listPending()`                       | Get active (non-expired) pending requests                                                                                                 |
+| `getAllowlist()`                      | Get approved sender IDs                                                                                                                   |
+| `getGroupAllowlist()`                 | Get approved group IDs                                                                                                                    |
+| `revoke(senderId)`                    | Remove an approved sender. Returns whether the sender was present.                                                                        |
+| `revokeGroup(groupId)`                | Remove an approved group. Returns whether the group was present.                                                                          |
 
 ## Envelope
 

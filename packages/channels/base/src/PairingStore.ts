@@ -177,8 +177,9 @@ export class PairingStore {
 
   /**
    * Create a pairing request for an unknown sender.
-   * Returns the code if created, or null if the pending cap is reached.
-   * If the sender already has a non-expired pending request, returns that code.
+   * Returns the code if created, or null if the pending cap is reached or the
+   * sender already holds a pending request for another subject. If the subject
+   * already has a non-expired pending request, returns that code.
    */
   createRequest(senderId: string, senderName: string): string | null {
     return this.createSubjectRequest(
@@ -220,6 +221,14 @@ export class PairingStore {
     );
     if (existing) {
       return existing.code;
+    }
+
+    // One sender may hold only one pending request at a time: subject-keyed
+    // dedup lets a single member vouch for distinct groups, and without this
+    // limit one sender could occupy every shared slot and block all other
+    // pairing requests until expiry.
+    if (active.some((request) => request.senderId === senderId)) {
+      return null;
     }
 
     // Cap check

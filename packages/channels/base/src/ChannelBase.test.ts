@@ -13609,8 +13609,8 @@ describe('ChannelBase', () => {
           store.createGroupRequest(
             `group-${index}`,
             `Group ${index}`,
-            'alice',
-            'Alice',
+            `sender-${index}`,
+            `Sender ${index}`,
           );
         }
         const ch = createChannel({ groupPolicy: 'pairing' });

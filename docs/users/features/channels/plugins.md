@@ -54,7 +54,7 @@ All standard channel options work with custom channels:
 | `cwd`          | Working directory for the agent                |
 | `instructions` | Prepended to the first message of each session |
 | `model`        | Model override for the channel                 |
-| `groupPolicy`  | `disabled`, `allowlist`, or `open`             |
+| `groupPolicy`  | `disabled`, `allowlist`, `pairing`, or `open`  |
 | `dmPolicy`     | `open` or `disabled`                           |
 | `groups`       | Per-group settings                             |
 
