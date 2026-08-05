@@ -16,11 +16,13 @@ import type {
   TranscriptReplayGapInput,
 } from '@qwen-code/qwen-code-core/transcriptRecords';
 import {
+  isGoalCheckpointBookkeepingCause,
   isGoalCheckpointBookkeepingTransition,
   parseGoalSnapshotV2,
   parseGoalStateRecordPayloadV2,
   projectGoalStateToLegacy,
   type GoalSnapshotV2,
+  type GoalStateCause,
 } from '@qwen-code/qwen-code-core/goalWire';
 // Narrow path — the helper is Node-free. Importing the core package barrel
 // here would pull the whole Node-bound core graph into the browser
@@ -390,6 +392,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
   };
   private finalized = false;
   private goalState: GoalSnapshotV2 | undefined;
+  private goalCause: GoalStateCause | undefined;
 
   constructor(private readonly options: TranscriptReplayMachineOptions) {
     const initialState = parseInitialState(
@@ -874,15 +877,17 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         );
         return;
       }
-      const bookkeepingOnly = isGoalCheckpointBookkeepingTransition(
-        this.goalState,
-        payload.snapshot,
-      );
+      const bookkeepingOnly =
+        isGoalCheckpointBookkeepingTransition(
+          this.goalState,
+          payload.snapshot,
+        ) && isGoalCheckpointBookkeepingCause(payload.cause, this.goalCause);
       const projection = projectGoalStateToLegacy(
         payload,
         this.goalState?.goal ?? null,
       );
       this.goalState = payload.snapshot;
+      this.goalCause = payload.cause;
       if (bookkeepingOnly) return;
       const { type: _type, ...goalStatus } = projection.goalStatus;
       yield emit(

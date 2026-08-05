@@ -672,6 +672,41 @@ describe('goal runtime', () => {
     expect(host.started).toHaveLength(2);
   });
 
+  it('keeps a goal active when an empty turn finishes during the checkpoint check', async () => {
+    const journal = fakeGoalJournal();
+    let records: readonly RuntimeRecord[] = [];
+    const evidenceSource = fakeEvidenceSource(() => records);
+    const checkpointVerifier = vi.fn();
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({
+      journal,
+      evidenceSource,
+      verifier: vi.fn(),
+      checkpointVerifier,
+    });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+    const permit = host.started[0]!;
+    // The turn finished without recording any goal-owned transcript records
+    // (e.g. a hook blocked the prompt before anything was recorded).
+    records = [journal.records[0]!];
+
+    await runtime.finishTurn(permit);
+
+    expect(checkpointVerifier).not.toHaveBeenCalled();
+    expect(journal.appended.map((payload) => payload.cause)).toEqual([
+      'create',
+      'turn_finished',
+      'checkpoint',
+    ]);
+    expect(runtime.getSnapshot()).toMatchObject({
+      activity: 'running',
+      goal: { status: 'active' },
+    });
+    expect(runtime.getSnapshot().goal).not.toHaveProperty('evidenceCheckpoint');
+    expect(host.started).toHaveLength(2);
+  });
+
   it('counts checkpoint check time below the compaction threshold', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     try {
@@ -1201,6 +1236,90 @@ describe('goal runtime', () => {
       restored.getSnapshot().goal!.evidenceCheckpoint!.checkpointId,
     );
     expect(restoredHost.started).toHaveLength(1);
+  });
+
+  it('degrades recovery when the recovery checkpoint write fails', async () => {
+    const result = deferred<GoalCheckpointVerificationResult>();
+    const journal = fakeGoalJournal();
+    let records: readonly RuntimeRecord[] = [];
+    const evidenceSource = fakeEvidenceSource(() => records);
+    const checkpointVerifier = vi.fn(() => result.promise);
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({
+      journal,
+      evidenceSource,
+      verifier: vi.fn(),
+      checkpointVerifier,
+    });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+    const permit = host.started[0]!;
+    const evidence = verifierEvidenceWindow(
+      permit,
+      runtime.getSnapshot().goal!.evidenceCursor.recordId!,
+      80,
+    );
+    records = evidence;
+
+    const finishing = runtime.finishTurn(permit);
+    await vi.waitFor(() => expect(checkpointVerifier).toHaveBeenCalledOnce());
+    runtime.dispose();
+    result.resolve({
+      claims: [
+        {
+          proofKind: 'delivered_output',
+          claim: 'The implementation result was delivered.',
+          sourceRefs: ['assistant-evidence-79'],
+        },
+      ],
+    });
+    await finishing;
+
+    const recoveryRecords = [
+      journal.records[0]!,
+      ...evidence.slice(1),
+      journal.records[1]!,
+    ];
+    const restoredJournal = fakeGoalJournal({
+      appendError: new Error('writer lease inactive'),
+    });
+    const restoredHost = fakeGoalTurnHost();
+    const restoredCheckpointVerifier = vi.fn(async () => ({
+      claims: [
+        {
+          proofKind: 'delivered_output' as const,
+          claim: 'The implementation result was delivered.',
+          sourceRefs: ['assistant-evidence-79'],
+        },
+      ],
+    }));
+    const restored = createGoalRuntime({
+      journal: restoredJournal,
+      evidenceSource: fakeEvidenceSource(() => recoveryRecords),
+      verifier: vi.fn(),
+      checkpointVerifier: restoredCheckpointVerifier,
+    });
+    restored.bindHost(restoredHost);
+
+    await expect(restored.restore(recoveryRecords)).rejects.toMatchObject({
+      name: 'GoalPersistenceUnavailableError',
+      message: 'writer lease inactive',
+      cause: expect.objectContaining({ message: 'writer lease inactive' }),
+    });
+    expect(restoredCheckpointVerifier).toHaveBeenCalledOnce();
+    expect(restoredJournal.appended).toEqual([]);
+    expect(restored.getSnapshot()).toMatchObject({
+      activity: 'idle',
+      goal: { status: 'active' },
+    });
+    expect(restoredHost.started).toEqual([]);
+    await expect(
+      restored.dispatch({
+        action: 'clear',
+        expectedGoalId: permit.goalId,
+        expectedRevision: permit.revision,
+      }),
+    ).rejects.toBeInstanceOf(GoalPersistenceUnavailableError);
   });
 
   it('checkpoints before continuing after the terminal verifier rejects', async () => {

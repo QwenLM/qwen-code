@@ -844,6 +844,17 @@ export function createGoalRuntime(
       await recordCheckpoint(attempt, checkpoint);
     } catch (error) {
       if (attempt.controller.signal.aborted) return;
+      if (
+        error instanceof EvidenceSourceUnavailableError &&
+        error.code === 'current_turn_not_tail'
+      ) {
+        // A turn that recorded no goal-owned transcript records (e.g. a
+        // hook-blocked permit finished before anything was recorded) is a
+        // legitimate empty turn, not an integrity failure; close the
+        // attempt with bookkeeping only so the goal stays active.
+        await finishCheckpointCheck(attempt);
+        return;
+      }
       const reason = error instanceof Error ? error.message : String(error);
       await recordCheckpointFailure(attempt, reason);
     }
@@ -935,7 +946,20 @@ export function createGoalRuntime(
         },
       );
       return restoring.then(async (attempt) => {
-        if (attempt) await runCheckpoint(attempt);
+        if (!attempt) return;
+        try {
+          await runCheckpoint(attempt);
+        } catch (error) {
+          if (checkpointAttempt === attempt) {
+            checkpointAttempt = undefined;
+          }
+          snapshot = { ...snapshot, activity: 'idle' };
+          recoveryError = new GoalPersistenceUnavailableError(
+            error instanceof Error ? error.message : String(error),
+            { cause: error },
+          );
+          throw recoveryError;
+        }
       });
     },
     bindHost(nextHost: GoalTurnHost): () => void {

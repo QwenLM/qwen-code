@@ -7,6 +7,7 @@
 import type {
   GoalRecord,
   GoalSnapshotV2,
+  GoalStateCause,
   GoalStateRecordPayloadV2,
 } from './goal-protocol.js';
 
@@ -120,6 +121,20 @@ export function isGoalCheckpointBookkeepingTransition(
     previousGoal.turnCount === nextGoal.turnCount &&
     previousGoal.createdAt === nextGoal.createdAt &&
     previousGoal.lastReason === nextGoal.lastReason
+  );
+}
+
+// A shape-equal transition is bookkeeping only when its cause is a
+// checkpoint follow-up write; a verifier rejection that repeats the
+// preceding turn's snapshot is a genuine rejection card.
+export function isGoalCheckpointBookkeepingCause(
+  cause: GoalStateCause,
+  previousCause: GoalStateCause | undefined,
+): boolean {
+  if (cause === 'checkpoint') return true;
+  return (
+    cause === 'verifier_reject' &&
+    (previousCause === 'verifier_reject' || previousCause === 'checkpoint')
   );
 }
 
