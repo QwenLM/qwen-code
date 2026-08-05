@@ -1564,6 +1564,28 @@ describe('fileUtils', () => {
       });
     });
 
+    it('rejects bridge-bound audio above 10 MiB before reading it', async () => {
+      const audioPath = path.join(tempRootDir, 'oversized-recording.wav');
+      actualNodeFs.writeFileSync(audioPath, '');
+      actualNodeFs.truncateSync(audioPath, 10 * 1024 * 1024 + 1);
+      mockMimeGetType.mockReturnValue('audio/wav');
+      const readFileSpy = vi.spyOn(fs.promises, 'readFile');
+      const mockConfigNoAudio = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: {} }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        audioPath,
+        mockConfigNoAudio,
+        { preserveUnsupportedAudio: true },
+      );
+
+      expect(result.errorType).toBe(ToolErrorType.FILE_TOO_LARGE);
+      expect(result.llmContent).toContain('File size exceeds the 10MB limit');
+      expect(readFileSpy).not.toHaveBeenCalled();
+    });
+
     it('still applies the base64 gate to non-bridge audio', async () => {
       const audioBytes = Buffer.alloc(8 * 1024 * 1024, 7);
       const audioPath = path.join(tempRootDir, 'long-inline.wav');

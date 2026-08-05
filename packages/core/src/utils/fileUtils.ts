@@ -69,6 +69,8 @@ export const DEFAULT_ENCODING: BufferEncoding = 'utf-8';
 // larger ceiling so legitimate large documents can still be sampled.
 const PDF_FULL_TEXT_EXTRACTION_MAX_MB = 100;
 const PDF_PAGED_TEXT_EXTRACTION_MAX_MB = 512;
+// Keep this aligned with the batch voice bridge's decoded-byte ceiling.
+const AUDIO_BRIDGE_MAX_SOURCE_BYTES = 10 * 1024 * 1024;
 
 // --- Unicode BOM detection & decoding helpers --------------------------------
 
@@ -1269,14 +1271,18 @@ export async function processSingleFileContent(
         errorType: ToolErrorType.FILE_TOO_LARGE,
       };
     }
-    // Bridge-bound audio is capped later by the bridge's decoded-byte
-    // MAX_AUDIO_BYTES check, so the ~9.9 MB read-time gates don't apply.
+    // Bridge-bound audio may exceed the inline data-URI budget, but it must
+    // still fit the bridge's decoded-byte ceiling before we read or encode it.
+    const bridgeCanAcceptAudio =
+      fileType === 'audio' &&
+      preserveUnsupportedAudio &&
+      stats.size <= AUDIO_BRIDGE_MAX_SOURCE_BYTES;
     if (
       fileSizeInMB > 9.9 &&
       !willExtractPdfText &&
       fileType !== 'text' &&
       !shouldRenderImageOverview &&
-      !(fileType === 'audio' && preserveUnsupportedAudio)
+      !bridgeCanAcceptAudio
     ) {
       return {
         llmContent: 'File size exceeds the 10MB limit.',
@@ -1552,10 +1558,7 @@ export async function processSingleFileContent(
         const base64Data = contentBuffer.toString('base64');
         const base64SizeInMB = base64Data.length / (1024 * 1024);
         // Use 9.9MB instead of 10MB to leave margin for small overhead (#1880)
-        if (
-          base64SizeInMB > 9.9 &&
-          !(fileType === 'audio' && preserveUnsupportedAudio)
-        ) {
+        if (base64SizeInMB > 9.9 && !bridgeCanAcceptAudio) {
           return {
             llmContent: `File exceeds the 10MB data URI limit after base64 encoding (${base64SizeInMB.toFixed(2)}MB encoded).`,
             returnDisplay: `File exceeds the 10MB data URI limit after base64 encoding.`,
