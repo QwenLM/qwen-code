@@ -401,6 +401,15 @@ export interface ChannelConfigFieldDescriptor {
 
 export interface ChannelManagementDescriptor {
   fields: readonly ChannelConfigFieldDescriptor[];
+
+  /**
+   * Cross-field validation applied to the resolved config during managed
+   * upserts, after secret updates. Return an error message to reject the
+   * update, or undefined to accept it.
+   */
+  validateConfig?: (
+    config: Readonly<Record<string, unknown>>,
+  ) => string | undefined;
 }
 
 /**

@@ -386,6 +386,10 @@ export class WorkspaceChannelSettingsStore {
       if (value !== undefined) nextConfig[key] = value;
     }
     assertManagedConfig(nextConfig, previous, plugin.management.fields);
+    const crossFieldError = plugin.management.validateConfig?.(nextConfig);
+    if (crossFieldError !== undefined) {
+      throw invalidConfig(crossFieldError);
+    }
 
     const channels = { ...current.channels, [name]: nextConfig };
     const workspaceFile = loadSettings(this.workspaceCwd, {

@@ -18,12 +18,14 @@ function runtime(
   workspaceId: string,
   workspaceCwd: string,
   trusted = true,
+  provenance?: WorkspaceRuntime['provenance'],
 ): WorkspaceRuntime {
   return {
     workspaceId,
     workspaceCwd,
     primary: workspaceId === 'primary',
     trusted,
+    provenance,
   } as WorkspaceRuntime;
 }
 
@@ -97,6 +99,26 @@ describe('channel notify routes', () => {
       secondary.workspaceCwd,
       expect.objectContaining({ channelName: 'dingtalk' }),
     );
+  });
+
+  it('rejects qualified notifications for the Conversations runtime', async () => {
+    const live = runtime(
+      'conversations',
+      '/work/Conversations',
+      true,
+      'live-conversation',
+    );
+    const { app, deliver } = setup({
+      runtimes: [runtime('primary', '/work/main'), live],
+    });
+
+    const response = await request(app)
+      .post('/workspaces/conversations/notify')
+      .send(body);
+
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe('live_channel_management_reserved');
+    expect(deliver).not.toHaveBeenCalled();
   });
 
   it('rejects invalid bodies before delivery', async () => {
