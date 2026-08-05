@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { dispatchAgentViewSession } from './supervisor-dispatch.js';
 import {
+  getAgentViewStorePaths,
   readAgentViewLaunch,
   readAgentViewRoster,
   readAgentViewSessionState,
@@ -76,5 +77,23 @@ describe('dispatchAgentViewSession', () => {
     await expect(readAgentViewRoster({ globalDir: tempDir })).resolves.toEqual(
       expect.objectContaining({ sessions: [] }),
     );
+  });
+
+  it('removes session files when roster persistence fails', async () => {
+    const paths = getAgentViewStorePaths({ globalDir: tempDir });
+    await fs.mkdir(path.join(paths.daemonDir, 'roster.json'), {
+      recursive: true,
+    });
+
+    await expect(
+      dispatchAgentViewSession('write tests', '/repo/pkg', {
+        globalDir: tempDir,
+        token: 'token',
+        sidebandEndpoint: '/tmp/agent-view.sock',
+      }),
+    ).rejects.toThrow();
+
+    const jobs = await fs.readdir(paths.jobsDir);
+    expect(jobs).toEqual([]);
   });
 });
