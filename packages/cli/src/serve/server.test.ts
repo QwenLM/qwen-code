@@ -11664,6 +11664,7 @@ describe('createServeApp', () => {
     it('keeps a transitioning restore scoped and rolls its stale result back', async () => {
       const secondaryStarted = deferred();
       const releaseSecondary = deferred();
+      const daemonLog = fakeDaemonLog();
       const primaryBridge = fakeBridge();
       const secondaryBridge = fakeBridge({
         loadImpl: async (req) => {
@@ -11696,7 +11697,7 @@ describe('createServeApp', () => {
       const app = createServeApp(
         { ...baseOpts, workspace: WS_BOUND },
         undefined,
-        { workspaceRegistry: registry },
+        { workspaceRegistry: registry, daemonLog },
       );
 
       const secondaryRequest = request(app)
@@ -11728,6 +11729,18 @@ describe('createServeApp', () => {
         liveWorkspaceCwd: WS_DIFFERENT,
         liveWorkspaceId: 'ws-secondary',
       });
+      expect(daemonLog.warn).toHaveBeenCalledWith(
+        'session routing failed',
+        expect.objectContaining({
+          route: 'POST /session/:id/load',
+          resolutionKind: 'workspace_conflict',
+          sessionId: 'concurrent-restore',
+          workspaceId: 'ws-primary',
+          workspaceCwd: WS_BOUND,
+          liveWorkspaceId: 'ws-secondary',
+          liveWorkspaceCwd: WS_DIFFERENT,
+        }),
+      );
       expect(primaryBridge.loadCalls).toHaveLength(0);
 
       const secondaryRes = await secondaryRequest;

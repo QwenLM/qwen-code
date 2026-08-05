@@ -46,7 +46,7 @@ Restore performs no disk scan because its purpose is to open existing history. I
 
 Reservations are idempotent and remove state only when the map still contains the exact state object they captured. This identity check prevents a delayed release from deleting a newer claim for the same ID. Restore references decrement individually and remove the state at zero.
 
-Bridge enumeration errors fail closed with retryable `session_id_admission_unavailable`. A normal `SessionNotFoundError` means only that the bridge does not own the ID. Persistence read failures do not inherit `SessionService`'s treat-error-as-exists behavior: the scan surfaces them as retryable `503 session_id_admission_unavailable` instead of a `409` conflict. Clients should bound their 503 retries — a permanently unreadable transcript directory keeps returning 503 and never resolves on its own.
+Bridge enumeration and persistence inspection errors fail closed with retryable `session_id_admission_unavailable`. A normal `SessionNotFoundError` means only that the bridge does not own the ID. Persistence read failures do not inherit `SessionService`'s treat-error-as-exists behavior: the scan surfaces them as retryable `503 session_id_admission_unavailable` instead of a `409` conflict. Clients should bound their 503 retries — a permanently unreadable transcript directory keeps returning 503 and never resolves on its own.
 
 ## Runtime replacement and workspace scope
 
@@ -79,7 +79,7 @@ Web UI consumers inherit the optional TypeScript field but do not set it. The Py
 | Invalid requested ID                                    | `400 invalid_session_id`                                      | `INVALID_PARAMS`, `data.httpStatus=400`                         |
 | Create conflicts with live, pending, or persisted state | `409 session_id_conflict`                                     | `INVALID_PARAMS`, `data.httpStatus=409`                         |
 | Restore belongs to another runtime generation           | `409 session_workspace_conflict`                              | `INVALID_PARAMS`, `data.httpStatus=409`                         |
-| Live bridge ownership cannot be checked                 | `503 session_id_admission_unavailable` with `retryable: true` | internal error with `data.httpStatus=503` and `retryable: true` |
+| Live or persisted ownership cannot be checked           | `503 session_id_admission_unavailable` with `retryable: true` | internal error with `data.httpStatus=503` and `retryable: true` |
 | Downstream returns a different ID                       | `500 session_id_not_honored`                                  | internal error with `data.httpStatus=500`                       |
 
 ## Alternatives rejected

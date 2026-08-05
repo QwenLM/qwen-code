@@ -1982,7 +1982,7 @@ Response:
 
 `attached: true` means a session for that workspace already existed and you're now sharing it.
 
-Caller-supplied IDs are unique across all currently registered workspace runtimes and every still-live bridge generation, including draining replacements. A live, pending, active, archived, or worktree-backed duplicate returns `409 session_id_conflict`. Invalid values return `400 invalid_session_id`; an unavailable live-owner check returns retryable `503 session_id_admission_unavailable`. If the downstream agent returns a different ID, the daemon removes that orphan and returns `500 session_id_not_honored`. After an ambiguous response, load or resume the known ID instead of retrying create as an attach.
+Caller-supplied IDs are unique across all currently registered workspace runtimes and every still-live bridge generation, including draining replacements. A live, pending, active, archived, or worktree-backed duplicate returns `409 session_id_conflict`. Invalid values return `400 invalid_session_id`; an unavailable live-owner or persisted-state check returns retryable `503 session_id_admission_unavailable`. Retry with bounded backoff after bridge or storage health changes; `retryable` means another attempt is safe, not that an immediate retry will succeed. If the downstream agent returns a different ID, the daemon removes that orphan and returns `500 session_id_not_honored`. After an ambiguous response, load or resume the known ID instead of retrying create as an attach.
 
 Multi-client integrations that want independent conversations should send
 `sessionScope: "thread"` on each `POST /session`. Use the default `single`
@@ -2024,7 +2024,7 @@ ACP clients request the same behavior through the extension metadata field:
 }
 ```
 
-The response contains the normalized lowercase ID. Primary and workspace-qualified ACP mounts share admission with REST, including `session/load` and `session/resume`. Invalid IDs use ACP `INVALID_PARAMS` with `data.httpStatus=400` and `data.errorKind="invalid_session_id"`; conflicts use `data.httpStatus=409`; unavailable ownership checks use `data.httpStatus=503` and `data.retryable=true`.
+The response contains the normalized lowercase ID. Primary and workspace-qualified ACP mounts share admission with REST, including `session/load` and `session/resume`. Invalid IDs use ACP `INVALID_PARAMS` with `data.httpStatus=400` and `data.errorKind="invalid_session_id"`; conflicts use `data.httpStatus=409`; unavailable live-owner or persisted-state checks use `data.httpStatus=503` and `data.retryable=true`.
 
 An ACP-created session that never receives a prompt leaves no persisted trace, and the daemon reaps it when its owning connection closes with zero attached sessions. After that reap the same ID can be created again — that is connection lifecycle, not ID reuse: while the connection (or any attachment) is live, admission rejects the duplicate.
 

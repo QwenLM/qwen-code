@@ -1062,7 +1062,7 @@ export class DaemonClient {
 
   async requireCapability(capability: string): Promise<void> {
     const caps = await this.capabilities();
-    if (!caps.features.includes(capability)) {
+    if (!Array.isArray(caps.features) || !caps.features.includes(capability)) {
       throw new DaemonCapabilityMissingError(
         capability,
         `daemon does not advertise the ${capability} feature`,

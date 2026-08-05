@@ -582,7 +582,11 @@ export function registerSessionRoutes(
     error: RequestedSessionIdAdmissionError,
     route: string,
   ): void => {
-    logSessionRoutingFailure(route, error.code, {
+    const resolutionKind =
+      error.code === 'session_workspace_conflict'
+        ? 'workspace_conflict'
+        : error.code;
+    logSessionRoutingFailure(route, resolutionKind, {
       sessionId: error.sessionId,
       ...error.details,
     });

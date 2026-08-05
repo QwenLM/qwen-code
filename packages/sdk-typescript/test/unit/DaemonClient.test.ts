@@ -1949,6 +1949,28 @@ describe('DaemonClient', () => {
       ]);
     });
 
+    it('treats a malformed capabilities envelope as missing capability', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          v: 1,
+          mode: 'http-bridge',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.createOrAttachSession({
+          sessionId: '550e8400-e29b-41d4-a716-446655440000',
+        }),
+      ).rejects.toMatchObject({
+        name: 'DaemonCapabilityMissingError',
+        capability: 'session_id_override',
+      });
+      expect(calls.map((call) => call.url)).toEqual([
+        'http://daemon/capabilities',
+      ]);
+    });
+
     it('throws a protocol error when the daemon returns a different sessionId', async () => {
       const { fetch } = recordingFetch((request) =>
         request.url.endsWith('/capabilities')
