@@ -6,7 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { execFile } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -58,11 +58,12 @@ describe('scripts/check-build-status.js', () => {
   it('does not create a warnings file when the variable is unset', async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'qwen-check-build-'));
     const warningsFile = join(cwd, 'warnings.txt');
-    const env = { ...process.env };
+    const env = { ...process.env, TMPDIR: cwd, TMP: cwd, TEMP: cwd };
     delete env.QWEN_CODE_WARNINGS_FILE;
     try {
       await runChecker(cwd, env);
       expect(() => readFileSync(warningsFile)).toThrow();
+      expect(existsSync(join(cwd, 'qwen-code-warnings.txt'))).toBe(false);
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }

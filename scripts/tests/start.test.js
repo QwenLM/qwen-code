@@ -5,11 +5,13 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { isAbsolute } from 'node:path';
+import { dirname, isAbsolute } from 'node:path';
+import { tmpdir } from 'node:os';
 
-const { spawnMock, execSyncMock } = vi.hoisted(() => ({
+const { spawnMock, execSyncMock, rmSyncMock } = vi.hoisted(() => ({
   spawnMock: vi.fn(() => ({ on: vi.fn() })),
   execSyncMock: vi.fn(() => ''),
+  rmSyncMock: vi.fn(),
 }));
 
 vi.mock('node:child_process', () => ({
@@ -19,7 +21,7 @@ vi.mock('node:child_process', () => ({
 
 vi.mock('node:fs', () => ({
   readFileSync: vi.fn(() => JSON.stringify({ version: '0.0.0-test' })),
-  rmSync: vi.fn(),
+  rmSync: rmSyncMock,
 }));
 
 const normalizePath = (path) => String(path).replaceAll('\\', '/');
@@ -88,6 +90,7 @@ describe('scripts/start.js launcher', () => {
 
     expect(checkerPath).toBe(childOptions.env.QWEN_CODE_WARNINGS_FILE);
     expect(isAbsolute(checkerPath)).toBe(true);
+    expect(dirname(checkerPath)).toBe(tmpdir());
     expect(normalizePath(checkerPath)).toMatch(
       /qwen-code-warnings-\d+-[0-9a-f-]+\.txt$/,
     );
@@ -100,5 +103,24 @@ describe('scripts/start.js launcher', () => {
     expect(checkerCalls[1][1].env.QWEN_CODE_WARNINGS_FILE).not.toBe(
       checkerPath,
     );
+  });
+
+  it('cleans up the scoped warnings file when the child closes', async () => {
+    await import('../start.js?cleans-startup-warnings');
+
+    const child = spawnMock.mock.results[0].value;
+    const close = child.on.mock.calls.find(([ev]) => ev === 'close')[1];
+    const [, checkerOptions] = execSyncMock.mock.calls[0];
+    const warningsPath = checkerOptions.env.QWEN_CODE_WARNINGS_FILE;
+
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined);
+    try {
+      close(0, null);
+      expect(rmSyncMock).toHaveBeenCalledWith(warningsPath, { force: true });
+    } finally {
+      exitSpy.mockRestore();
+    }
   });
 });
