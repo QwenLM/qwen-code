@@ -129,6 +129,12 @@ export function tmuxPlan(opts: {
   rows: number;
   command: string;
   cwd: string;
+  /** Absolute path the holder touches AFTER its trap is installed — the
+   * command layer sends no key until this file exists, closing the race
+   * where a --keys C-c lands before the holder's first line has run
+   * (measured: the INTR fires the instant tmux writes 0x03 to the pty,
+   * not when the shell reads it — no in-script ordering can win). */
+  readyFile: string;
 }): {
   start: string[];
   capture: string[];
@@ -169,7 +175,7 @@ export function tmuxPlan(opts: {
   // every layer, so no shell parses its text adjacent to the hold
   // (probe-verified with odd-run shapes on this exact plan).
   const inner = `sh -c '${esc(opts.command)}'`;
-  const held = `sh -c '${esc(`trap : INT\n${inner}\nsleep 7200`)}'`;
+  const held = `sh -c '${esc(`trap : INT\n: > '${opts.readyFile}'\n${inner}\nsleep 7200`)}'`;
   return {
     // ONE client invocation, three properties:
     // - `-f /dev/null` starts the server CONFIG-FREE: without it the

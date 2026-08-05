@@ -90,6 +90,7 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
     rows: 24,
     command: 'node cli.js',
     cwd: '/work',
+    readyFile: '/ready',
   });
 
   it('carries -L on every call — start, capture, captureText, kill', () => {
@@ -184,7 +185,7 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
     // neither the holder nor the server (measured: untrapped, pane →
     // session → server died before the capture).
     expect(plan.start[plan.start.length - 1]).toBe(
-      `sh -c 'trap : INT\nsh -c '\\''node cli.js'\\''\nsleep 7200'`,
+      `sh -c 'trap : INT\n: > '\\''/ready'\\''\nsh -c '\\''node cli.js'\\''\nsleep 7200'`,
     );
   });
 
@@ -196,6 +197,7 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
       rows: 24,
       command: `printf '%s' "it's"`,
       cwd: '/work',
+    readyFile: '/ready',
     });
     // A single quote in the command must not close either layer's quoting.
     // The expectation is COMPOSED with the same POSIX escaping rule stated
@@ -207,7 +209,9 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
     const cmd = `printf '%s' "it's"`;
     const inner = `sh -c '${esc(cmd)}'`;
     const held = p.start[p.start.length - 1];
-    expect(held).toBe(`sh -c '${esc(`trap : INT\n${inner}\nsleep 7200`)}'`);
+    expect(held).toBe(
+      `sh -c '${esc(`trap : INT\n: > '/ready'\n${inner}\nsleep 7200`)}'`,
+    );
   });
 
   it('matches --until on a joined, escape-free view while .ans stays physical', () => {

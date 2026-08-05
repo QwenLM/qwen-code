@@ -730,7 +730,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     mkdirSync(binDir, { recursive: true });
     writeFileSync(
       join(binDir, 'tmux'),
-      '#!/bin/sh\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\nfor a in "$@"; do [ "$a" = "kill-server" ] && { echo "wedged" >&2; exit 1; }; done\necho ""\nexit 0\n',
+      `#!/bin/sh\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\nfor a in "$@"; do [ "$a" = "kill-server" ] && { echo "wedged" >&2; exit 1; }; done\nfor a in "$@"; do [ "$a" = "new-session" ] && : > "${join(dir, 'cap.holder-ready')}"; done\necho ""\nexit 0\n`,
       { mode: 0o755 },
     );
     const realPath = process.env['PATH'];

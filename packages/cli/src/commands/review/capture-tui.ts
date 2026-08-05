@@ -225,7 +225,16 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   const ansPath = `${outBase}.ans`;
   const pngPath = `${outBase}.png`;
   const manifestPath = `${outBase}.json`;
+  const holderReadyPath = `${outBase}.holder-ready`;
   try {
+    // Clears FIRST — before even mkdir: under fd exhaustion (EMFILE,
+    // measured on macOS) mkdirSync itself can throw, and the refusal must
+    // still leave no stale evidence; unlink needs no descriptor. Every exit
+    // path must leave THIS run's artifacts or nothing.
+    rmSync(ansPath, { force: true });
+    rmSync(pngPath, { force: true });
+    rmSync(manifestPath, { force: true });
+    rmSync(holderReadyPath, { force: true });
     mkdirSync(dirname(outBase), { recursive: true });
     // Probe the actual write target BEFORE any process starts: mkdirSync
     // with `recursive` does no permission check on a directory that already
@@ -234,15 +243,6 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // The probe uses a UNIQUE sibling, never the .ans itself: truncating the
     // real one would delete the previous run's text while its manifest/png
     // survive to misdescribe it.
-    // Clear the previous run's artifacts BEFORE the write probe, not after:
-    // a probe failure (ENOSPC, EMFILE at openSync — measured) must ALSO
-    // refuse with the stale evidence gone. Every exit path — including a
-    // refusal for a typo'd flag later in this validation chain — must leave
-    // THIS run's artifacts or nothing; a stale manifest next to a refusal
-    // hands a verifier evidence from a different capture.
-    rmSync(ansPath, { recursive: true, force: true });
-    rmSync(pngPath, { recursive: true, force: true });
-    rmSync(manifestPath, { recursive: true, force: true });
     const probePath = `${outBase}.write-probe-${randomBytes(4).toString('hex')}`;
     const fd = openSync(probePath, 'w');
     closeSync(fd);
@@ -416,6 +416,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     rows: args.rows,
     command: args.command,
     cwd: resolvedCwd,
+    readyFile: holderReadyPath,
   });
 
   // The no-orphan guarantee cannot rest on `finally` alone: a SIGINT/SIGTERM
@@ -498,6 +499,21 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   try {
     tmux(plan.start);
     serverStarted = true;
+    // Before ANY key can be sent, wait for the holder's ready sentinel: the
+    // pty's INTR fires the instant tmux writes 0x03 — a C-c racing the
+    // holder's own `trap : INT` line killed pane, session and server
+    // (measured; no in-script ordering can win, so the wait sits out here).
+    {
+      const holderDeadline = Date.now() + 10_000;
+      while (!existsSync(holderReadyPath)) {
+        if (Date.now() >= holderDeadline) {
+          throw new Error(
+            'the pane never initialized — its holder wrote no ready marker',
+          );
+        }
+        await sleep(25);
+      }
+    }
     // One deadline covers the ready gate AND the until poll: two separate
     // clocks would let a capture run to 2× --timeout-ms.
     const deadline = Date.now() + args.timeoutMs;
@@ -590,6 +606,13 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // the freeze render below, which can block up to its belt.
     reap();
     if (captureFailed) releaseSignals();
+  }
+
+  // The sentinel is plumbing, not evidence — never left next to artifacts.
+  try {
+    rmSync(holderReadyPath, { force: true });
+  } catch {
+    // Litter is cosmetic.
   }
 
   try {
