@@ -11,6 +11,7 @@
 import type { Argv, CommandModule } from 'yargs';
 import { parseArgsCommand } from './review/parse-args.js';
 import { composeReviewCommand } from './review/compose-review.js';
+import { findingsCommand } from './review/findings.js';
 import { fetchPrCommand } from './review/fetch-pr.js';
 import { captureLocalCommand } from './review/capture-local.js';
 import { planDiffCommand } from './review/plan-diff.js';
@@ -18,15 +19,24 @@ import { prContextCommand } from './review/pr-context.js';
 import { commentStatusCommand } from './review/comment-status.js';
 import { loadRulesCommand } from './review/load-rules.js';
 import { presubmitCommand } from './review/presubmit.js';
+import { publishAssetsCommand } from './review/publish-assets.js';
 import { resolveAnchorsCommand } from './review/resolve-anchors.js';
 import { checkCoverageCommand } from './review/check-coverage.js';
 import { agentPromptCommand } from './review/agent-prompt.js';
 import { buildTestCommand } from './review/build-test.js';
+import { baseTreeCommand } from './review/base-tree.js';
+import { testDeltaCommand } from './review/test-delta.js';
+import { driveCommand } from './review/drive.js';
+import { mockProviderCommand } from './review/mock-provider.js';
+import { extractStepCommand } from './review/extract-step.js';
 import { scriptLintCommand } from './review/script-lint.js';
 import { submitCommand } from './review/submit.js';
 import { testEfficacyCommand } from './review/test-efficacy.js';
+import { testPlanCommand } from './review/test-plan.js';
 import { cleanupCommand } from './review/cleanup.js';
+import { costLedgerCommand } from './review/cost-ledger.js';
 import { runCommand } from './review/run.js';
+import { saveArtifactCommand } from './review/save-artifact.js';
 
 export const reviewCommand: CommandModule = {
   command: 'review',
@@ -44,17 +54,27 @@ export const reviewCommand: CommandModule = {
       .command(loadRulesCommand)
       .command(agentPromptCommand)
       .command(buildTestCommand)
+      .command(baseTreeCommand)
+      .command(testDeltaCommand)
+      .command(driveCommand)
+      .command(mockProviderCommand)
+      .command(extractStepCommand)
       .command(scriptLintCommand)
       .command(resolveAnchorsCommand)
       .command(checkCoverageCommand)
+      .command(costLedgerCommand)
       .command(presubmitCommand)
       .command(testEfficacyCommand)
+      .command(testPlanCommand)
+      .command(findingsCommand)
+      .command(publishAssetsCommand)
       .command(composeReviewCommand)
+      .command(saveArtifactCommand)
       .command(submitCommand)
       .command(cleanupCommand)
       .demandCommand(
         1,
-        'Specify a subcommand: run, parse-args, fetch-pr, capture-local, plan-diff, pr-context, comment-status, load-rules, agent-prompt, build-test, script-lint, resolve-anchors, check-coverage, presubmit, test-efficacy, compose-review, submit, or cleanup.',
+        'Specify a subcommand: run, parse-args, fetch-pr, capture-local, plan-diff, pr-context, comment-status, load-rules, agent-prompt, build-test, base-tree, test-delta, drive, mock-provider, extract-step, script-lint, resolve-anchors, check-coverage, cost-ledger, presubmit, test-efficacy, test-plan, findings, publish-assets, compose-review, save-artifact, submit, or cleanup.',
       )
       .version(false),
   handler: () => {

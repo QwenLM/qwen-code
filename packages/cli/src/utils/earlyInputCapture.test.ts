@@ -136,6 +136,67 @@ describe('earlyInputCapture', () => {
       expect(input.length).toBe(0);
     });
 
+    it('should filter SGR mouse button press (ESC [ < ... M)', () => {
+      startEarlyInputCapture();
+      // SGR mouse button press: ESC [ < 65 ; 68 ; 23 M
+      mockStdin.write(Buffer.from('\x1b[<65;68;23M'));
+      stopEarlyInputCapture();
+
+      const input = getAndClearCapturedInput();
+      expect(input.length).toBe(0);
+    });
+
+    it('should filter SGR mouse button release (ESC [ < ... m)', () => {
+      startEarlyInputCapture();
+      // SGR mouse button release: ESC [ < 65 ; 68 ; 23 m
+      mockStdin.write(Buffer.from('\x1b[<65;68;23m'));
+      stopEarlyInputCapture();
+
+      const input = getAndClearCapturedInput();
+      expect(input.length).toBe(0);
+    });
+
+    it('should filter SGR mouse move events', () => {
+      startEarlyInputCapture();
+      // Multiple SGR mouse move events
+      mockStdin.write(
+        Buffer.from('\x1b[<32;10;5M\x1b[<32;11;5M\x1b[<32;12;5M'),
+      );
+      stopEarlyInputCapture();
+
+      const input = getAndClearCapturedInput();
+      expect(input.length).toBe(0);
+    });
+
+    it('should keep user input mixed with SGR mouse events', () => {
+      startEarlyInputCapture();
+      mockStdin.write(Buffer.from('a\x1b[<65;68;23Mb\x1b[<0;10;5mc'));
+      stopEarlyInputCapture();
+
+      const input = getAndClearCapturedInput();
+      expect(input.toString()).toBe('abc');
+    });
+
+    it('should filter SGR mouse events split across chunks', () => {
+      startEarlyInputCapture();
+      mockStdin.write(Buffer.from('\x1b[<65;68'));
+      mockStdin.write(Buffer.from(';23M'));
+      stopEarlyInputCapture();
+
+      const input = getAndClearCapturedInput();
+      expect(input.length).toBe(0);
+    });
+
+    it('should filter SGR mouse events split at ESC[ prefix', () => {
+      startEarlyInputCapture();
+      mockStdin.write(Buffer.from('\x1b['));
+      mockStdin.write(Buffer.from('<65;68;23M'));
+      stopEarlyInputCapture();
+
+      const input = getAndClearCapturedInput();
+      expect(input.length).toBe(0);
+    });
+
     it('should filter OSC sequences (ESC ])', () => {
       startEarlyInputCapture();
       // OSC sequence: ESC ] 0 ; title BEL

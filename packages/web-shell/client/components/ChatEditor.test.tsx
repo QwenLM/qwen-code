@@ -214,6 +214,10 @@ vi.mock('../voice/VoiceButton', () => ({
   },
 }));
 
+vi.mock('../live/LiveVoiceButton', () => ({
+  LiveVoiceButton: () => <span data-testid="live-voice-button" />,
+}));
+
 vi.mock('./SpecularComposerEffect', () => ({
   SpecularComposerEffect: () => (
     <span data-web-shell-composer-specular aria-hidden="true" />
@@ -257,10 +261,12 @@ function renderChatEditor(props: {
   currentMode?: string;
   currentModel?: string;
   availableModels?: Array<{ id: string; label?: string }>;
+  sessionWorkflowEnabled?: boolean;
   onSelectMode?: (mode: string) => void;
   onSelectModel?: (model: string) => void;
   onAttachmentsChange?: (hasAttachments: boolean) => void;
   placeholderText?: string;
+  animatePlaceholder?: boolean;
   disabled?: boolean;
   followupState?: UseDaemonFollowupSuggestionReturn['followupState'];
   customization?: WebShellCustomization;
@@ -317,19 +323,22 @@ function renderChatEditor(props: {
 }
 
 describe('ChatEditor voice toolbar integration', () => {
-  it('mounts voice only when the host toolbar allows it', () => {
+  it('keeps dictation and Live together when the host toolbar allows voice', () => {
+    const defaults = renderChatEditor({});
+    const voiceOnly = renderChatEditor({ visibleToolbarActions: ['voice'] });
+    const hidden = renderChatEditor({ visibleToolbarActions: [] });
+
+    for (const container of [defaults, voiceOnly]) {
+      expect(
+        container.querySelector('[data-testid="voice-button"]'),
+      ).not.toBeNull();
+      expect(
+        container.querySelector('[data-testid="live-voice-button"]'),
+      ).not.toBeNull();
+    }
+    expect(hidden.querySelector('[data-testid="voice-button"]')).toBeNull();
     expect(
-      renderChatEditor({}).querySelector('[data-testid="voice-button"]'),
-    ).not.toBeNull();
-    expect(
-      renderChatEditor({
-        visibleToolbarActions: ['voice'],
-      }).querySelector('[data-testid="voice-button"]'),
-    ).not.toBeNull();
-    expect(
-      renderChatEditor({
-        visibleToolbarActions: [],
-      }).querySelector('[data-testid="voice-button"]'),
+      hidden.querySelector('[data-testid="live-voice-button"]'),
     ).toBeNull();
   });
 });
@@ -393,6 +402,18 @@ describe('ChatEditor animation layers', () => {
 
   it('does not mount the typewriter for an empty placeholder', () => {
     const container = renderChatEditor({ placeholderText: '' });
+
+    expect(
+      container.querySelector('[data-web-shell-composer-typewriter]'),
+    ).toBeNull();
+    expect(container.querySelector('[data-typewriter-visible]')).toBeNull();
+  });
+
+  it('does not mount the typewriter when placeholder animation is disabled', () => {
+    const container = renderChatEditor({
+      placeholderText: 'abc',
+      animatePlaceholder: false,
+    });
 
     expect(
       container.querySelector('[data-web-shell-composer-typewriter]'),
@@ -776,6 +797,53 @@ describe('ChatEditor top composer tag tooltip', () => {
   });
 });
 
+describe('ChatEditor Session Workflow mode rename', () => {
+  it('renames only the plan entry in the mode dropdown while enabled', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['approvalMode'],
+      sessionWorkflowEnabled: true,
+    });
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')
+        ?.click();
+    });
+
+    const popover = document.querySelector('[data-web-shell-toolbar-popover]');
+    expect(popover).not.toBeNull();
+    const labels = Array.from(popover?.querySelectorAll('button') ?? []).map(
+      (button) => button.textContent ?? '',
+    );
+    expect(labels.some((label) => label.includes('Plan & Review (plan)'))).toBe(
+      true,
+    );
+    expect(
+      labels.some((label) => label.includes('Ask Approval (default)')),
+    ).toBe(true);
+    expect(labels.some((label) => label.includes('Plan (plan)'))).toBe(false);
+  });
+
+  it('renames the active plan mode chip while enabled', () => {
+    const withWorkflow = renderChatEditor({
+      currentMode: 'plan',
+      sessionWorkflowEnabled: true,
+    });
+    expect(
+      withWorkflow
+        .querySelector('[data-toolbar-measure="mode:expanded"]')
+        ?.textContent?.includes('Plan & Review'),
+    ).toBe(true);
+
+    const withoutWorkflow = renderChatEditor({ currentMode: 'plan' });
+    expect(
+      withoutWorkflow
+        .querySelector('[data-toolbar-measure="mode:expanded"]')
+        ?.textContent?.includes('Plan & Review'),
+    ).toBe(false);
+  });
+});
+
 describe('ChatEditor toolbar popovers', () => {
   it('opens the approval mode popover and restores editor focus after selection', async () => {
     const onSelectMode = vi.fn();
@@ -913,6 +981,30 @@ describe('ChatEditor toolbar popovers', () => {
     );
     expect(button?.textContent).toContain('Provider One');
     expect(button?.textContent).not.toContain(routeId);
+  });
+
+  it('exposes the complete model name on dropdown items for hover', () => {
+    const modelLabel =
+      'Qwen Very Long Model Name For Web Shell Reproduction 2026';
+    const container = renderChatEditor({
+      visibleToolbarActions: ['model'],
+      currentModel: 'long-model',
+      availableModels: [{ id: 'long-model', label: modelLabel }],
+    });
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-model-button]')
+        ?.click();
+    });
+
+    const option = Array.from(
+      document.querySelectorAll<HTMLButtonElement>(
+        '[data-web-shell-toolbar-popover] button',
+      ),
+    ).find((button) => button.textContent?.includes(modelLabel));
+    expect(option).not.toBeUndefined();
+    expect(option?.title).toBe(modelLabel);
   });
 
   it('switches between sibling toolbar popovers without dismissing the target', async () => {

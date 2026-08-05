@@ -11,7 +11,21 @@ jobs:
     name: 'Validate runner'
     runs-on: ['self-hosted', 'Windows', 'X64', 'ecs-win']
     timeout-minutes: 60
+    env:
+      # LC_ALL overrides LANG, so set only LC_ALL. C.UTF-8 keeps deterministic
+      # C collation while preserving UTF-8 output for any non-ASCII assertions.
+      LC_ALL: 'C.UTF-8'
     steps:
+      - name: 'Configure Windows test environment'
+        # The self-hosted runner has Windows PowerShell, not necessarily pwsh.
+        # Force UTF-8 so GITHUB_ENV is not written as UTF-16LE.
+        shell: 'powershell'
+        run: |-
+          $ErrorActionPreference = 'Stop'
+          git config --global core.autocrlf false
+          "TEMP=$env:RUNNER_TEMP" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "TMP=$env:RUNNER_TEMP" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
 
@@ -20,6 +34,10 @@ jobs:
         run: |-
           $ErrorActionPreference = 'Stop'
           whoami
+          "TEMP=$env:TEMP"
+          if ($env:TEMP -ne $env:RUNNER_TEMP) {
+            throw "TEMP not redirected to RUNNER_TEMP: $env:TEMP"
+          }
           git --version
           $nodeVersion = node --version
           $nodeVersion
@@ -79,6 +97,10 @@ jobs:
           QWEN_API_KEY: ''
           GEMINI_API_KEY: ''
           QWEN_DEFAULT_AUTH_TYPE: ''
+          NODE_OPTIONS: '--max-old-space-size=3072'
         run: |-
           node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
-          npm run test:ci
+          # Root test:scripts exercises bash-only workflow scripts; Linux CI covers it.
+          # npm has no --parallel (a pnpm/lerna flag) and ignores it, so the
+          # workspaces run serially; kept for parity with the root test:ci script.
+          npm run test:ci --workspaces --if-present --parallel

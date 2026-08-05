@@ -225,6 +225,9 @@ describe('SessionService', () => {
 
     it('should list archived sessions from archive directory only', async () => {
       readdirSyncSpy.mockImplementation((dir: fs.PathLike) => {
+        // path.join is mocked above to join with '/', so production paths
+        // always use '/' here regardless of host platform — match that, not
+        // path.sep (which stays the real host separator under the automock).
         if (dir.toString().endsWith('/chats/archive')) {
           return [`${sessionIdB}.jsonl`] as unknown as Array<fs.Dirent<Buffer>>;
         }
@@ -249,7 +252,7 @@ describe('SessionService', () => {
 
     it('getSessionInfoCounts aggregates active and archived membership', async () => {
       readdirSyncSpy.mockImplementation((dir: fs.PathLike) => {
-        if (dir.toString().endsWith(`${path.sep}archive`)) {
+        if (dir.toString().endsWith('/archive')) {
           return [`${sessionIdB}.jsonl`] as unknown as Array<fs.Dirent<Buffer>>;
         }
         return [
@@ -282,7 +285,7 @@ describe('SessionService', () => {
 
     it('getSessionInfoCounts excludes sessions from other projects', async () => {
       readdirSyncSpy.mockImplementation((dir: fs.PathLike) =>
-        dir.toString().endsWith(`${path.sep}archive`)
+        dir.toString().endsWith('/archive')
           ? ([] as unknown as Array<fs.Dirent<Buffer>>)
           : ([`${sessionIdA}.jsonl`] as unknown as Array<fs.Dirent<Buffer>>),
       );
@@ -320,7 +323,7 @@ describe('SessionService', () => {
 
     it('marks counts truncated when a candidate session cannot be read', async () => {
       readdirSyncSpy.mockImplementation((dir: fs.PathLike) =>
-        dir.toString().endsWith(`${path.sep}archive`)
+        dir.toString().endsWith('/archive')
           ? ([] as unknown as Array<fs.Dirent<Buffer>>)
           : ([`${sessionIdA}.jsonl`, `${sessionIdB}.jsonl`] as unknown as Array<
               fs.Dirent<Buffer>
@@ -2517,6 +2520,40 @@ describe('SessionService', () => {
       const history = buildApiHistoryFromConversation(conversation);
 
       expect(history).toEqual([recordA1.message, assistantA1.message]);
+    });
+
+    it('keeps Realtime dialogue out of backend model history', () => {
+      const realtimeUser: ChatRecord = {
+        ...recordA1,
+        uuid: 'realtime-user',
+        subtype: 'realtime_message',
+        message: { role: 'user', parts: [{ text: 'voice question' }] },
+      };
+      const realtimeAssistant: ChatRecord = {
+        ...recordB2,
+        uuid: 'realtime-assistant',
+        parentUuid: realtimeUser.uuid,
+        sessionId: sessionIdA,
+        subtype: 'realtime_message',
+        message: { role: 'model', parts: [{ text: 'voice answer' }] },
+      };
+      const backendUser: ChatRecord = {
+        ...recordA1,
+        uuid: 'backend-user',
+        parentUuid: realtimeAssistant.uuid,
+        message: { role: 'user', parts: [{ text: 'backend task' }] },
+      };
+      const conversation: ConversationRecord = {
+        sessionId: sessionIdA,
+        projectHash: 'test-project-hash',
+        startTime: '2024-01-01T00:00:00Z',
+        lastUpdated: '2024-01-01T00:00:00Z',
+        messages: [realtimeUser, realtimeAssistant, backendUser],
+      };
+
+      expect(buildApiHistoryFromConversation(conversation)).toEqual([
+        backendUser.message,
+      ]);
     });
 
     it('does not deep-clone stored messages when rebuilding resume API history', () => {

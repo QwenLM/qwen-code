@@ -387,8 +387,11 @@ describe('UpdateGoalTool', () => {
     expect(recordTerminalProposal).not.toHaveBeenCalled();
   });
 
-  it('rejects completion when the evidence catalog is truncated', async () => {
-    const recordTerminalProposal = vi.fn();
+  it('queues truncated completion for boundary classification', async () => {
+    const recordTerminalProposal = vi.fn(() => ({
+      recorded: true,
+      readyForVerification: true,
+    }));
     const runtime = {
       getGoalForWorker: vi.fn().mockResolvedValue({
         goalId: permit.goalId,
@@ -437,11 +440,11 @@ describe('UpdateGoalTool', () => {
     const result = await invocation.execute(new AbortController().signal);
 
     expect(JSON.parse(String(result.llmContent))).toMatchObject({
-      proposalRecorded: false,
-      readyForVerification: false,
-      error: expect.stringContaining('not provably exhaustive'),
+      proposalRecorded: true,
+      readyForVerification: true,
     });
-    expect(recordTerminalProposal).not.toHaveBeenCalled();
+    expect(result.terminateTurn).toBe(true);
+    expect(recordTerminalProposal).toHaveBeenCalledOnce();
   });
 
   it('records one proposal while leaving the Goal active', async () => {

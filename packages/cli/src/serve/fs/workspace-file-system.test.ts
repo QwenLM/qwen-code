@@ -261,6 +261,48 @@ describe('WorkspaceFileSystem - readText', () => {
     expect((err as { hint?: string }).hint).toMatch(/readBytes/);
   });
 
+  it('reports the same lineEnding on every page of a CRLF file', async () => {
+    // A one-line slice arrives as text ending in '\r' — the '\n' was consumed
+    // as its terminator — so detecting on the slice would call page 1 'lf'
+    // while the cursor path called page 2 'crlf', for one file.
+    const target = path.join(h.workspace, 'crlf-pages.txt');
+    await fsp.writeFile(target, 'aa\r\nbb\r\ncc\r\n');
+    const r = await h.fs.resolve('crlf-pages.txt', 'read');
+
+    const first = await h.fs.readText(r, { limit: 1 });
+    expect(first.content).toBe('aa\r');
+    expect(first.meta.lineEnding).toBe('crlf');
+
+    const second = await h.fs.readText(r, {
+      cursor: first.meta.nextCursor!,
+      limit: 1,
+    });
+    expect(second.content).toBe('bb\r');
+    expect(second.meta.lineEnding).toBe('crlf');
+
+    const trunc = await h.fs.readText(r, { maxBytes: 3 });
+    expect(trunc.content).toBe('aa\r');
+    expect(trunc.meta.truncated).toBe(true);
+    expect(trunc.meta.lineEnding).toBe('crlf');
+  });
+
+  it('keeps an unterminated CRLF tail page consistent with page one', async () => {
+    // The tail page holds only `bb` — no terminator to test — so detection
+    // must come from the CRLF pair the cursor resumed after, or the two pages
+    // of one file disagree, the exact symptom fixed above.
+    const target = path.join(h.workspace, 'crlf-no-final.txt');
+    await fsp.writeFile(target, 'aa\r\nbb');
+    const r = await h.fs.resolve('crlf-no-final.txt', 'read');
+
+    const first = await h.fs.readText(r, { limit: 1 });
+    expect(first.content).toBe('aa\r');
+    expect(first.meta.lineEnding).toBe('crlf');
+
+    const tail = await h.fs.readText(r, { cursor: first.meta.nextCursor! });
+    expect(tail.content).toBe('bb');
+    expect(tail.meta.lineEnding).toBe('crlf');
+  });
+
   it('pages a large log by cursor and reassembles it exactly', async () => {
     const target = path.join(h.workspace, 'cursor-page.log');
     const lines = Array.from(
@@ -2145,33 +2187,39 @@ describe('WorkspaceFileSystem - multi-root workspaces', () => {
     expect(hits).toHaveLength(3);
   });
 
-  it('returns healthy root glob results when one workspace root fails', async () => {
-    await fsp.writeFile(path.join(h.workspace, 'primary.ts'), '');
-    await fsp.chmod(h.secondWorkspace, 0o000);
-    try {
-      await expect(h.fs.glob('*.ts')).resolves.toEqual([
-        path.join(h.workspace, 'primary.ts'),
-      ]);
-    } finally {
-      await fsp.chmod(h.secondWorkspace, 0o700);
-    }
-  });
+  it.skipIf(process.platform === 'win32')(
+    'returns healthy root glob results when one workspace root fails',
+    async () => {
+      await fsp.writeFile(path.join(h.workspace, 'primary.ts'), '');
+      await fsp.chmod(h.secondWorkspace, 0o000);
+      try {
+        await expect(h.fs.glob('*.ts')).resolves.toEqual([
+          path.join(h.workspace, 'primary.ts'),
+        ]);
+      } finally {
+        await fsp.chmod(h.secondWorkspace, 0o700);
+      }
+    },
+  );
 
-  it('throws AggregateError when every workspace root glob fails', async () => {
-    await fsp.chmod(h.workspace, 0o000);
-    await fsp.chmod(h.secondWorkspace, 0o000);
-    try {
-      const err = await h.fs.glob('*.ts').catch((e: unknown) => e);
-      const cause = (err as Error & { cause?: unknown }).cause;
+  it.skipIf(process.platform === 'win32')(
+    'throws AggregateError when every workspace root glob fails',
+    async () => {
+      await fsp.chmod(h.workspace, 0o000);
+      await fsp.chmod(h.secondWorkspace, 0o000);
+      try {
+        const err = await h.fs.glob('*.ts').catch((e: unknown) => e);
+        const cause = (err as Error & { cause?: unknown }).cause;
 
-      expect(isFsError(err)).toBe(true);
-      expect(cause).toBeInstanceOf(AggregateError);
-      expect((cause as AggregateError).errors).toHaveLength(2);
-    } finally {
-      await fsp.chmod(h.workspace, 0o700);
-      await fsp.chmod(h.secondWorkspace, 0o700);
-    }
-  });
+        expect(isFsError(err)).toBe(true);
+        expect(cause).toBeInstanceOf(AggregateError);
+        expect((cause as AggregateError).errors).toHaveLength(2);
+      } finally {
+        await fsp.chmod(h.workspace, 0o700);
+        await fsp.chmod(h.secondWorkspace, 0o700);
+      }
+    },
+  );
 
   it('glob with cwd searches only that resolved root', async () => {
     await fsp.writeFile(path.join(h.workspace, 'primary.ts'), '');

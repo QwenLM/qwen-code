@@ -39,7 +39,9 @@ export type RoleId =
   | '1b'
   | '1c'
   | '2'
-  | '3'
+  | '3a'
+  | '3b'
+  | '3c'
   | '4'
   | '5'
   | '6a'
@@ -132,6 +134,15 @@ export interface Brief {
   brief: string;
 }
 
+/**
+ * The model receipt the reverse-audit brief hands every auditor as its
+ * example. Exported so the retirement classifier can refuse a clause that
+ * parrots it — measured: agents repeat what they are handed, and a receipt
+ * the prompt wrote is not evidence of a walk.
+ */
+export const REVERSE_AUDIT_EXAMPLE_RECEIPT =
+  "No issues found — re-walked the reconnect state machine and the two changed exports' call sites; every gap I checked was already in the list";
+
 export const BRIEFS: Record<RoleId, Brief> = {
   '0': {
     label: 'Agent 0: Issue fidelity & root-cause ownership',
@@ -193,7 +204,11 @@ For every line the diff deletes or replaces:
 - **A rename / format / schema / default change must handle the data that already exists.** If the change reads, matches, or upserts against persisted state — rows in a store, comments on a thread, entries in a cache, a config or lockfile on disk — check it handles the **pre-change population**, not just new writes. A marker renamed with no legacy fallback leaves every existing record unmatched (orphaned, or double-written on the next upsert); a widened schema with no migration splits state into old- and new-shaped halves. Flag the un-migrated population and the split-brain it causes, and note that the fix is usually a two-line fallback (accept the old shape while writing the new).
 - **For moved or renamed code, check the move is faithful.** A branch dropped during a move looks like clean refactoring in each hunk separately, and is invisible unless the two hunks are compared.
 
-Each failure scenario must name what input or state now slips past the removed behaviour, and what wrong outcome results.`,
+Each failure scenario must name what input or state now slips past the removed behaviour, and what wrong outcome results.
+
+**A deleted call's INCIDENTAL effects are part of what was deleted.** A removed call, truncation, or throttle also un-provides everything it did on the side — a \`scheduler.stop()\` dropped from a recovery path removes its restart pairing; a deleted truncation was the de-facto enforcement of an opt-out. Enumerate what the removed code provided beyond its stated purpose, and check each against the new code, not just the headline behaviour.
+
+**A recovery path can defeat itself — check the correlation.** When the diff adds or reroutes a fallback, sweep the state matrix once: if every state that TRIGGERS the fallback is also a state where it cannot SUCCEED (a live case: every row where the rename fired, failed; every row that passed never renamed), the fallback is logically inert regardless of its test results. Trigger set ⊆ cannot-succeed set is a finding on its own.`,
   },
 
   '1c': {
@@ -221,7 +236,9 @@ For every field, option, or optional parameter the diff **adds**, grep its **rea
 
 **Also check callees:** does a parallel change elsewhere in this same PR make a call *this* code performs unsafe — a new precondition, a changed return shape, a new exception, a timing dependency? Re-read each callee's post-change definition and check the call site against its new contract.
 
-Expect the three ends to be far apart. The declaration, the pass-through, and the read routinely land in three different places, and the read is often in a file outside the diff entirely.`,
+Expect the three ends to be far apart. The declaration, the pass-through, and the read routinely land in three different places, and the read is often in a file outside the diff entirely.
+
+**Rule on REACHABILITY, not just correctness, for new code that claims to fix something.** Enumerate the in-tree callers of the new path: if no shipped caller can reach it (only tests do, or the producing condition cannot occur on any live path), the change is scaffolding, not a fix — say so, and grade the linked claim accordingly. Classify the input shape a guard defends against as actively-produced / latent / unreachable, and let the classification set the severity: a latent landmine is worth a note, an unreachable one is worth silence.`,
   },
 
   '2': {
@@ -240,23 +257,79 @@ Expect the three ends to be far apart. The declaration, the pass-through, and th
 - Sensitive data exposure in logs, error messages, or responses
 - Insecure deserialization; weak crypto
 - Hardcoded secrets, credentials, or API keys in the diff
-- CSRF and clickjacking, for web changes`,
+- CSRF and clickjacking, for web changes
+- **A borrowed protection idiom, missing what made it work at home.** When the diff lifts a defensive construct from elsewhere in the codebase — an escaping call, an encoding, a filter — go READ the source context, and check which of its surroundings did the actual protecting. A live case: an \`@\` → \`&#64;\` rewrite was lifted from a workflow whose output landed inside \`<code>\` — the code ancestor is what made mentions inert; the entity was belt-and-braces. In prose, GitHub decodes the entity before the mention filter runs, so the copied half protects nothing and the review that traced only the copied line would call it sound. Name what the original context provided and whether the new site has it.
+- **Authorization that pattern-matches SHAPE instead of PROVENANCE.** A gate that grants by recognising a canonical-looking string, config stanza, or marker — anything a model or user can write — authorizes whoever can imitate the shape. Probe it three ways: a canary action through the legitimate path, a forged input of the canonical shape through the illegitimate one, and a no-grant control; the fix is binding the grant to provenance the writer cannot fake (a CLI-created record, a receipt), never a stricter pattern.
+- **A second parser for a format someone else authoritatively parses.** When the diff implements its own model of another system's syntax — a sanitizer's fence scanner over markdown GitHub will parse, an escaper's tokenizer, a validator's URL splitter — the finding to hunt is an INPUT THE TWO PARSE DIFFERENTLY: every divergence is a bypass, because the sanitizer transforms what it saw while the authoritative parser renders what IS. Probe the corners the model simplifies (nesting, container prefixes, things that change meaning mid-stream: a fence opener inside a raw-HTML block, a quote inside an attribute) — and probe the sharpest corner FIRST: **the format's own delimiters inside a payload**. A non-greedy, no-escaping extractor fed a value that legitimately contains its close tag terminates the match early and truncates SILENTLY — a measured live case wrote a truncated file with no warning when the content contained a literal \`</parameter>\`. State the divergent input concretely — "these disagree somewhere" is not a finding.`,
   },
 
-  '3': {
+  // Code quality was one agent holding six unrelated checks — reuse, sibling
+  // symmetry, altitude, abstraction fit, conventions, dead code — and it is the
+  // same shape this file already refuses elsewhere. The invariant agents were split
+  // three ways on measured evidence (PR #6457's `QQChannel.ts`: one agent holding
+  // the whole eight-item checklist found **one** of the five invariant-class
+  // defects in that file; the same model split three ways found **all five**),
+  // because a long checklist is not a task an agent does six times — it is a task
+  // it does once, well, and then stops. Nothing about that finding is specific to
+  // invariants. The quality checklist is split on the same reasoning, along the
+  // seam where the questions genuinely differ: *does this code already exist*
+  // (3a), *is it at the right depth* (3b), and *does it match what surrounds it*
+  // (3c). Each slice is short enough to be walked to the end.
+  '3a': {
     reviewsCode: true,
-    label: 'Agent 3: Code quality',
-    publicLabel: 'the code-quality pass',
-    publicLabelZh: '代码质量检查',
+    label: 'Agent 3a: Reuse & duplication',
+    publicLabel: 'the reuse and duplication pass',
+    publicLabelZh: '复用与重复代码检查',
     readsDiff: true,
-    brief: `You are **Agent 3: Code Quality**. Review the diff for:
+    brief: `You are **Agent 3a: Reuse & Duplication**. One question, walked to the end: **does the codebase already have this?**
 
-- Style consistency with the surrounding codebase; naming conventions
-- **Duplication and missed reuse.** When the diff re-implements something the codebase already has, grep the shared/utility modules and the files adjacent to the change, and **name the existing helper it should call instead**. A duplication finding that does not name the thing being duplicated is not a finding.
-- **Sibling consistency — a guard one path has and its twin lacks.** When one member of a family of parallel paths carries a validation, guard, cleanup, or shape-check — sibling loaders, the handlers of a route table, the pair of functions that build the same command — check that **every** sibling carries it too. A lone exception is usually accidental, and the missing half is a latent **asymmetric failure**: harmless until the one input that path sees. Name the divergent sibling and the guard it is missing. When the missing guard is a validation on **untrusted input** (one \`gitCheckout\` validates its ref, its sibling does not), that is not a style nit — hand it to the security pass as a likely bug, not a consistency note.
-- Over-engineering and unnecessary abstraction
-- **Altitude** — is each change implemented at the right depth, or is it a fragile bandaid? A special case layered onto shared infrastructure to make one caller work is a sign the fix is not deep enough: prefer generalizing the underlying mechanism. The mirror image — a new abstraction serving a single call site — is over-engineering. **Name the depth the change should live at.**
-- Missing or misleading comments; dead code`,
+For every non-trivial block of logic the diff **adds** — a helper, a parse, a normalisation, a retry loop, a comparison, a format — go and look before accepting it as new:
+
+- \`grep_search\` the shared/utility modules, then the files adjacent to the change, then the rest of the package. Search for the *behaviour* (a distinctive literal, an error message, a regex, a field name), not only for a plausible function name — a duplicate rarely reuses the original's naming.
+- **Name the existing helper it should call instead**, with its path. A duplication finding that does not name the thing being duplicated is not a finding — it is a suspicion, and it will be rejected downstream.
+- Check the diff against **itself**, too: the same block pasted into two files in one pull request is duplication that has no older original to find.
+- A near-miss counts. When the existing helper does 90% of the job, say which 10% differs and whether the difference is deliberate — a copy made to change one line is how two implementations start drifting apart.
+
+Also report **dead code this diff leaves behind**: a function, branch, export, constant or import that nothing reaches once the change lands. Trace it (\`grep_search\` for the symbol) rather than assuming — the caller may live in a file the diff does not touch.
+
+Not your dimension: whether the change is at the right depth (3b owns altitude and abstraction fit) and whether it matches surrounding conventions (3c). Duplication that *should* be resolved by generalising a shared mechanism is still yours — name the duplication and say so; 3b will independently rule on the depth.`,
+  },
+
+  '3b': {
+    reviewsCode: true,
+    label: 'Agent 3b: Altitude & abstraction fit',
+    publicLabel: 'the altitude and abstraction pass',
+    publicLabelZh: '修复层次与抽象合理性检查',
+    readsDiff: true,
+    brief: `You are **Agent 3b: Altitude & Abstraction Fit**. One question, walked to the end: **is each change at the right depth?**
+
+Altitude is the failure that reads as correct at every individual line and is wrong as a whole. For each change ask where the problem it addresses actually lives, and compare that to where the fix was written:
+
+- **Too shallow — a bandaid on a symptom.** A special case layered onto shared infrastructure so that one caller works; a guard at the call site for a value the producer should never have emitted; a string patched after the fact by the code that consumed it. The tell is a change that would have to be repeated for the next caller. **Name the depth it should live at**, and the mechanism that should have been generalised.
+- **Too shallow in the other direction — the wrong owner.** The defect is upstream (another module, another service, the data's producer) and the diff compensates for it downstream. Say whose bug it is.
+- **Too deep — over-engineering.** A new abstraction, indirection layer, options object, or configuration point serving exactly one call site; a generalisation for a second case that does not exist. The cost is real and concrete: every future reader pays for the indirection, and the shape is fixed by a single example that may be unrepresentative.
+- **Blast radius.** When a change to shared infrastructure exists to serve one caller, name the *other* callers it now also affects, and what it means for them.
+
+Every finding needs the concrete cost, not an aesthetic judgement: what breaks next, what has to be repeated, who else is affected. "This should be more general" with no named next caller is not a finding.
+
+Not your dimension: whether the code already exists elsewhere (3a) or matches local conventions (3c).`,
+  },
+
+  '3c': {
+    reviewsCode: true,
+    label: 'Agent 3c: Consistency & clarity',
+    publicLabel: 'the consistency and clarity pass',
+    publicLabelZh: '一致性与可读性检查',
+    readsDiff: true,
+    brief: `You are **Agent 3c: Consistency & Clarity**. One question, walked to the end: **does this change match what surrounds it?**
+
+- **Sibling consistency — a guard one path has and its twin lacks.** This is the highest-value check in your slice; do it first and do it exhaustively. When one member of a family of parallel paths carries a validation, guard, cleanup, or shape-check — sibling loaders, the handlers of a route table, the two functions that build the same command, the arms of a switch — check that **every** sibling carries it too. A lone exception is usually accidental, and the missing half is a latent **asymmetric failure**: harmless until the one input that path sees. Name the divergent sibling and the guard it is missing. When the missing guard is a validation on **untrusted input** (one \`gitCheckout\` validates its ref, its sibling does not), that is not a consistency note — file it as the likely bug it is.
+- **Convention drift.** Naming, error-construction, logging, option-passing, module layout: does the new code do it the way the files around it do? Cite the surrounding example you are comparing against. A convention you cannot point at in this codebase is an external style preference, and those are not findings here.
+- **Misleading names and comments.** A comment that describes behaviour the code no longer has, a name that says the opposite of what the function does, a parameter whose name implies a unit or ordering the code does not honour. These are findings because they misinform the next reader; a merely *absent* comment is not, unless the logic is genuinely confusing.
+- **Needless complexity in the added code.** A condition that is always true, a branch that duplicates its sibling's body, a nested ternary or callback chain with a flat equivalent, state kept that is only ever written. Say what the simpler form is.
+- **Documentation parity with siblings.** When the diff adds a user-facing surface — a CLI flag, a slash-command option, a settings key — check whether its SIBLINGS are documented, and where. Three of four sibling selectors having a docs entry is a house convention the fourth just broke; a surface whose behaviour can silently change (a fallback, an automatic swap, an emitted warning) undocumented is a user staring at a message with nowhere to look it up. This is deliberately a **parity** check, not a docs mandate: the finding names the sibling precedent and the file it lives in (\`--fast\` and \`--vision\` are in \`docs/…/commands.md\`; the new \`--compaction\` is not), so "add docs" arrives as the codebase's own standard, not this reviewer's. No documented sibling, no finding. Severity: Suggestion.
+
+Not your dimension: whether the code already exists elsewhere (3a) or whether the fix is at the right depth (3b). Formatting a formatter would normalise is not a finding for anyone.`,
   },
 
   '4': {
@@ -301,7 +374,10 @@ Expect the three ends to be far apart. The declaration, the pass-through, and th
 
 - both sides of the assertion are computed the same way, so they move together — e.g. \`expect(extract(a)).toBe(extract(b))\` where a loose or unanchored \`extract\` returns \`undefined\` on both, i.e. \`expect(undefined).toBe(undefined)\`; **pin the literal** instead;
 - the assertion reads only the *first* of several sites the changed behaviour spans, so drift in a later site passes green;
-- an \`expect(x).toBe(x)\` / round-trip tautology, or a "does not throw" assertion for code whose bug would be a *wrong value*, not a throw.
+- an \`expect(x).toBe(x)\` / round-trip tautology, or a "does not throw" assertion for code whose bug would be a *wrong value*, not a throw;
+- **the test pins the MECHANISM instead of the EFFECT.** A test asserting \`&#64;\` appears in the output pins an encoding choice; the property that matters is that no mention-shaped \`@\` survives — and when the mechanism itself is broken (that entity still pings), the mechanism test is green precisely while the guarantee fails. Wherever the diff's test asserts *how* a protection is implemented rather than *what it must prevent*, say what the effect-shaped assertion would be;
+- **an existing test's assertion was FLIPPED to certify the new behaviour.** A green suite whose only guard over the changed behaviour was rewritten in this same diff is not evidence — it is the regression's own paperwork. Audit the TEST-side diff for renamed tests and inverted expectations over the changed lines; a flip can be legitimate, but it must be declared in the PR body, not discovered by a reviewer;
+- **the test's oracle mirrors the implementation's own model.** A fold-balance test whose helper re-implements the sanitizer's code-region scanner can never catch that scanner diverging from GitHub's parse — the test and the code share the blind spot **by construction**. An oracle must come from the authority the code is modelling (recorded real output, a spec fixture), or the test proves self-consistency, not correctness.
 
 A vacuous test is a **Suggestion** — an ineffective guard is a gap, not a defect in the code, and grading it Critical merely for being the sole guard is the severity inflation the shared ladder is built to avoid (Agent 7's efficacy probe reports the very same inert test as a Suggestion, and Step 4 keeps the higher of the two). Escalate only the way this dimension always does: if the vacuous test lets a **specific incorrect behaviour** ship, report **that behaviour** as the Critical with the test as your evidence — naming the bug is the work, naming the gap is not; and a test that asserts the **opposite** of the intended behaviour, or was **weakened/disabled in this diff**, is already Critical under the existing rule.
 
@@ -383,7 +459,10 @@ You are undirected on purpose. Do not restrict yourself to the list.`,
 Read the JSON it prints:
 
 - \`toolchain: "npm"\` → use its \`build[]\` / \`test[]\` results. A failure in a file **the diff changed** is a **Critical** (\`Source: [build]\` or \`[test]\`); a failure in a file it did **not** touch is pre-existing — say so, do not file it against this PR. A non-empty \`timedOut\`, or a failed \`install\`, is environment/infrastructure — informational, never a Critical. On \`ok: true\`, name the workspaces built and the commands run; a return that names no command is a whiff.
+- **When any \`test[]\` command failed (exit non-zero, not a timeout), MEASURE which failures are the PR's before ruling by path.** The path rule above misclassifies in both directions — an environment-flaky test in a touched file gets filed as a Critical it did not cause, and a PR that breaks a test in an UNTOUCHED file gets waved through as pre-existing. The measurement is two commands: \`qwen review base-tree --plan <plan> --worktree <worktree> --out <plan dir>/qwen-review-pr-<n>-base-tree.json\` (builds the merge base beside the worktree). **Read \`available\` before using \`path\`** — a tree that was created but did NOT build populates \`path\` too, and a base that failed to build says nothing whatsoever about the PR, so measuring against it turns an infrastructure failure into a list of Criticals. \`available: false\` (local/lightweight review, no merge base, a base that would not compile) means the path rule stands — say so and stop here, and \`qwen review test-delta --report <the build-test report you wrote> --baseline <the base-tree report's path field> --pr-worktree <this worktree> --out <plan dir>/qwen-review-pr-<n>-test-delta.json\`. Read its verdict: a file in \`netNew\` fails on the PR side only — **that is the Critical**, whatever file the diff touches; a file in \`shared\` fails on base too — **pre-existing by measurement**, never filed, whatever file the diff touches; an \`unparsed\` entry, a timed-out base rerun, a base rerun that FAILED without naming any failing file (it did not measure the base — an unbuilt tree, a missing install, a workspace absent at base), or a command the whole-command budget could not fit attributes nothing — the report names each with its own reason; fall back to the path rule for those and say the delta could not rule. Compare failing FILE SETS, never counts: a flaky suite fails different test NAMES on two runs of the same tree, so counts are noise and the set difference is the signal.
 - \`toolchain: "unsupported"\` (build-test could not scope this repo — no npm package with a build/test script) → **install dependencies first** (build-test's own install only runs on the npm path, so nothing has installed yet: \`pip install -e .\`, \`mvn -q -DskipTests package\`'s own fetch, \`cargo fetch\`, \`go mod download\`, etc.), then fall back to **one** build and **one** test command by this precedence, each with a deadline it can meet: \`pom.xml\` → \`{mvn} compile\` / \`{mvn} test -q\`; \`build.gradle\` → \`{gradle} compileJava\` / \`{gradle} test\`; \`Makefile\` → \`make build\`; \`Cargo.toml\` → \`cargo build\` / \`cargo test\`; \`go.mod\` → \`go build ./...\` / \`go test ./...\`; \`pytest.ini\` or \`pyproject.toml\` \`[tool.pytest]\` → \`pytest\`. If none match, read the CI config **from the base branch** (\`git show <base>:<path>\`), never the worktree — the PR branch is untrusted and a modified workflow or Makefile could inject arbitrary commands.
+
+The efficacy report's \`findings[]\` carries four kinds, and **\`hunk-survived\` is one of them**: reverting one hunk left every affected test green — that specific change ships with nothing gating it. Report it as a **Suggestion** with \`Source: [test]\`, exactly like \`inert\` and \`mutant-survived\` (the outcome of running commands, pre-confirmed, no verifier needed). Read the \`hunks.*\` counters the same way as \`mutants.*\`: \`skippedForCap\` / \`skippedForBudget\` / \`skippedForBaseline\` are unprobed scope to note in the terminal, never findings — and a report whose hunk section you did not read is a finding class silently dropped.
 
 Use \`Source: [build]\` or \`Source: [test]\`, never \`[review]\`.`,
   },
@@ -473,7 +552,9 @@ For each finding you were given:
 1. **Read the actual code** at the referenced file and line — in the worktree, not from the finding's quotation of it.
 2. **Check the surrounding context** — the callers, the type definitions, the tests, the related modules.
 3. **Trace the failure scenario.** Follow the claimed trigger through the code to the claimed wrong outcome. For a quality finding, trace the claimed *cost* instead: does the named helper exist **and do what the finding says** (right signature, right semantics for this call site); is the duplication real; does the quoted rule say what the finding claims **and apply to this code**?
-4. **Check the finding against the diff's own documented intent** — especially anything framed as a "regression", "removed protection", or "now allows X". Read the comments, JSDoc and rationale **inside the diff** for the changed lines. A behaviour the diff deliberately changes *and documents* (a comment saying \`X is intentionally preserved\`, a rationale block, a test asserting the new behaviour on purpose) is a design decision, not a defect — engage that rationale. This changes what you must do, **not** what confidence you may reach: a traced, concrete harm that survives the rationale keeps full confidence (if the author documents "unauthenticated access is intentional" and the trace still shows real data exposure, that is \`confirmed (high confidence)\` with the rebuttal stated — documentation does not make a harm safe). Use \`confirmed (low confidence)\` when engaging the rationale makes the harm genuinely uncertain. **Reject only** a finding that re-describes the documented change as a regression without naming a harm the rationale fails to answer. (A real run auto-posted a Critical claiming a secret-sanitization PR "now leaks AWS/GitHub tokens"; the file's own comment three lines up said those credentials **must remain available** to shell/MCP tools and the old broad denylist was the bug being fixed. The verifier had not read the rationale.)
+4. **Check the finding against the diff's own documented intent** — especially anything framed as a "regression", "removed protection", or "now allows X". Read the comments, JSDoc and rationale **inside the diff** for the changed lines. A behaviour the diff deliberately changes *and documents* (a comment saying \`X is intentionally preserved\`, a rationale block, a test asserting the new behaviour on purpose) is a design decision, not a defect — engage that rationale. This changes what you must do, **not** what confidence you may reach: a traced, concrete harm that survives the rationale keeps full confidence (if the author documents "unauthenticated access is intentional" and the trace still shows real data exposure, that is \`confirmed (high confidence)\` with the rebuttal stated — documentation does not make a harm safe). Use \`confirmed (low confidence)\` when engaging the rationale makes the harm genuinely uncertain. **Reject only** a finding that re-describes the documented change as a regression without naming a harm the rationale fails to answer. **And a deliberate-design defence extends only to the states it actually argues.** When one gate, guard, or policy serves several states — a hold that covers active AND paused AND exhausted, a filter shared by N modes — the rationale for the defended state does not transfer to its siblings: a live verification found an input-hold correct and well-argued for an *active* task, while the same gate silently froze user input in three idle states nothing had argued for, forever. Enumerate the states the shared implementation covers, and treat every unargued one on its own merits — the sibling-entrance rule, applied to a state machine instead of a syntax.
+
+   (A real run auto-posted a Critical claiming a secret-sanitization PR "now leaks AWS/GitHub tokens"; the file's own comment three lines up said those credentials **must remain available** to shell/MCP tools and the old broad denylist was the bug being fixed. The verifier had not read the rationale.)
 5. **Reject a false positive** — a finding that matches an item in the Exclusion Criteria below.
 
 **When the claim is runnable, do not just trace it — run it.** Reading is where this review missed its hardest bugs: measured, the strongest model traced a real double-execute (\`!git push\` firing twice) and called it correct. When a finding's failure scenario is a **concrete behavioural claim about a named unit** — a function, a component, a route — **and the repo has a fast unit harness** (a \`vitest\`/\`jest\`/\`pytest\` setup, with existing tests whose scaffolding you can copy) — **and tracing by reading has not settled it**, write a **probe**: a minimal test that reproduces the scenario and **records what actually happens** (the call count, the arguments, the return, the external state), and run it in the worktree. Two rules make a probe evidence and not theatre:
@@ -481,7 +562,61 @@ For each finding you were given:
 - **Show it distinguishes buggy from correct.** After the probe reports the suspected-wrong behaviour, apply the one-line fix the finding implies (or revert the change that introduced it), re-run, and confirm the probe **flips**; then restore. A probe you cannot make flip proves nothing — it is inconclusive, and the finding stays at low confidence.
 - **The observation is the verdict, not your reading of it.** The probe *ran* the code, so its output is the confirmation a Critical needs — cite the observed values (\`sendShellCommand called twice with ["git push"]\`). A probe that shows the **correct** outcome is exactly the "quote the contradicting code" that lets you reject a Critical: the code demonstrably does not do what the finding claims. A probe that could not be run, or could not be shown to flip, confirms nothing — fall back to the reading-based verdict and its low-confidence floor.
 
+**When the fix IS a threshold, measure the threshold.** A guard built on a ratio or length cutoff makes the fix's coverage an empirical number, not a reading: hold every other variable fixed, vary the guarded quantity, and binary-search the boundary where behaviour flips. Then put that number next to what the linked issue actually reports — a live verification of a prose-ratio guard measured the minimum recovering payload at ~473 chars with the issue's own preamble held fixed, which proved the fix covered the issue's \`edit\`/\`write_file\` half and silently declined its \`run_shell_command\` half. "Fix is narrower than its claim, here is the boundary, here is the half it misses" is a finding no amount of code-reading produces.
+
+**A suggested fix you did not run is a hypothesis; say which one you are giving.** When a finding's fix is cheap to apply, patch it in, re-run the same probe/harness to show it works, then revert — and state that every other number in your report comes from the unmodified PR (the contamination line is what lets a reader trust the rest). A fix too costly to verify is still worth proposing, labeled untested.
+
+**A probabilistic failure gets a RATE, not an anecdote.** For a timing/race claim, run N repetitions per arm and report the rates as the verdict; amplify with full CPU load to force the window open (a live case went from 4/11 idle to 5/5 loaded). And attribute honestly: a lower idle rate with no structural change is luck, not a fix. Fake-timer tests hardcode one ordering by construction — they cannot discriminate a race, so a green fake-timer suite is non-evidence here.
+
+**When the authority you need is unreachable, triangulate and label — do not guess and do not just give up.** A claim resting on an external service or an absent platform has a middle path between "confirmed" and "cannot tell": corroborate via the vendor's own tracker, an in-repo sibling convention, and a monotonic-safety argument (the change can only tighten, never widen); or model the blamed platform deviation locally and show the mechanism reproduces and the fix removes it. Either way, DECLARE the stub — "verified against a model of X, not X" is a different claim from "verified", and writing the first as the second is how a wrong platform assumption ships.
+
 **Leave the tree as you found it** — delete any probe file and revert any fix you applied for the self-check, so nothing you wrote reaches the diff or the build. A finding you actually probed carries \`Source: [probe]\` with the observed evidence; never tag one you only reasoned about — that source means "a run produced this", and downstream treats it as deterministic.
+
+**When the claim is about a CHANGE in behaviour, one tree cannot settle it — build the other one.** A probe runs the PR's code, which answers "what does it do now". It cannot answer "and what did it do before", and a whole class of finding is exactly that difference: "this changes the output format", "this only adds a field", "this silently drops the error message", "cancelled and failed used to be indistinguishable". Reading the diff to recover the old behaviour is the step that goes wrong quietly — the new lines are always there and always look right, and whether they change what anyone observes routinely turns on code the diff never touches. So when a finding's claim is comparative, get the *before* and measure it:
+
+\`\`\`bash
+"\${QWEN_CODE_CLI:-qwen}" review base-tree --plan <the plan report> --worktree <this worktree> \\
+  --out <the plan report's directory>/qwen-review-pr-<n>-base-tree.json
+\`\`\`
+
+It builds the merge base in a sibling worktree and reports \`available\` and \`path\`. Then run **the same input** in both trees — the same command, the same fixture, the same script — and compare the observed output byte for byte. The three rules that make this evidence:
+
+- **Prove the arm before trusting the run.** Before an A/B observation counts, confirm each artifact actually contains (PR side) or lacks (base side) the change — grep the built output for a string the diff introduces. And if your comparator reports "no difference", first show it CAN report one (feed it two runs known to differ): a dead comparator and a true no-op read identically.
+- **Same input, same procedure, both sides.** A difference produced by running two different things is not a difference between the two programs. If you had to build or install differently on one side, say so and treat the result as inconclusive.
+- **Quote both outputs.** \`BASE: <what it printed>\` / \`PR: <what it printed>\`. The observation is the verdict; a summary of it is a reading again.
+- **A/B is expensive — spend it on a claim that turns on it.** An install and a build (the command reuses an already-built base tree; shards that race the first build may both pay). A finding you can settle by tracing does not need this, and \`available: false\` (no merge base, a stale one, or a base that does not build) is a fact about the harness, never a finding against the PR.
+
+A finding an A/B settled carries \`Source: [probe]\` like any other run-produced evidence, with both sides' output quoted. **Do not remove the base tree** — \`cleanup\` sweeps it at the end of the review, and a later finding may need it.
+
+**When the claim is about what a WORKFLOW does, run the step — do not read the YAML.** A finding against a CI workflow ("this step posts the wrong body", "the sanitizer is bypassed on this path", "this only changed a log line") is a claim about a shell script that happens to live inside YAML, and reading it in place is where workflow review goes wrong quietly: the \`run:\` body is indented inside a block scalar, the \`env:\` that decides its behaviour is spread over three levels (workflow, job, step — nearest wins, and two of them are nowhere near the step), and every \`\${{ … }}\` is a hole the reader fills in from imagination. Lift it out instead:
+
+\`\`\`bash
+"\${QWEN_CODE_CLI:-qwen}" review extract-step --workflow <path in the tree being reviewed> \\
+  --job <job id> --step <name, id, or 0-based index> --out <the plan report's directory>/step.sh
+\`\`\`
+
+It writes the \`run:\` script **verbatim** as an executable and reports what the runner would have supplied: the effective \`env:\` with all three levels merged and each key's level named, every \`\${{ … }}\` site listed **unevaluated** — that list is precisely what you have to stub, because the command refuses to invent values for it — the resolved \`shell\` and \`working-directory\`, and the commands the script invokes. Stubbing and input are yours: shim \`gh\`/\`curl\` onto \`PATH\`, export the env, run it, observe. **Combined with \`base-tree\`, a workflow A/B is two invocations** — extract the same step from both trees, feed both the same input, diff what each would have done. That is how the strongest workflow finding in this pipeline's history was produced: the real composer step from both arms, a stubbed \`gh\`, and a byte-for-byte comparison against a comment the workflow had actually posted. Three limits worth knowing before you spend the step: a \`uses:\` step has no \`run:\` and is refused rather than simulated; a step NAME that two steps in the job share is refused as ambiguous rather than resolved to the first, so pass the index (which is what an A/B wants anyway — the two trees must select the same step, and a name that moved between them is exactly how they stop doing that); and the \`invokes\` list is a labelled heuristic — the verbatim script beside it is the authority.
+
+**When the claim is about what the product DOES at runtime, drive it — two commands make that mechanical.** A finding about behaviour ("this hangs when the provider 429s", "the retry never fires", "the daemon answers before it is ready") is settled by running the built product and watching, and the two halves that used to be hand-written every time are now commands.
+
+\`\`\`bash
+"\${QWEN_CODE_CLI:-qwen}" review mock-provider --responder <a module you write> \\
+  --log <plan dir>/mock.jsonl --ttl 600 --out <plan dir>/mock.json &
+until [ -s <plan dir>/mock.json ]; do sleep 0.1; done  # its port is in that report
+"\${QWEN_CODE_CLI:-qwen}" review drive --cwd <the worktree> --script <what to run> \\
+  --ready <a command polled until it exits 0> --timeout 300 --out <plan dir>/drive.json
+\`\`\`
+
+\`mock-provider\` serves \`/v1/chat/completions\` (OpenAI) and \`/v1/messages\` (Anthropic) on an OS-assigned port it reports back, and appends every request to a JSONL log; your responder module exports \`respond(req)\` returning \`{text}\`, \`{tool, args}\` or \`{status, body}\`, and never has to get SSE framing right. **It serves for the whole \`--ttl\` and returns only when that expires** — so background it and wait, as above; run sequentially it is already shut down by the time the next line starts. Its report is written once the port is bound, which is what makes the file's appearance a readiness signal rather than a guess, and the TTL is the only thing that ends it — set it to bound the drive, not to match it. **The log is the A/B evidence** — drive the same script against the PR worktree and the \`base-tree\` path, then diff the two request sequences; a difference is evidence, a reading is not.
+
+\`drive\` owns the three things that used to be guesswork, and its \`outcome\` is what you rule on, never the captured text alone: \`completed\` carries the script's own \`exitCode\` and is the only value that licenses a behavioural claim; \`not-ready\` means the readiness probe never passed, so **nothing was driven and nothing observed is evidence either way**; \`timed-out\` and \`overflowed\` mean the capture is PARTIAL — a partial capture is not evidence that the run produced nothing; \`unavailable\` (no tmux) is an environment gap and explicitly not a finding. Pass \`--ready\` for anything that binds a port: without it the drive starts immediately, and an empty capture reads as "the feature does not work" when it means "the daemon had not finished starting".
+
+For anything that is not one of those two wires — the project's own HTTP service, an MCP server, an OAuth endpoint — stand it up yourself and let \`drive\` own the lifecycle.
+
+**When the claim is about GITHUB's behaviour, neither tree can settle it — only GitHub can.** A claim like "this encoding renders identically and can never ping", "GitHub strips this tag", "this markdown shape closes the fold" is about the comment pipeline's parser, sanitizer allowlist and notification path, none of which exist in this environment — a local markdown library is a model of GitHub, and judging a sanitizer claim against a model of the authority is exactly the parser-divergence failure under review. Measured live: an \`@\` → \`&#64;\` defusal read as sound in every local trace, and GitHub's real renderer registered the mention and fired the notification. So:
+
+- **If the environment variable \`QWEN_REVIEW_SCRATCH_REPO\` is set** (an \`owner/repo\` the user designated for disposable test posts), you may adjudicate on the real renderer: post the payload as an issue comment there — \`gh api repos/$QWEN_REVIEW_SCRATCH_REPO/issues/<n>/comments -f body=@<file>\` against an issue you created there for this purpose — read it back with \`-H "Accept: application/vnd.github.html+json"\`, and rule on the returned HTML (and, for mention claims, the timeline events). The observation is the verdict; quote it. This is the ONLY write destination other than \`submit\`'s that any part of this review may touch, it is user-designated, and nothing about the PR under review, its code, or its authors may appear in what you post there — post the minimal payload shape, not the report.
+- **If it is not set, a rendering claim you could not settle by any local means is \`confirmed (low confidence)\` or \`cannot tell\` — never "confirmed" off a local markdown approximation.** Say what a scratch-repo check would have measured, so the user knows what the setting buys.
 
 Return, for each finding, one verdict:
 
@@ -492,6 +627,13 @@ Return, for each finding, one verdict:
 **Rejecting a Critical carries a higher bar than anything else, and it is one-way.** A rejected Critical is gone — no later stage revisits it, it vanishes from both the pull request and the terminal. To reject one you must **quote the specific code that contradicts the claim**. A passing test, a plausible-looking guard, or "I could not reproduce the reasoning" is not enough — when you cannot quote the contradiction, the floor is \`confirmed (low confidence)\`, never rejection. Downgrading is reversible; a human still sees a low-confidence finding under "Needs Human Review". Rejection is not.
 
 **For anything non-Critical, when uncertain, downgrade to low confidence rather than rejecting.** Reserve outright rejection for a finding that clearly does not match the code (it describes behaviour the code does not have) or matches an Exclusion Criterion. Low confidence is for "likely real, needs human judgement", not for "I have no idea" — a vague suspicion with no concrete evidence in the code can still be rejected.
+
+**Your job is to falsify, not to fail-to-verify — and the two feel identical from inside a trace that went nowhere.** Rejection is a claim that you hold **direct counter-evidence**: the quoted contradicting code, the observed probe output, the matched Exclusion Criterion (the one exception stays as stated above: a finding that names nothing checkable at all is rejectable for that reason). Two states reliably masquerade as grounds to reject, and neither is (the split is measured practice from a reflection filter that ran over production reviews at millions-of-comments scale, whose single operating rule was this asymmetry):
+
+- **"I could not verify it."** A trace that fails to confirm a claim is information about your trace, not about the claim — the trigger may need state you did not construct, a platform you are not on, a timing window your read-through cannot open. If the trace neither confirms nor contradicts, the verdict is \`confirmed (low confidence)\` with what-would-settle-it named. "Could not reproduce the reasoning" is already listed above as insufficient to reject a Critical; it is equally insufficient for a Suggestion whose evidence is merely out of your reach.
+- **"Its evidence is somewhere I did not look."** A finding may rest on evidence the finder gathered and you have not — a caller grepped in a file the diff never touches, issue evidence fetched from GitHub, a behaviour observed in a run. The evidence being absent from *your* view is not evidence of absence: you have the same tools the finder had, so **go read the claimed source first** — the named file, the quoted issue text in the launch message, the cited output. Reject only if what you find there contradicts the claim. If the source is genuinely unreachable from this environment (a lightweight diff-only review, an external service), the floor is the low-confidence downgrade, never rejection.
+
+The asymmetry cuts both ways: confirming also requires the trace, and a finding that merely *sounds* right confirms nothing. What it forbids is only the shortcut in the rejecting direction, because that direction is the irreversible one.
 
 **Do not reject an issue-fidelity / root-cause-ownership finding merely because the code compiles, runs, or has a passing test.** A working sanitizer with a green "malformed-shape" test does not disprove an issue-grounded claim that the root cause belongs upstream. Verify such a finding against the issue evidence quoted in the message that launched you; if that evidence is absent or genuinely inconclusive, downgrade rather than reject.`,
   },
@@ -511,7 +653,7 @@ Return, for each finding, one verdict:
 - **Report only Critical or Suggestion.** Do not report Nice to have.
 - A found gap uses the standard finding format (with \`Source: [review]\`), including its failure scenario — your findings go through the same verification as any other, so they must carry the evidence a verifier can trace.
 
-If you find no new gap in your scope, say so **and name what you re-examined** — \`No issues found — re-walked the reconnect state machine and the two changed exports' call sites; every gap I checked was already in the list\`. A bare "No issues found." is indistinguishable from an agent that did nothing, and it is treated as one: it ends nothing, and it earns your scope a relaunch.`,
+If you find no new gap in your scope, say so **and name what you re-examined** — \`${REVERSE_AUDIT_EXAMPLE_RECEIPT}\`. A bare "No issues found." is indistinguishable from an agent that did nothing, and it is treated as one: it ends nothing, and it earns your scope a relaunch.`,
   },
 };
 

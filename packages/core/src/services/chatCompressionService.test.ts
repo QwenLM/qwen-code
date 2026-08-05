@@ -20,9 +20,12 @@ import type { GeminiChat } from '../core/geminiChat.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
 import type { BaseLlmClient } from '../core/baseLlmClient.js';
+import { AuthType } from '../core/contentGenerator.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
 import * as sideQueryModule from '../utils/sideQuery.js';
 import * as postCompactModule from './postCompactAttachments.js';
+import * as slimmingModule from './compactionInputSlimming.js';
+import { logChatCompression } from '../telemetry/loggers.js';
 
 vi.mock('../telemetry/uiTelemetry.js');
 vi.mock('../core/tokenLimits.js');
@@ -32,7 +35,6 @@ describe('ChatCompressionService', () => {
   let service: ChatCompressionService;
   let mockChat: GeminiChat;
   let mockConfig: Config;
-  const mockModel = 'gemini-pro';
   const mockPromptId = 'test-prompt-id';
   let mockGetHookSystem: ReturnType<typeof vi.fn>;
 
@@ -53,6 +55,9 @@ describe('ChatCompressionService', () => {
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
       getHookSystem: mockGetHookSystem,
       getModel: () => 'test-model',
+      getCompactionModel: vi.fn(),
+      getFastModel: vi.fn(),
+      getAllConfiguredModels: vi.fn().mockReturnValue([]),
       getApprovalMode: () => 'default',
       getDebugLogger: () => ({
         warn: vi.fn(),
@@ -74,7 +79,6 @@ describe('ChatCompressionService', () => {
     const result = await service.compress(mockChat, {
       promptId: mockPromptId,
       force: false,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -97,7 +101,6 @@ describe('ChatCompressionService', () => {
     const result = await service.compress(mockChat, {
       promptId: mockPromptId,
       force: false,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: MAX_CONSECUTIVE_FAILURES,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -122,7 +125,6 @@ describe('ChatCompressionService', () => {
       // force=true so the only thing that could NOOP us up front is the
       // circuit-breaker. At MAX-1, the breaker must NOT trip.
       force: true,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: MAX_CONSECUTIVE_FAILURES - 1,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -142,7 +144,6 @@ describe('ChatCompressionService', () => {
     const tripped = await service.compress(mockChat, {
       promptId: mockPromptId,
       force: false,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: MAX_CONSECUTIVE_FAILURES,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -157,7 +158,6 @@ describe('ChatCompressionService', () => {
     await service.compress(mockChat, {
       promptId: mockPromptId,
       force: true,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: MAX_CONSECUTIVE_FAILURES,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -177,7 +177,6 @@ describe('ChatCompressionService', () => {
     const result = await service.compress(mockChat, {
       promptId: mockPromptId,
       force: false,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -275,7 +274,6 @@ describe('ChatCompressionService', () => {
       const result = await service.compress(mockChat, {
         promptId: mockPromptId,
         force: false,
-        model: mockModel,
         config: mockConfig,
         consecutiveFailures: 0,
         originalTokenCount: 50_000,
@@ -306,7 +304,6 @@ describe('ChatCompressionService', () => {
       const result = await service.compress(mockChat, {
         promptId: mockPromptId,
         force: false,
-        model: mockModel,
         config: mockConfig,
         consecutiveFailures: 0,
         originalTokenCount: 50_000,
@@ -328,7 +325,6 @@ describe('ChatCompressionService', () => {
       const result = await service.compress(mockChat, {
         promptId: mockPromptId,
         force: false,
-        model: mockModel,
         config: mockConfig,
         consecutiveFailures: 0,
         originalTokenCount: 50_000,
@@ -354,7 +350,6 @@ describe('ChatCompressionService', () => {
       const result = await service.compress(mockChat, {
         promptId: mockPromptId,
         force: false,
-        model: mockModel,
         config: mockConfig,
         consecutiveFailures: 0,
         originalTokenCount: 50_000,
@@ -394,7 +389,6 @@ describe('ChatCompressionService', () => {
     const result = await service.compress(mockChat, {
       promptId: mockPromptId,
       force: true,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: 100_000,
@@ -435,7 +429,6 @@ describe('ChatCompressionService', () => {
     const result = await service.compress(mockChat, {
       promptId: mockPromptId,
       force: true, // → compactTrigger 'manual'
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: 100_000,
@@ -485,7 +478,6 @@ describe('ChatCompressionService', () => {
       promptId: mockPromptId,
       force: true,
       trigger: 'auto', // keep the trailing fc (manual would strip it)
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: 100_000,
@@ -549,7 +541,6 @@ describe('ChatCompressionService', () => {
     const result = await service.compress(mockChat, {
       promptId: mockPromptId,
       force: false,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -591,7 +582,6 @@ describe('ChatCompressionService', () => {
     const result = await service.compress(mockChat, {
       promptId: mockPromptId,
       force: false,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -662,7 +652,6 @@ describe('ChatCompressionService', () => {
     const result = await service.compress(mockChat, {
       promptId: mockPromptId,
       force: false,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -701,7 +690,6 @@ describe('ChatCompressionService', () => {
       promptId: mockPromptId,
       force: true,
       // forced
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -737,7 +725,6 @@ describe('ChatCompressionService', () => {
     await service.compress(mockChat, {
       promptId: mockPromptId,
       force: true,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -773,7 +760,6 @@ describe('ChatCompressionService', () => {
     await service.compress(mockChat, {
       promptId: mockPromptId,
       force: true,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -822,7 +808,6 @@ describe('ChatCompressionService', () => {
     await service.compress(mockChat, {
       promptId: mockPromptId,
       force: true,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -838,7 +823,10 @@ describe('ChatCompressionService', () => {
     expect(serialized).toContain('[image: image/png]');
   });
 
-  it('forwards model, maxAttempts, and thinkingConfig to runSideQuery', async () => {
+  it('passes getCompactionModel to runSideQuery for compression', async () => {
+    // Compression passes config.getCompactionModel?.() to runSideQuery so it uses
+    // the compaction model (falls back to the main model) instead of
+    // the expensive main model, reducing cost. See https://github.com/QwenLM/qwen-code/issues/5956
     const history: Content[] = [
       { role: 'user', parts: [{ text: 'msg1' }] },
       { role: 'model', parts: [{ text: 'msg2' }] },
@@ -848,6 +836,9 @@ describe('ChatCompressionService', () => {
     vi.mocked(mockChat.getHistory).mockReturnValue(history);
     vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(100);
     vi.mocked(tokenLimit).mockReturnValue(1000);
+    vi.mocked(mockConfig.getCompactionModel).mockReturnValue(
+      'compaction-model-v1',
+    );
 
     const mockGenerateText = vi.fn().mockResolvedValue({
       text: 'Summary',
@@ -864,7 +855,6 @@ describe('ChatCompressionService', () => {
     await service.compress(mockChat, {
       promptId: mockPromptId,
       force: true,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -874,9 +864,10 @@ describe('ChatCompressionService', () => {
     // inconsistent) and the output is hard-capped by COMPACT_MAX_OUTPUT_TOKENS
     // so subsequent threshold math has a predictable reserve. maxAttempts=1
     // keeps the call best-effort (next turn re-triggers on failure).
+    // Model is set to getCompactionModel?.() to use the compaction model for cost efficiency.
     expect(mockGenerateText).toHaveBeenCalledWith(
       expect.objectContaining({
-        model: mockModel,
+        model: 'compaction-model-v1',
         maxAttempts: 1,
         config: expect.objectContaining({
           thinkingConfig: { includeThoughts: false },
@@ -884,6 +875,221 @@ describe('ChatCompressionService', () => {
         }),
       }),
     );
+  });
+
+  it('falls back to the main model when compactionModel is not set', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'msg1' }] },
+      { role: 'model', parts: [{ text: 'msg2' }] },
+      { role: 'user', parts: [{ text: 'msg3' }] },
+      { role: 'model', parts: [{ text: 'msg4' }] },
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(100);
+    vi.mocked(tokenLimit).mockReturnValue(1000);
+    // getCompactionModel() returns undefined when compactionModel is unset;
+    // the service coalesces to config.getModel() via ?? fallback
+    vi.mocked(mockConfig.getCompactionModel).mockReturnValue(undefined);
+
+    const mockGenerateText = vi.fn().mockResolvedValue({
+      text: 'Summary',
+      usage: {
+        promptTokenCount: 1100,
+        candidatesTokenCount: 50,
+        totalTokenCount: 1150,
+      },
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateText,
+    } as unknown as BaseLlmClient);
+
+    await service.compress(mockChat, {
+      promptId: mockPromptId,
+      force: true,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
+    });
+
+    expect(mockGenerateText).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: 'test-model',
+      }),
+    );
+  });
+
+  it('falls back to the main model when the compaction model context window is too small', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'msg1' }] },
+      { role: 'model', parts: [{ text: 'msg2' }] },
+      { role: 'user', parts: [{ text: 'msg3' }] },
+      { role: 'model', parts: [{ text: 'msg4' }] },
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(100);
+    vi.mocked(tokenLimit).mockReturnValue(1000);
+    vi.mocked(mockConfig.getCompactionModel).mockReturnValue('small-model');
+    vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue([
+      { id: 'small-model', contextWindowSize: 1 },
+    ] as never[]);
+
+    const mockGenerateText = vi.fn().mockResolvedValue({
+      text: 'Summary',
+      usage: {
+        promptTokenCount: 1100,
+        candidatesTokenCount: 50,
+        totalTokenCount: 1150,
+      },
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateText,
+    } as unknown as BaseLlmClient);
+
+    const result = await service.compress(mockChat, {
+      promptId: mockPromptId,
+      force: true,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 100,
+    });
+
+    expect(mockGenerateText).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: 'test-model',
+      }),
+    );
+    expect(result.info.warning).toBeDefined();
+    expect(result.info.warning).toContain('too small');
+  });
+
+  it('uses the compaction model when its context window is large enough', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'msg1' }] },
+      { role: 'model', parts: [{ text: 'msg2' }] },
+      { role: 'user', parts: [{ text: 'msg3' }] },
+      { role: 'model', parts: [{ text: 'msg4' }] },
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(100);
+    vi.mocked(tokenLimit).mockReturnValue(1000);
+    vi.mocked(mockConfig.getCompactionModel).mockReturnValue('big-model');
+    vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue([
+      { id: 'big-model', contextWindowSize: 200_000 },
+    ] as never[]);
+
+    const mockGenerateText = vi.fn().mockResolvedValue({
+      text: 'Summary',
+      usage: {
+        promptTokenCount: 1100,
+        candidatesTokenCount: 50,
+        totalTokenCount: 1150,
+      },
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateText,
+    } as unknown as BaseLlmClient);
+
+    const result = await service.compress(mockChat, {
+      promptId: mockPromptId,
+      force: true,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 100,
+    });
+
+    expect(mockGenerateText).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: 'big-model',
+      }),
+    );
+    expect(result.info.warning).toBeUndefined();
+  });
+
+  it('coalesces to the main model (not fastModel) when getCompactionModel returns undefined', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'msg1' }] },
+      { role: 'model', parts: [{ text: 'msg2' }] },
+      { role: 'user', parts: [{ text: 'msg3' }] },
+      { role: 'model', parts: [{ text: 'msg4' }] },
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(100);
+    vi.mocked(tokenLimit).mockReturnValue(1000);
+    vi.mocked(mockConfig.getCompactionModel).mockReturnValue(undefined);
+    vi.mocked(mockConfig.getFastModel).mockReturnValue('fast-model-v1');
+
+    const mockGenerateText = vi.fn().mockResolvedValue({
+      text: 'Summary',
+      usage: {
+        promptTokenCount: 1100,
+        candidatesTokenCount: 50,
+        totalTokenCount: 1150,
+      },
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateText,
+    } as unknown as BaseLlmClient);
+
+    await service.compress(mockChat, {
+      promptId: mockPromptId,
+      force: true,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 100,
+    });
+
+    // Must use the main model, NOT the fast model
+    expect(mockGenerateText).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: 'test-model',
+      }),
+    );
+  });
+
+  it('skips the guard when no explicit compaction model is configured', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'msg1' }] },
+      { role: 'model', parts: [{ text: 'msg2' }] },
+      { role: 'user', parts: [{ text: 'msg3' }] },
+      { role: 'model', parts: [{ text: 'msg4' }] },
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(100);
+    vi.mocked(tokenLimit).mockReturnValue(1000);
+    // getCompactionModel returns the main model (no override configured)
+    vi.mocked(mockConfig.getCompactionModel).mockReturnValue('test-model');
+    // Even with a tiny window, the guard should NOT fire for the main model
+    vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue([
+      { id: 'test-model', contextWindowSize: 1 },
+    ] as never[]);
+
+    const mockGenerateText = vi.fn().mockResolvedValue({
+      text: 'Summary',
+      usage: {
+        promptTokenCount: 1100,
+        candidatesTokenCount: 50,
+        totalTokenCount: 1150,
+      },
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateText,
+    } as unknown as BaseLlmClient);
+
+    const result = await service.compress(mockChat, {
+      promptId: mockPromptId,
+      force: true,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 100,
+    });
+
+    expect(mockGenerateText).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: 'test-model',
+      }),
+    );
+    // No warning — guard was skipped for the main model
+    expect(result.info.warning).toBeUndefined();
   });
 
   it('should return FAILED if new token count is inflated', async () => {
@@ -910,7 +1116,6 @@ describe('ChatCompressionService', () => {
     const result = await service.compress(mockChat, {
       promptId: mockPromptId,
       force: true,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -964,7 +1169,6 @@ describe('ChatCompressionService', () => {
     const result = await service.compress(mockChat, {
       promptId: mockPromptId,
       force: true,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1009,7 +1213,6 @@ describe('ChatCompressionService', () => {
     const result = await service.compress(mockChat, {
       promptId: mockPromptId,
       force: true,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1062,7 +1265,6 @@ describe('ChatCompressionService', () => {
     const result = await service.compress(mockChat, {
       promptId: mockPromptId,
       force: false,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1119,7 +1321,6 @@ describe('ChatCompressionService', () => {
     const result = await service.compress(mockChat, {
       promptId: mockPromptId,
       force: false,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1157,7 +1358,6 @@ describe('ChatCompressionService', () => {
     const result = await service.compress(mockChat, {
       promptId: mockPromptId,
       force: true,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1191,7 +1391,6 @@ describe('ChatCompressionService', () => {
     const result = await service.compress(mockChat, {
       promptId: mockPromptId,
       force: true,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1227,7 +1426,6 @@ describe('ChatCompressionService', () => {
     const result = await service.compress(mockChat, {
       promptId: mockPromptId,
       force: true,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1268,7 +1466,6 @@ describe('ChatCompressionService', () => {
     const result = await service.compress(mockChat, {
       promptId: mockPromptId,
       force: false,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1321,7 +1518,6 @@ describe('ChatCompressionService', () => {
         promptId: mockPromptId,
         force: true,
         // force = true -> Manual trigger
-        model: mockModel,
         config: mockConfig,
         consecutiveFailures: 0,
         originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1366,7 +1562,6 @@ describe('ChatCompressionService', () => {
         promptId: mockPromptId,
         force: false,
         // force = false -> Auto trigger
-        model: mockModel,
         config: mockConfig,
         consecutiveFailures: 0,
         originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1385,7 +1580,6 @@ describe('ChatCompressionService', () => {
       const result = await service.compress(mockChat, {
         promptId: mockPromptId,
         force: true,
-        model: mockModel,
         config: mockConfig,
         consecutiveFailures: 0,
         originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1409,7 +1603,6 @@ describe('ChatCompressionService', () => {
       const result = await service.compress(mockChat, {
         promptId: mockPromptId,
         force: false,
-        model: mockModel,
         config: mockConfig,
         consecutiveFailures: 0,
         originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1454,7 +1647,6 @@ describe('ChatCompressionService', () => {
       const result = await service.compress(mockChat, {
         promptId: mockPromptId,
         force: false,
-        model: mockModel,
         config: mockConfig,
         consecutiveFailures: 0,
         originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1502,7 +1694,6 @@ describe('ChatCompressionService', () => {
       await service.compress(mockChat, {
         promptId: mockPromptId,
         force: false,
-        model: mockModel,
         config: mockConfig,
         consecutiveFailures: 0,
         originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1544,7 +1735,6 @@ describe('ChatCompressionService', () => {
       const result = await service.compress(mockChat, {
         promptId: mockPromptId,
         force: false,
-        model: mockModel,
         config: mockConfig,
         consecutiveFailures: 0,
         originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1600,7 +1790,6 @@ describe('ChatCompressionService', () => {
         promptId: mockPromptId,
         force: true,
         // force = true -> Manual trigger
-        model: mockModel,
         config: mockConfig,
         consecutiveFailures: 0,
         originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1645,7 +1834,6 @@ describe('ChatCompressionService', () => {
         promptId: mockPromptId,
         force: false,
         // force = false -> Auto trigger
-        model: mockModel,
         config: mockConfig,
         consecutiveFailures: 0,
         originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1686,7 +1874,6 @@ describe('ChatCompressionService', () => {
       const result = await service.compress(mockChat, {
         promptId: mockPromptId,
         force: true,
-        model: mockModel,
         config: mockConfig,
         consecutiveFailures: 0,
         originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1733,7 +1920,6 @@ describe('ChatCompressionService', () => {
       const result = await service.compress(mockChat, {
         promptId: mockPromptId,
         force: false,
-        model: mockModel,
         config: mockConfig,
         consecutiveFailures: 0,
         originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1784,7 +1970,6 @@ describe('ChatCompressionService', () => {
       await service.compress(mockChat, {
         promptId: mockPromptId,
         force: false,
-        model: mockModel,
         config: mockConfig,
         consecutiveFailures: 0,
         originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1827,7 +2012,6 @@ describe('ChatCompressionService', () => {
       const result = await service.compress(mockChat, {
         promptId: mockPromptId,
         force: false,
-        model: mockModel,
         config: mockConfig,
         consecutiveFailures: 0,
         originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1881,6 +2065,7 @@ describe('ChatCompressionService.compress sideQuery config', () => {
         firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
       }),
       getModel: () => 'test-model',
+      getAllConfiguredModels: vi.fn().mockReturnValue([]),
       getApprovalMode: () => 'default',
       getDebugLogger: () => ({ warn: vi.fn(), debug: vi.fn() }),
       getTargetDir: () => '/tmp/test-workspace',
@@ -1890,7 +2075,6 @@ describe('ChatCompressionService.compress sideQuery config', () => {
     await service.compress(mockChat, {
       promptId: 'p',
       force: true,
-      model: 'qwen-test',
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: 180_000,
@@ -1947,6 +2131,7 @@ describe('ChatCompressionService.compress sideQuery config', () => {
         firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
       }),
       getModel: () => 'test-model',
+      getAllConfiguredModels: vi.fn().mockReturnValue([]),
       getApprovalMode: () => 'default',
       getDebugLogger: () => ({ warn, debug: vi.fn() }),
       getTargetDir: () => '/tmp/test-workspace',
@@ -1955,7 +2140,6 @@ describe('ChatCompressionService.compress sideQuery config', () => {
     const result = await new ChatCompressionService().compress(mockChat, {
       promptId: 'p',
       force: true,
-      model: 'qwen-test',
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: 180_000,
@@ -1968,6 +2152,699 @@ describe('ChatCompressionService.compress sideQuery config', () => {
     expect(warn).toHaveBeenCalledWith(
       expect.stringContaining('COMPACT_MAX_OUTPUT_TOKENS'),
     );
+  });
+});
+
+describe('ChatCompressionService.compress cache sharing', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const mainSystemInstruction = 'main system instruction';
+  const tools = [
+    {
+      functionDeclarations: [{ name: 'read_file', description: 'Read a file' }],
+    },
+  ];
+
+  function makeHistory(length = 4): Content[] {
+    return Array.from({ length }, (_, index) => ({
+      role: index % 2 === 0 ? 'user' : 'model',
+      parts: [{ text: `message-${index}` }],
+    }));
+  }
+
+  function makeMediaHistory(): Content[] {
+    return [
+      {
+        role: 'user',
+        parts: [
+          { inlineData: { mimeType: 'image/png', data: 'image-bytes' } },
+          {
+            inlineData: {
+              mimeType: 'application/pdf',
+              data: 'pdf-bytes',
+            },
+          },
+        ],
+      },
+      { role: 'model', parts: [{ text: 'media received' }] },
+    ];
+  }
+
+  function makeFixture(options?: {
+    history?: Content[];
+    authType?: AuthType;
+    baseUrl?: string;
+    compactionModel?: string;
+    enableCacheControl?: boolean;
+    contextWindowSize?: number | null;
+    lastPromptTokenCount?: number;
+    lastOutputTokenCount?: number;
+  }): {
+    chat: GeminiChat;
+    config: Config;
+    generateText: ReturnType<typeof vi.fn>;
+  } {
+    const history = options?.history ?? makeHistory();
+    const getHistory = vi.fn().mockReturnValue(history);
+    const generateText = vi.fn().mockResolvedValue({
+      text: '<state_snapshot>shared summary</state_snapshot>',
+      usage: {
+        promptTokenCount: 170_000,
+        candidatesTokenCount: 500,
+        totalTokenCount: 170_500,
+        cachedContentTokenCount: 160_000,
+      },
+      hadToolCall: false,
+    });
+    const baseLlmClient = { generateText } as unknown as BaseLlmClient;
+    const chat = {
+      getHistory,
+      getHistoryShallow: getHistory,
+      getGenerationConfig: vi.fn().mockReturnValue({
+        systemInstruction: mainSystemInstruction,
+        tools,
+        thinkingConfig: { includeThoughts: true },
+      }),
+      getLastPromptTokenCount: vi
+        .fn()
+        .mockReturnValue(options?.lastPromptTokenCount ?? 180_000),
+      getLastOutputTokenCount: vi
+        .fn()
+        .mockReturnValue(options?.lastOutputTokenCount ?? 0),
+    } as unknown as GeminiChat;
+    const config = {
+      getChatCompression: vi.fn(),
+      getAutoCompactThreshold: vi.fn(),
+      getBaseLlmClient: vi.fn().mockReturnValue(baseLlmClient),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({
+        model: 'test-model',
+        authType: options?.authType ?? AuthType.USE_ANTHROPIC,
+        baseUrl: options?.baseUrl,
+        ...(options?.contextWindowSize === null
+          ? {}
+          : { contextWindowSize: options?.contextWindowSize ?? 220_000 }),
+        enableCacheControl: options?.enableCacheControl ?? true,
+      }),
+      getHookSystem: vi.fn().mockReturnValue({
+        firePreCompactEvent: vi.fn().mockResolvedValue(undefined),
+        firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
+      }),
+      getModel: () => 'test-model',
+      getCompactionModel: vi.fn().mockReturnValue(options?.compactionModel),
+      getAllConfiguredModels: vi.fn().mockReturnValue([]),
+      getApprovalMode: () => 'default',
+      getDebugLogger: () => ({ warn: vi.fn(), debug: vi.fn() }),
+      getTargetDir: () => '/tmp/test-workspace',
+    } as unknown as Config;
+
+    return { chat, config, generateText };
+  }
+
+  it('preserves the main system, tools, and complete history before the compression directive', async () => {
+    const history = makeHistory(42);
+    const { chat, config, generateText } = makeFixture({ history });
+    const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+      customInstructions: 'Keep the exact command output.',
+    });
+
+    expect(generateText).toHaveBeenCalledTimes(1);
+    const request = generateText.mock.calls[0]![0] as {
+      contents: Content[];
+      systemInstruction?: string;
+      config?: {
+        tools?: unknown;
+        thinkingConfig?: {
+          includeThoughts?: boolean;
+          thinkingBudget?: number;
+        };
+        maxOutputTokens?: number;
+      };
+    };
+    expect(request.systemInstruction).toBe(mainSystemInstruction);
+    expect(request.config?.tools).toBe(tools);
+    expect(request.config?.thinkingConfig?.includeThoughts).toBe(true);
+    expect(request.config?.thinkingConfig?.thinkingBudget).toBe(
+      COMPACT_MAX_OUTPUT_TOKENS - 1,
+    );
+    expect(request.config?.maxOutputTokens).toBe(COMPACT_MAX_OUTPUT_TOKENS);
+    expect(request.contents.slice(0, -1)).toEqual(history);
+    expect(request.contents).toHaveLength(43);
+    expect(request.contents.at(-1)?.parts?.[0]?.text).toContain(
+      'Keep the exact command output.',
+    );
+    expect(coldSpy).not.toHaveBeenCalled();
+    expect(logChatCompression).toHaveBeenLastCalledWith(
+      config,
+      expect.objectContaining({
+        cache_sharing_attempted: true,
+        cache_sharing_used: true,
+      }),
+    );
+  });
+
+  it('preserves per-request tool overrides used by subagent turns', async () => {
+    const { chat, config, generateText } = makeFixture();
+    const requestTools = [
+      {
+        functionDeclarations: [
+          { name: 'subagent_tool', description: 'Subagent-only tool' },
+        ],
+      },
+    ];
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+      requestGenerationConfig: { tools: requestTools },
+    });
+
+    const request = generateText.mock.calls[0]![0] as {
+      config?: { tools?: unknown };
+    };
+    expect(request.config?.tools).toBe(requestTools);
+  });
+
+  it('attempts cache sharing with media still in the history', async () => {
+    const history = makeMediaHistory();
+    const { chat, config, generateText } = makeFixture({ history });
+    const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
+    const slimSpy = vi.spyOn(slimmingModule, 'slimCompactionInput');
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    expect(generateText).toHaveBeenCalledTimes(1);
+    const request = generateText.mock.calls[0]![0] as {
+      contents: Content[];
+    };
+    expect(request.contents.slice(0, -1)).toEqual(history);
+    expect(JSON.stringify(request.contents)).toContain('image-bytes');
+    expect(JSON.stringify(request.contents)).toContain('pdf-bytes');
+    expect(coldSpy).not.toHaveBeenCalled();
+    expect(slimSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([AuthType.QWEN_OAUTH, AuthType.USE_OPENAI])(
+    'uses cache sharing for DashScope through %s',
+    async (authType) => {
+      const { chat, config, generateText } = makeFixture({ authType });
+      const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
+
+      await new ChatCompressionService().compress(chat, {
+        promptId: 'p',
+        force: true,
+        config,
+        consecutiveFailures: 0,
+        originalTokenCount: 180_000,
+      });
+
+      expect(generateText).toHaveBeenCalledTimes(1);
+      expect(coldSpy).not.toHaveBeenCalled();
+    },
+  );
+
+  it('appends a pending tool result after the cached history and before the directive', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'read the file' }] },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: 'call-1',
+              name: 'read_file',
+              args: { path: 'README.md' },
+            },
+          },
+        ],
+      },
+    ];
+    const pendingUserMessage: Content = {
+      role: 'user',
+      parts: [
+        {
+          functionResponse: {
+            id: 'call-1',
+            name: 'read_file',
+            response: { output: 'contents' },
+          },
+        },
+      ],
+    };
+    const { chat, config, generateText } = makeFixture({ history });
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      trigger: 'auto',
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+      pendingUserMessage,
+    });
+
+    const request = generateText.mock.calls[0]![0] as {
+      contents: Content[];
+    };
+    expect(request.contents.slice(0, -1)).toEqual([
+      ...history,
+      pendingUserMessage,
+    ]);
+  });
+
+  it('preserves non-visible system and tool tokens in the post-compression count', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'x'.repeat(40_000) }] },
+      { role: 'model', parts: [{ text: 'y'.repeat(40_000) }] },
+    ];
+    const { chat, config } = makeFixture({ history });
+
+    const result = await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(result.info.newTokenCount).toBeGreaterThan(100_000);
+  });
+
+  it('accepts a complete shared summary when thinking reaches the output cap', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'x'.repeat(40_000) }] },
+      { role: 'model', parts: [{ text: 'y'.repeat(40_000) }] },
+    ];
+    const { chat, config, generateText } = makeFixture({ history });
+    generateText.mockResolvedValue({
+      text: '<analysis>long reasoning</analysis><state_snapshot>complete summary</state_snapshot>',
+      usage: {
+        promptTokenCount: 170_000,
+        candidatesTokenCount: COMPACT_MAX_OUTPUT_TOKENS,
+        totalTokenCount: 190_000,
+        cachedContentTokenCount: 160_000,
+      },
+      hadToolCall: false,
+    });
+    const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
+
+    const result = await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(result.newHistory).not.toBeNull();
+    expect(coldSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      name: 'tool call',
+      response: {
+        text: '<state_snapshot>shared summary</state_snapshot>',
+        usage: {},
+        hadToolCall: true,
+      },
+    },
+    {
+      name: 'malformed snapshot',
+      response: { text: 'plain summary', usage: {}, hadToolCall: false },
+    },
+    {
+      name: 'empty snapshot',
+      response: {
+        text: '<state_snapshot></state_snapshot>',
+        usage: {},
+        hadToolCall: false,
+      },
+    },
+    {
+      name: 'whitespace-only snapshot',
+      response: {
+        text: '<state_snapshot> </state_snapshot>',
+        usage: {},
+        hadToolCall: false,
+      },
+    },
+  ])(
+    'falls back once when the shared response contains a $name',
+    async ({ response }) => {
+      const { chat, config, generateText } = makeFixture();
+      generateText.mockResolvedValue(response);
+      const coldSpy = vi
+        .spyOn(sideQueryModule, 'runSideQuery')
+        .mockResolvedValue({
+          text: '<state_snapshot>cold summary</state_snapshot>',
+          usage: {
+            promptTokenCount: 170_000,
+            candidatesTokenCount: 500,
+            totalTokenCount: 170_500,
+          },
+        } as never);
+
+      await new ChatCompressionService().compress(chat, {
+        promptId: 'p',
+        force: true,
+        config,
+        consecutiveFailures: 0,
+        originalTokenCount: 180_000,
+      });
+
+      expect(generateText).toHaveBeenCalledTimes(1);
+      expect(coldSpy).toHaveBeenCalledTimes(1);
+      expect(logChatCompression).toHaveBeenLastCalledWith(
+        config,
+        expect.objectContaining({
+          cache_sharing_attempted: true,
+          cache_sharing_used: false,
+        }),
+      );
+    },
+  );
+
+  it('does not fall back after cancellation', async () => {
+    const { chat, config, generateText } = makeFixture();
+    const controller = new AbortController();
+    controller.abort(new DOMException('Aborted', 'AbortError'));
+    const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
+
+    await expect(
+      new ChatCompressionService().compress(chat, {
+        promptId: 'p',
+        force: true,
+        config,
+        consecutiveFailures: 0,
+        originalTokenCount: 180_000,
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow('Aborted');
+    expect(generateText).not.toHaveBeenCalled();
+    expect(coldSpy).not.toHaveBeenCalled();
+  });
+
+  it('does not fall back when cancellation lands with an unusable shared response', async () => {
+    const { chat, config, generateText } = makeFixture();
+    const controller = new AbortController();
+    generateText.mockImplementation(async () => {
+      controller.abort();
+      return { text: 'plain summary', usage: {}, hadToolCall: false };
+    });
+    const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
+
+    await expect(
+      new ChatCompressionService().compress(chat, {
+        promptId: 'p',
+        force: true,
+        config,
+        consecutiveFailures: 0,
+        originalTokenCount: 180_000,
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow();
+    expect(coldSpy).not.toHaveBeenCalled();
+  });
+
+  it('falls back once when the cache-sharing request fails', async () => {
+    const { chat, config, generateText } = makeFixture();
+    generateText.mockRejectedValue(new Error('provider failed'));
+    const coldSpy = vi
+      .spyOn(sideQueryModule, 'runSideQuery')
+      .mockResolvedValue({
+        text: '<state_snapshot>cold summary</state_snapshot>',
+        usage: {
+          promptTokenCount: 170_000,
+          candidatesTokenCount: 500,
+          totalTokenCount: 170_500,
+        },
+      } as never);
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    expect(coldSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('slims media only after the cache-sharing request fails', async () => {
+    const history = makeMediaHistory();
+    const { chat, config, generateText } = makeFixture({ history });
+    generateText.mockRejectedValue(new Error('provider failed'));
+    const slimSpy = vi.spyOn(slimmingModule, 'slimCompactionInput');
+    const coldSpy = vi
+      .spyOn(sideQueryModule, 'runSideQuery')
+      .mockResolvedValue({
+        text: '<state_snapshot>cold summary</state_snapshot>',
+        usage: {
+          promptTokenCount: 170_000,
+          candidatesTokenCount: 500,
+          totalTokenCount: 170_500,
+        },
+      } as never);
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    expect(generateText).toHaveBeenCalledTimes(1);
+    expect(slimSpy).toHaveBeenCalledTimes(1);
+    expect(coldSpy).toHaveBeenCalledTimes(1);
+    expect(coldSpy.mock.calls[0]![1].contents[0]?.parts).toEqual([
+      { text: '[image: image/png]' },
+      { text: '[document: application/pdf]' },
+    ]);
+  });
+
+  it.each([
+    {
+      name: 'provider prompt count',
+      originalTokenCount: 179_999,
+      precomputedEffectiveTokens: undefined,
+    },
+    {
+      name: 'hard-tier effective count',
+      originalTokenCount: 160_000,
+      precomputedEffectiveTokens: 180_001,
+    },
+  ])(
+    'skips a shared request when the $name cannot fit its output reserve',
+    async ({ originalTokenCount, precomputedEffectiveTokens }) => {
+      const history = makeMediaHistory();
+      const { chat, config, generateText } = makeFixture({
+        history,
+        contextWindowSize: 200_000,
+      });
+      const coldSpy = vi
+        .spyOn(sideQueryModule, 'runSideQuery')
+        .mockResolvedValue({
+          text: '<state_snapshot>cold summary</state_snapshot>',
+          usage: {
+            promptTokenCount: 170_000,
+            candidatesTokenCount: 500,
+            totalTokenCount: 170_500,
+          },
+        } as never);
+
+      await new ChatCompressionService().compress(chat, {
+        promptId: 'p',
+        force: true,
+        config,
+        consecutiveFailures: 0,
+        originalTokenCount,
+        precomputedEffectiveTokens,
+      });
+
+      expect(generateText).not.toHaveBeenCalled();
+      expect(coldSpy).toHaveBeenCalledTimes(1);
+      expect(coldSpy.mock.calls[0]![1].contents[0]?.parts).toEqual([
+        { text: '[image: image/png]' },
+        { text: '[document: application/pdf]' },
+      ]);
+      expect(logChatCompression).toHaveBeenLastCalledWith(
+        config,
+        expect.objectContaining({
+          cache_sharing_attempted: false,
+          cache_sharing_used: false,
+        }),
+      );
+    },
+  );
+
+  it('uses the default context window when the provider omits its size', async () => {
+    const { chat, config, generateText } = makeFixture({
+      contextWindowSize: null,
+    });
+    const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 150_000,
+    });
+
+    expect(generateText).toHaveBeenCalledTimes(1);
+    expect(coldSpy).not.toHaveBeenCalled();
+    expect(logChatCompression).toHaveBeenLastCalledWith(
+      config,
+      expect.objectContaining({
+        cache_sharing_attempted: true,
+        cache_sharing_used: true,
+      }),
+    );
+  });
+
+  it('includes the previous model output in the shared-request window check', async () => {
+    const { chat, config, generateText } = makeFixture({
+      contextWindowSize: 200_000,
+      lastPromptTokenCount: 170_000,
+      lastOutputTokenCount: 20_000,
+    });
+    const coldSpy = vi
+      .spyOn(sideQueryModule, 'runSideQuery')
+      .mockResolvedValue({
+        text: '<state_snapshot>cold summary</state_snapshot>',
+        usage: {
+          promptTokenCount: 170_000,
+          candidatesTokenCount: 500,
+          totalTokenCount: 170_500,
+        },
+      } as never);
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 170_000,
+    });
+
+    expect(generateText).not.toHaveBeenCalled();
+    expect(coldSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not add previous output to an all-inclusive prompt count', async () => {
+    const { chat, config, generateText } = makeFixture({
+      contextWindowSize: 200_000,
+      lastPromptTokenCount: 170_000,
+      lastOutputTokenCount: 20_000,
+    });
+    const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 170_000,
+      precomputedEffectiveTokens: 170_000,
+    });
+
+    expect(generateText).toHaveBeenCalledTimes(1);
+    expect(coldSpy).not.toHaveBeenCalled();
+  });
+
+  it('skips cache sharing when the chat has no provider token-count anchor', async () => {
+    const { chat, config, generateText } = makeFixture({
+      lastPromptTokenCount: 0,
+    });
+    const coldSpy = vi
+      .spyOn(sideQueryModule, 'runSideQuery')
+      .mockResolvedValue({
+        text: '<state_snapshot>cold summary</state_snapshot>',
+        usage: {
+          promptTokenCount: 170_000,
+          candidatesTokenCount: 500,
+          totalTokenCount: 170_500,
+        },
+      } as never);
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 0,
+      precomputedEffectiveTokens: 170_000,
+    });
+
+    expect(generateText).not.toHaveBeenCalled();
+    expect(coldSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    {
+      name: 'a distinct compaction model',
+      options: { compactionModel: 'compact-model' },
+    },
+    {
+      name: 'a provider without explicit cache support',
+      options: { authType: AuthType.USE_GEMINI },
+    },
+    {
+      name: 'a non-DashScope OpenAI-compatible provider',
+      options: {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://api.openai.com/v1',
+      },
+    },
+    {
+      name: 'disabled cache control',
+      options: { enableCacheControl: false },
+    },
+  ])('keeps $name on the cold path', async ({ options }) => {
+    const { chat, config, generateText } = makeFixture(options);
+    const coldSpy = vi
+      .spyOn(sideQueryModule, 'runSideQuery')
+      .mockResolvedValue({
+        text: '<state_snapshot>cold summary</state_snapshot>',
+        usage: {
+          promptTokenCount: 170_000,
+          candidatesTokenCount: 500,
+          totalTokenCount: 170_500,
+        },
+      } as never);
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    expect(generateText).not.toHaveBeenCalled();
+    expect(coldSpy).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -2006,6 +2883,7 @@ describe('ChatCompressionService.compress cheap-gate uses estimated tokens', () 
         firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
       }),
       getModel: () => 'test-model',
+      getAllConfiguredModels: vi.fn().mockReturnValue([]),
       getApprovalMode: () => 'default',
       getDebugLogger: () => ({ warn: vi.fn(), debug: vi.fn() }),
       getTargetDir: () => '/tmp/test-workspace',
@@ -2033,7 +2911,6 @@ describe('ChatCompressionService.compress cheap-gate uses estimated tokens', () 
     const result = await new ChatCompressionService().compress(makeFakeChat(), {
       promptId: 'p',
       force: false,
-      model: 'qwen-test',
       config: makeFakeConfig({ contextWindowSize: 200_000 }),
       consecutiveFailures: 0,
       originalTokenCount: 160_000,
@@ -2053,7 +2930,6 @@ describe('ChatCompressionService.compress cheap-gate uses estimated tokens', () 
     const result = await new ChatCompressionService().compress(makeFakeChat(), {
       promptId: 'p',
       force: false,
-      model: 'qwen-test',
       config: makeFakeConfig({ contextWindowSize: 200_000 }),
       consecutiveFailures: 0,
       originalTokenCount: 80_000,
@@ -2260,6 +3136,7 @@ describe('ChatCompressionService.compress — claude-code-style full-history com
         firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
       }),
       getModel: () => 'test-model',
+      getAllConfiguredModels: vi.fn().mockReturnValue([]),
       getApprovalMode: () => 'default',
       getDebugLogger: () => ({ warn: vi.fn(), debug: vi.fn() }),
       getTargetDir: () => '/tmp/test-workspace',
@@ -2289,7 +3166,6 @@ describe('ChatCompressionService.compress — claude-code-style full-history com
     await service.compress(makeFakeChat(history), {
       promptId: 'p',
       force: true,
-      model: 'qwen-vl',
       config: makeFakeConfig(),
       consecutiveFailures: 0,
       originalTokenCount: 180_000,
@@ -2337,7 +3213,6 @@ describe('ChatCompressionService.compress — claude-code-style full-history com
       {
         promptId: 'p',
         force: true,
-        model: 'qwen-vl',
         config: makeFakeConfig(),
         consecutiveFailures: 0,
         originalTokenCount: 180_000,
@@ -2407,7 +3282,6 @@ describe('ChatCompressionService.compress — claude-code-style full-history com
       {
         promptId: 'p',
         force: true,
-        model: 'qwen-vl',
         config: makeFakeConfig(),
         consecutiveFailures: 0,
         originalTokenCount: 180_000,
@@ -2453,7 +3327,6 @@ describe('ChatCompressionService.compress — claude-code-style full-history com
     const result = await service.compress(makeFakeChat(history), {
       promptId: 'p',
       force: true,
-      model: 'qwen-vl',
       config: makeFakeConfig(),
       consecutiveFailures: 0,
       originalTokenCount: 180_000,
@@ -2499,6 +3372,7 @@ describe('ChatCompressionService.compress cheap-gate uses computeThresholds.auto
         firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
       }),
       getModel: () => 'test-model',
+      getAllConfiguredModels: vi.fn().mockReturnValue([]),
       getApprovalMode: () => 'default',
       getDebugLogger: () => ({ warn: vi.fn(), debug: vi.fn() }),
       getTargetDir: () => '/tmp/test-workspace',
@@ -2513,7 +3387,6 @@ describe('ChatCompressionService.compress cheap-gate uses computeThresholds.auto
     const result = await new ChatCompressionService().compress(makeFakeChat(), {
       promptId: 'p',
       force: false,
-      model: 'qwen-test',
       config: makeFakeConfig({ contextWindowSize: 200_000 }),
       consecutiveFailures: 0,
       originalTokenCount: 160_000,
@@ -2536,7 +3409,6 @@ describe('ChatCompressionService.compress cheap-gate uses computeThresholds.auto
     const result = await new ChatCompressionService().compress(makeFakeChat(), {
       promptId: 'p',
       force: false,
-      model: 'qwen-test',
       config: makeFakeConfig({ contextWindowSize: 200_000 }),
       consecutiveFailures: 0,
       originalTokenCount: 171_000,
@@ -2561,7 +3433,6 @@ describe('ChatCompressionService.compress cheap-gate uses computeThresholds.auto
     const result = await new ChatCompressionService().compress(makeFakeChat(), {
       promptId: 'p',
       force: false,
-      model: 'qwen-test',
       config,
       consecutiveFailures: 0,
       originalTokenCount: 20_000,
@@ -2583,7 +3454,6 @@ describe('ChatCompressionService.compress cheap-gate uses computeThresholds.auto
     const result = await new ChatCompressionService().compress(makeFakeChat(), {
       promptId: 'p',
       force: false,
-      model: 'qwen-test',
       config,
       consecutiveFailures: 0,
       originalTokenCount: 20_000,
@@ -2625,6 +3495,7 @@ describe('ChatCompressionService.compress cheap-gate runs against the full windo
         firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
       }),
       getModel: () => 'test-model',
+      getAllConfiguredModels: vi.fn().mockReturnValue([]),
       getApprovalMode: () => 'default',
       getDebugLogger: () => ({ warn: vi.fn(), debug: vi.fn() }),
       getTargetDir: () => '/tmp/test-workspace',
@@ -2639,7 +3510,6 @@ describe('ChatCompressionService.compress cheap-gate runs against the full windo
     const result = await new ChatCompressionService().compress(makeFakeChat(), {
       promptId: 'p',
       force: false,
-      model: 'qwen-test',
       config: makeFakeConfig({ contextWindowSize: 131_072 }),
       consecutiveFailures: 0,
       originalTokenCount: 90_000,
@@ -2660,7 +3530,6 @@ describe('ChatCompressionService.compress cheap-gate runs against the full windo
     const result = await new ChatCompressionService().compress(makeFakeChat(), {
       promptId: 'p',
       force: false,
-      model: 'qwen-test',
       config: makeFakeConfig({ contextWindowSize: 131_072 }),
       consecutiveFailures: 0,
       originalTokenCount: 60_000,
@@ -2678,7 +3547,6 @@ describe('ChatCompressionService.compress cheap-gate runs against the full windo
     const result = await new ChatCompressionService().compress(makeFakeChat(), {
       promptId: 'p',
       force: false,
-      model: 'qwen-test',
       config: makeFakeConfig({ contextWindowSize: 200_000 }),
       consecutiveFailures: 0,
       originalTokenCount: 160_000,
@@ -2703,7 +3571,6 @@ describe('ChatCompressionService.compress cheap-gate runs against the full windo
     const result = await new ChatCompressionService().compress(makeFakeChat(), {
       promptId: 'p',
       force: false,
-      model: 'qwen-test',
       config: makeFakeConfig({ contextWindowSize: 131_072 }),
       consecutiveFailures: 0,
       originalTokenCount: 120_000,
@@ -2740,6 +3607,7 @@ describe('ChatCompressionService.compress — single-turn computer-use regressio
         firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
       }),
       getModel: () => 'test-model',
+      getAllConfiguredModels: vi.fn().mockReturnValue([]),
       getApprovalMode: () => 'default',
       getDebugLogger: () => ({ warn: vi.fn(), debug: vi.fn() }),
       getTargetDir: () => '/tmp/test-workspace',
@@ -2814,7 +3682,6 @@ describe('ChatCompressionService.compress — single-turn computer-use regressio
     const result = await service.compress(makeFakeChat(history), {
       promptId: 'p',
       force: true,
-      model: 'qwen-vl',
       config: makeFakeConfig(),
       consecutiveFailures: 0,
       originalTokenCount: 180_000,
@@ -2898,6 +3765,7 @@ describe('ChatCompressionService.compress — customInstructions plumbing', () =
         .mockReturnValue({ contextWindowSize: 200_000 }),
       getHookSystem: vi.fn().mockReturnValue(hookSystem),
       getModel: () => 'test-model',
+      getAllConfiguredModels: vi.fn().mockReturnValue([]),
       getApprovalMode: () => 'default',
       getDebugLogger: () => ({ warn: vi.fn(), debug: vi.fn() }),
       getTargetDir: () => '/tmp/test-workspace',
@@ -2920,7 +3788,6 @@ describe('ChatCompressionService.compress — customInstructions plumbing', () =
     await service.compress(mockChat, {
       promptId: 'p',
       force: true,
-      model: 'qwen-test',
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: 180_000,
@@ -2958,6 +3825,7 @@ describe('ChatCompressionService.compress — customInstructions plumbing', () =
         .fn()
         .mockReturnValue({ firePreCompactEvent, firePostCompactEvent }),
       getModel: () => 'test-model',
+      getAllConfiguredModels: vi.fn().mockReturnValue([]),
       getApprovalMode: () => ApprovalMode.DEFAULT,
       getDebugLogger: () => ({ warn: vi.fn(), debug: vi.fn() }),
       getTargetDir: () => '/tmp/test-workspace',
@@ -2966,7 +3834,6 @@ describe('ChatCompressionService.compress — customInstructions plumbing', () =
     const result = await new ChatCompressionService().compress(mockChat, {
       promptId: 'p',
       force: true,
-      model: 'qwen-test',
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: 1_000,
@@ -2998,7 +3865,6 @@ describe('ChatCompressionService.compress — customInstructions plumbing', () =
     await new ChatCompressionService().compress(mockChat, {
       promptId: 'p',
       force: true,
-      model: 'qwen-test',
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: 180_000,
@@ -3035,7 +3901,6 @@ describe('ChatCompressionService.compress — customInstructions plumbing', () =
     await new ChatCompressionService().compress(mockChat, {
       promptId: 'p',
       force: true,
-      model: 'qwen-test',
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: 180_000,
@@ -3069,7 +3934,6 @@ describe('ChatCompressionService.compress — customInstructions plumbing', () =
     await new ChatCompressionService().compress(mockChat, {
       promptId: 'p',
       force: true,
-      model: 'qwen-test',
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: 180_000,
@@ -3098,7 +3962,6 @@ describe('ChatCompressionService.compress — customInstructions plumbing', () =
     await new ChatCompressionService().compress(mockChat, {
       promptId: 'p',
       force: true,
-      model: 'qwen-test',
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: 180_000,
@@ -3133,7 +3996,6 @@ describe('ChatCompressionService.compress — customInstructions plumbing', () =
     await new ChatCompressionService().compress(mockChat, {
       promptId: 'p',
       force: true,
-      model: 'qwen-test',
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: 180_000,
@@ -3188,6 +4050,7 @@ describe('ChatCompressionService.compress — plan-mode + subagent attachment wi
         firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
       }),
       getModel: () => 'test-model',
+      getAllConfiguredModels: vi.fn().mockReturnValue([]),
       getApprovalMode: () => opts.approvalMode ?? ApprovalMode.DEFAULT,
       getBackgroundTaskRegistry: () => ({
         getAll: () => opts.backgroundTasks ?? [],
@@ -3224,7 +4087,6 @@ describe('ChatCompressionService.compress — plan-mode + subagent attachment wi
     await new ChatCompressionService().compress(mockChat, {
       promptId: 'p',
       force: true,
-      model: 'qwen-test',
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: 180_000,
@@ -3252,7 +4114,6 @@ describe('ChatCompressionService.compress — plan-mode + subagent attachment wi
     await new ChatCompressionService().compress(mockChat, {
       promptId: 'p',
       force: true,
-      model: 'qwen-test',
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: 180_000,
@@ -3342,7 +4203,6 @@ describe('ChatCompressionService.compress — plan-mode + subagent attachment wi
     await new ChatCompressionService().compress(mockChat, {
       promptId: 'p',
       force: true,
-      model: 'qwen-test',
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: 180_000,
@@ -3384,6 +4244,7 @@ describe('ChatCompressionService.compress — plan-mode + subagent attachment wi
         firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
       }),
       getModel: () => 'test-model',
+      getAllConfiguredModels: vi.fn().mockReturnValue([]),
       getApprovalMode: () => 'default',
       // getBackgroundTaskRegistry intentionally omitted to simulate older
       // SDK consumers / test harnesses that haven't wired it.
@@ -3394,7 +4255,6 @@ describe('ChatCompressionService.compress — plan-mode + subagent attachment wi
     await new ChatCompressionService().compress(mockChat, {
       promptId: 'p',
       force: true,
-      model: 'qwen-test',
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: 180_000,
@@ -3442,7 +4302,6 @@ describe('ChatCompressionService.compress — plan-mode + subagent attachment wi
     const result = await new ChatCompressionService().compress(mockChat, {
       promptId: 'p',
       force: true,
-      model: 'qwen-test',
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: 100_000,

@@ -82,7 +82,7 @@ Use `reasonFilter` to drop noisy notification classes such as `ci_activity` or `
 
 Valid `reasonFilter` values are `mention`, `review_requested`, `assign`, `author`, `comment`, `ci_activity`, `manual`, `state_change`, `subscribed`, `team_mention`, `security_alert`, `approval_requested`, `invitation`, `member_feature_requested`, and `security_advisory_credit`.
 
-Filtered notifications are still marked read before they are skipped. Removing the filter later will not replay notifications the channel already skipped.
+Filtered notifications are marked read only after all accepted work in the poll window completes. Removing the filter later will not replay notifications the channel already skipped.
 
 ## ⚠️ Security
 
@@ -101,12 +101,15 @@ The adapter detects mentions by scanning comment text and first-contact issue or
 The adapter uses GitHub's Notifications API as a wake-up signal:
 
 1. **Poll** `GET /notifications` for unread threads
-2. **Mark read** via `markNotificationsAsRead` (best-effort cleanup, before processing)
-3. **Enumerate** comments via `listComments` within a cursor-based time window
+2. **Enumerate** comments via `listComments` within a cursor-based time window
+3. **Persist accepted work** before dispatch, including the source envelope and deduplication keys
 4. **Dispatch** by notification reason: strict mention matching, pull request review, issue triage, followed-thread comment aggregation, or per-comment fallback
-5. **First-contact fallback**: a brand-new unread issue/PR body can be processed when no comment was dispatched; mention notifications still require an actual body mention
+5. **Commit the poll window** only after accepted work completes: mark notifications read and advance the cursor
+6. **First-contact fallback**: a brand-new unread issue/PR body can be processed when no comment was dispatched; mention notifications still require an actual body mention
 
-The comment window is `(previousCursor, currentMaxUpdatedAt]` — comments already eligible in a previous poll cycle are excluded by the cursor, preventing duplicate replies even when the async mark-read has not taken effect. If the process crashes mid-processing, the user can re-mention the bot to retry.
+The comment window is `(previousCursor, currentMaxUpdatedAt]`. Accepted, running, and failed tasks are stored under `~/.qwen/channels/<workspace-scope>/` with private file permissions. On restart, the channel recovers those tasks before polling GitHub again. Failed tasks are attempted up to three times, then become terminal; cancelled tasks are terminal and are not rerun. A task whose final reply was already posted, suppressed, or queued for definite no-write retry is not rerun.
+
+The notification cursor does not advance while recoverable tasks remain, or when inbound task state cannot be read or written. This prevents a crash or agent failure from losing an accepted comment and preserves the deduplication keys needed to avoid a second dispatch from the notification feed.
 
 Non-comment activity (push, label changes) bumps the notification's `updated_at` but produces zero new comments in the window, so re-fetched threads are skipped without triggering the agent.
 
@@ -123,6 +126,14 @@ The GitHub channel always forces final-only delivery. The adapter sets `blockStr
   "blockStreaming": "off"
 }
 ```
+
+If GitHub returns a definite no-write delivery failure, such as a rate-limit
+response, the channel stores the final reply in
+`~/.qwen/channels/<workspace-scope>/<channel>-<name-hash>-github-pending-deliveries.json`
+with private file permissions and retries it on the next channel start. The
+corresponding inbound task remains in `reply_pending` state until that delivery
+succeeds or reaches a definite terminal failure. Ambiguous delivery failures are
+not retried automatically because GitHub may have created the comment.
 
 ## Known Limitations
 

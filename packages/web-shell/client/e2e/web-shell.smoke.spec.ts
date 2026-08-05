@@ -40,6 +40,30 @@ test('loads replayed transcript and connects to fake daemon @smoke', async ({
   await expect(page.locator('[data-web-shell-message-list]')).toContainText(
     'Hello from fake daemon',
   );
+
+  // #8214: pin the explicit ::selection rule on message content. This
+  // asserts the rule is present and matches every [data-user-selectable]
+  // wrapper row (user and assistant alike), not just the first one; it
+  // does not verify the Firefox paint effect itself (this repo's Playwright
+  // projects are chromium-only).
+  const selectionBackgrounds = await page.evaluate(() => {
+    // Match the wrapper rows themselves, not their descendants - a single
+    // row renders many descendant elements, so counting descendants does
+    // not enforce the "both roles present" invariant.
+    const rows = document.querySelectorAll('[data-user-selectable]');
+    return Array.from(rows, (row) => {
+      // ::selection applies to the element's text content; sample the first
+      // text-bearing descendant (or the row itself if it has none).
+      const target = row.querySelector('*') ?? row;
+      return getComputedStyle(target, '::selection').backgroundColor;
+    });
+  });
+  // The fixture renders both a user and an assistant message, so there must
+  // be at least two selectable rows and every one must carry the rule.
+  expect(selectionBackgrounds.length).toBeGreaterThanOrEqual(2);
+  for (const bg of selectionBackgrounds) {
+    expect(bg).toBe('rgba(0, 128, 255, 0.3)');
+  }
 });
 
 test('submits a prompt and renders a streamed assistant response @smoke', async ({
@@ -69,23 +93,23 @@ test('submits a prompt and renders a streamed assistant response @smoke', async 
   );
 });
 
-test('pastes long plain text as a placeholder and expands it on submit @smoke', async ({
+test('pastes long plain text as editable composer content @smoke', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario();
   const daemon = await installScenario(page, scenario, testInfo);
   const pasted = `${'original '.repeat(151)}end`;
-  const placeholder = `[Pasted Content ${pasted.length} chars]`;
   const edited = `${pasted} edited`;
 
   await gotoSession(page, scenario, daemon);
   await pasteComposerText(page, pasted);
 
   const editor = page.locator('[data-web-shell-composer-editor] .cm-content');
-  await expect(editor).toHaveText(placeholder);
+  await expect(editor).toHaveText(pasted);
+  await expect(editor).not.toContainText('Pasted Content');
 
   await page.keyboard.type(' edited');
-  await expect(editor).toHaveText(`${placeholder} edited`);
+  await expect(editor).toHaveText(edited);
   await page.locator('[data-web-shell-composer-submit]').click();
 
   await expect.poll(() => daemon.promptRequests().length).toBe(1);

@@ -16,6 +16,14 @@ export const REVIEWS_DIR = join('.qwen', 'reviews');
 export const REVIEW_CACHE_DIR = join('.qwen', 'review-cache');
 
 /**
+ * Filename prefix for review-worktree lease files under `REVIEW_TMP_DIR`.
+ * Lives here, not in `review-worktree-lease.ts`, because the review
+ * workflow's cleanup sweep deletes leases by glob — the sweep pattern and
+ * the lease writer must share one definition (the cleanup spec pins both).
+ */
+export const LEASE_PREFIX = 'qwen-review-lease-';
+
+/**
  * Where the skill tees `qwen review parse-args`'s verdict (SKILL Step 0). A fixed,
  * conventional name so a capture command can read back the effort the parser
  * already resolved without the orchestrator threading the `--effort` value through
@@ -46,6 +54,20 @@ export function worktreePath(prNumber: string | number): string {
  */
 export function probeWorktreePath(worktree: string): string {
   return `${resolve(worktree)}-probe`;
+}
+
+/**
+ * The merge-base tree an A/B probe compares against — a second sibling of the
+ * review worktree, holding the code as it stood *before* the PR.
+ *
+ * Absolute for the same reason as `probeWorktreePath`: `git worktree add` runs
+ * with the review worktree as cwd, so a relative path would land the base tree
+ * nested inside the tree it is meant to sit beside. Kept here beside its sibling
+ * so `base-tree` and `cleanup.ts`'s sweep cannot drift apart on the suffix —
+ * the failure mode that made the probe tree's helper shared in the first place.
+ */
+export function baseWorktreePath(worktree: string): string {
+  return `${resolve(worktree)}-base`;
 }
 
 /** Local branch ref name for a fetched PR head. */

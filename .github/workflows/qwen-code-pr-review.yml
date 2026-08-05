@@ -228,7 +228,9 @@ jobs:
         startsWith(github.event.review.body, '@qwen-code /review')))
     # Canonical same-repo guard: this job loads CI_BOT_PAT, so fork-triggered
     # runs stay on hosted (ephemeral); only in-repo PR events on QwenLM/qwen-code
-    # use the persistent ECS runner.
+    # use the persistent ECS runner. The job IS the write-permission check, so
+    # it cannot route on its own output; downstream jobs already route on the
+    # repository guard alone.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     permissions:
@@ -347,24 +349,33 @@ jobs:
          startsWith(github.event.review.body, '@qwen-code /review ') ||
          startsWith(github.event.review.body, format('@qwen-code /review{0}', '\n'))) &&
         needs.authorize.outputs.should_review == 'true'))
-    timeout-minutes: 260
+    # The per-review budget auto-scales to QWEN_REVIEW_MAX_TIMEOUT_MINUTES
+    # for any non-small PR (see "Run review"), and the shared retry budget
+    # plus comment posting need headroom above that within the job-level cap.
+    # Tunable via the `QWEN_REVIEW_JOB_TIMEOUT_MINUTES` repository variable
+    # (default: 360); must stay above QWEN_REVIEW_MAX_TIMEOUT_MINUTES so
+    # retry plus posting never hit the cap.
+    timeout-minutes: '${{ fromJSON(vars.QWEN_REVIEW_JOB_TIMEOUT_MINUTES) }}'
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions:
       contents: 'read'
       pull-requests: 'write'
       issues: 'write'
     steps:
-      # Self-hosted runners reuse the workspace; restore permissions before
-      # checkout tries to wipe files left by prior containerised jobs.
+      # Self-hosted runners reuse the workspace; a prior containerised job can
+      # leave root-owned, read-only files anywhere in it. Restore ownership and
+      # write permission unconditionally before checkout — probing only .qwen
+      # and .git first skips the recovery exactly when workspace-wide poisoning
+      # (root-owned node_modules/dist) needs it.
       - name: 'Restore workspace ownership'
         run: |-
           set -uo pipefail
           RUNNER_UID="$(id -u)"
           RUNNER_GID="$(id -g)"
           if [ "$RUNNER_UID" != "0" ]; then
-            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
           fi
-          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
 
       # Self-hosted runners reuse $HOME, /tmp and the workspace, so a prior run
       # can bleed into this one: its agent session/memory (under QWEN_HOME),
@@ -386,15 +397,17 @@ jobs:
             echo "no prior workspace; nothing to clean"
             exit 0
           fi
+          GIT_SAFE=(git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$GITHUB_WORKSPACE")
           rm -rf .qwen/tmp/review-pr-* 2>/dev/null || true
-          git worktree prune -v || true
-          git for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
+          "${GIT_SAFE[@]}" worktree prune -v || true
+          "${GIT_SAFE[@]}" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
             | while read -r stale_ref; do
                 if [ -n "$stale_ref" ]; then
-                  git branch -D "$stale_ref" || true
+                  "${GIT_SAFE[@]}" branch -D "$stale_ref" ||
+                    echo "::warning::could not remove review branch: $stale_ref"
                 fi
-              done
-          git worktree prune -v || true
+              done || true
+          "${GIT_SAFE[@]}" worktree prune -v || true
           echo "stale agent state cleaned"
 
       # SECURITY: checkout trusted base code; /review fetches PR diff context.
@@ -412,12 +425,17 @@ jobs:
           set -euo pipefail
           DEFAULT_TIMEOUT_MINUTES=180
           TIMEOUT_MINUTES="$DEFAULT_TIMEOUT_MINUTES"
+          # Tracks whether the caller chose a timeout explicitly (workflow_dispatch
+          # input or a /review --timeout=N comment). When false, "Run review"
+          # replaces this default with a PR-size-aware tier instead.
+          TIMEOUT_EXPLICIT=false
           TRIGGER_COMMAND="${TRIGGER_BODY%%$'\n'*}"
 
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             PR_NUMBER="${{ github.event.inputs.pr_number }}"
             REVIEW_MODE="${{ github.event.inputs.review_mode }}"
             TIMEOUT_MINUTES="${{ github.event.inputs.timeout_minutes || '180' }}"
+            TIMEOUT_EXPLICIT=true
           elif [ "${{ github.event_name }}" = "issue_comment" ]; then
             if ! printf '%s\n' "$TRIGGER_COMMAND" | grep -Eq '^@qwen-code[[:space:]]+/review([[:space:]]|$)'; then
               echo "should_run=false" >> "$GITHUB_OUTPUT"
@@ -446,9 +464,11 @@ jobs:
               case "$token" in
                 --timeout=*)
                   TIMEOUT_MINUTES="${token#--timeout=}"
+                  TIMEOUT_EXPLICIT=true
                   ;;
                 timeout=*)
                   TIMEOUT_MINUTES="${token#timeout=}"
+                  TIMEOUT_EXPLICIT=true
                   ;;
               esac
             done
@@ -460,6 +480,7 @@ jobs:
             echo "pr_number=$PR_NUMBER"
             echo "review_mode=$REVIEW_MODE"
             echo "timeout_minutes=$TIMEOUT_MINUTES"
+            echo "timeout_explicit=$TIMEOUT_EXPLICIT"
           } >> "$GITHUB_OUTPUT"
 
       - name: 'Setup Node.js for hosted review'
@@ -490,6 +511,7 @@ jobs:
           PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
           REVIEW_MODE: '${{ steps.context.outputs.review_mode }}'
           TIMEOUT_MINUTES: '${{ steps.context.outputs.timeout_minutes }}'
+          TIMEOUT_EXPLICIT: '${{ steps.context.outputs.timeout_explicit }}'
           # Per-run agent home so this review's session/memory cannot leak into
           # the next on the reused self-hosted workspace (reset in "Clean stale
           # agent state"). Must match the QWEN_HOME computed there.
@@ -706,8 +728,41 @@ jobs:
           if [ "$TIMEOUT_MINUTES" -le 5 ]; then
             fail "timeout_minutes must be greater than 5"
           fi
-          if [ "$TIMEOUT_MINUTES" -gt 240 ]; then
-            fail "timeout_minutes must not exceed 240 minutes"
+          MAX_TIMEOUT_MINUTES="${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}"
+          if [ "$TIMEOUT_MINUTES" -gt "$MAX_TIMEOUT_MINUTES" ]; then
+            fail "timeout_minutes must not exceed ${MAX_TIMEOUT_MINUTES} minutes"
+          fi
+
+          # Size-aware default timeout. A fixed 180-minute default times out
+          # non-trivial PRs whose deep review (chunked passes, two reverse-audit
+          # rounds, test-efficacy probes that run real builds) legitimately
+          # needs longer — e.g. #8241 (+1577) died on the clock at 180, and the
+          # same PR had finished in ~90 minutes on a less loaded runner, so the
+          # variance alone argues for a wide budget. When the caller did not
+          # pass an explicit --timeout, give any non-small PR (> 300 changed
+          # lines, additions + deletions) the full QWEN_REVIEW_MAX_TIMEOUT_MINUTES
+          # cap; small PRs keep the proven 180. An explicit --timeout always wins;
+          # a size lookup failure falls back to the 180 default rather than
+          # failing the review.
+          EFFECTIVE_TIMEOUT_MINUTES="$TIMEOUT_MINUTES"
+          if [ "${TIMEOUT_EXPLICIT:-false}" != "true" ]; then
+            PR_SIZE_LINES=''
+            if PR_SIZE_DATA="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json additions,deletions --jq '.additions + .deletions' 2>/dev/null)"; then
+              case "$PR_SIZE_DATA" in
+                ''|*[!0-9]*) ;;
+                *) PR_SIZE_LINES="$PR_SIZE_DATA" ;;
+              esac
+            fi
+            if [ -n "$PR_SIZE_LINES" ]; then
+              if [ "$PR_SIZE_LINES" -le 300 ]; then
+                EFFECTIVE_TIMEOUT_MINUTES=180
+              else
+                EFFECTIVE_TIMEOUT_MINUTES="${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}"
+              fi
+              echo "PR #${PR_NUMBER} changed ${PR_SIZE_LINES} lines; auto timeout ${EFFECTIVE_TIMEOUT_MINUTES} minutes."
+            else
+              echo "Could not determine PR #${PR_NUMBER} size; using default ${EFFECTIVE_TIMEOUT_MINUTES} minutes."
+            fi
           fi
 
           if ! PR_DATA="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json state,headRefOid --jq '[.state, .headRefOid] | @tsv')"; then
@@ -730,7 +785,10 @@ jobs:
           export QWEN_CI_REVIEW_REPO="$REPO"
           export QWEN_CI_REVIEW_PR_NUMBER="$PR_NUMBER"
           export QWEN_CI_REVIEW_EXPECTED_HEAD_SHA="$EXPECTED_HEAD_SHA"
-          echo "expected_head_sha=$EXPECTED_HEAD_SHA" >> "$GITHUB_OUTPUT"
+          {
+            echo "expected_head_sha=$EXPECTED_HEAD_SHA"
+            echo "effective_timeout_minutes=$EFFECTIVE_TIMEOUT_MINUTES"
+          } >> "$GITHUB_OUTPUT"
 
           PROMPT="/review ${REVIEW_URL}"
           if [ "$REVIEW_MODE" = "comment" ]; then
@@ -742,7 +800,7 @@ jobs:
             MODEL_ARGS=(--model "$OPENAI_MODEL")
           fi
 
-          QWEN_TIMEOUT="$TIMEOUT_MINUTES"
+          QWEN_TIMEOUT="$EFFECTIVE_TIMEOUT_MINUTES"
 
           # One attempt of the qwen review. Sets OUTCOME (success | retryable |
           # quota | timeout | fatal), plus REASON/KIND for the failure paths.
@@ -760,6 +818,36 @@ jobs:
             OUTCOME='fatal'
             REASON=''
             KIND=''
+            # The in-process soft deadline: the review's reverse-audit loop
+            # stops itself while there is still time to verify, compose and
+            # post, instead of being killed by the GNU timeout below holding
+            # hours of confirmed findings (#8368: five audit rounds, 3.5h,
+            # killed mid-verification, nothing posted). Recomputed per attempt
+            # so a retry gets a fresh deadline; ignored by CLIs that predate
+            # the gate.
+            QWEN_REVIEW_DEADLINE_EPOCH="$(( $(date +%s) + attempt_timeout ))"
+            export QWEN_REVIEW_DEADLINE_EPOCH
+            # The budget itself is chosen outside this file — repository
+            # variable, workflow input, or a /review --timeout=N comment — so
+            # the reserve scales with whatever arrived instead of assuming a
+            # size: a third of the attempt, floored at 10 minutes (a tiny
+            # explicit budget degrades to skipping the audit loop, correctly)
+            # and capped at 80 (the verify+compose+post tail does not grow
+            # just because the budget did). Under the pipelined loop the
+            # reserve is the terminal round's ONLY cover, and the only tail
+            # ever measured (#8368) was past 30 minutes and still running
+            # when the kill arrived — so the third is insurance until
+            # pipelined runs measure their tails. The 4800 cap mirrors
+            # DEFAULT_RESERVE_SECONDS in packages/cli/src/commands/review/
+            # lib/deadline.ts (the CLI's fallback when this var is absent) —
+            # keep the two in sync.
+            QWEN_REVIEW_DEADLINE_RESERVE_SECONDS="$(( attempt_timeout / 3 ))"
+            if [ "$QWEN_REVIEW_DEADLINE_RESERVE_SECONDS" -lt 600 ]; then
+              QWEN_REVIEW_DEADLINE_RESERVE_SECONDS=600
+            elif [ "$QWEN_REVIEW_DEADLINE_RESERVE_SECONDS" -gt 4800 ]; then
+              QWEN_REVIEW_DEADLINE_RESERVE_SECONDS=4800
+            fi
+            export QWEN_REVIEW_DEADLINE_RESERVE_SECONDS
             set +e
             # GNU timeout times out command children unless --foreground is used.
             timeout --kill-after=10s "${attempt_timeout}s" qwen \
@@ -898,7 +986,9 @@ jobs:
           FAILURE_REASON: "${{ steps.review.outputs.failure_reason || 'Run review failed. See workflow logs for details.' }}"
           PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
-          TIMEOUT_MINUTES: '${{ steps.context.outputs.timeout_minutes }}'
+          # The size-aware budget actually used by "Run review" (falls back to
+          # the raw context value if the review step failed before setting it).
+          TIMEOUT_MINUTES: '${{ steps.review.outputs.effective_timeout_minutes || steps.context.outputs.timeout_minutes }}'
         run: |-
           pr_data="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state,headRefOid --jq '[.state, .headRefOid] | @tsv')" || {
             echo "Could not verify PR #${PR_NUMBER}; skipping fallback comment." >> "$GITHUB_STEP_SUMMARY"
@@ -913,11 +1003,12 @@ jobs:
             echo "Skipping fallback comment: PR #${PR_NUMBER} moved from ${EXPECTED_HEAD_SHA} to ${current_head}." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
+          MAX_TIMEOUT_MINUTES="${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}"
           if [ "$FAILURE_KIND" = "timeout" ]; then
-            if [ "$TIMEOUT_MINUTES" -lt 240 ]; then
-              body="**Qwen Code review timed out.** ${FAILURE_REASON} For large PRs, retry with a longer timeout by commenting: \`@qwen-code /review --timeout=240\`. See [workflow logs](${RUN_URL})."
+            if [ "$TIMEOUT_MINUTES" -lt "$MAX_TIMEOUT_MINUTES" ]; then
+              body="**Qwen Code review timed out.** ${FAILURE_REASON} For large PRs, retry with a longer timeout by commenting: \`@qwen-code /review --timeout=${MAX_TIMEOUT_MINUTES}\`. See [workflow logs](${RUN_URL})."
             else
-              body="**Qwen Code review timed out.** ${FAILURE_REASON} This run already used the maximum 240 minute timeout. See [workflow logs](${RUN_URL})."
+              body="**Qwen Code review timed out.** ${FAILURE_REASON} This run already used the maximum ${MAX_TIMEOUT_MINUTES} minute timeout. See [workflow logs](${RUN_URL})."
             fi
           elif [ "$FAILURE_KIND" = "quota" ]; then
             # A quota reset is typically hours out, so an in-run retry can't
@@ -929,6 +1020,56 @@ jobs:
           gh pr comment "$PR_NUMBER" \
             --repo "$GITHUB_REPOSITORY" \
             --body "$body"
+
+      # A cancelled or timed-out review may not reach the CLI's process cleanup.
+      # Remove both the worktree directories and Git's worktree registrations so
+      # the next job on this reused runner can delete qwen-review/* branches.
+      # The sweep deletes all review artifacts, not just this PR's: safe because
+      # a runner executes one job at a time.
+      - name: 'Clean review worktrees'
+        if: 'always()'
+        timeout-minutes: 5
+        run: |-
+          set -uo pipefail
+          if [ ! -e .git ]; then
+            echo "no Git checkout; nothing to clean"
+            exit 0
+          fi
+
+          GIT_SAFE=(git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$GITHUB_WORKSPACE")
+          "${GIT_SAFE[@]}" worktree prune -v || true
+          "${GIT_SAFE[@]}" worktree list --porcelain \
+            | awk '$1 == "worktree" && index($0, "/.qwen/tmp/review-pr-") > 0 { sub(/^worktree /, ""); print }' \
+            | while read -r worktree; do
+                [ -n "$worktree" ] || continue
+                # Registered paths come from leftover git metadata and are
+                # untrusted: the awk filter above matched by substring, so reject
+                # `..` traversal and re-anchor to the review prefix before the
+                # destructive remove.
+                case "$worktree" in
+                  */../*|../*|*/..)
+                    echo "::warning::skipping suspicious review worktree path: $worktree"
+                    continue
+                    ;;
+                  "$GITHUB_WORKSPACE/.qwen/tmp/review-pr-"*) : ;;
+                  *)
+                    echo "::warning::skipping unexpected review worktree path: $worktree"
+                    continue
+                    ;;
+                esac
+                "${GIT_SAFE[@]}" worktree remove --force "$worktree" ||
+                  echo "::warning::could not remove review worktree: $worktree"
+              done || true
+          rm -rf .qwen/tmp/review-pr-* 2>/dev/null || true
+          "${GIT_SAFE[@]}" worktree prune -v || true
+          "${GIT_SAFE[@]}" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
+            | while read -r review_ref; do
+                [ -n "$review_ref" ] || continue
+                "${GIT_SAFE[@]}" branch -D "$review_ref" ||
+                  echo "::warning::could not remove review branch: $review_ref"
+              done || true
+          rm -f .qwen/tmp/qwen-review-lease-pr-*.json 2>/dev/null || true
+          echo "review worktrees cleaned"
 
   resolve-pr:
     needs: ['authorize']
@@ -1160,7 +1301,7 @@ jobs:
       - name: 'Resolve conflicts'
         if: "steps.prepare.outputs.decision == 'run'"
         id: 'resolve_conflicts'
-        uses: 'QwenLM/qwen-code-action@6d08e91aa807257b9c8af60edb5bb6bb2d7d951f'
+        uses: 'QwenLM/qwen-code-action@05f81718976f3b7da657422e6e8e4d372b8621d7'
         env:
           PR_NUMBER: '${{ steps.resolve.outputs.pr_number }}'
           BASE_REF: '${{ steps.prepare.outputs.base_ref }}'

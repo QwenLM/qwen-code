@@ -562,17 +562,45 @@ jobs:
             PRERELEASE_FLAG="--prerelease"
           fi
 
-          # Only anchor notes to the previous release when it is an ancestor of
-          # this release's target. A preview or nightly cut can lag behind (or
-          # diverge from) the latest stable, and a divergent --notes-start-tag
-          # makes `gh release create --generate-notes` fail, aborting the
-          # publish after the npm packages have already been published.
-          NOTES_START_TAG_FLAG=()
-          if [[ -n "${PREVIOUS_RELEASE_TAG}" ]] && git merge-base --is-ancestor "${PREVIOUS_RELEASE_TAG}" HEAD; then
-            NOTES_START_TAG_FLAG+=(--notes-start-tag "${PREVIOUS_RELEASE_TAG}")
-          elif [[ -n "${PREVIOUS_RELEASE_TAG}" ]]; then
-            echo "::warning::PREVIOUS_RELEASE_TAG (${PREVIOUS_RELEASE_TAG}) is not an ancestor of HEAD; omitting --notes-start-tag"
+          # Always anchor the notes to the previous release. Every stable tag
+          # lives on its own release/* branch that is tagged before merging back
+          # to main, so the previous tag is normally NOT an ancestor of the
+          # branch being released; GitHub still diffs it correctly through the
+          # merge base. Dropping the anchor is what hurts: GitHub then falls
+          # back to the entire branch history, and the generated body blows past
+          # the 125000 character limit, failing the release after the npm
+          # packages have already been published.
+          NOTES_ARGS=()
+          if [[ -n "${PREVIOUS_RELEASE_TAG}" ]]; then
+            NOTES_ARGS+=(-f "previous_tag_name=${PREVIOUS_RELEASE_TAG}")
           fi
+
+          # Generate the body up front so an unusable one can be repaired here
+          # instead of aborting `gh release create`. A failed call still prints
+          # the API error payload on stdout, so its output is discarded rather
+          # than published as release notes.
+          NOTES_FILE="${RUNNER_TEMP}/release-notes.md"
+          generate_notes() {
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+              -f "tag_name=${RELEASE_TAG}" \
+              -f "target_commitish=${RELEASE_BRANCH}" \
+              "$@" \
+              --jq '.body'
+          }
+          if ! generate_notes "${NOTES_ARGS[@]}" > "${NOTES_FILE}"; then
+            echo "::warning::Could not generate notes anchored at ${PREVIOUS_RELEASE_TAG:-<none>}; retrying without an anchor"
+            generate_notes > "${NOTES_FILE}" || : > "${NOTES_FILE}"
+          fi
+
+          # Caps the body below the 125000 character API limit and substitutes a
+          # minimal body when nothing was generated, so an oversized or missing
+          # changelog degrades the notes instead of the release.
+          node .github/scripts/cap-release-notes.mjs \
+            --file "${NOTES_FILE}" \
+            --tag "${RELEASE_TAG}" \
+            --previous-tag "${PREVIOUS_RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --server-url "${GITHUB_SERVER_URL}"
 
           gh release create "${RELEASE_TAG}" \
             dist/cli.js \
@@ -580,9 +608,30 @@ jobs:
             dist/standalone/SHA256SUMS \
             --target "${RELEASE_BRANCH}" \
             --title "Release ${RELEASE_TAG}" \
-            "${NOTES_START_TAG_FLAG[@]}" \
-            --generate-notes \
+            --notes-file "${NOTES_FILE}" \
             ${PRERELEASE_FLAG}
+
+      - name: 'Trigger ECS runner qwen update'
+        # Stable releases only: nightly/preview must not move the fleet.
+        if: |-
+          ${{ github.repository == 'QwenLM/qwen-code' &&
+              needs.prepare.outputs.is_dry_run == 'false' &&
+              needs.prepare.outputs.npm_tag == 'latest' }}
+        # The packages are already published; a dispatch failure must not
+        # fail the release — report it and let maintainers re-run the update
+        # workflow manually instead.
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+        run: |-
+          gh api "repos/${GITHUB_REPOSITORY}/dispatches" \
+            --method POST \
+            -f 'event_type=npm-published' \
+            -f "client_payload[version]=${RELEASE_VERSION}" || {
+              echo "::error::npm-published dispatch failed; run the 'Update ECS Runner Qwen' workflow manually."
+              exit 1
+            }
 
   notify_failure:
     name: 'Notify Release Failure'

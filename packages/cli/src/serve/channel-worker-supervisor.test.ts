@@ -12,7 +12,7 @@ import {
   CHANNEL_DELIVERY_IPC_TIMEOUT_MS,
   MAX_CHANNEL_DELIVERIES_IN_FLIGHT,
   type ChannelDeliveryRequest,
-} from './channel-delivery-ipc.js';
+} from '../runtime/channel-delivery-ipc.js';
 
 const TEST_HEARTBEAT_TIMEOUT_MS = CHANNEL_WORKER_HEARTBEAT_INTERVAL_MS + 5;
 
@@ -187,6 +187,7 @@ describe('createChannelWorkerSupervisor', () => {
   it('passes daemon connection details through env without putting token in argv', async () => {
     vi.stubEnv('QWEN_SERVER_TOKEN', 'serve-token');
     vi.stubEnv('QWEN_DAEMON_TOKEN', 'stale-daemon-token');
+    vi.stubEnv('QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN', 'guard-secret');
     vi.stubEnv('OPENAI_API_KEY', 'openai-secret');
     vi.stubEnv('ANTHROPIC_API_KEY', 'anthropic-secret');
     vi.stubEnv('AWS_SECRET_ACCESS_KEY', 'aws-secret');
@@ -242,6 +243,7 @@ describe('createChannelWorkerSupervisor', () => {
     const env = (spawnWorker.mock.calls[0]![2] as { env: NodeJS.ProcessEnv })
       .env;
     expect(env).not.toHaveProperty('QWEN_SERVER_TOKEN');
+    expect(env).not.toHaveProperty('QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN');
     expect(env).toHaveProperty('CUSTOM', 'value');
     expect(env).toHaveProperty('QWEN_DAEMON_TOKEN', 'secret-token');
     expect(env).toHaveProperty('OPENAI_API_KEY', 'openai-secret');

@@ -43,7 +43,10 @@ import {
 } from './artifacts/TurnOutputs';
 import { ParallelAgentsGroup } from './messages/tools/ParallelAgentsGroup';
 import { useSharedNow } from '../hooks/useSharedNow';
-import { toolContainsCallId } from './messages/toolFormatting';
+import {
+  isActiveToolStatus,
+  toolContainsCallId,
+} from './messages/toolFormatting';
 import turnCollapseStyles from './TurnCollapseRow.module.css';
 import flashStyles from './MessageLocateFlash.module.css';
 import styles from './MessageList.module.css';
@@ -64,7 +67,7 @@ interface MessageListProps {
   loadingOlderHistory?: boolean;
   historyCapacityReached?: boolean;
   historyPaginationError?: boolean;
-  onLoadOlderHistory?: () => Promise<void>;
+  onLoadOlderHistory?: (options?: { force?: boolean }) => Promise<void>;
   transcriptBlockCount?: number;
   transcriptActivity?: {
     getSnapshot(): {
@@ -123,6 +126,7 @@ interface MessageListProps {
   onOpenArtifact?: (artifactId: string, previewContent?: string) => void;
   onOpenScheduledTask?: (task: TurnOutputScheduledTask) => void;
   onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
+  onError?: (error: unknown, fallback: string) => void;
   generateContent?: SessionContentGenerator;
 }
 
@@ -1036,12 +1040,6 @@ function isExecutionWorkStep(item: DisplayItem): boolean {
   return item.message.role === 'tool_group' || item.message.role === 'plan';
 }
 
-function isActiveToolStatus(status: ACPToolCall['status'] | string): boolean {
-  return (
-    status === 'pending' || status === 'running' || status === 'in_progress'
-  );
-}
-
 function activeExecutionKey(item: DisplayItem): string | null {
   if (item.type === 'turn_outputs') return null;
 
@@ -1285,6 +1283,24 @@ export function getSessionTimelineRangeForIndexes(
  * remains. Returns the original array untouched when disabled or when there is
  * nothing to collapse.
  */
+/** Does any tool-carrying row in [start, end] hold a tool matching `pred`? */
+function someTurnToolCall(
+  items: DisplayItem[],
+  start: number,
+  end: number,
+  pred: (tool: ACPToolCall) => boolean,
+): boolean {
+  for (let i = start; i <= end; i++) {
+    const item = items[i];
+    if (item.type === 'parallel_agents') {
+      if (item.agents.some(pred)) return true;
+    } else if (item.type === 'message' && item.message.role === 'tool_group') {
+      if (item.message.tools.some(pred)) return true;
+    }
+  }
+  return false;
+}
+
 /** Does any tool group / parallel-agents row in [start, end] own `callId`? */
 function turnOwnsCallId(
   items: DisplayItem[],
@@ -1293,19 +1309,22 @@ function turnOwnsCallId(
   callId: string | null | undefined,
 ): boolean {
   if (!callId) return false;
-  for (let i = start; i <= end; i++) {
-    const item = items[i];
-    if (item.type === 'parallel_agents') {
-      if (item.agents.some((agent) => toolContainsCallId(agent, callId))) {
-        return true;
-      }
-    } else if (item.type === 'message' && item.message.role === 'tool_group') {
-      if (item.message.tools.some((tool) => toolContainsCallId(tool, callId))) {
-        return true;
-      }
-    }
-  }
-  return false;
+  return someTurnToolCall(items, start, end, (tool) =>
+    toolContainsCallId(tool, callId),
+  );
+}
+
+function turnHasActiveAgent(
+  items: DisplayItem[],
+  start: number,
+  end: number,
+): boolean {
+  return someTurnToolCall(
+    items,
+    start,
+    end,
+    (tool) => isSubAgentToolCall(tool) && isActiveToolStatus(tool.status),
+  );
 }
 
 export function applyTurnCollapse(
@@ -1342,6 +1361,7 @@ export function applyTurnCollapse(
     const turnId = head.message.id;
     const promptTs = head.message.timestamp;
     const isActiveTurn = k === userIdxs.length - 1 && isResponding;
+    const hasActiveAgent = turnHasActiveAgent(items, start, end);
     const hasPendingApproval = turnOwnsCallId(
       items,
       start,
@@ -1428,11 +1448,13 @@ export function applyTurnCollapse(
     }
 
     // A turn with foldable steps gets a chevron and defaults to expanded while
-    // streaming, when the turn errored, or when there is no final answer;
-    // otherwise it collapses once complete. A step-less turn (e.g. a plain "hi"
-    // reply) has nothing to fold, so it stays expanded and shows a chevron-less
-    // metrics line. An explicit user toggle always wins.
-    const shouldStayOpen = isActiveTurn || hasTurnError || answerIdx < 0;
+    // streaming, while a subagent is still active, when the turn errored, or
+    // when there is no final answer; otherwise it collapses once complete. A
+    // step-less turn (e.g. a plain "hi" reply) has nothing to fold, so it stays
+    // expanded and shows a chevron-less metrics line. An explicit user toggle
+    // always wins.
+    const shouldStayOpen =
+      isActiveTurn || hasActiveAgent || hasTurnError || answerIdx < 0;
     const expanded =
       hiddenCount === 0
         ? true
@@ -2233,6 +2255,7 @@ export const MessageList = memo(
       onOpenArtifact,
       onOpenScheduledTask,
       onTurnOutputOpen,
+      onError,
       generateContent,
     },
     ref,
@@ -3184,14 +3207,14 @@ export const MessageList = memo(
     }, [visibleItems, headerOffset, performScrollToRow]);
 
     const loadOlderHistory = useCallback(
-      async (allowRetry = false) => {
+      async (allowRetry = false, force = false) => {
         const el = containerRef.current;
         if (
           !el ||
           !onLoadOlderHistory ||
           loadingOlderHistory ||
           olderHistoryLoadInFlight.current ||
-          historyPaginationError ||
+          (historyPaginationError && !force) ||
           (olderHistoryRetryBlocked.current && !allowRetry)
         ) {
           return;
@@ -3203,7 +3226,7 @@ export const MessageList = memo(
         const previousTop = el.scrollTop;
         followPausedByUserRef.current = true;
         try {
-          await onLoadOlderHistory();
+          await onLoadOlderHistory(force ? { force: true } : undefined);
           setOlderHistoryAnchor({
             scrollHeight: previousHeight,
             scrollTop: previousTop,
@@ -3217,6 +3240,10 @@ export const MessageList = memo(
       },
       [loadingOlderHistory, onLoadOlderHistory, historyPaginationError],
     );
+
+    const retryOlderHistory = useCallback(() => {
+      void loadOlderHistory(true, true);
+    }, [loadOlderHistory]);
 
     // Rules 2 & 3: detect scroll direction to toggle follow mode.
     // Runs synchronously in the scroll handler — no rAF needed since
@@ -3654,6 +3681,7 @@ export const MessageList = memo(
                 onOpenScheduledTask={
                   onOpenScheduledTask ?? noopTurnOutputAction
                 }
+                onError={onError}
               />
             );
           }
@@ -3761,6 +3789,7 @@ export const MessageList = memo(
         onOpenScheduledTask,
         onReviewChanges,
         onTurnOutputOpen,
+        onError,
       ],
     );
 
@@ -3842,8 +3871,17 @@ export const MessageList = memo(
         {historyPaginationError &&
           !showLoadingSkeleton &&
           !historyCapacityReached && (
-            <div className={styles.historyStatus} role="status">
-              {t('history.paginationError')}
+            <div className={styles.historyStatus}>
+              <span role="status">{t('history.paginationError')}</span>
+              {onLoadOlderHistory && (
+                <button
+                  type="button"
+                  className={styles.historyRetryButton}
+                  onClick={retryOlderHistory}
+                >
+                  {t('history.retry')}
+                </button>
+              )}
             </div>
           )}
         <SessionTimeline

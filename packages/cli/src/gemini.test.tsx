@@ -28,8 +28,10 @@ import { type LoadedSettings } from './config/settings.js';
 import { appEvents, AppEvent } from './utils/events.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { ApprovalMode, OutputFormat } from '@qwen-code/qwen-code-core';
+import { EXTERNAL_TOOL_GUARD_REQUIRED_VALUE } from '@qwen-code/acp-bridge/externalToolGuard';
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
+const mockConsumeLastRenderError = vi.hoisted(() => vi.fn());
 const mockHandleListExtensions = vi.hoisted(() => vi.fn());
 const mockStartEarlyStartupPrefetches = vi.hoisted(() => vi.fn());
 const mockStartPostRenderPrefetches = vi.hoisted(() => vi.fn());
@@ -300,22 +302,46 @@ describe('gemini.tsx main function', () => {
     vi.restoreAllMocks();
   });
 
-  it('verifies that we dont load the config before relaunchAppInChildProcess', async () => {
+  it('relaunches before config load and preserves only private managed ACP activation', async () => {
     const processExitSpy = vi
       .spyOn(process, 'exit')
       .mockImplementation((code) => {
         throw new MockProcessExitError(code);
       });
     const { relaunchAppInChildProcess } = await import('./utils/relaunch.js');
-    const { loadCliConfig } = await import('./config/config.js');
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
     const { loadSettings } = await import('./config/settings.js');
     const { loadSandboxConfig } = await import('./config/sandboxConfig.js');
     vi.mocked(loadSandboxConfig).mockResolvedValue(undefined);
+    vi.mocked(parseArguments).mockResolvedValue({ acp: true } as CliArgs);
+    vi.stubEnv('QWEN_CODE_PRIVATE_ACP_CAPABILITY', 'private-capability');
+    vi.stubEnv(
+      'QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD',
+      EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+    );
+    vi.stubEnv('QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN', 'guard-secret');
+    vi.stubEnv('QWEN_CODE_NO_RELAUNCH', '');
 
     const callOrder: string[] = [];
-    vi.mocked(relaunchAppInChildProcess).mockImplementation(async () => {
-      callOrder.push('relaunch');
-    });
+    vi.mocked(relaunchAppInChildProcess).mockImplementation(
+      async (_memoryArgs, _extraArgs, options) => {
+        callOrder.push('relaunch');
+        expect(
+          process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'],
+        ).toBeUndefined();
+        expect(process.env['QWEN_CODE_PRIVATE_ACP_CAPABILITY']).toBeUndefined();
+        expect(
+          process.env['QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD'],
+        ).toBeUndefined();
+        expect(options?.childEnv).toEqual({
+          QWEN_CODE_PRIVATE_ACP_CAPABILITY: 'private-capability',
+          QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD:
+            EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+        });
+      },
+    );
     vi.mocked(loadCliConfig).mockImplementation(async () => {
       callOrder.push('loadCliConfig');
       return {
@@ -355,10 +381,14 @@ describe('gemini.tsx main function', () => {
       getProjectHooks: () => undefined,
     } as never);
     try {
-      await main();
-    } catch (e) {
-      // Mocked process exit throws an error.
-      if (!(e instanceof MockProcessExitError)) throw e;
+      try {
+        await main();
+      } catch (e) {
+        // Mocked process exit throws an error.
+        if (!(e instanceof MockProcessExitError)) throw e;
+      }
+    } finally {
+      vi.unstubAllEnvs();
     }
 
     // It is critical that we call relaunch before loadCliConfig to avoid
@@ -372,7 +402,14 @@ describe('gemini.tsx main function', () => {
     expect(relaunchAppInChildProcess).toHaveBeenCalledWith(
       expect.any(Array),
       [],
-      expect.objectContaining({ onUpdateRelaunch: expect.any(Function) }),
+      expect.objectContaining({
+        childEnv: {
+          QWEN_CODE_PRIVATE_ACP_CAPABILITY: 'private-capability',
+          QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD:
+            EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+        },
+        onUpdateRelaunch: expect.any(Function),
+      }),
     );
     processExitSpy.mockRestore();
   });
@@ -481,6 +518,30 @@ describe('gemini.tsx main function', () => {
       }
     },
   );
+
+  it('keeps the external Guard token available to command parsing and scrubs it before settings load', async () => {
+    vi.stubEnv('QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN', 'guard-secret');
+    const { parseArguments } = await import('./config/config.js');
+    const { loadSettings } = await import('./config/settings.js');
+    vi.mocked(parseArguments).mockImplementation(async () => {
+      expect(process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN']).toBe(
+        'guard-secret',
+      );
+      return {} as CliArgs;
+    });
+    vi.mocked(loadSettings).mockImplementation(() => {
+      expect(
+        process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'],
+      ).toBeUndefined();
+      throw new Error('stop after Guard token env check');
+    });
+
+    try {
+      await expect(main()).rejects.toThrow('stop after Guard token env check');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
 
   it('should skip full settings discovery in bare mode', async () => {
     const originalArgv = process.argv;
@@ -2056,6 +2117,55 @@ describe('gemini.tsx main function kitty protocol', () => {
     processExitSpy.mockRestore();
   });
 
+  it('still exits on SIGHUP with code 129', async () => {
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { loadSettings } = await import('./config/settings.js');
+    const cleanupModule = await import('./utils/cleanup.js');
+    const signalHandlers = new Map<string, (...args: unknown[]) => void>();
+    const realProcessOn = process.on.bind(process);
+    const processOnSpy = vi.spyOn(process, 'on').mockImplementation(((
+      eventName: string | symbol,
+      listener: (...args: unknown[]) => void,
+    ) => {
+      if (
+        eventName === 'SIGTERM' ||
+        eventName === 'SIGINT' ||
+        eventName === 'SIGHUP'
+      ) {
+        if (!signalHandlers.has(eventName as string)) {
+          signalHandlers.set(eventName as string, listener);
+        }
+        return process;
+      }
+      return realProcessOn(
+        eventName as string,
+        listener as (...args: unknown[]) => void,
+      );
+    }) as typeof process.on);
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as unknown as typeof process.exit);
+    const runExitCleanupMock = vi.mocked(cleanupModule.runExitCleanup);
+    runExitCleanupMock.mockResolvedValue(undefined);
+    applyInteractiveSigintConfigMocks(loadCliConfig, loadSettings);
+    vi.mocked(parseArguments).mockResolvedValue({
+      extensions: undefined,
+    } as never);
+
+    await main();
+    signalHandlers.get('SIGHUP')?.();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(runExitCleanupMock).toHaveBeenCalledTimes(1);
+    expect(processExitSpy).toHaveBeenCalledWith(129);
+
+    processOnSpy.mockRestore();
+    processExitSpy.mockRestore();
+  });
+
   it('rejects --json-schema when running in interactive (TUI) mode', async () => {
     // The synthetic structured_output tool only terminates the run inside
     // runNonInteractive. In TUI mode it's an inert tool that prints
@@ -2221,6 +2331,17 @@ describe('startInteractiveUI', () => {
   vi.mock('ink', () => ({
     render: vi.fn().mockReturnValue({ unmount: vi.fn() }),
   }));
+
+  vi.mock('./ui/components/shared/ErrorBoundary.js', async (importOriginal) => {
+    const original =
+      await importOriginal<
+        typeof import('./ui/components/shared/ErrorBoundary.js')
+      >();
+    return {
+      ...original,
+      consumeLastRenderError: mockConsumeLastRenderError,
+    };
+  });
 
   let initialExitListeners: NodeJS.ExitListener[] = [];
   let originalStdoutIsTTY: boolean | undefined;
@@ -2605,6 +2726,70 @@ describe('startInteractiveUI', () => {
     expect(
       vi.mocked(disableKittyProtocol).mock.invocationCallOrder[0],
     ).toBeGreaterThan(unmount.mock.invocationCallOrder[0]);
+  });
+
+  it('echoes a stored render error to stderr on cleanup (VP exit-time echo)', async () => {
+    const unmount = vi.fn();
+    const { render } = await import('ink');
+    vi.mocked(render).mockReturnValue({ unmount } as never);
+    mockConsumeLastRenderError.mockReturnValue(new Error('render boom'));
+    mockWriteStderrLine.mockClear();
+
+    await startInteractiveUI(
+      mockConfig,
+      mockSettings,
+      mockStartupWarnings,
+      mockWorkspaceRoot,
+      {
+        authError: null,
+        themeError: null,
+        shouldOpenAuthDialog: false,
+        geminiMdFileCount: 0,
+      },
+    );
+
+    const { registerCleanup } = await import('./utils/cleanup.js');
+    const cleanupFn = vi.mocked(registerCleanup).mock.calls.at(-1)?.[0] as
+      | (() => Promise<void> | void)
+      | undefined;
+    expect(cleanupFn).toBeTypeOf('function');
+    await cleanupFn?.();
+
+    expect(unmount).toHaveBeenCalledTimes(1);
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      '\nRendering error: render boom',
+    );
+  });
+
+  it('does not echo when no render error was stored', async () => {
+    const unmount = vi.fn();
+    const { render } = await import('ink');
+    vi.mocked(render).mockReturnValue({ unmount } as never);
+    mockConsumeLastRenderError.mockReturnValue(undefined);
+    mockWriteStderrLine.mockClear();
+
+    await startInteractiveUI(
+      mockConfig,
+      mockSettings,
+      mockStartupWarnings,
+      mockWorkspaceRoot,
+      {
+        authError: null,
+        themeError: null,
+        shouldOpenAuthDialog: false,
+        geminiMdFileCount: 0,
+      },
+    );
+
+    const { registerCleanup } = await import('./utils/cleanup.js');
+    const cleanupFn = vi.mocked(registerCleanup).mock.calls.at(-1)?.[0] as
+      | (() => Promise<void> | void)
+      | undefined;
+    await cleanupFn?.();
+
+    expect(mockWriteStderrLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('Rendering error'),
+    );
   });
 
   describe('periodic memory-pressure check', () => {

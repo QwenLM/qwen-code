@@ -232,9 +232,6 @@ export default {
   'Unknown Step': 'Unbekannter Schritt',
   'Esc to close': 'Esc zum Schließen',
   Transcript: 'Transkript',
-  'to close': 'zum Schließen',
-  'to scroll': 'zum Scrollen',
-  'Failed to render transcript.': 'Transkript konnte nicht gerendert werden.',
   'Read {{count}} file': '{{count}} Datei gelesen',
   'Read {{count}} files': '{{count}} Dateien gelesen',
   'Reading {{count}} file': 'Lese {{count}} Datei',
@@ -995,6 +992,14 @@ export default {
     'Zusammenfassung wird bereits generiert, warten Sie auf Abschluss der vorherigen Anfrage',
   'No conversation found to summarize.':
     'Kein Gespräch zum Zusammenfassen gefunden.',
+  'Summary path already exists and is not a generated summary: {{path}}':
+    'Der Zusammenfassungspfad existiert bereits und ist keine generierte Zusammenfassung: {{path}}',
+  'Summary path must be within the project root.':
+    'Der Zusammenfassungspfad muss sich im Projektstammverzeichnis befinden.',
+  'Summary path resolves to an existing directory: {{path}}':
+    'Der Zusammenfassungspfad verweist auf ein vorhandenes Verzeichnis: {{path}}',
+  'Summary path ends with a separator but is an existing file: {{path}}':
+    'Der Zusammenfassungspfad endet mit einem Trennzeichen, ist aber eine vorhandene Datei: {{path}}',
   'Failed to generate project context summary: {{error}}':
     'Fehler beim Generieren der Projektkontextzusammenfassung: {{error}}',
   'Saved project summary to {{filePathForDisplay}}.':
@@ -1911,7 +1916,7 @@ export default {
     'Raw-Modus nicht verfügbar. Bitte in einem interaktiven Terminal ausführen.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ Pfeiltasten zum Navigieren, Enter zum Auswählen, Ctrl+C zum Beenden)\n',
-  'to view transcript': 'zum Anzeigen des Transkripts',
+  'to expand details': 'zum Erweitern der Details',
   'Switch to plan mode or exit plan mode':
     'In den Plan-Modus wechseln oder den Plan-Modus verlassen',
   'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
@@ -2241,4 +2246,65 @@ export default {
     'Die Sitzungsaufzeichnung wurde nach einem Schreibfehler beendet. Neue Nachrichten der betroffenen Sitzung werden nicht gespeichert. Prüfen Sie Speicherplatz und Berechtigungen und starten Sie anschließend eine neue Sitzung, um die Aufzeichnung fortzusetzen. Weitere Details finden Sie im Debug-Protokoll.',
   'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
     'Die Sitzungsaufzeichnung wurde nach einem Schreibfehler beendet. Neue Nachrichten der betroffenen Sitzung werden nicht gespeichert. Prüfen Sie Speicherplatz und Berechtigungen und führen Sie anschließend `/clear` aus, um eine neue aufgezeichnete Sitzung zu starten. Weitere Details finden Sie im Debug-Protokoll.',
+
+  // ==========================================================================
+  // Auto-skill curator (/curator command)
+  // ==========================================================================
+  'Maintain project auto-skills based on recent use.':
+    'Projekt-Auto-Skills anhand der letzten Nutzung verwalten.',
+  'Show project auto-skill lifecycle status.':
+    'Lebenszyklusstatus der Projekt-Auto-Skills anzeigen.',
+  'Run project auto-skill lifecycle maintenance.':
+    'Lebenszykluswartung der Projekt-Auto-Skills ausführen.',
+  'Restore an archived project auto-skill.':
+    'Einen archivierten Projekt-Auto-Skill wiederherstellen.',
+  'Auto-skill curator': 'Auto-Skill-Kurator',
+  'Last run: {{time}}': 'Letzter Durchlauf: {{time}}',
+  'Active: {{count}}': 'Aktiv: {{count}}',
+  'Stale: {{count}}': 'Veraltet: {{count}}',
+  'Archived: {{count}}': 'Archiviert: {{count}}',
+  'Stale skills:': 'Veraltete Skills:',
+  'Pinned skills:': 'Fixierte Skills:',
+  'Archived skills:': 'Archivierte Skills:',
+  'Dry run complete.': 'Testlauf abgeschlossen.',
+  'Curator run complete.': 'Kurator-Durchlauf abgeschlossen.',
+  'Checked: {{count}}': 'Geprüft: {{count}}',
+  'First observed: {{count}}': 'Erstmals erfasst: {{count}}',
+  'Marked stale: {{count}}': 'Als veraltet markiert: {{count}}',
+  'Reactivated: {{count}}': 'Reaktiviert: {{count}}',
+  'Skipped archive collisions: {{count}}':
+    'Übersprungene Archivierungskonflikte: {{count}}',
+  'Archive candidates:': 'Archivierungskandidaten:',
+  'Skipped archive collisions:': 'Übersprungene Archivierungskonflikte:',
+  'Skipped rename errors: {{count}}':
+    'Übersprungene Umbenennungsfehler: {{count}}',
+  'Skipped rename errors:': 'Übersprungene Umbenennungsfehler:',
+  '{{verb}}: {{count}}': '{{verb}}: {{count}}',
+  'Would archive': 'Würde archivieren',
+  Archived: 'Archiviert',
+  'Failed to read auto-skill curator status: {{message}}':
+    'Status des Auto-Skill-Kurators konnte nicht gelesen werden: {{message}}',
+  'Usage: /curator run [--dry-run]': 'Verwendung: /curator run [--dry-run]',
+  'Failed to run auto-skill curator: {{message}}':
+    'Auto-Skill-Kurator konnte nicht ausgeführt werden: {{message}}',
+  'Usage: /curator restore <directory>':
+    'Verwendung: /curator restore <Verzeichnis>',
+  'Restored auto-skill: {{name}}': 'Auto-Skill wiederhergestellt: {{name}}',
+  'Failed to restore auto-skill: {{message}}':
+    'Auto-Skill konnte nicht wiederhergestellt werden: {{message}}',
+  'Exclude an auto-skill from automatic maintenance.':
+    'Einen Auto-Skill von der automatischen Wartung ausschließen.',
+  'Return a pinned auto-skill to automatic maintenance.':
+    'Einen fixierten Auto-Skill wieder automatisch warten.',
+  'Usage: /curator pin <directory>': 'Verwendung: /curator pin <Verzeichnis>',
+  'Usage: /curator unpin <directory>':
+    'Verwendung: /curator unpin <Verzeichnis>',
+  'Pinned auto-skill: {{name}}': 'Auto-Skill fixiert: {{name}}',
+  'Unpinned auto-skill: {{name}}': 'Fixierung aufgehoben: {{name}}',
+  'Failed to update auto-skill pin: {{message}}':
+    'Fixierung des Auto-Skills konnte nicht aktualisiert werden: {{message}}',
+  'Auto-skill curator changes are disabled in safe mode.':
+    'Änderungen durch den Auto-Skill-Kurator sind im Sicherheitsmodus deaktiviert.',
+  'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
+    'Änderungen durch den Auto-Skill-Kurator sind nur in vertrauenswürdigen Arbeitsbereichen verfügbar. Stufen Sie diesen Ordner mit `/trust` als vertrauenswürdig ein und versuchen Sie es erneut.',
 };

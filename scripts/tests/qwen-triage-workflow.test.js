@@ -19,6 +19,10 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const workflow = readFileSync('.github/workflows/qwen-triage.yml', 'utf8');
+const cacheProducerWorkflow = readFileSync(
+  '.github/workflows/npm-cache.yml',
+  'utf8',
+);
 const prSkill = readFileSync(
   '.qwen/skills/triage/references/pr-workflow.md',
   'utf8',
@@ -215,6 +219,16 @@ describe('qwen-triage tmux workflow', () => {
     expect(runStep).toContain("QWEN_HOME: '${{ runner.temp }}/qwen-home'");
   });
 
+  it('pins the action reinstall to the version the job already runs', () => {
+    expect(workflow).toContain("id: 'ensure_qwen'");
+    expect(workflow).toContain(
+      'echo "version=$(qwen --version)" >> "${GITHUB_OUTPUT}"',
+    );
+    expect(workflow).toContain(
+      "qwen_cli_version: '${{ steps.ensure_qwen.outputs.version }}'",
+    );
+  });
+
   it('passes triage output through env before bash reads it', () => {
     const checkStep = step('Check triage response');
 
@@ -303,6 +317,134 @@ describe('qwen-triage tmux workflow', () => {
       'Triage re-run completed without a new review.',
     );
     expect(notifyStep).not.toContain('-X PATCH');
+  });
+
+  // The re-run summary used to have two outcomes, and the routine one was
+  // reported as the broken one. The triage skill's confidence table sends 3/5
+  // down a DEFER path that posts a COMMENTED review and deliberately does not
+  // vote — a fork `refactor` hitting the approval guardrail, or a core change
+  // escalated for maintainer awareness. Observed on #7948 and #8141: both
+  // deferred exactly as designed, and both were told the bot had "no review of
+  // its own" while its COMMENTED review was visible on the page.
+  //
+  // Execute the real classifier rather than matching its text: the states are
+  // the contract, and a jq edit that silently reclassifies one is invisible to
+  // a string assertion.
+  it.skipIf(spawnSync('jq', ['--version']).status !== 0)(
+    'classifies a deferring COMMENTED review apart from a missing one',
+    () => {
+      const notifyStep = step('Notify silent triage re-run');
+      const program = notifyStep.match(
+        /--arg sha "\$HEAD_SHA" \\\n\s*'([\s\S]*?)'\n/,
+      )?.[1];
+      expect(program).toBeTruthy();
+
+      const dir = mkdtempSync(join(tmpdir(), 'rerun-standing-'));
+      const progFile = join(dir, 'standing.jq');
+      writeFileSync(progFile, program);
+      const classify = (reviews) => {
+        const r = spawnSync(
+          'jq',
+          [
+            '-rs',
+            '--arg',
+            'bot',
+            'bot',
+            '--arg',
+            'sha',
+            'HEAD',
+            '-f',
+            progFile,
+          ],
+          { input: JSON.stringify(reviews), encoding: 'utf8' },
+        );
+        expect(r.status, r.stderr).toBe(0);
+        return r.stdout.trim();
+      };
+      const rev = (state, login = 'bot', commit = 'HEAD') => ({
+        user: { login },
+        commit_id: commit,
+        state,
+      });
+
+      try {
+        // A vote of either kind stands.
+        expect(classify([rev('APPROVED')])).toBe('own');
+        expect(classify([rev('CHANGES_REQUESTED')])).toBe('own');
+
+        // The defer path. The second arm is the real #7948/#8141 shape: the bot
+        // deferred and a maintainer approved, which must NOT read as the bot's
+        // own vote — `main` needs two, so the PR is still one short.
+        expect(classify([rev('COMMENTED')])).toBe('deferred');
+        expect(classify([rev('COMMENTED'), rev('APPROVED', 'wenshao')])).toBe(
+          'deferred',
+        );
+
+        // DISMISSED is NOT a deferral, and this is the distinction the first
+        // draft of this change got wrong. `dismiss_stale_reviews` voids the
+        // bot's approval on every push, which is exactly when a fresh one is
+        // required — reporting that as a routine defer would say the opposite
+        // of what the maintainer needs to know. Same for an unsubmitted PENDING.
+        expect(classify([rev('DISMISSED')])).toBe('none');
+        expect(classify([rev('PENDING')])).toBe('none');
+        // ...but a real COMMENTED alongside a DISMISSED one is still a defer.
+        expect(classify([rev('DISMISSED'), rev('COMMENTED')])).toBe('deferred');
+
+        // The original incident this whole probe exists for: a human approval
+        // with no bot review must stay `none`, not be read as the bot's own.
+        expect(classify([rev('APPROVED', 'wenshao')])).toBe('none');
+        // A vote on an earlier commit does not carry over.
+        expect(classify([rev('APPROVED', 'bot', 'OLD')])).toBe('none');
+        expect(classify([])).toBe('none');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  // Both notes are posted in both languages, matching the status comment
+  // composer in the same step. The re-run summary was the one body in this
+  // workflow that shipped English only, so a Chinese reader got the bot's
+  // bilingual stage-3 review followed by an English-only summary of it.
+  it('writes the re-run summary bilingually, and warns on every no-vote state', () => {
+    const notifyStep = step('Notify silent triage re-run');
+    for (const key of ['NOTE_EN', 'NOTE_ZH']) {
+      // own / deferred / none / unreadable
+      expect(
+        (notifyStep.match(new RegExp(`${key}=`, 'g')) ?? []).length,
+        `${key} is missing a branch`,
+      ).toBe(4);
+    }
+    expect(notifyStep).toContain('"$NOTE_EN"');
+    expect(notifyStep).toContain('"$NOTE_ZH"');
+    expect(notifyStep).toMatch(/[一-鿿]/);
+
+    // The ::warning is the operator-facing signal. Both no-vote states
+    // (deferred and none) fire it — see the note below for why silencing
+    // the defer case would be wrong.
+    const noneBranch = notifyStep.slice(
+      notifyStep.indexOf('none)'),
+      notifyStep.indexOf('*)'),
+    );
+    const deferredBranch = notifyStep.slice(
+      notifyStep.indexOf('deferred)'),
+      notifyStep.indexOf('none)'),
+    );
+    // BOTH warn. At the reviews-API level a COMMENTED-only review is
+    // indistinguishable from a deliberate 3/5 defer — the same tuple is
+    // produced by an approval a push DISMISSED — and either way the PR is one
+    // approval short with the bot not supplying it. So the operator signal
+    // fires for both and only the wording differs. Silencing the defer case
+    // would have muted a warning that exists for a real incident.
+    expect(noneBranch).toContain(
+      '::warning title=Triage re-run left no bot review',
+    );
+    expect(deferredBranch).toContain(
+      '::warning title=Triage re-run left no bot review',
+    );
+    // ...and each warning describes what was actually measured.
+    expect(noneBranch).toContain('APPROVED, CHANGES_REQUESTED or COMMENTED');
+    expect(deferredBranch).toContain('only a COMMENTED review');
   });
 
   it('posts an early live-progress status comment and finalizes the same one', () => {
@@ -683,6 +825,14 @@ describe('qwen-triage tmux workflow', () => {
             commit_id: 'head',
           },
         ],
+        botNone: [
+          {
+            user: { login: 'human' },
+            state: 'APPROVED',
+            submitted_at: '2026-01-01T00:00:00Z',
+            commit_id: 'head',
+          },
+        ],
       };
 
       const run = (reviews, head) => {
@@ -741,7 +891,13 @@ describe('qwen-triage tmux workflow', () => {
       const humanOnly = run(REVIEWS.humanOnly, 'head');
       expect(humanOnly.status).toBe(0);
       expect(humanOnly.log).toContain('Triage re-run left no bot review');
-      expect(humanOnly.comment).toContain('no review of its own');
+      // Wording fixed: the bot DOES have a review here — a COMMENTED one,
+      // visible on the page — it just carries no vote. "No review of its own"
+      // told a reader the opposite of what they could see. The warning stays:
+      // from the reviews API this state is indistinguishable from a deliberate
+      // 3/5 defer, and both mean the PR is one approval short.
+      expect(humanOnly.comment).toContain('carries no vote');
+      expect(humanOnly.comment).not.toContain('no review of its own');
       expect(humanOnly.comment).toContain('does not count as the bot');
 
       // The bot's own approval standing on the head commit is the benign case.
@@ -756,6 +912,14 @@ describe('qwen-triage tmux workflow', () => {
       expect(postedNow.status).toBe(0);
       expect(postedNow.log).toContain('no summary comment needed');
       expect(postedNow.comment).toBe('');
+
+      // A true none: the bot has no review at all on the head commit.
+      // This exercises the none) arm's bash, which the humanOnly fixture
+      // no longer reaches after its reclassification to deferred.
+      const botNone = run(REVIEWS.botNone, 'head');
+      expect(botNone.status).toBe(0);
+      expect(botNone.log).toContain('Triage re-run left no bot review');
+      expect(botNone.comment).toContain('neither a verdict nor a deferral');
 
       // An unreadable head SHA must not masquerade as either verdict.
       const noHead = run(REVIEWS.humanOnly, '');
@@ -834,7 +998,13 @@ describe('qwen-triage verify workflow', () => {
     );
 
     let n = 0;
-    const gate = (commentBody, author, commenter, issueNumber = '1') => {
+    const gate = (
+      commentBody,
+      author,
+      commenter,
+      issueNumber = '1',
+      isPr = 'true',
+    ) => {
       const out = join(dir, `out-${n++}`);
       writeFileSync(out, '');
       spawnSync('bash', ['-c', script], {
@@ -851,6 +1021,7 @@ describe('qwen-triage verify workflow', () => {
           COMMENT_USER: commenter,
           PR_NUMBER: '1',
           ISSUE_NUMBER: issueNumber,
+          IS_PR: isPr,
           TMUX_PR: '',
         },
         encoding: 'utf8',
@@ -865,6 +1036,7 @@ describe('qwen-triage verify workflow', () => {
         run: val('should_run'),
         trust: val('verify_trust'),
         oid: val('verify_head_oid'),
+        lane: val('verify_lane'),
       };
     };
 
@@ -900,16 +1072,49 @@ describe('qwen-triage verify workflow', () => {
       expect(gate('@qwen-code /tmux', 'alice', 'mallory').run).toBe('true');
       expect(gate('@qwen-code /tmux', 'mallory', 'bob').run).toBe('false');
       expect(gate('@qwen-code /triage', 'mallory', 'bob').run).toBe('true');
-      // Neither non-verify path emits trust outputs. Assert the REAL keys:
-      // this line read `.runner` — a name from an earlier design that
-      // `gate()` never returns — so it was `expect(undefined).toBeUndefined()`
-      // and could not fail, however badly the trust level leaked.
-      const triage = gate('@qwen-code /triage', 'mallory', 'bob');
-      expect(triage.trust).toBeUndefined();
-      expect(triage.oid).toBeUndefined();
+
+      // /triage on a PR ALSO starts the verify lane, in parallel — and the
+      // point of routing it through the same classifier is that an external
+      // author still gets the external control set. If this ever emits
+      // `trusted` (or no trust at all) for `mallory`, the head-OID pin, the
+      // risk screen and both workspace wipes silently stop firing while the
+      // lane keeps executing that author's code on the persistent pool.
+      const triagePr = gate('@qwen-code /triage', 'mallory', 'bob');
+      expect(triagePr.run).toBe('true');
+      expect(triagePr.lane).toBe('true');
+      expect(triagePr.trust).toBe('external');
+      expect(triagePr.oid).toBe('deadbeefcafe');
+      expect(gate('@qwen-code /triage', 'alice', 'bob').trust).toBe('trusted');
+
+      // The lane fails closed DIFFERENTLY from an explicit /verify. An
+      // unreadable author permission denies `/verify` outright, because the
+      // commenter asked for exactly that; on `/triage` it must only close
+      // the lane, or a flaky permission API silently costs the reviewer
+      // their triage too. Same for a failed head-OID snapshot (issue 99).
+      const laneFail = gate('@qwen-code /triage', 'charlie', 'bob');
+      expect(laneFail.run).toBe('true');
+      expect(laneFail.lane).toBe('false');
+      expect(laneFail.trust).toBeUndefined();
+      const oidFail = gate('@qwen-code /triage', 'mallory', 'bob', '99');
+      expect(oidFail.run).toBe('true');
+      expect(oidFail.lane).toBe('false');
+      expect(gate('@qwen-code /verify', 'charlie', 'bob').run).toBe('false');
+
+      // On a plain ISSUE there is nothing to build, so the lane stays off
+      // and no author lookup is spent. This assertion used to be written as
+      // "/triage emits no trust outputs" with a fixture that never set
+      // IS_PR — true for the wrong reason, and it would have stayed green
+      // through the change above.
+      const triageIssue = gate('@qwen-code /triage', 'mallory', 'bob', '1', '');
+      expect(triageIssue.run).toBe('true');
+      expect(triageIssue.lane).toBeUndefined();
+      expect(triageIssue.trust).toBeUndefined();
+      expect(triageIssue.oid).toBeUndefined();
+
       const tmux = gate('@qwen-code /tmux', 'alice', 'bob');
       expect(tmux.trust).toBeUndefined();
       expect(tmux.oid).toBeUndefined();
+      expect(tmux.lane).toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -944,6 +1149,72 @@ describe('qwen-triage verify workflow', () => {
     const mk = verifyJob.indexOf('mkdir -p "$RUNNER_TEMP/verify-results"');
     expect(rm).toBeGreaterThan(-1);
     expect(mk).toBeGreaterThan(rm);
+  });
+
+  // The lane trigger was unpinned: deleting the gate from the verify job's
+  // `if` left every assertion green while the job became reachable from any
+  // comment on any open PR. Measured as a mutation before this test existed.
+  //
+  // `verify_lane` is also the single source of truth for WHICH comments
+  // start the lane. Re-enumerating the command strings in the job predicate
+  // is what let the trigger and the trust classification drift apart — the
+  // classifier keyed on `/verify` while the predicate would have keyed on
+  // `/verify` or `/triage`, so a `/triage`-started run would have executed
+  // an external author's code with `verify_trust` empty and all four
+  // external-only controls (head-OID pin, risk screen, both wipes) skipped.
+  it('gates the verify lane on authorize alone, not on re-matched commands', () => {
+    // Slice the two predicates APART. Asserting over the whole job text
+    // cannot tell them apart: the first version of this test did exactly
+    // that, and deleting the gate from `if:` still matched the copy inside
+    // `concurrency:` — the mutation survived its own regression test.
+    const raw = job('verify');
+    const ifBlock = raw.slice(
+      raw.indexOf('if: >-'),
+      raw.indexOf('concurrency:'),
+    );
+    const concBlock = raw.slice(
+      raw.indexOf('concurrency:'),
+      raw.indexOf('timeout-minutes:'),
+    );
+    expect(ifBlock).toBeTruthy();
+    expect(concBlock).toBeTruthy();
+    for (const predicate of [ifBlock, concBlock]) {
+      expect(predicate).toContain(
+        "needs.authorize.outputs.verify_lane == 'true'",
+      );
+    }
+    // Concurrency is evaluated after `needs`, so it can and must read the
+    // same output; an unguarded group would let non-runnable triggers share
+    // the per-PR group and cancel a real run.
+    expect(ifBlock).not.toContain("comment.body == '@qwen-code /verify'");
+    expect(concBlock).not.toContain("comment.body == '@qwen-code /verify'");
+
+    // And the authorize job has to actually publish it.
+    expect(job('authorize')).toContain(
+      "verify_lane: '${{ steps.perm.outputs.verify_lane }}'",
+    );
+  });
+
+  // Positive control for the mutations above: a guard this suite is known
+  // to pin, asserted per predicate. Written first as one `toContain` over
+  // the whole job, it survived its own mutation — the copy in
+  // `concurrency:` matched after the `if:` copy was deleted, which is the
+  // same coarse-assertion defect the test above documents. A control that
+  // cannot fail proves nothing about the assertions it vouches for.
+  it('pins the ECS kill switch on both verify predicates (control)', () => {
+    const raw = job('verify');
+    const ifBlock = raw.slice(
+      raw.indexOf('if: >-'),
+      raw.indexOf('concurrency:'),
+    );
+    const concBlock = raw.slice(
+      raw.indexOf('concurrency:'),
+      raw.indexOf('timeout-minutes:'),
+    );
+    expect(ifBlock).toContain("vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'");
+    expect(concBlock).toContain(
+      "vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'",
+    );
   });
 });
 
@@ -1549,6 +1820,496 @@ describe('qwen-triage verify hardening', () => {
   // tests do not cover it. Execute it: hostile content must stay literal,
   // and the escaped body must land under GitHub's 65,536-char comment cap
   // (the cap is applied AFTER escaping for exactly this reason).
+  it('renders report.md as sanitized markdown with an escaped-pre fallback', () => {
+    // #8140's verify comment displayed the whole curated bilingual report
+    // as a wall of raw markdown source inside <pre><code>. report.md now
+    // renders as MARKDOWN, wrapped in a collapsed <details> so it still
+    // costs one line in the conversation. A code-region-aware node sanitizer
+    // holds the security floor: CommonMark does NOT decode entities in code
+    // spans/fences, so escaping there would show &amp;&amp; / &lt;T&gt; in
+    // the very commands and types the report is read to copy — prose is
+    // escaped, code is left alone (inert under a code/pre ancestor), the
+    // comment-open token is broken EVERYWHERE so no forged qwen-triage:*
+    // marker survives in the RAW body the upsert greps, prose @ cannot fire
+    // mentions, and folds are balanced over prose only (a </details> quoted
+    // in code is inert) so a malformed report cannot swallow the footer or
+    // escape its wrapper. Oversized reports fall back to the escaped <pre>
+    // wholesale (cut markdown dangles fences).
+    const publishStep = step('Post verification report comment');
+    const body = publishStep.match(/run: \|-\n([\s\S]*)$/)?.[1];
+    const script = body.replace(/^ {10}/gm, '');
+    const helpers = script.slice(
+      script.indexOf('html_escape()'),
+      script.indexOf('EVIDENCE_SECTION='),
+    );
+    expect(helpers).toContain('emit_report()');
+    // Each fallback branch announces itself in the Actions log (mirroring
+    // emit_block's failure warning) so a degradation to the escaped pre dump
+    // is attributable, not silent. The fold-closer overhead is now budgeted
+    // inside the sanitized-size gate (closers land before it), so four
+    // warnings cover every degradation.
+    expect(helpers).toContain(
+      '::warning::emit_report fell back to escaped embedding (report exceeds size cap)',
+    );
+    expect(helpers).toContain(
+      '::warning::emit_report fell back to escaped embedding (sanitize failed)',
+    );
+    expect(helpers).toContain(
+      '::warning::emit_report fell back to escaped embedding (report ended inside an open code fence)',
+    );
+    expect(helpers).toContain(
+      '::warning::emit_report fell back to escaped embedding (sanitized output exceeds size cap)',
+    );
+    // The report call site uses the rendering path; the tmux lane keeps
+    // its escaped embedding.
+    expect(script).toContain('emit_report "$REPORT" 45000');
+    expect(step('Post tmux result comment')).not.toContain('emit_report');
+
+    // Mirror the sanitizer's code-region model so security assertions test
+    // PROSE only: a live-looking tag inside a fence is inert code text, not
+    // a hole, so grepping the raw output would give false positives.
+    const stripCode = (s) => {
+      const kept = [];
+      let inFence = false;
+      let fc = '';
+      let fl = 0;
+      let inHtml = false;
+      for (const line of s.split('\n')) {
+        if (!inFence) {
+          if (inHtml && /^\s*$/.test(line)) inHtml = false;
+          const wasHtml = inHtml;
+          const m = inHtml ? null : line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+          if (m && !(m[1][0] === '`' && m[2].includes('`'))) {
+            inFence = true;
+            fc = m[1][0];
+            fl = m[1].length;
+            continue;
+          }
+          if (/^\s*<\/?(details|summary)\b/.test(line)) inHtml = true;
+          kept.push(wasHtml ? line : line.replace(/`[^`]*`/g, ''));
+        } else {
+          const cm = line.match(/^ {0,3}(`{3,}|~{3,})\s*$/);
+          if (cm && cm[1][0] === fc && cm[1].length >= fl) inFence = false;
+        }
+      }
+      return kept.join('\n');
+    };
+
+    const dir = mkdtempSync(join(tmpdir(), 'verify-render-'));
+    try {
+      const report = join(dir, 'report.md');
+      writeFileSync(
+        report,
+        [
+          '# Deep Verification — `merge-ready`',
+          '',
+          '**Verdict:** pass && <T<U>> ok',
+          '',
+          'Run `npm test && Map<string> @pkg` then check `a -> b`.',
+          '',
+          '```bash',
+          'npm run build && node probe.mjs --pkg @qwen-code/core',
+          '<img src=x onerror=alert(1)>',
+          'marker: <!-- qwen-triage:verify-state=running -->',
+          'fold-quote: </details>',
+          '```',
+          '',
+          '> a blockquote && more',
+          '',
+          '| scenario | match |',
+          '| --- | --- |',
+          '| success | ✅ |',
+          '',
+          '<details>',
+          '<summary>中文摘要</summary>',
+          '',
+          '- 结论：通过 @everyone <img src=x onerror=alert(1)>',
+          '- marker: <!-- qwen-triage:verify -->',
+          '',
+          '</details>',
+          '',
+          '<details>',
+          '<summary>unclosed fold</summary>',
+          'tail',
+          '',
+        ].join('\n'),
+      );
+      const emit = (file, max) => {
+        const proc = spawnSync(
+          'bash',
+          ['-c', `${helpers}\nemit_report "$1" ${max}`, '_', file],
+          { encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 },
+        );
+        expect(proc.status).toBe(0);
+        return proc.stdout;
+      };
+
+      const out = emit(report, 45000);
+      // Wrapped in a collapsed <details>; markdown structure survives inside.
+      expect(out).toContain(
+        '<details>\n<summary>Verification report</summary>',
+      );
+      expect(out).toContain('| scenario | match |');
+      expect(out).toContain('**Verdict:**');
+      expect(out).toContain('<summary>中文摘要</summary>');
+      expect(out).not.toContain('<pre><code>');
+      // Prose fidelity: && and blockquotes survive; a prose < is escaped
+      // (renders back to <), > is left alone.
+      expect(out).toContain('pass && &lt;T&lt;U>> ok');
+      expect(out).toContain('> a blockquote && more');
+      expect(out).not.toContain('&amp;&amp;');
+      // Code fidelity: spans and fences are untouched — no entity mangling
+      // of the commands/types/paths a reader copies, and a fenced <img> or
+      // </details> stays inert code text.
+      expect(out).toContain('`npm test && Map<string> @pkg`');
+      expect(out).toContain(
+        'npm run build && node probe.mjs --pkg @qwen-code/core',
+      );
+      expect(out).toContain('<img src=x onerror=alert(1)>');
+      // Security floor over the WHOLE raw body: no live comment-open token
+      // anywhere (broken globally, prose AND code), so the upsert grep for
+      // the running marker cannot be forged from a fenced quote.
+      expect(out).not.toContain('<!--');
+      // Security floor over PROSE: the mention is neutralized by a ZWSP
+      // (GitHub decodes &#64; before the mention filter, so the entity alone
+      // was inert), no live non-allowlisted tag, and prose folds balance
+      // (the fenced </details> is NOT counted, so the genuinely unclosed
+      // fold still gets closed).
+      const prose = stripCode(out);
+      expect(prose).not.toContain('@everyone');
+      expect(prose).toContain('@&#8203;everyone');
+      expect(prose).not.toContain('<img');
+      expect(prose.match(/<(?!\/?(details|summary)\b)[A-Za-z]/g)).toBe(null);
+      const opens = prose.split('<details>').length - 1;
+      const closes = prose.split('</details>').length - 1;
+      expect(opens).toBe(closes);
+
+      // Guarantee 4, the hole the review reproduced: one genuinely unclosed
+      // fold plus a fenced block quoting </details>. The fenced closer is
+      // inert code and must NOT balance the live fold — the prose folds
+      // still net to zero only because a closer is appended for the open.
+      const hole = join(dir, 'hole.md');
+      writeFileSync(
+        hole,
+        '<details>\n<summary>fold that never closes</summary>\n\n```html\n</details>\n```\n',
+      );
+      const holeOut = emit(hole, 45000);
+      const holeProse = stripCode(holeOut);
+      expect(holeProse.split('<details>').length).toBe(
+        holeProse.split('</details>').length,
+      );
+
+      // HTML-block divergence: a fence opener inside a <details> HTML
+      // block is literal text per CommonMark/GitHub, not a fence. The
+      // sanitizer must prose-escape the content (neutralizing <img>)
+      // rather than passing it through escCode as inert code.
+      const htmlblk = join(dir, 'htmlblk.md');
+      writeFileSync(
+        htmlblk,
+        [
+          '<details>',
+          '<summary>fold</summary>',
+          '```',
+          '<img src=x onerror=alert(1)>',
+          '```',
+          '</details>',
+          '',
+        ].join('\n'),
+      );
+      const htmlOut = emit(htmlblk, 45000);
+      // The <img> is prose-escaped, not passed through as inert code.
+      expect(htmlOut).toContain('&lt;img src=x onerror=alert(1)>');
+      expect(htmlOut).not.toContain('<img');
+      // The fold balances: wrapper 1 open / 1 close, report fold balanced.
+      expect(htmlOut.split('<details>').length - 1).toBe(
+        htmlOut.split('</details>').length - 1,
+      );
+
+      // Code-span divergence: a backtick code span inside a <details>
+      // HTML block is literal text per CommonMark/GitHub, not code.
+      // The sanitizer must prose-escape the whole line (neutralizing
+      // <img>) rather than splitting it through proseLine and passing
+      // the span through escCode as inert code.
+      const codespan = join(dir, 'codespan.md');
+      writeFileSync(
+        codespan,
+        [
+          '<details>',
+          '<summary>fold</summary>',
+          'text `<img src=x onerror=alert(1)>` more',
+          '</details>',
+          '',
+        ].join('\n'),
+      );
+      const csOut = emit(codespan, 45000);
+      expect(csOut).toContain('&lt;img src=x onerror=alert(1)>');
+      expect(csOut).not.toContain('<img');
+      expect(csOut.split('<details>').length - 1).toBe(
+        csOut.split('</details>').length - 1,
+      );
+      const csProse = stripCode(csOut);
+      expect(csProse).not.toContain('<img');
+
+      // Indented fold: a <details> nested in a list (indent >= 4) must
+      // enter the inHtml state too — GitHub opens HTML blocks relative
+      // to the list-item content column, not just at column 0-3.
+      const indented = join(dir, 'indented.md');
+      writeFileSync(
+        indented,
+        [
+          '- list item',
+          '    <details>',
+          '    <summary>fold</summary>',
+          '    text `<img src=x>` more',
+          '    </details>',
+          '',
+        ].join('\n'),
+      );
+      const indOut = emit(indented, 45000);
+      expect(indOut).toContain('&lt;img src=x>');
+      expect(indOut).not.toContain('<img');
+
+      // Mirror case: a surplus </details> with no open is dropped so it
+      // cannot close the wrapping fold early — the wrapper stays 1 open /
+      // 1 close even though the report shipped an orphan closer.
+      const surplus = join(dir, 'surplus.md');
+      writeFileSync(surplus, 'text </details> more\n');
+      const surplusOut = emit(surplus, 45000);
+      expect(surplusOut).toContain('text  more');
+      expect(surplusOut.split('<details>').length - 1).toBe(1);
+      expect(surplusOut.split('</details>').length - 1).toBe(1);
+
+      // A report ending inside an open code fence: a fence still open at
+      // EOF means the flat scanner diverged from GitHub's container-aware
+      // parser (which closes a list-nested fence at the container's end,
+      // not at EOF). Rather than guess and ship prose GitHub parses as
+      // live, emit_report degrades to the escaped-pre fallback through its
+      // non-zero-exit branch, announcing the cause with its own warning.
+      const fence = join(dir, 'fence.md');
+      writeFileSync(fence, '# Title\n\n```bash\ncode here\n');
+      const fenceProc = spawnSync(
+        'bash',
+        ['-c', `${helpers}\nemit_report "$1" 45000`, '_', fence],
+        { encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 },
+      );
+      expect(fenceProc.status).toBe(0);
+      expect(fenceProc.stdout).toContain('<pre><code>');
+      expect(fenceProc.stdout).toContain(
+        'Verification report (report.md, escaped fallback)',
+      );
+      expect(fenceProc.stderr).toContain(
+        '::warning::emit_report fell back to escaped embedding (report ended inside an open code fence)',
+      );
+
+      // Container-axis hole the review reproduced: a fence nested in a list
+      // item, never explicitly closed. CommonMark closes it at the
+      // container's end but the flat scanner stays inFence to EOF, so before
+      // the fix the trailing unindented line shipped as prose GitHub parsed
+      // as live (mention, <img>, raw <a href>). The EOF-open fence now
+      // degrades to the escaped fallback. Red before the fix (output was
+      // sanitized markdown carrying a literal <img>/<a>, not the escaped
+      // pre), green after; the @mention is inert under the pre/code ancestor.
+      const listFence = join(dir, 'list-fence.md');
+      writeFileSync(
+        listFence,
+        [
+          '- step one:',
+          '',
+          '  ```bash',
+          '  npm test',
+          '',
+          'Back at top level: @everyone <img src=x onerror=alert(1)> <a href="https://evil.example/phish">click</a>',
+          '',
+        ].join('\n'),
+      );
+      const listOut = emit(listFence, 45000);
+      expect(listOut).toContain('<pre><code>');
+      expect(listOut).toContain(
+        'Verification report (report.md, escaped fallback)',
+      );
+      expect(listOut).not.toContain('<img');
+      expect(listOut).not.toContain('<a href');
+
+      // Container-axis hole with a BALANCING closer (review hole #2 / the
+      // inline Critical): the list-nested fence opens indented, column-0
+      // prose follows, then a column-0 fence marker balances the flat
+      // scanner so it reaches EOF with inFence false — the old EOF guard
+      // never fired and the unescaped prose (mention, <img>, raw <a href>)
+      // shipped. The dedent guard now exits non-zero the moment a non-blank
+      // line dedents below the fence opener's indent. Asserted on the RAW
+      // output (parser-independent): the fallback is the escaped pre, so no
+      // live <img>/<a href> reaches the body and the @mention is inert under
+      // the pre/code ancestor.
+      const listFenceClosed = join(dir, 'list-fence-closed.md');
+      writeFileSync(
+        listFenceClosed,
+        [
+          '- step one:',
+          '',
+          '  ```bash',
+          '  npm test',
+          '',
+          'Back at top level: @everyone <img src=x onerror=alert(1)> <a href="https://evil.example/phish">click</a>',
+          '',
+          '```',
+          'after',
+          '',
+        ].join('\n'),
+      );
+      const lfcOut = emit(listFenceClosed, 45000);
+      expect(lfcOut).toContain('<pre><code>');
+      expect(lfcOut).toContain(
+        'Verification report (report.md, escaped fallback)',
+      );
+      expect(lfcOut).not.toContain('<img');
+      expect(lfcOut).not.toContain('<a href');
+
+      // Paragraph-spanning code span (review hole #1): CommonMark matches a
+      // code span across the lines of a paragraph, but proseLine matches per
+      // line. An unmatched backtick run on one line flips the parity for the
+      // rest of the paragraph, so the span the sanitizer classified as code
+      // was prose to GitHub — a live <img>/@everyone shipped before the fix.
+      // The scanner now fails closed: an unmatched run prose-escapes the rest
+      // of the paragraph. Asserted on the RAW output (parser-independent)
+      // rather than through stripCode, which mirrors the sanitizer's own
+      // line-scoped model and so cannot see this divergence.
+      const paraSpan = join(dir, 'para-span.md');
+      writeFileSync(
+        paraSpan,
+        ['A `hint about --flag', 'See `<img src=x> @everyone` here', ''].join(
+          '\n',
+        ),
+      );
+      const psOut = emit(paraSpan, 45000);
+      expect(psOut).toContain('&lt;img src=x>');
+      expect(psOut).not.toContain('<img');
+      expect(psOut).toContain('@&#8203;everyone');
+      expect(psOut).not.toContain('@everyone');
+
+      // Backslash-escaped opening backtick (review Critical): CommonMark's
+      // escape rule consumes \` before the backticks rule runs, so it does
+      // NOT open a code span — but the raw-text backtick scanner still lets it
+      // CLOSE one. Before the fix proseLine paired the escaped backtick with a
+      // later one and shipped the gap as inert code, so GitHub rendered prose:
+      // a live <a href>, an un-defused @everyone, and a </details> that
+      // balance() never saw (it went through escCode), closing the wrapper
+      // early. The scanner now fails closed on an odd backslash run. Asserted
+      // on the RAW output (parser-independent): no live <a href>/<img>, the
+      // mention is ZWSP-defused, and the injected closer is dropped so the
+      // wrapper stays 1 open / 1 close.
+      const escBt = join(dir, 'esc-bt.md');
+      writeFileSync(
+        escBt,
+        'see \\` opts </details> @everyone <a href="https://evil.example/phish">Merge instructions</a> ` end\n',
+      );
+      const escBtOut = emit(escBt, 45000);
+      expect(escBtOut).not.toContain('<a href');
+      expect(escBtOut).not.toContain('<img');
+      expect(escBtOut).toContain('@&#8203;everyone');
+      expect(escBtOut).not.toContain('@everyone');
+      expect(escBtOut.split('<details>').length - 1).toBe(1);
+      expect(escBtOut.split('</details>').length - 1).toBe(1);
+
+      // Pre-escaped entities (review Medium): escProse restores the allowlist
+      // by round-tripping through &lt;, so before the fix it could not tell a
+      // &lt; it just produced from one the author typed — a literal
+      // &lt;details> in the report was promoted to a LIVE fold and a literal
+      // &lt;/details> was silently deleted by the surplus-closer drop. The
+      // sentinel now protects only the source's OWN raw tags, so author-typed
+      // entities stay escaped text: no forged fold, nothing deleted, wrapper
+      // stays 1 open / 1 close.
+      const ent = join(dir, 'entity.md');
+      writeFileSync(
+        ent,
+        'pre-escaped: &lt;/details> and &lt;details> and &lt;img src=x>\n',
+      );
+      const entOut = emit(ent, 45000);
+      expect(entOut).toContain('&lt;/details>');
+      expect(entOut).toContain('&lt;details>');
+      expect(entOut).toContain('&lt;img src=x>');
+      expect(entOut.split('<details>').length - 1).toBe(1);
+      expect(entOut.split('</details>').length - 1).toBe(1);
+
+      // A NUL byte in the report is stripped (parity with emit_block's
+      // tr -d '\000'); it must not reach the comment body.
+      const nul = join(dir, 'nul.md');
+      writeFileSync(nul, 'before\u0000after\n');
+      const nulOut = emit(nul, 45000);
+      expect(nulOut).toContain('beforeafter');
+      expect(nulOut).not.toContain('\u0000');
+
+      // Oversize → wholesale fallback to the escaped pre embedding.
+      const big = join(dir, 'big.md');
+      writeFileSync(big, `x${'y'.repeat(46000)}`);
+      const fb = emit(big, 45000);
+      expect(fb).toContain('<pre><code>');
+      expect(fb).toContain('Verification report (report.md, truncated)');
+
+      // Inflation: raw under the cap but sanitized over it. & is no longer
+      // escaped (it is not a security control), so < drives the inflation —
+      // each < becomes the 4-byte &lt;.
+      const dense = join(dir, 'dense.md');
+      writeFileSync(dense, '<'.repeat(12000));
+      const inflated = emit(dense, 45000);
+      expect(inflated).toContain('<pre><code>');
+      expect(inflated).toContain('Verification report (report.md, truncated)');
+
+      // The sanitizer runs under the step's real `set -euo pipefail`; a
+      // fold-free report must still exit 0 and render (no grep whose
+      // zero-match exit could abort the composer).
+      const nofolds = join(dir, 'nofolds.md');
+      writeFileSync(nofolds, '## heading\nbody text\n');
+      const pf = spawnSync(
+        'bash',
+        [
+          '-c',
+          `set -o pipefail\n${helpers}\nemit_report "$1" 45000`,
+          '_',
+          nofolds,
+        ],
+        { encoding: 'utf8' },
+      );
+      expect(pf.status).toBe(0);
+      expect(pf.stdout).toContain('<summary>Verification report</summary>');
+      expect(pf.stdout).toContain('## heading');
+
+      // Appended fold closers land in the sanitized output BEFORE the size
+      // gate, so a report dense in unbalanced <details> opens falls back to
+      // the capped pre dump once the closers push the wrapped section over
+      // the budget — rather than shipping a section over the cap.
+      // 100 opens: raw ~900 B clears max=2000, but 900 + 100*11 closers +
+      // the ~61 B wrapper > 2000 forces the fallback.
+      const folds = join(dir, 'folds.md');
+      writeFileSync(folds, '<details>\n'.repeat(100));
+      const over = emit(folds, 2000);
+      expect(over).toContain('<pre><code>');
+      expect(over).toContain('Verification report (report.md, truncated)');
+
+      // Sanitizer crash → escaped-pre fallback. Override node so the
+      // sanitizer's `node -e` fails; emit_block's own node call has a
+      // head -c fallback so the escaped output still renders.
+      const crash = join(dir, 'crash.md');
+      writeFileSync(crash, '# crash report\n\nbody text\n');
+      const crashProc = spawnSync(
+        'bash',
+        [
+          '-c',
+          `node() { return 1; }\n${helpers}\nemit_report "$1" 45000`,
+          '_',
+          crash,
+        ],
+        { encoding: 'utf8' },
+      );
+      expect(crashProc.status).toBe(0);
+      expect(crashProc.stdout).toContain('<pre><code>');
+      expect(crashProc.stdout).toContain(
+        'Verification report (report.md, escaped fallback)',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('escapes and size-caps the verify report body', () => {
     const publishStep = step('Post verification report comment');
     const body = publishStep.match(/run: \|-\n([\s\S]*)$/)?.[1];
@@ -2244,6 +3005,147 @@ describe('qwen-triage verify hardening round 2', () => {
     // ...counting emitted envelopes instead of delivered prompts would have
     // hidden every gate on the path.
     expect(flat).toContain('count at the destination, not at the component');
+
+    // #8147 R6: a composer-step replay whose base arm reproduced the
+    // production step's real posted comment byte-for-byte (allowed diffs
+    // named: run id, assets block) — without that calibration the A/B
+    // measures the harness, not the PR.
+    expect(flat).toContain('Calibrate the replay before believing it');
+
+    // #8147 R6: the verbatim-extraction half of the workflow/CI bullet —
+    // a YAML parser, not retyping; bash --noprofile --norc plus the step's
+    // own set line. Without this the calibration half is pinned but the
+    // extraction discipline that feeds it is not.
+    expect(flat).toContain('a YAML parser, not retyping');
+    expect(flat).toContain('bash --noprofile --norc');
+
+    // #8147 R6 §4: round 6 taught the sanitizer that a fence inside a
+    // raw-HTML block is not a fence; the backtick code-span door next to
+    // it was still open, and a list-nested fold never entered the state at
+    // all. Same root cause, one level down — found by walking the
+    // neighbouring doors, not by re-testing the reported shape.
+    expect(flat).toContain('gets its siblings swept');
+
+    // #8147 R6: the fix's new test drove the fence form only, so the suite
+    // was green with and without the two-line patch — proof the code-span
+    // axis was unpinned, visible only by running the mutation in reverse.
+    expect(flat).toContain('cannot tell head from head-plus-fix');
+
+    // #8147 R6 §5: a deferred mangling artifact got WORSE (5 visible
+    // characters became 8) in exactly the shapes the base rendered
+    // correctly — the follow-up status enum needs a cell for that, and
+    // declined/deferred rows must be re-measured, not carried.
+    expect(flat).toContain(
+      'fixed / stands / worsened / superseded / declined-with-rationale',
+    );
+
+    // #8147 R6 §5: the enum alone does not pin the re-measurement rule —
+    // deleting "declined and deferred rows are not exempt" would leave
+    // the enum assertion green while the normative sentence is gone.
+    expect(flat).toContain(
+      'Declined and deferred rows are not exempt from re-measurement',
+    );
+
+    // #8147 R6 §6: the PR named links and images as the accepted rendering
+    // cost; issue cross-references were the unnamed sibling that also
+    // fired, stamping timeline events under the bot identity.
+    expect(flat).toContain('An accepted-tradeoff list is a completeness claim');
+
+    // #8147 R6: the two-line suggested fix shipped with measured zero
+    // collateral — hostile fixtures clean, benign fixtures byte-identical,
+    // suite green — which is what separates evidence from a guess.
+    expect(flat).toContain('A suggested fix is measured, not eyeballed');
+
+    // #8215 §1: an ambiguous line regex ran per line over the PR body and
+    // went 0.96s/3.2s/14.4s/>100s on 2k/3k/5k/20k spaces. A single sample
+    // is 0.0ms and proves nothing — only the ladder shows the curve, and
+    // only tracing the body to a fork contributor makes it a finding.
+    expect(flat).toContain(
+      'Untrusted text reaching a parser is a scaling question',
+    );
+    expect(flat).toContain('ladder');
+    expect(flat).toContain('claimed escape hatch really excludes the path');
+
+    // #8215 §3: "one extra build per review, at most" was a line in an
+    // agent brief, while Step 4 launched ceil(N/8) shards that each got
+    // the same unleased worktree. The benign interleaving crashes; the
+    // one that matters returns an empty BASE arm that reads as a real
+    // behavioural difference and is quoted as deterministic evidence.
+    expect(flat).toContain('An instruction in a prompt is not an invariant');
+    expect(flat).toContain('rank the interleavings by what they produce');
+    expect(flat).toContain(
+      'A race that fabricates a result outranks a race that crashes',
+    );
+
+    // #8215 §4: the test titled "past a workspace flag" used a fixture
+    // where the flag trails the script, so it stepped over nothing — the
+    // shapes that break are the ones the title claims. Not vacuity: the
+    // assertion can fail and the scenario runs; the fixture is just wrong.
+    expect(flat).toContain("a test's name is a claim about its fixture");
+
+    // #8215 §8: the PR priced a base worktree as "one extra build" while
+    // the sibling probe tree in the same subsystem documents that a
+    // repo-nested tree needs no per-tree install. One of the two accounts
+    // is wrong and the reviewer pays whichever it is.
+    expect(flat).toContain("audit it against the repo's own accounting");
+
+    // #8037 F1: the recovery guard keyed on a length ratio, so whether it
+    // fired depended on payload size. Holding the issue's own 1898-char
+    // preamble fixed and varying only the tool showed run_shell_command —
+    // named in the issue — declined at these sizes. The report enumerates
+    // the cases; the fix inherits them.
+    expect(flat).toContain('The bug report is a coverage specification');
+
+    // #8037 F2: the same unescaped parser either dropped a required arg
+    // (schema-rejected, loud) or silently truncated a file. Same defect,
+    // and the silent half is the one to fix first — the same ordering as
+    // the fabricating-race rule.
+    expect(flat).toContain("Rank a defect's variants by observability");
+
+    // #8037 "Not verified": the harness replayed the exact wire bytes of
+    // the reported failure but not the model-side degradation producing
+    // them. A reader otherwise credits an end-to-end reproduction.
+    expect(flat).toContain('not the model-side degradation that produces it');
+
+    // #8005 test plan: step 3 asked the reviewer to insert real user input
+    // into an active turn. No code path does that — and the unrunnable
+    // step was the round's sharpest finding, because it meant the
+    // feature's own completion criterion was unreachable.
+    expect(flat).toContain("Walk the PR's own Reviewer Test Plan step by step");
+
+    // #8005 F1b: the static chain said the user_input branch was
+    // unreachable; 30 captured verifier payloads carried only
+    // delivered_output, which is what turned a reading into a proof.
+    expect(flat).toContain('Prove a negative by census, not by reading');
+
+    // #8005 F3: two mutations survived 429/429 and 326/326 — believable
+    // only because a third, expected-caught mutation turned one test red.
+    // Without it, "no coverage" and "harness never ran" look identical.
+    expect(flat).toContain(
+      'A surviving mutation needs a positive control before it becomes a',
+    );
+
+    // #8132: a cookie->Authorization bridge was gated to the desktop shell
+    // on the MINTING side, while the accepting middleware was mounted
+    // unconditionally, so every server treated that cookie as a bearer. The
+    // tests were named after the gated end, which is what made the ungated
+    // end look covered.
+    expect(flat).toContain('A capability has two ends');
+    expect(flat).toContain('tests are named after the gated end');
+
+    // #8261: `emptyDiff` was set both for a genuinely empty PR and for a
+    // FAILED diff capture, and the consumer answered it by recommending the
+    // PR be closed as superseded — a transient fetch error closing live
+    // work. The flag is not the defect; the consumer is.
+    expect(flat).toContain('must be different values');
+    expect(flat).toContain('check what consumes them');
+
+    // #8261: the re-classifier that demotes a dead harness's findings ran
+    // after the findings list was assembled, so a harness proven dead still
+    // filed `mutant-survived`. A control that runs late is not a control.
+    expect(flat).toContain(
+      'A validity control must run before the artifact it invalidates',
+    );
   });
 
   // PR #7836's report said "Verdict: merge-ready — the 7 failures are all
@@ -2663,10 +3565,13 @@ describe('qwen-triage verify publish fidelity', () => {
           expect(assertZh).toBeGreaterThan(details);
           expect(assertZh).toBeLessThan(detailsEnd);
         }
-        // The report block stays outside the Chinese fold.
-        expect(body.indexOf('Verification report (report.md)')).toBeGreaterThan(
-          detailsEnd,
-        );
+        // The report section stays outside the Chinese fold — now rendered
+        // as markdown inside its own collapsed <details>, not an escaped
+        // <pre> dump and not a 45 KB wall in the conversation.
+        expect(
+          body.indexOf('<summary>Verification report</summary>'),
+        ).toBeGreaterThan(detailsEnd);
+        expect(body).toContain('## real report');
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
@@ -3164,13 +4069,17 @@ describe('qwen-triage verify round-3 hardening', () => {
       'QWEN_VERIFY_CHROMIUM',
     );
 
-    // And the skill must stop calling captures optional, must name the
-    // gate, and must forbid the install the agent cannot complete.
+    // And the skill must stop calling captures optional.
     const flat = verifySkill.replace(/\s+/g, ' ');
     expect(flat).toContain('Produce these whenever you ran a harness');
-    expect(flat).toContain('QWEN_VERIFY_CHROMIUM=1');
-    expect(flat).toContain('Do **not** run `playwright install`');
     expect(flat).not.toContain('Optionally `evidence/*.png`');
+    // The TERMINAL capture route no longer depends on this browser at all —
+    // it is @xterm/headless + sharp, so the skill must not gate captures on
+    // QWEN_VERIFY_CHROMIUM or the agent skips when the browser is absent.
+    // The variable and its install stay for a future web-UI capture; see
+    // scripts/verify-capture.mjs for why the terminal route needs neither.
+    expect(flat).toContain('node scripts/verify-capture.mjs --out');
+    expect(flat).not.toContain('Route: `terminal-capture` skill');
   });
 
   // The browser step's require.resolve + cli.js join is otherwise guarded
@@ -3395,11 +4304,13 @@ describe('qwen-triage verify round-3 hardening', () => {
     );
     // A numbered budget item alongside the A/B, harnesses and gates.
     expect(scope).toMatch(/^4\. \*\*Capture/m);
-    expect(scope).toContain('QWEN_VERIFY_CHROMIUM=1');
+    // The command, so budgeting does not mean budgeting for pipeline
+    // authoring — that is what made this cost ~5 minutes and never happen.
+    expect(scope).toContain('node scripts/verify-capture.mjs');
+    expect(scope).toContain('~2 minutes');
     // Time reserved, and the failure that motivated it named — a rule
     // stated without its failure reads as advice and gets skipped.
-    expect(scope).toContain('~5 minutes');
-    expect(scope).toContain('produced **zero**');
+    expect(scope).toContain('four live runs produced zero images');
     // Bounded: the cap exists so "budget it" does not become eight images.
     expect(scope).toMatch(/normally two, at most a handful/);
 
@@ -4350,6 +5261,121 @@ describe('qwen-triage tmux lane parity', () => {
     expect(transcriptCap).toBeGreaterThan(0);
     const envelope = 4096; // verdict header, description, markers, signature
     expect(reportCap + transcriptCap + envelope).toBeLessThan(65536);
+  });
+
+  // The cache step must be restore-only: `actions/cache/restore` has no
+  // post-save hook, so PR lifecycle scripts cannot write to the shared
+  // cache. Swapping to `actions/cache` would re-enable the save path and
+  // let a PR poison subsequent runs.
+  it('pins the npm cache step to restore-only in both lanes', () => {
+    for (const jobName of ['verify', 'tmux-testing']) {
+      const cacheStep = stepIn(jobName, 'Restore npm cache');
+      expect(cacheStep).toContain('actions/cache/restore@');
+      expect(cacheStep).not.toMatch(/uses:\s*'actions\/cache@/);
+      // A separate save step would reopen the same hole the
+      // restore-only variant closes.
+      expect(job(jobName)).not.toContain('actions/cache/save@');
+      expect(job(jobName)).not.toMatch(/uses:\s*'actions\/cache@/);
+    }
+  });
+
+  it('points npm ci at the restored cache directory in both lanes', () => {
+    for (const jobName of ['verify', 'tmux-testing']) {
+      const prepare = stepIn(jobName, 'Install and build PR app');
+      expect(prepare).toContain('--cache "$RUNNER_TEMP/npm-cache"');
+      expect(prepare).toContain(
+        'npm ci --prefer-offline --no-audit --progress=false --cache "$RUNNER_TEMP/npm-cache"',
+      );
+      expect(prepare).toContain('mkdir -p "$RUNNER_TEMP/npm-cache"');
+      expect(prepare).toContain('chown -R node:node "$RUNNER_TEMP/npm-cache"');
+      const cacheStep = stepIn(jobName, 'Restore npm cache');
+      const cachePath = cacheStep.match(
+        /path:\s*'\$\{\{\s*runner\.temp\s*\}\}\/([^']+)'/,
+      )?.[1];
+      expect(cachePath).toBeTruthy();
+      const npmCaches = [
+        ...prepare.matchAll(/--cache "\$RUNNER_TEMP\/([^"]+)"/g),
+      ].map((m) => m[1]);
+      expect(npmCaches.length).toBeGreaterThanOrEqual(2);
+      for (const c of npmCaches) expect(c).toBe(cachePath);
+    }
+  });
+  it('clears stale npm cache before restore in both lanes', () => {
+    for (const jobName of ['verify', 'tmux-testing']) {
+      const clearStep = stepIn(jobName, 'Clear stale npm cache');
+      expect(clearStep, `${jobName} must have a clear step`).toContain(
+        'rm -rf',
+      );
+      const clearIdx = job(jobName).indexOf("'Clear stale npm cache'");
+      const restoreIdx = job(jobName).indexOf("'Restore npm cache'");
+      expect(clearIdx).toBeGreaterThan(-1);
+      expect(restoreIdx).toBeGreaterThan(-1);
+      expect(clearIdx).toBeLessThan(restoreIdx);
+    }
+  });
+
+  it('reports the npm cache hit so a permanent miss is visible in both lanes', () => {
+    for (const jobName of ['verify', 'tmux-testing']) {
+      const cacheStep = stepIn(jobName, 'Restore npm cache');
+      expect(cacheStep).toContain("id: 'npm-cache'");
+      const reportStep = stepIn(jobName, 'Report npm cache hit');
+      expect(reportStep).toContain('steps.npm-cache.outputs.cache-hit');
+      expect(reportStep).toContain('GITHUB_STEP_SUMMARY');
+    }
+  });
+});
+
+describe('qwen-triage npm cache producer', () => {
+  it('saves with the same key and path the triage lanes restore', () => {
+    expect(cacheProducerWorkflow).toContain('actions/cache/save@');
+    // Prettier may choose single or double quotes depending on inner
+    // quote characters, so compare the parsed scalar, not the raw YAML.
+    const yamlScalar = (raw) => {
+      if (!raw) return '';
+      if (raw.startsWith("'")) return raw.slice(1, -1).replace(/''/g, "'");
+      return raw.startsWith('"') ? raw.slice(1, -1) : raw;
+    };
+    const savePath = yamlScalar(
+      cacheProducerWorkflow.match(/path:\s*('[^']+'|"[^"]+")/)?.[1],
+    );
+    const saveKey = yamlScalar(
+      cacheProducerWorkflow.match(/key:\s*('(?:[^']|'')+'|"[^"]+")/)?.[1],
+    );
+    for (const jobName of ['verify', 'tmux-testing']) {
+      const restoreStep = stepIn(jobName, 'Restore npm cache');
+      const path = yamlScalar(
+        restoreStep.match(/path:\s*('[^']+'|"[^"]+")/)?.[1],
+      );
+      const key = yamlScalar(
+        restoreStep.match(/key:\s*('(?:[^']|'')+'|"[^"]+")/)?.[1],
+      );
+      expect(path).toBeTruthy();
+      expect(key).toBeTruthy();
+      expect(savePath).toBe(path);
+      expect(saveKey).toBe(key);
+    }
+  });
+
+  it('triggers on push to main', () => {
+    expect(cacheProducerWorkflow).toMatch(/push:/);
+    expect(cacheProducerWorkflow).toMatch(/branches:\s*\['main'\]/);
+  });
+
+  it('runs on the same target as the consumers so the cache version matches', () => {
+    // actions/cache scopes an entry by a hash of the literal cache path plus
+    // the compression method, so a producer on a different runner or outside
+    // the container computes a different version and every restore misses
+    // even when the key and path strings match.
+    expect(cacheProducerWorkflow).toContain(
+      "runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']",
+    );
+    expect(cacheProducerWorkflow).toContain("image: 'node:22-bookworm'");
+    for (const jobName of ['verify', 'tmux-testing']) {
+      expect(job(jobName)).toContain(
+        "runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']",
+      );
+      expect(job(jobName)).toContain("image: 'node:22-bookworm'");
+    }
   });
 });
 

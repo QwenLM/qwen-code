@@ -15,6 +15,9 @@
 # Review and post inline comments on the PR
 /review 123 --comment
 
+# Review local changes and apply the findings to your working tree
+/review --fix
+
 # Review a specific file
 /review src/utils/auth.ts
 
@@ -29,13 +32,13 @@ If there are no uncommitted changes, `/review` will let you know and stop — no
 
 `--effort low|medium|high` trades depth for speed:
 
-| Level    | What runs                                                                                                                                                                 | Findings cap        | Verdict                             | Posts to PR      |
-| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- | ----------------------------------- | ---------------- |
-| `low`    | One inline pass over the diff — no subagents, no build/test, no project rules                                                                                             | 8 (unverified)      | None                                | Never            |
-| `medium` | Finder angles run sequentially in one context: line-by-line, removed-behavior, cross-file trace (same-repo only), quality/altitude, performance, project-rule conventions | 12 (unverified)     | None                                | Never            |
-| `high`   | Full pipeline: 12 parallel agents → sharded verification → iterative reverse audit                                                                                        | Uncapped (verified) | Approve / Request changes / Comment | With `--comment` |
+| Level    | What runs                                                                                                                                                   | Findings cap        | Verdict                             | Posts to PR      |
+| -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- | ----------------------------------- | ---------------- |
+| `low`    | 3-6 directed inline angles over the diff (scaled by diff size) plus a gap sweep — no subagents, no build/test, no project rules                             | 10 (unverified)     | None                                | Never            |
+| `medium` | The high pipeline minus its most expensive passes: the parallel finder fan-out over a reduced dimension set, plus build/test and a single verification pass | Uncapped (verified) | Approve capped at Comment           | Never            |
+| `high`   | Full pipeline: 14 parallel agents → sharded verification → iterative reverse audit                                                                          | Uncapped (verified) | Approve / Request changes / Comment | With `--comment` |
 
-Defaults: **high** for PR reviews, **medium** for local and file reviews. An effective `--comment` forces high (posted comments must survive verification) — on a non-PR target `--comment` is ignored with a warning and does **not** change the effort. Medium runs no dedicated security or test-coverage pass — use `--effort high` for security-sensitive changes. Worktree isolation applies to same-repo PR reviews; cross-repo PRs run in lightweight mode (diff-only, no worktree or build/test). Quick passes are labeled unverified, never emit a verdict, and never write the incremental review cache, so a later `--effort high` run is never skipped as "already reviewed". The diff-obtaining mechanics are identical at every level — PR reviews always use the isolated worktree and the same base resolution, so the review is never against the wrong base. One scope difference remains: the incremental cache is high-only, so a high re-review may cover just the new commits (`lastCommitSha..HEAD`) while low/medium always review the full PR diff.
+Defaults: **high** for PR reviews, **medium** for local and file reviews. An effective `--comment` forces high (posted comments must survive verification) — on a non-PR target `--comment` is ignored with a warning and does **not** change the effort. Medium keeps the security and test-coverage agents and build/test, and drops the adversarial personas, the diff-specialist finders and the reverse audit — so a subtle Critical only the second look would surface can slip; use `--effort high` for security-sensitive or pre-release reviews. Only `low` is unverified. Worktree isolation applies to same-repo PR reviews; cross-repo PRs run in lightweight mode (diff-only, no worktree or build/test). The low pass is labeled unverified, emits no verdict, and never writes the incremental review cache, so a later `--effort high` run is never skipped as "already reviewed"; medium is verified but its Approve is capped at Comment, because nothing looked twice for what the first pass missed. The diff-obtaining mechanics are identical at every level — PR reviews always use the isolated worktree and the same base resolution, so the review is never against the wrong base. One scope difference remains: the incremental cache is high-only, so a high re-review may cover just the new commits (`lastCommitSha..HEAD`) while low/medium always review the full PR diff.
 
 ## How It Works
 
@@ -45,15 +48,17 @@ The `/review` command runs a multi-stage pipeline:
 Step 1:  Determine scope + effort level (local diff / PR worktree / file)
          Capture the diff to a file + partition it into chunks
 Step 2:  Load project review rules (medium/high)
-Step 3C: low/medium effort: inline pass, no subagents  [0 subagent calls]
-Step 3A: high, <=500 src AND <=3200 total: 12 agents       [12+ LLM calls]
+Step 3C: low effort: 3-6 inline angles + gap sweep     [0 subagent calls]
+Step 3A: high, <=500 src AND <=3200 total: 14 agents       [14+ LLM calls]
            |-- Agent 0: Issue Fidelity & Root-Cause Ownership
            |-- Agent 1a: Correctness — line-by-line scan
            |     (incl. language-pitfall + wrapper-routing checks)
            |-- Agent 1b: Correctness — removed-behavior audit
            |-- Agent 1c: Correctness — cross-file tracer
            |-- Agent 2: Security
-           |-- Agent 3: Code Quality (incl. altitude)
+           |-- Agent 3a: Reuse & duplication
+           |-- Agent 3b: Altitude & abstraction fit
+           |-- Agent 3c: Consistency & clarity
            |-- Agent 4: Performance & Efficiency
            |-- Agent 5: Test Coverage
            |-- Agent 6: Undirected Audit (3 personas: 6a/6b/6c)
@@ -79,7 +84,9 @@ Step 4:  Deduplicate --> Sharded verify (<=8 findings each)
            --> Aggregate                    [ceil(F/8) calls, F=findings]
 Step 5:  Iterative reverse audit, fanned out per chunk;
            stop after 2 consecutive dry rounds (cap 5)
-Step 6:  Present findings + verdict (high; quick passes: findings only)
+Step 6:  Present findings + verdict (high; low pass: findings only)
+         Canonicalize findings -> .qwen/tmp/...-findings.json
+Step 6B: Apply findings + record per-finding outcomes  (--fix only)
 Step 7:  Submit PR review (inline comments, if requested; high only)
 Step 8:  Save report + incremental cache (cache: high only)
 Step 9:  Clean up (remove worktree + temp files)
@@ -96,14 +103,16 @@ Steps 3A/3B/4/5 are the high-effort pipeline; at `--effort low|medium` a single 
 | Agent 1b: Removed-behavior audit  | Walks every deleted/replaced line: names the invariant it enforced and hunts for where the new code re-establishes it — including removed **exports**, whose replacement often lives in another file and quietly changed a default. In 3B it runs whole-diff (chunk agents keep the local half) |
 | Agent 1c: Cross-file tracer       | Walks every changed symbol's callers (consumer direction) and every added field's read sites (producer direction), plus same-PR callee changes                                                                                                                                                  |
 | Agent 2: Security                 | Injection, XSS, SSRF, auth bypass, sensitive data exposure                                                                                                                                                                                                                                      |
-| Agent 3: Code Quality             | Style consistency, naming, duplication/reuse, altitude (fix at the right depth, not a bandaid on shared infrastructure), dead code                                                                                                                                                              |
+| Agent 3a: Reuse & duplication     | Does the codebase already have this? Greps for the behavior, names the existing helper to call instead, and flags dead code the diff leaves behind                                                                                                                                              |
+| Agent 3b: Altitude & abstraction  | Is the fix at the right depth — or a bandaid on shared infrastructure, a downstream compensation for an upstream bug, or an abstraction serving one call site?                                                                                                                                  |
+| Agent 3c: Consistency & clarity   | Sibling consistency (a guard one member of a parallel family has but its twin lacks), convention drift against a cited local example, misleading names/comments, needless complexity                                                                                                            |
 | Agent 4: Performance & Efficiency | N+1 queries, memory leaks, unnecessary re-renders, bundle size                                                                                                                                                                                                                                  |
 | Agent 5: Test Coverage            | Untested code paths in the diff, missing branch coverage, weak assertions                                                                                                                                                                                                                       |
 | Agent 6: Undirected Audit         | 3 parallel personas (attacker / 3am-oncall / maintainer) — catches cross-dimensional issues                                                                                                                                                                                                     |
 | Agent 7: Build & Test             | Runs build and test commands, reports failures                                                                                                                                                                                                                                                  |
 | Agent 8: Diff-specialized finders | 0-2 extra finders written per-review when the diff concentrates in a domain with known failure modes (reconnect logic, module loaders, schedulers, codecs)                                                                                                                                      |
 
-The three Correctness agents are **procedural**: each is defined by how it walks the diff (line-by-line / deleted lines / cross-file edges), not by a bug taxonomy — so their coverage is complementary instead of overlapping. All agents run in parallel (Agent 1 launches 3 procedural variants and Agent 6 launches 3 persona variants concurrently, totaling 12 parallel tasks for same-repo PR reviews, plus 0-2 Agent 8 finders when the diff's domain calls for them — so 12-14 in practice; Agent 0 is skipped for local-diff and file-path reviews, which run 11-13; cross-repo lightweight mode also skips Agents 1c and 7, running 10-12).
+The three Correctness agents are **procedural**: each is defined by how it walks the diff (line-by-line / deleted lines / cross-file edges), not by a bug taxonomy — so their coverage is complementary instead of overlapping. The same reasoning splits **code quality into three** (3a/3b/3c): one agent holding a six-item checklist finishes one item — measured on a heavily-rewritten file, one agent holding an eight-item checklist found 1 of 5 defects and the same model split three ways found all 5 — so the quality checklist is cut where the questions genuinely differ. All agents run in parallel (Agent 1 launches 3 procedural variants, Agent 3 launches 3 checklist slices, and Agent 6 launches 3 persona variants concurrently, totaling 14 parallel tasks for same-repo PR reviews, plus 0-2 Agent 8 finders when the diff's domain calls for them — so 14-16 in practice; Agent 0 is skipped for local-diff and file-path reviews, which run 13-15; cross-repo lightweight mode also skips Agents 1c and 7, running 12-14).
 
 Every finding must state a **failure scenario** — the concrete input, state, or timing that triggers it and the wrong outcome that results (for quality findings, the concrete cost instead). A finding that cannot name its scenario is dropped at the source, and verification re-traces the claimed scenario through the real code rather than judging the finding's prose.
 
@@ -174,7 +183,7 @@ Or, after running `/review 123`, type `post comments` to publish findings withou
 - Where the fix is a single localized edit, a ` ```suggestion ` block you can apply in one click
 - For Approve/Request changes verdicts: a review summary with the verdict
 - For Comment verdict with all inline comments posted: no separate summary (inline comments are sufficient)
-- Model attribution footer on each comment (e.g., _— qwen3-coder via Qwen Code /review_)
+- Model and CLI version attribution footer on each comment (e.g., _— qwen3-coder via Qwen Code /review (v0.21.2)_)
 
 **What stays terminal-only:**
 
@@ -187,18 +196,62 @@ Or, after running `/review 123`, type `post comments` to publish findings withou
 
 **CI / build status check before APPROVE:** if the verdict is "Approve", `/review` queries the PR's check-runs and commit statuses before submitting. If any check has failed (or all checks are still pending), the API event is automatically downgraded from `APPROVE` to `COMMENT`, with the review body explaining why. Rationale: the LLM review reads code statically and cannot see runtime test failures; approving while CI is red would be misleading. The inline findings are still posted unchanged. If you want to approve anyway (e.g., a known-flaky CI failure), submit the GitHub approval manually after verifying.
 
+## Applying the Findings (`--fix`)
+
+`--fix` is `--comment` reflected. `--comment` writes to a **pull request**, so it needs one; `--fix` writes to a **working tree**, so it needs one that outlives the review:
+
+```bash
+/review --fix                 # local uncommitted changes
+/review src/auth.ts --fix     # a single file
+```
+
+On a **PR target it is ignored with a warning** — a PR review runs in an ephemeral worktree that is deleted when the review ends, so "fixed" edits there are discarded minutes later. Use `--comment` to publish the findings instead.
+
+An effective `--fix` **floors the effort at medium**, because it edits your files and `low` runs no verification: applying an unverified finding is the same mistake as posting one, aimed at your working tree rather than someone's PR. It does not force `high` — medium's findings are verified, and the reverse audit `high` adds hunts for findings that are _missing_, which is not what deciding whether to apply one turns on.
+
+After the review, each finding is applied with the `edit` tool and then **accounted for**, one of three ways:
+
+| Outcome            | Meaning                                               | Stays on your plate? |
+| ------------------ | ----------------------------------------------------- | -------------------- |
+| `fixed`            | The edit is in your tree                              | No                   |
+| `skipped`          | Real, not applied — the reason is reported alongside  | Yes                  |
+| `no_change_needed` | The finding was wrong, or the code already handled it | No                   |
+
+A finding is skipped when its fix would change intended behavior, would need changes well outside the reviewed diff, or turns out on a second look to be a false positive.
+
+**Every finding gets an outcome, and this is enforced rather than requested.** The ledger goes through `qwen review findings --outcomes`, which refuses a set that does not cover all of them — a fixer that applies six of nine findings and reports six has not lied about any one of them, it has silently shortened the list, and you would have no way to see the three that fell off.
+
+## Findings as Data
+
+Confirmed findings are canonicalized into `.qwen/tmp/qwen-review-<target>-findings.json` before anything else consumes them — the terminal report, the saved Markdown report, and the PR review JSON all read that one artifact instead of re-typing the list. Each finding carries a unique `id` (what outcomes and resolved anchors join on), `severity`, `confidence`, `source`, `summary`, a `shortSummary` capped at 60 characters for list rendering, `failureScenario`, and one or more `locations` — a pattern-aggregated finding keeps **one location per occurrence**, so each still gets its own inline comment.
+
+The command validates on write: a duplicate id, a finding with no failure scenario, an empty locations array, or an unknown severity is an error rather than a silently mangled entry.
+
+## Evidence Images in PR Comments
+
+GitHub's API cannot attach images to review comments, so `/review` can host evidence images (TUI screenshots, rendered-output comparisons) in a repository you designate and embed them by URL:
+
+```bash
+export QWEN_REVIEW_ASSETS_REPO=your-org/your-repo   # a repo you can push to
+/review 123 --comment
+```
+
+Maintainers typically point it at the repo under review; anyone else can use a fork or a scratch repo. Images land on the `pr-assets/<pr>-review` branch with content-hashed names, and comments reference them by **commit-pinned** URL — immutable even if the branch later moves, and working unchanged on GitHub Enterprise.
+
+The publishing is gated exactly like posting: no designated repo means no publish, and an unauthorized run (no effective `--comment`) is refused the same way `submit` refuses. Only image types are accepted (SVG is excluded deliberately), with size caps, and each file's bytes must match the format its extension claims — mislabeled or unrecognized content is refused. A manifest records every file pushed. Without a designation, findings keep their evidence as local file paths in the terminal and saved report — nothing breaks, comments just stay text-only.
+
 ## Follow-up Actions
 
 After the review, context-aware tips appear as ghost text. Press Tab to accept:
 
-| State after review                 | Tip                | What happens                            |
-| ---------------------------------- | ------------------ | --------------------------------------- |
-| Local review with unfixed findings | `fix these issues` | LLM interactively fixes each finding    |
-| PR review with findings            | `post comments`    | Posts PR inline comments (no re-review) |
-| PR review, zero findings           | `post comments`    | Approves the PR on GitHub (LGTM)        |
-| Local review, all clear            | `commit`           | Commits your changes                    |
+| State after review               | Tip                | What happens                            |
+| -------------------------------- | ------------------ | --------------------------------------- |
+| Local review, `--fix` not passed | `fix these issues` | LLM interactively fixes each finding    |
+| PR review with findings          | `post comments`    | Posts PR inline comments (no re-review) |
+| PR review, zero findings         | `post comments`    | Approves the PR on GitHub (LGTM)        |
+| Local review, all clear          | `commit`           | Commits your changes                    |
 
-Note: `fix these issues` is only available for local reviews. For PR reviews the worktree is cleaned up after the review, so post-review interactive fixing is not possible — use `--comment` or `post comments` to publish findings instead.
+Note: `fix these issues` is only available for local reviews, for the same reason `--fix` is — for PR reviews the worktree is cleaned up after the review, so post-review interactive fixing is not possible; use `--comment` or `post comments` to publish findings instead. When `--fix` was passed, the findings already carry outcomes and no fix tip is offered.
 
 ## Project Review Rules
 
@@ -269,7 +322,9 @@ For same-repo reviews, results are saved as a Markdown file in your project's `.
 .qwen/reviews/2026-04-06-150510-local.md
 ```
 
-Reports include: timestamp, diff stats, build/test results, all findings with verification status, and the verdict.
+Reports include: timestamp, diff stats, build/test results, all findings with verification status, and the verdict. Section headings and descriptive prose follow the output language preference; technical identifiers (SHAs, file paths, gate names, finding ids) stay verbatim.
+
+Medium- and high-effort reviews also save a structured JSON companion with the same stem (for example, `2026-04-06-143022-pr-123.json`) holding the canonical findings and the composed verdict as data. Qwen Code's Web Shell renders that document as an interactive review view with filterable findings; the Markdown report stays the human-readable archive.
 
 The deterministic halves of the pipeline — argument parsing (`qwen review parse-args`) and the event/body decision (`qwen review compose-review`) — are tested subcommands rather than prompt text, so `--effort` grammar, `--comment` forcing, verdict caps, and downgrade behavior are pinned by unit tests and cannot drift with the model.
 
@@ -297,6 +352,8 @@ The exit code is the contract a gate should read:
 
 `3` (not `2`) lets a gate distinguish "the review is blocking" from "the tool broke" — yargs already uses `1` for usage errors — without parsing any output. `--timeout-minutes` (default 120, floored at 1) terminates a hung review and exits `1`, and cancelling the command (Ctrl+C / SIGTERM) terminates the review's process group rather than orphaning it.
 
+A time-budgeted run can also export a **soft** deadline so the review stops its open-ended reverse-audit loop while there is still time to verify, compose and post: `QWEN_REVIEW_DEADLINE_EPOCH` is the Unix-seconds moment the run will be killed, and `QWEN_REVIEW_DEADLINE_RESERVE_SECONDS` (default 3600; `0` keeps only the round estimate) is the tail that must remain for the last round's verification, `compose-review` and submission. When the remaining budget no longer fits another round plus that tail, the round builder refuses to build it, and the composed verdict discloses the truncated audit (an otherwise-Approve verdict is capped at Comment). A missing or malformed deadline leaves the review ungated — the outer timeout still bounds the run.
+
 ## Cross-file Impact Analysis
 
 A dedicated cross-file tracer (Agent 1c) owns this walk end-to-end. When code changes modify exported functions, classes, or interfaces, it searches for all callers and checks compatibility:
@@ -310,18 +367,33 @@ It also walks the **producer direction**: every field, option, or optional param
 
 For large diffs (>10 modified symbols), the caller-direction analysis prioritizes functions with signature changes; the producer direction is never budget-limited, because an unchanged signature is exactly its point.
 
+## Review Budget
+
+The parts of the pipeline that are elastic in diff size are scaled from it, and the scaling is written into the diff plan so every stage reads one number rather than each deciding for itself:
+
+| Budget field    | What it scopes                      | How it scales                                                      |
+| --------------- | ----------------------------------- | ------------------------------------------------------------------ |
+| `inlineAngles`  | How many `low` angles run (Step 3C) | 3, plus one per 60 source lines, capped at the 6 angles that exist |
+| `sweep`         | Whether `low`'s gap sweep runs      | Off below 25 source lines                                          |
+| `specialistCap` | The Agent 8 ceiling                 | 0 below 80 source lines, otherwise 2                               |
+| `verifyShard`   | Findings per verification agent     | Flat at 8 — a property of the verifier, not of the diff            |
+
+Two things it deliberately does not do. It **never scales a dimension away**: which agents a review owes is decided by the roster, which reads the effort level, so a small diff still gets its security pass and its test-coverage pass. And it reads **source** lines, not diff lines — a 40-line production change shipping 900 lines of new tests is a small change, and the same reasoning already governs the territory-fan-out gate.
+
+Why the floors are where they are: on a nine-line typo fix, six inline walks are five walks over nothing, and the sweep — a fresh reader hunting what the first pass did not get to — has nothing to hunt when the first pass got to all of it. Agent 8's floor is the substantive one: "one domain dominates the diff" is a judgement, and a judgement made about forty lines finds a dominant domain every time, because forty lines are usually all one thing.
+
 ## Token Efficiency
 
 The high-effort pipeline bounds each stage (shard size, audit rounds), but total calls scale with findings — `ceil(F/8)` verification shards — and, under 3B, with chunk count (reverse audit runs per chunk per round). Typical 3A profile:
 
 | Stage                            | LLM calls                      | Notes                                                                                                          |
 | -------------------------------- | ------------------------------ | -------------------------------------------------------------------------------------------------------------- |
-| Review agents (Step 3)           | 12 (+0-2)                      | Run in parallel; cross-repo skips Agents 1c and 7 (10), local/file skips Agent 0 (11)                          |
+| Review agents (Step 3)           | 14 (+0-2)                      | Run in parallel; cross-repo skips Agents 1c and 7 (12), local/file skips Agent 0 (13)                          |
 | Sharded verification (Step 4)    | ceil(F/8)                      | F = findings; at most 8 per verification agent, launched together                                              |
 | Iterative reverse audit (Step 5) | 2-5 (3A); rounds × chunks (3B) | Two consecutive dry rounds to stop (cap 5); 3B fans out one auditor per chunk per round                        |
-| **Total**                        | **~15-21 (~13-20)**            | 3A same-repo: ~15-21 (typical ~15-17); cross-repo or local/file: ~13-20; 3B scales with chunks (see DESIGN.md) |
+| **Total**                        | **~17-23 (~15-22)**            | 3A same-repo: ~17-23 (typical ~17-19); cross-repo or local/file: ~15-22; 3B scales with chunks (see DESIGN.md) |
 
-Most PRs converge to the lower end of the range; the caps prevent runaway cost on pathological cases. At `--effort low|medium` the review runs entirely inline — **0 subagent calls**.
+Most PRs converge to the lower end of the range; the caps prevent runaway cost on pathological cases. At `--effort low` the review runs entirely inline — **0 subagent calls** — walking the diff once per angle instead of once in total.
 
 ## What's NOT Flagged
 

@@ -50,17 +50,20 @@ env:
   # BOTH the github_ci_only helper step and the full-profile Test step, so a
   # new helper test can't be added to one path and silently dropped from the
   # other.
-  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/auto-minimize-spam.test.mjs'
+  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs'
 
 jobs:
   classify_pr:
     name: 'Classify PR'
     if: "${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' }}"
-    # Gate runs on ECS for in-repo PRs and for the merge queue (which runs in the
-    # base-repo context), else a busy hosted pool delays it and blocks the
-    # ECS-bound jobs. The kill-switch is read here, so flipping it reverts
-    # everything to hosted.
-    runs-on: '${{ (vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event.pull_request.head.repo.full_name == github.repository || github.event_name == ''merge_group'')) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # Gate runs on ECS for in-repo PRs, fork PRs whose author has write access
+    # (OWNER/MEMBER/COLLABORATOR association — a write-access author is as
+    # trusted as an in-repo branch), and the merge queue (base-repo context),
+    # else a busy hosted pool delays it and blocks the ECS-bound jobs. The
+    # kill-switch is read here, so flipping it reverts everything to hosted.
+    # This runs-on and the pick_runner step below are the canonical home of
+    # the association routing; sdk-java.yml and serve-ab.yml mirror it.
+    runs-on: '${{ (vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association) || github.event_name == ''merge_group'')) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     continue-on-error: true
     outputs:
       skip_ci: '${{ steps.release_sync.outputs.skip_ci }}'
@@ -102,23 +105,29 @@ jobs:
           echo "skip_ci=${skip_ci}" >> "${GITHUB_OUTPUT}"
           echo "skip_ci=${skip_ci}"
 
-      # In-repo PR (head branch in this repo => author has write access) and the
-      # merge queue (base-repo context) run the Linux jobs on ECS; fork PRs stay
+      # In-repo PRs, fork PRs whose author has write access
+      # (OWNER/MEMBER/COLLABORATOR association), and the merge queue
+      # (base-repo context) run the Linux jobs on ECS; other fork PRs stay
       # hosted. Disable via repo var MAINTAINER_ECS_RUNNER_DISABLED=true.
       - name: 'Select Linux runner'
         id: 'pick_runner'
         env:
           SAME_REPO: '${{ github.event.pull_request.head.repo.full_name == github.repository }}'
+          AUTHOR_ASSOCIATION: '${{ github.event.pull_request.author_association }}'
           ECS_DISABLED: '${{ vars.MAINTAINER_ECS_RUNNER_DISABLED }}'
           EVENT_NAME: '${{ github.event_name }}'
           DISPATCH_LINUX_RUNNER: '${{ github.event.inputs.linux_runner }}'
         run: |-
           ubuntu_runner='["ubuntu-latest"]'
+          trusted_author=false
+          case "${AUTHOR_ASSOCIATION}" in
+            OWNER|MEMBER|COLLABORATOR) trusted_author=true ;;
+          esac
           if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
             if [[ "${ECS_DISABLED}" != "true" && "${DISPATCH_LINUX_RUNNER}" == "self-hosted" ]]; then
               ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
             fi
-          elif [[ "${ECS_DISABLED}" != "true" && ( "${SAME_REPO}" == "true" || "${EVENT_NAME}" == "merge_group" ) ]]; then
+          elif [[ "${ECS_DISABLED}" != "true" && ( "${SAME_REPO}" == "true" || "${trusted_author}" == "true" || "${EVENT_NAME}" == "merge_group" ) ]]; then
             ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
           fi
           echo "ubuntu_runner=${ubuntu_runner}" >> "${GITHUB_OUTPUT}"
@@ -144,6 +153,80 @@ jobs:
       checks: 'write'
       pull-requests: 'write'
     steps:
+      # Pre-checkout cleanup: a previous containerised job (e.g. qwen-triage
+      # verify) may leave root-owned, read-only files anywhere in the workspace.
+      # Restore ownership and write permission unconditionally so the checkout
+      # below can wipe the tree without EACCES. Do not gate this behind a
+      # .qwen/.git probe: poisoning is workspace-wide (root-owned node_modules/
+      # dist with no .qwen/.git), so a probe reports "healthy" and skips the
+      # recovery exactly when it is needed.
+      - name: 'Restore workspace ownership'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+
+      # Remove .qwen/ left by a previous job so actions/checkout doesn't trip
+      # on restrictive permissions.
+      - name: 'Clean stale .qwen before checkout'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: |-
+          set -uo pipefail
+          if [ -d "$GITHUB_WORKSPACE/.qwen" ] && [ ! -L "$GITHUB_WORKSPACE/.qwen" ]; then
+            chmod -R u+w "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || true
+            rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || sudo -n rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || echo "::warning::leaked .qwen; runner needs manual cleanup"
+          fi
+          # Interrupted reviews leave worktree registrations under .qwen/tmp/
+          # and qwen-review/* branches behind. prune drops registrations whose
+          # directories the rm above removed; worktree remove --force then
+          # clears any still-registered leftover directory (--force tolerates
+          # dirty contents), since a branch checked out in a live worktree
+          # cannot be deleted. If removal still fails, the registration
+          # survives and the branch delete below warns. The sweep deletes all
+          # review artifacts, not just the current PR's: safe because a runner
+          # executes one job at a time. Kept inline rather than a shared
+          # script: this runs pre-checkout on shared runners, where leftover
+          # workspace files are untrusted.
+          if [ -e "$GITHUB_WORKSPACE/.git" ]; then
+            GIT_SAFE=(git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$GITHUB_WORKSPACE")
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" worktree list --porcelain \
+              | awk '$1 == "worktree" && index($0, "/.qwen/tmp/review-pr-") > 0 { sub(/^worktree /, ""); print }' \
+              | while read -r worktree; do
+                  [ -n "$worktree" ] || continue
+                  # Registered paths come from leftover git metadata and are
+                  # untrusted: the awk filter above matched by substring, so reject
+                  # `..` traversal and re-anchor to the review prefix before the
+                  # destructive remove.
+                  case "$worktree" in
+                    */../*|../*|*/..)
+                      echo "::warning::skipping suspicious review worktree path: $worktree"
+                      continue
+                      ;;
+                    "$GITHUB_WORKSPACE/.qwen/tmp/review-pr-"*) : ;;
+                    *)
+                      echo "::warning::skipping unexpected review worktree path: $worktree"
+                      continue
+                      ;;
+                  esac
+                  "${GIT_SAFE[@]}" worktree remove --force "$worktree" ||
+                    echo "::warning::could not remove review worktree: $worktree"
+                done || true
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
+              | while read -r stale_ref; do
+                  if [ -n "$stale_ref" ]; then
+                    "${GIT_SAFE[@]}" branch -D "$stale_ref" ||
+                      echo "::warning::could not remove review branch: $stale_ref"
+                  fi
+                done || true
+          fi
+
       # On PRs, check out refs/pull/N/head (the immutable PR head, published the
       # instant the branch is pushed) instead of github.ref. github.ref is the
       # merge ref (refs/pull/N/merge), which GitHub rebuilds asynchronously and
@@ -151,20 +234,6 @@ jobs:
       # Merge queue refs are ephemeral; check out the event head SHA directly so
       # slow hosted runners do not fail after the queue branch is removed.
       # Non-PR/non-queue events keep github.ref.
-      # Pre-checkout cleanup: remove .qwen/ left by a previous job on a
-      # reused runner. Without this, git checkout fails with "unable to
-      # unlink old '.qwen/...': Permission denied" when the stale files
-      # have restrictive permissions (e.g. from a verify/tmux job that
-      # ran chmod -R a-w .qwen/).
-      - name: 'Clean stale .qwen before checkout'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
-        run: |-
-          if [ -d .qwen ]; then
-            chmod -R u+w .qwen 2>/dev/null || true
-            rm -rf .qwen
-          fi
-
-
       - name: 'Checkout'
         id: 'checkout'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
@@ -393,9 +462,55 @@ jobs:
           node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
           npm run test:ci
 
-      - name: 'Run no-AK integration smoke tests'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && github.event_name == 'pull_request' }}"
-        run: 'npm run test:integration:no-ak:sandbox:none'
+      # Release guard for the Chrome extension: build, package, and scan real
+      # artifacts for forbidden adapter signatures instead of leaving
+      # `scan:artifacts` manual-only. Linux leg only — packaging shells out to
+      # the POSIX `zip`; skip (not fail) where it is missing.
+      - name: 'Package and scan Chrome extension artifacts'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: |-
+          if ! command -v zip >/dev/null 2>&1; then
+            echo "::warning::zip is not installed; skipping the Chrome extension artifact scan"
+            exit 0
+          fi
+          npm -w packages/chrome-extension run package
+          npm -w packages/chrome-extension run scan:artifacts
+
+      - name: 'Run required no-AK integration gate'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}"
+        timeout-minutes: 20
+        env:
+          HOME: '${{ runner.temp }}/qwen-no-ak-home'
+          USERPROFILE: '${{ runner.temp }}/qwen-no-ak-home'
+          QWEN_HOME: '${{ runner.temp }}/qwen-no-ak-home/.qwen'
+          API_KEY: ''
+          ANTHROPIC_API_KEY: ''
+          ANTHROPIC_BASE_URL: ''
+          ANTHROPIC_MODEL: ''
+          BAILIAN_CODING_PLAN_API_KEY: ''
+          BAILIAN_TOKEN_PLAN_API_KEY: ''
+          DEEPSEEK_API_KEY: ''
+          OPENAI_API_KEY: ''
+          OPENAI_BASE_URL: ''
+          OPENAI_MODEL: ''
+          DASHSCOPE_API_KEY: ''
+          GOOGLE_API_KEY: ''
+          GOOGLE_MODEL: ''
+          QWEN_API_KEY: ''
+          QWEN_MODEL: ''
+          GEMINI_API_KEY: ''
+          GEMINI_MODEL: ''
+          IDEALAB_API_KEY: ''
+          MINIMAX_API_KEY: ''
+          MODELSCOPE_API_KEY: ''
+          OPENROUTER_API_KEY: ''
+          REQUESTY_API_KEY: ''
+          XAI_API_KEY: ''
+          ZAI_API_KEY: ''
+          QWEN_DEFAULT_AUTH_TYPE: ''
+        run: |-
+          mkdir -p "${HOME}" "${QWEN_HOME}"
+          npm run test:integration:no-ak:sandbox:none
 
       - name: 'Publish Test Report (for non-forks)'
         if: |-
@@ -439,6 +554,76 @@ jobs:
     permissions:
       contents: 'read'
     steps:
+      # Self-hosted runners reuse the workspace; a prior containerised job can
+      # leave root-owned, read-only files anywhere in it. Restore ownership and
+      # write permission unconditionally before checkout — see the test job's
+      # 'Restore workspace ownership' step for why probing first is unsafe.
+      - name: 'Restore workspace ownership'
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+
+      # Same pre-checkout recovery as the test job: this job lands on the
+      # same reused pool, so leftover review worktrees and branches from an
+      # interrupted review would break this checkout too.
+      - name: 'Clean stale .qwen before checkout'
+        run: |-
+          set -uo pipefail
+          if [ -d "$GITHUB_WORKSPACE/.qwen" ] && [ ! -L "$GITHUB_WORKSPACE/.qwen" ]; then
+            chmod -R u+w "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || true
+            rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || sudo -n rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || echo "::warning::leaked .qwen; runner needs manual cleanup"
+          fi
+          # Interrupted reviews leave worktree registrations under .qwen/tmp/
+          # and qwen-review/* branches behind. prune drops registrations whose
+          # directories the rm above removed; worktree remove --force then
+          # clears any still-registered leftover directory (--force tolerates
+          # dirty contents), since a branch checked out in a live worktree
+          # cannot be deleted. If removal still fails, the registration
+          # survives and the branch delete below warns. The sweep deletes all
+          # review artifacts, not just the current PR's: safe because a runner
+          # executes one job at a time. Kept inline rather than a shared
+          # script: this runs pre-checkout on shared runners, where leftover
+          # workspace files are untrusted.
+          if [ -e "$GITHUB_WORKSPACE/.git" ]; then
+            GIT_SAFE=(git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$GITHUB_WORKSPACE")
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" worktree list --porcelain \
+              | awk '$1 == "worktree" && index($0, "/.qwen/tmp/review-pr-") > 0 { sub(/^worktree /, ""); print }' \
+              | while read -r worktree; do
+                  [ -n "$worktree" ] || continue
+                  # Registered paths come from leftover git metadata and are
+                  # untrusted: the awk filter above matched by substring, so reject
+                  # `..` traversal and re-anchor to the review prefix before the
+                  # destructive remove.
+                  case "$worktree" in
+                    */../*|../*|*/..)
+                      echo "::warning::skipping suspicious review worktree path: $worktree"
+                      continue
+                      ;;
+                    "$GITHUB_WORKSPACE/.qwen/tmp/review-pr-"*) : ;;
+                    *)
+                      echo "::warning::skipping unexpected review worktree path: $worktree"
+                      continue
+                      ;;
+                  esac
+                  "${GIT_SAFE[@]}" worktree remove --force "$worktree" ||
+                    echo "::warning::could not remove review worktree: $worktree"
+                done || true
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
+              | while read -r stale_ref; do
+                  if [ -n "$stale_ref" ]; then
+                    "${GIT_SAFE[@]}" branch -D "$stale_ref" ||
+                      echo "::warning::could not remove review branch: $stale_ref"
+                  fi
+                done || true
+          fi
+
       - name: 'Checkout'
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
@@ -717,6 +902,76 @@ jobs:
       OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
       OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
     steps:
+      # Self-hosted runners reuse the workspace; a prior containerised job can
+      # leave root-owned, read-only files anywhere in it. Restore ownership and
+      # write permission unconditionally before checkout — see the test job's
+      # 'Restore workspace ownership' step for why probing first is unsafe.
+      - name: 'Restore workspace ownership'
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+
+      # Same pre-checkout recovery as the test job: this job lands on the
+      # same reused pool, so leftover review worktrees and branches from an
+      # interrupted review would break this checkout too.
+      - name: 'Clean stale .qwen before checkout'
+        run: |-
+          set -uo pipefail
+          if [ -d "$GITHUB_WORKSPACE/.qwen" ] && [ ! -L "$GITHUB_WORKSPACE/.qwen" ]; then
+            chmod -R u+w "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || true
+            rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || sudo -n rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || echo "::warning::leaked .qwen; runner needs manual cleanup"
+          fi
+          # Interrupted reviews leave worktree registrations under .qwen/tmp/
+          # and qwen-review/* branches behind. prune drops registrations whose
+          # directories the rm above removed; worktree remove --force then
+          # clears any still-registered leftover directory (--force tolerates
+          # dirty contents), since a branch checked out in a live worktree
+          # cannot be deleted. If removal still fails, the registration
+          # survives and the branch delete below warns. The sweep deletes all
+          # review artifacts, not just the current PR's: safe because a runner
+          # executes one job at a time. Kept inline rather than a shared
+          # script: this runs pre-checkout on shared runners, where leftover
+          # workspace files are untrusted.
+          if [ -e "$GITHUB_WORKSPACE/.git" ]; then
+            GIT_SAFE=(git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$GITHUB_WORKSPACE")
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" worktree list --porcelain \
+              | awk '$1 == "worktree" && index($0, "/.qwen/tmp/review-pr-") > 0 { sub(/^worktree /, ""); print }' \
+              | while read -r worktree; do
+                  [ -n "$worktree" ] || continue
+                  # Registered paths come from leftover git metadata and are
+                  # untrusted: the awk filter above matched by substring, so reject
+                  # `..` traversal and re-anchor to the review prefix before the
+                  # destructive remove.
+                  case "$worktree" in
+                    */../*|../*|*/..)
+                      echo "::warning::skipping suspicious review worktree path: $worktree"
+                      continue
+                      ;;
+                    "$GITHUB_WORKSPACE/.qwen/tmp/review-pr-"*) : ;;
+                    *)
+                      echo "::warning::skipping unexpected review worktree path: $worktree"
+                      continue
+                      ;;
+                  esac
+                  "${GIT_SAFE[@]}" worktree remove --force "$worktree" ||
+                    echo "::warning::could not remove review worktree: $worktree"
+                done || true
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
+              | while read -r stale_ref; do
+                  if [ -n "$stale_ref" ]; then
+                    "${GIT_SAFE[@]}" branch -D "$stale_ref" ||
+                      echo "::warning::could not remove review branch: $stale_ref"
+                  fi
+                done || true
+          fi
+
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
@@ -785,3 +1040,99 @@ jobs:
       - name: 'Run CLI Integration Tests'
         run: |-
           npm run test:integration:cli:sandbox:none
+
+  #
+  # Desktop Shell: compile + test the Tauri crate in PR CI.
+  #
+  # The desktop-release workflow (workflow_dispatch only) is otherwise the sole
+  # place this crate is built, so a compile error can land on a PR and stay
+  # invisible until release time. This job compiles the crate and runs its
+  # release-config tests on every PR that touches the shell. It does not need
+  # the bundled runtime, so it is cheap. `cargo test` builds the crate and thus
+  # catches compile failures (e.g. a moved-value error); fmt/clippy are not run
+  # here because the release pipeline does not gate on them either.
+  desktop_shell:
+    name: 'Desktop Shell (ubuntu-22.04)'
+    needs: 'classify_pr'
+    if: "${{ !cancelled() && github.event_name != 'push' && needs.classify_pr.outputs.skip_ci != 'true' }}"
+    runs-on: 'ubuntu-22.04'
+    timeout-minutes: 45
+    permissions:
+      contents: 'read'
+      pull-requests: 'read'
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}"
+          fetch-depth: 1
+
+      # Fail open: any uncertainty (non-PR event, API failure) runs the job.
+      #
+      # Ask GitHub which files the PR changed, the same call the CI profile
+      # classifier makes above. The two-tree `git diff BASE HEAD` this replaced
+      # is not the PR's diff: it reports everything the base gained since the
+      # branch point as a change on the PR's side. #8132 added
+      # packages/desktop-shell, so every branch older than it saw 78 phantom
+      # desktop-shell paths, ran this job, and failed in a checkout of
+      # refs/pull/N/head that has no such directory.
+      - name: 'Detect desktop-shell changes'
+        id: 'filter'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          PR_NUMBER: "${{ github.event_name == 'pull_request' && github.event.pull_request.number || '' }}"
+        run: |-
+          changed=true
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" && -n "${PR_NUMBER}" ]]; then
+            # `previous_filename` too: renaming a file out of the crate changes
+            # it, and only the old path says so.
+            if files="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --jq '.[] | .filename, (.previous_filename // empty)')"; then
+              if grep -Eq '^(packages/desktop-shell/|\.github/scripts/create-desktop-update-manifest\.mjs|\.github/workflows/ci\.yml)' <<<"${files}"; then
+                changed=true
+              else
+                changed=false
+              fi
+            else
+              echo "::warning::Unable to list the PR's changed files; compiling the crate."
+            fi
+          fi
+          # Whatever the filter decided, a tree without the crate cannot have
+          # regressed it, and cargo has no manifest to run against — the job
+          # would report a missing working directory as a failure of the PR.
+          if [[ "${changed}" == "true" && ! -f packages/desktop-shell/src-tauri/Cargo.toml ]]; then
+            echo "::notice::packages/desktop-shell/src-tauri is absent from this head; nothing to compile."
+            changed=false
+          fi
+          echo "changed=${changed}" >> "${GITHUB_OUTPUT}"
+          echo "desktop-shell changed: ${changed}"
+
+      # cargo test links the Tauri/wry webview, so the WebKit/GTK dev headers
+      # must be present (mirrors the Linux build job in desktop-release.yml).
+      - name: 'Install Linux dependencies'
+        if: "${{ steps.filter.outputs.changed == 'true' }}"
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libatk-bridge2.0-0 at-spi2-core dbus-x11 patchelf libfuse2 xdg-utils
+
+      - uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        if: "${{ steps.filter.outputs.changed == 'true' }}"
+        with:
+          node-version: '22.x'
+
+      - uses: 'dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4' # stable
+        if: "${{ steps.filter.outputs.changed == 'true' }}"
+
+      - uses: 'Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae' # v2
+        if: "${{ steps.filter.outputs.changed == 'true' }}"
+        with:
+          workspaces: 'packages/desktop-shell/src-tauri -> target'
+
+      - name: 'Compile and test the desktop crate'
+        if: "${{ steps.filter.outputs.changed == 'true' }}"
+        working-directory: 'packages/desktop-shell'
+        run: 'cargo test --manifest-path src-tauri/Cargo.toml'
+
+      - name: 'Run desktop release tests'
+        if: "${{ steps.filter.outputs.changed == 'true' }}"
+        working-directory: 'packages/desktop-shell'
+        run: 'node scripts/test-release.js'

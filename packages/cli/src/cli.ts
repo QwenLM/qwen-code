@@ -9,6 +9,7 @@ import {
   chmodSync,
   constants,
   existsSync,
+  realpathSync,
   statSync,
 } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -16,6 +17,10 @@ import type { ArgumentsCamelCase, Argv, Options } from 'yargs';
 import { normalizeServeFastPathArgv } from './serve/fast-path-argv.js';
 import { initStartupProfiler } from './utils/startupProfiler.js';
 import { initCpuProfiler } from './utils/cpuProfiler.js';
+import {
+  handleUncaughtException,
+  isExpectedPtyRaceError,
+} from './utils/uncaught-exception-handler.js';
 
 // Preserve the old entrypoint's profiling baseline before route-specific
 // dynamic imports or command handling shift startup measurements.
@@ -350,6 +355,7 @@ export async function runCliEntry(
     process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION'];
   if (managedUpdateVersion) {
     delete process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION'];
+    delete process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'];
     const { installManagedNpmUpdate } = await import(
       './utils/managed-npm-update.js'
     );
@@ -359,6 +365,13 @@ export async function runCliEntry(
 
   const argv = normalizeServeFastPathArgv(rawArgv);
   const route = resolveBootstrapRoute(argv);
+  if (route !== 'serve') {
+    // This credential belongs only to `qwen serve`. Scrub it before any other
+    // subcommand handler can start a child process during yargs parsing. The
+    // serve route keeps it until either the fast path or full serve handler
+    // has captured it into daemon-local options.
+    delete process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'];
+  }
 
   if (route === 'version') {
     await printBootstrapVersion();
@@ -388,42 +401,6 @@ export async function runCliEntry(
   const { main } = await import('./gemini.js');
   acpStartupProfiler?.markAcpStartup('geminiImportEnd');
   await main();
-}
-
-function getErrnoCode(error: unknown): string | undefined {
-  if (!error || typeof error !== 'object') {
-    return undefined;
-  }
-  const code = (error as { code?: unknown }).code;
-  return typeof code === 'string' ? code : undefined;
-}
-
-export function isExpectedPtyRaceError(error: unknown): boolean {
-  if (!(error instanceof Error)) {
-    return false;
-  }
-
-  const message = error.message;
-  const code = getErrnoCode(error);
-
-  if (
-    (code === 'EIO' && message.includes('read')) ||
-    message.includes('read EIO')
-  ) {
-    return true;
-  }
-
-  if (
-    (code === 'EAGAIN' && message.includes('read')) ||
-    message.includes('read EAGAIN')
-  ) {
-    return true;
-  }
-
-  return (
-    message.includes('ioctl(2) failed, EBADF') ||
-    message.includes('Cannot resize a pty that has already exited')
-  );
 }
 
 export async function handleCriticalError(error: unknown): Promise<void> {
@@ -533,24 +510,21 @@ export function stampCliEntryEnv(entryPath?: string): void {
   }
 }
 
+// handleUncaughtException and isExpectedPtyRaceError live in
+// ./utils/uncaught-exception-handler.js and are re-exported here for existing
+// importers (cli.test.ts). gemini.tsx must import them from that leaf module
+// directly: a static import of this entry file from a module the bundle loads
+// lazily makes esbuild hoist this entry into a shared chunk, which silently
+// disables the bootstrap guard at the bottom.
+export { handleUncaughtException, isExpectedPtyRaceError };
+
 export async function runCliEntryPoint(
   run: () => Promise<void> = runCliEntry,
   handleError: (error: unknown) => Promise<void> = handleCriticalError,
 ): Promise<void> {
   stampCliEntryEnv();
 
-  process.on('uncaughtException', (error) => {
-    if (isExpectedPtyRaceError(error)) {
-      return;
-    }
-
-    if (error instanceof Error) {
-      writeStderrLine(error.stack ?? error.message);
-    } else {
-      writeStderrLine(String(error));
-    }
-    process.exit(1);
-  });
+  process.on('uncaughtException', handleUncaughtException);
 
   try {
     await run();
@@ -576,9 +550,17 @@ export async function runCliEntryPoint(
   }
 }
 
-if (
-  process.argv[1] !== undefined &&
-  import.meta.url === pathToFileURL(process.argv[1]).href
-) {
+let isMain = false;
+if (process.argv[1] !== undefined) {
+  try {
+    const argvRealHref = pathToFileURL(realpathSync(process.argv[1])).href;
+    const argvHref = pathToFileURL(process.argv[1]).href;
+    isMain = import.meta.url === argvHref || import.meta.url === argvRealHref;
+  } catch {
+    isMain = import.meta.url === pathToFileURL(process.argv[1]).href;
+  }
+}
+
+if (isMain) {
   void runCliEntryPoint();
 }

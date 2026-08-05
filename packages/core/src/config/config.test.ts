@@ -6,7 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
-import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, rm, stat, writeFile } from 'node:fs/promises';
 import type { ConfigParameters, SandboxConfig } from './config.js';
 import {
   Config,
@@ -83,6 +83,7 @@ import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-stat
 import * as runtimeStatus from '../utils/runtimeStatus.js';
 import { ExtensionManager } from '../extension/extensionManager.js';
 import { SkillManager } from '../skills/skill-manager.js';
+import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
 import { HookSystem } from '../hooks/index.js';
 import { GOAL_HOOK_ID_OUTPUT_KEY } from '../goals/goalHook.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
@@ -96,8 +97,10 @@ import {
   type GoalTurnHost,
 } from '../goals/goal-runtime.js';
 import {
+  getSessionWriterLockPath,
   SessionTranscriptChangedError,
   SessionWriterLease,
+  SessionWriterUnavailableError,
 } from '../services/session-writer-lease.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { checkPriorRead } from '../tools/priorReadEnforcement.js';
@@ -202,6 +205,9 @@ vi.mock('../memory/team-memory-sync.js', () => ({
   syncTeamMemory: vi
     .fn()
     .mockResolvedValue({ committed: false, pulled: false, pushed: false }),
+}));
+vi.mock('../skills/skill-curator.js', () => ({
+  maybeRunAutoSkillCurator: vi.fn().mockResolvedValue({ status: 'not_due' }),
 }));
 vi.mock('../memory/team-memory-git-status.js', () => ({
   getTeamMemoryShareabilityWarning: vi.fn().mockReturnValue(null),
@@ -620,6 +626,45 @@ describe('Server Config (config.ts)', () => {
           ...baseParams,
           memoryAgentTimeoutMinutes: -5,
         }).getMemoryAgentTimeoutMinutes(),
+      ).toBeUndefined();
+    });
+  });
+
+  describe('getMemoryAgentMaxTurns', () => {
+    it('returns undefined when unset', () => {
+      expect(new Config(baseParams).getMemoryAgentMaxTurns()).toBeUndefined();
+    });
+
+    it('passes through non-negative values, including 0', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          memoryAgentMaxTurns: 25,
+        }).getMemoryAgentMaxTurns(),
+      ).toBe(25);
+      expect(
+        new Config({
+          ...baseParams,
+          memoryAgentMaxTurns: 0,
+        }).getMemoryAgentMaxTurns(),
+      ).toBe(0);
+    });
+
+    it('treats negative values as unset', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          memoryAgentMaxTurns: -1,
+        }).getMemoryAgentMaxTurns(),
+      ).toBeUndefined();
+    });
+
+    it('treats fractional values as unset', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          memoryAgentMaxTurns: 2.5,
+        }).getMemoryAgentMaxTurns(),
       ).toBeUndefined();
     });
   });
@@ -2859,6 +2904,92 @@ describe('Server Config (config.ts)', () => {
       },
     );
 
+    it('releases a pending lease while a real baseline read is gated', async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), 'qwen-config-writer-'));
+      const runtimeBaseDir = path.join(root, 'runtime');
+      const projectDir = path.join(root, 'project');
+      await mkdir(projectDir, { recursive: true });
+      Storage.setRuntimeBaseDir(runtimeBaseDir);
+      const config = new Config({
+        ...baseParams,
+        sessionId: 'pending-baseline',
+        cwd: projectDir,
+        targetDir: projectDir,
+        chatRecording: true,
+        experimentalZedIntegration: true,
+        sessionWriterLeaseEnabled: true,
+      });
+      const transcriptPath = config.getTranscriptPath();
+      await mkdir(path.dirname(transcriptPath), { recursive: true });
+      const transcript = Buffer.alloc(2 * 1024 * 1024, 0x20);
+      transcript[transcript.byteLength - 1] = 0x0a;
+      await writeFile(transcriptPath, transcript);
+      const lockPath = getSessionWriterLockPath(
+        runtimeBaseDir,
+        'pending-baseline',
+      );
+      const probe = await open(transcriptPath, 'r');
+      const fileHandlePrototype = Object.getPrototypeOf(probe) as {
+        read: typeof probe.read;
+      };
+      await probe.close();
+      const originalRead = fileHandlePrototype.read;
+      let releaseRead!: () => void;
+      const readGate = new Promise<void>((resolve) => {
+        releaseRead = resolve;
+      });
+      let notifyReadStarted!: () => void;
+      const readStarted = new Promise<void>((resolve) => {
+        notifyReadStarted = resolve;
+      });
+      let gated = false;
+      const read = vi
+        .spyOn(fileHandlePrototype, 'read')
+        .mockImplementation(async function (
+          this: fs.promises.FileHandle,
+          ...args
+        ) {
+          const result = await originalRead.apply(this, args);
+          const values = args as readonly unknown[];
+          if (!gated && values[2] === 1024 * 1024) {
+            gated = true;
+            notifyReadStarted();
+            await readGate;
+          }
+          return result;
+        });
+
+      try {
+        const initialize = config.initialize();
+        await readStarted;
+        await expect(stat(lockPath)).resolves.toBeDefined();
+        const close = config.closeSessionWriter();
+
+        await vi.waitFor(
+          () =>
+            expect(stat(lockPath)).rejects.toMatchObject({
+              code: 'ENOENT',
+            }),
+          { timeout: 1_000 },
+        );
+        expect(gated).toBe(true);
+        releaseRead();
+        await expect(close).resolves.toBeUndefined();
+        await expect(initialize).rejects.toMatchObject({
+          name: 'SessionWriterUnavailableError',
+        });
+        expect(config.hasSessionWriteOwnership()).toBe(false);
+        expect(config.getChatRecordingService()?.hasWriteOwnership()).toBe(
+          false,
+        );
+      } finally {
+        releaseRead();
+        read.mockRestore();
+        Storage.setRuntimeBaseDir(null);
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
     it('treats managed shutdown during writer acquisition as a clean terminal', async () => {
       const config = new Config({
         ...baseParams,
@@ -2921,11 +3052,7 @@ describe('Server Config (config.ts)', () => {
         'getSessionLocation',
       ).mockRejectedValue(activationError);
 
-      const result = await (
-        config as unknown as { activateChatRecording(): Promise<void> }
-      )
-        .activateChatRecording()
-        .catch((error: unknown) => error);
+      const result = await config.initialize().catch((error: unknown) => error);
 
       expect(result).toMatchObject({
         name: 'SessionWriterUnavailableError',
@@ -2938,6 +3065,67 @@ describe('Server Config (config.ts)', () => {
         (result as Error & { cause: AggregateError }).cause.errors,
       ).toEqual([activationError, releaseError]);
       expect(release).toHaveBeenCalledOnce();
+      acquire.mockRestore();
+    });
+
+    it('does not report the same acquisition release failure twice', async () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        experimentalZedIntegration: true,
+        sessionWriterLeaseEnabled: true,
+      });
+      const activationError = new SessionTranscriptChangedError();
+      const releaseError = new Error('lease release failed');
+      const acquisitionFailure = new SessionWriterUnavailableError({
+        cause: new AggregateError([activationError, releaseError]),
+      });
+      const release = vi.fn().mockRejectedValue(releaseError);
+      const lease = {
+        release,
+        isReleased: false,
+      } as unknown as SessionWriterLease;
+      const acquire = vi
+        .spyOn(SessionWriterLease, 'acquire')
+        .mockImplementation(async (options) => {
+          options.onOwnershipAcquired?.(lease);
+          throw acquisitionFailure;
+        });
+
+      const result = await config.initialize().catch((error: unknown) => error);
+
+      expect(result).toBe(acquisitionFailure);
+      expect(release).toHaveBeenCalledOnce();
+      acquire.mockRestore();
+    });
+
+    it('does not duplicate a concurrent activation and close failure', async () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        experimentalZedIntegration: true,
+        sessionWriterLeaseEnabled: true,
+      });
+      const activationError = new SessionTranscriptChangedError();
+      let rejectAcquire!: (error: Error) => void;
+      const acquireGate = new Promise<SessionWriterLease>(
+        (_resolve, reject) => {
+          rejectAcquire = reject;
+        },
+      );
+      const acquire = vi
+        .spyOn(SessionWriterLease, 'acquire')
+        .mockReturnValue(acquireGate);
+
+      const initialize = config.initialize().catch((error: unknown) => error);
+      await vi.waitFor(() => expect(acquire).toHaveBeenCalledOnce());
+      const close = config
+        .closeSessionWriter()
+        .catch((error: unknown) => error);
+      rejectAcquire(activationError);
+
+      expect(await close).toBe(activationError);
+      expect(await initialize).toBe(activationError);
       acquire.mockRestore();
     });
 
@@ -2972,6 +3160,44 @@ describe('Server Config (config.ts)', () => {
       expect(
         (result as Error & { cause: AggregateError }).cause.errors,
       ).toEqual([initializationError, closeError]);
+    });
+
+    it('runs due auto-skill curation before loading skills when enabled', async () => {
+      const config = new Config({ ...baseParams, enableAutoSkill: true });
+
+      await config.initialize();
+
+      expect(maybeRunAutoSkillCurator).toHaveBeenCalledWith(TARGET_DIR);
+      expect(
+        vi.mocked(maybeRunAutoSkillCurator).mock.invocationCallOrder[0],
+      ).toBeLessThan(vi.mocked(SkillManager).mock.invocationCallOrder[0]);
+    });
+
+    it('does not run auto-skill curation when auto-skill is disabled', async () => {
+      await new Config({ ...baseParams, enableAutoSkill: false }).initialize();
+
+      expect(maybeRunAutoSkillCurator).not.toHaveBeenCalled();
+    });
+
+    it('does not run auto-skill curation in an untrusted folder', async () => {
+      await new Config({
+        ...baseParams,
+        enableAutoSkill: true,
+        trustedFolder: false,
+      }).initialize();
+
+      expect(maybeRunAutoSkillCurator).not.toHaveBeenCalled();
+    });
+
+    it('continues loading skills when auto-skill curation fails', async () => {
+      vi.mocked(maybeRunAutoSkillCurator).mockRejectedValueOnce(
+        new Error('corrupt curator state'),
+      );
+
+      const config = new Config({ ...baseParams, enableAutoSkill: true });
+
+      await expect(config.initialize()).resolves.toBeUndefined();
+      expect(SkillManager).toHaveBeenCalledTimes(1);
     });
 
     it('waits for in-flight initialization before cleaning late resources', async () => {
@@ -3678,6 +3904,75 @@ describe('Server Config (config.ts)', () => {
       ).mock.calls.map((call) => call[0]);
       expect(registeredNames).toContain(ToolNames.ARTIFACT);
       expect(registeredNames).toContain(ToolNames.RECORD_ARTIFACT);
+    });
+
+    it('registers display_image only for the main interactive TUI', async () => {
+      const interactive = new Config({
+        ...baseParams,
+        interactive: true,
+        sdkMode: false,
+      });
+      await interactive.initialize();
+
+      const registerToolMock = ToolRegistry.prototype.registerFactory as Mock;
+      expect(registerToolMock.mock.calls.map((call) => call[0])).toContain(
+        ToolNames.DISPLAY_IMAGE,
+      );
+
+      for (const params of [
+        { interactive: false, sdkMode: false },
+        { interactive: true, sdkMode: true },
+        {
+          interactive: true,
+          sdkMode: false,
+          inputFormat: InputFormat.STREAM_JSON,
+        },
+        {
+          interactive: true,
+          sdkMode: false,
+          accessibility: { screenReader: true },
+        },
+      ]) {
+        registerToolMock.mockClear();
+        const config = new Config({ ...baseParams, ...params });
+        await config.initialize();
+        expect(
+          registerToolMock.mock.calls.map((call) => call[0]),
+        ).not.toContain(ToolNames.DISPLAY_IMAGE);
+      }
+
+      registerToolMock.mockClear();
+      await interactive.createToolRegistry(undefined, {
+        skipDiscovery: true,
+        forSubAgent: true,
+      });
+      expect(registerToolMock.mock.calls.map((call) => call[0])).not.toContain(
+        ToolNames.DISPLAY_IMAGE,
+      );
+    });
+
+    it('forwards terminal image renderer support to the display tool', async () => {
+      const provider = vi.fn().mockResolvedValue({
+        available: false,
+        reason: 'renderer unavailable',
+      });
+      const config = new Config({
+        ...baseParams,
+        terminalImageRenderSupportProvider: provider,
+      });
+
+      await expect(config.getTerminalImageRenderSupport()).resolves.toEqual({
+        available: false,
+        reason: 'renderer unavailable',
+      });
+      expect(provider).toHaveBeenCalledWith();
+
+      await expect(
+        new Config(baseParams).getTerminalImageRenderSupport(),
+      ).resolves.toEqual({
+        available: false,
+        reason: 'No terminal image renderer is configured.',
+      });
     });
 
     it('registers only record_artifact by default for daemon artifact metadata', async () => {
@@ -4587,6 +4882,224 @@ describe('Server Config (config.ts)', () => {
       });
 
       expect(config.getFastModel()).toBeUndefined();
+    });
+
+    describe('getCompactionModel', () => {
+      it('returns the compaction model when set', async () => {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'gpt-4',
+          compactionModel: 'compaction-model',
+          modelProvidersConfig: {
+            [AuthType.USE_OPENAI]: [
+              {
+                id: 'gpt-4',
+                name: 'GPT-4',
+                baseUrl: 'https://api.openai.com/v1',
+                envKey: 'OPENAI_API_KEY',
+              },
+              {
+                id: 'compaction-model',
+                name: 'Compaction Model',
+                baseUrl: 'https://api.openai.com/v1',
+                envKey: 'OPENAI_API_KEY',
+              },
+            ],
+          },
+        });
+
+        await config.refreshAuth(AuthType.USE_OPENAI);
+
+        expect(config.getCompactionModel()).toBe('compaction-model');
+      });
+
+      it('resolves an authType-qualified compaction model selector', async () => {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_ANTHROPIC,
+          model: 'claude-opus-4-7',
+          compactionModel: 'openai:compaction-model',
+          modelProvidersConfig: {
+            [AuthType.USE_OPENAI]: [
+              {
+                id: 'compaction-model',
+                name: 'Compaction Model',
+                baseUrl: 'https://api.openai.com/v1',
+                envKey: 'OPENAI_API_KEY',
+              },
+            ],
+            [AuthType.USE_ANTHROPIC]: [
+              {
+                id: 'claude-opus-4-7',
+                name: 'claude-opus-4-7',
+                baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
+                envKey: 'IDEALAB_OPUS_API_KEY',
+              },
+            ],
+          },
+        });
+
+        await config.refreshAuth(AuthType.USE_ANTHROPIC);
+
+        expect(config.getCompactionModel()).toBe('openai:compaction-model');
+      });
+
+      it('falls back to the main model when compactionModel is not set', async () => {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'gpt-4',
+          fastModel: 'fast-model',
+          modelProvidersConfig: {
+            [AuthType.USE_OPENAI]: [
+              {
+                id: 'gpt-4',
+                name: 'GPT-4',
+                baseUrl: 'https://api.openai.com/v1',
+                envKey: 'OPENAI_API_KEY',
+              },
+              {
+                id: 'fast-model',
+                name: 'Fast Model',
+                baseUrl: 'https://api.openai.com/v1',
+                envKey: 'OPENAI_API_KEY',
+              },
+            ],
+          },
+        });
+
+        await config.refreshAuth(AuthType.USE_OPENAI);
+
+        // fastModel is intentionally ignored — compaction falls back to main
+        expect(config.getCompactionModel()).toBe('gpt-4');
+      });
+
+      it('falls back to main model when neither compactionModel nor fastModel is set', () => {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'gpt-4',
+          modelProvidersConfig: {
+            [AuthType.USE_OPENAI]: [
+              {
+                id: 'gpt-4',
+                name: 'GPT-4',
+                baseUrl: 'https://api.openai.com/v1',
+                envKey: 'OPENAI_API_KEY',
+              },
+            ],
+          },
+        });
+
+        expect(config.getCompactionModel()).toBe('gpt-4');
+      });
+
+      it('returns undefined when the compaction model is voiceOnly', async () => {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'gpt-4',
+          compactionModel: 'voice-model',
+          modelProvidersConfig: {
+            [AuthType.USE_OPENAI]: [
+              {
+                id: 'gpt-4',
+                name: 'GPT-4',
+                baseUrl: 'https://api.openai.com/v1',
+                envKey: 'OPENAI_API_KEY',
+              },
+              {
+                id: 'voice-model',
+                name: 'Voice Model',
+                voiceOnly: true,
+                baseUrl: 'https://api.openai.com/v1',
+                envKey: 'OPENAI_API_KEY',
+              },
+            ],
+          },
+        });
+
+        await config.refreshAuth(AuthType.USE_OPENAI);
+
+        expect(config.getCompactionModel()).toBeUndefined();
+      });
+
+      it('returns undefined when the compaction model is visionOnly', async () => {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'gpt-4',
+          compactionModel: 'vision-model',
+          modelProvidersConfig: {
+            [AuthType.USE_OPENAI]: [
+              {
+                id: 'gpt-4',
+                name: 'GPT-4',
+                baseUrl: 'https://api.openai.com/v1',
+                envKey: 'OPENAI_API_KEY',
+              },
+              {
+                id: 'vision-model',
+                name: 'Vision Model',
+                visionOnly: true,
+                baseUrl: 'https://api.openai.com/v1',
+                envKey: 'OPENAI_API_KEY',
+              },
+            ],
+          },
+        });
+
+        await config.refreshAuth(AuthType.USE_OPENAI);
+
+        expect(config.getCompactionModel()).toBeUndefined();
+      });
+
+      it('falls back to the main model when the compaction model selector is malformed', async () => {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_ANTHROPIC,
+          model: 'claude-opus-4-7',
+          compactionModel: 'openai:',
+          modelProvidersConfig: {
+            [AuthType.USE_OPENAI]: [
+              {
+                id: 'deepseek-v4-flash',
+                name: 'deepseek-v4-flash',
+                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                envKey: 'DASHSCOPE_API_KEY',
+              },
+            ],
+          },
+        });
+
+        await config.refreshAuth(AuthType.USE_ANTHROPIC);
+
+        expect(config.getCompactionModel()).toBe('claude-opus-4-7');
+      });
+
+      it('returns undefined when the compaction model is not configured for the current auth type', async () => {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_ANTHROPIC,
+          model: 'claude-opus-4-7',
+          compactionModel: 'missing-model',
+          modelProvidersConfig: {
+            [AuthType.USE_ANTHROPIC]: [
+              {
+                id: 'claude-opus-4-7',
+                name: 'Claude Opus 4',
+                baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
+                envKey: 'IDEALAB_OPUS_API_KEY',
+              },
+            ],
+          },
+        });
+
+        await config.refreshAuth(AuthType.USE_ANTHROPIC);
+
+        expect(config.getCompactionModel()).toBeUndefined();
+      });
     });
 
     it('should refresh auth when switching to model with different envKey', async () => {
