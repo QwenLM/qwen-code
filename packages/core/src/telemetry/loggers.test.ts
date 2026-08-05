@@ -354,7 +354,7 @@ describe('loggers', () => {
   });
 
   describe('logRepeatedToolFailureGuard', () => {
-    it('emits a privacy-safe transition log and low-cardinality metric', () => {
+    it('emits a data-minimized transition log and low-cardinality metric', () => {
       const config = makeFakeConfig({ sessionId: 'test-session-id' });
       vi.spyOn(
         metrics,
@@ -438,7 +438,7 @@ describe('loggers', () => {
   });
 
   describe('logLoopDetected', () => {
-    it('keeps repeated execution failure stops out of session-scoped RUM', () => {
+    it('does not infer telemetry destinations from the loop type', () => {
       const config = makeFakeConfig({ sessionId: 'test-session-id' });
       const logLoopDetectedEvent = vi.fn();
       const getInstanceSpy = vi
@@ -454,14 +454,36 @@ describe('loggers', () => {
       try {
         logLoopDetected(config, event);
 
+        expect(logLoopDetectedEvent).toHaveBeenCalledWith(event);
+      } finally {
+        getInstanceSpy.mockRestore();
+      }
+    });
+
+    it('supports explicitly keeping a loop event out of QwenLogger', () => {
+      const config = makeFakeConfig({ sessionId: 'test-session-id' });
+      const logLoopDetectedEvent = vi.fn();
+      const getInstanceSpy = vi
+        .spyOn(QwenLogger, 'getInstance')
+        .mockReturnValue({
+          logLoopDetectedEvent,
+        } as unknown as QwenLogger);
+      const event = new LoopDetectedEvent(
+        LoopType.REPEATED_TOOL_EXECUTION_FAILURE,
+        'prompt-id',
+      );
+
+      try {
+        logLoopDetected(config, event, { recordToQwenLogger: false });
+
         expect(logLoopDetectedEvent).not.toHaveBeenCalled();
         expect(mockLogger.emit).toHaveBeenCalledWith({
           body: `Loop detected. Type: ${LoopType.REPEATED_TOOL_EXECUTION_FAILURE}.`,
-          attributes: event,
+          attributes: {
+            'session.id': 'test-session-id',
+            ...event,
+          },
         });
-        expect(
-          mockLogger.emit.mock.calls.at(-1)?.[0].attributes,
-        ).not.toHaveProperty('session.id');
       } finally {
         getInstanceSpy.mockRestore();
       }

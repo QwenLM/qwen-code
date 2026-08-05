@@ -78,6 +78,15 @@ export type RepeatedToolFailureResetReason =
   | 'unreliable_input'
   | 'contract_violation';
 
+const INELIGIBLE_RESET_REASON_PRECEDENCE = [
+  'contract_violation',
+  'cancelled',
+  'unknown',
+  'not_started',
+  'post_execution_failure',
+  'success',
+] as const satisfies readonly RepeatedToolFailureResetReason[];
+
 export type RepeatedToolFailureGuardDecision =
   | { kind: 'none'; state: RepeatedToolFailureGuardState }
   | {
@@ -126,12 +135,6 @@ export function parseRepeatedToolFailureGuardMode(
     default:
       return undefined;
   }
-}
-
-export function resolveRepeatedToolFailureGuardMode(
-  value: string | undefined,
-): RepeatedToolFailureGuardMode {
-  return parseRepeatedToolFailureGuardMode(value) ?? 'shadow';
 }
 
 function resetState(
@@ -205,43 +208,71 @@ export function reduceRepeatedToolFailureGuard(
   }
 
   const eligible: FailureKey[] = [];
+  const resetReasons = new Set<RepeatedToolFailureResetReason>();
+  let enforcementDisabled = state.enforcementDisabled;
   for (const observation of observations) {
     const { terminalStatus, executionStatus } = observation;
-    if (
-      terminalStatus === 'success' &&
-      (executionStatus === 'error' || executionStatus === 'cancelled')
-    ) {
-      return reset(state, 'contract_violation', true);
-    }
     if (terminalStatus === 'cancelled') {
-      return reset(state, 'cancelled');
+      resetReasons.add('cancelled');
+      continue;
     }
     if (executionStatus === undefined || executionStatus === 'unknown') {
-      return reset(state, 'unknown', true);
-    }
-    if (executionStatus === 'cancelled') {
-      return reset(state, 'cancelled');
+      resetReasons.add('unknown');
+      enforcementDisabled = true;
+      continue;
     }
     if (terminalStatus === 'success') {
-      return reset(state, 'success');
+      if (executionStatus === 'error' || executionStatus === 'cancelled') {
+        resetReasons.add('contract_violation');
+        enforcementDisabled = true;
+      } else if (
+        executionStatus === 'success' ||
+        executionStatus === 'not_started'
+      ) {
+        resetReasons.add('success');
+      } else {
+        resetReasons.add('unknown');
+        enforcementDisabled = true;
+      }
+      continue;
+    }
+    if (executionStatus === 'cancelled') {
+      resetReasons.add('cancelled');
+      continue;
     }
     if (executionStatus === 'not_started') {
-      return reset(state, 'not_started');
+      resetReasons.add('not_started');
+      continue;
     }
     if (executionStatus === 'success') {
-      return reset(state, 'post_execution_failure');
+      resetReasons.add('post_execution_failure');
+      continue;
+    }
+    if (executionStatus !== 'error') {
+      resetReasons.add('unknown');
+      enforcementDisabled = true;
+      continue;
     }
     if (
       !observation.policyToolName ||
       observation.executionErrorType === undefined ||
       observation.executionErrorType === ToolErrorType.UNKNOWN
     ) {
-      return reset(state, 'unknown', true);
+      resetReasons.add('unknown');
+      enforcementDisabled = true;
+      continue;
     }
     eligible.push({
       policyToolName: observation.policyToolName,
       executionErrorType: observation.executionErrorType,
     });
+  }
+
+  const resetReason = INELIGIBLE_RESET_REASON_PRECEDENCE.find((reason) =>
+    resetReasons.has(reason),
+  );
+  if (resetReason !== undefined) {
+    return reset(state, resetReason, enforcementDisabled);
   }
 
   const key = eligible[0];

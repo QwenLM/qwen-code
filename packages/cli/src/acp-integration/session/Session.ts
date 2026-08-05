@@ -5,7 +5,7 @@
  */
 
 import { Buffer } from 'node:buffer';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { realpathSync, statSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -170,6 +170,7 @@ import {
   runWithInvocationContext,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
+import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
 import { ENV_ACP_REPEATED_TOOL_FAILURE_GUARD } from '../../config/shared-env-keys.js';
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
 // so a rename can't desync caller and answerer into a silent -32601 latch.
@@ -305,7 +306,6 @@ const USER_CANCEL_ABORT_REASON = 'qwen:user-cancel';
 const SESSION_DISPOSE_ABORT_REASON = 'qwen:session-dispose';
 const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
 const DAEMON_CONTINUE_META_KEY = 'qwen.daemon.continueLastTurn';
-const CHANNEL_PROMPT_META_KEY = 'qwen.channel.prompt';
 const TODO_STOP_GUARD_PROMPT_PREFIX = '[Todo Stop Guard] ';
 const TODO_STOP_GUARD_PROMPT_BODY_SUFFIX =
   ' todo item(s) are still pending or in progress. Continue executing the current task now. Do not ask the user whether to continue. If progress requires user input, use the structured question or permission flow. If progress depends on external state, report the blocker explicitly.';
@@ -460,7 +460,6 @@ type DaemonToolLoopState = {
   loopDetected: boolean;
   repeatedToolFailureMode: RepeatedToolFailureGuardMode;
   repeatedToolFailureState: RepeatedToolFailureGuardState;
-  repeatedToolFailureTelemetryId?: string;
 };
 
 const DAEMON_INVALID_TOOL_PARAMS_THRESHOLD = 3;
@@ -476,8 +475,7 @@ const TOOL_POST_EXECUTION_CANCELLED_MESSAGE =
   'The tool had already completed; its output was discarded.';
 
 function createDaemonToolLoopState(
-  repeatedToolFailureMode: RepeatedToolFailureGuardMode = 'off',
-  telemetrySourceId?: string,
+  repeatedToolFailureMode: RepeatedToolFailureGuardMode,
 ): DaemonToolLoopState {
   return {
     totalToolCalls: 0,
@@ -485,13 +483,6 @@ function createDaemonToolLoopState(
     loopDetected: false,
     repeatedToolFailureMode,
     repeatedToolFailureState: createRepeatedToolFailureGuardState(),
-    ...(repeatedToolFailureMode === 'off' || telemetrySourceId === undefined
-      ? {}
-      : {
-          repeatedToolFailureTelemetryId: createHash('sha256')
-            .update(telemetrySourceId)
-            .digest('hex'),
-        }),
   };
 }
 
@@ -514,17 +505,13 @@ function repeatedToolFailureBatchBucket(count: number): '0' | '1' | '2' | '3+' {
 
 function recordRepeatedToolFailureDecision(
   config: Config,
-  telemetryPromptId: string | undefined,
+  promptId: string,
   mode: RepeatedToolFailureGuardMode,
   previousState: RepeatedToolFailureGuardState,
   decision: RepeatedToolFailureGuardDecision,
   batch: RepeatedToolFailureBatch,
 ): void {
-  if (
-    mode === 'off' ||
-    decision.kind === 'none' ||
-    telemetryPromptId === undefined
-  ) {
+  if (mode === 'off' || decision.kind === 'none') {
     return;
   }
 
@@ -556,7 +543,7 @@ function recordRepeatedToolFailureDecision(
     logRepeatedToolFailureGuard(
       config,
       new RepeatedToolFailureGuardEvent({
-        prompt_id: telemetryPromptId,
+        prompt_id: promptId,
         route: 'acp_foreground',
         mode,
         phase_before: previousState.phase,
@@ -593,12 +580,17 @@ function recordDaemonLoopDetected(
   loopType: LoopType,
   message: string,
   loopState: DaemonToolLoopState,
+  options: { recordToQwenLogger?: boolean } = {},
 ): true {
   if (!loopState.loopDetected) {
     loopState.loopDetected = true;
     debugLogger.warn(message);
     try {
-      logLoopDetected(config, new LoopDetectedEvent(loopType, promptId));
+      logLoopDetected(
+        config,
+        new LoopDetectedEvent(loopType, promptId),
+        options,
+      );
     } catch (error) {
       debugLogger.debug(
         '[Session] Failed to record loop detection telemetry',
@@ -3283,7 +3275,6 @@ export class Session implements SessionContext {
               promptMetadata?.[CHANNEL_PROMPT_META_KEY] === true
                 ? 'off'
                 : this.repeatedToolFailureGuardMode,
-              promptId,
             );
 
             // conversation_finished must fire on every terminal path of the
@@ -3661,7 +3652,7 @@ export class Session implements SessionContext {
 
       if (this.todoStopGuard.needsStopInspection) {
         const drained = await this.#drainMidTurnInput(pendingSend.signal, {
-          watchQueuedPromptForTodoStopGuard: true,
+          watchQueuedPrompt: true,
           onFullTurnModel,
         });
         if (drained.parts.length > 0) {
@@ -3760,7 +3751,7 @@ export class Session implements SessionContext {
 
         if (this.todoStopGuard.needsStopInspection) {
           const drained = await this.#drainMidTurnInput(pendingSend.signal, {
-            watchQueuedPromptForTodoStopGuard: true,
+            watchQueuedPrompt: true,
             onFullTurnModel,
           });
           if (drained.parts.length > 0) {
@@ -3944,7 +3935,7 @@ export class Session implements SessionContext {
   ): Promise<StopContinuationResult> {
     let nextMessage: Content | null = { role: 'user', parts };
     let nextGuardContinuation = options.guardContinuation;
-    const toolLoopState = createDaemonToolLoopState();
+    const toolLoopState = createDaemonToolLoopState('off');
     let initialSend = true;
     let automaticContinuationValidated = false;
     let supersededAutomaticContinuation = false;
@@ -4027,7 +4018,7 @@ export class Session implements SessionContext {
                   const drained = await this.#drainMidTurnInput(
                     pendingSend.signal,
                     {
-                      watchQueuedPromptForTodoStopGuard: true,
+                      watchQueuedPrompt: true,
                       onFullTurnModel: options.onFullTurnModel,
                     },
                   );
@@ -4507,15 +4498,6 @@ export class Session implements SessionContext {
           options.onFullTurnModel,
         );
         nextMessage = nextAfterTools.message;
-        if (nextAfterTools.stoppedByRepeatedToolFailure) {
-          return {
-            kind: 'terminal',
-            stopReason: 'end_turn',
-            ...(supersededAutomaticContinuation
-              ? { supersededAutomaticContinuation: true }
-              : {}),
-          };
-        }
         if (nextAfterTools.hadMidTurnUserInput) {
           nextGuardContinuation = undefined;
           continue;
@@ -4965,8 +4947,7 @@ export class Session implements SessionContext {
       return { message: null, hadMidTurnUserInput: false };
     }
     const drained = await this.#drainMidTurnInput(abortSignal, {
-      watchQueuedPromptForTodoStopGuard:
-        toolLoopState.repeatedToolFailureMode !== 'off',
+      watchQueuedPrompt: toolLoopState.repeatedToolFailureMode !== 'off',
       onFullTurnModel,
     });
     const hadMidTurnUserInput = drained.parts.length > 0;
@@ -5000,7 +4981,7 @@ export class Session implements SessionContext {
     );
     recordRepeatedToolFailureDecision(
       this.config,
-      toolLoopState.repeatedToolFailureTelemetryId,
+      promptId,
       toolLoopState.repeatedToolFailureMode,
       previousRepeatedToolFailureState,
       repeatedToolFailureDecision,
@@ -5037,10 +5018,11 @@ export class Session implements SessionContext {
       await this.messageRewriter?.waitForPendingRewrites();
       recordDaemonLoopDetected(
         this.config,
-        toolLoopState.repeatedToolFailureTelemetryId ?? promptId,
+        promptId,
         LoopType.REPEATED_TOOL_EXECUTION_FAILURE,
         REPEATED_TOOL_FAILURE_STOP_MESSAGE,
         toolLoopState,
+        { recordToQwenLogger: false },
       );
       try {
         await this.messageEmitter.emitAgentMessage(
@@ -5180,7 +5162,7 @@ export class Session implements SessionContext {
   async #drainMidTurnInput(
     abortSignal: AbortSignal,
     options: {
-      watchQueuedPromptForTodoStopGuard?: boolean;
+      watchQueuedPrompt?: boolean;
       onFullTurnModel?: (model: string) => boolean;
     } = {},
   ): Promise<MidTurnDrainResult> {
@@ -5203,7 +5185,8 @@ export class Session implements SessionContext {
     try {
       drainPromise = this.client.extMethod(MID_TURN_QUEUE_DRAIN_METHOD, {
         sessionId: this.sessionId,
-        ...(options.watchQueuedPromptForTodoStopGuard
+        // Keep the legacy wire name for ACP host compatibility.
+        ...(options.watchQueuedPrompt
           ? { todoStopGuardWatchQueuedPrompt: true }
           : {}),
       });
@@ -5223,7 +5206,7 @@ export class Session implements SessionContext {
       this.midTurnDrainTimeoutStrikes = 0;
       const reliable = isValidMidTurnDrainResponse(
         response,
-        options.watchQueuedPromptForTodoStopGuard === true,
+        options.watchQueuedPrompt === true,
       );
       return {
         parts: await this.#buildMidTurnParts(
@@ -5810,7 +5793,7 @@ export class Session implements SessionContext {
                   { text: modelText },
                 ],
               };
-              const toolLoopState = createDaemonToolLoopState();
+              const toolLoopState = createDaemonToolLoopState('off');
 
               while (nextMessage !== null) {
                 turnCount++;
@@ -5980,9 +5963,6 @@ export class Session implements SessionContext {
                       toolLoopState,
                     );
                   nextMessage = nextAfterTools.message;
-                  if (nextAfterTools.stoppedByRepeatedToolFailure) {
-                    return;
-                  }
                   if (toolRun.loopDetected) {
                     this.todoStopGuard.suspend();
                     await this.#preserveStoppedToolRun(toolRun, ac.signal);
@@ -6341,7 +6321,7 @@ export class Session implements SessionContext {
               ...notificationParts,
             ],
           };
-          const toolLoopState = createDaemonToolLoopState();
+          const toolLoopState = createDaemonToolLoopState('off');
 
           while (nextMessage !== null) {
             if (ac.signal.aborted) {
@@ -6499,10 +6479,6 @@ export class Session implements SessionContext {
                 toolLoopState,
               );
               nextMessage = nextAfterTools.message;
-              if (nextAfterTools.stoppedByRepeatedToolFailure) {
-                await this.#emitBackgroundNotificationEndTurn('end_turn');
-                return;
-              }
               if (toolRun.loopDetected) {
                 this.todoStopGuard.suspend();
                 await this.#preserveStoppedToolRun(toolRun, ac.signal);
@@ -9349,7 +9325,8 @@ export class Session implements SessionContext {
             persistedOutputFiles: toolResult.persistedOutputFiles,
             policyToolName,
             toolType,
-            executionErrorType,
+            executionErrorType:
+              executionStatus === 'error' ? executionErrorType : undefined,
             metadata: {
               callId,
               status,

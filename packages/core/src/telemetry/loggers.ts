@@ -135,7 +135,6 @@ import type {
   MemoryRecallEvent,
   MemoryRecallDeliveryEvent,
 } from './types.js';
-import { LoopType } from './types.js';
 import type { HookCallEvent } from './types.js';
 import type { UiEvent } from './uiTelemetry.js';
 import { uiTelemetryService } from './uiTelemetry.js';
@@ -639,18 +638,15 @@ export function logApiResponse(config: Config, event: ApiResponseEvent): void {
 export function logLoopDetected(
   config: Config,
   event: LoopDetectedEvent,
+  options: { recordToQwenLogger?: boolean } = {},
 ): void {
-  const privacyRestricted =
-    event.loop_type === LoopType.REPEATED_TOOL_EXECUTION_FAILURE;
-  // This loop type uses its guard-generated opaque prompt correlation ID and
-  // intentionally omits the session-scoped RUM and common session attribute.
-  if (!privacyRestricted) {
+  if (options.recordToQwenLogger !== false) {
     QwenLogger.getInstance(config)?.logLoopDetectedEvent(event);
   }
   if (!isTelemetrySdkInitialized()) return;
 
   const attributes: LogAttributes = {
-    ...(privacyRestricted ? {} : getCommonAttributes(config)),
+    ...getCommonAttributes(config),
     ...event,
   };
 

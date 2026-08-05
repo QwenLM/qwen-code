@@ -285,7 +285,9 @@ interactive foreground ACP prompt. Both channel bridge implementations mark
 their prompts explicitly, and Session forces those marked prompts to `off`
 even when the process is configured for enforcement. It is not process-global
 and must not fall back to a legacy or primary runtime when workspace ownership
-is unknown.
+is unknown. The marker is client-asserted ACP metadata, so another client can
+also opt its prompt out of this conservative protection; it is a routing trust
+signal, not an authorization boundary.
 
 Modes:
 
@@ -294,11 +296,12 @@ Modes:
 - `warn`: inject the reminder but never stop.
 - `enforce`: inject and stop according to the state machine.
 
-Default is `shadow`. Unknown ownership, an untrusted producer, or mixed
-deployment versions force at most `warn`. A missing `executionStatus` or an
-unsupported outcome combination resets the streak and downgrades the rest of
-that prompt to at most `warn`. Cron, notification, background, and custom
-routes remain `off` in the first release.
+Default is `shadow`. The deployment control plane must not assign `enforce` to
+unknown ownership, untrusted producers, or mixed deployment versions; the
+runtime does not infer those deployment properties. A missing
+`executionStatus` or an unsupported outcome combination resets the streak and
+downgrades the rest of that prompt to at most `warn`. Cron, notification, and
+background routes remain `off` in the first release.
 
 The mode is an operator-controlled deployment policy, not a user-facing
 setting. `QWEN_CODE_ACP_REPEATED_TOOL_FAILURE_GUARD` selects `off`, `shadow`,
@@ -306,9 +309,9 @@ setting. `QWEN_CODE_ACP_REPEATED_TOOL_FAILURE_GUARD` selects `off`, `shadow`,
 to `shadow`, and a non-empty invalid value records an operator diagnostic.
 Project `.env`, project `.qwen/.env`, and workspace `settings.env` sources are
 not allowed to set this policy; an exported process value or a user-level
-environment file remains valid. The deployment control plane must set it only
-on the assigned version-pinned cohort. This feature does not introduce a
-second rollout or owner-assignment service.
+environment file remains valid. The deployment control plane must set it above
+`shadow` only on the assigned version-pinned cohort. This feature does not
+introduce a second rollout or owner-assignment service.
 
 The guard depends on the ACP host implementing `craft/drainMidTurnQueue` with a
 boolean `hasQueuedPrompt` when the guard is enabled. Older or third-party hosts
@@ -320,8 +323,8 @@ supported-host shadow baseline.
 
 ## Telemetry and privacy
 
-Emit low-cardinality counters plus one privacy-restricted structured diagnostic
-log per reducer transition:
+Emit low-cardinality counters plus one data-minimized structured diagnostic log
+per reducer transition:
 
 - deployment environment and service version from the existing OpenTelemetry
   resource rather than new guard labels;
@@ -337,24 +340,26 @@ log per reducer transition:
   `external_input`, or `contract_violation`;
 - failure count bucket: `0`, `1-2`, `3-4`, `5-7`, or `8+`;
 - batch count bucket: `0`, `1`, `2`, or `3+`;
-- a prompt-local guard correlation ID in the diagnostic log only, for checking
-  transition order; it is a one-way SHA-256 digest of the ACP prompt ID, so an
-  authorized investigation can hash a known trace prompt ID while the central
-  event does not disclose the prompt or session ID; and
+- the same raw ACP `prompt_id` already emitted by tool-call telemetry, in the
+  diagnostic log only, so authorized rollout analysis can join guard
+  transitions to the settled tool batch without a second identifier space; and
 - a prompt-local candidate ordinal in the diagnostic log only. The reducer
   reuses the ordinal while the same private key is active and allocates a new
   one when the key changes.
 
-The guard correlation ID and candidate ordinal are never metric labels. The
-ordinal cannot correlate a tool across prompts and does not reveal its
-identity. An `idle`-to-`idle` observation emits nothing.
+The prompt ID and candidate ordinal are never metric labels. The ordinal cannot
+correlate a tool across prompts and does not reveal its identity. An
+`idle`-to-`idle` observation emits nothing.
 
 The terminal `repeated_tool_execution_failure` loop event uses the same
-privacy-restricted OpenTelemetry path and bypasses session-scoped RUM. Other
-loop types keep their existing telemetry behavior.
+OpenTelemetry prompt ID and explicitly bypasses QwenLogger/RUM at the Session
+call site. The shared Core logger does not infer destinations from the loop
+type. Other loop types keep their existing telemetry behavior.
 
 Do not emit tool arguments, results, raw error messages, stack traces, paths,
-MCP server names, user IDs, session IDs, or the unhashed failure key.
+MCP server names, user IDs, or the private failure key in guard-specific
+fields. The existing OpenTelemetry prompt correlation and the terminal loop
+event's session field retain their normal meaning and access policy.
 
 Cancellation is excluded from every failure-rate numerator. The primary
 execution SLI uses PR #8180's contract:
@@ -395,10 +400,11 @@ Shadow mode advances a virtual warned state without injecting the reminder, so
 `would_warn` and `would_stop` estimate volume only. They cannot establish how a
 model behaves after seeing the reminder.
 
-The default shadow mode adds `todoStopGuardWatchQueuedPrompt: true` to the
-existing mid-turn drain request so the reducer can prove that no full prompt is
-queued. Hosts without that response contract are counted through
-`unreliable_input` and excluded from supported-host shadow conclusions.
+The default shadow mode does not change model continuation or injected
+messages. It does add `todoStopGuardWatchQueuedPrompt: true` to the existing
+mid-turn drain request so the reducer can prove that no full prompt is queued.
+Hosts without that response contract are counted through `unreliable_input`
+and excluded from supported-host shadow conclusions.
 
 Required invariants:
 
@@ -518,8 +524,9 @@ Automated ACP Session and channel tests cover:
 Telemetry tests cover:
 
 - low-cardinality attributes; and
-- exclusion of session-scoped common attributes and sensitive tool fields from
-  the guard and terminal loop events.
+- explicit exclusion of the terminal loop event from QwenLogger/RUM while
+  preserving standard OpenTelemetry correlation fields, plus exclusion of
+  sensitive tool fields from guard-specific telemetry.
 
 The behavioral change also has an E2E plan under `.qwen/e2e-tests/`. Its manual
 ACP fixture run remains required before promotion out of Draft. It covers one

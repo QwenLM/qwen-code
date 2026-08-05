@@ -6,7 +6,6 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { createHash } from 'node:crypto';
 import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
@@ -51,6 +50,7 @@ import * as nonInteractiveCliCommands from '../../nonInteractiveCliCommands.js';
 import { CommandKind } from '../../ui/commands/types.js';
 import { MessageType } from '../../ui/types.js';
 import { buildAcpModelOptions } from '../../utils/acpModelUtils.js';
+import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
 
 const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
 const debugLoggerDebugSpy = vi.hoisted(() => vi.fn());
@@ -6550,7 +6550,7 @@ describe('Session', () => {
             session.prompt({
               sessionId: 'test-session-id',
               prompt: [{ type: 'text', text: 'channel task' }],
-              _meta: { 'qwen.channel.prompt': true },
+              _meta: { [CHANNEL_PROMPT_META_KEY]: true },
             }),
           ).resolves.toEqual({ stopReason: 'end_turn' });
 
@@ -6700,22 +6700,16 @@ describe('Session', () => {
             mockConfig,
             expect.objectContaining({
               loop_type: core.LoopType.REPEATED_TOOL_EXECUTION_FAILURE,
+              prompt_id: 'test-session-id########1',
             }),
+            { recordToQwenLogger: false },
           );
           const telemetryPromptIds =
             logRepeatedToolFailureGuardSpy.mock.calls.map(
               ([, event]) => event.prompt_id,
             );
           expect(new Set(telemetryPromptIds).size).toBe(1);
-          expect(telemetryPromptIds[0]).toBe(
-            createHash('sha256')
-              .update('test-session-id########1')
-              .digest('hex'),
-          );
-          expect(logLoopDetectedSpy).toHaveBeenCalledWith(
-            mockConfig,
-            expect.objectContaining({ prompt_id: telemetryPromptIds[0] }),
-          );
+          expect(telemetryPromptIds[0]).toBe('test-session-id########1');
           expect(mockChat.addHistory).toHaveBeenCalledWith({
             role: 'user',
             parts: expect.arrayContaining([

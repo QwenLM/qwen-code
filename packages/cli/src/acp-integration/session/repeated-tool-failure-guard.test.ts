@@ -14,7 +14,7 @@ import {
   reduceRepeatedToolFailureGuard,
   REPEATED_TOOL_FAILURE_REMINDER,
   REPEATED_TOOL_FAILURE_STOP_MESSAGE,
-  resolveRepeatedToolFailureGuardMode,
+  parseRepeatedToolFailureGuardMode,
   type RepeatedToolFailureGuardMode,
   type RepeatedToolFailureObservation,
   type RepeatedToolFailureTerminalStatus,
@@ -58,10 +58,10 @@ function reduce(
 }
 
 describe('repeated tool failure guard', () => {
-  it('defaults invalid or missing deployment modes to shadow', () => {
-    expect(resolveRepeatedToolFailureGuardMode(undefined)).toBe('shadow');
-    expect(resolveRepeatedToolFailureGuardMode('invalid')).toBe('shadow');
-    expect(resolveRepeatedToolFailureGuardMode(' WARN ')).toBe('warn');
+  it('parses valid deployment modes and rejects missing or invalid values', () => {
+    expect(parseRepeatedToolFailureGuardMode(undefined)).toBeUndefined();
+    expect(parseRepeatedToolFailureGuardMode('invalid')).toBeUndefined();
+    expect(parseRepeatedToolFailureGuardMode(' WARN ')).toBe('warn');
   });
 
   it('does no work when the deployment mode is off', () => {
@@ -326,6 +326,57 @@ describe('repeated tool failure guard', () => {
       state: { enforcementDisabled: false },
     });
   });
+
+  it.each([
+    ['cancelled first', ['cancelled', 'unknown']],
+    ['unknown first', ['unknown', 'cancelled']],
+  ] as const)(
+    'classifies mixed ineligible batches deterministically when %s',
+    (_label, order) => {
+      const tracked = reduce(createRepeatedToolFailureGuardState(), [
+        observation(),
+      ]);
+      const byOutcome = {
+        cancelled: observation({
+          callId: 'cancelled',
+          terminalStatus: 'cancelled',
+          executionStatus: 'cancelled',
+          executionErrorType: undefined,
+        }),
+        unknown: observation({
+          callId: 'unknown',
+          policyToolName: undefined,
+        }),
+      };
+      const result = reduce(
+        tracked.state,
+        order.map((outcome) => byOutcome[outcome]),
+      );
+
+      expect(result).toMatchObject({
+        kind: 'reset',
+        reason: 'cancelled',
+        state: { enforcementDisabled: true },
+      });
+    },
+  );
+
+  it.each(['error', 'success'] as const)(
+    'fails open when a future execution status reaches a terminal %s observation',
+    (terminalStatus) => {
+      const result = reduce(createRepeatedToolFailureGuardState(), [
+        observation({
+          terminalStatus,
+          executionStatus: 'timeout' as ToolExecutionStatus,
+        }),
+      ]);
+
+      expect(result).toMatchObject({
+        reason: 'unknown',
+        state: { enforcementDisabled: true },
+      });
+    },
+  );
 
   it('uses fixed privacy-safe reminder and stop text', () => {
     expect(REPEATED_TOOL_FAILURE_REMINDER).toBe(
