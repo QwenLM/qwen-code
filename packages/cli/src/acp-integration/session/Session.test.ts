@@ -46,6 +46,7 @@ import type {
 } from '@agentclientprotocol/sdk';
 import type { LoadedSettings } from '../../config/settings.js';
 import * as nonInteractiveCliCommands from '../../nonInteractiveCliCommands.js';
+import * as audioBridgeService from '../../services/audio-bridge-service.js';
 import { CommandKind } from '../../ui/commands/types.js';
 import { MessageType } from '../../ui/types.js';
 import { buildAcpModelOptions } from '../../utils/acpModelUtils.js';
@@ -4624,6 +4625,83 @@ describe('Session', () => {
       );
     });
 
+    it('fails closed oversized direct ACP audio at the default inline media cap', async () => {
+      const ENV_KEY = 'QWEN_CODE_MAX_INLINE_MEDIA_BYTES';
+      const original = process.env[ENV_KEY];
+      delete process.env[ENV_KEY];
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      Object.assign(mockSettings.merged as Record<string, unknown>, {
+        voiceModel: 'qwen3-asr-flash',
+      });
+
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'caption before audio' },
+            {
+              type: 'audio',
+              mimeType: 'audio/ogg',
+              data: 'A'.repeat(Math.ceil(((10 * 1024 * 1024 + 1) * 4) / 3)),
+            },
+          ],
+        });
+      } finally {
+        if (original === undefined) delete process.env[ENV_KEY];
+        else process.env[ENV_KEY] = original;
+      }
+
+      expect(transcribeVoiceAudioSpy).not.toHaveBeenCalled();
+      const sent = firstSentMessage();
+      expect(sent.some((part) => 'inlineData' in part)).toBe(false);
+      expect(textParts(sent).join('\n')).toContain('audio too large');
+      expect(textParts(sent).join('\n')).not.toContain('Media omitted');
+      expect(agentMessageChunks()).toContain(
+        'Audio bridge could not transcribe 1 audio file(s): audio too large.',
+      );
+    });
+
+    it('still bridges direct ACP audio when the inline media cap is lowered', async () => {
+      const ENV_KEY = 'QWEN_CODE_MAX_INLINE_MEDIA_BYTES';
+      const original = process.env[ENV_KEY];
+      process.env[ENV_KEY] = '1024';
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      Object.assign(mockSettings.merged as Record<string, unknown>, {
+        voiceModel: 'qwen3-asr-flash',
+      });
+      transcribeVoiceAudioSpy.mockResolvedValue('lowered cap transcript');
+
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'caption before audio' },
+            {
+              type: 'audio',
+              mimeType: 'audio/ogg',
+              // ~2 KiB decoded: over the 1 KiB env cap, under the bridge limit
+              data: 'A'.repeat(2731),
+            },
+          ],
+        });
+      } finally {
+        if (original === undefined) delete process.env[ENV_KEY];
+        else process.env[ENV_KEY] = original;
+      }
+
+      expect(transcribeVoiceAudioSpy).toHaveBeenCalledTimes(1);
+      const sent = firstSentMessage();
+      expect(sent.some((part) => 'inlineData' in part)).toBe(false);
+      expect(textParts(sent).join('\n')).toContain('lowered cap transcript');
+      expect(textParts(sent).join('\n')).not.toContain('Media omitted');
+    });
+
     it('falls back to text-only parts when audio bridge transcription fails', async () => {
       mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
       mockChat.sendMessageStream = vi
@@ -7588,11 +7666,9 @@ describe('Session', () => {
       });
 
       it('adds a fallback marker when audio resolution fails', async () => {
-        const clampSpy = vi
-          .spyOn(core, 'clampInlineMediaPart')
-          .mockImplementation(() => {
-            throw new Error('audio decode failed');
-          });
+        const bridgeSpy = vi
+          .spyOn(audioBridgeService, 'runAudioBridge')
+          .mockRejectedValue(new Error('audio resolution failed'));
         const executeSpy = vi.fn().mockResolvedValue({
           llmContent: 'file contents',
           returnDisplay: 'file contents',
@@ -7671,10 +7747,10 @@ describe('Session', () => {
             'please listen to this audio',
           );
           expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
-            'Failed to resolve mid-turn message: audio decode failed',
+            'Failed to resolve mid-turn message: audio resolution failed',
           );
         } finally {
-          clampSpy.mockRestore();
+          bridgeSpy.mockRestore();
         }
       });
 

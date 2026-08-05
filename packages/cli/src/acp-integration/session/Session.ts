@@ -9339,12 +9339,15 @@ export class Session implements SessionContext {
             },
           });
         case 'audio':
-          return clampInlineMediaPart({
+          // Audio skips the generic inline-media clamp: runAudioBridge owns
+          // its fail-closed handling (native passthrough, transcription, or
+          // a sized-out marker), mirroring the @-path and resource arms.
+          return {
             inlineData: {
               mimeType: part.mimeType,
               data: part.data,
             },
-          });
+          };
         case 'resource_link': {
           if (part.uri.startsWith(FILE_URI_SCHEME)) {
             return {
