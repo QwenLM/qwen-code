@@ -289,6 +289,7 @@ export {
   decodeSessionTranscriptCursor,
   encodeSessionTranscriptCursor,
   InvalidSessionTranscriptCursorError,
+  isReplayTurnStartType,
   SESSION_TRANSCRIPT_CURSOR_VERSION,
   SESSION_TRANSCRIPT_DEFAULT_LIMIT,
   SESSION_TRANSCRIPT_MAX_INDEX_BYTES,

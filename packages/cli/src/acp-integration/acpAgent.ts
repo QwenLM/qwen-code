@@ -72,6 +72,7 @@ import {
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptTooLargeError,
   encodeSessionTranscriptCursor,
+  isReplayTurnStartType,
   subagentGenerator,
   redactUrlCredentials,
   computeUniqueBranchTitle,
@@ -717,7 +718,7 @@ function getLoadReplayPageSize(params: LoadSessionRequest): number | undefined {
 }
 
 function isHistoryTurnStart(record: ChatRecord): boolean {
-  return record.type === 'user' && record.subtype !== 'mid_turn_user_message';
+  return isReplayTurnStartType(record.type, record.subtype);
 }
 
 function selectRecentHistoryRecords(

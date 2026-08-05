@@ -480,9 +480,16 @@ function selectPageUuids(
   return selected;
 }
 
+export function isReplayTurnStartType(
+  type: ChatRecord['type'] | undefined,
+  subtype: string | undefined,
+): boolean {
+  return type === 'user' && subtype !== 'mid_turn_user_message';
+}
+
 function isReplayTurnStart(index: TranscriptIndex, uuid: string): boolean {
   const entry = index.byUuid.get(uuid);
-  return entry?.type === 'user' && entry.subtype !== 'mid_turn_user_message';
+  return isReplayTurnStartType(entry?.type, entry?.subtype);
 }
 
 // Walk backward from `from` toward the nearest replay turn start, never below

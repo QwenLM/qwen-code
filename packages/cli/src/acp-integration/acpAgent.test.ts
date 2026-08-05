@@ -276,6 +276,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     Buffer.from(JSON.stringify(state), 'utf8').toString('base64url'),
   ),
   SessionTranscriptReader: vi.fn(),
+  isReplayTurnStartType: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).isReplayTurnStartType,
   ALL_PROVIDERS: [
     {
       id: 'deepseek',

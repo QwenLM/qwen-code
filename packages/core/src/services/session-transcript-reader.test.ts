@@ -26,6 +26,7 @@ import {
   encodeSessionTranscriptCursor,
   getSessionTranscriptIndexCacheStatsForTest,
   InvalidSessionTranscriptCursorError,
+  isReplayTurnStartType,
   SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
   SESSION_TRANSCRIPT_MAX_LIMIT,
   resetSessionTranscriptIndexCacheForTest,
@@ -1510,5 +1511,15 @@ describe('SessionTranscriptReader', () => {
       expect(page.records.map((item) => item.uuid)).toEqual(['ac3', 'ar3']);
       expect(page.hasMore).toBe(true);
     });
+  });
+});
+
+describe('isReplayTurnStartType', () => {
+  it('treats only non-mid-turn user records as turn starts', () => {
+    expect(isReplayTurnStartType('user', undefined)).toBe(true);
+    expect(isReplayTurnStartType('user', 'slash_command')).toBe(true);
+    expect(isReplayTurnStartType('user', 'mid_turn_user_message')).toBe(false);
+    expect(isReplayTurnStartType('assistant', undefined)).toBe(false);
+    expect(isReplayTurnStartType(undefined, undefined)).toBe(false);
   });
 });
