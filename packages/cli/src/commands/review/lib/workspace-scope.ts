@@ -66,7 +66,11 @@ import {
  * there is no full-suite mode (see the module comment for why).
  */
 export interface TestScope {
-  /** The dirs whose suites the run executes — exactly those with a test script. */
+  /**
+   * The dirs whose suites the run executes — exactly those with a test
+   * script, in scope (alphabetical) order, NOT run order. The run itself
+   * goes affected-first; the report's `test[]` array records that order.
+   */
   workspaces: string[];
   /**
    * Suites the whole-call budget stopped before they ran, when that happened.
@@ -105,6 +109,17 @@ const LICENSE_LIKE_RE =
 export function isInertLicense(path: string): boolean {
   return LICENSE_LIKE_RE.test(path);
 }
+
+/**
+ * Outside files no workspace suite reads, however central they are to the
+ * repo's OTHER machinery: CI definitions (`.github/` — the workflow tests
+ * live outside the npm workspaces and are not run here either), the
+ * changelog, and editor/VCS dotfiles. Measured over 120 recent commits,
+ * naming these in the caveat would fire on ~2 of 5 diffs — a caveat that
+ * fires on most PRs teaches the reader to skim past caveats.
+ */
+const INERT_OUTSIDE_RE =
+  /^(\.github\/|CHANGELOG\.md$|\.gitignore$|\.gitattributes$|\.editorconfig$|\.idea\/|\.vscode\/)/;
 
 /**
  * Decide the test scope for a workspace monorepo. Pure given its inputs; the
@@ -169,15 +184,19 @@ export function resolveTestScope(input: {
   );
   // Files a negation excludes (!packages/desktop — a separate toolchain with
   // its own lockfile) cannot affect any included workspace's tests, so they
-  // earn no caveat either. Nor does the root `docs/` tree: no suite in this
-  // repo reads it, and a caveat that fires on most PRs teaches the reader to
-  // ignore caveats. Root-LEVEL prose (AGENTS.md) stays influential — this
-  // repo's load-rules.test.ts asserts on it.
+  // earn no incomplete-scope caveat — but their own suites were not run
+  // either, and "nothing is silent" covers that too: disclose it as the
+  // softest line, not as an incompleteness. Nor does the root `docs/` tree
+  // (no suite here reads it) or the CI/changelog/dotfile family. Root-LEVEL
+  // prose (AGENTS.md) stays influential — this repo's load-rules.test.ts
+  // asserts on it.
   const outside = changed.filter((f) => workspaceDirFor(f, globs) === null);
+  const excluded = outside.filter((f) => isNegationExcluded(f, globs));
   const influential = outside.filter(
     (f) =>
       !isInertLicense(f) &&
       !f.startsWith('docs/') &&
+      !INERT_OUTSIDE_RE.test(f) &&
       !isNegationExcluded(f, globs),
   );
   if (unmapped.length > 0) {
@@ -193,6 +212,14 @@ export function resolveTestScope(input: {
         `and are not inert (e.g. ${influential.slice(0, 3).join(', ')}); a ` +
         "root script or config can affect any package's tests, and the " +
         'scoped set cannot cover them',
+    );
+  }
+  if (excluded.length > 0) {
+    caveats.push(
+      `${excluded.length} changed file(s) sit in negated workspaces (e.g. ` +
+        `${excluded.slice(0, 3).join(', ')}) — excluded from the npm ` +
+        'workspace graph (a separate toolchain and lockfile); their own ' +
+        "toolchain's suites were not run",
     );
   }
 

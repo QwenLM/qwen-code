@@ -135,16 +135,21 @@ describe('resolveTestScope', () => {
     expect(scope.caveat).toContain('package.json');
   });
 
-  it('records no caveat for a member a negation excludes — the npm graph cannot feel it', () => {
+  it('discloses — softly, not as incompleteness — a member a negation excludes', () => {
     // !packages/desktop is a separate toolchain with its own lockfile; a diff
-    // inside it cannot fail any included workspace's suite.
+    // inside it cannot fail any included workspace's suite, so it earns no
+    // incomplete-scope caveat. But its own suite was not run either, and
+    // "nothing is silent" covers that: a softer line says what did not run.
     const scope = resolveTestScope({
       changed: ['packages/desktop/src/main.rs'],
       globs: ['packages/*', '!packages/desktop'],
       packages: PKGS,
       skipped: [],
     });
-    expect(scope).toEqual({ workspaces: [] });
+    expect(scope.workspaces).toEqual([]);
+    expect(scope.caveat).toContain('packages/desktop/src/main.rs');
+    expect(scope.caveat).toContain('were not run');
+    expect(scope.caveat).not.toContain('outside every workspace');
   });
 
   it('obliges no test and no caveat for a diff of LICENSE-family files alone', () => {
@@ -202,6 +207,24 @@ describe('resolveTestScope', () => {
       skipped: [],
     });
     expect(riding).toEqual({ workspaces: ['packages/i1'] });
+  });
+
+  it('carves out CI, changelog, and editor/VCS dotfiles — no workspace suite reads them', () => {
+    // Measured at ~38% of recent commits: naming these on every other PR
+    // would teach the reader to skim past caveats. The workflow tests that
+    // read .github live outside the npm workspaces and are not run either way.
+    const scope = resolveTestScope({
+      changed: [
+        '.github/workflows/ci.yml',
+        'CHANGELOG.md',
+        '.gitignore',
+        '.vscode/settings.json',
+      ],
+      globs: GLOBS,
+      packages: PKGS,
+      skipped: [],
+    });
+    expect(scope).toEqual({ workspaces: [] });
   });
 
   it('keeps a prose file riding along scoped, but records the caveat', () => {

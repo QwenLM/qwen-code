@@ -188,6 +188,11 @@ export function readWorkspaceGlobs(root: string): string[] {
   }
 }
 
+/** The root package as a graph node, with the raw script texts the fan-out detector reads. */
+export interface RootPackage extends WorkspacePackage {
+  scriptsText: Record<string, string>;
+}
+
 /**
  * The root package itself, when it defines a build/test script.
  *
@@ -201,7 +206,7 @@ export function readWorkspaceGlobs(root: string): string[] {
  * script to run — there is nothing to scope, and the brief's precedence list
  * takes over.
  */
-export function readRootPackage(root: string): WorkspacePackage | null {
+export function readRootPackage(root: string): RootPackage | null {
   let pkg: ManifestLike;
   try {
     pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
@@ -213,16 +218,21 @@ export function readRootPackage(root: string): WorkspacePackage | null {
   if (pkg === null) return null;
   const scripts = Object.keys(pkg.scripts ?? {});
   if (!scripts.includes('build') && !scripts.includes('test')) return null;
+  const scriptsText: Record<string, string> = {};
+  for (const [k, v] of Object.entries(pkg.scripts ?? {})) {
+    if (typeof v === 'string') scriptsText[k] = v;
+  }
   return {
     dir: '.',
     name: typeof pkg.name === 'string' && pkg.name ? pkg.name : 'root',
     scripts,
     deps: declaredDeps(pkg),
+    scriptsText,
   };
 }
 
 /**
- * Does the root's `script` fan out over every workspace?
+ * Does a script fan out over every workspace?
  *
  * `npm test --workspaces …` (or the same for `build`) at the root is ONE
  * command that repeats the whole monorepo — the exact run that cannot finish
@@ -232,23 +242,12 @@ export function readRootPackage(root: string): WorkspacePackage | null {
  * an aggregator produces no artifacts of its own — the scoped loop already
  * builds the members it drives. Detected from the script text: the
  * `--workspaces` flag (and npm's `-ws`/`--ws` shorthands) is the fan-out;
- * other aggregators (turbo, nx, lerna) are not modeled and run as written.
+ * `-w`/`--workspace` (singular) deliberately does NOT match, and neither does
+ * an explicit opt-OUT like `--workspaces=false` — the flag must stand alone
+ * (whitespace or end), not merely prefix-match. Other aggregators (turbo, nx,
+ * lerna) are not modeled and run as written.
  */
-export function rootScriptFansOut(
-  root: string,
-  script: 'build' | 'test',
-): boolean {
-  let pkg: ManifestLike | null;
-  try {
-    pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
-  } catch {
-    return false;
-  }
-  const text = pkg?.scripts?.[script];
-  // `--workspaces` and npm's `-ws`/`--ws` shorthands fan out; `-w`/`--workspace`
-  // (singular, one named workspace) deliberately do NOT match, and neither
-  // does an explicit opt-OUT like `--workspaces=false` — the flag must stand
-  // alone (whitespace or end), not merely prefix-match.
+export function scriptFansOut(text: unknown): boolean {
   return (
     typeof text === 'string' &&
     /(^|\s)(--workspaces(?=\s|$)|--?ws(?=\s|$))/.test(text)

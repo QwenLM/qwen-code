@@ -24,7 +24,7 @@ import {
   readWorkspaceGlobs,
   readRootPackage,
   readWorkspacePackages,
-  rootScriptFansOut,
+  scriptFansOut,
   type WorkspacePackage,
 } from './workspaces.js';
 
@@ -155,6 +155,7 @@ describe('readRootPackage', () => {
       name: 'solo',
       scripts: ['build', 'lint'],
       deps: [],
+      scriptsText: { build: 'tsc', lint: 'eslint' },
     });
     rmSync(root, { recursive: true, force: true });
   });
@@ -407,33 +408,16 @@ describe('readWorkspacePackages', () => {
   });
 });
 
-describe('rootScriptFansOut', () => {
-  const withRootScript = (script: 'build' | 'test', text: unknown): string => {
-    const root = mkdtempSync(join(tmpdir(), 'ws-fanout-'));
-    writeFileSync(
-      join(root, 'package.json'),
-      JSON.stringify({ name: 'r', scripts: { [script]: text } }),
-    );
-    return root;
-  };
-
+describe('scriptFansOut', () => {
   it('detects --workspaces and the -ws/--ws shorthands', () => {
     for (const script of [
       'npm run test --workspaces --if-present',
       'npm test -ws',
       'npm test --ws',
+      'npm run build --workspaces',
     ]) {
-      const root = withRootScript('test', script);
-      expect(rootScriptFansOut(root, 'test')).toBe(true);
-      rmSync(root, { recursive: true, force: true });
+      expect(scriptFansOut(script)).toBe(true);
     }
-  });
-
-  it('detects a fan-out build script too — and reads only the script asked for', () => {
-    const root = withRootScript('build', 'npm run build --workspaces');
-    expect(rootScriptFansOut(root, 'build')).toBe(true);
-    expect(rootScriptFansOut(root, 'test')).toBe(false);
-    rmSync(root, { recursive: true, force: true });
   });
 
   it('does not fire on -w/--workspace (singular), an explicit opt-out, or a plain suite', () => {
@@ -443,21 +427,14 @@ describe('rootScriptFansOut', () => {
       'npm test -w packages/cli',
       'vitest run --workspaces=false',
     ]) {
-      const root = withRootScript('test', script);
-      expect(rootScriptFansOut(root, 'test')).toBe(false);
-      rmSync(root, { recursive: true, force: true });
+      expect(scriptFansOut(script)).toBe(false);
     }
   });
 
-  it('is false when the manifest is missing or the script is not a string', () => {
-    const root = mkdtempSync(join(tmpdir(), 'ws-fanout-'));
-    expect(rootScriptFansOut(root, 'test')).toBe(false);
-    writeFileSync(
-      join(root, 'package.json'),
-      JSON.stringify({ name: 'r', scripts: { test: 42 } }),
-    );
-    expect(rootScriptFansOut(root, 'test')).toBe(false);
-    rmSync(root, { recursive: true, force: true });
+  it('is false for a non-string script', () => {
+    expect(scriptFansOut(undefined)).toBe(false);
+    expect(scriptFansOut(42)).toBe(false);
+    expect(scriptFansOut(null)).toBe(false);
   });
 });
 

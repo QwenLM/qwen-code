@@ -1153,11 +1153,10 @@ describe('runBuildTest', () => {
   });
 
   it('attempts every suite with the REMAINING budget and names only the never-attempted', () => {
-    // Three suites × ~600ms of real wall clock against a 1s budget: the first
-    // two run — the second with a deadline shortened to what remains — and
-    // only the third is named notRun. Reserving a full per-command deadline
-    // per suite (the old guard) would have run NONE of them for the same
-    // second of work.
+    // Suites of ~2s of real wall clock against a 16s budget: core runs — with
+    // a deadline shrunk to what remains, never the full 60s — and the suites
+    // the floor cuts off are named notRun. Reserving a full per-command
+    // deadline per suite (the old guard) would have run NONE of them.
     writeFileSync(
       join(root, 'package.json'),
       JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
@@ -1189,13 +1188,13 @@ describe('runBuildTest', () => {
       plan: planPath,
       worktree: root,
       timeout: 60,
-      budget: 1,
+      budget: 16,
       install: false,
       exec: (command, _cwd, timeoutMs) => {
         if (command.startsWith('npm test')) {
           testCalls.push({ command, timeoutMs });
           // Real wall clock, so the budget actually drains.
-          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 600);
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000);
         }
         return {
           command,
@@ -1206,18 +1205,65 @@ describe('runBuildTest', () => {
         };
       },
     });
-    // core (affected) and a ran — each attempted with a deadline shrunk to
-    // what the budget had left, never the full 60s.
+    // core (affected) ran with a deadline shrunk to the remaining budget; a
+    // and b fell below the 15s attempt floor and are named, not faked.
     expect(rep.test.map((t) => t.command)).toEqual([
       'npm test --workspace="packages/core"',
-      'npm test --workspace="packages/a"',
     ]);
     expect(testCalls.every((c) => c.timeoutMs < 60_000)).toBe(true);
     // Structural: workspaces names what ran (scope order), notRun what was
     // never attempted.
-    expect(rep.testScope?.workspaces).toEqual(['packages/a', 'packages/core']);
-    expect(rep.testScope?.notRun).toEqual(['packages/b']);
-    expect(rep.note).toContain('not run: packages/b');
+    expect(rep.testScope?.workspaces).toEqual(['packages/core']);
+    expect(rep.testScope?.notRun).toEqual(['packages/a', 'packages/b']);
+    expect(rep.note).toContain('not run: packages/a, packages/b');
+    expect(rep.ok).toBe(true);
+  });
+
+  it('routes builds and suites to notBuilt/notRun below the attempt floor — never a fake timeout', () => {
+    // Budget below the 15s floor from the start: no build is attempted (an
+    // attempt would manufacture a fake timeout), no suite runs against
+    // artifacts never compiled, and the report says both plainly.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/core', {
+      name: '@x/core',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/leaf', {
+      name: '@x/leaf',
+      dependencies: { '@x/core': '*' },
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    writePlan(['packages/core/src/a.ts']);
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      budget: 1,
+      install: false,
+      exec: (command) => {
+        calls.push(command);
+        return {
+          command,
+          exitCode: 0,
+          seconds: 1,
+          timedOut: false,
+          output: '',
+        };
+      },
+    });
+    expect(calls.filter((c) => c.startsWith('npm run build'))).toEqual([]);
+    expect(rep.test).toEqual([]);
+    // Nothing reports as built or run that was not.
+    expect(rep.buildSet).toEqual([]);
+    expect(rep.testScope?.workspaces).toEqual([]);
+    expect(rep.testScope?.notRun).toEqual(['packages/core', 'packages/leaf']);
+    expect(rep.note).toContain('not built: packages/core, packages/leaf');
+    expect(rep.note).toContain('before any suite could run');
     expect(rep.ok).toBe(true);
   });
 
@@ -1551,8 +1597,8 @@ describe('runBuildTest', () => {
   });
 
   it('does not widen an outside-file caveat to every workspace — the closure still runs', () => {
-    // ci.yml is influential, but the run stays the diff's closure: b does not
-    // depend on a, so its suite cannot fail from this diff.
+    // eslint.config.js is influential, but the run stays the diff's closure:
+    // b does not depend on a, so its suite cannot fail from this diff.
     writeFileSync(
       join(root, 'package.json'),
       JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
@@ -1562,7 +1608,7 @@ describe('runBuildTest', () => {
       scripts: { build: 'exit 0', test: 'exit 0' },
     });
     pkg('packages/b', { name: '@x/b', scripts: { test: 'exit 0' } });
-    writePlan(['packages/a/src/x.ts', '.github/workflows/ci.yml']);
+    writePlan(['packages/a/src/x.ts', 'eslint.config.js']);
 
     const rep = runBuildTest({
       plan: planPath,
@@ -1571,7 +1617,7 @@ describe('runBuildTest', () => {
       install: false,
       exec: okExec,
     });
-    expect(rep.testScope?.caveat).toContain('ci.yml');
+    expect(rep.testScope?.caveat).toContain('eslint.config.js');
     expect(rep.test.map((t) => t.command)).toEqual([
       'npm test --workspace="packages/a"',
     ]);
@@ -1651,10 +1697,11 @@ describe('runBuildTest', () => {
     ]);
   });
 
-  it('records no caveat for a diff inside a negated member — the npm graph cannot feel it', () => {
+  it('discloses a diff inside a negated member — softly, never as an incomplete scope', () => {
     // packages/desktop is a separate toolchain (its own lockfile); a diff
     // inside it cannot fail any npm workspace's suite, so "nothing to run"
-    // stays a complete answer.
+    // stays the answer — disclosed softly (its own suite did not run), never
+    // as an incomplete scope.
     writeFileSync(
       join(root, 'package.json'),
       JSON.stringify({
@@ -1682,9 +1729,10 @@ describe('runBuildTest', () => {
     });
     expect(rep.build).toEqual([]);
     expect(rep.test).toEqual([]);
-    expect(rep.testScope).toEqual({ workspaces: [] });
-    expect(rep.note).toContain('complete answer');
-    expect(rep.note).not.toContain('caveat');
+    expect(rep.testScope?.workspaces).toEqual([]);
+    expect(rep.testScope?.caveat).toContain('packages/desktop/src/main.rs');
+    expect(rep.testScope?.caveat).toContain('were not run');
+    expect(rep.note).toContain('were not run');
   });
 
   it('keeps a plain single-package repo report free of the testScope field', () => {

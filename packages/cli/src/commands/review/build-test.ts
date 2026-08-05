@@ -55,7 +55,8 @@ import {
   readRootPackage,
   readWorkspaceGlobs,
   readWorkspacePackages,
-  rootScriptFansOut,
+  reverseDependencyClosure,
+  scriptFansOut,
   type WorkspacePackage,
 } from './lib/workspaces.js';
 import { resolveTestScope, type TestScope } from './lib/workspace-scope.js';
@@ -96,6 +97,12 @@ export interface CommandResult {
   timedOut: boolean;
   /** Trimmed output: enough to correlate a failure with the diff. */
   output: string;
+  /**
+   * The deadline the command was actually given (ms) — the whole-call budget
+   * shortens it below the per-command default, and the timeout note must
+   * quote the number that fired, not the flag default.
+   */
+  deadlineMs?: number;
 }
 
 export interface BuildTestReport {
@@ -221,6 +228,14 @@ export function trimOutput(s: string): string {
  */
 const INSTALL_MIN_FREE_BYTES = 3 * 1024 ** 3;
 const BUILD_MIN_FREE_BYTES = 1024 ** 3;
+/**
+ * Below this much remaining whole-call budget a command is NOT attempted: npm
+ * cannot boot and produce signal in a few hundred milliseconds, so an
+ * "attempt" would manufacture a fake timeout (exitCode null, ok flips false)
+ * where an honest notRun says exactly what happened. 15s covers an npm/vitest
+ * cold start with headroom for a small suite.
+ */
+const BUDGET_MIN_ATTEMPT_MS = 15_000;
 
 /**
  * Free bytes on the filesystem holding `dir`, or `null` where that cannot be
@@ -286,6 +301,7 @@ function run(command: string, cwd: string, timeoutMs: number): CommandResult {
     seconds: Math.round((Date.now() - started) / 1000),
     timedOut,
     output: trimOutput(`${r.stdout ?? ''}${r.stderr ?? ''}`),
+    deadlineMs: timeoutMs,
   };
 }
 
@@ -394,6 +410,11 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   const callBudgetMs =
     (args.budget ?? Math.max(args.timeout, args.timeout * 2 - 30)) * 1000;
   const runStarted = Date.now();
+  /** Budget left for the whole call; every phase spends from it. */
+  const remainingMs = (): number => callBudgetMs - (Date.now() - runStarted);
+  /** The deadline a timed-out command was actually given, in whole seconds. */
+  const deadlineSecs = (r: CommandResult): number =>
+    Math.round((r.deadlineMs ?? perCommandMs) / 1000);
   const exec = args.exec ?? run;
   const changed = changedFilesFrom(args.plan);
 
@@ -485,7 +506,7 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
           skipped,
           rootPackage: rootPkg,
           rootTestFansOut: rootPkg?.scripts.includes('test')
-            ? rootScriptFansOut(root, 'test')
+            ? scriptFansOut(rootPkg.scriptsText['test'])
             : false,
         });
   // The SAME graph feeds the build set, so the built set and the tested set
@@ -654,7 +675,11 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
         'informational.';
       return results;
     }
-    const install = exec(installCmd, root, perCommandMs);
+    const install = exec(
+      installCmd,
+      root,
+      Math.min(perCommandMs, Math.max(remainingMs(), 1)),
+    );
     results.install = install;
     if (install.timedOut) results.timedOut.push(install.command);
     // A timeout leaves a partial tree — remove it, so this is not mistaken next time
@@ -677,7 +702,7 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     if (install.timedOut || !installComplete()) {
       results.ok = false;
       results.note = install.timedOut
-        ? `\`${install.command}\` ran out of time (${args.timeout}s) and left an ` +
+        ? `\`${install.command}\` ran out of time (${deadlineSecs(install)}s) and left an ` +
           'incomplete `node_modules`, so nothing could be built or tested against it. ' +
           'This is an infrastructure result, not a defect in the diff — report it as ' +
           'informational.'
@@ -713,11 +738,19 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   // running. Only a NON-fan-out root build — one that compiles the root's own
   // sources — is worth its deadline.
   const rootBuildRuns =
-    !!rootPkg?.scripts.includes('build') && !rootScriptFansOut(root, 'build');
+    !!rootPkg?.scripts.includes('build') &&
+    !scriptFansOut(rootPkg.scriptsText['build']);
+  // One predicate for both the loop skip and the reported set: a fan-out
+  // root's build does not run — never in single-root mode, where the root is
+  // the only package there is.
+  const rootBuildSkipped = !singleRoot && !rootBuildRuns;
+  const notBuilt: string[] = [];
 
   // Build, and let the compiler correct the set. Three widenings is generous: each
   // one is a package the graph could not have known about, and a fourth would mean
-  // the graph is not wrong but absent.
+  // the graph is not wrong but absent. Every command spends from the same
+  // whole-call budget as the tests — an unbounded build phase would hand the
+  // outer shell kill a report the budget exists to save.
   for (let attempt = 0; attempt <= 3; attempt++) {
     let failure: CommandResult | null = null;
 
@@ -728,14 +761,30 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
         built.add(dir); // Nothing to build is not a failure to build.
         continue;
       }
-      if (dir === '.' && !singleRoot && !rootBuildRuns) {
+      if (dir === '.' && rootBuildSkipped) {
         // Fan-out aggregator root: the members it drives are built by this
         // very loop; the bare `npm run build` would re-build all of them
         // inside one deadline (see above).
         built.add(dir);
         continue;
       }
-      const r = exec(buildCommand(dir), root, perCommandMs);
+      if (remainingMs() < BUDGET_MIN_ATTEMPT_MS) {
+        // The budget is spent: stop building and disclose. Suites of unbuilt
+        // packages must not run either — a suite against artifacts never
+        // compiled manufactures failures the diff did not cause (the exact
+        // lesson of the scoped-build/full-test cascade).
+        notBuilt.push(
+          ...set.filter(
+            (d) => !built.has(d) && byDir.get(d)?.scripts.includes('build'),
+          ),
+        );
+        break;
+      }
+      const r = exec(
+        buildCommand(dir),
+        root,
+        Math.min(perCommandMs, remainingMs()),
+      );
       results.build.push(r);
       if (r.timedOut) results.timedOut.push(r.command);
       if (r.exitCode !== 0) {
@@ -771,12 +820,14 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     if (missing.length === 0 || failure.timedOut || attempt === 3) {
       results.ok = false;
       results.note = failure.timedOut
-        ? `\`${failure.command}\` ran out of time (${args.timeout}s). That is an ` +
+        ? `\`${failure.command}\` ran out of time (${deadlineSecs(failure)}s). That is an ` +
           'infrastructure result, not a defect in the diff — report it as informational.'
         : `\`${failure.command}\` failed. Correlate the errors below with the diff: a ` +
           'compile error in a file the PR changed is a Critical; one in a file it did not ' +
           'touch is a pre-existing failure, and belongs in the terminal, not on the PR.';
-      results.buildSet = rootBuildRuns ? set : set.filter((d) => d !== '.');
+      results.buildSet = (
+        rootBuildSkipped ? set.filter((d) => d !== '.') : set
+      ).filter((d) => !notBuilt.includes(d));
       results.widenedWith = [...widened];
       return results;
     }
@@ -803,8 +854,11 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
 
   // The build set reports what was (to be) BUILT: a fan-out root whose build
   // was skipped — an aggregator the loop already covered member by member —
-  // must not linger in it, or the report names a build that never ran.
-  results.buildSet = rootBuildRuns ? set : set.filter((d) => d !== '.');
+  // and packages the budget stopped before building must not linger in it, or
+  // the report names builds that never ran.
+  results.buildSet = (
+    rootBuildSkipped ? set.filter((d) => d !== '.') : set
+  ).filter((d) => !notBuilt.includes(d));
   results.widenedWith = [...widened];
 
   // Test what the diff can break: the changed workspaces plus their
@@ -828,13 +882,14 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   // Those per-command deadlines SUM, though, and a large closure can sum past
   // the whole-call ceiling the brief welds on (600s by default) — the outer
   // shell kill then discards the report entirely. So the loop below runs
-  // against a whole-call budget: every suite is ATTEMPTED with whatever of
-  // the budget remains, up to its own deadline. A suite killed at the budget
-  // boundary is a timeout — already framed as infrastructure — and a partial
-  // attempt is signal where a never-attempted suite is none. Only a fully
-  // spent budget names suites not run. A partial report is signal; a
-  // discarded one is the "71 timeouts, nothing verified" failure this command
-  // exists to end.
+  // against a whole-call budget that EVERY phase (install, builds, tests)
+  // spends from: each command gets the smaller of its own deadline and what
+  // remains. A suite killed at the budget boundary is a timeout — already
+  // framed as infrastructure — and a partial attempt is signal where a
+  // never-attempted suite is none. Below the floor an attempt cannot even
+  // boot npm, so the suite goes to notRun instead of manufacturing a fake
+  // timeout. A partial report is signal; a discarded one is the "71
+  // timeouts, nothing verified" failure this command exists to end.
   const rootHasTest = !!rootPkg?.scripts.includes('test');
   const testDirs = args.buildOnly
     ? []
@@ -853,18 +908,27 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     ...testDirs.filter((d) => affectedSet.has(d) && runnable(d)),
     ...testDirs.filter((d) => !affectedSet.has(d) && runnable(d)),
   ];
+  // Suites of packages the budget left UNBUILT cannot run — against artifacts
+  // never compiled, their failures would be manufactured, not measured.
+  const untestable =
+    notBuilt.length > 0
+      ? new Set(reverseDependencyClosure(notBuilt, scopeGraph))
+      : new Set<string>();
   const notRun: string[] = [];
   for (let i = 0; i < runnableDirs.length; i++) {
-    const remainingMs = callBudgetMs - (Date.now() - runStarted);
-    if (remainingMs <= 0) {
-      notRun.push(...runnableDirs.slice(i));
+    const dir = runnableDirs[i];
+    if (untestable.has(dir)) {
+      notRun.push(dir);
+      continue;
+    }
+    const remaining = remainingMs();
+    if (remaining < BUDGET_MIN_ATTEMPT_MS) {
+      // Below the floor an "attempt" cannot even boot npm — it would
+      // manufacture a fake timeout where an honest notRun says what happened.
+      notRun.push(...runnableDirs.slice(i).filter((d) => !untestable.has(d)));
       break;
     }
-    const r = exec(
-      testCommand(runnableDirs[i]),
-      root,
-      Math.min(perCommandMs, remainingMs),
-    );
+    const r = exec(testCommand(dir), root, Math.min(perCommandMs, remaining));
     results.test.push(r);
     if (r.timedOut) results.timedOut.push(r.command);
     if (r.exitCode !== 0) results.ok = false;
@@ -874,16 +938,24 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   // documented (and quoted by the agent's brief) as exactly the suites that
   // ran, so the trimmed suites leave it, and `notRun` names them.
   const partialNote =
-    notRun.length > 0
-      ? `the whole-call budget (${Math.round(callBudgetMs / 1000)}s) was ` +
-        `spent with ${notRun.length} suite(s) still to run — not run: ` +
-        notRun.join(', ')
-      : undefined;
+    [
+      notBuilt.length > 0
+        ? `the build phase reached the whole-call budget — not built: ` +
+          notBuilt.join(', ')
+        : '',
+      notRun.length > 0
+        ? `the whole-call budget (${Math.round(callBudgetMs / 1000)}s) was ` +
+          `spent with ${notRun.length} suite(s) still to run — not run: ` +
+          notRun.join(', ')
+        : '',
+    ]
+      .filter(Boolean)
+      .join('; ') || undefined;
   if (testScope && partialNote) {
     const ran = testScope.workspaces.filter((d) => !notRun.includes(d));
     testScope = {
       workspaces: ran,
-      notRun,
+      ...(notRun.length > 0 ? { notRun } : {}),
       caveat: testScope.caveat
         ? `${testScope.caveat}; ${partialNote}`
         : partialNote,
