@@ -298,12 +298,39 @@ describe('hookUrlPatternCovers', () => {
     ).toBe(false);
   });
 
+  it('fails closed when a pre-escaped entry keeps a bare dot', () => {
+    // `compilePattern` takes the pre-escaped branch once a pattern carries
+    // `\.`, reading every non-* character as raw regex: a surviving bare
+    // dot is a wildcard there, so the literal comparison cannot prove
+    // coverage — the runtime regex matches lookalike hosts the outer
+    // pattern excludes.
+    expect(
+      hookUrlPatternCovers(
+        'https://hooks.corp.com/*',
+        'https://hooks\\.corp.com/*',
+      ),
+    ).toBe(false);
+    expect(
+      hookUrlPatternCovers(
+        'https://hooks.example.co.uk/*',
+        'https://hooks\\.example.co.uk/*',
+      ),
+    ).toBe(false);
+    // Why this must fail closed: the pre-escaped runtime regex treats the
+    // bare dots as wildcards and matches a different public host.
+    const runtime = new UrlValidator(['https://hooks\\.example.co.uk/*']);
+    expect(runtime.isAllowed('https://hooks.example.co/uk/exfil')).toBe(true);
+  });
+
   it('stays linear on long near-miss entries instead of backtracking', () => {
     const start = Date.now();
+    // The input passes the startsWith/endsWith anchors, so the chunk-scan
+    // loop itself must walk the ~200 KB body before rejecting it: a
+    // quadratic rescan or regex-based containment would blow the bound.
     expect(
       hookUrlPatternCovers(
         'https://hooks.corp.com/*/*/*/done',
-        `https://hooks.corp.com/${'a/'.repeat(100_000)}not-quite`,
+        `https://hooks.corp.com/${'a'.repeat(200_000)}/done`,
       ),
     ).toBe(false);
     // The regex this replaced measured seconds at ~1000 separators and

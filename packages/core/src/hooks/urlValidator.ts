@@ -199,7 +199,8 @@ export function createUrlValidator(
  * the `\.` escape, which is normalized first so both spellings of the same
  * pattern cover each other. Any other escape or regex metacharacter makes
  * coverage unprovable (the pre-escaped `compilePattern` branch would read
- * it as raw regex), so such patterns fail closed (return false).
+ * it as raw regex — including a bare `.` that survives the unescaping,
+ * which acts as a wildcard), so such patterns fail closed (return false).
  *
  * The comparison is a linear chunk scan — split `outer` on `*` and require
  * the chunks in `inner` in order, anchored at both ends — never a regex
@@ -215,9 +216,18 @@ export function hookUrlPatternCovers(
   const inner = unescape(innerPattern).toLowerCase();
   // `compilePattern` treats everything but `*` as raw regex once a pattern
   // contains `\.`, so any remaining regex-active character could widen the
-  // runtime language past the literal reading used here.
+  // runtime language past the literal reading used here. A bare `.` is
+  // regex-active in that branch too, but only after unescaping: the `\.`
+  // sequences it came from are literal dots, so strip them before checking.
   const regexActive = /[+?^${}()|[\]\\]/;
-  if (regexActive.test(outer) || regexActive.test(inner)) {
+  const bareDotAfterUnescape = (pattern: string) =>
+    pattern.includes('\\.') && pattern.replace(/\\\./g, '').includes('.');
+  if (
+    regexActive.test(outer) ||
+    regexActive.test(inner) ||
+    bareDotAfterUnescape(outerPattern) ||
+    bareDotAfterUnescape(innerPattern)
+  ) {
     return false;
   }
   const chunks = outer.split('*');

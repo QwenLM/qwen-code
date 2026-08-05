@@ -2277,10 +2277,19 @@ export async function loadCliConfig(
     warnings: resolvedCliConfig.warnings,
     bareMode,
     safeMode,
-    allowedHttpHookUrls:
-      bareMode || safeMode
-        ? []
-        : (settings.security?.allowedHttpHookUrls ?? []),
+    allowedHttpHookUrls: (() => {
+      if (bareMode || safeMode) {
+        return [];
+      }
+      // Settings files are validated only as top-level JSON objects, so a
+      // hand-edited file can put a bare string or non-string entries here;
+      // reduce it to a valid list before it reaches the UrlValidator, which
+      // maps over it and would abort startup on a non-array.
+      const hookUrls = settings.security?.allowedHttpHookUrls;
+      return Array.isArray(hookUrls)
+        ? hookUrls.filter((entry): entry is string => typeof entry === 'string')
+        : [];
+    })(),
     allowPrivateNetworkHooks:
       bareMode || safeMode
         ? false

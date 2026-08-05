@@ -3302,6 +3302,69 @@ describe('loadCliConfig allowPrivateNetworkHooks', () => {
   });
 });
 
+describe('loadCliConfig allowedHttpHookUrls', () => {
+  const originalArgv = process.argv;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
+    vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
+  });
+
+  afterEach(() => {
+    process.argv = originalArgv;
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it('should pass through security.allowedHttpHookUrls from settings', async () => {
+    process.argv = ['node', 'script.js'];
+    const settings: Settings = {
+      security: {
+        allowedHttpHookUrls: ['https://hooks.corp.com/*'],
+      },
+    };
+    const argv = await parseArguments();
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getAllowedHttpHookUrls()).toEqual([
+      'https://hooks.corp.com/*',
+    ]);
+  });
+
+  it('should read a malformed non-array allowedHttpHookUrls as an empty list instead of crashing', async () => {
+    process.argv = ['node', 'script.js'];
+    // A hand-edited settings file can hold a bare string here (settings
+    // are validated only as top-level JSON objects); it must be coerced
+    // before reaching the UrlValidator instead of aborting startup.
+    const settings: Settings = {
+      security: {
+        allowedHttpHookUrls: 'https://hooks.corp.com/*' as unknown as string[],
+      },
+    };
+    const argv = await parseArguments();
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getAllowedHttpHookUrls()).toEqual([]);
+  });
+
+  it('should drop non-string allowedHttpHookUrls entries', async () => {
+    process.argv = ['node', 'script.js'];
+    const settings: Settings = {
+      security: {
+        allowedHttpHookUrls: [
+          42,
+          'https://hooks.corp.com/ci/*',
+          null,
+        ] as unknown as string[],
+      },
+    };
+    const argv = await parseArguments();
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getAllowedHttpHookUrls()).toEqual([
+      'https://hooks.corp.com/ci/*',
+    ]);
+  });
+});
+
 describe('loadCliConfig with includeDirectories', () => {
   const originalArgv = process.argv;
 
