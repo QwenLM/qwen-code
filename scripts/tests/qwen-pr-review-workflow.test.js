@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
@@ -376,9 +376,11 @@ function captureToolsSource() {
   expect(maxTimeFlag).not.toBeNull();
   const curlRetries = Number(retryFlag[1]);
   const curlMaxTime = Number(maxTimeFlag[1]);
-  expect((curlRetries + 1) * curlMaxTime).toBeLessThanOrEqual(
-    step['timeout-minutes'] * 60,
-  );
+  // + backoff: curl doubles its default 1s retry delay each retry, so
+  // n retries add 2^n - 1s on top of the (retries + 1) transfer windows.
+  expect(
+    (curlRetries + 1) * curlMaxTime + (2 ** curlRetries - 1),
+  ).toBeLessThanOrEqual(step['timeout-minutes'] * 60);
   // A freeze bump edits exactly these three adjacent lines. The harness
   // exports all of them into every stub, so a malformed or missing value can
   // never disagree with itself downstream — only this shape check sees it.
@@ -482,9 +484,11 @@ const mktempNoToolsDirStub = [
 // instead of per scenario: re-reading and re-symlinking every host PATH dir
 // (a full /usr/bin on CI) for every scenario was most of this file's runtime.
 let cachedTmuxlessPath = null;
+let cachedTmuxlessRoot = null;
 function tmuxlessHostPath() {
   if (cachedTmuxlessPath !== null) return cachedTmuxlessPath;
   const root = mkdtempSync(join(tmpdir(), 'capture-tools-shadow-'));
+  cachedTmuxlessRoot = root;
   let shadowSeq = 0;
   cachedTmuxlessPath = (process.env.PATH ?? '')
     .split(':')
@@ -507,6 +511,13 @@ function tmuxlessHostPath() {
     .join(':');
   return cachedTmuxlessPath;
 }
+// The farm is cached across all scenarios, so no per-scenario finally owns
+// it; the suite removes it once here.
+afterAll(() => {
+  if (cachedTmuxlessRoot !== null) {
+    rmSync(cachedTmuxlessRoot, { recursive: true, force: true });
+  }
+});
 
 function runCaptureToolsStep({
   stubs = {},
