@@ -381,7 +381,17 @@ export function getProviderDefaultModalities(
   const model = provider?.models?.find(
     (candidate) => candidate.id.toLowerCase() === lookup.modelId.toLowerCase(),
   );
-  return model?.modalities ? { ...model.modalities } : undefined;
+  if (model?.modalities) return { ...model.modalities };
+
+  // Recognize values persisted by older Coding Plan templates so catalog
+  // metadata can replace them without treating them as user overrides.
+  if (
+    provider?.id === 'coding-plan' &&
+    /^(?:qwen3\.5-plus|kimi-k2\.5)$/i.test(lookup.modelId)
+  ) {
+    return { image: true, video: true };
+  }
+  return undefined;
 }
 
 function resolveCatalogProviderId(

@@ -349,10 +349,7 @@ export class ModelRegistry {
       providerDefaultModalities &&
       areModalitiesEqual(generationConfig.modalities, providerDefaultModalities)
     ) {
-      if (
-        catalogModalities &&
-        areModalitiesEqual(providerDefaultModalities, catalogModalities)
-      ) {
+      if (catalogModalities) {
         generationConfig.modalities = catalogModalities;
         modalitiesSource = 'catalog';
       } else {

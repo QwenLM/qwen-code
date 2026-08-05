@@ -29,6 +29,15 @@ describe('coding plan provider', () => {
     );
     const version = computeModelListVersion(template);
 
+    expect(
+      template.find((model) => model.id === 'qwen3.5-plus')?.generationConfig
+        ?.modalities,
+    ).toBeUndefined();
+    expect(
+      template.find((model) => model.id === 'kimi-k2.5')?.generationConfig
+        ?.modalities,
+    ).toBeUndefined();
+
     const plan = buildInstallPlan(codingPlanProvider, {
       baseUrl,
       apiKey: 'sk-coding',

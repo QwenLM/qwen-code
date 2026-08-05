@@ -23,7 +23,6 @@ const MODELSTUDIO_MODELS: ModelSpec[] = [
     id: 'qwen3.5-plus',
     contextWindowSize: 1000000,
     enableThinking: true,
-    modalities: { image: true, video: true },
   },
   {
     id: 'qwen3.6-plus',
@@ -38,7 +37,6 @@ const MODELSTUDIO_MODELS: ModelSpec[] = [
     id: 'kimi-k2.5',
     contextWindowSize: 262144,
     enableThinking: true,
-    modalities: { image: true, video: true },
   },
   { id: 'MiniMax-M2.5', contextWindowSize: 196608, enableThinking: true },
   { id: 'qwen3-coder-plus', contextWindowSize: 1000000 },
