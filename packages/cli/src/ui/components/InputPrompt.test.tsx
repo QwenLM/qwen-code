@@ -5834,12 +5834,12 @@ describe('InputPrompt', () => {
       await wait();
 
       stdin.write('\x1B');
-      await wait();
+      await wait(50);
       // First ESC: show double-press prompt, buffer preserved.
       expect(props.buffer.text).toBe('draft to clear');
 
       stdin.write('\x1B');
-      await wait();
+      await wait(50);
       // Second ESC within the timeout: clear typed input.
       expect(props.buffer.text).toBe('');
       unmount();
