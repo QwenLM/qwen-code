@@ -751,7 +751,8 @@ jobs:
   # Windows counterpart of test_macos (see that job's note). ECS is the default
   # with a windows-2022 kill-switch fallback; the check name stays unchanged so
   # it matches the required-status-check context. The job is merge_group-only,
-  # so fork PRs never reach it and runs-on needs only the kill switch. ECS-only
+  # so code reaching it is post-approval; maintainers can still queue fork PRs.
+  # The runs-on expression therefore needs only the kill switch. ECS-only
   # tuning is gated on runner.environment; the hosted fallback is the pre-ECS
   # job plus the checkout guard and a job-level timeout-minutes.
   test_windows:
