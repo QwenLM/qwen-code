@@ -5179,6 +5179,57 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
+  it('answers bare /assets during the deferred window like the warm app', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-assets-bare-')),
+    );
+    const shellDir = path.join(tmpDir, 'web-shell');
+    fs.mkdirSync(path.join(shellDir, 'assets'), { recursive: true });
+    fs.writeFileSync(
+      path.join(shellDir, 'index.html'),
+      '<!doctype html><body><div id="root"></div></body>',
+    );
+    vi.spyOn(webShellResolver, 'resolveWebShellDir').mockReturnValue(shellDir);
+    const bridge = makeRuntimeBridge();
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValue(
+        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        token: 'secret-token',
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+      },
+    );
+
+    try {
+      // First request to a cold daemon. Express 5's `app.use('/assets', ...)`
+      // also matches the bare mount path pre-auth — the warm app answers 301
+      // to `/assets/` (then 404) — so the deferred gate must exempt it too
+      // instead of 401ing.
+      const bareRes = await fetch(`${handle.url}/assets`, {
+        redirect: 'manual',
+      });
+      expect(bareRes.status).toBe(301);
+      expect(bareRes.headers.get('location')).toBe('/assets/');
+      expect(createBridge).toHaveBeenCalledTimes(1);
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('serves trailing-slash and case-variant session deep links during the deferred window', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-shapes-')),

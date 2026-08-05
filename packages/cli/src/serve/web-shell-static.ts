@@ -98,7 +98,12 @@ export function isPreAuthWebShellRequest(req: Request): boolean {
   // Express route matching is case-insensitive by default, so the warm app
   // serves /Session/<id> and /Assets/* pre-auth too; mirror that exactly.
   const reqPath = req.path.toLowerCase();
-  if (reqPath === '/' || reqPath.startsWith('/assets/')) return true;
+  if (
+    reqPath === '/' ||
+    reqPath === '/assets' ||
+    reqPath.startsWith('/assets/')
+  )
+    return true;
   return SESSION_DEEP_LINK_PATH.test(reqPath) && isDocumentNavigation(req);
 }
 
