@@ -5782,6 +5782,68 @@ describe('InputPrompt', () => {
       expect(setTextSpy).not.toHaveBeenCalled();
       unmount();
     });
+
+    it('does not pop queued messages on ESC when responding with typed text AND a queue (#8201)', async () => {
+      // R6-1: the pop-skip guard is pinned only for the empty-buffer case
+      // without this. A mutation to `!== Responding || buffer.text !== ''`
+      // survives all tests unless this combination is covered.
+      mockedUseUIState.mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: ['queued follow-up'],
+        pendingGeminiHistoryItems: [],
+        streamingState: StreamingState.Responding,
+      } as unknown as ReturnType<typeof useUIState>);
+      const mockPopAllQueued = vi.fn(() => null);
+      mockedUseUIActions.mockReturnValue({
+        handleRetryLastPrompt: vi.fn(),
+        temporaryCloseFeedbackDialog: vi.fn(),
+        popAllQueuedMessages: mockPopAllQueued,
+        invalidateSubmittedPromptProvenance: vi.fn(),
+      } as unknown as ReturnType<typeof useUIActions>);
+      props.buffer.setText('half typed message');
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\x1B');
+      await wait();
+
+      // Queue must NOT be popped (guard fires regardless of buffer content).
+      expect(mockPopAllQueued).not.toHaveBeenCalled();
+      // Typed text survives single ESC (double-press still required).
+      expect(props.buffer.text).toBe('half typed message');
+      unmount();
+    });
+
+    it('still clears typed input on double-ESC while responding (#8201)', async () => {
+      // R6-2: the double-press contract this diff preserves - double-ESC
+      // clears typed input even while Responding - had no test. Without it,
+      // adding `if (streamingState === Responding) return true` before the
+      // double-ESC block ships green.
+      mockedUseUIState.mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: [],
+        pendingGeminiHistoryItems: [],
+        streamingState: StreamingState.Responding,
+      } as unknown as ReturnType<typeof useUIState>);
+      props.buffer.setText('draft to clear');
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\x1B');
+      await wait();
+      // First ESC: show double-press prompt, buffer preserved.
+      expect(props.buffer.text).toBe('draft to clear');
+
+      stdin.write('\x1B');
+      await wait();
+      // Second ESC within the timeout: clear typed input.
+      expect(props.buffer.text).toBe('');
+      unmount();
+    });
   });
 });
 function clean(str: string | undefined): string {
