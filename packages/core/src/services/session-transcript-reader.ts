@@ -492,6 +492,16 @@ function isReplayTurnStart(index: TranscriptIndex, uuid: string): boolean {
   return isReplayTurnStartType(entry?.type, entry?.subtype);
 }
 
+// A backward page can safely start at a replay turn start or at the
+// assistant record owning any following tool results.
+function isReplayPageStart(index: TranscriptIndex, uuid: string): boolean {
+  const entry = index.byUuid.get(uuid);
+  return (
+    entry?.type === 'assistant' ||
+    isReplayTurnStartType(entry?.type, entry?.subtype)
+  );
+}
+
 // Walk backward from `from` toward the nearest replay turn start, never below
 // `floor`. The returned index is a turn start only if one exists within the
 // bound; otherwise it is `floor` itself, so callers must re-check the result.
@@ -537,8 +547,8 @@ function selectBackwardPageUuids(
   for (let i = position - 1; i >= start; i--) {
     const uuid = index.activeUuids[i]!;
     const bytes = recordSegmentBytes(index, uuid);
-    // A turn cannot be split across pages; always take at least one record
-    // so an oversized turn cannot dead-end backward pagination.
+    // Always take at least one record so backward pagination cannot
+    // dead-end.
     if (
       selectedStart < position &&
       maxBytes !== undefined &&
@@ -587,12 +597,22 @@ function selectBackwardPageUuids(
   // call as failed ("result missing") on the older page and the result as an
   // orphan block on the newer one. Extend the page down to the owning
   // assistant record (or turn boundary) so pairs stay on a single page.
+  // The walk is bounded to one window below the selection: one assistant
+  // record can own an arbitrarily long contiguous tool_result run (a
+  // persisted parallel batch), and an uncapped walk would balloon the page
+  // far past `limit`/`maxBytes` — reintroducing the unbounded growth this
+  // function exists to cap. An owner beyond that budget keeps the bounded
+  // selection, accepting a mid-pair boundary in that edge.
+  const pairFloor = Math.max(0, selectedStart - limit);
+  let pairStart = selectedStart;
   while (
-    selectedStart > 0 &&
-    !isReplayTurnStart(index, index.activeUuids[selectedStart]!) &&
-    index.byUuid.get(index.activeUuids[selectedStart]!)?.type !== 'assistant'
+    pairStart > pairFloor &&
+    !isReplayPageStart(index, index.activeUuids[pairStart]!)
   ) {
-    selectedStart--;
+    pairStart--;
+  }
+  if (isReplayPageStart(index, index.activeUuids[pairStart]!)) {
+    selectedStart = pairStart;
   }
 
   return {

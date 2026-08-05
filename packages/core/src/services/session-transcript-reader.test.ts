@@ -1511,6 +1511,80 @@ describe('SessionTranscriptReader', () => {
       expect(page.records.map((item) => item.uuid)).toEqual(['ac3', 'ar3']);
       expect(page.hasMore).toBe(true);
     });
+
+    it('caps pair extension for a long tool_result run', async () => {
+      // One assistant record owning a long contiguous tool_result run (a
+      // persisted parallel batch): the walk toward the owning call must
+      // stay bounded instead of absorbing the whole run, and chaining must
+      // still reach the owner and the turn start.
+      const records: ChatRecord[] = [record('u1', null, 'prompt')];
+      records.push(toolCallRecord('ac1', 'u1', 'call-1'));
+      let parent = 'ac1';
+      for (let i = 0; i < 400; i++) {
+        const resultUuid = `ar${i}`;
+        records.push(toolResultRecord(resultUuid, parent, 'call-1'));
+        parent = resultUuid;
+      }
+      await writeRecords(records);
+
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const first = await reader.readPage(sessionId, {
+        direction: 'backward',
+        limit: 50,
+      });
+
+      expect(first.records.length).toBeLessThanOrEqual(100);
+      // The owner lies below the expansion budget, so the bounded selection
+      // stands and the page starts mid-run on a tool_result record.
+      expect(first.records.at(0)?.type).toBe('tool_result');
+      expect(first.records.at(-1)?.uuid).toBe('ar399');
+      expect(first.hasMore).toBe(true);
+
+      const seen = new Set(first.records.map((item) => item.uuid));
+      let boundary: string | undefined = first.records.at(0)?.uuid;
+      let pages = 1;
+      while (boundary !== undefined) {
+        const next = await reader.readPage(sessionId, {
+          beforeRecordId: boundary,
+          limit: 50,
+        });
+        pages += 1;
+        // Contract bound: requested window + one alignment window + one
+        // pair-extension window (the page absorbing the owning call).
+        expect(next.records.length).toBeLessThanOrEqual(150);
+        for (const item of next.records) seen.add(item.uuid);
+        boundary = next.hasMore ? next.records.at(0)?.uuid : undefined;
+        expect(pages).toBeLessThan(20);
+      }
+      expect(seen.size).toBe(records.length);
+      expect(seen.has('ac1')).toBe(true);
+      expect(seen.has('u1')).toBe(true);
+    });
+
+    it('keeps a byte-limited page bounded against a long tool_result run', async () => {
+      const records: ChatRecord[] = [record('u1', null, 'prompt')];
+      records.push(toolCallRecord('ac1', 'u1', 'call-1'));
+      let parent = 'ac1';
+      for (let i = 0; i < 400; i++) {
+        const resultUuid = `ar${i}`;
+        records.push(toolResultRecord(resultUuid, parent, 'call-1'));
+        parent = resultUuid;
+      }
+      await writeRecords(records);
+
+      const page = await new SessionTranscriptReader(workspaceDir).readPage(
+        sessionId,
+        { direction: 'backward', limit: 50, maxBytes: 5000 },
+      );
+
+      // The budget admits only a few records; pair extension must not drag
+      // the page back through the 400-record run toward the owning call.
+      expect(page.records.length).toBeGreaterThan(0);
+      expect(page.records.length).toBeLessThanOrEqual(100);
+      expect(page.records.at(0)?.type).toBe('tool_result');
+      expect(page.records.at(-1)?.uuid).toBe('ar399');
+      expect(page.hasMore).toBe(true);
+    });
   });
 });
 

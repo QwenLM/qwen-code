@@ -82,12 +82,15 @@ Backward pages are returned in chronological display order. Each selected page
 starts at a normal user-turn boundary when one is reachable within one extra
 window (`limit` records) of expansion. Inside a single long turn no boundary is
 reachable within that budget, so pages stay bounded near the anchor, may start
-mid-turn, and chain until the turn start surfaces. A page boundary never lands
-between a tool call and its persisted result: the page extends to the owning
-assistant record so independently replayed backward pages cannot split the
-pair. The workspace route retains its hard response-byte limit: a page whose
-serialized response exceeds that limit returns `transcript_page_too_large`.
-Forward cursors and responses remain byte-for-byte compatible.
+mid-turn, and chain until the turn start surfaces. A page boundary avoids
+landing between a tool call and its persisted result: the page extends to the
+owning assistant record when that owner is reachable within one further
+window below the selection, so independently replayed backward pages do not
+split the pair; an owner beyond that budget keeps the bounded selection and
+the page starts mid-pair. The workspace route retains its hard response-byte
+limit: a page whose serialized response exceeds that limit returns
+`transcript_page_too_large`. Forward cursors and responses remain
+byte-for-byte compatible.
 
 ### WebUI transcript state
 
