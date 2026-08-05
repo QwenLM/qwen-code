@@ -49,7 +49,7 @@ const CLI_BIN =
   process.env['TEST_CLI_PATH'] ??
   path.resolve(__dirname, '../../packages/cli/dist/index.js');
 const TOKEN = 'streaming-integ-secret';
-const REPO_ROOT = path.resolve(__dirname, '../..');
+let workspaceDir = '';
 
 // Windows: this suite shells out to `pgrep` / `kill -KILL` to simulate
 // child-process crashes for the SIGKILL → `session_died` test, and those
@@ -122,6 +122,7 @@ beforeAll(async () => {
     return { content: 'fake response complete' };
   });
   homeDir = mkdtempSync(path.join(tmpdir(), 'qwen-serve-streaming-home-'));
+  workspaceDir = mkdtempSync(path.join(tmpdir(), 'qwen-serve-streaming-ws-'));
   const qwenHome = path.join(homeDir, '.qwen');
   mkdirSync(qwenHome, { recursive: true });
   writeFileSync(
@@ -143,16 +144,18 @@ beforeAll(async () => {
       '--hostname',
       '127.0.0.1',
       // Per #3803 §02 (1 daemon = 1 workspace), pin the bound
-      // workspace so every `createOrAttachSession({ workspaceCwd:
-      // REPO_ROOT })` below matches. Without this the daemon inherits
-      // the test runner's cwd (CI / IDE-launcher / direct vitest
-      // invocations all differ) and every session create returns
-      // 400 workspace_mismatch — the SSE / permission / Last-Event-ID
-      // tests below would all silently 404. Same fix the sibling routes test
-      // received earlier in this PR — missed in this file in the original §02
-      // pass.
+      // workspace so every `createOrAttachSession({ workspaceCwd })`
+      // below matches. Without this the daemon inherits the test
+      // runner's cwd (CI / IDE-launcher / direct vitest invocations
+      // all differ) and every session create returns 400
+      // workspace_mismatch — the tests below would all silently 404.
+      // Use a hermetic temp dir instead of the repo checkout: ambient
+      // workspace settings (a local or leaked `.qwen/settings.json`,
+      // e.g. a `tools.core` allowlist) otherwise filter tools such as
+      // todo_write out of the session registry and silently break the
+      // Todo Stop Guard test.
       '--workspace',
-      REPO_ROOT,
+      workspaceDir,
     ],
     {
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -211,6 +214,9 @@ afterAll(async () => {
   if (homeDir) {
     rmSync(homeDir, { recursive: true, force: true });
   }
+  if (workspaceDir) {
+    rmSync(workspaceDir, { recursive: true, force: true });
+  }
 }, 15_000);
 
 /** Open an authenticated SSE stream and yield parsed frames. */
@@ -241,7 +247,7 @@ async function* sseFrames(
 describePOSIX('qwen serve — child-crash recovery (real SIGKILL)', () => {
   it('publishes session_died after the qwen --acp child is SIGKILL-ed', async () => {
     const session = await client.createOrAttachSession({
-      workspaceCwd: REPO_ROOT,
+      workspaceCwd: workspaceDir,
     });
 
     // Find the daemon's direct `--acp` child PID.
@@ -295,7 +301,7 @@ describePOSIX('qwen serve — child-crash recovery (real SIGKILL)', () => {
     );
 
     // Listing must NOT show the dead session.
-    const remaining = await client.listWorkspaceSessions(REPO_ROOT);
+    const remaining = await client.listWorkspaceSessions(workspaceDir);
     // Explicit `s` type for resilience against a stale dist .d.ts
     // in the reviewer's tsc env (see same note in routes.test.ts).
     expect(
@@ -306,7 +312,7 @@ describePOSIX('qwen serve — child-crash recovery (real SIGKILL)', () => {
 
     // Retry must spawn fresh, not reuse the corpse.
     const fresh = await client.createOrAttachSession({
-      workspaceCwd: REPO_ROOT,
+      workspaceCwd: workspaceDir,
     });
     expect(fresh.sessionId).not.toBe(session.sessionId);
     expect(fresh.attached).toBe(false);
@@ -316,7 +322,7 @@ describePOSIX('qwen serve — child-crash recovery (real SIGKILL)', () => {
 describePOSIX('qwen serve — multi-client first-responder permission', () => {
   it('fans out permission_request to both subscribers; only one vote wins', async () => {
     const session = await client.createOrAttachSession({
-      workspaceCwd: REPO_ROOT,
+      workspaceCwd: workspaceDir,
     });
 
     // Pin the session to `default` approval mode. The ACP child
@@ -448,7 +454,7 @@ describePOSIX('qwen serve — multi-client first-responder permission', () => {
 describePOSIX('qwen serve — Last-Event-ID resume', () => {
   it('reconnect with Last-Event-ID:N yields events with id > N', async () => {
     const session = await client.createOrAttachSession({
-      workspaceCwd: REPO_ROOT,
+      workspaceCwd: workspaceDir,
     });
 
     // Fire a short prompt to populate the bus.
@@ -494,7 +500,7 @@ describePOSIX('qwen serve — Last-Event-ID resume', () => {
 describePOSIX('qwen serve — daemon Todo Stop Guard replay', () => {
   it('continues after prompt admission without an SSE client and replays the bounded attempts', async () => {
     const session = await client.createOrAttachSession({
-      workspaceCwd: REPO_ROOT,
+      workspaceCwd: workspaceDir,
     });
     const requestStart = fakeServer.requests.length;
     const guardMarker = `todo-guard-e2e-${requestStart}`;
