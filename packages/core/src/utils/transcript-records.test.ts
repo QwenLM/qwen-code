@@ -155,6 +155,18 @@ describe('prepareTranscriptRecords', () => {
     );
   });
 
+  it('accepts Realtime dialogue as a known record subtype', () => {
+    const prepared = prepareTranscriptRecords([
+      record('realtime-user', null, {
+        subtype: 'realtime_message',
+        message: { role: 'user', parts: [{ text: 'voice question' }] },
+      }),
+    ]);
+
+    expect(prepared.records).toHaveLength(1);
+    expect(prepared.diagnostics).toEqual([]);
+  });
+
   it('accepts Goal state and runtime records as known subtypes', () => {
     const prepared = prepareTranscriptRecords([
       record('goal-state', null, {

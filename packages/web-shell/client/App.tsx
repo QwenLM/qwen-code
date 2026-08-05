@@ -65,6 +65,7 @@ import {
   type VoiceStatusRevision,
 } from './voice/voice-workspace-target';
 import { useVoiceWorkspaceSettings } from './voice/use-voice-workspace-settings';
+import { useLiveVoiceSetup } from './live/useLiveVoiceSetup';
 import {
   ChatEditor,
   type ComposerToolbarAction,
@@ -1834,7 +1835,8 @@ export function App({
     ? workspaces.map((entry) => ({
         id: entry.id,
         cwd: entry.cwd,
-        label: workspaceLabel(entry),
+        label:
+          entry.kind === 'live' ? t('sidebar.live') : workspaceLabel(entry),
         primary: entry.primary,
         trusted: entry.trusted,
       }))
@@ -5046,6 +5048,11 @@ export function App({
     setValue: setWorkspaceSetting,
     reload: reloadWorkspaceSettings,
   } = workspaceSettingsState;
+  const liveSetup = useLiveVoiceSetup(
+    workspaceSettings.some(
+      (setting) => setting.key === 'experimental.liveVoice.enabled',
+    ),
+  );
   const sessionWorkflowEnabled =
     workspaceSettings.find(
       (setting) => setting.key === 'experimental.sessionWorkflow',
@@ -5090,6 +5097,7 @@ export function App({
     ...workspaceSettingsState,
     settings: targetedWorkspaceSettings,
     reload: reloadTargetedWorkspaceSettings,
+    liveSetup,
   };
   const themeSetting = workspaceSettings.find(
     (setting) => setting.key === THEME_SETTING_KEY,
@@ -6483,11 +6491,13 @@ export function App({
   // to that session. loadSidebarSession already closes the panel, so this just
   // returns to the chat view and reports load failures.
   const handleOpenSessionFromOverview = useCallback(
-    (sessionId: string) => {
+    (sessionId: string, workspaceCwd?: string) => {
       setMainView('chat');
-      void loadSidebarSession(sessionId).catch((error: unknown) => {
-        reportError(error, 'Failed to open session');
-      });
+      void loadSidebarSession(sessionId, workspaceCwd).catch(
+        (error: unknown) => {
+          reportError(error, 'Failed to open session');
+        },
+      );
     },
     [loadSidebarSession, reportError],
   );
@@ -6496,9 +6506,20 @@ export function App({
   // when a `qwen-session://<id>` link is clicked. Navigate to the session.
   useEffect(() => {
     const handler = (e: Event) => {
-      const sessionId = (e as CustomEvent<string>).detail;
+      const detail = (
+        e as CustomEvent<
+          string | { sessionId?: unknown; workspaceCwd?: unknown }
+        >
+      ).detail;
+      const sessionId = typeof detail === 'string' ? detail : detail?.sessionId;
+      const workspaceCwd =
+        typeof detail === 'object' &&
+        detail !== null &&
+        typeof detail.workspaceCwd === 'string'
+          ? detail.workspaceCwd
+          : undefined;
       if (typeof sessionId === 'string' && sessionId) {
-        handleOpenSessionFromOverview(sessionId);
+        handleOpenSessionFromOverview(sessionId, workspaceCwd);
       }
     };
     window.addEventListener('qwen:open-session', handler);

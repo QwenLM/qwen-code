@@ -88,6 +88,7 @@ export interface CreateDaemonSessionActionsArgs {
   setRestoreSessionNonce: Dispatch<SetStateAction<number>>;
   setAttachSessionNonce: Dispatch<SetStateAction<number>>;
   setNewSessionNonce: Dispatch<SetStateAction<number>>;
+  clearLiveJournalRepair?: () => void;
 }
 
 export function getConnectionAfterSessionClear(
@@ -152,10 +153,12 @@ export function createDaemonSessionActions({
   setRestoreSessionNonce,
   setAttachSessionNonce,
   setNewSessionNonce,
+  clearLiveJournalRepair = () => undefined,
 }: CreateDaemonSessionActionsArgs): DaemonSessionActions {
   const silentHardFailureNoticeKeys = new Set<string>();
 
   function clearActiveSessionState() {
+    clearLiveJournalRepair();
     silentHardFailureNoticeKeys.clear();
     for (const [, active] of activePromptsRef.current) {
       active.controller.abort();
@@ -186,6 +189,7 @@ export function createDaemonSessionActions({
     sessionId: string,
     mode: PendingSessionLoad['mode'],
     signal?: AbortSignal,
+    replaySource?: PendingSessionLoad['replaySource'],
   ): Promise<void> {
     const loadId = pendingSessionLoadIdRef.current + 1;
     pendingSessionLoadIdRef.current = loadId;
@@ -220,6 +224,7 @@ export function createDaemonSessionActions({
         resolve,
         reject,
         ...(signal ? { signal } : {}),
+        ...(replaySource ? { replaySource } : {}),
       };
     });
     return loadPromise;
@@ -230,14 +235,23 @@ export function createDaemonSessionActions({
     mode: 'load' | 'resume',
     workspaceCwd?: string,
     signal?: AbortSignal,
+    replaySource?: PendingSessionLoad['replaySource'],
   ): Promise<void> {
+    if (replaySource !== 'memory') {
+      clearLiveJournalRepair();
+    }
     if (signal?.aborted) {
       return Promise.reject(
         new DOMException('Session load cancelled', 'AbortError'),
       );
     }
     manualSessionClearRef.current = false;
-    const loadPromise = startPendingSessionLoad(sessionId, mode, signal);
+    const loadPromise = startPendingSessionLoad(
+      sessionId,
+      mode,
+      signal,
+      replaySource,
+    );
     const currentSession = sessionRef.current;
     const currentSessionId = currentSession?.sessionId;
     const activePrompt = currentSessionId
@@ -645,7 +659,7 @@ export function createDaemonSessionActions({
       return startSessionSwitch(sessionId, 'load', options?.workspaceCwd);
     },
 
-    async reloadSession(signal) {
+    async reloadSession(signal, options) {
       const session = requireSessionForAction(
         addNotice,
         sessionRef.current,
@@ -657,6 +671,7 @@ export function createDaemonSessionActions({
         'load',
         session.workspaceCwd,
         signal,
+        options?.replaySource,
       );
     },
 

@@ -264,12 +264,14 @@ export async function replayTranscriptRecordPage({
   config,
   encodeCursor,
   logger,
+  finalizeDangling = true,
 }: {
   sessionId: string;
   page: SessionTranscriptRecordPage;
   config?: Config;
   encodeCursor: (state: SessionTranscriptCursorState) => string;
   logger?: ReplayLogger;
+  finalizeDangling?: boolean;
 }): Promise<ReplayedTranscriptPage> {
   const state = parseTranscriptReplayState(page.replay, logger);
   const updates: SessionUpdate[] = [];
@@ -282,7 +284,8 @@ export async function replayTranscriptRecordPage({
     const replayPageState = await replayer.replayPage(page.records, {
       pendingToolCalls:
         page.direction === 'backward' ? [] : state.pendingToolCalls,
-      finalizeDangling: page.direction === 'backward' || !page.hasMore,
+      finalizeDangling:
+        finalizeDangling && (page.direction === 'backward' || !page.hasMore),
       gaps: page.gaps,
       ...(state.goalState ? { goalState: state.goalState } : {}),
     });

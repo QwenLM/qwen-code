@@ -426,9 +426,11 @@ export interface DaemonStateResyncRequiredData {
 
 export interface DaemonHistoryTruncatedData {
   reason: 'replay_window_exceeded';
+  scope?: 'live_journal' | (string & {});
   truncatedEvents: number;
   retainedEvents: number;
   maxBytes: number;
+  maxEvents?: number;
   truncatedTurns?: number;
   /**
    * Pagination anchor: the last `qwen.session.recordId` observed by the
@@ -2777,10 +2779,14 @@ function isHistoryTruncatedData(
     return false;
   }
   const truncatedTurns = value['truncatedTurns'];
+  const scope = value['scope'];
+  const maxEvents = value['maxEvents'];
   return (
     isNonNegativeInteger(value['truncatedEvents']) &&
     isNonNegativeInteger(value['retainedEvents']) &&
     isNonNegativeInteger(value['maxBytes']) &&
+    (scope === undefined || isNonEmptyString(scope)) &&
+    (maxEvents === undefined || isNonNegativeInteger(maxEvents)) &&
     (truncatedTurns === undefined || isNonNegativeInteger(truncatedTurns))
   );
 }

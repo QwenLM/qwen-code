@@ -15,7 +15,10 @@ import {
   resolve,
 } from 'node:path';
 
-export type WorkspaceRuntimeProvenance = 'existing' | 'managed-scratch';
+export type WorkspaceRuntimeProvenance =
+  | 'existing'
+  | 'managed-scratch'
+  | 'live-conversation';
 
 /** Filesystem identity captured when the daemon accepts its private root. */
 export interface ManagedScratchRoot {

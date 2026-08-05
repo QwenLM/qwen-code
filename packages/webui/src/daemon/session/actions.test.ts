@@ -374,14 +374,39 @@ describe('createDaemonSessionActions', () => {
 
   it('keeps the reload abort signal with the pending load', () => {
     const controller = new AbortController();
+    const clearLiveJournalRepair = vi.fn();
     const { actions, pendingSessionLoadRef } = createActionsHarness({
+      clearLiveJournalRepair,
+      connection: { status: 'connected', sessionId: 'session-a' },
+      session: createMockSession('session-a'),
+    });
+
+    void actions
+      .reloadSession(controller.signal, { replaySource: 'memory' })
+      .catch(() => undefined);
+
+    expect(pendingSessionLoadRef.current?.signal).toBe(controller.signal);
+    expect(pendingSessionLoadRef.current?.replaySource).toBe('memory');
+    expect(clearLiveJournalRepair).not.toHaveBeenCalled();
+    clearTimeout(pendingSessionLoadRef.current?.timeout);
+    pendingSessionLoadRef.current?.reject(
+      new DOMException('Test cleanup', 'AbortError'),
+    );
+    pendingSessionLoadRef.current = undefined;
+  });
+
+  it('clears live journal repair state for a configured reload', () => {
+    const controller = new AbortController();
+    const clearLiveJournalRepair = vi.fn();
+    const { actions, pendingSessionLoadRef } = createActionsHarness({
+      clearLiveJournalRepair,
       connection: { status: 'connected', sessionId: 'session-a' },
       session: createMockSession('session-a'),
     });
 
     void actions.reloadSession(controller.signal).catch(() => undefined);
 
-    expect(pendingSessionLoadRef.current?.signal).toBe(controller.signal);
+    expect(clearLiveJournalRepair).toHaveBeenCalledOnce();
     clearTimeout(pendingSessionLoadRef.current?.timeout);
     pendingSessionLoadRef.current?.reject(
       new DOMException('Test cleanup', 'AbortError'),
@@ -784,6 +809,7 @@ function createActionsHarness(
   opts: {
     activePrompts?: Map<string, ActivePrompt>;
     addNotice?: ReturnType<typeof vi.fn>;
+    clearLiveJournalRepair?: ReturnType<typeof vi.fn>;
     connection?: DaemonConnectionState;
     createDetachedSession?: ReturnType<typeof vi.fn>;
     manualSessionClearRef?: { current: boolean };
@@ -838,6 +864,7 @@ function createActionsHarness(
     resetCurrentSessionActivePrompt: vi.fn(),
     restartEventStream: opts.restartEventStream ?? vi.fn(),
     addNotice: opts.addNotice ?? vi.fn(),
+    clearLiveJournalRepair: opts.clearLiveJournalRepair,
     setConnection: (update) => {
       connection = typeof update === 'function' ? update(connection) : update;
     },
