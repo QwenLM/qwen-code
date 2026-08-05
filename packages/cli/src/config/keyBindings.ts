@@ -192,17 +192,25 @@ export const defaultKeyBindings: KeyBindingConfig = {
   //
   // Tradeoff, accepted deliberately: while the `@` completion menu is open the
   // bare arrows no longer move the caret in the input buffer — press Esc to
-  // dismiss the menu first. The consuming branch in InputPrompt is still gated
-  // on the menu being visible AND more than two categories being available, so
-  // outside that narrow window ←/→ keep their normal caret behaviour.
+  // dismiss the menu first. The consuming branch in InputPrompt is gated on
+  // the tab bar actually being rendered (menu visible, more than two
+  // categories, no history search) and not in attachment mode, so outside
+  // that window ←/→ keep their normal caret behaviour.
   //
   // Modifiers are pinned false so Alt/Option+arrow word movement and any
   // Ctrl+arrow terminal binding fall through untouched.
+  //
+  // Ctrl+Tab / Ctrl+Shift+Tab are kept as alternatives: with Vim keybindings
+  // enabled, vimHandleInput consumes the bare arrows before completion
+  // handling runs, but tab keys pass through Vim insert mode, so these keep
+  // a keyboard path to switch categories for Vim users.
   [Command.COMPLETION_TAB_LEFT]: [
     { key: 'left', shift: false, ctrl: false, command: false, meta: false },
+    { key: 'tab', shift: true, ctrl: true, command: false },
   ],
   [Command.COMPLETION_TAB_RIGHT]: [
     { key: 'right', shift: false, ctrl: false, command: false, meta: false },
+    { key: 'tab', shift: false, ctrl: true, command: false },
   ],
 
   // Text input

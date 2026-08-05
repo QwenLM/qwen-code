@@ -67,18 +67,20 @@ These shortcuts apply while an interactive foreground shell command is running.
 
 ## Suggestions
 
-| Shortcut                | Description                                                                                                                         |
-| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `Down Arrow` / `Ctrl+N` | Navigate down through the suggestions.                                                                                              |
-| `Tab` / `Enter`         | Accept the selected suggestion.                                                                                                     |
-| `Up Arrow` / `Ctrl+P`   | Navigate up through the suggestions.                                                                                                |
-| `Right Arrow`           | Switch to the next completion category when category tabs are shown. Also accepts a ghost-text suggestion when the prompt is empty. |
-| `Left Arrow`            | Switch to the previous completion category when category tabs are shown.                                                            |
+| Shortcut                        | Description                                                                                                                                       |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Down Arrow` / `Ctrl+N`         | Navigate down through the suggestions.                                                                                                            |
+| `Tab` / `Enter`                 | Accept the selected suggestion.                                                                                                                   |
+| `Up Arrow` / `Ctrl+P`           | Navigate up through the suggestions.                                                                                                              |
+| `Right Arrow` / `Ctrl+Tab`      | Switch to the next completion category when category tabs are shown. `Right Arrow` also accepts a ghost-text suggestion when the prompt is empty. |
+| `Left Arrow` / `Ctrl+Shift+Tab` | Switch to the previous completion category when category tabs are shown.                                                                          |
 
 > Note: while the `@` completion menu is showing category tabs, `Left Arrow` and
 > `Right Arrow` switch categories instead of moving the cursor. Press `Esc` to
 > dismiss the menu first if you need to move the cursor. `Alt/Option+Arrow` word
-> movement is unaffected.
+> movement is unaffected. `Ctrl+Tab` / `Ctrl+Shift+Tab` remain available as
+> alternatives when an editor mode (for example Vim keybindings) consumes the
+> bare arrows.
 
 ## History Search
 

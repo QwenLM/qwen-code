@@ -47,9 +47,11 @@ describe('keyMatchers', () => {
     [Command.COMPLETION_DOWN]: (key: Key) =>
       (key.name === 'down' && !key.shift) || (key.ctrl && key.name === 'n'),
     [Command.COMPLETION_TAB_LEFT]: (key: Key) =>
-      key.name === 'left' && !key.shift && !key.ctrl && !key.meta,
+      (key.name === 'left' && !key.shift && !key.ctrl && !key.meta) ||
+      (key.name === 'tab' && key.ctrl && key.shift && !key.meta),
     [Command.COMPLETION_TAB_RIGHT]: (key: Key) =>
-      key.name === 'right' && !key.shift && !key.ctrl && !key.meta,
+      (key.name === 'right' && !key.shift && !key.ctrl && !key.meta) ||
+      (key.name === 'tab' && key.ctrl && !key.shift && !key.meta),
     [Command.ESCAPE]: (key: Key) => key.name === 'escape',
     [Command.SUBMIT]: (key: Key) =>
       key.name === 'return' && !key.ctrl && !key.meta && !key.paste,
@@ -212,7 +214,14 @@ describe('keyMatchers', () => {
     // Auto-completion
     {
       command: Command.ACCEPT_SUGGESTION,
-      positive: [createKey('tab'), createKey('return')],
+      positive: [
+        createKey('tab'),
+        // Modifiers are ignored on the tab entry, so Ctrl+Tab accepts when
+        // the category tab bar is hidden (COMPLETION_TAB_* only consumes it
+        // while the tab bar is rendered).
+        createKey('tab', { ctrl: true }),
+        createKey('return'),
+      ],
       negative: [
         createKey('return', { ctrl: true }),
         createKey('return', { shift: true }),
@@ -242,23 +251,32 @@ describe('keyMatchers', () => {
       ],
     },
     {
+      // Ctrl+Shift+Tab passes through Vim insert mode where the bare arrows
+      // are consumed, so it stays bound as an alternative (#8069).
       command: Command.COMPLETION_TAB_LEFT,
-      positive: [createKey('left')],
+      positive: [
+        createKey('left'),
+        createKey('tab', { ctrl: true, shift: true }),
+      ],
       negative: [
         createKey('left', { ctrl: true }),
         createKey('left', { shift: true }),
         createKey('left', { meta: true }),
         createKey('right'),
+        createKey('tab'),
+        createKey('tab', { ctrl: true }),
       ],
     },
     {
       command: Command.COMPLETION_TAB_RIGHT,
-      positive: [createKey('right')],
+      positive: [createKey('right'), createKey('tab', { ctrl: true })],
       negative: [
         createKey('right', { ctrl: true }),
         createKey('right', { shift: true }),
         createKey('right', { meta: true }),
         createKey('left'),
+        createKey('tab'),
+        createKey('tab', { ctrl: true, shift: true }),
       ],
     },
 
@@ -515,67 +533,6 @@ describe('keyMatchers', () => {
           createKey('tab', { ctrl: true }),
         ),
       ).toBe(true); // modifiers ignored
-    });
-  });
-
-  // The bare ←/→ bindings replace the original Ctrl+←/→ and the Ctrl+Tab
-  // alternatives: terminals and macOS Mission Control intercepted the Ctrl
-  // gestures, leaving the documented shortcut unreachable (#8069). The caret
-  // tradeoff while the menu is open is gated in InputPrompt, not here.
-  describe('Completion tab-switching bare arrow bindings (#8069)', () => {
-    it('should match bare ← / → as COMPLETION_TAB_LEFT / RIGHT', () => {
-      expect(keyMatchers[Command.COMPLETION_TAB_LEFT](createKey('left'))).toBe(
-        true,
-      );
-      expect(
-        keyMatchers[Command.COMPLETION_TAB_RIGHT](createKey('right')),
-      ).toBe(true);
-    });
-
-    it('should not consume Ctrl+arrows so terminal word-jump falls through', () => {
-      expect(
-        keyMatchers[Command.COMPLETION_TAB_LEFT](
-          createKey('left', { ctrl: true }),
-        ),
-      ).toBe(false);
-      expect(
-        keyMatchers[Command.COMPLETION_TAB_RIGHT](
-          createKey('right', { ctrl: true }),
-        ),
-      ).toBe(false);
-    });
-
-    it('should not consume Alt/Option+arrows so word movement is preserved', () => {
-      expect(
-        keyMatchers[Command.COMPLETION_TAB_LEFT](
-          createKey('left', { meta: true }),
-        ),
-      ).toBe(false);
-      expect(
-        keyMatchers[Command.COMPLETION_TAB_RIGHT](
-          createKey('right', { meta: true }),
-        ),
-      ).toBe(false);
-    });
-
-    it('should no longer bind Ctrl+Tab / Ctrl+Shift+Tab', () => {
-      expect(
-        keyMatchers[Command.COMPLETION_TAB_RIGHT](
-          createKey('tab', { ctrl: true }),
-        ),
-      ).toBe(false);
-      expect(
-        keyMatchers[Command.COMPLETION_TAB_LEFT](
-          createKey('tab', { ctrl: true, shift: true }),
-        ),
-      ).toBe(false);
-      // Bare Tab still accepts the suggestion rather than switching tabs.
-      expect(keyMatchers[Command.COMPLETION_TAB_RIGHT](createKey('tab'))).toBe(
-        false,
-      );
-      expect(keyMatchers[Command.COMPLETION_TAB_LEFT](createKey('tab'))).toBe(
-        false,
-      );
     });
   });
 

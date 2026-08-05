@@ -2799,6 +2799,120 @@ describe('InputPrompt', () => {
     unmount();
   });
 
+  it('should switch category on Ctrl+Tab / Ctrl+Shift+Tab when availableCategories > 2', async () => {
+    const switchCategory = vi.fn();
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      completionMode: CompletionMode.AT,
+      showSuggestions: true,
+      suggestions: [
+        { label: 'file.ts', value: 'file.ts', category: 'file' },
+        { label: 'sess', value: 'sess', category: 'session' },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: false,
+      availableCategories: ['all', 'file', 'session'],
+      switchCategory,
+    });
+    props.buffer.setText('@');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    // Kitty CSI-u encodings of Ctrl+Tab / Ctrl+Shift+Tab — the fallback that
+    // stays reachable with Vim keybindings, where bare arrows are consumed
+    // before completion handling runs (#8069).
+    stdin.write('\x1b[9;5u');
+    await wait();
+
+    expect(switchCategory).toHaveBeenCalledWith(1);
+
+    stdin.write('\x1b[9;6u');
+    await wait();
+
+    expect(switchCategory).toHaveBeenCalledWith(-1);
+    unmount();
+  });
+
+  it('should NOT switch category on bare arrows while command search is active', async () => {
+    props.shellModeActive = false;
+    const switchCategory = vi.fn();
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      completionMode: CompletionMode.AT,
+      // Completion stays "open" under command search (its reset effect only
+      // reacts to shell reverse search), while the tab bar is hidden.
+      showSuggestions: true,
+      suggestions: [
+        { label: 'file.ts', value: 'file.ts', category: 'file' },
+        { label: 'sess', value: 'sess', category: 'session' },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: false,
+      availableCategories: ['all', 'file', 'session'],
+      switchCategory,
+    });
+    props.buffer.setText('@ses');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\x12'); // Ctrl+R enters command search; the tab bar hides
+    await wait();
+    stdin.write('\x1b[C'); // right arrow
+    await wait();
+    stdin.write('\x1b[D'); // left arrow
+    await wait();
+
+    // Search renders the menu without category tabs, so the arrows must not
+    // switch a hidden tab bar.
+    expect(switchCategory).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('should NOT switch category on bare arrows while in attachment mode', async () => {
+    const isWindows = process.platform === 'win32';
+    vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(true);
+    vi.mocked(clipboardUtils.saveClipboardImage).mockResolvedValue(
+      path.join('test', 'project', '.qwen', 'tmp', 'clipboard.png'),
+    );
+    vi.mocked(clipboardUtils.cleanupOldClipboardImages).mockResolvedValue(
+      undefined,
+    );
+
+    const switchCategory = vi.fn();
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      completionMode: CompletionMode.AT,
+      showSuggestions: true,
+      // A single-suggestion tab: Up at row 0 skips suggestion navigation and
+      // enters attachment mode while the menu stays open.
+      suggestions: [{ label: 'file.ts', value: 'file.ts', category: 'file' }],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: false,
+      availableCategories: ['all', 'file', 'session'],
+      switchCategory,
+    });
+    props.buffer.setText('@');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write(isWindows ? '\x1Bv' : '\x16'); // paste image -> attachment
+    await wait();
+    stdin.write('\x1b[A'); // Up at row 0 -> attachment mode
+    await wait();
+    stdin.write('\x1b[C'); // right arrow
+    await wait();
+    stdin.write('\x1b[D'); // left arrow
+    await wait();
+
+    // In attachment mode the arrows navigate the attachment chips, so they
+    // must not switch the (still-rendered) category tab bar.
+    expect(switchCategory).not.toHaveBeenCalled();
+    unmount();
+  });
+
   it('should reset history navigation after submitting on Enter', async () => {
     mockedUseCommandCompletion.mockReturnValue({
       ...mockCommandCompletion,

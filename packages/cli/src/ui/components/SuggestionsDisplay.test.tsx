@@ -193,6 +193,10 @@ describe('SuggestionsDisplay tabs', () => {
     );
     expect(lastFrame()).toContain('Files');
     expect(lastFrame()).toContain('Sessions');
+    // The hint must advertise a binding that actually reaches the handler:
+    // terminals and macOS Mission Control intercept the old Ctrl+gestures
+    // (#8069), so a regression back to them must fail CI.
+    expect(lastFrame()).toContain('(←/→ to switch)');
   });
 
   it('filters rows to the active category', () => {
@@ -228,6 +232,7 @@ describe('SuggestionsDisplay tabs', () => {
       />,
     );
     expect(lastFrame()).not.toContain('Files');
+    expect(lastFrame()).not.toContain('(←/→ to switch)');
   });
 });
 

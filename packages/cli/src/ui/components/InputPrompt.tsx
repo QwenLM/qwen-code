@@ -1411,11 +1411,18 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
       if (showCompletionSuggestions) {
         // Category tab switching for the tabbed `@` completion UI. Consumes the
-        // bare ←/→ (per the COMPLETION_TAB_* bindings) and only when there are
-        // more than two tabs (at least 3 entries including 'all'). While this
-        // menu is open the arrows therefore do NOT move the caret — Esc first to
-        // dismiss it. Outside this branch ←/→ keep their normal caret behaviour.
-        if ((completion.availableCategories?.length ?? 0) > 2) {
+        // bare ←/→ and Ctrl+Tab (per the COMPLETION_TAB_* bindings) only while
+        // the tab bar is actually rendered: more than two tabs (at least 3
+        // entries including 'all') and no history search active (search shows
+        // the menu without categories). In attachment mode the arrows belong
+        // to chip navigation below. While this menu is open the arrows
+        // therefore do NOT move the caret — Esc first to dismiss it.
+        if (
+          !commandSearchActive &&
+          !reverseSearchActive &&
+          !isAttachmentMode &&
+          (completion.availableCategories?.length ?? 0) > 2
+        ) {
           if (keyMatchers[Command.COMPLETION_TAB_RIGHT](key)) {
             completion.switchCategory(1);
             setExpandedSuggestionIndex(-1);
