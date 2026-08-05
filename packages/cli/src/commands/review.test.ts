@@ -58,6 +58,7 @@ describe('reviewCommand', () => {
       'script-lint',
       'resolve-anchors',
       'check-coverage',
+      'cost-ledger',
       'presubmit',
       'test-efficacy',
       'test-plan',
