@@ -2083,12 +2083,21 @@ export class GeminiClient {
           m.pendingToolResultChars && m.pendingToolResultChars > 0
             ? ` (+${m.pendingToolResultChars} pending)`
             : '';
+        const virtualAfter =
+          (m.toolResultCharsAfter ?? 0) + (m.pendingToolResultChars ?? 0);
+        const targetNote =
+          m.toolResultsLowWatermark !== undefined
+            ? `, target ${m.toolResultsLowWatermark}` +
+              (virtualAfter > m.toolResultsLowWatermark
+                ? ' (soft-exceeded)'
+                : '')
+            : '';
         debugLogger.info(
           `[TOOL-RESULT MC] tool result chars ${m.toolResultCharsBefore} > ` +
             `${m.toolResultsTotalCharsThreshold}, cleared ${m.toolsCleared} ` +
             `tool result(s) (~${m.tokensSaved} tokens), history now ` +
-            `${m.toolResultCharsAfter}${pendingNote}, kept ${m.toolsKept} ` +
-            `tool result(s)`,
+            `${m.toolResultCharsAfter}${pendingNote}${targetNote}, kept ` +
+            `${m.toolsKept} tool result(s)`,
         );
       } else {
         debugLogger.info(

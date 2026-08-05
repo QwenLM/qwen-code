@@ -16,6 +16,14 @@ export const REVIEWS_DIR = join('.qwen', 'reviews');
 export const REVIEW_CACHE_DIR = join('.qwen', 'review-cache');
 
 /**
+ * Filename prefix for review-worktree lease files under `REVIEW_TMP_DIR`.
+ * Lives here, not in `review-worktree-lease.ts`, because the review
+ * workflow's cleanup sweep deletes leases by glob — the sweep pattern and
+ * the lease writer must share one definition (the cleanup spec pins both).
+ */
+export const LEASE_PREFIX = 'qwen-review-lease-';
+
+/**
  * Where the skill tees `qwen review parse-args`'s verdict (SKILL Step 0). A fixed,
  * conventional name so a capture command can read back the effort the parser
  * already resolved without the orchestrator threading the `--effort` value through

@@ -9,6 +9,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
 import { Storage } from '../config/storage.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   createChannelMemoryEntry,
   MAX_CHANNEL_MEMORY_ENTRIES_PER_REQUEST,
@@ -52,6 +53,8 @@ export const CHANNEL_MEMORY_FILE_NAME = 'CHANNEL.json';
 export const LEGACY_CHANNEL_MEMORY_FILE_NAME = 'CHANNEL.md';
 export const MAX_CHANNEL_MEMORY_BYTES = 1024 * 1024;
 
+const debugLogger = createDebugLogger('CHANNEL_MEMORY');
+
 const pendingMutations = new Map<string, Promise<void>>();
 const LOCK_OPTIONS: lockfile.LockOptions = {
   realpath: false,
@@ -63,6 +66,9 @@ const LOCK_OPTIONS: lockfile.LockOptions = {
     randomize: true,
   },
   stale: 5000,
+  onCompromised: (err) => {
+    debugLogger.warn('channel memory lock compromised:', err);
+  },
 };
 
 interface LoadedChannelMemory {

@@ -11,6 +11,7 @@ import { isAgentTool } from '@qwen-code/webui/daemon-react-sdk';
 import type { PermissionRequest, TodoItem } from '../../adapters/types';
 import { useI18n } from '../../i18n';
 import { PlanExecutionView } from './PlanExecutionView';
+import { isExitPlanApprovalRequest } from '../../utils/todos';
 import { localizeToolDisplayName } from './toolFormatting';
 import styles from './ToolApproval.module.css';
 
@@ -372,9 +373,7 @@ export function ToolApproval({
   const showsCommandBlock = Boolean(
     (isExec && command) || (contentText && contentText !== request.title),
   );
-  const isExitPlanApproval =
-    request.toolKind === 'switch_mode' &&
-    request.toolName?.toLowerCase() === 'exit_plan_mode';
+  const isExitPlanApproval = isExitPlanApprovalRequest(request);
   const showsPlanWorkflow = planTodos.length > 0 && isExitPlanApproval;
   const questionText = isAgent
     ? t('approval.launchAgentQuestion')
