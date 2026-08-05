@@ -14,7 +14,6 @@ import {
   type MockInstance,
 } from 'vitest';
 import {
-  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -112,8 +111,9 @@ vi.mock('./config/config.js', () => ({
   parseArguments: vi.fn().mockResolvedValue({}),
   isDebugMode: vi.fn(() => false),
   buildDisabledSkillNamesProvider: vi.fn(() => () => new Set<string>()),
+  // Mirrors SESSION_ID_REGEX in ./config/config.ts; keep them in sync.
   isValidSessionId: vi.fn((value: string) =>
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(-agent-[a-zA-Z0-9_.-]+)?$/i.test(
       value,
     ),
   ),
@@ -2268,14 +2268,6 @@ describe('startInteractiveUI', () => {
   const mockStartupWarnings = ['warning1'];
   const mockWorkspaceRoot = '/root';
 
-  vi.mock('node:fs', async (importOriginal) => {
-    const actual = await importOriginal<typeof import('node:fs')>();
-    return {
-      ...actual,
-      existsSync: vi.fn(actual.existsSync),
-    };
-  });
-
   vi.mock('./utils/version.js', () => ({
     getCliVersion: vi.fn(() => Promise.resolve('1.0.0')),
   }));
@@ -2796,12 +2788,18 @@ describe('startInteractiveUI', () => {
       } as unknown as Config;
     }
 
-    it('echoes the resume command when the session file exists', async () => {
-      const sessionId = 'b2a1c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
+    it.each([
+      ['a canonical session ID', 'b2a1c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d'],
+      // Arena's agent-suffixed IDs are also accepted by --resume.
+      [
+        'an agent-suffixed session ID',
+        'b2a1c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d-agent-qwen',
+      ],
+    ])('echoes the resume command for %s', async (_, sessionId) => {
       const projectDir = mkdtempSync(join(tmpdir(), 'resume-echo-'));
       mkdirSync(join(projectDir, 'chats'), { recursive: true });
       const sessionFile = join(projectDir, 'chats', `${sessionId}.jsonl`);
-      writeFileSync(sessionFile, '');
+      writeFileSync(sessionFile, '{"type":"message"}\n');
 
       try {
         await runCleanup(makeRecordingConfig(sessionId, sessionFile));
@@ -2811,6 +2809,24 @@ describe('startInteractiveUI', () => {
         // locale's dictionary in the i18n module state.
         expect(mockWriteStdoutLine).toHaveBeenCalledWith(
           expect.stringContaining(`qwen --resume ${sessionId}`),
+        );
+      } finally {
+        rmSync(projectDir, { recursive: true, force: true });
+      }
+    });
+
+    it('does not echo when the transcript file is empty', async () => {
+      const sessionId = '99999999-8888-4777-a666-555555555555';
+      const projectDir = mkdtempSync(join(tmpdir(), 'resume-echo-'));
+      mkdirSync(join(projectDir, 'chats'), { recursive: true });
+      const sessionFile = join(projectDir, 'chats', `${sessionId}.jsonl`);
+      writeFileSync(sessionFile, '');
+
+      try {
+        await runCleanup(makeRecordingConfig(sessionId, sessionFile));
+
+        expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+          expect.stringContaining('qwen --resume'),
         );
       } finally {
         rmSync(projectDir, { recursive: true, force: true });
@@ -2842,21 +2858,16 @@ describe('startInteractiveUI', () => {
       ['leading dash', '-cafebabe0123456789abcdef01234567'],
       ['non-UUID token', 'abc123'],
     ])('does not echo a session ID with a %s', async (_, sessionId) => {
-      // Win32 forbids control bytes in file names, so stub the existence
-      // gate instead of creating a real session file.
-      const existsMock = vi.mocked(existsSync).mockReturnValue(true);
+      // No real session file is created: control bytes are invalid file
+      // name chars on Windows, and the ID gate rejects before any file
+      // probe anyway.
+      await runCleanup(
+        makeRecordingConfig(sessionId, '/project/session.jsonl'),
+      );
 
-      try {
-        await runCleanup(
-          makeRecordingConfig(sessionId, '/project/session.jsonl'),
-        );
-
-        expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
-          expect.stringContaining('qwen --resume'),
-        );
-      } finally {
-        existsMock.mockReset();
-      }
+      expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+        expect.stringContaining('qwen --resume'),
+      );
     });
 
     it('does not echo when chat recording is disabled', async () => {

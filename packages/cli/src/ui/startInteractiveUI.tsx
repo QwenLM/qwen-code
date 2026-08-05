@@ -345,8 +345,10 @@ export async function startInteractiveUI(
         // Gate to the canonical shape `--resume` itself accepts
         // (isValidSessionId): a single token with no newlines, escapes, or
         // leading dash, which also keeps the echoed command from falling
-        // through to title matching on paste.
-        if (fs.existsSync(sessionFile) && isValidSessionId(sessionId)) {
+        // through to title matching on paste. Require a non-empty
+        // transcript too: the recorder creates the file before the first
+        // record lands, and `--resume` refuses to load an empty one.
+        if (isValidSessionId(sessionId) && fs.statSync(sessionFile).size > 0) {
           writeStdoutLine(
             `\n${t('To continue this session, run')}\nqwen --resume ${sessionId}`,
           );
