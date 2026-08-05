@@ -17,6 +17,7 @@ import {
   runAutoSkillCurator,
   setAutoSkillPinned,
 } from './skill-curator.js';
+import { mockCompromisedLock } from '../test-utils/mock-compromised-lock.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -89,6 +90,23 @@ describe('auto-skill curator', () => {
     await expect(
       fs.lstat(path.join(projectRoot, '.qwen', 'skill-curator.lock')),
     ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('registers a lock-compromised handler and completes when the curator lock is compromised', async () => {
+    const now = new Date('2026-07-27T00:00:00.000Z');
+    const { lockSpy, getLockedFile, getOnCompromised } = mockCompromisedLock();
+
+    try {
+      await expect(
+        runAutoSkillCurator(projectRoot, { now }),
+      ).resolves.toMatchObject({ dryRun: false });
+      expect(getOnCompromised()).toBeTypeOf('function');
+      expect(getLockedFile()).toBe(
+        path.join(projectRoot, '.qwen', 'skill-curator.lock'),
+      );
+    } finally {
+      lockSpy.mockRestore();
+    }
   });
 
   it.skipIf(process.platform === 'win32')(

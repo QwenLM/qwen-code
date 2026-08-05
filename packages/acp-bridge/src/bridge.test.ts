@@ -54,6 +54,10 @@ import {
   SERVE_CONTROL_EXT_METHODS,
   SERVE_STATUS_EXT_METHODS,
 } from './status.js';
+import {
+  EXTERNAL_TOOL_GUARD_READY_META_KEY,
+  EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+} from './externalToolGuard.js';
 import type { ChannelFactory } from './channel.js';
 import type { BridgeTelemetry } from './bridgeOptions.js';
 import { createInMemoryChannel } from './inMemoryChannel.js';
@@ -1259,6 +1263,45 @@ describe('createAcpSessionBridge', () => {
     ).toBe(capabilities[1]);
     await bridge1.shutdown();
     await bridge2.shutdown();
+  });
+
+  it('rejects a required Guard channel whose child does not acknowledge enforcement', async () => {
+    const handle = makeChannel();
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      externalToolGuard: async () => ({ allowed: true }),
+    });
+
+    await expect(bridge.spawnOrAttach({ workspaceCwd: WS_A })).rejects.toThrow(
+      'did not acknowledge',
+    );
+    expect(handle.agent.newSessionCalls).toHaveLength(0);
+    await bridge.shutdown();
+  });
+
+  it('accepts a required Guard channel only after the child acknowledges enforcement', async () => {
+    const handle = makeChannel({
+      initializeImpl: async () => ({
+        protocolVersion: PROTOCOL_VERSION,
+        agentInfo: { name: 'guard-aware-agent', version: '0' },
+        authMethods: [],
+        agentCapabilities: {},
+        _meta: {
+          [EXTERNAL_TOOL_GUARD_READY_META_KEY]:
+            EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+        },
+      }),
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      externalToolGuard: async () => ({ allowed: true }),
+    });
+
+    await expect(
+      bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+    ).resolves.toMatchObject({ sessionId: SESS_A });
+    expect(handle.agent.newSessionCalls).toHaveLength(1);
+    await bridge.shutdown();
   });
 
   it('spawns a session and returns the agent-assigned id', async () => {
@@ -3566,6 +3609,115 @@ describe('createAcpSessionBridge', () => {
     };
     expect(retained.update?.content?.text).toBe(`new-${'y'.repeat(600)}`);
     expect(loaded.historyHasMore).toBe(true);
+
+    await bridge.shutdown();
+  });
+
+  it('attributes live journal markers across queued prompts to the active prompt', async () => {
+    const firstPromptGate = deferred<void>();
+    const secondPromptGate = deferred<void>();
+    const handle = makeChannel({
+      promptImpl: async (req) => {
+        const text = (req.prompt[0] as { text?: string } | undefined)?.text;
+        await (text === 'first turn'
+          ? firstPromptGate.promise
+          : secondPromptGate.promise);
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      maxJournalEvents: 2,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const firstPrompt = bridge.sendPrompt(
+      session.sessionId,
+      {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'first turn' }],
+      },
+      undefined,
+      { clientId: session.clientId, promptId: 'prompt-first' },
+    );
+    const secondPrompt = bridge.sendPrompt(
+      session.sessionId,
+      {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'second turn' }],
+      },
+      undefined,
+      { clientId: session.clientId, promptId: 'prompt-second' },
+    );
+    await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+    for (const text of ['first-a', 'first-b', 'first-c']) {
+      await handle.agentConnection.sessionUpdate({
+        sessionId: session.sessionId,
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text },
+        },
+      });
+    }
+
+    const duringTurn = await bridge.loadSession({
+      sessionId: session.sessionId,
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+    });
+    expect(
+      duringTurn.liveJournal?.find(
+        (event) => event.type === 'history_truncated',
+      ),
+    ).toMatchObject({
+      promptId: 'prompt-first',
+      data: { scope: 'live_journal' },
+    });
+
+    firstPromptGate.resolve();
+    await firstPrompt;
+    await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(2));
+    for (const text of ['second-a', 'second-b', 'second-c']) {
+      await handle.agentConnection.sessionUpdate({
+        sessionId: session.sessionId,
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text },
+        },
+      });
+    }
+    const duringSecondTurn = await bridge.loadSession({
+      sessionId: session.sessionId,
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+    });
+    expect(
+      duringSecondTurn.liveJournal?.find(
+        (event) => event.type === 'history_truncated',
+      ),
+    ).toMatchObject({
+      promptId: 'prompt-second',
+      data: { scope: 'live_journal' },
+    });
+
+    secondPromptGate.resolve();
+    await secondPrompt;
+    const afterTurn = await bridge.loadSession({
+      sessionId: session.sessionId,
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+    });
+    expect(afterTurn.liveJournal).not.toContainEqual(
+      expect.objectContaining({ type: 'history_truncated' }),
+    );
+    expect(afterTurn.compactedReplay).not.toContainEqual(
+      expect.objectContaining({ type: 'history_truncated' }),
+    );
+    expect(JSON.stringify(afterTurn.compactedReplay)).toContain(
+      'first-afirst-bfirst-c',
+    );
+    expect(JSON.stringify(afterTurn.compactedReplay)).toContain(
+      'second-asecond-bsecond-c',
+    );
 
     await bridge.shutdown();
   });

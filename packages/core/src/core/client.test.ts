@@ -3509,7 +3509,7 @@ describe('Gemini Client (client.ts)', () => {
             functionResponse: {
               id: 'pending-shell',
               name: 'run_shell_command',
-              response: { output: 'Y'.repeat(50_000) },
+              response: { output: 'Y'.repeat(140_000) },
             },
           },
         ],
@@ -3527,14 +3527,70 @@ describe('Gemini Client (client.ts)', () => {
         compacted[1]!.parts![0]!.functionResponse!.response!['output'],
       ).toBe('[Old tool result content cleared]');
       expect(clear).not.toHaveBeenCalled();
-      expect(markReadEvictedFromHistory).toHaveBeenCalledTimes(1);
+      // Three reads are blanked while clearing down to the 250K watermark.
+      expect(markReadEvictedFromHistory).toHaveBeenCalledTimes(3);
       expect(mockClientDebugLogger.info).toHaveBeenCalledWith(
         expect.stringContaining(
-          '[TOOL-RESULT MC] tool result chars 530000 > 500000',
+          '[TOOL-RESULT MC] tool result chars 620000 > 500000',
         ),
       );
       expect(mockClientDebugLogger.info).toHaveBeenCalledWith(
-        expect.stringContaining('history now 360000 (+50000 pending)'),
+        expect.stringContaining(
+          'history now 120000 (+140000 pending), target 250000 (soft-exceeded)',
+        ),
+      );
+    });
+
+    it('omits the soft-exceeded marker when clearing lands exactly on the watermark', async () => {
+      // Pins the marker's absence at the boundary: virtual total after
+      // clearing == watermark must NOT be flagged (kills the `>=` and
+      // always-true mutants of the marker condition).
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+      const { history } = await makeReadFileResponses(3, 150_000);
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory,
+      } as unknown as GeminiChat;
+      vi.mocked(mockConfig.getClearContextOnIdle).mockReturnValue({
+        toolResultsThresholdMinutes: 60,
+        toolResultsNumToKeep: 1,
+        toolResultsTotalCharsThreshold: 500_000,
+      });
+      client['lastApiCompletionTimestamp'] = Date.now();
+      mockClientDebugLogger.info.mockClear();
+
+      const stream = client.sendMessageStream(
+        [
+          {
+            functionResponse: {
+              id: 'pending-shell-exact',
+              name: 'run_shell_command',
+              response: { output: 'Y'.repeat(100_000) },
+            },
+          },
+        ],
+        new AbortController().signal,
+        'prompt-toolresult-watermark-boundary',
+        { type: SendMessageType.ToolResult },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      // 550K total → clear two 150K reads → 150K committed + 100K pending
+      // sits exactly on the 250K watermark.
+      expect(setHistory).toHaveBeenCalled();
+      expect(clear).not.toHaveBeenCalled();
+      expect(markReadEvictedFromHistory).toHaveBeenCalledTimes(2);
+      expect(mockClientDebugLogger.info).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'history now 150000 (+100000 pending), target 250000',
+        ),
+      );
+      expect(mockClientDebugLogger.info).not.toHaveBeenCalledWith(
+        expect.stringContaining('(soft-exceeded)'),
       );
     });
 
@@ -3575,6 +3631,9 @@ describe('Gemini Client (client.ts)', () => {
       );
       expect(mockClientDebugLogger.info).toHaveBeenCalledWith(
         expect.stringContaining('cleared 0 tool result(s)'),
+      );
+      expect(mockClientDebugLogger.info).toHaveBeenCalledWith(
+        expect.stringContaining('target 250000 (soft-exceeded)'),
       );
       expect(mockClientDebugLogger.info).toHaveBeenCalledWith(
         expect.stringContaining('history now 800000'),
