@@ -341,19 +341,30 @@ describe('TodoWriteTool', () => {
       mockFs.readFile.mockResolvedValue(
         JSON.stringify({
           planId: 'finished-plan',
-          todos: [{ id: '1', content: 'Done', status: 'completed' }],
+          todos: [
+            { id: 'prepare', content: 'Prepare', status: 'completed' },
+            {
+              id: 'ship',
+              content: 'Done',
+              status: 'completed',
+              blockedBy: ['prepare'],
+            },
+          ],
         }),
       );
       mockFs.mkdir.mockResolvedValue(undefined);
       mockAtomicWrite.mockResolvedValue(undefined);
 
       const result = await tool
-        .build({ todos: [{ id: '1', content: 'New', status: 'pending' }] })
+        .build({ todos: [{ id: 'ship', content: 'New', status: 'pending' }] })
         .execute(mockAbortSignal);
       const display = result.returnDisplay as { planId?: string };
 
       expect(display.planId).toEqual(expect.any(String));
       expect(display.planId).not.toBe('finished-plan');
+      expect(
+        JSON.parse(mockAtomicWrite.mock.calls[0][1] as string).todos,
+      ).toEqual([{ id: 'ship', content: 'New', status: 'pending' }]);
     });
 
     it('should start a new plan for a distinct all-completed snapshot', async () => {
@@ -482,6 +493,54 @@ describe('TodoWriteTool', () => {
         .lastCall?.[1];
       expect(reminder).toContain('New Task');
       expect(reminder).not.toContain('Updated Task');
+    });
+
+    it('preserves dependencies when a status update omits blockedBy', async () => {
+      mockFs.readFile.mockResolvedValue(
+        JSON.stringify({
+          todos: [
+            { id: 'prepare', content: 'Prepare', status: 'completed' },
+            {
+              id: 'ship',
+              content: 'Ship',
+              status: 'pending',
+              blockedBy: ['prepare'],
+            },
+            {
+              id: 'note',
+              content: 'Old note',
+              status: 'pending',
+              blockedBy: ['prepare'],
+            },
+          ],
+        }),
+      );
+      mockFs.mkdir.mockResolvedValue(undefined);
+      mockAtomicWrite.mockResolvedValue(undefined);
+
+      await tool
+        .build({
+          todos: [
+            { id: 'prepare', content: 'Prepare', status: 'completed' },
+            { id: 'ship', content: 'Ship', status: 'completed' },
+            {
+              id: 'note',
+              content: 'Updated note',
+              status: 'pending',
+              blockedBy: [],
+            },
+          ],
+        })
+        .execute(mockAbortSignal);
+
+      expect(
+        JSON.parse(mockAtomicWrite.mock.calls[0][1] as string).todos,
+      ).toContainEqual(
+        expect.objectContaining({ id: 'ship', blockedBy: ['prepare'] }),
+      );
+      expect(
+        JSON.parse(mockAtomicWrite.mock.calls[0][1] as string).todos,
+      ).toContainEqual(expect.objectContaining({ id: 'note', blockedBy: [] }));
     });
 
     it('should handle file write errors', async () => {
