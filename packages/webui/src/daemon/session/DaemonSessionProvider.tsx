@@ -26,6 +26,7 @@ import {
   normalizeDaemonEvent,
   type CreateSessionRequest,
   type DaemonEvent,
+  type DaemonSseConnectReason,
   type DaemonTranscriptBlock,
   type DaemonTranscriptState,
   type DaemonTranscriptStore,
@@ -548,6 +549,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         sessionId: string;
         controller: AbortController;
         restartRequested: boolean;
+        restartReason?: DaemonSseConnectReason;
       }
     | undefined
   >(undefined);
@@ -798,6 +800,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       let reconnectSessionId = restoreSessionId;
       let shouldCreateFreshSession = !restoreSessionId && newSessionNonce > 0;
       let reconnectAttempt = 0;
+      let nextSseConnectReason: DaemonSseConnectReason | undefined;
       let skipMetadataRefresh = false;
       let hasCurrentSessionActivePrompt = () => false;
       // Set when the user explicitly deletes the session (server
@@ -816,6 +819,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               sessionId: string;
               controller: AbortController;
               restartRequested: boolean;
+              restartReason?: DaemonSseConnectReason;
             }
           | undefined;
         let removeProviderAbortListener: (() => void) | undefined;
@@ -1862,6 +1866,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             activeSession.setLastEventId(0);
             reconnectSessionId = activeSession.sessionId;
             resyncRequested = true;
+            nextSseConnectReason = 'state_resync';
             session = undefined;
             sessionRef.current = undefined;
             hasCurrentSessionActivePromptRef.current = () => false;
@@ -1889,9 +1894,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           });
           removeProviderAbortListener = () =>
             abort.signal.removeEventListener('abort', abortEventStream);
+          const sseConnectReason = nextSseConnectReason;
+          nextSseConnectReason = undefined;
           for await (const event of activeSession.events({
             signal: eventStreamController.signal,
             maxQueued,
+            ...(sseConnectReason ? { sseConnectReason } : {}),
           })) {
             if (sessionRef.current?.sessionId !== activeSession.sessionId) {
               break;
@@ -2160,6 +2168,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     activeSession.sessionId,
                   );
                   resyncRequested = true;
+                  nextSseConnectReason = 'state_resync';
                   session = undefined;
                   sessionRef.current = undefined;
                   hasCurrentSessionActivePromptRef.current = () => false;
@@ -2221,6 +2230,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const restartRequested = eventStream.restartRequested;
           clearEventStream();
           if (restartRequested) {
+            nextSseConnectReason =
+              eventStream.restartReason ?? 'prompt_restart';
             reconnectAttempt = 0;
             skipMetadataRefresh = true;
             continue;
@@ -2255,6 +2266,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             return;
           }
           if (!disposed && !abort.signal.aborted && !resyncRequested) {
+            nextSseConnectReason = 'stream_end';
             // Keep the session handle after a normal SSE close so the next
             // subscription can resume from DaemonSessionClient.lastEventId.
             if (sessionRef.current?.sessionId === activeSession.sessionId) {
@@ -2288,6 +2300,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           clearEventStream();
           if (restartRequested && !disposed && !abort.signal.aborted) {
             flushTranscriptSync();
+            nextSseConnectReason =
+              eventStream?.restartReason ?? 'prompt_restart';
             reconnectAttempt = 0;
             skipMetadataRefresh = true;
             continue;
@@ -2411,6 +2425,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               '[DaemonSessionProvider] retriable SSE error, preserving session for delta resume (sessionId=%s)',
               session?.sessionId,
             );
+            if (eventStream) {
+              nextSseConnectReason = 'transport_error';
+            }
           }
           if (!autoReconnect) {
             session = undefined;
@@ -2692,6 +2709,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const eventStream = eventStreamRef.current;
           if (eventStream?.sessionId !== sessionId) return;
           eventStream.restartRequested = true;
+          eventStream.restartReason = 'prompt_restart';
           eventStream.controller.abort();
         },
         getCreateSessionRequest: () => ({
