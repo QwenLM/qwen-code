@@ -70,6 +70,14 @@ const nodeBuildOptions = {
   sourcesContent: false,
   external: ['electron'],
   logLevel: 'silent',
+  // Source is ESM and uses `import.meta.url`, but these bundles are emitted as
+  // CJS and run under Electron/Node (CJS). esbuild's CJS shim leaves
+  // `import.meta.url` undefined, which crashes `fileURLToPath` at load. Rebind
+  // it to a real file URL derived from the native CJS `__filename`.
+  define: { 'import.meta.url': 'importMetaUrl' },
+  banner: {
+    js: "const importMetaUrl = require('url').pathToFileURL(__filename).href;",
+  },
 };
 
 async function main() {
