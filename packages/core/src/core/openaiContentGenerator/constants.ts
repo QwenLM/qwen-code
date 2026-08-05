@@ -40,6 +40,21 @@ export const QWEN_STREAM_IDLE_TIMEOUT_MS_ENV = 'QWEN_STREAM_IDLE_TIMEOUT_MS';
 // delays to 1ms, which would make the watchdog fire almost immediately, so an
 // idle timeout above this is treated as invalid.
 export const MAX_STREAM_IDLE_TIMEOUT_MS = 2_147_483_647;
+
+// Total-lifetime cap for a single streaming response, measured from the first
+// byte and NOT refreshed by chunk arrival. The idle watchdog above cannot see
+// a drip-fed stream — an upstream delivering one tiny chunk per window keeps
+// resetting it while the message never completes (issue #8597: CI review runs
+// burned 2.5–4.5 h on such a stream and died by the outer kill). 15 minutes
+// gives even a slow, oversized single response ample room, and a false trip
+// is cheap: the error rides the transport-continuation recovery, which
+// resumes a healthy generation where the cap cut it.
+export const DEFAULT_STREAM_MAX_LIFETIME_MS = 900000;
+// Env override (deployment knob) for the stream lifetime cap — same
+// conventions as QWEN_STREAM_IDLE_TIMEOUT_MS: an explicit
+// ContentGeneratorConfig.streamMaxLifetimeMs wins, `0` disables, a malformed
+// value falls back to the default with a warning.
+export const QWEN_STREAM_MAX_LIFETIME_MS_ENV = 'QWEN_STREAM_MAX_LIFETIME_MS';
 export const DEFAULT_MAX_RETRIES = 3;
 
 export const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';

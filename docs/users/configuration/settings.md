@@ -213,7 +213,7 @@ Settings are organized into categories. Most settings should be placed within th
 
 **timeout (request timeout):**
 
-`timeout` is the per-request timeout in milliseconds (default `120000`). Set it to `0` to disable the request timeout — matching the `QWEN_STREAM_IDLE_TIMEOUT_MS=0` convention — rather than aborting the request. It can also be set via the `QWEN_CODE_API_TIMEOUT_MS` environment variable. This is distinct from `QWEN_STREAM_IDLE_TIMEOUT_MS`, which bounds inactivity _between_ streamed chunks.
+`timeout` is the per-request timeout in milliseconds (default `120000`). Set it to `0` to disable the request timeout — matching the `QWEN_STREAM_IDLE_TIMEOUT_MS=0` convention — rather than aborting the request. It can also be set via the `QWEN_CODE_API_TIMEOUT_MS` environment variable. This is distinct from `QWEN_STREAM_IDLE_TIMEOUT_MS`, which bounds inactivity _between_ streamed chunks, and from `QWEN_STREAM_MAX_LIFETIME_MS` (default `900000`), which caps the _total_ lifetime of one streaming response regardless of chunk flow — the bound a drip-fed stream that never completes cannot reset. Both stream guards accept `0` to disable.
 
 **max_tokens (output token limit):**
 

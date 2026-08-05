@@ -27,8 +27,10 @@ import {
 } from '../modalityDefaults.js';
 import {
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+  DEFAULT_STREAM_MAX_LIFETIME_MS,
   MAX_STREAM_IDLE_TIMEOUT_MS,
   QWEN_STREAM_IDLE_TIMEOUT_MS_ENV,
+  QWEN_STREAM_MAX_LIFETIME_MS_ENV,
 } from './constants.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { getToolCallPreparations } from '../tool-call-preparation.js';
@@ -89,6 +91,32 @@ export class StreamInactivityTimeoutError extends Error {
         `(or 0 to disable it).`,
     );
     this.name = 'StreamInactivityTimeoutError';
+  }
+}
+
+/**
+ * Thrown when a streaming response exceeds its total lifetime cap without
+ * completing — however many chunks arrived meanwhile. The inactivity watchdog
+ * cannot see this shape: a drip-fed stream (a gateway trickling keep-alive
+ * chunks, or a model crawling through an oversized response) resets it
+ * forever (issue #8597). Same retryable `ETIMEDOUT` code, so the
+ * transport-continuation recovery resumes a healthy generation the cap cut.
+ */
+export class StreamLifetimeExceededError extends Error {
+  readonly code = 'ETIMEDOUT' as const;
+
+  constructor(
+    readonly maxLifetimeMs: number,
+    readonly chunksReceived: number,
+    readonly streamLifetimeMs: number,
+  ) {
+    super(
+      `Stream exceeded its ${maxLifetimeMs}ms total lifetime cap after ` +
+        `${chunksReceived} chunks without completing. Set ` +
+        `${QWEN_STREAM_MAX_LIFETIME_MS_ENV} to increase this cap ` +
+        `(or 0 to disable it).`,
+    );
+    this.name = 'StreamLifetimeExceededError';
   }
 }
 
@@ -182,19 +210,22 @@ function clampProviderOutputBudgetKeys(
 }
 
 /**
- * Resolve the effective streaming inactivity timeout (ms). Precedence:
- * explicit `ContentGeneratorConfig.streamIdleTimeoutMs` (programmatic, wins —
- * including `0` to disable) > the `QWEN_STREAM_IDLE_TIMEOUT_MS` env deployment
- * knob > the built-in default. A malformed env value is ignored (with a
- * `console.warn`) rather than failing the request.
+ * Resolve a stream-guard timeout (ms). Precedence, for both guards: explicit
+ * `ContentGeneratorConfig` field (programmatic, wins — including `0` to
+ * disable) > the env deployment knob > the built-in default. A malformed env
+ * value is ignored (with a `console.warn`) rather than failing the request.
  */
-function resolveStreamIdleTimeoutMs(config: ContentGeneratorConfig): number {
+function resolveStreamGuardMs(
+  fromConfig: number | undefined,
+  configLabel: string,
+  envName: string,
+  defaultMs: number,
+): number {
   // 1. Explicit config field (programmatic) wins:
-  //    - `<= 0` disables the watchdog (downstream `idleMs > 0` guard skips it).
+  //    - `<= 0` disables the watchdog (downstream `> 0` guards skip it).
   //    - Values above the JS timer ceiling are rejected: setTimeout silently
   //      compresses them to 1ms, which would fire near-immediately.
   //    - NaN/Infinity/non-integer are invalid.
-  const fromConfig = config.streamIdleTimeoutMs;
   if (typeof fromConfig === 'number') {
     if (
       Number.isInteger(fromConfig) &&
@@ -204,15 +235,15 @@ function resolveStreamIdleTimeoutMs(config: ContentGeneratorConfig): number {
     }
     // eslint-disable-next-line no-console
     console.warn(
-      `[qwen-code] Ignoring out-of-range streamIdleTimeoutMs=${fromConfig} ` +
+      `[qwen-code] Ignoring out-of-range ${configLabel}=${fromConfig} ` +
         `(expected an integer in (-∞, ${MAX_STREAM_IDLE_TIMEOUT_MS}]); ` +
-        `falling back to ${QWEN_STREAM_IDLE_TIMEOUT_MS_ENV}/default.`,
+        `falling back to ${envName}/default.`,
     );
   }
   // 2. Env deployment knob. Strict decimal integer only — reject hex/scientific
   //    notation/floats/signs so a typo can't silently become a surprising
   //    timeout. `0` disables; values above the timer ceiling are rejected.
-  const raw = process.env[QWEN_STREAM_IDLE_TIMEOUT_MS_ENV];
+  const raw = process.env[envName];
   const trimmed = raw?.trim();
   if (trimmed) {
     if (/^\d+$/.test(trimmed)) {
@@ -223,54 +254,96 @@ function resolveStreamIdleTimeoutMs(config: ContentGeneratorConfig): number {
     }
     // eslint-disable-next-line no-console
     console.warn(
-      `[qwen-code] Ignoring invalid ${QWEN_STREAM_IDLE_TIMEOUT_MS_ENV}="${raw}" ` +
+      `[qwen-code] Ignoring invalid ${envName}="${raw}" ` +
         `(expected an integer of milliseconds in [0, ${MAX_STREAM_IDLE_TIMEOUT_MS}]); ` +
-        `using default ${DEFAULT_STREAM_IDLE_TIMEOUT_MS}ms.`,
+        `using default ${defaultMs}ms.`,
     );
   }
-  return DEFAULT_STREAM_IDLE_TIMEOUT_MS;
+  return defaultMs;
+}
+
+function resolveStreamIdleTimeoutMs(config: ContentGeneratorConfig): number {
+  return resolveStreamGuardMs(
+    config.streamIdleTimeoutMs,
+    'streamIdleTimeoutMs',
+    QWEN_STREAM_IDLE_TIMEOUT_MS_ENV,
+    DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+  );
+}
+
+function resolveStreamMaxLifetimeMs(config: ContentGeneratorConfig): number {
+  return resolveStreamGuardMs(
+    config.streamMaxLifetimeMs,
+    'streamMaxLifetimeMs',
+    QWEN_STREAM_MAX_LIFETIME_MS_ENV,
+    DEFAULT_STREAM_MAX_LIFETIME_MS,
+  );
 }
 
 /**
- * Wraps a streaming chunk source with an inactivity watchdog. If no chunk
- * arrives for `idleMs`, `abortRequest()` is invoked (to abort the underlying
- * request and free the socket) and the iterator throws — a user `AbortError`
- * when the parent signal was cancelled, otherwise a retryable ETIMEDOUT. The
- * timer resets on every chunk (including thinking/reasoning deltas), so an
- * actively streaming model is never interrupted.
+ * Wraps a streaming chunk source with two guards. The inactivity watchdog: if
+ * no chunk arrives for `idleMs`, `abortRequest()` is invoked (to abort the
+ * underlying request and free the socket) and the iterator throws — a user
+ * `AbortError` when the parent signal was cancelled, otherwise a retryable
+ * ETIMEDOUT. The idle timer resets on every chunk (including
+ * thinking/reasoning deltas), so an actively streaming model is never
+ * interrupted by it. The lifetime cap does NOT reset: once the stream has
+ * been open for `maxLifetimeMs` without completing, the iterator throws the
+ * same way — the bound a drip-fed stream cannot reset (issue #8597).
+ * `<= 0` disables each guard independently.
  */
 async function* withStreamInactivityTimeout(
   source: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
   idleMs: number,
+  maxLifetimeMs: number,
   abortRequest: () => void,
   parentSignal: AbortSignal | undefined,
 ): AsyncGenerator<OpenAI.Chat.ChatCompletionChunk> {
   const it = source[Symbol.asyncIterator]();
   const streamStartedAt = Date.now();
+  const deadline = streamStartedAt + maxLifetimeMs;
   let chunksReceived = 0;
   try {
     while (true) {
       const nextPromise = it.next();
       let timer: ReturnType<typeof setTimeout> | undefined;
       const timeout = new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => {
-          if (parentSignal?.aborted) {
-            // Plain Error (not DOMException) so error redaction's prototype
-            // clone cannot corrupt it; name 'AbortError' satisfies isAbortError.
-            const abortErr = new Error('Aborted');
-            abortErr.name = 'AbortError';
-            reject(abortErr);
-          } else {
-            abortRequest();
-            reject(
-              new StreamInactivityTimeoutError(
-                idleMs,
-                chunksReceived,
-                Date.now() - streamStartedAt,
-              ),
-            );
-          }
-        }, idleMs);
+        // The caller wraps only when at least one guard is positive, so at
+        // least one of these is finite.
+        const idleIn = idleMs > 0 ? idleMs : Number.POSITIVE_INFINITY;
+        const lifetimeIn =
+          maxLifetimeMs > 0 ? deadline - Date.now() : Number.POSITIVE_INFINITY;
+        const wait = Math.min(idleIn, lifetimeIn);
+        timer = setTimeout(
+          () => {
+            if (parentSignal?.aborted) {
+              // Plain Error (not DOMException) so error redaction's prototype
+              // clone cannot corrupt it; name 'AbortError' satisfies isAbortError.
+              const abortErr = new Error('Aborted');
+              abortErr.name = 'AbortError';
+              reject(abortErr);
+            } else if (lifetimeIn <= idleIn) {
+              abortRequest();
+              reject(
+                new StreamLifetimeExceededError(
+                  maxLifetimeMs,
+                  chunksReceived,
+                  Date.now() - streamStartedAt,
+                ),
+              );
+            } else {
+              abortRequest();
+              reject(
+                new StreamInactivityTimeoutError(
+                  idleMs,
+                  chunksReceived,
+                  Date.now() - streamStartedAt,
+                ),
+              );
+            }
+          },
+          Math.max(wait, 0),
+        );
         timer.unref?.();
       });
       let result: IteratorResult<OpenAI.Chat.ChatCompletionChunk>;
@@ -307,11 +380,15 @@ export class ContentGenerationPipeline {
   // Resolved once (config field > env > default) so the env read + any
   // invalid-value warning happen per pipeline, not per streaming request.
   private readonly streamIdleTimeoutMs: number;
+  private readonly streamMaxLifetimeMs: number;
 
   constructor(private config: PipelineConfig) {
     this.contentGeneratorConfig = config.contentGeneratorConfig;
     this.client = this.config.provider.buildClient();
     this.streamIdleTimeoutMs = resolveStreamIdleTimeoutMs(
+      this.contentGeneratorConfig,
+    );
+    this.streamMaxLifetimeMs = resolveStreamMaxLifetimeMs(
       this.contentGeneratorConfig,
     );
   }
@@ -448,13 +525,18 @@ export class ContentGenerationPipeline {
         // Inactivity watchdog: the SDK `timeout` only bounds connect + first
         // response, so a stream that returns 200 then goes silent is otherwise
         // unbounded. Abort + surface a retryable ETIMEDOUT after `idleMs` of no
-        // chunks. `<= 0` disables it.
+        // chunks. The lifetime cap covers what the watchdog cannot: a drip-fed
+        // stream resets the idle timer forever while never completing
+        // (issue #8597), so it aborts at `maxLifetimeMs` from stream start
+        // regardless of chunk flow. `<= 0` disables each guard.
         const idleMs = this.streamIdleTimeoutMs;
+        const maxLifetimeMs = this.streamMaxLifetimeMs;
         const guarded =
-          idleMs > 0
+          idleMs > 0 || maxLifetimeMs > 0
             ? withStreamInactivityTimeout(
                 stream,
                 idleMs,
+                maxLifetimeMs,
                 () => perRequestAc.abort(),
                 parentSignal,
               )
@@ -702,6 +784,16 @@ export class ContentGenerationPipeline {
       if (error instanceof StreamInactivityTimeoutError) {
         debugLogger.warn('OpenAI stream inactivity timeout', {
           idleMs: error.idleMs,
+          chunksReceived: error.chunksReceived,
+          streamLifetimeMs: error.streamLifetimeMs,
+        });
+        throw redactProxyError(error);
+      }
+      // Same bypass for the lifetime cap (issue #8597) — same ETIMEDOUT code,
+      // same retry path.
+      if (error instanceof StreamLifetimeExceededError) {
+        debugLogger.warn('OpenAI stream lifetime cap exceeded', {
+          maxLifetimeMs: error.maxLifetimeMs,
           chunksReceived: error.chunksReceived,
           streamLifetimeMs: error.streamLifetimeMs,
         });

@@ -20,6 +20,7 @@ import {
   NonSSEResponseError,
   StreamContentError,
   StreamInactivityTimeoutError,
+  StreamLifetimeExceededError,
 } from './pipeline.js';
 import { OpenAIContentConverter } from './converter.js';
 import { openaiRequestCaptureContext } from './requestCaptureContext.js';
@@ -31,8 +32,10 @@ import { DefaultOpenAICompatibleProvider } from './provider/default.js';
 import { DashScopeOpenAICompatibleProvider } from './provider/dashscope.js';
 import {
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+  DEFAULT_STREAM_MAX_LIFETIME_MS,
   MAX_STREAM_IDLE_TIMEOUT_MS,
   QWEN_STREAM_IDLE_TIMEOUT_MS_ENV,
+  QWEN_STREAM_MAX_LIFETIME_MS_ENV,
 } from './constants.js';
 import { logProtocolTagSanitized } from '../../telemetry/loggers.js';
 import {
@@ -4999,10 +5002,14 @@ describe('ContentGenerationPipeline', () => {
       } as GenerateContentParameters;
     }
 
-    function buildPipeline(streamIdleTimeoutMs?: number) {
+    function buildPipeline(
+      streamIdleTimeoutMs?: number,
+      streamMaxLifetimeMs?: number,
+    ) {
       mockContentGeneratorConfig = {
         ...mockContentGeneratorConfig,
         ...(streamIdleTimeoutMs !== undefined ? { streamIdleTimeoutMs } : {}),
+        ...(streamMaxLifetimeMs !== undefined ? { streamMaxLifetimeMs } : {}),
       } as ContentGeneratorConfig;
       mockConfig = {
         ...mockConfig,
@@ -5022,10 +5029,12 @@ describe('ContentGenerationPipeline', () => {
           return r;
         },
       );
-      // Clean baseline: ignore any ambient QWEN_STREAM_IDLE_TIMEOUT_MS from the
-      // dev/CI shell so the default-timeout tests aren't silently overridden.
-      // Env-specific tests re-stub it; afterEach unstubs everything.
+      // Clean baseline: ignore any ambient QWEN_STREAM_IDLE_TIMEOUT_MS /
+      // QWEN_STREAM_MAX_LIFETIME_MS from the dev/CI shell so the
+      // default-timeout tests aren't silently overridden. Env-specific tests
+      // re-stub them; afterEach unstubs everything.
       vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, undefined);
+      vi.stubEnv(QWEN_STREAM_MAX_LIFETIME_MS_ENV, undefined);
       vi.useFakeTimers();
     });
     afterEach(() => {
@@ -5656,6 +5665,226 @@ describe('ContentGenerationPipeline', () => {
       expect(settled).toBe(false);
       gated.end();
       await consume;
+    });
+
+    it('caps the total stream lifetime even when chunks keep resetting the idle watchdog (issue #8597)', async () => {
+      const gated = gatedStream(); // drip-fed, never ends
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000, 3000); // idle 1s, lifetime 3s
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let error: unknown;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch((e: unknown) => {
+        error = e;
+      });
+      // A chunk every 500ms: every drip resets the 1s idle watchdog, so it can
+      // never fire — the CI hang shape. The 3s lifetime cap does not reset.
+      for (let i = 0; i < 5; i++) {
+        gated.push(chunk('x'));
+        await vi.advanceTimersByTimeAsync(500);
+      }
+      await vi.advanceTimersByTimeAsync(1000); // t=3500 — past the cap
+      await consume;
+      expect(error).toBeInstanceOf(StreamLifetimeExceededError);
+      expect(error).toMatchObject({ code: 'ETIMEDOUT' });
+      expect((error as StreamLifetimeExceededError).maxLifetimeMs).toBe(3000);
+      expect((error as StreamLifetimeExceededError).chunksReceived).toBe(5);
+      expect((error as Error).message).toContain('QWEN_STREAM_MAX_LIFETIME_MS');
+      expect(gated.wasReturned()).toBe(true);
+      expect(mockErrorHandler.handle).not.toHaveBeenCalled();
+    });
+
+    it('does not interrupt a drip-fed stream that completes within the lifetime cap', async () => {
+      const gated = gatedStream();
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000, 3000);
+      const gen = await p.executeStream(streamingRequest(), 'id');
+      let done = false;
+      let error: unknown;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().then(
+        () => (done = true),
+        (e: unknown) => (error = e),
+      );
+      gated.push(chunk('a'));
+      await vi.advanceTimersByTimeAsync(500);
+      gated.push(chunk('b'));
+      await vi.advanceTimersByTimeAsync(500);
+      gated.end(); // completes at t=1000, well under the 3s cap
+      await vi.advanceTimersByTimeAsync(0);
+      await consume;
+      expect(error).toBeUndefined();
+      expect(done).toBe(true);
+    });
+
+    it('honours QWEN_STREAM_MAX_LIFETIME_MS when no explicit config is set', async () => {
+      vi.stubEnv(QWEN_STREAM_MAX_LIFETIME_MS_ENV, '4000');
+      const gated = gatedStream(); // drip-fed, never ends
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000); // idle 1s; lifetime from the env
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let error: unknown;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch((e: unknown) => {
+        error = e;
+      });
+      for (let i = 0; i < 7; i++) {
+        gated.push(chunk('x'));
+        await vi.advanceTimersByTimeAsync(500);
+      }
+      await vi.advanceTimersByTimeAsync(1000); // t=4500 — past the 4s env cap
+      await consume;
+      expect(error).toBeInstanceOf(StreamLifetimeExceededError);
+      expect((error as StreamLifetimeExceededError).maxLifetimeMs).toBe(4000);
+    });
+
+    it('lets an explicit streamMaxLifetimeMs config take precedence over the env', async () => {
+      vi.stubEnv(QWEN_STREAM_MAX_LIFETIME_MS_ENV, '1000');
+      const gated = gatedStream(); // drip-fed, never ends
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(500, 3000); // config 3s wins over env 1s
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let error: unknown;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch((e: unknown) => {
+        error = e;
+      });
+      for (let i = 0; i < 4; i++) {
+        gated.push(chunk('x'));
+        await vi.advanceTimersByTimeAsync(400);
+      }
+      // t=1600: past the env value (1s) — must NOT have tripped yet.
+      expect(error).toBeUndefined();
+      for (let i = 0; i < 4; i++) {
+        gated.push(chunk('x'));
+        await vi.advanceTimersByTimeAsync(400);
+      }
+      // t=3200: past the 3s config cap.
+      await consume;
+      expect(error).toBeInstanceOf(StreamLifetimeExceededError);
+      expect((error as StreamLifetimeExceededError).maxLifetimeMs).toBe(3000);
+    });
+
+    it('ignores a malformed QWEN_STREAM_MAX_LIFETIME_MS and falls back to the default', async () => {
+      vi.stubEnv(QWEN_STREAM_MAX_LIFETIME_MS_ENV, 'not-a-number');
+      const gated = gatedStream(); // drip-fed, never ends
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000); // idle 1s (never reached); lifetime env invalid
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let error: unknown;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch((e: unknown) => {
+        error = e;
+      });
+      // The effective cap must be the default: not tripped before it (a
+      // malformed value did not become 0/disabled or fire immediately), and
+      // tripped at it (the default — not some other value — is used).
+      const drips = Math.ceil(DEFAULT_STREAM_MAX_LIFETIME_MS / 500);
+      for (let i = 0; i < drips - 1; i++) {
+        gated.push(chunk('x'));
+        await vi.advanceTimersByTimeAsync(500);
+      }
+      expect(error).toBeUndefined(); // not before the default
+      gated.push(chunk('x'));
+      await vi.advanceTimersByTimeAsync(500); // trips at the default
+      await consume;
+      expect(error).toBeInstanceOf(StreamLifetimeExceededError);
+      expect((error as StreamLifetimeExceededError).maxLifetimeMs).toBe(
+        DEFAULT_STREAM_MAX_LIFETIME_MS,
+      );
+    });
+
+    it('uses the default lifetime cap when nothing overrides it', async () => {
+      const gated = gatedStream(); // drip-fed, never ends
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000); // idle 1s; lifetime default 900s
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let error: unknown;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch((e: unknown) => {
+        error = e;
+      });
+      // Drip at 500ms intervals all the way to the default cap: the idle
+      // watchdog never fires, the 15-minute lifetime cap does.
+      const drips = Math.ceil(DEFAULT_STREAM_MAX_LIFETIME_MS / 500);
+      for (let i = 0; i < drips; i++) {
+        gated.push(chunk('x'));
+        await vi.advanceTimersByTimeAsync(500);
+      }
+      await consume;
+      expect(error).toBeInstanceOf(StreamLifetimeExceededError);
+      expect((error as StreamLifetimeExceededError).maxLifetimeMs).toBe(
+        DEFAULT_STREAM_MAX_LIFETIME_MS,
+      );
+    });
+
+    it('disables the lifetime cap when streamMaxLifetimeMs is 0', async () => {
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000, 0); // lifetime disabled; idle 1s active
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let error: unknown;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch((e: unknown) => {
+        error = e;
+      });
+      await vi.advanceTimersByTimeAsync(1000);
+      await consume;
+      // The idle guard still answers for a silent stream; no lifetime error.
+      expect(error).toBeInstanceOf(StreamInactivityTimeoutError);
     });
   });
 });

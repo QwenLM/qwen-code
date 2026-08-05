@@ -87,6 +87,11 @@ export type ContentGeneratorConfig = {
   // The SDK `timeout` only covers connect + first response, so a stream that
   // returns 200 then goes silent is otherwise unbounded. `<= 0` disables it.
   streamIdleTimeoutMs?: number;
+  // Total-lifetime cap for one streaming response, NOT refreshed by chunk
+  // arrival: a drip-fed stream resets the idle watchdog forever while never
+  // completing the message (issue #8597), so that shape needs a bound the
+  // chunks cannot reset. `<= 0` disables it.
+  streamMaxLifetimeMs?: number;
   maxRetries?: number; // Maximum retries for rate-limit errors
   retryInitialDelayMs?: number; // Initial delay for stream rate-limit retries
   retryMaxDelayMs?: number; // Maximum delay for stream rate-limit retries
