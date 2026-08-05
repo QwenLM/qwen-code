@@ -3646,6 +3646,59 @@ describe('SessionService', () => {
       ).resolves.toBeDefined();
     });
 
+    it('forks from a checkpoint whose line is duplicated in the transcript', async () => {
+      const oldId = '11111111-1111-1111-1111-111111111117';
+      const newId = '22222222-2222-2222-2222-222222222228';
+      const { file, lines } = seedSession(oldId);
+      const checkpoint = {
+        uuid: 'checkpoint-dup',
+        parentUuid: 'u2',
+        sessionId: oldId,
+        type: 'system',
+        subtype: 'branch_checkpoint',
+        timestamp: '2026-04-22T00:00:02.000Z',
+        cwd,
+        version: 'test',
+        systemPayload: {
+          v: 1,
+          startExclusiveRecordUuid: null,
+          assistantRecordUuid: 'u2',
+        },
+      };
+      const later = {
+        uuid: 'u3',
+        parentUuid: 'checkpoint-dup',
+        sessionId: oldId,
+        type: 'user',
+        timestamp: '2026-04-22T00:00:03.000Z',
+        cwd,
+        version: 'test',
+        message: { role: 'user', parts: [{ text: 'later' }] },
+      };
+      fs.writeFileSync(
+        file,
+        [...lines, checkpoint, checkpoint, later]
+          .map((record) => JSON.stringify(record))
+          .join('\n') + '\n',
+      );
+
+      const result = await service.forkSession(oldId, newId, {
+        atRecordId: 'checkpoint-dup',
+      });
+
+      expect(result.copiedCount).toBe(3);
+      const written = fs
+        .readFileSync(result.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      expect(written.map((record) => record.uuid)).toEqual([
+        'u1',
+        'u2',
+        'checkpoint-dup',
+      ]);
+    });
+
     it('rejects a checkpoint that is no longer on the active chain', async () => {
       const oldId = '11111111-1111-1111-1111-111111111114';
       const newId = '22222222-2222-2222-2222-222222222225';
@@ -4206,6 +4259,21 @@ describe('SessionService', () => {
       );
       expect(fs.readdirSync(claimsDir)).toEqual([]);
       expect(fs.readdirSync(stagingDir)).toEqual([]);
+    });
+
+    it('omits dot file-history backup names instead of failing the fork', async () => {
+      const oldId = '31313131-3131-3131-3131-313131313137';
+      const newId = '41414141-4141-4141-4141-414141414147';
+      const { file, lines } = seedSession(oldId);
+      appendFileHistorySnapshot(oldId, file, lines, ['.', '..', 'backup-ok']);
+      const sourceBackupDir = realPath.join(realTmpDir, 'file-history', oldId);
+      const targetBackupDir = realPath.join(realTmpDir, 'file-history', newId);
+      fs.mkdirSync(sourceBackupDir, { recursive: true });
+      fs.writeFileSync(realPath.join(sourceBackupDir, 'backup-ok'), 'content');
+
+      await expect(service.forkSession(oldId, newId)).resolves.toBeDefined();
+
+      expect(fs.readdirSync(targetBackupDir)).toEqual(['backup-ok']);
     });
 
     it('leaves no visible target after an existing backup cannot be copied', async () => {

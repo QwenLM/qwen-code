@@ -5259,6 +5259,13 @@ class QwenAgent implements Agent {
         throw error;
       }
     }
+    // Prompt calls queued at the history-mutation gate are tracked in
+    // activePromptCalls but have no session pendingPrompt yet, so
+    // cancelPendingPrompt cannot see them. Abort their controllers too, or a
+    // cancelled prompt would run in full once the gate frees.
+    for (const call of this.activePromptCalls.get(params.sessionId) ?? []) {
+      call.controller.abort();
+    }
   }
 
   private loadPermissionSettings(cwd: string): LoadedSettings {
@@ -10810,6 +10817,7 @@ class QwenAgent implements Agent {
         const recording = sourceConfig.getChatRecordingService();
         if (recording) await recording.flush();
         const sessionService = sourceConfig.getSessionService();
+        const title = deriveForkBaseName(name, recording, sessionId);
         const newSessionId = randomUUID();
         const fork = () =>
           sessionService.forkSession(sessionId, newSessionId, {
@@ -10817,36 +10825,12 @@ class QwenAgent implements Agent {
               sourceType: 'side_task',
               sourceId: sessionId,
             },
+            title,
           });
         if (recording) {
           await recording.runWithWriteBarrier(fork);
         } else {
           await fork();
-        }
-
-        let title: string;
-        try {
-          const baseName = deriveForkBaseName(name, recording, sessionId);
-          title = baseName;
-          const renamed = await sessionService.renameSession(
-            newSessionId,
-            title,
-            'manual',
-          );
-          if (!renamed) {
-            throw new RequestError(
-              -32603,
-              `Failed to set title on forked session ${newSessionId}`,
-              { errorKind: 'internal', sessionId: newSessionId },
-            );
-          }
-        } catch (error) {
-          sessionService.removeSession(newSessionId).catch((removeError) => {
-            process.stderr.write(
-              `qwen serve: failed to clean up orphan session ${newSessionId}: ${removeError instanceof Error ? removeError.message : removeError}\n`,
-            );
-          });
-          throw error;
         }
         return { newSessionId, title, displayName: title };
       }

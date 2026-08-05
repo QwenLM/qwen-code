@@ -1986,13 +1986,17 @@ export class SessionService {
         options.atRecordId,
       );
       if (!point) throw new BranchPointInvalidError(options.atRecordId);
-      const matchingIndexes = records.flatMap((record, index) =>
-        record.uuid === options.atRecordId ? [index] : [],
+      // The active chain merges duplicate uuids first-wins, so a checkpoint
+      // line repeated by a crash-retry still resolves above. Bound the raw
+      // prefix at the first occurrence: that is where the logical checkpoint
+      // committed, and anything written after it must not leak into the fork.
+      const matchingIndex = records.findIndex(
+        (record) => record.uuid === options.atRecordId,
       );
-      if (matchingIndexes.length !== 1) {
+      if (matchingIndex < 0) {
         throw new BranchPointInvalidError(options.atRecordId);
       }
-      boundedRecords = records.slice(0, matchingIndexes[0]! + 1);
+      boundedRecords = records.slice(0, matchingIndex + 1);
       activeMessages = this.reconstructHistory(boundedRecords, {
         leafUuid: options.atRecordId,
       }).messages;
@@ -2261,11 +2265,6 @@ export class SessionService {
         );
         if (copiedBackupNames.size !== backupNames.size) {
           backupNames = copiedBackupNames;
-          manifest.backupNames = [...backupNames].sort();
-          fs.writeFileSync(claimPath, JSON.stringify(manifest), {
-            encoding: 'utf8',
-          });
-          fsyncPath(claimPath);
         }
         if (backupNames.size > 0) {
           fsyncDirectoryBestEffort(stagedBackupPath);
@@ -2950,6 +2949,8 @@ function collectReferencedFileHistoryBackupNames(
           backup.failed !== true &&
           typeof backup.backupFileName === 'string' &&
           backup.backupFileName.length > 0 &&
+          backup.backupFileName !== '.' &&
+          backup.backupFileName !== '..' &&
           path.basename(backup.backupFileName) === backup.backupFileName
         ) {
           names.add(backup.backupFileName);

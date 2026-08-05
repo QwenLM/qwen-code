@@ -245,11 +245,10 @@ function appendBranchPointRecord(
     ...(existing.message?.parts ?? []),
     ...(projected.message?.parts ?? []),
   ];
-  // Duplicate uuids merge first-wins for identity fields, matching the
-  // byUuid index and fragment aggregation, so the reader never advertises a
-  // branch marker that the first-wins fork path cannot honor.
+  // Duplicate uuids merge strictly first-wins for identity fields, matching
+  // the byUuid index and fragment aggregation, so the reader never advertises
+  // a branch marker that the first-wins fork path cannot honor.
   records.set(record.uuid, {
-    ...projected,
     ...existing,
     ...(parts.length > 0 ? { message: { parts } } : {}),
   });

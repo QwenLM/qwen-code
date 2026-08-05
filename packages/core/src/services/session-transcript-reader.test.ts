@@ -719,6 +719,37 @@ describe('SessionTranscriptReader', () => {
     });
   });
 
+  it('does not advertise a checkpoint merged into a subtype-less first duplicate', async () => {
+    const plain: ChatRecord = {
+      ...record('dup', 'a1', ''),
+      type: 'system',
+      message: undefined,
+    };
+    const checkpoint: ChatRecord = {
+      ...record('dup', 'a1', ''),
+      type: 'system',
+      subtype: 'branch_checkpoint',
+      message: undefined,
+      systemPayload: {
+        v: 1,
+        startExclusiveRecordUuid: null,
+        assistantRecordUuid: 'a1',
+      },
+    };
+    await writeRecords([
+      record('u1', null, 'prompt'),
+      record('a1', 'u1', 'answer'),
+      plain,
+      checkpoint,
+    ]);
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+    );
+
+    expect(page.branchPointsByAssistantUuid).toBeUndefined();
+  });
+
   it('reports a branch point whose checkpoint falls on a later page', async () => {
     const user = record('u1', null, 'prompt');
     const assistant = record('a1', 'u1', 'answer');
