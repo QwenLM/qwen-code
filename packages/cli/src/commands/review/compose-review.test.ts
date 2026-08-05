@@ -3604,3 +3604,115 @@ describe('the ledger marker reaches the POSTED body', () => {
     expect(r.body).not.toContain('qwen-review-ledger');
   });
 });
+
+describe('composeReview — the findings file tag check', () => {
+  // The pipelined loop's invariant, machine-read. Under the serial loop the
+  // last round's verification completing before Step 6 was structural; the
+  // pipelined loop replaced the structure with a tag the orchestrator adds,
+  // removes, and reads by hand. The delivery floor cannot see the miss — one
+  // delivered verify launch anywhere in the run satisfies it, keyed per
+  // round's findings digest — so compose-review reads the cumulative
+  // findings file itself and caps on any surviving tag.
+
+  function findingsFile(content: string): string {
+    const f = join(dir, 'qwen-review-findings.md');
+    writeFileSync(f, content);
+    return f;
+  }
+
+  const TAGGED =
+    '- **File:** src/pay.ts:42\n' +
+    '- **Issue:** off-by-one in the retry cap\n' +
+    '- **Severity:** Critical — [unverified]\n';
+  const CLEAN =
+    '- **File:** src/pay.ts:42\n' +
+    '- **Issue:** off-by-one in the retry cap\n' +
+    '- **Severity:** Critical\n';
+
+  it('caps a clean Approve at Comment and discloses the surviving tag', () => {
+    const r = composeReview(base({ findingsPath: findingsFile(TAGGED) }));
+    expect(r.baseEvent).toBe('APPROVE');
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('findings-unverified-at-compose');
+    expect(r.body).toContain(
+      '1 finding(s) still carried the `— [unverified]` tag when the loop ' +
+        'ended',
+    );
+    // The opener may not certify over a loop that ended mid-verification.
+    expect(r.body).not.toContain('no blockers');
+    expect(r.remediation.join(' ')).toContain('--role verify');
+    expect(verdictLine(r)).toBe(
+      'Verdict: Comment — an Approve was NOT available: findings were ' +
+        'still unverified when the loop ended',
+    );
+  });
+
+  it('counts every surviving tag', () => {
+    const two = `${TAGGED}\n- **File:** src/other.ts:7 — race in the retry queue — [unverified]\n`;
+    const r = composeReview(base({ findingsPath: findingsFile(two) }));
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain('2 finding(s) still carried the');
+  });
+
+  it('a tag-free findings file caps nothing', () => {
+    const r = composeReview(base({ findingsPath: findingsFile(CLEAN) }));
+    expect(r.event).toBe('APPROVE');
+    expect(r.cappedBy).not.toContain('findings-unverified-at-compose');
+  });
+
+  it('a missing findingsPath disables the check — every non-high run', () => {
+    const r = composeReview(base({}));
+    expect(r.event).toBe('APPROVE');
+    expect(r.cappedBy).not.toContain('findings-unverified-at-compose');
+  });
+
+  it('softens a Request changes whose blockers are non-deterministic', () => {
+    // The verifier's delivery is clean here (coveredPlan records it), so the
+    // softening is the tag flag alone: a review posting non-deterministic
+    // Criticals cannot prove they are not the still-tagged entries.
+    const r = composeReview(
+      base({ criticalsInline: 1, findingsPath: findingsFile(TAGGED) }),
+    );
+    expect(r.baseEvent).toBe('REQUEST_CHANGES');
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('findings-unverified-at-compose');
+    expect(r.cappedBy).not.toContain('criticals-unverified');
+    expect(verdictLine(r)).toBe(
+      'Verdict: Comment — a Request changes was NOT available: findings ' +
+        'were still unverified when the loop ended (they are posted, ' +
+        'disclosed)',
+    );
+  });
+
+  it('a deterministic-only Request changes stands despite the tag', () => {
+    // A [build] blocker is pre-confirmed; nothing posted owed a verifier, so
+    // a tag on an entry the review did not confirm un-blocks nothing — but
+    // the disclosure still rides the body.
+    const r = composeReview(
+      base({
+        bodyCriticals: ['[build] tsc fails on the merge commit'],
+        findingsPath: findingsFile(TAGGED),
+      }),
+    );
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.cappedBy).toContain('findings-unverified-at-compose');
+    expect(r.body).toContain('still carried the `— [unverified]` tag');
+  });
+
+  it('fails CLOSED on a findingsPath that does not read', () => {
+    const r = composeReview(
+      base({ findingsPath: join(dir, 'no-such-findings.md') }),
+    );
+    expect(r.baseEvent).toBe('APPROVE');
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('findings-unverified-at-compose');
+    expect(r.body).toContain('findings file could not be read at compose time');
+    expect(r.remediation.join(' ')).toContain('findingsPath');
+  });
+
+  it('refuses a present findingsPath of the wrong shape', () => {
+    expect(() =>
+      composeReview(base({ findingsPath: 42 as unknown as string })),
+    ).toThrow(/findingsPath must be a non-empty string/);
+  });
+});
