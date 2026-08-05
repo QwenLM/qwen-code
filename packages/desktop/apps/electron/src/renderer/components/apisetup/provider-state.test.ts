@@ -125,6 +125,21 @@ describe('provider endpoint state', () => {
     expect(drafts.size).toBe(0);
   });
 
+  it('keeps the typed API key when the current base URL matches no endpoint option', () => {
+    const drafts = new Map<string, string>();
+
+    expect(
+      apiKeyAfterBaseUrlChange(
+        kimi,
+        'https://corporate-proxy.example/v1',
+        'https://api.kimi.com/coding/v1',
+        'typed-key',
+        drafts,
+      ),
+    ).toBe('typed-key');
+    expect(drafts.size).toBe(0);
+  });
+
   it('restores API key drafts across a cross-domain endpoint round trip', () => {
     const drafts = new Map<string, string>();
     const codingUrl = 'https://api.kimi.com/coding/v1';

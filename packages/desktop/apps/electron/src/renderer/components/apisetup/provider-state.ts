@@ -98,7 +98,9 @@ export function apiKeyAfterBaseUrlChange(
   }
   const currentDomain = selectedBaseUrlEnvKey(provider, currentBaseUrl);
   const nextDomain = selectedBaseUrlEnvKey(provider, nextBaseUrl);
-  if (!currentDomain || !nextDomain) return '';
+  // A baseUrl that matches no option has no draft domain — keep the typed
+  // key rather than wiping it unrecoverably.
+  if (!currentDomain || !nextDomain) return currentApiKey;
   drafts.set(currentDomain, currentApiKey);
   return drafts.get(nextDomain) ?? '';
 }

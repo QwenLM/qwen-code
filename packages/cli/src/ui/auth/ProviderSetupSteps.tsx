@@ -765,12 +765,18 @@ export function ProviderSetupSteps({
       const items = PROTOCOL_ITEMS.filter((p) =>
         protocolOpts.includes(p.value as AuthType),
       );
+      // Highlight the restored protocol for providers whose saved setup
+      // seeded one (custom provider); fresh flows start on the first item.
+      const initialIndex = Math.max(
+        0,
+        items.findIndex((p) => p.value === flow.state.protocol),
+      );
       return (
         <>
           <Box marginTop={1}>
             <DescriptiveRadioButtonSelect
               items={items}
-              initialIndex={0}
+              initialIndex={initialIndex}
               onSelect={flow.selectProtocol}
               itemGap={1}
             />

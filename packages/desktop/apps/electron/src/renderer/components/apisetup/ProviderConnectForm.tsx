@@ -426,6 +426,7 @@ export function ProviderConnectForm({
                 onValueChange={(value) => {
                   setBaseUrl(value);
                   if (value !== baseUrl) {
+                    setFormError(null);
                     setApiKey(
                       apiKeyAfterBaseUrlChange(
                         selectedProvider,

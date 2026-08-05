@@ -35,6 +35,28 @@ const kimi: DaemonAuthProviderDescriptor = {
   steps: ['baseUrl', 'apiKey', 'models'],
 };
 
+const mimo: DaemonAuthProviderDescriptor = {
+  id: 'xiaomi-mimo',
+  label: 'Xiaomi MiMo API Key',
+  description: 'Pay-as-you-go API or Token Plan access to Xiaomi MiMo',
+  protocol: 'openai',
+  envKey: 'MIMO_API_KEY',
+  models: [{ id: 'mimo-v2.5-pro' }, { id: 'mimo-v2.5' }],
+  baseUrl: [
+    {
+      id: 'pay-as-you-go',
+      label: 'Pay-as-you-go API',
+      url: 'https://api.xiaomimimo.com/v1',
+    },
+    {
+      id: 'token-plan-china',
+      label: 'Token Plan (China)',
+      url: 'https://token-plan-cn.xiaomimimo.com/v1',
+    },
+  ],
+  steps: ['baseUrl', 'apiKey', 'models'],
+};
+
 describe('auth provider endpoint state', () => {
   it('uses endpoint-specific environment keys and model defaults', () => {
     expect(
@@ -157,6 +179,30 @@ describe('auth provider endpoint state', () => {
     expect(
       apiKeyAfterBaseUrlChange(kimi, codingUrl, apiUrl, '', 'openai', drafts),
     ).toBe('typed-api-key');
+  });
+
+  it('falls back to provider-level models for options without endpoint models', () => {
+    const option = Array.isArray(mimo.baseUrl) ? mimo.baseUrl[0] : undefined;
+    expect(option).toBeDefined();
+    expect(selectedBaseUrlModelIds(mimo, 'https://api.xiaomimimo.com/v1')).toBe(
+      'mimo-v2.5-pro, mimo-v2.5',
+    );
+    expect(
+      baseUrlOptionModelIds(option!, mimo, 'mimo-v2.5, custom-model'),
+    ).toBe('mimo-v2.5-pro, mimo-v2.5, custom-model');
+  });
+
+  it('falls back to the provider-level env key for options without one', () => {
+    expect(
+      selectedBaseUrlEnvKey(mimo, 'https://api.xiaomimimo.com/v1', 'openai'),
+    ).toBe('MIMO_API_KEY');
+    expect(
+      selectedBaseUrlEnvKey(
+        mimo,
+        'https://token-plan-cn.xiaomimimo.com/v1',
+        'openai',
+      ),
+    ).toBe('MIMO_API_KEY');
   });
 
   it('restores the highlighted endpoint from the selected base URL', () => {

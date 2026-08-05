@@ -177,6 +177,94 @@ describe('useProviderSetupFlow', () => {
     expect(result.current.state.apiKey).toBe('draft-second');
   });
 
+  it('clears stale field errors when switching endpoints', () => {
+    const firstUrl = 'https://first.example/v1';
+    const secondUrl = 'https://second.example/v1';
+    const provider: ProviderConfig = {
+      id: 'endpoint-provider',
+      label: 'Endpoint Provider',
+      description: 'Provider with endpoint-specific defaults',
+      protocol: AuthType.USE_OPENAI,
+      baseUrl: [
+        { id: 'first', label: 'First', url: firstUrl },
+        { id: 'second', label: 'Second', url: secondUrl },
+      ],
+      envKey: (_protocol, baseUrl) =>
+        baseUrl === firstUrl ? 'FIRST_API_KEY' : 'SECOND_API_KEY',
+      models: [{ id: 'endpoint-model' }],
+      modelsEditable: true,
+      modelNamePrefix: 'Endpoint',
+    };
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+
+    act(() => {
+      result.current.start(provider, undefined, {
+        FIRST_API_KEY: 'sk-first',
+        SECOND_API_KEY: 'sk-second',
+      });
+      result.current.changeApiKey('');
+    });
+    act(() => {
+      expect(result.current.submitApiKey()).toBe(false);
+    });
+    expect(result.current.state.apiKeyError).not.toBeNull();
+
+    act(() => {
+      result.current.changeModelIds('');
+    });
+    act(() => {
+      expect(result.current.submitModelIds()).toBe(false);
+    });
+    expect(result.current.state.modelIdsError).not.toBeNull();
+
+    act(() => {
+      result.current.selectBaseUrl(secondUrl);
+    });
+
+    expect(result.current.state.apiKey).toBe('sk-second');
+    expect(result.current.state.apiKeyError).toBeNull();
+    expect(result.current.state.modelIdsError).toBeNull();
+  });
+
+  it('preserves seeded endpoint and key when reselecting the saved protocol', () => {
+    const provider: ProviderConfig = {
+      id: 'multi-protocol-provider',
+      label: 'Multi Protocol Provider',
+      description: 'Provider with a protocol step',
+      protocol: AuthType.USE_OPENAI,
+      protocolOptions: [AuthType.USE_OPENAI, AuthType.USE_ANTHROPIC],
+      envKey: (protocol) =>
+        protocol === AuthType.USE_ANTHROPIC
+          ? 'ANTHROPIC_API_KEY'
+          : 'OPENAI_API_KEY',
+      modelsEditable: true,
+      modelNamePrefix: 'Multi',
+    };
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+
+    act(() => {
+      result.current.start(
+        provider,
+        AuthType.USE_ANTHROPIC,
+        { ANTHROPIC_API_KEY: 'sk-stored' },
+        [],
+        'https://my-proxy.example/v1',
+      );
+    });
+
+    act(() => {
+      result.current.selectProtocol(AuthType.USE_ANTHROPIC);
+    });
+    expect(result.current.state.baseUrl).toBe('https://my-proxy.example/v1');
+    expect(result.current.state.apiKey).toBe('sk-stored');
+
+    act(() => {
+      result.current.selectProtocol(AuthType.USE_OPENAI);
+    });
+    expect(result.current.state.baseUrl).toBe('');
+    expect(result.current.state.apiKey).toBe('');
+  });
+
   it('starts from a previously installed endpoint', () => {
     const firstUrl = 'https://first.example/v1';
     const secondUrl = 'https://second.example/v1';

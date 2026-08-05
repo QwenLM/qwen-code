@@ -222,15 +222,18 @@ export function useProviderSetupFlow(
   const selectProtocol = useCallback(
     (selectedProtocol: AuthType) => {
       setProtocol(selectedProtocol);
-      // Clear baseUrl so the user types fresh; show the protocol's default
-      // endpoint as a placeholder (used if they submit blank).
-      setBaseUrl('');
-      setBaseUrlPlaceholder(getDefaultBaseUrlForProtocol(selectedProtocol));
-      setApiKey('');
-      setApiKeyError(null);
+      if (selectedProtocol !== protocol) {
+        // Clear baseUrl so the user types fresh; show the protocol's default
+        // endpoint as a placeholder (used if they submit blank). Reselecting
+        // the seeded protocol keeps the restored endpoint and key.
+        setBaseUrl('');
+        setBaseUrlPlaceholder(getDefaultBaseUrlForProtocol(selectedProtocol));
+        setApiKey('');
+        setApiKeyError(null);
+      }
       goNext();
     },
-    [goNext],
+    [goNext, protocol],
   );
 
   const selectBaseUrl = useCallback(
@@ -238,6 +241,8 @@ export function useProviderSetupFlow(
       setBaseUrl(selectedUrl);
       setBaseUrlError(null);
       if (provider && selectedUrl !== baseUrl) {
+        setApiKeyError(null);
+        setModelIdsError(null);
         const builtInIds = new Set([
           ...(provider.models?.map((model) => model.id) ?? []),
           ...(Array.isArray(provider.baseUrl)
