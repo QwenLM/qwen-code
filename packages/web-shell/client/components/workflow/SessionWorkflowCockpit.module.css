@@ -41,6 +41,10 @@
   cursor: pointer;
   font-size: 12px;
   font-weight: 700;
+  transition:
+    transform 160ms ease,
+    box-shadow 160ms ease,
+    background 160ms ease;
 }
 
 .primaryButton {
@@ -52,148 +56,53 @@
 .secondaryButton:hover,
 .darkButton:hover {
   background: #f5f7fa;
+  box-shadow: 0 7px 18px rgba(29, 42, 67, 0.08);
+  transform: translateY(-1px);
 }
 
 .cockpit {
-  display: grid;
-  grid-template-columns: 220px minmax(0, 1fr);
   width: 100%;
   height: 100%;
   min-height: 0;
   overflow: hidden;
 }
 
-.sidebar {
-  display: flex;
-  min-height: 0;
-  flex-direction: column;
-  color: #dbe3f2;
-  border-right: 1px solid rgba(255, 255, 255, 0.05);
-  background:
-    linear-gradient(145deg, rgba(74, 108, 231, 0.13), transparent 42%), #111b30;
-}
-
-.sidebarBrand {
-  display: flex;
-  height: 70px;
-  align-items: center;
-  gap: 11px;
-  padding: 0 20px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-}
-
 .brandMark {
-  display: grid;
+  position: relative;
+  display: block;
   width: 30px;
   height: 30px;
   flex: none;
-  place-items: center;
   border-radius: 9px;
-  color: #fff;
   background: linear-gradient(145deg, #5d79ee, #3157e2);
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
-  font-size: 13px;
-  font-weight: 900;
 }
 
-.sidebarBrand strong,
-.sidebarFoot strong {
-  display: block;
-  color: #fff;
-  font-size: 13px;
+.brandMark::before,
+.brandMark::after {
+  position: absolute;
+  border-radius: 5px;
+  background: #fff;
+  content: '';
 }
 
-.sidebarBrand small,
-.sidebarFoot small {
-  display: block;
-  margin-top: 2px;
-  color: #7586a1;
-  font-size: 8px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+.brandMark::before {
+  top: 6px;
+  left: 8px;
+  width: 5px;
+  height: 18px;
 }
 
-.navLabel {
-  margin: 24px 20px 8px;
-  color: #71819c;
-  font-family: monospace;
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-}
-
-.nav {
-  display: grid;
-  gap: 3px;
-  padding: 0 10px;
-}
-
-.nav button {
-  display: grid;
-  grid-template-columns: 18px minmax(0, 1fr) auto;
-  width: 100%;
-  min-height: 42px;
-  align-items: center;
-  gap: 10px;
-  padding: 0 12px;
-  border: 0;
-  border-radius: 9px;
-  color: #9dabc0;
-  background: transparent;
-  cursor: pointer;
-  font-size: 12px;
-  text-align: left;
-}
-
-.nav button:hover,
-.navActive {
-  color: #fff !important;
-  background: #192640 !important;
-}
-
-.navActive {
-  box-shadow: inset 3px 0 #4b70f2;
-}
-
-.nav button > span {
-  text-align: center;
-}
-
-.nav button b {
-  display: grid;
-  min-width: 20px;
-  height: 20px;
-  place-items: center;
-  border-radius: 6px;
-  color: #dfe6ff;
-  background: rgba(75, 112, 242, 0.22);
-  font-family: monospace;
-  font-size: 10px;
-}
-
-.sidebarFoot {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-top: auto;
-  padding: 17px 18px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
-}
-
-.userAvatar {
-  display: grid;
-  width: 31px;
-  height: 31px;
-  place-items: center;
-  border-radius: 9px;
-  color: #fff;
-  background: linear-gradient(145deg, #506ed1, #354988);
-  font-size: 10px;
-  font-weight: 800;
+.brandMark::after {
+  right: 8px;
+  bottom: 6px;
+  width: 5px;
+  height: 11px;
+  opacity: 0.65;
 }
 
 .main {
+  height: 100%;
   min-width: 0;
   overflow: auto;
 }
@@ -213,12 +122,19 @@
   backdrop-filter: blur(16px);
 }
 
-.topbar > div:first-child {
+.topbarCrumb {
   display: flex;
+  min-width: 0;
   align-items: center;
   gap: 8px;
   color: #6e7889;
   font-size: 12px;
+}
+
+.topbarCrumb strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .topbar i {
@@ -230,6 +146,61 @@
   color: #142037;
 }
 
+.cockpitTabs {
+  display: flex;
+  height: 38px;
+  flex: none;
+  align-items: center;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid #e0e5ec;
+  border-radius: 10px;
+  background: #f5f7fa;
+}
+
+.cockpitTabs button {
+  display: flex;
+  height: 30px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 7px;
+  color: #667085;
+  background: transparent;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.cockpitTabs button:hover {
+  color: #142037;
+  background: rgba(255, 255, 255, 0.7);
+}
+
+.cockpitTabs button[data-active='true'] {
+  color: #2646bd;
+  background: #fff;
+  box-shadow: 0 2px 8px rgba(40, 57, 91, 0.1);
+}
+
+.cockpitTabs svg {
+  width: 14px;
+  height: 14px;
+  stroke-width: 1.9;
+}
+
+.cockpitTabs b {
+  display: grid;
+  min-width: 17px;
+  height: 17px;
+  place-items: center;
+  border-radius: 6px;
+  color: #9b5c13;
+  background: #fff0d9;
+  font-size: 9px;
+}
+
 .topActions {
   display: flex;
   align-items: center;
@@ -237,13 +208,26 @@
 }
 
 .topActions > button {
+  display: flex;
   min-height: 34px;
+  align-items: center;
+  gap: 6px;
   padding: 0 11px;
   border: 1px solid #e0e5ec;
   border-radius: 9px;
   background: #fff;
   cursor: pointer;
-  font-size: 10px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.topActions > button:hover {
+  background: #f5f7fa;
+}
+
+.topActions > button svg {
+  width: 15px;
+  height: 15px;
 }
 
 .environment {
@@ -256,7 +240,7 @@
   color: #4e5a6e;
   background: #fff;
   font-family: monospace;
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .environment i,
@@ -329,7 +313,7 @@
   gap: 17px;
   margin-top: 9px;
   color: #6e7889;
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .taskMeta code {
@@ -450,7 +434,7 @@
   display: block;
   margin-top: 2px;
   color: #6e7889;
-  font-size: 8px;
+  font-size: 9px;
 }
 
 .panelHeader button {
@@ -458,7 +442,7 @@
   color: #3157e2;
   background: transparent;
   cursor: pointer;
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .panelHeader code {
@@ -486,9 +470,13 @@
   text-align: left;
 }
 
-.phase:hover,
+.phase:hover {
+  background: #f6f8fb;
+}
+
 .phaseActive {
   background: #eef2ff;
+  box-shadow: inset 3px 0 #3157e2;
 }
 
 .phase > i {
@@ -501,7 +489,7 @@
   color: #8a95a6;
   background: #fff;
   font-family: monospace;
-  font-size: 8px;
+  font-size: 9px;
   font-style: normal;
   font-weight: 700;
 }
@@ -541,7 +529,7 @@
 }
 
 .phase > span strong {
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .phase > span small {
@@ -553,7 +541,7 @@
 .phase > em {
   color: #8e98a7;
   font-family: monospace;
-  font-size: 7px;
+  font-size: 8px;
   font-style: normal;
 }
 
@@ -576,7 +564,7 @@
   color: #6e7889;
   background: transparent;
   cursor: pointer;
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .stageTabActive {
@@ -685,7 +673,7 @@
   color: #3157e2;
   background: #edf1ff;
   font-family: monospace;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 900;
 }
 
@@ -766,13 +754,13 @@
 
 .dependencyCards span {
   color: #6e7889;
-  font-size: 8px;
+  font-size: 9px;
 }
 
 .dependencyCards strong {
   margin-top: 4px;
   overflow-wrap: anywhere;
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .agentCards {
@@ -812,18 +800,18 @@
 }
 
 .agentCards strong {
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .agentCards small {
   margin-top: 3px;
   color: #6e7889;
-  font-size: 8px;
+  font-size: 9px;
 }
 
 .agentCards em {
   color: #3157e2;
-  font-size: 8px;
+  font-size: 9px;
   font-style: normal;
 }
 
@@ -877,13 +865,13 @@
 }
 
 .activityRow strong {
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .activityRow small {
   margin-top: 3px;
   color: #6e7889;
-  font-size: 8px;
+  font-size: 9px;
 }
 
 .activityRow em,
@@ -921,12 +909,12 @@
 }
 
 .reviewBanner strong {
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .reviewBanner p {
   margin: 5px 0 0;
-  font-size: 8px;
+  font-size: 9px;
   line-height: 1.5;
 }
 
@@ -966,13 +954,13 @@
 }
 
 .checkList strong {
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .checkList small {
   margin-top: 2px;
   color: #6e7889;
-  font-size: 7px;
+  font-size: 9px;
   line-height: 1.4;
 }
 
@@ -982,7 +970,7 @@
   color: #1b9a70;
   background: #eaf6f2;
   font-family: monospace;
-  font-size: 7px;
+  font-size: 8px;
   font-style: normal;
   font-weight: 700;
 }
@@ -1016,7 +1004,7 @@
 .evidenceGrid span {
   margin-top: 2px;
   color: #6e7889;
-  font-size: 7px;
+  font-size: 9px;
 }
 
 .reviewActions {
@@ -1094,14 +1082,14 @@
 }
 
 .deliverables section strong {
-  font-size: 8px;
+  font-size: 9px;
 }
 
 .deliverables section small,
 .deliverables section p {
   margin-top: 3px;
   color: #6e7889;
-  font-size: 7px;
+  font-size: 9px;
 }
 
 .attentionHeading {
@@ -1592,43 +1580,10 @@
 }
 
 @media (max-width: 1220px) {
-  .cockpit {
-    grid-template-columns: 74px minmax(0, 1fr);
-  }
-
-  .sidebarBrand {
-    justify-content: center;
-    padding: 0;
-  }
-
-  .sidebarBrand > div,
-  .sidebarFoot > div,
-  .navLabel,
-  .nav button:not(.navActive) b {
-    display: none;
-  }
-
-  .nav button {
-    display: grid;
-    grid-template-columns: 1fr;
-    place-items: center;
-    padding: 0;
-    font-size: 0;
-  }
-
-  .nav button > span {
-    font-size: 13px;
-  }
-
-  .nav button b {
-    position: absolute;
-    margin: -25px 0 0 28px;
-    font-size: 8px;
-  }
-
-  .sidebarFoot {
-    justify-content: center;
-    padding: 17px 0;
+  .topbar {
+    gap: 12px;
+    padding-right: 18px;
+    padding-left: 18px;
   }
 
   .workspace {
@@ -1645,13 +1600,13 @@
 }
 
 @media (max-width: 860px) {
-  .cockpit {
-    display: block;
-    overflow: auto;
+  .topbarCrumb,
+  .environment {
+    display: none;
   }
 
-  .sidebar {
-    display: none;
+  .cockpitTabs {
+    margin-right: auto;
   }
 
   .topbar,
@@ -1704,6 +1659,20 @@
   .logRows {
     border-right: 0;
     border-bottom: 1px solid #e0e5ec;
+  }
+}
+
+@media (max-width: 560px) {
+  .cockpitTabs button span,
+  .topActions > button span {
+    display: none;
+  }
+
+  .cockpitTabs button,
+  .topActions > button {
+    width: 34px;
+    justify-content: center;
+    padding: 0;
   }
 }
 

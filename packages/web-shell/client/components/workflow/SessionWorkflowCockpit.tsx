@@ -1,4 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
+import {
+  CircleAlert,
+  GitBranch,
+  LayoutDashboard,
+  MessageSquareText,
+} from 'lucide-react';
 import type {
   DaemonSessionAgentTaskStatus,
   DaemonSessionTaskStatus,
@@ -162,7 +168,7 @@ function PlanReview({
     <div className={styles.reviewShell} data-testid="cockpit-plan-review">
       <header className={styles.reviewTopbar}>
         <div className={styles.brandLockup}>
-          <span className={styles.brandMark}>Q</span>
+          <span className={styles.brandMark} aria-hidden="true" />
           <span>Session Cockpit</span>
         </div>
         <span className={styles.reviewTopTitle}>执行前计划确认</span>
@@ -400,62 +406,39 @@ export function SessionWorkflowCockpit({
 
   return (
     <div className={styles.cockpit} data-testid="session-workflow-cockpit">
-      <aside className={styles.sidebar}>
-        <div className={styles.sidebarBrand}>
-          <span className={styles.brandMark}>Q</span>
-          <div>
-            <strong>Session Cockpit</strong>
-            <small>Agent Collaboration</small>
-          </div>
-        </div>
-        <span className={styles.navLabel}>工作空间</span>
-        <nav aria-label="驾驶舱导航" className={styles.nav}>
-          <button
-            className={section === 'task' ? styles.navActive : ''}
-            onClick={() => setSection('task')}
-            type="button"
-          >
-            <span>◇</span>协作任务 <b>1</b>
-          </button>
-          <button
-            className={section === 'attention' ? styles.navActive : ''}
-            onClick={() => setSection('attention')}
-            type="button"
-          >
-            <span>!</span>待我处理 <b>{attentionTodos.length}</b>
-          </button>
-          <button onClick={onOpenWorkflow} type="button">
-            <span>⌘</span>技术 DAG
-          </button>
-        </nav>
-        <span className={styles.navLabel}>对话</span>
-        <nav className={styles.nav}>
-          <button onClick={onBackToChat} type="button">
-            <span>←</span>返回 Chat
-          </button>
-        </nav>
-        <div className={styles.sidebarFoot}>
-          <span className={styles.userAvatar}>QC</span>
-          <div>
-            <strong>Qwen Code</strong>
-            <small>实验演示环境</small>
-          </div>
-        </div>
-      </aside>
-
       <main className={styles.main}>
         <header className={styles.topbar}>
-          <div>
-            <span>{section === 'task' ? '协作任务' : '工作空间'}</span>
+          <div className={styles.topbarCrumb}>
+            <span>Session Workflow</span>
             <i>/</i>
             <strong>
               {section === 'task' ? sessionName || '当前 Session' : '待我处理'}
             </strong>
           </div>
-          <div className={styles.topActions}>
-            <button onClick={onBackToChat} type="button">
-              返回 Chat
+          <nav aria-label="驾驶舱视图" className={styles.cockpitTabs}>
+            <button
+              data-active={section === 'task' || undefined}
+              onClick={() => setSection('task')}
+              type="button"
+            >
+              <LayoutDashboard aria-hidden="true" />
+              <span>协作任务</span>
             </button>
+            <button
+              data-active={section === 'attention' || undefined}
+              onClick={() => setSection('attention')}
+              type="button"
+            >
+              <CircleAlert aria-hidden="true" />
+              <span>待我处理</span>
+              {attentionTodos.length > 0 && <b>{attentionTodos.length}</b>}
+            </button>
+            <button onClick={onOpenWorkflow} type="button">
+              <GitBranch aria-hidden="true" />
+              <span>技术 DAG</span>
+            </button>
+          </nav>
+          <div className={styles.topActions}>
             <span
               className={styles.environment}
               data-connected={connected || undefined}
@@ -463,6 +446,10 @@ export function SessionWorkflowCockpit({
               <i />
               daemon {connected ? 'connected' : 'reconnecting'}
             </span>
+            <button onClick={onBackToChat} type="button">
+              <MessageSquareText aria-hidden="true" />
+              <span>返回 Chat</span>
+            </button>
           </div>
         </header>
 
