@@ -8,6 +8,7 @@ import {
   extractTodosFromToolCall,
   getAgentToolsForPlan,
   getFloatingTodos,
+  getSessionWorkflowTodos,
   getActiveTodosForPlanRevision,
   getTodoStatusIcon,
   getTodoWindow,
@@ -236,6 +237,26 @@ describe('getFloatingTodos', () => {
     expect(state.todos).toHaveLength(2);
     expect(state.allCompleted).toBe(true);
     expect(state.sourceMessageId).toBe('p1');
+  });
+});
+
+describe('getSessionWorkflowTodos', () => {
+  it('retains the latest workflow after a later user message', () => {
+    const state = getSessionWorkflowTodos([
+      todoWriteMessage(
+        'done',
+        [todo('first', 'completed'), todo('second', 'completed')],
+        undefined,
+        'plan-1',
+      ),
+      userMessage('follow-up'),
+      assistantMessage('reply'),
+    ]);
+
+    expect(state.todos.map((todo) => todo.id)).toEqual(['first', 'second']);
+    expect(state.planId).toBe('plan-1');
+    expect(state.allCompleted).toBe(true);
+    expect(state.sourceMessageId).toBe('done');
   });
 });
 

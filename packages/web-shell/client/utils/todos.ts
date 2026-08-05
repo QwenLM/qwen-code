@@ -120,8 +120,9 @@ const EMPTY_FLOATING_TODOS: FloatingTodosState = {
   sourceMessageId: null,
 };
 
-export function getFloatingTodos(
+function getLatestTodos(
   messages: readonly Message[],
+  clearAfterUserMessage: boolean,
 ): FloatingTodosState {
   let todos: TodoItem[] = [];
   let planId: string | null = null;
@@ -155,8 +156,20 @@ export function getFloatingTodos(
 
   if (todos.length === 0) return EMPTY_FLOATING_TODOS;
   const allCompleted = !hasActiveTodos(todos);
-  if (userMessageAfter) return EMPTY_FLOATING_TODOS;
+  if (clearAfterUserMessage && userMessageAfter) return EMPTY_FLOATING_TODOS;
   return { todos, planId, allCompleted, sourceMessageId };
+}
+
+export function getFloatingTodos(
+  messages: readonly Message[],
+): FloatingTodosState {
+  return getLatestTodos(messages, true);
+}
+
+export function getSessionWorkflowTodos(
+  messages: readonly Message[],
+): FloatingTodosState {
+  return getLatestTodos(messages, false);
 }
 
 export function getActiveTodosForPlanRevision(

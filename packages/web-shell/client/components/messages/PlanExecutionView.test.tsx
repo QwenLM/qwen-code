@@ -409,6 +409,17 @@ describe('PlanExecutionView', () => {
 
   it('groups executions by todo and keeps missing links unassigned', () => {
     const onOpen = vi.fn();
+    const runningRoot = task('running', {
+      runtimeMs: 65_000,
+      stats: { totalTokens: 1_200, toolUses: 4, durationMs: 65_000 },
+      recentActivities: [
+        {
+          name: 'read_file',
+          description: 'Inspecting the implementation',
+          at: 1,
+        },
+      ],
+    });
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -419,11 +430,15 @@ describe('PlanExecutionView', () => {
             todos={todos}
             tools={[agentTool('build'), agentTool()]}
             tasks={[
-              task('running'),
+              runningRoot,
               task('running', {
                 id: 'agent-child',
                 label: 'Child agent',
                 parentAgentId: 'agent-build',
+              }),
+              task('running', {
+                id: 'agent-unrelated',
+                toolUseId: 'call-unrelated',
               }),
             ]}
             onOpenSubagent={onOpen}
@@ -433,6 +448,9 @@ describe('PlanExecutionView', () => {
     });
 
     expect(container.textContent).toContain('Depends on: research');
+    expect(container.textContent).toContain('33%');
+    expect(container.textContent).toContain('1 / 3');
+    expect(container.textContent).toContain('2Active agents');
     expect(container.textContent).toContain('Child agent');
     expect(container.textContent).toContain('Unassigned executions');
     const step = container.querySelector<HTMLButtonElement>(
@@ -445,7 +463,15 @@ describe('PlanExecutionView', () => {
     expect(details?.textContent).toContain('Step details');
     expect(details?.textContent).toContain('Build');
     expect(details?.textContent).toContain('Depends on: research');
+    expect(details?.textContent).toContain('Unblocks: verify');
     expect(details?.textContent).toContain('Subagents');
+    expect(details?.textContent).toContain(
+      'Current activity:Inspecting the implementation',
+    );
+    expect(details?.textContent).toContain(
+      '1m 5s · 4 tool calls · 1,200 tokens',
+    );
+    expect(details?.textContent).toContain('Open subagent details →');
     const button = Array.from(details?.querySelectorAll('button') ?? []).find(
       (candidate) => candidate.textContent?.includes('Agent build'),
     );
