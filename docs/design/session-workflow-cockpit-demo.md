@@ -10,7 +10,7 @@ This branch turns the collaboration-cockpit reference into a real Web Shell page
 - Agent calls are linked to a Todo through `todo_id`; daemon task snapshots supply live status, activity, usage, and persisted transcript/output paths.
 - `exit_plan_mode` remains the execution gate. When the experimental Session Workflow setting is enabled, a revision-bound approval opens the cockpit's four-step plan review before execution.
 - Approval uses the existing permission API. The cockpit does not schedule, pause, or persist tasks itself.
-- The Chat header opens either the collaboration cockpit or the technical DAG. The cockpit links back to Chat and to the technical Workflow, and Agent cards open the existing transcript detail panel.
+- The shared Session header switches between Chat, the operational cockpit, and the technical Workflow DAG. Agent cards open the existing transcript detail panel.
 - `?view=cockpit` makes the cockpit directly addressable and browser navigation returns to Chat.
 
 ## Demo
@@ -46,8 +46,8 @@ Expected flow:
 1. The pending `exit_plan_mode` request opens the cockpit plan review with four nodes and the two-way fan-in dependency.
 2. Approval starts execution and keeps the cockpit open as the live dashboard.
 3. Selecting a Todo shows its dependencies and linked Agent; selecting the Agent opens its persisted transcript.
-4. **技术 DAG** opens the compact execution graph, and Back returns to the cockpit.
-5. **返回 Chat** resumes the conversation. The header or `?view=cockpit` reopens the completed workflow later.
+4. The shared Session header switches between **Chat / 驾驶舱 / Workflow** without leaving the Session.
+5. Returning to Chat resumes the conversation. The header or `?view=cockpit` reopens the completed workflow later.
 
 ## Deliberate boundary
 

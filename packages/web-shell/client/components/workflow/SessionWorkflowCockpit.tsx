@@ -1,10 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import {
-  ArrowLeft,
-  CircleAlert,
-  GitBranch,
-  LayoutDashboard,
-} from 'lucide-react';
+import { CircleAlert, LayoutDashboard } from 'lucide-react';
 import type {
   DaemonSessionAgentTaskStatus,
   DaemonSessionTaskStatus,
@@ -42,12 +37,11 @@ interface SessionWorkflowCockpitProps {
   tasks: readonly DaemonSessionTaskStatus[];
   approval?: CockpitApproval;
   onBackToChat: () => void;
-  onOpenWorkflow: () => void;
   onOpenSubagent: (tool: ACPToolCall) => void;
 }
 
 type CockpitSection = 'task' | 'attention';
-type StageTab = 'work' | 'dag' | 'activity';
+type StageTab = 'work' | 'activity';
 
 function toolTodoId(tool: ACPToolCall): string | undefined {
   const value = tool.args?.todo_id;
@@ -166,24 +160,6 @@ function PlanReview({
 
   return (
     <div className={styles.reviewShell} data-testid="cockpit-plan-review">
-      <header className={styles.reviewTopbar}>
-        <div className={styles.pageIdentity}>
-          <button
-            className={styles.backButton}
-            aria-label="返回 Chat"
-            onClick={onBackToChat}
-            title="返回 Chat"
-            type="button"
-          >
-            <ArrowLeft aria-hidden="true" />
-          </button>
-          <div>
-            <strong>执行前计划确认</strong>
-            <span>{sessionName || '当前协作任务'}</span>
-          </div>
-        </div>
-        <span className={styles.reviewState}>等待确认</span>
-      </header>
       <div className={styles.reviewBody}>
         <main className={styles.reviewMain}>
           <section className={styles.reviewSteps}>
@@ -279,7 +255,6 @@ export function SessionWorkflowCockpit({
   tasks,
   approval,
   onBackToChat,
-  onOpenWorkflow,
   onOpenSubagent,
 }: SessionWorkflowCockpitProps) {
   const [section, setSection] = useState<CockpitSection>('task');
@@ -420,26 +395,7 @@ export function SessionWorkflowCockpit({
   return (
     <div className={styles.cockpit} data-testid="session-workflow-cockpit">
       <main className={styles.main}>
-        <header className={styles.topbar}>
-          <div className={styles.pageIdentity}>
-            <button
-              className={styles.backButton}
-              aria-label="返回 Chat"
-              onClick={onBackToChat}
-              title="返回 Chat"
-              type="button"
-            >
-              <ArrowLeft aria-hidden="true" />
-            </button>
-            <div>
-              <strong>Session Workflow</strong>
-              <span>
-                {section === 'task'
-                  ? sessionName || '当前 Session'
-                  : '待我处理'}
-              </span>
-            </div>
-          </div>
+        <div className={styles.viewBar}>
           <nav aria-label="驾驶舱视图" className={styles.cockpitTabs}>
             <button
               aria-label="协作任务"
@@ -460,25 +416,15 @@ export function SessionWorkflowCockpit({
               <span>待我处理</span>
               {attentionTodos.length > 0 && <b>{attentionTodos.length}</b>}
             </button>
-            <button
-              aria-label="技术 DAG"
-              onClick={onOpenWorkflow}
-              type="button"
-            >
-              <GitBranch aria-hidden="true" />
-              <span>技术 DAG</span>
-            </button>
           </nav>
-          <div className={styles.topActions}>
-            <span
-              className={styles.environment}
-              data-connected={connected || undefined}
-            >
-              <i />
-              daemon {connected ? 'connected' : 'reconnecting'}
-            </span>
-          </div>
-        </header>
+          <span
+            className={styles.environment}
+            data-connected={connected || undefined}
+          >
+            <i />
+            daemon {connected ? 'connected' : 'reconnecting'}
+          </span>
+        </div>
 
         {section === 'attention' ? (
           <section className={styles.attentionPage}>
@@ -624,9 +570,6 @@ export function SessionWorkflowCockpit({
                     <h2>执行计划</h2>
                     <span>{todos.length} 个节点 · 点击查看详情</span>
                   </div>
-                  <button onClick={() => setStageTab('dag')} type="button">
-                    查看 DAG
-                  </button>
                 </header>
                 <div className={styles.phases}>
                   {todos.map((todo, index) => {
@@ -668,7 +611,6 @@ export function SessionWorkflowCockpit({
                   {(
                     [
                       ['work', '工作现场'],
-                      ['dag', '执行 DAG'],
                       ['activity', 'Agent 记录'],
                     ] as const
                   ).map(([value, label]) => (
@@ -687,16 +629,7 @@ export function SessionWorkflowCockpit({
                     <i /> LIVE SESSION
                   </span>
                 </div>
-                {stageTab === 'dag' ? (
-                  <div className={styles.dagStage}>
-                    <PlanExecutionView
-                      todos={todos}
-                      tools={tools}
-                      tasks={tasks}
-                      onOpenSubagent={onOpenSubagent}
-                    />
-                  </div>
-                ) : stageTab === 'activity' ? (
+                {stageTab === 'activity' ? (
                   <div className={styles.activityStage}>
                     {activity.length > 0 ? (
                       activity.map((task) => (

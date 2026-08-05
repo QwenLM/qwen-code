@@ -2619,16 +2619,15 @@ describe('App plan todos', () => {
       container.querySelector('[data-testid="workflow-page"]')?.textContent,
     ).toContain('Worker agent');
     expect(document.activeElement).toBe(
-      container.querySelector(
-        '[data-testid="workflow-page"] button[aria-label="back"]',
-      ),
+      container.querySelector('[data-testid="open-workflow"]'),
     );
+    expect(
+      container.querySelector('[data-testid="chat-context-header"]'),
+    ).not.toBeNull();
 
     await act(async () => {
       container
-        .querySelector<HTMLButtonElement>(
-          '[data-testid="workflow-page"] button[aria-label="back"]',
-        )
+        .querySelector<HTMLButtonElement>('[data-testid="open-chat"]')
         ?.click();
       await Promise.resolve();
     });
@@ -2727,13 +2726,10 @@ describe('App plan todos', () => {
     rerender();
     await flush();
 
-    const technicalDagButton = Array.from(
-      container.querySelectorAll<HTMLButtonElement>(
-        '[data-testid="cockpit-page"] button',
-      ),
-    ).find((button) => button.textContent?.includes('技术 DAG'));
     await act(async () => {
-      technicalDagButton?.click();
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-workflow"]')
+        ?.click();
       await Promise.resolve();
     });
     expect(
@@ -2755,9 +2751,7 @@ describe('App plan todos', () => {
 
     await act(async () => {
       container
-        .querySelector<HTMLButtonElement>(
-          '[data-testid="workflow-page"] button[aria-label="back"]',
-        )
+        .querySelector<HTMLButtonElement>('[data-testid="open-cockpit"]')
         ?.click();
       await Promise.resolve();
     });
@@ -2767,6 +2761,15 @@ describe('App plan todos', () => {
     expect(new URLSearchParams(window.location.search).get('view')).toBe(
       'cockpit',
     );
+
+    testState.messages = [];
+    rerender();
+    await flush();
+    expect(
+      container.querySelector('[data-testid="cockpit-empty"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[data-testid="open-chat"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="open-workflow"]')).toBeNull();
   });
 
   it('keeps the tasks dialog plain when Session Workflow is off', async () => {

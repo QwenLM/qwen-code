@@ -60,73 +60,14 @@
   overflow: auto;
 }
 
-.topbar {
-  position: sticky;
-  z-index: 5;
-  top: 0;
+.viewBar {
   display: flex;
-  min-height: 61px;
+  width: min(1540px, 100%);
   align-items: center;
   justify-content: space-between;
-  gap: 18px;
-  padding: 10px 20px;
-  border-bottom: 1px solid var(--border);
-  background: var(--background);
-}
-
-.pageIdentity {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 10px;
-}
-
-.pageIdentity > div {
-  min-width: 0;
-}
-
-.pageIdentity strong,
-.pageIdentity span {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.pageIdentity strong {
-  color: var(--foreground);
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.pageIdentity span {
-  color: var(--muted-foreground);
-  font-size: 12px;
-}
-
-.backButton {
-  display: inline-flex;
-  width: 32px;
-  height: 32px;
-  flex: none;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: 0;
-  border-radius: 8px;
-  color: var(--muted-foreground);
-  background: transparent;
-  cursor: pointer;
-}
-
-.backButton:hover {
-  color: var(--foreground);
-  background: var(--accent);
-}
-
-.backButton svg {
-  width: 18px;
-  height: 18px;
+  gap: 12px;
+  margin: 0 auto;
+  padding: 18px 28px 0;
 }
 
 .cockpitTabs {
@@ -182,12 +123,6 @@
   color: var(--warning-color);
   background: var(--warning-bg);
   font-size: 11px;
-}
-
-.topActions {
-  display: flex;
-  align-items: center;
-  gap: 9px;
 }
 
 .environment {
@@ -772,14 +707,6 @@
   font-style: normal;
 }
 
-.dagStage {
-  padding: 18px;
-}
-
-.dagStage > section {
-  border-bottom: 0;
-}
-
 .activityStage {
   display: grid;
   gap: 0;
@@ -1236,31 +1163,8 @@
   overflow: auto;
 }
 
-.reviewTopbar {
-  position: sticky;
-  z-index: 5;
-  top: 0;
-  display: flex;
-  min-height: 61px;
-  align-items: center;
-  justify-content: space-between;
-  padding: 10px 20px;
-  border-bottom: 1px solid var(--border);
-  background: var(--background);
-}
-
-.reviewState {
-  padding: 5px 9px;
-  border: 1px solid var(--warning-border);
-  border-radius: 999px;
-  color: var(--warning-color);
-  background: var(--warning-bg);
-  font-size: 12px;
-  font-weight: 600;
-}
-
 .reviewBody {
-  min-height: calc(100% - 61px);
+  min-height: 100%;
 }
 
 .reviewSteps {
@@ -1511,12 +1415,6 @@
 }
 
 @media (max-width: 1220px) {
-  .topbar {
-    gap: 12px;
-    padding-right: 18px;
-    padding-left: 18px;
-  }
-
   .workspace {
     grid-template-columns: 220px minmax(480px, 1fr);
   }
@@ -1536,16 +1434,11 @@
 }
 
 @media (max-width: 860px) {
-  .pageIdentity span,
   .environment {
     display: none;
   }
 
-  .cockpitTabs {
-    margin-right: auto;
-  }
-
-  .topbar,
+  .viewBar,
   .content,
   .attentionPage {
     padding-right: 14px;

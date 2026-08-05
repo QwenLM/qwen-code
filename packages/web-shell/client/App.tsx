@@ -160,6 +160,7 @@ import { ReleaseSessionDialog } from './components/dialogs/ReleaseSessionDialog'
 import { RewindDialog } from './components/dialogs/RewindDialog';
 import { AddWorkspaceDialog } from './components/dialogs/AddWorkspaceDialog';
 import { Button } from './components/ui/button';
+import { ToggleGroup, ToggleGroupItem } from './components/ui/toggle-group';
 import {
   isPluginShadowPanel,
   installWebShellShadowStyles,
@@ -3689,8 +3690,7 @@ export function App({
     cockpitViewRequested() ? 'cockpit' : 'chat',
   );
   const mainViewRef = useRef(mainView);
-  const workflowBackRef = useRef<HTMLButtonElement>(null);
-  const workflowReturnViewRef = useRef<'chat' | 'cockpit'>('chat');
+  const workflowTabRef = useRef<HTMLButtonElement>(null);
   const useFloatingArtifactPanel =
     !canDockArtifactPanel || mainView === 'split' || mainView === 'cockpit';
   // Sessions to seed the split view with (e.g. the selection from the overview).
@@ -6738,8 +6738,6 @@ export function App({
   }, [reportError, requireActiveSessionForLocalCommand, sessionActions]);
   const openWorkflow = useCallback(() => {
     if (!requireActiveSessionForLocalCommand()) return;
-    workflowReturnViewRef.current =
-      mainViewRef.current === 'cockpit' ? 'cockpit' : 'chat';
     if (cockpitViewRequested()) updateCockpitLocation(false);
     setActivePanel(null);
     setTasksDialogMessage(null);
@@ -6756,13 +6754,6 @@ export function App({
     if (cockpitViewRequested()) updateCockpitLocation(false);
     setMainView('chat');
   }, []);
-  const closeWorkflow = useCallback(() => {
-    if (workflowReturnViewRef.current === 'cockpit') {
-      openCockpit();
-      return;
-    }
-    setMainView('chat');
-  }, [openCockpit]);
   const workflowApprovalRequest =
     sessionWorkflowEnabled &&
     isExitPlanApprovalRequest(pendingToolApproval) &&
@@ -6796,7 +6787,7 @@ export function App({
   }, [mainView, sessionWorkflowEnabled, workspaceSettingsState.status]);
   useEffect(() => {
     if (mainView === 'workflow' && !workflowApprovalRequest) {
-      workflowBackRef.current?.focus();
+      workflowTabRef.current?.focus();
     }
   }, [mainView, workflowApprovalRequest]);
   useEffect(() => {
@@ -9334,10 +9325,11 @@ export function App({
               </div>
             )}
             <div className={styles.contextShell}>
-              {chatHeaderEnabled &&
-                !isChatEmptyState &&
+              {!isChatEmptyState &&
                 !activePanel &&
-                mainView === 'chat' && (
+                ((chatHeaderEnabled && mainView === 'chat') ||
+                  mainView === 'cockpit' ||
+                  mainView === 'workflow') && (
                 <div className={styles.chatHeaderRow}>
                   {sidebarOptions.enabled &&
                     sidebarOptions.showCompactToggle && (
@@ -9366,7 +9358,7 @@ export function App({
                         </svg>
                       </button>
                     )}
-                  {renderChatHeader ? (
+                  {renderChatHeader && mainView === 'chat' ? (
                     <div className={styles.customChatHeader}>
                       {renderChatHeader({
                         sessionId: connection.sessionId,
@@ -9388,10 +9380,14 @@ export function App({
                           : null
                       }
                       environmentOpen={environmentPanelVisible}
-                      environmentAvailable={environmentHeaderItemVisible}
+                      environmentAvailable={
+                        mainView === 'chat' && environmentHeaderItemVisible
+                      }
                       rightPanelOpen={artifactPanelOpen}
                       rightPanelAvailable={
-                        rightPanelHeaderItemVisible && !artifactPanelOpen
+                        mainView === 'chat' &&
+                        rightPanelHeaderItemVisible &&
+                        !artifactPanelOpen
                       }
                       onToggleEnvironment={() =>
                         handleEnvironmentPanelOpenChange(
@@ -9404,28 +9400,41 @@ export function App({
                     />
                   )}
                   {sessionWorkflowEnabled &&
-                    sessionWorkflowTodos.length > 0 && (
-                      <>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          onClick={openCockpit}
+                    (sessionWorkflowTodos.length > 0 ||
+                      mainView === 'cockpit') && (
+                      <ToggleGroup
+                        type="single"
+                        value={mainView}
+                        variant="outline"
+                        size="sm"
+                        spacing={0}
+                        className="mr-3"
+                        aria-label="Session view"
+                        onValueChange={(view) => {
+                          if (view === 'chat') closeCockpit();
+                          if (view === 'cockpit') openCockpit();
+                          if (view === 'workflow') openWorkflow();
+                        }}
+                      >
+                        <ToggleGroupItem value="chat" data-testid="open-chat">
+                          Chat
+                        </ToggleGroupItem>
+                        <ToggleGroupItem
+                          value="cockpit"
                           data-testid="open-cockpit"
                         >
                           驾驶舱
-                        </Button>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          className="mr-3"
-                          onClick={openWorkflow}
-                          data-testid="open-workflow"
-                        >
-                          {t('workflow.title')}
-                        </Button>
-                      </>
+                        </ToggleGroupItem>
+                        {sessionWorkflowTodos.length > 0 && (
+                          <ToggleGroupItem
+                            ref={workflowTabRef}
+                            value="workflow"
+                            data-testid="open-workflow"
+                          >
+                            {t('workflow.title')}
+                          </ToggleGroupItem>
+                        )}
+                      </ToggleGroup>
                     )}
                 </div>
               )}
@@ -9877,7 +9886,6 @@ export function App({
                     tools={planAgentTools}
                     tasks={environmentAgentTasks}
                     onBackToChat={closeCockpit}
-                    onOpenWorkflow={openWorkflow}
                     onOpenSubagent={openSubagentPanel}
                     {...(sessionDisplayName
                       ? { sessionName: sessionDisplayName }
@@ -9902,33 +9910,6 @@ export function App({
               )}
               {mainView === 'workflow' && (
                 <div className={styles.fullPage} data-testid="workflow-page">
-                  <div className={styles.fullPageHeader}>
-                    <button
-                      ref={workflowBackRef}
-                      type="button"
-                      className={styles.fullPageBack}
-                      onClick={closeWorkflow}
-                      aria-label={t('common.back')}
-                      title={t('common.back')}
-                    >
-                      <svg
-                        viewBox="0 0 24 24"
-                        width="18"
-                        height="18"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        aria-hidden="true"
-                      >
-                        <path d="M15 18l-6-6 6-6" />
-                      </svg>
-                    </button>
-                    <div className={styles.fullPageTitle}>
-                      {t('workflow.title')}
-                    </div>
-                  </div>
                   <div className={styles.workflowPageBody}>
                     {workflowApprovalRequest ? (
                       <ToolApproval
