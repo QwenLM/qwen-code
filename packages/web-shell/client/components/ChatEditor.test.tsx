@@ -214,6 +214,10 @@ vi.mock('../voice/VoiceButton', () => ({
   },
 }));
 
+vi.mock('../live/LiveVoiceButton', () => ({
+  LiveVoiceButton: () => <span data-testid="live-voice-button" />,
+}));
+
 vi.mock('./SpecularComposerEffect', () => ({
   SpecularComposerEffect: () => (
     <span data-web-shell-composer-specular aria-hidden="true" />
@@ -319,19 +323,22 @@ function renderChatEditor(props: {
 }
 
 describe('ChatEditor voice toolbar integration', () => {
-  it('mounts voice only when the host toolbar allows it', () => {
+  it('keeps dictation and Live together when the host toolbar allows voice', () => {
+    const defaults = renderChatEditor({});
+    const voiceOnly = renderChatEditor({ visibleToolbarActions: ['voice'] });
+    const hidden = renderChatEditor({ visibleToolbarActions: [] });
+
+    for (const container of [defaults, voiceOnly]) {
+      expect(
+        container.querySelector('[data-testid="voice-button"]'),
+      ).not.toBeNull();
+      expect(
+        container.querySelector('[data-testid="live-voice-button"]'),
+      ).not.toBeNull();
+    }
+    expect(hidden.querySelector('[data-testid="voice-button"]')).toBeNull();
     expect(
-      renderChatEditor({}).querySelector('[data-testid="voice-button"]'),
-    ).not.toBeNull();
-    expect(
-      renderChatEditor({
-        visibleToolbarActions: ['voice'],
-      }).querySelector('[data-testid="voice-button"]'),
-    ).not.toBeNull();
-    expect(
-      renderChatEditor({
-        visibleToolbarActions: [],
-      }).querySelector('[data-testid="voice-button"]'),
+      hidden.querySelector('[data-testid="live-voice-button"]'),
     ).toBeNull();
   });
 });

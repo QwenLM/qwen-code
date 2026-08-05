@@ -817,6 +817,14 @@ export function WebShellSidebar({
       ? availableWorkspaces.filter((entry) => entry.cwd === lockedWorkspaceCwd)
       : availableWorkspaces;
   }, [connection.workspaceCwd, lockedWorkspaceCwd, projectName, workspaces]);
+  const liveWorkspaces = useMemo(
+    () => displayedWorkspaces.filter((entry) => entry.kind === 'live'),
+    [displayedWorkspaces],
+  );
+  const projectWorkspaces = useMemo(
+    () => displayedWorkspaces.filter((entry) => entry.kind !== 'live'),
+    [displayedWorkspaces],
+  );
   const pinnedSessions = useMemo(() => {
     const byId = new Map<string, DaemonSessionSummary>();
     for (const session of [
@@ -4097,6 +4105,64 @@ export function WebShellSidebar({
                 )}
               </>
             )}
+            {!collapsed &&
+              liveWorkspaces.map((ws) => (
+                <WorkspaceSection
+                  key={ws.id}
+                  workspace={ws}
+                  renderHeader={(expanded) => (
+                    <>
+                      <RadioTowerIcon
+                        size={16}
+                        strokeWidth={1.2}
+                        aria-hidden="true"
+                      />
+                      <span className={styles.liveWorkspaceLabel}>
+                        {t('sidebar.live')}
+                      </span>
+                      {expanded ? (
+                        <ChevronDownIcon
+                          size={15}
+                          strokeWidth={1.8}
+                          aria-hidden="true"
+                        />
+                      ) : (
+                        <ChevronRightIcon
+                          size={15}
+                          strokeWidth={1.8}
+                          aria-hidden="true"
+                        />
+                      )}
+                    </>
+                  )}
+                  client={workspace.client}
+                  reloadToken={workspaceSessionsReloadToken}
+                  untrustedLabel={t('sidebar.workspaceUntrusted')}
+                  readOnlyLabel={t('sidebar.workspaceReadOnly')}
+                  trustToOpenLabel={t('sidebar.workspaceTrustToOpen')}
+                  noSessionsLabel={t('sidebar.noSessions')}
+                  loadErrorLabel={t('sidebar.loadFailed')}
+                  organizationEnabled={false}
+                  ungroupedLabel={t('sidebar.groupUngrouped')}
+                  formatTime={(iso) => formatRelativeTime(iso, t)}
+                  autoExpandKey={
+                    autoExpandWorkspace?.id === ws.id
+                      ? autoExpandWorkspace.key
+                      : undefined
+                  }
+                  renderSession={(session) =>
+                    renderSessionRow(
+                      { ...session, workspaceCwd: ws.cwd },
+                      {
+                        readOnly: isActiveSessionReadOnly({
+                          ...session,
+                          workspaceCwd: ws.cwd,
+                        }),
+                      },
+                    )
+                  }
+                />
+              ))}
             {!collapsed && !hideProjectHeader && (
               <div className={styles.projectsHeader}>
                 <button
@@ -4161,7 +4227,7 @@ export function WebShellSidebar({
                 {!collapsed && (
                   <div className={styles.workspacePicker}>
                     <div className={styles.workspaceList}>
-                      {displayedWorkspaces.map((ws) => (
+                      {projectWorkspaces.map((ws) => (
                         <Fragment key={ws.id}>
                           <WorkspaceSection
                             workspace={ws}

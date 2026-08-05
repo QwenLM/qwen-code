@@ -3167,7 +3167,9 @@ describe('Server Config (config.ts)', () => {
 
       await config.initialize();
 
-      expect(maybeRunAutoSkillCurator).toHaveBeenCalledWith(TARGET_DIR);
+      expect(maybeRunAutoSkillCurator).toHaveBeenCalledWith(
+        path.resolve(TARGET_DIR),
+      );
       expect(
         vi.mocked(maybeRunAutoSkillCurator).mock.invocationCallOrder[0],
       ).toBeLessThan(vi.mocked(SkillManager).mock.invocationCallOrder[0]);
