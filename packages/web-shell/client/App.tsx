@@ -215,10 +215,7 @@ import {
   encodeVisionModelForSetting,
   extractBareModelId,
 } from './utils/modelEncoding';
-import {
-  appendLocalUserEchoIfIdle,
-  appendOrDeferLocalUserMessage,
-} from './utils/localCommandQueue';
+import { appendOrDeferLocalUserMessage } from './utils/localCommandQueue';
 import { QueuedPromptDisplay } from './components/QueuedPromptDisplay';
 import { useQueuedPrompts } from './hooks/useQueuedPrompts';
 import { useNewSessionSuggestion } from './hooks/useNewSessionSuggestion';
@@ -5013,14 +5010,12 @@ export function App({
   // Echo a local command when idle, but never block it. Read-only display
   // commands (/stats, /about, /context) render their result as a status
   // block, which does not split the active turn, so they run immediately
-  // mid-turn with only the echo skipped (see appendLocalUserEchoIfIdle).
+  // mid-turn with only the echo skipped.
   const echoLocalCommandIfIdle = useCallback(
     (text: string): void => {
-      appendLocalUserEchoIfIdle(streamingStateRef.current !== 'idle', text, {
-        append: (value: string) => store.appendLocalUserMessage(value),
-      });
+      void echoOrDeferLocalCommand(text);
     },
-    [store],
+    [echoOrDeferLocalCommand],
   );
 
   // Shared result dispatch for those read-only commands: `clearActiveText:
@@ -5892,9 +5887,10 @@ export function App({
   }, [currentMode, handleSetMode]);
 
   // Shared by the /context slash command and the status-bar context
-  // indicator. Echoes the command as a local user message first — that also
-  // makes the transcript follow the tail (MessageList Rule 4), so the panel
-  // is revealed even when the click comes while scrolled up.
+  // indicator. Echoes the command when idle — that also makes the transcript
+  // follow the tail (MessageList Rule 4). Mid-turn the echo is skipped and
+  // dispatchReadOnlyStatus's resumeChatBottomFollow resumes bottom-follow,
+  // so the panel is revealed even when the click comes while scrolled up.
   const showContextUsage = useCallback(
     (commandText: string, detail: boolean) => {
       // Read-only: every entry point (keyboard, status-bar button, in-chat

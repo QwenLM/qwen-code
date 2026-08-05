@@ -18,8 +18,9 @@ import type { PromptImage } from '../adapters/promptTypes';
  * The only call sites that should bypass this and append mid-stream are the
  * deliberate "busy acknowledgement" paths (e.g. clearing a goal while a turn
  * runs), which opt in by calling `append` directly. Read-only display
- * commands (/stats, /about, /context) use `appendLocalUserEchoIfIdle`
- * instead: they skip the echo mid-turn and still run immediately.
+ * commands (/stats, /about, /context) go through the same helper but ignore
+ * its suppression signal: they skip the echo mid-turn and still run
+ * immediately.
  */
 export interface LocalEchoSink {
   /** Append the command as a local user message (renders inline immediately). */
@@ -44,30 +45,6 @@ export function appendOrDeferLocalUserMessage(
   }
   sink.append(text);
   return false;
-}
-
-/**
- * Append a local command's echo when idle, skipping it while a turn is
- * streaming — without ever blocking the command itself.
- *
- * Read-only display commands render their result as a status block, which is
- * not a turn boundary in `applyTurnCollapse`, so they can run mid-turn; only
- * the user echo row would split the active turn. Skipping the echo also
- * avoids `appendLocalUserTranscriptMessage` finalizing the in-flight
- * assistant block mid-stream — and the command's result dispatch must pass
- * `clearActiveText: false` for the same reason.
- *
- * Delegates to `appendOrDeferLocalUserMessage` so the idle gate lives in one
- * place; note the inverted polarity — here `true` means "echo appended".
- *
- * @returns `true` if the echo was appended, `false` if it was skipped.
- */
-export function appendLocalUserEchoIfIdle(
-  isStreaming: boolean,
-  text: string,
-  sink: LocalEchoSink,
-): boolean {
-  return !appendOrDeferLocalUserMessage(isStreaming, text, undefined, sink);
 }
 
 /**

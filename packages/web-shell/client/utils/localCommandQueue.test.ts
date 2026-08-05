@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
-  appendLocalUserEchoIfIdle,
   appendOrDeferLocalUserMessage,
   isCommandPrompt,
 } from './localCommandQueue';
@@ -50,26 +49,6 @@ describe('appendOrDeferLocalUserMessage', () => {
     appendOrDeferLocalUserMessage(true, '/stats', images, { append });
 
     expect(enqueue).not.toHaveBeenCalled();
-    expect(append).not.toHaveBeenCalled();
-  });
-});
-
-describe('appendLocalUserEchoIfIdle', () => {
-  it('appends and returns true when no turn is streaming', () => {
-    const append = vi.fn();
-
-    const appended = appendLocalUserEchoIfIdle(false, '/stats', { append });
-
-    expect(appended).toBe(true);
-    expect(append).toHaveBeenCalledExactlyOnceWith('/stats');
-  });
-
-  it('skips the echo but returns false without blocking while streaming', () => {
-    const append = vi.fn();
-
-    const appended = appendLocalUserEchoIfIdle(true, '/about', { append });
-
-    expect(appended).toBe(false);
     expect(append).not.toHaveBeenCalled();
   });
 });
