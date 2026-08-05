@@ -267,9 +267,11 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
     fullDetail ||
     (thoughtExpanded ??
       (allExpanded || expandedHeadIds.has(thoughtGroupHeadId)));
-  // fullDetail and `thoughtExpanded === true` both pin the thought open, so
-  // a click could never collapse it — ClickableThinkMessage disarms itself.
-  const forcedOpen = fullDetail || thoughtExpanded === true;
+  // fullDetail, Ctrl+O full-detail (`allExpanded`), and `thoughtExpanded ===
+  // true` all pin the thought open, so a click could never collapse it —
+  // ClickableThinkMessage disarms itself. `allExpanded` matters on surfaces
+  // that don't forward it as `fullDetail` (e.g. AgentChatContent).
+  const forcedOpen = fullDetail || allExpanded || thoughtExpanded === true;
   const settings = useSettings();
   const showTimestamps = settings.merged.output?.showTimestamps === true;
 

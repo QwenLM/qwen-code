@@ -5474,6 +5474,57 @@ describe('AppContainer State Management', () => {
     });
   });
 
+  describe('Pending thought expansion settle wiring', () => {
+    it('passes a settle callback to useGeminiStream wired to settlePendingExpansion', () => {
+      // The callback AppContainer hands useGeminiStream is the reducer glue
+      // that keeps a click-expanded streaming thought expanded after it
+      // commits. This harness never propagates internal setState to the
+      // captured context consumer (same limitation documented in the Ctrl+O
+      // test above), so the wiring is pinned in two layers: the real
+      // callback must be the hook's last argument, and its source must apply
+      // settlePendingExpansion to the real setExpandedThoughtHeadIds setter.
+      // Probe-verified mutations settlePendingExpansion(prev, null) and
+      // settlePendingExpansion(new Set(), committedHeadId) fail the source
+      // guard; the pure-function behavior itself is covered in
+      // ThoughtExpandedContext.test.tsx.
+      mockedUseGeminiStream.mockReturnValue({
+        streamingState: 'idle',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        pendingToolCalls: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      const settlePendingThoughtExpansion = mockedUseGeminiStream.mock.calls
+        .at(-1)
+        ?.at(-1);
+      expect(settlePendingThoughtExpansion).toBeTypeOf('function');
+      expect(
+        (
+          settlePendingThoughtExpansion as (...args: unknown[]) => unknown
+        ).toString(),
+      ).toMatch(
+        // `(0, mod.settlePendingExpansion)` is the bundler's ESM-call interop
+        // form; the module prefix varies by transform.
+        /setExpandedThoughtHeadIds\(\s*\(prev\)\s*=>\s*(?:\(0,\s*)?(?:[A-Za-z0-9_$]+\.)?settlePendingExpansion\)?\(\s*prev\s*,\s*committedHeadId\s*\)/,
+      );
+    });
+  });
+
   describe('Model Dialog Integration', () => {
     it('should provide isModelDialogOpen in the UIStateContext', () => {
       mockedUseModelCommand.mockReturnValue({

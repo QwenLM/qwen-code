@@ -10994,6 +10994,70 @@ describe('useGeminiStream', () => {
       expect(settle).toHaveBeenCalledTimes(2);
     });
 
+    it('settles null only for the first Thought event of a continued thought', async () => {
+      vi.useFakeTimers();
+
+      const settle = vi.fn();
+      let releaseContinuation!: () => void;
+      const holdContinuation = new Promise<void>((resolve) => {
+        releaseContinuation = resolve;
+      });
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'thinking part one' },
+          };
+          await holdContinuation;
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'thinking part two' },
+          };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'the answer',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderWithSettleSpy(settle);
+
+      act(() => {
+        void result.current.submitQuery('test query');
+      });
+
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        // Let the stream loop reach the first Thought and schedule its
+        // throttled flush timer before the 60ms advance below fires it.
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      // Fire the throttled flush while only part one is buffered, so the
+      // continuation below reaches handleThoughtEvent with a non-empty
+      // thought buffer — the `startingNewThought === false` path.
+      await act(async () => {
+        vi.advanceTimersByTime(60);
+      });
+
+      await act(async () => {
+        releaseContinuation();
+      });
+
+      const committedId = findAddedItemId('gemini_thought');
+      // The continuation Thought chunk must not re-drop the sentinel
+      // mid-stream: settle fires with null exactly once (first event), then
+      // with the committed head id at commit.
+      expect(settle).toHaveBeenNthCalledWith(1, null);
+      expect(settle).toHaveBeenNthCalledWith(2, committedId);
+      expect(settle).toHaveBeenCalledTimes(2);
+    });
+
     it('settles the split head id on an oversized thought split, never for content tails', async () => {
       vi.useFakeTimers();
 

@@ -930,6 +930,60 @@ describe('<HistoryItemDisplay />', () => {
       expect(output).not.toContain('click');
     });
 
+    it('disarms the click handler when allExpanded (Ctrl+O) is active without fullDetail forwarding', () => {
+      vi.mocked(useMouseEvents).mockClear();
+      renderWithProviders(
+        <VirtualViewportContext.Provider value={true}>
+          <ThoughtExpandedProvider
+            value={{
+              allExpanded: true,
+              expandedHeadIds: new Set<number>(),
+              toggle: vi.fn(),
+            }}
+          >
+            <HistoryItemDisplay
+              item={thoughtItem}
+              terminalWidth={100}
+              isPending={true}
+            />
+          </ThoughtExpandedProvider>
+        </VirtualViewportContext.Provider>,
+      );
+      const opts = vi.mocked(useMouseEvents).mock.calls.at(-1)?.[1];
+
+      // AgentChatContent never forwards `fullDetail`; Ctrl+O pins the thought
+      // open via `allExpanded` alone, so the handler must not subscribe —
+      // clicks could only record invisible toggles that resurface as flipped
+      // rows once Ctrl+O turns off.
+      expect(opts?.isActive).toBe(false);
+    });
+
+    it('drops the click wording from the collapse hint when allExpanded is active without fullDetail forwarding', () => {
+      const { lastFrame } = renderWithProviders(
+        <VirtualViewportContext.Provider value={true}>
+          <ThoughtExpandedProvider
+            value={{
+              allExpanded: true,
+              expandedHeadIds: new Set<number>(),
+              toggle: vi.fn(),
+            }}
+          >
+            <HistoryItemDisplay
+              item={thoughtItem}
+              terminalWidth={100}
+              isPending={false}
+            />
+          </ThoughtExpandedProvider>
+        </VirtualViewportContext.Provider>,
+      );
+
+      const output = lastFrame() ?? '';
+      // Same contract as fullDetail, exercised through the context flag alone
+      // — the path surfaces that don't forward fullDetail take.
+      expect(output).toContain(`${toggleKeyHint} to collapse`);
+      expect(output).not.toContain('click');
+    });
+
     it('disarms the click handler when the thoughtExpanded prop forces the thought open', () => {
       vi.mocked(useMouseEvents).mockClear();
       renderWithProviders(
