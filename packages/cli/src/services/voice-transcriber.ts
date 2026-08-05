@@ -224,6 +224,8 @@ function readIpv4CompatibleIpv6(host: string): string | undefined {
 }
 
 function readIpv4MappedIpv6(host: string): string | undefined {
+  // The dotted-quad branch is unreachable once normalizeIpAddress has
+  // canonicalized IPv6 literals to hex form; kept defensively.
   const dotted = host.match(/^::ffff:(\d+(?:\.\d+){3})$/i);
   if (dotted && isIP(dotted[1]!) === 4) {
     return dotted[1];

@@ -197,30 +197,36 @@ describe('resolveDesktopVoiceConfig', () => {
     expect(config.baseUrl).toBe('https://dashscope-proxy.example.com/asr/v1')
   })
 
-  it('falls through when an exact model provider baseUrl is incomplete', async () => {
-    await expect(
-      resolveDesktopVoiceConfig({
-        getVoiceModel: () => 'qwen3-asr-flash',
-        env: {},
-        readQwenJson: async <T,>(file: string) =>
-          (file === 'settings.json'
-            ? {
-                env: { DASHSCOPE_API_KEY: 'settings-key' },
-                modelProviders: {
-                  openai: [
-                    {
-                      id: 'qwen3-asr-flash',
-                      baseUrl: 'dashscope.aliyuncs.com/compatible-mode/v1',
-                      envKey: 'DASHSCOPE_API_KEY',
-                    },
-                  ],
-                },
-              }
-            : undefined) as T | undefined,
-        readSystemJson: async () => undefined,
-        readHomeEnvFile: async () => undefined,
-      }),
-    ).rejects.toThrow('Voice dictation needs Qwen credentials')
+  it('falls through and warns when an exact model provider baseUrl is incomplete', async () => {
+    const warnSpy = spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      await expect(
+        resolveDesktopVoiceConfig({
+          getVoiceModel: () => 'qwen3-asr-flash',
+          env: {},
+          readQwenJson: async <T,>(file: string) =>
+            (file === 'settings.json'
+              ? {
+                  env: { DASHSCOPE_API_KEY: 'settings-key' },
+                  modelProviders: {
+                    openai: [
+                      {
+                        id: 'qwen3-asr-flash',
+                        baseUrl: 'dashscope.aliyuncs.com/compatible-mode/v1',
+                        envKey: 'DASHSCOPE_API_KEY',
+                      },
+                    ],
+                  },
+                }
+              : undefined) as T | undefined,
+          readSystemJson: async () => undefined,
+          readHomeEnvFile: async () => undefined,
+        }),
+      ).rejects.toThrow('Voice dictation needs Qwen credentials')
+      expect(warnSpy.mock.calls.flat().join(' ')).toContain('not a valid URL')
+    } finally {
+      warnSpy.mockRestore()
+    }
   })
 
   it('does not infer missing path segments for an exact model provider', async () => {

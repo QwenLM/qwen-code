@@ -40,6 +40,11 @@ Desktop treats a provider whose ID exactly matches the selected voice model as a
 
 Hostnames whose DNS records resolve to loopback addresses (for example `asr.localtest.me` or `/etc/hosts` aliases for a local ASR server) are always blocked, with or without an allowlist entry; the CLI previously allowed such DNS results. To reach a local endpoint, configure an explicit loopback baseUrl such as `http://localhost`, `http://127.0.0.1`, or `http://[::1]`, which remains allowed.
 
+Two more behavior changes relative to the pre-allowlist guard:
+
+- CLI: a voice model `baseUrl` with embedded credentials (`https://user:pass@host/...`) is rejected instead of proceeding with the credentials stripped — userinfo can make the URL parser resolve an attacker-controlled host.
+- Desktop: IPv4-mapped IPv6 literals such as `::ffff:127.0.0.1` are classified by their embedded IPv4 address and no longer bypass the loopback block; configure an explicit loopback spelling instead.
+
 ## Verification
 
 - Preserve default rejection for non-localhost HTTP and private endpoints.

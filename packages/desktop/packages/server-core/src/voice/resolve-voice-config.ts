@@ -161,10 +161,12 @@ const DOTENV_LINE =
 
 /** Parse home .env content exactly like dotenv@17. Exported for tests. */
 export function parseEnvFileContent(content: string): Record<string, string> {
-  const result: Record<string, string> = {};
+  const result: Record<string, string> = Object.create(null);
   const lines = content.replace(/\r\n?/g, '\n');
+  // Fresh instance per call: the grammar regex carries shared lastIndex state.
+  const linePattern = new RegExp(DOTENV_LINE.source, DOTENV_LINE.flags);
   let match: RegExpExecArray | null;
-  while ((match = DOTENV_LINE.exec(lines)) !== null) {
+  while ((match = linePattern.exec(lines)) !== null) {
     let value = match[2] ?? '';
     value = value.trim();
     const quote = value[0];
@@ -197,7 +199,7 @@ async function getHomeEnvFallback(
   if (!env.QWEN_HOME) {
     candidates.push(join(dirname(qwenDir), '.env'));
   }
-  const result: Record<string, string> = {};
+  const result: Record<string, string> = Object.create(null);
   for (const candidate of candidates) {
     const content = await readHomeEnvFile(candidate);
     if (content === undefined) {
@@ -548,6 +550,11 @@ function fromExactModelProvider(
   try {
     parsedBaseUrl = new URL(rawBaseUrl);
   } catch {
+    // Never fall through silently: shipping audio to a different endpoint
+    // than configured is exactly what the operator must be able to see.
+    voiceConfigLogger.warn(
+      `[voice] Provider baseUrl for voice model '${voiceModel}' is not a valid URL (${rawBaseUrl}); ignoring the entry and falling back to the next credential source.`,
+    );
     return undefined;
   }
   if (parsedBaseUrl.username || parsedBaseUrl.password) {
