@@ -187,6 +187,24 @@ const allowedProcessEnvAccesses = normalizeAllowances([
       accesses: { whole: 1 },
     },
   ],
+  [
+    'packages/cli/src/serve/live/live-host-coordinator.ts',
+    {
+      reason: 'Live Host diagnostics are enabled for the whole daemon process.',
+      accesses: { 'key:QWEN_LIVE_DIAGNOSTICS': 1 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/live/live-session-coordinator.ts',
+    {
+      reason:
+        'Live audio diagnostics are enabled and located for the whole daemon process.',
+      accesses: {
+        'key:QWEN_LIVE_DIAGNOSTICS': 2,
+        'key:QWEN_LIVE_DIAGNOSTICS_DIR': 1,
+      },
+    },
+  ],
 ]);
 
 function listTypeScriptFiles(dir: string): string[] {
