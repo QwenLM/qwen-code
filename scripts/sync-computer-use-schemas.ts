@@ -25,9 +25,9 @@ import {
   binaryPath,
 } from '../packages/core/src/tools/computer-use/constants.js';
 
-// cua-driver 0.5.2 advertises 35 tools. A drift here just means the upstream
+// Qwen CUA Driver 0.17.0 advertises 54 tools. A drift here means the pinned
 // surface changed — warn (so a bump is reviewed) but don't fail the sync.
-const EXPECTED_TOOL_COUNT = 35;
+const EXPECTED_TOOL_COUNT = 54;
 
 async function main(): Promise<void> {
   // Default to the pinned, locally-installed binary; allow an explicit override.
@@ -35,7 +35,14 @@ async function main(): Promise<void> {
 
   const transport = new StdioClientTransport({
     command: binary,
-    args: ['mcp'],
+    // Schema generation only calls tools/list. Direct mode avoids requiring a
+    // registered/TCC-authorized macOS app bundle in the developer checkout;
+    // the production client intentionally keeps the normal app/daemon path.
+    args: ['mcp', '--direct'],
+    env: {
+      ...process.env,
+      MCP_MODEL_PAYLOAD_FILTER: '1',
+    } as Record<string, string>,
   });
   const client = new Client(
     { name: 'qwen-code-schema-sync', version: '1.0.0' },
@@ -54,12 +61,17 @@ async function main(): Promise<void> {
 
   const schemas: Record<
     string,
-    { description: string; parameterSchema: unknown }
+    {
+      description: string;
+      parameterSchema: unknown;
+      annotations: unknown;
+    }
   > = {};
   for (const tool of result.tools) {
     schemas[tool.name] = {
       description: tool.description ?? '',
       parameterSchema: tool.inputSchema ?? { type: 'object', properties: {} },
+      annotations: tool.annotations ?? {},
     };
   }
 
@@ -85,6 +97,12 @@ async function main(): Promise<void> {
 export interface ComputerUseToolSchema {
   description: string;
   parameterSchema: Record<string, unknown>;
+  annotations: {
+    readOnlyHint?: boolean;
+    destructiveHint?: boolean;
+    idempotentHint?: boolean;
+    openWorldHint?: boolean;
+  };
 }
 
 export const COMPUTER_USE_TOOL_NAMES = ${JSON.stringify(

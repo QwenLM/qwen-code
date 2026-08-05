@@ -30,15 +30,17 @@ import { homedir } from 'node:os';
 type ComputerUseParams = Record<string, unknown>;
 
 const INSTALL_REASON =
-  'This downloads the Computer Use driver (~20MB, signed + notarized) into ~/.qwen/computer-use/ the first time. ' +
+  'This downloads the pinned Qwen CUA driver into ~/.qwen/computer-use/ the first time (the macOS bundle is signed + notarized). ' +
   'Computer Use can click, type, and read your desktop apps in the background. ' +
   "On macOS you'll be guided through Accessibility / Screen Recording permissions next.";
 
 /**
  * Tools / params that perform irreversible or sensitive actions and must NOT be
- * silently auto-approved in AUTO_EDIT mode. They surface a confirmation in
- * AUTO_EDIT; AUTO still routes them through its classifier (getDefaultPermission
- * stays 'ask'); YOLO still auto-approves everything.
+ * silently auto-approved in AUTO_EDIT mode. The generated MCP
+ * `destructiveHint` covers the expanded Qwen CUA surface; this curated set
+ * additionally protects sensitive operations whose upstream annotation is
+ * intentionally non-destructive. AUTO still routes them through its classifier
+ * (getDefaultPermission stays 'ask'); YOLO still auto-approves everything.
  *   - kill_app          force-kills a PID
  *   - launch_app        launches arbitrary apps (incl. with CDP debug ports)
  *   - start_recording   captures the screen to disk
@@ -81,6 +83,8 @@ export function isHighRiskCall(
   params: Record<string, unknown>,
 ): boolean {
   if (HIGH_RISK_TOOLS.has(upstreamName as ComputerUseToolName)) return true;
+  const schema = COMPUTER_USE_SCHEMAS[upstreamName as ComputerUseToolName];
+  if (schema?.annotations.destructiveHint === true) return true;
   return (
     upstreamName === 'page' &&
     HIGH_RISK_PAGE_ACTIONS.has(params['action'] as string)
@@ -111,7 +115,7 @@ class ComputerUseInvocation extends BaseToolInvocation<
    *
    * Earlier this returned 'allow' once the install-state file existed,
    * which conflated install approval with per-action approval and
-   * effectively granted blanket permission for all 9 computer_use__*
+   * effectively granted blanket permission for all computer_use__*
    * tools (including mutating actions like click / type_text / drag)
    * after the first install confirmation. See PR #4590 review for the
    * full discussion.
@@ -183,7 +187,7 @@ class ComputerUseInvocation extends BaseToolInvocation<
         title: installApproved
           ? `Allow high-risk Computer Use (${this.upstreamName})`
           : `Allow high-risk Computer Use (${this.upstreamName}) — first use also downloads the driver`,
-        serverName: 'cua-driver',
+        serverName: 'qwen-cua-driver',
         toolName: this.upstreamName,
         toolDisplayName: `computer_use__${this.upstreamName}`,
         permissionRules,

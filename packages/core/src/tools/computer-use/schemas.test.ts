@@ -11,8 +11,8 @@ describe('computer-use schemas (cua-driver full tool surface)', () => {
   it('exports the complete cua-driver tool set (no curation)', () => {
     // Every tool cua-driver advertises is exposed; if upstream adds/removes
     // tools, re-run scripts/sync-computer-use-schemas.ts and bump this count.
-    expect(Object.keys(COMPUTER_USE_SCHEMAS)).toHaveLength(35);
-    expect(COMPUTER_USE_TOOL_NAMES).toHaveLength(35);
+    expect(Object.keys(COMPUTER_USE_SCHEMAS)).toHaveLength(54);
+    expect(COMPUTER_USE_TOOL_NAMES).toHaveLength(54);
   });
 
   it('includes the renamed screenshot+AX tool (get_window_state, not get_app_state)', () => {
@@ -31,6 +31,13 @@ describe('computer-use schemas (cua-driver full tool surface)', () => {
       'move_cursor',
       'set_config',
       'get_accessibility_tree',
+      'get_desktop_state',
+      'browser_prepare',
+      'browser_download',
+      'clipboard_read',
+      'clipboard_write',
+      'health_report',
+      'verify_state',
     ]) {
       expect(COMPUTER_USE_TOOL_NAMES).toContain(t);
     }
@@ -65,7 +72,15 @@ describe('computer-use schemas (cua-driver full tool surface)', () => {
         `${name} missing parameterSchema`,
       ).toBeTruthy();
       expect((schema.parameterSchema as { type: string }).type).toBe('object');
+      expect(schema.annotations, `${name} missing annotations`).toBeTruthy();
     }
+  });
+
+  it('preserves destructive annotations used by the Qwen approval gate', () => {
+    expect(COMPUTER_USE_SCHEMAS.click.annotations.destructiveHint).toBe(true);
+    expect(COMPUTER_USE_SCHEMAS.list_apps.annotations.destructiveHint).toBe(
+      false,
+    );
   });
 
   it('list_apps takes no required parameters', () => {
@@ -76,16 +91,16 @@ describe('computer-use schemas (cua-driver full tool surface)', () => {
     expect(schema.required ?? []).toHaveLength(0);
   });
 
-  it('click targets a pid (cua-driver semantics, not the old ocu app string)', () => {
+  it('click supports window and absolute desktop addressing', () => {
     const schema = COMPUTER_USE_SCHEMAS.click.parameterSchema as {
       properties: Record<string, unknown>;
-      required: string[];
     };
     expect(schema.properties).toHaveProperty('pid');
+    expect(schema.properties).toHaveProperty('window_id');
+    expect(schema.properties).toHaveProperty('scope');
     expect(schema.properties).toHaveProperty('element_index');
     expect(schema.properties).toHaveProperty('x');
     expect(schema.properties).toHaveProperty('y');
-    expect(schema.required).toContain('pid');
     expect(schema.properties).not.toHaveProperty('app');
   });
 });

@@ -342,8 +342,7 @@ describe('ComputerUseInvocation confirmation pathway', () => {
     if (details.type === 'info') {
       expect(details.title).toContain('list_apps');
       expect(details.prompt).toContain('computer_use__list_apps');
-      // Install variant mentions the ~50MB download
-      expect(details.prompt).toContain('20MB');
+      expect(details.prompt).toContain('Qwen CUA driver');
       expect(details.permissionRules).toContain('computer_use__list_apps');
     }
   });
@@ -359,22 +358,21 @@ describe('ComputerUseInvocation confirmation pathway', () => {
       approvedAtIso: new Date().toISOString(),
     });
 
-    const tool = new ComputerUseTool('click', COMPUTER_USE_SCHEMAS.click);
-    const invocation = tool.build({ pid: 4567 });
+    const tool = new ComputerUseTool('scroll', COMPUTER_USE_SCHEMAS.scroll);
+    const invocation = tool.build({ direction: 'down' });
     const details = await invocation.getConfirmationDetails(
       new AbortController().signal,
     );
 
     expect(details.type).toBe('info');
     if (details.type === 'info') {
-      expect(details.title).toContain('click');
-      expect(details.prompt).toContain('computer_use__click');
-      // Per-action variant shows args and does NOT mention the install size
-      expect(details.prompt).toContain('4567');
-      expect(details.prompt).not.toContain('20MB');
+      expect(details.title).toContain('scroll');
+      expect(details.prompt).toContain('computer_use__scroll');
+      expect(details.prompt).toContain('down');
+      expect(details.prompt).not.toContain('Qwen CUA driver');
       // Same per-tool permission rule — user can ProceedAlwaysTool to skip
-      // future confirmations for THIS tool only (not all 9).
-      expect(details.permissionRules).toContain('computer_use__click');
+      // future confirmations for THIS tool only (not the whole surface).
+      expect(details.permissionRules).toContain('computer_use__scroll');
     }
   });
 
@@ -454,6 +452,10 @@ describe('ComputerUseInvocation confirmation pathway', () => {
       'start_recording',
       'set_config',
       'replay_trajectory',
+      'click',
+      'type_text',
+      'browser_download',
+      'install_ffmpeg',
     ]) {
       expect(isHighRiskCall(name, {})).toBe(true);
     }
@@ -464,13 +466,7 @@ describe('ComputerUseInvocation confirmation pathway', () => {
   });
 
   it('does NOT flag ordinary tools (or page with a non-JS action)', () => {
-    for (const name of [
-      'click',
-      'type_text',
-      'list_apps',
-      'get_window_state',
-      'page',
-    ]) {
+    for (const name of ['list_apps', 'get_window_state', 'scroll', 'page']) {
       expect(isHighRiskCall(name, {})).toBe(false);
     }
     expect(isHighRiskCall('page', { action: 'get_text' })).toBe(false);
@@ -490,10 +486,13 @@ describe('ComputerUseInvocation confirmation pathway', () => {
     expect(invocation.getDescription()).toContain('123'); // args via tool-header
   });
 
-  it('ordinary tools keep info type (auto-approved in AUTO_EDIT as before)', async () => {
-    const tool = new ComputerUseTool('click', COMPUTER_USE_SCHEMAS.click);
+  it('read-only tools keep the info confirmation type', async () => {
+    const tool = new ComputerUseTool(
+      'list_apps',
+      COMPUTER_USE_SCHEMAS.list_apps,
+    );
     const details = await tool
-      .build({ pid: 123 })
+      .build({})
       .getConfirmationDetails(new AbortController().signal);
     expect(details.type).toBe('info');
   });

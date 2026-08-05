@@ -2738,7 +2738,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: {},
         description:
-          "Cross-platform desktop automation via the cua-driver native driver (trycua/cua). On first invocation a pinned, signed + notarized binary (~20MB) is downloaded into ~/.qwen/computer-use/ and the user is walked through macOS Accessibility / Screen Recording permissions if needed. Exposes cua-driver's full tool surface (click, type_text, scroll, drag, press_key, get_window_state, page, launch_app, and more).",
+          "Cross-platform desktop automation via the vendored Qwen CUA driver. On first invocation a pinned platform bundle is downloaded into ~/.qwen/computer-use/ (signed + notarized on macOS), and the user is walked through macOS Accessibility / Screen Recording permissions if needed. Absolute pixel coordinates are the driver default; relative coordinates remain an explicit environment opt-in. Exposes the driver's full tool surface (click, type_text, scroll, browser automation, clipboard, recording, sessions, and more).",
         showInDialog: false,
         properties: {
           enabled: {
@@ -2748,7 +2748,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: true,
             default: true,
             description:
-              'When enabled (default), the cua-driver computer_use__* tools are registered as deferred built-ins. Set to false to prevent the driver from being downloaded or spawned.',
+              'When enabled (default), the Qwen CUA computer_use__* tools are registered as deferred built-ins. Set to false to prevent the driver from being downloaded or spawned.',
             showInDialog: true,
           },
           idleTimeoutMs: {
@@ -2770,7 +2770,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: true,
             default: -1,
             description:
-              "Longest-edge pixel cap applied to cua-driver screenshots (via set_config's max_image_dimension). -1 (default) keeps cua-driver's built-in default (1568); 0 disables resizing (full resolution); a positive value caps the longest edge. Lower caps cut vision-token cost at the expense of fine detail. Overridable via the QWEN_COMPUTER_USE_MAX_IMAGE_DIMENSION env var.",
+              "Best-effort longest-edge pixel cap applied to Qwen CUA screenshots (via set_config's max_image_dimension). -1 (default) keeps the driver's built-in default (1568); 0 disables resizing (full resolution); a positive value caps the longest edge. If standard authorization refuses the runtime config change, startup continues with the driver default. Lower caps cut vision-token cost at the expense of fine detail. Overridable via the QWEN_COMPUTER_USE_MAX_IMAGE_DIMENSION env var.",
             showInDialog: false,
           },
         },

@@ -8423,7 +8423,7 @@ export class Config {
       });
     }
 
-    // Register computer-use tools unless disabled. All 9 are deferred —
+    // Register computer-use tools unless disabled. The full generated surface is deferred —
     // they surface only via ToolSearch keyword match
     // (see packages/core/src/tools/computer-use/).
     //

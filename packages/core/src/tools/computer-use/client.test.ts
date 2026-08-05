@@ -1,6 +1,7 @@
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import {
   ComputerUseClient,
+  computerUseMcpEnv,
   DEFAULT_COMPUTER_USE_IDLE_TIMEOUT_MS,
   isTransportClosedError,
   MAX_COMPUTER_USE_IDLE_TIMEOUT_MS,
@@ -28,6 +29,20 @@ describe('ComputerUseClient', () => {
     const a = ComputerUseClient.shared();
     const b = ComputerUseClient.shared();
     expect(a).toBe(b);
+  });
+});
+
+describe('computerUseMcpEnv', () => {
+  it('enables model payload filtering without forcing relative coordinates', () => {
+    const env = computerUseMcpEnv({ HTTPS_PROXY: 'http://proxy.test' });
+    expect(env['MCP_MODEL_PAYLOAD_FILTER']).toBe('1');
+    expect(env['HTTPS_PROXY']).toBe('http://proxy.test');
+    expect(env).not.toHaveProperty('CUA_DRIVER_RS_COORDINATE_SPACE');
+  });
+
+  it('preserves an explicit user opt-in to relative coordinates', () => {
+    const env = computerUseMcpEnv({ CUA_DRIVER_RS_COORDINATE_SPACE: '1' });
+    expect(env['CUA_DRIVER_RS_COORDINATE_SPACE']).toBe('1');
   });
 });
 
@@ -101,6 +116,24 @@ describe('applyRuntimeConfig (set_config on connect)', () => {
     await expect(invokeApply(c, inner, progress)).resolves.toBeUndefined();
     expect(progress).toHaveBeenCalledWith(
       expect.stringContaining('max_image_dimension=800'),
+    );
+  });
+
+  it('treats an MCP isError set_config result as a best-effort failure', async () => {
+    const inner: Inner = {
+      callTool: vi.fn().mockResolvedValue({
+        content: [{ type: 'text', text: 'authorization required' }],
+        isError: true,
+      }),
+    };
+    const progress = vi.fn();
+    const c = new ComputerUseClient({
+      binary: '/fake/qwen-cua-driver',
+      maxImageDimension: 800,
+    });
+    await expect(invokeApply(c, inner, progress)).resolves.toBeUndefined();
+    expect(progress).toHaveBeenCalledWith(
+      expect.stringContaining('authorization required'),
     );
   });
 });
@@ -320,11 +353,11 @@ describe('isTransportClosedError', () => {
 
   it('matches the daemon-restart error (Screen Recording grant → daemon restart)', () => {
     // The first-use failure mode: after granting Screen Recording, macOS
-    // restarts the CuaDriver daemon; the proxy → daemon Unix socket dies.
+    // restarts the QwenCuaDriver daemon; the proxy → daemon Unix socket dies.
     expect(
       isTransportClosedError(
         new Error(
-          'MCP error -32603: daemon transport error forwarding `list_windows`: connect to /Users/x/Library/Caches/cua-driver/cua-driver.sock: Connection refused (os error 61)',
+          'MCP error -32603: daemon transport error forwarding `list_windows`: connect to /Users/x/Library/Caches/qwen-cua-driver/qwen-cua-driver.sock: Connection refused (os error 61)',
         ),
       ),
     ).toBe(true);
@@ -495,7 +528,7 @@ describe('callTool reconnect path', () => {
     c.behaviors = [
       async () => {
         throw new Error(
-          'MCP error -32603: daemon transport error forwarding `list_windows`: connect to /Users/x/Library/Caches/cua-driver/cua-driver.sock: Connection refused (os error 61)',
+          'MCP error -32603: daemon transport error forwarding `list_windows`: connect to /Users/x/Library/Caches/qwen-cua-driver/qwen-cua-driver.sock: Connection refused (os error 61)',
         );
       },
       async () => successResult,
