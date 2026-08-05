@@ -52,6 +52,7 @@ import {
   selectToolchainAdapter,
   type ReviewToolchainAdapter,
 } from './lib/toolchain.js';
+import { type TestScope } from './lib/workspace-scope.js';
 
 /** The root toolchains build-test can select. */
 export const toolchainAdapters: readonly ReviewToolchainAdapter[] = [
@@ -80,6 +81,12 @@ export interface CommandResult {
    * Test Plan claim reproduced against this run.
    */
   swallowedFailure?: boolean;
+  /**
+   * The deadline the command was actually given (ms) — the whole-call budget
+   * shortens it below the per-command default, and the timeout note must
+   * quote the number that fired, not the flag default.
+   */
+  deadlineMs?: number;
 }
 
 export interface BuildTestReport {
@@ -89,11 +96,28 @@ export interface BuildTestReport {
   affected: string[];
   /** What was built, dependencies first — after any widening. */
   buildSet: string[];
+  /**
+   * Packages the whole-call budget stopped BEFORE their build ran, when that
+   * happened. Structural for the same reason `notRun` is: a tree missing
+   * these was never fully compiled, and consumers of this report
+   * (`base-tree`'s availability gate) must be able to see that without
+   * parsing prose.
+   */
+  notBuilt?: string[];
   /** Packages the compiler asked for that the dependency graph had not predicted. */
   widenedWith: string[];
   install: CommandResult | null;
   build: CommandResult[];
   test: CommandResult[];
+  /**
+   * What the test phase covered, so the review can state exactly what was and
+   * was not run: `workspaces` lists exactly the suites the run executes, and
+   * `caveat` — when present — says why that set may be incomplete. Only set
+   * for workspace monorepos on a test-running call: a single-package repo's
+   * one suite IS its full suite, and a build-only probe runs no tests, so
+   * neither may claim a scoping decision it never made.
+   */
+  testScope?: TestScope;
   /**
    * True when every build and test command exited 0. An install that exits non-zero
    * but leaves a usable tree (a failed `prepare` hook) does NOT set this false — the
@@ -234,6 +258,7 @@ function run(command: string, cwd: string, timeoutMs: number): CommandResult {
     seconds: Math.round((Date.now() - started) / 1000),
     timedOut,
     output: trimOutput(`${r.stdout ?? ''}${r.stderr ?? ''}`),
+    deadlineMs: timeoutMs,
   };
 }
 
@@ -256,6 +281,18 @@ interface BuildTestArgs {
    * unchanged.
    */
   buildOnly?: boolean;
+  /**
+   * Whole-call wall-clock budget in seconds (default: 2× `timeout` − 30s of
+   * headroom for process startup and the report write, floored at one
+   * per-command deadline). Measured from the top of the call — install and
+   * build time count against it. The closure's per-command deadlines SUM, and
+   * a large one sums past the tool timeout the brief welds onto the call —
+   * whose outer kill discards the report. Each suite is attempted with
+   * whatever of this budget remains (a suite killed at the boundary is
+   * reported as a timeout — infrastructure, not a finding); only suites never
+   * attempted are named in `notRun`.
+   */
+  budget?: number;
   /**
    * How to run a command. Injectable so the tests can build the states that are
    * hard to force out of real npm — chiefly the one that cost a live review: an
@@ -299,6 +336,7 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     timeout: args.timeout,
     install: args.install,
     buildOnly: args.buildOnly,
+    budget: args.budget,
     exec: args.exec ?? run,
   };
   const { adapter, applicable } = selectToolchainAdapter(
@@ -357,8 +395,9 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
 export const buildTestCommand: CommandModule = {
   command: 'build-test',
   describe:
-    'Build and test the workspaces the diff changes (and what they compile ' +
-    'against), with a deadline the commands can actually meet',
+    'Build the workspaces the diff changes (and what they compile against), ' +
+    'test those plus their dependents, with a deadline the commands can ' +
+    'actually meet',
   builder: (yargs) =>
     yargs
       .option('plan', {
@@ -385,8 +424,20 @@ export const buildTestCommand: CommandModule = {
           'Per-command deadline in seconds. Kept strictly below the 600s (600000ms) ' +
           "tool timeout the agent's brief welds onto the whole call, so a single hung " +
           "command's own deadline fires — and build-test reports it as data — before " +
-          'the outer shell kill would discard the report. (A giant PR whose commands ' +
-          'sum past the tool ceiling is a separate, acknowledged follow-up.)',
+          'the outer shell kill would discard the report. Commands that would SUM ' +
+          'past the whole call are stopped and disclosed instead — see --budget.',
+      })
+      .option('budget', {
+        type: 'number',
+        describe:
+          'Whole-call wall-clock budget in seconds, measured from the top of ' +
+          'the call — install and build time count against it (default: 2× ' +
+          '--timeout minus 30s of headroom for process startup and the report ' +
+          'write). Each suite is attempted with whatever of the budget ' +
+          'remains — a suite killed at the boundary is a timeout, reported as ' +
+          'infrastructure — and only suites never attempted are named notRun. ' +
+          'A partial report survives where the outer shell kill would discard ' +
+          'the whole one.',
       })
       .option('install', {
         type: 'boolean',

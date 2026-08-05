@@ -175,6 +175,34 @@ describe('runBaseTree', () => {
     expect(r.available).toBe(true); // built through the corpse
   });
 
+  it('a budget-TRUNCATED build is unavailable but NOT settled — no marker either way', () => {
+    // A rerun against packages the budget left unbuilt manufactures
+    // "fails on base too" — but truncation says nothing about the SHA, so
+    // neither marker is written and a later shard may repay and succeed.
+    const truncatedBuild = {
+      ...okBuild,
+      notBuilt: ['packages/a', 'packages/b'],
+    } as unknown as BuildTestReport;
+    const builds: string[] = [];
+    const build = (w: string) => {
+      builds.push(w);
+      return truncatedBuild;
+    };
+    const first = run({}, build);
+    expect(first.available).toBe(false);
+    expect(first.note).toContain('not built');
+    expect(first.note).toContain('packages/a');
+    // No success marker and no failed marker: the next shard repays the build.
+    expect(existsSync(join(first.path!, '.qwen-review-base-ok'))).toBe(false);
+    expect(existsSync(join(first.path!, '.qwen-review-base-failed'))).toBe(
+      false,
+    );
+    const second = run({}, build);
+    expect(second.available).toBe(false);
+    expect(second.note).not.toContain('already failed');
+    expect(builds).toHaveLength(2);
+  });
+
   it('a FAILED build is a settled answer — later shards do not re-pay it', () => {
     const builds: string[] = [];
     const build = (w: string) => {
@@ -520,34 +548,37 @@ describe('runBaseTree', () => {
     expect(r.available).toBe(true);
   });
 
-  it('still detects a nested pom under a directory named with a line terminator', () => {
-    // A regex `.` cannot span `\n`, and a `\n` in a name is a standard
-    // core.quotePath escape — the probe parses the NUL-delimited entries
-    // structurally, or this base slips past the gate.
-    mkdirSync(join(repo, 'bad\ndir'), { recursive: true });
-    writeFileSync(join(repo, 'bad\ndir', 'pom.xml'), '<project/>');
-    git(repo, 'add', '-A');
-    git(repo, 'commit', '-qam', 'newline-dir nested maven base');
-    const sha = git(repo, 'rev-parse', 'HEAD');
+  it.skipIf(process.platform === 'win32')(
+    'still detects a nested pom under a directory named with a line terminator',
+    () => {
+      // A regex `.` cannot span `\n`, and a `\n` in a name is a standard
+      // core.quotePath escape — the probe parses the NUL-delimited entries
+      // structurally, or this base slips past the gate.
+      mkdirSync(join(repo, 'bad\ndir'), { recursive: true });
+      writeFileSync(join(repo, 'bad\ndir', 'pom.xml'), '<project/>');
+      git(repo, 'add', '-A');
+      git(repo, 'commit', '-qam', 'newline-dir nested maven base');
+      const sha = git(repo, 'rev-parse', 'HEAD');
 
-    const plan = join(repo, 'plan.json');
-    writeFileSync(plan, JSON.stringify({ mergeBaseSha: sha, files: [] }));
-    const builds: string[] = [];
-    const r = runBaseTree({
-      plan,
-      worktree,
-      timeout: 60,
-      install: false,
-      build: (w) => {
-        builds.push(w);
-        return okBuild;
-      },
-    });
+      const plan = join(repo, 'plan.json');
+      writeFileSync(plan, JSON.stringify({ mergeBaseSha: sha, files: [] }));
+      const builds: string[] = [];
+      const r = runBaseTree({
+        plan,
+        worktree,
+        timeout: 60,
+        install: false,
+        build: (w) => {
+          builds.push(w);
+          return okBuild;
+        },
+      });
 
-    expect(r.available).toBe(false);
-    expect(builds).toEqual([]);
-    expect(r.note).toContain('Maven');
-  });
+      expect(r.available).toBe(false);
+      expect(builds).toEqual([]);
+      expect(r.note).toContain('Maven');
+    },
+  );
 
   it('is NOT available for a Maven build report the delta machinery cannot consume', () => {
     const mavenBuild = {

@@ -98,6 +98,7 @@ describe('npm toolchain adapter', () => {
         root,
         changedFiles: ['src/index.ts'],
         timeout: 5,
+        budget: 600,
         install: false,
         exec: okExec,
       }),
@@ -214,6 +215,7 @@ describe('npm toolchain adapter', () => {
       root,
       changedFiles: ['packages/a/src/x.ts'],
       timeout: 5,
+      budget: 600,
       install: false,
       exec: okExec,
     });

@@ -17,6 +17,12 @@ export interface ToolchainRunArgs {
    */
   install: boolean;
   buildOnly?: boolean;
+  /**
+   * Whole-call wall-clock budget in seconds, measured from the top of the
+   * call — undefined leaves the adapter its default (2× `timeout` minus
+   * startup headroom, floored at one per-command deadline).
+   */
+  budget?: number;
   exec: (command: string, cwd: string, timeoutMs: number) => CommandResult;
 }
 

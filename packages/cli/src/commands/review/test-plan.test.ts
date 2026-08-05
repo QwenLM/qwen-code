@@ -830,6 +830,85 @@ describe('runTestPlan', () => {
       expect(claim?.observed).toBe('no package defines this script');
     });
 
+    it('reproduces a script defined only by a nameless-but-parseable member', () => {
+      // A nameless member lands in `skipped`, but its manifest PARSES — the
+      // scripts table is fully readable (scripts need no `name` to enumerate),
+      // so the ruling uses the evidence it holds rather than declaring the
+      // whole table unreadable.
+      mkdirSync(join(dir, 'packages/nameless'), { recursive: true });
+      writeFileSync(
+        join(dir, 'packages/nameless/package.json'),
+        JSON.stringify({ scripts: { 'test:ghost': 'vitest' } }),
+      );
+      const r = run('## Test Plan\n\nRan `npm run test:ghost`');
+      const claim = r.claims.find((c) => c.text === 'npm run test:ghost');
+      expect(claim?.verdict).toBe('reproduces');
+    });
+
+    it('contradicts a fabricated script even when a nameless member exists', () => {
+      // Every manifest parses — the script table is complete — so a positive
+      // absence is sound; `unchecked` is reserved for genuinely unreadable
+      // manifests.
+      mkdirSync(join(dir, 'packages/nameless'), { recursive: true });
+      writeFileSync(
+        join(dir, 'packages/nameless/package.json'),
+        JSON.stringify({ scripts: { 'test:ghost': 'vitest' } }),
+      );
+      const r = run('## Test Plan\n\nRan `npm run test:nonexistent`');
+      const claim = r.claims.find((c) => c.text === 'npm run test:nonexistent');
+      expect(claim?.verdict).toBe('contradicted');
+    });
+
+    it('rules unchecked — not contradicted — when only an unreadable manifest could define the script', () => {
+      // A manifest that does not PARSE proves nothing about its scripts, so
+      // the ruling must not assert a positive absence from a table it was
+      // told may be incomplete.
+      mkdirSync(join(dir, 'packages/broken'), { recursive: true });
+      writeFileSync(join(dir, 'packages/broken/package.json'), '{ not json');
+      const r = run('## Test Plan\n\nRan `npm run test:ghost`');
+      const claim = r.claims.find((c) => c.text === 'npm run test:ghost');
+      expect(claim?.verdict).toBe('unchecked');
+      expect(claim?.note).toContain('packages/broken');
+    });
+
+    it('rules unchecked when the workspace globs use a shape the walker does not model', () => {
+      // `packages/**` lands in NEITHER `packages` nor `skipped` — the table
+      // may be silently incomplete, so a positive absence would be unsound.
+      writeFileSync(
+        join(dir, 'package.json'),
+        JSON.stringify({
+          name: 'r',
+          workspaces: ['packages/**'],
+          scripts: { build: 'exit 0' },
+        }),
+      );
+      mkdirSync(join(dir, 'packages/cli'), { recursive: true });
+      writeFileSync(
+        join(dir, 'packages/cli/package.json'),
+        JSON.stringify({ name: '@x/cli', scripts: { 'test:unit': 'vitest' } }),
+      );
+      const r = run('## Test Plan\n\nRan `npm run test:unit`');
+      expect(verdictOf(r.claims, 'npm run test:unit')).toBe('unchecked');
+    });
+
+    it('models ./-prefixed workspace globs like their bare form', () => {
+      writeFileSync(
+        join(dir, 'package.json'),
+        JSON.stringify({
+          name: 'r',
+          workspaces: ['./packages/*'],
+          scripts: { build: 'exit 0' },
+        }),
+      );
+      mkdirSync(join(dir, 'packages/cli'), { recursive: true });
+      writeFileSync(
+        join(dir, 'packages/cli/package.json'),
+        JSON.stringify({ name: '@x/cli', scripts: { 'test:unit': 'vitest' } }),
+      );
+      const r = run('## Test Plan\n\nRan `npm run test:unit`');
+      expect(verdictOf(r.claims, 'npm run test:unit')).toBe('reproduces');
+    });
+
     it("prefers this review's own exit code over the manifest lookup", () => {
       const bt = {
         build: [
@@ -1388,6 +1467,29 @@ describe('runTestPlan', () => {
       expect(verdictOf(fewer.claims, './mvnw -pl core,app test')).toBe(
         'unchecked',
       );
+    });
+
+    it('does not contradict a -pl claim on a FAILED -am run of the same module set', () => {
+      // `-am` pulls the UPSTREAM modules into the run; a failure in one of
+      // them never falsifies a claim without `-am`, which never tests them.
+      // The green direction stays settled (pinned above): only the failing
+      // direction falls through to the conservative unchecked cascade.
+      const failed = {
+        build: [],
+        test: [
+          {
+            command:
+              './mvnw --batch-mode --no-transfer-progress -pl core -am test',
+            exitCode: 1,
+            seconds: 3,
+            timedOut: false,
+            output: '[ERROR] Tests failed',
+          },
+        ],
+      } as unknown as BuildTestReport;
+
+      const r = run('## Test Plan\n\nRan `./mvnw -pl core test`', [], failed);
+      expect(verdictOf(r.claims, './mvnw -pl core test')).toBe('unchecked');
     });
 
     it('reads -pl= and --projects selector spellings in both directions', () => {

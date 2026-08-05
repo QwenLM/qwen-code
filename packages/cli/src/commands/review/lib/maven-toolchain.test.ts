@@ -657,47 +657,60 @@ describe('maven toolchain adapter', () => {
     expect(timeout.test[0]?.infrastructure).toBeUndefined();
   });
 
-  it('does not classify a changed wrapper permission failure as infrastructure', () => {
-    writeReactor();
-    writeWrapper();
+  it.skipIf(process.platform === 'win32')(
+    'does not classify a changed wrapper permission failure as infrastructure',
+    () => {
+      // On win32 `mvnw` is the other platform's wrapper and is skipped by
+      // ownership, so the adapter sees no Maven target to run.
 
-    const report = mavenToolchainAdapter.run({
-      root,
-      changedFiles: ['mvnw'],
-      timeout: 5,
-      install: false,
-      exec: (command) =>
-        result(command, {
-          exitCode: 126,
-          output: '/bin/sh: ./mvnw: Permission denied',
-        }),
-    });
+      writeReactor();
+      writeWrapper();
 
-    expect(report.note).toContain('Correlate compiler or test errors');
-    expect(report.note).not.toContain('infrastructure evidence');
-  });
+      const report = mavenToolchainAdapter.run({
+        root,
+        changedFiles: ['mvnw'],
+        timeout: 5,
+        install: false,
+        exec: (command) =>
+          result(command, {
+            exitCode: 126,
+            output: '/bin/sh: ./mvnw: Permission denied',
+          }),
+      });
 
-  it('does not hide a permission failure behind `./mvnw` spelled differently', () => {
-    // The guard compares normalized paths: `./mvnw` and absolute paths name
-    // the same wrapper the raw comparison missed.
-    writeReactor();
-    writeWrapper();
+      expect(report.note).toContain('Correlate compiler or test errors');
+      expect(report.note).not.toContain('infrastructure evidence');
+    },
+  );
 
-    const report = mavenToolchainAdapter.run({
-      root,
-      changedFiles: ['./mvnw'],
-      timeout: 5,
-      install: false,
-      exec: (command) =>
-        result(command, {
-          exitCode: 126,
-          output: '/bin/sh: ./mvnw: Permission denied',
-        }),
-    });
+  it.skipIf(process.platform === 'win32')(
+    'does not hide a permission failure behind `./mvnw` spelled differently',
+    () => {
+      // On win32 the normalized `./mvnw` path is the other platform's
+      // wrapper and is skipped by ownership, so no permission-failure note
+      // is produced.
 
-    expect(report.note).toContain('Correlate compiler or test errors');
-    expect(report.note).not.toContain('infrastructure evidence');
-  });
+      // The guard compares normalized paths: `./mvnw` and absolute paths name
+      // the same wrapper the raw comparison missed.
+      writeReactor();
+      writeWrapper();
+
+      const report = mavenToolchainAdapter.run({
+        root,
+        changedFiles: ['./mvnw'],
+        timeout: 5,
+        install: false,
+        exec: (command) =>
+          result(command, {
+            exitCode: 126,
+            output: '/bin/sh: ./mvnw: Permission denied',
+          }),
+      });
+
+      expect(report.note).toContain('Correlate compiler or test errors');
+      expect(report.note).not.toContain('infrastructure evidence');
+    },
+  );
 
   it.each([
     ['sh: 1: mvn: not found', 127],
@@ -1552,29 +1565,35 @@ describe('maven toolchain adapter', () => {
     );
   });
 
-  it('does not classify a launch failure as infrastructure when the wrapper changed', () => {
-    // The PR's own wrapper edit may be what broke startup; the pinned intent
-    // (changed-wrapper failures are never environmental) covers the
-    // launch-failure disjunct too, not just the 126/127 wrapper one.
-    writeReactor();
-    writeWrapper();
+  it.skipIf(process.platform === 'win32')(
+    'does not classify a launch failure as infrastructure when the wrapper changed',
+    () => {
+      // On win32 `mvnw` is the other platform's wrapper and is skipped by
+      // ownership, so the adapter sees no Maven target to run.
 
-    const report = mavenToolchainAdapter.run({
-      root,
-      changedFiles: ['mvnw'],
-      timeout: 5,
-      install: false,
-      exec: (command) =>
-        result(command, {
-          exitCode: 1,
-          output:
-            'Error: The JAVA_HOME environment variable is not defined correctly',
-        }),
-    });
+      // The PR's own wrapper edit may be what broke startup; the pinned intent
+      // (changed-wrapper failures are never environmental) covers the
+      // launch-failure disjunct too, not just the 126/127 wrapper one.
+      writeReactor();
+      writeWrapper();
 
-    expect(report.note).toContain('Correlate compiler or test errors');
-    expect(report.note).not.toContain('infrastructure evidence');
-  });
+      const report = mavenToolchainAdapter.run({
+        root,
+        changedFiles: ['mvnw'],
+        timeout: 5,
+        install: false,
+        exec: (command) =>
+          result(command, {
+            exitCode: 1,
+            output:
+              'Error: The JAVA_HOME environment variable is not defined correctly',
+          }),
+      });
+
+      expect(report.note).toContain('Correlate compiler or test errors');
+      expect(report.note).not.toContain('infrastructure evidence');
+    },
+  );
 
   it.skipIf(process.platform === 'win32')(
     'does not launder a PR-caused fallback launch failure into infrastructure',
@@ -1602,27 +1621,34 @@ describe('maven toolchain adapter', () => {
     },
   );
 
-  it('discloses when a changed wrapper falls back to the system mvn', () => {
-    // No executable bit: mavenExecutable falls back to system mvn, so the
-    // wrapper the diff changes is never executed — the run must say so.
-    writeReactor();
-    writeFileSync(join(root, 'mvnw'), '#!/bin/sh\n');
-    const calls: string[] = [];
+  it.skipIf(process.platform === 'win32')(
+    'discloses when a changed wrapper falls back to the system mvn',
+    () => {
+      // On win32 `mvnw` is dropped by ownership, only the Java source is
+      // owned, and the run narrows to `-pl core -am test` instead of the
+      // reactor-wide command pinned here.
 
-    const report = mavenToolchainAdapter.run({
-      root,
-      changedFiles: ['mvnw', 'core/src/main/java/example/Core.java'],
-      timeout: 5,
-      install: false,
-      exec: (command) => {
-        calls.push(command);
-        return result(command);
-      },
-    });
+      // No executable bit: mavenExecutable falls back to system mvn, so the
+      // wrapper the diff changes is never executed — the run must say so.
+      writeReactor();
+      writeFileSync(join(root, 'mvnw'), '#!/bin/sh\n');
+      const calls: string[] = [];
 
-    expect(calls).toEqual(['mvn --batch-mode --no-transfer-progress test']);
-    expect(report.note).toContain('wrapper change itself was not exercised');
-  });
+      const report = mavenToolchainAdapter.run({
+        root,
+        changedFiles: ['mvnw', 'core/src/main/java/example/Core.java'],
+        timeout: 5,
+        install: false,
+        exec: (command) => {
+          calls.push(command);
+          return result(command);
+        },
+      });
+
+      expect(calls).toEqual(['mvn --batch-mode --no-transfer-progress test']);
+      expect(report.note).toContain('wrapper change itself was not exercised');
+    },
+  );
 
   it('does not treat a test-fixture POM as a dependency input', () => {
     // A fixture pom.xml under a module's src/ tree cannot change the reactor's
@@ -2417,4 +2443,135 @@ describe('maven toolchain adapter', () => {
 
     expect(readMavenReactor(root).error).toContain('Cannot safely parse');
   });
+
+  it('fails closed on BALANCED markup inside CDATA too', () => {
+    // Balanced CDATA markup tokenizes cleanly, which is exactly the
+    // hazard: at the right stack depth it could overwrite a real
+    // `<relativePath>` and silently delete the inheritance edge. CDATA is
+    // text; any `<` inside it fails the POM closed.
+    writeProject('.', ['core']);
+    writeProject('core');
+    writeFileSync(
+      join(root, 'core', 'pom.xml'),
+      childPomInheriting('../parent/pom.xml').replace(
+        '</parent>',
+        '<![CDATA[<relativePath>nowhere</relativePath>]]></parent>',
+      ),
+    );
+    writeProject('parent');
+
+    expect(readMavenReactor(root).error).toContain('Cannot safely parse');
+  });
+
+  it('resolves a named parent FILE relativePath and fans its change out', () => {
+    // Maven accepts a parent FILE of any name (DefaultModelBuilder appends
+    // pom.xml only when the resolved path is a directory): the Druid shape,
+    // `<relativePath>../base/parent.xml</relativePath>`. The edge must be
+    // recorded, and changing the named file must walk the inheritor closure
+    // exactly like changing the directory's pom.xml.
+    writeProject('.', ['base', 'app']);
+    writeProject('base');
+    writeProject('app');
+    writeFileSync(join(root, 'base', 'parent.xml'), pom());
+    writeFileSync(
+      join(root, 'app', 'pom.xml'),
+      childPomInheriting('../base/parent.xml'),
+    );
+
+    const parsed = readMavenReactor(root);
+    expect(parsed.reactor?.inheritors).toEqual({ base: ['app'] });
+    expect(parsed.reactor?.parentPomFiles).toEqual(['base/parent.xml']);
+    if (!parsed.reactor) throw new Error('expected reactor');
+    expect(
+      detectMavenOwnership(root, ['base/parent.xml'], parsed.reactor),
+    ).toEqual({
+      reactorWide: false,
+      modules: ['app', 'base'],
+      inactiveProjects: [],
+    });
+  });
+
+  it('does not parse CDATA-wrapped report content as markup', () => {
+    // `<system-out>` CDATA is the standard vehicle for test output that
+    // itself contains XML; scanning it as markup fabricated phantom suites
+    // and failure evidence for a passing one-test suite.
+    writeReactor();
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Core.xml'),
+          '<testsuite tests="1" failures="0" errors="0" skipped="0">' +
+            '<testcase classname="example.CoreTest" name="passes">' +
+            '<system-out><![CDATA[<testsuite tests="3" failures="2" errors="1">' +
+            '<testcase classname="ghost.Case" name="phantom"><failure/>' +
+            '</testcase></testsuite>]]></system-out>' +
+            '</testcase></testsuite>',
+        );
+        return result(command);
+      },
+    });
+
+    expect(report.ok).toBe(true);
+    expect(report.test[0]?.output).toContain('tests=1, failures=0');
+    expect(report.test[0]?.output).not.toContain('[maven-test-failure]');
+  });
+
+  it('keeps a dependency outage infrastructure when the changed POM is deleted', () => {
+    // `legacy/pom.xml` exists only in the diff — a deleted POM cannot be a
+    // resolution input, so it must not suppress the infrastructure
+    // carve-out for an outage the diff cannot have caused.
+    writeReactor();
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java', 'legacy/pom.xml'],
+      timeout: 5,
+      install: false,
+      exec: (command) =>
+        result(command, {
+          exitCode: 1,
+          output:
+            '[ERROR] Could not resolve dependencies for project example:core',
+        }),
+    });
+
+    expect(report.note).toContain('infrastructure evidence');
+    expect(report.test[0]?.infrastructure).toBe(true);
+  });
+
+  it('parses a report of unterminated openers in linear time', () => {
+    // The quadratic pre-fix regex scan spent seconds per 256 KiB of
+    // never-closed `<testcase` openers — a denial of service through
+    // PR-controlled report bytes. The linear scan must stay fast at the
+    // size cap; the bound is generous (slow CI) yet far below the
+    // pre-fix extrapolation of tens of seconds at this input size.
+    writeReactor();
+    const startedAt = Date.now();
+
+    const report = mavenToolchainAdapter.run({
+      root,
+      changedFiles: ['core/src/Main.java'],
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Core.xml'),
+          '<testcase x '.repeat(100_000),
+        );
+        return result(command);
+      },
+    });
+
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+    expect(report.ok).toBe(true);
+  }, 20_000);
 });

@@ -43,6 +43,13 @@ export interface MavenReactor {
    * exactly as by aggregation children, so the POM-change closure walks both.
    */
   inheritors: Record<string, string[]>;
+  /**
+   * Named parent POM files (any spelling other than `pom.xml`) that back a
+   * recorded inheritance edge. Maven accepts a parent FILE of any name, so a
+   * change to one is parent-config exactly like a change to the directory's
+   * `pom.xml` and must walk the inheritor closure too.
+   */
+  parentPomFiles?: string[];
 }
 
 export interface MavenOwnership {
@@ -117,8 +124,10 @@ function isInside(root: string, path: string): boolean {
  *
  * CDATA content is kept, not deleted: deleting silently empties a
  * CDATA-wrapped `<artifactId>` and drops the inheritance edge that depends
- * on it — a silent under-approximation. Unwrapped content carrying a `<`
- * fails the tag tokenizer below instead, which is the fail-closed direction.
+ * on it — a silent under-approximation. Content carrying ANY `<` fails the
+ * whole POM closed instead: unwrapped BALANCED markup would otherwise parse
+ * like ordinary markup and could overwrite a real `<relativePath>` or inject
+ * a phantom `<module>` — a silent edge deletion is worse than an abort.
  */
 function stripCdataAndComments(pom: string): string | null {
   const chunks: string[] = [];
@@ -136,8 +145,10 @@ function stripCdataAndComments(pom: string): string | null {
     if (pom.startsWith('<![CDATA[', i)) {
       const end = pom.indexOf(']]>', i + 9);
       if (end === -1) return null;
+      const inner = pom.slice(i + 9, end);
+      if (inner.includes('<')) return null;
       chunks.push(pom.slice(chunkStart, i));
-      chunks.push(pom.slice(i + 9, end));
+      chunks.push(inner);
       i = end + 3;
       chunkStart = i;
       continue;
@@ -342,6 +353,7 @@ export function readMavenReactor(root: string): MavenReactorResult {
   // parent can live ANYWHERE in the reactor (`../parent/pom.xml`), so the
   // POM-change closure walks these edges rather than directory prefixes.
   const inheritors = new Map<string, string[]>();
+  const namedParentPoms = new Set<string>();
   for (const [modulePath, structure] of structures) {
     const parent = structure.parent;
     if (!parent) continue;
@@ -354,14 +366,50 @@ export function readMavenReactor(root: string): MavenReactorResult {
       };
     }
     let parentPom = resolve(reactorRoot, modulePath, relPath);
-    if (basename(parentPom) !== 'pom.xml')
-      parentPom = join(parentPom, 'pom.xml');
+    // Maven appends `pom.xml` only when the resolved path IS A DIRECTORY
+    // (DefaultModelBuilder.getParentPomFile): a parent FILE may carry any
+    // name. A path that is not an existing file keeps the historical append,
+    // so an absent target never resolves onto its parent directory.
+    if (basename(parentPom) !== 'pom.xml') {
+      let namedFile = false;
+      try {
+        namedFile = statSync(parentPom).isFile();
+      } catch {
+        // absent: keep the directory spelling
+      }
+      if (!namedFile) parentPom = join(parentPom, 'pom.xml');
+    }
     const parentDir = dirname(parentPom);
     if (!isInside(reactorRoot, parentDir)) continue;
     const parentPath = toPosix(relative(reactorRoot, parentDir)) || '.';
     if (parentPath === modulePath) continue;
-    const target = structures.get(parentPath);
-    if (!target || target.artifactId !== parent.artifactId) continue;
+    // A named parent FILE is not a visited reactor POM: match the
+    // declaration against its own artifactId, not the directory's pom.xml
+    // (which may not exist, or may be a different project).
+    let targetArtifactId: string | null;
+    if (basename(parentPom) === 'pom.xml') {
+      targetArtifactId = structures.get(parentPath)?.artifactId ?? null;
+    } else {
+      let namedPom: string;
+      try {
+        namedPom = readFileSync(parentPom, 'utf8');
+      } catch (error) {
+        return {
+          error: `Cannot read ${toPosix(relative(reactorRoot, parentPom))}: ${(error as Error).message}`,
+        };
+      }
+      const namedStructure = parsePomStructure(namedPom);
+      if (!namedStructure) {
+        return {
+          error: `Cannot safely parse literal Maven modules from ${toPosix(relative(reactorRoot, parentPom))}.`,
+        };
+      }
+      targetArtifactId = namedStructure.artifactId;
+    }
+    if (targetArtifactId !== parent.artifactId) continue;
+    if (basename(parentPom) !== 'pom.xml') {
+      namedParentPoms.add(toPosix(relative(reactorRoot, parentPom)));
+    }
     const inherited = inheritors.get(parentPath);
     if (inherited) inherited.push(modulePath);
     else inheritors.set(parentPath, [modulePath]);
@@ -383,6 +431,9 @@ export function readMavenReactor(root: string): MavenReactorResult {
           [...inherited].sort(),
         ]),
       ),
+      ...(namedParentPoms.size > 0
+        ? { parentPomFiles: [...namedParentPoms].sort() }
+        : {}),
     },
   };
 }
@@ -477,11 +528,41 @@ export function detectMavenOwnership(
   // into the unowned catch-all (which would run the whole reactor to verify
   // nothing).
   const otherPlatformWrapper = platform === 'win32' ? 'mvnw' : 'mvnw.cmd';
+  // Named parent POM files backing a recorded inheritance edge: a change to
+  // one is parent config exactly like the directory's `pom.xml`, so it walks
+  // the same closure below instead of routing as an ordinary source file.
+  const namedParentDirs = new Map<string, string>(
+    (reactor.parentPomFiles ?? []).map((file) => [file, dirname(file)]),
+  );
 
   for (const changedFile of changedFiles) {
     const path = normalizedChangedPath(root, changedFile);
     if (path === null) continue;
     if (path === otherPlatformWrapper) continue;
+    const namedParentDir = namedParentDirs.get(path);
+    if (namedParentDir !== undefined) {
+      if (namedParentDir === '.') {
+        reactorWide = true;
+      } else {
+        if (deepestFirst.includes(namedParentDir)) {
+          modules.add(namedParentDir);
+        }
+        const queue = [namedParentDir];
+        while (queue.length > 0) {
+          const aggregator = queue.pop() as string;
+          for (const child of [
+            ...(reactor.children[aggregator] ?? []),
+            ...(reactor.inheritors[aggregator] ?? []),
+          ]) {
+            if (!modules.has(child)) {
+              modules.add(child);
+              queue.push(child);
+            }
+          }
+        }
+      }
+      continue;
+    }
     if (REACTOR_WIDE_FILES.has(path) || path.startsWith('.mvn/')) {
       reactorWide = true;
       continue;
@@ -650,22 +731,91 @@ function numberAttribute(
   return Math.max(0, value);
 }
 
+/** A start tag located by `xmlOpenTagHeaders`. */
+interface XmlOpenTagHeader {
+  /** Attribute run between the tag name and the closing `>`. */
+  attributes: string;
+  /** Offset of the opening `<` in the scanned text. */
+  index: number;
+  /** The full tag text; a self-closing tag ends `/>`. */
+  text: string;
+}
+
+const XML_WORD_CHAR = /[A-Za-z0-9_]/;
+
 /**
- * Quote-aware attribute run for XML start tags. A `>` is legal unescaped
- * inside a quoted attribute value (parameterized-test and @DisplayName
- * suite/case names carry them), and `[^>]*` truncates there. The branches
- * start on disjoint characters, so the scan stays linear on hostile input.
+ * Quote-aware linear scan for `<name …>` start tags. A `>` is legal
+ * unescaped inside a quoted attribute value (parameterized-test and
+ * @DisplayName suite/case names carry them). The regex header walk this
+ * replaces went quadratic on PR-controlled reports: one never-closed opener
+ * made every later tag start scan to EOF (a 2 MiB report of `<testcase x `
+ * openers measured minutes per file — a denial of service through the very
+ * evidence this parser exists to read). Here each byte is examined once:
+ * locate a `<name` start, then advance to the next `>` outside quotes. An
+ * opener with no `>` before EOF ends the scan — the truncated-XML branch in
+ * parseTestReport handles what was seen until then.
  */
-const XML_ATTR_RUN = String.raw`(?:"[^"]*"|'[^']*'|[^>"'])*`;
-const TESTSUITE_HEADER_RE = new RegExp(
-  String.raw`<testsuite\b(${XML_ATTR_RUN})>`,
-  'gi',
-);
-const TESTCASE_HEADER_RE = new RegExp(
-  String.raw`<testcase\b(${XML_ATTR_RUN})\/?>`,
-  'gi',
-);
+function xmlOpenTagHeaders(xml: string, name: string): XmlOpenTagHeader[] {
+  const lower = xml.toLowerCase();
+  const tag = `<${name.toLowerCase()}`;
+  const headers: XmlOpenTagHeader[] = [];
+  let from = 0;
+  for (;;) {
+    const start = lower.indexOf(tag, from);
+    if (start === -1) return headers;
+    from = start + 1;
+    // `\b` semantics: `<testsuite` must not match `<testsuites`.
+    const next = xml[start + tag.length];
+    if (next !== undefined && XML_WORD_CHAR.test(next)) continue;
+    let quote: '"' | "'" | null = null;
+    let end = -1;
+    for (let i = start + tag.length; i < xml.length; i++) {
+      const c = xml[i];
+      if (quote !== null) {
+        if (c === quote) quote = null;
+      } else if (c === '"' || c === "'") {
+        quote = c;
+      } else if (c === '>') {
+        end = i;
+        break;
+      }
+    }
+    if (end === -1) return headers;
+    headers.push({
+      attributes: xml.slice(start + tag.length, end),
+      index: start,
+      text: xml.slice(start, end + 1),
+    });
+    from = end + 1;
+  }
+}
+
 const TESTCASE_CLOSE_RE = /<\/testcase\s*>/gi;
+
+/**
+ * Drop terminated `<![CDATA[ … ]]>` sections in one linear pass. An
+ * unterminated section stays verbatim: its content then fails closed
+ * exactly as it did before CDATA handling existed.
+ */
+function stripCdataSections(xml: string): string {
+  if (!xml.includes('<![CDATA[')) return xml;
+  const chunks: string[] = [];
+  let from = 0;
+  for (;;) {
+    const start = xml.indexOf('<![CDATA[', from);
+    if (start === -1) {
+      chunks.push(xml.slice(from));
+      return chunks.join('');
+    }
+    const end = xml.indexOf(']]>', start + 9);
+    if (end === -1) {
+      chunks.push(xml.slice(from));
+      return chunks.join('');
+    }
+    chunks.push(xml.slice(from, start));
+    from = end + 3;
+  }
+}
 
 function parseTestReport(root: string, path: string): MavenTestSummary | null {
   try {
@@ -679,6 +829,11 @@ function parseTestReport(root: string, path: string): MavenTestSummary | null {
   } catch {
     return null;
   }
+  // CDATA content is opaque text, never markup: test output wrapped in
+  // `<system-out>` CDATA routinely CONTAINS XML samples, and scanning it as
+  // markup fabricated phantom suites and failure evidence. Drop terminated
+  // sections; an unterminated one stays as-is and fails closed as before.
+  xml = stripCdataSections(xml);
   // Aggregate counts across EVERY suite in the file: aggregate JUnit writers
   // (jest-junit, karma reporters aimed at target/surefire-reports/ for
   // SonarQube) emit several `<testsuite>` elements, and reading only the
@@ -688,8 +843,8 @@ function parseTestReport(root: string, path: string): MavenTestSummary | null {
   let errors = 0;
   let skipped = 0;
   let suites = 0;
-  for (const suite of xml.matchAll(TESTSUITE_HEADER_RE)) {
-    const attributes = xmlAttributes(suite[1] ?? '');
+  for (const suite of xmlOpenTagHeaders(xml, 'testsuite')) {
+    const attributes = xmlAttributes(suite.attributes);
     suites += 1;
     tests += numberAttribute(attributes, 'tests');
     failures += numberAttribute(attributes, 'failures');
@@ -698,10 +853,10 @@ function parseTestReport(root: string, path: string): MavenTestSummary | null {
   }
   if (suites === 0) return null;
   const failedCases: string[] = [];
-  for (const header of xml.matchAll(TESTCASE_HEADER_RE)) {
-    const bodyStart = (header.index ?? 0) + header[0].length;
+  for (const header of xmlOpenTagHeaders(xml, 'testcase')) {
+    const bodyStart = header.index + header.text.length;
     let body = '';
-    if (!header[0].endsWith('/>')) {
+    if (!header.text.endsWith('/>')) {
       TESTCASE_CLOSE_RE.lastIndex = bodyStart;
       const close = TESTCASE_CLOSE_RE.exec(xml);
       // A file truncated mid-case has no closing tag to attribute a body to;
@@ -710,7 +865,7 @@ function parseTestReport(root: string, path: string): MavenTestSummary | null {
       body = xml.slice(bodyStart, close.index);
     }
     if (!/<(?:failure|error)\b/i.test(body)) continue;
-    const testcaseAttributes = xmlAttributes(header[1] ?? '');
+    const testcaseAttributes = xmlAttributes(header.attributes);
     const className = decodeXml(testcaseAttributes.get('classname') ?? '');
     const name = decodeXml(testcaseAttributes.get('name') ?? 'unknown');
     failedCases.push(className ? `${className}#${name}` : name);
@@ -1168,11 +1323,14 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
       return true;
     }
     if (path.endsWith('/pom.xml')) {
+      // Only a reactor MEMBER's POM is a resolution input. This branch is
+      // reachable only for a POM the diff DELETED or renamed away (the
+      // inactive-project abort needs the file on disk), and a POM absent
+      // from disk cannot take part in resolution — counting it would
+      // suppress the infrastructure carve-out for outages the diff cannot
+      // have caused. Fixture POMs under `src/` are not members either.
       const projectDir = path.slice(0, -'/pom.xml'.length);
-      return (
-        parsed.reactor.projectDirs.includes(projectDir) ||
-        !isUnderTestSourceTree(path, parsed.reactor.projectDirs)
-      );
+      return parsed.reactor.projectDirs.includes(projectDir);
     }
     return false;
   });
@@ -1276,6 +1434,10 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     result.exitCode !== null &&
     ((isLaunchFailure(result.output) &&
       !executedWrapperChanged &&
+      // maven-wrapper.properties feeds mvnw.cmd exactly as it feeds ./mvnw:
+      // when the executed wrapper fell back to system `mvn` (no win32
+      // wrapper in the tree), a config the diff changed is still suspect.
+      !wrapperConfigChanged &&
       !(executable === 'mvn' && platformWrapperChanged)) ||
       (isDependencyFailure(result.output) && !dependencyInputsChanged) ||
       (executable === './mvnw' &&
