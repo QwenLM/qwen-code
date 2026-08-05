@@ -267,6 +267,7 @@ import {
   isExitPlanApprovalRequest,
   todoDetailSignature,
   todoTimelineSignature,
+  type FloatingTodosState,
   type TodoDetail,
   type TodoSnapshotDiff,
 } from './utils/todos';
@@ -793,6 +794,12 @@ const emptyComposerApi: WebShellComposerApi = {
 };
 
 const EMPTY_BOTTOM_STATUS_ITEMS: readonly WebShellBottomStatusItem[] = [];
+const EMPTY_SESSION_WORKFLOW_TODOS: FloatingTodosState = {
+  todos: [],
+  planId: null,
+  allCompleted: false,
+  sourceMessageId: null,
+};
 const DEFAULT_CHAT_MAX_WIDTH = 1000;
 const DEFAULT_CHAT_HEADER_ITEMS: readonly WebShellChatHeaderItem[] = [
   'title',
@@ -3265,10 +3272,6 @@ export function App({
     () => getFloatingTodos(messages),
     [messages],
   );
-  const sessionWorkflowTodosState = useMemo(
-    () => getSessionWorkflowTodos(messages),
-    [messages],
-  );
   const approvalPlanTodos = useMemo(
     () =>
       isExitPlanApprovalRequest(pendingToolApproval)
@@ -3314,26 +3317,6 @@ export function App({
   const floatingTodos = useStableArray(floatingTodosState.todos, (todo) =>
     JSON.stringify([todo.id, todo.status, todo.content, todo.blockedBy ?? []]),
   );
-  const sessionWorkflowTodos = useStableArray(
-    sessionWorkflowTodosState.todos,
-    (todo) =>
-      JSON.stringify([
-        todo.id,
-        todo.status,
-        todo.content,
-        todo.blockedBy ?? [],
-      ]),
-  );
-  const sessionWorkflowGoal = useMemo(() => {
-    const message = messages.find(
-      (candidate) =>
-        candidate.role === 'user' &&
-        candidate.source !== 'background_notification',
-    );
-    return message?.role === 'user' && message.content.trim()
-      ? message.content
-      : undefined;
-  }, [messages]);
   const floatingTodosAllCompleted = floatingTodosState.allCompleted;
   const [todoPanelMode, setTodoPanelMode] = useState<'hidden' | 'active'>(
     'hidden',
@@ -3411,10 +3394,6 @@ export function App({
     taskActivityKey,
     connection.status === 'connected',
     backgroundTasksRefreshTrigger,
-  );
-  const environmentAgentTasks = useMemo(
-    () => getEnvironmentAgentTasks(messages, sessionTasks),
-    [messages, sessionTasks],
   );
   const backgroundTasks = useMemo(
     () => sessionTasks.filter((task) => task.kind !== 'agent'),
@@ -3686,9 +3665,7 @@ export function App({
   // (not a modal overlay), mirroring the reference design; creating or opening
   // a chat returns to 'chat'. (Daemon Status is no longer a boolean dialog — it
   // is one of the activePanel values below.)
-  const [mainView, setMainView] = useState<MainView>(() =>
-    cockpitViewRequested() ? 'cockpit' : 'chat',
-  );
+  const [mainView, setMainView] = useState<MainView>('chat');
   const mainViewRef = useRef(mainView);
   const workflowTabRef = useRef<HTMLButtonElement>(null);
   const useFloatingArtifactPanel =
@@ -4012,51 +3989,6 @@ export function App({
       editorRef.current?.focus();
     }
   }, [activePanel, approvalOverlayActive]);
-  // A pending approval (a gated tool call or an AskUserQuestion) renders its
-  // overlay in the chat footer, which is hidden (display:none) while a panel is
-  // shown. Left alone, the turn would hang behind Settings/Status with no
-  // visible prompt. Close the panel so the approval surfaces. Only actionable
-  // approvals count — pendingToolApproval/pendingAskUserApproval already gate on
-  // canActOnPendingApproval, so a non-owner in a shared session isn't yanked out
-  // of Settings by someone else's prompt.
-  useEffect(() => {
-    if (!approvalOverlayActive) return;
-    // The approval overlay renders in the chat footer; dismiss anything layered
-    // over it so it's visible and actionable instead of trapped behind a
-    // backdrop — the panel itself and any DialogShell sub-dialog opened from it
-    // (model picker, approval-mode picker). Leaving the approval-mode picker up
-    // is also a security hole: the user could pick "yolo" and silently
-    // auto-approve a tool call they never saw (handleSetMode auto-approves
-    // pendingApprovalRef.current).
-    if (activePanel) setActivePanel(null);
-    if (modelDialogMode) setModelDialogMode(null);
-    if (showApprovalModeDialog) setShowApprovalModeDialog(false);
-    // The Scheduled Tasks and Goals pages are full-pane overlays
-    // (position:absolute) that cover the chat footer too, so dismiss them for
-    // the same reason. The split view is deliberately NOT dismissed: each pane
-    // owns and renders its own session's approval, so an approval on the (outer)
-    // main session must not yank the user out of the panes they are working in.
-    const pageCanShowApproval =
-      (mainView === 'workflow' || mainView === 'cockpit') &&
-      isExitPlanApprovalRequest(pendingToolApproval) &&
-      approvalPlanTodos.length > 0;
-    if (
-      mainView === 'scheduledTasks' ||
-      mainView === 'goals' ||
-      ((mainView === 'workflow' || mainView === 'cockpit') &&
-        !pageCanShowApproval)
-    ) {
-      setMainView('chat');
-    }
-  }, [
-    approvalOverlayActive,
-    activePanel,
-    modelDialogMode,
-    showApprovalModeDialog,
-    mainView,
-    pendingToolApproval,
-    approvalPlanTodos,
-  ]);
   // Whether each approval overlay is the topmost (visible, uncovered) one. The
   // overlay components consume this as `keyboardActive`: when it flips true — on
   // appearance, or once a panel/dialog that was covering it closes — they pull
@@ -4171,21 +4103,6 @@ export function App({
   const escapeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [tasksDialogMessage, setTasksDialogMessage] =
     useState<SerializedTasksMessage | null>(null);
-  const planAgentTools = useMemo(() => {
-    if (tasksDialogMessage) {
-      return getAgentToolsForPlan(messages, floatingTodosState);
-    }
-    if (mainView === 'workflow' || mainView === 'cockpit') {
-      return getAgentToolsForPlan(messages, sessionWorkflowTodosState);
-    }
-    return [];
-  }, [
-    floatingTodosState,
-    mainView,
-    messages,
-    sessionWorkflowTodosState,
-    tasksDialogMessage,
-  ]);
   const handleOpenMonitorDetails = useCallback(
     (task: DaemonSessionMonitorTaskStatus) => {
       setTasksDialogMessage(null);
@@ -5152,10 +5069,125 @@ export function App({
       (setting) => setting.key === 'experimental.liveVoice.enabled',
     ),
   );
+  // Do not expose workflow surfaces until settings have loaded successfully.
+  // The resource keeps stale data when a reload fails, so the error check is
+  // required to fail closed in that case too.
   const sessionWorkflowEnabled =
+    !workspaceSettingsState.loading &&
+    !workspaceSettingsState.error &&
+    workspaceSettingsState.status !== undefined &&
     workspaceSettings.find(
       (setting) => setting.key === 'experimental.sessionWorkflow',
     )?.values.effective === true;
+  const sessionWorkflowSettingsResolved =
+    workspaceSettingsState.status !== undefined ||
+    workspaceSettingsState.error !== undefined;
+  const sessionWorkflowTodosState = useMemo(
+    () =>
+      sessionWorkflowEnabled
+        ? getSessionWorkflowTodos(messages)
+        : EMPTY_SESSION_WORKFLOW_TODOS,
+    [messages, sessionWorkflowEnabled],
+  );
+  const sessionWorkflowTodos = useStableArray(
+    sessionWorkflowTodosState.todos,
+    (todo) =>
+      JSON.stringify([
+        todo.id,
+        todo.status,
+        todo.content,
+        todo.blockedBy ?? [],
+      ]),
+  );
+  const sessionWorkflowGoal = useMemo(() => {
+    if (!sessionWorkflowEnabled) return undefined;
+    const sourceIndex = messages.findIndex(
+      (message) => message.id === sessionWorkflowTodosState.sourceMessageId,
+    );
+    for (let index = sourceIndex - 1; index >= 0; index--) {
+      const message = messages[index];
+      if (
+        message?.role === 'user' &&
+        message.source !== 'background_notification' &&
+        message.content.trim()
+      ) {
+        return message.content;
+      }
+    }
+    return undefined;
+  }, [messages, sessionWorkflowEnabled, sessionWorkflowTodosState]);
+  const environmentAgentTasks = useMemo(
+    () => getEnvironmentAgentTasks(messages, sessionTasks),
+    [messages, sessionTasks],
+  );
+  const planAgentTools = useMemo(() => {
+    if (tasksDialogMessage) {
+      return getAgentToolsForPlan(messages, floatingTodosState);
+    }
+    if (!sessionWorkflowEnabled) return [];
+    if (mainView === 'workflow' || mainView === 'cockpit') {
+      return getAgentToolsForPlan(messages, sessionWorkflowTodosState);
+    }
+    return [];
+  }, [
+    floatingTodosState,
+    mainView,
+    messages,
+    sessionWorkflowEnabled,
+    sessionWorkflowTodosState,
+    tasksDialogMessage,
+  ]);
+  // A pending approval (a gated tool call or an AskUserQuestion) renders its
+  // overlay in the chat footer, which is hidden (display:none) while a panel is
+  // shown. Left alone, the turn would hang behind Settings/Status with no
+  // visible prompt. Close the panel so the approval surfaces. Only actionable
+  // approvals count — pendingToolApproval/pendingAskUserApproval already gate on
+  // canActOnPendingApproval, so a non-owner in a shared session isn't yanked out
+  // of Settings by someone else's prompt.
+  useEffect(() => {
+    if (!approvalOverlayActive) return;
+    // The approval overlay renders in the chat footer; dismiss anything layered
+    // over it so it's visible and actionable instead of trapped behind a
+    // backdrop — the panel itself and any DialogShell sub-dialog opened from it
+    // (model picker, approval-mode picker). Leaving the approval-mode picker up
+    // is also a security hole: the user could pick "yolo" and silently
+    // auto-approve a tool call they never saw (handleSetMode auto-approves
+    // pendingApprovalRef.current).
+    if (activePanel) setActivePanel(null);
+    if (modelDialogMode) setModelDialogMode(null);
+    if (showApprovalModeDialog) setShowApprovalModeDialog(false);
+    // The Scheduled Tasks and Goals pages are full-pane overlays
+    // (position:absolute) that cover the chat footer too, so dismiss them for
+    // the same reason. The split view is deliberately NOT dismissed: each pane
+    // owns and renders its own session's approval, so an approval on the (outer)
+    // main session must not yank the user out of the panes they are working in.
+    const pageCanShowApproval =
+      sessionWorkflowEnabled &&
+      (mainView === 'workflow' || mainView === 'cockpit') &&
+      ((isExitPlanApprovalRequest(pendingToolApproval) &&
+        approvalPlanTodos.length > 0) ||
+        (mainView === 'cockpit' &&
+          sessionWorkflowTodos.length > 0 &&
+          pendingToolApproval !== null));
+    if (
+      mainView === 'scheduledTasks' ||
+      mainView === 'goals' ||
+      ((mainView === 'workflow' || mainView === 'cockpit') &&
+        !pageCanShowApproval)
+    ) {
+      setMainView('chat');
+    }
+  }, [
+    approvalOverlayActive,
+    activePanel,
+    modelDialogMode,
+    showApprovalModeDialog,
+    mainView,
+    pendingToolApproval,
+    approvalPlanTodos,
+    sessionWorkflowEnabled,
+    sessionWorkflowTodos.length,
+  ]);
   const reloadTargetedWorkspaceSettings = useCallback(async () => {
     const status = await reloadWorkspaceSettings();
     if (mainVoiceTarget?.route === 'workspace-qualified') {
@@ -6758,19 +6790,21 @@ export function App({
       });
   }, [reportError, requireActiveSessionForLocalCommand, sessionActions]);
   const openWorkflow = useCallback(() => {
+    if (!sessionWorkflowEnabled) return;
     if (!requireActiveSessionForLocalCommand()) return;
     if (cockpitViewRequested()) updateCockpitLocation(false);
     setActivePanel(null);
     setTasksDialogMessage(null);
     setMainView('workflow');
-  }, [requireActiveSessionForLocalCommand]);
+  }, [requireActiveSessionForLocalCommand, sessionWorkflowEnabled]);
   const openCockpit = useCallback(() => {
+    if (!sessionWorkflowEnabled) return;
     if (!requireActiveSessionForLocalCommand()) return;
     if (!cockpitViewRequested()) updateCockpitLocation(true);
     setActivePanel(null);
     setTasksDialogMessage(null);
     setMainView('cockpit');
-  }, [requireActiveSessionForLocalCommand]);
+  }, [requireActiveSessionForLocalCommand, sessionWorkflowEnabled]);
   const closeCockpit = useCallback(() => {
     if (cockpitViewRequested()) updateCockpitLocation(false);
     setMainView('chat');
@@ -6795,17 +6829,29 @@ export function App({
     openCockpit();
   }, [mainView, openCockpit, workflowApprovalRequest]);
   useEffect(() => {
-    if (
-      (mainView === 'workflow' || mainView === 'cockpit') &&
-      workspaceSettingsState.status &&
-      !sessionWorkflowEnabled
-    ) {
+    if (!sessionWorkflowEnabled) {
+      if (mainView !== 'workflow' && mainView !== 'cockpit') return;
       if (mainView === 'cockpit' && cockpitViewRequested()) {
-        updateCockpitLocation(false, true);
+        if (sessionWorkflowSettingsResolved) {
+          updateCockpitLocation(false, true);
+        }
       }
       setMainView('chat');
+      return;
     }
-  }, [mainView, sessionWorkflowEnabled, workspaceSettingsState.status]);
+    if (
+      mainView === 'chat' &&
+      cockpitViewRequested() &&
+      !approvalOverlayActive
+    ) {
+      setMainView('cockpit');
+    }
+  }, [
+    approvalOverlayActive,
+    mainView,
+    sessionWorkflowEnabled,
+    sessionWorkflowSettingsResolved,
+  ]);
   useEffect(() => {
     if (mainView === 'workflow' && !workflowApprovalRequest) {
       workflowTabRef.current?.focus();
@@ -6814,21 +6860,37 @@ export function App({
   useEffect(() => {
     const handlePopState = () => {
       if (cockpitViewRequested()) {
-        setMainView('cockpit');
+        if (sessionWorkflowEnabled) {
+          setMainView('cockpit');
+        } else {
+          setMainView('chat');
+          if (sessionWorkflowSettingsResolved) {
+            updateCockpitLocation(false, true);
+          }
+        }
       } else if (mainViewRef.current === 'cockpit') {
         setMainView('chat');
       }
     };
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
-  }, []);
+  }, [sessionWorkflowEnabled, sessionWorkflowSettingsResolved]);
   useEffect(() => {
-    if (mainView === 'cockpit' && !cockpitViewRequested()) {
+    if (
+      mainView === 'cockpit' &&
+      sessionWorkflowEnabled &&
+      !cockpitViewRequested()
+    ) {
       updateCockpitLocation(true, true);
-    } else if (mainView !== 'cockpit' && cockpitViewRequested()) {
+    } else if (
+      mainView !== 'cockpit' &&
+      cockpitViewRequested() &&
+      !sessionWorkflowEnabled &&
+      sessionWorkflowSettingsResolved
+    ) {
       updateCockpitLocation(false, true);
     }
-  }, [mainView]);
+  }, [mainView, sessionWorkflowEnabled, sessionWorkflowSettingsResolved]);
   const openEnvironmentTasksPanel = useCallback(() => {
     if (!requireActiveSessionForLocalCommand()) return;
     setEnvironmentPanelOpen(true);
@@ -9297,6 +9359,19 @@ export function App({
                     setMainView('chat');
                     return loadSidebarSession(sessionId, workspaceCwd);
                   }}
+                  onOpenSessionWorkflow={
+                    sessionWorkflowEnabled
+                      ? async (sessionId, workspaceCwd) => {
+                          closeMobileDrawer();
+                          await loadSidebarSession(sessionId, workspaceCwd);
+                          if (!cockpitViewRequested()) {
+                            updateCockpitLocation(true);
+                          }
+                          closePanel();
+                          setMainView('cockpit');
+                        }
+                      : undefined
+                  }
                   onSelectCurrentSession={() => {
                     closeMobileDrawer();
                     setMainView('chat');
@@ -9908,8 +9983,10 @@ export function App({
                     todos={sessionWorkflowTodos}
                     tools={planAgentTools}
                     tasks={environmentAgentTasks}
+                    artifacts={artifacts}
                     onBackToChat={closeCockpit}
                     onOpenSubagent={openSubagentPanel}
+                    onOpenArtifact={openArtifactPanel}
                     {...(sessionDisplayName
                       ? { sessionName: sessionDisplayName }
                       : {})}
@@ -9924,6 +10001,16 @@ export function App({
                           approval: {
                             request: workflowApprovalRequest,
                             todos: approvalPlanTodos,
+                            onConfirm: handleConfirm,
+                          },
+                        }
+                      : {})}
+                    {...(pendingToolApproval &&
+                    !isExitPlanApprovalRequest(pendingToolApproval) &&
+                    sessionWorkflowTodos.length > 0
+                      ? {
+                          decision: {
+                            request: pendingToolApproval,
                             onConfirm: handleConfirm,
                           },
                         }

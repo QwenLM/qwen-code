@@ -8,11 +8,9 @@ and the existing permission lifecycle.
 
 ## Rollout
 
-`experimental.sessionWorkflow` is disabled by default. When disabled, the Web
-Shell keeps the existing Todo list and Plan Mode behavior but does not render
-the Workflow DAG or rename Plan Mode. The setting changes presentation only;
-it does not register tools, alter Todo semantics, or create another approval
-mode.
+`experimental.sessionWorkflow` is disabled by default. When disabled, Core,
+the ACP session, and the Web Shell retain their existing Todo, Agent, approval,
+and split-view behavior. No Workflow marker or revision context is created.
 
 When enabled, the existing `plan` mode is presented as **Plan & Review**. Plan
 Mode remains the execution gate: read-only investigation is allowed, mutating
@@ -40,6 +38,10 @@ approving exits Plan Mode.
   Todo list.
 - Reuse the existing plan ID lineage so later snapshots and Agent executions
   continue updating the same Workflow without another store.
+- Mark Todo output only while the experimental setting and Plan/revision
+  context are both active. The Web Shell ignores ordinary Todo snapshots.
+- After approval, require top-level Agent calls to use a `todo_id` from the
+  approved revision. Nested Agents and ordinary sessions keep existing rules.
 - Fall back to the existing text-only approval when no matching snapshot is
   available.
 
@@ -58,9 +60,12 @@ approving exits Plan Mode.
 - Let a selected step show its upstream and downstream relationships plus the
   linked Agent's latest activity and runtime metrics. Opening an Agent continues
   into the existing transcript and artifact panel.
+- Show Skill calls from the Agent transcript, Session artifacts from the
+  existing artifact store, and current permission decisions through the
+  existing approval component.
 - Keep the Workflow entry available after completion, later chat turns, and
-  session resume by reading the latest Todo snapshot from the transcript. The
-  compact Todo panel still clears on the next user turn.
+  session resume by reading marked Todo snapshots from the transcript. A
+  feature-gated Session row action loads the Session and opens its cockpit.
 - Preserve an active Todo's existing dependencies when an update for the same
   ID omits `blockedBy`; an explicit empty array removes dependencies.
 
@@ -68,7 +73,9 @@ approving exits Plan Mode.
 
 The Workflow remains observational. It does not schedule dependencies, retry
 Agents, propagate completion, or add a Workflow store. `blockedBy` and
-`todo_id` remain optional for sessions outside Plan & Review.
+`todo_id` remain optional for sessions outside Plan & Review. Skill versions
+and a durable decision ledger are not claimed because the current transcript
+does not provide them.
 
 The standalone cockpit mock remains a product reference rather than a second
 application embedded through an iframe. The Web Shell Workflow page reuses the

@@ -143,6 +143,7 @@ export interface TodoItem {
 
 export interface TodoPlanSnapshot {
   planId?: string;
+  sessionWorkflow?: boolean;
   todos: TodoItem[];
 }
 

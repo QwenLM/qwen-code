@@ -291,6 +291,10 @@ interface WebShellSidebarProps {
     sessionId: string,
     workspaceCwd?: string,
   ) => Promise<void> | void;
+  onOpenSessionWorkflow?: (
+    sessionId: string,
+    workspaceCwd?: string,
+  ) => Promise<void> | void;
   onSelectCurrentSession?: () => void;
   onError: (error: unknown, fallback: string) => void;
   theme: WebShellTheme;
@@ -512,6 +516,7 @@ export function WebShellSidebar({
   canOpenSplitView,
   onNewSession,
   onLoadSession,
+  onOpenSessionWorkflow,
   onSelectCurrentSession,
   onError,
   theme,
@@ -3239,7 +3244,8 @@ export function WebShellSidebar({
                         (showRename && !inlineActionItems.has('rename')) ||
                         canOrganizeSession(session, 'group') ||
                         (showExport && !inlineActionItems.has('export')) ||
-                        (showDelete && !inlineActionItems.has('delete')) ? (
+                        (showDelete && !inlineActionItems.has('delete')) ||
+                        onOpenSessionWorkflow ? (
                           <DropdownMenu>
                             <DropdownMenuTrigger asChild>
                               <button
@@ -3265,6 +3271,20 @@ export function WebShellSidebar({
                               }}
                             >
                               <DropdownMenuGroup>
+                                {onOpenSessionWorkflow && (
+                                  <DropdownMenuItem
+                                    disabled={busy}
+                                    onSelect={() =>
+                                      onOpenSessionWorkflow(
+                                        session.sessionId,
+                                        session.workspaceCwd,
+                                      )
+                                    }
+                                  >
+                                    <LayoutGridIcon />
+                                    Session Workflow
+                                  </DropdownMenuItem>
+                                )}
                                 {showPin && !inlineActionItems.has('pin') && (
                                   <DropdownMenuItem
                                     disabled={busy}
@@ -3396,6 +3416,7 @@ export function WebShellSidebar({
       getIdentityForSession,
       getSessionDetailsCollisionBoundary,
       onError,
+      onOpenSessionWorkflow,
       handleArchive,
       handleDeleteSession,
       handleExportSession,

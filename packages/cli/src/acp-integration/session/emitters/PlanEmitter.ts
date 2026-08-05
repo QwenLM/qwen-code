@@ -39,6 +39,9 @@ export class PlanEmitter extends BaseEmitter {
       createTranscriptPlanUpdate(plan.todos, cumulative, {
         planToolCallId: sourceCallId,
         todoPlanId: plan.planId,
+        ...(plan.sessionWorkflow
+          ? { extra: { qwenSessionWorkflow: true } }
+          : {}),
       }),
     );
   }
@@ -62,6 +65,7 @@ export class PlanEmitter extends BaseEmitter {
     if (!plan) return null;
     return {
       ...(plan.planId ? { planId: plan.planId } : {}),
+      ...(plan.sessionWorkflow ? { sessionWorkflow: true } : {}),
       todos: plan.todos.map((todo, index) => ({
         id: todo.id ?? String(index),
         content: todo.content,

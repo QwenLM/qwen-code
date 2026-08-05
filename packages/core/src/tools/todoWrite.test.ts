@@ -38,6 +38,7 @@ describe('TodoWriteTool', () => {
     mockConfig = {
       getSessionId: () => 'test-session-123',
       getHookSystem: () => undefined,
+      isSessionWorkflowTodoContextActive: () => false,
       setActiveTodoReminder: vi.fn(),
     } as unknown as Config;
     tool = new TodoWriteTool(mockConfig);
@@ -541,6 +542,42 @@ describe('TodoWriteTool', () => {
       expect(
         JSON.parse(mockAtomicWrite.mock.calls[0][1] as string).todos,
       ).toContainEqual(expect.objectContaining({ id: 'note', blockedBy: [] }));
+    });
+
+    it('marks structured output in Session Workflow context', async () => {
+      mockConfig = {
+        getSessionId: () => 'test-session-123',
+        getHookSystem: () => undefined,
+        isSessionWorkflowTodoContextActive: vi.fn().mockReturnValue(true),
+        setActiveTodoReminder: vi.fn(),
+      } as unknown as Config;
+      tool = new TodoWriteTool(mockConfig);
+      mockFs.readFile.mockResolvedValue(
+        JSON.stringify({
+          todos: [
+            { id: 'prepare', content: 'Prepare', status: 'pending' },
+            {
+              id: 'ship',
+              content: 'Ship',
+              status: 'pending',
+              blockedBy: ['prepare'],
+            },
+          ],
+        }),
+      );
+      mockFs.mkdir.mockResolvedValue(undefined);
+      mockAtomicWrite.mockResolvedValue(undefined);
+
+      const result = await tool
+        .build({
+          todos: [
+            { id: 'prepare', content: 'Prepare', status: 'completed' },
+            { id: 'ship', content: 'Ship', status: 'pending' },
+          ],
+        })
+        .execute(mockAbortSignal);
+
+      expect(result.returnDisplay).toMatchObject({ sessionWorkflow: true });
     });
 
     it('should handle file write errors', async () => {

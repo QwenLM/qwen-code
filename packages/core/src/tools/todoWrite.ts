@@ -287,6 +287,8 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
       const hasActivePlan = oldTodos.some(
         (todo) => todo.status !== 'completed',
       );
+      const workflowContextActive =
+        this.config.isSessionWorkflowTodoContextActive?.() === true;
 
       let candidateTodos: unknown;
 
@@ -466,6 +468,7 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
       const todoResultDisplay = {
         type: 'todo_list' as const,
         ...(resultPlanId ? { planId: resultPlanId } : {}),
+        ...(workflowContextActive ? { sessionWorkflow: true } : {}),
         todos: finalTodos,
         changes,
       };

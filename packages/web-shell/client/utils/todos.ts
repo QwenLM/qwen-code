@@ -169,7 +169,23 @@ export function getFloatingTodos(
 export function getSessionWorkflowTodos(
   messages: readonly Message[],
 ): FloatingTodosState {
-  return getLatestTodos(messages, false);
+  let state = EMPTY_FLOATING_TODOS;
+  for (const message of messages) {
+    if (message.role !== 'tool_group') continue;
+    for (const tool of message.tools) {
+      const rawOutput = getRecord(tool.rawOutput);
+      if (rawOutput?.['sessionWorkflow'] !== true) continue;
+      const todos = extractTodosFromToolCall(tool);
+      if (!todos) continue;
+      state = {
+        todos,
+        planId: getTodoPlanId(tool),
+        allCompleted: !hasActiveTodos(todos),
+        sourceMessageId: message.id,
+      };
+    }
+  }
+  return state;
 }
 
 export function getActiveTodosForPlanRevision(

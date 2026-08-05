@@ -30,7 +30,11 @@
 .reviewShell button:focus-visible,
 .emptyCockpit button:focus-visible {
   outline: 3px solid
-    color-mix(in srgb, var(--agent-blue-500) var(--cockpit-tint-strong), transparent);
+    color-mix(
+      in srgb,
+      var(--agent-blue-500) var(--cockpit-tint-strong),
+      transparent
+    );
   outline-offset: 2px;
 }
 
@@ -384,7 +388,11 @@
 }
 
 .phaseActive {
-  background: color-mix(in srgb, var(--agent-blue-500) var(--cockpit-tint-weak), var(--card));
+  background: color-mix(
+    in srgb,
+    var(--agent-blue-500) var(--cockpit-tint-weak),
+    var(--card)
+  );
   box-shadow: inset 3px 0 var(--agent-blue-500);
 }
 
@@ -416,7 +424,11 @@
   border-color: var(--agent-blue-500);
   background: var(--agent-blue-500);
   box-shadow: 0 0 0 4px
-    color-mix(in srgb, var(--agent-blue-500) var(--cockpit-tint-ring), transparent);
+    color-mix(
+      in srgb,
+      var(--agent-blue-500) var(--cockpit-tint-ring),
+      transparent
+    );
 }
 
 .phase[data-status='blocked'] > i,
@@ -568,7 +580,11 @@
   color: var(--agent-blue-500);
   border-color: var(--agent-blue-500);
   box-shadow: 0 0 0 6px
-    color-mix(in srgb, var(--agent-blue-500) var(--cockpit-tint-ring), transparent);
+    color-mix(
+      in srgb,
+      var(--agent-blue-500) var(--cockpit-tint-ring),
+      transparent
+    );
 }
 
 .workDetail {
@@ -590,7 +606,11 @@
   place-items: center;
   border-radius: var(--radius-lg);
   color: var(--agent-blue-500);
-  background: color-mix(in srgb, var(--agent-blue-500) var(--cockpit-tint-weak), var(--card));
+  background: color-mix(
+    in srgb,
+    var(--agent-blue-500) var(--cockpit-tint-weak),
+    var(--card)
+  );
   font-family: var(--cockpit-mono);
   font-size: 12px;
   font-weight: 900;
@@ -704,7 +724,11 @@
 
 .agentCards button:hover {
   border-color: color-mix(in srgb, var(--agent-blue-500) 38%, var(--border));
-  background: color-mix(in srgb, var(--agent-blue-500) var(--cockpit-tint-weak), var(--card));
+  background: color-mix(
+    in srgb,
+    var(--agent-blue-500) var(--cockpit-tint-weak),
+    var(--card)
+  );
 }
 
 .agentCards button > span {
@@ -749,6 +773,20 @@
   border-bottom: 1px solid var(--border);
 }
 
+button.activityRow {
+  width: 100%;
+  padding-block: 0;
+  padding-right: 0;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+button.activityRow:hover {
+  background: var(--accent);
+}
+
 .activityRow time,
 .logRows time {
   color: var(--muted-foreground);
@@ -757,14 +795,18 @@
 }
 
 .activityRow > span,
-.logRows > div > span {
+.logRows > button > span {
   display: grid;
   width: 25px;
   height: 25px;
   place-items: center;
   border-radius: var(--radius-sm);
   color: var(--agent-blue-500);
-  background: color-mix(in srgb, var(--agent-blue-500) var(--cockpit-tint-weak), var(--card));
+  background: color-mix(
+    in srgb,
+    var(--agent-blue-500) var(--cockpit-tint-weak),
+    var(--card)
+  );
   font-family: var(--cockpit-mono);
   font-size: 10px;
   font-weight: 800;
@@ -939,13 +981,27 @@
   border-right: 1px solid var(--border);
 }
 
-.logRows > div:not(.inlineEmpty) {
+.logRows > button {
   display: grid;
   grid-template-columns: 48px 25px minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
   min-height: 38px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
   font-size: 11px;
+  text-align: left;
+}
+
+.logRows > button:not(:disabled) {
+  cursor: pointer;
+}
+
+.logRows > button:not(:disabled):hover {
+  background: var(--accent);
 }
 
 .logRows p {
@@ -977,11 +1033,22 @@
   margin-top: 10px;
 }
 
-.deliverables section > span {
+.deliverables section > button {
   min-width: 0;
   padding: 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
+  color: inherit;
+  background: transparent;
+  text-align: left;
+}
+
+.deliverables section > button:not(:disabled) {
+  cursor: pointer;
+}
+
+.deliverables section > button:not(:disabled):hover {
+  background: var(--accent);
 }
 
 .deliverables section strong,
@@ -1101,7 +1168,11 @@
  * `.attentionList > button` on specificity, so this wins without
  * `!important`. */
 .attentionList > button.attentionActive {
-  background: color-mix(in srgb, var(--agent-blue-500) var(--cockpit-tint-weak), var(--card));
+  background: color-mix(
+    in srgb,
+    var(--agent-blue-500) var(--cockpit-tint-weak),
+    var(--card)
+  );
   box-shadow: inset 3px 0 var(--agent-blue-500);
 }
 
@@ -1287,7 +1358,11 @@
   border-color: var(--agent-blue-500);
   background: var(--agent-blue-500);
   box-shadow: 0 0 0 4px
-    color-mix(in srgb, var(--agent-blue-500) var(--cockpit-tint-ring), transparent);
+    color-mix(
+      in srgb,
+      var(--agent-blue-500) var(--cockpit-tint-ring),
+      transparent
+    );
 }
 
 .reviewMain {
@@ -1426,7 +1501,11 @@
   font-size: 22px;
   font-weight: 900;
   box-shadow: 0 16px 32px
-    color-mix(in srgb, var(--agent-blue-500) var(--cockpit-tint-strong), transparent);
+    color-mix(
+      in srgb,
+      var(--agent-blue-500) var(--cockpit-tint-strong),
+      transparent
+    );
 }
 
 .emptyCockpit h1 {

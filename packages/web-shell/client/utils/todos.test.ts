@@ -41,6 +41,7 @@ function todoWriteMessage(
   todos: TodoItem[],
   stats?: TodoStatsSnapshot,
   planId?: string,
+  sessionWorkflow = false,
 ): Message {
   const tool: ACPToolCall = {
     callId: `call-${id}`,
@@ -48,11 +49,12 @@ function todoWriteMessage(
     status: 'completed',
     kind: 'think',
     args: { todos },
-    ...(stats || planId
+    ...(stats || planId || sessionWorkflow
       ? {
           rawOutput: {
             ...(stats ? { stats } : {}),
             ...(planId ? { plan: { id: planId } } : {}),
+            ...(sessionWorkflow ? { sessionWorkflow: true } : {}),
           },
         }
       : {}),
@@ -248,8 +250,10 @@ describe('getSessionWorkflowTodos', () => {
         [todo('first', 'completed'), todo('second', 'completed')],
         undefined,
         'plan-1',
+        true,
       ),
       userMessage('follow-up'),
+      todoWriteMessage('ordinary', [todo('unrelated', 'pending')]),
       assistantMessage('reply'),
     ]);
 

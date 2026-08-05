@@ -6,12 +6,13 @@ This branch turns the collaboration-cockpit reference into a real Web Shell page
 
 ## Data and control flow
 
-- The latest `todo_write` snapshot supplies stable Todo IDs, status, content, and `blockedBy` dependencies.
+- A `todo_write` snapshot marked inside an enabled Plan/revision context supplies stable Todo IDs, status, content, and `blockedBy` dependencies. Ordinary Todo snapshots are ignored by the cockpit.
 - Agent calls are linked to a Todo through `todo_id`; daemon task snapshots supply live status, activity, usage, and persisted transcript/output paths.
 - `exit_plan_mode` remains the execution gate. When the experimental Session Workflow setting is enabled, a revision-bound approval opens the cockpit's four-step plan review before execution.
 - Approval uses the existing permission API. The cockpit does not schedule, pause, or persist tasks itself.
-- The shared Session header switches between Chat, the operational cockpit, and the technical Workflow DAG. Agent cards open the existing transcript detail panel.
+- The shared Session header switches between Chat, the operational cockpit, and the technical Workflow DAG. Agent cards and activity rows open the existing transcript detail panel; deliverables open the existing artifact panel.
 - `?view=cockpit` makes the cockpit directly addressable and browser navigation returns to Chat.
+- The Session row menu can load a completed Session directly into its cockpit while the experiment is enabled.
 
 ## Demo
 
@@ -38,7 +39,7 @@ Enable **Experimental → Session Workflow Plan & Review**, enter Plan & Review 
 The cockpit is also directly addressable after the Session exists:
 
 ```text
-http://127.0.0.1:5294/session/<session-id>?view=cockpit#token=<copied-token>
+http://127.0.0.1:5294/session/<session-id>?token=<copied-token>&view=cockpit
 ```
 
 Expected flow:
@@ -51,4 +52,4 @@ Expected flow:
 
 ## Deliberate boundary
 
-The reference design's synthetic organization-wide queues, policy engine, and scheduler are not reproduced. “待我处理” is derived only from real failed or cancelled Agent tasks so the demo does not claim data or controls that the daemon does not provide.
+The reference design's synthetic organization-wide queues, policy engine, scheduler, Skill version catalog, and durable decision ledger are not reproduced. “待我处理” is derived from real failed/cancelled Agent tasks and the current permission request, so the page does not claim data the daemon does not provide.

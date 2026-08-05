@@ -326,8 +326,15 @@ const {
         onOpenMonitor?: (task: DaemonSessionMonitorTaskStatus) => void;
       } | null,
       settings: [] as DaemonSettingDescriptor[],
+      settingsLoading: false,
+      settingsError: undefined as Error | undefined,
       latestSettingsState: null as {
         settings: DaemonSettingDescriptor[];
+      } | null,
+      latestSplitViewProps: null as {
+        includeOtherWorkspaces?: boolean;
+        workspaceCwd?: string;
+        sessionWorkflowEnabled?: boolean;
       } | null,
       latestScheduledTasksProps: null as {
         onRunPrompt?: (
@@ -378,7 +385,13 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
     settings: testState.settings,
     setValue: settingsSetValue,
     reload: settingsReload,
-    loading: false,
+    loading: testState.settingsLoading,
+    error: testState.settingsError,
+    status: testState.settingsLoading
+      ? undefined
+      : testState.settingsError
+        ? undefined
+        : { v: 1, settings: testState.settings },
   }),
   useProviders: () => ({
     providers: [],
@@ -937,6 +950,9 @@ vi.doMock('./components/SplitView', async () => {
       onExit?: () => void;
       sessionIds?: string[];
       onPanesChange?: (ids: string[]) => void;
+      includeOtherWorkspaces?: boolean;
+      workspaceCwd?: string;
+      sessionWorkflowEnabled?: boolean;
       onPaneArtifactsChange?: (
         sessionId: string,
         artifacts: unknown[],
@@ -954,6 +970,7 @@ vi.doMock('./components/SplitView', async () => {
       }) => unknown;
       voiceWorkspaces?: readonly unknown[];
     }) => {
+      testState.latestSplitViewProps = props;
       const paneActions = {
         readWorkspaceFile: vi.fn().mockResolvedValue('<p>pane</p>'),
       };
@@ -2300,7 +2317,10 @@ beforeEach(() => {
   testState.backgroundTasks = [];
   testState.latestMonitorDetailsOnOpen = null;
   testState.settings = [];
+  testState.settingsLoading = false;
+  testState.settingsError = undefined;
   testState.latestSettingsState = null;
+  testState.latestSplitViewProps = null;
   testState.latestScheduledTasksProps = null;
   testState.latestGoalsProps = null;
   sidebarTokens.length = 0;
@@ -2432,6 +2452,44 @@ afterEach(() => {
 });
 
 describe('App plan todos', () => {
+  it('keeps a direct cockpit route and normal approval fail-closed when disabled', async () => {
+    testState.blocks = [makePendingPermissionBlock()];
+    window.history.replaceState(null, '', '/?view=cockpit');
+
+    const { container } = renderApp();
+    await flush();
+
+    expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="approval-overlay"]'),
+    ).not.toBeNull();
+    expect(new URLSearchParams(window.location.search).has('view')).toBe(false);
+
+    window.history.pushState(null, '', '/?view=cockpit');
+    act(() => window.dispatchEvent(new PopStateEvent('popstate')));
+    expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="approval-overlay"]'),
+    ).not.toBeNull();
+  });
+
+  it('does not enter cockpit while settings are loading or after an error', async () => {
+    testState.settingsLoading = true;
+    window.history.replaceState(null, '', '/?view=cockpit');
+
+    const { container, rerender } = renderApp();
+    await flush();
+    expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
+
+    testState.settingsLoading = false;
+    testState.settingsError = new Error('settings unavailable');
+    rerender();
+    await flush();
+
+    expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
+    expect(new URLSearchParams(window.location.search).has('view')).toBe(false);
+  });
+
   it('gates the exit-plan workflow on the experimental setting', async () => {
     const approvedEntries = [
       {
@@ -2455,6 +2513,7 @@ describe('App plan todos', () => {
             toolName: 'todo_write',
             status: 'completed',
             rawOutput: {
+              sessionWorkflow: true,
               entries: approvedEntries,
               plan: { id: 'plan-1' },
             },
@@ -2471,6 +2530,7 @@ describe('App plan todos', () => {
             toolName: 'todo_write',
             status: 'completed',
             rawOutput: {
+              sessionWorkflow: true,
               entries: [
                 ...approvedEntries.map((entry) => ({
                   ...entry,
@@ -2607,7 +2667,10 @@ describe('App plan todos', () => {
             args: {
               todos: [{ id: 'work', content: 'Work', status: 'in_progress' }],
             },
-            rawOutput: { plan: { id: 'plan-1' } },
+            rawOutput: {
+              sessionWorkflow: true,
+              plan: { id: 'plan-1' },
+            },
           },
         ],
       },
@@ -2679,7 +2742,10 @@ describe('App plan todos', () => {
             args: {
               todos: [{ id: 'work', content: 'Work', status: 'completed' }],
             },
-            rawOutput: { plan: { id: 'plan-1' } },
+            rawOutput: {
+              sessionWorkflow: true,
+              plan: { id: 'plan-1' },
+            },
           },
         ],
       },
