@@ -6,6 +6,7 @@ import type {
   DaemonInputAnnotation,
   DaemonSessionMonitorTaskStatus,
   DaemonSessionShellTaskStatus,
+  DaemonSessionTaskStatus,
   DaemonSettingDescriptor,
   DaemonWorkspaceGitStatus,
 } from '@qwen-code/sdk/daemon';
@@ -302,7 +303,7 @@ const {
         | ((error: unknown, fallback: string) => void)
         | null,
       latestBackgroundTasksRefreshTrigger: null as number | null,
-      backgroundTasks: [] as DaemonSessionMonitorTaskStatus[],
+      backgroundTasks: [] as DaemonSessionTaskStatus[],
       latestMonitorDetailsOnOpen: null as
         | ((tool: {
             callId: string;
@@ -1903,6 +1904,7 @@ describe('environment agent tasks', () => {
         id: 'general-purpose-internal-1',
         label: 'Review code',
         status: 'completed',
+        toolUseId: 'call-agent-1',
       },
     ]);
   });
@@ -2594,7 +2596,7 @@ describe('App plan todos', () => {
             toolName: 'Agent',
             title: 'Worker agent',
             status: 'in_progress',
-            args: { todo_id: 'work' },
+            args: { todo_id: 'work', description: 'Inspect repository' },
           },
         ],
       },
@@ -2677,9 +2679,53 @@ describe('App plan todos', () => {
     expect(
       container.querySelector('[data-testid="cockpit-page"]')?.textContent,
     ).toContain('Worker agent');
+    expect(
+      container.querySelector('[data-testid="cockpit-page"]')?.textContent,
+    ).toContain('执行指标未记录');
     expect(new URLSearchParams(window.location.search).get('view')).toBe(
       'cockpit',
     );
+
+    const agentActivityButton = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="cockpit-page"] button',
+      ),
+    ).find((button) => button.textContent?.includes('Agent 记录'));
+    expect(agentActivityButton).toBeDefined();
+    await act(async () => {
+      agentActivityButton?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="cockpit-page"]')?.textContent,
+    ).toContain('Worker agent');
+    expect(
+      container.querySelector('[data-testid="cockpit-page"]')?.textContent,
+    ).not.toContain('还没有关联到 Todo 的 Agent 执行');
+
+    testState.backgroundTasks = [
+      {
+        kind: 'agent',
+        id: 'restored-agent',
+        label: 'Restored worker',
+        description: 'Inspect repository',
+        status: 'completed',
+        startTime: 1,
+        endTime: 65_001,
+        runtimeMs: 65_000,
+        isBackgrounded: true,
+        stats: { totalTokens: 1_200, toolUses: 4, durationMs: 65_000 },
+        recentActivities: [
+          {
+            name: 'read_file',
+            description: 'Restored from daemon history',
+            at: 65_000,
+          },
+        ],
+      },
+    ];
+    rerender();
+    await flush();
 
     const technicalDagButton = Array.from(
       container.querySelectorAll<HTMLButtonElement>(
@@ -2694,6 +2740,18 @@ describe('App plan todos', () => {
       container.querySelector('[data-testid="workflow-page"]'),
     ).not.toBeNull();
     expect(new URLSearchParams(window.location.search).has('view')).toBe(false);
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-plan-node-id="work"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="workflow-page"]')?.textContent,
+    ).toContain('Restored from daemon history');
+    expect(
+      container.querySelector('[data-testid="workflow-page"]')?.textContent,
+    ).toContain('1,200 tokens');
 
     await act(async () => {
       container

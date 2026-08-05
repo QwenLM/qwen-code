@@ -387,6 +387,15 @@ export function SessionWorkflowCockpit({
   const outputFiles = agents
     .flatMap((task) => (task.outputFile ? [task.outputFile] : []))
     .slice(0, 3);
+  const hasCompleteAgentStats = agents.every((task) => task.stats);
+  const totalAgentToolUses = agents.reduce(
+    (sum, task) => sum + (task.stats?.toolUses ?? 0),
+    0,
+  );
+  const totalAgentTokens = agents.reduce(
+    (sum, task) => sum + (task.stats?.totalTokens ?? 0),
+    0,
+  );
 
   if (todos.length === 0) {
     return (
@@ -433,6 +442,7 @@ export function SessionWorkflowCockpit({
           </div>
           <nav aria-label="驾驶舱视图" className={styles.cockpitTabs}>
             <button
+              aria-label="协作任务"
               data-active={section === 'task' || undefined}
               onClick={() => setSection('task')}
               type="button"
@@ -441,6 +451,7 @@ export function SessionWorkflowCockpit({
               <span>协作任务</span>
             </button>
             <button
+              aria-label="待我处理"
               data-active={section === 'attention' || undefined}
               onClick={() => setSection('attention')}
               type="button"
@@ -449,7 +460,11 @@ export function SessionWorkflowCockpit({
               <span>待我处理</span>
               {attentionTodos.length > 0 && <b>{attentionTodos.length}</b>}
             </button>
-            <button onClick={onOpenWorkflow} type="button">
+            <button
+              aria-label="技术 DAG"
+              onClick={onOpenWorkflow}
+              type="button"
+            >
               <GitBranch aria-hidden="true" />
               <span>技术 DAG</span>
             </button>
@@ -473,13 +488,6 @@ export function SessionWorkflowCockpit({
                 <h1>待我处理</h1>
                 <p>这里只展示 Agent 无法自行处理、需要用户介入的节点。</p>
               </div>
-              <button
-                className={styles.secondaryButton}
-                onClick={() => setSection('task')}
-                type="button"
-              >
-                返回任务驾驶舱
-              </button>
             </div>
             <div className={styles.attentionStats}>
               <div>
@@ -574,22 +582,6 @@ export function SessionWorkflowCockpit({
                   <span>{todos.length} 个步骤</span>
                   <span>{tools.length} 个 Agent 调用</span>
                 </div>
-              </div>
-              <div className={styles.headingActions}>
-                <button
-                  className={styles.secondaryButton}
-                  onClick={onOpenWorkflow}
-                  type="button"
-                >
-                  查看技术 DAG
-                </button>
-                <button
-                  className={styles.primaryButton}
-                  onClick={onBackToChat}
-                  type="button"
-                >
-                  返回 Chat
-                </button>
               </div>
             </section>
 
@@ -778,7 +770,9 @@ export function SessionWorkflowCockpit({
                         <div className={styles.runtime}>
                           <strong>
                             {selectedTask
-                              ? formatRuntime(selectedTask.runtimeMs)
+                              ? selectedTask.startTime > 0
+                                ? formatRuntime(selectedTask.runtimeMs)
+                                : '--'
                               : '--'}
                           </strong>
                           <span>执行耗时</span>
@@ -829,9 +823,16 @@ export function SessionWorkflowCockpit({
                                     {tool.title || getAgentDescription(tool)}
                                   </strong>
                                   <small>
-                                    {task
-                                      ? `${taskStatusLabel(task.status)} · ${task.stats?.toolUses ?? 0} 次工具调用 · ${(task.stats?.totalTokens ?? 0).toLocaleString()} tokens`
-                                      : '打开持久化 transcript 查看完整输出'}
+                                    {task ? (
+                                      <>
+                                        {taskStatusLabel(task.status)} ·{' '}
+                                        {task.stats
+                                          ? `${task.stats.toolUses} 次工具调用 · ${task.stats.totalTokens.toLocaleString()} tokens`
+                                          : '执行指标未记录'}
+                                      </>
+                                    ) : (
+                                      '打开持久化 transcript 查看完整输出'
+                                    )}
                                   </small>
                                 </div>
                                 <em>打开详情 →</em>
@@ -916,21 +917,15 @@ export function SessionWorkflowCockpit({
                 <div className={styles.evidenceGrid}>
                   <div>
                     <strong>
-                      {agents.reduce(
-                        (sum, task) => sum + (task.stats?.toolUses ?? 0),
-                        0,
-                      )}
+                      {hasCompleteAgentStats ? totalAgentToolUses : '--'}
                     </strong>
                     <span>工具调用</span>
                   </div>
                   <div>
                     <strong>
-                      {agents
-                        .reduce(
-                          (sum, task) => sum + (task.stats?.totalTokens ?? 0),
-                          0,
-                        )
-                        .toLocaleString()}
+                      {hasCompleteAgentStats
+                        ? totalAgentTokens.toLocaleString()
+                        : '--'}
                     </strong>
                     <span>Agent tokens</span>
                   </div>

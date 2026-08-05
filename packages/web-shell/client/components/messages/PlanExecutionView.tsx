@@ -516,7 +516,7 @@ export function PlanExecutionView({
     const latestActivity = liveTask?.recentActivities?.at(-1);
     const metrics = liveTask
       ? [
-          formatRuntime(liveTask.runtimeMs),
+          liveTask.startTime > 0 ? formatRuntime(liveTask.runtimeMs) : '',
           liveTask.stats?.toolUses === undefined
             ? ''
             : t('planExecution.toolCalls', {

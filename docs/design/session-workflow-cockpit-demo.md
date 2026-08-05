@@ -15,9 +15,31 @@ This branch turns the collaboration-cockpit reference into a real Web Shell page
 
 ## Demo
 
-Enable **Experimental → Session Workflow Plan & Review**, enter Plan mode, and send:
+From the repository root, start the daemon and Web Shell in separate terminals. Generate the daemon token in the first terminal and copy the printed value for the browser URL below:
 
-> Review how the experimental Session Workflow feature is implemented in this repository and prepare a concise implementation assessment. Before asking to execute, call todo_write with exactly these pending steps and dependency IDs: inspect-ui; inspect-daemon; compare-cockpit blocked by inspect-ui and inspect-daemon; write-assessment blocked by compare-cockpit. Then call exit_plan_mode. After approval, delegate inspect-ui and inspect-daemon to two subagents in parallel, passing the matching todo_id to each Agent call. Keep all work read-only and return the final assessment in chat.
+Terminal 1:
+
+```bash
+export QWEN_SERVER_TOKEN="$(openssl rand -hex 32)"
+printf 'Demo token: %s\n' "$QWEN_SERVER_TOKEN"
+npm run dev -- serve --port 4293 --workspace "$PWD" --no-web
+```
+
+Terminal 2:
+
+```bash
+QWEN_DAEMON_URL=http://127.0.0.1:4293 npm run dev --workspace @qwen-code/web-shell -- --host 127.0.0.1 --port 5294
+```
+
+Enable **Experimental → Session Workflow Plan & Review**, enter Plan & Review mode, and send:
+
+> Prepare a five-bullet repository orientation. Before doing any inspection, call todo_write with exactly these pending steps and dependency IDs: inspect-readme; inspect-package; compare-findings blocked by inspect-readme and inspect-package; write-summary blocked by compare-findings. Immediately call exit_plan_mode. After approval, launch exactly two Explore subagents in parallel: one reads only README.md and returns at most three bullets; the other reads only package.json and returns at most three bullets. Pass todo_id inspect-readme and inspect-package to the matching Agent calls. Do not run shell commands or edit files. Update the Todo statuses as each phase completes and return at most five bullets.
+
+The cockpit is also directly addressable after the Session exists:
+
+```text
+http://127.0.0.1:5294/session/<session-id>?view=cockpit#token=<copied-token>
+```
 
 Expected flow:
 

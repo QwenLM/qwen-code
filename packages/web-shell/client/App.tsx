@@ -1341,6 +1341,7 @@ export function getEnvironmentAgentTasks(
           liveTask
             ? {
                 ...liveTask,
+                toolUseId: tool.callId,
                 label,
                 description: taskDescription || liveTask.description,
                 ...(subagentType ? { subagentType } : {}),
@@ -9874,7 +9875,7 @@ export function App({
                     connected={connected}
                     todos={sessionWorkflowTodos}
                     tools={planAgentTools}
-                    tasks={sessionTasks}
+                    tasks={environmentAgentTasks}
                     onBackToChat={closeCockpit}
                     onOpenWorkflow={openWorkflow}
                     onOpenSubagent={openSubagentPanel}
@@ -9941,7 +9942,7 @@ export function App({
                       <PlanExecutionView
                         todos={sessionWorkflowTodos}
                         tools={planAgentTools}
-                        tasks={sessionTasks}
+                        tasks={environmentAgentTasks}
                         onOpenSubagent={openSubagentPanel}
                       />
                     )}
