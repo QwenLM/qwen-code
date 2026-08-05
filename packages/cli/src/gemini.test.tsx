@@ -2918,16 +2918,23 @@ describe('startInteractiveUI', () => {
       ['leading dash', '-cafebabe0123456789abcdef01234567'],
       ['non-UUID token', 'abc123'],
     ])('does not echo a session ID with a %s', async (_, sessionId) => {
-      // No real session file is created: control bytes are invalid file
-      // name chars on Windows, and the ID gate rejects before any file
-      // probe anyway.
-      await runCleanup(
-        makeRecordingConfig(sessionId, '/project/session.jsonl'),
-      );
+      // Pair each hostile ID with a real non-empty transcript under a
+      // benign filename so only the ID gate can suppress the echo; a
+      // missing file would mask a regression of the gate itself.
+      const projectDir = mkdtempSync(join(tmpdir(), 'resume-echo-'));
+      mkdirSync(join(projectDir, 'chats'), { recursive: true });
+      const sessionFile = join(projectDir, 'chats', 'benign.jsonl');
+      writeFileSync(sessionFile, '{"type":"message"}\n');
 
-      expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
-        expect.stringContaining('qwen --resume'),
-      );
+      try {
+        await runCleanup(makeRecordingConfig(sessionId, sessionFile));
+
+        expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+          expect.stringContaining('qwen --resume'),
+        );
+      } finally {
+        rmSync(projectDir, { recursive: true, force: true });
+      }
     });
 
     it('does not echo when chat recording is disabled', async () => {
@@ -2935,7 +2942,7 @@ describe('startInteractiveUI', () => {
       const projectDir = mkdtempSync(join(tmpdir(), 'resume-echo-'));
       mkdirSync(join(projectDir, 'chats'), { recursive: true });
       const sessionFile = join(projectDir, 'chats', `${sessionId}.jsonl`);
-      writeFileSync(sessionFile, '');
+      writeFileSync(sessionFile, '{"type":"message"}\n');
 
       try {
         await runCleanup({
@@ -2960,7 +2967,7 @@ describe('startInteractiveUI', () => {
       const projectDir = mkdtempSync(join(tmpdir(), 'resume-echo-'));
       mkdirSync(join(projectDir, 'chats'), { recursive: true });
       const sessionFile = join(projectDir, 'chats', `${sessionId}.jsonl`);
-      writeFileSync(sessionFile, '');
+      writeFileSync(sessionFile, '{"type":"message"}\n');
 
       try {
         await runCleanup(makeRecordingConfig(sessionId, sessionFile));

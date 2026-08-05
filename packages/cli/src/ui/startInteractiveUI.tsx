@@ -348,6 +348,9 @@ export async function startInteractiveUI(
         // through to title matching on paste. Require a non-empty
         // transcript too: the recorder creates the file before the first
         // record lands, and `--resume` refuses to load an empty one.
+        // Non-emptiness here relies on config.shutdown() flushing the
+        // recorder first — it is registered earlier in the cleanup chain
+        // in gemini.tsx; keep that registration order.
         if (isValidSessionId(sessionId) && fs.statSync(sessionFile).size > 0) {
           writeStdoutLine(
             `\n${t('To continue this session, run')}\nqwen --resume ${sessionId}`,

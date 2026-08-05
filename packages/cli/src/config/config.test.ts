@@ -15,6 +15,7 @@ import {
   Storage,
 } from '@qwen-code/qwen-code-core';
 import {
+  isValidSessionId,
   loadCliConfig,
   parseArguments,
   SessionIdConflictError,
@@ -217,6 +218,29 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       respectQwenIgnore: true,
     },
   };
+});
+
+describe('isValidSessionId', () => {
+  it.each([
+    ['a canonical UUID', 'b2a1c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d'],
+    [
+      'an agent-suffixed UUID',
+      'b2a1c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d-agent-qwen',
+    ],
+  ])('accepts %s', (_, value) => {
+    expect(isValidSessionId(value)).toBe(true);
+  });
+
+  // These shapes are paste-into-shell payloads for the exit-time resume
+  // echo, so the production gate must reject them.
+  it.each([
+    ['newline', 'evil\nrm -rf ~'],
+    ['escape sequence', 'evil\u001B]52;c;pwned\u0007session'],
+    ['leading dash', '-cafebabe0123456789abcdef01234567'],
+    ['non-UUID token', 'abc123'],
+  ])('rejects a payload with a %s', (_, value) => {
+    expect(isValidSessionId(value)).toBe(false);
+  });
 });
 
 describe('parseArguments', () => {
