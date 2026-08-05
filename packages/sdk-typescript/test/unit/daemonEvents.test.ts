@@ -2852,6 +2852,8 @@ describe('PR 21 — auth device-flow events', () => {
           truncatedEvents: 4,
           retainedEvents: 2,
           maxBytes: 512,
+          scope: 'live_journal',
+          maxEvents: 10_000,
           truncatedTurns: 2,
           fullTranscriptAvailable: true,
         },
@@ -2891,6 +2893,27 @@ describe('PR 21 — auth device-flow events', () => {
           },
         }),
       ).toBeUndefined();
+      for (const extra of [
+        { scope: '' },
+        { scope: 42 },
+        { maxEvents: -1 },
+        { maxEvents: 1.5 },
+      ]) {
+        expect(
+          asKnownDaemonEvent({
+            v: 1,
+            type: 'history_truncated',
+            data: {
+              reason: 'replay_window_exceeded',
+              truncatedEvents: 4,
+              retainedEvents: 2,
+              maxBytes: 512,
+              fullTranscriptAvailable: true,
+              ...extra,
+            },
+          }),
+        ).toBeUndefined();
+      }
       expect(
         asKnownDaemonEvent({
           v: 1,
