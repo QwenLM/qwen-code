@@ -53,10 +53,12 @@ region's metadata. Idealab's `Qwen*-DogFooding` models and its listed
 `bailian/` aliases resolve by model family to the corresponding Alibaba China,
 DeepSeek, Moonshot, or MiniMax model IDs.
 
-Alibaba endpoints first use their exact regional catalog entry. When that
-catalog does not list a proxied DeepSeek, Kimi, MiniMax, or GLM model, lookup
-falls back to the model family's original provider catalog. Exact Alibaba
-metadata always takes precedence over the original provider.
+Every resolved provider first uses its exact catalog entry. When that catalog
+does not list a recognized DeepSeek, Kimi, MiniMax, or GLM model, lookup falls
+back to the model family's original provider catalog. This applies to Alibaba
+and other gateways, while exact metadata from the current provider always
+takes precedence. Lookup never scans arbitrary providers for the first matching
+model ID; unrecognized families remain on the local fallback path.
 
 OpenRouter model variants first use an exact catalog entry. When models.dev
 does not list the variant, the recognized OpenRouter suffixes `:free`,

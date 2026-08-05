@@ -375,19 +375,17 @@ function mapIdealabProvider(modelId: string): string | undefined {
   return mapModelFamilyProvider(bailianModelId);
 }
 
-function findAlibabaProxyModel(
+function findOriginalProviderModel(
   catalog: ModelMetadataCatalog,
+  currentProviderId: string,
   modelId: string,
   sourceProviderId: string | undefined,
 ): CatalogModel | undefined {
   const providerId = mapModelFamilyProvider(modelId);
+  if (providerId === currentProviderId) return undefined;
   const provider = providerId ? catalog[providerId] : undefined;
   if (!provider || !providerId) return undefined;
   return findCatalogModel(provider, providerId, sourceProviderId, modelId);
-}
-
-function isAlibabaCatalogProvider(providerId: string): boolean {
-  return providerId === 'alibaba' || providerId.startsWith('alibaba-');
 }
 
 export function getProviderDefaultModalities(
@@ -528,9 +526,12 @@ export function getCatalogModalities(
   );
   const model =
     providerModel ??
-    (isAlibabaCatalogProvider(providerId)
-      ? findAlibabaProxyModel(catalog, lookup.modelId, sourceProviderId)
-      : undefined);
+    findOriginalProviderModel(
+      catalog,
+      providerId,
+      lookup.modelId,
+      sourceProviderId,
+    );
   if (!model) return undefined;
 
   const input = Array.isArray(model) ? model : model.modalities?.input;

@@ -196,7 +196,7 @@ describe('getCatalogModalities', () => {
     ['deepseek-v4-pro', 'deepseek', 'deepseek-v4-pro'],
     ['glm-5.2', 'zai', 'glm-5.2'],
   ])(
-    'borrows %s metadata from the %s catalog when Alibaba does not list it',
+    'borrows %s metadata from the %s catalog when the current provider does not list it',
     (modelId, providerId, officialModelId) => {
       expect(
         getCatalogModalities(
@@ -226,7 +226,35 @@ describe('getCatalogModalities', () => {
     },
   );
 
-  it('prefers Alibaba metadata over the original provider catalog', () => {
+  it('borrows original provider metadata for non-Alibaba gateways', () => {
+    expect(
+      getCatalogModalities(
+        {
+          gateway: {
+            api: 'https://gateway.example.com/v1',
+            models: {
+              'gateway-model': { modalities: { input: ['text'] } },
+            },
+          },
+          minimax: {
+            models: {
+              'MiniMax-M3': {
+                modalities: { input: ['text', 'image', 'video'] },
+              },
+            },
+          },
+        },
+        {
+          providerId: 'openai',
+          modelId: 'MiniMax-M3',
+          baseUrl: 'https://gateway.example.com/v1',
+          envKey: 'GATEWAY_API_KEY',
+        },
+      ),
+    ).toEqual({ image: true, video: true });
+  });
+
+  it('prefers current provider metadata over the original provider catalog', () => {
     expect(
       getCatalogModalities(
         {
@@ -254,7 +282,7 @@ describe('getCatalogModalities', () => {
     ).toEqual({});
   });
 
-  it('does not borrow an unrelated provider model for Alibaba', () => {
+  it('does not borrow an unrelated provider model', () => {
     expect(
       getCatalogModalities(
         {
