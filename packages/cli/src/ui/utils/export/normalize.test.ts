@@ -71,6 +71,59 @@ describe('normalizeSessionData', () => {
     ]);
   });
 
+  it('exports the diff path from filePath rather than the fileName basename', () => {
+    const record: ChatRecord = {
+      uuid: 'tool-2',
+      parentUuid: null,
+      sessionId: 'session-1',
+      timestamp: '2025-01-01T00:00:00.000Z',
+      type: 'tool_result',
+      cwd: '',
+      version: '1.0.0',
+      message: {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call-2',
+              name: 'edit_file',
+              response: { output: 'ok' },
+            },
+          },
+        ],
+      },
+      toolCallResult: {
+        callId: 'call-2',
+        resultDisplay: {
+          fileName: 'Foo.kt',
+          filePath: '/workspace/app/src/main/java/com/example/Foo.kt',
+          fileDiff: '--- Foo.kt\n+++ Foo.kt\n',
+          originalContent: 'old',
+          newContent: 'new',
+        },
+      },
+    };
+
+    const normalized = normalizeSessionData(
+      {
+        sessionId: 'session-1',
+        startTime: '2025-01-01T00:00:00.000Z',
+        messages: [],
+      },
+      [record],
+      config,
+    );
+
+    expect(normalized.messages[0].toolCall?.content).toEqual([
+      {
+        type: 'diff',
+        path: '/workspace/app/src/main/java/com/example/Foo.kt',
+        oldText: 'old',
+        newText: 'new',
+      },
+    ]);
+  });
+
   it('accepts the minimal daemon export config shape', () => {
     const minimalConfig: ExportConfig = {};
     const record: ChatRecord = {
