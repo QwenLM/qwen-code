@@ -4055,6 +4055,60 @@ describe('App read-only local commands mid-turn', () => {
     expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith('/about');
   });
 
+  it('runs /status immediately while streaming and skips the echo', async () => {
+    const { rerender } = renderApp({});
+    await flush();
+
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({});
+    });
+
+    let accepted: boolean | void;
+    await act(async () => {
+      accepted = testState.latestChatEditorProps?.onSubmit('/status');
+      await vi.waitFor(() => {
+        expect(mockWorkspaceActions.loadPreflight).toHaveBeenCalled();
+      });
+    });
+
+    expect(accepted).toBe(true);
+    expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalled();
+    expect(mockStore.dispatch).toHaveBeenCalledWith([
+      expect.objectContaining({
+        type: 'status',
+        clearActiveText: false,
+        text: serializeStatusMessage({
+          cliVersion: '1.2.3',
+          runtime: '',
+          platform: '',
+          auth: '',
+          baseUrl: '',
+          model: 'qwen',
+          fastModel: 'qwen',
+          sessionId: 'session-1',
+          sandbox: '',
+          proxy: '',
+          memoryUsage: '',
+        }),
+      }),
+    ]);
+  });
+
+  it('echoes /status when idle', async () => {
+    renderApp({});
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/status');
+      await vi.waitFor(() => {
+        expect(mockWorkspaceActions.loadPreflight).toHaveBeenCalled();
+      });
+    });
+
+    expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith('/status');
+  });
+
   it('runs /context immediately while streaming and skips the echo', async () => {
     const contextFixture: DaemonSessionContextUsageStatus = {
       v: 1,

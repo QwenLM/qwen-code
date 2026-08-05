@@ -4993,7 +4993,10 @@ export function App({
   // Echo a local command into the transcript, or suppress it while a turn is
   // streaming so the injected user row can't split the active turn (see
   // appendOrDeferLocalUserMessage). Returns true when suppressed — callers must
-  // then stop and not run the command's inline side effects.
+  // then stop and not run the command's inline side effects. Exception:
+  // read-only display commands wrap this in echoLocalCommandIfIdle and
+  // intentionally ignore the suppression signal — their status-block output
+  // does not split the active turn.
   const echoOrDeferLocalCommand = useCallback(
     (text: string, images?: PromptImage[]): boolean =>
       appendOrDeferLocalUserMessage(
