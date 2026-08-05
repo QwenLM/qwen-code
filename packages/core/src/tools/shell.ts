@@ -3016,7 +3016,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
               type: ToolErrorType.SHELL_EXECUTE_ERROR,
             },
           }
-        : (result.exitCode === null && result.signal !== null) ||
+        : (!result.aborted && result.signal !== null && result.signal !== 0) ||
             isShellExitError(this.params.command, result.exitCode)
           ? {
               error: {

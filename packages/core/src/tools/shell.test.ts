@@ -2900,7 +2900,7 @@ describe('ShellTool', () => {
       });
     });
 
-    it('keeps a successful PTY exit code successful when signal metadata is present', async () => {
+    it('keeps a successful PTY exit code successful with signal 0 metadata', async () => {
       const invocation = shellTool.build({
         command: 'pty-cleanup-command',
         is_background: false,
@@ -2909,7 +2909,7 @@ describe('ShellTool', () => {
       resolveShellExecution({
         output: 'completed',
         exitCode: 0,
-        signal: 15,
+        signal: 0,
         aborted: false,
       });
 
@@ -2917,6 +2917,48 @@ describe('ShellTool', () => {
 
       expect(result.error).toBeUndefined();
       expect(result.llmContent).toContain('Output: completed');
+    });
+
+    it('reports a PTY signal termination as a tool error', async () => {
+      const invocation = shellTool.build({
+        command: 'pty-signal-terminated-command',
+        is_background: false,
+      });
+      const promise = invocation.execute(mockAbortSignal);
+      resolveShellExecution({
+        output: '',
+        exitCode: 0,
+        signal: 15,
+        error: null,
+        aborted: false,
+      });
+
+      const result = await promise;
+
+      expect(result.error).toEqual({
+        message: expect.stringContaining('Signal: 15'),
+        type: ToolErrorType.SHELL_EXECUTE_ERROR,
+      });
+    });
+
+    it('does not report a user-cancelled signal as a tool error', async () => {
+      const invocation = shellTool.build({
+        command: 'cancelled-command',
+        is_background: false,
+      });
+      const promise = invocation.execute(mockAbortSignal);
+      resolveShellExecution({
+        output: '',
+        exitCode: null,
+        signal: 15,
+        error: null,
+        aborted: true,
+      });
+
+      const result = await promise;
+
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('Command was cancelled');
     });
 
     it.each([
