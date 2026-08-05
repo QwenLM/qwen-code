@@ -1727,9 +1727,13 @@ function createDelegatingServeApp(
           ? (options.authenticateDeferredChannelWebhookRequest ??
             options.authenticateDeferredRuntimeRequest)
           : options.authenticateDeferredRuntimeRequest;
+        // A rejecting predicate must not 500 every deferred request —
+        // fail closed to the bearer gate instead.
         const preAuthExempted =
           authGate !== undefined &&
-          (await options.isPreAuthRequest?.(req)) === true;
+          (await Promise.resolve(options.isPreAuthRequest?.(req)).catch(
+            () => false,
+          )) === true;
         if (authGate && !preAuthExempted) {
           if (!runSynchronousRequestGate(authGate, req, res, next)) {
             return;

@@ -39,6 +39,7 @@ import type {
 import * as qwenCore from '@qwen-code/qwen-code-core';
 import * as serverModule from './server.js';
 import * as webShellResolver from './web-shell-resolver.js';
+import * as webShellStatic from './web-shell-static.js';
 import * as settingsRuntime from '../config/settings.js';
 import * as environmentRuntime from '../config/environment.js';
 import * as trustedFoldersRuntime from '../config/trustedFolders.js';
@@ -5115,6 +5116,65 @@ describe('runQwenServe runtime startup failures', () => {
       expect(createBridge).toHaveBeenCalledTimes(1);
       await expect(handle.runtimeReady).resolves.toBeUndefined();
     } finally {
+      await handle.close();
+    }
+  });
+
+  it('serves the // root alias during the deferred window like the warm app', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-root-alias-')),
+    );
+    writeWebShellFixture(tmpDir);
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir);
+
+    try {
+      // Express non-strict routing matches a raw `//` against `app.get('/')`,
+      // so the warm app serves it pre-auth; the cold gate must exempt it too
+      // instead of 401ing.
+      const aliasRes = await fetch(`${handle.url}//`);
+      expect(aliasRes.status).toBe(200);
+      expect(aliasRes.headers.get('content-type')).toContain('text/html');
+      expect(await aliasRes.text()).toContain('<div id="root">');
+      expect(createBridge).toHaveBeenCalledTimes(1);
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('degrades to the bearer gate when the pre-auth predicate rejects', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-predicate-fail-')),
+    );
+    writeWebShellFixture(tmpDir);
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir);
+    const predicateSpy = vi
+      .spyOn(webShellStatic, 'isPreAuthWebShellRequest')
+      .mockImplementation(() => {
+        throw new Error('predicate module glitch');
+      });
+
+    try {
+      // Without the fail-closed guard, a rejecting predicate 500s the whole
+      // deferred branch. A tokenless navigation must hit the bearer gate...
+      const anonRes = await fetch(`${handle.url}/`, {
+        headers: { accept: 'text/html' },
+      });
+      expect(anonRes.status).toBe(401);
+
+      // ...and a correctly-tokened request must still get through.
+      const authedRes = await fetch(`${handle.url}/session/abc`, {
+        headers: {
+          accept: 'text/html',
+          authorization: 'Bearer secret-token',
+        },
+      });
+      expect(authedRes.status).toBe(200);
+      expect(authedRes.headers.get('content-type')).toContain('text/html');
+      expect(createBridge).toHaveBeenCalledTimes(1);
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      predicateSpy.mockRestore();
       await handle.close();
     }
   });

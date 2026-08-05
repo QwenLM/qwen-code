@@ -3001,6 +3001,17 @@ describe('createServeApp', () => {
       expect(res.headers['cache-control']).toContain('no-cache');
     });
 
+    it('serves the shell for a // root request pre-auth (non-strict routing)', async () => {
+      // Express non-strict routing matches a raw `//` against `app.get('/')`
+      // too; the deferred gate's isPreAuthWebShellRequest mirrors this shape.
+      const app = createServeApp({ ...baseOpts, token: 'secret' }, undefined, {
+        webShellDir,
+      });
+      const res = await request(app).get('//').set('Host', host);
+      expect(res.status).toBe(200);
+      expect(res.text).toContain('<div id="root">');
+    });
+
     it('allows configured extension origins to frame the shell without self-framing', async () => {
       const app = createServeApp(
         {

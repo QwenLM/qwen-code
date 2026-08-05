@@ -100,6 +100,9 @@ export function isPreAuthWebShellRequest(req: Request): boolean {
   const reqPath = req.path.toLowerCase();
   if (
     reqPath === '/' ||
+    // Express non-strict routing compiles `/` to `/^(?:\/)(?:\/$)?$/i`, so
+    // a raw `//` also matches `app.get('/')` pre-auth (but `///` does not).
+    reqPath === '//' ||
     reqPath === '/assets' ||
     reqPath.startsWith('/assets/')
   )
