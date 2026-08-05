@@ -130,10 +130,10 @@ const ClickableThinkMessage: React.FC<{
   const { rows: terminalHeight } = useTerminalSize();
   const settings = useSettings();
   const mouseTrackingEnabled = useMouseTrackingEnabled();
-  // A forced-open thought — Ctrl+O full-detail or the `thoughtExpanded` prop
-  // (SessionPreview) — can never collapse on click, so don't advertise a
-  // click target that would be ignored. This single check gates both the
-  // hint text and the mouse subscription.
+  // A thought whose expansion is pinned — Ctrl+O full-detail or the
+  // `thoughtExpanded` prop (SessionPreview) — can never change on click, so
+  // don't advertise a click target that would be ignored. This single check
+  // gates both the hint text and the mouse subscription.
   const clickable =
     useVirtualViewport(settings.merged.ui?.useTerminalBuffer) &&
     mouseTrackingEnabled &&
@@ -267,11 +267,12 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
     fullDetail ||
     (thoughtExpanded ??
       (allExpanded || expandedHeadIds.has(thoughtGroupHeadId)));
-  // fullDetail, Ctrl+O full-detail (`allExpanded`), and `thoughtExpanded ===
-  // true` all pin the thought open, so a click could never collapse it —
-  // ClickableThinkMessage disarms itself. `allExpanded` matters on surfaces
-  // that don't forward it as `fullDetail` (e.g. AgentChatContent).
-  const forcedOpen = fullDetail || allExpanded || thoughtExpanded === true;
+  // fullDetail, Ctrl+O full-detail (`allExpanded`), and any explicit
+  // `thoughtExpanded` prop pin the thought's expansion state (open or
+  // closed), so a click could never change it — ClickableThinkMessage
+  // disarms itself. `allExpanded` matters on surfaces that don't forward it
+  // as `fullDetail` (e.g. AgentChatContent).
+  const forcedOpen = fullDetail || allExpanded || thoughtExpanded !== undefined;
   const settings = useSettings();
   const showTimestamps = settings.merged.output?.showTimestamps === true;
 

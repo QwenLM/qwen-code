@@ -1023,6 +1023,43 @@ describe('<HistoryItemDisplay />', () => {
       expect(output).not.toContain('click');
     });
 
+    it('disarms the click handler when thoughtExpanded={false} pins the thought closed', () => {
+      vi.mocked(useMouseEvents).mockClear();
+      renderWithProviders(
+        <VirtualViewportContext.Provider value={true}>
+          <HistoryItemDisplay
+            item={thoughtItem}
+            terminalWidth={100}
+            isPending={false}
+            thoughtExpanded={false}
+          />
+        </VirtualViewportContext.Provider>,
+      );
+      const opts = vi.mocked(useMouseEvents).mock.calls.at(-1)?.[1];
+
+      // `thoughtExpanded === false` pins the thought closed just as `true`
+      // pins it open; a click could only record a toggle the display never
+      // reflects, which would resurface once the prop stops applying.
+      expect(opts?.isActive).toBe(false);
+    });
+
+    it('drops the click wording from the expand hint when thoughtExpanded pins the thought closed', () => {
+      const { lastFrame } = renderWithProviders(
+        <VirtualViewportContext.Provider value={true}>
+          <HistoryItemDisplay
+            item={thoughtItem}
+            terminalWidth={100}
+            isPending={false}
+            thoughtExpanded={false}
+          />
+        </VirtualViewportContext.Provider>,
+      );
+
+      const output = lastFrame() ?? '';
+      expect(output).toContain(`${toggleKeyHint} to expand`);
+      expect(output).not.toContain('click');
+    });
+
     it('does not toggle when selecting text by dragging', () => {
       const toggle = vi.fn();
       const handler = renderThoughtWithToggle(toggle);

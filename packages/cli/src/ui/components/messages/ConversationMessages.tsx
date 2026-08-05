@@ -67,9 +67,10 @@ interface ThinkMessageProps {
   contentWidth: number;
   durationMs?: number;
   /**
-   * VP mode only: the header line is mouse-clickable, so the hint advertises
-   * "click" in addition to the keyboard toggle — both the collapsed expand
-   * hint and the expanded collapse hint. Non-VP has no click handler.
+   * VP mode only: the header line is mouse-clickable, so the hints
+   * advertise "click" — the expand hint alongside the keyboard toggle, the
+   * collapse hint on its own (ctrl+o cannot collapse a click-expanded
+   * thought). Non-VP has no click handler.
    */
   clickable?: boolean;
 }
@@ -350,8 +351,12 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
   const label = isPending
     ? pendingLabel
     : (completedLabel ?? `${t('Thinking')}…`);
+  // When clickable, expansion can only have come from the per-head click
+  // set (the pinned-open routes disarm `clickable`), and ctrl+o cannot
+  // collapse a click-expanded thought — it is the app-wide full-detail
+  // switch — so the hint must not advertise it.
   const collapseHint = clickable
-    ? ` ${t('(click or {{keyHint}} to collapse)', { keyHint: toggleKeyHint })}`
+    ? ` ${t('(click to collapse)')}`
     : ` ${t('({{keyHint}} to collapse)', { keyHint: toggleKeyHint })}`;
 
   return (

@@ -68,9 +68,9 @@ describe('<ThinkMessage />', () => {
       />,
     ).lastFrame();
     // A click-expanded thought cannot be collapsed by ctrl+o (that is the
-    // app-wide full-detail switch), so the hint must advertise clicking.
-    expect(withClick).toContain('click');
-    expect(withClick).toContain('to collapse');
+    // app-wide full-detail switch), so the hint advertises clicking only.
+    expect(withClick).toContain('(click to collapse)');
+    expect(withClick).not.toContain(toggleKeyHint);
   });
 
   it('hints click-to-collapse when committed, expanded and clickable (VP mode)', () => {
@@ -88,8 +88,8 @@ describe('<ThinkMessage />', () => {
         clickable={true}
       />,
     ).lastFrame();
-    expect(withClick).toContain('click');
-    expect(withClick).toContain('to collapse');
+    expect(withClick).toContain('(click to collapse)');
+    expect(withClick).not.toContain(toggleKeyHint);
   });
 
   it('should render collapsed line when committed and not expanded', () => {

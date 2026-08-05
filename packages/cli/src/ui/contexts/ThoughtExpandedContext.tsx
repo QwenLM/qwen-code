@@ -12,7 +12,9 @@ import { createContext, useContext } from 'react';
  * under this sentinel and migrated to the real committed head id when the
  * thought commits (see `settlePendingExpansion` below). Negative so it can
  * never collide with a real committed head id, which is always a large
- * positive `baseTimestamp + counter` value.
+ * positive `baseTimestamp + counter` value, and far enough from zero that it
+ * cannot coincide with the VP path's pending-item ids (`-(i + 1)`), which
+ * are a separate negative namespace.
  *
  * Accepted race: a press→release straddling the thought's commit can
  * dead-click or toggle this stale sentinel, because commit remounts the row
@@ -23,7 +25,7 @@ import { createContext, useContext } from 'react';
  * recovers, and settle(null) at the next thought start drops any stray
  * sentinel.
  */
-export const PENDING_THOUGHT_HEAD_ID = -1;
+export const PENDING_THOUGHT_HEAD_ID = -1_000_001;
 
 /**
  * Migrate a pending thought's provisional expansion, keyed by
