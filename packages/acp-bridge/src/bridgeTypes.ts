@@ -110,7 +110,13 @@ export interface BridgeSpawnRequest {
 
 export interface BridgeSession {
   sessionId: string;
+  /**
+   * Runtime ownership root used for routing and persisted-session lookup.
+   * This does not change when the agent session changes cwd.
+   */
   workspaceCwd: string;
+  /** Current agent cwd when it differs from {@link workspaceCwd}. */
+  currentCwd?: string;
   /** True if this attach reused an existing session under `sessionScope: 'single'`. */
   attached: boolean;
   /**
@@ -329,11 +335,17 @@ export interface ChangeSessionCwdRequest {
   /**
    * Server-controlled containment roots. When present, the agent-side
    * sessionCd handler verifies (after its own realpath) that the
-   * canonical target is under one of these roots. Only set by the
-   * daemon's worktree create/restore paths; direct user cd omits this
-   * field, preserving existing behavior.
+   * canonical target is under one of these roots. Only set by daemon-owned
+   * relocation paths; direct user cd omits this field, preserving existing
+   * behavior.
    */
   allowedRoots?: string[];
+  /**
+   * Private daemon capability for a Live conversation directory. The ACP
+   * child validates the authenticated parent, private root, and direct child
+   * before this may bypass the independent global folder-trust registry.
+   */
+  managedRelocation?: 'live-conversation';
 }
 
 export interface ChangeSessionCwdResult {
@@ -543,6 +555,18 @@ export interface BridgeClientRequestContext {
    * SSE event to the pending HTTP 202 request.
    */
   promptId?: string;
+  /**
+   * Internal synchronous admission signal. The bridge invokes it only after
+   * the prompt owns a pending-queue slot. Transport routes never populate it
+   * from request input.
+   */
+  onPromptAdmitted?: () => void;
+  /**
+   * Internal model input that replaces the public prompt only inside the
+   * trusted ACP child. The bridge still echoes and persists `PromptRequest`
+   * unchanged. HTTP routes never populate this from request input.
+   */
+  modelPrompt?: string;
   /** Trusted Channel delivery correlation injected by the daemon prompt
    * route. Never populated from caller-controlled ACP metadata. */
   channelDelivery?: {
@@ -568,6 +592,17 @@ export interface BridgeClientRequestContext {
    * REST prompt route from `resolvePromptDeadlineMs(serverMs, requestMs)`.
    */
   deadlineMs?: number;
+}
+
+export const DAEMON_MODEL_PROMPT_META_KEY = 'qwen.daemon.modelPrompt';
+export const MAX_TRUSTED_MODEL_PROMPT_CHARS = 64 * 1024;
+
+export function isValidTrustedModelPrompt(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.trim().length > 0 &&
+    value.length <= MAX_TRUSTED_MODEL_PROMPT_CHARS
+  );
 }
 
 export const DAEMON_CHANNEL_DELIVERY_META_KEY = 'qwen.daemon.channelDelivery';
@@ -850,6 +885,16 @@ export type BridgeWorkspaceGenerationNotificationEvent = Exclude<
   { type: 'done' }
 >;
 
+/** A daemon-owned worker completion injected into its parent session. */
+export interface BridgeBackgroundNotification {
+  displayText: string;
+  modelText: string;
+  taskId: string;
+  status: 'completed' | 'failed' | 'cancelled';
+  kind: 'agent';
+  toolUseId?: string;
+}
+
 export type RuntimeMcpServerAddResult =
   | {
       name: string;
@@ -877,6 +922,29 @@ export type RuntimeMcpServerRemoveResult =
 export interface AcpSessionBridge {
   /** Read-only daemon diagnostics for status endpoints. */
   getDaemonStatusSnapshot(): BridgeDaemonStatusSnapshot;
+
+  /**
+   * Installs the daemon-owned capture handler used by the dedicated Live
+   * `capture_screen_context` tool. Undefined disables the child-to-daemon
+   * route. The bridge authenticates the caller session before invoking it.
+   */
+  setLiveScreenContextCaptureHandler?(
+    handler:
+      | import('./bridgeOptions.js').LiveScreenContextCaptureHandler
+      | undefined,
+  ): void;
+
+  /** Installs the daemon-owned handler for the five Codex-parity Live task tools. */
+  setLiveTaskToolRequestHandler?(
+    handler:
+      | import('./bridgeOptions.js').LiveTaskToolRequestHandler
+      | undefined,
+  ): void;
+
+  /** Installs the daemon-owned handler for the backend-only Live speech tool. */
+  setLiveSpeakToUserHandler?(
+    handler: import('./bridgeOptions.js').LiveSpeakToUserHandler | undefined,
+  ): void;
 
   /**
    * Create a new session, or — under `sessionScope: 'single'` — attach to an
@@ -1362,6 +1430,22 @@ export interface AcpSessionBridge {
     refreshed: boolean;
   }>;
 
+  /** Apply Codex's realtime-active world-state transition to one session. */
+  setSessionLiveConversationActive(
+    sessionId: string,
+    active: boolean,
+  ): Promise<void>;
+
+  /** Persist Realtime-owned dialogue without starting a backend model turn. */
+  appendSessionLiveTranscript(
+    sessionId: string,
+    entries: ReadonlyArray<{
+      role: 'user' | 'assistant';
+      text: string;
+    }>,
+    model: string,
+  ): Promise<void>;
+
   /**
    * Change the approval mode of a live session and broadcast an
    * `approval_mode_changed` event. `opts.persist === true` also writes
@@ -1454,6 +1538,16 @@ export interface AcpSessionBridge {
     messageId: string,
     context?: BridgeClientRequestContext,
   ): { removed: boolean };
+
+  /**
+   * Queue a daemon-owned worker completion in its live parent session. The
+   * session records the notification and runs its normal automatic follow-up
+   * turn, matching the return path used by in-process background agents.
+   */
+  enqueueBackgroundNotification(
+    sessionId: string,
+    notification: BridgeBackgroundNotification,
+  ): Promise<{ sessionId: string; accepted: boolean }>;
 
   /**
    * Execute a shell command directly on the daemon (no LLM involvement).

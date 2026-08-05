@@ -323,6 +323,7 @@ describe('DaemonClient', () => {
             cwd: '/work/secondary',
             primary: false,
             trusted: true,
+            kind: 'live',
           },
         ],
       };

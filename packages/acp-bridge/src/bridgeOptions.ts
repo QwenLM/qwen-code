@@ -577,6 +577,54 @@ export type CreateSubSessionHandler = (
   info: CreateSubSessionInfo,
 ) => Promise<CreateSubSessionResult>;
 
+export const MAX_LIVE_SCREEN_CONTEXT_TEXT_CHARS = 32_000;
+
+export interface LiveScreenContextCaptureInfo {
+  callerSessionId: string;
+}
+
+export interface LiveScreenContextCaptureResult {
+  appName: string;
+  windowTitle?: string;
+  accessibilityText: string;
+  screenshotPath: string;
+}
+
+export type LiveScreenContextCaptureHandler = (
+  info: LiveScreenContextCaptureInfo,
+) => Promise<LiveScreenContextCaptureResult>;
+
+export const LIVE_TASK_TOOL_NAMES = [
+  'list_threads',
+  'read_thread',
+  'wait_threads',
+  'send_message_to_thread',
+  'create_thread',
+] as const;
+
+export type LiveTaskToolName = (typeof LIVE_TASK_TOOL_NAMES)[number];
+
+export interface LiveTaskToolRequestInfo {
+  callerSessionId: string;
+  name: LiveTaskToolName;
+  arguments: Record<string, unknown>;
+}
+
+export type LiveTaskToolRequestHandler = (
+  info: LiveTaskToolRequestInfo,
+) => Promise<Record<string, unknown>>;
+
+export const MAX_LIVE_SPEAK_TO_USER_MESSAGE_CHARS = 32_000;
+
+export interface LiveSpeakToUserInfo {
+  callerSessionId: string;
+  message: string;
+}
+
+export type LiveSpeakToUserHandler = (
+  info: LiveSpeakToUserInfo,
+) => Promise<void>;
+
 // Canonical set — cli channel-delivery-ipc.ts and bridgeClient.ts import this;
 // sdk-typescript events.ts carries an independent copy with a cross-check test.
 export type ChannelDeliveryErrorCode =

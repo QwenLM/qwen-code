@@ -381,6 +381,7 @@ export interface CapabilitiesEnvelope {
     primary: boolean;
     trusted: boolean;
     removable?: boolean;
+    kind?: 'live';
   }>;
   /**
    * Transport families this daemon supports. Always includes `'rest'`;
