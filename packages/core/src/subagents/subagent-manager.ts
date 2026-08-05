@@ -935,12 +935,14 @@ export class SubagentManager {
         // repository files, so they sit on the same footing as 'user' —
         // except when the project root IS the home directory: listing
         // skips 'project' there, so repository-committed agent files
-        // surface at 'user' level and require trust too.
-        const homeIsProjectRoot =
-          path.resolve(runtimeContext.getProjectRoot()) ===
-          path.resolve(os.homedir());
+        // surface at 'user' level and require trust too. Listing records
+        // that case as `homeRootShadow`; recomputing it here from
+        // `runtimeContext.getProjectRoot()` would read the per-agent
+        // override that worktree isolation / working_dir provisioning
+        // rebinds to the worktree path, opening the gate for exactly the
+        // repo-supplied agents the shadow surfaced.
         const trustedAgentLevel =
-          (config.level === 'user' && !homeIsProjectRoot) ||
+          (config.level === 'user' && config.homeRootShadow !== true) ||
           config.level === 'builtin' ||
           config.level === 'extension' ||
           config.level === 'session';
@@ -1388,6 +1390,18 @@ export class SubagentManager {
           // why their agent wasn't loading.
           warnInvalidSubagentFile(filePath, error);
           continue;
+        }
+      }
+
+      // Home-root shadow: when the project root IS the home directory the
+      // 'project' level was skipped above, so repository-committed agent
+      // files surface at this 'user' level. Tag them so the hooks trust
+      // gate at spawn time stays correct even when the spawn path rebinds
+      // getProjectRoot() on a per-agent override (worktree isolation,
+      // working_dir pins). Mirrors SkillManager.listSkillsAtLevel.
+      if (level === 'user' && isHomeDirectory) {
+        for (const subagent of subagents) {
+          subagent.homeRootShadow = true;
         }
       }
 

@@ -604,18 +604,17 @@ describe('SkillCommandLoader', () => {
       expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
     });
 
-    it('does not grant allowedTools for a user-level skill when the project root is the home directory', async () => {
+    it('does not grant allowedTools for a home-root-shadowed user-level skill in an untrusted folder', async () => {
       // SkillManager skips the 'project' level when the project root IS
       // the home directory, so repository-committed skills surface at
-      // 'user' level there and must stay gated on folder trust.
-      (mockConfig.getProjectRoot as ReturnType<typeof vi.fn>).mockReturnValue(
-        os.homedir(),
-      );
+      // 'user' level there (tagged `homeRootShadow` at collection time)
+      // and must stay gated on folder trust.
       (mockConfig.isTrustedFolder as ReturnType<typeof vi.fn>).mockReturnValue(
         false,
       );
       const skill = makeSkill({
         level: 'user',
+        homeRootShadow: true,
         allowedTools: ['Bash(git *)', 'Edit'],
       });
       mockSkillManager.listSkills.mockImplementation(

@@ -20,7 +20,6 @@ import {
   SkillLaunchEvent,
 } from '../telemetry/index.js';
 import path from 'path';
-import * as os from 'os';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { registerSkillHooks } from '../hooks/registerSkillHooks.js';
 import { recordAutoSkillUsage } from '../skills/skill-curator.js';
@@ -377,12 +376,15 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
     // 'user' skills live in ~/.qwen — except when the project root IS the
     // home directory: SkillManager skips the 'project' level there, so
     // repository-committed skills surface at 'user' level and must be
-    // gated like project skills.
-    const homeIsProjectRoot =
-      path.resolve(this.config.getProjectRoot()) === path.resolve(os.homedir());
+    // gated like project skills. SkillManager records that case on the
+    // skill at collection time (`homeRootShadow`); recomputing it from
+    // `this.config.getProjectRoot()` would trust the per-agent override
+    // this tool runs on inside subagents — worktree isolation and
+    // working_dir pins rebind `getProjectRoot()` to the worktree path,
+    // which would flip the detection and open the gate.
     const sideEffectsGated =
       (!isTrustedSkillLevel(skill.level) ||
-        (skill.level === 'user' && homeIsProjectRoot)) &&
+        (skill.level === 'user' && skill.homeRootShadow === true)) &&
       !this.config.isTrustedFolder();
 
     if (sideEffectsGated) {

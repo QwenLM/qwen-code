@@ -94,6 +94,18 @@ export interface SubagentConfig {
   /** Storage level - determines where the configuration file is stored */
   level: SubagentLevel;
 
+  /**
+   * Set by SubagentManager at collection time on 'user'-level agents when
+   * the project root IS the home directory: listing skips the 'project'
+   * level there, so repository-committed agent files surface at 'user'
+   * level. The hooks trust gate must treat such agents as repo-supplied;
+   * the flag travels with the agent so the decision stays correct even
+   * where a per-agent Config override rebinds `getProjectRoot()` (worktree
+   * isolation, working_dir pins) and would flip a path-equality
+   * recomputation. Not serialized to frontmatter.
+   */
+  homeRootShadow?: boolean;
+
   /** Absolute path to the configuration file. Optional for session subagents. */
   filePath?: string;
 

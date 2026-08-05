@@ -780,6 +780,27 @@ Skill 3 content`);
       expect(projectSkills.every((s) => s.level === 'project')).toBe(true);
     });
 
+    it('tags user-level skills with homeRootShadow when the project root is the home directory', async () => {
+      // Listing skips the 'project' level there, so repository-committed
+      // skills surface at 'user' level; the side-effect trust gates
+      // consume this flag instead of re-reading the (rebindable) project
+      // root.
+      vi.spyOn(mockConfig, 'getProjectRoot').mockReturnValue(TEST_HOME);
+
+      const skills = await manager.listSkills();
+
+      expect(skills.map((s) => s.name).sort()).toEqual(['skill1', 'skill3']);
+      expect(skills.every((s) => s.level === 'user')).toBe(true);
+      expect(skills.every((s) => s.homeRootShadow === true)).toBe(true);
+    });
+
+    it('does not tag skills with homeRootShadow in a normal project', async () => {
+      const skills = await manager.listSkills();
+
+      expect(skills).toHaveLength(3); // skill1, skill2 (project), skill3 (user)
+      expect(skills.every((s) => s.homeRootShadow === undefined)).toBe(true);
+    });
+
     it('should return a stable alphabetical order regardless of priority (priority only affects the /skills display layer)', async () => {
       vi.mocked(fs.readdir).mockReset();
       mockParseYaml.mockImplementation((yamlString: string) =>

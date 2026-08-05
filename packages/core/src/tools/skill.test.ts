@@ -5,7 +5,6 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import * as os from 'os';
 import { logSkillLaunch, recordSkillInvocation } from '../telemetry/index.js';
 import { SkillTool, type SkillParams } from './skill.js';
 import type { PartListUnion } from '@google/genai';
@@ -605,15 +604,16 @@ describe('SkillTool', () => {
       expect(registerSkillHooks).toHaveBeenCalledTimes(1);
     });
 
-    it('gates hooks for a user-level skill when the project root is the home directory', async () => {
+    it('gates hooks for a home-root-shadowed user-level skill in an untrusted folder', async () => {
       // SkillManager skips the 'project' level when the project root IS
       // the home directory, so repository-committed skills surface at
-      // 'user' level there; the gate must treat them as repo-supplied.
-      vi.mocked(config.getProjectRoot).mockReturnValue(os.homedir());
+      // 'user' level there and are tagged `homeRootShadow`; the gate
+      // must treat them as repo-supplied.
       vi.mocked(config.isTrustedFolder).mockReturnValue(false);
       vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue({
         ...hookedSkill,
         level: 'user',
+        homeRootShadow: true,
       });
       const getSessionHooksManager = vi.fn();
       vi.mocked(config.getHookSystem).mockReturnValue({
@@ -630,12 +630,12 @@ describe('SkillTool', () => {
       expect(partToString(result.llmContent)).toContain('Body.');
     });
 
-    it('registers hooks for a home-rooted user-level skill once the folder is trusted', async () => {
-      vi.mocked(config.getProjectRoot).mockReturnValue(os.homedir());
+    it('registers hooks for a home-root-shadowed user-level skill once the folder is trusted', async () => {
       vi.mocked(config.isTrustedFolder).mockReturnValue(true);
       vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue({
         ...hookedSkill,
         level: 'user',
+        homeRootShadow: true,
       });
       const getSessionHooksManager = vi.fn().mockReturnValue({});
       vi.mocked(config.getHookSystem).mockReturnValue({
@@ -648,6 +648,36 @@ describe('SkillTool', () => {
       await invocation.execute();
 
       expect(registerSkillHooks).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps hooks gated when the subagent config rebinds getProjectRoot (worktree isolation)', async () => {
+      // Inside a worktree-isolated / working_dir-pinned subagent the
+      // SkillTool runs on a per-agent Config override whose
+      // getProjectRoot is rebound to the worktree path. The gate must
+      // consume the listing-time `homeRootShadow` flag instead of
+      // re-deriving the shadow from that rebound value — otherwise a
+      // home-rooted repo skill surfaced at 'user' level would register
+      // its hooks on the parent session despite the untrusted folder.
+      vi.mocked(config.getProjectRoot).mockReturnValue(
+        '/test/project/.qwen/worktrees/agent-x',
+      );
+      vi.mocked(config.isTrustedFolder).mockReturnValue(false);
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue({
+        ...hookedSkill,
+        level: 'user',
+        homeRootShadow: true,
+      });
+      const getSessionHooksManager = vi.fn();
+      vi.mocked(config.getHookSystem).mockReturnValue({
+        getSessionHooksManager,
+      } as unknown as ReturnType<Config['getHookSystem']>);
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'hooked' });
+      await invocation.execute();
+
+      expect(registerSkillHooks).not.toHaveBeenCalled();
     });
 
     it('registers hooks for an extension-level skill regardless of folder trust', async () => {

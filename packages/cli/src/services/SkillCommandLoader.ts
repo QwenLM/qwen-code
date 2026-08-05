@@ -13,8 +13,7 @@ import {
   isTrustedSkillLevel,
   recordAutoSkillUsage,
 } from '@qwen-code/qwen-code-core';
-import * as os from 'node:os';
-import { dirname, resolve } from 'node:path';
+import { dirname } from 'node:path';
 import type { ICommandLoader } from './types.js';
 import {
   writeSkillArgs,
@@ -160,13 +159,11 @@ export class SkillCommandLoader implements ICommandLoader {
             // only levels that cannot originate from the repository skip it,
             // and when the project root IS the home directory, listing skips
             // 'project' and repository-committed skills surface at 'user'
-            // level, so that combination is gated too.
-            const homeIsProjectRoot =
-              this.config !== null &&
-              resolve(this.config.getProjectRoot()) === resolve(os.homedir());
+            // level — SkillManager records that on the skill as
+            // `homeRootShadow`, so that combination is gated too.
             if (
               (isTrustedSkillLevel(skill.level) &&
-                !(skill.level === 'user' && homeIsProjectRoot)) ||
+                !(skill.level === 'user' && skill.homeRootShadow === true)) ||
               this.config?.isTrustedFolder()
             ) {
               applySkillAllowedTools(
