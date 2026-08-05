@@ -747,6 +747,9 @@ jobs:
             exit 1
           fi
 
+      # The npm-ci retry recipe and the 'Prepare Qwen Code CLI' shim below
+      # are duplicated in build-cli and review-address; the workflow
+      # contract tests pin every copy in lockstep — edit them together.
       - name: 'Install dependencies and build'
         env:
           QWEN_SKIP_PREPARE: '1'
@@ -2624,6 +2627,9 @@ jobs:
           cache: 'npm'
           cache-dependency-path: 'package-lock.json'
 
+      # The npm-ci retry recipe and the 'Prepare Qwen Code CLI' shim below
+      # are duplicated in issue-autofix and review-address; the workflow
+      # contract tests pin every copy in lockstep — edit them together.
       - name: 'Install dependencies and build'
         env:
           QWEN_SKIP_PREPARE: '1'
@@ -2759,6 +2765,19 @@ jobs:
       # address run. The ref is pinned to the SHA build-cli compiled — not
       # the live default branch — so a mid-run base push can never leave a
       # leg running a bundle built from DIFFERENT sources than its checkout.
+      # The SHA is validated fail-loud FIRST: actions/checkout resolves an
+      # empty ref to the event default — on pull_request_review triggers the
+      # PR merge ref — so a broken build-cli output must fail this leg
+      # instead of silently unpinning it.
+      - name: 'Validate bundle SHA'
+        env:
+          BASE_SHA: '${{ needs.build-cli.outputs.base_sha }}'
+        run: |-
+          if [[ ! "${BASE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::build-cli published no usable base_sha ('${BASE_SHA:-<empty>}') — refusing to fall back to the event-default ref."
+            exit 1
+          fi
+
       - name: 'Checkout trusted base'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
@@ -2835,7 +2854,9 @@ jobs:
       # need node_modules: the agent builds/tests the PR branch, and the
       # verify gate rebuilds from branch sources (wiping the restored
       # packages/*/dist via build_package.js, so no base staleness leaks
-      # into branch verification).
+      # into branch verification). The retry recipe (and the shim below) is
+      # duplicated in issue-autofix and build-cli; the workflow contract
+      # tests pin every copy in lockstep — edit them together.
       - name: 'Install dependencies'
         env:
           QWEN_SKIP_PREPARE: '1'

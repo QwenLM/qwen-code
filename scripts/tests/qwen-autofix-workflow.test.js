@@ -147,6 +147,10 @@ const installAndBuildSteps =
   workflow.match(
     /- name: 'Install dependencies and build'[\s\S]*?(?=\n[ ]{6}- name: ')/g,
   ) ?? [];
+const nodeSetupSteps =
+  workflow.match(
+    /- name: 'Set up Node.js \(hosted\)'[\s\S]*?(?=\n[ ]{6}- name: ')/g,
+  ) ?? [];
 
 function readAutofixSkill() {
   return readFileSync('.qwen/skills/autofix/SKILL.md', 'utf8');
@@ -5226,6 +5230,9 @@ describe('qwen-autofix workflow', () => {
         'exec node "${GITHUB_WORKSPACE}/dist/cli.js" "$@"',
       );
       expect(step).toContain('qwen-bin');
+      expect(step).toContain('chmod +x "${qwen_bin}/qwen"');
+      expect(step).toContain('echo "${qwen_bin}" >> "${GITHUB_PATH}"');
+      expect(step).toContain('qwen --version');
       expect(step).not.toContain('current_version="$(qwen --version');
       expect(step).not.toContain('Using pre-installed Qwen Code');
       expect(step).not.toContain('npm install -g');
@@ -5296,6 +5303,20 @@ describe('qwen-autofix workflow', () => {
     }
   });
 
+  it('keeps the Node setup recipe identical across the autofix jobs', () => {
+    // The three setup steps are lockstep copies; a partial recipe edit (a
+    // Node bump applied to two of the three jobs) must not ship green.
+    expect(nodeSetupSteps).toHaveLength(3);
+    for (const step of nodeSetupSteps) {
+      expect(step).toContain(
+        'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e',
+      );
+      expect(step).toContain("node-version: '22.x'");
+      expect(step).toContain("cache: 'npm'");
+      expect(step).toContain("cache-dependency-path: 'package-lock.json'");
+    }
+  });
+
   it('builds the review CLI bundle once and fans it out to the address legs', () => {
     // Measured driver: 6 review-address legs each spent 3.5-5 minutes on
     // npm ci + build + bundle of the SAME trusted base (~25 runner-minutes
@@ -5336,8 +5357,26 @@ describe('qwen-autofix workflow', () => {
     expect(buildCliJob).toContain(
       'echo "base_sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"',
     );
+    // The step id is the LINK between those two pins: without id: 'meta',
+    // steps.meta.outputs.base_sha resolves to '' at runtime and every leg
+    // silently checks out the event-default ref.
+    expect(stepOf(buildCliJob, 'Upload CLI bundle')).toContain("id: 'meta'");
     expect(stepOf(addressJob, 'Checkout trusted base')).toContain(
       "ref: '${{ needs.build-cli.outputs.base_sha }}'",
+    );
+    // The guard must fail the leg LOUD before the checkout: an empty ref
+    // makes actions/checkout fall back to the event default — on
+    // pull_request_review triggers the PR merge ref.
+    const validateShaStep = stepOf(addressJob, 'Validate bundle SHA');
+    expect(validateShaStep).toContain(
+      "BASE_SHA: '${{ needs.build-cli.outputs.base_sha }}'",
+    );
+    expect(validateShaStep).toContain(
+      'if [[ ! "${BASE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then',
+    );
+    expect(validateShaStep).toContain('exit 1');
+    expect(addressJob.indexOf("- name: 'Validate bundle SHA'")).toBeLessThan(
+      addressJob.indexOf("- name: 'Checkout trusted base'"),
     );
 
     // The artifact is the repo-root dist/ only — copy_bundle_assets.js
@@ -5355,9 +5394,11 @@ describe('qwen-autofix workflow', () => {
       'tar -xzf "${RUNNER_TEMP}/cli-dist/qwen-cli-dist.tar.gz"',
     );
     expect(restoreStep).toContain('test -f dist/cli.js');
-    expect(stepOf(addressJob, 'Download CLI bundle')).toContain(
-      "name: 'qwen-autofix-cli-dist'",
-    );
+    const downloadStep = stepOf(addressJob, 'Download CLI bundle');
+    expect(downloadStep).toContain("name: 'qwen-autofix-cli-dist'");
+    // Download directory and restore extract path are one contract — pin
+    // both sides so a rename of either fails this suite.
+    expect(downloadStep).toContain("path: '${{ runner.temp }}/cli-dist'");
 
     // The leg itself never rebuilds the base bundle — that is the entire
     // point of the fan-out.
