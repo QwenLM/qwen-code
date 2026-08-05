@@ -1416,6 +1416,45 @@ describe('useVim hook', () => {
     });
   });
 
+  describe('NORMAL mode completion key pass-through (#8069)', () => {
+    it('should pass through Ctrl+Tab and Ctrl+Shift+Tab in NORMAL mode', () => {
+      // The bare arrows are vim movement in NORMAL mode, so the documented
+      // Ctrl+Tab alternatives must stay live for category switching.
+      mockVimContext.vimMode = 'NORMAL';
+      const { result } = renderVimHook();
+
+      expect(
+        result.current.handleInput({ ...makeKey('\t', 'tab'), ctrl: true }),
+      ).toBe(false);
+      expect(
+        result.current.handleInput({
+          ...makeKey('\t', 'tab'),
+          ctrl: true,
+          shift: true,
+        }),
+      ).toBe(false);
+    });
+
+    it('should keep consuming bare Tab and bare arrows in NORMAL mode', () => {
+      mockVimContext.vimMode = 'NORMAL';
+      const { result } = renderVimHook();
+
+      let handled = false;
+      act(() => {
+        handled = result.current.handleInput(makeKey('\t', 'tab'));
+      });
+      expect(handled).toBe(true);
+      act(() => {
+        handled = result.current.handleInput(makeKey('\x1b[C', 'right'));
+      });
+      expect(handled).toBe(true);
+      act(() => {
+        handled = result.current.handleInput(makeKey('\x1b[D', 'left'));
+      });
+      expect(handled).toBe(true);
+    });
+  });
+
   // Line operations (dd, cc) are tested in text-buffer.test.ts
 
   describe('Reducer-based integration tests', () => {
