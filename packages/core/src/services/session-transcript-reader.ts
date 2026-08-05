@@ -485,6 +485,24 @@ function isReplayTurnStart(index: TranscriptIndex, uuid: string): boolean {
   return entry?.type === 'user' && entry.subtype !== 'mid_turn_user_message';
 }
 
+// Walk backward from `from` toward the nearest replay turn start, never below
+// `floor`. The returned index is a turn start only if one exists within the
+// bound; otherwise it is `floor` itself, so callers must re-check the result.
+function findReplayTurnStartAtOrBefore(
+  index: TranscriptIndex,
+  from: number,
+  floor: number,
+): number {
+  let candidate = from;
+  while (
+    candidate > floor &&
+    !isReplayTurnStart(index, index.activeUuids[candidate]!)
+  ) {
+    candidate--;
+  }
+  return candidate;
+}
+
 function selectBackwardPageUuids(
   index: TranscriptIndex,
   position: number,
@@ -505,12 +523,7 @@ function selectBackwardPageUuids(
   // and making anchor-based pagination dead-end at the file head. Allow at
   // most one extra window (`limit` records) of expansion.
   const expansionFloor = Math.max(0, position - 2 * limit);
-  while (
-    start > expansionFloor &&
-    !isReplayTurnStart(index, index.activeUuids[start]!)
-  ) {
-    start--;
-  }
+  start = findReplayTurnStartAtOrBefore(index, start, expansionFloor);
 
   let selectedStart = position;
   let selectedBytes = 0;
@@ -550,18 +563,29 @@ function selectBackwardPageUuids(
       selectedStart = 0;
     }
   } else if (!alignedToReplayBoundary) {
-    let candidate = selectedStart;
-    while (
-      candidate > expansionFloor &&
-      !isReplayTurnStart(index, index.activeUuids[candidate]!)
-    ) {
-      candidate--;
-    }
     // Expansion only pays off when it reaches a turn boundary; otherwise
     // keep the limit/maxBytes-respecting selection.
+    const candidate = findReplayTurnStartAtOrBefore(
+      index,
+      selectedStart,
+      expansionFloor,
+    );
     if (isReplayTurnStart(index, index.activeUuids[candidate]!)) {
       selectedStart = candidate;
     }
+  }
+
+  // Backward replay finalizes each page independently, so a page boundary
+  // between a tool call and its persisted result would render the completed
+  // call as failed ("result missing") on the older page and the result as an
+  // orphan block on the newer one. Extend the page down to the owning
+  // assistant record (or turn boundary) so pairs stay on a single page.
+  while (
+    selectedStart > 0 &&
+    !isReplayTurnStart(index, index.activeUuids[selectedStart]!) &&
+    index.byUuid.get(index.activeUuids[selectedStart]!)?.type !== 'assistant'
+  ) {
+    selectedStart--;
   }
 
   return {

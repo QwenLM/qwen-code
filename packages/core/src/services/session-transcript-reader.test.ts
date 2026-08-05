@@ -112,6 +112,46 @@ describe('SessionTranscriptReader', () => {
     };
   }
 
+  function toolCallRecord(
+    uuid: string,
+    parentUuid: string,
+    callId: string,
+  ): ChatRecord {
+    return {
+      ...record(uuid, parentUuid, ''),
+      message: {
+        role: 'model',
+        parts: [
+          { functionCall: { name: 'run_shell_command', id: callId, args: {} } },
+        ],
+      },
+    };
+  }
+
+  function toolResultRecord(
+    uuid: string,
+    parentUuid: string,
+    callId: string,
+  ): ChatRecord {
+    return {
+      ...record(uuid, parentUuid, ''),
+      type: 'tool_result',
+      message: {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'run_shell_command',
+              id: callId,
+              response: { output: 'ok' },
+            },
+          },
+        ],
+      },
+      toolCallResult: { callId, status: 'success' },
+    };
+  }
+
   function encodeCursor(
     state: Parameters<typeof encodeSessionTranscriptCursor>[0],
   ): string {
@@ -1364,6 +1404,110 @@ describe('SessionTranscriptReader', () => {
       // turn-alignment walk must not drag the page back toward the file
       // head once alignment proves unreachable within the expansion budget.
       expect(page.records.map((item) => item.uuid)).toEqual(['a149', 'a150']);
+      expect(page.hasMore).toBe(true);
+    });
+
+    it('keeps tool call/result pairs on the same backward page', async () => {
+      // A single long turn of assistant tool calls and persisted results.
+      // Call 30 has two results (a parallel batch) so backward page
+      // boundaries land mid-run on tool_result records. Backward replay
+      // finalizes each page independently, so a boundary between a call and
+      // its result would render the completed call as failed on the older
+      // page and the result as an orphan block on the newer one.
+      const records: ChatRecord[] = [record('u1', null, 'prompt')];
+      const resultsByCall = new Map<string, string[]>();
+      let parent = 'u1';
+      for (let i = 1; i <= 120; i++) {
+        const callUuid = `ac${i}`;
+        const callId = `call-${i}`;
+        records.push(toolCallRecord(callUuid, parent, callId));
+        const resultUuids: string[] = [];
+        let resultParent = callUuid;
+        for (let r = 0; r < (i === 30 ? 2 : 1); r++) {
+          const resultUuid = i === 30 ? `ar30-${r}` : `ar${i}`;
+          records.push(toolResultRecord(resultUuid, resultParent, callId));
+          resultUuids.push(resultUuid);
+          resultParent = resultUuid;
+        }
+        resultsByCall.set(callUuid, resultUuids);
+        parent = resultUuids[resultUuids.length - 1]!;
+      }
+      await writeRecords(records);
+
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const pages: ChatRecord[][] = [];
+      let page = await reader.readPage(sessionId, {
+        direction: 'backward',
+        limit: 50,
+      });
+      for (;;) {
+        pages.push(page.records);
+        expect(page.records.length).toBeGreaterThan(0);
+        if (!page.hasMore) break;
+        const boundary = page.records.at(0)?.uuid;
+        expect(boundary).toBeDefined();
+        page = await reader.readPage(sessionId, {
+          beforeRecordId: boundary,
+          limit: 50,
+        });
+        expect(pages.length).toBeLessThan(20);
+      }
+
+      let sawMidTurnCallStart = false;
+      for (const pageRecords of pages) {
+        // A page starting at a tool_result would replay that result without
+        // its call.
+        expect(pageRecords.at(0)?.type).not.toBe('tool_result');
+        const uuids = new Set(pageRecords.map((item) => item.uuid));
+        for (const item of pageRecords) {
+          if (item.type === 'tool_result') {
+            expect(item.parentUuid).not.toBeNull();
+            expect(uuids.has(item.parentUuid!)).toBe(true);
+          }
+          const results = resultsByCall.get(item.uuid);
+          if (results) {
+            for (const resultUuid of results) {
+              expect(uuids.has(resultUuid)).toBe(true);
+            }
+            if (pageRecords.at(0)?.uuid === item.uuid) {
+              sawMidTurnCallStart = true;
+            }
+          }
+        }
+      }
+      // The chain really exercised mid-turn page starts, not just
+      // turn-aligned pages.
+      expect(sawMidTurnCallStart).toBe(true);
+
+      const flat = pages.flat();
+      expect(flat.length).toBe(records.length);
+      expect(new Set(flat.map((item) => item.uuid)).size).toBe(records.length);
+      expect(flat.some((item) => item.uuid === 'u1')).toBe(true);
+    });
+
+    it('extends a byte-limited backward page to the owning tool call', async () => {
+      const records: ChatRecord[] = [record('u1', null, 'prompt')];
+      let parent = 'u1';
+      for (let i = 1; i <= 3; i++) {
+        records.push(toolCallRecord(`ac${i}`, parent, `call-${i}`));
+        records.push(toolResultRecord(`ar${i}`, `ac${i}`, `call-${i}`));
+        parent = `ar${i}`;
+      }
+      await writeRecords(records);
+
+      // Budget admits only the trailing tool_result; the page must still
+      // extend to the owning call rather than split the pair.
+      const resultBytes = Buffer.byteLength(JSON.stringify(records.at(-1)));
+      const page = await new SessionTranscriptReader(workspaceDir).readPage(
+        sessionId,
+        {
+          direction: 'backward',
+          limit: 2,
+          maxBytes: resultBytes,
+        },
+      );
+
+      expect(page.records.map((item) => item.uuid)).toEqual(['ac3', 'ar3']);
       expect(page.hasMore).toBe(true);
     });
   });

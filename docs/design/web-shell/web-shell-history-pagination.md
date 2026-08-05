@@ -79,12 +79,15 @@ backward and freezes file identity, active leaf, byte size, position, and replay
 direction.
 
 Backward pages are returned in chronological display order. Each selected page
-starts at a normal user-turn boundary. The record limit is therefore a soft page
-target: a long turn is returned intact even when it exceeds the requested record
-count, so scrolling never reveals only the tail of the previous turn. The
-workspace route retains its hard source-byte limit: if a complete turn exceeds
-that limit, it returns `transcript_page_too_large` rather than returning a
-partial turn. Forward cursors and responses remain byte-for-byte compatible.
+starts at a normal user-turn boundary when one is reachable within one extra
+window (`limit` records) of expansion. Inside a single long turn no boundary is
+reachable within that budget, so pages stay bounded near the anchor, may start
+mid-turn, and chain until the turn start surfaces. A page boundary never lands
+between a tool call and its persisted result: the page extends to the owning
+assistant record so independently replayed backward pages cannot split the
+pair. The workspace route retains its hard response-byte limit: a page whose
+serialized response exceeds that limit returns `transcript_page_too_large`.
+Forward cursors and responses remain byte-for-byte compatible.
 
 ### WebUI transcript state
 
