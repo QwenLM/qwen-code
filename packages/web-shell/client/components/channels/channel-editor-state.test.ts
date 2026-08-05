@@ -161,6 +161,39 @@ describe('Channel editor state', () => {
     });
   });
 
+  it('keeps object fields out of the editor draft', () => {
+    const draft = createChannelEditorDraft(DINGTALK, configuredInstance());
+    expect(draft.values).not.toHaveProperty('interactiveCards');
+  });
+
+  it('rejects number values at or below the exclusive minimum', () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      type: 'example',
+      displayName: 'Example',
+      manageable: true,
+      fields: [
+        {
+          key: 'timeoutMs',
+          label: 'Timeout (ms)',
+          kind: 'number',
+          exclusiveMinimum: 0,
+        },
+      ],
+    };
+
+    const invalid = createChannelEditorDraft(descriptor);
+    invalid.name = 'example';
+    invalid.values.timeoutMs = '0';
+    expect(validateChannelEditorDraft(descriptor, invalid, [])).toEqual({
+      timeoutMs: 'number',
+    });
+
+    const valid = createChannelEditorDraft(descriptor);
+    valid.name = 'example';
+    valid.values.timeoutMs = '270000';
+    expect(validateChannelEditorDraft(descriptor, valid, [])).toEqual({});
+  });
+
   it('rejects a non-numeric value for a number field', () => {
     const descriptor: DaemonChannelTypeDescriptor = {
       type: 'example',

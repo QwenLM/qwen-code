@@ -7,7 +7,10 @@
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { ChannelConfigFieldDescriptor } from '@qwen-code/channel-base';
-import { getPlugin } from '../commands/channel/channel-registry.js';
+import {
+  getPlugin,
+  UNSAFE_OBJECT_KEYS,
+} from '../commands/channel/channel-registry.js';
 import { loadSettings, saveSettings } from '../config/settings.js';
 
 export type ChannelSecretUpdate =
@@ -70,8 +73,6 @@ function invalidSecret(message: string): ChannelSettingsError {
 function invalidConfig(message: string): ChannelSettingsError {
   return new ChannelSettingsError('channel_settings_invalid_config', message);
 }
-
-const UNSAFE_OBJECT_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
 function assertSafeChannelName(name: string): void {
   if (UNSAFE_OBJECT_KEYS.has(name)) {

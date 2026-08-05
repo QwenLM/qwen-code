@@ -20,21 +20,31 @@ vi.mock('@qwen-code/channel-dingtalk', () => ({
   },
 }));
 
-import { supportedChannelCatalog } from './channel-registry.js';
+import { getPlugin, supportedChannelCatalog } from './channel-registry.js';
 
 describe('built-in channel registry', () => {
-  it('isolates an invalid built-in management descriptor', async () => {
+  it('keeps an invalid built-in channel running without management metadata', async () => {
     const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
 
     const catalog = await supportedChannelCatalog();
 
-    expect(catalog.map((entry) => entry.type)).not.toContain('dingtalk');
+    expect(catalog.find((entry) => entry.type === 'dingtalk')).toEqual({
+      type: 'dingtalk',
+      displayName: 'DingTalk',
+      manageable: false,
+      fields: [],
+    });
     expect(catalog.map((entry) => entry.type)).toContain('gitlab');
     expect(stderr).toHaveBeenCalledWith(
       expect.stringContaining(
         'Invalid management metadata in "dingtalk" channel: Channel field "settings" cannot be a required object.',
       ),
     );
+
+    const plugin = await getPlugin('dingtalk');
+    expect(plugin?.management).toBeUndefined();
+    expect(plugin?.createChannel).toBeTypeOf('function');
+
     stderr.mockRestore();
   });
 });

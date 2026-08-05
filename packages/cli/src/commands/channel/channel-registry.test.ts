@@ -1,91 +1,109 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { ChannelPlugin } from '@qwen-code/channel-base';
-import { registerPlugin, supportedChannelCatalog } from './channel-registry.js';
+import {
+  getPlugin,
+  registerPlugin,
+  supportedChannelCatalog,
+} from './channel-registry.js';
+
+function invalidPlugin(
+  type: string,
+  fields: readonly unknown[],
+): ChannelPlugin {
+  return {
+    channelType: type,
+    displayName: type,
+    management: { fields },
+    createChannel() {
+      throw new Error('not used');
+    },
+  } as unknown as ChannelPlugin;
+}
 
 describe('channel registry', () => {
   it.each([
     {
       type: 'invalid-nested-secret',
-      field: {
-        key: 'settings',
-        label: 'Settings',
-        kind: 'object',
-        properties: [{ key: 'token', label: 'Token', kind: 'secret' }],
-      },
+      fields: [
+        {
+          key: 'settings',
+          label: 'Settings',
+          kind: 'object',
+          properties: [{ key: 'token', label: 'Token', kind: 'secret' }],
+        },
+      ],
       message: 'Channel field "settings.token" cannot declare a nested secret.',
     },
     {
       type: 'invalid-nested-environment',
-      field: {
-        key: 'settings',
-        label: 'Settings',
-        kind: 'object',
-        properties: [
-          {
-            key: 'endpoint',
-            label: 'Endpoint',
-            kind: 'string',
-            envResolvable: true,
-          },
-        ],
-      },
+      fields: [
+        {
+          key: 'settings',
+          label: 'Settings',
+          kind: 'object',
+          properties: [
+            {
+              key: 'endpoint',
+              label: 'Endpoint',
+              kind: 'string',
+              envResolvable: true,
+            },
+          ],
+        },
+      ],
       message:
         'Channel field "settings.endpoint" cannot resolve environment references.',
     },
     {
       type: 'invalid-required-object',
-      field: {
-        key: 'settings',
-        label: 'Settings',
-        kind: 'object',
-        required: true,
-      },
+      fields: [
+        {
+          key: 'settings',
+          label: 'Settings',
+          kind: 'object',
+          required: true,
+        },
+      ],
       message: 'Channel field "settings" cannot be a required object.',
     },
     {
       type: 'invalid-env-resolvable-object',
-      field: {
-        key: 'settings',
-        label: 'Settings',
-        kind: 'object',
-        envResolvable: true,
-      },
+      fields: [
+        {
+          key: 'settings',
+          label: 'Settings',
+          kind: 'object',
+          envResolvable: true,
+        },
+      ],
       message:
         'Channel field "settings" cannot resolve environment references.',
     },
     {
       type: 'invalid-reserved-field-key',
-      field: {
-        key: 'constructor',
-        label: 'Constructor',
-        kind: 'string',
-      },
+      fields: [
+        {
+          key: 'constructor',
+          label: 'Constructor',
+          kind: 'string',
+        },
+      ],
       message: 'Channel field "constructor" cannot use a reserved key.',
     },
     {
       type: 'invalid-reserved-property-key',
-      field: {
-        key: 'settings',
-        label: 'Settings',
-        kind: 'object',
-        properties: [{ key: 'prototype', label: 'Prototype', kind: 'string' }],
-      },
+      fields: [
+        {
+          key: 'settings',
+          label: 'Settings',
+          kind: 'object',
+          properties: [
+            { key: 'prototype', label: 'Prototype', kind: 'string' },
+          ],
+        },
+      ],
       message: 'Channel field "settings.prototype" cannot use a reserved key.',
     },
-  ])('rejects $type management metadata', ({ type, field, message }) => {
-    const plugin = {
-      channelType: type,
-      displayName: type,
-      management: { fields: [field] },
-      createChannel() {
-        throw new Error('not used');
-      },
-    } as unknown as ChannelPlugin;
-
-    expect(() => registerPlugin(plugin)).toThrow(message);
-  });
-
-  it.each([
     {
       type: 'duplicate-top-level-field',
       fields: [
@@ -109,31 +127,51 @@ describe('channel registry', () => {
       ],
       message: 'Channel field "settings.enabled" is declared more than once.',
     },
-  ])('rejects $type management metadata', ({ type, fields, message }) => {
-    const plugin = {
-      channelType: type,
-      displayName: type,
-      management: { fields },
-      createChannel() {
-        throw new Error('not used');
-      },
-    } as unknown as ChannelPlugin;
+  ])(
+    'registers $type without management metadata',
+    async ({ type, fields, message }) => {
+      const plugin = invalidPlugin(type, fields);
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
 
-    expect(() => registerPlugin(plugin)).toThrow(message);
-  });
+      registerPlugin(plugin);
+
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining(
+          `Invalid management metadata in "${type}" channel: ${message}`,
+        ),
+      );
+      stderr.mockRestore();
+
+      const registered = await getPlugin(type);
+      expect(registered?.management).toBeUndefined();
+      expect(registered?.createChannel).toBe(plugin.createChannel);
+
+      const entry = (await supportedChannelCatalog()).find(
+        (candidate) => candidate.type === type,
+      );
+      expect(entry).toEqual({
+        type,
+        displayName: type,
+        manageable: false,
+        fields: [],
+      });
+    },
+  );
 
   it('only marks the manually configurable built-in types as manageable', async () => {
     const catalog = await supportedChannelCatalog();
-    expect(catalog.map((entry) => entry.type)).toEqual([
-      'telegram',
-      'weixin',
-      'dingtalk',
-      'wecom',
-      'feishu',
-      'qq',
-      'github',
-      'gitlab',
-    ]);
+    expect(catalog.map((entry) => entry.type)).toEqual(
+      expect.arrayContaining([
+        'telegram',
+        'weixin',
+        'dingtalk',
+        'wecom',
+        'feishu',
+        'qq',
+        'github',
+        'gitlab',
+      ]),
+    );
     expect(
       catalog.filter((entry) => entry.manageable).map((entry) => entry.type),
     ).toEqual(['dingtalk', 'wecom', 'feishu', 'github', 'gitlab']);

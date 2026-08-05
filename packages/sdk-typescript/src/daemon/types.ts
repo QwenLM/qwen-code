@@ -2996,19 +2996,27 @@ interface DaemonChannelConfigFieldDescriptorBase {
   label: string;
   options?: ReadonlyArray<{ value: string; label: string }>;
   default?: string;
-  exclusiveMinimum?: number;
   description?: string;
 }
 
-interface DaemonChannelConfigValueFieldDescriptor
+export interface DaemonChannelConfigValueFieldDescriptor
   extends DaemonChannelConfigFieldDescriptorBase {
-  kind: Exclude<DaemonChannelConfigFieldKind, 'object'>;
+  kind: Exclude<DaemonChannelConfigFieldKind, 'object' | 'number'>;
   required?: boolean;
   envResolvable?: boolean;
   properties?: never;
 }
 
-interface DaemonChannelConfigObjectFieldDescriptor
+export interface DaemonChannelConfigNumberFieldDescriptor
+  extends DaemonChannelConfigFieldDescriptorBase {
+  kind: 'number';
+  required?: boolean;
+  envResolvable?: boolean;
+  exclusiveMinimum?: number;
+  properties?: never;
+}
+
+export interface DaemonChannelConfigObjectFieldDescriptor
   extends DaemonChannelConfigFieldDescriptorBase {
   kind: 'object';
   required?: false;
@@ -3016,15 +3024,26 @@ interface DaemonChannelConfigObjectFieldDescriptor
   properties?: readonly DaemonChannelConfigNestedFieldDescriptor[];
 }
 
-type DaemonChannelConfigNestedFieldDescriptor =
+export type DaemonChannelConfigNestedFieldDescriptor =
   | (Omit<DaemonChannelConfigValueFieldDescriptor, 'kind' | 'envResolvable'> & {
-      kind: Exclude<DaemonChannelConfigFieldKind, 'secret' | 'object'>;
+      kind: Exclude<
+        DaemonChannelConfigFieldKind,
+        'secret' | 'object' | 'number'
+      >;
+      envResolvable?: never;
+    })
+  | (Omit<
+      DaemonChannelConfigNumberFieldDescriptor,
+      'kind' | 'envResolvable'
+    > & {
+      kind: 'number';
       envResolvable?: never;
     })
   | DaemonChannelConfigObjectFieldDescriptor;
 
 export type DaemonChannelConfigFieldDescriptor =
   | DaemonChannelConfigValueFieldDescriptor
+  | DaemonChannelConfigNumberFieldDescriptor
   | DaemonChannelConfigObjectFieldDescriptor;
 
 export interface DaemonChannelTypeDescriptor {

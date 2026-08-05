@@ -781,7 +781,9 @@ Numeric descriptors can use `exclusiveMinimum` for open lower bounds. Clients
 that do not render an advertised field kind must preserve its existing config
 value instead of coercing or deleting it. Object fields cannot be required,
 and nested properties cannot be secrets or environment-resolvable fields;
-those management protocols remain top-level only.
+those management protocols remain top-level only. Writes replace each field's
+stored value wholesale, so preserving an object means resending the stored
+object; the daemon does not merge partial objects.
 
 Configuration writes use optimistic concurrency and the strict bearer-token
 gate:

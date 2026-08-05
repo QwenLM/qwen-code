@@ -12,7 +12,11 @@ export interface ChannelTypeDescriptor {
 
 const registry = new Map<string, ChannelPlugin>();
 let builtinsPromise: Promise<void> | null = null;
-const RESERVED_FIELD_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+export const UNSAFE_OBJECT_KEYS = new Set([
+  '__proto__',
+  'constructor',
+  'prototype',
+]);
 
 function assertManagementFields(
   fields: readonly ChannelConfigFieldDescriptor[],
@@ -32,15 +36,14 @@ function assertManagementFields(
 
 function assertManagementField(
   field: ChannelConfigFieldDescriptor,
-  path = field.key,
-  nested = false,
+  path: string,
+  nested: boolean,
 ): void {
-  if (RESERVED_FIELD_KEYS.has(field.key)) {
+  if (UNSAFE_OBJECT_KEYS.has(field.key)) {
     throw new Error(`Channel field "${path}" cannot use a reserved key.`);
   }
-  const envResolvable =
-    (field as { envResolvable?: unknown }).envResolvable === true;
-  const required = (field as { required?: unknown }).required === true;
+  const envResolvable = field.envResolvable === true;
+  const required = field.required === true;
   if (field.kind === 'secret' && nested) {
     throw new Error(`Channel field "${path}" cannot declare a nested secret.`);
   }
@@ -84,14 +87,10 @@ function ensureBuiltins(): Promise<void> {
       for (let i = 0; i < results.length; i++) {
         const result = results[i]!;
         if (result.status === 'fulfilled') {
-          try {
-            assertManagementDescriptor(result.value.plugin);
-            registry.set(result.value.plugin.channelType, result.value.plugin);
-          } catch (error) {
-            process.stderr.write(
-              `[channel-registry] Invalid management metadata in "${labelled[i]!.name}" channel: ${error instanceof Error ? error.message : String(error)}\n`,
-            );
-          }
+          registerWithManagementValidation(
+            result.value.plugin,
+            labelled[i]!.name,
+          );
         } else {
           process.stderr.write(
             `[channel-registry] Failed to load "${labelled[i]!.name}" channel: ${result.reason}\n`,
@@ -109,7 +108,24 @@ export function registerPlugin(plugin: ChannelPlugin): void {
       `Channel type "${plugin.channelType}" is already registered.`,
     );
   }
-  assertManagementDescriptor(plugin);
+  registerWithManagementValidation(plugin, plugin.channelType);
+}
+
+function registerWithManagementValidation(
+  plugin: ChannelPlugin,
+  label: string,
+): void {
+  try {
+    assertManagementDescriptor(plugin);
+  } catch (error) {
+    // Fail closed on the management surface only; the channel runtime keeps
+    // working with management stripped.
+    process.stderr.write(
+      `[channel-registry] Invalid management metadata in "${label}" channel: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+    registry.set(plugin.channelType, { ...plugin, management: undefined });
+    return;
+  }
   registry.set(plugin.channelType, plugin);
 }
 

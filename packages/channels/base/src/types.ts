@@ -394,19 +394,27 @@ interface ChannelConfigFieldDescriptorBase {
   label: string;
   options?: ReadonlyArray<{ value: string; label: string }>;
   default?: string;
-  exclusiveMinimum?: number;
   description?: string;
 }
 
-interface ChannelConfigValueFieldDescriptor
+export interface ChannelConfigValueFieldDescriptor
   extends ChannelConfigFieldDescriptorBase {
-  kind: Exclude<ChannelConfigFieldKind, 'object'>;
+  kind: Exclude<ChannelConfigFieldKind, 'object' | 'number'>;
   required?: boolean;
   envResolvable?: boolean;
   properties?: never;
 }
 
-interface ChannelConfigObjectFieldDescriptor
+export interface ChannelConfigNumberFieldDescriptor
+  extends ChannelConfigFieldDescriptorBase {
+  kind: 'number';
+  required?: boolean;
+  envResolvable?: boolean;
+  exclusiveMinimum?: number;
+  properties?: never;
+}
+
+export interface ChannelConfigObjectFieldDescriptor
   extends ChannelConfigFieldDescriptorBase {
   kind: 'object';
   required?: false;
@@ -414,15 +422,20 @@ interface ChannelConfigObjectFieldDescriptor
   properties?: readonly ChannelConfigNestedFieldDescriptor[];
 }
 
-type ChannelConfigNestedFieldDescriptor =
+export type ChannelConfigNestedFieldDescriptor =
   | (Omit<ChannelConfigValueFieldDescriptor, 'kind' | 'envResolvable'> & {
-      kind: Exclude<ChannelConfigFieldKind, 'secret' | 'object'>;
+      kind: Exclude<ChannelConfigFieldKind, 'secret' | 'object' | 'number'>;
+      envResolvable?: never;
+    })
+  | (Omit<ChannelConfigNumberFieldDescriptor, 'kind' | 'envResolvable'> & {
+      kind: 'number';
       envResolvable?: never;
     })
   | ChannelConfigObjectFieldDescriptor;
 
 export type ChannelConfigFieldDescriptor =
   | ChannelConfigValueFieldDescriptor
+  | ChannelConfigNumberFieldDescriptor
   | ChannelConfigObjectFieldDescriptor;
 
 export interface ChannelManagementDescriptor {

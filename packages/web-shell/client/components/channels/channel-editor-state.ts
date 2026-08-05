@@ -39,6 +39,8 @@ export type ChannelEditorValidationErrors = Record<
   ChannelEditorValidationCode
 >;
 
+const UNSAFE_OBJECT_KEYS = ['__proto__', 'constructor', 'prototype'];
+
 export function hasDescriptorSenderPolicy(
   descriptor: DaemonChannelTypeDescriptor,
 ): boolean {
@@ -143,10 +145,7 @@ export function validateChannelEditorDraft(
   const name = draft.name.trim();
   if (!name) {
     errors['name'] = 'required';
-  } else if (
-    name === 'all' ||
-    ['__proto__', 'constructor', 'prototype'].includes(name)
-  ) {
+  } else if (name === 'all' || UNSAFE_OBJECT_KEYS.includes(name)) {
     errors['name'] = 'invalid';
   } else if (existingNames.includes(name)) {
     errors['name'] = 'duplicate';
@@ -157,10 +156,16 @@ export function validateChannelEditorDraft(
     } else if (
       field.kind === 'number' &&
       typeof draft.values[field.key] === 'string' &&
-      draft.values[field.key] !== '' &&
-      !Number.isFinite(Number(draft.values[field.key]))
+      draft.values[field.key] !== ''
     ) {
-      errors[field.key] = 'number';
+      const parsed = Number(draft.values[field.key]);
+      if (
+        !Number.isFinite(parsed) ||
+        (field.exclusiveMinimum !== undefined &&
+          parsed <= field.exclusiveMinimum)
+      ) {
+        errors[field.key] = 'number';
+      }
     } else if (field.kind === 'string-list' && field.options) {
       const rawValue = draft.values[field.key];
       if (typeof rawValue === 'string') {

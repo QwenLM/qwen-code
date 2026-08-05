@@ -57,6 +57,12 @@ describe('WorkspaceChannelSettingsStore', () => {
           { key: 'enabled', label: 'Enabled', kind: 'boolean' },
           { key: 'retries', label: 'Retries', kind: 'number' },
           {
+            key: 'backoffSeconds',
+            label: 'Backoff seconds',
+            kind: 'number',
+            exclusiveMinimum: 0,
+          },
+          {
             key: 'mode',
             label: 'Mode',
             kind: 'enum',
@@ -336,6 +342,17 @@ describe('WorkspaceChannelSettingsStore', () => {
       },
     },
     {
+      label: 'number at the exclusive minimum',
+      config: {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+        backoffSeconds: 0,
+      },
+      secrets: {
+        clientSecret: { operation: 'replace', value: 'secret' } as const,
+      },
+    },
+    {
       label: 'invalid enum option',
       config: {
         type: 'management-validation-test',
@@ -437,6 +454,7 @@ describe('WorkspaceChannelSettingsStore', () => {
         clientId: '$CLIENT_ID',
         enabled: true,
         retries: 3,
+        backoffSeconds: 2.5,
         mode: 'safe',
         senderPolicy: 'open',
         allowedUsers: ['user-1'],
@@ -457,6 +475,7 @@ describe('WorkspaceChannelSettingsStore', () => {
       clientSecret: '$CLIENT_SECRET',
       enabled: true,
       retries: 3,
+      backoffSeconds: 2.5,
       mode: 'safe',
       senderPolicy: 'open',
       allowedUsers: ['user-1'],
