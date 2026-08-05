@@ -1313,6 +1313,105 @@ describe('the prompt the CLI built, against the prompt the agent got', () => {
   });
 });
 
+describe('a drifted launch whose payload provably arrived', () => {
+  it('notes a near-verbatim chunk launch instead of demanding a relaunch', () => {
+    // Measured on a real run: asked to copy twelve blocks, the model normalized
+    // one word in every block's tail ("you" → "it"), every launch failed the
+    // verbatim match, and the repair relaunched the entire fan-out — the most
+    // expensive step in the pipeline, redelivering text the agents had already
+    // acted on. The payload had arrived: the brief was opened and the diff was
+    // read, and both facts are the harness's records, not the run's prose.
+    const p = plan();
+    transcript('a1', good(1).replace('chunk 1 of 2', 'the chunk 1 of 2'), {
+      calls: 3,
+    });
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.rewrittenPrompts).toEqual([]);
+    expect(r.driftedLaunches).toHaveLength(1);
+    expect(r.driftedLaunches[0]).toContain('chunk 1');
+    expect(r.driftedLaunches[0]).toContain('delivery stands');
+    expect(r.coveredChunks).toEqual([1, 2]);
+    expect(r.ok).toBe(true);
+  });
+
+  it('does not rescue a drift that never opened the brief', () => {
+    const p = plan();
+    transcript('a1', good(1).replace('chunk 1 of 2', 'the chunk 1 of 2'), {
+      calls: 3,
+      opens: [],
+    });
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.driftedLaunches).toEqual([]);
+    expect(r.rewrittenPrompts).toHaveLength(1);
+    expect(r.ok).toBe(false);
+  });
+
+  it('requires the diff read, not brief-open alone', () => {
+    // A drifted launch that dropped the read list is not rescued on the
+    // brief-open by itself: the diff read is the other half of the payload.
+    const p = plan();
+    transcript('a1', good(1).replace('chunk 1 of 2', 'the chunk 1 of 2'), {
+      calls: 0,
+      opens: [chunkBrief(1)],
+    });
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.driftedLaunches).toEqual([]);
+    expect(r.rewrittenPrompts).toHaveLength(1);
+    expect(r.ok).toBe(false);
+  });
+
+  it('rescues a drifted dimension launch on brief-open plus the diff read', () => {
+    const p = planPr();
+    rmSync(join(dir, 'subagents', 'S1', 'agent-r-1c.jsonl'), { force: true });
+    const builtPrompt = readFileSync(
+      join(promptRecordDir(p), '1c.txt'),
+      'utf8',
+    );
+    transcript(
+      'r-1c-drift',
+      builtPrompt.replace('You are 1c.', 'You are Agent 1c.'),
+      { calls: 2 },
+    );
+    transcript('sec', wholeDiff(), { calls: 8 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.missingRoles).toEqual([]);
+    expect(r.unreadBriefs).toEqual([]);
+    expect(r.driftedLaunches).toHaveLength(1);
+    expect(r.driftedLaunches[0]).toContain('Cross-file tracer');
+    expect(r.ok).toBe(true);
+  });
+
+  it('one drifted transcript cannot certify two roles', () => {
+    // The verbatim matching is injective — one transcript, one requirement —
+    // or pasting the whole roster to a single agent certifies an N-agent
+    // fan-out with one reader. The rescue inherits the same rule.
+    const p = planPr();
+    rmSync(join(dir, 'subagents', 'S1', 'agent-r-1c.jsonl'), { force: true });
+    rmSync(join(dir, 'subagents', 'S1', 'agent-r-2.jsonl'), { force: true });
+    transcript(
+      'r-both-drift',
+      `You are neither role, exactly.\n` +
+        `read_file(file_path="${briefPath(p, '1c')}")\n` +
+        `read_file(file_path="${briefPath(p, '2')}")\n` +
+        `read_file(file_path="${DIFF}")`,
+      { calls: 2 },
+    );
+    transcript('sec', wholeDiff(), { calls: 8 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.driftedLaunches).toHaveLength(1);
+    expect(r.missingRoles).toHaveLength(1);
+    expect(r.ok).toBe(false);
+  });
+});
+
 describe('an agent that paged its chunk still read it', () => {
   it('merges paged reads before asking whether a chunk was covered', () => {
     // The prompt tells an agent to page when a read comes back `isTruncated` — and
@@ -1561,7 +1660,11 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     // the dogfooded failure was the orchestrator hand-appending `(round N)` to
     // the identity line because the CLI gave it nowhere else to put it.
     expect(fix).toMatch(/no hand-added round number/);
-    expect(fix).toContain('[--round <k>]');
+    // UNBRACKETED: `agent-prompt` refuses a round-less reverse-audit call, so
+    // a paste-and-run repair that bracketed --round as optional handed the
+    // orchestrator a first attempt the validation rejects.
+    expect(fix).toContain('--round <k>');
+    expect(fix).not.toContain('[--round <k>]');
   });
 
   it('names a rewritten verifier launch as itself too', () => {
@@ -1581,6 +1684,9 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     // told apart by their findings digest, not by that flag.
     expect(fix).toMatch(/no hand-added shard number,/);
     expect(fix).not.toContain('shard number (--round bakes it in)');
+    // For verify the flag stays BRACKETED — only a repeat verification round
+    // passes one, unlike reverse-audit where the CLI refuses without it.
+    expect(fix).toContain('[--round <k>]');
   });
 
   it('flags a reverse audit built but whose agent never opened its brief', () => {
