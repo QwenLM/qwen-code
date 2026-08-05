@@ -173,6 +173,61 @@ function readIpv4TranslatedIpv6(host: string): string | undefined {
   ].join('.');
 }
 
+function readNat64Ipv6(host: string): string | undefined {
+  const sections = host.split('::');
+  if (sections.length > 2) return undefined;
+  const parseGroups = (section: string): number[] | undefined => {
+    if (!section) return [];
+    const groups = section.split(':');
+    if (groups.some((group) => !/^[0-9a-f]{1,4}$/i.test(group))) {
+      return undefined;
+    }
+    return groups.map((group) => Number.parseInt(group, 16));
+  };
+  const left = parseGroups(sections[0]!);
+  const right = parseGroups(sections[1] ?? '');
+  if (!left || !right) return undefined;
+  const missing = 8 - left.length - right.length;
+  if ((sections.length === 1 && missing !== 0) || missing < 0) {
+    return undefined;
+  }
+  const groups =
+    sections.length === 1
+      ? left
+      : [...left, ...Array<number>(missing).fill(0), ...right];
+  if (groups[0] !== 0x0064 || groups[1] !== 0xff9b) return undefined;
+  let high: number;
+  let low: number;
+  if (groups.slice(2, 6).every((group) => group === 0)) {
+    high = groups[6]!;
+    low = groups[7]!;
+  } else if (
+    groups[2] === 0x0001 &&
+    (groups[4]! & 0xff00) === 0 &&
+    (groups[5]! & 0x00ff) === 0 &&
+    groups[6] === 0 &&
+    groups[7] === 0
+  ) {
+    high = groups[3]!;
+    low = ((groups[4]! & 0xff) << 8) | (groups[5]! >>> 8);
+  } else if (
+    groups[2] === 0x0001 &&
+    groups.slice(3, 6).every((group) => group === 0)
+  ) {
+    high = groups[6]!;
+    low = groups[7]!;
+  } else {
+    return undefined;
+  }
+  const value = (high << 16) | low;
+  return [
+    (value >>> 24) & 0xff,
+    (value >>> 16) & 0xff,
+    (value >>> 8) & 0xff,
+    value & 0xff,
+  ].join('.');
+}
+
 // Blocks IP-literal private networks only. Hostname DNS resolution and
 // rebinding protection require an async lookup or socket-level remoteAddress check.
 function isPrivateNetworkIp(hostname: string): boolean {
@@ -195,6 +250,10 @@ function isPrivateNetworkIp(hostname: string): boolean {
   const normalizedIpv4Translated = readIpv4TranslatedIpv6(host);
   if (normalizedIpv4Translated) {
     return isPrivateNetworkIp(normalizedIpv4Translated);
+  }
+  const normalizedNat64 = readNat64Ipv6(host);
+  if (normalizedNat64) {
+    return isPrivateNetworkIp(normalizedNat64);
   }
   if (host.startsWith('::ffff:')) {
     return true;

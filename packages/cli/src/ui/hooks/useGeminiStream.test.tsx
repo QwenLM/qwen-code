@@ -946,7 +946,7 @@ describe('useGeminiStream', () => {
       [{ text: 'listen' }, audioPart],
       expect.any(AbortSignal),
       expect.any(String),
-      expect.objectContaining({ modelOverride: 'audio-model' }),
+      expect.objectContaining({ modelOverride: 'audio-model\0' }),
     );
   });
 
@@ -3814,9 +3814,6 @@ describe('useGeminiStream', () => {
     };
     const resolvedTextPart: Part = { text: queuedPrompt };
     const transcriptPart: Part = { text: '[mid-turn audio transcript]' };
-    Object.assign(mockConfig, {
-      getEffectiveInputModalities: () => ({}),
-    });
     mockLoadedSettings.merged.voiceModel = 'qwen3-asr-flash';
     mockRunAudioBridge.mockResolvedValue({
       status: 'ok',
@@ -3944,8 +3941,12 @@ describe('useGeminiStream', () => {
     };
     const resolvedTextPart: Part = { text: queuedPrompt };
     const transcriptPart: Part = { text: '[mid-turn audio transcript]' };
+    const resolveForModel = vi.fn().mockResolvedValue({
+      contentGeneratorConfig: { modalities: {} },
+    });
     Object.assign(mockConfig, {
-      getEffectiveInputModalities: () => ({}),
+      getEffectiveInputModalities: () => ({ audio: true }),
+      getBaseLlmClient: () => ({ resolveForModel }),
     });
     mockLoadedSettings.merged.voiceModel = 'qwen3-asr-flash';
     mockRunAudioBridge.mockResolvedValue({
@@ -4048,12 +4049,19 @@ describe('useGeminiStream', () => {
       settings: mockLoadedSettings,
       parts: [resolvedTextPart, resolvedAudioPart],
       signal: expect.any(AbortSignal),
+      targetSupportsAudio: false,
+    });
+    expect(resolveForModel).toHaveBeenCalledWith('skill-model', {
+      failClosed: true,
     });
     expect(mockSendMessageStream).toHaveBeenCalledWith(
       [...toolCallResponseParts, transcriptPart],
       expect.any(AbortSignal),
       'prompt-id-midturn-audio-skill-override',
-      expect.objectContaining({ type: SendMessageType.ToolResult }),
+      expect.objectContaining({
+        type: SendMessageType.ToolResult,
+        modelOverride: 'skill-model\0',
+      }),
     );
     expect(mockAddItem).not.toHaveBeenCalledWith(
       expect.objectContaining({
@@ -8697,7 +8705,7 @@ describe('useGeminiStream', () => {
         });
         await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
         expect(mockSendMessageStream.mock.calls[0][3]).toMatchObject({
-          modelOverride: 'inline-model',
+          modelOverride: 'inline-model\0',
         });
         expect(mockRunVisionBridge).not.toHaveBeenCalled();
 
@@ -8745,7 +8753,7 @@ describe('useGeminiStream', () => {
         await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
         expect(mockSendMessageStream.mock.calls[0][3]).toMatchObject({
           type: SendMessageType.ToolResult,
-          modelOverride: 'inline-model',
+          modelOverride: 'inline-model\0',
         });
       });
 
@@ -8765,7 +8773,7 @@ describe('useGeminiStream', () => {
         });
         await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
         expect(mockSendMessageStream.mock.calls[0][3]).toMatchObject({
-          modelOverride: 'inline-model',
+          modelOverride: 'inline-model\0',
         });
 
         mockSendMessageStream.mockClear();
@@ -8815,7 +8823,7 @@ describe('useGeminiStream', () => {
         });
         await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
         expect(mockSendMessageStream.mock.calls[0][3]).toMatchObject({
-          modelOverride: 'inline-model',
+          modelOverride: 'inline-model\0',
         });
 
         mockSendMessageStream.mockClear();
@@ -8834,7 +8842,7 @@ describe('useGeminiStream', () => {
         await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
         expect(mockSendMessageStream.mock.calls[0][3]).toMatchObject({
           type: SendMessageType.Notification,
-          modelOverride: 'inline-model',
+          modelOverride: 'inline-model\0',
         });
 
         mockSendMessageStream.mockClear();

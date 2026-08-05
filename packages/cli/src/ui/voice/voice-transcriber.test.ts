@@ -614,6 +614,39 @@ describe('voice-transcriber', () => {
     ).rejects.toThrow(/private-network address/);
   });
 
+  it.each([
+    '64:ff9b::a9fe:a9fe',
+    '64:ff9b::a00:1',
+    '64:ff9b:1:a9fe:a9:fe00::',
+    '64:ff9b:1:a00:0:100::',
+    '64:ff9b:1::a9fe:a9fe',
+  ])('rejects private IPv4 embedded in NAT64 address %s', async (address) => {
+    await expect(
+      assertVoiceBaseUrlNetworkAllowed(
+        {
+          model: 'qwen3-asr-flash',
+          baseUrl: 'https://asr.example/v1',
+        },
+        vi.fn().mockResolvedValue({ address }),
+      ),
+    ).rejects.toThrow(/private-network address/);
+  });
+
+  it.each(['64:ff9b::808:808', '64:ff9b:1:808:8:800::'])(
+    'allows public IPv4 embedded in NAT64 address %s',
+    async (address) => {
+      await expect(
+        assertVoiceBaseUrlNetworkAllowed(
+          {
+            model: 'qwen3-asr-flash',
+            baseUrl: 'https://asr.example/v1',
+          },
+          vi.fn().mockResolvedValue({ address }),
+        ),
+      ).resolves.toBeUndefined();
+    },
+  );
+
   it('blocks compressed IPv4-mapped IPv6 literals via the blanket rule', async () => {
     await expect(
       assertVoiceBaseUrlNetworkAllowed(

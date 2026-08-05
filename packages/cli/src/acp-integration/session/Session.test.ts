@@ -5189,6 +5189,103 @@ describe('Session', () => {
       }
     });
 
+    it('reads audio @ paths for an audio-capable primary model', async () => {
+      const tempDir = await fs.realpath(
+        await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-audiocap-')),
+      );
+      const audioPath = path.join(tempDir, 'recording.wav');
+      await fs.writeFile(audioPath, 'audio');
+      mockConfig.getProjectRoot = vi.fn().mockReturnValue(tempDir);
+      mockConfig.getWorkspaceContext = vi.fn().mockReturnValue({
+        isPathWithinWorkspace: (pathSpec: string) =>
+          path.resolve(tempDir, pathSpec).startsWith(`${tempDir}${path.sep}`),
+      });
+      mockConfig.getEffectiveInputModalities = vi
+        .fn()
+        .mockReturnValue({ audio: true });
+      const readManyFilesSpy = vi
+        .spyOn(core, 'readManyFiles')
+        .mockResolvedValue({
+          contentParts: {
+            inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+          },
+        } as Awaited<ReturnType<typeof core.readManyFiles>>);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: `listen to @${audioPath}` }],
+        });
+
+        expect(readManyFilesSpy).toHaveBeenCalledWith(
+          mockConfig,
+          expect.objectContaining({
+            paths: [audioPath],
+            preserveUnsupportedAudioForBridge: true,
+          }),
+        );
+        expect(firstSentMessage().some((part) => 'inlineData' in part)).toBe(
+          true,
+        );
+      } finally {
+        readManyFilesSpy.mockRestore();
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it('fails closed after reading an audio @ path without a voice model', async () => {
+      const tempDir = await fs.realpath(
+        await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-no-voice-')),
+      );
+      const audioPath = path.join(tempDir, 'recording.wav');
+      await fs.writeFile(audioPath, 'audio');
+      mockConfig.getProjectRoot = vi.fn().mockReturnValue(tempDir);
+      mockConfig.getWorkspaceContext = vi.fn().mockReturnValue({
+        isPathWithinWorkspace: (pathSpec: string) =>
+          path.resolve(tempDir, pathSpec).startsWith(`${tempDir}${path.sep}`),
+      });
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      Object.assign(mockSettings.merged as Record<string, unknown>, {
+        voiceModel: undefined,
+      });
+      const readManyFilesSpy = vi
+        .spyOn(core, 'readManyFiles')
+        .mockResolvedValue({
+          contentParts: {
+            inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+          },
+        } as Awaited<ReturnType<typeof core.readManyFiles>>);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: `listen to @${audioPath}` }],
+        });
+
+        expect(readManyFilesSpy).toHaveBeenCalledWith(
+          mockConfig,
+          expect.objectContaining({
+            paths: [audioPath],
+            preserveUnsupportedAudioForBridge: true,
+          }),
+        );
+        const sent = firstSentMessage();
+        expect(sent.some((part) => 'inlineData' in part)).toBe(false);
+        expect(textParts(sent)).toContainEqual(
+          expect.stringContaining('no voice model is configured'),
+        );
+      } finally {
+        readManyFilesSpy.mockRestore();
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
     it('resolves image @ paths from ACP text through the vision bridge', async () => {
       const tempDir = await fs.realpath(
         await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-image-')),
@@ -5239,6 +5336,7 @@ describe('Session', () => {
           paths: [imagePath],
           signal: expect.any(AbortSignal),
           preserveUnsupportedImageForBridge: true,
+          preserveUnsupportedAudioForBridge: true,
           validatedPathIdentities: expect.any(Map),
           displayPaths: new Map([[imagePath, imagePath]]),
         });
@@ -12457,6 +12555,7 @@ describe('Session', () => {
 
         expect(readManyFilesSpy).toHaveBeenCalledWith(mockConfig, {
           paths: [canonicalFilePath],
+          preserveUnsupportedAudioForBridge: true,
           signal: expect.any(AbortSignal),
           validatedPathIdentities: expect.any(Map),
           displayPaths: new Map([[canonicalFilePath, fileName]]),

@@ -1190,14 +1190,9 @@ export const useGeminiStream = (
       let nextParts = parts;
       if (nextParts !== null && hasAudioParts(nextParts)) {
         const activeOverride = modelOverrideRef.current;
-        // Only an explicit inline `/model <id> <prompt>` override is a
-        // user-chosen route whose audio capability must gate the parts.
-        // Internal overrides (full-turn vision, skill tools) still route
-        // audio through the voice bridge like the no-override case.
-        if (
-          inlineModelOverrideActiveRef.current &&
-          activeOverride !== undefined
-        ) {
+        let shouldRunBridge = activeOverride === undefined;
+        let targetSupportsAudio: boolean | undefined;
+        if (activeOverride !== undefined) {
           const routeSelector = activeOverride.endsWith('\0')
             ? activeOverride.slice(0, -1)
             : activeOverride;
@@ -1215,23 +1210,32 @@ export const useGeminiStream = (
               }`,
             );
           }
+          targetSupportsAudio = supportsAudio;
           if (!supportsAudio) {
-            const reason = 'the active model override does not support audio';
-            nextParts = replaceAudioPartsWithUnavailable(nextParts, reason);
-            addItem(
-              {
-                type: MessageType.ERROR,
-                text: `Audio was not sent: ${reason}.`,
-              },
-              timestamp,
-            );
+            if (inlineModelOverrideActiveRef.current) {
+              const reason = 'the active model override does not support audio';
+              nextParts = replaceAudioPartsWithUnavailable(nextParts, reason);
+              addItem(
+                {
+                  type: MessageType.ERROR,
+                  text: `Audio was not sent: ${reason}.`,
+                },
+                timestamp,
+              );
+            } else {
+              shouldRunBridge = true;
+            }
           }
-        } else {
+        }
+        if (shouldRunBridge) {
           const result = await runAudioBridge({
             config,
             settings,
             parts: nextParts,
             signal,
+            ...(targetSupportsAudio === undefined
+              ? {}
+              : { targetSupportsAudio }),
           });
           if (result.status !== 'skipped' || result.egressCount > 0) {
             addItem(
@@ -3327,11 +3331,16 @@ export const useGeminiStream = (
             dualOutput.emitUserMessage(userParts);
           }
 
+          const activeModelOverride = modelOverrideRef.current;
           const sendOptions = {
             type: submitType,
             notificationDisplayText: metadata?.notificationDisplayText,
             todoWorkChainId: metadata?.todoWorkChainId,
-            modelOverride: modelOverrideRef.current,
+            modelOverride:
+              activeModelOverride === undefined ||
+              activeModelOverride.endsWith('\0')
+                ? activeModelOverride
+                : `${activeModelOverride}\0`,
             steerInput: metadata?.steerInput,
             ...(submittedPrompt !== undefined ? { submittedPrompt } : {}),
             ...(!allowConcurrentBtwDuringResponse && midTurnDrainRef

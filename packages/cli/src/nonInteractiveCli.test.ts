@@ -1328,6 +1328,9 @@ describe('runNonInteractive', () => {
 
   it('does not bridge audio when a slash prompt selects an audio model', async () => {
     setupMetricsMock();
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: vi.fn().mockReturnValue({}),
+    });
     const mockCommand = {
       name: 'audio-model',
       description: 'submit audio to another model',
@@ -1374,7 +1377,7 @@ describe('runNonInteractive', () => {
       'prompt-audio-model',
       {
         type: SendMessageType.UserQuery,
-        modelOverride: 'audio-model',
+        modelOverride: 'audio-model\0',
       },
     );
   });

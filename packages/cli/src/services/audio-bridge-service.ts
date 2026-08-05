@@ -119,14 +119,15 @@ export async function runAudioBridge(params: {
   settings: LoadedSettings;
   parts: PartListUnion;
   signal: AbortSignal;
+  targetSupportsAudio?: boolean;
 }): Promise<AudioBridgeResult> {
   const { config, settings, signal } = params;
   const parts = normalizeParts(params.parts);
   const audioCount = parts.filter(isAudioPart).length;
-  if (
-    audioCount === 0 ||
-    config.getEffectiveInputModalities?.().audio === true
-  ) {
+  const targetSupportsAudio =
+    params.targetSupportsAudio ??
+    config.getEffectiveInputModalities?.().audio === true;
+  if (audioCount === 0 || targetSupportsAudio) {
     return {
       status: 'skipped',
       parts,

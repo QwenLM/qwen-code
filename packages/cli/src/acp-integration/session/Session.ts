@@ -182,7 +182,6 @@ import {
   formatAudioBridgeNotice,
   hasAudioParts,
   runAudioBridge,
-  shouldPreserveUnsupportedAudioForBridge,
 } from '../../services/audio-bridge-service.js';
 import {
   inactiveExtensionSkillRefs,
@@ -9290,9 +9289,6 @@ export class Session implements SessionContext {
     const preserveUnsupportedImageForBridge = shouldRunVisionBridge(
       this.config,
     );
-    const preserveUnsupportedAudioForBridge =
-      shouldPreserveUnsupportedAudioForBridge(this.config, this.settings);
-
     const parts = message.map((part) => {
       switch (part.type) {
         case 'text':
@@ -9310,8 +9306,7 @@ export class Session implements SessionContext {
             const mimeType = getSpecificMimeType(canonicalPath);
             const bridgeCanRead =
               mimeType?.startsWith('image/') === true ||
-              (preserveUnsupportedAudioForBridge &&
-                mimeType?.startsWith('audio/') === true);
+              mimeType?.startsWith('audio/') === true;
             if (
               bridgeCanRead &&
               this.config
@@ -9409,8 +9404,7 @@ export class Session implements SessionContext {
           (textPathSpecsToRead.has(textPath) &&
             !(
               getSpecificMimeType(textPath)?.startsWith('image/') === true ||
-              (preserveUnsupportedAudioForBridge &&
-                getSpecificMimeType(textPath)?.startsWith('audio/') === true)
+              getSpecificMimeType(textPath)?.startsWith('audio/') === true
             )) ||
           this.config
             .getFileService()
@@ -9501,9 +9495,7 @@ export class Session implements SessionContext {
         ...(preserveUnsupportedImageForBridge
           ? { preserveUnsupportedImageForBridge }
           : {}),
-        ...(preserveUnsupportedAudioForBridge
-          ? { preserveUnsupportedAudioForBridge }
-          : {}),
+        preserveUnsupportedAudioForBridge: true,
         ...(validatedPathIdentities.size > 0
           ? { validatedPathIdentities }
           : {}),
@@ -9520,7 +9512,7 @@ export class Session implements SessionContext {
           referenceParts.push({ text: part });
         } else if (
           (preserveUnsupportedImageForBridge && hasImageParts([part])) ||
-          (preserveUnsupportedAudioForBridge && hasAudioParts([part]))
+          hasAudioParts([part])
         ) {
           referenceParts.push(part);
         } else {
@@ -9547,7 +9539,7 @@ export class Session implements SessionContext {
         };
         const preserveForBridge =
           (preserveUnsupportedImageForBridge && hasImageParts([inlinePart])) ||
-          (preserveUnsupportedAudioForBridge && hasAudioParts([inlinePart]));
+          hasAudioParts([inlinePart]);
         referenceParts.push(
           preserveForBridge ? inlinePart : clampInlineMediaPart(inlinePart),
         );

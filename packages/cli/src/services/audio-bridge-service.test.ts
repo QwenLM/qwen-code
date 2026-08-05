@@ -58,6 +58,31 @@ describe('audio bridge service', () => {
     expect(transcribeVoiceAudio).not.toHaveBeenCalled();
   });
 
+  it('transcribes for a text-only target even when the session model supports audio', async () => {
+    transcribeVoiceAudio.mockImplementation(
+      async (_audio: unknown, options: { onEgress?: () => void }) => {
+        options.onEgress?.();
+        return 'target transcript';
+      },
+    );
+
+    const result = await runAudioBridge({
+      config: config(true),
+      settings: settings('qwen3-asr-flash'),
+      parts: [audio()],
+      signal: new AbortController().signal,
+      targetSupportsAudio: false,
+    });
+
+    expect(result).toMatchObject({
+      status: 'ok',
+      convertedCount: 1,
+      egressCount: 1,
+    });
+    expect(result.parts[0]?.text).toContain('target transcript');
+    expect(transcribeVoiceAudio).toHaveBeenCalledTimes(1);
+  });
+
   it('replaces audio with an untrusted transcript for a text-only model', async () => {
     const controller = new AbortController();
     let capturedAbortSignal: AbortSignal | undefined;

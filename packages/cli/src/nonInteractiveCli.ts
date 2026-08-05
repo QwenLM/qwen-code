@@ -1480,7 +1480,11 @@ export async function runNonInteractive(
       let isFirstGoalSegment = activeGoalTurn !== undefined;
       let hasUnsentToolResponse = false;
       let modelOverride: string | undefined =
-        inlineModelOverride ?? fullTurnModelOverride;
+        inlineModelOverride === undefined
+          ? fullTurnModelOverride
+          : inlineModelOverride.endsWith('\0')
+            ? inlineModelOverride
+            : `${inlineModelOverride}\0`;
       // An explicit inline `/model <id> <prompt>` override wins for the whole
       // turn: while active, skill-tool `modelOverride` writes (including the
       // undefined-clears case) are skipped so they cannot silently revert the
