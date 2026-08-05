@@ -38,6 +38,10 @@ describe('substituteHookVariables', () => {
               type: HookType.Command as const,
               command: '${CLAUDE_PLUGIN_ROOT}/scripts/setup.sh',
             },
+            {
+              type: HookType.Command as const,
+              command: '${extensionPath}/scripts/init.sh',
+            },
           ],
         },
       ],
@@ -50,6 +54,9 @@ describe('substituteHookVariables', () => {
     expect(
       (result!['PreToolUse']![0].hooks![0] as { command: string }).command,
     ).toBe('/path/to/plugin/scripts/setup.sh');
+    expect(
+      (result!['PreToolUse']![0].hooks![1] as { command: string }).command,
+    ).toBe('/path/to/plugin/scripts/init.sh');
   });
 
   it('should handle multiple hooks with variables', () => {

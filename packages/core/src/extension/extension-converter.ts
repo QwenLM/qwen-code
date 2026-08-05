@@ -14,6 +14,8 @@ import {
 import {
   convertClaudePluginPackage,
   convertClaudePluginStandalone,
+  isClaudePluginConfig,
+  isClaudePluginStandaloneConfig,
 } from './claude-converter.js';
 import type {
   ExtensionNetworkPolicy,
@@ -40,13 +42,13 @@ export async function convertGeminiOrClaudeExtension(
     extensionDir,
     SUPPORTED_EXTENSION_MANIFESTS[0],
   );
+  // Prefer Claude manifests when present
   if (fs.existsSync(configFilePath)) {
     newExtensionDir = extensionDir;
-  } else if (isGeminiExtensionConfig(extensionDir)) {
-    newExtensionDir = (await convertGeminiExtensionPackage(extensionDir))
-      .convertedDir;
-    originSource = 'Gemini';
-  } else if (pluginName) {
+  } else if (
+    pluginName &&
+    isClaudePluginConfig(extensionDir, { extensionSource: '', pluginName })
+  ) {
     newExtensionDir = (
       await convertClaudePluginPackage(
         extensionDir,
@@ -56,12 +58,14 @@ export async function convertGeminiOrClaudeExtension(
       )
     ).convertedDir;
     originSource = 'Claude';
-  } else if (
-    fs.existsSync(path.join(extensionDir, SUPPORTED_EXTENSION_MANIFESTS[3]))
-  ) {
+  } else if (isClaudePluginStandaloneConfig(extensionDir)) {
     newExtensionDir = (await convertClaudePluginStandalone(extensionDir))
       .convertedDir;
     originSource = 'Claude';
+  } else if (isGeminiExtensionConfig(extensionDir)) {
+    newExtensionDir = (await convertGeminiExtensionPackage(extensionDir))
+      .convertedDir;
+    originSource = 'Gemini';
   }
   signal?.throwIfAborted();
   return { extensionDir: newExtensionDir, originSource };

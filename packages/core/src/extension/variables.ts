@@ -82,9 +82,10 @@ export function recursivelyHydrateStrings(
 }
 
 /**
- * Substitute variables in hook configurations, particularly ${CLAUDE_PLUGIN_ROOT}
+ * Substitute variables in hook configurations, in particular ${CLAUDE_PLUGIN_ROOT}
+ * (Claude plugins) and ${extensionPath} (Gemini extensions)
  * @param hooks - The hooks configuration object
- * @param basePath - The path to substitute for ${CLAUDE_PLUGIN_ROOT}
+ * @param basePath - The path to substitute for the path variables
  * @returns A deep cloned hooks object with variables substituted
  */
 export function substituteHookVariables(
@@ -96,7 +97,7 @@ export function substituteHookVariables(
   // Deep clone the hooks to avoid modifying the original
   const clonedHooks = JSON.parse(JSON.stringify(hooks));
 
-  // Replace ${CLAUDE_PLUGIN_ROOT} with the actual extension path in all command hooks
+  // Replace the path variables with the actual extension path in all command hooks
   for (const eventName in clonedHooks) {
     const eventHooks = clonedHooks[eventName as HookEventName];
     if (eventHooks && Array.isArray(eventHooks)) {
@@ -105,7 +106,7 @@ export function substituteHookVariables(
           for (const hook of hookDef.hooks) {
             if (hook.type === 'command' && hook.command) {
               hook.command = hook.command.replace(
-                /\$\{CLAUDE_PLUGIN_ROOT\}/g,
+                /\$\{(CLAUDE_PLUGIN_ROOT|extensionPath)\}/g,
                 basePath,
               );
             }

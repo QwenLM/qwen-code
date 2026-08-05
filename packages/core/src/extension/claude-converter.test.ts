@@ -13,6 +13,7 @@ import {
   convertClaudeAgentConfig,
   mergeClaudeConfigs,
   isClaudePluginConfig,
+  isClaudePluginStandaloneConfig,
   convertClaudePluginPackage,
   convertClaudePluginStandalone,
   normalizeClaudeMcpServer,
@@ -208,6 +209,54 @@ describe('isClaudePluginConfig', () => {
     expect(typeof isClaudePluginConfig(extensionDir, marketplace)).toBe(
       'boolean',
     );
+  });
+});
+
+describe('isClaudePluginStandaloneConfig', () => {
+  let testDir: string;
+
+  beforeEach(() => {
+    testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-standalone-test-'));
+  });
+
+  afterEach(() => {
+    if (fs.existsSync(testDir)) {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns true when plugin.json exists with a name', () => {
+    fs.mkdirSync(path.join(testDir, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(testDir, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'test-plugin', version: '1.0.0' }),
+    );
+
+    expect(isClaudePluginStandaloneConfig(testDir)).toBe(true);
+  });
+
+  it('returns false when plugin.json is absent', () => {
+    expect(isClaudePluginStandaloneConfig(testDir)).toBe(false);
+  });
+
+  it('returns false for invalid JSON content', () => {
+    fs.mkdirSync(path.join(testDir, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(testDir, '.claude-plugin', 'plugin.json'),
+      'null',
+    );
+
+    expect(isClaudePluginStandaloneConfig(testDir)).toBe(false);
+  });
+
+  it('returns false when plugin.json lacks a name', () => {
+    fs.mkdirSync(path.join(testDir, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(testDir, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ version: '1.0.0' }),
+    );
+
+    expect(isClaudePluginStandaloneConfig(testDir)).toBe(false);
   });
 });
 
@@ -804,7 +853,7 @@ describe('convertClaudePluginPackage', () => {
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });
 
-  it('should convert hooks from Claude plugin format to Qwen format with variable substitution', async () => {
+  it('should keep the hooks string path unresolved for runtime loading', async () => {
     // Setup: Create a plugin with hooks in Claude format
     const pluginSourceDir = path.join(testDir, 'plugin-with-hooks');
     fs.mkdirSync(pluginSourceDir, { recursive: true });
@@ -868,14 +917,9 @@ describe('convertClaudePluginPackage', () => {
       'hooks-plugin',
     );
 
-    // Verify: The converted config should contain processed hooks
-    expect(result.config.hooks).toBeDefined();
-    expect(result.config.hooks!['PostToolUse']).toHaveLength(1);
-    // Check that the variable was substituted
-    expect(
-      (result.config.hooks!['PostToolUse']![0].hooks![0] as { command: string })
-        .command,
-    ).toBe(`${pluginSourceDir}/scripts/post-install.sh`);
+    // Verify: the string hooks path is preserved; the hook file is loaded at
+    // runtime against the installed directory (see loadExtension).
+    expect(result.config.hooks).toBe('./hooks/hooks.json');
 
     // Clean up converted directory
     fs.rmSync(result.convertedDir, { recursive: true, force: true });

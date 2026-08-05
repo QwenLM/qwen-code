@@ -30,7 +30,6 @@ import {
 } from '../utils/yaml-parser.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent, stripAnsiAndControl } from '../utils/textUtils.js';
-import { substituteHookVariables } from './variables.js';
 
 const debugLogger = createDebugLogger('CLAUDE_CONVERTER');
 
@@ -410,11 +409,11 @@ export function convertClaudeToQwenConfig(
   }
 
   // Parse hooks
-  let hooks: { [K in HookEventName]?: HookDefinition[] } | undefined;
+  let hooks: ExtensionConfig['hooks'] | undefined;
   if (claudeConfig.hooks) {
     if (typeof claudeConfig.hooks === 'string') {
-      // If it's a string, it's a file path, we handle it later in the conversion process
-      // hooks will be loaded from file path in the convertClaudePluginPackage function
+      // Keep the string path; the hook file is loaded at runtime (see loadExtension).
+      hooks = claudeConfig.hooks;
     } else {
       // Assume it's already in the correct format
       hooks = claudeConfig.hooks as { [K in HookEventName]?: HookDefinition[] };
@@ -651,38 +650,6 @@ async function buildQwenExtensionFromPlugin(
         fs.existsSync(folderPath)
       ) {
         fs.rmSync(folderPath, { recursive: true, force: true });
-      }
-    }
-
-    // Handle hooks from a file path if needed.
-    if (mergedConfig.hooks && typeof mergedConfig.hooks === 'string') {
-      const hooksPath = resolvePluginRelativeFile(
-        pluginSource,
-        mergedConfig.hooks,
-      );
-
-      if (hooksPath && fs.existsSync(hooksPath)) {
-        try {
-          const hooksContent = fs.readFileSync(hooksPath, 'utf-8');
-          const parsedHooks = JSON.parse(hooksContent);
-
-          let hooksData;
-          if (parsedHooks.hooks && typeof parsedHooks.hooks === 'object') {
-            hooksData = parsedHooks.hooks as {
-              [K in HookEventName]?: HookDefinition[];
-            };
-          } else {
-            hooksData = parsedHooks as {
-              [K in HookEventName]?: HookDefinition[];
-            };
-          }
-
-          mergedConfig.hooks = substituteHookVariables(hooksData, pluginSource);
-        } catch (error) {
-          debugLogger.warn(
-            `Failed to parse hooks file ${hooksPath}: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        }
       }
     }
 
@@ -1010,6 +977,38 @@ export function isClaudePluginConfig(
   if (!marketplacePluginObj) return false;
 
   return true;
+}
+
+/**
+ * Checks if a directory is a standalone Claude plugin, i.e. it carries a
+ * `.claude-plugin/plugin.json` manifest.
+ * @param extensionDir The extension directory to check
+ * @returns true if the directory is a standalone Claude plugin
+ */
+export function isClaudePluginStandaloneConfig(extensionDir: string): boolean {
+  const pluginJsonPath = path.join(
+    extensionDir,
+    '.claude-plugin',
+    'plugin.json',
+  );
+  if (!fs.existsSync(pluginJsonPath)) {
+    return false;
+  }
+  // A symlinked manifest that escapes the package is treated as absent
+  if (!realPathWithin(pluginJsonPath, extensionDir)) {
+    return false;
+  }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(pluginJsonPath, 'utf-8'));
+    return (
+      typeof parsed === 'object' &&
+      parsed !== null &&
+      !Array.isArray(parsed) &&
+      typeof (parsed as { name?: unknown }).name === 'string'
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**

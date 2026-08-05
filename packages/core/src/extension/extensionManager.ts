@@ -167,7 +167,7 @@ export interface ExtensionConfig {
   skills?: string | string[];
   agents?: string | string[];
   settings?: ExtensionSetting[];
-  hooks?: { [K in HookEventName]?: HookDefinition[] };
+  hooks?: string | { [K in HookEventName]?: HookDefinition[] };
   channels?: Record<string, ExtensionChannelConfig>;
 }
 
