@@ -31,6 +31,7 @@ const HOST_READY_DELAY_MS = 50;
 const REMOTE_HOST_EXIT_POLL_MS = 5000;
 const UNIX_SOCKET_PATH_LIMIT = 100;
 const MAX_PTY_HOST_REQUEST_LINE_BYTES = 1024 * 1024;
+const MAX_PTY_HOST_RESPONSE_LINE_BYTES = 1024 * 1024;
 const PTY_HOST_AUTH_TOKEN_ENV = 'QWEN_AGENT_VIEW_PTY_HOST_TOKEN';
 const ALLOWED_KILL_SIGNALS = new Set<NodeJS.Signals>([
   'SIGINT',
@@ -345,7 +346,8 @@ export function getAgentViewPtyHostSocketPath(
   if (Buffer.byteLength(candidate) < UNIX_SOCKET_PATH_LIMIT) {
     return candidate;
   }
-  return path.join(os.tmpdir(), `qwen-agent-pty-${digest}.sock`);
+  const uid = typeof process.getuid === 'function' ? process.getuid() : 'user';
+  return path.join(os.tmpdir(), `qwen-agent-pty-${uid}`, `${digest}.sock`);
 }
 
 async function callAgentViewPtyHost(
@@ -374,6 +376,13 @@ class AgentViewPtyHostRequestError extends Error {
   ) {
     super(message);
     this.name = 'AgentViewPtyHostRequestError';
+  }
+}
+
+class AgentViewPtyHostProtocolError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AgentViewPtyHostProtocolError';
   }
 }
 
@@ -412,6 +421,18 @@ async function requestAgentViewPtyHost(
     });
     socket.on('data', (chunk) => {
       buffer += chunk;
+      if (
+        Buffer.byteLength(buffer, 'utf8') > MAX_PTY_HOST_RESPONSE_LINE_BYTES
+      ) {
+        finish(
+          undefined,
+          new AgentViewPtyHostProtocolError(
+            'Agent View PTY host response line is too large.',
+          ),
+        );
+        socket.destroy();
+        return;
+      }
       const newline = buffer.indexOf('\n');
       if (newline === -1) return;
       try {
@@ -687,8 +708,9 @@ async function waitForPtyHost(
       }
     } catch (error) {
       if (
-        error instanceof AgentViewPtyHostRequestError &&
-        error.code === 'unauthorized'
+        error instanceof AgentViewPtyHostProtocolError ||
+        (error instanceof AgentViewPtyHostRequestError &&
+          error.code === 'unauthorized')
       ) {
         throw error;
       }
