@@ -341,9 +341,10 @@ interface BuildTestArgs {
    * per-command deadline). Measured from the top of the call — install and
    * build time count against it. The closure's per-command deadlines SUM, and
    * a large one sums past the tool timeout the brief welds onto the call —
-   * whose outer kill discards the report. The test loop stops before a
-   * command whose deadline would cross this budget and discloses the suites
-   * that did not run.
+   * whose outer kill discards the report. Each suite is attempted with
+   * whatever of this budget remains (a suite killed at the boundary is
+   * reported as a timeout — infrastructure, not a finding); only suites never
+   * attempted are named in `notRun`.
    */
   budget?: number;
   /**
@@ -775,7 +776,7 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
         : `\`${failure.command}\` failed. Correlate the errors below with the diff: a ` +
           'compile error in a file the PR changed is a Critical; one in a file it did not ' +
           'touch is a pre-existing failure, and belongs in the terminal, not on the PR.';
-      results.buildSet = set;
+      results.buildSet = rootBuildRuns ? set : set.filter((d) => d !== '.');
       results.widenedWith = [...widened];
       return results;
     }
@@ -800,7 +801,10 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     set = buildSetFor(affected, scopeGraph, alsoBuild);
   }
 
-  results.buildSet = set;
+  // The build set reports what was (to be) BUILT: a fan-out root whose build
+  // was skipped — an aggregator the loop already covered member by member —
+  // must not linger in it, or the report names a build that never ran.
+  results.buildSet = rootBuildRuns ? set : set.filter((d) => d !== '.');
   results.widenedWith = [...widened];
 
   // Test what the diff can break: the changed workspaces plus their
@@ -824,10 +828,13 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   // Those per-command deadlines SUM, though, and a large closure can sum past
   // the whole-call ceiling the brief welds on (600s by default) — the outer
   // shell kill then discards the report entirely. So the loop below runs
-  // against a whole-call budget: when the next command's deadline would cross
-  // it, the loop stops and names the suites that did not run. A partial
-  // report is signal; a discarded one is the "71 timeouts, nothing verified"
-  // failure this command exists to end.
+  // against a whole-call budget: every suite is ATTEMPTED with whatever of
+  // the budget remains, up to its own deadline. A suite killed at the budget
+  // boundary is a timeout — already framed as infrastructure — and a partial
+  // attempt is signal where a never-attempted suite is none. Only a fully
+  // spent budget names suites not run. A partial report is signal; a
+  // discarded one is the "71 timeouts, nothing verified" failure this command
+  // exists to end.
   const rootHasTest = !!rootPkg?.scripts.includes('test');
   const testDirs = args.buildOnly
     ? []
@@ -848,11 +855,16 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   ];
   const notRun: string[] = [];
   for (let i = 0; i < runnableDirs.length; i++) {
-    if (Date.now() - runStarted + perCommandMs > callBudgetMs) {
+    const remainingMs = callBudgetMs - (Date.now() - runStarted);
+    if (remainingMs <= 0) {
       notRun.push(...runnableDirs.slice(i));
       break;
     }
-    const r = exec(testCommand(runnableDirs[i]), root, perCommandMs);
+    const r = exec(
+      testCommand(runnableDirs[i]),
+      root,
+      Math.min(perCommandMs, remainingMs),
+    );
     results.test.push(r);
     if (r.timedOut) results.timedOut.push(r.command);
     if (r.exitCode !== 0) results.ok = false;
@@ -1020,9 +1032,11 @@ export const buildTestCommand: CommandModule = {
           'Whole-call wall-clock budget in seconds, measured from the top of ' +
           'the call — install and build time count against it (default: 2× ' +
           '--timeout minus 30s of headroom for process startup and the report ' +
-          'write). The test loop stops before a command whose deadline would ' +
-          'cross it and names the suites that did not run — a partial report ' +
-          'survives where the outer shell kill would discard the whole one.',
+          'write). Each suite is attempted with whatever of the budget ' +
+          'remains — a suite killed at the boundary is a timeout, reported as ' +
+          'infrastructure — and only suites never attempted are named notRun. ' +
+          'A partial report survives where the outer shell kill would discard ' +
+          'the whole one.',
       })
       .option('install', {
         type: 'boolean',

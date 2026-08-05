@@ -436,11 +436,12 @@ describe('rootScriptFansOut', () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  it('does not fire on -w/--workspace (singular) or a plain suite', () => {
+  it('does not fire on -w/--workspace (singular), an explicit opt-out, or a plain suite', () => {
     for (const script of [
       'vitest',
       'npm test --workspace=packages/cli',
       'npm test -w packages/cli',
+      'vitest run --workspaces=false',
     ]) {
       const root = withRootScript('test', script);
       expect(rootScriptFansOut(root, 'test')).toBe(false);

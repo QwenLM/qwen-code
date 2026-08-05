@@ -246,10 +246,12 @@ export function rootScriptFansOut(
   }
   const text = pkg?.scripts?.[script];
   // `--workspaces` and npm's `-ws`/`--ws` shorthands fan out; `-w`/`--workspace`
-  // (singular, one named workspace) deliberately do NOT match.
+  // (singular, one named workspace) deliberately do NOT match, and neither
+  // does an explicit opt-OUT like `--workspaces=false` — the flag must stand
+  // alone (whitespace or end), not merely prefix-match.
   return (
     typeof text === 'string' &&
-    /(^|\s)(--workspaces\b|--?ws(?=\s|$))/.test(text)
+    /(^|\s)(--workspaces(?=\s|$)|--?ws(?=\s|$))/.test(text)
   );
 }
 

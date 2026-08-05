@@ -1152,10 +1152,12 @@ describe('runBuildTest', () => {
     expect(rep.ok).toBe(true);
   });
 
-  it('stops at the whole-call budget and names the suites that did not run', () => {
-    // Two suites in the closure and a budget smaller than one deadline: the
-    // loop must stop BEFORE the first test command rather than let the outer
-    // shell kill discard the report — and name what did not run.
+  it('attempts every suite with the REMAINING budget and names only the never-attempted', () => {
+    // Three suites × ~600ms of real wall clock against a 1s budget: the first
+    // two run — the second with a deadline shortened to what remains — and
+    // only the third is named notRun. Reserving a full per-command deadline
+    // per suite (the old guard) would have run NONE of them for the same
+    // second of work.
     writeFileSync(
       join(root, 'package.json'),
       JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
@@ -1164,9 +1166,14 @@ describe('runBuildTest', () => {
       name: '@x/core',
       scripts: { build: 'exit 0', test: 'exit 0' },
     });
-    pkg('packages/leaf', {
-      name: '@x/leaf',
+    pkg('packages/a', {
+      name: '@x/a',
       dependencies: { '@x/core': '*' },
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/b', {
+      name: '@x/b',
+      dependencies: { '@x/a': '*' },
       scripts: { build: 'exit 0', test: 'exit 0' },
     });
     for (const island of ['i1', 'i2', 'i3']) {
@@ -1177,28 +1184,40 @@ describe('runBuildTest', () => {
     }
     writePlan(['packages/core/src/a.ts']);
 
+    const testCalls: Array<{ command: string; timeoutMs: number }> = [];
     const rep = runBuildTest({
       plan: planPath,
       worktree: root,
       timeout: 60,
       budget: 1,
       install: false,
-      exec: okExec,
+      exec: (command, _cwd, timeoutMs) => {
+        if (command.startsWith('npm test')) {
+          testCalls.push({ command, timeoutMs });
+          // Real wall clock, so the budget actually drains.
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 600);
+        }
+        return {
+          command,
+          exitCode: 0,
+          seconds: 1,
+          timedOut: false,
+          output: '',
+        };
+      },
     });
-    // The builds ran (each inside its own deadline); no 60s test deadline can
-    // fit inside a 1s whole-call budget, so the loop stopped first.
-    expect(rep.build.length).toBeGreaterThan(0);
-    expect(rep.test).toEqual([]);
-    // Structural, not just prose: `workspaces` names exactly what ran
-    // (nothing), `notRun` names what the budget trimmed.
-    expect(rep.testScope?.workspaces).toEqual([]);
-    expect(rep.testScope?.notRun).toEqual(['packages/core', 'packages/leaf']);
-    expect(rep.testScope?.caveat).toContain(
-      'not run: packages/core, packages/leaf',
-    );
-    expect(rep.testScope?.caveat).toContain('whole-call budget');
-    expect(rep.note).toContain('whole-call budget');
-    expect(rep.note).not.toContain('Everything passed');
+    // core (affected) and a ran — each attempted with a deadline shrunk to
+    // what the budget had left, never the full 60s.
+    expect(rep.test.map((t) => t.command)).toEqual([
+      'npm test --workspace="packages/core"',
+      'npm test --workspace="packages/a"',
+    ]);
+    expect(testCalls.every((c) => c.timeoutMs < 60_000)).toBe(true);
+    // Structural: workspaces names what ran (scope order), notRun what was
+    // never attempted.
+    expect(rep.testScope?.workspaces).toEqual(['packages/a', 'packages/core']);
+    expect(rep.testScope?.notRun).toEqual(['packages/b']);
+    expect(rep.note).toContain('not run: packages/b');
     expect(rep.ok).toBe(true);
   });
 
@@ -1296,9 +1315,10 @@ describe('runBuildTest', () => {
         };
       },
     });
-    // The root is in the build SET (its edges matter) but its aggregator
-    // build must not execute; the note must not claim it did.
-    expect(rep.buildSet).toContain('.');
+    // The root is in the graph (its edges matter) but its aggregator build
+    // must not execute — and must not linger in the reported build set, or
+    // the report names a build that never ran.
+    expect(rep.buildSet).not.toContain('.');
     expect(calls).not.toContain('npm run build');
     expect(rep.note).not.toContain('plus the root package');
     // The root's NON-fan-out test still runs as a dependent.
