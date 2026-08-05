@@ -293,17 +293,17 @@ describe('GlobTool', () => {
     });
 
     it('should allow path outside workspace (external path support)', async () => {
-      // A dedicated EMPTY dir outside the workspace, never literal /tmp:
-      // the glob really walks the path, and a loaded CI runner's littered
-      // /tmp made this time out at 15s repeatedly. The claim under test is
-      // only "no workspace-boundary refusal", which an empty outside dir
-      // proves deterministically.
-      const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'glob-ext-'));
+      // Shared /tmp made this walk time out on loaded runners — keep this
+      // dir dedicated and empty.
+      const outside = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'glob-external-'),
+      );
       try {
         const params: GlobToolParams = { pattern: '*.txt', path: outside };
         const invocation = globTool.build(params);
         // External path is now allowed - it should not return a workspace error
         const result = await invocation.execute(abortSignal);
+        expect(result.error).toBeUndefined();
         expect(result.returnDisplay).not.toContain(
           'Path is not within workspace',
         );
