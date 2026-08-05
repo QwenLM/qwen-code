@@ -2857,9 +2857,9 @@ describe('the reverse-audit budget gate — the loop must end by reporting', () 
     writeFileSync(plan, JSON.stringify(PLAN)); // this run's capture, after
     const findings = join(dir, 'findings.md');
     writeFileSync(findings, '');
-    // 5500s remaining fits reserve + the 1800s CONSTANT (5400) — admitted —
+    // 7000s remaining fits reserve + the 1800s CONSTANT (6600) — admitted —
     // while the stale ~28800s measurement would refuse.
-    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 5500);
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 7000);
     (agentPromptCommand.handler as (a: unknown) => void)({
       plan,
       role: 'reverse-audit',
@@ -2873,7 +2873,7 @@ describe('the reverse-audit budget gate — the loop must end by reporting', () 
   it("measures the previous round's cost at the gate, not the constant", () => {
     // Round 1 admitted with a far deadline (it stamps); backdate the stamp
     // 3000s. The second deadline leaves room for reserve + the CONSTANT
-    // round estimate (3600 + 1800 fits in 5500) but not for reserve + the
+    // round estimate (4800 + 1800 fits in 7000) but not for reserve + the
     // MEASURED 3000s — so only a gate that measures refuses. The unsafe
     // direction is under-estimation: admitting a terminal round that does
     // not fit, the killed-mid-verification outcome this gate exists to
@@ -2889,7 +2889,7 @@ describe('the reverse-audit budget gate — the loop must end by reporting', () 
     // THIS run, and the previous-run fence keys on the plan's mtime.
     const captured = (Date.now() - 4_000_000) / 1000;
     utimesSync(plan, captured, captured);
-    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 5500);
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 7000);
     (agentPromptCommand.handler as (a: unknown) => void)({
       plan,
       role: 'reverse-audit',

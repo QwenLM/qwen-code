@@ -40,8 +40,9 @@ import { statSync } from 'node:fs';
 import { readTranscripts, type AgentRecord } from './transcripts.js';
 import { REVERSE_AUDIT_EXAMPLE_RECEIPT } from './agent-briefs.js';
 import {
-  deliveredVerbatim,
+  deliveredVerbatimLines,
   flattenPrompt,
+  promptLines,
   readRecordedPrompts,
 } from './prompt-record.js';
 
@@ -172,16 +173,22 @@ const SEVERITY_LINE_RE = /\*\*Severity:\*\*/;
  * The separator admits an em/en dash anywhere (`——` doubled included), a
  * colon in either width, and an ASCII hyphen only when it stands alone —
  * space-led or doubled — so the dash inside `retry-cap` never opens a clause
- * mid-word. The filler between phrase and separator (`were found`, `were
- * detected`) is capped and word-only: a period or markdown in between is a
- * new sentence, not this receipt.
+ * mid-word. Closing emphasis and quotation may sit between the phrase and
+ * the separator — auditors bold the phrase (`**No issues found** — …`,
+ * `**未发现新问题** —— …`) in the same `**File:**` / `**Severity:**` idiom
+ * the rest of the pipeline writes in, and a receipt refused on a bold mark
+ * reads `unknown` and never retires, on exactly the budgeted runs the
+ * optimization exists for. The filler between phrase and separator (`were
+ * found`, `were detected`, a parenthesised scope) is capped and word-only
+ * apart from parentheses: a period or other markdown in between is a new
+ * sentence, not this receipt.
  */
 const DRY_RECEIPT_RE = new RegExp(
-  '(?:\\bno (?:new )?(?:issues?|findings?|gaps?)[ \\w]{0,32}?' +
+  '(?:\\bno (?:new )?(?:issues?|findings?|gaps?)[ \\w()]{0,32}?' +
     '|未发现(?:新的?)?(?:问题|发现)' +
     '|无新的?(?:问题|发现)' +
     '|没有(?:发现)?(?:新的?)?问题)' +
-    '\\s*(?:[—–]+|[:：]|--+|-+\\s)\\s*' +
+    '\\s*[*_)\\]"”’]*\\s*(?:[—–]+|[:：]|--+|-+\\s)\\s*' +
     '([\\s\\S]*)',
   'i',
 );
@@ -207,11 +214,14 @@ const EXAMPLE_RECEIPT_CLAUSE = (
  * a path has a second slash or a dotted extension. Otherwise ~20 flattened
  * characters, or a handful of ideographs, is the least that can name a
  * territory; "all good." can not. The brief's own example receipt is
- * refused outright: every auditor is handed that sentence, agents parrot
- * what they are handed, and a clause that echoes the example names nothing
- * the agent examined itself. Misjudging here fails the way everything in
- * this module fails — the receipt reads `unknown` and the chunk stays
- * under audit.
+ * refused outright, but only VERBATIM: a clause containing the example's
+ * whole clause reads as the parrot it is, while real parroting is partial
+ * — the shape and a phrase or two — and a partial echo passes this check;
+ * what catches that is the rest of the dry bar (the territory read, the
+ * substance floor). This refusal closes the cheapest path: the exact
+ * sentence every auditor is handed. Misjudging here fails the way
+ * everything in this module fails — the receipt reads `unknown` and the
+ * chunk stays under audit.
  */
 function substantiveClause(clause: string): boolean {
   const c = clause.replace(/\s+/g, ' ').trim();
@@ -365,7 +375,7 @@ export function scheduleReverseAuditRound(
   const records: Array<{
     chunkId: number;
     round: number;
-    prompt: string;
+    lines: string[];
     territory: Array<[number, number]>;
   }> = [];
   for (const [key, prompt] of built) {
@@ -376,7 +386,10 @@ export function scheduleReverseAuditRound(
     records.push({
       chunkId: Number(m[1]),
       round: r,
-      prompt,
+      // Flattened ONCE per record, beside the once-per-transcript flatten
+      // below: the pairing walk pays neither half per (record, transcript)
+      // pair.
+      lines: promptLines(prompt),
       territory: bakedRanges(prompt, diffPath),
     });
   }
@@ -403,15 +416,16 @@ export function scheduleReverseAuditRound(
   // the critical path before the round is admitted — so cut the transcript
   // side down to the launches that carry the role marker first (a launch
   // that could match any record contains it; see REVERSE_AUDIT_MARKER), and
-  // flatten each survivor ONCE instead of once per pair. A transcript the
-  // cut drops fails the way everything here fails: it certifies nothing,
-  // and its chunk stays under audit.
+  // flatten each survivor ONCE instead of once per pair (the record side is
+  // already flattened once per record, above). A transcript the cut drops
+  // fails the way everything here fails: it certifies nothing, and its
+  // chunk stays under audit.
   const candidates = transcripts
     .filter((t) => t.launchPrompt.includes(REVERSE_AUDIT_MARKER))
     .map((t) => ({ transcript: t, flat: flattenPrompt(t.launchPrompt) }));
   const matchesByRecord = records.map((rec) =>
     candidates
-      .filter((c) => deliveredVerbatim(c.flat, rec.prompt))
+      .filter((c) => deliveredVerbatimLines(c.flat, rec.lines))
       .map((c) => c.transcript),
   );
   const recordsPerTranscript = new Map<AgentRecord, number>();

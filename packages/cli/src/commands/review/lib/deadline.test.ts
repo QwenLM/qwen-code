@@ -112,7 +112,7 @@ describe('reverseAuditBudgetExhausted — the round must fit, and its tail', () 
   it('honours the reserve-0 escape hatch — only the round itself must fit', () => {
     // `r >= 0` (not `> 0`) is the documented escape hatch: reserve 0 keeps
     // only the refusal of a round that cannot finish before the deadline.
-    // An edit to `> 0` would silently fall back to the 3600s default and
+    // An edit to `> 0` would silently fall back to the 4800s default and
     // refuse the next round a full hour before the operator's deadline.
     const env = {
       [DEADLINE_ENV]: String(NOW_S + DEFAULT_ROUND_SECONDS + 60),
@@ -390,7 +390,7 @@ describe('the CI wiring contract', () => {
     expect(workflow).toContain(
       `${DEADLINE_ENV}="$(( $(date +%s) + attempt_timeout ))"`,
     );
-    expect(workflow).toContain(`${RESERVE_ENV}="$(( attempt_timeout / 4 ))"`);
+    expect(workflow).toContain(`${RESERVE_ENV}="$(( attempt_timeout / 3 ))"`);
     // The workflow's reserve cap documents itself as mirroring
     // DEFAULT_RESERVE_SECONDS ("keep the two in sync") — enforce the mirror,
     // so a one-sided bump diverges a test instead of the CI tail.

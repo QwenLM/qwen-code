@@ -69,6 +69,17 @@ export const RESERVE_ENV = 'QWEN_REVIEW_DEADLINE_RESERVE_SECONDS';
  * round early, disclosed as a budget stop; under-reserving is #8368 —
  * killed mid-verification, holding every confirmed finding.
  *
+ * Sized from the only tail measurement the record holds (#8368, +1699
+ * lines): the loop ended with half an hour left and the outer kill found
+ * round 5's verification STILL RUNNING — the tail had consumed more than 30
+ * minutes and was nowhere through (compose, anchor resolution and
+ * submission never started). No upper bound was ever measured, so the size
+ * is insurance, not arithmetic: pipelining made this reserve the terminal
+ * round's ONLY cover, and until pipelined runs measure their tails, the
+ * reserve buys the unknown, not the known. Over-reserving ends the loop at
+ * most one round early, disclosed as a budget stop; under-reserving is
+ * #8368.
+ *
  * This is only the fallback: the budget itself is
  * chosen outside the CLI (a repository variable, a workflow input, a
  * `/review --timeout=N` comment), so the review workflow passes a reserve
@@ -77,7 +88,7 @@ export const RESERVE_ENV = 'QWEN_REVIEW_DEADLINE_RESERVE_SECONDS';
  * number (`.github/workflows/qwen-code-pr-review.yml`) — keep the two in
  * sync. A local run has no deadline and no reserve at all.
  */
-export const DEFAULT_RESERVE_SECONDS = 3600;
+export const DEFAULT_RESERVE_SECONDS = 4800;
 
 /**
  * The admission estimate for a round nothing has measured yet — round 1, or

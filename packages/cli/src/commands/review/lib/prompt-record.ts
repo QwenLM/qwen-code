@@ -216,26 +216,42 @@ export function wasDeliveredVerbatim(
 
 /**
  * `wasDeliveredVerbatim` with the launch prompt already put through
- * `flattenPrompt`. The pair exists for the one caller that pairs MANY records
- * against MANY transcripts (the retirement scheduler): flattening is the
- * expensive half of the check, and a caller that flattens each launch once
- * pays it per transcript instead of per (record, transcript) pair — a few
- * thousand full-prompt passes on the run the scheduler was built for, all
- * before the round is admitted. Same contract, same failure modes.
+ * `flattenPrompt`. The family exists for the one caller that pairs MANY
+ * records against MANY transcripts (the retirement scheduler): flattening is
+ * the expensive half of the check, and a caller that flattens each launch
+ * once pays it per transcript instead of per (record, transcript) pair — a
+ * few thousand full-prompt passes on the run the scheduler was built for,
+ * all before the round is admitted. Same contract, same failure modes.
  */
 export function deliveredVerbatim(
   flattenedLaunch: string,
   built: string,
 ): boolean {
-  // A zero-byte record is not a prompt, and the loop below would be vacuously true
-  // for it — the check would pass every agent, and the roster would credit a role
-  // to whichever transcript it happened to look at first. `recordPrompt` swallows
-  // its write errors by design (a read-only tmp dir must not stop a review being
-  // *built*), so an empty file is exactly what a partial write leaves behind. It is
-  // the one input that must fail closed.
   if (built.trim().length === 0) return false;
+  return deliveredVerbatimLines(flattenedLaunch, promptLines(built));
+}
+
+/**
+ * `deliveredVerbatim` with BOTH halves pre-flattened: the launch through
+ * `flattenPrompt`, the built prompt through `promptLines`. The scheduler
+ * hoists each record's `promptLines` alongside each transcript's flatten, so
+ * the pairing walk re-splits neither side — on the 6-chunk x 4-prior-round
+ * shape the old per-pair record flatten re-split every record's whole folded
+ * prompt (cumulative findings list included) once per candidate.
+ */
+export function deliveredVerbatimLines(
+  flattenedLaunch: string,
+  builtLines: string[],
+): boolean {
+  // A zero-byte record is not a prompt, and the loop below would be vacuously
+  // true for it (no lines) — the check would pass every agent, and the roster
+  // would credit a role to whichever transcript it happened to look at first.
+  // `recordPrompt` swallows its write errors by design (a read-only tmp dir
+  // must not stop a review being *built*), so an empty file is exactly what a
+  // partial write leaves behind. It is the one input that must fail closed.
+  if (builtLines.length === 0) return false;
   let at = 0;
-  for (const line of lines(built)) {
+  for (const line of builtLines) {
     const i = flattenedLaunch.indexOf(line, at);
     if (i === -1) return false;
     at = i + line.length;
@@ -252,7 +268,7 @@ export function flattenPrompt(s: string): string {
 }
 
 /** The built prompt's lines, whitespace-normalized, blanks dropped. */
-function lines(built: string): string[] {
+export function promptLines(built: string): string[] {
   return built
     .split('\n')
     .map((l) => flattenPrompt(l))

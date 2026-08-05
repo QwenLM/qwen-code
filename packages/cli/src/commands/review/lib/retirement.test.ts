@@ -421,6 +421,49 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     expect(r3.converged).toBe(true);
   });
 
+  it('a receipt whose phrase is bolded is dry — emphasis is not a sentence break', () => {
+    // Auditors bold the phrase in the same **File:** / **Severity:** idiom
+    // the pipeline writes in; the old separator class refused the closing
+    // marks, so the most idiomatic shape never retired — on the unfixed
+    // class this receipt reads `unknown` and the chunk stays due.
+    const receipt =
+      '**No issues found** — re-walked the retry cap and both changed ' +
+      "exports' call sites.";
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), receipt);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), receipt);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([]);
+    expect(r3.converged).toBe(true);
+  });
+
+  it('a bolded Chinese phrase is dry, exactly like the English one', () => {
+    const receipt =
+      '**未发现新问题** —— 重新走查了重连状态机与两个已改导出的全部调用点,' +
+      '每个疑点都已在确认清单中。';
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), receipt);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), receipt);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([]);
+    expect(r3.converged).toBe(true);
+  });
+
+  it('a parenthesised scope between phrase and separator is dry', () => {
+    // The filler admits parentheses beside words: a scope label is not a
+    // sentence break, and the clause after the separator still names the
+    // territory.
+    const receipt =
+      'No new issues found (chunk 13) — re-walked the retry cap and both ' +
+      "changed exports' call sites.";
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), receipt);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), receipt);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([]);
+    expect(r3.converged).toBe(true);
+  });
+
   it('a Chinese receipt with a named territory is dry', () => {
     // The other probe: auditors narrate in the review's output language, and
     // the old English-only phrase left a zh receipt `unknown` at any length.
