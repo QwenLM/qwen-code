@@ -211,6 +211,24 @@ describe('Agent View PTY host process server', () => {
     await expect(connected.exited).resolves.toEqual({ exitCode: 0 });
   });
 
+  it('resolves connected host exit when killed', async () => {
+    const host = fakeHost();
+    const socketPath = shortSocketPath();
+    const server = createAgentViewPtyHostServer(host, socketPath);
+    servers.push(server);
+    await server.listen();
+
+    const connected = await connectAgentViewPtyHostProcess(
+      createLaunch('session-1'),
+      socketPath,
+    );
+
+    connected.kill('SIGTERM');
+
+    await waitFor(() => host.killedWith === 'SIGTERM');
+    await expect(connected.exited).resolves.toEqual({ exitCode: 1 });
+  });
+
   it('resolves connected host exit when status polling fails', async () => {
     vi.useFakeTimers();
     try {
