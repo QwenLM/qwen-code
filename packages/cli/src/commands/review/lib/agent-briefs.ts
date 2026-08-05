@@ -134,6 +134,15 @@ export interface Brief {
   brief: string;
 }
 
+/**
+ * The model receipt the reverse-audit brief hands every auditor as its
+ * example. Exported so the retirement classifier can refuse a clause that
+ * parrots it — measured: agents repeat what they are handed, and a receipt
+ * the prompt wrote is not evidence of a walk.
+ */
+export const REVERSE_AUDIT_EXAMPLE_RECEIPT =
+  "No issues found — re-walked the reconnect state machine and the two changed exports' call sites; every gap I checked was already in the list";
+
 export const BRIEFS: Record<RoleId, Brief> = {
   '0': {
     label: 'Agent 0: Issue fidelity & root-cause ownership',
@@ -644,7 +653,7 @@ The asymmetry cuts both ways: confirming also requires the trace, and a finding 
 - **Report only Critical or Suggestion.** Do not report Nice to have.
 - A found gap uses the standard finding format (with \`Source: [review]\`), including its failure scenario — your findings go through the same verification as any other, so they must carry the evidence a verifier can trace.
 
-If you find no new gap in your scope, say so **and name what you re-examined** — \`No issues found — re-walked the reconnect state machine and the two changed exports' call sites; every gap I checked was already in the list\`. A bare "No issues found." is indistinguishable from an agent that did nothing, and it is treated as one: it ends nothing, and it earns your scope a relaunch.`,
+If you find no new gap in your scope, say so **and name what you re-examined** — \`${REVERSE_AUDIT_EXAMPLE_RECEIPT}\`. A bare "No issues found." is indistinguishable from an agent that did nothing, and it is treated as one: it ends nothing, and it earns your scope a relaunch.`,
   },
 };
 

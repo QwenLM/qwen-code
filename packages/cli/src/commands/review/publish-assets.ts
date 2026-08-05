@@ -40,11 +40,13 @@ import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { gh, ghWithInputRetried, setGhHost } from './lib/gh.js';
 import { reviewWriteAuthorization } from './lib/authorization.js';
 import {
+  ASSET_HEADER_BYTES,
   assetsBranch,
   parseAssetsRepo,
   rawAssetUrl,
   remoteAssetPath,
   validateAssetBatch,
+  validateAssetContent,
   type AssetsManifest,
   type PublishedAsset,
 } from './lib/assets.js';
@@ -386,6 +388,17 @@ export function runPublishAssets(args: PublishAssetsArgs): void {
           err instanceof Error ? err.message : String(err)
         }`,
       );
+      return;
+    }
+    // The batch ruling above admitted the file by name and size; this one
+    // admits it by CONTENT — an extension is a claim anyone can make, and
+    // the allowlist is only as strong as the bytes behind it.
+    const contentRuling = validateAssetContent(
+      st.basename,
+      content.subarray(0, ASSET_HEADER_BYTES),
+    );
+    if (!contentRuling.ok) {
+      refuse(`${JSON.stringify(st.file)}: ${contentRuling.reason}`);
       return;
     }
     const sha256 = createHash('sha256').update(content).digest('hex');
