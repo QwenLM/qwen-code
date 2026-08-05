@@ -87,16 +87,22 @@ export interface AgentRecord {
 export class TranscriptsUnavailableError extends Error {}
 
 /**
- * Where this session's subagent transcripts live.
+ * The environment this module reads, validated once and returned together.
  *
  * Both halves come from the environment the CLI exported, never from an argument:
  * a path the model can choose is a path the model can point somewhere flattering.
  * `QWEN_CODE_PROJECT_DIR` exists because the project dir is keyed on the session's
  * *launch* cwd, and this subcommand may well be running inside a PR worktree the
  * skill `cd`-ed into — recomputing it from `process.cwd()` yields a directory that
- * never existed.
+ * never existed. Callers that need both halves (the chat file lives beside the
+ * subagent dir) take them here rather than re-reading the env after `transcriptDir`
+ * validated it.
  */
-export function transcriptDir(env: NodeJS.ProcessEnv = process.env): string {
+export function transcriptPaths(env: NodeJS.ProcessEnv = process.env): {
+  projectDir: string;
+  sessionId: string;
+  dir: string;
+} {
   const projectDir = env['QWEN_CODE_PROJECT_DIR']?.trim();
   const sessionId = env['QWEN_CODE_SESSION_ID']?.trim();
   if (!projectDir || !sessionId) {
@@ -105,11 +111,20 @@ export function transcriptDir(env: NodeJS.ProcessEnv = process.env): string {
         "this run cannot find the harness's record of what its agents did",
     );
   }
-  return join(projectDir, 'subagents', sessionId);
+  return {
+    projectDir,
+    sessionId,
+    dir: join(projectDir, 'subagents', sessionId),
+  };
+}
+
+/** Where this session's subagent transcripts live. */
+export function transcriptDir(env: NodeJS.ProcessEnv = process.env): string {
+  return transcriptPaths(env).dir;
 }
 
 /** Text out of a record's message parts. */
-function textOf(rec: Record<string, unknown>): string {
+export function textOf(rec: Record<string, unknown>): string {
   const msg = rec['message'] as { parts?: unknown } | undefined;
   const parts = Array.isArray(msg?.parts) ? msg.parts : [];
   return parts
@@ -307,6 +322,21 @@ function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
 }
 
 /**
+ * The session's subagent transcript files, one listing every reader shares.
+ *
+ * The coverage gate and the cost ledger both claim to read "the same records",
+ * and the harness writes sibling file kinds per agent (`.meta.json`,
+ * `.jsonl.stream`) with a generalized `<kind>-<id>.jsonl` namespace planned —
+ * so the definition of "which files are transcripts" lives here, once, not in
+ * each reader's own filter. Throws on any readdir failure; what the caller
+ * does with that (name the fault, or treat an absent dir as "no agents") is
+ * its decision.
+ */
+export function listAgentTranscriptFiles(dir: string): string[] {
+  return readdirSync(dir).filter((name) => name.endsWith('.jsonl'));
+}
+
+/**
  * Every subagent this session launched, as the harness recorded it.
  *
  * `since` drops transcripts older than the plan they are supposed to be evidence
@@ -323,7 +353,7 @@ export function readTranscripts(
   const dir = transcriptDir(env);
   let names: string[];
   try {
-    names = readdirSync(dir);
+    names = listAgentTranscriptFiles(dir);
   } catch (err) {
     // No directory at all is an *infrastructure* fact, not a verdict about the
     // agents. Conflating the two would let a read-only HOME or a full disk read
@@ -337,7 +367,6 @@ export function readTranscripts(
 
   const out: AgentRecord[] = [];
   for (const name of names) {
-    if (!name.endsWith('.jsonl')) continue;
     const rec = parseTranscript(join(dir, name), diffPath);
     if (!rec) continue;
     if (since !== undefined && rec.mtimeMs < since) continue;

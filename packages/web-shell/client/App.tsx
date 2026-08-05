@@ -258,7 +258,8 @@ import {
   computeTodoTimeline,
   getAgentToolsForPlan,
   getFloatingTodos,
-  getLatestActiveTodos,
+  getActiveTodosForPlanRevision,
+  isExitPlanApprovalRequest,
   todoDetailSignature,
   todoTimelineSignature,
   type TodoDetail,
@@ -2292,10 +2293,16 @@ export function App({
           previous.artifacts.length === paneArtifacts.length &&
           previous.artifacts.every((artifact, index) => {
             const nextArtifact = paneArtifacts[index];
+            // `metadata` is deliberately not compared: artifact events carry
+            // freshly parsed objects, so an identity check here would defeat
+            // the guard without catching a realistic change.
             return (
               nextArtifact?.id === artifact.id &&
+              nextArtifact.status === artifact.status &&
               nextArtifact.updatedAt === artifact.updatedAt &&
-              nextArtifact.sizeBytes === artifact.sizeBytes
+              nextArtifact.sizeBytes === artifact.sizeBytes &&
+              nextArtifact.title === artifact.title &&
+              nextArtifact.workspacePath === artifact.workspacePath
             );
           });
         if (unchanged) return current;
@@ -3228,8 +3235,11 @@ export function App({
     [messages],
   );
   const approvalPlanTodos = useMemo(
-    () => getLatestActiveTodos(messages),
-    [messages],
+    () =>
+      isExitPlanApprovalRequest(pendingToolApproval)
+        ? getActiveTodosForPlanRevision(messages, pendingToolApproval?.todoPlan)
+        : [],
+    [messages, pendingToolApproval],
   );
   // Keep the timeline Map referentially stable across streaming ticks that
   // don't touch any todo snapshot. The Map is a context value, so a fresh

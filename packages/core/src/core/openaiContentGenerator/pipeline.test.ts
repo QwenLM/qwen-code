@@ -28,6 +28,7 @@ import type { Config } from '../../config/config.js';
 import { AuthType, type ContentGeneratorConfig } from '../contentGenerator.js';
 import type { OpenAICompatibleProvider } from './provider/index.js';
 import { DefaultOpenAICompatibleProvider } from './provider/default.js';
+import { DashScopeOpenAICompatibleProvider } from './provider/dashscope.js';
 import {
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   MAX_STREAM_IDLE_TIMEOUT_MS,
@@ -734,6 +735,40 @@ describe('ContentGenerationPipeline', () => {
         expectedToolChoice: undefined,
       },
       {
+        name: 'remove required tool selection when reasoning effort enables thinking',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3.8-max',
+        extraBody: { reasoning_effort: 'high' },
+        thinkingMandatory: undefined,
+        reasoning: undefined,
+        includeThoughts: true,
+        expectedThinking: undefined,
+        expectedToolChoice: undefined,
+      },
+      {
+        name: 'preserve required tool selection when reasoning effort is none',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3.8-max',
+        extraBody: { reasoning_effort: 'none' },
+        thinkingMandatory: undefined,
+        reasoning: undefined,
+        includeThoughts: true,
+        expectedThinking: undefined,
+        expectedToolChoice: 'required',
+      },
+      {
+        name: 'preserve required tool selection for a non-qwen model with a user reasoning_effort',
+        baseUrl:
+          'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+        model: 'glm-5.2',
+        extraBody: { reasoning_effort: 'high' },
+        thinkingMandatory: undefined,
+        reasoning: undefined,
+        includeThoughts: true,
+        expectedThinking: undefined,
+        expectedToolChoice: 'required',
+      },
+      {
         name: 'preserve required tool selection when thinking is not enabled',
         baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
         model: 'qwen3.7-max',
@@ -742,6 +777,30 @@ describe('ContentGenerationPipeline', () => {
         reasoning: undefined,
         includeThoughts: true,
         expectedThinking: undefined,
+        expectedToolChoice: 'required',
+      },
+      {
+        name: 'emit the tier-native disable shape under the config-level reasoning opt-out',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3.8-max',
+        extraBody: { reasoning_effort: 'high' },
+        thinkingMandatory: undefined,
+        reasoning: false,
+        includeThoughts: true,
+        expectedThinking: undefined,
+        expectedReasoningEffort: 'none',
+        expectedToolChoice: 'required',
+      },
+      {
+        name: 'emit the tier-native disable shape under the per-request thinking opt-out',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3.8-max',
+        extraBody: { reasoning_effort: 'high' },
+        thinkingMandatory: undefined,
+        reasoning: undefined,
+        includeThoughts: false,
+        expectedThinking: undefined,
+        expectedReasoningEffort: 'none',
         expectedToolChoice: 'required',
       },
       {
@@ -869,6 +928,85 @@ describe('ContentGenerationPipeline', () => {
         .calls[0][0];
       expect(apiCall.enable_thinking).toBe(testCase.expectedThinking);
       expect(apiCall.tool_choice).toBe(testCase.expectedToolChoice);
+      if ('expectedReasoningEffort' in testCase) {
+        expect(apiCall.reasoning_effort).toBe(testCase.expectedReasoningEffort);
+      }
+    });
+
+    it('keeps forced tool selection for a non-qwen preset shape end to end', async () => {
+      // The table above mocks buildRequest as a plain extra_body merge, so
+      // the real provider never executes there. Run the actual DashScope
+      // provider instead: its family-gated drop keeps the glm preset's
+      // enable_thinking, and the pipeline's enable_thinking clause is
+      // family-gated too — on glm the field is an opaque no-op (GLM reads
+      // thinking.enabled), not a thinking switch, so tool_choice=required
+      // must survive for its forced-tool side queries.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl:
+          'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+        model: 'glm-5.2',
+        authType: AuthType.QWEN_OAUTH,
+        extra_body: { enable_thinking: true, reasoning_effort: 'high' },
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const realProvider = new DashScopeOpenAICompatibleProvider(
+        mockContentGeneratorConfig,
+        {
+          getContentGeneratorConfig: () => ({ enableCacheControl: false }),
+        } as unknown as Config,
+      );
+      (mockProvider.buildRequest as Mock).mockImplementation((req) =>
+        realProvider.buildRequest(req, 'side-query:combined-shape'),
+      );
+
+      const request: GenerateContentParameters = {
+        model: 'glm-5.2',
+        contents: [{ parts: [{ text: 'Summarize' }], role: 'user' }],
+        config: {
+          thinkingConfig: { includeThoughts: true },
+          tools: [
+            {
+              functionDeclarations: [
+                {
+                  name: 'respond_in_schema',
+                  parameters: { type: Type.OBJECT, properties: {} },
+                },
+              ],
+            },
+          ],
+          toolConfig: {
+            functionCallingConfig: { mode: FunctionCallingConfigMode.ANY },
+          },
+        },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Summarize' },
+      ]);
+      (mockConverter.convertGeminiToolsToOpenAI as Mock).mockResolvedValue([
+        { type: 'function', function: { name: 'respond_in_schema' } },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'side-query:combined-shape');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.enable_thinking).toBe(true);
+      expect(apiCall.reasoning_effort).toBe('high');
+      expect(apiCall.tool_choice).toBe('required');
     });
 
     it('learns required thinking from a provider error and retries once', async () => {
@@ -938,10 +1076,14 @@ describe('ContentGenerationPipeline', () => {
 
       const calls = (mockClient.chat.completions.create as Mock).mock.calls;
       expect(calls).toHaveLength(3);
+      // The tier-native disable shape is reasoning_effort: 'none' (the
+      // boolean is not a knob this family reads), and the retry trigger
+      // must recognise it.
       expect(calls[0][0]).toMatchObject({
-        enable_thinking: false,
+        reasoning_effort: 'none',
         tool_choice: 'required',
       });
+      expect(calls[0][0].enable_thinking).toBeUndefined();
       expect(calls[1][0].enable_thinking).toBe(true);
       expect(calls[1][0].tool_choice).toBeUndefined();
       expect(calls[2][0].enable_thinking).toBe(true);
@@ -2116,7 +2258,8 @@ describe('ContentGenerationPipeline', () => {
 
       const calls = (mockClient.chat.completions.create as Mock).mock.calls;
       expect(calls).toHaveLength(2);
-      expect(calls[0][0].enable_thinking).toBe(false);
+      expect(calls[0][0].reasoning_effort).toBe('none');
+      expect(calls[0][0].enable_thinking).toBeUndefined();
       expect(calls[1][0].enable_thinking).toBe(true);
       expect(mockReportOpenAiRequest).toHaveBeenNthCalledWith(1, calls[0][0]);
       expect(mockReportOpenAiRequest).toHaveBeenNthCalledWith(2, calls[1][0]);

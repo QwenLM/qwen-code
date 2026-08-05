@@ -69,6 +69,7 @@ describe('Telemetry Metrics', () => {
   let initializeMetricsModule: typeof import('./metrics.js').initializeMetrics;
   let recordToolCallMetricsModule: typeof import('./metrics.js').recordToolCallMetrics;
   let recordTokenUsageMetricsModule: typeof import('./metrics.js').recordTokenUsageMetrics;
+  let recordToolExecutionMetricsModule: typeof import('./metrics.js').recordToolExecutionMetrics;
   let recordFileOperationMetricModule: typeof import('./metrics.js').recordFileOperationMetric;
   let recordChatCompressionMetricsModule: typeof import('./metrics.js').recordChatCompressionMetrics;
   let recordStartupPerformanceModule: typeof import('./metrics.js').recordStartupPerformance;
@@ -96,6 +97,8 @@ describe('Telemetry Metrics', () => {
     initializeMetricsModule = metricsJsModule.initializeMetrics;
     recordToolCallMetricsModule = metricsJsModule.recordToolCallMetrics;
     recordTokenUsageMetricsModule = metricsJsModule.recordTokenUsageMetrics;
+    recordToolExecutionMetricsModule =
+      metricsJsModule.recordToolExecutionMetrics;
     recordFileOperationMetricModule = metricsJsModule.recordFileOperationMetric;
     recordChatCompressionMetricsModule =
       metricsJsModule.recordChatCompressionMetrics;
@@ -273,6 +276,62 @@ describe('Telemetry Metrics', () => {
       expect(mockCounterAddFn).toHaveBeenCalledWith(200, {
         model: 'gemini-ultra',
         type: 'input',
+      });
+    });
+  });
+
+  describe('recordToolExecutionMetrics', () => {
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getTelemetryEnabled: () => true,
+      getTelemetryMetricsIncludeSessionId: () => false,
+    } as unknown as Config;
+
+    it('does not record before metrics are initialized', () => {
+      recordToolExecutionMetricsModule(mockConfig, {
+        execution_status: 'unknown',
+        tool_type: 'native',
+      });
+
+      expect(mockCounterAddFn).not.toHaveBeenCalled();
+    });
+
+    it('uses a dedicated low-cardinality counter', () => {
+      initializeMetricsModule(mockConfig);
+      mockCounterAddFn.mockClear();
+
+      recordToolExecutionMetricsModule(mockConfig, {
+        execution_status: 'error',
+        tool_type: 'mcp',
+      });
+
+      expect(mockCreateCounterFn).toHaveBeenCalledWith(
+        'qwen-code.tool.execution.count',
+        expect.any(Object),
+      );
+      expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
+        execution_status: 'error',
+        tool_type: 'mcp',
+      });
+    });
+
+    it('merges common attributes when session id is opted in', () => {
+      const configWithSession = {
+        ...mockConfig,
+        getTelemetryMetricsIncludeSessionId: () => true,
+      } as unknown as Config;
+      initializeMetricsModule(configWithSession);
+      mockCounterAddFn.mockClear();
+
+      recordToolExecutionMetricsModule(configWithSession, {
+        execution_status: 'success',
+        tool_type: 'native',
+      });
+
+      expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
+        'session.id': 'test-session-id',
+        execution_status: 'success',
+        tool_type: 'native',
       });
     });
   });

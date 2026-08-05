@@ -723,10 +723,18 @@ vi.mock('./components/dialogs/GitDiffDialog', async () => {
 vi.mock('./components/dialogs/DialogShell', async () => {
   const React = await import('react');
   return {
-    DialogShell: (props: { children?: React.ReactNode }) =>
+    DialogShell: (props: {
+      children?: React.ReactNode;
+      title?: React.ReactNode;
+    }) =>
       React.createElement(
         'div',
-        { 'data-testid': 'dialog-shell' },
+        {
+          'data-testid': 'dialog-shell',
+          ...(typeof props.title === 'string'
+            ? { 'data-dialog-title': props.title }
+            : {}),
+        },
         props.children,
       ),
   };
@@ -945,6 +953,10 @@ vi.doMock('./components/SplitView', async () => {
         updatedAt: '2026-07-10T00:01:00Z',
         sizeBytes: 20,
       };
+      const changedArtifact = {
+        ...updatedArtifact,
+        status: 'changed',
+      };
       return React.createElement(
         'div',
         { 'data-testid': 'split-view-mock' },
@@ -998,6 +1010,20 @@ vi.doMock('./components/SplitView', async () => {
               ),
           },
           'updated artifact',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'split-report-changed-artifact',
+            type: 'button',
+            onClick: () =>
+              props.onPaneArtifactsChange?.(
+                'pane-session',
+                [changedArtifact],
+                paneActions,
+              ),
+          },
+          'changed artifact',
         ),
         React.createElement(
           'button',
@@ -2133,7 +2159,12 @@ async function triggerAutoRecap(): Promise<{
 // array, so the ask-user variant carries a toolCall.input.questions payload
 // (getPermissionRawInput reads toolCall.input) — a bare toolName isn't enough.
 function makePendingPermissionBlock(
-  overrides: { resolved?: boolean; toolName?: string; kind?: string } = {},
+  overrides: {
+    resolved?: boolean;
+    toolName?: string;
+    kind?: string;
+    todoPlan?: { planId: string; sourceCallId: string };
+  } = {},
 ): unknown {
   const toolName = overrides.toolName ?? 'run_shell_command';
   const isAskUser = toolName === 'ask_user_question';
@@ -2146,7 +2177,10 @@ function makePendingPermissionBlock(
     toolCall: {
       toolCallId: 'tc-1',
       kind: overrides.kind ?? (isAskUser ? 'other' : 'execute'),
-      _meta: { toolName },
+      _meta: {
+        toolName,
+        ...(overrides.todoPlan ? { qwenTodoApproval: overrides.todoPlan } : {}),
+      },
       ...(isAskUser
         ? { input: { questions: [{ question: 'Pick one', options: [] }] } }
         : {}),
@@ -2362,26 +2396,66 @@ afterEach(() => {
 
 describe('App plan todos', () => {
   it('gates the exit-plan workflow on the experimental setting', async () => {
+    const approvedEntries = [
+      {
+        content: 'Prepare',
+        status: 'completed',
+        _meta: { qwenTodo: { id: 'prepare' } },
+      },
+      {
+        content: 'Ship',
+        status: 'pending',
+        _meta: { qwenTodo: { id: 'ship', blockedBy: ['prepare'] } },
+      },
+    ];
     testState.messages = [
       {
-        id: 'plan',
-        role: 'plan',
-        todos: [
-          { id: 'prepare', content: 'Prepare', status: 'completed' },
+        id: 'approved-plan',
+        role: 'tool_group',
+        tools: [
           {
-            id: 'ship',
-            content: 'Ship',
-            status: 'pending',
-            blockedBy: ['prepare'],
+            callId: 'todo-approved',
+            toolName: 'todo_write',
+            status: 'completed',
+            rawOutput: {
+              entries: approvedEntries,
+              plan: { id: 'plan-1' },
+            },
           },
         ],
       },
       { id: 'revision', role: 'user', content: 'Revise the wording' },
+      {
+        id: 'newer-plan',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'todo-newer',
+            toolName: 'todo_write',
+            status: 'completed',
+            rawOutput: {
+              entries: [
+                ...approvedEntries.map((entry) => ({
+                  ...entry,
+                  status: 'completed',
+                })),
+                {
+                  content: 'Deploy',
+                  status: 'pending',
+                  _meta: { qwenTodo: { id: 'deploy' } },
+                },
+              ],
+              plan: { id: 'plan-1' },
+            },
+          },
+        ],
+      },
     ];
     testState.blocks = [
       makePendingPermissionBlock({
         toolName: 'exit_plan_mode',
         kind: 'switch_mode',
+        todoPlan: { planId: 'plan-1', sourceCallId: 'todo-approved' },
       }),
     ];
 
@@ -2476,6 +2550,43 @@ describe('App plan todos', () => {
     expect(
       testState.latestTasksStatusProps?.agentTools?.map((tool) => tool.callId),
     ).toEqual(['agent-call']);
+  });
+
+  it('keeps the tasks dialog plain when Session Workflow is off', async () => {
+    testState.messages = [
+      {
+        id: 'plan',
+        role: 'plan',
+        todos: [{ id: 'work', content: 'Work', status: 'in_progress' }],
+      },
+      {
+        id: 'agents',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'agent-call',
+            toolName: 'Agent',
+            status: 'in_progress',
+            args: { todo_id: 'work' },
+          },
+        ],
+      },
+    ];
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestTodoPanelOnOpen?.();
+      await Promise.resolve();
+    });
+
+    expect(testState.latestTasksStatusProps?.planTodos).toEqual([]);
+    expect(testState.latestTasksStatusProps?.agentTools).toEqual([]);
+    expect(
+      container
+        .querySelector('[data-testid="dialog-shell"]')
+        ?.getAttribute('data-dialog-title'),
+    ).toBe('Background tasks');
   });
 });
 
@@ -4510,7 +4621,7 @@ describe('App session callbacks', () => {
       emptyActions?.querySelectorAll<HTMLButtonElement>('button') ?? [],
     );
     expect(actions).toHaveLength(1);
-    expect(actions[0]?.textContent).toContain('Review');
+    expect(actions[0]?.textContent).toContain('Changes');
     expect(actions[0]?.disabled).toBe(true);
     expect(
       container.querySelector('button[aria-label="Add panel"]'),
@@ -4587,16 +4698,16 @@ describe('App session callbacks', () => {
         )
         ?.click();
     });
-    const review = Array.from(
+    const changes = Array.from(
       container.querySelectorAll<HTMLButtonElement>(
         '[data-testid="right-panel-empty-actions"] button',
       ),
-    ).find((button) => button.textContent?.startsWith('Review'));
-    expect(review?.disabled).toBe(false);
+    ).find((button) => button.textContent?.startsWith('Changes'));
+    expect(changes?.disabled).toBe(false);
 
-    act(() => review?.click());
+    act(() => changes?.click());
 
-    expect(container.querySelector('button[title="Review"]')).not.toBeNull();
+    expect(container.querySelector('button[title="Changes"]')).not.toBeNull();
     expect(container.textContent).toContain('latest.ts');
     expect(container.textContent).not.toContain('first.ts');
   });
@@ -9917,6 +10028,17 @@ describe('App session callbacks', () => {
     });
 
     expect(document.body.textContent).toContain('20 B');
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="split-report-changed-artifact"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(document.body.textContent).toContain('changed');
 
     await act(async () => {
       container

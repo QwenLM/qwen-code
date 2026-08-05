@@ -66,6 +66,10 @@ import {
   type ServeWorkspaceMcpToolsStatus,
 } from './status.js';
 import {
+  EXTERNAL_TOOL_GUARD_READY_META_KEY,
+  EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+} from './externalToolGuard.js';
+import {
   BranchWhilePromptActiveError,
   CdWhilePromptActiveError,
   SessionNotFoundError,
@@ -2318,6 +2322,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           () =>
             channelInfo?.sessionIds === sessionIds &&
             channelInfo.sessionSpawnsInFlight > 0,
+          opts.externalToolGuard,
         );
         connection = new ClientSideConnection(() => client, channel.stream);
       } catch (error) {
@@ -2531,6 +2536,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               initTimeoutMs,
               'initialize',
             );
+            if (opts.externalToolGuard) {
+              const guardAck =
+                response._meta?.[EXTERNAL_TOOL_GUARD_READY_META_KEY];
+              if (guardAck !== EXTERNAL_TOOL_GUARD_REQUIRED_VALUE) {
+                throw new Error(
+                  `ACP child did not acknowledge the required external tool guard (received: ${JSON.stringify(guardAck)}).`,
+                );
+              }
+            }
             try {
               const attributes = getChannelStartupProfileAttributes(
                 response,
@@ -4145,6 +4159,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       | 'restoreReplayPartial'
       | 'restoreReplayError'
       | 'restoreHistoryHasMore'
+      | 'activePromptId'
     >,
     action: 'load' | 'resume',
   ): Pick<
@@ -4180,9 +4195,21 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       };
     }
     if (action === 'load') {
+      const liveJournal = snapshot.liveJournal.map((event) => {
+        if (
+          !entry.activePromptId ||
+          event.type !== 'history_truncated' ||
+          !event.data ||
+          typeof event.data !== 'object' ||
+          (event.data as { scope?: unknown }).scope !== 'live_journal'
+        ) {
+          return event;
+        }
+        return { ...event, promptId: entry.activePromptId };
+      });
       return {
         compactedReplay: snapshot.compactedTurns,
-        liveJournal: snapshot.liveJournal,
+        liveJournal,
         lastEventId: snapshot.lastEventId,
         eventEpoch,
         ...replayStatus,
