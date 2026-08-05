@@ -112,6 +112,14 @@ export interface BuildTestReport {
   affected: string[];
   /** What was built, dependencies first — after any widening. */
   buildSet: string[];
+  /**
+   * Packages the whole-call budget stopped BEFORE their build ran, when that
+   * happened. Structural for the same reason `notRun` is: a tree missing
+   * these was never fully compiled, and consumers of this report
+   * (`base-tree`'s availability gate) must be able to see that without
+   * parsing prose.
+   */
+  notBuilt?: string[];
   /** Packages the compiler asked for that the dependency graph had not predicted. */
   widenedWith: string[];
   install: CommandResult | null;
@@ -675,10 +683,21 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
         'informational.';
       return results;
     }
+    if (remainingMs() < BUDGET_MIN_ATTEMPT_MS) {
+      // The same floor as the build/test loops: a sub-second `npm ci` cannot
+      // produce anything but a fake timeout, so skip and disclose instead.
+      results.ok = false;
+      results.note =
+        `The whole-call budget was spent before the install could start ` +
+        `(${args.budget != null ? `--budget ${args.budget}s` : 'default budget'}), ` +
+        'so nothing could be built or tested. This is an infrastructure ' +
+        'result, not a defect in the diff — report it as informational.';
+      return results;
+    }
     const install = exec(
       installCmd,
       root,
-      Math.min(perCommandMs, Math.max(remainingMs(), 1)),
+      Math.min(perCommandMs, remainingMs()),
     );
     results.install = install;
     if (install.timedOut) results.timedOut.push(install.command);
@@ -860,6 +879,7 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     rootBuildSkipped ? set.filter((d) => d !== '.') : set
   ).filter((d) => !notBuilt.includes(d));
   results.widenedWith = [...widened];
+  if (notBuilt.length > 0) results.notBuilt = [...notBuilt].sort();
 
   // Test what the diff can break: the changed workspaces plus their
   // reverse-dependency closure — exactly the suites that define a test script.
@@ -936,7 +956,9 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
 
   // A budget stop is STRUCTURAL, not just prose: `testScope.workspaces` is
   // documented (and quoted by the agent's brief) as exactly the suites that
-  // ran, so the trimmed suites leave it, and `notRun` names them.
+  // ran, so the trimmed suites leave it, and `notRun` names them. Sorted, so
+  // both fields are stable and comparable.
+  notRun.sort();
   const partialNote =
     [
       notBuilt.length > 0
@@ -1007,9 +1029,12 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
       if (testScope?.caveat) testsClause += ` Caveat: ${testScope.caveat}.`;
       // The root is not a workspace: count it separately, or a 22-member repo
       // reports "of 23" — a number in a report whose thesis is honest numbers.
-      const builtWorkspaces = results.buildSet.filter((d) => d !== '.').length;
+      // (A single-root repo's one package IS '.', and counts as the one.)
+      const builtWorkspaces = results.buildSet.filter(
+        (d) => singleRoot || d !== '.',
+      ).length;
       const rootSuffix =
-        results.buildSet.includes('.') && rootBuildRuns
+        !singleRoot && results.buildSet.includes('.') && !rootBuildSkipped
           ? ' (plus the root package)'
           : '';
       results.note =
@@ -1021,7 +1046,7 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
         })${testsClause}`;
     } else if (realFailures.length === 0) {
       results.note =
-        `${failed.length} command(s) ran out of time (${args.timeout}s). A timeout is an ` +
+        `${failed.length} command(s) ran out of time (${deadlineSecs(failed[0])}s). A timeout is an ` +
         'infrastructure result, not a defect in the diff — report it as informational.';
     } else {
       results.note =
