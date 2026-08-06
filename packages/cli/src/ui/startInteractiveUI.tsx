@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import * as fs from 'node:fs';
+import { stat } from 'node:fs/promises';
 import { basename } from 'node:path';
 import { render } from 'ink';
 import React from 'react';
@@ -351,7 +351,7 @@ export async function startInteractiveUI(
         // Non-emptiness here relies on config.shutdown() flushing the
         // recorder first — it is registered earlier in the cleanup chain
         // in gemini.tsx; keep that registration order.
-        if (isValidSessionId(sessionId) && fs.statSync(sessionFile).size > 0) {
+        if (isValidSessionId(sessionId) && (await stat(sessionFile)).size > 0) {
           writeStdoutLine(
             `\n${t('To continue this session, run')}\nqwen --resume ${sessionId}`,
           );
