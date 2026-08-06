@@ -32,6 +32,7 @@ export interface UseResumeCommandOptions {
     'addItem' | 'clearItems' | 'loadHistory'
   >;
   startNewSession: (sessionId: string) => void;
+  clearPendingState?: () => void;
   setSessionName?: (name: string | null) => void;
   remount?: () => void;
 }
@@ -80,6 +81,7 @@ export function useResumeCommand(
     settings,
     historyManager,
     startNewSession,
+    clearPendingState,
     setSessionName,
     remount,
   } = options;
@@ -177,6 +179,7 @@ export function useResumeCommand(
         //    into the old JSONL (split-brain).
         startNewSession(sessionId);
         setSessionName?.(customTitle ?? null);
+        clearPendingState?.();
         clearItems();
         loadHistory(uiHistoryItems);
         if (recoveredBackgroundAgentsNotice) {
@@ -242,6 +245,7 @@ export function useResumeCommand(
       clearItems,
       loadHistory,
       startNewSession,
+      clearPendingState,
       setSessionName,
       remount,
       settings.merged.ui?.history?.collapseOnResume,
