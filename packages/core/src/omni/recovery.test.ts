@@ -240,4 +240,137 @@ describe('runStartupRecoveryOnce', () => {
     // And a healthy store afterwards still works.
     await expect(runStartupRecoveryOnce(store)).resolves.toBeUndefined();
   });
+
+  describe('symlink containment (recovery must never leave the omni root)', () => {
+    /** External dir with a victim file whose NAME makes recovery want to
+     * delete it through every code path: hash-mismatched "object", expired
+     * ".part", and aged ".tmp-*". Returns the paths for survival checks. */
+    async function makeVictims(): Promise<{
+      outside: string;
+      victims: string[];
+    }> {
+      const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'omni-outside-'));
+      const old = new Date(Date.now() - 72 * 3600_000);
+      // Name shaped like a store object (64-hex sha) whose hash will NOT
+      // match its content → the sampler would delete it if it reached it.
+      const fakeObject = path.join(outside, `${'a'.repeat(64)}.mp4`);
+      const expiredPart = path.join(outside, 'victim.part');
+      const agedTmp = path.join(outside, '.tmp-victim');
+      for (const p of [fakeObject, expiredPart, agedTmp]) {
+        await fs.writeFile(p, 'external-bytes-recovery-must-not-touch');
+        await fs.utimes(p, old, old);
+      }
+      return { outside, victims: [fakeObject, expiredPart, agedTmp] };
+    }
+
+    async function expectAllSurvive(victims: string[]): Promise<void> {
+      for (const p of victims) {
+        await expect(fs.access(p)).resolves.toBeUndefined();
+        await expect(fs.readFile(p, 'utf8')).resolves.toBe(
+          'external-bytes-recovery-must-not-touch',
+        );
+      }
+    }
+
+    it('a symlinked SHARD under objects/sha256 is never traversed', async () => {
+      const { outside, victims } = await makeVictims();
+      try {
+        const objectsDir = store.getObjectsDir();
+        await fs.mkdir(objectsDir, { recursive: true });
+        // The reviewer's repro: shard name → symlink escaping the store.
+        await fs.symlink(outside, path.join(objectsDir, 'aa'));
+
+        await runStartupRecoveryOnce(store, undefined, {
+          sampleVerifyLimit: 100,
+        });
+
+        await expectAllSurvive(victims);
+      } finally {
+        await fs.rm(outside, { recursive: true, force: true });
+      }
+    });
+
+    it('a symlinked downloads/ directory is never swept', async () => {
+      const { outside, victims } = await makeVictims();
+      try {
+        const downloads = path.join(store.getOmniRootDir(), 'downloads');
+        await fs.rm(downloads, { recursive: true, force: true });
+        await fs.symlink(outside, downloads);
+
+        await runStartupRecoveryOnce(store);
+
+        await expectAllSurvive(victims);
+        // The symlink itself must also survive (nothing rm'd through it).
+        expect((await fs.lstat(downloads)).isSymbolicLink()).toBe(true);
+      } finally {
+        await fs.rm(outside, { recursive: true, force: true });
+      }
+    });
+
+    it('a symlinked objects/sha256 ROOT is never traversed', async () => {
+      const { outside, victims } = await makeVictims();
+      try {
+        // Give the external dir a shard-shaped inner layout so a traversal
+        // WOULD find the victims if the root guard were missing.
+        const innerShard = path.join(outside, 'aa');
+        await fs.mkdir(innerShard);
+        const old = new Date(Date.now() - 72 * 3600_000);
+        const innerNames: string[] = [];
+        for (const name of await fs.readdir(outside)) {
+          const src = path.join(outside, name);
+          if ((await fs.lstat(src)).isFile()) {
+            await fs.copyFile(src, path.join(innerShard, name));
+            await fs.utimes(path.join(innerShard, name), old, old);
+            innerNames.push(name);
+          }
+        }
+        expect(innerNames.length).toBeGreaterThan(0);
+        const objectsDir = store.getObjectsDir();
+        await fs.rm(objectsDir, { recursive: true, force: true });
+        await fs.symlink(outside, objectsDir);
+
+        await runStartupRecoveryOnce(store, undefined, {
+          sampleVerifyLimit: 100,
+        });
+
+        await expectAllSurvive(victims);
+        // Pin the EXACT surviving set — reading back "whatever remains"
+        // would pass vacuously if the sweep had deleted entries.
+        for (const name of innerNames) {
+          await expect(
+            fs.readFile(path.join(innerShard, name), 'utf8'),
+          ).resolves.toBe('external-bytes-recovery-must-not-touch');
+        }
+      } finally {
+        await fs.rm(outside, { recursive: true, force: true });
+      }
+    });
+
+    it('a symlinked CANDIDATE inside a real shard is never hashed or deleted', async () => {
+      const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'omni-outside-'));
+      try {
+        const victim = path.join(outside, 'victim.bin');
+        await fs.writeFile(victim, 'external-candidate-bytes');
+        // Real object pins the shard dir; the symlink poses as a second
+        // object whose name can never hash-match the external content.
+        const { objectPath } = await putObject('legit-neighbor');
+        const shard = path.dirname(objectPath);
+        const link = path.join(shard, `${'b'.repeat(64)}.mp4`);
+        await fs.symlink(victim, link);
+
+        await runStartupRecoveryOnce(store, undefined, {
+          sampleVerifyLimit: 100,
+        });
+
+        // External target intact, and the link itself not removed either
+        // (a hash of external bytes must never have happened).
+        await expect(fs.readFile(victim, 'utf8')).resolves.toBe(
+          'external-candidate-bytes',
+        );
+        expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
+      } finally {
+        await fs.rm(outside, { recursive: true, force: true });
+      }
+    });
+  });
 });

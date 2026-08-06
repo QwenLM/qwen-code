@@ -49,7 +49,25 @@ export function resetRecoveryLatchForTests(): void {
   recoveryOnce.clear();
 }
 
+/**
+ * True only for a REAL directory (lstat, so a symlink to a directory is
+ * rejected). Recovery deletes files under the paths it traverses, so every
+ * directory it descends into — downloads/, the objects root, and each
+ * shard — must be a genuine directory inside the omni root: a symlinked
+ * intermediate directory would redirect readdir+rm at arbitrary paths
+ * outside `.qwen/omni`. The store's own symlink guard (putFile) runs later
+ * and does not protect this pre-delivery scan.
+ */
+async function isRealDirectory(p: string): Promise<boolean> {
+  try {
+    return (await fs.lstat(p)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 async function sweepDownloads(downloadsDir: string): Promise<void> {
+  if (!(await isRealDirectory(downloadsDir))) return;
   let names: string[];
   try {
     names = await fs.readdir(downloadsDir);
@@ -74,6 +92,7 @@ async function sweepDownloads(downloadsDir: string): Promise<void> {
 }
 
 async function sweepTmpFiles(objectsDir: string): Promise<void> {
+  if (!(await isRealDirectory(objectsDir))) return;
   let shards: string[];
   try {
     shards = await fs.readdir(objectsDir);
@@ -82,6 +101,7 @@ async function sweepTmpFiles(objectsDir: string): Promise<void> {
   }
   for (const shard of shards) {
     const shardDir = path.join(objectsDir, shard);
+    if (!(await isRealDirectory(shardDir))) continue;
     let names: string[];
     try {
       names = await fs.readdir(shardDir);
@@ -114,6 +134,7 @@ async function sampleVerifyObjects(
   maxBytes: number,
 ): Promise<void> {
   const candidates: string[] = [];
+  if (!(await isRealDirectory(objectsDir))) return;
   let shards: string[];
   try {
     shards = await fs.readdir(objectsDir);
@@ -121,6 +142,9 @@ async function sampleVerifyObjects(
     return;
   }
   for (const shard of shards) {
+    // Symlinked shard = redirection outside the store; skip it entirely so
+    // its "candidates" (external files!) never enter the sample pool.
+    if (!(await isRealDirectory(path.join(objectsDir, shard)))) continue;
     let names: string[] = [];
     try {
       names = await fs.readdir(path.join(objectsDir, shard));
@@ -151,6 +175,11 @@ async function sampleVerifyObjects(
     const expected = path.basename(rel).split('.')[0]!;
     try {
       const st = await fs.lstat(full);
+      // Only regular files are store objects: a symlinked candidate would
+      // make the hash read — and the mismatch-delete below act on — a file
+      // outside the omni root. (rm on the symlink itself would only unlink
+      // the link, but the hash must not read external content either.)
+      if (!st.isFile()) continue;
       if (st.size > maxBytes) continue;
       const hash = createHash('sha256');
       await pipeline(createReadStream(full), hash);
