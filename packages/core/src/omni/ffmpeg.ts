@@ -138,6 +138,12 @@ export interface MediaProbeResult {
   /** Frame count of the primary video stream (image: >1 means animated —
    * GIF/APNG/animated WebP; absent when the container does not report it). */
   frameCount?: number;
+  /** Overall bit rate in bits/second (format-level; audio/video). */
+  bitRate?: number;
+  /** Sample rate in Hz of the first audio stream (audio only). */
+  sampleRateHz?: number;
+  /** Channel count of the first audio stream (audio only). */
+  channels?: number;
 }
 
 /** Parse an ffprobe rational like "30000/1001" (or plain "25") into fps. */
@@ -188,7 +194,7 @@ export async function probeMediaMetadata(
     );
   }
   let parsed: {
-    format?: { format_name?: string; duration?: string };
+    format?: { format_name?: string; duration?: string; bit_rate?: string };
     streams?: Array<{
       codec_type?: string;
       codec_name?: string;
@@ -197,6 +203,9 @@ export async function probeMediaMetadata(
       avg_frame_rate?: string;
       r_frame_rate?: string;
       nb_frames?: string;
+      sample_rate?: string;
+      channels?: number;
+      bit_rate?: string;
     }>;
   };
   try {
@@ -213,6 +222,14 @@ export async function probeMediaMetadata(
     Number.isFinite(durationSeconds) && durationSeconds >= 0
       ? Math.round(durationSeconds * 1000)
       : undefined;
+  const parsePositiveInt = (raw: string | undefined): number | undefined => {
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? Math.round(n) : undefined;
+  };
+  // Prefer the format-level bit rate; fall back to the primary stream's.
+  const bitRateFor = (stream?: { bit_rate?: string }): number | undefined =>
+    parsePositiveInt(parsed.format?.bit_rate) ??
+    parsePositiveInt(stream?.bit_rate);
 
   const base: MediaProbeResult = { formatName: parsed.format?.format_name };
   switch (modality) {
@@ -232,12 +249,17 @@ export async function probeMediaMetadata(
           : {}),
       };
     }
-    case 'audio':
+    case 'audio': {
+      const channels = audioStream?.channels;
       return {
         ...base,
         durationMs,
         codec: audioStream?.codec_name,
+        bitRate: bitRateFor(audioStream),
+        sampleRateHz: parsePositiveInt(audioStream?.sample_rate),
+        ...(typeof channels === 'number' && channels > 0 ? { channels } : {}),
       };
+    }
     case 'video':
     default:
       return {
@@ -249,6 +271,7 @@ export async function probeMediaMetadata(
           parseFrameRate(videoStream?.avg_frame_rate) ??
           parseFrameRate(videoStream?.r_frame_rate),
         codec: videoStream?.codec_name,
+        bitRate: bitRateFor(videoStream),
       };
   }
 }

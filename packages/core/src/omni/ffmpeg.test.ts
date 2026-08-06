@@ -203,7 +203,67 @@ describe('probeMediaMetadata per-modality branches', () => {
       formatName: 'mov,mp4',
       durationMs: 12_500,
       codec: 'aac',
+      sampleRateHz: 44_100,
+      channels: 2,
     });
+  });
+
+  it('prefers the format-level bit rate and falls back to the stream', async () => {
+    mockExecResult(() => ({
+      stdout: JSON.stringify({
+        format: { format_name: 'mp3', duration: '10', bit_rate: '320000' },
+        streams: [
+          { codec_type: 'audio', codec_name: 'mp3', bit_rate: '128000' },
+        ],
+      }),
+    }));
+    await expect(probeMediaMetadata('/a.mp3', 'audio')).resolves.toMatchObject({
+      bitRate: 320_000,
+    });
+
+    mockExecResult(() => ({
+      stdout: JSON.stringify({
+        format: { format_name: 'mp3', duration: '10' },
+        streams: [
+          { codec_type: 'audio', codec_name: 'mp3', bit_rate: '128000' },
+        ],
+      }),
+    }));
+    await expect(probeMediaMetadata('/a.mp3', 'audio')).resolves.toMatchObject({
+      bitRate: 128_000,
+    });
+  });
+
+  it('reports the video bit rate for modality video', async () => {
+    mockExecResult(() => ({
+      stdout: JSON.stringify({
+        format: { format_name: 'mp4', duration: '5', bit_rate: '2500000' },
+        streams: [{ codec_type: 'video', codec_name: 'h264' }],
+      }),
+    }));
+    await expect(probeMediaMetadata('/v.mp4', 'video')).resolves.toMatchObject({
+      bitRate: 2_500_000,
+    });
+  });
+
+  it('omits bitRate/sampleRateHz/channels when unusable', async () => {
+    mockExecResult(() => ({
+      stdout: JSON.stringify({
+        format: { format_name: 'wav', duration: '3', bit_rate: 'N/A' },
+        streams: [
+          {
+            codec_type: 'audio',
+            codec_name: 'pcm_s16le',
+            sample_rate: 'N/A',
+            channels: 0,
+          },
+        ],
+      }),
+    }));
+    const result = await probeMediaMetadata('/a.wav', 'audio');
+    expect(result.bitRate).toBeUndefined();
+    expect(result.sampleRateHz).toBeUndefined();
+    expect(result.channels).toBeUndefined();
   });
 
   it("reads only dimensions for modality 'image' (no duration)", async () => {
