@@ -442,8 +442,22 @@ function guardDir(
       status: 'no-worktree',
     };
   }
-  const ignored = isGitIgnored(gitRoot, toPosix(representative));
-  const trackedOut = git(gitRoot, ['ls-files', '--', `${toPosix(dir)}/`]);
+  // The artifacts land under the invocation cwd, which may be a subdirectory
+  // of the worktree — probe paths must be toplevel-relative. Both sides are
+  // realpath'd: git reports the symlink-resolved toplevel.
+  const prefix = toPosix(
+    relative(realpathSync(gitRoot), realpathSync(projectRoot)),
+  );
+  const prefixDir = prefix === '' ? '' : `${prefix}/`;
+  const ignored = isGitIgnored(
+    gitRoot,
+    `${prefixDir}${toPosix(representative)}`,
+  );
+  const trackedOut = git(gitRoot, [
+    'ls-files',
+    '--',
+    `${prefixDir}${toPosix(dir)}/`,
+  ]);
   const trackedFiles = (trackedOut ?? '')
     .split('\n')
     .filter((p) => p.length > 0)
@@ -497,7 +511,14 @@ export function applyExcludeRemedy(projectRoot: string): string {
       return '';
     }
   })();
-  const rules = ['/.qwen/audits/', '/.qwen/tmp/'];
+  // Anchor the rules where the artifacts land: the invocation cwd, which may
+  // be a subdirectory of the worktree.
+  const top = git(projectRoot, ['rev-parse', '--show-toplevel']);
+  const prefix = top
+    ? toPosix(relative(realpathSync(top.trim()), realpathSync(projectRoot)))
+    : '';
+  const anchor = prefix === '' ? '' : `/${prefix}`;
+  const rules = [`${anchor}/.qwen/audits/`, `${anchor}/.qwen/tmp/`];
   const missing = rules.filter((r) => !existing.includes(r));
   if (missing.length > 0) {
     mkdirSync(dirname(excludeFile), { recursive: true });

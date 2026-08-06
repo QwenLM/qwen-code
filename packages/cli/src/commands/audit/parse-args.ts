@@ -8,7 +8,7 @@ import type { CommandModule } from 'yargs';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
-import { tokenizeArgs } from '../review/parse-args.js';
+import { tokenizeArgs } from '../../utils/shell-args.js';
 import { resolveAuditRoot, type AuditEffort } from './lib/files-plan.js';
 
 const EFFORT_LEVELS: ReadonlySet<string> = new Set(['low', 'medium', 'high']);

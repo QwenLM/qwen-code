@@ -556,6 +556,34 @@ describe('git-backed checks', () => {
     ).toContain('/.qwen/audits/');
   });
 
+  it('probes toplevel-relative when the cwd is a subdirectory', () => {
+    const repo = initRepo();
+    writeFileSync(join(repo, '.gitignore'), '.qwen/\n');
+    const sub = join(repo, 'pkg', 'sub');
+    mkdirSync(sub, { recursive: true });
+    // .qwen/ ignored at the toplevel covers the subdirectory's landing too.
+    expect(checkLocalOnlyGuard(sub, 'x.md').dirs.map((d) => d.status)).toEqual([
+      'ok',
+      'ok',
+    ]);
+    // Without ignore rules the subdirectory landing is unprotected, and the
+    // remedy anchors the rules at the subdirectory.
+    const repo2 = join(dir, 'repo2');
+    mkdirSync(join(repo2, 'pkg', 'sub'), { recursive: true });
+    git(['init', '-q'], repo2);
+    const sub2 = join(repo2, 'pkg', 'sub');
+    expect(checkLocalOnlyGuard(sub2, 'x.md').dirs.map((d) => d.status)).toEqual(
+      ['unprotected', 'unprotected'],
+    );
+    applyExcludeRemedy(sub2);
+    expect(
+      readFileSync(join(repo2, '.git', 'info', 'exclude'), 'utf8'),
+    ).toContain('/pkg/sub/.qwen/audits/');
+    expect(checkLocalOnlyGuard(sub2, 'x.md').dirs.map((d) => d.status)).toEqual(
+      ['ok', 'ok'],
+    );
+  });
+
   it('passes vacuously outside any worktree', () => {
     const guard = checkLocalOnlyGuard(dir, 'x.md');
     expect(guard.dirs.map((d) => d.status)).toEqual([
