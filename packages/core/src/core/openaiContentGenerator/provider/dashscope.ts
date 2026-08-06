@@ -248,8 +248,9 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       qwenEffortConfig['reasoning_effort'] = requestParams['reasoning_effort'];
     }
     const hasQwenEffortConfig = Object.keys(qwenEffortConfig).length > 0;
-    // qwen3.8 rejects reasoning_effort with thinking_budget. Resolve conflicts
-    // across precedence layers, but leave explicit same-layer pairs untouched.
+    // qwen3.8 rejects reasoning_effort with thinking_budget. Resolve the
+    // highest-priority layer once; when both fields are explicit in that
+    // layer, reasoning_effort keeps the pre-existing provider behavior.
     const isTieredQwenModel = isTieredEffortWireModel(
       this.resolveWireModel(request.model),
     );
@@ -259,35 +260,20 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     const extraBodyHasBudget = extraBody?.['thinking_budget'] !== undefined;
     const requestHasEffort = requestParams['reasoning_effort'] !== undefined;
     const requestHasBudget = requestParams['thinking_budget'] !== undefined;
-    const thinkingBudgetWins =
-      isTieredQwenModel &&
-      !extraBodyDisablesThinking &&
-      ((extraBodyHasBudget && !extraBodyHasEffort) ||
-        (!extraBodyHasBudget &&
-          !extraBodyHasEffort &&
-          requestHasBudget &&
-          !requestHasEffort));
-    const reasoningEffortWins =
-      isTieredQwenModel &&
-      !extraBodyDisablesThinking &&
-      ((extraBodyHasEffort && !extraBodyHasBudget) ||
-        (!extraBodyHasBudget &&
-          !extraBodyHasEffort &&
-          requestHasEffort &&
-          !requestHasBudget));
-    const hasExplicitSameLayerConflict =
-      isTieredQwenModel &&
-      !extraBodyDisablesThinking &&
-      ((extraBodyHasEffort && extraBodyHasBudget) ||
-        (!extraBodyHasEffort &&
-          !extraBodyHasBudget &&
-          requestHasEffort &&
-          requestHasBudget));
-    const knobResolution = {
-      thinkingBudgetWins,
-      reasoningEffortWins,
-      preserveThinkingBudget: hasExplicitSameLayerConflict,
-    };
+    const extraBodyKnob = extraBodyHasEffort
+      ? 'reasoning_effort'
+      : extraBodyHasBudget
+        ? 'thinking_budget'
+        : undefined;
+    const requestKnob = requestHasEffort
+      ? 'reasoning_effort'
+      : requestHasBudget
+        ? 'thinking_budget'
+        : undefined;
+    const preferredThinkingKnob =
+      isTieredQwenModel && !extraBodyDisablesThinking
+        ? (extraBodyKnob ?? requestKnob)
+        : undefined;
 
     if (this.isVisionModel(request.model)) {
       // DashScope-exclusive fields not present in the OpenAI SDK types; spread
@@ -316,7 +302,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
         visionResult,
         extraBody,
         request.model,
-        knobResolution,
+        preferredThinkingKnob,
       );
     }
 
@@ -343,7 +329,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       result,
       extraBody,
       request.model,
-      knobResolution,
+      preferredThinkingKnob,
     );
   }
 
@@ -355,27 +341,31 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     result: Record<string, unknown>,
     extraBody: Record<string, unknown> | undefined,
     model: string | undefined,
-    resolution: {
-      thinkingBudgetWins: boolean;
-      reasoningEffortWins: boolean;
-      preserveThinkingBudget: boolean;
-    },
+    preferredThinkingKnob: 'reasoning_effort' | 'thinking_budget' | undefined,
   ): OpenAI.Chat.ChatCompletionCreateParams {
     const merged: Record<string, unknown> = {
       ...result,
       ...(extraBody ? extraBody : {}),
     };
-    if (resolution.thinkingBudgetWins) {
-      delete merged['reasoning_effort'];
+    const dropped: string[] = [];
+    if (
+      preferredThinkingKnob === 'thinking_budget' &&
+      merged['reasoning_effort'] !== undefined &&
+      merged['reasoning_effort'] !== 'none'
+    ) {
+      dropped.push('reasoning_effort');
     }
-    if (resolution.reasoningEffortWins) {
-      delete merged['thinking_budget'];
+    if (
+      preferredThinkingKnob === 'reasoning_effort' &&
+      merged['thinking_budget'] !== undefined
+    ) {
+      dropped.push('thinking_budget');
     }
-    this.dropConflictingThinkingKnobs(
-      model,
-      merged,
-      resolution.preserveThinkingBudget,
-    );
+    for (const key of dropped) {
+      delete merged[key];
+    }
+    this.warnConflictingKnobDrop(model, merged, dropped);
+    this.dropConflictingThinkingKnobs(model, merged);
     return merged as unknown as OpenAI.Chat.ChatCompletionCreateParams;
   }
 
@@ -418,8 +408,8 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
    * alongside an effort tier is a second competing knob (the shape the
    * nested-`reasoning` strip in buildRequest exists to prevent), and
    * DashScope rejects `reasoning_effort` combined with `thinking_budget`.
-   * Explicit same-layer effort/budget pairs are preserved rather than
-   * silently choosing between two user settings. An explicit
+   * Explicit same-layer effort/budget pairs retain reasoning_effort, matching
+   * the provider's behavior before cross-layer resolution. An explicit
    * `enable_thinking: false` is the documented extra_body escape hatch
    * winning over the config tier, so it is honoured as the family's
    * canonical disable (`reasoning_effort: 'none'`, preserved by the
@@ -433,7 +423,6 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   private dropConflictingThinkingKnobs(
     model: string | undefined,
     merged: Record<string, unknown>,
-    preserveThinkingBudget = false,
   ): void {
     const effort = merged['reasoning_effort'];
     // Value check, not presence: 'none' is an explicit disable that stays on
@@ -454,10 +443,10 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
         }
         dropped.push('enable_thinking');
       }
-      if (!preserveThinkingBudget && 'thinking_budget' in merged) {
+      if (merged['thinking_budget'] !== undefined) {
         dropped.push('thinking_budget');
       }
-    } else if ('thinking_budget' in merged) {
+    } else if (merged['thinking_budget'] !== undefined) {
       dropped.push('reasoning_effort');
     }
     if (dropped.length === 0) {
@@ -466,19 +455,24 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     for (const key of dropped) {
       delete merged[key];
     }
-    // Warn (not debug): this discards keys the user supplied through
-    // extra_body, the documented escape hatch. Once per generator so a
-    // persistent conflict doesn't spam every request.
+    this.warnConflictingKnobDrop(model, merged, dropped);
+  }
+
+  private warnConflictingKnobDrop(
+    model: string | undefined,
+    merged: Record<string, unknown>,
+    dropped: string[],
+  ): void {
+    if (dropped.length === 0) {
+      return;
+    }
     if (!this.conflictingKnobDropWarned) {
       this.conflictingKnobDropWarned = true;
-      debugLogger.warn(
-        'DashScope: dropped extra_body thinking knobs that conflict with reasoning_effort',
-        {
-          model: wireModel,
-          reasoningEffort: merged['reasoning_effort'],
-          dropped,
-        },
-      );
+      debugLogger.warn('DashScope: dropped conflicting thinking knobs', {
+        model: this.resolveWireModel(model),
+        reasoningEffort: merged['reasoning_effort'],
+        dropped,
+      });
     }
   }
 

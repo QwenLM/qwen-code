@@ -966,6 +966,7 @@ export class ContentGenerationPipeline {
 
     const typed = providerRequest as unknown as Record<string, unknown>;
     const reasoningEffort = typed['reasoning_effort'];
+    const thinkingBudget = typed['thinking_budget'];
     // DashScope rejects forced tool selection while thinking is enabled
     // ("The tool_choice parameter does not support being set to required or
     // object in thinking mode"). Both field clauses are family-gated like
@@ -982,12 +983,13 @@ export class ContentGenerationPipeline {
       (thinkingMandatory ||
         (isQwenFamilyWireModel(model) &&
           (typed['enable_thinking'] === true ||
+            typeof thinkingBudget === 'number' ||
             (typeof reasoningEffort === 'string' &&
               reasoningEffort !== 'none'))))
     ) {
       debugLogger.debug(
         'DashScope: dropping tool_choice=required while thinking is enabled',
-        { model, reasoningEffort, thinkingMandatory },
+        { model, reasoningEffort, thinkingBudget, thinkingMandatory },
       );
       delete typed['tool_choice'];
     }

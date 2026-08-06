@@ -746,6 +746,17 @@ describe('ContentGenerationPipeline', () => {
         expectedToolChoice: undefined,
       },
       {
+        name: 'remove required tool selection when thinking budget enables thinking',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3.8-max',
+        extraBody: { thinking_budget: 4096 },
+        thinkingMandatory: undefined,
+        reasoning: undefined,
+        includeThoughts: true,
+        expectedThinking: undefined,
+        expectedToolChoice: undefined,
+      },
+      {
         name: 'preserve required tool selection when reasoning effort is none',
         baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
         model: 'qwen3.8-max',
