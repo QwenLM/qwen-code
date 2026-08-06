@@ -11,9 +11,11 @@ import type { DingtalkCardCallbackResult } from './interactive-card-types.js';
 import { sanitizeStreamingImageMarkers } from './outbound-image.js';
 
 const FLUSH_INTERVAL_MS = 500;
+const STATUS_REFRESH_INTERVAL_MS = 1_000;
+const BREAKER_PROBE_INTERVAL_MS = 30_000;
 const MAX_CONSECUTIVE_STATUS_FAILURES = 3;
-const CONTENT_LIMIT = 20_000;
-const TRUNCATION_MARKER = '[Earlier output truncated]\n';
+export const CONTENT_LIMIT = 20_000;
+export const TRUNCATION_MARKER = '[Earlier output truncated]\n';
 
 type StatusState = 'Running' | 'Completed' | 'Failed' | 'Stopped' | 'Cancelled';
 
@@ -105,13 +107,14 @@ export class StatusCardController {
 
   /**
    * Drain any pending snapshot so callers can treat the card's current
-   * content as delivered. Returns false when there is no live record or the
-   * stream failed during the drain, so the caller can fall back instead of
-   * claiming delivery.
+   * content as delivered. Returns false when there is no live record, the
+   * card never became ready, or the stream failed during the drain, so the
+   * caller can fall back instead of claiming delivery.
    */
   async flushPending(segmentId: string): Promise<boolean> {
     const record = this.recordsBySegment.get(segmentId);
     if (!record || record.terminal) return false;
+    if (!(await record.ready)) return false;
     while (!record.terminal && !record.streamFailed) {
       if (record.flushTimer) {
         clearTimeout(record.flushTimer);
@@ -306,6 +309,10 @@ export class StatusCardController {
       .catch((error) => {
         record.streamFailed = true;
         record.pendingSnapshot = undefined;
+        if (record.statusTimer) {
+          clearTimeout(record.statusTimer);
+          record.statusTimer = undefined;
+        }
         this.options.onError?.('status card streaming', error);
       });
     const tracked = write.finally(() => {
@@ -409,7 +416,7 @@ export class StatusCardController {
   }
 
   private async updateRunningStatus(record: StatusRecord): Promise<void> {
-    if (record.terminal) return;
+    if (record.terminal || record.streamFailed) return;
     const status = this.statusLine(record, 'Running');
     if (status.second === record.lastStatusSecond) return;
     try {
@@ -419,6 +426,12 @@ export class StatusCardController {
       });
       record.lastStatusSecond = status.second;
       record.consecutiveStatusFailures = 0;
+      // A success revives the per-second chain even when only a low-frequency
+      // breaker probe is scheduled.
+      if (record.statusTimer) {
+        clearTimeout(record.statusTimer);
+        record.statusTimer = undefined;
+      }
       this.scheduleStatusRefresh(record);
     } catch (error) {
       record.consecutiveStatusFailures++;
@@ -426,13 +439,16 @@ export class StatusCardController {
     }
   }
 
-  private scheduleStatusRefresh(record: StatusRecord): void {
-    if (record.terminal || record.statusTimer) return;
+  private scheduleStatusRefresh(
+    record: StatusRecord,
+    intervalMs = STATUS_REFRESH_INTERVAL_MS,
+  ): void {
+    if (record.terminal || record.streamFailed || record.statusTimer) return;
     const elapsed = Math.max(0, Date.now() - record.startedAt);
-    const delay = Math.max(50, 1000 - (elapsed % 1000));
+    const delay = Math.max(50, intervalMs - (elapsed % intervalMs));
     record.statusTimer = setTimeout(() => {
       record.statusTimer = undefined;
-      if (record.terminal) return;
+      if (record.terminal || record.streamFailed) return;
       const refresh = record.writeChain.then(() =>
         this.updateRunningStatus(record),
       );
@@ -441,6 +457,9 @@ export class StatusCardController {
         if (
           record.consecutiveStatusFailures >= MAX_CONSECUTIVE_STATUS_FAILURES
         ) {
+          // An idle card cannot revive through a flush once the breaker
+          // trips, so keep a low-frequency probe instead of stopping forever.
+          this.scheduleStatusRefresh(record, BREAKER_PROBE_INTERVAL_MS);
           return;
         }
         this.scheduleStatusRefresh(record);

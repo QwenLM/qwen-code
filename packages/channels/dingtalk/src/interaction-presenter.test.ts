@@ -122,9 +122,10 @@ function createHarness() {
       }
     }),
   } as unknown as DingtalkInteractiveCardClient;
+  const cancelRun = vi.fn().mockResolvedValue(true);
   const statusCards = new StatusCardController({
     client,
-    cancelRun: vi.fn().mockResolvedValue(true),
+    cancelRun,
   });
   const presenterRef: { current?: DingtalkInteractionPresenter } = {};
   const sendFallback = vi.fn().mockResolvedValue(undefined);
@@ -147,6 +148,8 @@ function createHarness() {
     presenter,
     projectionOrder,
     questionCards,
+    statusCards,
+    cancelRun,
     sendFallback,
   };
 }
@@ -210,6 +213,24 @@ describe('DingtalkInteractionPresenter', () => {
     );
   });
 
+  it('deduplicates an inline sender echo before the final answer', async () => {
+    const { client, presenter } = createHarness();
+    presenter.registerRun('run-1', 'owner-1', target, 'session-1', {
+      senderName: '衍星',
+    });
+    presenter.appendOutput(segment('segment-1'), 'working');
+
+    await presenter.closeOutput('segment-1', '@衍星 这是最终答案', 'completed');
+
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          content: '@衍星\n\n这是最终答案',
+        }),
+      }),
+    );
+  });
+
   it('neutralizes hostile sender names before embedding them in cards', async () => {
     const { client, presenter } = createHarness();
     presenter.registerRun('run-1', 'owner-1', target, 'session-1', {
@@ -232,6 +253,25 @@ describe('DingtalkInteractionPresenter', () => {
       // eslint-disable-next-line no-control-regex
       expect(value).not.toMatch(/[\u2028\u2029\u001b[\]]/u);
     }
+  });
+
+  it('escapes markdown-sensitive sender names in card attribution', async () => {
+    const { client, presenter } = createHarness();
+    presenter.registerRun('run-1', 'owner-1', target, 'session-1', {
+      senderName: '衍_星#1 (ops)',
+    });
+    presenter.appendOutput(segment('segment-1'), 'final answer');
+
+    await presenter.closeOutput('segment-1', '', 'completed');
+
+    const terminalPayload = vi
+      .mocked(client.updateInstance)
+      .mock.calls.map(([request]) => request.cardParamMap)
+      .find((payload) => payload.flowStatus === 3);
+    expect(terminalPayload).toMatchObject({
+      content: '@衍\\_星\\#1 \\(ops\\)\n\nfinal answer',
+      copy_content: '@衍\\_星\\#1 \\(ops\\)\n\nfinal answer',
+    });
   });
 
   it('fails an eagerly created running card before any output is emitted', async () => {
@@ -285,6 +325,28 @@ describe('DingtalkInteractionPresenter', () => {
     expect(vi.mocked(client.updateInstance).mock.calls.length).toBe(
       callsAfterTerminal,
     );
+  });
+
+  it('finalizes an eagerly created running card cancelled before any output', async () => {
+    const { client, presenter } = createHarness();
+    presenter.startStatusCard('run-1');
+    await vi.waitFor(() =>
+      expect(client.createAndDeliver).toHaveBeenCalledOnce(),
+    );
+
+    presenter.terminalizeRun('run-1', 'cancelled', 'cancel_command');
+
+    await vi.waitFor(() => {
+      const terminalPayload = vi
+        .mocked(client.updateInstance)
+        .mock.calls.map(([request]) => request.cardParamMap)
+        .find((payload) => payload.flowStatus === 3);
+      expect(terminalPayload).toMatchObject({
+        content: '任务已停止',
+        copy_content: '任务已停止',
+        statusLine: expect.stringMatching(/^Stopped · \d+s$/),
+      });
+    });
   });
 
   it('presents a direct question without creating a status card', async () => {
@@ -347,6 +409,25 @@ describe('DingtalkInteractionPresenter', () => {
     await vi.waitFor(() => {
       expect(client.createAndDeliver).toHaveBeenCalledWith(
         expect.objectContaining({
+          target: { chatId: 'owner-1', isGroup: false },
+        }),
+      );
+    });
+  });
+
+  it('delivers an eagerly created status card to the direct message owner', async () => {
+    const { client, presenter } = createHarness();
+    presenter.registerRun('run-1', 'owner-1', {
+      chatId: 'conversation-1',
+      isGroup: false,
+    });
+
+    presenter.startStatusCard('run-1');
+
+    await vi.waitFor(() => {
+      expect(client.createAndDeliver).toHaveBeenCalledWith(
+        expect.objectContaining({
+          templateId: STATUS_CARD_TEMPLATE_ID,
           target: { chatId: 'owner-1', isGroup: false },
         }),
       );
@@ -512,6 +593,12 @@ describe('DingtalkInteractionPresenter', () => {
     await vi.waitFor(() =>
       expect(client.openOrUpdateStream).toHaveBeenCalledOnce(),
     );
+    // The card already displays this prefix when the stream fails; the
+    // boundary deliberately re-sends the whole segment rather than risk
+    // losing the suffix that never reached the card.
+    expect(client.openOrUpdateStream).toHaveBeenCalledWith(
+      expect.objectContaining({ content: 'intermediate result' }),
+    );
     vi.mocked(client.openOrUpdateStream).mockRejectedValueOnce(
       new Error('stream blip'),
     );
@@ -587,7 +674,7 @@ describe('DingtalkInteractionPresenter', () => {
   );
 
   it('attributes retained card content when a run completes without a final response', async () => {
-    const { client, presenter } = createHarness();
+    const { client, presenter, sendFallback } = createHarness();
     presenter.registerRun('run-1', 'owner-1', target, 'session-1', {
       senderName: '衍*星',
     });
@@ -606,6 +693,57 @@ describe('DingtalkInteractionPresenter', () => {
         copy_content: '@衍\\*星\n\nintermediate',
       });
     });
+    expect(sendFallback).not.toHaveBeenCalled();
+  });
+
+  it('re-delivers boundary content when the run later fails', async () => {
+    const { client, presenter, sendFallback } = createHarness();
+    presenter.appendOutput(segment('segment-1'), 'intermediate result');
+    await presenter.closeOutput('segment-1', '', 'response_boundary');
+    expect(sendFallback).not.toHaveBeenCalled();
+
+    presenter.terminalizeRun('run-1', 'failed', 'boom');
+
+    await vi.waitFor(() => {
+      expect(client.updateInstance).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cardParamMap: expect.objectContaining({
+            content: '本次处理失败，请稍后重试。',
+            statusLine: expect.stringMatching(/^Failed · \d+s$/),
+          }),
+        }),
+      );
+    });
+    expect(sendFallback).toHaveBeenCalledWith(
+      'cid-1',
+      'intermediate result',
+      'session-1',
+    );
+  });
+
+  it('re-delivers boundary content when the run is later cancelled', async () => {
+    const { client, presenter, sendFallback } = createHarness();
+    presenter.appendOutput(segment('segment-1'), 'intermediate result');
+    await presenter.closeOutput('segment-1', '', 'response_boundary');
+    expect(sendFallback).not.toHaveBeenCalled();
+
+    presenter.terminalizeRun('run-1', 'cancelled', 'cancel_command');
+
+    await vi.waitFor(() => {
+      expect(client.updateInstance).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cardParamMap: expect.objectContaining({
+            content: '任务已停止',
+            statusLine: expect.stringMatching(/^Stopped · \d+s$/),
+          }),
+        }),
+      );
+    });
+    expect(sendFallback).toHaveBeenCalledWith(
+      'cid-1',
+      'intermediate result',
+      'session-1',
+    );
   });
 
   it('neutralizes partial image markers in text fallbacks', async () => {
@@ -624,6 +762,23 @@ describe('DingtalkInteractionPresenter', () => {
     expect(sendFallback).toHaveBeenCalledWith(
       'cid-1',
       'photo [Image pending]',
+      'session-1',
+    );
+  });
+
+  it('keeps a bare trailing bracket out of text fallbacks', async () => {
+    const sendFallback = vi.fn().mockResolvedValue(undefined);
+    const presenter = new DingtalkInteractionPresenter({ sendFallback });
+    presenter.registerRun('run-1', 'owner-1', target);
+    presenter.appendOutput(segment('segment-1'), 'result: arr[');
+
+    await expect(
+      presenter.closeOutput('segment-1', '', 'response_boundary'),
+    ).resolves.toBe(true);
+
+    expect(sendFallback).toHaveBeenCalledWith(
+      'cid-1',
+      'result: arr[',
       'session-1',
     );
   });
@@ -680,6 +835,56 @@ describe('DingtalkInteractionPresenter', () => {
     expect(sendFallback).toHaveBeenCalledWith(
       'cid-1',
       'intermediate result',
+      'session-1',
+    );
+  });
+
+  it('holds a response boundary until in-flight card creation settles', async () => {
+    const { client, presenter, sendFallback } = createHarness();
+    const creation = deferred<void>();
+    vi.mocked(client.createAndDeliver).mockImplementation(async (request) => {
+      if (request.templateId === STATUS_CARD_TEMPLATE_ID) {
+        await creation.promise;
+      }
+    });
+    presenter.startStatusCard('run-1');
+    presenter.appendOutput(segment('segment-1'), 'segment one');
+
+    const closed = presenter.closeOutput('segment-1', '', 'response_boundary');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sendFallback).not.toHaveBeenCalled();
+
+    creation.resolve();
+    await expect(closed).resolves.toBe(true);
+    expect(sendFallback).not.toHaveBeenCalled();
+    expect(
+      vi
+        .mocked(client.openOrUpdateStream)
+        .mock.calls.map(([request]) => request.content),
+    ).toContain('segment one');
+  });
+
+  it('falls back at a boundary when the in-flight card creation fails', async () => {
+    const { client, presenter, sendFallback } = createHarness();
+    const creation = deferred<void>();
+    vi.mocked(client.createAndDeliver).mockImplementation(async (request) => {
+      if (request.templateId === STATUS_CARD_TEMPLATE_ID) {
+        await creation.promise;
+        throw new Error('status template unavailable');
+      }
+    });
+    presenter.startStatusCard('run-1');
+    presenter.appendOutput(segment('segment-1'), 'segment one');
+
+    const closed = presenter.closeOutput('segment-1', '', 'response_boundary');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sendFallback).not.toHaveBeenCalled();
+
+    creation.resolve();
+    await expect(closed).resolves.toBe(true);
+    expect(sendFallback).toHaveBeenCalledWith(
+      'cid-1',
+      'segment one',
       'session-1',
     );
   });
@@ -765,6 +970,50 @@ describe('DingtalkInteractionPresenter', () => {
     expect(JSON.stringify(sendFallback.mock.calls)).not.toContain('Alice');
   });
 
+  it('keeps the card sender prefix out of a boundary fallback', async () => {
+    const { client, presenter, sendFallback } = createHarness();
+    presenter.registerRun('run-1', 'owner-1', target, 'session-1', {
+      senderName: 'Alice',
+    });
+    vi.mocked(client.createAndDeliver).mockImplementation(async (request) => {
+      if (request.templateId === STATUS_CARD_TEMPLATE_ID) {
+        throw new Error('status template unavailable');
+      }
+    });
+    presenter.appendOutput(segment('segment-1'), 'intermediate result');
+
+    await presenter.closeOutput('segment-1', '', 'response_boundary');
+
+    expect(sendFallback).toHaveBeenCalledWith(
+      'cid-1',
+      'intermediate result',
+      'session-1',
+    );
+    expect(JSON.stringify(sendFallback.mock.calls)).not.toContain('Alice');
+  });
+
+  it('keeps the card sender prefix out of an input_requested fallback', async () => {
+    const { client, presenter, sendFallback } = createHarness();
+    presenter.registerRun('run-1', 'owner-1', target, 'session-1', {
+      senderName: 'Alice',
+    });
+    vi.mocked(client.createAndDeliver).mockImplementation(async (request) => {
+      if (request.templateId === STATUS_CARD_TEMPLATE_ID) {
+        throw new Error('status template unavailable');
+      }
+    });
+    presenter.appendOutput(segment('segment-1'), 'Explanation');
+
+    await presenter.closeOutput('segment-1', '', 'input_requested');
+
+    expect(sendFallback).toHaveBeenCalledWith(
+      'cid-1',
+      'Explanation',
+      'session-1',
+    );
+    expect(JSON.stringify(sendFallback.mock.calls)).not.toContain('Alice');
+  });
+
   it('surfaces a failed text fallback to the shared delivery boundary', async () => {
     const { client, presenter, sendFallback } = createHarness();
     vi.mocked(client.createAndDeliver).mockImplementation(async (request) => {
@@ -801,6 +1050,24 @@ describe('DingtalkInteractionPresenter', () => {
         }),
       }),
     );
+  });
+
+  it('propagates the run session into the card stop action', async () => {
+    const { client, presenter, statusCards, cancelRun } = createHarness();
+    presenter.registerRun('run-1', 'owner-1', target, 'session-1');
+    presenter.startStatusCard('run-1');
+    await vi.waitFor(() =>
+      expect(client.createAndDeliver).toHaveBeenCalledOnce(),
+    );
+    const outTrackId = vi.mocked(client.createAndDeliver).mock.calls[0]![0]
+      .outTrackId;
+
+    const execute = acceptedExecution(
+      statusCards.claimStop(outTrackId, 'owner-1'),
+    );
+    await execute();
+
+    expect(cancelRun).toHaveBeenCalledWith('session-1', 'run-1');
   });
 
   it('preserves the lifecycle cancellation reason for the status card', async () => {
@@ -918,6 +1185,46 @@ describe('DingtalkInteractionPresenter', () => {
     expect(projectionOrder.indexOf('update:question:submitted')).toBeLessThan(
       projectionOrder.lastIndexOf('create:status'),
     );
+  });
+
+  it('fails the status card when a resumed run dies before producing output', async () => {
+    const { client, presenter, questionCards } = createHarness();
+    presenter.startStatusCard('run-1');
+    presenter.appendOutput(segment('segment-1'), 'Explanation');
+    await presenter.closeOutput('segment-1', '', 'input_requested');
+    await presenter.presentInput(questionContext('segment-1'));
+    const questionOutTrackId = vi
+      .mocked(client.createAndDeliver)
+      .mock.calls.find(
+        ([request]) => request.templateId === QUESTION_CARD_TEMPLATE_ID,
+      )![0].outTrackId;
+
+    await acceptedExecution(
+      questionCards.claim({
+        outTrackId: questionOutTrackId,
+        actionId: 'submit',
+        actorId: 'owner-1',
+        formData: { '0': 'Beijing' },
+      }),
+    )();
+
+    presenter.terminalizeRun('run-1', 'failed', 'boom');
+
+    await vi.waitFor(() => {
+      const failedPayload = vi
+        .mocked(client.updateInstance)
+        .mock.calls.map(([request]) => request.cardParamMap)
+        .find(
+          (payload) =>
+            payload.flowStatus === 3 &&
+            typeof payload.statusLine === 'string' &&
+            payload.statusLine.startsWith('Failed · '),
+        );
+      expect(failedPayload).toMatchObject({
+        content: '本次处理失败，请稍后重试。',
+        copy_content: '本次处理失败，请稍后重试。',
+      });
+    });
   });
 
   it('does not create continuation output before the question terminal update finishes', async () => {

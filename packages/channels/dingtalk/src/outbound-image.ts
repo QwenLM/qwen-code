@@ -111,8 +111,12 @@ export function replaceImageMarkers(
 
 export function stripPartialImageMarker(text: string): string {
   const visibleText = maskCode(text);
-  const partialMarker =
-    /\[(?:I(?:M(?:A(?:G(?:E(?::[^\]\r\n]*)?)?)?)?)?)?$/i.exec(visibleText);
+  // Require at least the 'I' of 'IMAGE' so a bare trailing '[' (code output,
+  // a link split mid-stream) survives instead of becoming a false
+  // '[Image pending]' claim in final user-visible text.
+  const partialMarker = /\[I(?:M(?:A(?:G(?:E(?::[^\]\r\n]*)?)?)?)?)?$/i.exec(
+    visibleText,
+  );
   if (partialMarker?.index === undefined) return text;
   return `${text.slice(0, partialMarker.index)}[Image pending]`;
 }

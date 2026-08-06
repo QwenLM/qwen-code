@@ -3316,6 +3316,89 @@ describe('DingtalkChannel reply mentions', () => {
       at: { atUserIds: ['staff-1'] },
     });
   });
+
+  it('keeps the final answer mention after a mid-run card fallback', async () => {
+    const channel = createChannel({ atSender: true });
+    seedWebhook(channel, 'cid-1');
+    seedMentionTarget(channel, 'message-1', 'staff-1');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+    const cardClient = (
+      channel as unknown as {
+        interactiveCardClient: {
+          createAndDeliver: ReturnType<typeof vi.fn>;
+          openOrUpdateStream: ReturnType<typeof vi.fn>;
+          updateInstance: ReturnType<typeof vi.fn>;
+        };
+      }
+    ).interactiveCardClient;
+    cardClient.createAndDeliver = vi
+      .fn()
+      .mockRejectedValue(new Error('card unavailable'));
+    cardClient.openOrUpdateStream = vi.fn().mockResolvedValue(undefined);
+    cardClient.updateInstance = vi.fn().mockResolvedValue(undefined);
+
+    getPromptHook(channel, 'onPromptStart')('cid-1', 'session-1', 'message-1');
+    (
+      channel as unknown as { inboundCardOwners: Map<string, unknown> }
+    ).inboundCardOwners.set('message-1', {
+      ownerId: 'staff-1',
+      target: { chatId: 'cid-1', isGroup: true },
+      sender: { senderName: 'Alice' },
+    });
+    getLifecycleHook(channel)({
+      type: 'started',
+      channelName: 'dingtalk',
+      chatId: 'cid-1',
+      sessionId: 'session-1',
+      messageId: 'message-1',
+      runId: 'run-1',
+      owner: { kind: 'channel_user', id: 'staff-1' },
+    });
+
+    const segmentContext = {
+      channelName: 'dingtalk',
+      sessionId: 'session-1',
+      runId: 'run-1',
+      segmentId: 'segment-1',
+      owner: { kind: 'channel_user', id: 'staff-1' },
+      target: {
+        channelName: 'dingtalk',
+        chatId: 'cid-1',
+        senderId: 'staff-1',
+        isGroup: true,
+      },
+    } as ChannelOutputSegmentContext;
+    getChunkHook(channel)(
+      'cid-1',
+      'intermediate result',
+      'session-1',
+      segmentContext,
+    );
+    await getOutputSegmentEndHook(channel)(
+      'cid-1',
+      'session-1',
+      segmentContext,
+      'response_boundary',
+    );
+    await getResponseHook(channel)('cid-1', 'final answer', 'session-1');
+
+    const bodies = fetchSpy.mock.calls.map(([, init]) =>
+      JSON.parse(String((init as RequestInit).body)),
+    );
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]).toMatchObject({
+      msgtype: 'markdown',
+      markdown: { text: '@staff-1\n\nintermediate result' },
+      at: { atUserIds: ['staff-1'] },
+    });
+    expect(bodies[1]).toMatchObject({
+      msgtype: 'markdown',
+      markdown: { text: '@staff-1\n\nfinal answer' },
+      at: { atUserIds: ['staff-1'] },
+    });
+  });
 });
 
 describe('DingtalkChannel mention target lifecycle', () => {

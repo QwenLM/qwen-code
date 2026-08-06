@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { sanitizeSenderName } from '@qwen-code/channel-base';
 import type {
   ChannelOutputSegmentContext,
@@ -8,7 +9,11 @@ import type {
 } from '@qwen-code/channel-base';
 import { stripPartialImageMarker } from './outbound-image.js';
 import type { QuestionCardController } from './question-card-controller.js';
-import type { StatusCardController } from './status-card-controller.js';
+import {
+  CONTENT_LIMIT,
+  TRUNCATION_MARKER,
+  type StatusCardController,
+} from './status-card-controller.js';
 
 interface RunPresentation {
   runId: string;
@@ -20,6 +25,7 @@ interface RunPresentation {
   activeSegmentId?: string;
   senderPrefix?: string;
   senderRawPrefix?: string;
+  cardDelivered?: { text: string; chatId: string; sessionId: string };
   terminal: boolean;
 }
 
@@ -38,9 +44,6 @@ export interface DingtalkInteractionPresenterOptions {
 export interface DingtalkCardSender {
   senderName: string;
 }
-
-const CARD_CONTENT_LIMIT = 20_000;
-const TRUNCATION_MARKER = '[Earlier output truncated]\n';
 
 function escapeMarkdownText(text: string): string {
   return text.replace(/([\\`*_[\]{}()#+.!|>~-])/gu, '\\$1');
@@ -169,6 +172,7 @@ export class DingtalkInteractionPresenter {
           statusContext.segmentId,
           this.withSenderPrefix(run, '本次处理失败，请稍后重试。'),
         );
+        await this.redeliverCardDeliveredContent(run);
         return statusCards !== undefined;
       }
       if (reason === 'cancelled') {
@@ -179,7 +183,14 @@ export class DingtalkInteractionPresenter {
           statusCards !== undefined &&
           (await statusCards.isCardLive(statusContext.segmentId)) &&
           (await statusCards.flushPending(statusContext.segmentId));
-        if (deliveredViaCard) return true;
+        if (deliveredViaCard) {
+          run.cardDelivered = {
+            text: stripPartialImageMarker(text || presentation.content),
+            chatId: presentation.context.target.chatId,
+            sessionId: presentation.context.sessionId,
+          };
+          return true;
+        }
         const fallbackText = stripPartialImageMarker(
           text || presentation.content,
         );
@@ -282,6 +293,7 @@ export class DingtalkInteractionPresenter {
           statusContext.segmentId,
           this.withSenderPrefix(run, '本次处理失败，请稍后重试。'),
         );
+        await this.redeliverCardDeliveredContent(run);
       } else if (terminal === 'cancelled') {
         const statusContext = run.statusContext;
         if (statusContext) {
@@ -298,6 +310,7 @@ export class DingtalkInteractionPresenter {
           runId,
           detail === 'cancel_command' ? 'cancel_command' : 'dropped',
         );
+        await this.redeliverCardDeliveredContent(run);
       } else {
         // Completing without a final segment (e.g. an empty response after the
         // last boundary) leaves the eagerly created card running forever.
@@ -345,6 +358,24 @@ export class DingtalkInteractionPresenter {
     };
   }
 
+  /**
+   * A failed or cancelled terminal overwrites the single continuity card,
+   * erasing content a boundary already declared delivered there. Send it as
+   * a text message so it survives the overwrite.
+   */
+  private async redeliverCardDeliveredContent(
+    run: RunPresentation,
+  ): Promise<void> {
+    const delivered = run.cardDelivered;
+    if (!delivered || !this.options.sendFallback) return;
+    run.cardDelivered = undefined;
+    await this.options.sendFallback(
+      delivered.chatId,
+      delivered.text,
+      delivered.sessionId,
+    );
+  }
+
   private enqueue<T>(
     run: RunPresentation,
     operation: () => T | Promise<T>,
@@ -357,7 +388,7 @@ export class DingtalkInteractionPresenter {
     return result;
   }
 
-  private boundContent(content: string, limit = CARD_CONTENT_LIMIT): string {
+  private boundContent(content: string, limit = CONTENT_LIMIT): string {
     if (content.length <= limit) return content;
     if (limit === 0) return '';
     if (limit <= TRUNCATION_MARKER.length) return content.slice(-limit);
@@ -373,7 +404,7 @@ export class DingtalkInteractionPresenter {
     const separator = '\n\n';
     const bodyLimit = Math.max(
       0,
-      CARD_CONTENT_LIMIT - run.senderPrefix.length - separator.length,
+      CONTENT_LIMIT - run.senderPrefix.length - separator.length,
     );
     return `${run.senderPrefix}${separator}${this.boundContent(
       body,
@@ -394,8 +425,8 @@ export class DingtalkInteractionPresenter {
         if (body === prefix) return '';
         if (!body.startsWith(prefix)) continue;
         const remainder = body.slice(prefix.length);
-        if (/^\r?\n/u.test(remainder)) {
-          body = remainder.replace(/^(?:\r?\n){1,2}/u, '');
+        if (/^\s/u.test(remainder)) {
+          body = remainder.replace(/^\s{1,2}/u, '');
           removed = true;
           break;
         }
@@ -412,7 +443,7 @@ export class DingtalkInteractionPresenter {
     if (run.statusContext) return run.statusContext;
     run.statusContext = segment
       ? { ...segment }
-      : { ...run.baseContext, segmentId: run.runId };
+      : { ...run.baseContext, segmentId: `${run.runId}:${randomUUID()}` };
     return run.statusContext;
   }
 

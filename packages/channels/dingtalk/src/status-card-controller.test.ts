@@ -42,6 +42,14 @@ function segment(
 
 const target = { chatId: 'cid-1', isGroup: true };
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
 function createHarness(
   options: {
     model?: string;
@@ -510,6 +518,168 @@ describe('StatusCardController', () => {
     await execute();
 
     expect(cancelRun).toHaveBeenCalledWith('session-1', 'run-1');
+  });
+
+  it('drains a snapshot queued while the boundary drain write is in flight', async () => {
+    const { client, controller } = createHarness();
+    controller.replace(segment(), target, 'first');
+    await vi.waitFor(() =>
+      expect(client.openOrUpdateStream).toHaveBeenCalledOnce(),
+    );
+    const gate = deferred<void>();
+    vi.mocked(client.openOrUpdateStream).mockImplementation(async (request) => {
+      if (request.content === 'first more') await gate.promise;
+    });
+    controller.replace(segment(), target, 'first more');
+
+    const pending = controller.flushPending('segment-1');
+    await vi.waitFor(() =>
+      expect(client.openOrUpdateStream).toHaveBeenCalledTimes(2),
+    );
+    controller.replace(segment(), target, 'first more second');
+    gate.resolve();
+
+    await expect(pending).resolves.toBe(true);
+    expect(
+      vi
+        .mocked(client.openOrUpdateStream)
+        .mock.calls.map(([request]) => request.content),
+    ).toContain('first more second');
+  });
+
+  it('awaits in-flight creation before reporting liveness', async () => {
+    const { client, controller } = createHarness();
+    const gate = deferred<void>();
+    vi.mocked(client.createAndDeliver).mockImplementationOnce(async () => {
+      await gate.promise;
+    });
+    controller.ensure(segment(), target);
+
+    const live = controller.isCardLive('segment-1');
+    let settled = false;
+    void live.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    gate.resolve();
+    await expect(live).resolves.toBe(true);
+  });
+
+  it('does not claim delivery for a card whose creation failed', async () => {
+    const { client, controller } = createHarness();
+    vi.mocked(client.createAndDeliver).mockRejectedValueOnce(
+      new Error('status template unavailable'),
+    );
+    controller.ensure(segment(), target);
+
+    await expect(controller.flushPending('segment-1')).resolves.toBe(false);
+    expect(client.openOrUpdateStream).not.toHaveBeenCalled();
+  });
+
+  it('stops status refreshes after the content stream fails', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const onError = vi.fn();
+    const { client, controller } = createHarness({ onError });
+    controller.replace(segment(), target, 'first');
+    await vi.advanceTimersByTimeAsync(0);
+    const gate = deferred<void>();
+    vi.mocked(client.openOrUpdateStream).mockImplementationOnce(async () => {
+      await gate.promise;
+      throw new Error('stream died');
+    });
+    controller.replace(segment(), target, 'first more');
+    await vi.advanceTimersByTimeAsync(500);
+    // The status timer fires while the failing write is still in flight and
+    // queues its refresh behind it.
+    await vi.advanceTimersByTimeAsync(500);
+    gate.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(onError).toHaveBeenCalledWith(
+      'status card streaming',
+      expect.any(Error),
+    );
+    expect(client.updateInstance).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(client.updateInstance).not.toHaveBeenCalled();
+  });
+
+  it('does not retry the content stream after a latched failure', async () => {
+    vi.useFakeTimers();
+    const onError = vi.fn();
+    const { client, controller } = createHarness({ onError });
+    controller.replace(segment(), target, 'first');
+    await vi.advanceTimersByTimeAsync(0);
+    controller.replace(segment(), target, 'first more');
+    await vi.advanceTimersByTimeAsync(500);
+    expect(client.openOrUpdateStream).toHaveBeenCalledTimes(2);
+    vi.mocked(client.openOrUpdateStream).mockRejectedValueOnce(
+      new Error('stream died'),
+    );
+
+    controller.replace(segment(), target, 'even more');
+    await vi.advanceTimersByTimeAsync(500);
+    expect(onError).toHaveBeenCalledWith(
+      'status card streaming',
+      expect.any(Error),
+    );
+
+    vi.mocked(client.openOrUpdateStream).mockClear();
+    controller.replace(segment(), target, 'and again');
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    expect(client.openOrUpdateStream).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledTimes(1);
+  });
+
+  it('resets the status failure breaker after a successful push', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const { client, controller } = createHarness();
+    controller.replace(segment(), target, 'first');
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.updateInstance).mockRejectedValue(
+      new Error('metadata down'),
+    );
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(client.updateInstance).toHaveBeenCalledTimes(3);
+
+    vi.mocked(client.updateInstance).mockResolvedValue(undefined);
+    controller.replace(segment(), target, 'first more');
+    await vi.advanceTimersByTimeAsync(500);
+    expect(client.updateInstance).toHaveBeenCalledTimes(4);
+
+    vi.mocked(client.updateInstance).mockRejectedValue(
+      new Error('metadata blip'),
+    );
+    vi.mocked(client.updateInstance).mockClear();
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(client.updateInstance).toHaveBeenCalledTimes(3);
+  });
+
+  it('revives idle status refreshes via a probe after the breaker trips', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const { client, controller } = createHarness();
+    controller.replace(segment(), target, 'first');
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.updateInstance).mockRejectedValue(
+      new Error('metadata down'),
+    );
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(client.updateInstance).toHaveBeenCalledTimes(3);
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(client.updateInstance).toHaveBeenCalledTimes(3);
+
+    vi.mocked(client.updateInstance).mockResolvedValue(undefined);
+    vi.mocked(client.updateInstance).mockClear();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(client.updateInstance.mock.calls.length).toBeGreaterThanOrEqual(2);
   });
 
   it('does not let a completed historical card stop a later run', async () => {
