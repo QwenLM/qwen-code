@@ -4760,6 +4760,22 @@ describe('SessionService', () => {
       expect(fs.existsSync(paths.targetTranscriptPath)).toBe(false);
     });
 
+    it('isolates branch GC failures from list operations', async () => {
+      const newId = '66666666-6666-6666-6666-666666666676';
+      const ownerToken = '77777777-7777-7777-7777-777777777786';
+      const paths = seedStaleBranchCreation(newId, ownerToken);
+      fs.writeFileSync(paths.claimPath, '{invalid manifest');
+      const staleTime = new Date(Date.now() - 25 * 60 * 60 * 1000);
+      fs.utimesSync(paths.claimPath, staleTime, staleTime);
+      const gcService = new SessionService(cwd, {
+        onWarning: () => {
+          throw new Error('notifier channel closed');
+        },
+      });
+
+      await expect(gcService.listSessions()).resolves.toBeDefined();
+    });
+
     it('preserves a branch creation younger than the stale threshold', () => {
       const newId = '66666666-6666-6666-6666-666666666675';
       const ownerToken = '77777777-7777-7777-7777-777777777785';
