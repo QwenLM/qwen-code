@@ -200,12 +200,12 @@ describe('runCleanup', () => {
         expect(mocks.execFileSync).toHaveBeenCalledWith(
           'tmux',
           ['-L', orphan, 'kill-server'],
-          { stdio: 'pipe', timeout: 15_000 },
+          { stdio: 'pipe', timeout: 15_000, killSignal: 'SIGKILL' },
         );
         expect(mocks.execFileSync).not.toHaveBeenCalledWith(
           'tmux',
           ['-L', live, 'kill-server'],
-          { stdio: 'pipe', timeout: 15_000 },
+          { stdio: 'pipe', timeout: 15_000, killSignal: 'SIGKILL' },
         );
         expect(mocks.rmSync).toHaveBeenCalledWith(`${dir}/${orphan}`, {
           force: true,
@@ -260,7 +260,7 @@ describe('runCleanup', () => {
         expect(mocks.execFileSync).toHaveBeenCalledWith(
           'tmux',
           ['-L', orphan2, 'kill-server'],
-          { stdio: 'pipe', timeout: 15_000 },
+          { stdio: 'pipe', timeout: 15_000, killSignal: 'SIGKILL' },
         );
         expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
           `Reaped orphaned capture server: ${orphan2}`,
