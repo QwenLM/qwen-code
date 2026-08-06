@@ -254,7 +254,10 @@ export function bundleStaleness(
     return { stale: false, unmeasured: 'the bundle carries no source digest' };
   }
   if (!currentDigest) {
-    return { stale: false, unmeasured: 'no review sources found to compare' };
+    return {
+      stale: false,
+      unmeasured: 'no review sources were found to compare',
+    };
   }
   return { stale: stampedDigest !== currentDigest };
 }
@@ -380,9 +383,9 @@ export function reviewSourceRoots(repoRoot: string): ReviewSourceRoot[] {
  * `drive`, and that is where the long work starts) is one line rather than a
  * copy of fifty.
  *
- * Returns the lines to emit, in order, and an empty array when there is
- * nothing to say. It reads the filesystem and decides nothing else; the caller
- * owns how they reach a terminal.
+ * Returns the line to emit, or `undefined` when there is nothing to say. It
+ * reads the filesystem and decides nothing else; the caller owns how it
+ * reaches a terminal.
  *
  * `brief` selects the one-line forms: `drive` repeats a check `parse-args`
  * already printed in full at the start of the review, and a repeated
@@ -391,13 +394,13 @@ export function reviewSourceRoots(repoRoot: string): ReviewSourceRoot[] {
 export function bundleStalenessNotices(
   entryPath: string | undefined,
   brief?: boolean,
-): string[] {
+): string | undefined {
   // Caught here rather than at each call site: the contract is the one check
   // that must never cost the run anything, and a guard inside the function is
   // a property of the module, where a call-site `try` belongs to its two call
   // sites.
   try {
-    if (!entryPath) return [];
+    if (!entryPath) return undefined;
     // `realpath` before deriving anything: node hands a symlinked entry over
     // unresolved, so an alias of the bundle (`ln -s dist/cli.js ~/bin/qwen`)
     // would hand `distDir` a directory with no stamp beside it and turn the
@@ -420,7 +423,7 @@ export function bundleStalenessNotices(
     // stamp beside them, and say "could not check" on every review forever, with
     // advice its reader can never act on. A layout with no stamp to grow is not
     // half-measured; it is not measured.
-    if (basename(distDir) !== 'dist') return [];
+    if (basename(distDir) !== 'dist') return undefined;
 
     const repoRoot = dirname(distDir);
     let stamped: string | undefined;
@@ -447,18 +450,18 @@ export function bundleStalenessNotices(
       // was made from, so the digest computed here covers less than the
       // stamped tree — a mismatch would accuse a build that may be
       // byte-for-byte correct. Name the case; accuse nothing.
-      return [
+      return (
         `review: could not check whether the bundle is current — ` +
-          `only some of the review sources are present` +
-          (brief
-            ? ' (a partial checkout).'
-            : ' (a sparse or partial checkout). The stamp covers the whole tree; materialize the missing sources to compare again.'),
-      ];
+        `only some of the review sources are present` +
+        (brief
+          ? ' (a partial checkout).'
+          : ' (a sparse or partial checkout). The stamp covers the whole tree; materialize the missing sources to compare again.')
+      );
     }
     const staleness = bundleStaleness(stamped, current);
 
     const warning = staleBundleWarning(staleness, brief);
-    if (warning) return [warning];
+    if (warning) return warning;
 
     // No digest, but the sources are on disk. The two reasons a measurement
     // comes up empty each name themselves: a file or directory that could not
@@ -472,28 +475,26 @@ export function bundleStalenessNotices(
       const reason = measured.incomplete
         ? 'a review source could not be read, so nothing was compared' +
           (brief ? '.' : '. Re-run once the tree is settled.')
-        : 'no review sources were found to compare.';
-      return [
-        `review: could not check whether the bundle is current — ${reason}`,
-      ];
+        : `${staleness.unmeasured}.`;
+      return `review: could not check whether the bundle is current — ${reason}`;
     }
     // A checkout whose `dist/` predates the stamp is genuinely stale and cannot
     // be measured — the state of every existing tree until its next rebuild. An
     // installed package has no sources either and gets nothing, so a user who
     // could do nothing about it is not told anything.
     if (!stamped && current) {
-      return [
+      return (
         `review: could not check whether the bundle is current — ${staleness.unmeasured}. ` +
-          (brief
-            ? 'Rebuild with `npm run bundle` to record one.'
-            : 'Either it was built before this check existed, or the build declined to ' +
-              'record one; rebuild with `npm run bundle` and, if the line persists, ' +
-              "read that build's output for why it refused."),
-      ];
+        (brief
+          ? 'Rebuild with `npm run bundle` to record one.'
+          : 'Either it was built before this check existed, or the build declined to ' +
+            'record one; rebuild with `npm run bundle` and, if the line persists, ' +
+            "read that build's output for why it refused.")
+      );
     }
-    return [];
+    return undefined;
   } catch {
-    return [];
+    return undefined;
   }
 }
 

@@ -480,11 +480,12 @@ export const parseArgsCommand: CommandModule = {
     // and the run measures the old behaviour without saying so. This is the
     // first command of a fresh review; `drive` repeats the check, because
     // the verifier brief sends agents there without a step 1.
-    for (const line of bundleStalenessNotices(process.argv[1])) {
+    const bundleNotice = bundleStalenessNotices(process.argv[1]);
+    if (bundleNotice) {
       // `…Safe`, the convention for diagnostics in this subsystem: stderr
       // piped to `head` raises EPIPE, and a warning that kills the review it
       // is warning about would be worse than the staleness it reports.
-      writeStderrLineSafe(line);
+      writeStderrLineSafe(bundleNotice);
     }
 
     const parsed = parseReviewArgs(rawStr);

@@ -78,9 +78,9 @@ const DIST_ALLOWED_ENTRIES = new Set([
   'README.md',
   'LICENSE',
   // Digest of the review sources this bundle was built from, stamped by
-  // copy_bundle_assets.js. Harmless to ship: a standalone install has no
-  // `packages/` sources to compare against, so the staleness check reports
-  // that it could not measure and stays silent.
+  // copy_bundle_assets.js. Harmless to ship: a standalone install lays the
+  // dist entries out under `lib/`, and the staleness check only applies to
+  // a `<root>/dist/cli.js` layout — it never reads the stamp there.
   'review-sources.sha256',
   'locales',
   'examples',

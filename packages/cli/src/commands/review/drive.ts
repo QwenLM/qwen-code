@@ -482,9 +482,8 @@ export const driveCommand: CommandModule = {
       // starts, which makes a stale bundle costliest here. The one-line form:
       // a fresh review already heard the full paragraph at `parse-args`, and
       // a repeated paragraph becomes wallpaper.
-      for (const line of bundleStalenessNotices(process.argv[1], true)) {
-        writeStderrLineSafe(line);
-      }
+      const bundleNotice = bundleStalenessNotices(process.argv[1], true);
+      if (bundleNotice) writeStderrLineSafe(bundleNotice);
       const args = argv as unknown as DriveArgs & { readyTimeout: number };
       const report = runDrive(args);
       if (args.out) {

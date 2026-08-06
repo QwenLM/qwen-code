@@ -373,7 +373,7 @@ describe('bundleStaleness', () => {
       'no sources to compare',
       'aaa',
       undefined,
-      'no review sources found to compare',
+      'no review sources were found to compare',
     ],
     ['neither', undefined, undefined, 'the bundle carries no source digest'],
   ])(
@@ -489,21 +489,25 @@ describe('the bundled skill stops on what this module prints', () => {
       const lines = [
         staleBundleWarning({ stale: true })!,
         staleBundleWarning({ stale: true }, true)!,
-        ...bundleStalenessNotices(entry),
       ];
+      const emit = (): void => {
+        const line = bundleStalenessNotices(entry);
+        if (line) lines.push(line);
+      };
+      emit();
       // Stamp over the full tree, then drop one root: the partial checkout.
       writeFileSync(
         join(distDir, DIGEST_FILE),
         reviewSourcesDigest(root, reviewSourceRoots(root))!,
       );
       rmSync(skillDir, { recursive: true, force: true });
-      lines.push(...bundleStalenessNotices(entry));
+      emit();
       // Full tree again, but a source read faults: the unreadable tree.
       mkdirSync(skillDir, { recursive: true });
       writeFileSync(join(skillDir, 'SKILL.md'), '# skill');
       unreadable.path = join(commands, 'review', 'drive.ts');
       try {
-        lines.push(...bundleStalenessNotices(entry));
+        emit();
       } finally {
         unreadable.path = '';
       }
@@ -514,7 +518,7 @@ describe('the bundled skill stops on what this module prints', () => {
       rmSync(join(services, 'review-worktree-lease.ts'));
       writeFileSync(join(commands, 'review', 'keep.test.ts'), 'a test');
       rmSync(skillDir, { recursive: true, force: true });
-      lines.push(...bundleStalenessNotices(entry));
+      emit();
 
       // An exact count, so a fixture stage that silently printed nothing
       // reddens instead of shrinking the pin.
