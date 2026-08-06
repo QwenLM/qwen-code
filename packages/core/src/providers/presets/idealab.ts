@@ -20,6 +20,7 @@ export const idealabProvider: ProviderConfig = {
       id: 'Qwen3.6-Plus-DogFooding',
       contextWindowSize: 1000000,
       enableThinking: true,
+      modalities: { image: true, video: true },
     },
     {
       id: 'bailian/deepseek-v4-pro',

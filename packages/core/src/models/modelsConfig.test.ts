@@ -1663,18 +1663,19 @@ describe('ModelsConfig', () => {
     });
   });
 
-  it('uses the registry catalog result for an initial provider with default credentials', () => {
+  it('uses the registry catalog result for an initial mapped provider', () => {
     const modelsConfig = new ModelsConfig({
       initialAuthType: AuthType.USE_OPENAI,
       modelProvidersConfig: {
-        openai: [{ id: 'gpt-4o' }],
-      },
-      generationConfig: { model: 'gpt-4o' },
+        minimax: [{ id: 'MiniMax-M3' }],
+      } as unknown as ModelProvidersConfig,
+      providerProtocolConfig: { minimax: 'openai' },
+      generationConfig: { model: 'MiniMax-M3' },
       modelMetadataCatalog: {
-        openai: {
+        minimax: {
           models: {
-            'gpt-4o': {
-              modalities: { input: ['text', 'image', 'pdf'] },
+            'MiniMax-M3': {
+              modalities: { input: ['text', 'image', 'video'] },
             },
           },
         },
@@ -1683,7 +1684,7 @@ describe('ModelsConfig', () => {
 
     expect(modelsConfig.getGenerationConfig().modalities).toEqual({
       image: true,
-      pdf: true,
+      video: true,
     });
     expect(modelsConfig.getGenerationConfigSources()['modalities']).toEqual({
       kind: 'computed',

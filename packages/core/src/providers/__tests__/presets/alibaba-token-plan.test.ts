@@ -68,25 +68,26 @@ describe('token plan provider', () => {
       contextWindowSize: 262144,
     });
     expect(
-      template.every(
-        (model) => model.generationConfig?.modalities === undefined,
-      ),
-    ).toBe(true);
+      template.find((model) => model.id === 'qwen3.7-plus')?.generationConfig
+        ?.modalities,
+    ).toEqual({ image: true, video: true });
     expect(plan.providerId).toBe('token-plan');
     expect(plan.authType).toBe(AuthType.USE_OPENAI);
     expect(plan.env).toEqual({ [TOKEN_PLAN_ENV_KEY]: 'sk-token' });
     expect(plan.modelSelection).toEqual({ modelId: template[0].id });
-    expect(plan.modelProviders).toEqual([
-      {
-        authType: AuthType.USE_OPENAI,
-        models: template.map((model) => ({
-          ...model,
-          envKey: TOKEN_PLAN_ENV_KEY,
-        })),
-        mergeStrategy: 'prepend-and-remove-owned',
-        ownsModel: expect.any(Function),
-      },
-    ]);
+    expect(plan.modelProviders?.[0]).toMatchObject({
+      authType: AuthType.USE_OPENAI,
+      mergeStrategy: 'prepend-and-remove-owned',
+      ownsModel: expect.any(Function),
+    });
+    expect(plan.modelProviders?.[0]?.models.map((model) => model.id)).toEqual(
+      template.map((model) => model.id),
+    );
+    expect(
+      plan.modelProviders?.[0]?.models.every(
+        (model) => model.generationConfig?.modalities === undefined,
+      ),
+    ).toBe(true);
     expect(plan.providerState).toEqual({
       'providerMetadata.token-plan': {
         baseUrl: TOKEN_PLAN_CHINA_BASE_URL,

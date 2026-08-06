@@ -1079,13 +1079,16 @@ describe('loadCliConfig', () => {
       const argv = await parseArguments();
       const config = await loadCliConfig(
         {
+          proxy: 'http://catalog-proxy.example:8080',
           security: { auth: { selectedType: 'openai' } },
           modelProviders: { openai: [{ id: 'gpt-4o' }] },
         },
         argv,
       );
 
-      expect(catalogSpy).toHaveBeenCalledOnce();
+      expect(catalogSpy).toHaveBeenCalledWith({
+        proxyUrl: 'http://catalog-proxy.example:8080',
+      });
       expect(config.getModelsConfig().getGenerationConfig().modalities).toEqual(
         { image: true, pdf: true },
       );

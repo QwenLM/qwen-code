@@ -385,11 +385,8 @@ function resolveGenerationConfig(
   const result: Partial<ContentGeneratorConfig> = {};
 
   for (const field of MODEL_GENERATION_CONFIG_FIELDS) {
-    if (
-      authType &&
-      modelProviderConfig &&
-      field in modelProviderConfig
-    ) {
+    // ModelProvider config takes priority over settings config
+    if (authType && modelProviderConfig && field in modelProviderConfig) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (result as any)[field] = modelProviderConfig[field];
       sources[field] = modelProvidersSource(

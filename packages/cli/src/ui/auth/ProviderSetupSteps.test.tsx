@@ -7,7 +7,7 @@
 import { renderWithProviders } from '../../test-utils/render.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
-import { AuthType } from '@qwen-code/qwen-code-core';
+import { AuthType, minimaxProvider } from '@qwen-code/qwen-code-core';
 import type { KeypressHandler, Key } from '../contexts/KeypressContext.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { ProviderSetupSteps } from './ProviderSetupSteps.js';
@@ -137,23 +137,8 @@ describe('ProviderSetupSteps', () => {
     return {
       state: {
         provider: {
-          id: 'minimax',
-          label: 'MiniMax API Key',
-          description: 'Quick setup for MiniMax models',
-          protocol: AuthType.USE_OPENAI,
+          ...minimaxProvider,
           baseUrl: 'https://api.minimax.io/v1',
-          envKey: 'MINIMAX_API_KEY',
-          models: [
-            {
-              id: 'MiniMax-M3',
-              contextWindowSize: 1000000,
-              modalities: { image: true, video: true },
-            },
-            { id: 'MiniMax-M2.7', contextWindowSize: 204800 },
-            { id: 'MiniMax-M2.5', contextWindowSize: 196608 },
-          ],
-          modelsEditable: true,
-          modelNamePrefix: 'MiniMax',
         },
         step: 'models',
         stepIndex: 0,

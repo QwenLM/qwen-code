@@ -144,6 +144,66 @@ describe('getCatalogModalities', () => {
     ).toBeUndefined();
   });
 
+  it.each([
+    ['token-plan', 'alibaba-token-plan-cn'],
+    ['alibabaStandard', 'alibaba-cn'],
+    ['grok', 'xai'],
+    ['gemini', 'google'],
+    ['vertex-ai', 'google'],
+  ])('maps provider id %s to %s', (providerId, catalogProviderId) => {
+    expect(
+      getCatalogModalities(
+        {
+          [catalogProviderId]: {
+            models: {
+              model: { modalities: { input: ['text', 'image'] } },
+            },
+          },
+        },
+        { providerId, modelId: 'model' },
+      ),
+    ).toEqual({ image: true });
+  });
+
+  it('prefers providerId over authType when both match the catalog', () => {
+    expect(
+      getCatalogModalities(
+        {
+          minimax: {
+            models: {
+              model: { modalities: { input: ['text', 'image'] } },
+            },
+          },
+          openai: {
+            models: {
+              model: { modalities: { input: ['text', 'video'] } },
+            },
+          },
+        },
+        { providerId: 'minimax', authType: 'openai', modelId: 'model' },
+      ),
+    ).toEqual({ image: true });
+  });
+
+  it('does not use authType when an unknown base URL is provider evidence', () => {
+    expect(
+      getCatalogModalities(
+        {
+          openai: {
+            models: {
+              model: { modalities: { input: ['text', 'image'] } },
+            },
+          },
+        },
+        {
+          authType: 'openai',
+          modelId: 'model',
+          baseUrl: 'https://unknown.example/v1',
+        },
+      ),
+    ).toBeUndefined();
+  });
+
   it('resolves an auth-type-only lookup without provider evidence', () => {
     expect(
       getCatalogModalities(
@@ -673,6 +733,29 @@ describe('loadModelMetadataCatalog', () => {
     ).toBeUndefined();
   });
 
+  it('safely retains reserved provider and model ids', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'models-dev-test-'));
+    tempDirs.push(dir);
+    const cachePath = path.join(dir, 'models-dev.json');
+    await fs.writeFile(
+      cachePath,
+      '{"__proto__":{"models":{"__proto__":["text","image"]}}}',
+    );
+
+    const loaded = await loadModelMetadataCatalog({
+      cachePath,
+      fetch: vi.fn(),
+    });
+
+    expect(Object.keys(loaded)).toEqual(['__proto__']);
+    expect(
+      getCatalogModalities(loaded, {
+        providerId: '__proto__',
+        modelId: '__proto__',
+      }),
+    ).toEqual({ image: true });
+  });
+
   it('rejects a fresh cache without valid model metadata', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'models-dev-test-'));
     tempDirs.push(dir);
@@ -772,12 +855,18 @@ describe('loadModelMetadataCatalog', () => {
         { image: true, video: true },
       ],
       ['alibaba-token-plan', 'kimi-k2.7-code', { image: true, video: true }],
+      ['alibaba-token-plan', 'qwen3.7-plus', { image: true, video: true }],
+      ['alibaba-token-plan', 'qwen3.6-plus', { image: true, video: true }],
+      ['alibaba-token-plan', 'kimi-k2.5', { image: true, video: true }],
       [
         'alibaba-token-plan-cn',
         'qwen3.8-max-preview',
         { image: true, video: true },
       ],
       ['alibaba-token-plan-cn', 'kimi-k2.7-code', { image: true, video: true }],
+      ['alibaba-token-plan-cn', 'qwen3.7-plus', { image: true, video: true }],
+      ['alibaba-token-plan-cn', 'qwen3.6-plus', { image: true, video: true }],
+      ['alibaba-token-plan-cn', 'kimi-k2.5', { image: true, video: true }],
       ['alibaba-coding-plan', 'qwen3.5-plus', { image: true, video: true }],
       ['alibaba-coding-plan', 'qwen3.6-plus', { image: true, video: true }],
       ['alibaba-coding-plan', 'kimi-k2.5', { image: true, video: true }],
@@ -873,16 +962,40 @@ describe('loadModelMetadataCatalog', () => {
   });
 
   it.each([
-    ['an HTTP error', () => new Response('unavailable', { status: 500 })],
-    [
-      'an oversized response body',
-      () => new Response(new Uint8Array(8 * 1024 * 1024 + 1)),
-    ],
-  ])('keeps the built-in snapshot for %s', async (_name, response) => {
+    ['an HTTP error', 500, undefined],
+    ['an oversized response body', 200, undefined],
+    ['an oversized declared length', 200, String(8 * 1024 * 1024 + 1)],
+  ])('keeps the built-in snapshot for %s', async (_name, status, length) => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'models-dev-test-'));
     tempDirs.push(dir);
     const cachePath = path.join(dir, 'models-dev.json');
-    const fetchMock = vi.fn(async () => response());
+    const cancel = vi.fn();
+    const body =
+      _name === 'an oversized response body'
+        ? JSON.stringify({
+            openrouter: {
+              models: {
+                model: {
+                  modalities: { input: ['text'] },
+                  padding: 'x'.repeat(8 * 1024 * 1024),
+                },
+              },
+            },
+          })
+        : JSON.stringify(catalog);
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(body));
+      },
+      cancel,
+    });
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(stream, {
+          status,
+          ...(length ? { headers: { 'content-length': length } } : {}),
+        }),
+    );
 
     const loaded = await loadModelMetadataCatalog({
       cachePath,
@@ -891,6 +1004,7 @@ describe('loadModelMetadataCatalog', () => {
 
     expect(Object.keys(loaded).length).toBeGreaterThan(1);
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(cancel).toHaveBeenCalledOnce());
     await expect(fs.stat(cachePath)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
@@ -922,6 +1036,15 @@ describe('loadModelMetadataCatalog', () => {
 
     await loadModelMetadataCatalog();
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://models.dev/api.json',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    await vi.waitFor(async () => {
+      await expect(
+        fs.readFile(path.join(dir, 'models-dev.json'), 'utf8'),
+      ).resolves.toBe(JSON.stringify(catalog));
+    });
     await vi.waitFor(() =>
       expect(
         timeoutSpy.mock.calls.some(([, delay]) => delay === 60 * 60 * 1000),
@@ -937,6 +1060,66 @@ describe('loadModelMetadataCatalog', () => {
     expect(refreshTimer).toBeDefined();
     expect(refreshTimer?.hasRef()).toBe(false);
     if (refreshTimer) clearTimeout(refreshTimer);
+  });
+
+  it('refreshes a fresh default cache when its timer fires', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'models-dev-test-'));
+    tempDirs.push(dir);
+    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(dir);
+    const cachePath = path.join(dir, 'models-dev.json');
+    await fs.writeFile(cachePath, JSON.stringify(catalog));
+    const freshTime = new Date(Date.now() - 60_000);
+    await fs.utimes(cachePath, freshTime, freshTime);
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response(JSON.stringify(catalog)));
+    const timeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+
+    await loadModelMetadataCatalog();
+    expect(fetchMock).not.toHaveBeenCalled();
+    const refreshIndex = timeoutSpy.mock.calls.findIndex(
+      ([, delay]) => typeof delay === 'number' && delay < 60 * 60 * 1000,
+    );
+    expect(refreshIndex).toBeGreaterThanOrEqual(0);
+    const refreshTimer = timeoutSpy.mock.results[refreshIndex]?.value as
+      | ReturnType<typeof setTimeout>
+      | undefined;
+    if (refreshTimer) clearTimeout(refreshTimer);
+    const refresh = timeoutSpy.mock.calls[refreshIndex]?.[0];
+    expect(refresh).toBeTypeOf('function');
+    if (typeof refresh === 'function') refresh();
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    await vi.waitFor(() =>
+      expect(
+        timeoutSpy.mock.calls.filter(([, delay]) => delay === 60 * 60 * 1000)
+          .length,
+      ).toBeGreaterThan(0),
+    );
+    for (const result of timeoutSpy.mock.results) {
+      clearTimeout(result.value as ReturnType<typeof setTimeout>);
+    }
+  });
+
+  it('re-arms the default refresh after a fetch failure', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'models-dev-test-'));
+    tempDirs.push(dir);
+    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(dir);
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockRejectedValue(new Error('offline'));
+    const timeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+
+    await loadModelMetadataCatalog();
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    await vi.waitFor(() =>
+      expect(
+        timeoutSpy.mock.calls.some(([, delay]) => delay === 60 * 60 * 1000),
+      ).toBe(true),
+    );
+    for (const result of timeoutSpy.mock.results) {
+      clearTimeout(result.value as ReturnType<typeof setTimeout>);
+    }
   });
 
   it('uses and closes the proxy dispatcher on a successful refresh', async () => {

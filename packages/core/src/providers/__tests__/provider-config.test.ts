@@ -181,6 +181,35 @@ describe('buildInstallPlan', () => {
     expect(plan.modelSelection).toEqual({ modelId: 'pre-1' });
   });
 
+  it('keeps preset modalities in templates but omits them from new installs', () => {
+    const config = makeConfig({
+      models: [
+        {
+          id: 'model-a',
+          contextWindowSize: 8192,
+          modalities: { image: true, video: true },
+        },
+      ],
+    });
+    const template = buildProviderTemplate(config);
+    const plan = buildInstallPlan(config, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['model-a'],
+    });
+
+    expect(template[0]?.generationConfig?.modalities).toEqual({
+      image: true,
+      video: true,
+    });
+    expect(
+      plan.modelProviders?.[0]?.models[0]?.generationConfig?.modalities,
+    ).toBeUndefined();
+    expect(plan.providerState?.['providerMetadata.test']?.['version']).toBe(
+      computeModelListVersion(template),
+    );
+  });
+
   it('throws when models list is empty', () => {
     const config = makeConfig({ models: undefined, modelNamePrefix: '' });
     expect(() =>

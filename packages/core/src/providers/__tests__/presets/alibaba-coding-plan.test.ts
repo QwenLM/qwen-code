@@ -30,10 +30,12 @@ describe('coding plan provider', () => {
     const version = computeModelListVersion(template);
 
     expect(
-      template.every(
-        (model) => model.generationConfig?.modalities === undefined,
-      ),
-    ).toBe(true);
+      template.find((model) => model.id === 'qwen3.5-plus')?.generationConfig
+        ?.modalities,
+    ).toEqual({ image: true, video: true });
+    expect(version).toBe(
+      '7eeb6cbf66d95c6a12e6857d249165767a5d83259e7f390ab95f6bc717fdad51',
+    );
 
     const plan = buildInstallPlan(codingPlanProvider, {
       baseUrl,
@@ -45,17 +47,19 @@ describe('coding plan provider', () => {
     expect(plan.authType).toBe(AuthType.USE_OPENAI);
     expect(plan.env).toEqual({ [CODING_PLAN_ENV_KEY]: 'sk-coding' });
     expect(plan.modelSelection).toEqual({ modelId: template[0].id });
-    expect(plan.modelProviders).toEqual([
-      {
-        authType: AuthType.USE_OPENAI,
-        models: template.map((model) => ({
-          ...model,
-          envKey: CODING_PLAN_ENV_KEY,
-        })),
-        mergeStrategy: 'prepend-and-remove-owned',
-        ownsModel: expect.any(Function),
-      },
-    ]);
+    expect(plan.modelProviders?.[0]).toMatchObject({
+      authType: AuthType.USE_OPENAI,
+      mergeStrategy: 'prepend-and-remove-owned',
+      ownsModel: expect.any(Function),
+    });
+    expect(plan.modelProviders?.[0]?.models.map((model) => model.id)).toEqual(
+      template.map((model) => model.id),
+    );
+    expect(
+      plan.modelProviders?.[0]?.models.every(
+        (model) => model.generationConfig?.modalities === undefined,
+      ),
+    ).toBe(true);
     expect(plan.providerState).toEqual({
       'providerMetadata.coding-plan': {
         baseUrl: CODING_PLAN_CHINA_BASE_URL,

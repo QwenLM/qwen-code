@@ -283,6 +283,31 @@ describe('ModelRegistry', () => {
       ).toEqual({ video: true });
     });
 
+    it('passes mapped provider ids to catalog resolution', () => {
+      const registry = new ModelRegistry(
+        {
+          minimax: [{ id: 'MiniMax-M3' }],
+        },
+        { minimax: 'openai' },
+        {
+          minimax: {
+            models: {
+              'MiniMax-M3': {
+                modalities: { input: ['text', 'image', 'video'] },
+              },
+            },
+          },
+        },
+      );
+
+      const model = registry.getModel(AuthType.USE_OPENAI, 'MiniMax-M3')!;
+      expect(model.generationConfig.modalities).toEqual({
+        image: true,
+        video: true,
+      });
+      expect(registry.getModalitiesSource(model)).toBe('catalog');
+    });
+
     it('keeps explicit modalities ahead of catalog metadata', () => {
       const registry = new ModelRegistry(
         {

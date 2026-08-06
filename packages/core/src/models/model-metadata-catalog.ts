@@ -80,7 +80,7 @@ function parseCatalog(text: string): ModelMetadataCatalog | undefined {
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
       return undefined;
     }
-    const catalog: ModelMetadataCatalog = {};
+    const catalog = Object.create(null) as ModelMetadataCatalog;
     let modelCount = 0;
     for (const [providerId, provider] of Object.entries(parsed)) {
       if (
@@ -101,7 +101,7 @@ function parseCatalog(text: string): ModelMetadataCatalog | undefined {
       if (!models || typeof models !== 'object' || Array.isArray(models)) {
         continue;
       }
-      const validModels: Record<string, CatalogModel> = {};
+      const validModels = Object.create(null) as Record<string, CatalogModel>;
       for (const [modelId, model] of Object.entries(models)) {
         if (Array.isArray(model)) {
           if (model.some((modality) => typeof modality !== 'string')) {
@@ -146,11 +146,13 @@ function parseCatalog(text: string): ModelMetadataCatalog | undefined {
 
 async function readResponseText(response: Response): Promise<string> {
   if (!response.ok) {
+    await response.body?.cancel().catch(() => undefined);
     throw new Error(`models.dev returned HTTP ${response.status}`);
   }
 
   const contentLength = Number(response.headers.get('content-length'));
   if (Number.isFinite(contentLength) && contentLength > MAX_CATALOG_BYTES) {
+    await response.body?.cancel().catch(() => undefined);
     throw new Error('models.dev response is too large');
   }
 

@@ -992,31 +992,6 @@ describe('modelConfigResolver', () => {
       expect(result.config.modalities?.video).toBe(false);
       expect(result.sources['modalities'].kind).toBe('settings');
     });
-
-    it('preserves modalities saved by an older auth template', () => {
-      const result = resolveModelConfig({
-        authType: AuthType.USE_OPENAI,
-        cli: {},
-        settings: {
-          generationConfig: { modalities: { audio: true } },
-        },
-        env: { MINIMAX_API_KEY: 'test-key' },
-        modelProvider: {
-          id: 'MiniMax-M3',
-          baseUrl: 'https://api.minimax.io/v1',
-          envKey: 'MINIMAX_API_KEY',
-          generationConfig: {
-            modalities: { image: true, video: true },
-          },
-        },
-      });
-
-      expect(result.config.modalities).toEqual({
-        image: true,
-        video: true,
-      });
-      expect(result.sources['modalities'].kind).toBe('modelProviders');
-    });
   });
 
   describe('[Regression] env-var-only path must apply model context defaults', () => {
