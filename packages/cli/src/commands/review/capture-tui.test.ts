@@ -609,6 +609,18 @@ describe('capture-tui without tmux (probe seam)', () => {
       }
     },
   );
+
+  it('registers the full REAP set — a pure pin, gated on nothing', () => {
+    // The set check needs neither tmux nor pgrep; buried in a skipIf test
+    // it vanished on slim hosts — where dropping SIGHUP/SIGQUIT (a
+    // regression that shipped green once before) would ship green again.
+    expect([...REAP_SIGNALS].sort()).toEqual([
+      'SIGHUP',
+      'SIGINT',
+      'SIGQUIT',
+      'SIGTERM',
+    ]);
+  });
 });
 
 // The command boundary drives REAL tmux — a private-server capture the mocks
@@ -1386,18 +1398,6 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     const ans = readFileSync(join(dir, 'order.ans'), 'utf8');
     expect(ans.indexOf('LINE1')).toBeGreaterThan(-1);
     expect(ans.indexOf('LINE2')).toBeGreaterThan(ans.indexOf('LINE1'));
-  });
-
-  it('registers the full REAP set — a pure pin, gated on nothing', () => {
-    // The set check needs neither tmux nor pgrep; buried in a skipIf test
-    // it vanished on slim hosts — where dropping SIGHUP/SIGQUIT (a
-    // regression that shipped green once before) would ship green again.
-    expect([...REAP_SIGNALS].sort()).toEqual([
-      'SIGHUP',
-      'SIGINT',
-      'SIGQUIT',
-      'SIGTERM',
-    ]);
   });
 
   it('refuses degenerate geometry with the refusal contract', async () => {
