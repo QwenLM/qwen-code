@@ -81,13 +81,34 @@ interface CaptureTuiArgs {
  * the seam the belt itself is untestable. */
 export const probeBudget = { timeoutMs: 10_000 };
 
-function probeOutput(bin: string, flag: string): string | undefined {
+/** The holder-init sentinel deadline, a seam like the other belts — a pane
+ * that dies at startup must refuse within it, and without the seam neither
+ * the floor nor the ceiling is provable. */
+export const holderInit = { timeoutMs: 10_000 };
+
+type ProbeResult =
+  | { status: 'ok'; out: string }
+  | { status: 'absent' }
+  // Belt-killed: present but not answering. Reported distinctly — an
+  // operator told "not installed" for a wedged binary goes to fix an
+  // installation that exists (the freeze render path names its belt kill
+  // for the same reason).
+  | { status: 'hung' };
+
+function probeOutput(bin: string, flag: string): ProbeResult {
   const r = spawnSync(bin, [flag], {
     encoding: 'utf8',
     timeout: probeBudget.timeoutMs,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-  return r.status === 0 ? (r.stdout ?? '').trim() : undefined;
+  if (r.status === 0) return { status: 'ok', out: (r.stdout ?? '').trim() };
+  if (
+    r.error &&
+    (r.error as NodeJS.ErrnoException).code === 'ETIMEDOUT'
+  ) {
+    return { status: 'hung' };
+  }
+  return { status: 'absent' };
 }
 
 /** The freeze render invocation, exported as a seam: the 30s belt against a
@@ -106,11 +127,11 @@ export const probes = {
   // The VERSION LINE, not a boolean: capture-pane -N needs tmux 3.1, and a
   // host with an older tmux must be told so up front — the real cause named,
   // no server started — instead of dying mid-capture on the unknown flag.
-  tmux: (): string | undefined => probeOutput('tmux', '-V'),
+  tmux: (): ProbeResult => probeOutput('tmux', '-V'),
   // `--help`, not `--version`: freeze ≤0.1.6 (the whole 2024 release line)
   // has no --version flag and would be misdiagnosed as absent; --help exits
   // 0 on both release lines (measured on v0.1.6 and v0.2.2).
-  freeze: () => probeOutput('freeze', '--help') !== undefined,
+  freeze: (): ProbeResult => probeOutput('freeze', '--help'),
 };
 
 /** Every signal whose default action would terminate the process past the
@@ -305,8 +326,16 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       return;
     }
   }
-  const tmuxVersion = probes.tmux();
-  if (tmuxVersion === undefined) {
+  const tmuxProbe = probes.tmux();
+  if (tmuxProbe.status === 'hung') {
+    refuse(
+      `tmux did not answer -V within ${probeBudget.timeoutMs}ms — present ` +
+        'but wedged, not absent. Fix or restart the tmux binary; rendering ' +
+        'claims stay argued from the code until it answers.',
+    );
+    return;
+  }
+  if (tmuxProbe.status === 'absent') {
     refuse(
       'tmux is not installed. Rendering claims stay argued from the code on ' +
         'this host; say so in the finding rather than describing an imagined ' +
@@ -314,6 +343,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     );
     return;
   }
+  const tmuxVersion = tmuxProbe.out;
   if (tmuxSupportsCaptureN(tmuxVersion) === false) {
     refuse(
       `${tmuxVersion} is too old: capture-pane -N needs tmux 3.1 or newer.`,
@@ -536,7 +566,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // holder's own `trap : INT` line killed pane, session and server
     // (measured; no in-script ordering can win, so the wait sits out here).
     {
-      const holderDeadline = Date.now() + 10_000;
+      const holderDeadline = Date.now() + holderInit.timeoutMs;
       while (!existsSync(holderReadyPath)) {
         if (Date.now() >= holderDeadline) {
           throw new Error(
@@ -645,7 +675,11 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     } catch {
       // Litter is cosmetic.
     }
-    if (captureFailed) releaseSignals();
+    // Same drain as the success tail: a signal queued while reap() blocked
+    // in execFileSync must dispatch to the handler (re-raise) before the
+    // listeners go away — bare release read as "it refused on its own"
+    // where the harness's kill actually landed.
+    if (captureFailed) await drainSignalsThenRelease();
   }
 
   try {
@@ -701,9 +735,11 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     degradations.push(
       'pane captured empty — nothing to render, no image produced',
     );
-  } else if (!probes.freeze()) {
+  } else if (probes.freeze().status !== 'ok') {
     degradations.push(
-      'freeze is not installed — .ans text captured, no image rendered',
+      probes.freeze().status === 'hung'
+        ? `freeze did not answer --help within ${probeBudget.timeoutMs}ms — present but wedged; .ans text captured, no image rendered`
+        : 'freeze is not installed — .ans text captured, no image rendered',
     );
   } else {
     // stdin MUST be /dev/null: freeze treats a pipe stdin — Node's spawnSync

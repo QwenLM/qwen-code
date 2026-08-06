@@ -23,6 +23,7 @@ import {
   captureTuiCommand,
   freezeRender,
   MATCH_BUDGET_MS,
+  holderInit,
   probeBudget,
   probes,
   REAP_SIGNALS,
@@ -101,7 +102,7 @@ describe('capture-tui without tmux (probe seam)', () => {
   });
 
   it('refuses with the contract — exit 3, no artifacts, the RIGHT reason', async () => {
-    probes.tmux = () => undefined;
+    probes.tmux = () => ({ status: 'absent' }) as const;
     const dir = mkdtempSync(join(tmpdir(), 'capture-tui-notmux-'));
     try {
       const { stdout, stderr } = await withStdio(() =>
@@ -120,6 +121,7 @@ describe('capture-tui without tmux (probe seam)', () => {
       expect(process.exitCode).toBe(3);
       expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
       expect(existsSync(join(dir, 'cap.json'))).toBe(false);
+      expect(existsSync(join(dir, 'cap.holder-ready'))).toBe(false);
       // The reason pins the PATH taken: an inverted probe would fall through
       // to the mid-capture catch and say "tmux failed mid-capture" instead.
       expect(stderr).toContain('tmux is not installed');
@@ -139,7 +141,7 @@ describe('capture-tui without tmux (probe seam)', () => {
     // -N landed in tmux 3.1; an older host passes -V and would otherwise
     // die MID-capture on the unknown flag — blaming tmux for a version
     // problem, after paying for a server start.
-    probes.tmux = () => 'tmux 2.8';
+    probes.tmux = () => ({ status: 'ok', out: 'tmux 2.8' }) as const;
     const dir = mkdtempSync(join(tmpdir(), 'capture-tui-oldtmux-'));
     try {
       const { stderr } = await withStdio(() =>
@@ -178,6 +180,7 @@ describe('capture-tui without tmux (probe seam)', () => {
       writeFileSync(join(dir, 'cap.ans'), 'old run');
       writeFileSync(join(dir, 'cap.png'), 'old run');
       writeFileSync(join(dir, 'cap.json'), '{"evidence":"png"}');
+      writeFileSync(join(dir, 'cap.holder-ready'), '');
       const binDir = join(dir, 'fakebin');
       mkdirSync(binDir, { recursive: true });
       writeFileSync(
@@ -209,6 +212,7 @@ describe('capture-tui without tmux (probe seam)', () => {
       expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
       expect(existsSync(join(dir, 'cap.png'))).toBe(false);
       expect(existsSync(join(dir, 'cap.json'))).toBe(false);
+      expect(existsSync(join(dir, 'cap.holder-ready'))).toBe(false);
       // The writability probe uses a unique sibling and removes it — it
       // must not outlive the run either.
       expect(readdirSync(dir).filter((f) => f.includes('write-probe'))).toEqual(
@@ -226,12 +230,13 @@ describe('capture-tui without tmux (probe seam)', () => {
     // A REAL-looking probe so the run reaches the --until compile gate its
     // title claims (with the probe undefined, the no-tmux refusal fired
     // first and every later gate stayed unpinned for the clear).
-    probes.tmux = () => 'tmux 3.9';
+    probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
     const dir = mkdtempSync(join(tmpdir(), 'capture-tui-staleearly-'));
     try {
       writeFileSync(join(dir, 'cap.ans'), 'old run');
       writeFileSync(join(dir, 'cap.png'), 'old run');
       writeFileSync(join(dir, 'cap.json'), '{"evidence":"png"}');
+      writeFileSync(join(dir, 'cap.holder-ready'), '');
       await withStdio(() =>
         runCaptureTui({
           command: 'printf hi',
@@ -249,6 +254,7 @@ describe('capture-tui without tmux (probe seam)', () => {
       expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
       expect(existsSync(join(dir, 'cap.png'))).toBe(false);
       expect(existsSync(join(dir, 'cap.json'))).toBe(false);
+      expect(existsSync(join(dir, 'cap.holder-ready'))).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -302,6 +308,7 @@ describe('capture-tui without tmux (probe seam)', () => {
       writeFileSync(join(dir, 'cap.ans'), 'old run');
       writeFileSync(join(dir, 'cap.png'), 'old run');
       writeFileSync(join(dir, 'cap.json'), '{"evidence":"png"}');
+      writeFileSync(join(dir, 'cap.holder-ready'), '');
       await withStdio(() =>
         runCaptureTui({
           command: ['a', 'b'],
@@ -319,6 +326,7 @@ describe('capture-tui without tmux (probe seam)', () => {
       expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
       expect(existsSync(join(dir, 'cap.png'))).toBe(false);
       expect(existsSync(join(dir, 'cap.json'))).toBe(false);
+      expect(existsSync(join(dir, 'cap.holder-ready'))).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -333,7 +341,10 @@ describe('capture-tui without tmux (probe seam)', () => {
       const dir = mkdtempSync(join(tmpdir(), 'capture-tui-hangprobe-'));
       const binDir = join(dir, 'bin');
       mkdirSync(binDir, { recursive: true });
-      writeFileSync(join(binDir, 'tmux'), '#!/bin/sh\nsleep 30\n', {
+      // /bin/sleep by absolute path: PATH is binDir alone below, so a bare
+      // `sleep` would ENOENT and the shim would EXIT instantly instead of
+      // hanging — the test then never exercised the belt at all.
+      writeFileSync(join(binDir, 'tmux'), '#!/bin/sh\n/bin/sleep 30\n', {
         mode: 0o755,
       });
       const realPath = process.env['PATH'];
@@ -363,8 +374,15 @@ describe('capture-tui without tmux (probe seam)', () => {
         rmSync(dir, { recursive: true, force: true });
       }
       expect(process.exitCode).toBe(3);
-      expect(stderr).toContain('tmux is not installed');
-      expect(Date.now() - started).toBeLessThan(5_000);
+      // A belt-killed probe is WEDGED, not absent — the refusal must not
+      // send an operator to reinstall a binary that exists.
+      expect(stderr).toContain('present but wedged');
+      expect(stderr).not.toContain('not installed');
+      const elapsed = Date.now() - started;
+      // Floor proves the shim actually hung to the belt; the tight ceiling
+      // kills a hardcoded 10s mutant.
+      expect(elapsed).toBeGreaterThanOrEqual(450);
+      expect(elapsed).toBeLessThan(2_500);
     },
   );
 
@@ -373,7 +391,7 @@ describe('capture-tui without tmux (probe seam)', () => {
     // both must refuse, not throw uncaught or silently corrupt the capture.
     // Undefined required options are the exported-function vector of the
     // same class: demandOption covers the CLI path only.
-    probes.tmux = () => undefined; // never reached — shapes refuse first
+    probes.tmux = () => ({ status: 'absent' }) as const; // never reached — shapes refuse first
     // A test-owned out, not '/tmp/never-written': the hardcoded path
     // routed most iterations through the mkdir+probe block before the
     // guards under test, and on Windows resolve() lands it at the drive
@@ -437,6 +455,7 @@ describe('capture-tui without tmux (probe seam)', () => {
         writeFileSync(join(dir, 'cap.ans'), 'old run');
         writeFileSync(join(dir, 'cap.png'), 'old run');
         writeFileSync(join(dir, 'cap.json'), '{"evidence":"png"}');
+      writeFileSync(join(dir, 'cap.holder-ready'), '');
         const fdSource = join(dir, 'fd-source');
         writeFileSync(fdSource, 'x');
         for (;;) {
@@ -464,6 +483,7 @@ describe('capture-tui without tmux (probe seam)', () => {
         expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
         expect(existsSync(join(dir, 'cap.png'))).toBe(false);
         expect(existsSync(join(dir, 'cap.json'))).toBe(false);
+      expect(existsSync(join(dir, 'cap.holder-ready'))).toBe(false);
       } finally {
         for (const fd of fds) {
           try {
@@ -729,6 +749,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(stderr).not.toContain('may still be running');
     expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
     expect(existsSync(join(dir, 'cap.json'))).toBe(false);
+      expect(existsSync(join(dir, 'cap.holder-ready'))).toBe(false);
   });
 
   it('refuses a FAILED .ans write after capture — contract, not stack trace', async () => {
@@ -754,6 +775,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
     expect(existsSync(join(dir, 'cap.png'))).toBe(false);
     expect(existsSync(join(dir, 'cap.json'))).toBe(false);
+      expect(existsSync(join(dir, 'cap.holder-ready'))).toBe(false);
   });
 
   it('refuses a FAILED manifest write and removes what it already wrote', async () => {
@@ -777,6 +799,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
     expect(existsSync(join(dir, 'cap.png'))).toBe(false);
     expect(existsSync(join(dir, 'cap.json'))).toBe(false);
+      expect(existsSync(join(dir, 'cap.holder-ready'))).toBe(false);
   });
 
   it('WARNS when kill-server fails twice — never an unqualified success', async () => {
@@ -841,6 +864,9 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
       `#!/bin/sh\necho "$*" >> "${callLog}"\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\necho ""\nexit 0\n`,
       { mode: 0o755 },
     );
+    const realHolder = holderInit.timeoutMs;
+    holderInit.timeoutMs = 600;
+    const started = Date.now();
     const realPath = process.env['PATH'];
     process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
     let stderr = '';
@@ -851,8 +877,14 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     } finally {
       if (realPath === undefined) delete process.env['PATH'];
       else process.env['PATH'] = realPath;
+      holderInit.timeoutMs = realHolder;
     }
     expect(process.exitCode).toBe(3);
+    // The deadline actually elapsed (floor) and is seam-driven (ceiling —
+    // the hardcoded-10s mutant blows it).
+    const waited = Date.now() - started;
+    expect(waited).toBeGreaterThanOrEqual(550);
+    expect(waited).toBeLessThan(5_000);
     expect(stderr).toContain('never initialized');
     // No key was fired into the uninitialized pane.
     expect(readFileSync(callLog, 'utf8')).not.toContain('send-keys');
@@ -903,6 +935,66 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     } as never);
     const manifest = JSON.parse(readFileSync(join(dir, 'nocwd.json'), 'utf8'));
     expect(manifest.cwd).toBe(process.cwd());
+  });
+
+  it('survives a C-\\ sent through --keys — QUIT is trapped at layer 0', async () => {
+    // The wrapped holder trapped one layer deep: INT survived by shell
+    // wait semantics, QUIT killed the untrapped session leader (measured:
+    // exit 3, "no server running", zero artifacts). The unwrapped script
+    // traps both at the pane's own shell.
+    await runCaptureTui({
+      command: 'cat',
+      cwd: dir,
+      cols: 80,
+      rows: 24,
+      settleMs: 800,
+      until: undefined,
+      keys: ['C-\\'],
+      out: join(dir, 'cq'),
+      timeoutMs: 10_000,
+    } as never);
+    expect(process.exitCode).toBeUndefined();
+    expect(existsSync(join(dir, 'cq.json'))).toBe(true);
+  });
+
+  it('renders WIDTH x HEIGHT, not height x width — the frame has rows lines', async () => {
+    // validGeometry accepts a transposed pair, so only a behavioral pin
+    // catches a cols/rows swap: a 30x10 pane captures as 10 physical lines.
+    await run({
+      command: 'printf "GEOM\\n"; sleep 30',
+      until: 'GEOM',
+      cols: 30,
+      rows: 10,
+      out: join(dir, 'geom'),
+    });
+    const ans = readFileSync(join(dir, 'geom.ans'), 'utf8');
+    const lines = ans.replace(/\n$/, '').split('\n').length;
+    expect(lines).toBe(10);
+  });
+
+  it('reaps on the SECOND kill attempt without a WARNING — the retry is real', async () => {
+    // Every prior fixture failed both attempts or neither; the fail-once
+    // shape is what the retry exists for, and a retry-less mutant WARNs.
+    const binDir = join(dir, 'fakebin');
+    mkdirSync(binDir, { recursive: true });
+    const marker = join(dir, 'kill-attempted');
+    writeFileSync(
+      join(binDir, 'tmux'),
+      `#!/bin/sh\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\nfor a in "$@"; do [ "$a" = "kill-server" ] && { if [ ! -e "${marker}" ]; then : > "${marker}"; echo "transient" >&2; exit 1; fi; exit 0; }; done\nfor a in "$@"; do [ "$a" = "new-session" ] && : > "${join(dir, 'cap.holder-ready')}"; done\necho ""\nexit 0\n`,
+      { mode: 0o755 },
+    );
+    const realPath = process.env['PATH'];
+    process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
+    let stderr = '';
+    try {
+      ({ stderr } = await withStdio(() => run({ until: undefined, settleMs: 0 })));
+    } finally {
+      if (realPath === undefined) delete process.env['PATH'];
+      else process.env['PATH'] = realPath;
+    }
+    expect(process.exitCode).toBeUndefined();
+    expect(stderr).not.toContain('WARNING');
+    expect(existsSync(marker)).toBe(true);
   });
 
   it('settles by regex when --until matches, and says so', async () => {
@@ -1153,6 +1245,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(process.exitCode).toBe(3);
     expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
     expect(existsSync(join(dir, 'cap.json'))).toBe(false);
+      expect(existsSync(join(dir, 'cap.holder-ready'))).toBe(false);
     // The reason pins the path: validated up front, this reads "not a valid
     // regex"; thrown after tmux started, it would read "tmux failed
     // mid-capture: Invalid regular expression…" — a caller mistake blamed
@@ -1250,7 +1343,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     });
     const realFreeze = probes.freeze;
     const realBin = freezeRender.bin;
-    probes.freeze = () => true;
+    probes.freeze = () => ({ status: 'ok', out: '' }) as const;
     freezeRender.bin = bin;
     try {
       await fn();
@@ -1259,6 +1352,17 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
       freezeRender.bin = realBin;
     }
   }
+
+  it('renders only AFTER the .ans is on disk — text evidence survives a hang', async () => {
+    // The fake refuses to render unless the .ans already exists and is
+    // non-empty: a write-after-render mutant fails it.
+    await withFakeFreeze(
+      '#!/bin/sh\n[ -s "$3" ] || { echo "ans missing at render time" >&2; exit 9; }\nprintf x > "$5"\nexit 0\n',
+      () => run(),
+    );
+    const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
+    expect(manifest.evidence).toBe('png');
+  });
 
   it('records a freeze CRASH with its diagnostics, not just its absence', async () => {
     await withFakeFreeze(
@@ -1351,7 +1455,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     const realPath = process.env['PATH'];
     process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
     try {
-      expect(probes.freeze()).toBe(true);
+      expect(probes.freeze().status).toBe('ok');
     } finally {
       if (realPath === undefined) delete process.env['PATH'];
       else process.env['PATH'] = realPath;
@@ -1362,7 +1466,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     // Through the probe seam, so the freeze-less rung is pinned even on
     // hosts that have freeze installed.
     const realFreeze = probes.freeze;
-    probes.freeze = () => false;
+    probes.freeze = () => ({ status: 'absent' }) as const;
     try {
       await run();
     } finally {
@@ -1490,7 +1594,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     // timed window spends up to a second of the bound on the render, and
     // hosts with freeze would test a different window than hosts without.
     const realFreeze = probes.freeze;
-    probes.freeze = () => false;
+    probes.freeze = () => ({ status: 'absent' }) as const;
     const started = performance.now();
     try {
       await run({
@@ -1761,6 +1865,8 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     // iteration past the shared deadline.
     expect(MATCH_BUDGET_MS).toBe(500);
     expect(tmuxControl.timeoutMs).toBe(15_000);
+    expect(probeBudget.timeoutMs).toBe(10_000);
+    expect(holderInit.timeoutMs).toBe(10_000);
   });
 
   it.skipIf(!hasPgrep)(

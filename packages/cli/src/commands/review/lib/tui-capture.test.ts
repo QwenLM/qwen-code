@@ -190,7 +190,7 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
     // neither the holder nor the server (measured: untrapped, pane →
     // session → server died before the capture).
     expect(plan.start[plan.start.length - 1]).toBe(
-      `sh -c 'trap : INT\n: > '\\''/ready'\\''\nsh -c '\\''node cli.js'\\''\nwhile :; do sleep 3600; done'`,
+      `trap : INT QUIT\n: > '/ready'\nsh -c 'node cli.js'\nwhile :; do sleep 3600; done`,
     );
   });
 
@@ -215,11 +215,11 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
     const inner = `sh -c '${esc(cmd)}'`;
     const held = p.start[p.start.length - 1];
     expect(held).toBe(
-      `sh -c '${esc(`trap : INT\n: > '${esc('/ready')}'\n${inner}\nwhile :; do sleep 3600; done`)}'`,
+      `trap : INT QUIT\n: > '${esc('/ready')}'\n${inner}\nwhile :; do sleep 3600; done`,
     );
   });
 
-  it('quote-escapes a user-derived readyFile through BOTH holder layers', () => {
+  it('quote-escapes a user-derived readyFile in the holder script', () => {
     // --out is user-derived (verify briefs build it from target/branch
     // names; git refs may carry an apostrophe), and the holder shell
     // re-parses the sentinel line — so the path needs its OWN esc():
@@ -238,8 +238,11 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
     const esc = (v: string): string => v.replaceAll("'", "'\\''");
     const inner = `sh -c '${esc('node cli.js')}'`;
     const held = p.start[p.start.length - 1];
+    // Single layer now: the plan hands tmux the SCRIPT itself (default-shell
+    // is pinned to /bin/sh in the same invocation), so the trap lives at
+    // layer 0 — QUIT included — and only the sentinel path needs escaping.
     expect(held).toBe(
-      `sh -c '${esc(`trap : INT\n: > '${esc(readyFile)}'\n${inner}\nwhile :; do sleep 3600; done`)}'`,
+      `trap : INT QUIT\n: > '${esc(readyFile)}'\n${inner}\nwhile :; do sleep 3600; done`,
     );
   });
 

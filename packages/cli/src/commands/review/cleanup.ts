@@ -376,7 +376,7 @@ function auditPrWrites(target: string, prNumber: string): void {
  * Reap the capture servers capture-tui's own reap could not reach: a
  * SIGKILL'd or OOM'd harness skips finally and the signal net alike, and
  * the private server then lives until its pane holder's sleep expires (up
- * to two hours). The launcher's pid rides in the socket name for exactly
+ * to for good — the hold loop is unbounded and the config-free server has nothing else to destroy it). The launcher's pid rides in the socket name for exactly
  * this — a socket whose pid is dead is an orphan. A reap that fails is
  * noted on stderr AND surfaced as `failed`, so runCleanup neither claims
  * "Nothing to clean" over a live orphan nor clears the worktree lease.
@@ -413,7 +413,7 @@ function reapOrphanedCaptureServers(): { reaped: boolean; failed: boolean } {
     // and an unlinked socket makes a live server unreachable forever — and
     // one retry before giving up: a transient client-spawn failure (EMFILE
     // after a long review's many spawns) is the named shape, and the
-    // identical second attempt reaps what otherwise lives out the 2h holder.
+    // identical second attempt reaps what otherwise lives out the unbounded holder.
     let serverDead = false;
     for (let attempt = 0; attempt < 2 && !serverDead; attempt++) {
       try {

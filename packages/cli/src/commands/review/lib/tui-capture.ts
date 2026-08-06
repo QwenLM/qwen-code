@@ -182,7 +182,14 @@ export function tmuxPlan(opts: {
   // running sleep; the trap runs and a single-sleep script would simply
   // end — pane, session and server gone (measured 5/5). The loop re-enters
   // sleep and the pane survives.
-  const held = `sh -c '${esc(`trap : INT\n: > '${esc(opts.readyFile)}'\n${inner}\nwhile :; do sleep 3600; done`)}'`;
+  // NO outer `sh -c` wrapper: the same invocation pins default-shell to
+  // /bin/sh, so tmux's direct child — the pane's session leader — runs this
+  // script ITSELF, and the trap lives at layer 0. Wrapped, the trap sat one
+  // layer deep: INT survived via the outer shell's wait-and-cooperate
+  // semantics, but a --keys C-\ (SIGQUIT) killed the untrapped layer 0 —
+  // pane, session, server gone (measured end-to-end). QUIT is trapped for
+  // the same reason INT is; both reset to default in the children.
+  const held = `trap : INT QUIT\n: > '${esc(opts.readyFile)}'\n${inner}\nwhile :; do sleep 3600; done`;
   return {
     // ONE client invocation, three properties:
     // - `-f /dev/null` starts the server CONFIG-FREE: without it the

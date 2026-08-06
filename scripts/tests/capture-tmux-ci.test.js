@@ -47,9 +47,11 @@ describe('ci.yml capture tooling', () => {
     // required green Test check while every other pin in this file stays
     // green — the exact silent-skip regression this file exists to prevent.
     const install = steps[nameIndex(INSTALL)];
-    expect(install.if).toContain("runner.os == 'Linux'");
-    expect(install.if).toContain("skip_ci != 'true'");
-    expect(install.if).toContain("ci_profile == 'full'");
+    // EXACT equality, not containment: `A && (B || true)` still contains
+    // every pinned substring while the gate is destroyed.
+    expect(install.if.replace(/\s+/g, ' ').trim()).toBe(
+      "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.os == 'Linux' }}",
+    );
   });
 
   it('keeps the step advisory — no branch may fail the required check', () => {
@@ -60,33 +62,40 @@ describe('ci.yml capture tooling', () => {
     // Rejoin `\` continuations so each LOGICAL statement is checked whole:
     // the apt-install guard belongs to the update && install chain, and a
     // future tidy that splits the chain must not escape the pin.
-    const logicalLines = run.split('\n').reduce((acc, line) => {
-      if (acc.length > 0 && acc[acc.length - 1].endsWith('\\')) {
-        acc[acc.length - 1] = acc[acc.length - 1].slice(0, -1) + line.trim();
-      } else {
-        acc.push(line.trim());
-      }
-      return acc;
-    }, []);
+    const logicalLines = run
+      .split('\n')
+      // Comments first: a commented-out statement must not satisfy (or
+      // fail) any pin, and a `\` at the end of a COMMENT line is comment
+      // text, not a shell continuation.
+      .filter((line) => !line.trim().startsWith('#'))
+      .reduce((acc, line) => {
+        if (acc.length > 0 && acc[acc.length - 1].endsWith('\\')) {
+          acc[acc.length - 1] = acc[acc.length - 1].slice(0, -1) + line.trim();
+        } else {
+          acc.push(line.trim());
+        }
+        return acc;
+      }, []);
     for (const line of logicalLines) {
       // Any echo STATEMENT, whatever its quoting: the single-quote-only
       // match let a re-quoted `|| echo "..."` skip both assertions and
       // regress a permanent install failure to one plain log line.
-      if (/(^|&&|\|\||;)\s*echo\b/.test(line)) {
-        // EVERY echo statement is a ::warning:: annotation naming the
-        // outcome — a lane where the install PERMANENTLY fails loses the
-        // real-tmux coverage forever (the zip suite throws on its own),
-        // and a plain echo hides that as one line in a multi-thousand-line
-        // log while the check UI stays clean.
-        expect(line, line).toContain('::warning::');
+      // EVERY echo statement is a ::warning:: annotation naming the
+      // outcome — by COUNT, so a second plain echo cannot hide behind one
+      // compliant sibling on the same logical line.
+      const echoCount = (line.match(/(^|&&|\|\||;)\s*echo\b/g) ?? []).length;
+      const warningCount = (line.match(/echo ['"]::warning::/g) ?? []).length;
+      expect(warningCount, line).toBe(echoCount);
+      if (echoCount > 0) {
         expect(line, line).toContain('will be skipped');
       }
-      // Command position only — `command -v apt-get` is a probe, not an
-      // invocation, and needs no guard.
-      if (/(^|&&|\|\||;)\s*(sudo\s+)?apt-get/.test(line)) {
-        // bash -eo pipefail reds the required check on an UNGUARDED apt
-        // statement (a transient mirror hiccup) before any test runs.
-        expect(line, line).toMatch(/\|\| echo/);
+      // PER STATEMENT, not per line: each apt-get invocation carries its
+      // own guard — one `|| echo` at the tail must not launder an earlier
+      // unguarded statement separated by `;`.
+      for (const stmt of line.split(';')) {
+        if (/(^|&&|\|\|)\s*(sudo\s+)?apt-get/.test(stmt.trim() ? `&&${stmt}` : stmt) || /^\s*(sudo\s+)?apt-get/.test(stmt.trim())) {
+          expect(stmt, stmt).toMatch(/\|\| echo/);
+        }
       }
     }
   });
