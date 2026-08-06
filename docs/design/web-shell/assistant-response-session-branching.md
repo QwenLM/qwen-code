@@ -275,7 +275,7 @@ Add:
 ```ts
 recordBranchCheckpointTransaction(input: {
   startExclusiveRecordUuid: string | null;
-  stopReason: PromptResponse['stopReason'];
+  stopReason: string;
   promptId?: string;
 }): Promise<BranchPoint | undefined>;
 ```

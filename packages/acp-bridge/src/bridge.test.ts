@@ -7424,6 +7424,47 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('rejects rewind at admission while a prompt is active', async () => {
+      const promptStarted = deferred<void>();
+      const promptGate = deferred<void>();
+      const handle = makeChannel({
+        promptImpl: async () => {
+          promptStarted.resolve();
+          await promptGate.promise;
+          return { stopReason: 'end_turn' };
+        },
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionRewind) {
+            throw new Error('rewind must not run while the prompt is active');
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const prompt = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'active' }],
+      });
+      await promptStarted.promise;
+
+      // Admission rejects synchronously — queuing behind the prompt would
+      // execute the rewind after the client's timeout reported failure.
+      await expect(
+        bridge.rewindSession(session.sessionId, { promptId: 'prompt-1' }),
+      ).rejects.toBeInstanceOf(SessionBusyError);
+
+      promptGate.resolve();
+      await prompt;
+      await new Promise((r) => setImmediate(r));
+      expect(handle.agent.extMethodCalls).not.toContainEqual(
+        expect.objectContaining({
+          method: SERVE_CONTROL_EXT_METHODS.sessionRewind,
+        }),
+      );
+      await bridge.shutdown();
+    });
+
     it('dispatches branchSession on the source channel during channel overlap', async () => {
       // Overlap construction: channel A hosts two sessions; killing the
       // first one fails at the agent close, so the bridge marks A dying
@@ -7648,7 +7689,7 @@ describe('createAcpSessionBridge', () => {
     });
   });
 
-  describe('pendingPromptList', () => {
+  describe('turn_complete branchPoint', () => {
     it('publishes a validated completed-turn branch point', async () => {
       const events: BridgeEvent[] = [];
       const handle = makeChannel({
@@ -7799,7 +7840,9 @@ describe('createAcpSessionBridge', () => {
       });
       await bridge.shutdown();
     });
+  });
 
+  describe('pendingPromptList', () => {
     it('tracks a single prompt without publishing a pending_prompt_added event', async () => {
       const events: BridgeEvent[] = [];
       const handle = makeChannel({
