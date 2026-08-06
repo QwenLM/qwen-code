@@ -7350,6 +7350,38 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('rejects a queued rewind when the source starts closing', async () => {
+      const closeGate = deferred<Record<string, unknown>>();
+      const handle = makeChannel({
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionClose) {
+            return closeGate.promise;
+          }
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionRewind) {
+            throw new Error('rewind must not reach the closing source');
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const rewind = bridge.rewindSession(session.sessionId, {
+        promptId: 'prompt-1',
+      });
+      const close = bridge.closeSession(session.sessionId);
+
+      await expect(rewind).rejects.toBeInstanceOf(SessionNotFoundError);
+      expect(handle.agent.extMethodCalls).not.toContainEqual(
+        expect.objectContaining({
+          method: SERVE_CONTROL_EXT_METHODS.sessionRewind,
+        }),
+      );
+
+      closeGate.resolve({});
+      await close;
+      await bridge.shutdown();
+    });
+
     it('rejects a normal branch at admission while a prompt is active', async () => {
       const promptStarted = deferred<void>();
       const promptGate = deferred<void>();

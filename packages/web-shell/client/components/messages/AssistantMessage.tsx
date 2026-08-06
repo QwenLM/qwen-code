@@ -95,6 +95,8 @@ export const AssistantMessage = memo(function AssistantMessage({
     setBranchPending(true);
     try {
       await onBranchSession();
+    } catch {
+      // host owns error surfacing
     } finally {
       setBranchPending(false);
     }

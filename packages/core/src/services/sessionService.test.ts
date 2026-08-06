@@ -3107,6 +3107,7 @@ describe('SessionService', () => {
         archived?: boolean;
         stageBackup?: boolean;
         stagedMarkerOwnerToken?: string;
+        stale?: boolean;
       } = {},
     ) => {
       const chatsDir = realPath.join(
@@ -3188,8 +3189,10 @@ describe('SessionService', () => {
           }),
         );
       }
-      const stale = new Date(Date.now() - 25 * 60 * 60 * 1000);
-      fs.utimesSync(claimPath, stale, stale);
+      if (options.stale !== false) {
+        const staleTime = new Date(Date.now() - 25 * 60 * 60 * 1000);
+        fs.utimesSync(claimPath, staleTime, staleTime);
+      }
       return {
         claimPath,
         stagedTranscriptPath,
@@ -4211,6 +4214,83 @@ describe('SessionService', () => {
       expect(fs.readdirSync(targetBackupDir)).toEqual(['backup-a']);
     });
 
+    it('does not leak post-checkpoint artifact records into a historical fork', async () => {
+      const oldId = '31313131-3131-3131-3131-313131313138';
+      const newId = '41414141-4141-4141-4141-414141414148';
+      const { file, lines } = seedSession(oldId);
+      const checkpoint = {
+        uuid: 'checkpoint-artifact',
+        parentUuid: 'u2',
+        sessionId: oldId,
+        type: 'system',
+        subtype: 'branch_checkpoint',
+        timestamp: '2026-04-22T00:00:03.000Z',
+        cwd,
+        version: 'test',
+        systemPayload: {
+          v: 1,
+          startExclusiveRecordUuid: null,
+          assistantRecordUuid: 'u2',
+        },
+      };
+      const artifactId = stableSessionArtifactId(
+        oldId,
+        'url:https://example.com/after-checkpoint',
+      );
+      const lateArtifact = {
+        uuid: 'artifact-late',
+        parentUuid: 'checkpoint-artifact',
+        sessionId: oldId,
+        type: 'system',
+        subtype: 'session_artifact_event',
+        timestamp: '2026-04-22T00:00:04.000Z',
+        cwd,
+        version: 'test',
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: oldId,
+          sequence: 1,
+          recordedAt: '2026-04-22T00:00:04.000Z',
+          changes: [
+            {
+              action: 'created',
+              artifactId,
+              artifact: {
+                id: artifactId,
+                kind: 'link',
+                storage: 'external_url',
+                source: 'client',
+                status: 'available',
+                title: 'Late artifact',
+                url: 'https://example.com/after-checkpoint',
+                retention: 'restorable',
+                clientRetained: true,
+                createdAt: '2026-04-22T00:00:04.000Z',
+                updatedAt: '2026-04-22T00:00:04.000Z',
+                persistedAt: '2026-04-22T00:00:04.000Z',
+              },
+            },
+          ],
+        },
+      };
+      fs.writeFileSync(
+        file,
+        [...lines, checkpoint, lateArtifact]
+          .map((record) => JSON.stringify(record))
+          .join('\n') + '\n',
+      );
+
+      const result = await service.forkSession(oldId, newId, {
+        atRecordId: checkpoint.uuid,
+      });
+
+      const loaded = await service.loadSession(newId);
+      expect(loaded?.artifactSnapshot?.artifacts ?? []).toEqual([]);
+      const forkedRaw = fs.readFileSync(result.filePath, 'utf8');
+      expect(forkedRaw).not.toContain('artifact-late');
+      expect(forkedRaw).not.toContain('Late artifact');
+    });
+
     it('omits a missing file-history backup without failing the fork', async () => {
       const oldId = '31313131-3131-3131-3131-313131313134';
       const newId = '41414141-4141-4141-4141-414141414144';
@@ -4678,6 +4758,21 @@ describe('SessionService', () => {
       expect(fs.existsSync(paths.stagedTranscriptPath)).toBe(false);
       expect(fs.existsSync(paths.targetBackupPath)).toBe(false);
       expect(fs.existsSync(paths.targetTranscriptPath)).toBe(false);
+    });
+
+    it('preserves a branch creation younger than the stale threshold', () => {
+      const newId = '66666666-6666-6666-6666-666666666675';
+      const ownerToken = '77777777-7777-7777-7777-777777777785';
+      const paths = seedStaleBranchCreation(newId, ownerToken, {
+        stageBackup: true,
+        stale: false,
+      });
+
+      service['cleanupStaleBranchCreations']();
+
+      expect(fs.existsSync(paths.claimPath)).toBe(true);
+      expect(fs.existsSync(paths.stagedTranscriptPath)).toBe(true);
+      expect(fs.existsSync(paths.stagedBackupPath)).toBe(true);
     });
 
     it('defers stale branch GC until an active list operation', async () => {

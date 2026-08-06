@@ -450,6 +450,10 @@ An invalid, inactive, malformed, or stale checkpoint returns:
 ```
 
 with HTTP status `409`. There is no fallback to the current session tail.
+Request-shape validation is distinct: a present but non-string `atRecordId`
+returns the same `branch_point_invalid` code with HTTP status `400`. Stale-
+checkpoint recovery keyed on the `409` status must not trigger for the `400`
+type-level rejection.
 
 ### 11.2 UI behavior
 
@@ -564,7 +568,8 @@ For each referenced name:
 1. validate it as a filename, not an arbitrary path;
 2. resolve source and destination paths and verify their directory boundary;
 3. if the source is already missing or is no longer a regular file, warn and
-   omit it from the target backup manifest;
+   omit it from backup staging (the claim manifest keeps listing every
+   referenced name);
 4. copy or link every available source into staging; and
 5. treat an access or copy failure for an existing backup as a fork failure.
 
@@ -602,8 +607,10 @@ token. Staged transcript and backup files use restrictive permissions.
 ### 14.3 Commit sequence
 
 1. Write the complete titled transcript to staging.
-2. Copy or link every available referenced backup to backup staging and make
-   the claim manifest describe only the successfully staged names.
+2. Copy or link every available referenced backup to backup staging. The
+   claim manifest lists every referenced name; backups whose source is
+   missing are warned and omitted from staging, and consumers must not treat
+   a listed-but-unstaged name as corruption.
 3. Re-run target branch-point validation.
 4. Flush staged files and relevant staging directories.
 5. Publish the complete backup directory with claim-guarded, no-overwrite

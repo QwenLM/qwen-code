@@ -369,8 +369,20 @@ function branchOwnerMarkerMatches(
   }
 }
 
-function fsyncPath(filePath: string): void {
-  const fd = fs.openSync(filePath, 'r');
+function fsyncPath(filePath: string, openFlags: fs.OpenMode = 'r'): void {
+  let fd: number;
+  try {
+    // Windows maps fsync to FlushFileBuffers, which needs write access.
+    fd = fs.openSync(filePath, openFlags);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== 'EACCES' && code !== 'EPERM') throw error;
+    // Backups inherit their source file's mode, so a read-only file cannot
+    // be opened for write: POSIX flushes through a read handle, while
+    // Windows has no flush path without write access (best-effort skip).
+    if (process.platform === 'win32') return;
+    fd = fs.openSync(filePath, 'r');
+  }
   try {
     fs.fsyncSync(fd);
   } finally {
@@ -423,7 +435,7 @@ function copyFileHistoryBackupsToStaging(
       serializeBranchOwnerMarker(targetSessionId, ownerToken),
       { encoding: 'utf8', mode: 0o600, flag: 'wx' },
     );
-    fsyncPath(ownerMarker);
+    fsyncPath(ownerMarker, 'r+');
     stagingCreated = true;
   };
   for (const name of backupNames) {
@@ -449,7 +461,7 @@ function copyFileHistoryBackupsToStaging(
     } catch {
       fs.copyFileSync(source, target, fs.constants.COPYFILE_EXCL);
     }
-    fsyncPath(target);
+    fsyncPath(target, 'r+');
     copiedNames.add(name);
   }
   if (stagingCreated) fsyncDirectoryBestEffort(targetDirectory);
@@ -490,7 +502,13 @@ export class SessionService {
     const lastRunAt = SessionService.branchGcLastRunAt.get(gcKey) ?? 0;
     if (now - lastRunAt < 60 * 60 * 1000) return;
     SessionService.branchGcLastRunAt.set(gcKey, now);
-    this.cleanupStaleBranchCreations();
+    try {
+      this.cleanupStaleBranchCreations();
+    } catch (error) {
+      debugLogger.warn(
+        `branch staging GC aborted: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   private cleanupStaleBranchCreations(): void {

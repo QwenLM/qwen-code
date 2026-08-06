@@ -10505,6 +10505,21 @@ class QwenAgent implements Agent {
           );
         }
 
+        // Fail fast like branch admission: the bridge bounds this RPC with a
+        // timeout that races but cannot cancel queued work, so a rewind
+        // admitted behind an active turn would still truncate history after
+        // the client was told it failed. rewindToTurn re-checks inside the
+        // gate.
+        if (!session.isIdle()) {
+          throw new RequestError(
+            -32602,
+            'Cannot rewind while a prompt is running',
+            {
+              errorKind: 'session_busy',
+            },
+          );
+        }
+
         return await this.runExclusiveHistoryMutation(sessionId, async () => {
           let turnIndex: number | undefined = params['targetTurnIndex'] as
             | number

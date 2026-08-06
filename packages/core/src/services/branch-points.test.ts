@@ -510,4 +510,144 @@ describe('branch points', () => {
 
     expect(resolveBranchPoints([...records, checkpoint])).toEqual(new Map());
   });
+
+  it('rejects an orphan tool response after a closed loop', () => {
+    const records = [
+      record('u1', null, 'user', [{ text: 'question' }]),
+      record('a-tool', 'u1', 'assistant', [
+        { functionCall: { id: 'call-1', name: 'read_file', args: {} } },
+      ]),
+      record('tool', 'a-tool', 'tool_result', [
+        {
+          functionResponse: {
+            id: 'call-1',
+            name: 'read_file',
+            response: { output: 'ok' },
+          },
+        },
+      ]),
+      record('tool-ghost', 'tool', 'tool_result', [
+        {
+          functionResponse: {
+            id: 'ghost',
+            name: 'read_file',
+            response: { output: 'late' },
+          },
+        },
+      ]),
+      record('a-final', 'tool-ghost', 'assistant', [{ text: 'done' }]),
+    ];
+
+    expect(
+      resolveCompletedTurnBranchCandidate({
+        activeChain: records,
+        startExclusiveRecordUuid: null,
+        endInclusiveRecordUuid: 'a-final',
+      }),
+    ).toBeUndefined();
+  });
+
+  it('rejects a turn whose final assistant carries only thought text', () => {
+    const records = [
+      record('u1', null, 'user', [{ text: 'question' }]),
+      record('a1', 'u1', 'assistant', [
+        { thought: true, text: 'internal reasoning' },
+      ]),
+    ];
+
+    expect(
+      resolveCompletedTurnBranchCandidate({
+        activeChain: records,
+        startExclusiveRecordUuid: null,
+        endInclusiveRecordUuid: 'a1',
+      }),
+    ).toBeUndefined();
+  });
+
+  it('rejects a turn ending in two visible assistants', () => {
+    const records = [
+      record('u1', null, 'user', [{ text: 'question' }]),
+      record('a-tool', 'u1', 'assistant', [
+        { functionCall: { id: 'call-1', name: 'read_file', args: {} } },
+      ]),
+      record('tool', 'a-tool', 'tool_result', [
+        {
+          functionResponse: {
+            id: 'call-1',
+            name: 'read_file',
+            response: { output: 'ok' },
+          },
+        },
+      ]),
+      record('a-mid', 'tool', 'assistant', [{ text: 'interim' }]),
+      record('a-final', 'a-mid', 'assistant', [{ text: 'final' }]),
+    ];
+
+    expect(
+      resolveCompletedTurnBranchCandidate({
+        activeChain: records,
+        startExclusiveRecordUuid: null,
+        endInclusiveRecordUuid: 'a-final',
+      }),
+    ).toBeUndefined();
+  });
+
+  it('rejects a checkpoint detached from its parent position', () => {
+    const user = record('u1', null, 'user', [{ text: 'question' }]);
+    const assistant = record('a1', 'u1', 'assistant', [{ text: 'answer' }]);
+    const checkpoint: ChatRecord = {
+      ...record('c1', 'u1', 'system'),
+      subtype: 'branch_checkpoint',
+      systemPayload: {
+        v: 1,
+        startExclusiveRecordUuid: null,
+        assistantRecordUuid: 'a1',
+      },
+    };
+
+    // c1 claims u1 as its parent but sits immediately after a1; the
+    // adjacency guard must refuse it instead of resolving onto the wrong
+    // block.
+    expect(resolveBranchPoints([user, assistant, checkpoint])).toEqual(
+      new Map(),
+    );
+  });
+
+  it('rejects a checkpoint whose start boundary is absent from the chain', () => {
+    const user = record('u1', null, 'user', [{ text: 'question' }]);
+    const assistant = record('a1', 'u1', 'assistant', [{ text: 'answer' }]);
+    const checkpoint: ChatRecord = {
+      ...record('c1', 'a1', 'system'),
+      subtype: 'branch_checkpoint',
+      systemPayload: {
+        v: 1,
+        startExclusiveRecordUuid: 'missing-record',
+        assistantRecordUuid: 'a1',
+      },
+    };
+
+    expect(resolveBranchPoints([user, assistant, checkpoint])).toEqual(
+      new Map(),
+    );
+  });
+
+  it('rejects checkpoints with malformed or future payloads', () => {
+    const chainWith = (systemPayload: unknown): ChatRecord[] => [
+      record('u1', null, 'user', [{ text: 'question' }]),
+      record('a1', 'u1', 'assistant', [{ text: 'answer' }]),
+      {
+        ...record('c1', 'a1', 'system'),
+        subtype: 'branch_checkpoint',
+        systemPayload: systemPayload as ChatRecord['systemPayload'],
+      },
+    ];
+
+    for (const payload of [
+      { v: 2, startExclusiveRecordUuid: null, assistantRecordUuid: 'a1' },
+      { v: 1, startExclusiveRecordUuid: null, assistantRecordUuid: '' },
+      { v: 1, startExclusiveRecordUuid: 42, assistantRecordUuid: 'a1' },
+    ]) {
+      expect(resolveBranchPoints(chainWith(payload))).toEqual(new Map());
+    }
+  });
 });

@@ -4359,6 +4359,66 @@ describe('App session callbacks', () => {
     expect(onToast).toHaveBeenCalledWith('error', 'Failed to branch session.');
   });
 
+  it('explains a stale checkpoint without reloading when pagination is unsupported', async () => {
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    // beforeEach leaves capabilities.features empty, so the daemon does not
+    // advertise session_transcript_pagination.
+    mockSessionActions.branchSession.mockRejectedValue(
+      new DaemonHttpError(
+        409,
+        { code: 'branch_point_invalid' },
+        'Invalid branch point',
+      ),
+    );
+    const onToast = vi.fn();
+    renderApp({ onToast });
+    await flush();
+
+    await act(async () => {
+      await testState.latestMessageListProps?.onBranchSession?.(
+        'stale-checkpoint',
+      );
+    });
+
+    expect(mockSessionActions.reloadSession).not.toHaveBeenCalled();
+    expect(onToast).toHaveBeenCalledWith(
+      'error',
+      'This response is no longer on the active history path. Branching from this point is not supported by the current session.',
+    );
+  });
+
+  it('reports when the stale-checkpoint transcript refresh itself fails', async () => {
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    mockConnection.capabilities.features = ['session_transcript_pagination'];
+    mockSessionActions.branchSession.mockRejectedValue(
+      new DaemonHttpError(
+        409,
+        { code: 'branch_point_invalid' },
+        'Invalid branch point',
+      ),
+    );
+    mockSessionActions.reloadSession.mockRejectedValue(
+      new Error('Session load superseded'),
+    );
+    const onToast = vi.fn();
+    renderApp({ onToast });
+    await flush();
+
+    await act(async () => {
+      await testState.latestMessageListProps?.onBranchSession?.(
+        'stale-checkpoint',
+      );
+    });
+
+    expect(mockSessionActions.reloadSession).toHaveBeenCalledWith(
+      expect.any(AbortSignal),
+    );
+    expect(onToast).toHaveBeenCalledWith(
+      'error',
+      'This response is no longer on the active history path, and the transcript could not be refreshed. Please retry.',
+    );
+  });
+
   it('binds the main composer Voice target to its active secondary session', async () => {
     mockConnection.workspaceCwd = '/work/secondary';
     mockWorkspace.capabilities = {
