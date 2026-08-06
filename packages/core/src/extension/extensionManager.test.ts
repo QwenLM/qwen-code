@@ -214,6 +214,37 @@ describe('extension tests', () => {
       expect(fs.existsSync(installed.path)).toBe(false);
     });
 
+    it('does not re-prompt for a marketplace plugin when the source is an extension root', async () => {
+      const sourceDir = path.join(tempWorkspaceDir, 'direct-root-source');
+      writeExtractedExtension(sourceDir, 'direct-root-extension');
+      const requestChoicePlugin = vi.fn(async () => 'wrong-subplugin');
+      const manager = createExtensionManager({ requestChoicePlugin });
+
+      const installed = await manager.installExtension(
+        {
+          type: 'local',
+          source: sourceDir,
+          originSource: 'Claude',
+          pluginSourceKind: 'extension-root',
+          marketplaceConfig: {
+            name: 'unrelated-marketplace',
+            owner: { name: 'Owner', email: 'owner@example.com' },
+            plugins: [
+              {
+                name: 'wrong-subplugin',
+                version: '1.0.0',
+                source: './plugins/wrong-subplugin',
+              },
+            ],
+          },
+        },
+        async () => {},
+      );
+
+      expect(requestChoicePlugin).not.toHaveBeenCalled();
+      expect(installed.name).toBe('direct-root-extension');
+    });
+
     it('commits workspace initial activation with the installed artifact', async () => {
       const archivePath = path.join(tempWorkspaceDir, 'workspace-ext.zip');
       fs.writeFileSync(archivePath, 'archive');

@@ -1731,12 +1731,14 @@ export class ExtensionManager {
       if (
         installMetadata.originSource === 'Claude' &&
         installMetadata.marketplaceConfig &&
+        installMetadata.pluginSourceKind !== 'extension-root' &&
         !installMetadata.pluginName
       ) {
         const pluginName = await this.requestChoicePlugin(
           installMetadata.marketplaceConfig,
         );
         installMetadata.pluginName = pluginName;
+        installMetadata.pluginSourceKind = 'marketplace-entry';
       }
 
       if (
@@ -1812,6 +1814,7 @@ export class ExtensionManager {
             installMetadata.pluginName,
             installMetadata.networkPolicy,
             signal,
+            installMetadata.pluginSourceKind,
           );
         signal?.throwIfAborted();
 

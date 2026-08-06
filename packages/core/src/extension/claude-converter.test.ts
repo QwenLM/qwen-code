@@ -23,6 +23,7 @@ import {
 import { cloneFromGit, downloadFromGitHubRelease } from './github.js';
 import { HookType } from '../hooks/types.js';
 import { performVariableReplacement } from './variables.js';
+import { ExtensionStorage } from './storage.js';
 
 // The git-subdir source clones a repo; stub the network clone so the security
 // guards around the cloned subdirectory can be exercised against a real fs.
@@ -225,6 +226,56 @@ describe('convertClaudePluginPackage', () => {
     // Clean up test directory
     if (fs.existsSync(testDir)) {
       fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it('cleans the temporary plugin staging directory after conversion', async () => {
+    const pluginSourceDir = path.join(testDir, 'root-plugin');
+    const marketplaceDir = path.join(pluginSourceDir, '.claude-plugin');
+    fs.mkdirSync(marketplaceDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(marketplaceDir, 'marketplace.json'),
+      JSON.stringify({
+        name: 'test-marketplace',
+        owner: { name: 'Owner' },
+        plugins: [
+          {
+            name: 'root-plugin',
+            version: '1.0.0',
+            source: './',
+          },
+        ],
+      }),
+      'utf-8',
+    );
+
+    const createTmpDir = ExtensionStorage.createTmpDir.bind(ExtensionStorage);
+    const tempDirs: string[] = [];
+    const createTmpDirSpy = vi
+      .spyOn(ExtensionStorage, 'createTmpDir')
+      .mockImplementation(async () => {
+        const tempDir = await createTmpDir();
+        tempDirs.push(tempDir);
+        return tempDir;
+      });
+    let outputDir: string | undefined;
+
+    try {
+      const result = await convertClaudePluginPackage(
+        pluginSourceDir,
+        'root-plugin',
+      );
+      outputDir = result.convertedDir;
+
+      expect(tempDirs).toHaveLength(2);
+      expect(outputDir).toBe(tempDirs[1]);
+      expect(fs.existsSync(tempDirs[0])).toBe(false);
+      expect(fs.existsSync(outputDir)).toBe(true);
+    } finally {
+      createTmpDirSpy.mockRestore();
+      for (const tempDir of tempDirs) {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
     }
   });
 

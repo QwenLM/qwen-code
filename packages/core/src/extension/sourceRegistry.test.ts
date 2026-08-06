@@ -181,6 +181,7 @@ describe('discoverPlugins', () => {
     expect(pdf.installed).toBe(false);
     expect(pdf.homepage).toBe('https://example.com/pdf');
     expect(pdf.installSource).toBe('anthropics/skills:pdf');
+    expect(pdf.pluginSourceKind).toBe('marketplace-entry');
     expect(discovered.find((p) => p.name === 'docx')!.installed).toBe(true);
   });
 
@@ -294,6 +295,19 @@ describe('discoverPlugins', () => {
           version: '1.0.0',
           source: { source: 'url', url: 'https://example.com/p.tgz' },
         },
+        {
+          name: 'https-root',
+          version: '1.0.0',
+          source: 'https://github.com/someone/root-plugin',
+        },
+        {
+          name: 'url-github-root',
+          version: '1.0.0',
+          source: {
+            source: 'url',
+            url: 'https://github.com/someone/other-root-plugin',
+          },
+        },
       ]),
     );
 
@@ -305,9 +319,27 @@ describe('discoverPlugins', () => {
     expect(discovered.find((p) => p.name === 'gh-plugin')!.installSource).toBe(
       'someone/repo:gh-plugin',
     );
+    expect(
+      discovered.find((p) => p.name === 'gh-plugin')!.pluginSourceKind,
+    ).toBe('extension-root');
     expect(discovered.find((p) => p.name === 'url-plugin')!.installSource).toBe(
       'https://example.com/p.tgz',
     );
+    expect(
+      discovered.find((p) => p.name === 'url-plugin')!.pluginSourceKind,
+    ).toBe('extension-root');
+    expect(discovered.find((p) => p.name === 'https-root')!.installSource).toBe(
+      'https://github.com/someone/root-plugin',
+    );
+    expect(
+      discovered.find((p) => p.name === 'https-root')!.pluginSourceKind,
+    ).toBe('extension-root');
+    expect(
+      discovered.find((p) => p.name === 'url-github-root')!.installSource,
+    ).toBe('https://github.com/someone/other-root-plugin');
+    expect(
+      discovered.find((p) => p.name === 'url-github-root')!.pluginSourceKind,
+    ).toBe('extension-root');
   });
 
   it('rejects local-path sources from a remote (http) marketplace', async () => {

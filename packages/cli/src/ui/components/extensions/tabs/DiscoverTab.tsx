@@ -219,7 +219,9 @@ export const DiscoverTab = ({
       for (const plugin of targets) {
         let ext;
         try {
-          const metadata = await parseInstallSource(plugin.installSource);
+          const metadata = await parseInstallSource(plugin.installSource, {
+            pluginSourceKind: plugin.pluginSourceKind,
+          });
           ext = await extensionManager.installExtension(
             metadata,
             undefined,

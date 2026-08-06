@@ -330,6 +330,7 @@ export async function checkForExtensionUpdate(
           installMetadata.pluginName,
           installMetadata.networkPolicy,
           signal,
+          installMetadata.pluginSourceKind,
         );
         extensionDir = converted.extensionDir;
         if (extensionDir !== tempDir) {
@@ -382,6 +383,7 @@ export async function checkForExtensionUpdate(
         installMetadata.pluginName,
         installMetadata.networkPolicy,
         signal,
+        installMetadata.pluginSourceKind,
       );
       const extensionDir = converted.extensionDir;
       if (extensionDir !== tempDir) {

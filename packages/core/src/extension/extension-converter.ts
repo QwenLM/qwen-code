@@ -10,6 +10,7 @@ import { EXTENSIONS_CONFIG_FILENAME } from './variables.js';
 import {
   convertGeminiExtensionPackage,
   isGeminiExtensionConfig,
+  realPathWithin,
 } from './gemini-converter.js';
 import {
   convertClaudePluginPackage,
@@ -18,6 +19,7 @@ import {
 import type {
   ExtensionNetworkPolicy,
   ExtensionOriginSource,
+  ExtensionPluginSourceKind,
 } from '../config/config.js';
 
 export const SUPPORTED_EXTENSION_MANIFESTS = [
@@ -27,11 +29,70 @@ export const SUPPORTED_EXTENSION_MANIFESTS = [
   '.claude-plugin/plugin.json',
 ] as const;
 
+function removeConvertedDirectory(directory: string): void {
+  try {
+    fs.rmSync(directory, { recursive: true, force: true });
+  } catch {
+    // Ignore cleanup errors so they do not mask the conversion result.
+  }
+}
+
+type MarketplacePluginLocation = 'root' | 'other' | 'missing-marketplace';
+
+function selectedMarketplacePluginLocation(
+  extensionDir: string,
+  pluginName: string,
+): MarketplacePluginLocation {
+  const marketplacePath = path.join(
+    extensionDir,
+    SUPPORTED_EXTENSION_MANIFESTS[2],
+  );
+  try {
+    fs.lstatSync(marketplacePath);
+  } catch {
+    return 'missing-marketplace';
+  }
+  if (
+    !fs.existsSync(marketplacePath) ||
+    !realPathWithin(marketplacePath, extensionDir)
+  ) {
+    return 'other';
+  }
+
+  try {
+    const marketplace: unknown = JSON.parse(
+      fs.readFileSync(marketplacePath, 'utf-8'),
+    );
+    if (
+      typeof marketplace !== 'object' ||
+      marketplace === null ||
+      !Array.isArray((marketplace as { plugins?: unknown }).plugins)
+    ) {
+      return 'other';
+    }
+
+    const selectedPlugin = (
+      marketplace as { plugins: Array<Record<string, unknown>> }
+    ).plugins.find((plugin) => plugin['name'] === pluginName);
+    if (typeof selectedPlugin?.['source'] !== 'string') {
+      return 'other';
+    }
+
+    return path.resolve(path.join(extensionDir, selectedPlugin['source'])) ===
+      path.resolve(extensionDir)
+      ? 'root'
+      : 'other';
+  } catch {
+    return 'other';
+  }
+}
+
 export async function convertGeminiOrClaudeExtension(
   extensionDir: string,
   pluginName?: string,
   networkPolicy?: ExtensionNetworkPolicy,
   signal?: AbortSignal,
+  pluginSourceKind?: ExtensionPluginSourceKind,
 ): Promise<{ extensionDir: string; originSource: ExtensionOriginSource }> {
   signal?.throwIfAborted();
   let newExtensionDir = extensionDir;
@@ -40,26 +101,101 @@ export async function convertGeminiOrClaudeExtension(
     extensionDir,
     SUPPORTED_EXTENSION_MANIFESTS[0],
   );
-  if (fs.existsSync(configFilePath)) {
-    newExtensionDir = extensionDir;
-  } else if (isGeminiExtensionConfig(extensionDir)) {
-    newExtensionDir = (await convertGeminiExtensionPackage(extensionDir))
-      .convertedDir;
-    originSource = 'Gemini';
-  } else if (pluginName) {
+  const hasQwenConfig = fs.existsSync(configFilePath);
+  const isGeminiExtension =
+    !hasQwenConfig && isGeminiExtensionConfig(extensionDir);
+  const hasClaudePlugin = fs.existsSync(
+    path.join(extensionDir, SUPPORTED_EXTENSION_MANIFESTS[3]),
+  );
+  // `pluginName` has two meanings: a selector inside a marketplace repo, or an
+  // alias retained for a direct plugin-root install. New metadata disambiguates
+  // them. Legacy metadata keeps the old manifest-first behavior so an update
+  // cannot suddenly replace a previously installed root Gemini/Qwen extension
+  // with a marketplace subplugin.
+  const marketplaceLocation = pluginName
+    ? selectedMarketplacePluginLocation(extensionDir, pluginName)
+    : 'missing-marketplace';
+  const isExplicitMarketplaceEntry = pluginSourceKind === 'marketplace-entry';
+  const isExplicitExtensionRoot = pluginSourceKind === 'extension-root';
+  const selectedMarketplaceEntryUsesRoot = marketplaceLocation === 'root';
+  const rootMarketplacePluginName =
+    pluginName && !isExplicitExtensionRoot && selectedMarketplaceEntryUsesRoot
+      ? pluginName
+      : undefined;
+
+  // A selected subdirectory/remote marketplace plugin must win over manifests
+  // at the marketplace repository root. Only explicit new metadata opts into
+  // this precedence; legacy installs retain their previous root selection.
+  if (
+    isExplicitMarketplaceEntry &&
+    pluginName &&
+    !selectedMarketplaceEntryUsesRoot
+  ) {
     newExtensionDir = (
       await convertClaudePluginPackage(
         extensionDir,
         pluginName,
         networkPolicy,
         signal,
+        true,
       )
     ).convertedDir;
     originSource = 'Claude';
-  } else if (
-    fs.existsSync(path.join(extensionDir, SUPPORTED_EXTENSION_MANIFESTS[3]))
-  ) {
-    newExtensionDir = (await convertClaudePluginStandalone(extensionDir))
+  } else if (hasQwenConfig) {
+    newExtensionDir = extensionDir;
+  } else if (isGeminiExtension && hasClaudePlugin) {
+    const geminiConversion = await convertGeminiExtensionPackage(extensionDir);
+    let claudeConversion:
+      | Awaited<ReturnType<typeof convertClaudePluginStandalone>>
+      | undefined;
+    try {
+      signal?.throwIfAborted();
+      claudeConversion = rootMarketplacePluginName
+        ? await convertClaudePluginPackage(
+            extensionDir,
+            rootMarketplacePluginName,
+            networkPolicy,
+            signal,
+            true,
+          )
+        : await convertClaudePluginStandalone(extensionDir, true);
+      const mergedConfig = {
+        ...geminiConversion.config,
+        hooks: claudeConversion.config.hooks ?? geminiConversion.config.hooks,
+      };
+      signal?.throwIfAborted();
+      fs.writeFileSync(
+        path.join(geminiConversion.convertedDir, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify(mergedConfig, null, 2),
+        'utf-8',
+      );
+      newExtensionDir = geminiConversion.convertedDir;
+      originSource = 'Gemini';
+    } catch (error) {
+      removeConvertedDirectory(geminiConversion.convertedDir);
+      throw error;
+    } finally {
+      if (claudeConversion) {
+        removeConvertedDirectory(claudeConversion.convertedDir);
+      }
+    }
+  } else if (isGeminiExtension) {
+    newExtensionDir = (await convertGeminiExtensionPackage(extensionDir))
+      .convertedDir;
+    originSource = 'Gemini';
+  } else if (pluginName && !isExplicitExtensionRoot) {
+    newExtensionDir = (
+      await convertClaudePluginPackage(
+        extensionDir,
+        pluginName,
+        networkPolicy,
+        signal,
+        true,
+      )
+    ).convertedDir;
+    originSource = 'Claude';
+  } else if (hasClaudePlugin) {
+    newExtensionDir = (await convertClaudePluginStandalone(extensionDir, true))
       .convertedDir;
     originSource = 'Claude';
   }

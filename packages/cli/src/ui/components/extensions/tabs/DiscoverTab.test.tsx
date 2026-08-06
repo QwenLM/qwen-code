@@ -59,6 +59,7 @@ describe('DiscoverTab', () => {
       name: 'demo',
       marketplaceName: 'market',
       installSource: 'owner/demo',
+      pluginSourceKind: 'extension-root',
       installed: false,
     } as DiscoveredPlugin;
     const manager = {
@@ -94,6 +95,9 @@ describe('DiscoverTab', () => {
     });
 
     await waitFor(() => expect(manager.installExtension).toHaveBeenCalled());
+    expect(mockParseInstallSource).toHaveBeenCalledWith('owner/demo', {
+      pluginSourceKind: 'extension-root',
+    });
     expect(manager.installExtension).toHaveBeenCalledWith(
       { type: 'git', source: 'owner/demo' },
       undefined,
