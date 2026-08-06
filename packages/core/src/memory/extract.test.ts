@@ -18,6 +18,7 @@ import {
   rebuildManagedAutoMemoryIndex,
   rebuildUserAutoMemoryIndex,
 } from './indexer.js';
+import { refreshMemoryInstruction } from './refresh.js';
 
 vi.mock('./extractionAgentPlanner.js', () => ({
   runAutoMemoryExtractionByAgent: vi.fn(),
@@ -26,6 +27,10 @@ vi.mock('./extractionAgentPlanner.js', () => ({
 vi.mock('./indexer.js', () => ({
   rebuildManagedAutoMemoryIndex: vi.fn().mockResolvedValue(''),
   rebuildUserAutoMemoryIndex: vi.fn().mockResolvedValue(''),
+}));
+
+vi.mock('./refresh.js', () => ({
+  refreshMemoryInstruction: vi.fn().mockResolvedValue(undefined),
 }));
 
 describe('auto-memory extraction', () => {
@@ -217,6 +222,32 @@ describe('auto-memory extraction', () => {
 
       expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledTimes(1);
       expect(rebuildUserAutoMemoryIndex).not.toHaveBeenCalled();
+    });
+
+    it('refreshes the live instruction after touched topics are indexed', async () => {
+      vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
+        touchedTopics: ['project'],
+        touchedProjectScope: true,
+        touchedUserScope: false,
+        hasToolActivity: true,
+        systemMessage: undefined,
+      });
+
+      await runAutoMemoryExtract({
+        projectRoot,
+        sessionId: 'session-1',
+        config: mockConfig,
+        history: [...newHistory],
+      });
+
+      expect(refreshMemoryInstruction).toHaveBeenCalledWith(mockConfig, {
+        logContext: 'managed auto-memory extraction',
+      });
+      expect(
+        vi.mocked(rebuildManagedAutoMemoryIndex).mock.invocationCallOrder[0],
+      ).toBeLessThan(
+        vi.mocked(refreshMemoryInstruction).mock.invocationCallOrder[0],
+      );
     });
   });
 

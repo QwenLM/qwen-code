@@ -101,6 +101,7 @@ const mockActiveGoalEquals = vi.hoisted(() => vi.fn());
 const mockSetActiveGoal = vi.hoisted(() => vi.fn());
 const mockClearActiveGoal = vi.hoisted(() => vi.fn());
 const mockRefreshMemoryAfterManagedWrite = vi.hoisted(() => vi.fn());
+const mockRefreshMemoryInstruction = vi.hoisted(() => vi.fn());
 const mockCleanupReviewWorktreeLeases = vi.hoisted(() => vi.fn());
 const mockLogConversationFinishedEvent = vi.hoisted(() => vi.fn());
 const mockUseDualOutput = vi.hoisted(() => vi.fn());
@@ -139,6 +140,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     clearActiveGoal: mockClearActiveGoal,
     runVisionBridge: mockRunVisionBridge,
     refreshMemoryAfterManagedWrite: mockRefreshMemoryAfterManagedWrite,
+    refreshMemoryInstruction: mockRefreshMemoryInstruction,
     logConversationFinishedEvent: mockLogConversationFinishedEvent,
     finalizeToolResponses: mockFinalizeToolResponses,
   };
@@ -218,6 +220,7 @@ describe('useGeminiStream', () => {
   beforeEach(() => {
     vi.clearAllMocks(); // Clear mocks before each test
     mockRefreshMemoryAfterManagedWrite.mockResolvedValue(false);
+    mockRefreshMemoryInstruction.mockResolvedValue(undefined);
     mockGetActiveGoal.mockReturnValue(undefined);
     mockActiveGoalEquals.mockReturnValue(false);
     vi.mocked(findLastSafeSplitPoint).mockImplementation(
@@ -8436,6 +8439,103 @@ describe('useGeminiStream', () => {
         ],
         { logContext: 'interactive memory tool batch' },
       );
+    });
+
+    it('refreshes context-file instructions after bare remember writes QWEN.md', async () => {
+      const completedToolCall: TrackedCompletedToolCall = {
+        request: {
+          callId: 'write-context-call-1',
+          name: 'write_file',
+          args: { file_path: '/test/dir/QWEN.md' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-bare-remember',
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId: 'write-context-call-1',
+          responseParts: [{ text: 'Wrote QWEN.md' }],
+          resultDisplay: 'Wrote QWEN.md',
+          error: undefined,
+          errorType: undefined,
+        },
+        tool: {
+          name: 'write_file',
+          displayName: 'write_file',
+          description: 'Writes files',
+          build: vi.fn(),
+        } as any,
+        invocation: {
+          getDescription: () => `Mock description`,
+        } as unknown as AnyToolInvocation,
+      };
+      mockHandleSlashCommand.mockResolvedValue({
+        type: 'submit_prompt',
+        content: 'remember this',
+        refreshContextFilesOnWrite: true,
+      });
+
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('/remember fact');
+      });
+      const onComplete = mockUseReactToolScheduler.mock.calls.at(-1)?.[0] as
+        | ((completedTools: TrackedToolCall[]) => Promise<void>)
+        | undefined;
+      await act(async () => {
+        await onComplete?.([completedToolCall]);
+      });
+
+      expect(mockRefreshMemoryInstruction).toHaveBeenCalledWith(mockConfig, {
+        logContext: 'interactive context-file memory tool batch',
+      });
+    });
+
+    it('does not refresh context-file instructions for ordinary QWEN.md writes', async () => {
+      const completedToolCall: TrackedCompletedToolCall = {
+        request: {
+          callId: 'write-context-call-1',
+          name: 'write_file',
+          args: { file_path: '/test/dir/QWEN.md' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-ordinary',
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId: 'write-context-call-1',
+          responseParts: [{ text: 'Wrote QWEN.md' }],
+          resultDisplay: 'Wrote QWEN.md',
+          error: undefined,
+          errorType: undefined,
+        },
+        tool: {
+          name: 'write_file',
+          displayName: 'write_file',
+          description: 'Writes files',
+          build: vi.fn(),
+        } as any,
+        invocation: {
+          getDescription: () => `Mock description`,
+        } as unknown as AnyToolInvocation,
+      };
+      mockHandleSlashCommand.mockResolvedValue({
+        type: 'submit_prompt',
+        content: 'write docs',
+      });
+
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('/write-docs');
+      });
+      const onComplete = mockUseReactToolScheduler.mock.calls.at(-1)?.[0] as
+        | ((completedTools: TrackedToolCall[]) => Promise<void>)
+        | undefined;
+      await act(async () => {
+        await onComplete?.([completedToolCall]);
+      });
+
+      expect(mockRefreshMemoryInstruction).not.toHaveBeenCalled();
     });
 
     it('does not run the legacy save_memory refresh when managed-memory writes refresh the batch', async () => {

@@ -66,7 +66,9 @@ import {
   markDuplicateProviderToolCallResponseSent,
   findRepeatedDuplicateProviderToolCall,
   AutonomousLoopTickResolver,
+  DEFAULT_CONTEXT_FILENAME,
   refreshMemoryAfterManagedWrite,
+  refreshMemoryInstruction,
   finalizeToolResponses,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
@@ -204,6 +206,34 @@ function sharedGoalPermit(
     throw new Error('ToolResult batch has mixed Goal contexts');
   }
   return { ...first };
+}
+
+function didWriteProjectContextFile(
+  tools: readonly TrackedCompletedToolCall[],
+  projectRoot: string,
+): boolean {
+  const contextFilePath = path.resolve(projectRoot, DEFAULT_CONTEXT_FILENAME);
+
+  return tools.some((toolCall) => {
+    if (toolCall.status !== 'success') {
+      return false;
+    }
+    if (
+      toolCall.request.name !== ToolNames.WRITE_FILE &&
+      toolCall.request.name !== ToolNames.EDIT
+    ) {
+      return false;
+    }
+
+    const args = toolCall.request.args as Record<string, unknown> | undefined;
+    const filePath =
+      args?.['file_path'] ?? args?.['path'] ?? args?.['target_file'];
+
+    return (
+      typeof filePath === 'string' &&
+      path.resolve(projectRoot, filePath) === contextFilePath
+    );
+  });
 }
 
 /**
@@ -714,6 +744,7 @@ export const useGeminiStream = (
   );
   const processedMemoryToolsRef = useRef<Set<string>>(new Set());
   const submitPromptOnCompleteRef = useRef<(() => Promise<void>) | null>(null);
+  const refreshContextFilesOnWriteRef = useRef(false);
   const modelOverrideRef = useRef<string | undefined>(undefined);
   // True when the current turn's model override came from an explicit inline
   // `/model <id> <prompt>`. Skill-tool overrides must not clobber a user's
@@ -1261,6 +1292,9 @@ export const useGeminiStream = (
               localQueryToSendToGemini = slashCommandResult.content;
               submitPromptOnCompleteRef.current =
                 slashCommandResult.onComplete ?? null;
+              refreshContextFilesOnWriteRef.current = Boolean(
+                slashCommandResult.refreshContextFilesOnWrite,
+              );
               // Per-turn model override (e.g. inline `/model <id> <prompt>`).
               // Runs after the new-user-turn reset above and before the stream
               // is sent, so it applies to this turn and — because the reset is
@@ -2950,6 +2984,13 @@ export const useGeminiStream = (
         duplicateProviderToolCallResponseIdsRef.current.clear();
         pendingDuplicateToolResponsesRef.current = [];
         immediateDuplicateToolResponsesRef.current = null;
+        if (
+          submitType !== SendMessageType.Retry &&
+          submitType !== SendMessageType.Notification &&
+          submitType !== SendMessageType.Goal
+        ) {
+          refreshContextFilesOnWriteRef.current = false;
+        }
       }
 
       const userMessageTimestamp = Date.now();
@@ -3870,6 +3911,18 @@ export const useGeminiStream = (
         })),
         { logContext: 'interactive memory tool batch' },
       );
+      if (
+        refreshContextFilesOnWriteRef.current &&
+        didWriteProjectContextFile(
+          completedAndReadyToSubmitTools,
+          config.getProjectRoot(),
+        )
+      ) {
+        await refreshMemoryInstruction(config, {
+          logContext: 'interactive context-file memory tool batch',
+        });
+        refreshContextFilesOnWriteRef.current = false;
+      }
       if (newSuccessfulMemorySaves.length > 0) {
         if (!didRefreshManagedMemory) {
           // Perform the legacy save_memory refresh only when the managed-memory
