@@ -19,6 +19,7 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { hasShellSubstitution } from './shell-utils.js';
 import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
 import {
   classifyAwkCommandSafety,
@@ -1138,7 +1139,18 @@ export async function classifyShellCommandSafety(
   command: string,
 ): Promise<ShellCommandSafety> {
   if (typeof command !== 'string' || !command.trim()) return 'unknown';
-  return classifyInternal(command).catch(() => 'unknown');
+  const classification = await classifyInternal(command).catch(
+    (): ShellCommandSafety => 'unknown',
+  );
+  return classification === 'read-only' && hasShellSubstitution(command)
+    ? 'unknown'
+    : classification;
+}
+
+function isShellCommandReadOnlyFallback(command: string): boolean {
+  // The regex fallback cannot model Bash parameter transformations. Keep
+  // array subscripts (`${arr[@]}`) allowed while failing closed on `@P` etc.
+  return !/\$\{[^}]*@[A-Za-z]/.test(command) && isShellCommandReadOnly(command);
 }
 
 /**
@@ -1158,12 +1170,13 @@ export async function isShellCommandReadOnlyAST(
   command: string,
 ): Promise<boolean> {
   if (typeof command !== 'string' || !command.trim()) return false;
+  if (hasShellSubstitution(command)) return false;
 
   // If the WASM parser is permanently unavailable (e.g. WASM file missing
   // after a symlinked install), fall back to the regex-based checker so the
   // agent remains functional instead of hanging or crashing.
   if (parserInitFailed) {
-    return isShellCommandReadOnly(command);
+    return isShellCommandReadOnlyFallback(command);
   }
 
   try {
@@ -1171,7 +1184,7 @@ export async function isShellCommandReadOnlyAST(
   } catch {
     // Unexpected runtime failure (e.g. WASM init error on first call) –
     // fall back to the regex-based checker rather than propagating the error.
-    return isShellCommandReadOnly(command);
+    return isShellCommandReadOnlyFallback(command);
   }
 }
 

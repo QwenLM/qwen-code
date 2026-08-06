@@ -1334,6 +1334,13 @@ describe('detectCommandSubstitution line continuations (#8582)', () => {
     );
   });
 
+  it.each(['echo $\\\n{PWD@P}', 'echo "$\\\n{PWD@P}"', 'cat <<< $\\\n{PWD@P}'])(
+    'detects @P expansion split across a line continuation: %j',
+    (command) => {
+      expect(detectCommandSubstitution(command)).toBe(true);
+    },
+  );
+
   it('detects $(...) split across chained line continuations', () => {
     expect(
       detectCommandSubstitution('echo "$\\\n\\\n(touch /tmp/pwned)"'),
@@ -1383,6 +1390,13 @@ describe('detectCommandSubstitution line continuations (#8582)', () => {
     expect(detectCommandSubstitution('echo $\\\n#foo$(x)')).toBe(true);
   });
 
+  it.each(['echo a\\#\\\n#$(x)', 'echo a\\;\\\n#$(x)'])(
+    'preserves escaped word characters across continuations: %j',
+    (command) => {
+      expect(detectCommandSubstitution(command)).toBe(true);
+    },
+  );
+
   it('still treats # after a word-boundary continuation as a comment', () => {
     // bash joins this into `echo # $(x)` — the `#` follows a space, so it
     // starts a comment and nothing executes.
@@ -1393,6 +1407,11 @@ describe('detectCommandSubstitution line continuations (#8582)', () => {
     const cmd = ['cat <<EOF', '$\\', '\\', '(touch /tmp/pwned)', 'EOF'].join(
       '\n',
     );
+    expect(detectCommandSubstitution(cmd)).toBe(true);
+  });
+
+  it('detects continuation-split @P expansion in an unquoted heredoc', () => {
+    const cmd = ['cat <<EOF', '$\\', '{PWD@P}', 'EOF'].join('\n');
     expect(detectCommandSubstitution(cmd)).toBe(true);
   });
 

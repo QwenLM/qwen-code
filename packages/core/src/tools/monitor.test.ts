@@ -513,6 +513,7 @@ describe('MonitorTool', () => {
     // across a line continuation, so the pre-AST substitution gate must
     // catch it on the monitor path too.
     it('asks for $(...) hidden by a line continuation (issue #8582)', async () => {
+      mockIsShellCommandReadOnlyAST.mockResolvedValue(true);
       const invocation = createInvocation({
         command: 'echo "$\\\n(touch /tmp/pwned)"',
       });

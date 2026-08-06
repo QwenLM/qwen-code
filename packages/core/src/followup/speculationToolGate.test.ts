@@ -140,6 +140,16 @@ describe('speculationToolGate', () => {
       expect(result.action).toBe('boundary');
     });
 
+    it('hits boundary for continuation-hidden substitution', async () => {
+      const result = await evaluateToolCall(
+        ToolNames.SHELL,
+        { command: 'echo "$\\\n(touch /tmp/pwned)"' },
+        overlayFs,
+        ApprovalMode.DEFAULT,
+      );
+      expect(result.action).toBe('boundary');
+    });
+
     it('hits boundary for empty command', async () => {
       const result = await evaluateToolCall(
         ToolNames.SHELL,

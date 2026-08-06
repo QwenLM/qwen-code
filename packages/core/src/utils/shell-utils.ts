@@ -1565,7 +1565,12 @@ export function detectCommandSubstitution(command: string): boolean {
     startIndex: number,
   ): { nextIndex: number; heredoc: PendingHeredoc } | null => {
     // startIndex points at the first '<' of the `<<` operator.
-    if (command[startIndex] !== '<' || command[startIndex + 1] !== '<') {
+    if (
+      command[startIndex] !== '<' ||
+      command[startIndex + 1] !== '<' ||
+      command[startIndex - 1] === '<' ||
+      command[startIndex + 2] === '<'
+    ) {
       return null;
     }
 
@@ -1734,7 +1739,10 @@ export function detectCommandSubstitution(command: string): boolean {
         }
 
         if (!heredoc.isQuotedDelimiter) {
-          if (pendingDollarLineContinuation && effectiveLine.startsWith('(')) {
+          if (
+            pendingDollarLineContinuation &&
+            (effectiveLine.startsWith('(') || effectiveLine.startsWith('{'))
+          ) {
             return { nextIndex: i, hasSubstitution: true };
           }
 
@@ -1801,6 +1809,7 @@ export function detectCommandSubstitution(command: string): boolean {
   let lastSignificantInDoubleQuotes = false;
   let lastSignificantInSingleQuotes = false;
   let lastSignificantInBackticks = false;
+  let lastSignificantWasEscaped = false;
   let justAfterContinuation = false;
 
   while (i < command.length) {
@@ -1841,7 +1850,7 @@ export function detectCommandSubstitution(command: string): boolean {
       const continuationJoinsWord =
         justAfterContinuation &&
         lastSignificantChar !== '' &&
-        !isWordBoundary(lastSignificantChar);
+        (lastSignificantWasEscaped || !isWordBoundary(lastSignificantChar));
       if (!inComment && !continuationJoinsWord && isCommentStart(i)) {
         inComment = true;
         i++;
@@ -1865,10 +1874,13 @@ export function detectCommandSubstitution(command: string): boolean {
         i += 2;
         continue;
       }
-      // A genuinely escaped character cannot start a substitution (`\$(` is
-      // a literal `$` followed by `(`), so make it inert for the
-      // continuation-adjacency check.
-      lastSignificantChar = '';
+      // An escaped character remains part of the current word, but cannot
+      // start a substitution (`\$(` is a literal `$` followed by `(`).
+      lastSignificantChar = nextChar ?? '';
+      lastSignificantInDoubleQuotes = inDoubleQuotes;
+      lastSignificantInSingleQuotes = inSingleQuotes;
+      lastSignificantInBackticks = inBackticks;
+      lastSignificantWasEscaped = true;
       justAfterContinuation = false;
       i += 2; // Skip the escaped character
       continue;
@@ -1880,8 +1892,9 @@ export function detectCommandSubstitution(command: string): boolean {
     // `"$"\<newline>(` is a quoted dollar followed by `(`, not `$(`.
     if (justAfterContinuation) {
       justAfterContinuation = false;
-      if (!inSingleQuotes && char === '(') {
+      if (!inSingleQuotes && (char === '(' || char === '{')) {
         if (
+          !lastSignificantWasEscaped &&
           lastSignificantChar === '$' &&
           !lastSignificantInSingleQuotes &&
           lastSignificantInDoubleQuotes === inDoubleQuotes
@@ -1889,6 +1902,8 @@ export function detectCommandSubstitution(command: string): boolean {
           return true;
         }
         if (
+          char === '(' &&
+          !lastSignificantWasEscaped &&
           (lastSignificantChar === '<' || lastSignificantChar === '>') &&
           !lastSignificantInSingleQuotes &&
           !lastSignificantInDoubleQuotes &&
@@ -1956,6 +1971,7 @@ export function detectCommandSubstitution(command: string): boolean {
     lastSignificantInDoubleQuotes = inDoubleQuotes;
     lastSignificantInSingleQuotes = inSingleQuotes;
     lastSignificantInBackticks = inBackticks;
+    lastSignificantWasEscaped = false;
     i++;
   }
 

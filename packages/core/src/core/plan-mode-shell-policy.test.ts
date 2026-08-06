@@ -98,6 +98,12 @@ describe('plan-mode shell policy', () => {
     });
   });
 
+  it('does not classify continuation-hidden substitution as read-only', async () => {
+    await expect(
+      evaluate('echo "$\\\n(touch /tmp/pwned)"'),
+    ).resolves.toMatchObject({ classification: 'unknown' });
+  });
+
   it('classifies monitor safetyCommand rather than the wrapper', async () => {
     await expect(
       evaluate("/bin/bash -c 'git status &' ignored", {

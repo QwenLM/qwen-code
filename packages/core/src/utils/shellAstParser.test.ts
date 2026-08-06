@@ -446,6 +446,14 @@ describe('isShellCommandReadOnlyAST', () => {
       );
     });
   });
+
+  it.each(['echo "$\\\n(touch /tmp/pwned)"', 'echo $\\\n{PWD@P}'])(
+    'rejects substitution hidden by a line continuation: %j',
+    async (command) => {
+      expect(await classifyShellCommandSafety(command)).toBe('unknown');
+      expect(await isShellCommandReadOnlyAST(command)).toBe(false);
+    },
+  );
 });
 
 // =========================================================================
@@ -1057,6 +1065,12 @@ describe('isShellCommandReadOnlyAST fallback to regex-based checker', () => {
     _setParserFailedForTesting();
     // Both implementations agree: ls is read-only
     expect(await isShellCommandReadOnlyAST('ls -la')).toBe(true);
+  });
+
+  it('fails closed for @ transformations when the parser is unavailable', async () => {
+    _setParserFailedForTesting();
+    expect(await isShellCommandReadOnlyAST('echo "${two@P}"')).toBe(false);
+    expect(await isShellCommandReadOnlyAST('echo "${arr[@]}"')).toBe(true);
   });
 
   it('maps parser unavailability to unknown in the classification API', async () => {
