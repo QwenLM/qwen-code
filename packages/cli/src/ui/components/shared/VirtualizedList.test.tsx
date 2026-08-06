@@ -870,52 +870,63 @@ describe('<VirtualizedList /> VP collapsed thought groups', () => {
     Array.from({ length: rows }, (_, i) => `${seed} ${line(i)}`).join('\n');
 
   const HEAD_ID = 1;
-  const thoughtHistory = (rows: number, answerRows = 0): HistoryItem[] => [
-    { id: 0, type: 'user', text: 'hello' },
-    {
-      id: HEAD_ID,
-      type: 'gemini_thought',
-      text: body('head', rows),
-      durationMs: 101_000,
-    } as HistoryItem,
-    {
-      id: 2,
-      type: 'gemini_thought_content',
-      text: body('c1', rows),
-    } as HistoryItem,
-    {
-      id: 3,
-      type: 'gemini_thought_content',
-      text: body('c2', rows),
-    } as HistoryItem,
-    {
-      id: 4,
-      type: 'gemini_thought_content',
-      text: body('c3', rows),
-    } as HistoryItem,
-    {
-      id: 5,
+  const thoughtHistory = (
+    rows: number,
+    answerRows = 0,
+    continuations = 3,
+  ): HistoryItem[] => {
+    const items: HistoryItem[] = [
+      { id: 0, type: 'user', text: 'hello' },
+      {
+        id: HEAD_ID,
+        type: 'gemini_thought',
+        text: body('head', rows),
+        durationMs: 101_000,
+      } as HistoryItem,
+    ];
+    for (let i = 0; i < continuations; i++) {
+      items.push({
+        id: 2 + i,
+        type: 'gemini_thought_content',
+        text: body(`c${i + 1}`, rows),
+      } as HistoryItem);
+    }
+    items.push({
+      id: 2 + continuations,
       type: 'gemini',
       text: answerRows > 0 ? body('answer', answerRows) : 'final answer',
-    },
-  ];
+    });
+    return items;
+  };
 
   // Mirror production wiring (MainContent, AgentChatContent): derive the
   // group → head-id map from the fixture's own data instead of a
   // hardcoded lookup, so these tests validate the wiring production
   // actually produces.
-  const renderThoughtItem = (data: HistoryItem[]) => {
+  const renderThoughtItem = (
+    data: HistoryItem[],
+    onRenderIndex?: (index: number) => void,
+  ) => {
     const headIdMap = buildThoughtHeadIdMap(data);
-    const ThoughtItem = ({ item }: { item: HistoryItem }) => (
-      <HistoryItemDisplay
-        terminalWidth={80}
-        mainAreaWidth={80}
-        availableTerminalHeight={40}
-        item={item}
-        isPending={false}
-        thoughtHeadId={headIdMap.get(item)}
-      />
-    );
+    const ThoughtItem = ({
+      item,
+      index,
+    }: {
+      item: HistoryItem;
+      index: number;
+    }) => {
+      onRenderIndex?.(index);
+      return (
+        <HistoryItemDisplay
+          terminalWidth={80}
+          mainAreaWidth={80}
+          availableTerminalHeight={40}
+          item={item}
+          isPending={false}
+          thoughtHeadId={headIdMap.get(item)}
+        />
+      );
+    };
     return ThoughtItem;
   };
 
@@ -924,6 +935,7 @@ describe('<VirtualizedList /> VP collapsed thought groups', () => {
     ref: RefObject<VirtualizedListRef<HistoryItem> | null>,
     data: HistoryItem[],
     initialScrollIndex?: number,
+    onRenderIndex?: (index: number) => void,
   ) => (
     <SettingsContext.Provider value={settings}>
       <VirtualViewportContext.Provider value={true}>
@@ -934,7 +946,7 @@ describe('<VirtualizedList /> VP collapsed thought groups', () => {
             <VirtualizedList
               ref={ref}
               data={data}
-              renderItem={renderThoughtItem(data)}
+              renderItem={renderThoughtItem(data, onRenderIndex)}
               estimatedItemHeight={() => 3}
               keyExtractor={(item) => `h-${item.id}`}
               isStaticItem={() => true}
@@ -971,6 +983,9 @@ describe('<VirtualizedList /> VP collapsed thought groups', () => {
     expect(lines.some((l) => l.includes('c1 thought line 0'))).toBe(false);
     expect(lines.filter((l) => l.trim() !== '').length).toBeLessThanOrEqual(6);
     expect(lines.length).toBeLessThanOrEqual(8);
+    // Collapsed state must still render the head summary, not an empty
+    // window (the assertions above also hold for a blank frame).
+    expect(lines.some((l) => l.includes('Thought for 1m 41s'))).toBe(true);
   });
 
   it('does not lock the render window when a tall thought collapses off-screen', async () => {
@@ -1009,6 +1024,67 @@ describe('<VirtualizedList /> VP collapsed thought groups', () => {
   });
 
   it('heals every cached-zero continuation at the viewport top in one pass', async () => {
+    const data = thoughtHistory(12, 0, 5);
+    const ref: RefObject<VirtualizedListRef<HistoryItem> | null> = {
+      current: null,
+    };
+    const harness = render(
+      thoughtTree(new Set([HEAD_ID]), ref, data, SCROLL_TO_ITEM_END),
+    );
+    await tick();
+    await tick();
+
+    // Collapse while the group is still mounted so all five
+    // continuations measure 0 and cache it, then grow the answer: the
+    // bottom-stuck viewport moves below the collapsed group and the
+    // cached zeros persist off-screen.
+    harness.rerender(thoughtTree(new Set(), ref, data, SCROLL_TO_ITEM_END));
+    await tick();
+    await tick();
+    const tallData = thoughtHistory(12, 60, 5);
+    harness.rerender(thoughtTree(new Set(), ref, tallData, SCROLL_TO_ITEM_END));
+    await tick();
+    await tick();
+
+    // Scroll while still collapsed: the viewport top lands exactly on
+    // the coincident-offset run while the cached zeros are stable.
+    // scrollToIndex lands on the run's own offset; scrollTo(2) lands
+    // before the run and heals via a whole-list mount instead.
+    act(() => {
+      ref.current?.scrollToIndex({ index: 2 });
+    });
+    await tick();
+    await tick();
+
+    // Re-expand: the render pass computing the window from the cached
+    // zeros must mount the run's FIRST item. Indices render ascending
+    // per pass, so the first descending step ends that first pass; a
+    // one-step (`if`) or missing walk-back starts the window mid-run
+    // and heals the run one item per pass. A `<=` walk-back collapses
+    // the window to index 0 and mounts the whole list.
+    const rendered: number[] = [];
+    harness.rerender(
+      thoughtTree(new Set([HEAD_ID]), ref, tallData, SCROLL_TO_ITEM_END, (i) =>
+        rendered.push(i),
+      ),
+    );
+    const firstPass: number[] = [];
+    for (const i of rendered) {
+      if (firstPass.length > 0 && i <= firstPass[firstPass.length - 1]) break;
+      firstPass.push(i);
+    }
+    expect(firstPass).toEqual([2, 3, 4, 5, 6, 7]);
+    for (let i = 0; i < 10; i++) {
+      await tick();
+    }
+
+    // Every cached zero must be healed in this one pass: each unhealed
+    // continuation leaves scrollHeight 12 rows short of the fully
+    // healed total.
+    expect(ref.current!.getScrollState().scrollHeight).toBe(137);
+  });
+
+  it('anchors to the first item of a cached-zero run so re-expand stays visible', async () => {
     const data = thoughtHistory(12);
     const ref: RefObject<VirtualizedListRef<HistoryItem> | null> = {
       current: null,
@@ -1019,10 +1095,8 @@ describe('<VirtualizedList /> VP collapsed thought groups', () => {
     await tick();
     await tick();
 
-    // Collapse while the group is still mounted so all three
-    // continuations measure 0 and cache it, then grow the answer: the
-    // bottom-stuck viewport moves below the collapsed group and the
-    // cached zeros persist off-screen.
+    // Collapse so the continuations cache 0, then grow the answer to pin
+    // the viewport bottom-stuck below the collapsed group.
     harness.rerender(thoughtTree(new Set(), ref, data, SCROLL_TO_ITEM_END));
     await tick();
     await tick();
@@ -1031,27 +1105,27 @@ describe('<VirtualizedList /> VP collapsed thought groups', () => {
     await tick();
     await tick();
 
-    // Re-expand, then bring the viewport top to the group's offset. The
-    // whole coincident-offset run must mount and re-measure in this one
-    // pass; without the walk-back, only the run's last item mounts and
-    // each further scroll pass heals just one more continuation.
+    // Land the viewport top exactly on the coincident-offset run.
+    act(() => {
+      ref.current?.scrollToIndex({ index: 2 });
+    });
+    await tick();
+    await tick();
+    // findLastLE alone resolves to the run's LAST index (the answer);
+    // the anchor must walk back to the run's first item.
+    expect(ref.current!.getScrollIndex()).toBe(2);
+
+    // Re-expand: the healed heights must not push the group's content
+    // above the viewport.
     harness.rerender(
       thoughtTree(new Set([HEAD_ID]), ref, tallData, SCROLL_TO_ITEM_END),
     );
     await tick();
-    await tick();
-    act(() => {
-      ref.current?.scrollTo(2);
-    });
     for (let i = 0; i < 10; i++) {
       await tick();
     }
-
-    // user(1) + head summary(collapsed height) + c1..c3(12 each) +
-    // answer(60). One-per-pass healing would still be 12 rows short
-    // here (c1 left at its cached 0).
-    expect(ref.current!.getScrollState().scrollHeight).toBeGreaterThanOrEqual(
-      90,
+    expect((harness.lastFrame() ?? '').includes('c1 thought line 0')).toBe(
+      true,
     );
   });
 });

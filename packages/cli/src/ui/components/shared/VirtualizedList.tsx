@@ -285,9 +285,16 @@ function VirtualizedList<T>(
       scrollTop: number,
       offsets: number[],
     ): { index: number; offset: number } => {
-      const index = findLastLE(offsets, scrollTop);
+      let index = findLastLE(offsets, scrollTop);
       if (index === -1) {
         return { index: 0, offset: 0 };
+      }
+      // Mirror the startIndex walk-back: anchoring to a coincident-offset
+      // run's LAST item makes actualScrollTop jump by the run's whole
+      // re-expanded height once the cached zeros heal, dropping the
+      // expanded content above the viewport.
+      while (index > 0 && offsets[index - 1] === offsets[index]) {
+        index--;
       }
       return { index, offset: scrollTop - offsets[index] };
     },
