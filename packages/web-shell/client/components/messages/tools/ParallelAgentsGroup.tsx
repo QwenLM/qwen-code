@@ -414,6 +414,10 @@ export function ParallelAgentsGroup({
                       >
                         <span
                           className={styles.rowStatus}
+                          // role="img" makes the span nameable; aria-label on a
+                          // bare <span> (generic role) is not exposed to
+                          // assistive tech (see ChatPane's workspace tag).
+                          role="img"
                           aria-label={rowStatusLabel}
                           title={rowStatusLabel}
                         >

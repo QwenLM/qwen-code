@@ -460,6 +460,61 @@ describe('pinActiveParallelAgentsToTurnEnd', () => {
     ).toEqual(['u1', 'answer', 'par-a1']);
   });
 
+  it('pins every active group of a turn to the turn end in encounter order', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeBackgroundAgentToolGroup('a1'),
+      makeBackgroundAgentToolGroup('a2'),
+      makeAssistantMessage('narration'),
+      makeBackgroundAgentToolGroup('b1'),
+      makeBackgroundAgentToolGroup('b2'),
+      makeAssistantMessage('answer'),
+    ]);
+
+    expect(keys(pinActiveParallelAgentsToTurnEnd(items))).toEqual([
+      'u1',
+      'narration',
+      'answer',
+      'par-a1',
+      'par-b1',
+    ]);
+  });
+
+  it('keeps a terminal group in place while pinning a later active group', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeBackgroundAgentToolGroup('a1'),
+      makeBackgroundAgentToolGroup('a2'),
+      makeAssistantMessage('narration'),
+      makeBackgroundAgentToolGroup('b1', 'completed'),
+      makeBackgroundAgentToolGroup('b2', 'completed'),
+      makeAssistantMessage('answer'),
+    ]);
+
+    expect(keys(pinActiveParallelAgentsToTurnEnd(items))).toEqual([
+      'u1',
+      'narration',
+      'par-b1',
+      'answer',
+      'par-a1',
+    ]);
+  });
+
+  it('flushes an automatically expanded group before the next turn starts', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeBackgroundAgentToolGroup('a1', 'completed'),
+      makeBackgroundAgentToolGroup('a2', 'completed'),
+      makeAssistantMessage('answer'),
+      makeUserMessage('u2'),
+      makeAssistantMessage('next-answer'),
+    ]);
+
+    expect(
+      keys(pinActiveParallelAgentsToTurnEnd(items, new Set(['par-a1']))),
+    ).toEqual(['u1', 'answer', 'par-a1', 'u2', 'next-answer']);
+  });
+
   it.each([
     ['user', makeUserMessage('u2')],
     ['user shell', makeUserShellMessage('shell')],
@@ -1543,6 +1598,21 @@ describe('applyTurnCollapse', () => {
     ]);
 
     expect(collapseOf(collapseItems(items), 'u1')?.collapsed).toBe(true);
+  });
+
+  it('does not consume a later-launched agent for an earlier anonymous completion', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeBackgroundAgentToolGroup('a1', 'completed'),
+      makeAssistantMessage('launched'),
+      makeBackgroundNotification('notification-anonymous'),
+      makeAssistantMessage('launching-another'),
+      makeBackgroundAgentToolGroup('b1', 'completed'),
+      makeBackgroundNotification('notification-a1', 'call-a1'),
+      makeAssistantMessage('summary'),
+    ]);
+
+    expect(collapseOf(collapseItems(items), 'u1')?.collapsed).toBe(false);
   });
 
   it('counts background agents launched after an earlier notification', () => {

@@ -210,6 +210,21 @@ const monitorNotificationMsg = (id: string): SystemMessage => ({
   source: 'background_notification',
   data: { kind: 'monitor' },
 });
+const describedAgentMsg = (
+  id: string,
+  description: string,
+): ToolGroupMessage => ({
+  id,
+  role: 'tool_group',
+  tools: [
+    {
+      callId: `call-${id}`,
+      toolName: 'Task',
+      status: 'completed',
+      args: { subagent_type: 'explore', description },
+    },
+  ],
+});
 const thinkingMsg = (id: string): ThinkingMessage => ({
   id,
   role: 'thinking',
@@ -671,6 +686,55 @@ describe('MessageList — turn collapse (DOM)', () => {
     );
   });
 
+  it('expands active agents when catch-up ends mid-response', () => {
+    const firstAgent = agentMsg('agent-1');
+    const secondAgent = agentMsg('agent-2');
+    firstAgent.tools[0]!.status = 'pending';
+    secondAgent.tools[0]!.status = 'pending';
+    const messages = [userMsg('u1'), firstAgent, secondAgent];
+    const c = mount(messages, undefined, {
+      catchingUp: true,
+      isResponding: true,
+    });
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'false',
+    );
+
+    rerenderMessages(c, messages, {
+      catchingUp: false,
+      isResponding: true,
+    });
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'true',
+    );
+  });
+
+  it('keeps an earlier turn group collapsed when an unrelated response starts', () => {
+    const firstAgent = agentMsg('agent-1');
+    const secondAgent = agentMsg('agent-2');
+    firstAgent.tools[0]!.status = 'pending';
+    secondAgent.tools[0]!.status = 'pending';
+    const messages = [userMsg('u1'), firstAgent, secondAgent, asstMsg('a1')];
+    const c = mount(messages, undefined, { catchingUp: true });
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'false',
+    );
+
+    rerenderMessages(c, messages, { catchingUp: false });
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'false',
+    );
+
+    rerenderMessages(
+      c,
+      [...messages, userMsg('u2'), thinkingMsg('u2-thinking')],
+      { catchingUp: false, isResponding: true },
+    );
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'false',
+    );
+  });
+
   it('does not reopen a background notification loaded with transcript history', () => {
     const c = mount([], undefined, { loadingTranscript: true });
 
@@ -682,6 +746,26 @@ describe('MessageList — turn collapse (DOM)', () => {
 
     expect(has(c, 'a1')).toBe(false);
     expect(has(c, 'bg1')).toBe(true);
+  });
+
+  it('does not flash a grace window when catch-up delivers a notification', () => {
+    const initialMessages = [
+      userMsg('u1'),
+      asstMsg('a1'),
+      backgroundNotificationMsg('bg-old'),
+    ];
+    const c = mount(initialMessages);
+    expect(has(c, 'a1')).toBe(false);
+
+    rerenderMessages(c, initialMessages, { catchingUp: true });
+    rerenderMessages(
+      c,
+      [...initialMessages, backgroundNotificationMsg('bg-new')],
+      { catchingUp: false },
+    );
+
+    expect(has(c, 'a1')).toBe(false);
+    expect(has(c, 'bg-new')).toBe(true);
   });
 
   it('does not briefly reopen agent history after an idle empty first render', () => {
@@ -824,7 +908,12 @@ describe('MessageList — turn collapse (DOM)', () => {
       asstMsg('u1-summary'),
     ];
     rerenderMessages(c, completedTurn);
-    act(() => vi.advanceTimersByTime(1_000));
+    // Stay inside the 400ms summary-collapse window so the pending collapse
+    // is live when the unrelated turn arrives.
+    act(() => vi.advanceTimersByTime(200));
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'true',
+    );
 
     rerenderMessages(
       c,
@@ -832,6 +921,37 @@ describe('MessageList — turn collapse (DOM)', () => {
       { isResponding: true },
     );
     act(() => vi.advanceTimersByTime(500));
+
+    expect(parallelAgentsSummary(c)).toBeNull();
+  });
+
+  it('does not snap a mid-collapse agent group open for an unrelated new turn', () => {
+    vi.useFakeTimers();
+    const firstAgent = agentMsg('agent-1');
+    const secondAgent = agentMsg('agent-2');
+    firstAgent.tools[0]!.status = 'pending';
+    secondAgent.tools[0]!.status = 'pending';
+    const c = mount([userMsg('u1'), firstAgent, secondAgent]);
+
+    const completedTurn = [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      agentMsg('agent-2'),
+      backgroundNotificationMsg('bg1', 'call-agent-1'),
+      backgroundNotificationMsg('bg2', 'call-agent-2'),
+      asstMsg('u1-summary'),
+    ];
+    rerenderMessages(c, completedTurn);
+    // Advance into the 180ms exit animation (the collapse fires at 400ms).
+    act(() => vi.advanceTimersByTime(500));
+    expect(c.querySelector('[data-agent-collapse-exit="true"]')).not.toBeNull();
+
+    rerenderMessages(
+      c,
+      [...completedTurn, userMsg('u2'), thinkingMsg('u2-thinking')],
+      { isResponding: true },
+    );
+    act(() => vi.advanceTimersByTime(300));
 
     expect(parallelAgentsSummary(c)).toBeNull();
   });
@@ -853,7 +973,13 @@ describe('MessageList — turn collapse (DOM)', () => {
     ];
 
     rerenderMessages(c, completedMessages);
-    act(() => vi.advanceTimersByTime(1_000));
+    // Stay inside the 400ms summary-collapse window so the pending collapse
+    // is live when the monitor notification arrives.
+    act(() => vi.advanceTimersByTime(200));
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'true',
+    );
+
     rerenderMessages(
       c,
       [...completedMessages, monitorNotificationMsg('monitor')],
@@ -910,6 +1036,90 @@ describe('MessageList — turn collapse (DOM)', () => {
     rerenderMessages(c, [...completedMessages, asstMsg('u2-summary')]);
     act(() => vi.advanceTimersByTime(1_500));
     expect(parallelAgentsSummary(c)).toBeNull();
+  });
+
+  it('defers automatic collapse of a latest-turn group while still responding', () => {
+    vi.useFakeTimers();
+    const firstAgent = agentMsg('agent-1');
+    const secondAgent = agentMsg('agent-2');
+    firstAgent.tools[0]!.status = 'pending';
+    secondAgent.tools[0]!.status = 'pending';
+    const c = mount([userMsg('u1'), firstAgent, secondAgent], undefined, {
+      isResponding: true,
+    });
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'true',
+    );
+    const completedMessages = [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      agentMsg('agent-2'),
+      asstMsg('u1-answer'),
+    ];
+
+    rerenderMessages(c, completedMessages, { isResponding: true });
+    act(() => vi.advanceTimersByTime(3_000));
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'true',
+    );
+
+    rerenderMessages(c, completedMessages, { isResponding: false });
+    act(() => vi.advanceTimersByTime(1_500));
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'false',
+    );
+    act(() => vi.advanceTimersByTime(180));
+    expect(parallelAgentsSummary(c)).toBeNull();
+  });
+
+  it('defers only the group that owns the awaited agent notification', () => {
+    vi.useFakeTimers();
+    const agentA1 = describedAgentMsg('agent-a1', 'group A task');
+    const agentA2 = describedAgentMsg('agent-a2', 'group A task');
+    const agentB1 = describedAgentMsg('agent-b1', 'group B task');
+    const agentB2 = describedAgentMsg('agent-b2', 'group B task');
+    agentA1.tools[0]!.status = 'pending';
+    agentA2.tools[0]!.status = 'pending';
+    agentB1.tools[0]!.status = 'pending';
+    agentB2.tools[0]!.status = 'pending';
+    const c = mount([
+      userMsg('u1'),
+      agentA1,
+      agentA2,
+      asstMsg('narration'),
+      agentB1,
+      agentB2,
+    ]);
+
+    const summaries = () =>
+      Array.from(c.querySelectorAll('button')).filter((button) =>
+        button.textContent?.includes('Parallel agents'),
+      );
+    expect(summaries()).toHaveLength(2);
+    expect(
+      summaries().every((b) => b.getAttribute('aria-expanded') === 'true'),
+    ).toBe(true);
+
+    rerenderMessages(c, [
+      userMsg('u1'),
+      describedAgentMsg('agent-a1', 'group A task'),
+      describedAgentMsg('agent-a2', 'group A task'),
+      asstMsg('narration'),
+      describedAgentMsg('agent-b1', 'group B task'),
+      describedAgentMsg('agent-b2', 'group B task'),
+      backgroundNotificationMsg('bg-a1', 'call-agent-a1'),
+      backgroundNotificationMsg('bg-a2', 'call-agent-a2'),
+    ]);
+
+    // Past group B's 1500ms collapse plus its 180ms exit; group A stays
+    // deferred while the turn awaits its summary.
+    act(() => vi.advanceTimersByTime(1_680));
+    expect(c.textContent).toContain('group A task');
+    expect(c.textContent).not.toContain('group B task');
+    expect(summaries().map((b) => b.getAttribute('aria-expanded'))).toEqual([
+      'false',
+      'true',
+    ]);
   });
 
   it('renders collapse metrics in the standalone turn row', () => {
