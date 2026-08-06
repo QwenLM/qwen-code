@@ -93,6 +93,75 @@ test('submits a prompt and renders a streamed assistant response @smoke', async 
   );
 });
 
+test('uploads an Extension archive from the manager @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  let uploadUrl = '';
+  let uploadHeaders: Record<string, string> = {};
+  let uploadBody: Buffer | null = null;
+  await page.route(
+    '**/workspace/extensions/install-archive?*',
+    async (route) => {
+      uploadUrl = route.request().url();
+      uploadHeaders = route.request().headers();
+      uploadBody = route.request().postDataBuffer();
+      await route.fulfill({
+        contentType: 'application/json',
+        status: 202,
+        body: JSON.stringify({ accepted: true, operationId: 'op-upload' }),
+      });
+    },
+  );
+  await page.route(
+    '**/workspace/extensions/operations/op-upload',
+    async (route) => {
+      await route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({
+          v: 1,
+          operationId: 'op-upload',
+          operation: 'install',
+          status: 'succeeded',
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          result: {
+            status: 'installed',
+            source: 'upload:demo.zip',
+            name: 'demo',
+            version: '1.0.0',
+          },
+        }),
+      });
+    },
+  );
+
+  await gotoSession(page, scenario, daemon);
+  await submitLocalCommand(page, '/extensions');
+  await page.getByRole('button', { name: 'Add' }).click();
+  await page.getByRole('tab', { name: 'Archive' }).click();
+  await page.getByLabel('Select a .zip or .tar.gz archive.').setInputFiles({
+    name: 'demo.zip',
+    mimeType: 'application/zip',
+    buffer: Buffer.from('archive-content'),
+  });
+  await expect(page.getByText('Selected archive: demo.zip')).toBeVisible();
+  await page.getByRole('button', { name: 'Install' }).click();
+
+  await expect
+    .poll(() => uploadUrl)
+    .toContain(
+      '/workspace/extensions/install-archive?filename=demo.zip&consent=true',
+    );
+  expect(uploadHeaders['content-type']).toBe('application/octet-stream');
+  expect(uploadHeaders['x-qwen-client-id']).toBe(scenario.clientId);
+  expect(uploadBody?.toString()).toBe('archive-content');
+  await expect(
+    page.getByRole('heading', { name: 'Add Extension' }),
+  ).toHaveCount(0);
+});
+
 test('pastes long plain text as editable composer content @smoke', async ({
   page,
 }, testInfo) => {

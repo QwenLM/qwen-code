@@ -36,6 +36,7 @@ import type {
   ExtensionRefreshResponse,
   ExtensionScopeRequest,
   ExtensionInstallRequest,
+  ExtensionArchiveInstallRequest,
   ExtensionInstallResponse,
   ExtensionUpdateCheckResponse,
   DaemonInitWorkspaceResult,
@@ -559,6 +560,10 @@ export interface DaemonWorkspaceActions {
   // Extensions
   installExtension(
     params: ExtensionInstallRequest,
+    clientId?: string,
+  ): Promise<ExtensionInstallResponse>;
+  installExtensionArchive(
+    params: ExtensionArchiveInstallRequest,
     clientId?: string,
   ): Promise<ExtensionInstallResponse>;
   extensionOperationStatus(

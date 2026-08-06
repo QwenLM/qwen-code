@@ -287,6 +287,38 @@ describe('extension tests', () => {
       ]);
     });
 
+    it('reads an uploaded archive from a local path without persisting that path', async () => {
+      const archivePath = path.join(tempWorkspaceDir, 'uploaded.zip');
+      fs.writeFileSync(archivePath, 'archive');
+      mockExtractArchiveFile.mockImplementation(
+        async (_source: string, destination: string) => {
+          writeExtractedExtension(destination, 'uploaded-extension');
+        },
+      );
+      const manager = createExtensionManager();
+
+      const prepared = await manager.prepareExtensionInstall({
+        installMetadata: { type: 'local', source: 'upload:uploaded.zip' },
+        localSourcePath: archivePath,
+        initialActivation: { scope: 'user' },
+        requestConsent: async () => {},
+      });
+
+      expect(mockExtractArchiveFile).toHaveBeenLastCalledWith(
+        archivePath,
+        expect.any(String),
+        undefined,
+      );
+      expect(prepared.installMetadata.source).toBe('upload:uploaded.zip');
+
+      await manager.commitPreparedExtension(prepared);
+      const metadata = manager.loadInstallMetadata(
+        path.join(userExtensionsDir, 'uploaded-extension'),
+      );
+      expect(metadata?.source).toBe('upload:uploaded.zip');
+      await manager.disposePreparedExtension(prepared);
+    });
+
     it('signals the durable commit before runtime refresh completes', async () => {
       const archivePath = path.join(tempWorkspaceDir, 'commit-boundary.zip');
       fs.writeFileSync(archivePath, 'archive');

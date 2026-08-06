@@ -4873,6 +4873,96 @@ describe('createServeApp', () => {
       };
     };
 
+    it('installs an uploaded extension archive and removes the temporary file', async () => {
+      let localSourcePath = '';
+      let recordedSource = '';
+      let uploadedContent = '';
+      const restore = mockExtensionManagerMethods({
+        async prepareExtensionInstall(options) {
+          localSourcePath = options.localSourcePath ?? '';
+          recordedSource = options.installMetadata.source;
+          uploadedContent = await fsp.readFile(localSourcePath, 'utf8');
+          return testExtension('uploaded-ext');
+        },
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const res = await request(app)
+          .post(
+            '/workspace/extensions/install-archive?filename=demo.zip&consent=true',
+          )
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .set('Content-Type', 'application/octet-stream')
+          .send(Buffer.from('archive-content'));
+
+        expect(res.status).toBe(202);
+        expect(res.body).toMatchObject({ accepted: true });
+        await vi.waitFor(() => {
+          expect(bridge.extensionEvents.at(-1)).toMatchObject({
+            status: 'installed',
+            source: 'upload:demo.zip',
+            name: 'uploaded-ext',
+          });
+        });
+        expect(recordedSource).toBe('upload:demo.zip');
+        expect(localSourcePath).toMatch(/extension\.zip$/);
+        expect(uploadedContent).toBe('archive-content');
+        expect(existsSync(localSourcePath)).toBe(false);
+      } finally {
+        restore();
+      }
+    });
+
+    it('validates extension archive upload metadata and body', async () => {
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge: fakeBridge() },
+      );
+      const upload = (query: string, body = Buffer.from('archive')) =>
+        request(app)
+          .post(`/workspace/extensions/install-archive?${query}`)
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('Content-Type', 'application/octet-stream')
+          .send(body);
+
+      const missingConsent = await upload('filename=demo.zip');
+      expect(missingConsent.status).toBe(400);
+      expect(missingConsent.body.error).toContain('explicit consent');
+
+      const unsupported = await upload('filename=demo.tgz&consent=true');
+      expect(unsupported.status).toBe(400);
+      expect(unsupported.body.error).toContain('.zip or .tar.gz');
+
+      const empty = await upload(
+        'filename=demo.tar.gz&consent=true',
+        Buffer.alloc(0),
+      );
+      expect(empty.status).toBe(400);
+      expect(empty.body.error).toContain('empty');
+
+      const wrongType = await request(app)
+        .post(
+          '/workspace/extensions/install-archive?filename=demo.zip&consent=true',
+        )
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'text/plain')
+        .send('archive');
+      expect(wrongType.status).toBe(415);
+    });
+
     it('queues extension install without a workspace client id', async () => {
       const restore = mockExtensionManagerMethods();
       const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };

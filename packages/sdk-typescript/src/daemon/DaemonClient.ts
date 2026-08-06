@@ -171,6 +171,7 @@ import type {
   DaemonWorkspaceExtensionsStatus,
   ExtensionMutationResponse,
   ExtensionInstallRequest,
+  ExtensionArchiveInstallRequest,
   ExtensionManagementInstallRequest,
   ExtensionActivationState,
   ExtensionCatalog,
@@ -1360,6 +1361,38 @@ export class DaemonClient {
       '/workspace/extensions/install',
       'POST /workspace/extensions/install',
       { method: 'POST', body: params, clientId, mode: 'rest' },
+    );
+  }
+
+  async installExtensionArchive(
+    params: ExtensionArchiveInstallRequest,
+    clientId?: string,
+  ): Promise<ExtensionInstallResponse> {
+    const query = new URLSearchParams({
+      filename: params.filename,
+      consent: String(params.consent === true),
+    });
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/extensions/install-archive?${query}`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/octet-stream' },
+          clientId,
+        ),
+        body: params.archive,
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'POST /workspace/extensions/install-archive',
+          );
+        }
+        return (await res.json()) as ExtensionInstallResponse;
+      },
+      undefined,
+      'rest',
     );
   }
 

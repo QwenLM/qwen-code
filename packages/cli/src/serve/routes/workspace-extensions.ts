@@ -5,6 +5,9 @@
  */
 
 import * as crypto from 'node:crypto';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import {
   parseInstallSource,
   redactUrlCredentials,
@@ -15,7 +18,12 @@ import {
   type ClaudeMarketplaceConfig,
   type ExtensionSetting,
 } from '@qwen-code/qwen-code-core';
-import type { Application, Request, RequestHandler, Response } from 'express';
+import express, {
+  type Application,
+  type Request,
+  type RequestHandler,
+  type Response,
+} from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { createFifoTaskQueue } from '../extension-operation-scheduler.js';
@@ -49,6 +57,37 @@ const EXTENSION_INTERACTION_DEADLINE_MS = 10 * 60_000;
 const EXTENSION_INTERACTIVE_PREPARE_DEADLINE_MS =
   EXTENSION_PREPARE_DEADLINE_MS + EXTENSION_INTERACTION_DEADLINE_MS;
 const EXTENSION_UPDATE_CHECK_DEADLINE_MS = 2 * 60_000;
+const EXTENSION_ARCHIVE_UPLOAD_LIMIT = '10mb';
+
+const extensionArchiveBodyParser = express.raw({
+  type: 'application/octet-stream',
+  limit: EXTENSION_ARCHIVE_UPLOAD_LIMIT,
+});
+
+const parseExtensionArchiveFilename = (
+  value: unknown,
+): { filename: string; suffix: '.zip' | '.tar.gz' } | null => {
+  const invalidCharacter =
+    typeof value === 'string' &&
+    Array.from(value).some((character) => {
+      const code = character.charCodeAt(0);
+      return (
+        character === '/' || character === '\\' || code < 32 || code === 127
+      );
+    });
+  if (
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    Buffer.byteLength(value, 'utf8') > 255 ||
+    invalidCharacter
+  ) {
+    return null;
+  }
+  const lower = value.toLowerCase();
+  if (lower.endsWith('.tar.gz')) return { filename: value, suffix: '.tar.gz' };
+  if (lower.endsWith('.zip')) return { filename: value, suffix: '.zip' };
+  return null;
+};
 
 const parseExtensionScope = (
   body: Record<string, unknown>,
@@ -653,6 +692,121 @@ export function registerWorkspaceExtensionRoutes(
         } catch (err) {
           sendBridgeError(res, err, {
             route: `POST ${base}/operations/:operationId/interactions/:interactionId`,
+          });
+        }
+      },
+    );
+
+    app.post(
+      `${base}/install-archive`,
+      mutate({ strict: true }),
+      extensionArchiveBodyParser,
+      async (req, res) => {
+        const ctrl = resolve(req, res, true);
+        if (!ctrl) return;
+        try {
+          if (
+            !ctrl.validateExtensionMutationClient(req, res, {
+              requireClientId: false,
+            })
+          ) {
+            return;
+          }
+          if (req.query['consent'] !== 'true') {
+            res.status(400).json({
+              error: 'Extension installation requires explicit consent',
+            });
+            return;
+          }
+          const archiveName = parseExtensionArchiveFilename(
+            req.query['filename'],
+          );
+          if (!archiveName) {
+            res.status(400).json({
+              error: '`filename` must name a .zip or .tar.gz archive',
+            });
+            return;
+          }
+          if (!req.is('application/octet-stream')) {
+            res.status(415).json({
+              error:
+                'Extension archive uploads require application/octet-stream',
+            });
+            return;
+          }
+          if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+            res.status(400).json({ error: 'Extension archive is empty' });
+            return;
+          }
+          const archive = req.body;
+          const source = `upload:${archiveName.filename}`;
+
+          ctrl.runQueuedExtensionMutation(
+            'install',
+            { source },
+            res,
+            async (extensionManager, _signal, context, operationId) => {
+              const uploadDir = await fs.mkdtemp(
+                path.join(os.tmpdir(), 'qwen-extension-upload-'),
+              );
+              const archivePath = path.join(
+                uploadDir,
+                `extension${archiveName.suffix}`,
+              );
+              try {
+                await fs.writeFile(archivePath, archive);
+                const prepared = await context!.prepare(async (signal) => {
+                  supersedeActiveInstallOperations(ctrl, operationId!);
+                  return await extensionManager.prepareExtensionInstall({
+                    installMetadata: { type: 'local', source },
+                    localSourcePath: archivePath,
+                    initialActivation: { scope: 'user' },
+                    requestConsent: () => Promise.resolve(),
+                    signal,
+                  });
+                });
+                try {
+                  const committed = await context!.commit(
+                    async (onCommitted) =>
+                      await extensionManager.commitPreparedExtension(
+                        prepared,
+                        onCommitted,
+                      ),
+                  );
+                  return {
+                    status: 'installed',
+                    source,
+                    name: committed.identity.name,
+                    version: committed.version,
+                  };
+                } finally {
+                  await extensionManager.disposePreparedExtension(prepared);
+                }
+              } finally {
+                await fs.rm(uploadDir, { recursive: true, force: true });
+              }
+            },
+            {
+              createManager: (operationId) =>
+                ctrl.createExtensionManager(
+                  undefined,
+                  undefined,
+                  extensionInteractionHandlers(ctrl, operationId),
+                ),
+              onSettled: (operationId) => {
+                supersededInstallOperations.delete(operationId);
+                cancelPendingExtensionInteraction(
+                  operationId,
+                  'Extension operation ended',
+                );
+              },
+              deadlineMs: EXTENSION_INTERACTIVE_PREPARE_DEADLINE_MS,
+              ...globalReconciliationOptions(),
+            },
+          );
+        } catch (err) {
+          sendBridgeError(res, err, {
+            route: `POST ${base}/install-archive`,
           });
         }
       },

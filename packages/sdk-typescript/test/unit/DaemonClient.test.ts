@@ -4883,6 +4883,42 @@ describe('DaemonClient', () => {
   });
 
   describe('extension operations', () => {
+    it('POSTs an extension archive as a binary body', async () => {
+      let capturedUrl = '';
+      let capturedInit: RequestInit | undefined;
+      const fetch = vi.fn(
+        async (input: RequestInfo | URL, init?: RequestInit) => {
+          capturedUrl = String(input);
+          capturedInit = init;
+          return jsonResponse(202, {
+            accepted: true,
+            operationId: 'op-upload',
+          });
+        },
+      ) as unknown as typeof globalThis.fetch;
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const archive = new Blob(['archive-content']);
+
+      await expect(
+        client.installExtensionArchive(
+          { archive, filename: 'demo archive.tar.gz', consent: true },
+          'client-1',
+        ),
+      ).resolves.toEqual({ accepted: true, operationId: 'op-upload' });
+
+      expect(capturedUrl).toBe(
+        'http://daemon/workspace/extensions/install-archive?filename=demo+archive.tar.gz&consent=true',
+      );
+      expect(capturedInit?.method).toBe('POST');
+      expect(new Headers(capturedInit?.headers).get('content-type')).toBe(
+        'application/octet-stream',
+      );
+      expect(new Headers(capturedInit?.headers).get('x-qwen-client-id')).toBe(
+        'client-1',
+      );
+      expect(capturedInit?.body).toBe(archive);
+    });
+
     it('GETs active extension operations', async () => {
       const { fetch, calls } = recordingFetch(() =>
         jsonResponse(200, { v: 1, operations: [] }),

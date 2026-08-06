@@ -852,6 +852,14 @@ export function createDaemonWorkspaceActions({
       );
     },
 
+    async installExtensionArchive(params, clientId) {
+      const client = requireClient(getClient, 'Install extension failed');
+      return withActionTimeout(
+        client.installExtensionArchive(params, clientId),
+        'Install extension timed out',
+      );
+    },
+
     async extensionOperationStatus(operationId) {
       const client = requireClient(
         getClient,

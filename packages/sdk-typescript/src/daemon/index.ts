@@ -637,6 +637,7 @@ export type {
   DaemonExtensionUpdateState,
   DaemonWorkspaceExtensionsStatus,
   ExtensionInstallRequest,
+  ExtensionArchiveInstallRequest,
   ExtensionManagementInstallRequest,
   ExtensionInitialActivation,
   ExtensionActivationState,
