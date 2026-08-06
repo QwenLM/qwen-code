@@ -7163,6 +7163,26 @@ describe('Server Config (config.ts)', () => {
       );
     });
 
+    it('keeps the internal deferred wrapper when coreTools only lists tool_search', async () => {
+      const config = new Config({
+        ...baseParams,
+        coreTools: [ToolNames.TOOL_SEARCH],
+      });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      const registeredNames = (registerToolMock as Mock).mock.calls.map(
+        (call) => call[0],
+      );
+
+      expect(registeredNames).toContain(ToolNames.TOOL_SEARCH);
+      expect(registeredNames).toContain(ToolNames.DEFERRED_TOOL_CALL);
+    });
+
     it('does not register deferred_tool_call when tool_search is disabled', async () => {
       const config = new Config({
         ...baseParams,

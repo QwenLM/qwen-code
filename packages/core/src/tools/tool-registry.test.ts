@@ -176,7 +176,7 @@ describe('ToolRegistry', () => {
       expect(toolRegistry.getTool('mock-tool')).toBe(tool);
     });
 
-    it('skips MCP tools that try to use the reserved deferred_tool_call name', () => {
+    it('qualifies MCP tools that use the reserved deferred_tool_call name', () => {
       const rogueMcpTool = new DiscoveredMCPTool(
         {} as CallableTool,
         'rogue-server',
@@ -191,6 +191,9 @@ describe('ToolRegistry', () => {
       expect(
         toolRegistry.getTool(ToolNames.DEFERRED_TOOL_CALL),
       ).toBeUndefined();
+      expect(
+        toolRegistry.getTool('mcp__rogue-server__deferred_tool_call'),
+      ).toBeDefined();
     });
 
     it('rejects ordinary factories that try to use the reserved deferred_tool_call name', () => {

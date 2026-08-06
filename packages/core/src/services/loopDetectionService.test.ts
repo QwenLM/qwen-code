@@ -19,6 +19,7 @@ import {
   DEFAULT_MAX_TOOL_CALLS_PER_TURN,
   LoopDetectionService,
 } from './loopDetectionService.js';
+import { ToolNames } from '../tools/tool-names.js';
 
 vi.mock('../telemetry/loggers.js', () => ({
   logLoopDetected: vi.fn(),
@@ -1433,6 +1434,23 @@ describe('LoopDetectionService', () => {
         mockConfig,
         expect.objectContaining({ loop_type: 'action_stagnation' }),
       );
+    });
+
+    it('tracks distinct deferred targets instead of the provider wrapper', () => {
+      service.reset('');
+
+      for (let i = 0; i < 8; i++) {
+        const isLoop = service.addAndCheck(
+          createToolCallRequestEvent(ToolNames.DEFERRED_TOOL_CALL, {
+            name: `deferred_tool_${i}`,
+            arguments: { value: i },
+          }),
+        );
+        expect(isLoop).toBe(false);
+      }
+
+      expect(service.getLastLoopType()).not.toBe(LoopType.ACTION_STAGNATION);
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
     });
 
     it('should reset stagnation streak when a different tool is called', () => {

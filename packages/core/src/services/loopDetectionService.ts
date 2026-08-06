@@ -18,6 +18,7 @@ import {
   LoopType,
 } from '../telemetry/types.js';
 import type { Config } from '../config/config.js';
+import { unwrapDeferredToolCallShape } from '../core/deferred-tool-call-normalization.js';
 
 // Consecutive identical tool calls (same name + identical args) tolerated
 // before the always-on guard halts the turn. Repeating an identical call
@@ -266,8 +267,13 @@ export class LoopDetectionService {
         // observable progress — any prior thoughts should not carry over.
         this.thoughtHistory = [];
 
-        this.trackToolCall(event.value);
-        const toolCallKey = this.getToolCallKey(event.value);
+        // The provider sees every deferred invocation as the stable wrapper,
+        // but loop heuristics must reason about the real target. Otherwise
+        // eight different deferred tools look like one repeated action and
+        // falsely trip ACTION_STAGNATION.
+        const toolCall = unwrapDeferredToolCallShape(event.value);
+        this.trackToolCall(toolCall);
+        const toolCallKey = this.getToolCallKey(toolCall);
         const globalDup = this.checkGlobalDuplicate(toolCallKey);
         const alternating = this.checkAlternatingPattern(toolCallKey);
         const readFileLoop = this.checkReadFileLoop();

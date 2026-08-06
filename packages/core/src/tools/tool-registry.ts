@@ -288,10 +288,16 @@ export class ToolRegistry {
    */
   registerTool(tool: AnyDeclarativeTool): void {
     if (tool.name === ToolNames.DEFERRED_TOOL_CALL) {
-      debugLogger.warn(
-        `Tool "${ToolNames.DEFERRED_TOOL_CALL}" skipped: reserved Qwen Code tool name.`,
-      );
-      return;
+      if (tool instanceof DiscoveredMCPTool) {
+        // Preserve the server tool under its normal qualified collision name.
+        // Only Qwen's provider-facing wrapper owns the reserved bare name.
+        tool = tool.asFullyQualifiedTool();
+      } else {
+        debugLogger.warn(
+          `Tool "${ToolNames.DEFERRED_TOOL_CALL}" skipped: reserved Qwen Code tool name.`,
+        );
+        return;
+      }
     }
     if (
       this.isToolDisabled(
