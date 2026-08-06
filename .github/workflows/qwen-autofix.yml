@@ -1745,18 +1745,44 @@ jobs:
             return 1
           }
 
+          # 'none' and HTTP 404 are DEFINITIVE answers, not lookup failures.
+          # GitHub returns 200 with permission 'none' for logins that exist but
+          # hold nothing here (bot-type logins such as dependabot[bot], and org
+          # logins), and 404 for logins that do not exist or are empty. Both
+          # mean "no write access" — the routine rejection this gate is for.
+          # Retrying them would burn 3 API calls plus back-off per candidate per
+          # scheduled tick, forever, and strand the caller on
+          # 'permission_lookup_failed': a red forced run (exit 1) whose blocked
+          # comment promises "a later scheduled scan will retry" — a retry that
+          # can never succeed — while the actionable "grant the fork author
+          # write access" guidance behind author_permission_* stays unreachable.
+          # Only genuinely transient answers (5xx, network, auth) retry.
           read_live_permission() {
-            local login="$1" attempt permission
+            local login="$1" attempt permission err result=''
+            # An empty login can only 404; skip the call and answer terminally.
+            if [[ -z "${login}" ]]; then
+              printf 'none'
+              return 0
+            fi
+            err="$(mktemp)"
             for attempt in 1 2 3; do
-              if permission="$(gh api "repos/${REPO}/collaborators/${login}/permission" --jq '.permission // ""' 2> /dev/null)" \
-                && [[ "${permission}" =~ ^(admin|maintain|write|triage|read)$ ]]; then
-                printf '%s' "${permission}"
-                return 0
+              if permission="$(gh api "repos/${REPO}/collaborators/${login}/permission" --jq '.permission // ""' 2> "${err}")" \
+                && [[ "${permission}" =~ ^(admin|maintain|write|triage|read|none)$ ]]; then
+                result="${permission}"
+                break
               fi
-              echo "::warning::Permission lookup failed for ${login} (attempt ${attempt}/3)" >&2
+              if grep -q 'HTTP 404' "${err}"; then
+                result='none'
+                break
+              fi
+              # Surface gh's own diagnosis instead of discarding it: a rate
+              # limit, an expired PAT and a 5xx all look identical otherwise.
+              echo "::warning::Permission lookup failed for ${login} (attempt ${attempt}/3): $(tr '\n' ' ' < "${err}")" >&2
               [[ "${attempt}" -lt 3 ]] && sleep "${attempt}"
             done
-            return 1
+            rm -f "${err}"
+            [[ -n "${result}" ]] || return 1
+            printf '%s' "${result}"
           }
 
           forced_admission_reason() {

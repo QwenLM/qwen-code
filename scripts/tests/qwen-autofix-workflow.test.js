@@ -2491,9 +2491,14 @@ describe('qwen-autofix workflow', () => {
     // forces a deliberate test update, however it is spaced or line-wrapped:
     // bump this count AND pipe the new site through the normalizer (bumping
     // the count below too) — bumping this pin alone leaves toBe(9) green.
-    expect(workflow.split('--paginate').length - 1).toBe(13);
+    expect(workflow.split('--paginate').length - 1).toBe(14);
     // scan ic + pr-events + ic re-fetch + scan rv/rc + prepare rv/rc/ic +
-    // report COMMENTS_JSON fallback = nine normalized fetch sites.
+    // report COMMENTS_JSON fallback = nine normalized fetch sites. The
+    // blocked-takeover status lookup is deliberately NOT among them: like the
+    // sibling STATUS_ID read, it consumes the page stream inline via
+    // `--jq ... | .id` into `tail -1` and never lands in a WORKDIR json file,
+    // so piping it through `jq -s 'add // []'` would wrap the id stream in an
+    // array and break the tail-1 consumer.
     expect(workflow.split("jq -s 'add // []'").length - 1).toBe(9);
     // Empty-input semantics: a total gh failure feeds the fallback an EMPTY
     // stream, where the normalizer filter must yield '[]' and not 'null' —
@@ -3681,6 +3686,216 @@ exit 1
       status: 0,
       stderr: '',
     });
+  });
+
+  it('answers terminal permission states without retrying them', () => {
+    const readPermission = reviewScanJob.match(
+      /(read_live_permission\(\) \{[\s\S]*?\n {10}\})/,
+    )?.[1];
+    expect(readPermission).toBeTruthy();
+    // 'none' MUST be in the accepted set. Without it the `case *)` arms that
+    // render author_permission_${FPERM:-none} are unreachable dead code and
+    // every bot/org author falls through to permission_lookup_failed instead.
+    expect(readPermission).toContain(
+      '^(admin|maintain|write|triage|read|none)$',
+    );
+
+    const runPermission = (ghBody, login = 'qqqys') => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-perm-'));
+      try {
+        const callsFile = join(dir, 'calls');
+        writeFileSync(
+          join(dir, 'gh'),
+          `#!/bin/bash\nprintf 'call\\n' >> '${callsFile}'\n${ghBody}\n`,
+        );
+        chmodSync(join(dir, 'gh'), 0o755);
+        const result = spawnSync(
+          'bash',
+          [
+            '-c',
+            `sleep() { :; }\n${readPermission.replace(/\n {10}/g, '\n')}\nread_live_permission '${login}'`,
+          ],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              REPO: 'QwenLM/qwen-code',
+            },
+            encoding: 'utf8',
+          },
+        );
+        const calls = existsSync(callsFile)
+          ? readFileSync(callsFile, 'utf8').split('\n').filter(Boolean).length
+          : 0;
+        return {
+          status: result.status,
+          stdout: result.stdout,
+          stderr: result.stderr,
+          calls,
+        };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+
+    // Bot-type logins (dependabot[bot], github-actions[bot], renovate[bot])
+    // and org logins answer HTTP 200 with permission 'none' — a definitive
+    // "holds nothing here", settled in ONE call.
+    expect(runPermission("printf '%s' 'none'\nexit 0")).toMatchObject({
+      status: 0,
+      stdout: 'none',
+      calls: 1,
+    });
+    // A login that does not exist answers HTTP 404 — equally definitive.
+    expect(
+      runPermission("printf 'gh: Not Found (HTTP 404)\\n' >&2\nexit 1"),
+    ).toMatchObject({ status: 0, stdout: 'none', calls: 1 });
+    // An empty login can only ever 404, so it is answered without a call.
+    expect(runPermission("printf '%s' 'write'\nexit 0", '')).toMatchObject({
+      status: 0,
+      stdout: 'none',
+      calls: 0,
+    });
+    // Every real grant level passes through verbatim, one call each.
+    for (const permission of ['admin', 'maintain', 'write', 'triage', 'read']) {
+      expect(
+        runPermission(`printf '%s' '${permission}'\nexit 0`),
+      ).toMatchObject({ status: 0, stdout: permission, calls: 1 });
+    }
+    // A genuinely transient answer still burns the full retry budget and
+    // reports failure: collapsing 5xx into 'none' would silently reject an
+    // author who actually holds write.
+    const transient = runPermission(
+      "printf 'gh: Server Error (HTTP 502)\\n' >&2\nexit 1",
+    );
+    expect(transient.status).toBe(1);
+    expect(transient.calls).toBe(3);
+    expect(transient.stderr).toContain('(attempt 3/3)');
+    // gh's own diagnosis rides along instead of being discarded to /dev/null —
+    // a rate limit, an expired PAT and a 5xx are indistinguishable without it.
+    expect(transient.stderr).toContain('HTTP 502');
+  });
+
+  it('wires forced admission end to end: reader, classifier, permission gate, reporter', () => {
+    // The four pieces are unit-pinned above; this runs the ACTUAL gate that
+    // joins them, so a rewiring (wrong reason string, a gate that exits 1 on a
+    // routine rejection, a reporter that never sees the reason) fails here.
+    const readMeta = reviewScanJob.match(
+      /(read_forced_pr_meta\(\) \{[\s\S]*?\n {10}\})/,
+    )?.[1];
+    const readPermission = reviewScanJob.match(
+      /(read_live_permission\(\) \{[\s\S]*?\n {10}\})/,
+    )?.[1];
+    const classifier = reviewScanJob.match(
+      /(forced_admission_reason\(\) \{[\s\S]*?\n {10}\})/,
+    )?.[1];
+    const reportBlocked = reviewScanJob.match(
+      /(report_forced_takeover_blocked\(\) \{[\s\S]*?\n {10}\})/,
+    )?.[1];
+    const gate = reviewScanJob.match(
+      /(if ! META="\$\(read_forced_pr_meta\)"; then[\s\S]*?\n {14}exit 0\n {12}fi)/,
+    )?.[1];
+    expect(readMeta).toBeTruthy();
+    expect(readPermission).toBeTruthy();
+    expect(classifier).toBeTruthy();
+    expect(reportBlocked).toBeTruthy();
+    expect(gate).toBeTruthy();
+
+    const forkMeta = JSON.stringify({
+      number: 8320,
+      state: 'OPEN',
+      author: { login: 'renovate[bot]' },
+      headRefName: 'topic',
+      baseRefName: 'main',
+      isCrossRepository: true,
+      labels: [{ name: 'autofix/takeover' }],
+      maintainerCanModify: true,
+    });
+
+    const runGate = (permission) => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-wiring-'));
+      try {
+        const callsFile = join(dir, 'calls');
+        const outputFile = join(dir, 'github-output');
+        writeFileSync(outputFile, '');
+        writeFileSync(
+          join(dir, 'gh'),
+          `#!/bin/bash
+printf '%q ' "$@" >> '${callsFile}'
+printf '\\n' >> '${callsFile}'
+case "$1 $2" in
+  'pr view') printf '%s' '${forkMeta}'; exit 0 ;;
+  'api user') printf '%s' 'qwen-code-dev-bot'; exit 0 ;;
+esac
+case "$2" in
+  *collaborators/*/permission) printf '%s' '${permission}'; exit 0 ;;
+  */issues/8320/comments) printf '%s' '123'; exit 0 ;;
+esac
+[[ "$1 $2 $3" == 'api --method PATCH' ]] && exit 0
+exit 1
+`,
+        );
+        chmodSync(join(dir, 'gh'), 0o755);
+        const result = spawnSync(
+          'bash',
+          [
+            '-c',
+            [
+              'sleep() { :; }',
+              readMeta.replace(/\n {10}/g, '\n'),
+              readPermission.replace(/\n {10}/g, '\n'),
+              classifier.replace(/\n {10}/g, '\n'),
+              reportBlocked.replace(/\n {10}/g, '\n'),
+              gate.replace(/\n {12}/g, '\n'),
+              'echo "ADMITTED:${ADMISSION_REASON}"',
+            ].join('\n'),
+          ],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              REPO: 'QwenLM/qwen-code',
+              FORCED_PR: '8320',
+              DRY_RUN: 'false',
+              AUTOFIX_BOT: 'qwen-code-dev-bot',
+              TAKEOVER_LABEL: 'autofix/takeover',
+              SKIP_LABEL: 'autofix/skip',
+              GITHUB_RUN_ID: '30778039590',
+              GITHUB_OUTPUT: outputFile,
+            },
+            encoding: 'utf8',
+          },
+        );
+        return {
+          status: result.status,
+          stdout: result.stdout,
+          calls: readFileSync(callsFile, 'utf8'),
+          output: readFileSync(outputFile, 'utf8'),
+        };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+
+    // A fork author holding nothing is a ROUTINE rejection: green run, the
+    // reason names the actual permission, and the blocked comment carries the
+    // remedy that can actually clear it. Before 'none' was a terminal answer
+    // this exited 1 and promised a scheduled retry that could never succeed.
+    const rejected = runGate('none');
+    expect(rejected.status).toBe(0);
+    expect(rejected.stdout).toContain('rejected: author_permission_none');
+    expect(rejected.stdout).not.toContain('permission_lookup_failed');
+    expect(rejected.output).toContain('has_targets=false');
+    expect(rejected.calls).toContain('Grant the fork author write access');
+    // The gate never reaches the 'ADMITTED' echo — it exits inside the block.
+    expect(rejected.stdout).not.toContain('ADMITTED:');
+
+    // A write-holding fork author falls through the gate as eligible.
+    const admitted = runGate('write');
+    expect(admitted.status).toBe(0);
+    expect(admitted.stdout).toContain('admitted (author renovate[bot]=write)');
+    expect(admitted.stdout).toContain('ADMITTED:eligible');
+    expect(admitted.calls).not.toContain('--method');
   });
 
   it('serializes forced status writes with the matching address job', () => {
