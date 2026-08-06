@@ -52,13 +52,11 @@ describe('release workflow', () => {
     // `force_skip_tests: 'true'` skips that job entirely — so a future
     // change that removes the stamp step or this guard must fail here
     // instead of shipping a release that silently lost its digest.
-    expect(workflow).toContain(
-      'npm run bundle\n' +
-        '          # The review staleness check degrades to "could not check" without\n' +
-        '          # this stamp; fail here instead of shipping a release that silently\n' +
-        '          # lost it.\n' +
-        '          test -f dist/review-sources.sha256\n' +
-        '          npm run prepare:package',
+    // The ordering — bundle, then the stamp gate, then packaging — not the
+    // gate's prose or indentation: rewording the comment above the check must
+    // not fail a test whose subject is the guard itself.
+    expect(workflow).toMatch(
+      /npm run bundle[\s\S]*?test -f dist\/review-sources\.sha256[\s\S]*?npm run prepare:package/,
     );
   });
 

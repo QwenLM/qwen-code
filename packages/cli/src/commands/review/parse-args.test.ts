@@ -15,7 +15,6 @@ import {
 } from 'vitest';
 import yargs from 'yargs';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
 import {
   parseArgsCommand,
   parseReviewArgs,
@@ -23,11 +22,12 @@ import {
   type ParsedReviewArgs,
 } from './parse-args.js';
 import { reviewCommand } from '../review.js';
+import { reviewSourceRoots, reviewSourcesDigest } from './lib/stale-bundle.js';
 import {
-  DIGEST_FILE,
-  reviewSourceRoots,
-  reviewSourcesDigest,
-} from './lib/stale-bundle.js';
+  FOREIGN_DIGEST,
+  makeStaleBundleFixture,
+  stampDigest,
+} from './lib/test-utils.js';
 import {
   writeStdoutLine,
   writeStderrLineSafe,
@@ -597,39 +597,15 @@ describe('parse-args warns when the bundle is not built from these sources', () 
   });
 
   beforeEach(() => {
-    repo = fsReal.mkdtempSync(join(tmpdir(), 'parse-args-stale-'));
-    fsReal.mkdirSync(join(repo, 'dist'), { recursive: true });
-    argv1 = join(repo, 'dist', 'cli.js');
-    fsReal.writeFileSync(argv1, 'bundle');
-    const commands = join(repo, 'packages', 'cli', 'src', 'commands');
-    const reviewDir = join(commands, 'review');
-    fsReal.mkdirSync(reviewDir, { recursive: true });
-    fsReal.writeFileSync(join(reviewDir, 'drive.ts'), 'the built behaviour');
-    // The fixture holds all THREE roots, the shape of a real checkout: a
-    // tree holding only some of them is a partial checkout, and the check
-    // answers that case with 'could not check' rather than a verdict.
-    fsReal.writeFileSync(join(commands, 'review.ts'), 'registers');
-    const skillDir = join(
-      repo,
-      'packages',
-      'core',
-      'src',
-      'skills',
-      'bundled',
-      'review',
-    );
-    fsReal.mkdirSync(skillDir, { recursive: true });
-    fsReal.writeFileSync(join(skillDir, 'SKILL.md'), '# skill');
+    // `node:fs` is mocked for this file, so the fixture builder must write
+    // through the real bindings pulled in above.
+    ({ repo, argv1 } = makeStaleBundleFixture(fsReal, 'parse-args-stale-'));
     vi.mocked(writeStderrLineSafe).mockClear();
     vi.mocked(writeStdoutLine).mockClear();
   });
   afterEach(() => fsReal.rmSync(repo, { recursive: true, force: true }));
 
-  // Well-formed (64 hex) but matching no real tree: a malformed stamp is
-  // unmeasured, not stale, so the mismatch branch needs a plausible digest.
-  const foreignDigest = 'ab'.repeat(32);
-  const stamp = (digest: string) =>
-    fsReal.writeFileSync(join(repo, 'dist', DIGEST_FILE), digest);
+  const stamp = (digest: string) => stampDigest(fsReal, repo, digest);
   const run = () => {
     const original = process.argv[1];
     process.argv[1] = argv1;
@@ -644,7 +620,7 @@ describe('parse-args warns when the bundle is not built from these sources', () 
   };
 
   it('warns when the stamp does not match the sources', () => {
-    stamp(foreignDigest);
+    stamp(FOREIGN_DIGEST);
     run();
     // The full paragraph: this is the first command of the review, and the
     // one-line form belongs to `drive`, which repeats the check.
@@ -673,7 +649,7 @@ describe('parse-args warns when the bundle is not built from these sources', () 
     // `ln -s dist/cli.js ~/bin/qwen` must resolve back to the bundle before
     // the layout guard derives `dist/` from it — otherwise the check is
     // silently off for every symlinked entry.
-    stamp(foreignDigest);
+    stamp(FOREIGN_DIGEST);
     const alias = join(repo, 'qwen-alias');
     fsReal.symlinkSync(argv1, alias);
     const original = process.argv[1];
@@ -729,7 +705,7 @@ describe('parse-args warns when the bundle is not built from these sources', () 
       // Distinct from an installed package: the roots are on disk, so the
       // check has switched itself off for someone about to read a verdict,
       // and the docstring promises every unmeasurable case names itself.
-      stamp(foreignDigest);
+      stamp(FOREIGN_DIGEST);
       const src = join(
         repo,
         'packages',
@@ -766,7 +742,7 @@ describe('parse-args warns when the bundle is not built from these sources', () 
       // which `existsSync` reports as absence. That is a tree whose sources
       // cannot be measured, not a tree with none — and the notice must say
       // so instead of passing silently.
-      stamp(foreignDigest);
+      stamp(FOREIGN_DIGEST);
       const packages = join(repo, 'packages');
       fsReal.chmodSync(packages, 0o000);
       try {
@@ -789,7 +765,7 @@ describe('parse-args warns when the bundle is not built from these sources', () 
     // docstring promises each unmeasurable case names itself. The other two
     // roots come out of the fixture too, so the zero is complete, not the
     // partial-checkout case.
-    stamp(foreignDigest);
+    stamp(FOREIGN_DIGEST);
     const reviewDir = join(
       repo,
       'packages',
@@ -864,7 +840,7 @@ describe('parse-args warns when the bundle is not built from these sources', () 
 
   it('still parses the arguments', () => {
     // The warning is a diagnostic; the parse is unaffected by it.
-    stamp(foreignDigest);
+    stamp(FOREIGN_DIGEST);
     run();
     expect(writeStdoutLine).toHaveBeenCalled();
   });

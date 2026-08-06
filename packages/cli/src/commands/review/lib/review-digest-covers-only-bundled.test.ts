@@ -88,6 +88,23 @@ function isTypeOnlyClause(clause: string): boolean {
   return /^\s*type\s+(?:[{*]|[A-Za-z_$][\w$]*\s*$)/.test(clause);
 }
 
+/**
+ * The source with comments dropped, which is what the scans below must read:
+ * esbuild's lexer ignores comments, so a comment inside a multi-line import
+ * clause must neither hide the edge (a comment carrying `;` or `'` defeats
+ * the clause capture for the whole statement) nor fake one (a comment-
+ * decorated `import type …` would escape `isTypeOnlyClause` and count a
+ * clause esbuild erases). String and template literals match first and are
+ * returned verbatim, so a `/*` or a `// …` line inside a literal — the
+ * agent prompts embed both — never triggers the comment arms.
+ */
+function stripComments(src: string): string {
+  return src.replace(
+    /'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`(?:[^`\\]|\\.)*`|\/\*[\s\S]*?\*\/|\/\/[^\n]*/g,
+    (m) => (m.startsWith('/') ? ' ' : m),
+  );
+}
+
 const isTest = (f: string) => NOT_BUNDLED_RE.test(basename(f));
 const isFixture = (f: string) =>
   relative(reviewDir, f)
@@ -96,7 +113,7 @@ const isFixture = (f: string) =>
 
 /** The modules `f` imports from within this repo, resolved to real paths. */
 function localImports(f: string): string[] {
-  const src = readFileSync(f, 'utf8');
+  const src = stripComments(readFileSync(f, 'utf8'));
   const specs: string[] = [];
   // `from '…'` / `export … from '…'`, `await import('…')` — the directory
   // has nine dynamic edges, and a helper reached only that way would be
@@ -193,7 +210,7 @@ describe('the staleness digest covers only what the bundle can contain', () => {
     );
     expect(
       unreachable.map((f) => relative(repoRoot, f)),
-      'an unimported file here is either test-only support or a scratch file — production code reaches the bundle only through an import',
+      'an unimported file here is either test-only support or a scratch file — or the closure missed it: the scanner sees only single-quoted relative import literals and is seeded from review.ts, so widen the seed set before believing this finding',
     ).toEqual([]);
   });
 
@@ -240,6 +257,33 @@ describe('the staleness digest covers only what the bundle can contain', () => {
       expect(edgesOf('import { type T, v }')).toEqual([b]);
       expect(edgesOf('import D, { type T }')).toEqual([b]);
       expect(edgesOf('import { v }')).toEqual([b]);
+    });
+
+    it('reads through comments the way esbuild does', () => {
+      const b = join(dir, 'b.ts');
+      // A comment cannot rescue a clause esbuild erases…
+      expect(edgesOf('import type /* note */ { T }')).toEqual([]);
+      expect(edgesOf('import type /* note */ D')).toEqual([]);
+      // …nor hide one it keeps.
+      expect(edgesOf('import /* kept */ { v }')).toEqual([b]);
+      // The clause capture stops at `;` and `'`, so a line comment inside a
+      // multi-line clause carrying either drops the whole edge.
+      const importer = join(dir, 'a.ts');
+      writeFileSync(
+        importer,
+        `import {\n  v, // drive's copy; keep in sync\n} from './b.js';\n`,
+      );
+      expect(localImports(importer)).toEqual([b]);
+    });
+
+    it('does not count import-shaped text inside string literals', () => {
+      // The scanner is a heuristic over single-quoted specifiers; a literal
+      // quoting an import is the class of edge esbuild never follows. A
+      // single-quoted literal cannot hold such a specifier without escaping
+      // it, which the scans do not match.
+      const importer = join(dir, 'a.ts');
+      writeFileSync(importer, `const s = 'import D from "./b.js";';\n`);
+      expect(localImports(importer)).toEqual([]);
     });
   });
 

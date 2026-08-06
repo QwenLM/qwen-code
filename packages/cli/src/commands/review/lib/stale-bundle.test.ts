@@ -74,6 +74,7 @@ vi.mock('node:fs', async (importOriginal) => {
 import {
   bundleStaleness,
   bundleStalenessNotices,
+  DIGEST_FILE,
   reviewSourceRoots,
   reviewSourcesDigest,
   staleBundleWarning,
@@ -441,7 +442,7 @@ const repoRoot = resolve(
 );
 
 describe('the bundled skill stops on what this module prints', () => {
-  it('every `review: \u2026` quote in SKILL.md is a prefix of a live notice', () => {
+  it('the SKILL.md quotes and the live notices are prefixes of each other', () => {
     const skillPath = join(
       repoRoot,
       'packages',
@@ -459,8 +460,6 @@ describe('the bundled skill stops on what this module prints', () => {
 
     const root = mkdtempSync(join(tmpdir(), 'skill-parity-'));
     try {
-      // Sources present, no stamp beside the bundle: the 'could not check'
-      // notice. The two warning forms come straight from `staleBundleWarning`.
       const distDir = join(root, 'dist');
       mkdirSync(distDir, { recursive: true });
       writeFileSync(join(distDir, 'cli.js'), 'bundle');
@@ -479,16 +478,56 @@ describe('the bundled skill stops on what this module prints', () => {
       );
       mkdirSync(skillDir, { recursive: true });
       writeFileSync(join(skillDir, 'SKILL.md'), '# skill');
+      const entry = join(distDir, 'cli.js');
+      // Every form this module can print, one fixture state apiece. The two
+      // warnings come straight from `staleBundleWarning`; the notices are the
+      // no-stamp, partial-checkout, unreadable-source, and nothing-to-compare
+      // branches of `bundleStalenessNotices`, each reached by moving the tree.
       const lines = [
         staleBundleWarning({ stale: true })!,
         staleBundleWarning({ stale: true }, true)!,
-        ...bundleStalenessNotices(join(distDir, 'cli.js')),
+        ...bundleStalenessNotices(entry),
       ];
-      expect(lines.length).toBeGreaterThan(2);
+      // Stamp over the full tree, then drop one root: the partial checkout.
+      writeFileSync(
+        join(distDir, DIGEST_FILE),
+        reviewSourcesDigest(root, reviewSourceRoots(root))!,
+      );
+      rmSync(skillDir, { recursive: true, force: true });
+      lines.push(...bundleStalenessNotices(entry));
+      // Full tree again, but a source read faults: the unreadable tree.
+      mkdirSync(skillDir, { recursive: true });
+      writeFileSync(join(skillDir, 'SKILL.md'), '# skill');
+      unreadable.path = join(commands, 'review', 'drive.ts');
+      try {
+        lines.push(...bundleStalenessNotices(entry));
+      } finally {
+        unreadable.path = '';
+      }
+      // Roots present but holding nothing the digest admits: nothing to
+      // compare.
+      rmSync(join(commands, 'review.ts'));
+      rmSync(join(commands, 'review', 'drive.ts'));
+      writeFileSync(join(commands, 'review', 'keep.test.ts'), 'a test');
+      rmSync(skillDir, { recursive: true, force: true });
+      lines.push(...bundleStalenessNotices(entry));
+
+      // An exact count, so a fixture stage that silently printed nothing
+      // reddens instead of shrinking the pin.
+      expect(lines).toHaveLength(6);
       for (const quote of quotes) {
         expect(
           lines.some((line) => line.startsWith(quote)),
           `SKILL.md quotes \`${quote}\`, but no notice this module prints begins with it`,
+        ).toBe(true);
+      }
+      // And the converse: a notice reworded under a prefix SKILL.md never
+      // quotes leaves the skill matching nothing on that line, so every form
+      // this module prints must begin with a quoted prefix.
+      for (const line of lines) {
+        expect(
+          quotes.some((quote) => line.startsWith(quote)),
+          `this module prints \`${line}\`, but SKILL.md quotes no prefix of it`,
         ).toBe(true);
       }
     } finally {

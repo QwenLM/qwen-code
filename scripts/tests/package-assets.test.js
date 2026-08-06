@@ -188,6 +188,8 @@ describe('package asset scripts', () => {
     // of a bundle nothing digested was built from.
     const rootDir = createFixtureRoot();
     writeFile(rootDir, 'dist/cli.js', 'the bundle\n');
+    // Every refusal removes an existing stamp first; pre-seed one to pin that.
+    writeFile(rootDir, 'dist/review-sources.sha256', 'a'.repeat(64));
     stubConsole();
 
     copyBundleAssets({ root: rootDir });
@@ -257,6 +259,8 @@ describe('package asset scripts', () => {
     // is then attributable only to the error refusal, where a bundle written
     // first lets the mtime gate mask a skip-and-continue mutant.
     writeFile(rootDir, 'dist/cli.js', 'the bundle\n');
+    // Every refusal removes an existing stamp first; pre-seed one to pin that.
+    writeFile(rootDir, 'dist/review-sources.sha256', 'a'.repeat(64));
     stubConsole();
     // The file vanishes between the walk that listed it and the read that
     // hashes it — a concurrent checkout, mid-build.
@@ -293,6 +297,8 @@ describe('package asset scripts', () => {
     // The bundle LAST, so the stamp's absence is attributable only to the
     // error refusal, not the mtime gate (see the unreadable-file twin).
     writeFile(rootDir, 'dist/cli.js', 'the bundle\n');
+    // Every refusal removes an existing stamp first; pre-seed one to pin that.
+    writeFile(rootDir, 'dist/review-sources.sha256', 'a'.repeat(64));
     stubConsole();
     const libDir = path.join(rootDir, 'packages/cli/src/commands/review/lib');
     vi.spyOn(fs, 'readdirSync').mockImplementation((target, ...rest) => {
@@ -330,6 +336,8 @@ describe('package asset scripts', () => {
     // The bundle LAST so the mtime gate cannot mask a skip-and-continue
     // mutant digesting the survivors.
     writeFile(rootDir, 'dist/cli.js', 'the bundle\n');
+    // Every refusal removes an existing stamp first; pre-seed one to pin that.
+    writeFile(rootDir, 'dist/review-sources.sha256', 'a'.repeat(64));
     stubConsole();
     const libDir = path.join(rootDir, 'packages/cli/src/commands/review/lib');
     const vanished = Object.assign(new Error('ENOENT: vanished mid-build'), {
@@ -368,6 +376,8 @@ describe('package asset scripts', () => {
     );
     writeFile(rootDir, 'packages/cli/src/commands/review.ts', 'registers\n');
     writeFile(rootDir, 'dist/cli.js', 'the bundle\n');
+    // Every refusal removes an existing stamp first; pre-seed one to pin that.
+    writeFile(rootDir, 'dist/review-sources.sha256', 'a'.repeat(64));
     stubConsole();
     const reviewDir = path.join(rootDir, 'packages/cli/src/commands/review');
     const denied = Object.assign(new Error('EACCES: permission denied'), {
@@ -399,6 +409,8 @@ describe('package asset scripts', () => {
       'packages/cli/src/commands/review/drive.ts',
       'export const drive = 1;\n',
     );
+    // Every refusal removes an existing stamp first; pre-seed one to pin that.
+    writeFile(rootDir, 'dist/review-sources.sha256', 'a'.repeat(64));
     stubConsole();
 
     expect(() => copyBundleAssets({ root: rootDir })).not.toThrow();
@@ -452,6 +464,8 @@ describe('package asset scripts', () => {
       );
       writeFile(rootDir, 'packages/cli/src/commands/review.ts', 'registers\n');
       writeFile(rootDir, 'dist/cli.js', 'the bundle\n');
+      // Every refusal removes an existing stamp first; pre-seed one to pin that.
+      writeFile(rootDir, 'dist/review-sources.sha256', 'a'.repeat(64));
       const reviewDir = path.join(rootDir, 'packages/cli/src/commands/review');
       stubConsole();
       fs.chmodSync(reviewDir, 0o000);

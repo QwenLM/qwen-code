@@ -35,11 +35,12 @@ import {
   writeStdoutLine,
   writeStderrLineSafe,
 } from '../../utils/stdioHelpers.js';
+import { reviewSourceRoots, reviewSourcesDigest } from './lib/stale-bundle.js';
 import {
-  DIGEST_FILE,
-  reviewSourceRoots,
-  reviewSourcesDigest,
-} from './lib/stale-bundle.js';
+  FOREIGN_DIGEST,
+  makeStaleBundleFixture,
+  stampDigest,
+} from './lib/test-utils.js';
 
 // The handler's output goes through the same helpers the parse-args suite
 // mocks; the wiring tests below intercept them so no real terminal is touched.
@@ -536,39 +537,17 @@ describe('drive warns when the bundle is not built from these sources', () => {
       ? { status: 1, stdout: '', stderr: '' }
       : { status: 0, stdout: '', stderr: '' };
 
+  // Real bindings by construction: this file never mocks `node:fs`.
+  const realFs = { mkdtempSync, mkdirSync, writeFileSync };
+
   beforeEach(() => {
-    repo = mkdtempSync(join(tmpdir(), 'drive-stale-'));
-    mkdirSync(join(repo, 'dist'), { recursive: true });
-    argv1 = join(repo, 'dist', 'cli.js');
-    writeFileSync(argv1, 'bundle');
-    const commands = join(repo, 'packages', 'cli', 'src', 'commands');
-    const reviewDir = join(commands, 'review');
-    mkdirSync(reviewDir, { recursive: true });
-    writeFileSync(join(reviewDir, 'drive.ts'), 'the built behaviour');
-    // All three roots, the shape of a real checkout: with only some of them
-    // present the check answers 'could not check' instead of a verdict.
-    writeFileSync(join(commands, 'review.ts'), 'registers');
-    const skillDir = join(
-      repo,
-      'packages',
-      'core',
-      'src',
-      'skills',
-      'bundled',
-      'review',
-    );
-    mkdirSync(skillDir, { recursive: true });
-    writeFileSync(join(skillDir, 'SKILL.md'), '# skill');
+    ({ repo, argv1 } = makeStaleBundleFixture(realFs, 'drive-stale-'));
     vi.mocked(writeStderrLineSafe).mockClear();
     vi.mocked(writeStdoutLine).mockClear();
   });
   afterEach(() => rmSync(repo, { recursive: true, force: true }));
 
-  // Well-formed (64 hex) but matching no real tree: a malformed stamp is
-  // unmeasured, not stale, so the mismatch branch needs a plausible digest.
-  const foreignDigest = 'ab'.repeat(32);
-  const stamp = (digest: string) =>
-    writeFileSync(join(repo, 'dist', DIGEST_FILE), digest);
+  const stamp = (digest: string) => stampDigest(realFs, repo, digest);
   const run = () => {
     const originalArgv = process.argv[1];
     const originalExit = process.exitCode;
@@ -590,7 +569,7 @@ describe('drive warns when the bundle is not built from these sources', () => {
   };
 
   it('warns when the stamp does not match the sources', () => {
-    stamp(foreignDigest);
+    stamp(FOREIGN_DIGEST);
     run();
     expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
       'NOT built from the review sources',
@@ -623,7 +602,7 @@ describe('drive warns when the bundle is not built from these sources', () => {
     // One review can invoke `drive` many times, and each invocation prints
     // into an agent's tool output; the repeat keeps the trigger and the
     // remedy and drops the explanation.
-    stamp(foreignDigest);
+    stamp(FOREIGN_DIGEST);
     run();
     const line = vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0] as string;
     expect(line).toContain('NOT built from the review sources');
@@ -632,7 +611,7 @@ describe('drive warns when the bundle is not built from these sources', () => {
   });
 
   it('still drives — the notice is a diagnostic, not a gate', () => {
-    stamp(foreignDigest);
+    stamp(FOREIGN_DIGEST);
     run();
     expect(writeStdoutLine).toHaveBeenCalled();
   });

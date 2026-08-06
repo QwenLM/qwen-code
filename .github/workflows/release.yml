@@ -428,7 +428,10 @@ jobs:
           # The review staleness check degrades to "could not check" without
           # this stamp; fail here instead of shipping a release that silently
           # lost it.
-          test -f dist/review-sources.sha256
+          test -f dist/review-sources.sha256 || {
+            echo 'the bundle step refused to stamp — see its output above'
+            exit 1
+          }
           npm run prepare:package
 
       - name: 'Build Standalone Archives'
