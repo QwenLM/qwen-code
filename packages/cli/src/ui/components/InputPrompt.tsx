@@ -1209,11 +1209,14 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         // "input has content -> double-press to clear" branch instead of the
         // cancel-work branch. This guard breaks that chain. #8201.
         //
-        // Relies on two invariants: (1) InputPrompt/BaseTextInput subscribe
-        // before AppContainer, and (2) buffer.text reads through to
-        // stateRef.current synchronously. Break either and the single-ESC
-        // cancel regresses with a fully green suite (no integration test
-        // covers this hop yet - the two harnesses mock each other's side).
+        // Relies on one invariant: buffer.text reads through to
+        // stateRef.current synchronously. Subscription order does not gate the
+        // cancel: the Responding pop guard skips the pop in either order (and
+        // BaseTextInput re-subscribes after AppContainer after any remount of
+        // InputPrompt, e.g. a tool-confirmation round trip). Break the buffer
+        // invariant and the single-ESC cancel regresses with a fully green
+        // suite (no integration test covers this hop yet - the two harnesses
+        // mock each other's side).
         // Only Responding is gated (matching AppContainer's cancel branch).
         // WaitingForConfirmation needs no handling here: Composer unmounts
         // InputPrompt whenever isInputActive is false (isInputActiveForState
@@ -1231,10 +1234,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           // returned false (queue already cleared) — fall through
         }
 
-        // Handle double ESC for clearing input. (When the agent is
-        // Responding and the buffer is empty, AppContainer's broadcast ESC
-        // handler - running after this one - takes its cancel-work branch
-        // directly, so no separate guard is needed here.) #8201.
+        // Handle double ESC for clearing input. Note: while Responding this
+        // clear composes with AppContainer's broadcast ESC handler - in the
+        // initial subscription order this handler empties the buffer first and
+        // AppContainer's cancel branch fires on the SAME keypress; after any
+        // remount of InputPrompt (e.g. a tool-confirmation round trip)
+        // AppContainer runs first, so the cancel lands on the next press
+        // instead. #8201.
         if (escPressCount === 0) {
           if (buffer.text === '') {
             return true;
