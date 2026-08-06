@@ -55,6 +55,32 @@ describe('workspace actions', () => {
     expect(workspaceAcpPreheat).toHaveBeenCalledWith(5_000);
   });
 
+  it('allows archive uploads to run for two minutes', async () => {
+    vi.useFakeTimers();
+    const installExtensionArchive = vi.fn(() => new Promise<never>(() => {}));
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => ({ installExtensionArchive }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/ws',
+      baseUrl: '',
+    });
+    const result = actions
+      .installExtensionArchive({
+        archive: new Blob(['archive']),
+        filename: 'demo.zip',
+        consent: true,
+      })
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+
+    await vi.advanceTimersByTimeAsync(120_000);
+
+    await expect(result).resolves.toMatchObject({
+      message: 'Install extension timed out after 120000ms',
+    });
+  });
+
   it('applies the action timeout to workspace removal', async () => {
     vi.useFakeTimers();
     const remove = vi.fn(() => new Promise<never>(() => {}));

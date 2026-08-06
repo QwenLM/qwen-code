@@ -462,6 +462,8 @@ export interface DaemonTurnError extends DaemonHttpError {
   _daemonTurnError: true;
 }
 
+const EXTENSION_ARCHIVE_UPLOAD_TIMEOUT_MS = 120_000;
+
 export function isDaemonTurnError(error: unknown): error is DaemonTurnError {
   return (
     typeof error === 'object' &&
@@ -1391,7 +1393,7 @@ export class DaemonClient {
         }
         return (await res.json()) as ExtensionInstallResponse;
       },
-      undefined,
+      EXTENSION_ARCHIVE_UPLOAD_TIMEOUT_MS,
       'rest',
     );
   }

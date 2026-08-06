@@ -4919,6 +4919,40 @@ describe('DaemonClient', () => {
       expect(capturedInit?.body).toBe(archive);
     });
 
+    it('allows extension archive uploads to outlive the generic fetch timeout', async () => {
+      const fetch = vi.fn(
+        (_input: RequestInfo | URL, init?: RequestInit) =>
+          new Promise<Response>((resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => {
+              reject(init.signal?.reason);
+            });
+            setTimeout(
+              () =>
+                resolve(
+                  jsonResponse(202, {
+                    accepted: true,
+                    operationId: 'op-upload',
+                  }),
+                ),
+              20,
+            );
+          }),
+      ) as unknown as typeof globalThis.fetch;
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        fetchTimeoutMs: 1,
+      });
+
+      await expect(
+        client.installExtensionArchive({
+          archive: new Blob(['archive']),
+          filename: 'demo.zip',
+          consent: true,
+        }),
+      ).resolves.toEqual({ accepted: true, operationId: 'op-upload' });
+    });
+
     it('GETs active extension operations', async () => {
       const { fetch, calls } = recordingFetch(() =>
         jsonResponse(200, { v: 1, operations: [] }),

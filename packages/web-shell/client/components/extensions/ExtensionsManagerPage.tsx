@@ -933,7 +933,9 @@ export function ExtensionsManagerPage({
       !source ||
       (installMethod === 'archive' &&
         (!installArchive ||
-          installArchive.size > MAX_EXTENSION_ARCHIVE_BYTES)) ||
+          installArchive.size === 0 ||
+          installArchive.size > MAX_EXTENSION_ARCHIVE_BYTES ||
+          !/\.(?:zip|tar\.gz)$/i.test(installArchive.name))) ||
       !operationsRecovered ||
       pendingInstall ||
       pendingMutation ||
@@ -1146,9 +1148,15 @@ export function ExtensionsManagerPage({
   const archiveTooLarge =
     installArchive !== null &&
     installArchive.size > MAX_EXTENSION_ARCHIVE_BYTES;
+  const archiveEmpty = installArchive !== null && installArchive.size === 0;
+  const archiveInvalid =
+    installArchive !== null && !/\.(?:zip|tar\.gz)$/i.test(installArchive.name);
   const installInputReady =
     installMethod === 'archive'
-      ? installArchive !== null && !archiveTooLarge
+      ? installArchive !== null &&
+        !archiveTooLarge &&
+        !archiveEmpty &&
+        !archiveInvalid
       : Boolean(installSource.trim());
 
   const returnToList = useCallback(() => {
@@ -1773,7 +1781,14 @@ export function ExtensionsManagerPage({
       <AlertDialog
         open={installOpen}
         onOpenChange={(open) => {
-          if (open || !installing) setInstallOpen(open);
+          if (open || !installing) {
+            setInstallOpen(open);
+            if (!open) {
+              setInstallMethod('source');
+              setInstallArchive(null);
+              if (archiveInputRef.current) archiveInputRef.current.value = '';
+            }
+          }
         }}
       >
         <AlertDialogContent size="middle">
@@ -1834,6 +1849,22 @@ export function ExtensionsManagerPage({
                     <AlertCircleIcon />
                     <AlertDescription>
                       {t('extensions.manage.archiveTooLarge')}
+                    </AlertDescription>
+                  </Alert>
+                ) : null}
+                {archiveEmpty ? (
+                  <Alert variant="destructive">
+                    <AlertCircleIcon />
+                    <AlertDescription>
+                      {t('extensions.manage.archiveEmpty')}
+                    </AlertDescription>
+                  </Alert>
+                ) : null}
+                {archiveInvalid ? (
+                  <Alert variant="destructive">
+                    <AlertCircleIcon />
+                    <AlertDescription>
+                      {t('extensions.manage.archiveInvalid')}
                     </AlertDescription>
                   </Alert>
                 ) : null}

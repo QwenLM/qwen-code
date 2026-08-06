@@ -141,6 +141,48 @@ test('uploads an Extension archive from the manager @smoke', async ({
   await submitLocalCommand(page, '/extensions');
   await page.getByRole('button', { name: 'Add' }).click();
   await page.getByRole('tab', { name: 'Archive' }).click();
+  const archiveInput = page.getByLabel('Select a .zip or .tar.gz archive.');
+  await archiveInput.setInputFiles({
+    name: 'stale.zip',
+    mimeType: 'application/zip',
+    buffer: Buffer.from('stale-archive'),
+  });
+  await page.getByRole('button', { name: 'Cancel' }).click();
+  await page.getByRole('button', { name: 'Add' }).click();
+  await page.getByRole('tab', { name: 'Archive' }).click();
+  await expect(page.getByText('Selected archive: stale.zip')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Install' })).toBeDisabled();
+
+  await archiveInput.setInputFiles({
+    name: 'backup.gz',
+    mimeType: 'application/gzip',
+    buffer: Buffer.from('archive-content'),
+  });
+  await expect(
+    page.getByText('Select a .zip or .tar.gz Extension archive.'),
+  ).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Install' })).toBeDisabled();
+
+  await archiveInput.setInputFiles({
+    name: 'empty.zip',
+    mimeType: 'application/zip',
+    buffer: Buffer.alloc(0),
+  });
+  await expect(
+    page.getByText('The selected Extension archive is empty.'),
+  ).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Install' })).toBeDisabled();
+
+  await archiveInput.setInputFiles({
+    name: 'large.zip',
+    mimeType: 'application/zip',
+    buffer: Buffer.alloc(10 * 1024 * 1024 + 1),
+  });
+  await expect(
+    page.getByText('Extension archives must be 10 MB or smaller.'),
+  ).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Install' })).toBeDisabled();
+
   await page.getByLabel('Select a .zip or .tar.gz archive.').setInputFiles({
     name: 'demo.zip',
     mimeType: 'application/zip',
@@ -160,6 +202,7 @@ test('uploads an Extension archive from the manager @smoke', async ({
   await expect(
     page.getByRole('heading', { name: 'Add Extension' }),
   ).toHaveCount(0);
+  await expect(page.getByText('Extension "demo" installed.')).toBeVisible();
 });
 
 test('pastes long plain text as editable composer content @smoke', async ({

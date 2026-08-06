@@ -2950,6 +2950,20 @@ describe('extension tests', () => {
         expect(id).toBe(hashValue('/path/to/ext'));
       });
 
+      it('gives same-named uploads distinct ids', () => {
+        const config: ExtensionConfig = { name: 'test-ext', version: '1.0.0' };
+        const first = getExtensionId(config, {
+          type: 'local',
+          source: 'upload:v1:first:extension.zip',
+        });
+        const second = getExtensionId(config, {
+          type: 'local',
+          source: 'upload:v1:second:extension.zip',
+        });
+
+        expect(first).not.toBe(second);
+      });
+
       it('should use GitHub URL for git install', () => {
         const config: ExtensionConfig = { name: 'test-ext', version: '1.0.0' };
         const metadata = {

@@ -1672,6 +1672,9 @@ const EN: Messages = {
     `Selected archive: ${v?.name ?? 'extension archive'}`,
   'extensions.manage.archiveTooLarge':
     'Extension archives must be 10 MB or smaller.',
+  'extensions.manage.archiveEmpty': 'The selected Extension archive is empty.',
+  'extensions.manage.archiveInvalid':
+    'Select a .zip or .tar.gz Extension archive.',
   'extensions.manage.installSelectPluginDescription': (v) =>
     `Choose a plugin from "${v?.marketplace ?? 'this marketplace'}".`,
   'extensions.manage.installTitle': 'Add Extension',
@@ -4385,6 +4388,9 @@ const ZH: Messages = {
   'extensions.manage.archiveSelected': (v) =>
     `已选择压缩包：${v?.name ?? 'Extension 压缩包'}`,
   'extensions.manage.archiveTooLarge': 'Extension 压缩包不能超过 10 MB。',
+  'extensions.manage.archiveEmpty': '所选 Extension 压缩包为空。',
+  'extensions.manage.archiveInvalid':
+    '请选择 .zip 或 .tar.gz Extension 压缩包。',
   'extensions.manage.installSelectPluginDescription': (v) =>
     `从「${v?.marketplace ?? '此市场'}」中选择插件。`,
   'extensions.manage.installTitle': '添加扩展',

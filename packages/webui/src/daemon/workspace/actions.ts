@@ -17,6 +17,7 @@ import type {
 } from './types.js';
 
 const AGENT_GENERATE_TIMEOUT_MS = 330_000;
+const EXTENSION_ARCHIVE_UPLOAD_TIMEOUT_MS = 120_000;
 
 export interface CreateDaemonWorkspaceActionsArgs {
   getClient: () => DaemonClient | undefined;
@@ -857,6 +858,7 @@ export function createDaemonWorkspaceActions({
       return withActionTimeout(
         client.installExtensionArchive(params, clientId),
         'Install extension timed out',
+        EXTENSION_ARCHIVE_UPLOAD_TIMEOUT_MS,
       );
     },
 

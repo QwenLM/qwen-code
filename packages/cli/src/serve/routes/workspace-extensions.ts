@@ -11,6 +11,7 @@ import * as path from 'node:path';
 import {
   parseInstallSource,
   redactUrlCredentials,
+  getErrorMessage,
   SettingScope,
   type Extension,
   type ExtensionInstallMetadata,
@@ -739,21 +740,50 @@ export function registerWorkspaceExtensionRoutes(
             return;
           }
           const archive = req.body;
-          const source = `upload:${archiveName.filename}`;
+          const source = `upload:v1:${crypto.randomUUID()}:${archiveName.filename}`;
 
           ctrl.runQueuedExtensionMutation(
             'install',
             { source },
             res,
             async (extensionManager, _signal, context, operationId) => {
-              const uploadDir = await fs.mkdtemp(
-                path.join(os.tmpdir(), 'qwen-extension-upload-'),
-              );
-              const archivePath = path.join(
-                uploadDir,
-                `extension${archiveName.suffix}`,
-              );
+              let uploadDir: string | undefined;
+              const sanitizeUploadError = (error: unknown): Error => {
+                const sanitized = new Error(
+                  uploadDir
+                    ? getErrorMessage(error).replaceAll(
+                        uploadDir,
+                        '<extension-upload-dir>',
+                      )
+                    : 'Could not create the temporary extension upload directory',
+                );
+                const code =
+                  typeof error === 'object' &&
+                  error !== null &&
+                  'code' in error &&
+                  typeof error.code === 'string'
+                    ? error.code
+                    : undefined;
+                if (code) Object.assign(sanitized, { code });
+                return sanitized;
+              };
+              let result:
+                | {
+                    status: 'installed';
+                    source: string;
+                    name: string;
+                    version: string;
+                  }
+                | undefined;
+              let failure: Error | undefined;
               try {
+                uploadDir = await fs.mkdtemp(
+                  path.join(os.tmpdir(), 'qwen-extension-upload-'),
+                );
+                const archivePath = path.join(
+                  uploadDir,
+                  `extension${archiveName.suffix}`,
+                );
                 await fs.writeFile(archivePath, archive);
                 const prepared = await context!.prepare(async (signal) => {
                   supersedeActiveInstallOperations(ctrl, operationId!);
@@ -773,7 +803,7 @@ export function registerWorkspaceExtensionRoutes(
                         onCommitted,
                       ),
                   );
-                  return {
+                  result = {
                     status: 'installed',
                     source,
                     name: committed.identity.name,
@@ -782,9 +812,18 @@ export function registerWorkspaceExtensionRoutes(
                 } finally {
                   await extensionManager.disposePreparedExtension(prepared);
                 }
-              } finally {
-                await fs.rm(uploadDir, { recursive: true, force: true });
+              } catch (error) {
+                failure = sanitizeUploadError(error);
               }
+              if (uploadDir) {
+                try {
+                  await fs.rm(uploadDir, { recursive: true, force: true });
+                } catch (error) {
+                  failure ??= sanitizeUploadError(error);
+                }
+              }
+              if (failure) throw failure;
+              return result!;
             },
             {
               createManager: (operationId) =>

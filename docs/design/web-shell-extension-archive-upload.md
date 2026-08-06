@@ -8,7 +8,7 @@ The CLI installs local `.zip` and `.tar.gz` Extension archives, but the Web Shel
 
 Add a dedicated `POST /workspace/extensions/install-archive` endpoint. The SDK sends the selected archive as `application/octet-stream` with the filename and explicit consent in query parameters. The endpoint accepts non-empty `.zip` and `.tar.gz` files up to 10 MB, writes the body to a temporary file, and submits the existing queued Extension install operation.
 
-The temporary artifact path is used only while preparing the install. Persisted install metadata records `upload:<filename>` instead, so Extension identity and the displayed source do not depend on a random temporary directory. The Extension manager therefore accepts an optional local source path for prepared installs while retaining the caller-provided metadata source.
+The temporary artifact path is used only while preparing the install. Persisted install metadata records an opaque per-upload identity plus the filename, while user-facing surfaces display `upload:<filename>`. Extension identity therefore remains unique without exposing or depending on a random temporary directory. The Extension manager accepts an optional local source path for prepared installs while retaining the caller-provided metadata source.
 
 The Web Shell Add Extension dialog offers source and archive tabs. Archive installs reuse the existing operation polling, interactive settings/plugin prompts, session refresh, and status messages. The temporary upload directory is removed after installation preparation and commit finish, whether they succeed or fail.
 
@@ -18,7 +18,7 @@ The Web Shell Add Extension dialog offers source and archive tabs. Archive insta
 - Only `.zip` and `.tar.gz` filenames are accepted.
 - The raw body parser caps uploads at 10 MB.
 - Archive extraction retains the existing traversal, symlink, and archive-shape protections.
-- Uploaded bytes and temporary paths are not returned in operation records.
+- Uploaded bytes and the upload temporary path are not returned in operation records.
 
 ## Test plan
 

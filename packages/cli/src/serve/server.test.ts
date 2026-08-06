@@ -4913,7 +4913,7 @@ describe('createServeApp', () => {
             name: 'uploaded-ext',
           });
         });
-        expect(recordedSource).toBe('upload:demo.zip');
+        expect(recordedSource).toMatch(/^upload:v1:[0-9a-f-]{36}:demo\.zip$/);
         expect(localSourcePath).toMatch(/extension\.zip$/);
         expect(uploadedContent).toBe('archive-content');
         expect(existsSync(localSourcePath)).toBe(false);
@@ -4945,6 +4945,19 @@ describe('createServeApp', () => {
       expect(unsupported.status).toBe(400);
       expect(unsupported.body.error).toContain('.zip or .tar.gz');
 
+      for (const query of [
+        'consent=true',
+        'filename=&consent=true',
+        'filename=..%2Fevil.zip&consent=true',
+        'filename=..%5Cevil.zip&consent=true',
+        'filename=bad%01name.zip&consent=true',
+        `filename=${encodeURIComponent(`${'a'.repeat(252)}.zip`)}&consent=true`,
+      ]) {
+        const invalid = await upload(query);
+        expect(invalid.status).toBe(400);
+        expect(invalid.body.error).toContain('.zip or .tar.gz');
+      }
+
       const empty = await upload(
         'filename=demo.tar.gz&consent=true',
         Buffer.alloc(0),
@@ -4961,6 +4974,155 @@ describe('createServeApp', () => {
         .set('Content-Type', 'text/plain')
         .send('archive');
       expect(wrongType.status).toBe(415);
+    });
+
+    it('rejects extension archives larger than 10 MB', async () => {
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge: fakeBridge() },
+      );
+
+      const res = await request(app)
+        .post(
+          '/workspace/extensions/install-archive?filename=demo.zip&consent=true',
+        )
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'application/octet-stream')
+        .send(Buffer.alloc(10 * 1024 * 1024 + 1));
+
+      expect(res.status).toBe(413);
+      expect(res.body).toEqual({ error: 'Request body too large (max 10 MB)' });
+    });
+
+    it('removes failed uploads and redacts their temporary path', async () => {
+      let localSourcePath = '';
+      const restore = mockExtensionManagerMethods({
+        async prepareExtensionInstall(options) {
+          localSourcePath = options.localSourcePath ?? '';
+          throw Object.assign(
+            new Error(`Could not read ${localSourcePath}: disk full`),
+            { code: 'ENOSPC' },
+          );
+        },
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+        const install = await request(app)
+          .post(
+            '/workspace/extensions/install-archive?filename=demo.zip&consent=true',
+          )
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('Content-Type', 'application/octet-stream')
+          .send(Buffer.from('archive'));
+
+        await vi.waitFor(async () => {
+          const poll = await request(app)
+            .get(`/workspace/extensions/operations/${install.body.operationId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(poll.body).toMatchObject({
+            status: 'failed',
+            code: 'ENOSPC',
+          });
+          expect(poll.body.error).toContain('<extension-upload-dir>');
+          expect(poll.body.error).not.toContain(path.dirname(localSourcePath));
+        });
+        expect(bridge.extensionEvents.at(-1)).toMatchObject({
+          status: 'failed',
+          code: 'ENOSPC',
+          error: expect.stringContaining('<extension-upload-dir>'),
+        });
+        expect(JSON.stringify(bridge.extensionEvents.at(-1))).not.toContain(
+          path.dirname(localSourcePath),
+        );
+        expect(existsSync(path.dirname(localSourcePath))).toBe(false);
+      } finally {
+        restore();
+      }
+    });
+
+    it('clears superseded archive operation state after settling', async () => {
+      let releaseFirst: (() => void) | undefined;
+      const firstBlocked = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      let installCount = 0;
+      let requestSetting:
+        | ((setting: {
+            name: string;
+            description: string;
+            envVar: string;
+          }) => Promise<string>)
+        | undefined;
+      const restore = mockExtensionManagerMethods({
+        async prepareExtensionInstall() {
+          installCount += 1;
+          if (installCount === 1) {
+            const manager = this as unknown as {
+              requestSetting?: typeof requestSetting;
+            };
+            requestSetting = manager.requestSetting?.bind(manager);
+            await firstBlocked;
+          }
+          return testExtension(`uploaded-${installCount}`);
+        },
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge: fakeBridge() },
+        );
+        const upload = () =>
+          request(app)
+            .post(
+              '/workspace/extensions/install-archive?filename=demo.zip&consent=true',
+            )
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret')
+            .set('Content-Type', 'application/octet-stream')
+            .send(Buffer.from('archive'));
+
+        const first = await upload();
+        await vi.waitFor(() => expect(requestSetting).toBeDefined());
+        const second = await upload();
+        releaseFirst?.();
+
+        await vi.waitFor(async () => {
+          const firstPoll = await request(app)
+            .get(`/workspace/extensions/operations/${first.body.operationId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          const secondPoll = await request(app)
+            .get(`/workspace/extensions/operations/${second.body.operationId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          expect(firstPoll.body.status).toBe('succeeded');
+          expect(secondPoll.body.status).toBe('succeeded');
+        });
+
+        await expect(
+          requestSetting?.({
+            name: 'API key',
+            description: 'API key',
+            envVar: 'API_KEY',
+          }),
+        ).rejects.toThrow('Extension operation already completed');
+      } finally {
+        releaseFirst?.();
+        restore();
+      }
     });
 
     it('queues extension install without a workspace client id', async () => {
