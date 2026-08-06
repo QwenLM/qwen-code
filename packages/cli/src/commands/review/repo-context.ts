@@ -19,6 +19,7 @@ import { git, gitOpt, gitRaw } from './lib/git.js';
 import { manifestRepositoryContextProvider } from './lib/manifest-repository-context.js';
 import {
   isSafeRepositoryRelativePath,
+  MAX_IDENTITY_BYTES,
   type RepositoryContext,
   type RepositoryContextProvider,
   validateRepositoryContext,
@@ -212,16 +213,20 @@ function readBaseIdentity(
   relativePath: string,
 ): string | null {
   let path = relativePath;
-  // A symlink target ending in `/` requires the finally resolved entry to
-  // be a directory, exactly the way realpathSync fails ENOTDIR on disk —
-  // without this the two modes diverge on a broken trailing-slash link.
+  // A symlink target ending in `/`, `.`, or `..` requires the finally
+  // resolved entry to be a directory, exactly the way realpathSync fails
+  // ENOTDIR on disk — without this the two modes diverge on a broken
+  // trailing-component link (a target like `a/.` walks THROUGH `a`).
   let requireDirectory = false;
   for (let hop = 0; hop < MAX_IDENTITY_SYMLINK_HOPS; hop++) {
     const entry = baseTreeEntry(worktree, mergeBase, path);
     if (entry === null) return null;
     if (entry.mode === '120000') {
       const target = readBaseBlob(worktree, mergeBase, path);
-      if (target.endsWith('/')) requireDirectory = true;
+      const lastSegment = target.split('/').pop();
+      if (target.endsWith('/') || lastSegment === '.' || lastSegment === '..') {
+        requireDirectory = true;
+      }
       const resolved = resolveTreeSymlinkTarget(path, target);
       if (resolved === null) {
         throw new Error(
@@ -277,7 +282,18 @@ function identityReader(
       );
     }
     try {
-      if (!statSync(resolved).isFile()) return null;
+      const stat = statSync(resolved);
+      if (!stat.isFile()) return null;
+      // Fail closed before reading (and therefore parsing) an oversized
+      // identity — the manifest provider's threat model is an
+      // attacker-committed file, and JSON.parse runs before any schema
+      // validation can reject it.
+      if (stat.size > MAX_IDENTITY_BYTES) {
+        throw new Error(
+          `repo-context: identity read exceeds the size limit: ` +
+            `${JSON.stringify(relativePath)}`,
+        );
+      }
       return normalizeIdentityContent(readFileSync(resolved, 'utf8'));
     } catch (error) {
       if (isAbsentError(error)) return null;

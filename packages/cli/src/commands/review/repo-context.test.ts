@@ -19,11 +19,18 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { RepositoryContextProvider } from './lib/repository-context.js';
+import {
+  MAX_IDENTITY_BYTES,
+  type RepositoryContextProvider,
+} from './lib/repository-context.js';
 import { repoContextCommand, runRepoContext } from './repo-context.js';
 
+const tempRoots: string[] = [];
+
 function temp(): string {
-  return realpathSync(mkdtempSync(join(tmpdir(), 'repo-context-')));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'repo-context-')));
+  tempRoots.push(root);
+  return root;
 }
 
 function write(path: string, content: string): void {
@@ -55,6 +62,13 @@ beforeEach(() => {
 afterEach(() => {
   process.env = savedEnv;
   rmSync(gitHome, { recursive: true, force: true });
+  // Every test builds fixture worktrees (several with initialized git
+  // repos) in the OS tmpdir; leaking them accumulates toward ENOSPC on
+  // long-lived machines.
+  for (const root of tempRoots) {
+    rmSync(root, { recursive: true, force: true });
+  }
+  tempRoots.length = 0;
 });
 
 function initGit(root: string): void {
@@ -518,13 +532,15 @@ describe('repo-context providers and trust boundary', () => {
 
   it('normalizes identity content identically in local and pull-request modes', () => {
     // A provider that exact-compares a marker file must get the same value in
-    // both modes: CRLF normalised to LF, surrounding whitespace trimmed.
+    // both modes: CRLF normalised to LF, surrounding whitespace trimmed. The
+    // interior CRLF is the pin — a single trailing one is stripped by trim
+    // alone.
     const root = temp();
     const worktree = join(root, 'worktree');
-    write(join(worktree, '.review', 'identity'), 'token\r\n');
+    write(join(worktree, '.review', 'identity'), 'token\r\ntail\r\n');
     const localProvide = vi.fn<RepositoryContextProvider['provide']>(
       (input) => {
-        expect(input.readIdentityFile('.review/identity')).toBe('token');
+        expect(input.readIdentityFile('.review/identity')).toBe('token\ntail');
         return context();
       },
     );
@@ -536,11 +552,11 @@ describe('repo-context providers and trust boundary', () => {
     const repository = join(root, 'repository');
     initGit(repository);
     execFileSync('git', ['-C', repository, 'config', 'core.autocrlf', 'false']);
-    write(join(repository, '.review', 'identity'), 'token\r\n');
+    write(join(repository, '.review', 'identity'), 'token\r\ntail\r\n');
     write(join(repository, 'src', 'change.ts'), 'base\n');
     const base = commitAll(repository);
     const prProvide = vi.fn<RepositoryContextProvider['provide']>((input) => {
-      expect(input.readIdentityFile('.review/identity')).toBe('token');
+      expect(input.readIdentityFile('.review/identity')).toBe('token\ntail');
       return context();
     });
     run(
@@ -854,4 +870,157 @@ describe('repo-context providers and trust boundary', () => {
     });
     expect(readJson(out)).toEqual(manifestContext());
   });
+
+  it('preserves plan fields the command does not know across the rewrite', () => {
+    // The rewrite must carry every field downstream steps read — `files[]`,
+    // `effort`, and anything else the plan holds — not just
+    // `repositoryContext`.
+    const root = temp();
+    const worktree = join(root, 'worktree');
+    mkdirSync(worktree);
+    const { planPath } = run(
+      root,
+      worktree,
+      {
+        files: [{ path: 'src/change.ts' }],
+        effort: 'high',
+        customField: 'kept',
+      },
+      [{ provide: () => context() }],
+    );
+    expect(readJson(planPath)).toMatchObject({
+      files: [{ path: 'src/change.ts' }],
+      effort: 'high',
+      customField: 'kept',
+      repositoryContext: context(),
+    });
+  });
+
+  it('rejects a corrupted plan whose files field is not an array', () => {
+    // The sibling gate for item-level shape: a corrupted plan must exit
+    // fail-closed, not produce empty changedPaths and a null artifact.
+    const root = temp();
+    const worktree = join(root, 'worktree');
+    mkdirSync(worktree);
+    expect(() => run(root, worktree, { files: 'oops' })).toThrow(
+      'plan.files must be an array',
+    );
+  });
+
+  it('creates a missing --out parent directory', () => {
+    const root = temp();
+    const worktree = join(root, 'worktree');
+    mkdirSync(worktree);
+    const planPath = planAt(root, { files: [{ path: 'src/change.ts' }] });
+    const outPath = join(root, 'fresh-subdir', 'context.json');
+    runRepoContext({ plan: planPath, worktree, out: outPath }, [
+      { provide: () => context() },
+    ]);
+    expect(readJson(outPath)).toEqual(context());
+  });
+
+  it('fails closed when the local identity exceeds the size limit', () => {
+    // The identity read is size-capped BEFORE its content is parsed; an
+    // oversized manifest must throw rather than masquerade as readable.
+    const root = temp();
+    const worktree = join(root, 'worktree');
+    write(
+      join(worktree, '.qwen', 'review-context.json'),
+      `"${'x'.repeat(MAX_IDENTITY_BYTES)}"`,
+    );
+    expect(() =>
+      run(root, worktree, { files: [{ path: 'src/change.ts' }] }),
+    ).toThrow('exceeds the size limit');
+  });
+
+  // Windows symlink creation needs elevated privileges.
+  it.skipIf(process.platform === 'win32')(
+    'canonicalizes a symlinked --worktree argument',
+    () => {
+      // Local-mode containment compares fully realpathed identity reads
+      // against the canonicalised argument; with an un-canonicalised
+      // argument whose ancestor is a symlink (macOS /tmp, linked mounts or
+      // home dirs) every identity read computes an escaping path and the
+      // whole review fails closed.
+      const root = temp();
+      const worktree = join(root, 'worktree');
+      write(join(worktree, '.review', 'identity'), 'local\n');
+      const link = join(root, 'worktree-link');
+      symlinkSync(worktree, link);
+      const provide = vi.fn<RepositoryContextProvider['provide']>((input) => {
+        expect(input.worktree).toBe(realpathSync(worktree));
+        expect(input.readIdentityFile('.review/identity')).toBe('local');
+        return context();
+      });
+      run(root, link, { files: [{ path: 'src/change.ts' }] }, [{ provide }]);
+      expect(provide).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('attaches context from a SHA-256 repository', () => {
+    // The mergeBaseSha validator's 64-hex alternative exists for SHA-256
+    // repositories; without this pin a future simplification to 40-hex
+    // ships green and hard-fails every PR review in such a repository on a
+    // correctly recorded value.
+    const root = temp();
+    const worktree = join(root, 'repository');
+    try {
+      execFileSync('git', [
+        'init',
+        '-q',
+        '--template=',
+        '--object-format=sha256',
+        worktree,
+      ]);
+    } catch {
+      return; // git < 2.29 has no object format
+    }
+    execFileSync('git', [
+      '-C',
+      worktree,
+      'config',
+      'user.email',
+      'test@example.com',
+    ]);
+    execFileSync('git', ['-C', worktree, 'config', 'user.name', 'Test']);
+    execFileSync('git', ['-C', worktree, 'config', 'commit.gpgsign', 'false']);
+    writeManifest(worktree);
+    write(join(worktree, 'src', 'change.ts'), 'base\n');
+    const base = commitAll(worktree);
+    expect(base).toMatch(/^[0-9a-f]{64}$/);
+    expect(
+      readJson(
+        run(join(root, 'sha256'), worktree, {
+          files: [{ path: 'src/change.ts' }],
+          mergeBaseSha: base,
+        }).outPath,
+      ),
+    ).toEqual(manifestContext());
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'reads a `.`-targeted identity symlink as absent in both modes',
+    () => {
+      // A target like `a/.` walks THROUGH `a`, so the kernel fails ENOTDIR
+      // when `a` is a file; base mode must degrade to null exactly like the
+      // worktree reader instead of dropping the `.` and reading the blob —
+      // the "base mode reads strictly less, never more" invariant.
+      const root = temp();
+      const worktree = join(root, 'repository');
+      initGit(worktree);
+      write(join(worktree, '.qwen', 'a'), '{}');
+      symlinkSync('a/.', join(worktree, '.qwen', 'review-context.json'));
+      write(join(worktree, 'src', 'change.ts'), 'base\n');
+      const base = commitAll(worktree);
+      const pr = run(join(root, 'pr'), worktree, {
+        files: [{ path: 'src/change.ts' }],
+        mergeBaseSha: base,
+      });
+      expect(readJson(pr.outPath)).toBeNull();
+      const local = run(join(root, 'local'), worktree, {
+        files: [{ path: 'src/change.ts' }],
+      });
+      expect(readJson(local.outPath)).toBeNull();
+    },
+  );
 });

@@ -1876,6 +1876,19 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(reviewerBrief).toContain('debug, linux-x64');
     expect(reviewerBrief).toContain('Alternate runtime was not exercised');
     expect(reviewerBrief).toContain('Use the repository native test runner');
+    // Section adjacency: each field is pinned under ITS OWN label, or a
+    // rendering swap between two same-shaped arrays ships green while
+    // reviewers are told the repository's proof boundaries are its
+    // verification instructions — and vice versa.
+    expect(reviewerBrief).toContain(
+      'Related paths:\n- src/compiler.ts\n- src/runtime.ts',
+    );
+    expect(reviewerBrief).toContain(
+      'Unverified dimensions:\n- Alternate runtime was not exercised',
+    );
+    expect(reviewerBrief).toContain(
+      'Verification notes:\n- Use the repository native test runner',
+    );
 
     const territoryBrief = buildChunkAgentPrompt(contextPlan, 13);
     expect(territoryBrief).toContain('Example project repository context');
@@ -1885,6 +1898,16 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(requiredAgentBrief).toContain('Example project repository context');
     expect(requiredAgentBrief).toContain('src/compiler.ts');
     expect(requiredAgentBrief).toContain('test:compiler');
+
+    // Positive pins for code-reviewing roles OUTSIDE the manifest
+    // allow-list that reach the block solely through `brief.reviewsCode`:
+    // a narrowing mutant that keeps every pinned role strips exactly these
+    // and ships green.
+    for (const role of ['verify', 'reverse-audit'] as const) {
+      expect(buildRoleBrief(contextPlan, role)).toContain(
+        'Example project repository context',
+      );
+    }
 
     const buildBrief = buildRoleBrief(contextPlan, '7');
     expect(buildBrief).not.toContain('Example project repository context');

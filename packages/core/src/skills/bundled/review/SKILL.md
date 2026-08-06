@@ -205,7 +205,10 @@ For **local-diff and file-path reviews**, capture and plan in one command:
 # the plan so the roster, check-coverage and compose-review all read one value.
 ```
 
-It writes the diff to `.qwen/tmp/qwen-review-<target>-diff.txt` and emits the same report `fetch-pr` does (`diffPathAbsolute`, `chunks[]`, `files[]`, the topology counts), plus two fields of its own.
+It writes the diff to `.qwen/tmp/qwen-review-<target>-diff.txt` and emits the same report `fetch-pr` does (`diffPathAbsolute`, `chunks[]`, `files[]`, the topology counts), plus two fields of its own:
+
+- **`untrackedFiles`** — brand-new files, whose contents no `git diff` would have shown. **Name them in the review's summary.** A local review now reads files the user never staged, and the most common untracked-but-unignored file in the wild is a credentials file (`.env`, a key dump). Nothing is filtered — a hardcoded skip-list would reintroduce exactly the silent-skipping this command exists to end — so the user is told instead, and can re-run with `--no-untracked` or fix their `.gitignore`.
+- **`skippedFiles`** — untracked files that were **not** reviewed, each with a reason: too large, an embedded git repository, a symlink to a directory, a total-budget or file-count cap. **List these under "Not reviewed" in Step 6.** A capture that quietly dropped a file is the bug this command exists to fix; dropping one for a subtler reason would be the same bug wearing a hat.
 
 At **medium or high** effort, for local, file-path, and same-repository PR reviews, attach declarative repository context before `agent-prompt --roster` — the roster and every brief bake this context in, so running it later silently drops the manifest's required agents and guidance (and it is therefore also before launching agents):
 
@@ -217,9 +220,6 @@ At **medium or high** effort, for local, file-path, and same-repository PR revie
 ```
 
 Use the captured plan's absolute path and its resolved worktree path. The only manifest is strict JSON at `.qwen/review-context.json`; matching rules add generic domains, related files, tests, configurations, roles, and verification boundaries. For PRs the command reads that manifest from the trusted merge base, never from the PR head — a PR whose base never resolved degrades to a `null` artifact rather than reading the head. Local reviews read it from the current worktree. All three arguments must be absolute so later agent working directories cannot change their meaning. A `null` artifact means no manifest or no matching rule and is not an error; a NON-ZERO exit is fail-closed — stop the review and report it, do not continue with the step silently skipped. Skip this command at low effort and in cross-repository lightweight mode, where there is no trusted local tree.
-
-- **`untrackedFiles`** — brand-new files, whose contents no `git diff` would have shown. **Name them in the review's summary.** A local review now reads files the user never staged, and the most common untracked-but-unignored file in the wild is a credentials file (`.env`, a key dump). Nothing is filtered — a hardcoded skip-list would reintroduce exactly the silent-skipping this command exists to end — so the user is told instead, and can re-run with `--no-untracked` or fix their `.gitignore`.
-- **`skippedFiles`** — untracked files that were **not** reviewed, each with a reason: too large, an embedded git repository, a symlink to a directory, a total-budget or file-count cap. **List these under "Not reviewed" in Step 6.** A capture that quietly dropped a file is the bug this command exists to fix; dropping one for a subtler reason would be the same bug wearing a hat.
 
 Do **not** hand-type a `git diff` here. Two reasons, and the second is why this is a command and not a prose recipe:
 

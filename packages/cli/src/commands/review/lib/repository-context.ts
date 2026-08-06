@@ -20,6 +20,17 @@ export const MAX_TOKEN_LENGTH = 160;
 export const MAX_PATH_LENGTH = 512;
 export const MAX_NOTE_LENGTH = 512;
 
+/**
+ * Fail-closed ceiling on a single identity read. An identity file is a small
+ * marker or manifest; a multi-megabyte one is an attacker payload whose cost
+ * lands in `JSON.parse` BEFORE any schema validation can reject it (the
+ * parse runs first). Both the worktree reader (stat size) and the parser
+ * (content length) enforce this, symmetric in both modes. One megabyte is
+ * far beyond any honest manifest and far below the heap damage a
+ * near-push-limit file demonstrably causes.
+ */
+export const MAX_IDENTITY_BYTES = 1024 * 1024;
+
 export interface RepositoryContext {
   version: typeof REPOSITORY_CONTEXT_VERSION;
   provider: string;
@@ -71,6 +82,23 @@ const CONTEXT_KEYS = [
 
 const SAFE_PROVIDER = /^[a-z0-9][a-z0-9._-]*$/;
 
+// Unicode bidi directional formatting code points render attacker-controlled
+// text in a different order than its bytes, and the zero-width characters
+// here hide content the eye never sees (trojan-source class display
+// spoofing). A manifest entry carrying one survives the provider and is
+// rendered intact into the posted review body and every reviewer prompt, so
+// the validator rejects them. Zero-width JOINERS (0x200C/0x200D) stay
+// allowed: they carry emoji ZWJ sequences and several living scripts, and
+// neither reorder nor hide on their own.
+const SPOOFING_FORMAT_CODE_UNITS = (code: number): boolean =>
+  code === 0x61c ||
+  code === 0x200b ||
+  code === 0x200e ||
+  code === 0x200f ||
+  (code >= 0x202a && code <= 0x202e) ||
+  (code >= 0x2066 && code <= 0x2069) ||
+  code === 0xfeff;
+
 export function isControlFree(value: string): boolean {
   for (let index = 0; index < value.length; index++) {
     const code = value.charCodeAt(index);
@@ -78,7 +106,8 @@ export function isControlFree(value: string): boolean {
       code < 0x20 ||
       (code >= 0x7f && code <= 0x9f) ||
       code === 0x2028 ||
-      code === 0x2029
+      code === 0x2029 ||
+      SPOOFING_FORMAT_CODE_UNITS(code)
     ) {
       return false;
     }

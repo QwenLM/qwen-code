@@ -5,23 +5,39 @@
  */
 
 import {
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   realpathSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 import {
   manifestRepositoryContextProvider,
   MAX_GLOB_CANDIDATES,
+  MAX_MATCH_WORK,
 } from './manifest-repository-context.js';
+import { MAX_IDENTITY_BYTES } from './repository-context.js';
+
+const worktrees: string[] = [];
 
 function temp(): string {
-  return realpathSync(mkdtempSync(join(tmpdir(), 'manifest-context-')));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'manifest-context-')));
+  worktrees.push(root);
+  return root;
 }
+
+// Several fixtures hold 16k-entry trees; leaking them exhausts a tmpfs
+// /tmp within a handful of runs.
+afterAll(() => {
+  for (const root of worktrees) {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 function write(path: string, content = ''): void {
   mkdirSync(dirname(path), { recursive: true });
@@ -113,6 +129,7 @@ describe('manifest repository context provider', () => {
 
   it.each([
     ['malformed JSON', '{'],
+    ['unsupported manifest version', manifest({ version: 2 })],
     ['unknown top-level field', manifest({ extra: true })],
     ['missing required field', JSON.stringify({ version: 1, rules: [] })],
     [
@@ -297,15 +314,17 @@ describe('manifest repository context provider', () => {
   });
 
   // A backslash is a path separator on Windows, so the POSIX-only filename
-  // shape this guards against cannot exist there.
+  // shapes this guards against cannot exist there.
   it.skipIf(process.platform === 'win32')(
     'skips related files with POSIX-legal unsafe name bytes',
     () => {
-      // A backslash is a legal filename byte on POSIX; such a file must be
-      // skipped rather than failing validation for the whole review.
+      // A backslash and a control character are legal filename bytes on
+      // POSIX; such files must be skipped rather than failing validation
+      // for the whole review.
       const worktree = temp();
       write(join(worktree, 'src', 'safe.ts'));
       write(join(worktree, 'src', 'foo\\bar.ts'));
+      write(join(worktree, 'src', 'foo\u0001bar.ts'));
       const context = provide(
         worktree,
         ['src/change.ts'],
@@ -598,7 +617,7 @@ describe('manifest repository context provider', () => {
           ],
         }),
       ),
-    ).toThrow('scan exceeds limit');
+    ).toThrow('matching work exceeds limit');
   }, 30_000);
 
   it('expands static related paths as their own files', () => {
@@ -713,4 +732,281 @@ describe('manifest repository context provider', () => {
       'src/z.ts',
     ]);
   });
+
+  it('fails closed before parsing an oversized manifest', () => {
+    // The size ceiling sits BEFORE JSON.parse: an attacker-committed
+    // manifest near the push size limits must not drive the parser's
+    // memory to the heap ceiling just to reach the bounded-array
+    // rejection.
+    expect(() =>
+      provide(temp(), ['src/change.ts'], 'x'.repeat(MAX_IDENTITY_BYTES + 1)),
+    ).toThrow('exceeds the size limit');
+  });
+
+  it('merges fields only from rules whose paths matched', () => {
+    // A rule scoped to another tree must not attach its fields to a review
+    // it does not match: `matched.flatMap` rewritten to
+    // `manifest.rules.flatMap` inflates every context with every rule and
+    // must turn red here.
+    const worktree = temp();
+    write(join(worktree, 'docs', 'note.md'));
+    const content = manifest({
+      rules: [
+        { paths: ['docs/**'], domains: ['docs-domain'] },
+        {
+          paths: ['tools/**'],
+          domains: ['tools-domain'],
+          requiredAgents: ['test-matrix'],
+          verificationNotes: ['tools note'],
+        },
+      ],
+    });
+    const context = provide(worktree, ['docs/note.md'], content);
+    expect(context?.domains).toEqual(['docs-domain']);
+    expect(context?.requiredAgents).toEqual([]);
+    expect(context?.verificationNotes).toEqual([]);
+  });
+
+  it('enforces the skip set case-insensitively', () => {
+    // A case-varied pattern or directory name walks into a skipped tree on
+    // every platform unless membership compares case-insensitively at both
+    // enforcement sites.
+    const worktree = temp();
+    expect(() =>
+      provide(
+        worktree,
+        ['src/change.ts'],
+        manifest({ rules: [{ paths: ['NODE_MODULES/**'] }] }),
+      ),
+    ).toThrow('paths enters a skipped directory');
+    expect(() =>
+      provide(
+        worktree,
+        ['src/change.ts'],
+        manifest({
+          rules: [{ paths: ['src/**'], relatedPaths: ['src/DIST/**'] }],
+        }),
+      ),
+    ).toThrow('relatedPaths enters a skipped directory');
+    write(join(worktree, 'src', 'keep.ts'));
+    write(join(worktree, 'src', 'NODE_MODULES', 'dep.js'));
+    expect(
+      provide(
+        worktree,
+        ['src/change.ts'],
+        manifest({
+          rules: [{ paths: ['src/**'], relatedPaths: ['src/**'] }],
+        }),
+      )?.relatedPaths,
+    ).toEqual(['src/keep.ts']);
+  });
+
+  it('skips a static related entry that is itself a symlink', () => {
+    // The scan-root lstat guard needs its own pin: the recursion-level
+    // dirent check never sees a symlink that IS the scan root.
+    const worktree = temp();
+    write(join(worktree, 'src', 'real.ts'));
+    symlinkSync('real.ts', join(worktree, 'src', 'link.ts'));
+    expect(
+      provide(
+        worktree,
+        ['src/change.ts'],
+        manifest({
+          rules: [{ paths: ['src/**'], relatedPaths: ['src/link.ts'] }],
+        }),
+      )?.relatedPaths,
+    ).toEqual([]);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'excludes files reached through a symlinked interior scan-root component',
+    () => {
+      // The scan-root lstat guard inspects only the FINAL component; the
+      // containment check is the only defense against an escaping symlink
+      // MID-path. A head that swaps a base rule's directory for such a link
+      // would otherwise leak outside files into every reviewer prompt.
+      const root = temp();
+      const worktree = join(root, 'worktree');
+      const outside = join(root, 'outside');
+      write(join(outside, 'v2', 'secret.ts'));
+      mkdirSync(join(worktree, 'docs'), { recursive: true });
+      symlinkSync(outside, join(worktree, 'docs', 'api'));
+      expect(
+        provide(
+          worktree,
+          ['src/change.ts'],
+          manifest({
+            rules: [
+              {
+                paths: ['src/**'],
+                relatedPaths: ['docs/api/v2/**', 'docs/api/v2/secret.ts'],
+              },
+            ],
+          }),
+        )?.relatedPaths,
+      ).toEqual([]);
+    },
+  );
+
+  it('still scans names the skip set deliberately excludes', () => {
+    // The per-member tests pin the set in the SHRINK direction only; this
+    // pins that a name outside it stays scannable, or a perf-motivated
+    // addition rejects legal manifests with every suite green.
+    const worktree = temp();
+    write(join(worktree, 'build', 'gen.ts'));
+    expect(
+      provide(
+        worktree,
+        ['src/change.ts'],
+        manifest({
+          rules: [{ paths: ['src/**'], relatedPaths: ['build/**'] }],
+        }),
+      )?.relatedPaths,
+    ).toEqual(['build/gen.ts']);
+  });
+
+  it('dedupes identical scan roots before charging the scan bound', () => {
+    // Two patterns sharing one static prefix scan the shared root ONCE; a
+    // dedupe regression visits it per pattern and fails a legal manifest
+    // closed at half the tree.
+    const worktree = temp();
+    const source = join(worktree, 'src');
+    mkdirSync(source);
+    for (let index = 0; index < MAX_GLOB_CANDIDATES / 2 + 1; index++) {
+      mkdirSync(join(source, `d-${String(index).padStart(5, '0')}`));
+    }
+    writeFileSync(join(source, 'keep.ts'), '');
+    expect(
+      provide(
+        worktree,
+        ['src/change.ts'],
+        manifest({
+          rules: [{ paths: ['src/**'], relatedPaths: ['src/**', 'src/*.ts'] }],
+        }),
+      )?.relatedPaths,
+    ).toEqual(['src/keep.ts']);
+  }, 30_000);
+
+  it('keeps sibling scan roots when one string-prefixes the other', () => {
+    // The subsumption filter's trailing-`/` boundary: without it `src`
+    // string-prefix-matches `sr` and every related file under it is
+    // silently dropped.
+    const worktree = temp();
+    write(join(worktree, 'sr', 'a.ts'));
+    write(join(worktree, 'src', 'b.ts'));
+    expect(
+      provide(
+        worktree,
+        ['src/change.ts'],
+        manifest({
+          rules: [{ paths: ['src/**'], relatedPaths: ['sr/**', 'src/**'] }],
+        }),
+      )?.relatedPaths,
+    ).toEqual(['sr/a.ts', 'src/b.ts']);
+  });
+
+  it('fails closed when rule-filter matching work exceeds the budget', () => {
+    // The filter bills the same length-based budget the expansion does: a
+    // bulk change set crossed with schema-legal `paths` globs must fail
+    // closed in this sibling stage too instead of stalling the step.
+    const changed = Array.from(
+      { length: 1024 },
+      (_, index) =>
+        `src/${'c'.repeat(240)}${String(index).padStart(4, '0')}.ts`,
+    );
+    const paths = Array.from(
+      { length: 128 },
+      (_, index) =>
+        `src/${'p'.repeat(240)}${String(index).padStart(3, '0')}/**`,
+    );
+    expect(() =>
+      provide(temp(), changed, manifest({ rules: [{ paths }] })),
+    ).toThrow('paths matching work exceeds limit');
+  }, 30_000);
+
+  it('accepts matching work sitting exactly at the budget', () => {
+    // The reject side pins an over-budget shape; this accept pin charges
+    // exactly MAX_MATCH_WORK (pattern length x path length per attempt), so
+    // a billing-multiplier or budget-halving regression fails a shape the
+    // calibration admits. Every file misses every pattern, so the whole
+    // budget is charged and nothing matches.
+    const worktree = temp();
+    const source = join(worktree, 'src');
+    mkdirSync(source);
+    const fileCount = 1024;
+    for (let index = 0; index < fileCount; index++) {
+      writeFileSync(
+        join(source, `${'f'.repeat(53)}${String(index).padStart(4, '0')}.ts`),
+        '',
+      );
+    }
+    const patterns = Array.from(
+      { length: 128 },
+      (_, index) =>
+        `src/**/${'m'.repeat(118)}${String(index).padStart(3, '0')}`,
+    );
+    const pathLength = `src/${'f'.repeat(53)}0000.ts`.length;
+    expect(fileCount * patterns.length * pathLength * patterns[0].length).toBe(
+      MAX_MATCH_WORK,
+    );
+    expect(
+      provide(
+        worktree,
+        ['src/change.ts'],
+        manifest({
+          rules: [{ paths: ['src/**'], relatedPaths: patterns }],
+        }),
+      )?.relatedPaths,
+    ).toEqual([]);
+  }, 30_000);
+
+  it('expands related globs whose static prefix contains ?', () => {
+    // The prefix scanner must STOP at `?`: a break-condition regression
+    // makes the scan root the literal `src/a?c`, which does not exist, and
+    // the rule silently attaches nothing.
+    const worktree = temp();
+    write(join(worktree, 'src', 'a1c', 'x.ts'));
+    write(join(worktree, 'src', 'a2c', 'y.ts'));
+    expect(
+      provide(
+        worktree,
+        ['src/change.ts'],
+        manifest({
+          rules: [{ paths: ['src/**'], relatedPaths: ['src/a?c/**'] }],
+        }),
+      )?.relatedPaths,
+    ).toEqual(['src/a1c/x.ts', 'src/a2c/y.ts']);
+  });
+
+  // Permission-based failure injection is meaningless to root, and chmod(0)
+  // does not block reads on Windows — the repo convention for this case.
+  const isRoot = process.platform === 'win32' || process.getuid?.() === 0;
+
+  it.skipIf(isRoot)(
+    'fails closed when a scanned directory cannot be read',
+    () => {
+      // An unreadable subtree must fail the review closed, the way the
+      // identity reader does — silently omitting it degrades the scan into
+      // a complete-looking result with a hole in it.
+      const worktree = temp();
+      write(join(worktree, 'src', 'safe.ts'));
+      const locked = join(worktree, 'src', 'locked');
+      mkdirSync(locked);
+      writeFileSync(join(locked, 'inner.ts'), '');
+      chmodSync(locked, 0);
+      try {
+        expect(() =>
+          provide(
+            worktree,
+            ['src/change.ts'],
+            manifest({
+              rules: [{ paths: ['src/**'], relatedPaths: ['src/**'] }],
+            }),
+          ),
+        ).toThrow();
+      } finally {
+        chmodSync(locked, 0o755);
+      }
+    },
+  );
 });

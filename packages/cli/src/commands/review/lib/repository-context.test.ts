@@ -77,7 +77,8 @@ describe('repository context validation', () => {
     expect(() =>
       validateRepositoryContext({ ...valid, provider: '../provider' }),
     ).toThrow('provider is invalid');
-    // isControlFree rejects all of 0x00-0x1F, 0x7F-0x9F and U+2028/2029;
+    // isControlFree rejects all of 0x00-0x1F, 0x7F-0x9F, U+2028/2029, the
+    // bidi directional formatting block, and zero-width hiding characters;
     // probing range ends plus interior points pins the range, not a
     // four-separator regex (under which `label: 'X\r## heading'`
     // validates and CR-overwrites the rendered heading).
@@ -92,6 +93,15 @@ describe('repository context validation', () => {
       '\u009f',
       '\u2028',
       '\u2029',
+      '\u061c',
+      '\u200b',
+      '\u200e',
+      '\u200f',
+      '\u202a',
+      '\u202e',
+      '\u2066',
+      '\u2069',
+      '\ufeff',
     ]) {
       expect(() =>
         validateRepositoryContext({
@@ -257,6 +267,15 @@ describe('repository context validation', () => {
         '\u009f',
         '\u2028',
         '\u2029',
+        '\u061c',
+        '\u200b',
+        '\u200e',
+        '\u200f',
+        '\u202a',
+        '\u202e',
+        '\u2066',
+        '\u2069',
+        '\ufeff',
       ]) {
         expect(() =>
           validateRepositoryContext({
@@ -266,6 +285,27 @@ describe('repository context validation', () => {
         ).toThrow(`${field} is invalid`);
       }
     }
+  });
+
+  it('fails closed on non-string and empty values', () => {
+    // The string-type and non-empty gates fail closed today; pin them, or
+    // a future simplification ships green and `[object Object]` / `123` /
+    // empty entries flow into every reviewer prompt and the posted body.
+    expect(() => validateRepositoryContext({ ...valid, label: 123 })).toThrow(
+      'label is invalid',
+    );
+    expect(() => validateRepositoryContext({ ...valid, label: '' })).toThrow(
+      'label is invalid',
+    );
+    expect(() =>
+      validateRepositoryContext({ ...valid, domains: [123] }),
+    ).toThrow('domains is invalid');
+    expect(() =>
+      validateRepositoryContext({ ...valid, domains: [''] }),
+    ).toThrow('domains is invalid');
+    expect(() =>
+      validateRepositoryContext({ ...valid, verificationNotes: [null] }),
+    ).toThrow('verificationNotes is invalid');
   });
 
   it('rejects unsafe paths and roles that cannot join the initial roster', () => {

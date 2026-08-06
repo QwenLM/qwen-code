@@ -250,6 +250,29 @@ describe('requiredAgents — Step 3A', () => {
     expect(fanOut).toContain('1b');
   });
 
+  it('fails closed on a present-but-invalid repository context', () => {
+    // Full wire shape but version 2: the exact-keys check passes, the
+    // version gate throws. A try/catch-return-null wrapper around
+    // repositoryContextOf would silently drop every context-required role
+    // from the roster AND the coverage certification — certifying a run
+    // where the agents the repository required never launched.
+    const future = {
+      version: 2,
+      provider: 'fake-provider',
+      label: 'Example project',
+      domains: [],
+      relatedPaths: [],
+      recommendedTests: [],
+      requiredConfigurations: [],
+      requiredAgents: [],
+      unverifiedDimensions: [],
+      verificationNotes: [],
+    };
+    expect(() => keys({ ...PR, repositoryContext: future })).toThrow(
+      'unsupported repositoryContext version',
+    );
+  });
+
   it('keeps the generic roster when repository context is absent', () => {
     expect(keys(PR)).not.toContain('test-matrix');
   });

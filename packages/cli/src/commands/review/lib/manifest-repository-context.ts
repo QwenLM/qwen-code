@@ -17,6 +17,7 @@ import {
   isControlFree,
   isSafeRepositoryRelativePath,
   MAX_ARRAY_ITEMS,
+  MAX_IDENTITY_BYTES,
   MAX_LABEL_LENGTH,
   MAX_NOTE_LENGTH,
   MAX_PATH_LENGTH,
@@ -38,18 +39,21 @@ const MANIFEST_PATH = '.qwen/review-context.json';
  */
 export const MAX_GLOB_CANDIDATES = 16384;
 /**
- * Matching-work ceiling for one expansion. The visited-entry cap bounds a
+ * Matching-work ceiling for one stage. The visited-entry cap bounds a
  * COUNT; the per-candidate matching work is a separate dimension — one
- * memoised `**` match explores O(pattern segments x path segments) states,
- * and in an untrusted repository an attacker controls both factors within
- * their schema maxima. Every attempted pattern match charges that product
- * against this budget, so a matching burst fails closed with the scan limit
- * instead of stalling the step. Calibrated so a schema-max scan (every
- * visited entry tested against every pattern at realistic depths) stays far
- * below it, while a maximal-shape adversarial evaluation exhausts it within
- * the first few dozen candidates.
+ * memoised `**` match is quadratic in segment LENGTH, and in an untrusted
+ * repository an attacker controls both lengths within their schema maxima
+ * (255-byte filenames, 512-character patterns), so billing segment COUNTS
+ * never trips for a schema-legal stall shape. Every attempted pattern match
+ * therefore charges `pattern.length × path.length` against this budget, in
+ * the rule filter as well as the expansion, so a matching burst fails
+ * closed instead of stalling the step. Calibrated so the documented
+ * legitimate scan — every entry of an installed-checkout `packages/` tree
+ * against a handful of realistic globs — stays far below it, while a
+ * schema-max adversarial evaluation exhausts it within the first few dozen
+ * candidates.
  */
-const MAX_MATCH_WORK = MAX_GLOB_CANDIDATES * MAX_GLOB_CANDIDATES;
+export const MAX_MATCH_WORK = 1024 * 1024 * 1024;
 const MAX_RULES = 128;
 const MANIFEST_PREFIX = 'repository context manifest ';
 
@@ -58,6 +62,8 @@ const MANIFEST_PREFIX = 'repository context manifest ';
 // them would exhaust the visited-entry ceiling on every installed checkout.
 // Names tracked source must not live under in this repository's conventions
 // (a `build/` directory holds real scripts here) stay out of this set.
+// Membership is compared case-insensitively at every enforcement site, or a
+// case-varied pattern walks into a skipped tree on every platform.
 const SKIPPED_DIRECTORIES = new Set([
   '.git',
   '.next',
@@ -158,7 +164,9 @@ function validateGlob(pattern: string, field: string): void {
   // The never-descend invariant below is enforced for entries discovered
   // during recursion; a pattern rooted inside a skipped tree would bypass
   // it through the scan roots, so such patterns are rejected here too.
-  if (segments.some((segment) => SKIPPED_DIRECTORIES.has(segment))) {
+  if (
+    segments.some((segment) => SKIPPED_DIRECTORIES.has(segment.toLowerCase()))
+  ) {
     throw new Error(
       `repository context manifest ${field} enters a skipped directory`,
     );
@@ -197,6 +205,9 @@ function optionalStringArray(
 }
 
 function parseManifest(content: string): Manifest {
+  if (content.length > MAX_IDENTITY_BYTES) {
+    throw new Error('repository context manifest exceeds the size limit');
+  }
   let value: unknown;
   try {
     value = JSON.parse(content);
@@ -406,16 +417,15 @@ function expandRelatedPaths(
 ): string[] {
   const matches = new Set<string>();
   let candidates = 0;
-  const patternSegments = patterns.map((pattern) => pattern.split('/').length);
+  const patternLengths = patterns.map((pattern) => pattern.length);
   let matchWork = 0;
 
   const anyPatternMatches = (path: string): boolean => {
-    const pathSegmentCount = path.split('/').length;
     for (let index = 0; index < patterns.length; index++) {
-      matchWork += patternSegments[index] * pathSegmentCount;
+      matchWork += patternLengths[index] * path.length;
       if (matchWork > MAX_MATCH_WORK) {
         throw new Error(
-          'repository context manifest relatedPaths scan exceeds limit',
+          'repository context manifest relatedPaths matching work exceeds limit',
         );
       }
       if (globMatches(patterns[index], path)) return true;
@@ -452,7 +462,15 @@ function expandRelatedPaths(
       }
       entries = readdirSync(resolve(worktree, directory), {
         withFileTypes: true,
-      }).sort((left, right) => compareText(left.name, right.name));
+      });
+      // Bound the listing before sorting it, or an oversized directory pays
+      // the full read plus an O(n log n) sort before the cap can trip.
+      if (candidates + entries.length > MAX_GLOB_CANDIDATES) {
+        throw new Error(
+          'repository context manifest relatedPaths scan exceeds limit',
+        );
+      }
+      entries.sort((left, right) => compareText(left.name, right.name));
     } catch (error) {
       if (
         error instanceof Error &&
@@ -460,6 +478,12 @@ function expandRelatedPaths(
       ) {
         throw error;
       }
+      // A subtree that EXISTS but cannot be read fails the review closed,
+      // the way the identity reader does — silently skipping it would
+      // degrade the scan into a complete-looking result with a hole in it.
+      // Only a racing deletion still reads as "absent".
+      const code = (error as NodeJS.ErrnoException | null)?.code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') throw error;
       return;
     }
 
@@ -473,7 +497,7 @@ function expandRelatedPaths(
       if (entry.isSymbolicLink()) continue;
       const path = `${directory}/${entry.name}`;
       if (entry.isDirectory()) {
-        if (!SKIPPED_DIRECTORIES.has(entry.name)) visit(path);
+        if (!SKIPPED_DIRECTORIES.has(entry.name.toLowerCase())) visit(path);
         continue;
       }
       // Disk names can carry POSIX-legal bytes the wire format rejects (a
@@ -530,9 +554,22 @@ export const manifestRepositoryContextProvider: RepositoryContextProvider = {
     const content = input.readIdentityFile(MANIFEST_PATH);
     if (content === null) return null;
     const manifest = parseManifest(content);
+    // Nothing caps the changed-path count a bulk diff brings, so the filter
+    // charges the same budget the expansion does, with the same length-based
+    // billing — a matching burst must fail closed in this stage too instead
+    // of stalling the step.
+    let filterWork = 0;
     const matched = manifest.rules.filter((rule) =>
       input.changedPaths.some((path) =>
-        rule.paths.some((pattern) => globMatches(pattern, path)),
+        rule.paths.some((pattern) => {
+          filterWork += pattern.length * path.length;
+          if (filterWork > MAX_MATCH_WORK) {
+            throw new Error(
+              `${MANIFEST_PREFIX}paths matching work exceeds limit`,
+            );
+          }
+          return globMatches(pattern, path);
+        }),
       ),
     );
     if (matched.length === 0) return null;
