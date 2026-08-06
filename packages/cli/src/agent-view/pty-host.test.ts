@@ -71,6 +71,17 @@ describe('BoundedOutputRing', () => {
     expect(ring.toString()).not.toContain('\uFFFD');
     expect(ring.retainedBytes).toBeLessThanOrEqual(4);
   });
+
+  it('coalesces small chunks while preserving the byte cap', () => {
+    const ring = new BoundedOutputRing(1024 * 1024);
+
+    for (let index = 0; index < 10_000; index++) {
+      ring.append('x');
+    }
+
+    expect(ring.retainedBytes).toBe(10_000);
+    expect(ring.toString()).toBe('x'.repeat(10_000));
+  });
 });
 
 describe('PTY availability', () => {
@@ -136,7 +147,7 @@ describe('launchAgentViewPtyHost', () => {
           cwd: '/repo/work',
           cols: 100,
           rows: 30,
-          handleFlowControl: true,
+          handleFlowControl: false,
         }),
       },
     ]);
@@ -169,12 +180,16 @@ describe('launchAgentViewPtyHost', () => {
     handle.write(Buffer.from([0xe4, 0xbd]));
     handle.write(Buffer.from([0xa0, 0xe5, 0xa5, 0xbd]));
     handle.resize({ columns: 120, rows: 40 });
+    handle.pause?.();
+    handle.resume?.();
     pty.process.emitData('output');
     disposable?.dispose();
     pty.process.emitData('ignored');
 
     expect(pty.process.input).toBe('hello 你好');
     expect(pty.process.resizes).toEqual([{ columns: 120, rows: 40 }]);
+    expect(pty.process.pauses).toBe(1);
+    expect(pty.process.resumes).toBe(1);
     expect(data).toEqual(['output']);
   });
 
@@ -182,8 +197,10 @@ describe('launchAgentViewPtyHost', () => {
     const pty = createFakePty();
     const previousToken = process.env['QWEN_AGENT_VIEW_PTY_HOST_TOKEN'];
     const previousTerm = process.env['TERM'];
+    const previousMarker = process.env['QWEN_AGENT_VIEW_AMBIENT_MARKER'];
     process.env['QWEN_AGENT_VIEW_PTY_HOST_TOKEN'] = 'host-secret';
     process.env['TERM'] = 'ambient-term';
+    process.env['QWEN_AGENT_VIEW_AMBIENT_MARKER'] = 'ambient-value';
     try {
       await launchAgentViewPtyHost(createLaunch(), { pty });
     } finally {
@@ -197,11 +214,17 @@ describe('launchAgentViewPtyHost', () => {
       } else {
         process.env['TERM'] = previousTerm;
       }
+      if (previousMarker === undefined) {
+        delete process.env['QWEN_AGENT_VIEW_AMBIENT_MARKER'];
+      } else {
+        process.env['QWEN_AGENT_VIEW_AMBIENT_MARKER'] = previousMarker;
+      }
     }
 
     expect(pty.spawnCalls[0]?.options.env).toEqual(
       expect.objectContaining({
         QWEN_AGENT_VIEW_WORKER: '1',
+        QWEN_AGENT_VIEW_AMBIENT_MARKER: 'ambient-value',
         TERM: 'xterm-256color',
       }),
     );
@@ -218,6 +241,26 @@ describe('launchAgentViewPtyHost', () => {
 
     expect(pty.process.killedWith).toBeUndefined();
     expect(pty.process.killCalls).toEqual([undefined]);
+    await expect(handle.exited).resolves.toEqual({ exitCode: 1 });
+  });
+
+  it('gracefully shuts down the PTY process with SIGTERM', async () => {
+    const pty = createFakePty();
+    const handle = await launchAgentViewPtyHost(createLaunch(), { pty });
+
+    handle.shutdown?.();
+
+    expect(pty.process.killedWith).toBe('SIGTERM');
+  });
+
+  it('loads PTY through the configured loader', async () => {
+    const pty = createFakePty();
+    const handle = await launchAgentViewPtyHost(createLaunch(), {
+      loadPty: async () => pty,
+    });
+
+    expect(handle.workerPid).toBe(1234);
+    expect(pty.spawnCalls).toHaveLength(1);
   });
 
   it('throws a typed error when PTY is unavailable', async () => {
@@ -288,6 +331,8 @@ class FakePtyProcess implements AgentViewPtyProcess {
   resizes: Array<{ columns: number; rows: number }> = [];
   killedWith: string | undefined;
   killCalls: Array<string | undefined> = [];
+  pauses = 0;
+  resumes = 0;
 
   write(data: string): void {
     this.input += data;
@@ -322,6 +367,14 @@ class FakePtyProcess implements AgentViewPtyProcess {
 
   resize(columns: number, rows: number): void {
     this.resizes.push({ columns, rows });
+  }
+
+  pause(): void {
+    this.pauses += 1;
+  }
+
+  resume(): void {
+    this.resumes += 1;
   }
 
   emitData(data: string): void {

@@ -39,9 +39,11 @@ describe('AgentViewAttachLeaseManager', () => {
         sessionId: 'session-1',
       },
     });
-    expect(result.lease.leaseId).toMatch(
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
-    );
+    if (result.ok) {
+      expect(result.lease.leaseId).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      );
+    }
   });
 
   it('rejects a second acquire while a lease is active', () => {
@@ -59,7 +61,39 @@ describe('AgentViewAttachLeaseManager', () => {
     ).toEqual({
       ok: false,
       reason: 'already_attached',
-      lease: first.lease,
+      lease: {
+        sessionId: first.lease.sessionId,
+        acquiredAt: first.lease.acquiredAt,
+        lastHeartbeatAt: first.lease.lastHeartbeatAt,
+        expiresAt: first.lease.expiresAt,
+      },
+    });
+  });
+
+  it('does not disclose the active lease id on contested acquire', () => {
+    const manager = new AgentViewAttachLeaseManager({
+      createLeaseId: () => 'lease-1',
+    });
+    manager.acquire('session-1');
+
+    const result = manager.acquire('session-1', { leaseId: 'lease-2' });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect('leaseId' in result.lease).toBe(false);
+    }
+  });
+
+  it('generates a lease id when the provided id is empty', () => {
+    const manager = new AgentViewAttachLeaseManager({
+      createLeaseId: () => 'generated-lease',
+    });
+
+    expect(manager.acquire('session-1', { leaseId: '' })).toMatchObject({
+      ok: true,
+      lease: {
+        leaseId: 'generated-lease',
+      },
     });
   });
 

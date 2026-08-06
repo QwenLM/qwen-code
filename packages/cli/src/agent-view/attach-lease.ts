@@ -17,12 +17,17 @@ export interface AgentViewAttachLease {
   expiresAt: string;
 }
 
+export type AgentViewAttachLeaseConflict = Omit<
+  AgentViewAttachLease,
+  'leaseId'
+>;
+
 export type AgentViewAttachLeaseAcquireResult =
   | { ok: true; lease: AgentViewAttachLease }
   | {
       ok: false;
       reason: 'already_attached';
-      lease: AgentViewAttachLease;
+      lease: AgentViewAttachLeaseConflict;
     };
 
 export interface AgentViewAttachLeaseAcquireOptions {
@@ -66,14 +71,14 @@ export class AgentViewAttachLeaseManager {
       return {
         ok: false,
         reason: 'already_attached',
-        lease: existing,
+        lease: redactLeaseId(existing),
       };
     }
 
     const acquiredAt = this.now();
     const lease: AgentViewAttachLease = {
       sessionId,
-      leaseId: options.leaseId ?? this.createLeaseId(),
+      leaseId: options.leaseId || this.createLeaseId(),
       ...(options.clientId ? { clientId: options.clientId } : {}),
       acquiredAt: acquiredAt.toISOString(),
       lastHeartbeatAt: acquiredAt.toISOString(),
@@ -152,4 +157,16 @@ export class AgentViewAttachLeaseManager {
       throw new Error('Agent View session id is required.');
     }
   }
+}
+
+function redactLeaseId(
+  lease: AgentViewAttachLease,
+): AgentViewAttachLeaseConflict {
+  return {
+    sessionId: lease.sessionId,
+    ...(lease.clientId ? { clientId: lease.clientId } : {}),
+    acquiredAt: lease.acquiredAt,
+    lastHeartbeatAt: lease.lastHeartbeatAt,
+    expiresAt: lease.expiresAt,
+  };
 }

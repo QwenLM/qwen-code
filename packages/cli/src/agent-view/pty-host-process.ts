@@ -32,7 +32,7 @@ const HOST_READY_REQUEST_TIMEOUT_MS = 250;
 const REMOTE_HOST_EXIT_POLL_MS = 5000;
 const UNIX_SOCKET_PATH_LIMIT = 100;
 const MAX_PTY_HOST_REQUEST_LINE_BYTES = 1024 * 1024;
-const MAX_PTY_HOST_RESPONSE_LINE_BYTES = 2 * 1024 * 1024;
+const MAX_PTY_HOST_RESPONSE_LINE_BYTES = 4 * 1024 * 1024;
 const PTY_HOST_AUTH_TOKEN_ENV = 'QWEN_AGENT_VIEW_PTY_HOST_TOKEN';
 const ALLOWED_KILL_SIGNALS = new Set<NodeJS.Signals>([
   'SIGINT',
@@ -256,8 +256,9 @@ function createRemotePtyHostHandle({
       const allowedSignal = killSignalValue(signal);
       void callAgentViewPtyHost(socketPath, authToken, 'kill', {
         signal: allowedSignal,
-      }).catch(() => {});
-      child?.kill(allowedSignal);
+      }).catch(() => {
+        child?.kill(allowedSignal);
+      });
       if (!child) {
         exitTracker.resolve({ exitCode: 1 });
       }
@@ -276,7 +277,6 @@ function createRemotePtyHostHandle({
         child?.kill('SIGTERM');
       });
       attachSocket?.destroy();
-      child?.kill('SIGTERM');
       exitTracker.resolve({ exitCode: 1 });
     },
   };
@@ -481,6 +481,9 @@ async function requestAgentViewPtyHost(
       }
     });
     socket.on('error', (error) => finish(undefined, error));
+    socket.on('close', () => {
+      finish(undefined, new Error('Agent View PTY host connection closed.'));
+    });
   });
 }
 
@@ -710,6 +713,7 @@ async function waitForSpawnedPtyHost(
     const cleanup = () => {
       abortController.abort();
       child.off('exit', onExit);
+      child.off('error', onError);
     };
     const finishResolve = (value: { pid: number; workerPid: number }) => {
       if (settled) return;
@@ -729,7 +733,11 @@ async function waitForSpawnedPtyHost(
         new Error(`Agent View PTY host exited before ready (${suffix}).`),
       );
     };
+    const onError = (error: Error) => {
+      finishReject(error);
+    };
     child.once('exit', onExit);
+    child.once('error', onError);
     void waitForPtyHost(socketPath, HOST_READY_RETRIES, authToken, {
       requestTimeoutMs: HOST_READY_REQUEST_TIMEOUT_MS,
       signal: abortController.signal,
