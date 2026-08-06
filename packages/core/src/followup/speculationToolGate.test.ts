@@ -176,7 +176,7 @@ describe('speculationToolGate', () => {
       it('hits boundary for read-only git when cwd config executes programs', async () => {
         const result = await evaluateToolCall(
           ToolNames.SHELL,
-          { command: 'git diff' },
+          { command: 'git diff', directory: '' },
           overlayFs,
           ApprovalMode.DEFAULT,
           dirtyRepo,

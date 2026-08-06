@@ -76,7 +76,7 @@ interface ConfigEntry {
   subsection: string | null;
   /** Lowercased key name. */
   key: string;
-  /** Raw value text (quotes and continuation marker left intact). */
+  /** Raw value text (quotes left intact). */
   value: string;
 }
 
@@ -85,16 +85,53 @@ const SECTION_HEADER = /^([A-Za-z0-9.-]+)(?:\s+"((?:[^"\\]|\\.)*)")?\s*$/;
 /**
  * Minimal git config parser: enough to identify section/key pairs and raw
  * values. Understands `[section]` and `[section "subsection"]` headers,
- * `key = value` lines, and `#` / `;` comments. Does not resolve includes —
- * an attacker who can write an include target can write `.git/config`
- * directly, so includes add no attack surface beyond a direct write.
+ * `key = value` lines, continuations, and `#` / `;` comments. Does not
+ * resolve includes — an attacker who can write an include target can write
+ * `.git/config` directly, so includes add no attack surface beyond a direct
+ * write.
  */
 function parseGitConfig(content: string): ConfigEntry[] {
   const entries: ConfigEntry[] = [];
   let section = '';
   let subsection: string | null = null;
+  const lines: string[] = [];
+  let continued = '';
 
   for (const rawLine of content.split(/\r?\n/)) {
+    const line = continued + rawLine;
+    let quoted = false;
+    let escaped = false;
+    let comment = line.length;
+    for (let i = 0; i < line.length; i++) {
+      const char = line[i]!;
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '"') {
+        quoted = !quoted;
+      } else if (!quoted && (char === '#' || char === ';')) {
+        comment = i;
+        break;
+      }
+    }
+    const logicalContent = line.slice(0, comment);
+    let trailingBackslashes = 0;
+    while (
+      logicalContent[logicalContent.length - 1 - trailingBackslashes] === '\\'
+    ) {
+      trailingBackslashes++;
+    }
+    if (trailingBackslashes % 2 === 1) {
+      continued = logicalContent.slice(0, -1);
+    } else {
+      lines.push(logicalContent);
+      continued = '';
+    }
+  }
+  if (continued) lines.push(continued);
+
+  for (const rawLine of lines) {
     const line = rawLine.trim();
     if (!line || line.startsWith('#') || line.startsWith(';')) continue;
 
@@ -169,6 +206,23 @@ function entriesMayExecutePrograms(entries: ConfigEntry[]): boolean {
   return false;
 }
 
+function worktreeConfigEnabled(entries: ConfigEntry[]): boolean {
+  let enabled = false;
+  for (const entry of entries) {
+    if (
+      entry.section === 'extensions' &&
+      entry.subsection === null &&
+      entry.key === 'worktreeconfig'
+    ) {
+      const value = normalizeValue(entry.value);
+      // Git also accepts hexadecimal integers and k/m/g suffixes. Treat
+      // anything except its definite false forms as enabled (fail closed).
+      enabled = !/^(?:false|no|off|[+-]?(?:0+|0x0+)[kmg]?)$/i.test(value);
+    }
+  }
+  return enabled;
+}
+
 /**
  * Locate the repository-local config files for the repo enclosing `cwd`:
  *
@@ -210,20 +264,18 @@ function findLocalGitConfigFiles(cwd: string): string[] {
         const match = pointer.match(/^\s*gitdir:\s*(.+?)\s*$/m);
         if (!match) return [];
         const gitDir = path.resolve(dir, match[1]!);
-        const files = [
-          path.join(gitDir, 'config'),
-          path.join(gitDir, 'config.worktree'),
-        ];
+        const files = [path.join(gitDir, 'config')];
         try {
           const commonDir = fs
             .readFileSync(path.join(gitDir, 'commondir'), 'utf8')
             .trim();
           if (commonDir) {
-            files.push(path.join(path.resolve(gitDir, commonDir), 'config'));
+            files[0] = path.join(path.resolve(gitDir, commonDir), 'config');
           }
         } catch {
           // Submodule git dir (no commondir) — the two paths above suffice.
         }
+        files.push(path.join(gitDir, 'config.worktree'));
         return files;
       }
     }
@@ -249,7 +301,9 @@ export function gitConfigMayExecutePrograms(cwd: string | undefined): boolean {
   if (!cwd) return false;
 
   try {
+    let readWorktreeConfig = false;
     for (const file of findLocalGitConfigFiles(cwd)) {
+      if (file.endsWith('config.worktree') && !readWorktreeConfig) continue;
       let content: string;
       try {
         content = fs.readFileSync(file, 'utf8');
@@ -258,7 +312,9 @@ export function gitConfigMayExecutePrograms(cwd: string | undefined): boolean {
         if (code === 'ENOENT' || code === 'ENOTDIR') continue;
         return true; // exists but unreadable — fail closed
       }
-      if (entriesMayExecutePrograms(parseGitConfig(content))) return true;
+      const entries = parseGitConfig(content);
+      if (entriesMayExecutePrograms(entries)) return true;
+      readWorktreeConfig ||= worktreeConfigEnabled(entries);
     }
     return false;
   } catch {

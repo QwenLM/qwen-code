@@ -126,7 +126,10 @@ describe('gitConfigMayExecutePrograms', () => {
   });
 
   it('reads config.worktree of the main checkout (extensions.worktreeConfig)', () => {
-    const repo = makeRepo('wtcfg', '[core]\n\tbare = false\n');
+    const repo = makeRepo(
+      'wtcfg',
+      '[extensions]\n\tworktreeConfig = false # ignored\\\n\tworktreeConfig = 0x\\\n1k # enabled\n',
+    );
     fs.writeFileSync(
       path.join(repo, '.git', 'config.worktree'),
       '[diff]\n\texternal = /tmp/evil\n',
@@ -134,9 +137,24 @@ describe('gitConfigMayExecutePrograms', () => {
     expect(gitConfigMayExecutePrograms(repo)).toBe(true);
   });
 
+  it('ignores config.worktree unless worktreeConfig is enabled', () => {
+    const repo = makeRepo(
+      'disabled-worktree-config',
+      '[extensions]\n\tworktreeConfig = 0x0k\n',
+    );
+    fs.writeFileSync(
+      path.join(repo, '.git', 'config.worktree'),
+      '[diff]\n\texternal = /tmp/evil\n',
+    );
+    expect(gitConfigMayExecutePrograms(repo)).toBe(false);
+  });
+
   describe('linked worktrees and submodules', () => {
     it('reads config.worktree and the common config via the .git file', () => {
-      const main = makeRepo('main-repo', '[core]\n\tbare = false\n');
+      const main = makeRepo(
+        'main-repo',
+        '[core]\n\tbare = false\n[extensions]\n\tworktreeConfig = true\n',
+      );
       const commonGitDir = path.join(main, '.git');
 
       // Linked worktree: <wt>/.git is a file pointing into
