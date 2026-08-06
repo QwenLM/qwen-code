@@ -1322,14 +1322,6 @@ function foldFindings(
 }
 
 /**
- * Write the findings list a findings-role launch is built from and return the
- * path the printed block points at — one file per (role, round, digest), so
- * every block of an --all-chunks round points at the SAME list. An empty list
- * gets no file: the inline "nothing is confirmed yet" note carries it. Null
- * on a failed write: findingsSection then inlines the list instead.
- */
-
-/**
  * The round suffix baked into every findings-role record key and findings
  * file name. Spelled once here and shared by `runAllChunks`, the single
  * build, and `findingsFileFor` — three sites deriving it independently
@@ -1340,6 +1332,13 @@ function roundPartOf(round: number | undefined): string {
   return round !== undefined ? `--round-${round}` : '';
 }
 
+/**
+ * Write the findings list a findings-role launch is built from and return the
+ * path the printed block points at — one file per (role, round, digest), so
+ * every block of an --all-chunks round points at the SAME list. An empty list
+ * gets no file: the inline "nothing is confirmed yet" note carries it. Null
+ * on a failed write: findingsSection then inlines the list instead.
+ */
 function findingsFileFor(
   planPath: string,
   role: RoleId,

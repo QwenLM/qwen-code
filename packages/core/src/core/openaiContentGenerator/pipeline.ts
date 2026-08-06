@@ -837,7 +837,9 @@ export class ContentGenerationPipeline {
             : 'OpenAI stream inactivity timeout',
           {
             chunksReceived: error.chunksReceived,
-            streamLifetimeMs: error.streamLifetimeMs,
+            // Wall clock, labelled apart from the cap so the two numbers in
+            // the log reconcile the same way the error message does.
+            wallClockMs: error.streamLifetimeMs,
             ...(isLifetime
               ? {
                   maxLifetimeMs: (error as StreamLifetimeExceededError)
