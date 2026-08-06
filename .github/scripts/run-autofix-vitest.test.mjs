@@ -1,0 +1,131 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import test from 'node:test';
+
+const config = readFileSync(
+  new URL('./autofix-vitest.config.mjs', import.meta.url),
+  'utf8',
+);
+const launcher = readFileSync(
+  new URL('./autofix-cli-launcher.mjs', import.meta.url),
+  'utf8',
+);
+const wrapper = readFileSync(
+  new URL('./run-autofix-vitest.sh', import.meta.url),
+  'utf8',
+);
+const worktree = readFileSync(
+  new URL('./prepare-autofix-verification-worktree.sh', import.meta.url),
+  'utf8',
+);
+
+test('keeps candidate code outside the trusted Vitest worker', () => {
+  assert.match(config, /pool: 'forks'/);
+  assert.match(config, /singleFork: true/);
+  assert.doesNotMatch(config, /execArgv|globalSetup|@qwen-code\/sdk/);
+  // Without this Vitest's 5 s default applies, which would fail any future
+  // allowlisted case that does not declare its own timeout.
+  assert.match(config, /testTimeout: 5 \* 60 \* 1000/);
+  assert.match(wrapper, /TEST_CLI_PATH="\$\{launcher\}"/);
+  assert.ok(
+    wrapper.includes(
+      `[[ "\${test_file}" != /* && "\${test_file}" != *$'\\n'* && "\${test_file}" != *'..'* ]]`,
+    ),
+  );
+  assert.match(wrapper, /^cd "\$\{workspace\}"$/m);
+  assert.ok(
+    wrapper.indexOf('cd "${workspace}"') <
+      wrapper.indexOf('npx --no-install vitest run'),
+  );
+  assert.match(
+    wrapper,
+    /AUTOFIX_CANDIDATE_CLI="\$\{workspace\}\/dist\/cli\.js"/,
+  );
+  assert.match(launcher, /process\.getuid\(\) === 0/);
+  assert.match(launcher, /process\.setgroups\(\[\]\)/);
+  assert.ok(
+    launcher.indexOf('process.setgroups([])') <
+      launcher.indexOf('process.setgid(gid)'),
+  );
+  assert.ok(
+    launcher.indexOf('process.setgid(gid)') <
+      launcher.indexOf('process.setuid(uid)'),
+  );
+  assert.ok(
+    launcher.indexOf('process.setuid(uid)') <
+      launcher.indexOf('await import(candidateCli)'),
+  );
+  assert.match(launcher, /running as an unexpected user/);
+  assert.match(launcher, /typeof candidate\.runCliEntryPoint !== 'function'/);
+  assert.match(launcher, /await candidate\.runCliEntryPoint\(\)/);
+  assert.ok(
+    launcher.indexOf('await import(candidateCli)') <
+      launcher.indexOf('await candidate.runCliEntryPoint()'),
+  );
+});
+
+test('keeps the JSON proof root-owned and kills all candidate processes', () => {
+  // Recursive: useradd --create-home leaves /etc/skel copies owned by the
+  // verify user; the whole home must be root-owned before the downgrade.
+  assert.match(worktree, /sudo chown -R root:root "\$\{home\}"/);
+  assert.ok(
+    worktree.indexOf('sudo chown -R root:root "${home}"') <
+      worktree.indexOf('sudo install -d -o root -g root -m 0711'),
+  );
+  assert.match(worktree, /install -d -o root -g root -m 0700/);
+  assert.match(
+    wrapper,
+    /expected_report="\$\{5:\?expected report path is required\}"/,
+  );
+  assert.match(wrapper, /vitest report path disagreement/);
+  // Anchor existence independently: an indexOf ordering check alone stays
+  // green (-1 < anything) when the assignment is deleted.
+  assert.match(
+    wrapper,
+    /report="\$\{home\}\/reports\/\$\{report_name\}\/report\.json"/,
+  );
+  assert.ok(
+    wrapper.indexOf('report="${home}/reports/${report_name}/report.json"') <
+      wrapper.indexOf('vitest report path disagreement'),
+  );
+  assert.match(worktree, /id -u "\$\{user\}" > \/dev\/null 2>&1 \|\|/);
+  assert.match(wrapper, /sudo chown "root:\$\{user\}" "\$\{run_home\}"/);
+  assert.match(wrapper, /sudo chmod 0770 "\$\{run_home\}"/);
+  assert.match(wrapper, /sudo install -d -o root -g "\$\{user\}" -m 0770/);
+  assert.match(wrapper, /setsid sudo --/);
+  assert.match(wrapper, /setpriv --no-new-privs/);
+  assert.match(wrapper, /--bounding-set=-dac_override,-dac_read_search/);
+  assert.match(wrapper, /Do not "fix" this by adding --reuid/);
+  assert.match(wrapper, /coordinator_pid="\$\{command_pid\}"/);
+  assert.match(wrapper, /sudo kill -KILL -- "-\$\{coordinator_pid\}"/);
+  assert.doesNotMatch(wrapper, /coordinator\.pid/);
+  assert.match(wrapper, /AUTOFIX_VERIFY_UID="\$\{uid\}"/);
+  assert.match(wrapper, /sudo pgrep -u "\$\{uid\}"/);
+  assert.match(wrapper, /sudo pkill -TERM -u "\$\{uid\}"/);
+  assert.match(wrapper, /sudo pkill -KILL -u "\$\{uid\}"/);
+  assert.ok(
+    wrapper.indexOf('sudo pkill -TERM -u "${uid}"') <
+      wrapper.indexOf('sudo pkill -KILL -u "${uid}"'),
+  );
+  assert.match(wrapper, /sudo chown root:root "\$\{report\}"/);
+  assert.match(wrapper, /sudo chmod 0444 "\$\{report\}"/);
+  // The proof check must run privileged BEFORE the downgrade: the report
+  // directory is 0700 root:root, so an unprivileged [[ -f ]] stats EACCES
+  // and every passing run would abort via the EXIT trap.
+  assert.match(wrapper, /sudo test -f "\$\{report\}"/);
+  assert.match(wrapper, /sudo test ! -L "\$\{report\}"/);
+  assert.ok(
+    wrapper.indexOf('sudo test -f "${report}"') <
+      wrapper.indexOf('sudo chown root:root "${report}"'),
+  );
+  assert.ok(
+    wrapper.indexOf('sudo test ! -L "${report}"') <
+      wrapper.indexOf('sudo chown root:root "${report}"'),
+  );
+  assert.match(
+    wrapper,
+    /sudo chmod 0555 "\$\{home\}\/reports\/\$\{report_name\}"/,
+  );
+  assert.doesNotMatch(wrapper, /GITHUB_TOKEN|CI_DEV_BOT_PAT|GITHUB_OUTPUT/);
+  assert.match(wrapper, /env -i \\/);
+});

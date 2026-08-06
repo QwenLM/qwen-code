@@ -1,0 +1,247 @@
+#!/usr/bin/env node
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+function fail(message) {
+  throw new Error(message);
+}
+
+function parseArgs(argv) {
+  const options = {};
+  for (let index = 0; index < argv.length; index += 2) {
+    const key = argv[index];
+    const value = argv[index + 1];
+    if (!key?.startsWith('--') || value === undefined)
+      fail('Invalid arguments');
+    options[key.slice(2)] = value;
+  }
+  return options;
+}
+
+function ghJson(endpoint) {
+  return JSON.parse(
+    execFileSync('gh', ['api', endpoint], {
+      encoding: 'utf8',
+      maxBuffer: 10 * 1024 * 1024,
+    }),
+  );
+}
+
+// The producer workflow is the only trusted uploader of targeted E2E
+// metadata; scoping enumeration to its runs keeps the working set bounded
+// instead of slurping the repository's entire artifact listing (a
+// repo-wide --paginate --slurp grows unbounded and exhausts maxBuffer).
+const PRODUCER_WORKFLOW_FILE = 'main-ci-failure-issue.yml';
+// The producer uploads artifacts with retention-days: 30, while workflow
+// runs stay listable for ~90 days. Runs older than the retention window
+// (plus margin) cannot hold live artifacts, so enumeration stops there
+// instead of issuing one artifacts API call per stale run.
+const PRODUCER_ARTIFACT_RETENTION_DAYS = 30;
+const PRODUCER_RUN_LOOKBACK_DAYS = PRODUCER_ARTIFACT_RETENTION_DAYS + 5;
+
+export function validateMetadata(metadata, { issue, repository }) {
+  if (metadata?.schemaVersion !== 1) fail('Unsupported E2E metadata schema');
+  if (metadata?.kind !== 'main-e2e-failure') fail('Unexpected metadata kind');
+  if (metadata?.repository !== repository) fail('Metadata repository mismatch');
+  if (metadata?.issue !== issue) fail('Metadata issue mismatch');
+  if (metadata?.workflow !== 'E2E Tests') fail('Unexpected source workflow');
+  if (!Number.isInteger(metadata?.source?.runId) || metadata.source.runId <= 0)
+    fail('Invalid source run ID');
+  if (
+    !Number.isInteger(metadata?.source?.runAttempt) ||
+    metadata.source.runAttempt <= 0
+  )
+    fail('Invalid source run attempt');
+  if (!/^[0-9a-f]{40}$/.test(metadata?.source?.headSha ?? ''))
+    fail('Invalid source head SHA');
+  if (metadata?.source?.headBranch !== 'main')
+    fail('Source branch is not main');
+  if (metadata?.source?.event !== 'push') fail('Source event is not push');
+  if (metadata?.source?.conclusion !== 'failure')
+    fail('Source conclusion is not failure');
+  return metadata;
+}
+
+export function validateProducerRun(run) {
+  if (run?.path !== '.github/workflows/main-ci-failure-issue.yml')
+    fail('Metadata artifact was produced by an unexpected workflow');
+  if (run?.event !== 'workflow_run') fail('Unexpected metadata producer event');
+}
+
+export function validateSourceRun(run, metadata) {
+  if (run?.name !== 'E2E Tests') fail('Source run workflow mismatch');
+  if (run?.run_attempt !== metadata.source.runAttempt)
+    fail('Source run attempt mismatch');
+  if (run?.event !== 'push') fail('Source run event mismatch');
+  if (run?.head_branch !== 'main') fail('Source run branch mismatch');
+  if (run?.conclusion !== 'failure') fail('Source run conclusion mismatch');
+  if (run?.head_sha !== metadata.source.headSha)
+    fail('Source run SHA mismatch');
+}
+
+function positiveInteger(value, label) {
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number <= 0) fail(`Invalid ${label}`);
+  return number;
+}
+
+export function parseArtifactName(name, issue) {
+  const match = new RegExp(
+    `^autofix-e2e-failure-${issue}-([1-9][0-9]*)-([1-9][0-9]*)-([1-9][0-9]*)-([1-9][0-9]*)$`,
+  ).exec(name ?? '');
+  if (!match) fail('Invalid targeted E2E artifact name');
+  return {
+    sourceRunId: positiveInteger(match[1], 'artifact source run ID'),
+    sourceRunAttempt: positiveInteger(match[2], 'artifact source run attempt'),
+    producerRunId: positiveInteger(match[3], 'artifact producer run ID'),
+    producerRunAttempt: positiveInteger(
+      match[4],
+      'artifact producer run attempt',
+    ),
+  };
+}
+
+function readArtifactMetadata({ artifact, issue, repository, directory }) {
+  const artifactId = positiveInteger(artifact.id, 'artifact ID');
+  const archive = join(directory, `artifact-${artifactId}.zip`);
+  const zip = execFileSync(
+    'gh',
+    ['api', `repos/${repository}/actions/artifacts/${artifactId}/zip`],
+    { encoding: 'buffer', maxBuffer: 10 * 1024 * 1024 },
+  );
+  writeFileSync(archive, zip);
+  const entries = execFileSync('unzip', ['-Z1', archive], {
+    encoding: 'utf8',
+    maxBuffer: 1024 * 1024,
+  })
+    .split('\n')
+    .filter(Boolean);
+  if (entries.length !== 1 || entries[0] !== 'metadata.json')
+    fail('Targeted E2E artifact must contain only metadata.json');
+  const metadataText = execFileSync('unzip', ['-p', archive, 'metadata.json'], {
+    encoding: 'utf8',
+    maxBuffer: 1024 * 1024,
+  });
+  return validateMetadata(JSON.parse(metadataText), { issue, repository });
+}
+
+function listProducerArtifacts({ repository, artifactPrefix }) {
+  const artifacts = [];
+  const cutoff = Date.now() - PRODUCER_RUN_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
+  for (let page = 1; ; page += 1) {
+    const runs = ghJson(
+      `repos/${repository}/actions/workflows/${PRODUCER_WORKFLOW_FILE}/runs?per_page=100&page=${page}`,
+    );
+    const workflowRuns = runs?.workflow_runs ?? [];
+    let reachedCutoff = false;
+    for (const run of workflowRuns) {
+      const createdAt = Date.parse(run?.created_at ?? '');
+      // Runs arrive newest-first; once one is older than the retention
+      // window, every later run on this and following pages is too.
+      if (Number.isFinite(createdAt) && createdAt < cutoff) {
+        reachedCutoff = true;
+        break;
+      }
+      const runId = positiveInteger(run?.id, 'producer run ID');
+      const listing = ghJson(
+        `repos/${repository}/actions/runs/${runId}/artifacts?per_page=100`,
+      );
+      for (const artifact of listing?.artifacts ?? []) {
+        if (artifact.name?.startsWith(artifactPrefix) && !artifact.expired)
+          artifacts.push(artifact);
+      }
+    }
+    if (reachedCutoff) {
+      process.stderr.write(
+        `Stopped enumerating producer runs older than ${PRODUCER_RUN_LOOKBACK_DAYS} days (artifact retention is ${PRODUCER_ARTIFACT_RETENTION_DAYS} days).\n`,
+      );
+      break;
+    }
+    if (workflowRuns.length < 100) break;
+  }
+  return artifacts;
+}
+
+export function loadMetadata({ issue, repository, output }) {
+  const artifactPrefix = `autofix-e2e-failure-${issue}-`;
+  const artifacts = listProducerArtifacts({ repository, artifactPrefix });
+  if (!artifacts.length) fail(`No live artifact with prefix ${artifactPrefix}`);
+
+  const directory = mkdtempSync(join(tmpdir(), 'autofix-e2e-metadata-'));
+  try {
+    const trusted = [];
+    for (const artifact of artifacts) {
+      const producerRunId = positiveInteger(
+        artifact.workflow_run?.id,
+        'artifact producer run ID',
+      );
+      const producerRun = ghJson(
+        `repos/${repository}/actions/runs/${producerRunId}`,
+      );
+      try {
+        validateProducerRun(producerRun);
+      } catch (error) {
+        process.stderr.write(`Skipping artifact ${artifact.id}: ${error}\n`);
+        continue;
+      }
+      const name = parseArtifactName(artifact.name, issue);
+      if (producerRunId !== name.producerRunId)
+        fail('Artifact producer run ID mismatch');
+      const producerAttempt = ghJson(
+        `repos/${repository}/actions/runs/${producerRunId}/attempts/${name.producerRunAttempt}`,
+      );
+      validateProducerRun(producerAttempt);
+      const metadata = readArtifactMetadata({
+        artifact,
+        issue,
+        repository,
+        directory,
+      });
+      if (
+        metadata.source.runId !== name.sourceRunId ||
+        metadata.source.runAttempt !== name.sourceRunAttempt
+      ) {
+        fail('Artifact name does not match source metadata');
+      }
+      const sourceRun = ghJson(
+        `repos/${repository}/actions/runs/${metadata.source.runId}/attempts/${metadata.source.runAttempt}`,
+      );
+      validateSourceRun(sourceRun, metadata);
+      trusted.push({ metadata, name, artifactId: artifact.id });
+    }
+    trusted.sort(
+      (left, right) =>
+        right.metadata.source.runId - left.metadata.source.runId ||
+        right.metadata.source.runAttempt - left.metadata.source.runAttempt ||
+        right.name.producerRunId - left.name.producerRunId ||
+        right.name.producerRunAttempt - left.name.producerRunAttempt ||
+        right.artifactId - left.artifactId,
+    );
+    if (!trusted.length)
+      fail(`No trusted artifact with prefix ${artifactPrefix}`);
+    const metadata = trusted[0].metadata;
+    writeFileSync(output, `${JSON.stringify(metadata, null, 2)}\n`);
+    return metadata;
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const options = parseArgs(process.argv.slice(2));
+  const issue = Number(options.issue);
+  if (!Number.isInteger(issue) || issue <= 0) fail('Invalid issue number');
+  if (!options.repository || !options.output)
+    fail('Missing required arguments');
+  loadMetadata({
+    issue,
+    repository: options.repository,
+    output: options.output,
+  });
+  process.stdout.write(
+    `Loaded trusted targeted E2E metadata for issue #${issue}.\n`,
+  );
+}
