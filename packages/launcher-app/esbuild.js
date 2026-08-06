@@ -70,10 +70,16 @@ const nodeBuildOptions = {
   sourcesContent: false,
   external: ['electron'],
   logLevel: 'silent',
-  // Source is ESM and uses `import.meta.url`, but these bundles are emitted as
-  // CJS and run under Electron/Node (CJS). esbuild's CJS shim leaves
-  // `import.meta.url` undefined, which crashes `fileURLToPath` at load. Rebind
-  // it to a real file URL derived from the native CJS `__filename`.
+};
+
+// `main.ts` is ESM source using `import.meta.url`, but it is emitted as CJS and
+// run in the Electron main process. esbuild's CJS shim leaves `import.meta.url`
+// undefined, crashing `fileURLToPath` at load — so rebind it to a real file URL
+// from the native CJS `__filename`. MAIN ONLY: the preload runs in Electron's
+// sandbox, where `require('url')` is unavailable; injecting this banner there
+// throws before `contextBridge.exposeInMainWorld`, leaving `window.launcher`
+// undefined. The preload never uses `import.meta.url`, so it gets no banner.
+const mainImportMetaShim = {
   define: { 'import.meta.url': 'importMetaUrl' },
   banner: {
     js: "const importMetaUrl = require('url').pathToFileURL(__filename).href;",
@@ -83,6 +89,7 @@ const nodeBuildOptions = {
 async function main() {
   const mainCtx = await esbuild.context({
     ...nodeBuildOptions,
+    ...mainImportMetaShim,
     entryPoints: ['src/main/main.ts'],
     outfile: 'dist/main/main.cjs',
     plugins: [esbuildProblemMatcherPlugin],
