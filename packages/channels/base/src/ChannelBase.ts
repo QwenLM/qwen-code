@@ -20,6 +20,7 @@ import type {
   ChannelUserQuestion,
   DispatchMode,
   Envelope,
+  ObservedChannelContactGraph,
   ObservedChannelContactObservation,
   SanitizedToolCallEvent,
   SessionTarget,
@@ -229,6 +230,8 @@ export interface ChannelBaseOptions {
       channelName: string,
       observation: ObservedChannelContactObservation,
     ): void | Promise<void>;
+    /** Read persisted observations so adapters can hydrate label caches. */
+    list?(): ObservedChannelContactGraph;
   };
 }
 
@@ -4918,6 +4921,27 @@ export abstract class ChannelBase {
   }
 
   protected onObservedContact(_envelope: Envelope): void {}
+
+  /**
+   * Observations persisted for this channel, when a read path is configured.
+   * Adapters hydrate label caches from it after a restart so known labels are
+   * not reverted to raw IDs by the next initial write.
+   */
+  protected persistedObservedContacts():
+    | ObservedChannelContactGraph
+    | undefined {
+    const list = this.observedContacts?.list;
+    if (!list) return undefined;
+    try {
+      const graph = list();
+      return {
+        users: graph.users.filter((user) => user.channelName === this.name),
+        groups: graph.groups.filter((group) => group.channelName === this.name),
+      };
+    } catch {
+      return undefined;
+    }
+  }
 
   protected markPreflighted(envelope: Envelope): void {
     this.preflightedEnvelopes.add(envelope);
