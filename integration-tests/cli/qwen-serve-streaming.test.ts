@@ -9,7 +9,7 @@
  *
  * These tests fire real daemon prompts and observe the resulting SSE stream,
  * but the model side is backed by a local OpenAI-compatible fake server so
- * the suite can run without API keys. They cover three flows that unit tests
+ * the suite can run without API keys. They cover five flows that unit tests
  * can't fully exercise:
  *
  *   1. Real `qwen --acp` child crash → daemon publishes `session_died`,
@@ -24,11 +24,22 @@
  *   4. An admitted prompt keeps running with no SSE subscriber while the Todo
  *      Stop Guard performs its bounded continuations; a later subscriber
  *      replays each discrete status event.
+ *   5. A same-host ACP child reads text outside the workspace only after the
+ *      daemon permission request is approved, and never returns the content
+ *      after rejection.
  *
  */
 import { spawn, execSync, type ChildProcess } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import {
+  accessSync,
+  constants,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -51,6 +62,16 @@ const CLI_BIN =
 const TOKEN = 'streaming-integ-secret';
 const REPO_ROOT = path.resolve(__dirname, '../..');
 
+function isPathAtOrWithin(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return (
+    relative === '' ||
+    (relative !== '..' &&
+      !relative.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(relative))
+  );
+}
+
 // Windows: this suite shells out to `pgrep` / `kill -KILL` to simulate
 // child-process crashes for the SIGKILL → `session_died` test, and those
 // binaries are POSIX-only. A Windows-equivalent (`taskkill`) would need
@@ -72,13 +93,38 @@ const SKIP =
   );
 const describePOSIX = SKIP ? describe.skip : describe;
 
+function findExternalReadBase(): string | undefined {
+  if (SKIP) return undefined;
+  for (const candidate of [homedir(), '/var/tmp']) {
+    try {
+      const resolved = realpathSync(candidate);
+      accessSync(resolved, constants.W_OK);
+      if (
+        !isPathAtOrWithin(realpathSync('/tmp'), resolved) &&
+        !isPathAtOrWithin(realpathSync(REPO_ROOT), resolved)
+      ) {
+        return resolved;
+      }
+    } catch {
+      // Try the next candidate.
+    }
+  }
+  return undefined;
+}
+
+const externalReadBase = findExternalReadBase();
+
 let daemon: ChildProcess;
 let port = 0;
 let base = '';
 let client: DaemonClient;
 let fakeServer: FakeOpenAIServer;
 let homeDir = '';
+let externalReadDir = '';
 let pendingWritePath = '';
+let pendingReadPath = '';
+let pendingReadMarker = '';
+let pendingReadSentinel = '';
 
 beforeAll(async () => {
   if (SKIP) return;
@@ -119,9 +165,45 @@ beforeAll(async () => {
       };
     }
 
+    if (
+      pendingReadPath &&
+      pendingReadMarker &&
+      messages.includes(pendingReadMarker)
+    ) {
+      if (!hasToolResult) {
+        return {
+          toolCalls: [
+            fakeToolCall('read_file', {
+              file_path: pendingReadPath,
+            }),
+          ],
+        };
+      }
+
+      return {
+        content: messages.includes(pendingReadSentinel)
+          ? `external read observed: ${pendingReadSentinel}`
+          : 'external read content not observed',
+      };
+    }
+
     return { content: 'fake response complete' };
   });
   homeDir = mkdtempSync(path.join(tmpdir(), 'qwen-serve-streaming-home-'));
+  if (externalReadBase) {
+    let candidateDir = '';
+    try {
+      candidateDir = mkdtempSync(
+        path.join(externalReadBase, '.qwen-serve-external-read-'),
+      );
+      externalReadDir = realpathSync(candidateDir);
+    } catch {
+      if (candidateDir) {
+        rmSync(candidateDir, { recursive: true, force: true });
+      }
+      externalReadDir = '';
+    }
+  }
   const qwenHome = path.join(homeDir, '.qwen');
   mkdirSync(qwenHome, { recursive: true });
   writeFileSync(
@@ -164,6 +246,7 @@ beforeAll(async () => {
         ),
         HOME: homeDir,
         QWEN_HOME: path.join(homeDir, '.qwen'),
+        QWEN_ACP_LOCAL_READ_ROOTS: '',
         NO_PROXY: '127.0.0.1,localhost',
         no_proxy: '127.0.0.1,localhost',
         OPENAI_API_KEY: 'fake-key',
@@ -210,6 +293,9 @@ afterAll(async () => {
   await fakeServer?.close();
   if (homeDir) {
     rmSync(homeDir, { recursive: true, force: true });
+  }
+  if (externalReadDir) {
+    rmSync(externalReadDir, { recursive: true, force: true });
   }
 }, 15_000);
 
@@ -443,6 +529,152 @@ describePOSIX('qwen serve — multi-client first-responder permission', () => {
       pendingWritePath = '';
     }
   }, 90_000);
+});
+
+describePOSIX('qwen serve — same-host external text reads', () => {
+  async function runExternalRead(
+    decision: 'allow_once' | 'reject_once',
+  ): Promise<void> {
+    const suffix = `${decision}-${Date.now()}`;
+    const marker = `external-read-${suffix}`;
+    const sentinel = `external-read-sentinel-${suffix}`;
+    const externalPath = path.join(externalReadDir, 'outside-workspace.txt');
+    writeFileSync(externalPath, sentinel);
+    pendingReadPath = externalPath;
+    pendingReadMarker = marker;
+    pendingReadSentinel = sentinel;
+
+    const session = await client.createOrAttachSession({
+      workspaceCwd: REPO_ROOT,
+      sessionScope: 'thread',
+    });
+    await client.setSessionApprovalMode(session.sessionId, 'default');
+
+    const events: DaemonEvent[] = [];
+    const ac = new AbortController();
+    let promptId: string | undefined;
+    const subscriber = (async () => {
+      try {
+        for await (const event of sseFrames(session.sessionId, {
+          signal: ac.signal,
+        })) {
+          events.push(event);
+          const data = event.data as { promptId?: string } | undefined;
+          if (event.type === 'turn_complete' && data?.promptId === promptId) {
+            break;
+          }
+        }
+      } catch {
+        /* aborted */
+      }
+    })();
+    const findReadPermission = () =>
+      events.find((event) => {
+        if (event.type !== 'permission_request') return false;
+        const data = event.data as {
+          toolCall?: {
+            rawInput?: { file_path?: string };
+            _meta?: { toolName?: string };
+          };
+        };
+        return (
+          data.toolCall?._meta?.toolName === 'read_file' &&
+          data.toolCall.rawInput?.file_path === externalPath
+        );
+      });
+
+    const requestStart = fakeServer.requests.length;
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      const accepted = await client.promptNonBlocking(session.sessionId, {
+        prompt: [{ type: 'text', text: marker }],
+      });
+      expect('promptId' in accepted).toBe(true);
+      if (!('promptId' in accepted)) return;
+      promptId = accepted.promptId;
+
+      await expect.poll(findReadPermission, { timeout: 30_000 }).toBeDefined();
+      const permission = findReadPermission();
+      const permissionData = permission!.data as {
+        requestId: string;
+        options: Array<{ optionId: string; kind: string }>;
+      };
+      const optionId = permissionData.options.find(
+        (option) => option.kind === decision,
+      )?.optionId;
+      expect(optionId).toBeDefined();
+      expect(
+        await client.respondToPermission(permissionData.requestId, {
+          outcome: { outcome: 'selected', optionId: optionId! },
+        }),
+      ).toBe(true);
+
+      await expect
+        .poll(
+          () =>
+            events.some((event) => {
+              const data = event.data as { promptId?: string } | undefined;
+              return (
+                event.type === 'turn_complete' && data?.promptId === promptId
+              );
+            }),
+          { timeout: 30_000 },
+        )
+        .toBe(true);
+
+      const modelRequests = fakeServer.requests
+        .slice(requestStart)
+        .map((request) => JSON.stringify(request.body['messages'] ?? []))
+        .filter((messages) => messages.includes(marker));
+
+      const serializedEvents = JSON.stringify(events);
+      if (decision === 'allow_once') {
+        expect(modelRequests.length).toBeGreaterThanOrEqual(2);
+        expect(
+          modelRequests.some((messages) => messages.includes(sentinel)),
+        ).toBe(true);
+        expect(serializedEvents).toContain(
+          `external read observed: ${sentinel}`,
+        );
+      } else {
+        expect(modelRequests).toHaveLength(1);
+        expect(
+          modelRequests.every((messages) => !messages.includes(sentinel)),
+        ).toBe(true);
+        expect(
+          events.some((event) => {
+            if (event.type !== 'session_update') return false;
+            const data = event.data as {
+              update?: { sessionUpdate?: string; status?: string };
+            };
+            return (
+              data.update?.sessionUpdate === 'tool_call_update' &&
+              data.update.status === 'failed'
+            );
+          }),
+        ).toBe(true);
+        expect(serializedEvents).toContain('was canceled by the user.');
+        expect(serializedEvents).not.toContain(sentinel);
+      }
+    } finally {
+      await client.cancel(session.sessionId).catch(() => undefined);
+      ac.abort();
+      await subscriber;
+      await client.closeSession(session.sessionId).catch(() => undefined);
+      pendingReadPath = '';
+      pendingReadMarker = '';
+      pendingReadSentinel = '';
+      rmSync(externalPath, { force: true });
+    }
+  }
+
+  it('returns approved content and withholds rejected content', async (ctx) => {
+    if (!externalReadDir) {
+      ctx.skip('no writable fixture root outside the workspace and /tmp');
+    }
+    await runExternalRead('allow_once');
+    await runExternalRead('reject_once');
+  }, 150_000);
 });
 
 describePOSIX('qwen serve — Last-Event-ID resume', () => {

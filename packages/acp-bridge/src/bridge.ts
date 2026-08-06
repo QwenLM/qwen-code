@@ -2542,7 +2542,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   [PRIVATE_PARENT_CAPABILITY_META_KEY]: privateParentCapability,
                 },
                 clientCapabilities: {
-                  fs: { readTextFile: true, writeTextFile: true },
+                  fs: {
+                    readTextFile: opts.delegateReadTextFileToClient ?? true,
+                    writeTextFile: true,
+                  },
                 },
                 clientInfo: { name: 'qwen-serve-bridge', version: '0' },
               }),

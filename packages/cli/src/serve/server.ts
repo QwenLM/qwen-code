@@ -975,8 +975,9 @@ export function createServeApp(
       // Wire the production status provider so direct embeds / tests
       // that don't inject `deps.bridge` get daemon env + preflight cells.
       statusProvider,
-      // Wire the WorkspaceFileSystem adapter so ACP writeTextFile /
-      // readTextFile pick up trust / TOCTOU / audit.
+      delegateReadTextFileToClient: false,
+      // Final ACP text writes remain delegated through WorkspaceFileSystem.
+      // Unexpected delegated reads still fail closed at the WFS boundary.
       fileSystem: createBridgeFileSystemAdapter(fsFactory),
       // Reverse tool channel: answer the child's `client_mcp/message`
       // ext-method by reaching the WS connection that hosts the named server.

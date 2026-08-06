@@ -26,6 +26,7 @@ import type { FileSystemService } from '@qwen-code/qwen-code-core';
 import { AcpFileSystemService } from './filesystem.js';
 import type { AgentSideConnection } from '@agentclientprotocol/sdk';
 import { promises as fs } from 'node:fs';
+import type { Stats } from 'node:fs';
 import { realpath as fsRealpath } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -965,9 +966,10 @@ describe('AcpFileSystemService', () => {
       });
     });
 
-    it('uses fallback when readTextFile capability is disabled', async () => {
+    it('keeps writes delegated when readTextFile capability is disabled', async () => {
       const client = {
         readTextFile: vi.fn(),
+        writeTextFile: vi.fn().mockResolvedValue(undefined),
       } as unknown as AgentSideConnection;
 
       const fallback = createFallback();
@@ -987,21 +989,41 @@ describe('AcpFileSystemService', () => {
       );
 
       const signal = new AbortController().signal;
+      const stats = {} as Stats;
       const result = await svc.readTextFile({
         path: '/some/file.txt',
         line: 0,
+        limit: 7,
         maxOutputBytes: 2048,
         signal,
+        stats,
+        _meta: { request: 'same-host' },
       });
 
       expect(result).toEqual(fallbackResponse);
       expect(fallback.readTextFile).toHaveBeenCalledWith({
         path: '/some/file.txt',
         line: 0,
+        limit: 7,
         maxOutputBytes: 2048,
         signal,
+        stats,
+        _meta: { request: 'same-host' },
       });
       expect(client.readTextFile).not.toHaveBeenCalled();
+
+      const writeResult = await svc.writeTextFile({
+        path: '/some/file.txt',
+        content: 'updated content',
+      });
+
+      expect(writeResult).toEqual({ _meta: undefined });
+      expect(client.writeTextFile).toHaveBeenCalledWith({
+        path: '/some/file.txt',
+        content: 'updated content',
+        sessionId: 'session-3',
+      });
+      expect(fallback.writeTextFile).not.toHaveBeenCalled();
     });
   });
 
