@@ -10,7 +10,7 @@ import {
   type WebShellComposerTag,
   type WebShellCustomization,
 } from '../customization';
-import { I18nProvider } from '../i18n';
+import { I18nProvider, type WebShellLanguage } from '../i18n';
 import type {
   MobileComposerBackend,
   SlashMenuState,
@@ -270,11 +270,13 @@ function renderChatEditor(props: {
   disabled?: boolean;
   followupState?: UseDaemonFollowupSuggestionReturn['followupState'];
   customization?: WebShellCustomization;
+  language?: WebShellLanguage;
 }) {
   const {
     composerTags,
     pastedImages,
     customization,
+    language = 'en',
     renderComposerTagTooltip,
     onComposerTagClick,
     ...chatEditorProps
@@ -304,7 +306,7 @@ function renderChatEditor(props: {
             onComposerTagClick,
           }}
         >
-          <I18nProvider language="en">
+          <I18nProvider language={language}>
             <ChatEditor
               onSubmit={() => undefined}
               commands={[]}
@@ -1044,6 +1046,28 @@ describe('ChatEditor toolbar popovers', () => {
         '[data-web-shell-toolbar-popover] input[type="search"]',
       ),
     ).toBeNull();
+  });
+
+  it('localizes the approval-mode button accessible name', () => {
+    const english = renderChatEditor({
+      visibleToolbarActions: ['approvalMode'],
+      language: 'en',
+    });
+    const chinese = renderChatEditor({
+      visibleToolbarActions: ['approvalMode'],
+      language: 'zh-CN',
+    });
+
+    expect(
+      english
+        .querySelector('[data-web-shell-mode-button]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Approval mode');
+    expect(
+      chinese
+        .querySelector('[data-web-shell-mode-button]')
+        ?.getAttribute('aria-label'),
+    ).toBe('审批模式');
   });
 });
 

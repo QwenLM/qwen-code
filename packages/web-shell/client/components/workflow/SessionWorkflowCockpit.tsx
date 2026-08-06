@@ -10,6 +10,7 @@ import type {
   PermissionRequest,
   TodoItem,
 } from '../../adapters/types';
+import { useI18n } from '../../i18n';
 import { formatRuntime } from '../../utils/formatRuntime';
 import { ToolApproval } from '../messages/ToolApproval';
 import {
@@ -135,35 +136,35 @@ function agentToolStats(
     : undefined;
 }
 
-function statusLabel(status: PlanNodeStatus): string {
+function statusKey(status: PlanNodeStatus): string {
   switch (status) {
     case 'running':
-      return '运行中';
+      return 'workflow.status.running';
     case 'paused':
-      return '已暂停';
+      return 'workflow.status.paused';
     case 'completed':
-      return '已完成';
+      return 'workflow.status.completed';
     case 'blocked':
-      return '等待依赖';
+      return 'workflow.status.blocked';
     case 'in_progress':
-      return '处理中';
+      return 'workflow.status.inProgress';
     default:
-      return '待执行';
+      return 'workflow.status.ready';
   }
 }
 
-function taskStatusLabel(status: DaemonSessionAgentTaskStatus['status']) {
+function taskStatusKey(status: DaemonSessionAgentTaskStatus['status']) {
   switch (status) {
     case 'running':
-      return '运行中';
+      return 'workflow.status.running';
     case 'paused':
-      return '已暂停';
+      return 'workflow.status.paused';
     case 'completed':
-      return '已完成';
+      return 'workflow.status.completed';
     case 'failed':
-      return '失败';
+      return 'workflow.status.failed';
     default:
-      return '已取消';
+      return 'workflow.status.cancelled';
   }
 }
 
@@ -205,6 +206,7 @@ function PlanReview({
   SessionWorkflowCockpitProps,
   'sessionName' | 'goal' | 'onBackToChat'
 > & { approval: CockpitApproval }) {
+  const { t } = useI18n();
   const completedContextSteps = 2;
   const dependencyCount = approval.todos.reduce(
     (total, todo) => total + (todo.blockedBy?.length ?? 0),
@@ -226,16 +228,34 @@ function PlanReview({
         <main className={styles.reviewMain}>
           <section className={styles.reviewSteps}>
             <div className={styles.reviewStepsIntro}>
-              <div className={styles.reviewEyebrow}>PLAN &amp; REVIEW</div>
-              <strong>从目标到执行</strong>
-              <span>确认计划后才会退出 Plan Mode</span>
+              <div className={styles.reviewEyebrow}>
+                {t('workflow.planReview.title')}
+              </div>
+              <strong>{t('workflow.planReview.journeyTitle')}</strong>
+              <span>{t('workflow.planReview.journeyHint')}</span>
             </div>
             <div className={styles.reviewStepList}>
               {[
-                ['01', '描述目标', '目标已进入当前 Session'],
-                ['02', '确认理解', '模型已完成只读分析'],
-                ['03', '预览计划', '检查节点、依赖与并行关系'],
-                ['04', '授权并启动', '确认后才开始执行'],
+                [
+                  '01',
+                  t('workflow.planReview.stepGoal'),
+                  t('workflow.planReview.stepGoalCopy'),
+                ],
+                [
+                  '02',
+                  t('workflow.planReview.stepContext'),
+                  t('workflow.planReview.stepContextCopy'),
+                ],
+                [
+                  '03',
+                  t('workflow.planReview.stepPreview'),
+                  t('workflow.planReview.stepPreviewCopy'),
+                ],
+                [
+                  '04',
+                  t('workflow.planReview.stepAuthorize'),
+                  t('workflow.planReview.stepAuthorizeCopy'),
+                ],
               ].map(([number, title, copy], index) => (
                 <div
                   className={`${styles.reviewStep} ${
@@ -258,18 +278,20 @@ function PlanReview({
           </section>
           <div className={styles.reviewHeading}>
             <div>
-              <span>STEP 03 · EXECUTION GRAPH</span>
-              <h2>{sessionName || '当前协作任务'}</h2>
-              <p>{goal || '模型已生成结构化执行计划，请确认后继续。'}</p>
+              <span>{t('workflow.planReview.graphEyebrow')}</span>
+              <h2 title={sessionName}>
+                {sessionName || t('workflow.planReview.defaultTask')}
+              </h2>
+              <p>{goal || t('workflow.planReview.defaultGoal')}</p>
             </div>
             <div className={styles.planFacts}>
               <div>
                 <strong>{approval.todos.length}</strong>
-                <span>执行步骤</span>
+                <span>{t('workflow.planReview.executionSteps')}</span>
               </div>
               <div>
                 <strong>{dependencyCount}</strong>
-                <span>依赖关系</span>
+                <span>{t('workflow.planReview.dependencies')}</span>
               </div>
               <div>
                 <strong>
@@ -278,7 +300,7 @@ function PlanReview({
                       .length
                   }
                 </strong>
-                <span>可并行起点</span>
+                <span>{t('workflow.planReview.parallelStarts')}</span>
               </div>
             </div>
           </div>
@@ -288,15 +310,16 @@ function PlanReview({
             </section>
             <aside className={styles.permissionCard}>
               <div className={styles.permissionKicker}>
-                STEP 04 · GUARDRAILS
+                {t('workflow.planReview.guardrailsEyebrow')}
               </div>
-              <h3>确认边界并启动</h3>
-              <p>批准后，Agent 才能按照这个 revision 继续执行。</p>
+              <h3>{t('workflow.planReview.guardrailsTitle')}</h3>
+              <p>{t('workflow.planReview.guardrailsCopy')}</p>
               <ToolApproval
                 request={approval.request}
                 onConfirm={handleConfirm}
                 variant="inline"
                 keyboardActive
+                planTodos={approval.todos}
               />
             </aside>
           </div>
@@ -322,6 +345,7 @@ export function SessionWorkflowCockpit({
   onOpenSubagent,
   onOpenArtifact,
 }: SessionWorkflowCockpitProps) {
+  const { t } = useI18n();
   const [section, setSection] = useState<CockpitSection>('task');
   const [stageTab, setStageTab] = useState<StageTab>('work');
   const [selectedTodoId, setSelectedTodoId] = useState<string>();
@@ -422,18 +446,19 @@ export function SessionWorkflowCockpit({
   const attentionTool = attentionTodo
     ? toolsByTodo.get(attentionTodo.id)?.[0]
     : undefined;
-  const taskStatus =
+  const taskStatusI18nKey =
     progress === 100
-      ? '已完成'
+      ? 'workflow.task.completed'
       : activeAgents.length > 0 ||
           todos.some((todo) => {
             const status = states.get(todo.id)?.status;
             return status === 'running' || status === 'in_progress';
           })
-        ? '协作运行中'
+        ? 'workflow.task.running'
         : todos.length > 0
-          ? '等待执行'
-          : '等待计划';
+          ? 'workflow.task.waitingExecution'
+          : 'workflow.task.waitingPlan';
+  const taskStatus = t(taskStatusI18nKey);
   const activity = agents.slice().sort((a, b) => b.startTime - a.startTime);
   const replayableAgents = agents.filter(
     (task) => task.outputFile || task.toolUseId,
@@ -449,13 +474,13 @@ export function SessionWorkflowCockpit({
       (artifact.toolCallId && selectedToolCallIds.has(artifact.toolCallId)),
   );
   const deliverables = selectedArtifacts.length ? selectedArtifacts : artifacts;
-  const sessionState = !connected
-    ? 'RECONNECTING'
+  const sessionStateKey = !connected
+    ? 'workflow.sessionState.reconnecting'
     : activeAgents.length > 0
-      ? 'LIVE'
+      ? 'workflow.sessionState.live'
       : progress === 100
-        ? 'HISTORY'
-        : 'READY';
+        ? 'workflow.sessionState.history'
+        : 'workflow.sessionState.ready';
   const agentStats = tools.map(
     (tool) => taskForTool(tool, tasks)?.stats ?? agentToolStats(tool),
   );
@@ -474,17 +499,17 @@ export function SessionWorkflowCockpit({
     return (
       <div className={styles.emptyCockpit} data-testid="cockpit-empty">
         <div className={styles.emptyMark}>Q</div>
-        <div className={styles.reviewEyebrow}>SESSION COCKPIT</div>
-        <h1>这个 Session 还没有结构化 Workflow</h1>
-        <p>
-          返回 Chat，进入 Plan &amp; Review 并让模型先写入带 ID 和依赖的 Todo。
-        </p>
+        <div className={styles.reviewEyebrow}>
+          {t('workflow.empty.eyebrow')}
+        </div>
+        <h1>{t('workflow.empty.title')}</h1>
+        <p>{t('workflow.empty.copy')}</p>
         <button
           className={styles.primaryButton}
           onClick={onBackToChat}
           type="button"
         >
-          返回 Chat 创建计划
+          {t('workflow.empty.action')}
         </button>
       </div>
     );
@@ -494,24 +519,27 @@ export function SessionWorkflowCockpit({
     <div className={styles.cockpit} data-testid="session-workflow-cockpit">
       <main className={styles.main}>
         <div className={styles.viewBar}>
-          <nav aria-label="驾驶舱视图" className={styles.cockpitTabs}>
+          <nav
+            aria-label={t('workflow.tabs.label')}
+            className={styles.cockpitTabs}
+          >
             <button
-              aria-label="协作任务"
+              aria-label={t('workflow.tabs.task')}
               data-active={section === 'task' || undefined}
               onClick={() => setSection('task')}
               type="button"
             >
               <LayoutDashboard aria-hidden="true" />
-              <span>协作任务</span>
+              <span>{t('workflow.tabs.task')}</span>
             </button>
             <button
-              aria-label="待我处理"
+              aria-label={t('workflow.tabs.attention')}
               data-active={section === 'attention' || undefined}
               onClick={() => setSection('attention')}
               type="button"
             >
               <CircleAlert aria-hidden="true" />
-              <span>待我处理</span>
+              <span>{t('workflow.tabs.attention')}</span>
               {attentionCount > 0 && <b>{attentionCount}</b>}
             </button>
           </nav>
@@ -520,7 +548,11 @@ export function SessionWorkflowCockpit({
             data-connected={connected || undefined}
           >
             <i />
-            daemon {connected ? 'connected' : 'reconnecting'}
+            {t(
+              connected
+                ? 'workflow.connection.connected'
+                : 'workflow.connection.reconnecting',
+            )}
           </span>
         </div>
 
@@ -528,39 +560,41 @@ export function SessionWorkflowCockpit({
           <section className={styles.attentionPage}>
             <div className={styles.attentionHeading}>
               <div>
-                <span className={styles.reviewEyebrow}>HUMAN IN THE LOOP</span>
-                <h1>待我处理</h1>
-                <p>这里只展示 Agent 无法自行处理、需要用户介入的节点。</p>
+                <span className={styles.reviewEyebrow}>
+                  {t('workflow.attention.eyebrow')}
+                </span>
+                <h1>{t('workflow.attention.title')}</h1>
+                <p>{t('workflow.attention.copy')}</p>
               </div>
             </div>
             <div className={styles.attentionStats}>
               <div>
                 <strong>{attentionCount}</strong>
-                <span>需要处理</span>
+                <span>{t('workflow.attention.count')}</span>
               </div>
               <div>
                 <strong>
                   {agents.filter((task) => task.status === 'failed').length}
                 </strong>
-                <span>Agent 失败</span>
+                <span>{t('workflow.attention.failed')}</span>
               </div>
               <div>
                 <strong>
                   {agents.filter((task) => task.status === 'cancelled').length}
                 </strong>
-                <span>已取消</span>
+                <span>{t('workflow.attention.cancelled')}</span>
               </div>
               <div>
                 <strong>{activeAgents.length}</strong>
-                <span>仍在运行</span>
+                <span>{t('workflow.attention.running')}</span>
               </div>
             </div>
             {attentionCount > 0 ? (
               <div className={styles.attentionWorkspace}>
                 <div className={styles.attentionList}>
                   <header>
-                    <strong>决策队列</strong>
-                    <span>按 Workflow 顺序</span>
+                    <strong>{t('workflow.attention.queue')}</strong>
+                    <span>{t('workflow.attention.queueOrder')}</span>
                   </header>
                   {attentionTodos.map((todo) => (
                     <button
@@ -592,14 +626,14 @@ export function SessionWorkflowCockpit({
                       <span>?</span>
                       <div>
                         <strong>{decision.request.title}</strong>
-                        <small>等待用户决策</small>
+                        <small>{t('workflow.attention.waiting')}</small>
                       </div>
                     </button>
                   )}
                 </div>
                 <article className={styles.attentionDetail}>
                   <span className={styles.reviewEyebrow}>
-                    WORKFLOW ATTENTION
+                    {t('workflow.attention.detailEyebrow')}
                   </span>
                   {decision && (selectedDecision || !attentionTodo) ? (
                     <>
@@ -614,17 +648,14 @@ export function SessionWorkflowCockpit({
                   ) : (
                     <>
                       <h2>{attentionTodo?.content}</h2>
-                      <p>
-                        该节点关联的 Agent 执行失败或取消。返回 Chat
-                        补充信息，或打开 Agent transcript 查看完整证据。
-                      </p>
+                      <p>{t('workflow.attention.failureCopy')}</p>
                       {attentionTool && (
                         <button
                           className={styles.primaryButton}
                           onClick={() => onOpenSubagent(attentionTool)}
                           type="button"
                         >
-                          查看 Agent 完整输出
+                          {t('workflow.attention.openOutput')}
                         </button>
                       )}
                     </>
@@ -634,11 +665,8 @@ export function SessionWorkflowCockpit({
             ) : (
               <div className={styles.attentionEmpty}>
                 <span>✓</span>
-                <h2>当前没有需要人工处理的节点</h2>
-                <p>
-                  Plan 审批和 Agent
-                  异常会自动进入这里；普通依赖等待不会制造噪音。
-                </p>
+                <h2>{t('workflow.attention.emptyTitle')}</h2>
+                <p>{t('workflow.attention.emptyCopy')}</p>
               </div>
             )}
           </section>
@@ -647,22 +675,36 @@ export function SessionWorkflowCockpit({
             <section className={styles.taskHeading}>
               <div>
                 <div className={styles.titleLine}>
-                  <h1>{sessionName || '当前 Session Workflow'}</h1>
+                  <h1 title={sessionName}>
+                    {sessionName || t('workflow.session.defaultTitle')}
+                  </h1>
                   <span data-status={taskStatus}>{taskStatus}</span>
                 </div>
                 <div className={styles.taskMeta}>
                   <code>{sessionId.slice(0, 8)}</code>
-                  <span>{workspaceCwd?.split('/').at(-1) || 'workspace'}</span>
-                  <span>{todos.length} 个步骤</span>
-                  <span>{tools.length} 个 Agent 调用</span>
+                  <span>
+                    {workspaceCwd?.split('/').at(-1) ||
+                      t('workflow.session.workspace')}
+                  </span>
+                  <span>
+                    {t('workflow.session.steps', { count: todos.length })}
+                  </span>
+                  <span>
+                    {t('workflow.session.agentCalls', { count: tools.length })}
+                  </span>
                 </div>
               </div>
             </section>
 
-            <section className={styles.stats} aria-label="任务概况">
+            <section
+              className={`${styles.stats} ${
+                progress === 100 ? styles.statsCompleted : ''
+              }`}
+              aria-label={t('workflow.overview.label')}
+            >
               <div className={styles.progressStat}>
                 <div>
-                  <span>整体进度</span>
+                  <span>{t('workflow.overview.progress')}</span>
                   <strong>
                     {progress}% · {taskStatus}
                   </strong>
@@ -671,23 +713,29 @@ export function SessionWorkflowCockpit({
                   <i style={{ width: `${progress}%` }} />
                 </div>
               </div>
-              <div>
-                <strong>{activeAgents.length}</strong>
-                <span>Agent 正在工作</span>
-              </div>
+              {progress < 100 && (
+                <div>
+                  <strong>{activeAgents.length}</strong>
+                  <span>{t('workflow.overview.activeAgents')}</span>
+                </div>
+              )}
               <div>
                 <strong>
                   {completedCount} / {todos.length}
                 </strong>
-                <span>步骤已完成</span>
+                <span>{t('workflow.overview.completedSteps')}</span>
               </div>
               <div>
                 <strong>{agents.length}</strong>
-                <span>Agent 执行记录</span>
+                <span>{t('workflow.overview.agentRecords')}</span>
               </div>
               <div data-attention={attentionCount > 0 || undefined}>
-                <strong>{attentionCount}</strong>
-                <span>需要人工处理</span>
+                <strong>
+                  {progress === 100 && attentionCount === 0
+                    ? t('workflow.overview.noAttention')
+                    : attentionCount}
+                </strong>
+                <span>{t('workflow.overview.attention')}</span>
               </div>
             </section>
 
@@ -695,8 +743,10 @@ export function SessionWorkflowCockpit({
               <aside className={styles.panel}>
                 <header className={styles.panelHeader}>
                   <div>
-                    <h2>执行计划</h2>
-                    <span>{todos.length} 个节点 · 点击查看详情</span>
+                    <h2>{t('workflow.plan.title')}</h2>
+                    <span>
+                      {t('workflow.plan.subtitle', { count: todos.length })}
+                    </span>
                   </div>
                 </header>
                 <div className={styles.phases}>
@@ -723,11 +773,13 @@ export function SessionWorkflowCockpit({
                           <strong>{todo.content}</strong>
                           <small>
                             {todoTools.length
-                              ? `${todoTools.length} 个 Agent`
+                              ? t('workflow.plan.agentCount', {
+                                  count: todoTools.length,
+                                })
                               : todo.id}
                           </small>
                         </span>
-                        <em>{statusLabel(status)}</em>
+                        <em>{t(statusKey(status))}</em>
                       </button>
                     );
                   })}
@@ -741,8 +793,8 @@ export function SessionWorkflowCockpit({
                 <div className={styles.stageTabs}>
                   {(
                     [
-                      ['work', '工作现场'],
-                      ['activity', 'Agent 记录'],
+                      ['work', t('workflow.stage.work')],
+                      ['activity', t('workflow.stage.activity')],
                     ] as const
                   ).map(([value, label]) => (
                     <button
@@ -757,7 +809,10 @@ export function SessionWorkflowCockpit({
                     </button>
                   ))}
                   <span>
-                    <i /> {sessionState} SESSION
+                    <i />{' '}
+                    {t('workflow.stage.session', {
+                      state: t(sessionStateKey),
+                    })}
                   </span>
                 </div>
                 {stageTab === 'activity' ? (
@@ -781,7 +836,7 @@ export function SessionWorkflowCockpit({
                               </small>
                             </div>
                             <em data-status={task.status}>
-                              {taskStatusLabel(task.status)}
+                              {t(taskStatusKey(task.status))}
                             </em>
                           </>
                         );
@@ -805,7 +860,7 @@ export function SessionWorkflowCockpit({
                       })
                     ) : (
                       <div className={styles.inlineEmpty}>
-                        还没有关联到 Todo 的 Agent 执行。
+                        {t('workflow.activity.empty')}
                       </div>
                     )}
                   </div>
@@ -849,8 +904,8 @@ export function SessionWorkflowCockpit({
                           <h2>{selectedTodo?.content}</h2>
                           <p>
                             {selectedState
-                              ? statusLabel(selectedState)
-                              : '等待执行'}
+                              ? t(statusKey(selectedState))
+                              : t('workflow.status.ready')}
                           </p>
                         </div>
                         <div className={styles.runtime}>
@@ -861,35 +916,36 @@ export function SessionWorkflowCockpit({
                                 ? formatRuntime(selectedTask.runtimeMs)
                                 : '--'}
                           </strong>
-                          <span>执行耗时</span>
+                          <span>{t('workflow.runtime.duration')}</span>
                         </div>
                       </div>
                       <div className={styles.currentAction}>
-                        <strong>当前动作</strong>
+                        <strong>{t('workflow.runtime.currentAction')}</strong>
                         <p>
                           {latestActivity?.description ||
                             selectedTask?.description ||
                             (selectedTool
                               ? getAgentDescription(selectedTool)
                               : selectedState === 'completed'
-                                ? '步骤已完成。'
+                                ? t('workflow.runtime.stepCompleted')
                                 : selectedTodo?.blockedBy?.length
-                                  ? '等待上游依赖完成后开始执行。'
-                                  : '等待开始执行。')}
+                                  ? t('workflow.runtime.waitUpstream')
+                                  : t('workflow.runtime.waitStart'))}
                         </p>
                       </div>
                       <div className={styles.dependencyCards}>
                         <div>
-                          <span>上游依赖</span>
+                          <span>{t('workflow.dependencies.upstream')}</span>
                           <strong>
                             {selectedTodo?.blockedBy?.join(', ') ||
-                              '无，可直接开始'}
+                              t('workflow.dependencies.none')}
                           </strong>
                         </div>
                         <div>
-                          <span>完成后解锁</span>
+                          <span>{t('workflow.dependencies.unblocks')}</span>
                           <strong>
-                            {selectedDependents.join(', ') || '无下游节点'}
+                            {selectedDependents.join(', ') ||
+                              t('workflow.dependencies.noDownstream')}
                           </strong>
                         </div>
                       </div>
@@ -927,34 +983,47 @@ export function SessionWorkflowCockpit({
                                     {stats ? (
                                       <>
                                         {task
-                                          ? taskStatusLabel(task.status)
+                                          ? t(taskStatusKey(task.status))
                                           : tool.status === 'failed'
-                                            ? '失败'
-                                            : '已完成'}{' '}
-                                        · {stats.toolUses} 次工具调用 ·{' '}
-                                        {stats.totalTokens.toLocaleString()}{' '}
-                                        tokens
+                                            ? t('workflow.agent.failed')
+                                            : t(
+                                                'workflow.agent.completed',
+                                              )}{' '}
+                                        ·{' '}
+                                        {t('workflow.agent.metrics', {
+                                          tools: stats.toolUses,
+                                          tokens:
+                                            stats.totalTokens.toLocaleString(),
+                                        })}
                                       </>
                                     ) : task ? (
-                                      `${taskStatusLabel(task.status)} · 执行指标未记录`
+                                      `${t(taskStatusKey(task.status))} · ${t(
+                                        'workflow.agent.metricsMissing',
+                                      )}`
                                     ) : (
-                                      '打开持久化 transcript 查看完整输出'
+                                      t('workflow.agent.openTranscript')
                                     )}
                                   </small>
                                   {skills.length > 0 && (
-                                    <small>Skills: {skills.join(', ')}</small>
+                                    <small>
+                                      {t('workflow.agent.skills', {
+                                        skills: skills.join(', '),
+                                      })}
+                                    </small>
                                   )}
                                 </div>
-                                <em>打开详情 →</em>
+                                <em>{t('workflow.agent.openDetails')}</em>
                               </button>
                             );
                           })}
                         </div>
                       ) : (
                         <div className={styles.inlineEmpty}>
-                          {selectedState === 'completed'
-                            ? '此步骤由主 Agent 完成，未启动 Subagent。'
-                            : '这个步骤还没有启动 Subagent。'}
+                          {t(
+                            selectedState === 'completed'
+                              ? 'workflow.agent.mainCompleted'
+                              : 'workflow.agent.notStarted',
+                          )}
                         </div>
                       )}
                     </div>
@@ -965,59 +1034,88 @@ export function SessionWorkflowCockpit({
               <aside className={styles.panel}>
                 <header className={styles.panelHeader}>
                   <div>
-                    <h2>检查与决策</h2>
-                    <span>来自同一 Workflow 状态</span>
+                    <h2>{t('workflow.review.title')}</h2>
+                    <span>{t('workflow.review.subtitle')}</span>
                   </div>
-                  <code>{attentionCount ? 'ATTN' : 'READY'}</code>
+                  <code>
+                    {t(
+                      attentionCount
+                        ? 'workflow.review.attentionCode'
+                        : 'workflow.review.readyCode',
+                    )}
+                  </code>
                 </header>
                 <div
                   className={styles.reviewBanner}
                   data-attention={attentionCount > 0 || undefined}
                 >
                   <strong>
-                    {attentionCount ? '⚠ 需要人工介入' : '✓ 当前状态正常'}
+                    {t(
+                      attentionCount
+                        ? 'workflow.review.attentionTitle'
+                        : 'workflow.review.normalTitle',
+                    )}
                   </strong>
                   <p>
                     {attentionCount
-                      ? `${attentionCount} 项需要处理。`
-                      : '没有失败或取消的 Agent；依赖等待属于正常执行状态。'}
+                      ? t('workflow.review.attentionCopy', {
+                          count: attentionCount,
+                        })
+                      : t('workflow.review.normalCopy')}
                   </p>
                 </div>
                 <div className={styles.checkList}>
                   <div>
                     <i>✓</i>
                     <span>
-                      <strong>结构化计划</strong>
-                      <small>{todos.length} 个 Todo 均有稳定 ID</small>
+                      <strong>{t('workflow.review.structuredPlan')}</strong>
+                      <small>
+                        {t('workflow.review.stableIds', {
+                          count: todos.length,
+                        })}
+                      </small>
                     </span>
-                    <em>READY</em>
+                    <em>{t('workflow.review.readyCode')}</em>
                   </div>
                   <div>
                     <i>✓</i>
                     <span>
-                      <strong>依赖拓扑</strong>
+                      <strong>{t('workflow.review.dependencyTopology')}</strong>
                       <small>
-                        {todos.reduce(
-                          (count, todo) =>
-                            count + (todo.blockedBy?.length ?? 0),
-                          0,
-                        )}{' '}
-                        条 blockedBy 关系
+                        {t('workflow.review.edgeCount', {
+                          count: todos.reduce(
+                            (count, todo) =>
+                              count + (todo.blockedBy?.length ?? 0),
+                            0,
+                          ),
+                        })}
                       </small>
                     </span>
                     <em>
-                      {todos.some((todo) => todo.blockedBy?.length)
-                        ? 'EDGES'
-                        : 'READY'}
+                      {t(
+                        todos.some((todo) => todo.blockedBy?.length)
+                          ? 'workflow.review.edgesCode'
+                          : 'workflow.review.readyCode',
+                      )}
                     </em>
                   </div>
                   <div data-warning={attentionTodos.length > 0 || undefined}>
                     <i>{attentionTodos.length ? '!' : '✓'}</i>
                     <span>
-                      <strong>Agent 执行</strong>
-                      <small>{agents.length} 条关联记录</small>
+                      <strong>{t('workflow.review.agentExecution')}</strong>
+                      <small>
+                        {t('workflow.review.agentRecords', {
+                          count: agents.length,
+                        })}
+                      </small>
                     </span>
-                    <em>{attentionTodos.length ? 'CHECK' : 'READY'}</em>
+                    <em>
+                      {t(
+                        attentionTodos.length
+                          ? 'workflow.review.checkCode'
+                          : 'workflow.review.readyCode',
+                      )}
+                    </em>
                   </div>
                   <div
                     data-warning={
@@ -1028,13 +1126,15 @@ export function SessionWorkflowCockpit({
                       {replayableAgents.length === agents.length ? '✓' : '·'}
                     </i>
                     <span>
-                      <strong>历史可回放</strong>
-                      <small>完成后仍可打开 Agent 详情</small>
+                      <strong>{t('workflow.review.history')}</strong>
+                      <small>{t('workflow.review.historyCopy')}</small>
                     </span>
                     <em>
-                      {replayableAgents.length === agents.length
-                        ? 'READY'
-                        : 'PARTIAL'}
+                      {t(
+                        replayableAgents.length === agents.length
+                          ? 'workflow.review.readyCode'
+                          : 'workflow.review.partialCode',
+                      )}
                     </em>
                   </div>
                 </div>
@@ -1043,7 +1143,7 @@ export function SessionWorkflowCockpit({
                     <strong>
                       {hasCompleteAgentStats ? totalAgentToolUses : '--'}
                     </strong>
-                    <span>工具调用</span>
+                    <span>{t('workflow.evidence.toolCalls')}</span>
                   </div>
                   <div>
                     <strong>
@@ -1051,16 +1151,18 @@ export function SessionWorkflowCockpit({
                         ? totalAgentTokens.toLocaleString()
                         : '--'}
                     </strong>
-                    <span>Agent tokens</span>
+                    <span>{t('workflow.evidence.tokens')}</span>
                   </div>
                   <div>
                     <strong>{completedCount}</strong>
-                    <span>完成节点</span>
+                    <span>{t('workflow.evidence.completedNodes')}</span>
                   </div>
-                  <div>
-                    <strong>{artifacts.length}</strong>
-                    <span>Session 产物</span>
-                  </div>
+                  {artifacts.length > 0 && (
+                    <div>
+                      <strong>{artifacts.length}</strong>
+                      <span>{t('workflow.evidence.artifacts')}</span>
+                    </div>
+                  )}
                 </div>
                 <div className={styles.reviewActions}>
                   {attentionCount > 0 && (
@@ -1069,7 +1171,7 @@ export function SessionWorkflowCockpit({
                       onClick={() => setSection('attention')}
                       type="button"
                     >
-                      进入待我处理
+                      {t('workflow.actions.attention')}
                     </button>
                   )}
                   <button
@@ -1077,7 +1179,7 @@ export function SessionWorkflowCockpit({
                     onClick={onBackToChat}
                     type="button"
                   >
-                    回到 Chat 继续协作
+                    {t('workflow.actions.back')}
                   </button>
                 </div>
               </aside>
@@ -1086,8 +1188,8 @@ export function SessionWorkflowCockpit({
             <section className={`${styles.panel} ${styles.collaboration}`}>
               <header className={styles.panelHeader}>
                 <div>
-                  <h2>协作记录</h2>
-                  <span>Agent 通过 Todo、工具调用和产物交接</span>
+                  <h2>{t('workflow.collaboration.title')}</h2>
+                  <span>{t('workflow.collaboration.subtitle')}</span>
                 </div>
                 <button
                   onClick={() => {
@@ -1096,7 +1198,7 @@ export function SessionWorkflowCockpit({
                   }}
                   type="button"
                 >
-                  查看完整记录
+                  {t('workflow.collaboration.fullActivity')}
                 </button>
               </header>
               <div className={styles.collaborationBody}>
@@ -1118,22 +1220,30 @@ export function SessionWorkflowCockpit({
                           {task.recentActivities?.at(-1)?.description ||
                             task.description}
                         </p>
-                        <em>{taskStatusLabel(task.status)}</em>
+                        <em>{t(taskStatusKey(task.status))}</em>
                       </button>
                     );
                   })}
                   {activity.length === 0 && (
                     <div className={styles.inlineEmpty}>
-                      {progress === 100
-                        ? '本次 Workflow 未启动 Subagent。'
-                        : '等待 Agent 开始执行。'}
+                      {t(
+                        progress === 100
+                          ? 'workflow.collaboration.noSubagents'
+                          : 'workflow.collaboration.waiting',
+                      )}
                     </div>
                   )}
                 </div>
                 <div className={styles.deliverables}>
                   <div>
-                    <strong>当前交付包</strong>
-                    <span>{deliverables.length} 个 Session 产物</span>
+                    <strong>{t('workflow.deliverables.title')}</strong>
+                    <span>
+                      {deliverables.length > 0
+                        ? t('workflow.deliverables.count', {
+                            count: deliverables.length,
+                          })
+                        : t('workflow.deliverables.none')}
+                    </span>
                   </div>
                   <section>
                     {deliverables.length ? (
@@ -1151,7 +1261,7 @@ export function SessionWorkflowCockpit({
                         </button>
                       ))
                     ) : (
-                      <p>Agent 发布产物后会显示在这里。</p>
+                      <p>{t('workflow.deliverables.none')}</p>
                     )}
                   </section>
                 </div>

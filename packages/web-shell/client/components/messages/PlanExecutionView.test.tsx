@@ -514,6 +514,97 @@ describe('PlanExecutionView', () => {
     container.remove();
   });
 
+  it('locates the active step once and exposes a manual locate action', () => {
+    const rect = (left: number, width: number) =>
+      ({
+        x: left,
+        y: 0,
+        left,
+        top: 0,
+        width,
+        height: 80,
+        right: left + width,
+        bottom: 80,
+        toJSON: () => ({}),
+      }) as DOMRect;
+    const rectSpy = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function () {
+        if (this.hasAttribute('data-plan-workflow')) return rect(0, 300);
+        if (this.tagName === 'ARTICLE') {
+          const id = this.querySelector('[data-plan-node-id]')?.getAttribute(
+            'data-plan-node-id',
+          );
+          return rect(id === 'build-api' ? 600 : 0, 200);
+        }
+        return rect(0, 0);
+      });
+    const widthSpy = vi
+      .spyOn(HTMLElement.prototype, 'clientWidth', 'get')
+      .mockReturnValue(300);
+    const scrollTo = vi.fn();
+    const originalScrollTo = HTMLElement.prototype.scrollTo;
+    Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+      configurable: true,
+      value: scrollTo,
+    });
+    const animationSpy = vi
+      .spyOn(window, 'requestAnimationFrame')
+      .mockImplementation((callback) => {
+        callback(0);
+        return 1;
+      });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <PlanExecutionView todos={branchedTodos} tools={[]} tasks={[]} />
+        </I18nProvider>,
+      );
+    });
+    expect(scrollTo).toHaveBeenCalledWith({ left: 550, behavior: 'auto' });
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <PlanExecutionView
+            todos={branchedTodos}
+            tools={[]}
+            tasks={[task('running')]}
+          />
+        </I18nProvider>,
+      );
+    });
+    expect(scrollTo).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      Array.from(container.querySelectorAll('button'))
+        .find((button) => button.textContent === 'Locate current step')
+        ?.click();
+    });
+    expect(scrollTo).toHaveBeenLastCalledWith({
+      left: 550,
+      behavior: 'smooth',
+    });
+
+    act(() => root.unmount());
+    container.remove();
+    animationSpy.mockRestore();
+    rectSpy.mockRestore();
+    widthSpy.mockRestore();
+    if (originalScrollTo) {
+      Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+        configurable: true,
+        value: originalScrollTo,
+      });
+    } else {
+      delete HTMLElement.prototype.scrollTo;
+    }
+  });
+
   it('normalizes measured coordinates when the workflow is CSS-scaled', () => {
     const scaledRect = (
       left: number,

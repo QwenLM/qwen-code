@@ -11,6 +11,28 @@
   font-weight: 700;
 }
 
+.heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.locateButton {
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--foreground);
+  background: var(--background);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+}
+
+.locateButton:hover {
+  background: var(--accent);
+}
+
 .overview {
   display: grid;
   grid-template-columns: minmax(220px, 2fr) repeat(3, minmax(110px, 1fr));

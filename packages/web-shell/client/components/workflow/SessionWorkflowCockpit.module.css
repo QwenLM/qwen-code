@@ -187,6 +187,7 @@
 
 .titleLine {
   display: flex;
+  min-width: 0;
   align-items: center;
   gap: 11px;
 }
@@ -198,8 +199,16 @@
   letter-spacing: -0.035em;
 }
 
+.titleLine h1 {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .titleLine > span {
   display: inline-flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 6px;
   padding: 6px 9px;
@@ -241,6 +250,10 @@
   border-radius: var(--radius-xl);
   background: var(--card);
   box-shadow: var(--cockpit-shadow);
+}
+
+.statsCompleted {
+  grid-template-columns: 1.55fr repeat(3, 1fr);
 }
 
 .stats > div {
@@ -1388,9 +1401,13 @@ button.activityRow:hover {
 }
 
 .reviewHeading h2 {
+  min-width: 0;
   margin: 9px 0 7px;
+  overflow: hidden;
   font-size: clamp(24px, 3vw, 36px);
   letter-spacing: -0.04em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .reviewHeading p {

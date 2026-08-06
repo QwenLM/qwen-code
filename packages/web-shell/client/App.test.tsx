@@ -2770,7 +2770,7 @@ describe('App plan todos', () => {
     ).toContain('Worker agent');
     expect(
       container.querySelector('[data-testid="cockpit-page"]')?.textContent,
-    ).toContain('执行指标未记录');
+    ).toContain('Execution metrics unavailable');
     expect(new URLSearchParams(window.location.search).get('view')).toBe(
       'cockpit',
     );
@@ -2779,7 +2779,7 @@ describe('App plan todos', () => {
       container.querySelectorAll<HTMLButtonElement>(
         '[data-testid="cockpit-page"] button',
       ),
-    ).find((button) => button.textContent?.includes('Agent 记录'));
+    ).find((button) => button.textContent?.includes('Agent activity'));
     expect(agentActivityButton).toBeDefined();
     await act(async () => {
       agentActivityButton?.click();
@@ -2790,7 +2790,7 @@ describe('App plan todos', () => {
     ).toContain('Worker agent');
     expect(
       container.querySelector('[data-testid="cockpit-page"]')?.textContent,
-    ).not.toContain('还没有关联到 Todo 的 Agent 执行');
+    ).not.toContain('No Agent runs are linked to a Todo yet.');
 
     testState.backgroundTasks = [
       {

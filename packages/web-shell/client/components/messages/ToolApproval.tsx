@@ -210,6 +210,8 @@ export function ToolApproval({
     () => prepareDisplayOptions(request.options),
     [request.options],
   );
+  const isExitPlanApproval = isExitPlanApprovalRequest(request);
+  const showsPlanWorkflow = planTodos.length > 0 && isExitPlanApproval;
   const safeDefaultIndex = useMemo(
     () => getSafeDefaultIndex(displayOptions),
     [displayOptions],
@@ -228,11 +230,19 @@ export function ToolApproval({
       if (key) keyCount.set(key, (keyCount.get(key) ?? 0) + 1);
     }
     return (option: PermissionRequest['options'][number]) => {
+      if (showsPlanWorkflow) {
+        if (option.kind === 'allow_once') {
+          return t('workflow.planReview.confirm');
+        }
+        if (option.kind === 'reject_once' || option.kind === 'reject_always') {
+          return t('workflow.planReview.continuePlanning');
+        }
+      }
       const key = getOptionI18nKey(option);
       if (key && keyCount.get(key) === 1) return t(key);
       return option.label || (key ? t(key) : '');
     };
-  }, [displayOptions, t]);
+  }, [displayOptions, showsPlanWorkflow, t]);
   const [selected, setSelected] = useState(safeDefaultIndex);
   const requestRef = useRef(request);
   requestRef.current = request;
@@ -261,8 +271,12 @@ export function ToolApproval({
   const parsedTitle = parseTitle(request.title);
   const rawToolName =
     request.toolName || parsedTitle.toolName || request.kind || 'Tool';
-  const toolName = localizeToolDisplayName(rawToolName, t);
-  const descriptionText = getDescriptionText(request);
+  const toolName = showsPlanWorkflow
+    ? t('workflow.planReview.title')
+    : localizeToolDisplayName(rawToolName, t);
+  const descriptionText = showsPlanWorkflow
+    ? undefined
+    : getDescriptionText(request);
   const contentText = extractContentText(request);
 
   const confirm = useCallback(
@@ -373,13 +387,13 @@ export function ToolApproval({
   const showsCommandBlock = Boolean(
     (isExec && command) || (contentText && contentText !== request.title),
   );
-  const isExitPlanApproval = isExitPlanApprovalRequest(request);
-  const showsPlanWorkflow = planTodos.length > 0 && isExitPlanApproval;
-  const questionText = isAgent
-    ? t('approval.launchAgentQuestion')
-    : isExec
-      ? t('approval.execQuestion', { tool: toolName })
-      : t('approval.changeQuestion');
+  const questionText = showsPlanWorkflow
+    ? t('workflow.planReview.question')
+    : isAgent
+      ? t('approval.launchAgentQuestion')
+      : isExec
+        ? t('approval.execQuestion', { tool: toolName })
+        : t('approval.changeQuestion');
 
   return (
     <div

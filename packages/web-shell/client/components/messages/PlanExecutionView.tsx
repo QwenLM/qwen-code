@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useId,
   useLayoutEffect,
@@ -391,6 +392,7 @@ export function PlanExecutionView({
   }
   const graphId = useId().replaceAll(':', '');
   const markerId = `plan-arrow-${graphId}`;
+  const viewportRef = useRef<HTMLDivElement>(null);
   const graphRef = useRef<HTMLDivElement>(null);
   const nodeRefs = useRef(new Map<string, HTMLElement>());
   const topologyRef = useRef(topology);
@@ -398,14 +400,55 @@ export function PlanExecutionView({
   const layerByTodoRef = useRef(layerByTodo);
   layerByTodoRef.current = layerByTodo;
   const graphSignatureRef = useRef('');
+  const autoLocatedTopologyRef = useRef('');
   const [graph, setGraph] = useState(EMPTY_GRAPH_LAYOUT);
   const [selectedTodoId, setSelectedTodoId] = useState<string>();
+  const focusTodoId =
+    todos.find((todo) => {
+      const status = statesByTodo.get(todo.id)?.status;
+      return status === 'running' || status === 'in_progress';
+    })?.id ??
+    todos.find((todo) => todo.status !== 'completed')?.id ??
+    todos[0]?.id;
+  const locateFocusTodo = useCallback(
+    (behavior: ScrollBehavior) => {
+      const viewport = viewportRef.current;
+      const node = focusTodoId ? nodeRefs.current.get(focusTodoId) : undefined;
+      if (!viewport || !node) return;
+      const viewportRect = viewport.getBoundingClientRect();
+      const nodeRect = node.getBoundingClientRect();
+      viewport.scrollTo({
+        left:
+          viewport.scrollLeft +
+          nodeRect.left -
+          viewportRect.left -
+          (viewport.clientWidth - nodeRect.width) / 2,
+        behavior,
+      });
+    },
+    [focusTodoId],
+  );
 
   useEffect(() => {
     if (selectedTodoId && !todos.some((todo) => todo.id === selectedTodoId)) {
       setSelectedTodoId(undefined);
     }
   }, [selectedTodoId, todos]);
+
+  useEffect(() => {
+    if (
+      !hasDependencies ||
+      !focusTodoId ||
+      autoLocatedTopologyRef.current === topologyKey
+    ) {
+      return;
+    }
+    const frame = requestAnimationFrame(() => {
+      locateFocusTodo('auto');
+      autoLocatedTopologyRef.current = topologyKey;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [focusTodoId, hasDependencies, locateFocusTodo, topologyKey]);
 
   useLayoutEffect(() => {
     if (!drawsDependencyEdges) return;
@@ -649,8 +692,19 @@ export function PlanExecutionView({
   return (
     <section className={styles.section} aria-label={t('planExecution.title')}>
       <div className={styles.heading}>
-        {t('planExecution.title')}{' '}
-        <span className={styles.count}>({todos.length})</span>
+        <span>
+          {t('planExecution.title')}{' '}
+          <span className={styles.count}>({todos.length})</span>
+        </span>
+        {hasDependencies && (
+          <button
+            type="button"
+            className={styles.locateButton}
+            onClick={() => locateFocusTodo('smooth')}
+          >
+            {t('planExecution.locateCurrent')}
+          </button>
+        )}
       </div>
       <div className={styles.overview} aria-label={t('planExecution.overview')}>
         <div className={styles.progressCard}>
@@ -688,6 +742,7 @@ export function PlanExecutionView({
       </div>
       <div
         className={hasDependencies ? styles.dagViewport : styles.flatList}
+        ref={hasDependencies ? viewportRef : undefined}
         {...(hasDependencies ? { 'data-plan-workflow': true } : {})}
       >
         <div
