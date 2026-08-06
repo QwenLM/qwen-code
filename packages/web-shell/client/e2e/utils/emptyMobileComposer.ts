@@ -8,6 +8,7 @@ import { expect, type Page } from '@playwright/test';
 
 export interface EmptyMobileComposerLayout {
   chatPaneBottom: number;
+  chatPaneTop: number;
   chatViewIsPaneFlexItem: boolean;
   chatViewPosition: string;
   chatViewZIndex: string;
@@ -24,6 +25,7 @@ export interface EmptyMobileComposerLayout {
   welcomeFooterBottom: number | null;
   welcomeFooterTop: number | null;
   welcomeHeaderBottom: number;
+  welcomeHeaderTop: number;
 }
 
 export interface EmptyMobileComposerLayoutOptions {
@@ -111,6 +113,7 @@ export async function emptyMobileComposerLayout(
 
       return {
         chatPaneBottom: chatPaneRect.bottom,
+        chatPaneTop: chatPaneRect.top,
         chatViewIsPaneFlexItem:
           chatView.parentElement === chatPane &&
           chatPaneStyle.display === 'flex',
@@ -133,6 +136,7 @@ export async function emptyMobileComposerLayout(
         welcomeFooterBottom: welcomeFooterRect?.bottom ?? null,
         welcomeFooterTop: welcomeFooterRect?.top ?? null,
         welcomeHeaderBottom: welcomeHeader.getBoundingClientRect().bottom,
+        welcomeHeaderTop: welcomeHeader.getBoundingClientRect().top,
       };
     }, options.requireWelcomeFooter !== false);
 }
@@ -168,5 +172,12 @@ export function expectEmptyMobileComposerAnchored(
       layout.welcomeFooterTop,
     );
     expect(layout.welcomeFooterBottom).toBeLessThanOrEqual(layout.footerTop);
+  } else {
+    const welcomeHeaderMiddle =
+      (layout.welcomeHeaderTop + layout.welcomeHeaderBottom) / 2;
+    const welcomeRowMiddle = (layout.chatPaneTop + layout.footerTop) / 2;
+    expect(
+      Math.abs(welcomeHeaderMiddle - welcomeRowMiddle),
+    ).toBeLessThanOrEqual(3);
   }
 }

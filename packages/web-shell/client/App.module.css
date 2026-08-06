@@ -931,6 +931,14 @@
     justify-content: safe center;
   }
 
+  .appChatEmpty
+    .chatViewWithMobileComposerBottom:not(.chatViewWithWelcomeMiddle)
+    [data-web-shell-message-list] {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+
   .appChatEmpty .chatViewWithWelcomeMiddle .footerWithCustomFooter {
     display: flex;
     flex-direction: column;

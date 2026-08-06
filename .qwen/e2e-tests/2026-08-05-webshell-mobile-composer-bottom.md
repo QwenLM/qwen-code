@@ -15,6 +15,8 @@ and repeat at short 400px and 320px pane heights.
 - The welcome header stays above the composer at normal and short pane heights;
   the dot field covers the pane, stays behind the foreground, and does not
   capture pointer events.
+- Without a welcome footer, the welcome header remains vertically centered in
+  the available row above the composer.
 - A custom footer stays in the same real bottom wrapper above the composer.
 - Applying the production hidden-chat class still removes the grid from layout,
   matching the panel/full-page visibility contract.
@@ -33,7 +35,7 @@ npx playwright test --config packages/web-shell/playwright.config.ts packages/we
 ```
 
 After the repair and edge-case hardening, the focused upstream run passed
-(`6 passed`, 12.4s). The
+(`6 passed`, 9.3s). The
 embedded extension-host browser verification also passed in Chrome on macOS
 using the naturally narrow Data Agent sidebar: the welcome content stayed
 centered, the composer aligned with the sidebar bottom, the dot field remained
