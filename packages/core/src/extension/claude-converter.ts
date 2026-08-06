@@ -500,6 +500,16 @@ export async function convertClaudePluginPackage(
     signal,
   );
 
+  // When the source resolves to the marketplace dir itself (source "."), the
+  // pluginDir was created but never used — remove the empty directory.
+  if (pluginSource !== pluginDir) {
+    try {
+      await fs.promises.rmdir(pluginDir);
+    } catch {
+      // Non-empty or already removed; leave it alone.
+    }
+  }
+
   if (!fs.existsSync(pluginSource)) {
     throw new Error(`Plugin source directory not found: ${pluginSource}`);
   }
