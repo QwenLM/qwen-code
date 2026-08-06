@@ -705,7 +705,7 @@ jobs:
       # jobs execute human-authored code as the runner user, so a prior job
       # can plant git exec knobs (core.fsmonitor, filter.*.smudge,
       # diff.external, includeIf, hooks) in the local config that would fire
-      # inside THIS job's PAT-bearing git steps. The composite action keeps
+      # inside THIS job's PAT-bearing git steps. It keeps
       # a known-safe allowlist and unsets everything else, hardened against
       # the worktree-config and global-hooksPath bypasses verified in
       # qwen-triage on this pool. No-op on a fresh hosted runner.
@@ -740,7 +740,7 @@ jobs:
           # runner) means grep exits 1, which would kill the step exactly
           # when there is nothing to clean.
           git config --local --name-only --list 2>/dev/null \
-            | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\.|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } \
+            | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\.[^.]+\.(url|fetch|pushurl)|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } \
             | while IFS= read -r key; do git config --local --unset-all "$key" 2>/dev/null || true; done
           # Belt and braces after the config scrub: only delete inside the
           # repository's own git dir. A hooks path resolving anywhere else is
@@ -765,7 +765,7 @@ jobs:
             # into it and put an empty hooks directory back.
             RAW_HOOKS="$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git rev-parse --git-path hooks 2>/dev/null || echo .git/hooks)"
             echo "::warning::hooks path did not resolve inside the git dir (${HOOKS_ABS:-unresolved}); unlinking it."
-            rm -f "$RAW_HOOKS" 2>/dev/null || rm -rf "$RAW_HOOKS" 2>/dev/null || true
+            rm -f "$RAW_HOOKS" 2>/dev/null || echo "::warning::refusing to recursively delete planted hooks path '$RAW_HOOKS' (a hooksPath resolving to the git dir itself would otherwise wipe .git); leaving it to the pool re-clean."
             mkdir -p "${GIT_DIR_ABS:-.git}/hooks" 2>/dev/null || true
             git config --local --unset-all core.hooksPath 2>/dev/null || true
           fi
@@ -787,10 +787,10 @@ jobs:
           # Age-sweep abandoned run-scoped dirs on this shared /tmp: a hard
           # runner kill skips the always() teardown and run_id never repeats,
           # so nothing else ever reclaims them.
-          find /tmp -maxdepth 1 -name 'autofix-*' -mmin +1440 -exec rm -rf {} + 2>/dev/null || true
+          find /tmp -maxdepth 1 -name 'autofix*' -mmin +1440 -exec rm -rf {} + 2>/dev/null || true
           # The reused workspace's .git accumulates unreferenced objects
           # across fetch runs on this persistent pool; prune them.
-          git gc --prune=now --quiet 2>/dev/null || true
+          git gc --auto --prune=now --quiet 2>/dev/null || true
 
       # Self-hosted runners keep the workspace's .git across runs, so a
       # failed earlier attempt's local branch survives here: the agent's
@@ -1448,15 +1448,13 @@ jobs:
           BRANCH="autofix/issue-${ISSUE}"
           git config --local --unset-all http.https://github.com/.extraheader || true
           git config core.hooksPath /dev/null
-          # Authenticate the push via a transient credential helper: the
-          # PAT enters neither the remote URL (persisted to .git/config on
-          # this reused workspace) nor the process argv (/proc/<pid>/cmdline
-          # is world-readable on this shared host). The config holds only a
-          # ${GITHUB_TOKEN} reference, and credential.* is off the sanitize
-          # allowlist, so a leftover helper is swept next run.
-          git config --local credential.helper '!f(){ echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; };f'
-          git push --no-verify "https://github.com/${REPO}.git" "${BRANCH}"
-          git config --local --unset-all credential.helper || true
+          # Authenticate the push with a one-shot, host-scoped credential
+          # helper via `git -c`: nothing is written to the reused
+          # workspace's .git/config (no error path can strand it there),
+          # argv holds only the literal ${GITHUB_TOKEN} reference, and the
+          # host scope means it cannot answer a non-GitHub URL.
+          git -c credential."https://github.com".helper='!f(){ echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; };f' \
+            push --no-verify "https://github.com/${REPO}.git" "${BRANCH}"
 
           PR_URL="$(gh pr create --repo "${REPO}" \
             --base main --head "${BRANCH}" \
@@ -2824,7 +2822,7 @@ jobs:
           # runner) means grep exits 1, which would kill the step exactly
           # when there is nothing to clean.
           git config --local --name-only --list 2>/dev/null \
-            | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\.|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } \
+            | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\.[^.]+\.(url|fetch|pushurl)|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } \
             | while IFS= read -r key; do git config --local --unset-all "$key" 2>/dev/null || true; done
           # Belt and braces after the config scrub: only delete inside the
           # repository's own git dir. A hooks path resolving anywhere else is
@@ -2849,7 +2847,7 @@ jobs:
             # into it and put an empty hooks directory back.
             RAW_HOOKS="$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git rev-parse --git-path hooks 2>/dev/null || echo .git/hooks)"
             echo "::warning::hooks path did not resolve inside the git dir (${HOOKS_ABS:-unresolved}); unlinking it."
-            rm -f "$RAW_HOOKS" 2>/dev/null || rm -rf "$RAW_HOOKS" 2>/dev/null || true
+            rm -f "$RAW_HOOKS" 2>/dev/null || echo "::warning::refusing to recursively delete planted hooks path '$RAW_HOOKS' (a hooksPath resolving to the git dir itself would otherwise wipe .git); leaving it to the pool re-clean."
             mkdir -p "${GIT_DIR_ABS:-.git}/hooks" 2>/dev/null || true
             git config --local --unset-all core.hooksPath 2>/dev/null || true
           fi
@@ -3061,7 +3059,7 @@ jobs:
       # jobs execute human-authored code as the runner user, so a prior job
       # can plant git exec knobs (core.fsmonitor, filter.*.smudge,
       # diff.external, includeIf, hooks) in the local config that would fire
-      # inside THIS job's PAT-bearing git steps. The composite action keeps
+      # inside THIS job's PAT-bearing git steps. It keeps
       # a known-safe allowlist and unsets everything else, hardened against
       # the worktree-config and global-hooksPath bypasses verified in
       # qwen-triage on this pool. No-op on a fresh hosted runner.
@@ -3096,7 +3094,7 @@ jobs:
           # runner) means grep exits 1, which would kill the step exactly
           # when there is nothing to clean.
           git config --local --name-only --list 2>/dev/null \
-            | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\.|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } \
+            | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\.[^.]+\.(url|fetch|pushurl)|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } \
             | while IFS= read -r key; do git config --local --unset-all "$key" 2>/dev/null || true; done
           # Belt and braces after the config scrub: only delete inside the
           # repository's own git dir. A hooks path resolving anywhere else is
@@ -3121,7 +3119,7 @@ jobs:
             # into it and put an empty hooks directory back.
             RAW_HOOKS="$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git rev-parse --git-path hooks 2>/dev/null || echo .git/hooks)"
             echo "::warning::hooks path did not resolve inside the git dir (${HOOKS_ABS:-unresolved}); unlinking it."
-            rm -f "$RAW_HOOKS" 2>/dev/null || rm -rf "$RAW_HOOKS" 2>/dev/null || true
+            rm -f "$RAW_HOOKS" 2>/dev/null || echo "::warning::refusing to recursively delete planted hooks path '$RAW_HOOKS' (a hooksPath resolving to the git dir itself would otherwise wipe .git); leaving it to the pool re-clean."
             mkdir -p "${GIT_DIR_ABS:-.git}/hooks" 2>/dev/null || true
             git config --local --unset-all core.hooksPath 2>/dev/null || true
           fi
@@ -3144,10 +3142,10 @@ jobs:
           # Age-sweep abandoned run-scoped dirs on this shared /tmp: a hard
           # runner kill skips the always() teardown and run_id never repeats,
           # so nothing else ever reclaims them.
-          find /tmp -maxdepth 1 -name 'autofix-*' -mmin +1440 -exec rm -rf {} + 2>/dev/null || true
+          find /tmp -maxdepth 1 -name 'autofix*' -mmin +1440 -exec rm -rf {} + 2>/dev/null || true
           # The reused workspace's .git accumulates unreferenced objects
           # across fetch runs on this persistent pool; prune them.
-          git gc --prune=now --quiet 2>/dev/null || true
+          git gc --auto --prune=now --quiet 2>/dev/null || true
 
       # Stage the schema gate script from the TRUSTED BASE checkout before
       # "Prepare branch and feedback" switches the working tree to the PR
@@ -3398,8 +3396,8 @@ jobs:
             # and fine-grained PATs are documented as NOT receiving it.
             # Prove push access NOW, before an agent round is spent, instead
             # of 403ing at the report step after the work is done.
-            git config --local credential.helper '!f(){ echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; };f'
-            if ! git push --no-verify --dry-run "https://github.com/${HEAD_REPO}.git" HEAD:"${BRANCH}" > /dev/null 2>&1; then
+            if ! git -c credential."https://github.com".helper='!f(){ echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; };f' \
+              push --no-verify --dry-run "https://github.com/${HEAD_REPO}.git" HEAD:"${BRANCH}" > /dev/null 2>&1; then
               echo "🫥 fork push preflight failed for ${HEAD_REPO} (allow-edits grant or PAT type) — discarding without action or marker"
               {
                 echo "stale=true"
@@ -3409,7 +3407,6 @@ jobs:
               } >> "${GITHUB_OUTPUT}"
               exit 0
             fi
-            git config --local --unset-all credential.helper || true
           else
             git checkout -B "${BRANCH}" "origin/${BRANCH}"
           fi
@@ -4299,10 +4296,10 @@ jobs:
             # commits get checked). A pre-push hook would execute that code
             # with the PAT in env — sever hooks entirely before pushing.
             git config core.hooksPath /dev/null
-            # Authenticate via a transient credential helper instead of a
-            # token-bearing URL: the PAT enters neither .git/config nor the
-            # process argv on this shared host (see Publish PR).
-            git config --local credential.helper '!f(){ echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; };f'
+            # Authenticate push/fetch with a one-shot, host-scoped credential
+            # helper via a git_auth wrapper (see Publish PR) — nothing lands
+            # in .git/config, argv holds only the ${GITHUB_TOKEN} reference.
+            git_auth() { git -c credential."https://github.com".helper='!f(){ echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; };f' "$@"; }
             if [[ "${HEAD_REPO:-${REPO}}" != "${REPO}" ]]; then
               # Push back to the FORK branch via allow-edits (PAT has push
               # rights on the upstream, which GitHub extends to the fork's
@@ -4328,7 +4325,7 @@ jobs:
             # through to the existing failure path — same as today.
             PUSH_RACE_MERGED='false'
             for push_attempt in 1 2 3; do
-              if git push --no-verify "${PUSH_URL}" HEAD:"${BRANCH}"; then
+              if git_auth push --no-verify "${PUSH_URL}" HEAD:"${BRANCH}"; then
                 break
               fi
               if [[ "${push_attempt}" == 3 ]]; then
@@ -4336,7 +4333,7 @@ jobs:
                 exit 1
               fi
               echo "⚠️ push rejected (attempt ${push_attempt}) — branch moved during the run; merging the new head and retrying"
-              if ! git fetch "${PUSH_URL}" "refs/heads/${BRANCH}"; then
+              if ! git_auth fetch "${PUSH_URL}" "refs/heads/${BRANCH}"; then
                 echo "::error::could not fetch the moved head (attempt ${push_attempt}) — cannot salvage this push"
                 exit 1
               fi
@@ -4357,7 +4354,6 @@ jobs:
                 PUSH_RACE_MERGED='true'
               fi
             done
-            git config --local --unset-all credential.helper || true
             CAN_RESOLVE_THREADS='false'
             if [[ -s "${WORKDIR}/resolved-comments.txt" ]]; then
               LOCAL_PUSHED_HEAD="$(git rev-parse HEAD)"
