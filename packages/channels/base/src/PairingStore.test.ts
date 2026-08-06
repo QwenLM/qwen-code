@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -573,6 +573,95 @@ describe('PairingStore workspace scoping (#7017)', () => {
       expect(reopened.isApproved('scoped-sender')).toBe(true);
       expect(reopened.isApproved('legacy-sender')).toBe(false);
     });
+  });
+});
+
+describe('group allowlist durability', () => {
+  let qwenHome: string;
+  let workspace: string;
+  let prevQwenHome: string | undefined;
+
+  beforeEach(() => {
+    qwenHome = fs.mkdtempSync(path.join(os.tmpdir(), 'pairing-home-'));
+    workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'pairing-ws-'));
+    prevQwenHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = qwenHome;
+  });
+
+  afterEach(() => {
+    if (prevQwenHome === undefined) {
+      delete process.env['QWEN_HOME'];
+    } else {
+      process.env['QWEN_HOME'] = prevQwenHome;
+    }
+    for (const dir of [qwenHome, workspace]) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  const groupsPath = () =>
+    path.join(
+      qwenHome,
+      'channels',
+      getWorkspaceScopeDirName(workspace),
+      'support-bot-groups.json',
+    );
+
+  it('refuses to rebuild an unreadable group allowlist on approve', () => {
+    const store = new PairingStore('support-bot', workspace);
+    const code = codeOf(
+      store.createGroupRequest('group-a', 'Group A', 'sender-1', 'Alice'),
+    );
+    fs.mkdirSync(path.dirname(groupsPath()), { recursive: true });
+    fs.writeFileSync(groupsPath(), '["group-b", "group-c"'); // torn JSON
+
+    expect(() => store.approve(code)).toThrow(/unreadable group allowlist/);
+
+    // The pending request must survive the failed approve so the code stays
+    // usable, and the corrupt file must be left untouched for the operator.
+    expect(store.listPending()).toHaveLength(1);
+    expect(fs.readFileSync(groupsPath(), 'utf-8')).toBe(
+      '["group-b", "group-c"',
+    );
+  });
+
+  it('fails closed and logs when the group allowlist is unreadable', () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      const store = new PairingStore('support-bot', workspace);
+      fs.mkdirSync(path.dirname(groupsPath()), { recursive: true });
+      fs.writeFileSync(groupsPath(), 'not json');
+
+      expect(store.isGroupApproved('group-b')).toBe(false);
+      expect(store.getGroupAllowlist()).toEqual([]);
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('group allowlist'),
+      );
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('keeps stored approvals when approving into an existing allowlist', () => {
+    const store = new PairingStore('support-bot', workspace);
+    fs.mkdirSync(path.dirname(groupsPath()), { recursive: true });
+    fs.writeFileSync(groupsPath(), JSON.stringify(['group-b'], null, 2));
+    const code = codeOf(
+      store.createGroupRequest('group-a', 'Group A', 'sender-1', 'Alice'),
+    );
+
+    const approved = store.approve(code);
+
+    expect(approved?.subject.id).toBe('group-a');
+    expect(store.getGroupAllowlist()).toEqual(['group-b', 'group-a']);
+    // The atomic write must not leave a temp file behind.
+    expect(
+      fs
+        .readdirSync(path.dirname(groupsPath()))
+        .filter((name) => name.includes('.tmp')),
+    ).toEqual([]);
   });
 });
 

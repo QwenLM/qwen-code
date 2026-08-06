@@ -231,10 +231,11 @@ export class PairingStore {
       return { code: existing.code };
     }
 
-    // One sender may hold only one pending request at a time: subject-keyed
-    // dedup lets a single member vouch for distinct groups, and without this
+    // One sender may hold only one pending request at a time: without this
     // limit one sender could occupy every shared slot and block all other
-    // pairing requests until expiry.
+    // pairing requests until expiry. Subject-keyed dedup (above) keeps
+    // re-mentions of the same group returning its existing code instead of
+    // tripping this check.
     if (active.some((request) => request.senderId === senderId)) {
       return { rejected: 'sender_pending' };
     }
@@ -263,11 +264,13 @@ export class PairingStore {
     if (idx === -1) return null;
 
     const request = pending[idx]!;
-    pending.splice(idx, 1);
-    this.writePending(pending);
 
+    // Persist the approval BEFORE consuming the request: if the allowlist
+    // write fails (or an existing allowlist file is unreadable and we refuse
+    // to rebuild it from []), the request stays pending and the code remains
+    // usable instead of being silently burned.
     if (request.subject.type === 'group') {
-      const groups = this.readGroupAllowlist();
+      const groups = this.readGroupAllowlist(true);
       if (!groups.includes(request.subject.id)) {
         groups.push(request.subject.id);
         this.writeGroupAllowlist(groups);
@@ -279,6 +282,9 @@ export class PairingStore {
         this.writeAllowlist(users);
       }
     }
+
+    pending.splice(idx, 1);
+    this.writePending(pending);
 
     return request;
   }
@@ -359,18 +365,41 @@ export class PairingStore {
     fs.writeFileSync(this.allowlistPath, JSON.stringify(list, null, 2));
   }
 
-  private readGroupAllowlist(): string[] {
+  private readGroupAllowlist(strict = false): string[] {
     try {
       const data = fs.readFileSync(this.groupAllowlistPath, 'utf-8');
       return JSON.parse(data) as string[];
-    } catch {
+    } catch (err) {
+      const exists = fs.existsSync(this.groupAllowlistPath);
+      if (strict && exists) {
+        // An existing-but-unreadable allowlist (torn write, permissions)
+        // must not be silently rebuilt from []: that would permanently
+        // discard every stored group approval on the next write.
+        throw new Error(
+          `refusing to rewrite unreadable group allowlist ` +
+            `"${path.basename(this.groupAllowlistPath)}": ` +
+            `${(err as Error)?.message}`,
+        );
+      }
+      if (exists) {
+        process.stderr.write(
+          `[PairingStore] group allowlist ` +
+            `"${path.basename(this.groupAllowlistPath)}" is unreadable ` +
+            `(${(err as Error)?.message}); treating as empty — stored group ` +
+            `approvals are not in effect and will be lost on the next approve\n`,
+        );
+      }
       return [];
     }
   }
 
   private writeGroupAllowlist(list: string[]): void {
     this.ensureDir();
-    fs.writeFileSync(this.groupAllowlistPath, JSON.stringify(list, null, 2));
+    // Atomic temp+rename: this file is an authorization artifact, and a torn
+    // write left behind by a crash mid-write would read as "no approvals".
+    const tmpPath = `${this.groupAllowlistPath}.${process.pid}.tmp`;
+    fs.writeFileSync(tmpPath, JSON.stringify(list, null, 2));
+    fs.renameSync(tmpPath, this.groupAllowlistPath);
   }
 }
 

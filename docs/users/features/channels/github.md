@@ -104,7 +104,7 @@ Always use `senderPolicy: "allowlist"` with explicit `allowedUsers` on public re
 
 Allowlist and pairing entries follow the **username**, not the immutable account ID. If an allowlisted user renames their GitHub account, remove the stale entry — GitHub releases the old username for anyone else to claim, and the new holder would inherit the allowlist/pairing authorization.
 
-Note that under `groupPolicy: "pairing"`, access is granted per repository: once a repository is approved, **any GitHub user** can drive the bot through that repository's issues and pull requests. All GitHub traffic is group traffic, so `senderPolicy` and `allowedUsers` do not gate members of an approved repository.
+Note that under `groupPolicy: "pairing"`, access is granted per repository: once a repository is approved, **any GitHub user** can drive the bot through that repository's issues and pull requests. All GitHub traffic is group traffic, so `senderPolicy` and `allowedUsers` do not gate members of an approved repository. Approvals are keyed by the repository full name (`owner/repo`), which changes on rename or transfer — revoke stale group approvals after any repository rename, transfer, or deletion.
 
 ## Mention Detection
 

@@ -201,7 +201,7 @@ Run these from the channel's workspace directory (or pass `--cwd <dir>`) — pai
 - Codes are 8 characters, uppercase, using an unambiguous alphabet (no `0`/`O`/`1`/`I`)
 - Codes expire after 1 hour
 - Maximum 3 pending requests per channel at a time, and at most one per sender — additional requests are declined until one expires or is approved
-- Users listed in `allowedUsers` in `settings.json` always skip pairing
+- Users listed in `allowedUsers` in `settings.json` skip user pairing; under `groupPolicy: "pairing"`, the group itself must still be approved
 - Approved users are stored per workspace in `~/.qwen/channels/<workspace-scope>/<name>-allowlist.json` — treat this file as sensitive
 
 ## Group Chats
@@ -224,7 +224,7 @@ request identifies the group and the member who initiated it:
 qwen channel pairing approve my-channel <CODE>
 ```
 
-Group approvals are stored by the group's chat ID in the channel's workspace scope. On GitHub and GitLab the chat ID is the repository/project path, so a rename or transfer detaches the stored approval — re-approve the group after renaming.
+Group approvals are stored by the group's chat ID in the channel's workspace scope. On GitHub and GitLab the chat ID is the repository/project path, so a rename or transfer detaches the stored approval — re-approve the group after renaming. A repo or project re-created under the same path inherits any stale approval — revoke group approvals after any rename, transfer, or deletion.
 An unmentioned message never creates a group pairing request, even when a group
 sets `requireMention` to `false`; after approval, the configured mention policy
 applies normally.

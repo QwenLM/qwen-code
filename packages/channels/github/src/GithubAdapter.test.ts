@@ -1922,6 +1922,113 @@ describe('GithubChannel', () => {
       );
     });
 
+    it('does not turn ambient comments into pairing requests under senderPolicy open', async () => {
+      await initWithoutLoop({ groupPolicy: 'pairing' });
+      channel.usePreflight = true;
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'comment',
+            last_read_at: '2026-07-01T12:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([
+          makeComment({ body: 'ambient chatter without a mention' }),
+        ]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      expect(
+        new PairingStore('test-github', '/tmp/test').listPending(),
+      ).toEqual([]);
+    });
+
+    it('posts one pairing comment when assign and body mention both trigger pairing', async () => {
+      await initWithoutLoop({ groupPolicy: 'pairing' });
+      channel.usePreflight = true;
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({ reason: 'assign', last_read_at: null }),
+        ])
+        .mockResolvedValueOnce([
+          makeIssueEvent({
+            event: 'assigned',
+            assigner: { login: 'maintainer' },
+            assignee: { login: 'test-bot' },
+          }),
+        ])
+        .mockResolvedValueOnce([]);
+      mockOctokit.rest.issues.get.mockResolvedValue({
+        data: {
+          title: 'broken build',
+          state: 'open',
+          user: { login: 'alice' },
+          body: '@test-bot please look at this issue',
+        },
+      });
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(
+        expect.objectContaining({
+          body: expect.stringContaining('pairing code'),
+        }),
+      );
+      expect(
+        new PairingStore('test-github', '/tmp/test').listPending(),
+      ).toHaveLength(1);
+    });
+
+    it('does not re-feed the body when a re-listed thread already had a pairing effect', async () => {
+      await initWithoutLoop({
+        groupPolicy: 'pairing',
+        senderPolicy: 'allowlist',
+        allowedUsers: [],
+      });
+      channel.usePreflight = true;
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({ reason: 'mention', last_read_at: null }),
+        ])
+        .mockResolvedValueOnce([makeComment()]);
+      mockOctokit.rest.issues.get.mockResolvedValue({
+        data: {
+          title: 'Test Issue',
+          body: '@test-bot the issue body mentions the bot too',
+          user: { login: 'alice' },
+        },
+      });
+
+      await pollOnce();
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(channel.cursor.dispatchedBodies).toContain('owner/repo|issue:42');
+
+      // Poll 2: marking the thread read failed, so it is listed as unread
+      // again. The mentioning comment is now outside the comment window; the
+      // body feed must stay suppressed or it would post a second identical
+      // pairing-code comment.
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'mention',
+            last_read_at: null,
+            updated_at: '2026-07-02T11:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(mockOctokit.rest.issues.get).not.toHaveBeenCalled();
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+    });
+
     it('bounds each aggregated comment without hiding later comments', async () => {
       await initWithoutLoop();
       mockOctokit.paginate

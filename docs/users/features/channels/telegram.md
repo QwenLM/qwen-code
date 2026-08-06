@@ -74,7 +74,7 @@ To use the bot in Telegram groups:
 2. **Disable privacy mode** in BotFather: `/mybots` → select your bot → Bot Settings → Group Privacy → Turn Off
 3. Add the bot to a group. If it was already in the group, **remove and re-add it** (Telegram caches privacy settings from when the bot joined)
 4. If using `groupPolicy: "allowlist"`, add the group's chat ID to `groups` in your config
-5. If using `groupPolicy: "pairing"`, approve the group's pairing request once before responses start
+5. If using `groupPolicy: "pairing"`, approve the group's pairing request once before responses start. Note that once a group is approved, **any member of that group** can use the bot; `senderPolicy` and `allowedUsers` do not gate members of an approved group.
 
 By default, the bot requires an @mention or a reply to respond in groups. Set `"requireMention": false` for a specific group to make it respond to all messages (useful for dedicated task groups). See [Group Chats](./overview#group-chats) for full details.
 

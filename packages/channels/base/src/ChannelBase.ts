@@ -376,6 +376,11 @@ export abstract class ChannelBase {
     observation: ChannelMemoryRecallObservation,
   ) => void;
   private groupHistory: GroupHistoryStore;
+  // Tracks the pairing code already announced per group so repeated triggers
+  // of the same pending request (extra mentions, parallel notification lanes)
+  // post the public notification once. In-memory by design: a restart can
+  // re-post once per still-pending request, but never per trigger.
+  private readonly groupPairingNotified = new Map<string, string>();
   private readonly loopController?: ChannelLoopController;
   private readonly observedContacts?: ChannelBaseOptions['observedContacts'];
   private readonly observedContactEnvelopes = new WeakSet<Envelope>();
@@ -5772,6 +5777,16 @@ export abstract class ChannelBase {
       : 'Too many pending pairing requests. Please try again later.';
   }
 
+  private groupPairingRejectionMessage(
+    rejected: 'sender_pending' | 'cap_reached',
+  ): string {
+    // Group variant: the DM wording would publicly attribute the mentioning
+    // member's unrelated pending request to the whole group.
+    return rejected === 'sender_pending'
+      ? 'A pairing request cannot be created right now. Another member can mention the bot to start group approval, or try again later.'
+      : 'Too many pending pairing requests. Please try again later.';
+  }
+
   protected async onPairingRequired(
     chatId: string,
     result: CreatePairingRequestResult,
@@ -5798,16 +5813,20 @@ export abstract class ChannelBase {
     threadId?: string,
   ): Promise<void> {
     if ('code' in result) {
+      if (this.groupPairingNotified.get(chatId) === result.code) {
+        return;
+      }
       await this.sendThreadMessage(
         chatId,
         threadId,
         `This group requires approval. Its pairing code is: ${result.code}\n\nAsk the bot operator to approve the group with:\n  qwen channel pairing approve ${this.name} ${result.code}`,
       );
+      this.groupPairingNotified.set(chatId, result.code);
     } else {
       await this.sendThreadMessage(
         chatId,
         threadId,
-        this.pairingRejectionMessage(result.rejected),
+        this.groupPairingRejectionMessage(result.rejected),
       );
     }
   }

@@ -2782,6 +2782,33 @@ describe('ChannelBase', () => {
           .calls[0][1] as string;
         expect(prompt).not.toContain('- [Bob] background');
         expect(prompt).toContain('[Carol] @bot summarize');
+
+        // Re-approve and mention again: the history recorded before the
+        // revocation must stay discarded. This pins that the revocation-time
+        // drain actually removed the entries from disk — a check-before-drain
+        // ordering would leave them behind and surface them here.
+        const recreated = store.createGroupRequest(
+          'chat1',
+          'Release Team',
+          'dave',
+          'Dave',
+        );
+        store.approve(pairingCodeOf(recreated));
+
+        await ch.handleInbound(
+          envelope({
+            isGroup: true,
+            isMentioned: true,
+            senderId: 'carol',
+            senderName: 'Carol',
+            text: '@bot follow-up',
+          }),
+        );
+
+        const secondPrompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+          .calls[1][1] as string;
+        expect(secondPrompt).not.toContain('- [Bob] background');
+        expect(secondPrompt).toContain('[Carol] @bot follow-up');
       } finally {
         if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
         else process.env['QWEN_HOME'] = previousQwenHome;
@@ -2921,14 +2948,28 @@ describe('ChannelBase', () => {
 
         expect(existsSync(historyPath)).toBe(false);
 
-        const store = new PairingStore('test-chan', '/tmp');
-        const created = store.createGroupRequest(
-          'group-1',
-          'Release Team',
-          'alice',
-          'Alice',
+        // The pairing-trigger half is dropped without recording too: content
+        // that fails authorization at preflight must not reach the model
+        // prompt later through the group-history backfill path.
+        await ch.handleInbound(
+          envelope({
+            isGroup: true,
+            chatId: 'group-1',
+            isMentioned: true,
+            senderId: 'dave',
+            senderName: 'Dave',
+            text: '@bot pair this group',
+          }),
         );
-        store.approve(pairingCodeOf(created));
+
+        expect(existsSync(historyPath)).toBe(false);
+        expect(ch.sent).toHaveLength(1);
+        expect(ch.sent[0]!.text).toContain('pairing code');
+
+        const store = new PairingStore('test-chan', '/tmp');
+        const pending = store.listPending();
+        expect(pending).toHaveLength(1);
+        store.approve(pending[0]!.code);
 
         await ch.handleInbound(
           envelope({
@@ -2944,6 +2985,7 @@ describe('ChannelBase', () => {
         const prompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
           .calls[0][1] as string;
         expect(prompt).not.toContain('pre-approval chatter');
+        expect(prompt).not.toContain('pair this group');
         expect(prompt).toContain('[Carol] @bot summarize');
       } finally {
         if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
@@ -13608,6 +13650,50 @@ describe('ChannelBase', () => {
       }
     });
 
+    it('posts one pairing notification when multiple mentions trigger the same group request', async () => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const qwenHome = mkdtempSync(join(tmpdir(), 'qwen-group-pairing-'));
+      process.env['QWEN_HOME'] = qwenHome;
+      try {
+        const ch = createChannel({ groupPolicy: 'pairing' });
+
+        await ch.handleInbound(
+          envelope({
+            isGroup: true,
+            isMentioned: true,
+            chatId: 'group-1',
+            chatName: 'Release Team',
+            senderId: 'alice',
+            senderName: 'Alice',
+          }),
+        );
+        await ch.handleInbound(
+          envelope({
+            isGroup: true,
+            isMentioned: true,
+            chatId: 'group-1',
+            chatName: 'Release Team',
+            senderId: 'bob',
+            senderName: 'Bob',
+          }),
+        );
+
+        // The request is deduped by subject; the public notification must be
+        // deduped the same way instead of posting once per mention.
+        expect(ch.sent).toHaveLength(1);
+        expect(ch.sent[0]!.chatId).toBe('group-1');
+        expect(ch.sent[0]!.text).toContain('pairing code');
+        expect(bridge.prompt).not.toHaveBeenCalled();
+        expect(
+          new PairingStore('test-chan', '/tmp').listPending(),
+        ).toHaveLength(1);
+      } finally {
+        if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+        else process.env['QWEN_HOME'] = previousQwenHome;
+        rmSync(qwenHome, { recursive: true, force: true });
+      }
+    });
+
     it('lets an approved paired group talk without mentions when requireMention is false', async () => {
       const previousQwenHome = process.env['QWEN_HOME'];
       const qwenHome = mkdtempSync(join(tmpdir(), 'qwen-group-pairing-'));
@@ -13678,6 +13764,9 @@ describe('ChannelBase', () => {
         expect(ch.sent).toHaveLength(1);
         expect(ch.sent[0]!.text).toContain('Too many pending pairing requests');
         expect(bridge.prompt).not.toHaveBeenCalled();
+        expect(
+          new PairingStore('test-chan', '/tmp').listPending(),
+        ).toHaveLength(3);
       } finally {
         if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
         else process.env['QWEN_HOME'] = previousQwenHome;
@@ -13873,7 +13962,15 @@ describe('ChannelBase', () => {
 
         expect(ch.sent).toHaveLength(2);
         expect(ch.sent[1]!.chatId).toBe('group-1');
+        // Group wording must not publicly attribute the sender's unrelated
+        // pending (DM) request to the whole group.
         expect(ch.sent[1]!.text).toContain(
+          'A pairing request cannot be created right now',
+        );
+        expect(ch.sent[1]!.text).toContain(
+          'Another member can mention the bot',
+        );
+        expect(ch.sent[1]!.text).not.toContain(
           'You already have a pending pairing request',
         );
         expect(bridge.prompt).not.toHaveBeenCalled();
