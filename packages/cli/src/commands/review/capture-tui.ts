@@ -309,7 +309,12 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       const code = (e as NodeJS.ErrnoException).code;
       shaped = code === 'EMFILE' || code === 'ENFILE' ? undefined : false;
     }
-    clearArtifact(holderReadyPath);
+    // The sentinel clears as a PLAIN file — never recursively: this tool
+    // only ever writes it as a file, so a DIRECTORY at that path is a
+    // user's, and recursive removal would destroy it on every run
+    // (measured: a seeded content-bearing directory at <out>.holder-ready
+    // was deleted even by fully successful runs).
+    rmSync(holderReadyPath, { force: true });
     if (shaped !== false) {
       clearArtifact(ansPath);
       clearArtifact(pngPath);
@@ -759,7 +764,9 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // .ans from an interrupted write (measured with a real ENOSPC) must not
     // persist undescribed.
     try {
-      rmSync(ansPath, { recursive: true, force: true });
+      // Plain, never recursive: this run wrote a FILE (or nothing); a
+      // directory at the path is not ours to delete.
+      rmSync(ansPath, { force: true });
     } catch {
       // The refusal reason below is the primary signal either way.
     }
@@ -866,7 +873,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       // manifest is about to deny — remove it (measured: a fake freeze that
       // wrote bytes then exited 9 left a torn png behind).
       try {
-        rmSync(pngPath, { recursive: true, force: true });
+        rmSync(pngPath, { force: true });
       } catch {
         // The degradation entry above is the primary signal.
       }
@@ -912,11 +919,12 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // (and possibly a png) with no manifest to describe them — best-effort
     // remove what this run already wrote before refusing.
     try {
-      rmSync(ansPath, { recursive: true, force: true });
-      rmSync(pngPath, { recursive: true, force: true });
+      // Plain, never recursive — same rationale as the .ans catch above.
+      rmSync(ansPath, { force: true });
+      rmSync(pngPath, { force: true });
       // The failed write itself can leave a PARTIAL manifest at the path —
       // worse than none: it parses or half-parses as evidence description.
-      rmSync(manifestPath, { recursive: true, force: true });
+      rmSync(manifestPath, { force: true });
     } catch {
       // The refusal reason below is the primary signal either way.
     }

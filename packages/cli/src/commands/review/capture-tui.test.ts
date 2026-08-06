@@ -939,9 +939,11 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
       evidence: 'none',
       reason: expect.stringContaining('cannot write capture output'),
     });
-    // THIS run's artifacts or nothing — the catch's rmSync clears even the
-    // blocker dir the fixture created.
-    expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
+    // THIS run's artifacts or nothing — but a DIRECTORY at the path is not
+    // this run's artifact, and force-deleting it destroyed pre-existing
+    // user directories (measured). The blocker survives; the refusal names
+    // the cause; nothing of OURS remains.
+    expect(statSync(join(dir, 'cap.ans')).isDirectory()).toBe(true);
     expect(existsSync(join(dir, 'cap.png'))).toBe(false);
     expect(existsSync(join(dir, 'cap.json'))).toBe(false);
     expect(existsSync(join(dir, 'cap.holder-ready'))).toBe(false);
@@ -967,7 +969,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     });
     expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
     expect(existsSync(join(dir, 'cap.png'))).toBe(false);
-    expect(existsSync(join(dir, 'cap.json'))).toBe(false);
+    expect(statSync(join(dir, 'cap.json')).isDirectory()).toBe(true);
     expect(existsSync(join(dir, 'cap.holder-ready'))).toBe(false);
   });
 
