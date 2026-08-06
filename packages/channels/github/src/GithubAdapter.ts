@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { execFile } from 'node:child_process';
 import {
   appendFileSync,
   chmodSync,
@@ -31,6 +32,115 @@ import { testBotMention, stripBotMention } from './mention.js';
 interface GithubConfig extends ChannelConfig {
   baseUrl?: string;
   reasonFilter?: unknown;
+  useLocalGh?: boolean;
+}
+
+const GH_AUTH_TIMEOUT_MS = 10_000;
+const GH_AUTH_MAX_BUFFER = 64 * 1024;
+// Same allowlist as the sibling gh wrappers, plus a leading-dash rejection so
+// the value cannot be parsed as a gh option when passed to `gh auth token`.
+const GH_HOSTNAME_RE = /^[A-Za-z0-9.-]+$/;
+
+function ghHostname(channelName: string, baseUrl: string): string {
+  let url: URL;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    throw new Error(
+      `[Channel:${channelName}] baseUrl is not a valid URL: ${baseUrl}`,
+    );
+  }
+  if (!url.hostname) {
+    throw new Error(
+      `[Channel:${channelName}] baseUrl is not a valid URL: ${baseUrl}`,
+    );
+  }
+  if (url.protocol !== 'https:') {
+    throw new Error(
+      `[Channel:${channelName}] local GitHub CLI authentication requires an HTTPS baseUrl.`,
+    );
+  }
+  const hostname =
+    url.hostname === 'api.github.com' ? 'github.com' : url.hostname;
+  if (hostname.startsWith('-') || !GH_HOSTNAME_RE.test(hostname)) {
+    throw new Error(
+      `[Channel:${channelName}] baseUrl hostname is invalid: ${hostname}`,
+    );
+  }
+  return hostname;
+}
+
+// Sibling gh subprocess wrappers: core/src/utils/github-prs.ts, cli/src/commands/review/lib/gh.ts
+function resolveGhAuthToken(
+  channelName: string,
+  hostname: string,
+): Promise<string> {
+  const env = { ...process.env };
+  delete env['GH_TOKEN'];
+  delete env['GITHUB_TOKEN'];
+  delete env['GH_ENTERPRISE_TOKEN'];
+  delete env['GITHUB_ENTERPRISE_TOKEN'];
+  return new Promise((resolve, reject) => {
+    execFile(
+      'gh',
+      ['auth', 'token', '--hostname', hostname],
+      {
+        timeout: GH_AUTH_TIMEOUT_MS,
+        maxBuffer: GH_AUTH_MAX_BUFFER,
+        windowsHide: true,
+        encoding: 'utf8',
+        env,
+      },
+      (error, stdout, stderr) => {
+        if (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          let message: string;
+          if (code === 'ENOENT') {
+            message =
+              'GitHub CLI (gh) is not installed on the daemon host or is not on the daemon PATH.';
+          } else if ((error as { killed?: unknown }).killed === true) {
+            // Node sets killed=true even when the timed-out child also exited
+            // with a numeric code, so this must precede the exit-code branch.
+            message = `GitHub CLI authentication lookup for ${hostname} timed out after ${GH_AUTH_TIMEOUT_MS / 1000} seconds.`;
+          } else if (typeof code === 'number') {
+            // Matches go-gh's ConfigDir precedence: GH_CONFIG_DIR,
+            // XDG_CONFIG_HOME, %AppData%\GitHub CLI (Windows only), HOME.
+            message = `No GitHub CLI authentication is available for ${hostname}. Run \`gh auth login --hostname ${hostname}\` on the daemon host. gh config dir: ${
+              env['GH_CONFIG_DIR'] ||
+              (env['XDG_CONFIG_HOME']
+                ? `${env['XDG_CONFIG_HOME']}/gh`
+                : process.platform === 'win32' && env['APPDATA']
+                  ? `${env['APPDATA']}\\GitHub CLI`
+                  : env['HOME']
+                    ? `${env['HOME']}/.config/gh`
+                    : 'unknown')
+            }`;
+          } else {
+            message = `GitHub CLI authentication lookup for ${hostname} failed to execute.`;
+          }
+          const stderrHint = stderr ? sanitizeLogText(stderr, 256).trim() : '';
+          reject(
+            new Error(
+              `[Channel:${channelName}] ${message}${
+                stderrHint ? ` gh stderr: ${stderrHint}` : ''
+              }`,
+            ),
+          );
+          return;
+        }
+        const token = stdout.trim();
+        if (!token) {
+          reject(
+            new Error(
+              `[Channel:${channelName}] GitHub CLI returned an empty token for ${hostname}. Run \`gh auth login --hostname ${hostname}\` on the daemon host.`,
+            ),
+          );
+          return;
+        }
+        resolve(token);
+      },
+    );
+  });
 }
 
 const KNOWN_NOTIFICATION_REASONS = new Set([
@@ -431,11 +541,28 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const cfg = this.config as GithubConfig;
     this.reasonFilter = normalizeReasonFilter(cfg, this.name);
     const baseUrl = cfg.baseUrl || 'https://api.github.com';
+    const configuredToken = cfg.token?.trim() ?? '';
+    if (cfg.useLocalGh !== undefined && typeof cfg.useLocalGh !== 'boolean') {
+      throw new Error(`[Channel:${this.name}] useLocalGh must be a boolean.`);
+    }
+    if (!configuredToken && cfg.useLocalGh !== true) {
+      throw new Error(
+        `[Channel:${this.name}] configure a GitHub token or enable local GitHub CLI authentication.`,
+      );
+    }
+    let auth = configuredToken;
+    let credential = 'configured token';
+    if (!configuredToken) {
+      const hostname = ghHostname(this.name, baseUrl);
+      auth = await resolveGhAuthToken(this.name, hostname);
+      credential = `local gh credential for ${hostname}`;
+    }
+    process.stderr.write(`[Channel:${this.name}] using ${credential}\n`);
     this.webOrigin = baseUrl
       .replace(/\/api\/v3\/?$/, '')
       .replace(/^https:\/\/api\.github\.com/, 'https://github.com');
     this.octokit = new Octokit({
-      auth: cfg.token,
+      auth,
       baseUrl,
       ...(this.proxy
         ? { request: { agent: new HttpsProxyAgent(this.proxy) } }
@@ -444,6 +571,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     try {
       const { data } = await this.octokit.rest.users.getAuthenticated();
       this.botUsername = data.login;
+      process.stderr.write(
+        `[Channel:${this.name}] authenticated as "${sanitizeLogText(data.login, 64)}"\n`,
+      );
     } catch (err) {
       throw new Error(
         `[Channel:${this.name}] failed to resolve bot identity: ${err}`,
@@ -464,7 +594,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     ) {
       if (allowed.every((user) => user === botUsername)) {
         throw new Error(
-          `[Channel:${this.name}] GitHub allowlist only contains the authenticated GitHub account "${this.botUsername}", which cannot trigger this channel because self-authored comments are ignored. Use a separate bot-owned PAT and allowlist the operator account.`,
+          `[Channel:${this.name}] GitHub allowlist only contains the authenticated GitHub account "${this.botUsername}", which cannot trigger this channel because self-authored comments are ignored. Use a separate bot account (or a separate bot-owned PAT) and allowlist the operator account.`,
         );
       }
       process.stderr.write(

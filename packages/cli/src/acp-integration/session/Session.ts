@@ -279,6 +279,7 @@ import type {
   ToolCallStartParams,
 } from './types.js';
 import { HistoryReplayer } from './history-replayer.js';
+import { projectAcpToolResultUpdate } from './acp-tool-result-text-projection.js';
 import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 import { ToolCallPreparationTracker } from './tool-call-preparation-tracker.js';
 import { PlanEmitter } from './emitters/PlanEmitter.js';
@@ -4712,7 +4713,7 @@ export class Session implements SessionContext {
   async sendUpdate(update: SessionUpdate): Promise<void> {
     const params: SessionNotification = {
       sessionId: this.sessionId,
-      update,
+      update: projectAcpToolResultUpdate(update),
     };
 
     if (update.sessionUpdate === 'plan') {
