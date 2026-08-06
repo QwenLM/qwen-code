@@ -34,9 +34,6 @@ const reviewVerificationRunner = readFileSync(
 const autofixContractsScriptPath = '.github/scripts/check-autofix-contracts.sh';
 const autofixContractsScript = readFileSync(autofixContractsScriptPath, 'utf8');
 const autofixRunnerScriptPath = '.qwen/skills/autofix/scripts/run-agent.mjs';
-const sanitizeActionPath =
-  '.github/actions/sanitize-workspace-git-config/action.yml';
-const sanitizeAction = readFileSync(sanitizeActionPath, 'utf8');
 const checkBotCredentialsStep =
   workflow.match(
     /- name: 'Check bot credentials'[\s\S]*?(?=\n[ ]{6}- name: 'Set up Node.js')/,
@@ -63,6 +60,13 @@ const buildCliJob =
 const reviewAddressJob =
   workflow.match(
     /\n {2}review-address:[\s\S]*?(?=\n {2}[a-z][a-z0-9-]*:\n|$)/,
+  )?.[0] ?? '';
+// The sanitize step is inlined into each heavy job as a `run:` step (a
+// local action would need a checkout it is meant to precede). issue-autofix's
+// copy is the canonical text for the ordering and hardening assertions below.
+const sanitizeStep =
+  issueAutofixJob.match(
+    /- name: 'Sanitize workspace git config'[\s\S]*?(?=\n[ ]{6}- name: ')/,
   )?.[0] ?? '';
 const publishPrStep =
   workflow.match(
@@ -5597,9 +5601,13 @@ describe('qwen-autofix workflow', () => {
           `${name}: '${stepName}' must precede checkout`,
         ).toBeLessThan(job.indexOf("- name: 'Checkout"));
       }
+      // Inlined as a run step, not a local action: a `uses: './...'`
+      // before checkout fails on a clean runner and executes leftover
+      // content on a reused one.
       expect(job).toContain(
-        "uses: './.github/actions/sanitize-workspace-git-config'",
+        "- name: 'Sanitize workspace git config'\n        run: |-",
       );
+      expect(job).not.toContain("uses: './");
     }
     // The issue phase treats "the branch exists" as proof the agent ran,
     // so only it sweeps stale autofix/issue-* branches — detached, so
@@ -5617,12 +5625,12 @@ describe('qwen-autofix workflow', () => {
     // unsets and which CAN carry core.hooksPath — pointing the hook
     // sweep's recursive delete at /. Then the allowlist sweep, and only
     // then the hooks resolution: the ordering IS the containment.
-    const rmWorktreeCfg = sanitizeAction.indexOf('--git-path config.worktree');
-    const unsetExt = sanitizeAction.indexOf(
+    const rmWorktreeCfg = sanitizeStep.indexOf('--git-path config.worktree');
+    const unsetExt = sanitizeStep.indexOf(
       '--unset-all extensions.worktreeConfig',
     );
-    const sweep = sanitizeAction.indexOf('--name-only --list');
-    const hooks = sanitizeAction.indexOf('--git-path hooks');
+    const sweep = sanitizeStep.indexOf('--name-only --list');
+    const hooks = sanitizeStep.indexOf('--git-path hooks');
     expect(rmWorktreeCfg).toBeGreaterThan(-1);
     expect(unsetExt).toBeGreaterThan(rmWorktreeCfg);
     expect(sweep).toBeGreaterThan(unsetExt);
@@ -5631,17 +5639,30 @@ describe('qwen-autofix workflow', () => {
     // global core.hooksPath must not steer the sweep), deletion stays
     // inside the repository's own git dir, and an outward-resolving entry
     // is unlinked, never descended into.
-    expect(sanitizeAction).toContain('GIT_CONFIG_GLOBAL=/dev/null');
-    expect(sanitizeAction).toContain('GIT_CONFIG_SYSTEM=/dev/null');
-    expect(sanitizeAction).toContain('rev-parse --absolute-git-dir');
-    expect(sanitizeAction).toContain('unlinking it');
-    expect(sanitizeAction).toContain('-type f -o -type l');
-    expect(sanitizeAction).toContain(
+    expect(sanitizeStep).toContain('GIT_CONFIG_GLOBAL=/dev/null');
+    expect(sanitizeStep).toContain('GIT_CONFIG_SYSTEM=/dev/null');
+    expect(sanitizeStep).toContain('rev-parse --absolute-git-dir');
+    expect(sanitizeStep).toContain('unlinking it');
+    expect(sanitizeStep).toContain('-type f -o -type l');
+    expect(sanitizeStep).toContain(
       'git config --local --unset-all core.hooksPath',
     );
     // Provenance link: the action and qwen-triage's hardened step must be
     // edited together.
-    expect(sanitizeAction).toContain('qwen-triage');
+    expect(sanitizeStep).toContain('qwen-triage');
+  });
+
+  it('never invokes a local action before checkout', () => {
+    // A `uses: './...'` local action resolves from $GITHUB_WORKSPACE, so
+    // it only exists after a checkout — before one it fails on a clean
+    // runner and executes a leftover copy on a reused one.
+    for (const block of workflow.split(/\n {2}# ={6,}/)) {
+      const localUse = block.indexOf("uses: './");
+      if (localUse === -1) continue;
+      const checkout = block.indexOf("uses: 'actions/checkout");
+      expect(checkout).toBeGreaterThan(-1);
+      expect(localUse).toBeGreaterThan(checkout);
+    }
   });
 
   it('runs qwen headless once in each agent step', () => {
