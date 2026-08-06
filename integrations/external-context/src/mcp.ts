@@ -91,7 +91,7 @@ export function createExternalContextMcpServer(
       {
         title: 'Remember external context',
         description:
-          'Store the exact supplied text in the administrator-bound Mem0 repository memory.',
+          'Store the exact supplied text in the administrator-bound Mem0 repository memory. This non-idempotent operation may create a duplicate; use it only after the user approves the exact content.',
         inputSchema: {
           content: z
             .string()
@@ -162,6 +162,21 @@ function errorResult(text: string) {
 }
 
 function rememberResult(result: RememberResult) {
+  if (result.status === 'failed') {
+    return {
+      isError: true,
+      content: [
+        {
+          type: 'text' as const,
+          text: JSON.stringify({
+            status: 'failed',
+            message:
+              'The provider rejected the memory. Do not retry without changing the content or configuration.',
+          }),
+        },
+      ],
+    };
+  }
   if (result.status === 'unknown') {
     return {
       isError: true,

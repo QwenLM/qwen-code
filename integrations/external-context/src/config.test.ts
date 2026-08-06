@@ -95,7 +95,16 @@ describe('loadConfig', () => {
         QWEN_EXTERNAL_CONTEXT_CONFIG: fixture.config,
         CONTEXT_TOKEN: 'secret-value',
       }),
-    ).rejects.toThrow('External context config is invalid.');
+    ).rejects.toThrow(
+      'External context memory writes require a Mem0 provider.',
+    );
+    await expect(
+      loadConfig({
+        QWEN_EXTERNAL_CONTEXT_CONFIG: fixture.config,
+      }),
+    ).rejects.toThrow(
+      'External context memory writes require a Mem0 provider.',
+    );
 
     await writeConfig(fixture, {
       version: 2,

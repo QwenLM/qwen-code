@@ -65,6 +65,11 @@ inherited by Qwen may also be visible to same-UID processes and tools. Use the
 governed profile when the credential, write authorization, or outbound-content
 policy must be isolated from the CLI user.
 
+Retrieved context remains untrusted reference data if the model proposes
+storing it back into the shared corpus. A user approval does not upgrade that
+trust label. Review the complete write carefully because persisting retrieved
+or injected text can expose it to later users and model turns.
+
 The managed-settings example allows Qwen to invoke search without per-call
 confirmation. It is on-demand rather than prompt-triggered, but it is not
 necessarily initiated manually by the user. In interactive non-YOLO mode,
@@ -154,7 +159,10 @@ another copy of the same content.
    the Project, not authorization.
 2. Copy `examples/mem0-write.json` to an administrator-owned path and set the
    referenced `MEM0_API_KEY`. `write` is accepted only for version 1 Mem0
-   configurations. Generic HTTP and version 2 configurations reject it.
+   configurations. Generic HTTP and version 2 configurations reject it. The
+   top-level `timeoutMs` applies to both search and write; choose a write budget
+   appropriate for the deployment because a client timeout produces an
+   ambiguous `unknown` result.
 3. Build the workspace so both `dist/main.js` and
    `dist/write-confirmation.js` exist.
 4. Start Qwen with an administrator-owned copy of
@@ -186,7 +194,8 @@ text exceeds the constrained terminal area, Qwen reports the hidden line count
 and `Ctrl-S` reveals the remaining confirmation content. YOLO
 bypasses the ordinary permission rule, but a working Hook still asks once.
 Plan mode, unknown permission modes, malformed Hook input, and environments
-unable to confirm are denied. Hook transport failure follows Qwen's existing
+unable to confirm are denied. Extra tool arguments are ignored consistently by
+the Hook and MCP schema and never reach Mem0. Hook transport failure follows Qwen's existing
 fail-open semantics, so this is a user-experience safeguard, not an enforceable
 authorization boundary. Strict approval requires the governed profile.
 
@@ -202,9 +211,12 @@ UTF-16. It never accepts a model-selected tenant, Project, `app_id`, filter, or
 metadata. Each approval performs exactly one request; the integration does not
 pre-search, retry, poll, cache, or deduplicate.
 
-Mem0 V3 Add may complete asynchronously. `PENDING` with a valid `event_id`
-returns `accepted`, not `stored`. A valid synchronous `SUCCEEDED` response
-returns `stored`. A timeout, cancellation, broken response, unexpected status,
+Mem0 V3 Add is asynchronous in normal operation. `PENDING` with a valid
+`event_id` is therefore the expected successful response and returns
+`accepted`, not `stored`. A valid synchronous `SUCCEEDED` response returns
+`stored` as a defensive compatibility path. Explicit `FAILED` and HTTP 400,
+401, 403, or 404 responses return a stable failed result. A timeout,
+cancellation, redirect, other HTTP status, broken response, unexpected status,
 or invalid operation identifier returns `unknown` and an MCP error warning the
 model not to retry automatically, because Mem0 may already have accepted the
 write. Cancellation therefore does not prove that no memory was created.

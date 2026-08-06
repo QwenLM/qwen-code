@@ -12,7 +12,7 @@ import {
 } from './write-confirmation.js';
 
 describe('write confirmation Hook', () => {
-  it.each(['default', 'auto', 'auto-edit', 'auto_edit', 'yolo'])(
+  it.each(['default', 'auto', 'auto_edit', 'yolo'])(
     'asks in %s mode and displays a reversible escaped representation',
     (permissionMode) => {
       const content =
@@ -44,12 +44,9 @@ describe('write confirmation Hook', () => {
   );
 
   it.each([
-    ['plan mode', validInput({ permission_mode: 'plan' })],
-    ['unknown mode', validInput({ permission_mode: 'future' })],
     ['wrong event', validInput({ hook_event_name: 'PostToolUse' })],
     ['wrong tool', validInput({ tool_name: 'context_remember' })],
     ['missing input', validInput({ tool_input: undefined })],
-    ['extra input', validInput({ extraToolInput: true })],
     ['non-string content', validInput({ content: 42 })],
     ['whitespace content', validInput({ content: ' \t\n' })],
     ['control-only content', validInput({ content: '\u0000\u200b\u202e' })],
@@ -66,6 +63,39 @@ describe('write confirmation Hook', () => {
       permissionDecisionReason:
         'External context memory write confirmation request is invalid.',
     });
+  });
+
+  it.each([
+    ['plan', 'External context memory writes are not allowed in plan mode.'],
+    [
+      'auto-edit',
+      'External context memory write permission mode is unsupported.',
+    ],
+    ['future', 'External context memory write permission mode is unsupported.'],
+  ])('denies %s mode with a specific reason', (permissionMode, reason) => {
+    const result = runWriteConfirmation(
+      validInput({ permission_mode: permissionMode }),
+    );
+
+    expect(result.hookSpecificOutput).toEqual({
+      hookEventName: 'PreToolUse',
+      permissionDecision: 'deny',
+      permissionDecisionReason: reason,
+    });
+  });
+
+  it('ignores extra tool arguments that the MCP schema strips', () => {
+    const content = 'repository policy';
+
+    const result = runWriteConfirmation(
+      validInput({ content, extraToolInput: true }),
+    );
+
+    expect(result.hookSpecificOutput.permissionDecision).toBe('ask');
+    const serialized = result.hookSpecificOutput.permissionDecisionReason.slice(
+      result.hookSpecificOutput.permissionDecisionReason.indexOf('\n') + 1,
+    );
+    expect(JSON.parse(serialized)).toBe(content);
   });
 
   it('accepts exactly 4000 Unicode code points', () => {
@@ -109,6 +139,18 @@ describe('write confirmation Hook', () => {
     expect(JSON.parse(write.mock.calls[0]?.[0] as string)).toMatchObject({
       hookSpecificOutput: { permissionDecision: 'ask' },
     });
+  });
+
+  it('propagates output failures to the process entry point', async () => {
+    const input = Readable.from([JSON.stringify(validInput())]);
+
+    await expect(
+      runWriteConfirmationCli(input, {
+        write: () => {
+          throw new Error('broken stdout');
+        },
+      }),
+    ).rejects.toThrow('broken stdout');
   });
 });
 

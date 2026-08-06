@@ -5,7 +5,11 @@
  */
 
 import { ConfigurationError } from './config.js';
-import { postJson, validateProviderBaseUrl } from './http-client.js';
+import {
+  postJson,
+  ProviderHttpStatusError,
+  validateProviderBaseUrl,
+} from './http-client.js';
 import type {
   ExternalContextItem,
   ExternalContextProvider,
@@ -20,6 +24,7 @@ const MEM0_BASE_URL = new URL('https://api.mem0.ai/');
 const MAX_PROVIDER_ITEMS = 5;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const DEFINITIVE_WRITE_REJECTION_STATUSES = new Set([400, 401, 403, 404]);
 
 export function createProvider(
   config: ProviderConfig,
@@ -116,7 +121,13 @@ export class Mem0PlatformV3Adapter
         },
         signal: input.signal,
       });
-    } catch {
+    } catch (error) {
+      if (
+        error instanceof ProviderHttpStatusError &&
+        DEFINITIVE_WRITE_REJECTION_STATUSES.has(error.status)
+      ) {
+        return { status: 'failed' };
+      }
       return { status: 'unknown' };
     }
     return parseMem0RememberResult(response);
@@ -131,7 +142,7 @@ function parseMem0RememberResult(response: unknown): RememberResult {
   const status = response['status'];
   const operationId = parseOperationId(response['event_id']);
   if (status === 'FAILED') {
-    throw new Error('External context memory write failed.');
+    return { status: 'failed' };
   }
   if (status === 'PENDING') {
     return operationId === undefined

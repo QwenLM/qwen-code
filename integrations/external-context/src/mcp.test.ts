@@ -289,6 +289,29 @@ describe('external context MCP server', () => {
     }
   });
 
+  it('returns a stable error for a definitive provider rejection', async () => {
+    const client = await connect({
+      config: writeConfig(),
+      provider: searchProvider(),
+      writer: memoryWriter({ status: 'failed' }),
+    });
+
+    const result = await client.callTool({
+      name: 'context_remember',
+      arguments: { content: 'repository policy' },
+    });
+
+    expect(result.isError).toBe(true);
+    const text = result.content[0];
+    expect(text).toMatchObject({ type: 'text' });
+    const body = JSON.parse(text.type === 'text' ? text.text : '{}');
+    expect(body).toMatchObject({ status: 'failed' });
+    expect(body.message).toContain('provider rejected the memory');
+    expect(body.message).toContain(
+      'Do not retry without changing the content or configuration.',
+    );
+  });
+
   it('returns a stable memory error without provider details', async () => {
     const client = await connect({
       config: writeConfig(),

@@ -14,13 +14,7 @@ import {
 
 const MAX_HOOK_INPUT_BYTES = 1024 * 1024;
 const REMEMBER_TOOL_NAME = 'mcp__external-context__context_remember';
-const ASK_PERMISSION_MODES = new Set([
-  'default',
-  'auto',
-  'auto-edit',
-  'auto_edit',
-  'yolo',
-]);
+const ASK_PERMISSION_MODES = new Set(['default', 'auto', 'auto_edit', 'yolo']);
 
 interface HookOutput {
   hookSpecificOutput: {
@@ -40,7 +34,7 @@ interface HookOutputStream {
 
 export function runWriteConfirmation(value: unknown): HookOutput {
   if (!isRecord(value)) {
-    return deny();
+    return denyInvalid();
   }
   const toolInput = value['tool_input'];
   const permissionMode = value['permission_mode'];
@@ -48,13 +42,19 @@ export function runWriteConfirmation(value: unknown): HookOutput {
     value['hook_event_name'] !== 'PreToolUse' ||
     value['tool_name'] !== REMEMBER_TOOL_NAME ||
     typeof permissionMode !== 'string' ||
-    !ASK_PERMISSION_MODES.has(permissionMode) ||
     !isRecord(toolInput) ||
-    Object.keys(toolInput).length !== 1 ||
     typeof toolInput['content'] !== 'string' ||
     !isValidMemoryContent(toolInput['content'])
   ) {
-    return deny();
+    return denyInvalid();
+  }
+  if (permissionMode === 'plan') {
+    return deny('External context memory writes are not allowed in plan mode.');
+  }
+  if (!ASK_PERMISSION_MODES.has(permissionMode)) {
+    return deny(
+      'External context memory write permission mode is unsupported.',
+    );
   }
 
   return {
@@ -76,13 +76,16 @@ export async function runWriteConfirmationCli(
   outputStream.write(JSON.stringify(runWriteConfirmation(input)));
 }
 
-function deny(): HookOutput {
+function denyInvalid(): HookOutput {
+  return deny('External context memory write confirmation request is invalid.');
+}
+
+function deny(reason: string): HookOutput {
   return {
     hookSpecificOutput: {
       hookEventName: 'PreToolUse',
       permissionDecision: 'deny',
-      permissionDecisionReason:
-        'External context memory write confirmation request is invalid.',
+      permissionDecisionReason: reason,
     },
   };
 }
@@ -129,5 +132,9 @@ async function isDirectEntryPoint(): Promise<boolean> {
 }
 
 if (await isDirectEntryPoint()) {
-  await runWriteConfirmationCli().catch(() => undefined);
+  try {
+    await runWriteConfirmationCli();
+  } catch {
+    process.exitCode = 1;
+  }
 }

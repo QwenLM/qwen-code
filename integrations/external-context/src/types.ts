@@ -22,6 +22,7 @@ export interface ExternalMemoryWriter {
 export type RememberResult =
   | { status: 'stored'; providerOperationId?: string }
   | { status: 'accepted'; providerOperationId: string }
+  | { status: 'failed' }
   | { status: 'unknown' };
 
 export interface ExternalContextItem {

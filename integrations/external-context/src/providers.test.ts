@@ -438,6 +438,7 @@ describe('Mem0PlatformV3Adapter', () => {
     ],
     [{ status: 'PENDING' }, { status: 'unknown' }],
     [{ status: 'PENDING', event_id: 'not-a-uuid' }, { status: 'unknown' }],
+    [{ status: 'SUCCEEDED', event_id: 'not-a-uuid' }, { status: 'unknown' }],
     [{ status: 'UNKNOWN', event_id: eventId }, { status: 'unknown' }],
     [{}, { status: 'unknown' }],
     [[], { status: 'unknown' }],
@@ -454,7 +455,7 @@ describe('Mem0PlatformV3Adapter', () => {
     ).resolves.toEqual(expected);
   });
 
-  it('maps an explicit Mem0 failure to a stable rejected error', async () => {
+  it('maps an explicit Mem0 failure to a stable failed result', async () => {
     const baseUrl = await startServer((_request, response) => {
       json(response, {
         status: 'FAILED',
@@ -467,10 +468,30 @@ describe('Mem0PlatformV3Adapter', () => {
         content: 'repository policy',
         signal: AbortSignal.timeout(1000),
       }),
-    ).rejects.toThrow('External context memory write failed.');
+    ).resolves.toEqual({ status: 'failed' });
   });
 
-  it.each([302, 429, 500])(
+  it.each([400, 401, 403, 404])(
+    'returns failed for definitive HTTP %s rejections',
+    async (status) => {
+      let requestCount = 0;
+      const baseUrl = await startServer((_request, response) => {
+        requestCount += 1;
+        response.writeHead(status);
+        response.end('private upstream detail');
+      });
+
+      await expect(
+        mem0Adapter(baseUrl).remember({
+          content: 'repository policy',
+          signal: AbortSignal.timeout(1000),
+        }),
+      ).resolves.toEqual({ status: 'failed' });
+      expect(requestCount).toBe(1);
+    },
+  );
+
+  it.each([302, 408, 429, 500])(
     'returns unknown for HTTP %s without retrying',
     async (status) => {
       let requestCount = 0;

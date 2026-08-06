@@ -111,14 +111,16 @@ export async function loadConfig(
     throw new ConfigurationError('External context config is invalid.');
   }
 
-  const provider = resolveProvider(result.data.provider, env);
   if (result.data.version === 1) {
     if (
       result.data.write !== undefined &&
-      provider.type !== 'mem0-platform-v3'
+      result.data.provider.type !== 'mem0-platform-v3'
     ) {
-      throw new ConfigurationError('External context config is invalid.');
+      throw new ConfigurationError(
+        'External context memory writes require a Mem0 provider.',
+      );
     }
+    const provider = resolveProvider(result.data.provider, env);
     return {
       version: 1,
       timeoutMs: result.data.timeoutMs,
@@ -127,6 +129,7 @@ export async function loadConfig(
     };
   }
 
+  const provider = resolveProvider(result.data.provider, env);
   return {
     version: 2,
     timeoutMs: result.data.timeoutMs,

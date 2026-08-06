@@ -64,7 +64,7 @@ sequenceDiagram
     Q->>E: Approved invocation
     E->>P: One Direct Import request
     P-->>E: SUCCEEDED, PENDING, failure, or ambiguous transport
-    E-->>Q: stored, accepted, or unknown
+    E-->>Q: stored, accepted, failed, or unknown
 ```
 
 The MCP process and confirmation Hook are separate processes. They share only
@@ -89,6 +89,7 @@ interface ExternalMemoryWriter {
 type RememberResult =
   | { status: 'stored'; providerOperationId?: string }
   | { status: 'accepted'; providerOperationId: string }
+  | { status: 'failed' }
   | { status: 'unknown' };
 ```
 
@@ -143,9 +144,9 @@ selectors or metadata to the Provider request.
 
 The confirmation Hook validates the same content contract and reads at most
 1 MiB from stdin. It requires the exact `PreToolUse` event and fully qualified
-MCP tool name. `default`, `auto`, `auto-edit`, compatibility `auto_edit`, and
-`yolo` return `ask`; `plan`, unknown modes, invalid input, or unexpected tool
-arguments return `deny`.
+MCP tool name. `default`, `auto`, `auto_edit`, and `yolo` return `ask`; `plan`,
+unknown modes, or invalid input return `deny`. Extra tool arguments are ignored
+by both the Hook and MCP schema and never reach the Provider.
 
 The reason contains the complete text as a JSON string. JSON escaping makes
 quotes, backslashes, newlines, and C0 controls reversible; the renderer also
@@ -187,17 +188,21 @@ neither would provide idempotency for an async remote operation.
 
 Result mapping is conservative:
 
-| Provider outcome                                                                                                            | Tool result                  |
-| --------------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
-| Valid `SUCCEEDED`                                                                                                           | `stored`                     |
-| Valid `PENDING` with UUID `event_id`                                                                                        | `accepted` with operation ID |
-| Explicit `FAILED`                                                                                                           | Stable MCP error             |
-| Timeout, cancellation, redirect, 4xx/5xx, broken or oversized response, invalid JSON, unknown status, or invalid identifier | `unknown` with MCP error     |
+| Provider outcome                                                                                                                      | Tool result                    |
+| ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
+| Valid `SUCCEEDED`                                                                                                                     | `stored`                       |
+| Valid `PENDING` with UUID `event_id`                                                                                                  | `accepted` with operation ID   |
+| Explicit `FAILED`, or HTTP 400, 401, 403, or 404                                                                                      | `failed` with stable MCP error |
+| Timeout, cancellation, redirect, other HTTP status, broken or oversized response, invalid JSON, unknown status, or invalid identifier | `unknown` with MCP error       |
 
-`accepted` means queued, not persisted. `unknown` states that the Provider may
-already have accepted the write and tells the model not to retry automatically.
-The integration never polls the event or retries. User cancellation likewise
-does not prove that no record was created.
+Mem0 Add normally returns `PENDING`, so `accepted` is the expected successful
+result and means queued, not persisted. `stored` is retained only for a valid
+synchronous `SUCCEEDED` response. `failed` is a definitive rejection and tells
+the model not to retry without changing the content or configuration.
+`unknown` states that the Provider may already have accepted the write and
+tells the model not to retry automatically. The integration never polls the
+event or retries. User cancellation likewise does not prove that no record was
+created.
 
 Errors and tool results never include the content, credential, Provider URL,
 raw response, or raw upstream error. The integration emits no local per-request
@@ -230,6 +235,11 @@ not authorization. A key capable of Direct Import may also allow other Project
 operations outside this MCP surface. Use the governed profile in #7449 when
 credentials, identity, policy, approval, or audit must be enforced outside the
 CLI user's process.
+
+Search results remain untrusted reference data even when the model proposes
+writing them back into the same corpus. Approval does not upgrade their trust.
+The reviewer must inspect the complete content because storing retrieved or
+injected text can propagate it to later users and model turns.
 
 ## Verification and rollout
 
