@@ -473,9 +473,10 @@ describe('qwen-triage tmux workflow', () => {
 
     const finalizeStep = step('Finalize triage status comment');
     // Runs on EVERY terminal outcome and edits the SAME marker comment (no
-    // second post). always(), not success() || failure(): the job timeout and
-    // a manual cancel surface as cancellation, which skipped the step and left
-    // the early comment claiming the run was still in progress.
+    // second post). always(), not success() || failure(): cancellation —
+    // usually cancel-in-progress superseding the run, also job timeout or
+    // manual cancel — skipped the step and left the early comment claiming
+    // the run was still in progress.
     expect(finalizeStep).toContain("MARKER='<!-- qwen-triage lifecycle -->'");
     expect(finalizeStep).toContain(
       "LEGACY_MARKER='<!-- qwen-triage stage=status -->'",
@@ -490,6 +491,9 @@ describe('qwen-triage tmux workflow', () => {
     expect(finalizeStep).toContain('已取消');
     expect(finalizeStep).toContain(
       'elif [ "${JOB_STATUS:-}" = \'cancelled\' ]',
+    );
+    expect(finalizeStep).toContain(
+      'if [ "${TRIAGE_OUTCOME:-}" = \'success\' ] && [ "${JOB_STATUS:-}" != \'failure\' ]; then',
     );
     expect(finalizeStep).toContain(
       'Cannot resolve bot identity; skipping final status comment upsert.',
@@ -546,7 +550,7 @@ describe('qwen-triage tmux workflow', () => {
             'fi',
             'case "$*" in',
             "  'api user --jq .login') echo qwen-code-ci-bot ;;",
-            '  *--paginate*) cat "$GH_STUB_COMMENTS" ;;',
+            '  *--paginate*) [ -n "${GH_STUB_FAIL_LIST:-}" ] && exit 1; cat "$GH_STUB_COMMENTS" ;;',
             'esac',
             'exit 0',
           ].join('\n'),
@@ -554,10 +558,15 @@ describe('qwen-triage tmux workflow', () => {
         );
 
         const RUN_URL = 'https://github.com/QwenLM/qwen-code/actions/runs/77';
+        // GitHub runs `shell: bash` as `bash --noprofile --norc -eo pipefail
+        // {0}`, and the step's own `set -uo pipefail` does not turn `-e` back
+        // off. Match that, or an unguarded failing command kills the real
+        // step in production while this harness stays green.
+        const bashArgs = ['--noprofile', '--norc', '-eo', 'pipefail', '-c'];
         const run = (env) => {
           rmSync(bodyOut, { force: true });
           rmSync(callOut, { force: true });
-          const proc = spawnSync('bash', ['-c', script], {
+          const proc = spawnSync('bash', [...bashArgs, script], {
             env: {
               ...process.env,
               PATH: `${dir}:${process.env.PATH}`,
@@ -578,6 +587,7 @@ describe('qwen-triage tmux workflow', () => {
           return {
             body: existsSync(bodyOut) ? readFileSync(bodyOut, 'utf8') : null,
             call: existsSync(callOut) ? readFileSync(callOut, 'utf8') : null,
+            out: `${proc.stdout}${proc.stderr}`,
           };
         };
 
@@ -594,6 +604,10 @@ describe('qwen-triage tmux workflow', () => {
           // A timeout/manual cancel landing AFTER the triage step already
           // succeeded still reports the success.
           [{ TRIAGE_OUTCOME: 'success', JOB_STATUS: 'cancelled' }, 'finished'],
+          // A red job despite a successful triage step — 'Check triage
+          // response' exits 1 on an empty summary — must NOT say "finished"
+          // and point at stage comments that were never posted.
+          [{ TRIAGE_OUTCOME: 'success', JOB_STATUS: 'failure' }, 'early'],
           [
             { TRIAGE_OUTCOME: 'cancelled', JOB_STATUS: 'cancelled' },
             'cancelled',
@@ -622,7 +636,10 @@ describe('qwen-triage tmux workflow', () => {
 
         // A cancel landing before THIS run's claim posted must not clobber a
         // previous run's terminal wording — ownership is the run link the
-        // claim embeds, which a prior run's comment does not carry.
+        // claim embeds, which a prior run's comment does not carry. The
+        // foreign marker gets a FRESH terminal comment, not a skip: skipping
+        // would strand a stale "running" claim (a failed claim post leaves
+        // the previous run's wording; a legacy body carries no run URL).
         writeFileSync(
           commentsFile,
           JSON.stringify([
@@ -637,8 +654,10 @@ describe('qwen-triage tmux workflow', () => {
           TRIAGE_OUTCOME: 'skipped',
           JOB_STATUS: 'cancelled',
         });
-        expect(foreign.body).toBe(null);
-        expect(foreign.call).toBe(null);
+        expect(foreign.call).toContain('issues/7999/comments');
+        expect(foreign.call).not.toContain('--method PATCH');
+        expect(foreign.body).toContain('Qwen Triage was cancelled');
+        expect(foreign.out).toContain('Marker comment belongs to another run');
 
         // A marker embedding a run ID that is a decimal superstring of this
         // run's (runs/778 vs runs/77) is foreign: only the match bounded by
@@ -657,12 +676,14 @@ describe('qwen-triage tmux workflow', () => {
           TRIAGE_OUTCOME: 'skipped',
           JOB_STATUS: 'cancelled',
         });
-        expect(prefixed.body).toBe(null);
-        expect(prefixed.call).toBe(null);
+        expect(prefixed.call).toContain('issues/7999/comments');
+        expect(prefixed.call).not.toContain('--method PATCH');
+        expect(prefixed.call).not.toContain('issues/comments/778');
+        expect(prefixed.out).toContain('Marker comment belongs to another run');
 
         // Both a prior run's terminal comment and this run's claim present:
-        // `last` must select the own claim, not classify the older foreign
-        // one and skip — a `first` mutant would otherwise survive the suite.
+        // the last OWN marker must win, not classify the older foreign one
+        // and skip — a `first` mutant would otherwise survive the suite.
         writeFileSync(
           commentsFile,
           JSON.stringify([
@@ -684,6 +705,43 @@ describe('qwen-triage tmux workflow', () => {
         });
         expect(both.call).toContain('--method PATCH');
         expect(both.call).toContain('issues/comments/43');
+
+        // The mirror image: a NEWER foreign comment must not mask this
+        // run's older claim. Selection takes the last comment this run OWNS,
+        // not the newest marker comment, or id 43 would never be finalized.
+        writeFileSync(
+          commentsFile,
+          JSON.stringify([
+            {
+              id: 43,
+              user: { login: 'qwen-code-ci-bot' },
+              body: `<!-- qwen-triage lifecycle -->\n\n🔄 running — [watch live progress](${RUN_URL})`,
+            },
+            {
+              id: 44,
+              user: { login: 'qwen-code-ci-bot' },
+              body: '<!-- qwen-triage lifecycle -->\n\n🚫 later cancel [view run](https://github.com/QwenLM/qwen-code/actions/runs/999)',
+            },
+          ]),
+        );
+        const masked = run({
+          TRIAGE_OUTCOME: 'failure',
+          JOB_STATUS: 'cancelled',
+        });
+        expect(masked.call).toContain('--method PATCH');
+        expect(masked.call).toContain('issues/comments/43');
+
+        // An unreadable comment list is neither "no comment" nor "foreign":
+        // POSTing would add a duplicate lifecycle comment while the real
+        // claim stays at "running". Warn and skip instead.
+        const unreadable = run({
+          TRIAGE_OUTCOME: 'failure',
+          JOB_STATUS: 'cancelled',
+          GH_STUB_FAIL_LIST: '1',
+        });
+        expect(unreadable.body).toBe(null);
+        expect(unreadable.call).toBe(null);
+        expect(unreadable.out).toContain('Cannot read the comment list');
 
         // The intended case: the claim carries this run's link, so the
         // timeout-cancel after the claim still flips it to terminal.
