@@ -16,7 +16,8 @@
  *   - `core.fsmonitor` — status
  *   - `core.pager`, `pager.<cmd>` — log / show / diff / blame on a TTY
  *   - `core.askpass`, `credential.helper`, `core.sshCommand`,
- *     `remote.<name>.proxy`, `ext::` remote URLs — `remote show` network auth
+ *     `remote.<name>.proxy`, `ext::` remote URLs, `core.gitProxy` —
+ *     `remote show` network/transport helpers
  *   - `gpg.program` — signature verification helpers
  *
  * A `.git/config` planted by an attacker (prompt-injection chain with local
@@ -35,6 +36,12 @@
  * The probe is synchronous (bounded stat walk + small file reads) so it can
  * be shared by the AST classifier and the synchronous regex fallback
  * without changing either API's async shape.
+ *
+ * Known limitation: a compound command that `cd`s into a DIFFERENT
+ * repository before running git (e.g. `cd ../other-repo && git status`)
+ * is probed against the tool's own cwd, so the other repo's config is not
+ * checked. `cd` within the same repository resolves to the same config and
+ * is covered.
  */
 
 import fs from 'node:fs';
@@ -62,6 +69,7 @@ const MAX_REPO_SEARCH_DEPTH = 64;
 const PROGRAM_VALUED_KEYS = new Set([
   'core.askpass', // credential prompts (e.g. `git remote show <url>`)
   'core.fsmonitor', // fsmonitor hook command (`git status`)
+  'core.gitproxy', // git:// transport proxy (`git remote show git://…`)
   'core.pager', // pager program for log / show / diff output
   'core.sshcommand', // ssh override for authenticated remotes
   'credential.helper', // credential helpers during network auth
@@ -84,16 +92,24 @@ const SECTION_HEADER = /^([A-Za-z0-9.-]+)(?:\s+"((?:[^"\\]|\\.)*)")?\s*$/;
 
 /**
  * Minimal git config parser: enough to identify section/key pairs and raw
- * values. Understands `[section]` and `[section "subsection"]` headers,
- * `key = value` lines, continuations, and `#` / `;` comments. Does not
- * resolve includes — an attacker who can write an include target can write
- * `.git/config` directly, so includes add no attack surface beyond a direct
- * write.
+ * values. Understands `[section]` and `[section "subsection"]` headers
+ * (including the inline `[section] key = value` form), `key = value` lines,
+ * continuations, and `#` / `;` comments. Includes are not resolved —
+ * `include` / `includeIf` entries make the probe fail closed instead,
+ * because their targets can live outside `.git` (e.g. tracked files).
  */
 function parseGitConfig(content: string): ConfigEntry[] {
   const entries: ConfigEntry[] = [];
   let section = '';
   let subsection: string | null = null;
+
+  const recordEntry = (text: string): void => {
+    const eq = text.indexOf('=');
+    const key = (eq < 0 ? text : text.slice(0, eq)).trim().toLowerCase();
+    const value = eq < 0 ? '' : text.slice(eq + 1).trim();
+    if (!key) return;
+    entries.push({ section, subsection, key, value });
+  };
   const lines: string[] = [];
   let continued = '';
 
@@ -137,29 +153,31 @@ function parseGitConfig(content: string): ConfigEntry[] {
 
     if (line.startsWith('[')) {
       const close = line.indexOf(']');
-      if (close < 0) continue;
+      if (close < 0) continue; // unclosed header — git aborts config load
       const match = line.slice(1, close).trim().match(SECTION_HEADER);
-      if (!match) continue;
+      if (!match) {
+        // Valid to git but opaque here (e.g. `]` inside a quoted
+        // subsection) — fail closed.
+        throw new Error('unrecognized git config section header');
+      }
       section = match[1]!.toLowerCase();
       subsection = match[2] ?? null;
+      // Inline form: `[section] key = value` on the same line.
+      const rest = line.slice(close + 1).trim();
+      if (rest) recordEntry(rest);
       continue;
     }
 
     if (!section) continue;
-    const eq = line.indexOf('=');
-    const key = (eq < 0 ? line : line.slice(0, eq)).trim().toLowerCase();
-    const value = eq < 0 ? '' : line.slice(eq + 1).trim();
-    if (!key) continue;
-    entries.push({ section, subsection, key, value });
+    recordEntry(line);
   }
 
   return entries;
 }
 
-/** Strip a trailing line-continuation marker and surrounding quotes. */
+/** Strip surrounding quotes from a raw config value. */
 function normalizeValue(raw: string): string {
   let value = raw.trim();
-  if (value.endsWith('\\')) value = value.slice(0, -1).trim();
   if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
     value = value.slice(1, -1);
   }
@@ -171,6 +189,12 @@ function entriesMayExecutePrograms(entries: ConfigEntry[]): boolean {
   for (const entry of entries) {
     const value = normalizeValue(entry.value);
     if (value === '') continue;
+
+    // Include targets can live outside `.git` (e.g. files tracked in the
+    // working tree), so flag them instead of resolving them.
+    if (entry.section === 'include' || entry.section === 'includeif') {
+      return true;
+    }
 
     if (entry.subsection === null) {
       // `[pager] <cmd> = <program>` overrides live in the flat section.
@@ -262,7 +286,10 @@ function findLocalGitConfigFiles(cwd: string): string[] {
           throw new Error(`unreadable git pointer file: ${gitPath}`);
         }
         const match = pointer.match(/^\s*gitdir:\s*(.+?)\s*$/m);
-        if (!match) return [];
+        if (!match) {
+          // Unparseable pointer — fail closed like the unreadable case.
+          throw new Error(`unparseable git pointer file: ${gitPath}`);
+        }
         const gitDir = path.resolve(dir, match[1]!);
         const files = [path.join(gitDir, 'config')];
         try {

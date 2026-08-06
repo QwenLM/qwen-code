@@ -125,6 +125,28 @@ describe('gitConfigMayExecutePrograms', () => {
     expect(gitConfigMayExecutePrograms(repo)).toBe(false);
   });
 
+  it('parses inline `[section] key = value` lines', () => {
+    const dirty = makeRepo('inline-dirty', '[diff] external = /tmp/evil\n');
+    expect(gitConfigMayExecutePrograms(dirty)).toBe(true);
+    const clean = makeRepo('inline-clean', '[core] bare = false\n');
+    expect(gitConfigMayExecutePrograms(clean)).toBe(false);
+  });
+
+  it('flags core.gitProxy (git:// transport helper)', () => {
+    const repo = makeRepo('gitproxy', '[core]\n\tgitProxy = /tmp/evil\n');
+    expect(gitConfigMayExecutePrograms(repo)).toBe(true);
+  });
+
+  it('flags include/includeIf entries instead of resolving them', () => {
+    const inc = makeRepo('include', '[include]\n\tpath = ../other-config\n');
+    expect(gitConfigMayExecutePrograms(inc)).toBe(true);
+    const incIf = makeRepo(
+      'include-if',
+      '[includeIf "gitdir:~/src/"]\n\tpath = /tmp/other-config\n',
+    );
+    expect(gitConfigMayExecutePrograms(incIf)).toBe(true);
+  });
+
   it('reads config.worktree of the main checkout (extensions.worktreeConfig)', () => {
     const repo = makeRepo(
       'wtcfg',
@@ -216,5 +238,22 @@ describe('gitConfigMayExecutePrograms', () => {
     } finally {
       fs.chmodSync(path.join(repo, '.git'), 0o644);
     }
+  });
+
+  it('fails closed on an unparseable .git pointer file', () => {
+    const repo = path.join(root, 'garbage-pointer');
+    fs.mkdirSync(repo, { recursive: true });
+    fs.writeFileSync(path.join(repo, '.git'), 'not a gitdir pointer\n');
+    expect(gitConfigMayExecutePrograms(repo)).toBe(true);
+  });
+
+  it('fails closed on section headers it cannot parse', () => {
+    // `]` inside a quoted subsection is valid to git but opaque to the
+    // minimal parser — must not silently drop the entries below it.
+    const repo = makeRepo(
+      'bracket-subsection',
+      '[diff "a]b"]\n\ttextconv = /tmp/evil\n',
+    );
+    expect(gitConfigMayExecutePrograms(repo)).toBe(true);
   });
 });

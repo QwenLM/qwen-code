@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -3885,5 +3885,51 @@ describe('matchesRule — param matcher type guards', () => {
         { count: 42 },
       ),
     ).toBe(true);
+  });
+});
+
+describe('git config execution probe wiring (#8575)', () => {
+  let root: string;
+  let cleanRepo: string;
+  let dirtyRepo: string;
+
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'pm-git-config-'));
+    cleanRepo = path.join(root, 'clean');
+    fs.mkdirSync(path.join(cleanRepo, '.git'), { recursive: true });
+    fs.writeFileSync(path.join(cleanRepo, '.git', 'config'), '[core]\n');
+    dirtyRepo = path.join(root, 'dirty');
+    fs.mkdirSync(path.join(dirtyRepo, '.git'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dirtyRepo, '.git', 'config'),
+      '[diff]\n\texternal = /tmp/evil\n',
+    );
+  });
+
+  afterEach(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('resolves the default shell permission against ctx.cwd', async () => {
+    const manager = new PermissionManager(makeConfig());
+    manager.initialize();
+
+    // No rules match, so 'default' resolves through the classifier, which
+    // must see the execution cwd: dirty repo config → ask, clean → allow.
+    await expect(
+      manager.evaluate({
+        toolName: 'run_shell_command',
+        command: 'git status',
+        cwd: dirtyRepo,
+      }),
+    ).resolves.toBe('ask');
+
+    await expect(
+      manager.evaluate({
+        toolName: 'run_shell_command',
+        command: 'git status',
+        cwd: cleanRepo,
+      }),
+    ).resolves.toBe('allow');
   });
 });
