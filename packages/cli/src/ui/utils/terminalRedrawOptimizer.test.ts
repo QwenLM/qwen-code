@@ -56,24 +56,16 @@ describe('optimizeMultilineEraseLines', () => {
 });
 
 describe('installTerminalRedrawOptimizer', () => {
-  beforeEach(() => {
-    // Clear WSL + flag env vars so existing tests expecting the optimizer to
-    // be active are not silently skipped when run in WSL or with the flag set
-    // on the host. #7634
-    vi.stubEnv('WSL_DISTRO_NAME', '');
-    vi.stubEnv('WSL_INTEROP', '');
-    vi.stubEnv('QWEN_CODE_LEGACY_ERASE_LINES', '');
-  });
-
   afterEach(() => {
-    vi.unstubAllEnvs();
     resetTerminalRedrawStats();
   });
 
   it('optimizes string writes and restores the original writer', () => {
     const write = vi.fn(() => true);
     const stdout = { write } as unknown as NodeJS.WriteStream;
-    const restore = installTerminalRedrawOptimizer(stdout);
+    // Explicit empty env: pins "no WSL markers / no flag -> installed" without
+    // depending on the host environment. #7634
+    const restore = installTerminalRedrawOptimizer(stdout, {});
     const input = `${ERASE_LINE}${CURSOR_UP_ONE}${ERASE_LINE}${CURSOR_UP_ONE}${ERASE_LINE}${CURSOR_LEFT}`;
 
     stdout.write(input);
@@ -91,7 +83,7 @@ describe('installTerminalRedrawOptimizer', () => {
   it('passes non-string writes through unchanged', () => {
     const write = vi.fn(() => true);
     const stdout = { write } as unknown as NodeJS.WriteStream;
-    installTerminalRedrawOptimizer(stdout);
+    installTerminalRedrawOptimizer(stdout, {});
     const input = Buffer.from('hello');
 
     stdout.write(input);
@@ -102,7 +94,7 @@ describe('installTerminalRedrawOptimizer', () => {
   it('tracks write, byte, clear, and erase optimization counters', () => {
     const write = vi.fn(() => true);
     const stdout = { write } as unknown as NodeJS.WriteStream;
-    installTerminalRedrawOptimizer(stdout);
+    installTerminalRedrawOptimizer(stdout, {});
 
     stdout.write(
       `${ERASE_LINE}${CURSOR_UP_ONE}${ERASE_LINE}${CURSOR_UP_ONE}${ERASE_LINE}${CURSOR_LEFT}`,
@@ -124,10 +116,10 @@ describe('installTerminalRedrawOptimizer', () => {
   });
 
   it('can be disabled for terminal compatibility fallback', () => {
-    vi.stubEnv('QWEN_CODE_LEGACY_ERASE_LINES', '1');
+    const env = { QWEN_CODE_LEGACY_ERASE_LINES: '1' };
     const write = vi.fn(() => true);
     const stdout = { write } as unknown as NodeJS.WriteStream;
-    const restore = installTerminalRedrawOptimizer(stdout);
+    const restore = installTerminalRedrawOptimizer(stdout, env);
 
     expect(stdout.write).toBe(write);
     restore();

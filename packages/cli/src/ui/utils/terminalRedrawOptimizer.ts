@@ -6,7 +6,7 @@
 
 import ansiEscapes from 'ansi-escapes';
 
-import { isWsl } from './terminal-env.js';
+import { isWsl } from '@qwen-code/qwen-code-core';
 
 const ESC = '\u001B[';
 const ERASE_LINE = `${ESC}2K`;
@@ -122,6 +122,8 @@ export function optimizeMultilineEraseLines(output: string): string {
 
 export function installTerminalRedrawOptimizer(
   stdout: NodeJS.WriteStream,
+  // Injectable for tests; production callers omit it and it resolves to
+  // process.env at call time.
   env: NodeJS.ProcessEnv = process.env,
 ): () => void {
   // QWEN_CODE_LEGACY_ERASE_LINES:
@@ -133,14 +135,14 @@ export function installTerminalRedrawOptimizer(
     return () => {};
   }
 
-  // The batching optimizer emits cursor-up sequences in bulk, which ConPTY
-  // (Windows Console Pseudo Terminal) processes differently from individual
-  // per-line erases - the cursor ends up at the wrong row, and each streaming
-  // frame overlaps remnants of the previous one, causing duplicate text.
-  // Skip the optimizer on WSL (ConPTY is the default pty there), unless the
-  // user explicitly force-enables it. WT_SESSION is deliberately NOT included:
-  // it is set on the Windows side and is not propagated into WSL shells
-  // without WSLENV, so it can never be the variable that fires for #7634.
+  // The optimizer is the only path that emits cursor-down (CSI 1 B) and
+  // multi-count cursor-up (CSI n A); Ink's native erase path uses neither.
+  // ConPTY's (Windows Console Pseudo Terminal) row tracking diverges on those,
+  // so the erase lands on the wrong rows and streaming frames stack, causing
+  // duplicate text. Skip the optimizer on WSL (ConPTY is the default pty there),
+  // unless the user explicitly force-enables it. WT_SESSION is deliberately NOT
+  // included: it is set on the Windows side and is not propagated into WSL
+  // shells without WSLENV, so it can never be the variable that fires for #7634.
   if (env['QWEN_CODE_LEGACY_ERASE_LINES'] !== '0' && isWsl(env)) {
     return () => {};
   }

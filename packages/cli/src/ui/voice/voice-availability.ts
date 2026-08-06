@@ -6,8 +6,8 @@
 
 import { existsSync } from 'node:fs';
 import process from 'node:process';
+import { isWsl } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
-import { isWsl } from '../utils/terminal-env.js';
 
 // Pre-flight environment check so users get a clear message at /voice-enable
 // time, instead of a cryptic recorder failure when no microphone can work
