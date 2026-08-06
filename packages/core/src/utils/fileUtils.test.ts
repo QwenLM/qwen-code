@@ -97,6 +97,18 @@ vi.mock('./pdf.js', async (importOriginal) => {
   return { ...actual, renderPDFPagesToImages: vi.fn() };
 });
 
+// The omni module is imported dynamically inside processSingleFileContent;
+// vitest intercepts dynamic imports too, so a registry mock is what stubs
+// the delivery pipeline. Safe for every non-omni test: the cheap
+// `config.isOmniEnabled?.()` gate runs BEFORE the import, and the default
+// mockConfig has no isOmniEnabled.
+const omniGateMocks = vi.hoisted(() => ({
+  isOmniDeliveryActive: vi.fn(),
+  sniffFileModality: vi.fn(),
+  readMediaViaOmniDelivery: vi.fn(),
+}));
+vi.mock('../omni/index.js', () => omniGateMocks);
+
 const mockMimeGetType = mime.getType as Mock;
 const mockExecFile = vi.mocked(execFile);
 const mockRender = vi.mocked(renderPDFPagesToImages);
@@ -1426,6 +1438,128 @@ describe('fileUtils', () => {
       expect(result.llmContent).toContain('Unsupported image file');
       expect(result.llmContent).toContain('does not support image input');
       expect(result.returnDisplay).toContain('Skipped image file');
+    });
+
+    describe('omni delivery gating', () => {
+      // Exercises the omni-vs-legacy decision in processSingleFileContent:
+      // enablement gate → delivery-active gate → content pre-sniff → per-
+      // modality config. The pipeline itself is mocked (index.test.ts owns
+      // it); what is pinned here is WHICH path a file takes.
+      function omniConfig(overrides: Record<string, unknown> = {}): Config {
+        return {
+          ...mockConfig,
+          isOmniEnabled: () => true,
+          getContentGeneratorConfig: () => ({
+            modalities: { image: true, audio: true, video: true },
+          }),
+          ...overrides,
+        } as unknown as Config;
+      }
+
+      beforeEach(() => {
+        omniGateMocks.isOmniDeliveryActive.mockReturnValue(true);
+        omniGateMocks.readMediaViaOmniDelivery.mockResolvedValue({
+          llmContent: {
+            fileData: { fileUri: 'oss://bucket/key', mimeType: 'video/mp4' },
+          },
+          returnDisplay: 'Delivered via omni upload.',
+        });
+      });
+
+      it('routes a sniff-confirmed video through readMediaViaOmniDelivery', async () => {
+        const videoPath = path.join(tempRootDir, 'clip.mp4');
+        actualNodeFs.writeFileSync(videoPath, Buffer.from('fake mp4'));
+        mockMimeGetType.mockReturnValue('video/mp4');
+        omniGateMocks.sniffFileModality.mockResolvedValue('video');
+
+        const result = await processSingleFileContent(videoPath, omniConfig());
+
+        expect(omniGateMocks.readMediaViaOmniDelivery).toHaveBeenCalledWith(
+          expect.objectContaining({
+            filePath: videoPath,
+            expectedModality: 'video',
+          }),
+        );
+        expect(result.returnDisplay).toBe('Delivered via omni upload.');
+      });
+
+      it('falls back to the legacy inline path when the sniff disagrees with the extension', async () => {
+        // A file whose bytes sniff as a DIFFERENT modality than its
+        // extension suggests must take the legacy path (inline under its
+        // extension-derived type), not the fail-closed pipeline.
+        const videoPath = path.join(tempRootDir, 'clip.mp4');
+        actualNodeFs.writeFileSync(videoPath, Buffer.from('small bytes'));
+        mockMimeGetType.mockReturnValue('video/mp4');
+        omniGateMocks.sniffFileModality.mockResolvedValue(null);
+
+        const result = await processSingleFileContent(videoPath, omniConfig());
+
+        expect(omniGateMocks.readMediaViaOmniDelivery).not.toHaveBeenCalled();
+        const content = result.llmContent as Part;
+        expect(content.inlineData?.mimeType).toBe('video/mp4');
+      });
+
+      it('never sniffs or delivers when the modality is disabled in config', async () => {
+        const videoPath = path.join(tempRootDir, 'clip.mp4');
+        actualNodeFs.writeFileSync(videoPath, Buffer.from('fake mp4'));
+        mockMimeGetType.mockReturnValue('video/mp4');
+
+        const result = await processSingleFileContent(
+          videoPath,
+          omniConfig({
+            getContentGeneratorConfig: () => ({
+              modalities: { video: false },
+            }),
+          }),
+        );
+
+        expect(omniGateMocks.sniffFileModality).not.toHaveBeenCalled();
+        expect(omniGateMocks.readMediaViaOmniDelivery).not.toHaveBeenCalled();
+        expect(result.returnDisplay).toContain('Skipped video file');
+      });
+
+      it('takes the legacy path when omni delivery is not active for the endpoint', async () => {
+        const videoPath = path.join(tempRootDir, 'clip.mp4');
+        actualNodeFs.writeFileSync(videoPath, Buffer.from('small bytes'));
+        mockMimeGetType.mockReturnValue('video/mp4');
+        omniGateMocks.isOmniDeliveryActive.mockReturnValue(false);
+
+        const result = await processSingleFileContent(videoPath, omniConfig());
+
+        expect(omniGateMocks.readMediaViaOmniDelivery).not.toHaveBeenCalled();
+        const content = result.llmContent as Part;
+        expect(content.inlineData?.mimeType).toBe('video/mp4');
+      });
+
+      it('bypasses the 100 MB image source cap when omni takes the file', async () => {
+        // The cap protects the overview DECODER; the omni path uploads
+        // original bytes without decoding and enforces its own ceiling, so
+        // an over-cap image must delegate to omni delivery instead of being
+        // rejected. Sparse file: only the stat size matters — the mocked
+        // pipeline never reads the bytes.
+        const imagePath = path.join(tempRootDir, 'huge.png');
+        actualNodeFs.writeFileSync(imagePath, Buffer.alloc(0));
+        actualNodeFs.truncateSync(imagePath, 101 * 1024 * 1024);
+        mockMimeGetType.mockReturnValue('image/png');
+        omniGateMocks.sniffFileModality.mockResolvedValue('image');
+        omniGateMocks.readMediaViaOmniDelivery.mockResolvedValue({
+          llmContent: {
+            fileData: { fileUri: 'oss://bucket/key', mimeType: 'image/png' },
+          },
+          returnDisplay: 'Delivered via omni upload.',
+        });
+
+        const result = await processSingleFileContent(imagePath, omniConfig());
+
+        expect(result.error).toBeUndefined();
+        expect(result.returnDisplay).toBe('Delivered via omni upload.');
+        expect(omniGateMocks.readMediaViaOmniDelivery).toHaveBeenCalledWith(
+          expect.objectContaining({
+            filePath: imagePath,
+            expectedModality: 'image',
+          }),
+        );
+      });
     });
 
     it('keeps image inline when preserveUnsupportedImage is true', async () => {

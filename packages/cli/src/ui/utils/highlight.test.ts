@@ -206,6 +206,17 @@ describe('parseInputForHighlighting', () => {
     ]);
   });
 
+  it('should paint a URL ref with a backslash-escaped span in full', () => {
+    // The parser's escape branch runs for URL refs too, so the highlighter
+    // must not split the token at the backslash.
+    const text = 'play @https://host/my\\ video.mp4 now';
+    expect(parseInputForHighlighting(text, 0)).toEqual([
+      { text: 'play ', type: 'default' },
+      { text: '@https://host/my\\ video.mp4', type: 'file' },
+      { text: ' now', type: 'default' },
+    ]);
+  });
+
   it('should only highlight valid slash commands when command metadata is provided', () => {
     const text = '/help please /review this /clear and /missing plus /usr/bin';
     expect(parseInputForHighlighting(text, 0, slashCommands)).toEqual([

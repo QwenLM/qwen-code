@@ -1746,6 +1746,7 @@ describe('handleAtCommand', () => {
       downloadMediaUrl: vi.fn(),
       processMediaForOmniDelivery: vi.fn(),
       effectiveMaxDownloadFileBytes: vi.fn(),
+      sniffFileModality: vi.fn(),
     }));
 
     vi.mock('@qwen-code/qwen-code-core/omni', () => ({
@@ -1757,10 +1758,18 @@ describe('handleAtCommand', () => {
       },
     }));
 
-    function omniConfig(enabled: boolean): Config {
+    function omniConfig(
+      enabled: boolean,
+      modalities: Record<string, boolean> = {
+        image: true,
+        audio: true,
+        video: true,
+      },
+    ): Config {
       return {
         ...mockConfig,
         isOmniEnabled: () => enabled,
+        getContentGeneratorConfig: () => ({ modalities }),
         storage: { getQwenDir: () => path.join(os.tmpdir(), 'omni-at-test') },
       } as unknown as Config;
     }
@@ -1769,6 +1778,7 @@ describe('handleAtCommand', () => {
       omniMocks.isOmniDeliveryActive.mockReturnValue(true);
       omniMocks.parseHttpUrlRef.mockImplementation((url: string) => ({ url }));
       omniMocks.effectiveMaxDownloadFileBytes.mockReturnValue(1024 * 1024);
+      omniMocks.sniffFileModality.mockResolvedValue('video');
       const partPath = path.join(testRootDir, 'downloaded.mp4');
       await createTestFile(partPath, 'fake media bytes');
       omniMocks.downloadMediaUrl.mockResolvedValue({ partPath });
@@ -1791,6 +1801,13 @@ describe('handleAtCommand', () => {
       expect(result.shouldProceed).toBe(true);
       expect(omniMocks.downloadMediaUrl).toHaveBeenCalledWith(
         expect.objectContaining({ url: 'https://example.com/clip.mp4' }),
+      );
+      // Guard/error messages inside the pipeline must name the URL's file,
+      // not the opaque staging path the download landed under.
+      expect(omniMocks.processMediaForOmniDelivery).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.anything(),
+        expect.objectContaining({ displayName: 'clip.mp4' }),
       );
       const parts = result.processedQuery as Array<Record<string, unknown>>;
       expect(parts).toContainEqual({
@@ -1842,6 +1859,79 @@ describe('handleAtCommand', () => {
       expect(mockOnDebugMessage).not.toHaveBeenCalledWith(
         'No valid file paths found in @ commands to read.',
       );
+    });
+
+    it('skips store/upload when the sniffed modality is not in the model modalities', async () => {
+      // Mirrors the local-file path's per-modality gate: media the active
+      // model cannot consume must not be uploaded only to be replaced by an
+      // unsupported-modality placeholder in the converter.
+      omniMocks.sniffFileModality.mockResolvedValue('image');
+      const result = await handleAtCommand({
+        query: 'look @https://example.com/pic.jpg please',
+        config: omniConfig(true, { image: false, audio: true, video: true }),
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 703,
+        signal: abortController.signal,
+      });
+
+      expect(result.shouldProceed).toBe(true);
+      expect(omniMocks.processMediaForOmniDelivery).not.toHaveBeenCalled();
+      const parts = result.processedQuery as Array<Record<string, unknown>>;
+      expect(parts.some((p) => 'fileData' in p)).toBe(false);
+      expect(result.toolDisplays![0]).toMatchObject({
+        name: 'Fetch Media URL',
+        status: ToolCallStatus.Error,
+      });
+      expect(
+        (result.toolDisplays![0] as { resultDisplay: string }).resultDisplay,
+      ).toContain('does not accept image input');
+    });
+
+    it('isolates a failing URL: error card shown, remaining URLs still delivered', async () => {
+      omniMocks.downloadMediaUrl
+        .mockRejectedValueOnce(new Error('URL host did not resolve'))
+        .mockResolvedValueOnce({
+          partPath: path.join(testRootDir, 'downloaded.mp4'),
+        });
+      const result = await handleAtCommand({
+        query: 'compare @https://bad.example/a.mp4 @https://good.example/b.mp4',
+        config: omniConfig(true),
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 704,
+        signal: abortController.signal,
+      });
+
+      expect(result.shouldProceed).toBe(true);
+      expect(result.toolDisplays).toHaveLength(2);
+      expect(result.toolDisplays![0]).toMatchObject({
+        status: ToolCallStatus.Error,
+      });
+      expect(
+        (result.toolDisplays![0] as { resultDisplay: string }).resultDisplay,
+      ).toContain('bad.example');
+      expect(result.toolDisplays![1]).toMatchObject({
+        status: ToolCallStatus.Success,
+      });
+      const parts = result.processedQuery as Array<Record<string, unknown>>;
+      expect(parts.filter((p) => 'fileData' in p)).toHaveLength(1);
+    });
+
+    it('ends the turn quietly (shouldProceed=false) on a user abort mid-download', async () => {
+      omniMocks.downloadMediaUrl.mockImplementation(async () => {
+        abortController.abort();
+        throw new Error('aborted');
+      });
+      const result = await handleAtCommand({
+        query: 'summarize @https://example.com/clip.mp4',
+        config: omniConfig(true),
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 705,
+        signal: abortController.signal,
+      });
+
+      expect(result.shouldProceed).toBe(false);
+      expect(result.processedQuery).toBeNull();
+      expect(omniMocks.processMediaForOmniDelivery).not.toHaveBeenCalled();
     });
   });
 });

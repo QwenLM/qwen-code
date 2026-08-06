@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -21,31 +21,36 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 const debugLogger = createDebugLogger('omni:download');
 
 /** Thrown for URL localization failures. Messages must stay free of
- * credentials; they may include the URL host and HTTP status. */
+ * credentials and local filesystem paths; they may include the URL host and
+ * HTTP status. */
 export class OmniDownloadError extends Error {
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
     this.name = 'OmniDownloadError';
   }
 }
 
 export interface DownloadedMedia {
   /** Path of the fully-written temp file (inside downloads/). Caller is
-   * responsible for recognition, promotion into objects/, and cleanup. */
+   * responsible for recognition, promotion into objects/, and cleanup. This
+   * is deliberately the ONLY field: the pipeline re-derives identity (hash,
+   * sniff, size) from the file on disk — transfer-time observations such as
+   * the server's Content-Type or the final URL must never be trusted, so
+   * they are not carried here at all. */
   partPath: string;
-  /** SHA-256 computed while streaming (identity of the downloaded bytes). */
-  sha256: string;
-  /** Total bytes written. */
-  sizeBytes: number;
-  /** Final URL after any permitted redirects. */
-  finalUrl: string;
-  /** Content-Type reported by the server (advisory only — sniff decides). */
-  contentType?: string;
 }
 
+/** How long the DNS resolve-and-pin step may take before the download is
+ * declared stuck. Without it, resolution would be the only phase with no
+ * watchdog: a resolver that never answers (and a caller that never aborts)
+ * would spin the turn forever. The race abandons rather than cancels the
+ * underlying lookup — it only stops waiting for it. */
+const RESOLVE_TIMEOUT_MS = 30_000;
 const HEADER_TIMEOUT_MS = 30_000;
 const IDLE_TIMEOUT_MS = 60_000;
-const MAX_REDIRECTS = 5;
+/** Exported so the redirect-budget test can pin the exact fetch count to
+ * this constant rather than to a magic number that drifts. */
+export const MAX_REDIRECTS = 5;
 
 /**
  * Test whether an @-path is a downloadable http(s) URL.
@@ -65,7 +70,79 @@ export function parseHttpUrlRef(pathName: string): URL | null {
 }
 
 /**
- * Stream a media URL into `downloads/<id>.part`, hashing while writing.
+ * Strip absolute filesystem paths from a message before it enters an
+ * OmniDownloadError, keeping only the basename. fs and stream errors embed
+ * full local paths (`ENOTDIR: not a directory, mkdir '/home/x/…'`), and
+ * OmniDownloadError messages reach the UI and the debug log. The wrap sites
+ * below only interpolate fs/undici error text — never URLs — so a
+ * separator-based pattern cannot eat anything it should keep.
+ */
+function scrubPathsFromMessage(message: string): string {
+  return message.replace(
+    /(?:[A-Za-z]:)?(?:[\\/][^\s'"`\\/]+){2,}[\\/]?/g,
+    (match) => path.basename(match),
+  );
+}
+
+/**
+ * Flatten an error's `cause` chain into "CODE: message" fragments. Undici
+ * reports connection-level failures as a bare `TypeError: fetch failed` with
+ * the actionable reason (ECONNREFUSED, TLS codes) on `cause`; without this
+ * the user would see "fetch failed" and nothing they can act on.
+ */
+function formatCauseChain(err: unknown): string | undefined {
+  const parts: string[] = [];
+  let cause: unknown = err instanceof Error ? err.cause : undefined;
+  for (let depth = 0; cause != null && depth < 4; depth++) {
+    const code = (cause as { code?: unknown }).code;
+    const message =
+      cause instanceof Error
+        ? cause.message
+        : typeof cause === 'string'
+          ? cause
+          : undefined;
+    if (typeof code === 'string' && message && !message.includes(code)) {
+      parts.push(`${code}: ${message}`);
+    } else if (message) {
+      parts.push(message);
+    } else if (typeof code === 'string') {
+      parts.push(code);
+    }
+    cause = cause instanceof Error ? cause.cause : undefined;
+  }
+  return parts.length > 0 ? scrubPathsFromMessage(parts.join('; ')) : undefined;
+}
+
+/**
+ * Detect a configured HTTP(S) proxy. Mirrors how the rest of the codebase
+ * decides to proxy: config.ts installs a process-wide `EnvHttpProxyAgent` as
+ * the global dispatcher when `--proxy`/`settings.proxy` resolves to a value
+ * (see Config.initialize), and `EnvHttpProxyAgent` itself honors the
+ * `HTTP(S)_PROXY` environment variables — so a proxy is in play if either
+ * the env vars are set or that global dispatcher has been installed.
+ */
+function detectConfiguredProxy(
+  undici: Awaited<ReturnType<typeof loadUndici>>,
+): boolean {
+  for (const key of [
+    'https_proxy',
+    'HTTPS_PROXY',
+    'http_proxy',
+    'HTTP_PROXY',
+    'all_proxy',
+    'ALL_PROXY',
+  ]) {
+    if (process.env[key]) return true;
+  }
+  try {
+    return undici.getGlobalDispatcher() instanceof undici.EnvHttpProxyAgent;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Stream a media URL into `downloads/<id>.part`.
  *
  * Policy (mirrors utils/fetch.ts fetchWithPolicy, but streaming — that
  * helper buffers whole bodies in memory and is unsuitable for GiB media):
@@ -84,12 +161,18 @@ export function parseHttpUrlRef(pathName: string): URL | null {
  *   redirect can still re-resolve elsewhere between hops);
  * - Node only: refused outright on runtimes that accept the pinning agent and
  *   ignore it (Bun), since there the pin is unenforceable;
+ * - refused outright behind a configured proxy, for the same reason as the
+ *   Bun case: through a proxy CONNECT tunnel the proxy resolves the name
+ *   itself and the pinned `connect.lookup` never runs, so the pin would be a
+ *   claim we cannot keep — while the bare pinned Agent, dispatching directly,
+ *   would silently bypass the proxy users are required to route through;
  * - redirects followed only when same-host/protocol/port (isPermittedRedirect),
  *   bounded by MAX_REDIRECTS;
  * - `maxBytes` enforced against BOTH Content-Length and actual bytes written;
- * - two-timer model: header timeout (30s, cleared when headers arrive) plus
- *   an idle watchdog reset per chunk (60s) — a slow large body is fine, a
- *   stalled one is not;
+ * - three-timer model: resolve watchdog (30s, covering the DNS
+ *   resolve-and-pin step), header timeout (30s, cleared when headers arrive),
+ *   plus an idle watchdog reset per chunk (60s) — a slow large body is fine,
+ *   a stalled one is not;
  * - on ANY failure the `.part` file is removed (no half-download survives).
  */
 export async function downloadMediaUrl(params: {
@@ -104,8 +187,28 @@ export async function downloadMediaUrl(params: {
    * they neither touch real DNS nor need a listening socket.
    */
   resolveTarget?: (url: string) => Promise<ResolvedNetworkTarget>;
+  /**
+   * Test seam for the proxy gate; production detects via the env vars plus
+   * the global dispatcher (see detectConfiguredProxy). Tests inject a fake
+   * so they neither depend on nor mutate process-wide state.
+   */
+  detectProxy?: () => boolean;
+  /** Test seams for the three watchdogs. Real timers with tiny injected
+   * values are more faithful here than fake timers, which fight undici's
+   * internals and the stream plumbing. Production always uses the defaults. */
+  resolveTimeoutMs?: number;
+  headerTimeoutMs?: number;
+  idleTimeoutMs?: number;
 }): Promise<DownloadedMedia> {
-  const { url, downloadsDir, maxBytes, signal } = params;
+  const {
+    url,
+    downloadsDir,
+    maxBytes,
+    signal,
+    resolveTimeoutMs = RESOLVE_TIMEOUT_MS,
+    headerTimeoutMs = HEADER_TIMEOUT_MS,
+    idleTimeoutMs = IDLE_TIMEOUT_MS,
+  } = params;
   // `'public'` is what turns on resolution + address vetting + pinning; the
   // helper is a no-op passthrough for any other policy.
   const resolveTarget =
@@ -118,13 +221,23 @@ export async function downloadMediaUrl(params: {
     );
   }
 
+  // isPrivateHost above fails OPEN on unparseable input (returns false), so
+  // this re-parse is where a malformed ref first surfaces — unguarded it
+  // would escape as a raw TypeError instead of the documented error type.
+  // The ref itself stays out of the message (it may embed anything).
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new OmniDownloadError('URL media ref is not a valid URL (refused).');
+  }
+
   // https only, checked here so the message names the real reason: the
   // resolve-and-pin step below refuses plaintext (its error would just say
   // "could not be verified"). Media fetched over http can be swapped in
   // flight, and these bytes are uploaded to a third party under the user's
   // account — a URL whose contents cannot be attributed to the named host has
   // no business being delivered to the model.
-  const parsed = new URL(url);
   if (parsed.protocol !== 'https:') {
     throw new OmniDownloadError(
       `URL media must be https (refused for safety): ` +
@@ -162,7 +275,40 @@ export async function downloadMediaUrl(params: {
     );
   }
 
-  await fs.mkdir(downloadsDir, { recursive: true, mode: 0o700 });
+  const undici = await loadUndici();
+
+  // Refuse outright behind a configured proxy, for the same reason as the
+  // Bun case above: the bare pinned Agent below dispatches DIRECTLY, so it
+  // would silently bypass the proxy config.ts installs process-wide (and any
+  // TLS-inspection policy riding on it) — while routing THROUGH the proxy
+  // would hand name resolution to the proxy's CONNECT handling, where the
+  // pinned `connect.lookup` never runs and the SSRF pin becomes
+  // unenforceable. Either way the promise cannot be kept, so refuse.
+  const proxied = params.detectProxy
+    ? params.detectProxy()
+    : detectConfiguredProxy(undici);
+  if (proxied) {
+    throw new OmniDownloadError(
+      `URL media fetching is not supported behind a proxy yet (refused): ` +
+        `the connection pinning that enforces SSRF protection cannot be ` +
+        `applied through a proxy. Download the file manually and use a ` +
+        `local path instead.`,
+    );
+  }
+
+  // Local filesystem failures (ENOTDIR, EROFS, EACCES) must stay inside the
+  // OmniDownloadError contract, and fs error text embeds the absolute
+  // directory path, which must not reach the UI or the debug log.
+  try {
+    await fs.mkdir(downloadsDir, { recursive: true, mode: 0o700 });
+  } catch (err) {
+    throw new OmniDownloadError(
+      `Could not prepare the downloads directory for URL media: ${
+        err instanceof Error ? scrubPathsFromMessage(err.message) : String(err)
+      }`,
+      { cause: err },
+    );
+  }
   const partPath = path.join(
     downloadsDir,
     `${randomBytes(8).toString('hex')}.part`,
@@ -181,18 +327,56 @@ export async function downloadMediaUrl(params: {
       // `fetch` would resolve the name a second time and could still be
       // handed a private address.
       let target: ResolvedNetworkTarget;
+      const resolveAbort = new AbortController();
+      const resolveTimer = setTimeout(
+        () => resolveAbort.abort(new Error('resolve timeout')),
+        resolveTimeoutMs,
+      );
       try {
-        target = await resolveTarget(currentUrl);
+        const pending = resolveTarget(currentUrl);
+        // The race abandons `pending` on timeout; without this no-op handler
+        // a late rejection from the abandoned lookup would surface as an
+        // unhandled rejection.
+        pending.catch(() => {});
+        target = await Promise.race([
+          pending,
+          new Promise<never>((_, reject) => {
+            resolveAbort.signal.addEventListener(
+              'abort',
+              () => reject(resolveAbort.signal.reason),
+              { once: true },
+            );
+          }),
+        ]);
       } catch (err) {
         if (signal?.aborted) throw err;
+        if (resolveAbort.signal.aborted) {
+          throw new OmniDownloadError(
+            `Download timed out resolving ${new URL(currentUrl).hostname} ` +
+              `(${resolveTimeoutMs / 1000}s)`,
+          );
+        }
         // Fail closed: unlike the general web-fetch path, these bytes are
         // uploaded to a third party, so "could not verify" must mean "do not
-        // fetch" rather than "connect and hope".
+        // fetch" rather than "connect and hope". The resolver's own text is
+        // translated rather than echoed: resolveNetworkTarget phrases its
+        // errors as "Extension network host …" (that helper's original
+        // caller), the same misattribution the credentials check above
+        // avoids — and nothing server-controlled beyond the hostname may
+        // enter the message anyway.
+        const text = err instanceof Error ? err.message : String(err);
+        const reason = /blocked address/i.test(text)
+          ? 'resolved to a non-public address'
+          : /did not resolve/i.test(text)
+            ? 'did not resolve'
+            : 'could not be verified';
         throw new OmniDownloadError(
-          `URL host is not publicly routable or could not be verified ` +
-            `(refused for safety): ${new URL(currentUrl).hostname}: ` +
-            `${err instanceof Error ? err.message : String(err)}`,
+          `URL host ${reason} (refused for safety): ` +
+            `${new URL(currentUrl).hostname}`,
+          { cause: err },
         );
+      } finally {
+        clearTimeout(resolveTimer);
       }
       if (!target.lookup) {
         // No pinned lookup means the connection cannot be bound to the vetted
@@ -203,7 +387,6 @@ export async function downloadMediaUrl(params: {
             `(refused for safety): ${new URL(currentUrl).hostname}`,
         );
       }
-      const undici = await loadUndici();
       // Default to undici's OWN fetch, not the global one. The dispatcher below
       // comes from the bundled undici, and Node's built-in fetch may ship a
       // different major version whose handler-interface check rejects it
@@ -220,7 +403,7 @@ export async function downloadMediaUrl(params: {
       const headerAbort = new AbortController();
       const headerTimer = setTimeout(
         () => headerAbort.abort(new Error('header timeout')),
-        HEADER_TIMEOUT_MS,
+        headerTimeoutMs,
       );
       const combined = AbortSignal.any(
         signal ? [signal, headerAbort.signal] : [headerAbort.signal],
@@ -243,13 +426,21 @@ export async function downloadMediaUrl(params: {
         if (headerAbort.signal.aborted) {
           throw new OmniDownloadError(
             `Download timed out waiting for response headers from ` +
-              `${new URL(currentUrl).hostname} (${HEADER_TIMEOUT_MS / 1000}s)`,
+              `${new URL(currentUrl).hostname} (${headerTimeoutMs / 1000}s)`,
           );
         }
+        // Undici reports connection-level failures as a bare "fetch failed"
+        // TypeError with the actionable reason (ECONNREFUSED, TLS codes) on
+        // `cause` — surface that chain, or the user has nothing to act on.
+        const detail =
+          err instanceof Error
+            ? scrubPathsFromMessage(err.message)
+            : String(err);
+        const causeDetail = formatCauseChain(err);
         throw new OmniDownloadError(
-          `Download request failed for ${new URL(currentUrl).hostname}: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
+          `Download request failed for ${new URL(currentUrl).hostname}: ` +
+            `${detail}${causeDetail ? ` (${causeDetail})` : ''}`,
+          { cause: err },
         );
       } finally {
         clearTimeout(headerTimer);
@@ -301,13 +492,15 @@ export async function downloadMediaUrl(params: {
         throw new OmniDownloadError('Download response had no body.');
       }
 
-      // Stream to disk with hash + byte cap + idle watchdog.
-      const hash = createHash('sha256');
+      // Stream to disk with byte cap + idle watchdog. Deliberately no hashing
+      // here: the pipeline re-derives identity from the file on disk (see
+      // DownloadedMedia), so a transfer-time hash would be dead work over up
+      // to a GiB of media.
       let written = 0;
       const idleAbort = new AbortController();
       let idleTimer = setTimeout(
         () => idleAbort.abort(new Error('idle timeout')),
-        IDLE_TIMEOUT_MS,
+        idleTimeoutMs,
       );
       const streamSignal = AbortSignal.any(
         signal ? [signal, idleAbort.signal] : [idleAbort.signal],
@@ -322,7 +515,7 @@ export async function downloadMediaUrl(params: {
             clearTimeout(idleTimer);
             idleTimer = setTimeout(
               () => idleAbort.abort(new Error('idle timeout')),
-              IDLE_TIMEOUT_MS,
+              idleTimeoutMs,
             );
             written += chunk.length;
             if (written > maxBytes) {
@@ -330,7 +523,6 @@ export async function downloadMediaUrl(params: {
                 `Download exceeds the omni media limit: >${maxBytes} bytes received.`,
               );
             }
-            hash.update(chunk);
             yield chunk;
           }
         };
@@ -347,13 +539,18 @@ export async function downloadMediaUrl(params: {
         if (idleAbort.signal.aborted) {
           throw new OmniDownloadError(
             `Download stalled from ${new URL(currentUrl).hostname}: no data ` +
-              `for ${IDLE_TIMEOUT_MS / 1000}s`,
+              `for ${idleTimeoutMs / 1000}s`,
           );
         }
+        // Write-stream failures embed the absolute `.part` path in their
+        // message; scrub before interpolating (same contract as mkdir above).
         throw new OmniDownloadError(
           `Download interrupted from ${new URL(currentUrl).hostname}: ${
-            err instanceof Error ? err.message : String(err)
+            err instanceof Error
+              ? scrubPathsFromMessage(err.message)
+              : String(err)
           }`,
+          { cause: err },
         );
       } finally {
         clearTimeout(idleTimer);
@@ -362,13 +559,7 @@ export async function downloadMediaUrl(params: {
       debugLogger.debug(
         `downloaded ${written} bytes from ${new URL(currentUrl).hostname}`,
       );
-      return {
-        partPath,
-        sha256: hash.digest('hex'),
-        sizeBytes: written,
-        finalUrl: currentUrl,
-        contentType: res.headers.get('content-type') ?? undefined,
-      };
+      return { partPath };
     }
   } catch (err) {
     await fs.rm(partPath, { force: true });

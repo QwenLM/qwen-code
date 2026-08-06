@@ -1075,6 +1075,13 @@ function getMediaType(mimeType: string): 'image' | 'audio' | 'video' | 'file' {
  * Audio formats the DashScope input_audio channel accepts. Kept in
  * lockstep with the omni recognizer's audio sniff set — an upload the
  * recognizer accepts must never textify here after paying for transfer.
+ *
+ * flac/ogg/m4a are a DashScope acceptance extension beyond the OpenAI
+ * SDK's wav|mp3 union, applied unconditionally because RequestContext
+ * carries no provider identity to scope on. The trade is deliberate:
+ * a non-DashScope endpoint that rejects the format returns an explicit
+ * 400, whereas textifying would silently drop the audio. Revisit if a
+ * provider flag ever lands on RequestContext.
  */
 function getAudioFormat(
   mimeType: string,

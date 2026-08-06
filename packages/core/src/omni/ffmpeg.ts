@@ -138,14 +138,7 @@ export interface MediaProbeResult {
   /** Frame count of the primary video stream (image: >1 means animated —
    * GIF/APNG/animated WebP; absent when the container does not report it). */
   frameCount?: number;
-  /** Sample rate in Hz of the first audio stream (audio only). */
-  sampleRateHz?: number;
-  /** Channel count of the first audio stream (audio only). */
-  channels?: number;
 }
-
-/** @deprecated S1 name kept for existing imports. */
-export type VideoProbeResult = MediaProbeResult;
 
 /** Parse an ffprobe rational like "30000/1001" (or plain "25") into fps. */
 function parseFrameRate(raw: string | undefined): number | undefined {
@@ -204,8 +197,6 @@ export async function probeMediaMetadata(
       avg_frame_rate?: string;
       r_frame_rate?: string;
       nb_frames?: string;
-      sample_rate?: string;
-      channels?: number;
     }>;
   };
   try {
@@ -246,10 +237,6 @@ export async function probeMediaMetadata(
         ...base,
         durationMs,
         codec: audioStream?.codec_name,
-        sampleRateHz: audioStream?.sample_rate
-          ? Number(audioStream.sample_rate)
-          : undefined,
-        channels: audioStream?.channels,
       };
     case 'video':
     default:
@@ -264,12 +251,4 @@ export async function probeMediaMetadata(
         codec: videoStream?.codec_name,
       };
   }
-}
-
-/** @deprecated S1 wrapper: video probe. */
-export async function probeVideoMetadata(
-  filePath: string,
-  signal?: AbortSignal,
-): Promise<MediaProbeResult> {
-  return probeMediaMetadata(filePath, 'video', signal);
 }

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -12,9 +12,15 @@ import path from 'node:path';
 import {
   extensionForVideoMime,
   hashFileSha256,
+  recognizeMediaFile,
   sniffFileModality,
   sniffVideoMimeType,
 } from './recognition.js';
+import { probeMediaMetadata } from './ffmpeg.js';
+
+vi.mock('./ffmpeg.js', () => ({
+  probeMediaMetadata: vi.fn(),
+}));
 
 function mp4Header(brand = 'isom'): Buffer {
   // [size:4]["ftyp"][major brand:4][minor version:4]
@@ -163,10 +169,27 @@ describe('sniffMediaType (S2 modalities)', async () => {
     expect(sniffMediaType(Buffer.alloc(0))).toBeNull();
   });
 
+  it('requires the full 6-byte GIF signature, not just the "GIF" prefix', () => {
+    // Plain text happening to start with "GIF " must not sniff as an image.
+    expect(sniffMediaType(Buffer.from('GIF export notes, take 2'))).toBeNull();
+    expect(sniffMediaType(Buffer.from('GIF90a....'))).toBeNull();
+    // Both real signatures detect.
+    expect(sniffMediaType(Buffer.from('GIF87a....'))).toMatchObject({
+      mimeType: 'image/gif',
+      modality: 'image',
+    });
+    expect(sniffMediaType(Buffer.from('GIF89a....'))).toMatchObject({
+      mimeType: 'image/gif',
+      modality: 'image',
+    });
+  });
+
   it('does not mistake the UTF-16 LE BOM for an MPEG frame sync', () => {
-    // 0xFF 0xFE passes the naive sync mask (0xFE & 0xE0 === 0xE0), but a
-    // real MPEG frame never uses 0xFE (reserved layer bits). Callers
-    // without a secondary modality gate must not see audio/mpeg here.
+    // 0xFF 0xFE passes the naive sync mask (0xFE & 0xE0 === 0xE0) and is even
+    // a technically valid MPEG-1 Layer I header, but it is also the UTF-16 LE
+    // BOM; the sniffer deliberately excludes it so UTF-16 LE text does not
+    // sniff as audio. Callers without a secondary modality gate must not see
+    // audio/mpeg here.
     const utf16le = Buffer.concat([
       Buffer.from([0xff, 0xfe]),
       Buffer.from('h\0e\0l\0l\0o\0', 'latin1'),
@@ -223,5 +246,97 @@ describe('sniffFileModality', () => {
     await expect(
       sniffFileModality(path.join(os.tmpdir(), 'omni-absent-xyz.mp4')),
     ).resolves.toBeNull();
+  });
+
+  it('returns the sniffed modality even when close() rejects (never throws)', async () => {
+    // Network mounts can fail the final close() (EIO/ESTALE); the pre-gate's
+    // never-throws contract must survive a rejecting close, not turn a
+    // successful sniff into a crash.
+    const header = mp4Header('isom');
+    const openSpy = vi.spyOn(fs, 'open').mockResolvedValue({
+      stat: async () => ({ size: header.length }),
+      read: async (buf: Buffer) => {
+        header.copy(buf);
+        return { bytesRead: header.length, buffer: buf };
+      },
+      close: async () => {
+        throw Object.assign(new Error('EIO: i/o error, close'), {
+          code: 'EIO',
+        });
+      },
+    } as unknown as fs.FileHandle);
+    try {
+      await expect(sniffFileModality('/mnt/nfs/clip.mp4')).resolves.toBe(
+        'video',
+      );
+    } finally {
+      openSpy.mockRestore();
+    }
+  });
+});
+
+describe('recognizeMediaFile', () => {
+  const probeMock = vi.mocked(probeMediaMetadata);
+  const tmpDirs: string[] = [];
+
+  async function tempFile(name: string, content: Buffer): Promise<string> {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'omni-recognize-'));
+    tmpDirs.push(dir);
+    const filePath = path.join(dir, name);
+    await fs.writeFile(filePath, content);
+    return filePath;
+  }
+
+  afterEach(async () => {
+    probeMock.mockReset();
+    await Promise.all(
+      tmpDirs
+        .splice(0)
+        .map((dir) => fs.rm(dir, { recursive: true, force: true })),
+    );
+  });
+
+  it('fails closed on content that does not sniff as supported media', async () => {
+    const filePath = await tempFile(
+      'notes.txt',
+      Buffer.from('just some plain text, definitely not media'),
+    );
+    await expect(recognizeMediaFile(filePath)).rejects.toThrow(
+      /does not match a supported media container.*notes\.txt/s,
+    );
+    expect(probeMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects a sniffed modality that contradicts expectedModality', async () => {
+    // A real MP3 frame sync referenced as video: the sniff succeeds (audio)
+    // but the modality gate must reject the mismatch.
+    const filePath = await tempFile(
+      'clip.mp4',
+      Buffer.from([0xff, 0xfb, 0x90, 0x00, 0x00, 0x00]),
+    );
+    await expect(
+      recognizeMediaFile(filePath, { expectedModality: 'video' }),
+    ).rejects.toThrow(
+      /sniffs as audio \(audio\/mpeg\) but was referenced as video.*clip\.mp4/s,
+    );
+    expect(probeMock).not.toHaveBeenCalled();
+  });
+
+  it('resolves with the sniffed modality, MIME type, size, and probe metadata', async () => {
+    probeMock.mockResolvedValue({ durationMs: 5000, codec: 'mp3' });
+    const content = Buffer.concat([
+      Buffer.from([0xff, 0xfb, 0x90, 0x00]),
+      Buffer.alloc(60),
+    ]);
+    const filePath = await tempFile('song.mp3', content);
+    await expect(
+      recognizeMediaFile(filePath, { expectedModality: 'audio' }),
+    ).resolves.toEqual({
+      modality: 'audio',
+      detectedMimeType: 'audio/mpeg',
+      sizeBytes: content.length,
+      metadata: { durationMs: 5000, codec: 'mp3' },
+    });
+    expect(probeMock).toHaveBeenCalledWith(filePath, 'audio', undefined);
   });
 });

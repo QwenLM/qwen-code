@@ -14,7 +14,6 @@ function media(
 ): RecognizedMedia {
   return {
     modality,
-    sha256: 'a'.repeat(64),
     detectedMimeType: 'x/y',
     sizeBytes: 1,
     metadata,

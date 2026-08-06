@@ -21,6 +21,7 @@ import {
 } from './guard.js';
 import {
   extensionForMime,
+  hashFileSha256,
   recognizeMediaFile,
   type OmniModality,
   type RecognizedMedia,
@@ -38,7 +39,6 @@ export { OmniObjectStore } from './storage.js';
 export { DashScopeUploader, OSS_URL_PREFIX } from './upload.js';
 export {
   recognizeMediaFile,
-  recognizeVideoFile,
   sniffMediaType,
   sniffFileModality,
   sniffVideoMimeType,
@@ -123,9 +123,6 @@ export interface OmniMediaDelivery {
   deduped: boolean;
 }
 
-/** @deprecated S1 name kept for existing imports. */
-export type OmniVideoDelivery = OmniMediaDelivery;
-
 /** Thrown for omni pipeline failures. The pipeline fails closed: callers
  * surface the message instead of silently falling back to inline base64.
  * Messages must not contain absolute paths or raw upstream response
@@ -183,11 +180,8 @@ export function isOmniDeliveryActive(config: Config): boolean {
   return DashScopeOpenAICompatibleProvider.isDashScopeProvider(cgc);
 }
 
-/** @deprecated S1 name kept for existing imports. */
-export const isOmniVideoDeliveryActive = isOmniDeliveryActive;
-
 /**
- * Omni pipeline: recognize → transport guard → promote into the
+ * Omni pipeline: recognize → transport guard → hash → promote into the
  * content-addressed store → upload via the DashScope temporary channel →
  * return the oss:// URL plus the token estimate.
  *
@@ -200,10 +194,20 @@ export const isOmniVideoDeliveryActive = isOmniDeliveryActive;
 export async function processMediaForOmniDelivery(
   filePath: string,
   config: Config,
-  options?: { expectedModality?: OmniModality; signal?: AbortSignal },
+  options?: {
+    expectedModality?: OmniModality;
+    signal?: AbortSignal;
+    /**
+     * Name used for the file in guard/error messages. Defaults to the
+     * file's basename — callers whose input is not a user-visible path
+     * (the URL funnel stages downloads under opaque temp names) pass the
+     * user-recognizable name instead.
+     */
+    displayName?: string;
+  },
 ): Promise<OmniMediaDelivery> {
   const { expectedModality, signal } = options ?? {};
-  const displayName = path.basename(filePath);
+  const displayName = options?.displayName ?? path.basename(filePath);
 
   // Defense in depth: startup validation already asserted this, but the
   // pipeline can also be reached in embedders that skip Config.initialize.
@@ -241,20 +245,29 @@ export async function processMediaForOmniDelivery(
     );
   }
 
-  // Token guard AFTER probe (needs metadata), BEFORE copy/upload.
+  // Token guard AFTER probe (needs metadata), BEFORE hash/copy/upload — a
+  // token-oversized input must not pay a full-file SHA-256 to be rejected.
   const tokenEstimate = assertWithinTokenLimit(config, recognized, displayName);
+
+  // Content hash: identity of the stored object. Computed only once all
+  // guards have passed, immediately before promotion into the store.
+  let sha256: string;
+  try {
+    sha256 = await hashFileSha256(filePath, signal);
+  } catch (err) {
+    if (signal?.aborted) throw err;
+    throw new OmniDeliveryError(
+      `Failed to hash media file ${displayName}: ${sanitizeErrorMessage(err, [filePath])}`,
+      { cause: err },
+    );
+  }
 
   const store = new OmniObjectStore(config.storage.getQwenDir());
   const extension = extensionForMime(recognized.detectedMimeType);
   let objectPath: string;
   let deduped: boolean;
   try {
-    const put = await store.putFile(
-      filePath,
-      recognized.sha256,
-      extension,
-      signal,
-    );
+    const put = await store.putFile(filePath, sha256, extension, signal);
     objectPath = put.objectPath;
     deduped = put.deduped;
   } catch (err) {
@@ -292,30 +305,18 @@ export async function processMediaForOmniDelivery(
   }
 
   debugLogger.debug(
-    `omni ${recognized.modality} delivered: sha256=${recognized.sha256.slice(0, 12)}… ` +
+    `omni ${recognized.modality} delivered: sha256=${sha256.slice(0, 12)}… ` +
       `size=${recognized.sizeBytes} est=${tokenEstimate.estimatedTokenCount}(${tokenEstimate.status}) ` +
       `deduped=${deduped} uri=${fileUri}`,
   );
   return {
     fileUri,
     mimeType: recognized.detectedMimeType,
-    sha256: recognized.sha256,
+    sha256,
     recognized,
     tokenEstimate,
     deduped,
   };
-}
-
-/** @deprecated S1 wrapper: video-only pipeline. */
-export async function processVideoForOmniDelivery(
-  filePath: string,
-  config: Config,
-  signal?: AbortSignal,
-): Promise<OmniMediaDelivery> {
-  return processMediaForOmniDelivery(filePath, config, {
-    expectedModality: 'video',
-    signal,
-  });
 }
 
 /** Read-result shape consumed by fileUtils.processSingleFileContent for
@@ -340,9 +341,6 @@ export interface OmniMediaReadResult {
   errorType?: ToolErrorType;
   tokenEstimate?: OmniTokenEstimate;
 }
-
-/** @deprecated S1 name kept for existing imports. */
-export type OmniVideoReadResult = OmniMediaReadResult;
 
 /**
  * fileUtils-facing wrapper: run the delivery pipeline and shape the
@@ -418,17 +416,6 @@ export async function readMediaViaOmniDelivery(params: {
       errorType: ToolErrorType.READ_CONTENT_FAILURE,
     };
   }
-}
-
-/** @deprecated S1 wrapper. */
-export async function readVideoViaOmniDelivery(params: {
-  filePath: string;
-  config: Config;
-  displayName: string;
-  relativePathForDisplay: string;
-  signal?: AbortSignal;
-}): Promise<OmniMediaReadResult> {
-  return readMediaViaOmniDelivery({ ...params, expectedModality: 'video' });
 }
 
 /** Effective download byte ceiling — never above the upload channel cap

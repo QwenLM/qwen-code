@@ -4,7 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest';
+import os from 'node:os';
+import nodePath from 'node:path';
+import nodeFs from 'node:fs/promises';
 import type { Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 
@@ -33,13 +44,27 @@ function inlinePart(mimeType: string, bytes: Buffer): Part {
   return { inlineData: { mimeType, data: bytes.toString('base64') } };
 }
 
+// Per-run isolated qwen dir: a shared hardcoded path would leak staging
+// files across runs and collide between concurrent test invocations.
+let testQwenDir: string;
+
 function cfg(modalities: Record<string, boolean>): Config {
   return {
     isOmniEnabled: () => true,
     getContentGeneratorConfig: () => ({ modalities }),
-    storage: { getQwenDir: () => '/tmp/omni-trm-test-qwen' },
+    storage: { getQwenDir: () => testQwenDir },
   } as unknown as Config;
 }
+
+beforeAll(async () => {
+  testQwenDir = await nodeFs.mkdtemp(
+    nodePath.join(os.tmpdir(), 'omni-trm-qwen-'),
+  );
+});
+
+afterAll(async () => {
+  await nodeFs.rm(testQwenDir, { recursive: true, force: true });
+});
 
 beforeEach(() => {
   gateMock.mockReturnValue(true);
@@ -176,12 +201,11 @@ describe('processToolResultOmniMedia', () => {
     // That failure must degrade THIS part to inline like any other delivery
     // failure — not reject the whole call, which would report a tool that
     // succeeded as failed.
-    const os = await import('node:os');
-    const nodePath = await import('node:path');
-    const fs = await import('node:fs/promises');
-    const qwenDir = await fs.mkdtemp(nodePath.join(os.tmpdir(), 'omni-trm-'));
+    const qwenDir = await nodeFs.mkdtemp(
+      nodePath.join(os.tmpdir(), 'omni-trm-'),
+    );
     // OmniObjectStore roots at <qwenDir>/omni; make that path a plain file.
-    await fs.writeFile(nodePath.join(qwenDir, 'omni'), 'not a directory');
+    await nodeFs.writeFile(nodePath.join(qwenDir, 'omni'), 'not a directory');
     try {
       const config = {
         isOmniEnabled: () => true,
@@ -193,7 +217,111 @@ describe('processToolResultOmniMedia', () => {
       expect(result).toBe(parts);
       expect(deliverMock).not.toHaveBeenCalled();
     } finally {
-      await fs.rm(qwenDir, { recursive: true, force: true });
+      await nodeFs.rm(qwenDir, { recursive: true, force: true });
     }
+  });
+
+  it('returns the original array untouched when the omni gate is off', async () => {
+    gateMock.mockReturnValue(false);
+    const parts = [inlinePart('image/png', PNG_BYTES)];
+    const result = await processToolResultOmniMedia(
+      parts,
+      cfg({ image: true }),
+      signal,
+    );
+    expect(result).toBe(parts);
+    expect(deliverMock).not.toHaveBeenCalled();
+  });
+
+  it('converts media nested inside functionResponse.parts (the production funnel shape)', async () => {
+    // Both physical funnels deliver tool-result media wrapped by
+    // convertToFunctionResponse as {functionResponse: {…, parts:
+    // [{inlineData}]}} — not as top-level inlineData parts. This is the
+    // branch production actually exercises.
+    const parts: Part[] = [
+      {
+        functionResponse: {
+          id: 'call_1',
+          name: 'Read',
+          response: { output: 'ok' },
+          parts: [
+            { text: 'caption' },
+            inlinePart('image/png', PNG_BYTES),
+          ] as Part[],
+        },
+      } as Part,
+    ];
+    const result = await processToolResultOmniMedia(
+      parts,
+      cfg({ image: true }),
+      signal,
+    );
+    expect(result).not.toBe(parts);
+    const nested = result[0]!.functionResponse?.parts as Part[];
+    expect(nested[0]!.text).toBe('caption');
+    expect(nested[1]!.fileData?.fileUri).toBe('oss://bucket/key');
+    expect(nested[1]!.inlineData).toBeUndefined();
+    // The wrapper's identity fields survive the rebuild.
+    expect(result[0]!.functionResponse?.id).toBe('call_1');
+    expect(result[0]!.functionResponse?.name).toBe('Read');
+  });
+
+  it('returns the original identity when functionResponse.parts contains no qualifying media', async () => {
+    const parts: Part[] = [
+      {
+        functionResponse: {
+          id: 'call_1',
+          name: 'Read',
+          response: { output: 'ok' },
+          parts: [{ text: 'no media here' }] as Part[],
+        },
+      } as Part,
+    ];
+    const result = await processToolResultOmniMedia(
+      parts,
+      cfg({ image: true }),
+      signal,
+    );
+    expect(result).toBe(parts);
+  });
+
+  it('enforces the aggregate upload-byte budget (over-budget parts stay inline)', async () => {
+    // Two parts: the first consumes nearly the whole 128 MiB budget, the
+    // second no longer fits and must stay inline even though the upload
+    // COUNT budget still has room.
+    const bigBytes = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.alloc(127 * 1024 * 1024),
+    ]);
+    const parts = [
+      inlinePart('image/png', bigBytes),
+      inlinePart('image/png', bigBytes),
+    ];
+    const result = await processToolResultOmniMedia(
+      parts,
+      cfg({ image: true }),
+      signal,
+    );
+    expect(deliverMock).toHaveBeenCalledTimes(1);
+    expect(result[0]!.fileData).toBeDefined();
+    expect(result[1]!.inlineData).toBeDefined();
+  });
+
+  it('propagates an abort instead of degrading the part to inline', async () => {
+    // A user abort is not a delivery failure — swallowing it into the
+    // keep-inline path would let an aborted turn keep converting parts.
+    const controller = new AbortController();
+    deliverMock.mockImplementation(async () => {
+      controller.abort();
+      throw new Error('aborted mid-upload');
+    });
+    const parts = [inlinePart('image/png', PNG_BYTES)];
+    await expect(
+      processToolResultOmniMedia(
+        parts,
+        cfg({ image: true }),
+        controller.signal,
+      ),
+    ).rejects.toThrow('aborted mid-upload');
   });
 });

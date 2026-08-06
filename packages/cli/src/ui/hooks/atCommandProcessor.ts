@@ -590,13 +590,38 @@ export async function resolveAtCommandQuery({
         // Full local-file pipeline on the downloaded bytes: sniff/probe/
         // hash again (the design requires re-recognition from the local
         // file — never trust transfer-time observations), guard, store,
-        // upload. readMediaViaOmniDelivery needs a stable name for
-        // display; use the URL basename.
+        // upload. Displays and error messages need a stable name; use the
+        // URL basename.
         const urlBase = path.basename(new URL(ref.url).pathname) || hostLabel;
+        // Per-modality gate, mirroring the local-file path in fileUtils:
+        // media the active model cannot consume must not be stored and
+        // uploaded — the fileData part would only be replaced by an
+        // unsupported-modality placeholder in the converter, after paying
+        // for the upload. (The download itself is unavoidable: modality
+        // is only knowable from the bytes.) A null sniff falls through to
+        // the pipeline, whose recognition failure names the problem.
+        const modalities =
+          config.getContentGeneratorConfig?.()?.modalities ?? {};
+        const sniffedModality = await core.sniffFileModality(
+          downloaded.partPath,
+        );
+        if (sniffedModality && !modalities[sniffedModality]) {
+          urlMediaDisplays.push({
+            callId,
+            name: 'Fetch Media URL',
+            description: `Download ${ref.url}`,
+            status: ToolCallStatus.Error,
+            resultDisplay: `Skipped ${urlBase}: the active model does not accept ${sniffedModality} input.`,
+            confirmationDetails: undefined,
+          });
+          continue;
+        }
         const delivery = await core.processMediaForOmniDelivery(
           downloaded.partPath,
           config,
-          { signal },
+          // displayName: guard/error messages must name the URL's file, not
+          // the opaque staging path the download landed under.
+          { signal, displayName: urlBase },
         );
         urlMediaParts.push({
           fileData: {

@@ -3641,12 +3641,13 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: false,
         description:
-          'Enable the omni media pipeline. Local video files referenced ' +
-          'with @ are recognized (ffprobe), stored content-addressed under ' +
-          '.qwen/omni/objects/, uploaded through the DashScope temporary ' +
-          'upload channel, and delivered as oss:// URLs instead of inline ' +
-          'base64. Only active for DashScope-compatible endpoints. Can ' +
-          'also be enabled via QWEN_CODE_ENABLE_OMNI=1.',
+          'Enable the omni media pipeline. Media files (video, image, ' +
+          'audio) referenced with @ — and media served from @https:// ' +
+          'URLs — are recognized (ffprobe), stored content-addressed ' +
+          'under .qwen/omni/objects/, uploaded through the DashScope ' +
+          'temporary upload channel, and delivered as oss:// URLs instead ' +
+          'of inline base64. Only active for DashScope-compatible ' +
+          'endpoints. Can also be enabled via QWEN_CODE_ENABLE_OMNI=1.',
         showInDialog: true,
       },
       upload: {
@@ -3697,10 +3698,9 @@ const SETTINGS_SCHEMA = {
             description:
               'Estimated-token ceiling for a single omni media input, ' +
               'checked before upload using the versioned raw-resource ' +
-              'estimator. 0 disables the token guard (estimates are still ' +
-              'attached for observability) — the estimation formula is ' +
-              'pending confirmation with the model provider; set a ' +
-              'positive threshold to enforce fail-closed rejection.',
+              'estimator. 0 disables the token guard — the estimation ' +
+              'formula is pending confirmation with the model provider; ' +
+              'set a positive threshold to enforce fail-closed rejection.',
             showInDialog: false,
             jsonSchemaOverride: {
               type: 'number',

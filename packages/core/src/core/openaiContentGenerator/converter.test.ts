@@ -2468,6 +2468,55 @@ describe('OpenAIContentConverter', () => {
       }
     });
 
+    it('should convert inline flac/ogg/m4a audio instead of textifying', () => {
+      // Mirrors the fileData case above: the inline branch shares
+      // getAudioFormat, and a regression that re-textifies inline
+      // flac/ogg/m4a must not ship green.
+      for (const [mime, format] of [
+        ['audio/flac', 'flac'],
+        ['audio/ogg', 'ogg'],
+        ['audio/mp4', 'm4a'],
+      ] as const) {
+        const request: GenerateContentParameters = {
+          model: 'models/test',
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                {
+                  inlineData: {
+                    mimeType: mime,
+                    data: 'YXVkaW8=',
+                    displayName: 'clip',
+                  },
+                },
+              ],
+            },
+          ],
+        };
+        const messages = converter.convertGeminiRequestToOpenAI(
+          request,
+          requestContext,
+        );
+        const userMessage = messages.find((m) => m.role === 'user');
+        const contentArray = userMessage?.content as Array<{
+          type: string;
+          input_audio?: { data: string; format: string };
+          text?: string;
+        }>;
+        const audioPart = contentArray.find((p) => p.type === 'input_audio');
+        expect(audioPart?.input_audio?.format).toBe(format);
+        expect(audioPart?.input_audio?.data).toBe(
+          `data:${mime};base64,YXVkaW8=`,
+        );
+        expect(
+          contentArray.some((p) =>
+            p.text?.includes('Unsupported inline media type'),
+          ),
+        ).toBe(false);
+      }
+    });
+
     it('should render unsupported inlineData file types as a text block', () => {
       const request: GenerateContentParameters = {
         model: 'models/test',

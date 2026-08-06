@@ -10,7 +10,6 @@ import {
   assertWithinByteLimit,
   assertWithinTokenLimit,
   effectiveMaxUploadFileBytes,
-  DEFAULT_OMNI_MAX_UPLOAD_FILE_BYTES,
   OmniTransportGuardError,
 } from './guard.js';
 import type { RecognizedMedia } from './recognition.js';
@@ -24,7 +23,6 @@ function cfg(overrides: { maxBytes?: number; maxTokens?: number }): Config {
 
 const AUDIO_5S: RecognizedMedia = {
   modality: 'audio',
-  sha256: 'a'.repeat(64),
   detectedMimeType: 'audio/mpeg',
   sizeBytes: 40_000,
   metadata: { durationMs: 5000 },
@@ -32,7 +30,6 @@ const AUDIO_5S: RecognizedMedia = {
 
 const VIDEO_8MIN: RecognizedMedia = {
   modality: 'video',
-  sha256: 'b'.repeat(64),
   detectedMimeType: 'video/mp4',
   sizeBytes: 36_000_000,
   metadata: { width: 852, height: 480, durationMs: 506_000, frameRate: 30 },
@@ -40,14 +37,16 @@ const VIDEO_8MIN: RecognizedMedia = {
 
 describe('byte guard', () => {
   it('uses the default 1 GiB when unset or non-positive', () => {
-    expect(effectiveMaxUploadFileBytes(cfg({}))).toBe(
-      DEFAULT_OMNI_MAX_UPLOAD_FILE_BYTES,
-    );
+    // Assert the literal, not the exported constant: settingsSchema.ts
+    // hardcodes 1073741824 as the documented default (the DashScope
+    // temporary-upload per-file cap), so a drifted constant must fail here
+    // rather than ship green by comparing the implementation to itself.
+    expect(effectiveMaxUploadFileBytes(cfg({}))).toBe(1024 * 1024 * 1024);
     expect(effectiveMaxUploadFileBytes(cfg({ maxBytes: 0 }))).toBe(
-      DEFAULT_OMNI_MAX_UPLOAD_FILE_BYTES,
+      1024 * 1024 * 1024,
     );
     expect(effectiveMaxUploadFileBytes(cfg({ maxBytes: -5 }))).toBe(
-      DEFAULT_OMNI_MAX_UPLOAD_FILE_BYTES,
+      1024 * 1024 * 1024,
     );
   });
 

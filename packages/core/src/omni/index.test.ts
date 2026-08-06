@@ -10,7 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { Config } from '../config/config.js';
 import { AuthType } from '../core/contentGenerator.js';
-import { isOmniVideoDeliveryActive } from './index.js';
+import { isOmniDeliveryActive } from './index.js';
 import { effectiveMaxDownloadFileBytes } from './index.js';
 import { sanitizeErrorMessage } from './index.js';
 
@@ -88,18 +88,16 @@ describe('effectiveMaxDownloadFileBytes', () => {
   });
 });
 
-describe('isOmniVideoDeliveryActive', () => {
+describe('isOmniDeliveryActive', () => {
   it('is active for a DashScope endpoint with a static API key in a trusted workspace', () => {
     expect(
-      isOmniVideoDeliveryActive(
-        stubConfig({ trusted: true, cgc: DASHSCOPE_CGC }),
-      ),
+      isOmniDeliveryActive(stubConfig({ trusted: true, cgc: DASHSCOPE_CGC })),
     ).toBe(true);
   });
 
   it('is inactive when omni is disabled', () => {
     expect(
-      isOmniVideoDeliveryActive(
+      isOmniDeliveryActive(
         stubConfig({ omniEnabled: false, trusted: true, cgc: DASHSCOPE_CGC }),
       ),
     ).toBe(false);
@@ -107,15 +105,13 @@ describe('isOmniVideoDeliveryActive', () => {
 
   it('is inactive in an untrusted workspace', () => {
     expect(
-      isOmniVideoDeliveryActive(
-        stubConfig({ trusted: false, cgc: DASHSCOPE_CGC }),
-      ),
+      isOmniDeliveryActive(stubConfig({ trusted: false, cgc: DASHSCOPE_CGC })),
     ).toBe(false);
   });
 
   it('treats unknown trust (undefined) as trusted', () => {
     expect(
-      isOmniVideoDeliveryActive(
+      isOmniDeliveryActive(
         stubConfig({ trusted: undefined, cgc: DASHSCOPE_CGC }),
       ),
     ).toBe(true);
@@ -123,7 +119,7 @@ describe('isOmniVideoDeliveryActive', () => {
 
   it('is inactive under Qwen OAuth even though a placeholder apiKey exists', () => {
     expect(
-      isOmniVideoDeliveryActive(
+      isOmniDeliveryActive(
         stubConfig({
           trusted: true,
           cgc: {
@@ -138,7 +134,7 @@ describe('isOmniVideoDeliveryActive', () => {
 
   it('is inactive when the apiKey is the OAuth placeholder regardless of authType', () => {
     expect(
-      isOmniVideoDeliveryActive(
+      isOmniDeliveryActive(
         stubConfig({
           trusted: true,
           cgc: { ...DASHSCOPE_CGC, apiKey: 'QWEN_OAUTH_DYNAMIC_TOKEN' },
@@ -149,7 +145,7 @@ describe('isOmniVideoDeliveryActive', () => {
 
   it('is inactive without a baseUrl (never sends the key to a default origin)', () => {
     expect(
-      isOmniVideoDeliveryActive(
+      isOmniDeliveryActive(
         stubConfig({
           trusted: true,
           cgc: { authType: AuthType.USE_OPENAI, apiKey: 'sk-openai-key' },
@@ -160,7 +156,7 @@ describe('isOmniVideoDeliveryActive', () => {
 
   it('is inactive for non-DashScope endpoints', () => {
     expect(
-      isOmniVideoDeliveryActive(
+      isOmniDeliveryActive(
         stubConfig({
           trusted: true,
           cgc: {
@@ -175,7 +171,7 @@ describe('isOmniVideoDeliveryActive', () => {
 
   it('is inactive without a content generator config', () => {
     expect(
-      isOmniVideoDeliveryActive(stubConfig({ trusted: true, cgc: undefined })),
+      isOmniDeliveryActive(stubConfig({ trusted: true, cgc: undefined })),
     ).toBe(false);
   });
 });
@@ -208,7 +204,6 @@ describe('readMediaViaOmniDelivery result shape', () => {
           : modality === 'audio'
             ? 'audio/mpeg'
             : 'video/mp4',
-      sha256: 'a'.repeat(64),
       sizeBytes: 1234,
       metadata,
     };
@@ -252,6 +247,7 @@ describe('readMediaViaOmniDelivery result shape', () => {
         .mockResolvedValue(
           mockRecognized('image', { width: 1920, height: 1080 }),
         ),
+      hashFileSha256: vi.fn().mockResolvedValue('a'.repeat(64)),
       extensionForMime: vi.fn().mockReturnValue('.png'),
     }));
     vi.doMock('./storage.js', () => ({
@@ -302,6 +298,7 @@ describe('readMediaViaOmniDelivery result shape', () => {
       recognizeMediaFile: vi
         .fn()
         .mockResolvedValue(mockRecognized('audio', { durationMs: 60_000 })),
+      hashFileSha256: vi.fn().mockResolvedValue('a'.repeat(64)),
       extensionForMime: vi.fn().mockReturnValue('.mp3'),
     }));
     vi.doMock('./storage.js', () => ({
@@ -338,6 +335,109 @@ describe('readMediaViaOmniDelivery result shape', () => {
       },
     });
     expect(result.returnDisplay).toContain('audio');
+  });
+
+  it('rejects with OmniTransportGuardError before storing or uploading when the token guard trips', async () => {
+    // Every other pipeline test disables the guard (threshold 0); this one
+    // pins the guard call itself: a positive threshold with an over-budget
+    // estimate must reject BEFORE the hash/copy/upload stages run.
+    const putFileMock = vi.fn();
+    const uploadFileMock = vi.fn();
+    vi.doMock('./ffmpeg.js', () => ({
+      isFfmpegAvailable: vi.fn().mockResolvedValue(true),
+      isFfprobeAvailable: vi.fn().mockResolvedValue(true),
+    }));
+    vi.doMock('./recognition.js', () => ({
+      recognizeMediaFile: vi.fn().mockResolvedValue(
+        // 852×480×(506s × 30fps) / 2048 ≈ 3M tokens — far above 100.
+        mockRecognized('video', {
+          width: 852,
+          height: 480,
+          durationMs: 506_000,
+          frameRate: 30,
+        }),
+      ),
+      hashFileSha256: vi.fn().mockResolvedValue('a'.repeat(64)),
+      extensionForMime: vi.fn().mockReturnValue('.mp4'),
+    }));
+    vi.doMock('./storage.js', () => ({
+      OmniObjectStore: class {
+        putFile = putFileMock;
+        getOmniRootDir() {
+          return '/tmp/omni-test-qwen/omni';
+        }
+      },
+    }));
+    vi.doMock('./upload.js', () => ({
+      DashScopeUploader: class {
+        uploadFile = uploadFileMock;
+      },
+      OSS_URL_PREFIX: 'oss://',
+    }));
+    const { processMediaForOmniDelivery, OmniTransportGuardError } =
+      await import('./index.js');
+
+    const config = {
+      ...deliveryConfig(),
+      getOmniMaxEstimatedTokens: vi.fn().mockReturnValue(100),
+    } as unknown as Config;
+    await expect(
+      processMediaForOmniDelivery(await realFile('long.mp4'), config, {
+        expectedModality: 'video',
+      }),
+    ).rejects.toThrow(OmniTransportGuardError);
+    expect(putFileMock).not.toHaveBeenCalled();
+    expect(uploadFileMock).not.toHaveBeenCalled();
+  });
+
+  it('propagates an abort from uploadFile instead of returning a fail-closed result', async () => {
+    // A user abort must surface to the caller's abort handling — wrapping it
+    // in the error-result shape would report a cancellation as a failed read.
+    const controller = new AbortController();
+    vi.doMock('./ffmpeg.js', () => ({
+      isFfmpegAvailable: vi.fn().mockResolvedValue(true),
+      isFfprobeAvailable: vi.fn().mockResolvedValue(true),
+    }));
+    vi.doMock('./recognition.js', () => ({
+      recognizeMediaFile: vi
+        .fn()
+        .mockResolvedValue(mockRecognized('audio', { durationMs: 60_000 })),
+      hashFileSha256: vi.fn().mockResolvedValue('a'.repeat(64)),
+      extensionForMime: vi.fn().mockReturnValue('.mp3'),
+    }));
+    vi.doMock('./storage.js', () => ({
+      OmniObjectStore: class {
+        async putFile() {
+          return { objectPath: '/tmp/obj.mp3', deduped: false };
+        }
+        getOmniRootDir() {
+          return '/tmp/omni-test-qwen/omni';
+        }
+      },
+    }));
+    vi.doMock('./upload.js', () => ({
+      DashScopeUploader: class {
+        async uploadFile() {
+          controller.abort();
+          const err = new Error('The operation was aborted');
+          err.name = 'AbortError';
+          throw err;
+        }
+      },
+      OSS_URL_PREFIX: 'oss://',
+    }));
+    const { readMediaViaOmniDelivery } = await import('./index.js');
+
+    await expect(
+      readMediaViaOmniDelivery({
+        filePath: await realFile('song.mp3'),
+        config: deliveryConfig(),
+        displayName: 'song.mp3',
+        relativePathForDisplay: 'song.mp3',
+        expectedModality: 'audio',
+        signal: controller.signal,
+      }),
+    ).rejects.toMatchObject({ name: 'AbortError' });
   });
 
   it('fails closed with an error result (never inline base64) on failure', async () => {

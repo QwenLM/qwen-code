@@ -16,7 +16,6 @@ import {
   isFfmpegAvailable,
   isFfprobeAvailable,
   probeMediaMetadata,
-  probeVideoMetadata,
   resetFfmpegCachesForTests,
 } from './ffmpeg.js';
 
@@ -116,7 +115,7 @@ describe('assertOmniRuntimeDependencies', () => {
   });
 });
 
-describe('probeVideoMetadata', () => {
+describe('probeMediaMetadata (video)', () => {
   it('parses format and first-video-stream fields', async () => {
     mockExecResult((command) => {
       expect(command).toBe('ffprobe');
@@ -136,7 +135,7 @@ describe('probeVideoMetadata', () => {
         }),
       };
     });
-    await expect(probeVideoMetadata('/v.mp4')).resolves.toEqual({
+    await expect(probeMediaMetadata('/v.mp4', 'video')).resolves.toEqual({
       formatName: 'mov,mp4,m4a,3gp,3g2,mj2',
       durationMs: 5500,
       width: 1280,
@@ -159,7 +158,7 @@ describe('probeVideoMetadata', () => {
         ],
       }),
     }));
-    const result = await probeVideoMetadata('/v.mp4');
+    const result = await probeMediaMetadata('/v.mp4', 'video');
     expect(result.frameRate).toBe(25);
     expect(result.durationMs).toBeUndefined();
   });
@@ -169,14 +168,14 @@ describe('probeVideoMetadata', () => {
       error: Object.assign(new Error('bad'), { code: 1 }),
       stderr: 'moov atom not found',
     }));
-    await expect(probeVideoMetadata('/broken.mp4')).rejects.toThrow(
+    await expect(probeMediaMetadata('/broken.mp4', 'video')).rejects.toThrow(
       /ffprobe failed \(exit 1\).*moov atom/s,
     );
   });
 
   it('throws on unparseable ffprobe output', async () => {
     mockExecResult(() => ({ stdout: 'not-json' }));
-    await expect(probeVideoMetadata('/v.mp4')).rejects.toThrow(
+    await expect(probeMediaMetadata('/v.mp4', 'video')).rejects.toThrow(
       /unparseable output/,
     );
   });
@@ -185,8 +184,7 @@ describe('probeVideoMetadata', () => {
 describe('probeMediaMetadata per-modality branches', () => {
   it("reads the AUDIO stream (not video) for modality 'audio'", async () => {
     // A file carrying both streams proves the audio branch selects the
-    // audio stream: reading videoStream?.codec_name here would yield 'h264'
-    // and drop sampleRate/channels entirely.
+    // audio stream: reading videoStream?.codec_name here would yield 'h264'.
     mockExecResult(() => ({
       stdout: JSON.stringify({
         format: { format_name: 'mov,mp4', duration: '12.5' },
@@ -205,8 +203,6 @@ describe('probeMediaMetadata per-modality branches', () => {
       formatName: 'mov,mp4',
       durationMs: 12_500,
       codec: 'aac',
-      sampleRateHz: 44_100,
-      channels: 2,
     });
   });
 
@@ -285,6 +281,5 @@ describe('probeMediaMetadata per-modality branches', () => {
     }));
     const result = await probeMediaMetadata('/silent.mp4', 'audio');
     expect(result.codec).toBeUndefined();
-    expect(result.sampleRateHz).toBeUndefined();
   });
 });

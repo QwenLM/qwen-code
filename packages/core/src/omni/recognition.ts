@@ -18,8 +18,6 @@ export type OmniModality = 'image' | 'audio' | 'video';
 export interface RecognizedMedia {
   /** Modality derived from the sniffed container type. */
   modality: OmniModality;
-  /** Hex-encoded SHA-256 of the full file content. */
-  sha256: string;
   /** Authoritative MIME type detected from content (sniff), not extension. */
   detectedMimeType: string;
   /** File size in bytes. */
@@ -28,28 +26,20 @@ export interface RecognizedMedia {
   metadata: MediaProbeResult;
 }
 
-/** @deprecated S1 name — video-only alias kept for existing imports. */
-export type RecognizedVideo = RecognizedMedia;
-
 interface SniffedType {
   mimeType: string;
   modality: OmniModality;
-  extension: string;
 }
 
 function bmffBrandType(brand: string): SniffedType {
   if (brand.startsWith('qt')) {
-    return {
-      mimeType: 'video/quicktime',
-      modality: 'video',
-      extension: '.mov',
-    };
+    return { mimeType: 'video/quicktime', modality: 'video' };
   }
   // M4A/M4B audio brands inside ISO BMFF.
   if (brand.startsWith('M4A') || brand.startsWith('M4B')) {
-    return { mimeType: 'audio/mp4', modality: 'audio', extension: '.m4a' };
+    return { mimeType: 'audio/mp4', modality: 'audio' };
   }
-  return { mimeType: 'video/mp4', modality: 'video', extension: '.mp4' };
+  return { mimeType: 'video/mp4', modality: 'video' };
 }
 
 /**
@@ -68,21 +58,13 @@ export function sniffMediaType(header: Buffer): SniffedType | null {
     if (riff) {
       const kind = header.subarray(8, 12).toString('latin1');
       if (kind === 'AVI ') {
-        return {
-          mimeType: 'video/x-msvideo',
-          modality: 'video',
-          extension: '.avi',
-        };
+        return { mimeType: 'video/x-msvideo', modality: 'video' };
       }
       if (kind === 'WAVE') {
-        return { mimeType: 'audio/wav', modality: 'audio', extension: '.wav' };
+        return { mimeType: 'audio/wav', modality: 'audio' };
       }
       if (kind === 'WEBP') {
-        return {
-          mimeType: 'image/webp',
-          modality: 'image',
-          extension: '.webp',
-        };
+        return { mimeType: 'image/webp', modality: 'image' };
       }
       return null;
     }
@@ -90,35 +72,40 @@ export function sniffMediaType(header: Buffer): SniffedType | null {
   if (header.length >= 8) {
     // PNG
     if (header.readUInt32BE(0) === 0x89504e47) {
-      return { mimeType: 'image/png', modality: 'image', extension: '.png' };
+      return { mimeType: 'image/png', modality: 'image' };
+    }
+  }
+  if (header.length >= 6) {
+    // GIF: the full 6-byte GIF87a/GIF89a signature. Matching only the
+    // 3-byte "GIF" prefix would classify plain text starting with "GIF"
+    // (e.g. "GIF export notes.txt") as an image.
+    const gifSig = header.subarray(0, 6).toString('latin1');
+    if (gifSig === 'GIF87a' || gifSig === 'GIF89a') {
+      return { mimeType: 'image/gif', modality: 'image' };
     }
   }
   if (header.length >= 4) {
     // EBML (WebM/Matroska)
     if (header.readUInt32BE(0) === 0x1a45dfa3) {
-      return { mimeType: 'video/webm', modality: 'video', extension: '.webm' };
+      return { mimeType: 'video/webm', modality: 'video' };
     }
     // FLAC
     if (header.subarray(0, 4).toString('latin1') === 'fLaC') {
-      return { mimeType: 'audio/flac', modality: 'audio', extension: '.flac' };
+      return { mimeType: 'audio/flac', modality: 'audio' };
     }
     // OGG
     if (header.subarray(0, 4).toString('latin1') === 'OggS') {
-      return { mimeType: 'audio/ogg', modality: 'audio', extension: '.ogg' };
-    }
-    // GIF87a / GIF89a
-    if (header.subarray(0, 3).toString('latin1') === 'GIF') {
-      return { mimeType: 'image/gif', modality: 'image', extension: '.gif' };
+      return { mimeType: 'audio/ogg', modality: 'audio' };
     }
   }
   if (header.length >= 3) {
     // JPEG
     if (header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff) {
-      return { mimeType: 'image/jpeg', modality: 'image', extension: '.jpg' };
+      return { mimeType: 'image/jpeg', modality: 'image' };
     }
     // MP3: ID3 tag or bare MPEG frame sync (0xFFEx/0xFFFx).
     if (header.subarray(0, 3).toString('latin1') === 'ID3') {
-      return { mimeType: 'audio/mpeg', modality: 'audio', extension: '.mp3' };
+      return { mimeType: 'audio/mpeg', modality: 'audio' };
     }
     // 0xFF 0xFE is the UTF-16 LE BOM and also passes the sync mask
     // (0xFE & 0xE0 === 0xE0). Per the MPEG audio header 0xFF 0xFE is
@@ -133,7 +120,7 @@ export function sniffMediaType(header: Buffer): SniffedType | null {
       header[1] !== 0xfe &&
       (header[1]! & 0xe0) === 0xe0
     ) {
-      return { mimeType: 'audio/mpeg', modality: 'audio', extension: '.mp3' };
+      return { mimeType: 'audio/mpeg', modality: 'audio' };
     }
   }
   return null;
@@ -205,16 +192,22 @@ export async function sniffFileModality(
   } catch {
     return null;
   } finally {
-    await handle.close();
+    // A rejecting close() (EIO/ESTALE on network mounts) must not break the
+    // never-throws contract of this pre-gate.
+    await handle.close().catch(() => {});
   }
 }
 
 /**
- * Recognize a local media file: content sniff (magic bytes), streaming
- * SHA-256, and ffprobe metadata. Throws when the content does not sniff as
- * a supported media container or when probing fails — the omni pipeline
- * fails closed on unrecognizable input. Error messages carry the file's
- * basename only (they can reach model-visible content).
+ * Recognize a local media file: content sniff (magic bytes) and ffprobe
+ * metadata. Throws when the content does not sniff as a supported media
+ * container or when probing fails — the omni pipeline fails closed on
+ * unrecognizable input. Error messages carry the file's basename only
+ * (they can reach model-visible content).
+ *
+ * Hashing is deliberately NOT part of recognition: the token guard runs on
+ * this result, and an input it rejects must not have paid a full-file
+ * SHA-256 first. The pipeline hashes after the guard passes.
  *
  * When `expectedModality` is given, a successful sniff of a DIFFERENT
  * modality is rejected (e.g. an .mp3 that is actually an mp4 container).
@@ -249,24 +242,12 @@ export async function recognizeMediaFile(
     );
   }
 
-  const [sha256, metadata] = await Promise.all([
-    hashFileSha256(filePath, signal),
-    probeMediaMetadata(filePath, sniffed.modality, signal),
-  ]);
+  const metadata = await probeMediaMetadata(filePath, sniffed.modality, signal);
 
   return {
     modality: sniffed.modality,
-    sha256,
     detectedMimeType: sniffed.mimeType,
     sizeBytes,
     metadata,
   };
-}
-
-/** @deprecated S1 wrapper: video-only recognition. */
-export async function recognizeVideoFile(
-  filePath: string,
-  signal?: AbortSignal,
-): Promise<RecognizedMedia> {
-  return recognizeMediaFile(filePath, { expectedModality: 'video', signal });
 }

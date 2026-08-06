@@ -929,7 +929,8 @@ export interface ProcessedFileReadResult {
    * Raw-resource token estimate for omni-delivered media (the single
    * storage location for the estimate — design doc §6.4). Absent for
    * non-omni reads; `status: 'unavailable'` when required metadata was
-   * missing.
+   * missing. No consumer reads it yet — surfaces (context accounting,
+   * telemetry) land with the S4 limits slice.
    */
   tokenEstimate?: import('../omni/estimation.js').OmniTokenEstimate;
 }

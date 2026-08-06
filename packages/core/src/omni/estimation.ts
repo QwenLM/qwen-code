@@ -26,6 +26,11 @@ const AUDIO_TOKENS_PER_SECOND = 7;
 /** Pixels per visual token: 32×32 patch, 2 pixels per patch cell. */
 const VISUAL_PIXELS_PER_TOKEN = 32 * 32 * 2;
 
+/** Positive, finite number — rejects 0, negatives, NaN and Infinity. */
+function usable(value: number | undefined): value is number {
+  return value !== undefined && Number.isFinite(value) && value > 0;
+}
+
 /**
  * Estimate tokens from recognized raw-resource metadata (design doc §6.4):
  *
@@ -42,11 +47,6 @@ const VISUAL_PIXELS_PER_TOKEN = 32 * 32 * 2;
  *   probing as duration 0 must not produce a 0-token 'ok' that sails under
  *   the transport guard.
  */
-
-/** Positive, finite number — rejects 0, negatives, NaN and Infinity. */
-function usable(value: number | undefined): value is number {
-  return value !== undefined && Number.isFinite(value) && value > 0;
-}
 export function estimateRawResourceTokens(
   media: RecognizedMedia,
 ): OmniTokenEstimate {

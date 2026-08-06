@@ -5,13 +5,17 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import net from 'node:net';
 import type { AddressInfo, LookupFunction } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { downloadMediaUrl, OmniDownloadError } from './download.js';
+import {
+  downloadMediaUrl,
+  parseHttpUrlRef,
+  OmniDownloadError,
+  MAX_REDIRECTS,
+} from './download.js';
 
 // Keep the suite hermetic: the SSRF gate resolves hostnames, and tests that do
 // not inject a fake target must not depend on (or wait for) real DNS.
@@ -68,13 +72,51 @@ async function pinnedAddressOf(init: RequestInit | undefined): Promise<string> {
   });
 }
 
+/**
+ * A pull-counting body: `bytesPulled()` reports how much the consumer has
+ * actually drawn from the stream, which is what distinguishes a streaming
+ * implementation (stops pulling once the verdict is known) from one that
+ * buffers the whole body first. Counted in bytes, not pulls — Node's
+ * Response plumbing pulls a chunk or two on its own.
+ */
+function countingBody(chunkSize: number, chunkCount: number) {
+  let pulled = 0;
+  let index = 0;
+  const stream = new ReadableStream({
+    pull(controller) {
+      if (index >= chunkCount) {
+        controller.close();
+        return;
+      }
+      index += 1;
+      pulled += chunkSize;
+      controller.enqueue(new Uint8Array(chunkSize));
+    },
+  });
+  return { stream, bytesPulled: () => pulled };
+}
+
 let downloadsDir: string;
 
 beforeEach(async () => {
   downloadsDir = await fs.mkdtemp(path.join(os.tmpdir(), 'omni-dl-'));
+  // The proxy gate reads the process environment when no detectProxy is
+  // injected; a developer machine with HTTP(S)_PROXY set must not flip the
+  // verdict for every test in this file.
+  for (const key of [
+    'https_proxy',
+    'HTTPS_PROXY',
+    'http_proxy',
+    'HTTP_PROXY',
+    'all_proxy',
+    'ALL_PROXY',
+  ]) {
+    vi.stubEnv(key, '');
+  }
 });
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await fs.rm(downloadsDir, { recursive: true, force: true });
 });
 
@@ -89,8 +131,33 @@ async function listParts(): Promise<string[]> {
   return (await fs.readdir(downloadsDir)).filter((f) => f.endsWith('.part'));
 }
 
+describe('parseHttpUrlRef', () => {
+  it('accepts http and https refs, scheme case-insensitively', () => {
+    expect(parseHttpUrlRef('https://example.com/a.mp4')?.hostname).toBe(
+      'example.com',
+    );
+    expect(parseHttpUrlRef('http://example.com/a.mp4')?.protocol).toBe('http:');
+    expect(parseHttpUrlRef('HTTPS://EXAMPLE.COM/A.MP4')).toBeInstanceOf(URL);
+    expect(parseHttpUrlRef('HtTp://example.com/a.mp4')).toBeInstanceOf(URL);
+  });
+
+  it('returns null for non-URL paths and unparseable URLs', () => {
+    for (const ref of [
+      'src/media/clip.mp4',
+      './clip.mp4',
+      'clip.mp4',
+      'ftp://example.com/clip.mp4',
+      'httpx://example.com/clip.mp4',
+      'https://',
+      'https://[',
+    ]) {
+      expect(parseHttpUrlRef(ref)).toBeNull();
+    }
+  });
+});
+
 describe('downloadMediaUrl', () => {
-  it('streams to a .part file and hashes while writing', async () => {
+  it('streams the body to a .part file inside downloads/', async () => {
     const bytes = Buffer.from('media-bytes-here');
     const result = await downloadMediaUrl({
       url: 'https://media.example.com/a.mp4',
@@ -98,12 +165,28 @@ describe('downloadMediaUrl', () => {
       maxBytes: 1_000_000,
       fetchFn: fetchOk(bytes, { 'content-type': 'video/mp4' }),
     });
-    expect(result.sha256).toBe(
-      createHash('sha256').update(bytes).digest('hex'),
-    );
-    expect(result.sizeBytes).toBe(bytes.length);
-    expect(result.contentType).toBe('video/mp4');
+    expect(path.dirname(result.partPath)).toBe(downloadsDir);
+    expect(result.partPath.endsWith('.part')).toBe(true);
     await expect(fs.readFile(result.partPath)).resolves.toEqual(bytes);
+  });
+
+  it('rejects a malformed URL as a named download error, not a TypeError', async () => {
+    // isPrivateHost fails open on unparseable input, so the re-parse inside
+    // downloadMediaUrl is where a malformed ref surfaces — it must do so as
+    // the documented error type, without echoing the ref.
+    const fetchFn = vi.fn<typeof fetch>();
+    for (const url of ['https://exa mple.com/a.mp4', 'https://[']) {
+      const err = await downloadMediaUrl({
+        url,
+        downloadsDir,
+        maxBytes: 1000,
+        fetchFn,
+      }).catch((e: Error) => e);
+      expect(err).toBeInstanceOf(OmniDownloadError);
+      expect((err as Error).message).toMatch(/not a valid URL/);
+    }
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(await listParts()).toEqual([]);
   });
 
   it('refuses private/loopback hosts (SSRF)', async () => {
@@ -128,14 +211,17 @@ describe('downloadMediaUrl', () => {
     // text-level gate passes; only resolution reveals the target.
     for (const address of ['127.0.0.1', '169.254.169.254', '10.1.2.3']) {
       dnsLookupMock.mockResolvedValueOnce([{ address, family: 4 }]);
-      await expect(
-        downloadMediaUrl({
-          url: 'https://media.example.com/clip.mp4',
-          downloadsDir,
-          maxBytes: 1_000_000,
-          fetchFn,
-        }),
-      ).rejects.toThrow(/refused for safety/);
+      const err = await downloadMediaUrl({
+        url: 'https://media.example.com/clip.mp4',
+        downloadsDir,
+        maxBytes: 1_000_000,
+        fetchFn,
+      }).catch((e: Error) => e);
+      expect(err).toBeInstanceOf(OmniDownloadError);
+      expect((err as Error).message).toMatch(/refused for safety/);
+      // The resolver phrases its errors for its original caller ("Extension
+      // network host …"); that misattribution must not reach download errors.
+      expect((err as Error).message).not.toMatch(/Extension/);
     }
     expect(fetchFn).not.toHaveBeenCalled();
     expect(await listParts()).toEqual([]);
@@ -174,7 +260,7 @@ describe('downloadMediaUrl', () => {
       maxBytes: 1_000_000,
       fetchFn: fetchOk(bytes),
     });
-    expect(result.sizeBytes).toBe(bytes.length);
+    await expect(fs.readFile(result.partPath)).resolves.toEqual(bytes);
   });
 
   it('refuses when ANY resolved address is private (mixed A records)', async () => {
@@ -215,6 +301,77 @@ describe('downloadMediaUrl', () => {
     expect(await listParts()).toEqual([]);
   });
 
+  it('translates resolver errors into download-domain phrasing', async () => {
+    // resolveNetworkTarget phrases its errors for its original caller
+    // ("Extension network host …"). Passing that through verbatim would
+    // misattribute the refusal — the same problem the credentials gate
+    // already avoids — so the reachable resolver errors are translated, and
+    // nothing beyond the hostname is echoed.
+    const cases: Array<[string, RegExp]> = [
+      [
+        'Extension network host resolved to a blocked address: media.example.com',
+        /URL host resolved to a non-public address/,
+      ],
+      [
+        'Extension network host did not resolve: media.example.com',
+        /URL host did not resolve/,
+      ],
+      ['socket hang up', /URL host could not be verified/],
+    ];
+    for (const [resolverText, expected] of cases) {
+      const err = await downloadMediaUrl({
+        url: 'https://media.example.com/a.mp4',
+        downloadsDir,
+        maxBytes: 1000,
+        fetchFn: vi.fn<typeof fetch>(),
+        resolveTarget: async () => {
+          throw new Error(resolverText);
+        },
+      }).catch((e: Error) => e);
+      expect(err).toBeInstanceOf(OmniDownloadError);
+      expect((err as Error).message).toMatch(expected);
+      expect((err as Error).message).not.toMatch(/Extension/);
+    }
+  });
+
+  it('times out a resolve step that never answers', async () => {
+    // Resolution is otherwise the only phase with no watchdog: a resolver
+    // that never settles (and a caller that never aborts) would spin the
+    // turn forever.
+    const fetchFn = vi.fn<typeof fetch>();
+    await expect(
+      downloadMediaUrl({
+        url: 'https://media.example.com/a.mp4',
+        downloadsDir,
+        maxBytes: 1000,
+        fetchFn,
+        resolveTarget: () => new Promise(() => {}),
+        resolveTimeoutMs: 50,
+      }),
+    ).rejects.toThrow(/timed out resolving media\.example\.com/);
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(await listParts()).toEqual([]);
+  });
+
+  it('propagates a user abort during resolve as an abort, not a timeout', async () => {
+    const controller = new AbortController();
+    const err = await downloadMediaUrl({
+      url: 'https://media.example.com/a.mp4',
+      downloadsDir,
+      maxBytes: 1000,
+      signal: controller.signal,
+      fetchFn: vi.fn<typeof fetch>(),
+      resolveTarget: () =>
+        new Promise((_, reject) => {
+          controller.abort();
+          reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+        }),
+      resolveTimeoutMs: 50,
+    }).catch((e: Error) => e);
+    expect((err as Error).name).toBe('AbortError');
+    expect(err).not.toBeInstanceOf(OmniDownloadError);
+  });
+
   it('refuses a target that cannot be pinned to a vetted address', async () => {
     // If the resolve step yields no pinned lookup, the connection cannot be
     // bound, so claiming rebinding protection would be false. Refuse instead.
@@ -252,7 +409,72 @@ describe('downloadMediaUrl', () => {
       fetchFn: fetchOk(Buffer.from('ok-bytes')),
       resolveTarget: async (u) => pinnedTarget(u),
     });
-    expect(result.sizeBytes).toBe(8);
+    await expect(fs.readFile(result.partPath)).resolves.toEqual(
+      Buffer.from('ok-bytes'),
+    );
+  });
+
+  it('refuses to download when a proxy is configured (pin unenforceable)', async () => {
+    // Same doctrine as the Bun refusal: the bare pinned Agent dispatches
+    // directly, silently bypassing a configured proxy — while routing
+    // through the proxy would hand resolution to its CONNECT handling,
+    // where the pinned lookup never runs. Either way, refuse.
+    const fetchFn = vi.fn<typeof fetch>();
+    await expect(
+      downloadMediaUrl({
+        url: 'https://media.example.com/a.mp4',
+        downloadsDir,
+        maxBytes: 1000,
+        fetchFn,
+        detectProxy: () => true,
+        resolveTarget: async (u) => pinnedTarget(u),
+      }),
+    ).rejects.toThrow(/not supported behind a proxy/);
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(await listParts()).toEqual([]);
+  });
+
+  it('detects a configured proxy from the environment', async () => {
+    // Production detection path: no detectProxy injected, HTTPS_PROXY set —
+    // the same signal EnvHttpProxyAgent (and config.ts) honors.
+    vi.stubEnv('HTTPS_PROXY', 'http://proxy.corp.example:8080');
+    const fetchFn = vi.fn<typeof fetch>();
+    await expect(
+      downloadMediaUrl({
+        url: 'https://media.example.com/a.mp4',
+        downloadsDir,
+        maxBytes: 1000,
+        fetchFn,
+        resolveTarget: async (u) => pinnedTarget(u),
+      }),
+    ).rejects.toThrow(/not supported behind a proxy/);
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it('wraps downloads-directory failures without leaking the absolute path', async () => {
+    // fs.mkdir error text embeds the absolute directory path; the wrap must
+    // keep the failure inside the OmniDownloadError contract and scrub the
+    // path (messages reach the UI and the debug log).
+    const blockerFile = path.join(downloadsDir, 'blocker');
+    await fs.writeFile(blockerFile, 'not a directory');
+    const badDir = path.join(blockerFile, 'nested');
+    const fetchFn = vi.fn<typeof fetch>();
+    const err = await downloadMediaUrl({
+      url: 'https://media.example.com/a.mp4',
+      downloadsDir: badDir,
+      maxBytes: 1000,
+      fetchFn,
+      resolveTarget: async (u) => pinnedTarget(u),
+    }).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(OmniDownloadError);
+    expect((err as Error).message).toMatch(
+      /Could not prepare the downloads directory/,
+    );
+    expect((err as Error).message).not.toContain(downloadsDir);
+    expect((err as Error).message).not.toMatch(
+      /\/home|\/Users|\/private|\/tmp\//,
+    );
+    expect(fetchFn).not.toHaveBeenCalled();
   });
 
   it('pins the connection to the vetted address (real socket)', async () => {
@@ -289,6 +511,31 @@ describe('downloadMediaUrl', () => {
     } finally {
       server.close();
     }
+  });
+
+  it('surfaces the cause chain of connection-level fetch failures', async () => {
+    // Undici reports connection failures as a bare `TypeError: fetch failed`
+    // with the actionable reason (ECONNREFUSED, TLS codes) on `cause`; the
+    // wrap must surface it or the user has nothing to act on.
+    const fetchFn = vi.fn(async () => {
+      throw new TypeError('fetch failed', {
+        cause: Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:1'), {
+          code: 'ECONNREFUSED',
+        }),
+      });
+    }) as unknown as typeof fetch;
+    const err = await downloadMediaUrl({
+      url: 'https://media.example.com/a.mp4',
+      downloadsDir,
+      maxBytes: 1000,
+      fetchFn,
+      resolveTarget: async (u) => pinnedTarget(u),
+    }).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(OmniDownloadError);
+    expect((err as Error).message).toMatch(/ECONNREFUSED/);
+    expect((err as Error & { cause?: unknown }).cause).toBeInstanceOf(
+      TypeError,
+    );
   });
 
   it('re-resolves and re-pins at every redirect hop', async () => {
@@ -423,7 +670,9 @@ describe('downloadMediaUrl', () => {
         maxBytes: 1_000_000,
         fetchFn: fetchOk(Buffer.from('ok')),
       }),
-    ).resolves.toMatchObject({ sizeBytes: 2 });
+    ).resolves.toMatchObject({
+      partPath: expect.stringContaining('.part'),
+    });
     expect(dnsLookupMock).toHaveBeenCalledWith('media.example.com', {
       all: true,
       verbatim: true,
@@ -490,6 +739,33 @@ describe('downloadMediaUrl', () => {
     expect(await listParts()).toEqual([]);
   });
 
+  it('does not read the body when Content-Length already exceeds the cap', async () => {
+    // The pre-check must reject on the header alone, not after buffering the
+    // body: assert on bytes actually pulled from the stream. (Node's Response
+    // plumbing pulls a chunk or two by itself, so the bound is "far less
+    // than the body", not zero.)
+    const chunkSize = 8 * 1024;
+    const chunkCount = 100;
+    const { stream, bytesPulled } = countingBody(chunkSize, chunkCount);
+    const fetchFn = vi.fn(
+      async () =>
+        new Response(stream, {
+          status: 200,
+          headers: { 'content-length': String(chunkSize * chunkCount) },
+        }),
+    ) as unknown as typeof fetch;
+    await expect(
+      downloadMediaUrl({
+        url: 'https://m.example.com/big.mp4',
+        downloadsDir,
+        maxBytes: 64 * 1024,
+        fetchFn,
+      }),
+    ).rejects.toThrow(/Content-Length 819200 > 65536 bytes/);
+    expect(bytesPulled()).toBeLessThan(chunkSize * chunkCount);
+    expect(await listParts()).toEqual([]);
+  });
+
   it('enforces the byte cap on actual bytes even without Content-Length', async () => {
     // Streamed response with no content-length header.
     const stream = new ReadableStream({
@@ -513,6 +789,28 @@ describe('downloadMediaUrl', () => {
     expect(await listParts()).toEqual([]); // .part cleaned on failure
   });
 
+  it('stops pulling once the streamed byte cap trips (does not buffer the body)', async () => {
+    // A buffering implementation that reads the whole body and THEN rejects
+    // would pass the cap test above; asserting bytes pulled < body size is
+    // what pins the streaming behavior.
+    const chunkSize = 8 * 1024;
+    const chunkCount = 100;
+    const { stream, bytesPulled } = countingBody(chunkSize, chunkCount);
+    const fetchFn = vi.fn(
+      async () => new Response(stream, { status: 200 }),
+    ) as unknown as typeof fetch;
+    await expect(
+      downloadMediaUrl({
+        url: 'https://m.example.com/nolen.mp4',
+        downloadsDir,
+        maxBytes: 64 * 1024,
+        fetchFn,
+      }),
+    ).rejects.toThrow(/>65536 bytes received/);
+    expect(bytesPulled()).toBeLessThan(chunkSize * chunkCount);
+    expect(await listParts()).toEqual([]);
+  });
+
   it('surfaces HTTP errors with status and host, cleaning the .part', async () => {
     await expect(
       downloadMediaUrl({
@@ -525,25 +823,37 @@ describe('downloadMediaUrl', () => {
     expect(await listParts()).toEqual([]);
   });
 
-  it('follows same-origin redirects and refuses cross-origin ones', async () => {
+  it('follows same-origin redirects with manual redirect handling', async () => {
+    // `redirect: 'manual'` is load-bearing: without it, production undici
+    // auto-follows and every per-hop re-vet (re-resolve, re-pin, origin
+    // check) is silently skipped — so assert it inside the fetch mock.
     const bytes = Buffer.from('after-redirect');
+    const redirects: Array<string | undefined> = [];
     const sameOrigin = vi
       .fn<typeof fetch>()
-      .mockResolvedValueOnce(
-        new Response(null, {
+      .mockImplementationOnce(async (_u, init) => {
+        redirects.push(init?.redirect);
+        return new Response(null, {
           status: 302,
           headers: { location: 'https://m.example.com/real.mp4' },
-        }),
-      )
-      .mockResolvedValueOnce(new Response(bytes, { status: 200 }));
+        });
+      })
+      .mockImplementationOnce(async (_u, init) => {
+        redirects.push(init?.redirect);
+        return new Response(bytes, { status: 200 });
+      });
     const ok = await downloadMediaUrl({
       url: 'https://m.example.com/a.mp4',
       downloadsDir,
       maxBytes: 1000,
       fetchFn: sameOrigin,
     });
-    expect(ok.finalUrl).toBe('https://m.example.com/real.mp4');
-    expect(ok.sizeBytes).toBe(bytes.length);
+    expect(redirects).toEqual(['manual', 'manual']);
+    expect(sameOrigin).toHaveBeenLastCalledWith(
+      'https://m.example.com/real.mp4',
+      expect.anything(),
+    );
+    await expect(fs.readFile(ok.partPath)).resolves.toEqual(bytes);
 
     const crossOrigin = vi.fn(
       async () =>
@@ -560,6 +870,28 @@ describe('downloadMediaUrl', () => {
         fetchFn: crossOrigin,
       }),
     ).rejects.toThrow(/Cross-origin redirect refused/);
+  });
+
+  it('gives up after MAX_REDIRECTS same-origin hops', async () => {
+    // An unbounded loop here is a self-inflicted infinite redirect chase;
+    // pin both the refusal and the exact fetch budget.
+    const fetchFn = vi.fn(
+      async () =>
+        new Response(null, {
+          status: 302,
+          headers: { location: 'https://m.example.com/next.mp4' },
+        }),
+    ) as unknown as typeof fetch;
+    await expect(
+      downloadMediaUrl({
+        url: 'https://m.example.com/a.mp4',
+        downloadsDir,
+        maxBytes: 1000,
+        fetchFn,
+      }),
+    ).rejects.toThrow(/Too many or invalid redirects/);
+    expect(fetchFn).toHaveBeenCalledTimes(MAX_REDIRECTS + 1);
+    expect(await listParts()).toEqual([]);
   });
 
   it('surfaces a malformed redirect Location as a named download error', async () => {
@@ -583,6 +915,62 @@ describe('downloadMediaUrl', () => {
     expect(await listParts()).toEqual([]);
   });
 
+  it('times out when response headers never arrive', async () => {
+    // The mock only rejects when the signal handed to it aborts, so this
+    // test also pins the `signal` wiring in the fetch init: drop it and the
+    // promise never settles (the test itself times out) instead of naming
+    // the watchdog.
+    const fetchFn = vi.fn(
+      (_u: unknown, init?: RequestInit) =>
+        new Promise<Response>((_, reject) => {
+          init?.signal?.addEventListener(
+            'abort',
+            () =>
+              reject(
+                Object.assign(new Error('aborted'), { name: 'AbortError' }),
+              ),
+            { once: true },
+          );
+        }),
+    ) as unknown as typeof fetch;
+    await expect(
+      downloadMediaUrl({
+        url: 'https://m.example.com/slow.mp4',
+        downloadsDir,
+        maxBytes: 1000,
+        fetchFn,
+        headerTimeoutMs: 50,
+      }),
+    ).rejects.toThrow(
+      /timed out waiting for response headers from m\.example\.com/,
+    );
+    expect(await listParts()).toEqual([]);
+  });
+
+  it('declares a stalled body dead after the idle window and cleans up', async () => {
+    // First chunk arrives, then nothing — the idle watchdog (not the header
+    // timer, already cleared) must abort the stream with a named message.
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new Uint8Array(8));
+        // Never enqueues again, never closes.
+      },
+    });
+    const fetchFn = vi.fn(
+      async () => new Response(stream, { status: 200 }),
+    ) as unknown as typeof fetch;
+    await expect(
+      downloadMediaUrl({
+        url: 'https://m.example.com/stall.mp4',
+        downloadsDir,
+        maxBytes: 1000,
+        fetchFn,
+        idleTimeoutMs: 50,
+      }),
+    ).rejects.toThrow(/Download stalled from m\.example\.com/);
+    expect(await listParts()).toEqual([]);
+  });
+
   it('propagates user aborts and cleans up', async () => {
     const controller = new AbortController();
     const fetchFn = vi.fn(async () => {
@@ -598,6 +986,47 @@ describe('downloadMediaUrl', () => {
     }).catch((e: Error) => e);
     expect((err as Error).name).toBe('AbortError');
     expect(err).not.toBeInstanceOf(OmniDownloadError);
+    expect(await listParts()).toEqual([]);
+  });
+
+  it('stops a mid-stream download when the caller aborts', async () => {
+    // Unlike the test above, the fetch mock never throws on its own: the
+    // abort can only take effect through the {signal} handed to
+    // Readable.fromWeb. Remove that wiring and the body streams to
+    // completion, resolving instead of rejecting.
+    let pulls = 0;
+    let index = 0;
+    const stream = new ReadableStream({
+      async pull(controller) {
+        pulls += 1;
+        await new Promise((r) => setTimeout(r, 15));
+        if (index >= 40) {
+          controller.close();
+          return;
+        }
+        index += 1;
+        controller.enqueue(new Uint8Array(1024));
+      },
+    });
+    const fetchFn = vi.fn(
+      async () => new Response(stream, { status: 200 }),
+    ) as unknown as typeof fetch;
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 60);
+    const err = await downloadMediaUrl({
+      url: 'https://m.example.com/slowbody.mp4',
+      downloadsDir,
+      maxBytes: 1_000_000,
+      signal: controller.signal,
+      fetchFn,
+    }).catch((e: Error) => e);
+    expect((err as Error).name).toBe('AbortError');
+    expect(err).not.toBeInstanceOf(OmniDownloadError);
+    // No further chunks are drawn once the abort lands (one in-flight pull
+    // may still complete).
+    const pullsAtRejection = pulls;
+    await new Promise((r) => setTimeout(r, 100));
+    expect(pulls).toBeLessThanOrEqual(pullsAtRejection + 1);
     expect(await listParts()).toEqual([]);
   });
 });
