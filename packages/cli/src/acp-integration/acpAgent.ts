@@ -735,8 +735,23 @@ function selectRecentHistoryRecords(
       break;
     }
   }
-  while (start > 0 && !isHistoryTurnStart(records[start]!)) {
-    start--;
+  // Turn-boundary alignment may expand the page past the requested window,
+  // but never without bound: a history dominated by a single long in-flight
+  // turn would otherwise replay the WHOLE history in one payload and report
+  // hasMore=false, leaving the client unable to page backward. Allow at
+  // most one extra window of expansion, and only when it reaches a real
+  // turn start; otherwise keep the requested window so pages inside a long
+  // turn stay bounded and chainable.
+  const expansionFloor = Math.max(0, records.length - 2 * pageSize);
+  let candidate = start;
+  while (
+    candidate > expansionFloor &&
+    !isHistoryTurnStart(records[candidate]!)
+  ) {
+    candidate--;
+  }
+  if (isHistoryTurnStart(records[candidate]!)) {
+    start = candidate;
   }
   return { records: records.slice(start), hasMore: start > 0 };
 }

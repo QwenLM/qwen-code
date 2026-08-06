@@ -176,12 +176,13 @@ interface RegisterSessionRoutesDeps {
   isLiveSessionActive?: (sessionId: string) => boolean;
 }
 
-// Derived from the core hard page ceiling so the two caps cannot drift:
-// an expanded backward page can carry up to
-// SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES of source records, and the
-// serialized response (records re-serialized plus envelope) must fit above
-// that. A page this route cannot serialize would 413 and dead-end backward
-// pagination at its anchor on every retry.
+// Chosen cap for one serialized transcript response, kept proportional to
+// the core expanded-page ceiling so the two cannot drift arbitrarily. This
+// is not a derived guarantee: a single aggregated record can exceed any
+// page budget (the reader always takes at least one record so pagination
+// cannot dead-end), and replayed SessionUpdate objects are not a fixed
+// multiple of their source records. A page this route cannot serialize
+// returns transcript_page_too_large for that anchor.
 const WORKSPACE_TRANSCRIPT_RESPONSE_MAX_BYTES =
   2 * SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES;
 const WORKSPACE_TRANSCRIPT_CURSOR_MAX_BYTES = 64 * 1024;

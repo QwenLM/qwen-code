@@ -15148,6 +15148,57 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     await agentPromise;
   });
 
+  it('loadSession bounds bulk replay expansion inside one long turn', async () => {
+    const makeMessage = (
+      uuid: string,
+      parentUuid: string | null,
+      type: 'user' | 'assistant',
+    ) => ({
+      uuid,
+      parentUuid,
+      sessionId: 'persisted-bounded',
+      timestamp: '2026-07-16T00:00:00.000Z',
+      type,
+      cwd: '/tmp',
+      version: 'test',
+      message: { role: type === 'user' ? 'user' : 'model', parts: [] },
+    });
+    const messages = [makeMessage('u1', null, 'user')];
+    let parent = 'u1';
+    for (let i = 1; i <= 20; i++) {
+      messages.push(makeMessage(`a${i}`, parent, 'assistant'));
+      parent = `a${i}`;
+    }
+    bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: { messages },
+    });
+    mockHistoryReplay.mockImplementation(async (_context, history) => {
+      // The alignment walk stays bounded to one extra window instead of
+      // expanding the single long turn into the whole history, and the
+      // client can still page backward.
+      expect(history).toEqual(messages.slice(19));
+    });
+    const { agent, agentPromise } = await spawnAgent();
+
+    const response = (await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-bounded',
+      mcpServers: [],
+      _meta: {
+        'qwen.session.loadReplayMode': 'bulk',
+        'qwen.session.loadReplayPageSize': 2,
+      },
+    })) as {
+      _meta?: Record<string, { hasMore?: boolean }>;
+    };
+
+    expect(response._meta?.['qwen.session.loadReplay']?.hasMore).toBe(true);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('loadSession returns partial bulk replay updates when replay throws', async () => {
     const messages = [{ role: 'user', parts: [{ text: 'hi' }] }];
     bindRestoreMocks({
