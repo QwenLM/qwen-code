@@ -570,6 +570,15 @@ describe('BrowserPaneManager', () => {
     expect(instance.pageView.webContents.loadURL).toHaveBeenCalledWith('https://example.com')
   })
 
+  it('navigate recognizes host-like inputs with a query', async () => {
+    manager.createInstance('nav-query')
+    await manager.navigate('nav-query', '192.168.1.1:70000?token=SECRET')
+    const instance = (manager as any).instances.get('nav-query')
+    expect(instance.pageView.webContents.loadURL).toHaveBeenCalledWith(
+      'https://192.168.1.1:70000?token=SECRET'
+    )
+  })
+
   it('navigate treats plain text as search query', async () => {
     manager.createInstance('nav-2')
     await manager.navigate('nav-2', 'craft agents browser tools')

@@ -1,4 +1,4 @@
-import { describe, expect, it, mock } from 'bun:test'
+import { describe, expect, it, mock, spyOn } from 'bun:test'
 import {
   openUrlInBuiltInBrowser,
   type BrowserPaneApi,
@@ -26,7 +26,6 @@ describe('openUrlInBuiltInBrowser', () => {
 
     await openUrlInBuiltInBrowser('https://github.com/QwenLM/qwen-code', {
       browserPaneApi,
-      isChannelAvailable: () => true,
       openExternal,
     })
 
@@ -48,7 +47,7 @@ describe('openUrlInBuiltInBrowser', () => {
     const browserPaneApi = makeBrowserPaneApi()
     const openExternal = mock(() => {})
 
-    await openUrlInBuiltInBrowser('localhost:3000/docs', {
+    await openUrlInBuiltInBrowser('example.com:8443/docs', {
       browserPaneApi,
       isChannelAvailable: () => true,
       openExternal,
@@ -56,7 +55,7 @@ describe('openUrlInBuiltInBrowser', () => {
 
     expect(browserPaneApi.navigate).toHaveBeenCalledWith(
       'built-in-browser',
-      'localhost:3000/docs',
+      'example.com:8443/docs',
     )
     expect(openExternal).not.toHaveBeenCalled()
   })
@@ -65,14 +64,14 @@ describe('openUrlInBuiltInBrowser', () => {
     const browserPaneApi = makeBrowserPaneApi()
     const openExternal = mock(() => {})
 
-    await openUrlInBuiltInBrowser('  mailto:someone@example.com  ', {
+    await openUrlInBuiltInBrowser('  MAILTO:someone@example.com  ', {
       browserPaneApi,
       isChannelAvailable: () => true,
       openExternal,
     })
 
     expect(openExternal).toHaveBeenCalledTimes(1)
-    expect(openExternal).toHaveBeenCalledWith('mailto:someone@example.com')
+    expect(openExternal).toHaveBeenCalledWith('MAILTO:someone@example.com')
     expect(browserPaneApi.create).not.toHaveBeenCalled()
   })
 
@@ -94,17 +93,61 @@ describe('openUrlInBuiltInBrowser', () => {
   it('falls back to the system browser when browser-pane channels are unavailable', async () => {
     const browserPaneApi = makeBrowserPaneApi()
     const openExternal = mock(() => {})
+    const isChannelAvailable = mock(() => false)
+    const infoSpy = spyOn(console, 'info').mockImplementation(() => {})
 
-    await openUrlInBuiltInBrowser('localhost:3000/docs', {
+    await openUrlInBuiltInBrowser('127.0.0.1:3000/docs', {
       browserPaneApi,
-      isChannelAvailable: () => false,
+      isChannelAvailable,
       openExternal,
     })
 
+    expect(isChannelAvailable).toHaveBeenCalledWith('browser-pane:create')
+    expect(infoSpy).toHaveBeenCalledWith(
+      '[openUrlInBuiltInBrowser] Browser pane channel unavailable, falling back to default browser',
+    )
     expect(openExternal).toHaveBeenCalledTimes(1)
-    expect(openExternal).toHaveBeenCalledWith('https://localhost:3000/docs')
+    expect(openExternal).toHaveBeenCalledWith('https://127.0.0.1:3000/docs')
     expect(browserPaneApi.create).not.toHaveBeenCalled()
+    infoSpy.mockRestore()
   })
+
+  it('searches scheme-less free text in the built-in browser', async () => {
+    const browserPaneApi = makeBrowserPaneApi()
+    const openExternal = mock(() => {})
+
+    await openUrlInBuiltInBrowser('qwen code docs', {
+      browserPaneApi,
+      isChannelAvailable: () => true,
+      openExternal,
+    })
+
+    expect(browserPaneApi.navigate).toHaveBeenCalledWith(
+      'built-in-browser',
+      'qwen code docs',
+    )
+    expect(openExternal).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['256.1.1.1:8080', '256.1.1.1%3A8080'],
+    ['localhost:70000', 'localhost%3A70000'],
+    [
+      '192.168.1.1:70000?token=SECRET',
+      '192.168.1.1%3A70000',
+    ],
+  ])(
+    'searches invalid host-like input when falling back: %s',
+    async (url, query) => {
+      const openExternal = mock(() => {})
+
+      await openUrlInBuiltInBrowser(url, { openExternal })
+
+      expect(openExternal).toHaveBeenCalledWith(
+        `https://duckduckgo.com/?q=${query}`,
+      )
+    },
+  )
 
   it('falls back to the system browser when create fails', async () => {
     const browserPaneApi = makeBrowserPaneApi({
@@ -139,5 +182,20 @@ describe('openUrlInBuiltInBrowser', () => {
     expect(browserPaneApi.hide).not.toHaveBeenCalled()
     expect(openExternal).toHaveBeenCalledTimes(1)
     expect(openExternal).toHaveBeenCalledWith('https://example.com')
+  })
+
+  it('falls back when focusing the built-in browser fails', async () => {
+    const browserPaneApi = makeBrowserPaneApi({
+      focus: mock(() => Promise.reject(new Error('Focus failed'))),
+    } as Partial<BrowserPaneApi>)
+    const openExternal = mock(() => {})
+
+    await openUrlInBuiltInBrowser('https://example.com', {
+      browserPaneApi,
+      openExternal,
+    })
+
+    expect(openExternal).toHaveBeenCalledWith('https://example.com')
+    expect(browserPaneApi.hide).not.toHaveBeenCalled()
   })
 })

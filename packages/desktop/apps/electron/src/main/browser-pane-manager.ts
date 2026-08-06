@@ -752,7 +752,7 @@ export class BrowserPaneManager implements IBrowserPaneManager {
     const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(normalizedUrl)
     const isAbout = normalizedUrl.startsWith('about:')
     if (!hasScheme && !isAbout) {
-      const looksLikeHost = /^(localhost|\d{1,3}(?:\.\d{1,3}){3}|[\w-]+(?:\.[\w-]+)+)(?::\d+)?(?:\/|$)/i.test(normalizedUrl)
+      const looksLikeHost = /^(localhost|\d{1,3}(?:\.\d{1,3}){3}|[\w-]+(?:\.[\w-]+)+)(?::\d+)?(?:[/?#]|$)/i.test(normalizedUrl)
       if (looksLikeHost) {
         normalizedUrl = `https://${normalizedUrl}`
       } else {

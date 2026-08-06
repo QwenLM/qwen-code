@@ -6,7 +6,7 @@ export type BrowserPaneApi = ElectronAPI['browserPane']
 
 const EXPLICIT_SCHEME_PATTERN = /^[a-z][a-z0-9+.-]*:/i
 const HOST_PATTERN =
-  /^(localhost|\d{1,3}(?:\.\d{1,3}){3}|[\w-]+(?:\.[\w-]+)+)(?::\d+)?(?:\/|$)/i
+  /^(localhost|\d{1,3}(?:\.\d{1,3}){3}|[\w-]+(?:\.[\w-]+)+)(?::\d+)?(?:[/?#]|$)/i
 
 export interface OpenUrlInBuiltInBrowserOptions {
   /** Browser pane API surface (window.electronAPI.browserPane). */
@@ -26,7 +26,16 @@ function shouldUseBuiltInBrowser(trimmedUrl: string): boolean {
 }
 
 function normalizeExternalUrl(trimmedUrl: string): string {
-  if (HOST_PATTERN.test(trimmedUrl)) return `https://${trimmedUrl}`
+  if (HOST_PATTERN.test(trimmedUrl)) {
+    const candidate = `https://${trimmedUrl}`
+    try {
+      new URL(candidate)
+      return candidate
+    } catch {
+      const host = trimmedUrl.split(/[/?#]/, 1)[0]
+      return `https://duckduckgo.com/?q=${encodeURIComponent(host.toWellFormed())}`
+    }
+  }
   if (EXPLICIT_SCHEME_PATTERN.test(trimmedUrl)) return trimmedUrl
   return `https://duckduckgo.com/?q=${encodeURIComponent(trimmedUrl.toWellFormed())}`
 }
@@ -51,7 +60,15 @@ export async function openUrlInBuiltInBrowser(
   // The API surface is always present in Electron builds (built from the channel
   // map), so probe channel availability to detect servers without browser-pane
   // handlers (headless / thin-client) before attempting the built-in path.
-  if (!browserPaneApi || isChannelAvailable?.(RPC_CHANNELS.browserPane.CREATE) === false) {
+  if (!browserPaneApi) {
+    openExternal(externalUrl)
+    return
+  }
+
+  if (isChannelAvailable?.(RPC_CHANNELS.browserPane.CREATE) === false) {
+    console.info(
+      '[openUrlInBuiltInBrowser] Browser pane channel unavailable, falling back to default browser',
+    )
     openExternal(externalUrl)
     return
   }
