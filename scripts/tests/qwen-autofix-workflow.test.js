@@ -64,10 +64,19 @@ const reviewAddressJob =
 // The sanitize step is inlined into each heavy job as a `run:` step (a
 // local action would need a checkout it is meant to precede). issue-autofix's
 // copy is the canonical text for the ordering and hardening assertions below.
-const sanitizeStep =
-  issueAutofixJob.match(
+const sanitizeStepOf = (job) =>
+  job.match(
     /- name: 'Sanitize workspace git config'[\s\S]*?(?=\n[ ]{6}- name: ')/,
   )?.[0] ?? '';
+// All three heavy jobs inline the SAME sanitize step (it must precede the
+// checkout it protects, so it cannot be a shared action). The byte-identical
+// pin below makes the hardening assertions cover every copy, not one of three.
+const sanitizeSteps = [
+  sanitizeStepOf(issueAutofixJob),
+  sanitizeStepOf(buildCliJob),
+  sanitizeStepOf(reviewAddressJob),
+];
+const sanitizeStep = sanitizeSteps[0];
 const publishPrStep =
   workflow.match(
     /- name: 'Publish PR'[\s\S]*?(?=\n[ ]{6}- name: 'Withdraw claim on failure')/,
@@ -2227,13 +2236,13 @@ describe('qwen-autofix workflow', () => {
       'PUSH_URL="https://github.com/${HEAD_REPO}.git"',
     );
     expect(workflow).toContain(
-      'git push --no-verify "${PUSH_URL}" HEAD:"${BRANCH}"',
+      'git_auth push --no-verify "${PUSH_URL}" HEAD:"${BRANCH}"',
     );
     // The allow-edits grant rides the classic-PAT path only — prepare must
     // prove push access BEFORE an agent round is spent, discarding
     // gracefully instead of 403ing at the report step.
     expect(workflow).toContain(
-      'git push --no-verify --dry-run "https://github.com/${HEAD_REPO}.git" HEAD:"${BRANCH}"',
+      'push --no-verify --dry-run "https://github.com/${HEAD_REPO}.git" HEAD:"${BRANCH}"',
     );
     expect(workflow).toContain('fork push preflight failed');
     // First-pickup engage ack anchors the window when the label path could
@@ -5621,7 +5630,13 @@ describe('qwen-autofix workflow', () => {
     expect(buildCliJob).not.toContain("- name: 'Drop stale autofix branches'");
   });
 
-  it('hardens the shared git-config sanitize action against the verified bypasses', () => {
+  it('hardens the inlined git-config sanitize step against the verified bypasses', () => {
+    // The step is inlined into all three heavy jobs (a shared action cannot
+    // run before checkout); the copies must stay byte-identical so the
+    // assertions below hold for every job, not just issue-autofix.
+    expect(sanitizeSteps[0]).toBeTruthy();
+    expect(sanitizeSteps[1]).toBe(sanitizeSteps[0]);
+    expect(sanitizeSteps[2]).toBe(sanitizeSteps[0]);
     // Worktree-scoped config first: extensions.worktreeConfig activates
     // .git/config.worktree, which `git config --local` neither lists nor
     // unsets and which CAN carry core.hooksPath — pointing the hook
@@ -5649,8 +5664,8 @@ describe('qwen-autofix workflow', () => {
     expect(sanitizeStep).toContain(
       'git config --local --unset-all core.hooksPath',
     );
-    // Provenance link: the action and qwen-triage's hardened step must be
-    // edited together.
+    // Provenance link: the inlined step and qwen-triage's hardened step must
+    // be edited together.
     expect(sanitizeStep).toContain('qwen-triage');
   });
 
@@ -6466,7 +6481,7 @@ describe('qwen-autofix workflow', () => {
     // git push twice more and the salvage legs execute against a branch
     // that was already pushed.
     expect(pushAndReportStep).toMatch(
-      /if git push --no-verify "\$\{PUSH_URL\}" HEAD:"\$\{BRANCH\}"; then\n\s+break/,
+      /if git_auth push --no-verify "\$\{PUSH_URL\}" HEAD:"\$\{BRANCH\}"; then\n\s+break/,
     );
     // BOTH push-URL constructions stay pinned — the fork one is pinned by
     // the fork-plumbing test, and the same-repo one lost its old
@@ -6477,7 +6492,7 @@ describe('qwen-autofix workflow', () => {
       'PUSH_URL="https://github.com/${REPO}.git"',
     );
     expect(pushAndReportStep).toContain(
-      'git fetch "${PUSH_URL}" "refs/heads/${BRANCH}"',
+      'git_auth fetch "${PUSH_URL}" "refs/heads/${BRANCH}"',
     );
     // Every failure path in the salvage loop is ::error::-annotated — a
     // deleted fork branch (or transient network error) must not kill the
@@ -6551,7 +6566,7 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).not.toMatch(/\bgit push\b[^\n]* -[a-zA-Z]*f\b/);
     expect(workflow).not.toMatch(/\bgit push\b[^\n]* \+\S/);
     expect(publishPrStep).toContain(
-      'git push --no-verify "https://github.com/${REPO}.git" "${BRANCH}"',
+      'push --no-verify "https://github.com/${REPO}.git" "${BRANCH}"',
     );
     // Neither PAT push may expose the token — not persisted to .git/config
     // (a `git remote set-url`) and not in the process argv (a token-bearing
@@ -6562,10 +6577,19 @@ describe('qwen-autofix workflow', () => {
     expect(pushAndReportStep).not.toContain('git remote set-url');
     expect(publishPrStep).not.toContain('x-access-token:${GITHUB_TOKEN}@');
     expect(pushAndReportStep).not.toContain('x-access-token:${GITHUB_TOKEN}@');
-    expect(publishPrStep).toContain('credential.helper');
-    expect(pushAndReportStep).toContain('credential.helper');
+    expect(publishPrStep).toContain('credential."https://github.com".helper');
     expect(pushAndReportStep).toContain(
-      'git push --no-verify "${PUSH_URL}" HEAD:"${BRANCH}"',
+      'credential."https://github.com".helper',
+    );
+    // `git -c` never writes the helper into the reused workspace's
+    // .git/config, so no error path can strand a credential there for the
+    // next job that lands on this host to read.
+    expect(publishPrStep).not.toContain('git config --local credential.helper');
+    expect(pushAndReportStep).not.toContain(
+      'git config --local credential.helper',
+    );
+    expect(pushAndReportStep).toContain(
+      'git_auth push --no-verify "${PUSH_URL}" HEAD:"${BRANCH}"',
     );
     // Five sites now: both PAT pushes, the PAT-bearing prepare checkout,
     // AND both no-secret verification checkouts (convention: every host
