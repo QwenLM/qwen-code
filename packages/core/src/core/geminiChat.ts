@@ -768,27 +768,6 @@ function previousTailContainsAtLineBoundary(
  * caller's filter) cannot crash or read out of bounds. We deliberately leave
  * the guard in place rather than rely on the caller's invariant alone.
  */
-/**
- * Join already-delivered text to the continuation that resumes it, dropping
- * any tail the model replayed.
- *
- * The single definition of "merged turn text" for recovery paths. Both the
- * durable JSONL record and in-memory history are built from one call to this
- * (see the transport-continuation merge in `processStreamResponse`), so the
- * two storage layers cannot drift apart if the dedup rule changes — the same
- * reason the `willPersistToHistory` gate below is a shared binding rather than
- * two copies of one expression.
- */
-function mergeDeliveredPrefix(
-  deliveredText: string,
-  continuationText: string,
-): string {
-  return (
-    deliveredText +
-    getRecoveryContinuationSuffix(deliveredText, continuationText)
-  );
-}
-
 function getRecoveryContinuationSuffix(
   previousText: string,
   continuationText: string,
@@ -851,6 +830,27 @@ function getRecoveryContinuationSuffix(
   }
 
   return continuationText;
+}
+
+/**
+ * Join already-delivered text to the continuation that resumes it, dropping
+ * any tail the model replayed.
+ *
+ * The single definition of "merged turn text" for the transport-continuation
+ * path. Both the durable JSONL record and in-memory history are built from one
+ * call to this (see `processStreamResponse`), so the two storage layers cannot
+ * drift apart if the dedup rule ever changes — the same reason the
+ * `willPersistToHistory` gate is a shared binding rather than two copies of
+ * one expression.
+ */
+function mergeDeliveredPrefix(
+  deliveredText: string,
+  continuationText: string,
+): string {
+  return (
+    deliveredText +
+    getRecoveryContinuationSuffix(deliveredText, continuationText)
+  );
 }
 
 function isPlainTextPart(part: Part | undefined): part is Part & {
