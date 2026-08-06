@@ -421,6 +421,12 @@ function isShellExitError(command: string, exitCode: number | null) {
   return !EXIT_ONE_IS_NOT_ERROR_COMMANDS.has(commandName);
 }
 
+function isSignalTermination(signal: number | NodeJS.Signals | null): boolean {
+  // node-pty reports signal 0 for a clean exit; only a non-zero signal
+  // represents an actual signal termination.
+  return signal !== null && signal !== 0;
+}
+
 const SUDO_FLAGS_WITH_VALUE = new Set([
   '-u',
   '-g',
@@ -2836,7 +2842,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const shouldAppendLongRunHint =
       longRunThreshold !== null &&
       !result.aborted &&
-      result.signal === null &&
+      !isSignalTermination(result.signal) &&
       elapsedMs >= longRunThreshold;
     // Observability: the hint decision is otherwise invisible. If a
     // user reports "my 65s command didn't get the hint" or "5s command
@@ -2877,7 +2883,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
             : wasPromoteRefused
               ? 'Command finished before background-promote could be honoured.'
               : 'Command cancelled by user.';
-        } else if (result.signal) {
+        } else if (isSignalTermination(result.signal)) {
           returnDisplayMessage = `Command terminated by signal: ${result.signal}`;
         } else if (result.error) {
           returnDisplayMessage = `Command failed: ${getErrorMessage(
@@ -3016,9 +3022,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
               type: ToolErrorType.SHELL_EXECUTE_ERROR,
             },
           }
-        : // node-pty reports signal 0 (not null) for clean PTY exits; only a
-          // non-zero signal represents an actual signal termination.
-          (!result.aborted && result.signal !== null && result.signal !== 0) ||
+        : (!result.aborted && isSignalTermination(result.signal)) ||
             isShellExitError(this.params.command, result.exitCode)
           ? {
               error: {
@@ -3398,7 +3402,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // non-zero exitCode → fail; everything-null → fail with a generic
       // message.
       if (info.error) return { status: 'failed', failMsg: info.error.message };
-      if (info.signal !== null && info.signal !== 0) {
+      if (isSignalTermination(info.signal)) {
         return {
           status: 'failed',
           failMsg: `Terminated by signal ${info.signal}`,
@@ -3727,7 +3731,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
           } else if (
             result.error ||
             (result.exitCode !== null && result.exitCode !== 0) ||
-            result.signal !== null
+            isSignalTermination(result.signal)
           ) {
             // Non-zero exit / killed by signal / spawn error all count as failed.
             // Treating them as `completed` would let `/tasks` (and any future

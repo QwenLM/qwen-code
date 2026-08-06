@@ -296,7 +296,8 @@ export interface ShellPostPromoteHandlers {
   onData?: (event: ShellOutputEvent) => void;
   /**
    * Fired exactly once when the post-promote child settles — natural
-   * exit (including PTY `signal: 0`), signal kill (which may carry
+   * child-process exit (`exitCode` set, `signal: null`), natural PTY
+   * exit (`exitCode` set, `signal: 0`), signal kill (which may carry
    * `exitCode: 0` with a non-zero signal on PTY, or `exitCode: null`
    * with a string signal from `child_process`), or spawn-side error
    * (`error` set). NOT

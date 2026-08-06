@@ -218,7 +218,10 @@ export class ShellProcessor implements IPromptProcessor {
           executionResult.exitCode !== null
         ) {
           processedPrompt += `\n[Shell command '${injection.resolvedCommand}' exited with code ${executionResult.exitCode}]`;
-        } else if (executionResult.signal !== null) {
+        } else if (
+          executionResult.signal !== null &&
+          executionResult.signal !== 0
+        ) {
           processedPrompt += `\n[Shell command '${injection.resolvedCommand}' terminated by signal ${executionResult.signal}]`;
         }
       }
