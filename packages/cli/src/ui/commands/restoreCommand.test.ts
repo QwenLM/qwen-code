@@ -54,6 +54,7 @@ describe('restoreCommand', () => {
         config: mockConfig,
       },
     });
+    mockContext.ui.clearPendingState = vi.fn();
   });
 
   afterEach(async () => {
@@ -170,6 +171,7 @@ describe('restoreCommand', () => {
       expect(mockContext.ui.loadHistory).toHaveBeenCalledWith(
         toolCallData.history,
       );
+      expect(mockContext.ui.clearPendingState).toHaveBeenCalledTimes(1);
       expect(mockSetHistory).toHaveBeenCalledWith(toolCallData.clientHistory);
       expect(mockRewind).toHaveBeenCalledWith(toolCallData.promptId, true);
       expect(mockContext.ui.addItem).toHaveBeenCalledWith(

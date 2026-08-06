@@ -178,6 +178,7 @@ import {
   LIVE_HOST_PROTOCOL_VERSION,
 } from './live/types.js';
 import { WorkspaceVoiceCoordinator } from './voice/workspace-voice-coordinator.js';
+import { getActiveSseCount } from './routes/sse-events.js';
 
 // ── Worktree mock infrastructure ────────────────────────────────────
 // GitWorktreeService's constructor calls simpleGit() which validates
@@ -3114,6 +3115,17 @@ describe('createServeApp', () => {
       expect(res.headers['cache-control']).toContain('no-cache');
     });
 
+    it('serves the shell for a // root request pre-auth (non-strict routing)', async () => {
+      // Express non-strict routing matches a raw `//` against `app.get('/')`
+      // too; the deferred gate's isPreAuthWebShellRequest mirrors this shape.
+      const app = createServeApp({ ...baseOpts, token: 'secret' }, undefined, {
+        webShellDir,
+      });
+      const res = await request(app).get('//').set('Host', host);
+      expect(res.status).toBe(200);
+      expect(res.text).toContain('<div id="root">');
+    });
+
     it('allows configured extension origins to frame the shell without self-framing', async () => {
       const app = createServeApp(
         {
@@ -3151,7 +3163,7 @@ describe('createServeApp', () => {
       expect(res.text).not.toContain('<div id="root">');
     });
 
-    it('falls back to the shell for SPA deep-link navigations', async () => {
+    it('serves the shell for /session/:id document navigations (pre-auth route)', async () => {
       const app = createServeApp(baseOpts, undefined, { webShellDir });
       const res = await request(app)
         .get('/session/abc123')
@@ -3159,6 +3171,86 @@ describe('createServeApp', () => {
         .set('Accept', 'text/html');
       expect(res.status).toBe(200);
       expect(res.text).toContain('<div id="root">');
+    });
+
+    it('serves the shell for GET and HEAD /session/:id document navigations', async () => {
+      const app = createServeApp({ ...baseOpts, token: 'secret' }, undefined, {
+        webShellDir,
+      });
+      const shell = await request(app)
+        .get('/session/abc123')
+        .set('Host', host)
+        .set('Accept', 'text/html');
+      expect(shell.status).toBe(200);
+      expect(shell.text).toContain('<div id="root">');
+
+      const head = await request(app)
+        .head('/session/abc123')
+        .set('Host', host)
+        .set('Accept', 'text/html');
+      expect(head.status).toBe(200);
+      expect(head.headers['content-type']).toContain('text/html');
+
+      // Express non-strict routing: a refresh URL with a trailing slash is a
+      // real client shape and must load the shell too.
+      const trailingSlash = await request(app)
+        .get('/session/abc123/')
+        .set('Host', host)
+        .set('Accept', 'text/html');
+      expect(trailingSlash.status).toBe(200);
+      expect(trailingSlash.text).toContain('<div id="root">');
+    });
+
+    it('serves the shell for /session/:id on a sec-fetch-only navigation signal', async () => {
+      // A refresh navigates with `Sec-Fetch-Mode: navigate` and no HTML
+      // Accept prefix; the pre-auth route must honor the full
+      // isDocumentNavigation signal or this exact flow falls through to
+      // bearerAuth and 401s.
+      const app = createServeApp({ ...baseOpts, token: 'secret' }, undefined, {
+        webShellDir,
+      });
+      const res = await request(app)
+        .get('/session/abc123')
+        .set('Host', host)
+        .set('Accept', '*/*')
+        .set('Sec-Fetch-Mode', 'navigate');
+      expect(res.status).toBe(200);
+      expect(res.text).toContain('<div id="root">');
+    });
+
+    it('401s /session/:id for JSON requests', async () => {
+      const app = createServeApp({ ...baseOpts, token: 'secret' }, undefined, {
+        webShellDir,
+      });
+      const res = await request(app)
+        .get('/session/abc123')
+        .set('Host', host)
+        .set('Accept', 'application/json');
+      expect(res.status).toBe(401);
+    });
+
+    it('401s session API subpaths', async () => {
+      const app = createServeApp({ ...baseOpts, token: 'secret' }, undefined, {
+        webShellDir,
+      });
+      const res = await request(app)
+        .get('/session/abc123/status')
+        .set('Host', host)
+        .set('Accept', 'text/html');
+      expect(res.status).toBe(401);
+    });
+
+    it('401s /session/:id document navigations when the shell is disabled', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', serveWebShell: false },
+        undefined,
+        { webShellDir },
+      );
+      const res = await request(app)
+        .get('/session/abc123')
+        .set('Host', host)
+        .set('Accept', 'text/html');
+      expect(res.status).toBe(401);
     });
 
     it('leaves non-navigation API misses as JSON 404s', async () => {
@@ -3207,10 +3299,23 @@ describe('createServeApp', () => {
     it('falls back to the shell on a sec-fetch navigation signal', async () => {
       const app = createServeApp(baseOpts, undefined, { webShellDir });
       const res = await request(app)
-        .get('/session/deep')
+        .get('/deep/link')
         .set('Host', host)
         .set('Accept', '*/*')
         .set('Sec-Fetch-Mode', 'navigate');
+      expect(res.status).toBe(200);
+      expect(res.text).toContain('<div id="root">');
+    });
+
+    it('falls back to the shell for non-session SPA deep-link navigations', async () => {
+      // The pre-auth `/session/:id` route claims the session deep-link shapes
+      // above, so these non-session navigations are the direct coverage of
+      // mountWebShellSpaFallback's shell branch.
+      const app = createServeApp(baseOpts, undefined, { webShellDir });
+      const res = await request(app)
+        .get('/deep/link')
+        .set('Host', host)
+        .set('Accept', 'text/html');
       expect(res.status).toBe(200);
       expect(res.text).toContain('<div id="root">');
     });
@@ -12632,6 +12737,9 @@ describe('createServeApp', () => {
           nextCursor: 1,
           hasMore: true,
         });
+      // 50,001 rows would otherwise trigger 50,001 real readWorktreeSession
+      // sidecar reads; this test only exercises the truncation contract.
+      mockWt.readSidecar = () => Promise.resolve(null);
 
       try {
         const bridge = fakeBridge();
@@ -12651,6 +12759,7 @@ describe('createServeApp', () => {
         expect(res.body.truncated).toBe(true);
       } finally {
         listSessionsSpy.mockRestore();
+        mockWt.readSidecar = undefined;
       }
     });
 
@@ -21748,7 +21857,7 @@ describe('runQwenServe', () => {
       'https://anywhere.example.com',
     );
     expect(res.headers.get('access-control-expose-headers')).toBe(
-      'Retry-After, X-Qwen-Event-Epoch',
+      'Retry-After, X-Qwen-Event-Epoch, X-Qwen-SSE-Stream-Id',
     );
   });
 
@@ -22755,6 +22864,530 @@ describe('GET /session/:id/events (SSE)', () => {
     expect(JSON.parse(frames[1]!.data!)).not.toHaveProperty('promptId');
   });
 
+  it('correlates the SSE response, daemon lifecycle log, and request span', async () => {
+    const predecessor = '019535d9-3df7-7a61-8f6d-6f37c39c5f19';
+    const setAttribute = vi.fn();
+    const getSpanSpy = vi.spyOn(trace, 'getSpan').mockReturnValue({
+      setAttribute,
+      spanContext: () => ({
+        traceId: '1'.repeat(32),
+        spanId: '2'.repeat(16),
+        traceFlags: 1,
+      }),
+    } as unknown as Span);
+    const daemonLog = fakeDaemonLog();
+    const bridge = fakeBridge({
+      async *subscribeImpl() {
+        yield { id: 1, v: 1, type: 'session_update', data: 'done' };
+      },
+    });
+    const beforeActive = getActiveSseCount();
+    const app = createServeApp(baseOpts, undefined, { bridge, daemonLog });
+
+    try {
+      const res = await request(app)
+        .get(
+          `/session/sess-A/events?connectReason=prompt_restart&previousStreamId=${predecessor}`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-1');
+
+      expect(res.status).toBe(200);
+      const streamId = res.headers['x-qwen-sse-stream-id'];
+      expect(streamId).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      );
+      expect(daemonLog.info).toHaveBeenCalledWith(
+        'SSE stream opened',
+        expect.objectContaining({
+          sessionId: 'sess-A',
+          clientId: 'client-1',
+          streamId,
+          connectReason: 'prompt_restart',
+          previousStreamId: predecessor,
+        }),
+      );
+      expect(daemonLog.info).toHaveBeenCalledWith(
+        'SSE stream closed',
+        expect.objectContaining({
+          streamId,
+          closeReason: 'source_complete',
+          eventFramesWriteSettled: 1,
+          lastEventIdWritten: 1,
+        }),
+      );
+      expect(
+        vi
+          .mocked(daemonLog.info)
+          .mock.calls.filter(([message]) => message === 'SSE stream closed'),
+      ).toHaveLength(1);
+      expect(setAttribute).toHaveBeenCalledWith(
+        'qwen-code.daemon.sse.stream_id',
+        streamId,
+      );
+      expect(setAttribute).toHaveBeenCalledWith(
+        'qwen-code.daemon.sse.close_reason',
+        'source_complete',
+      );
+      expect(setAttribute).toHaveBeenCalledWith(
+        'qwen-code.daemon.sse.event_frames_write_settled',
+        1,
+      );
+      expect(setAttribute).toHaveBeenCalledWith(
+        'qwen-code.daemon.sse.duration_ms',
+        expect.any(Number),
+      );
+      expect(
+        setAttribute.mock.calls.some(([key]) => key === 'duration_ms'),
+      ).toBe(false);
+      const attributeKeys = setAttribute.mock.calls.map(([key]) => key);
+      for (const bareKey of [
+        'event_frames_write_settled',
+        'last_event_id_written',
+        'backpressure_count',
+        'max_drain_wait_ms',
+        'max_live_publish_to_write_settled_ms',
+        'slow_warning_count',
+        'event_bus_eviction_reason',
+        'terminal_event_type',
+        'close_reason',
+      ]) {
+        expect(attributeKeys).not.toContain(bareKey);
+      }
+      expect(getActiveSseCount()).toBe(beforeActive);
+    } finally {
+      getSpanSpy.mockRestore();
+    }
+  });
+
+  it('does not attach stream identity when the subscription is rejected', async () => {
+    const setAttribute = vi.fn();
+    const getSpanSpy = vi.spyOn(trace, 'getSpan').mockReturnValue({
+      setAttribute,
+      spanContext: () => ({
+        traceId: '1'.repeat(32),
+        spanId: '2'.repeat(16),
+        traceFlags: 1,
+      }),
+    } as unknown as Span);
+    const bridge = fakeBridge({
+      subscribeImpl: (sessionId) => {
+        throw new SessionNotFoundError(sessionId);
+      },
+    });
+    const app = createServeApp(baseOpts, undefined, { bridge });
+
+    try {
+      const res = await request(app)
+        .get('/session/missing/events?connectReason=initial')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(404);
+      expect(
+        setAttribute.mock.calls.some(
+          ([key]) => key === 'qwen-code.daemon.sse.stream_id',
+        ),
+      ).toBe(false);
+    } finally {
+      getSpanSpy.mockRestore();
+    }
+  });
+
+  it('normalizes invalid client-reported diagnostics without rejecting or logging them', async () => {
+    const daemonLog = fakeDaemonLog();
+    const bridge = fakeBridge({
+      async *subscribeImpl() {
+        yield { id: 1, v: 1, type: 'session_update', data: 'done' };
+      },
+    });
+    const app = createServeApp(baseOpts, undefined, { bridge, daemonLog });
+
+    const res = await request(app)
+      .get(
+        '/session/sess-A/events?connectReason=%0Aforged&previousStreamId=not-a-uuid',
+      )
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('X-Qwen-Client-Id', 'invalid client id');
+
+    expect(res.status).toBe(200);
+    expect(daemonLog.info).toHaveBeenCalledWith(
+      'SSE stream opened',
+      expect.objectContaining({
+        connectReason: 'unknown',
+        clientId: undefined,
+        previousStreamId: undefined,
+      }),
+    );
+    expect(JSON.stringify(vi.mocked(daemonLog.info).mock.calls)).not.toContain(
+      'forged',
+    );
+    expect(JSON.stringify(vi.mocked(daemonLog.info).mock.calls)).not.toContain(
+      'invalid client id',
+    );
+  });
+
+  it('adds stream identity to EventBus warning and eviction diagnostics', async () => {
+    const release = deferred<void>();
+    let subscribeOptions: SubscribeOptions | undefined;
+    const daemonLog = fakeDaemonLog();
+    const bridge = fakeBridge({
+      async *subscribeImpl(_sessionId, opts) {
+        subscribeOptions = opts;
+        yield { id: 1, v: 1, type: 'session_update', data: 'first' };
+        await release.promise;
+      },
+    });
+    const beforeActive = getActiveSseCount();
+    const app = createServeApp(baseOpts, undefined, { bridge, daemonLog });
+    const responsePromise = request(app)
+      .get('/session/sess-%E2%80%A8A/events?connectReason=resume')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('X-Qwen-Client-Id', 'client-1')
+      .then((response) => response);
+
+    await vi.waitFor(() => {
+      expect(subscribeOptions?.onSubscriberDiagnostic).toBeTypeOf('function');
+      expect(getActiveSseCount()).toBe(beforeActive + 1);
+    });
+    const opened = vi
+      .mocked(daemonLog.info)
+      .mock.calls.find(([message]) => message === 'SSE stream opened');
+    const streamId = (opened?.[1] as { streamId?: string } | undefined)
+      ?.streamId;
+    expect(streamId).toBeDefined();
+
+    const warningHandled = subscribeOptions!.onSubscriberDiagnostic?.({
+      type: 'slow_client_warning',
+      data: {
+        queueSize: 12,
+        maxQueued: 16,
+        lastEventId: 9,
+        queuedBytes: 2048,
+        maxQueuedBytes: 4096,
+        threshold: 'frames',
+        triggerEventType: `tool\n\u2028result${'x'.repeat(10_000)}`,
+        triggerEventBytes: 512,
+      },
+    });
+    const evictionHandled = subscribeOptions!.onSubscriberDiagnostic?.({
+      type: 'client_evicted',
+      data: {
+        reason: 'queue_bytes_overflow',
+        droppedAfter: 10,
+        queueSize: 13,
+        maxQueued: 16,
+        queuedBytes: 4608,
+        maxQueuedBytes: 4096,
+        eventBytes: 2560,
+        triggerEventType: 'tool_result',
+        triggerEventBytes: 2560,
+      },
+    });
+    expect(warningHandled).toBe(true);
+    expect(evictionHandled).toBe(true);
+    expect(daemonLog.warn).toHaveBeenCalledWith(
+      'SSE slow client warning',
+      expect.objectContaining({
+        sessionId: 'sess- A',
+        clientId: 'client-1',
+        streamId,
+        threshold: 'frames',
+        triggerEventType: `tool  result${'x'.repeat(116)}`,
+        triggerEventBytes: 512,
+      }),
+    );
+    expect(daemonLog.warn).toHaveBeenCalledWith(
+      'SSE client evicted',
+      expect.objectContaining({
+        streamId,
+        threshold: 'bytes',
+        reason: 'queue_bytes_overflow',
+        triggerEventBytes: 2560,
+      }),
+    );
+
+    release.resolve();
+    const res = await responsePromise;
+    expect(res.headers['x-qwen-sse-stream-id']).toBe(streamId);
+    expect(getActiveSseCount()).toBe(beforeActive);
+  });
+
+  it('starts live lag measurement only after replay_complete settles', async () => {
+    const daemonLog = fakeDaemonLog();
+    const bridge = fakeBridge({
+      async *subscribeImpl() {
+        yield {
+          id: 2,
+          v: 1,
+          type: 'session_update',
+          data: 'historical',
+          _meta: { serverTimestamp: 1 },
+        };
+        yield {
+          v: 1,
+          type: 'replay_complete',
+          data: {},
+          _meta: { serverTimestamp: 1 },
+        };
+        yield {
+          id: 3,
+          v: 1,
+          type: 'session_update',
+          data: 'live',
+          _meta: { serverTimestamp: Date.now() },
+        };
+      },
+    });
+    const app = createServeApp(baseOpts, undefined, { bridge, daemonLog });
+
+    const res = await request(app)
+      .get('/session/sess-A/events')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Last-Event-ID', '1');
+
+    expect(res.status).toBe(200);
+    expect(daemonLog.info).toHaveBeenCalledWith(
+      'SSE stream closed',
+      expect.objectContaining({
+        closeReason: 'source_complete',
+        eventFramesWriteSettled: 3,
+        lastEventIdWritten: 3,
+        maxLivePublishToWriteSettledMs: expect.any(Number),
+      }),
+    );
+    const closed = vi
+      .mocked(daemonLog.info)
+      .mock.calls.find(([message]) => message === 'SSE stream closed');
+    expect(
+      (closed?.[1] as { maxLivePublishToWriteSettledMs: number })
+        .maxLivePublishToWriteSettledMs,
+    ).toBeLessThan(10_000);
+  });
+
+  it.each([
+    {
+      event: {
+        v: 1,
+        type: 'client_evicted',
+        data: { reason: 'queue_bytes_overflow' },
+      } satisfies BridgeEvent,
+      closeReason: 'event_bus_evicted',
+      terminalEventType: 'client_evicted',
+    },
+    {
+      event: {
+        v: 1,
+        type: 'session_closed',
+        data: { reason: 'idle' },
+      } satisfies BridgeEvent,
+      closeReason: 'session_terminal',
+      terminalEventType: 'session_closed',
+    },
+  ])(
+    'uses $closeReason when $terminalEventType ends normally',
+    async ({ event, closeReason, terminalEventType }) => {
+      const daemonLog = fakeDaemonLog();
+      const bridge = fakeBridge({
+        async *subscribeImpl() {
+          yield event;
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge, daemonLog });
+
+      const res = await request(app)
+        .get('/session/sess-A/events')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(daemonLog.info).toHaveBeenCalledWith(
+        'SSE stream closed',
+        expect.objectContaining({ closeReason, terminalEventType }),
+      );
+    },
+  );
+
+  it('records a socket error without letting iterator cleanup overwrite it', async () => {
+    const http = await import('node:http');
+    type WriteCallback = (error?: Error | null) => void;
+    const originalWrite = http.ServerResponse.prototype.write as unknown as (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ) => boolean;
+    const writeSpy = vi.spyOn(http.ServerResponse.prototype, 'write');
+    let injected = false;
+    writeSpy.mockImplementation(function (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ): boolean {
+      const text = typeof chunk === 'string' ? chunk : chunk.toString();
+      if (!injected && text.includes('event: session_update')) {
+        injected = true;
+        throw new Error('socket reset');
+      }
+      const wrote =
+        typeof encodingOrCb === 'function'
+          ? originalWrite.call(this, chunk, encodingOrCb)
+          : originalWrite.call(this, chunk, encodingOrCb, cb);
+      return wrote;
+    });
+
+    try {
+      const daemonLog = fakeDaemonLog();
+      const bridge = fakeBridge({
+        async *subscribeImpl(_sessionId, opts) {
+          yield { id: 1, v: 1, type: 'session_update', data: 'first' };
+          if (!opts?.signal?.aborted) {
+            await new Promise<void>((resolve) => {
+              opts?.signal?.addEventListener('abort', () => resolve(), {
+                once: true,
+              });
+            });
+          }
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge, daemonLog });
+
+      const res = await request(app)
+        .get('/session/sess-A/events')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(injected).toBe(true);
+      expect(daemonLog.info).toHaveBeenCalledWith(
+        'SSE stream closed',
+        expect.objectContaining({ closeReason: 'socket_error' }),
+      );
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
+
+  it('records iterator errors without changing the terminal SSE frame contract', async () => {
+    const daemonLog = fakeDaemonLog();
+    const bridge = fakeBridge({
+      async *subscribeImpl() {
+        yield { id: 1, v: 1, type: 'session_update', data: 'first' };
+        throw new Error('iterator failed');
+      },
+    });
+    const app = createServeApp(baseOpts, undefined, { bridge, daemonLog });
+
+    const res = await request(app)
+      .get('/session/sess-A/events')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('event: stream_error');
+    expect(daemonLog.info).toHaveBeenCalledWith(
+      'SSE stream closed',
+      expect.objectContaining({
+        closeReason: 'iterator_error',
+        eventFramesWriteSettled: 2,
+      }),
+    );
+  });
+
+  it('does not let a terminal candidate hide a later iterator error', async () => {
+    const daemonLog = fakeDaemonLog();
+    const bridge = fakeBridge({
+      async *subscribeImpl() {
+        yield {
+          v: 1,
+          type: 'session_closed',
+          data: { reason: 'idle' },
+        };
+        throw new Error('iterator failed after terminal event');
+      },
+    });
+    const app = createServeApp(baseOpts, undefined, { bridge, daemonLog });
+
+    const res = await request(app)
+      .get('/session/sess-A/events')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+    expect(res.status).toBe(200);
+    expect(daemonLog.info).toHaveBeenCalledWith(
+      'SSE stream closed',
+      expect.objectContaining({
+        closeReason: 'iterator_error',
+        terminalEventType: 'session_closed',
+      }),
+    );
+  });
+
+  it('records an unfinished drain when writer idle eviction closes the stream', async () => {
+    const http = await import('node:http');
+    type WriteCallback = (error?: Error | null) => void;
+    const originalWrite = http.ServerResponse.prototype.write as unknown as (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ) => boolean;
+    const writeSpy = vi.spyOn(http.ServerResponse.prototype, 'write');
+    let forcedBackpressure = false;
+    writeSpy.mockImplementation(function (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ): boolean {
+      const wrote =
+        typeof encodingOrCb === 'function'
+          ? originalWrite.call(this, chunk, encodingOrCb)
+          : originalWrite.call(this, chunk, encodingOrCb, cb);
+      const text = typeof chunk === 'string' ? chunk : chunk.toString();
+      if (!forcedBackpressure && text.includes('event: session_update')) {
+        forcedBackpressure = true;
+        return false;
+      }
+      return wrote;
+    });
+
+    try {
+      const daemonLog = fakeDaemonLog();
+      const bridge = fakeBridge({
+        async *subscribeImpl() {
+          yield { id: 1, v: 1, type: 'session_update', data: 'first' };
+          await new Promise(() => {});
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, writerIdleTimeoutMs: 200 },
+        undefined,
+        { bridge, daemonLog },
+      );
+
+      const res = await request(app)
+        .get('/session/sess-A/events')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(forcedBackpressure).toBe(true);
+      expect(daemonLog.info).toHaveBeenCalledWith(
+        'SSE stream closed',
+        expect.objectContaining({
+          closeReason: 'writer_idle_timeout',
+          backpressureCount: 1,
+          eventFramesWriteSettled: 1,
+          maxDrainWaitMs: expect.any(Number),
+        }),
+      );
+      const closed = vi
+        .mocked(daemonLog.info)
+        .mock.calls.find(([message]) => message === 'SSE stream closed');
+      expect(
+        (closed?.[1] as { maxDrainWaitMs: number }).maxDrainWaitMs,
+      ).toBeGreaterThan(0);
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
+
   it('streams virtual subagent events without subscribing to the parent session', async () => {
     const bridge = fakeBridge({
       subscribeImpl: () => {
@@ -22799,6 +23432,7 @@ describe('GET /session/:id/events (SSE)', () => {
       expect(subscribeSpy.mock.calls[0]?.[2]).toMatchObject({
         lastEventId: 7,
         maxQueued: 32,
+        onSubscriberDiagnostic: expect.any(Function),
       });
     } finally {
       subscribeSpy.mockRestore();
@@ -23177,6 +23811,7 @@ describe('GET /session/:id/events (SSE)', () => {
 
   it('aborts the bridge subscription when the client disconnects', async () => {
     const aborted = { value: false };
+    const daemonLog = fakeDaemonLog();
     const bridge = fakeBridge({
       async *subscribeImpl(_sessionId, opts) {
         opts?.signal?.addEventListener(
@@ -23194,22 +23829,35 @@ describe('GET /session/:id/events (SSE)', () => {
         });
       },
     });
-    handle = await runQwenServe(
-      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
-      { bridge },
-    );
-    const port = (handle.server.address() as { port: number }).port;
+    let port = baseOpts.port;
+    const app = createServeApp(baseOpts, () => port, { bridge, daemonLog });
+    const server = app.listen(0, '127.0.0.1');
+    await new Promise<void>((resolve) => server.once('listening', resolve));
+    port = (server.address() as { port: number }).port;
 
-    const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
-    const frames = await readSseFrames(res.body!, 1);
-    expect(frames).toHaveLength(1);
-    // readSseFrames calls reader.cancel() once the requested frame count is
-    // reached, which severs the underlying connection — the daemon's
-    // `req.on('close')` handler then aborts the bridge subscription.
-
-    // Wait briefly for the close handler to propagate to the bridge.
-    await new Promise((r) => setTimeout(r, 100));
-    expect(aborted.value).toBe(true);
+    try {
+      const res = await fetch(
+        `http://127.0.0.1:${port}/session/sess-A/events`,
+        { headers: { Host: `127.0.0.1:${port}` } },
+      );
+      expect(res.status).toBe(200);
+      const frames = await readSseFrames(res.body!, 1);
+      expect(frames).toHaveLength(1);
+      // readSseFrames calls reader.cancel() once the requested frame count is
+      // reached, which severs the underlying connection — the daemon's
+      // `req.on('close')` handler then aborts the bridge subscription.
+      await vi.waitFor(() => {
+        expect(aborted.value).toBe(true);
+        expect(daemonLog.info).toHaveBeenCalledWith(
+          'SSE stream closed',
+          expect.objectContaining({ closeReason: 'client_disconnect' }),
+        );
+      });
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      });
+    }
   });
 
   it('emits a stream_error frame when the bridge iterator throws mid-stream', async () => {
@@ -23307,11 +23955,11 @@ describe('GET /session/:id/events (SSE)', () => {
         .filter((s) => s.includes('SSE ring eviction detected'));
       expect(stderrLines.length).toBeGreaterThanOrEqual(1);
       const line = stderrLines[0]!;
-      expect(line).toContain('session sess-A');
+      expect(line).toContain('sessionId=sess-A');
       expect(line).toContain('lastEventId=5');
       expect(line).toContain('earliestInRing=12');
       // gap = 12 - 5 - 1 = 6 events
-      expect(line).toContain('gap=6 events');
+      expect(line).toContain('gap=6');
       expect(line).toContain('reason=ring_evicted');
       expect(line).toContain('loadSession');
     } finally {
@@ -23319,12 +23967,9 @@ describe('GET /session/:id/events (SSE)', () => {
     }
   });
 
-  it('falls back to "?" placeholders when state_resync_required data is partial', async () => {
-    // Defensive: the `?? '?'` fallback for missing fields lets the log
-    // line still print intelligibly when the daemon emits a partial
-    // payload (e.g. a future schema change drops one field). Pins the
-    // placeholder behavior so a regression that crashes the log call
-    // is caught.
+  it('logs a bounded unknown reason when state_resync_required data is partial', async () => {
+    // Defensive: malformed future/partial data must not crash the diagnostic
+    // path or inject undefined numeric values into the structured daemon log.
     const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
     try {
       const bridge = fakeBridge({
@@ -23357,11 +24002,12 @@ describe('GET /session/:id/events (SSE)', () => {
         .filter((s) => s.includes('SSE ring eviction detected'));
       expect(stderrLines.length).toBeGreaterThanOrEqual(1);
       const line = stderrLines[0]!;
-      // All four `?? '?'` branches print `?` for the missing values.
-      expect(line).toContain('lastEventId=?');
-      expect(line).toContain('earliestInRing=?');
-      expect(line).toContain('gap=? events');
-      expect(line).toContain('reason=?');
+      expect(line).toContain('sessionId=sess-A');
+      expect(line).toContain('reason=unknown');
+      expect(line).toContain('streamId=');
+      expect(line).not.toContain('lastEventId=');
+      expect(line).not.toContain('earliestInRing=');
+      expect(line).not.toContain('gap=');
     } finally {
       stderrSpy.mockRestore();
     }
@@ -23671,7 +24317,7 @@ describe('--allow-origin CORS allowlist (T2.4 #4514)', () => {
     );
     expect(res.headers['access-control-max-age']).toBe('86400');
     expect(res.headers['access-control-expose-headers']).toBe(
-      'Retry-After, X-Qwen-Event-Epoch',
+      'Retry-After, X-Qwen-Event-Epoch, X-Qwen-SSE-Stream-Id',
     );
   });
 
@@ -23691,7 +24337,7 @@ describe('--allow-origin CORS allowlist (T2.4 #4514)', () => {
     );
     expect(res.headers['access-control-allow-methods']).toMatch(/POST/);
     expect(res.headers['access-control-expose-headers']).toBe(
-      'Retry-After, X-Qwen-Event-Epoch',
+      'Retry-After, X-Qwen-Event-Epoch, X-Qwen-SSE-Stream-Id',
     );
     expect(res.text).toBe('');
   });

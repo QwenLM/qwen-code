@@ -230,6 +230,7 @@ describe('AppContainer State Management', () => {
   const mockedUseKeypress = useKeypress as Mock;
   let originalStdoutIsTTY: boolean | undefined;
   let restoreCiEnv = () => {};
+  let mockClearPendingState: Mock;
   const mockedRestorePromptStash = vi.mocked(restorePromptStash);
 
   beforeEach(() => {
@@ -249,6 +250,7 @@ describe('AppContainer State Management', () => {
     capturedUIActions = null!;
     capturedRenderMode = 'render';
     capturedThoughtExpanded = null!;
+    mockClearPendingState = vi.fn();
 
     // **Provide a default return value for EVERY mocked hook.**
     mockedUseHistory.mockReturnValue({
@@ -338,6 +340,7 @@ describe('AppContainer State Management', () => {
       retryLastPrompt: vi.fn(),
       streamingResponseLengthRef: { current: 0 },
       isReceivingContent: false,
+      clearPendingState: mockClearPendingState,
     });
     mockedUseVim.mockReturnValue({ handleInput: vi.fn() });
     mockedUseFolderTrust.mockReturnValue({
@@ -1259,6 +1262,7 @@ describe('AppContainer State Management', () => {
       capturedUIActions.handleClearScreen();
 
       expect(clearSpy).toHaveBeenCalledTimes(1);
+      expect(mockClearPendingState).toHaveBeenCalledTimes(1);
       expect(mockStdout.write).not.toHaveBeenCalledWith(
         ansiEscapes.clearTerminal,
       );
@@ -5774,6 +5778,10 @@ describe('AppContainer State Management', () => {
         rewindUserItem(1, 'first prompt', 'prompt-1'),
         { id: 2, type: 'gemini', text: 'first response' },
       ]);
+      expect(mockClearPendingState).toHaveBeenCalledTimes(1);
+      expect(mockClearPendingState.mock.invocationCallOrder[0]).toBeLessThan(
+        harness.loadHistory.mock.invocationCallOrder[0]!,
+      );
       expect(harness.setText).toHaveBeenCalledWith('second prompt');
       expect(harness.addItem).toHaveBeenCalledWith(
         expect.objectContaining({

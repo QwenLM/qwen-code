@@ -6,7 +6,10 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  context as otelContext,
+  createContextKey,
   propagation,
+  ROOT_CONTEXT,
   SpanStatusCode,
   trace,
   type Span,
@@ -20,10 +23,12 @@ import {
   DAEMON_TRACEPARENT_META_KEY,
   DAEMON_TRACESTATE_META_KEY,
   addDaemonRequestAttribute,
+  captureDaemonTelemetryContext,
   createDaemonBridgeTelemetry,
   extractDaemonTraceContext,
   hashDaemonWorkspace,
   injectDaemonTraceContext,
+  runWithDaemonTelemetryContext,
   withDaemonSpan,
   withDaemonRequestSpan,
 } from './daemon-tracing.js';
@@ -340,6 +345,26 @@ describe('daemon-tracing', () => {
     expect(() =>
       addDaemonRequestAttribute('qwen-code.prompt_id', 'orphan'),
     ).not.toThrow();
+  });
+
+  it('runs deferred telemetry under the context captured by the request', async () => {
+    const requestContext = ROOT_CONTEXT.setValue(
+      createContextKey('daemon-sse-request'),
+      'request',
+    );
+    const publisherContext = ROOT_CONTEXT.setValue(
+      createContextKey('daemon-publisher'),
+      'publisher',
+    );
+    let activeContext = requestContext;
+    vi.spyOn(otelContext, 'active').mockImplementation(() => activeContext);
+    const withSpy = vi.spyOn(otelContext, 'with');
+
+    const captured = captureDaemonTelemetryContext();
+    activeContext = publisherContext;
+    await runWithDaemonTelemetryContext(captured, async () => undefined);
+
+    expect(withSpy).toHaveBeenCalledWith(requestContext, expect.any(Function));
   });
 
   it('bridge telemetry sets attributes on the active span', () => {

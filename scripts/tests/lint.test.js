@@ -4,7 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+
+// getLinterTempDir joins with the platform separator; compare normalized
+// paths so the suite also passes on the Windows gate.
+const toPosix = (value) => value.replaceAll(path.sep, '/');
 
 describe('getLinterTempDir', () => {
   const originalArgv = process.argv;
@@ -39,10 +44,10 @@ describe('getLinterTempDir', () => {
       },
     });
 
-    expect(first).toBe(
+    expect(toPosix(first)).toBe(
       '/runner/_work/_temp/qwen-code-linters/28501834362-1-test',
     );
-    expect(second).toBe(
+    expect(toPosix(second)).toBe(
       '/runner/_work/_temp/qwen-code-linters/28501834363-1-integration_cli',
     );
     expect(first).not.toBe(second);
@@ -60,8 +65,8 @@ describe('getLinterTempDir', () => {
       env: {},
     });
 
-    expect(first).toMatch(/\/qwen-code-linters\/local-[a-f0-9]{16}$/);
-    expect(second).toMatch(/\/qwen-code-linters\/local-[a-f0-9]{16}$/);
+    expect(toPosix(first)).toMatch(/\/qwen-code-linters\/local-[a-f0-9]{16}$/);
+    expect(toPosix(second)).toMatch(/\/qwen-code-linters\/local-[a-f0-9]{16}$/);
     expect(first).not.toBe(second);
   });
 });
