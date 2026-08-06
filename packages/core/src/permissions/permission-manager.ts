@@ -233,7 +233,10 @@ export class PermissionManager {
           SHELL_TOOL_NAMES.has(toolName) &&
           command !== undefined
         ) {
-          bashDecision = await this.resolveDefaultPermission(command);
+          bashDecision = await this.resolveDefaultPermission(
+            command,
+            this.probeCwd(ctx),
+          );
         }
       }
     } else {
@@ -461,7 +464,7 @@ export class PermissionManager {
       // (same logic as ShellToolInvocation.getDefaultPermission)
       const decision: ResolvedDecision =
         rawDecision === 'default'
-          ? await this.resolveDefaultPermission(subCmd)
+          ? await this.resolveDefaultPermission(subCmd, this.probeCwd(ctx))
           : (rawDecision as ResolvedDecision);
 
       if (PRIORITY[decision] > PRIORITY[mostRestrictive]) {
@@ -491,13 +494,19 @@ export class PermissionManager {
    * "relevant" rules for the surrounding compound command.
    *
    * @param command - The shell command to analyze.
+   * @param cwd - Execution directory; lets the classifier downgrade git
+   *   commands whose repository-local config executes programs (#8575).
    * @returns 'allow' for read-only, 'ask' otherwise.
    */
   private async resolveDefaultPermission(
     command: string,
+    cwd?: string,
   ): Promise<'allow' | 'ask'> {
     try {
-      const isReadOnly = await isShellCommandReadOnlyAST(command);
+      const isReadOnly = await isShellCommandReadOnlyAST(
+        command,
+        cwd ? { cwd } : undefined,
+      );
       if (isReadOnly) {
         return 'allow';
       }
@@ -511,6 +520,15 @@ export class PermissionManager {
     }
 
     return 'ask';
+  }
+
+  /**
+   * Best-effort execution directory for the git-config probe (#8575).
+   * Returns `undefined` when unknown — the probe is skipped and the
+   * classifier keeps its text-only verdict.
+   */
+  private probeCwd(ctx: PermissionCheckContext): string | undefined {
+    return ctx.cwd ?? this.config.getCwd?.();
   }
 
   private normalizePermissionContext(

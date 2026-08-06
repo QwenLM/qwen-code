@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
 
 describe('evaluateShellCommandReadOnly', () => {
@@ -457,7 +460,7 @@ describe('evaluateShellCommandReadOnly', () => {
         `git status ${'\\{'.repeat(10_000)}`,
       ];
       const startedAt = performance.now();
-      expect(commands.map(isShellCommandReadOnly)).toEqual([
+      expect(commands.map((c) => isShellCommandReadOnly(c))).toEqual([
         false,
         true,
         true,
@@ -465,5 +468,61 @@ describe('evaluateShellCommandReadOnly', () => {
       ]);
       expect(performance.now() - startedAt).toBeLessThan(1000);
     });
+  });
+});
+
+// =========================================================================
+// Git config execution probe (issue #8575) — the regex fallback must apply
+// the same repo-local config downgrade as the AST classifier.
+// =========================================================================
+
+describe('git config execution probe (#8575)', () => {
+  let root: string;
+  let cleanRepo: string;
+  let dirtyRepo: string;
+
+  beforeAll(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'shell-regex-git-config-'));
+
+    cleanRepo = path.join(root, 'clean');
+    fs.mkdirSync(path.join(cleanRepo, '.git'), { recursive: true });
+    fs.writeFileSync(
+      path.join(cleanRepo, '.git', 'config'),
+      '[core]\n\tbare = false\n',
+    );
+
+    dirtyRepo = path.join(root, 'dirty');
+    fs.mkdirSync(path.join(dirtyRepo, '.git'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dirtyRepo, '.git', 'config'),
+      '[core]\n\tfsmonitor = /tmp/evil\n',
+    );
+  });
+
+  afterAll(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it.each(['git diff', 'git status', 'git log'])(
+    'downgrades %s when repo config executes programs',
+    (command) => {
+      expect(isShellCommandReadOnly(command, { cwd: dirtyRepo })).toBe(false);
+      expect(isShellCommandReadOnly(command, { cwd: cleanRepo })).toBe(true);
+    },
+  );
+
+  it('keeps git --version and bare git read-only under a dirty cwd', () => {
+    expect(isShellCommandReadOnly('git --version', { cwd: dirtyRepo })).toBe(
+      true,
+    );
+    expect(isShellCommandReadOnly('git', { cwd: dirtyRepo })).toBe(true);
+  });
+
+  it('does not affect non-git commands', () => {
+    expect(isShellCommandReadOnly('ls -la', { cwd: dirtyRepo })).toBe(true);
+  });
+
+  it('is backward compatible without cwd', () => {
+    expect(isShellCommandReadOnly('git diff')).toBe(true);
   });
 });

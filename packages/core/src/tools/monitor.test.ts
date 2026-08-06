@@ -518,6 +518,19 @@ describe('MonitorTool', () => {
       await expect(invocation.getDefaultPermission()).resolves.toBe('allow');
     });
 
+    it('passes the execution cwd to the read-only classifier (#8575)', async () => {
+      mockIsShellCommandReadOnlyAST.mockResolvedValueOnce(true);
+      const invocation = createInvocation({
+        command: 'git status',
+      });
+
+      await expect(invocation.getDefaultPermission()).resolves.toBe('allow');
+      expect(mockIsShellCommandReadOnlyAST).toHaveBeenCalledWith(
+        expect.any(String),
+        { cwd: '/test/dir' },
+      );
+    });
+
     it('surfaces a command-substitution warning via getConfirmationDetails (issue #4093)', async () => {
       const invocation = createInvocation({
         command: 'echo $(cat secret.txt)',

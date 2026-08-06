@@ -5,6 +5,9 @@
  */
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import {
   classifyShellCommandSafety,
   initParser,
@@ -813,7 +816,7 @@ describe('classifyShellCommandSafety', () => {
     }
     const startedAt = performance.now();
     await expect(
-      Promise.all(commands.map(classifyShellCommandSafety)),
+      Promise.all(commands.map((c) => classifyShellCommandSafety(c))),
     ).resolves.toEqual(['unknown', 'unknown']);
     expect(performance.now() - startedAt).toBeLessThan(1000);
   });
@@ -834,7 +837,7 @@ describe('classifyShellCommandSafety', () => {
     ];
     const startedAt = performance.now();
     await expect(
-      Promise.all(commands.map(classifyShellCommandSafety)),
+      Promise.all(commands.map((c) => classifyShellCommandSafety(c))),
     ).resolves.toEqual([
       'unknown',
       'read-only',
@@ -1215,5 +1218,95 @@ describe('consistency: isShellCommandReadOnly (regex) vs isShellCommandReadOnlyA
         false,
       );
     });
+  });
+});
+
+// =========================================================================
+// Git config execution probe (issue #8575) — read-only git sub-commands
+// must be downgraded when the repo-local config executes programs.
+// =========================================================================
+
+describe('git config execution probe (#8575)', () => {
+  let root: string;
+  let cleanRepo: string;
+  let dirtyRepo: string;
+
+  beforeAll(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'shell-ast-git-config-'));
+
+    cleanRepo = path.join(root, 'clean');
+    fs.mkdirSync(path.join(cleanRepo, '.git'), { recursive: true });
+    fs.writeFileSync(
+      path.join(cleanRepo, '.git', 'config'),
+      '[core]\n\tbare = false\n[remote "origin"]\n\turl = https://example.com/repo.git\n',
+    );
+
+    dirtyRepo = path.join(root, 'dirty');
+    fs.mkdirSync(path.join(dirtyRepo, '.git'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dirtyRepo, '.git', 'config'),
+      '[diff]\n\texternal = /tmp/evil\n',
+    );
+  });
+
+  afterAll(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it.each(['git diff', 'git status', 'git log -p', 'git show HEAD'])(
+    'downgrades %s when repo config executes programs',
+    async (command) => {
+      expect(await isShellCommandReadOnlyAST(command, { cwd: dirtyRepo })).toBe(
+        false,
+      );
+      expect(
+        await classifyShellCommandSafety(command, { cwd: dirtyRepo }),
+      ).toBe('unknown');
+      // Same command stays read-only in a clean repo.
+      expect(await isShellCommandReadOnlyAST(command, { cwd: cleanRepo })).toBe(
+        true,
+      );
+    },
+  );
+
+  it('downgrades compound commands touching a dirty repo cwd', async () => {
+    expect(
+      await isShellCommandReadOnlyAST('git status && git diff', {
+        cwd: dirtyRepo,
+      }),
+    ).toBe(false);
+  });
+
+  it('keeps git commands that never consult repo config execution keys', async () => {
+    for (const command of ['git', 'git --version', 'git --help']) {
+      expect(await isShellCommandReadOnlyAST(command, { cwd: dirtyRepo })).toBe(
+        true,
+      );
+    }
+  });
+
+  it('does not affect non-git commands', async () => {
+    expect(await isShellCommandReadOnlyAST('ls -la', { cwd: dirtyRepo })).toBe(
+      true,
+    );
+  });
+
+  it('keeps text-side helper detection intact under a dirty cwd', async () => {
+    // --ext-diff is already non-read-only regardless of config.
+    expect(
+      await isShellCommandReadOnlyAST('git diff --ext-diff', {
+        cwd: cleanRepo,
+      }),
+    ).toBe(false);
+  });
+
+  it('is backward compatible without cwd', async () => {
+    expect(await isShellCommandReadOnlyAST('git diff')).toBe(true);
+  });
+
+  it('keeps git read-only when cwd is not inside a repository', async () => {
+    expect(await isShellCommandReadOnlyAST('git diff', { cwd: root })).toBe(
+      true,
+    );
   });
 });

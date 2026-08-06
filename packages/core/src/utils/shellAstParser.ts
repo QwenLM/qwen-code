@@ -25,6 +25,10 @@ import {
   classifySedCommandSafety,
   hasShellPatternExpansion,
 } from './shell-safety-rules.js';
+import {
+  gitConfigMayExecutePrograms,
+  type ShellReadOnlyCheckOptions,
+} from './git-config-safety.js';
 
 export type ShellCommandSafety = 'read-only' | 'write' | 'unknown';
 type Safety = ShellCommandSafety;
@@ -958,7 +962,10 @@ function processSafety(root: string, args: string[]): Safety {
   return 'write';
 }
 
-function evaluateSubstitutions(node: SyntaxNode): ShellCommandSafety {
+function evaluateSubstitutions(
+  node: SyntaxNode,
+  checkOptions?: ShellReadOnlyCheckOptions,
+): ShellCommandSafety {
   const substitutions = collectDescendants(
     node,
     new Set(['command_substitution', 'process_substitution']),
@@ -969,11 +976,14 @@ function evaluateSubstitutions(node: SyntaxNode): ShellCommandSafety {
     'unknown',
     ...substitutions
       .flatMap((substitution) => substitution.namedChildren)
-      .map(evaluateStatementSafety),
+      .map((child) => evaluateStatementSafety(child, checkOptions)),
   );
 }
 
-function evaluateCommandSafety(commandNode: SyntaxNode): ShellCommandSafety {
+function evaluateCommandSafety(
+  commandNode: SyntaxNode,
+  checkOptions?: ShellReadOnlyCheckOptions,
+): ShellCommandSafety {
   const rawRoot = commandNode.childForFieldName('name')?.text;
   const root = getCommandName(commandNode);
   const argNodes = getArgumentNodes(commandNode);
@@ -985,8 +995,24 @@ function evaluateCommandSafety(commandNode: SyntaxNode): ShellCommandSafety {
     result = hasHelp(args) ? 'unknown' : 'write';
   } else if (/^(kill|killall|pkill)$/.test(root)) {
     result = processSafety(root, args);
-  } else if (root === 'git') result = evaluateGitSafety(args);
-  else if (root === 'find') result = evaluateFindSafety(args);
+  } else if (root === 'git') {
+    result = evaluateGitSafety(args);
+    // Whitelisted read-only sub-commands can still execute programs
+    // configured in the repository-local `.git/config` (diff.external,
+    // core.fsmonitor, pagers, credential/ssh helpers). Require confirmation
+    // when such keys are present. Bare `git`, `git --version` and
+    // `git --help` are left as-is: they do not run repo-config programs.
+    // See issue #8575.
+    if (
+      result === 'read-only' &&
+      args.length > 0 &&
+      !args[0]!.startsWith('-') &&
+      checkOptions?.cwd &&
+      gitConfigMayExecutePrograms(checkOptions.cwd)
+    ) {
+      result = 'unknown';
+    }
+  } else if (root === 'find') result = evaluateFindSafety(args);
   else if (root === 'sed') result = evaluateSedSafety(args);
   else if (root === 'awk') result = evaluateAwkSafety(args);
   else if (root === 'sort' || root === 'tree') {
@@ -1046,7 +1072,7 @@ function evaluateCommandSafety(commandNode: SyntaxNode): ShellCommandSafety {
     evaluateRedirectionSafety(commandNode),
     ...commandNode.namedChildren
       .filter((child) => !child.type.endsWith('_redirect'))
-      .map(evaluateSubstitutions),
+      .map((child) => evaluateSubstitutions(child, checkOptions)),
   );
 }
 
@@ -1075,44 +1101,65 @@ function evaluateRedirectionSafety(node: SyntaxNode): ShellCommandSafety {
   return result;
 }
 
-function childrenSafety(node: SyntaxNode, floor: Safety = 'read-only'): Safety {
-  return mergeSafety(floor, ...node.namedChildren.map(evaluateStatementSafety));
+function childrenSafety(
+  node: SyntaxNode,
+  floor: Safety = 'read-only',
+  checkOptions?: ShellReadOnlyCheckOptions,
+): Safety {
+  return mergeSafety(
+    floor,
+    ...node.namedChildren.map((child) =>
+      evaluateStatementSafety(child, checkOptions),
+    ),
+  );
 }
 
-function evaluateStatementSafety(node: SyntaxNode): ShellCommandSafety {
-  if (node.type === 'command') return evaluateCommandSafety(node);
-  if (CHILD_STATEMENT.test(node.type)) return childrenSafety(node);
+function evaluateStatementSafety(
+  node: SyntaxNode,
+  checkOptions?: ShellReadOnlyCheckOptions,
+): ShellCommandSafety {
+  if (node.type === 'command') return evaluateCommandSafety(node, checkOptions);
+  if (CHILD_STATEMENT.test(node.type))
+    return childrenSafety(node, 'read-only', checkOptions);
   if (node.type === 'redirected_statement')
     return mergeSafety(
       ...node.namedChildren
         .filter((child) => !child.type.endsWith('_redirect'))
-        .map((child) => evaluateStatementSafety(child)),
+        .map((child) => evaluateStatementSafety(child, checkOptions)),
       evaluateRedirectionSafety(node),
     );
   if (/^variable_assignments?$/.test(node.type))
     return mergeSafety(
       node.parent?.namedChildCount === 1 ? 'read-only' : 'unknown',
-      evaluateSubstitutions(node),
+      evaluateSubstitutions(node, checkOptions),
     );
   if (node.type === 'function_definition') return 'unknown';
-  return childrenSafety(node, 'unknown');
+  return childrenSafety(node, 'unknown', checkOptions);
 }
 
-async function classifyInternal(command: string): Promise<Safety> {
+async function classifyInternal(
+  command: string,
+  checkOptions?: ShellReadOnlyCheckOptions,
+): Promise<Safety> {
   const tree = await parseShellCommand(command);
   try {
     const root = tree.rootNode;
     if (root.namedChildCount === 0 || root.hasError) return 'unknown';
-    return mergeSafety(...root.namedChildren.map(evaluateStatementSafety));
+    return mergeSafety(
+      ...root.namedChildren.map((child) =>
+        evaluateStatementSafety(child, checkOptions),
+      ),
+    );
   } finally {
     tree.delete();
   }
 }
 export async function classifyShellCommandSafety(
   command: string,
+  checkOptions?: ShellReadOnlyCheckOptions,
 ): Promise<ShellCommandSafety> {
   if (typeof command !== 'string' || !command.trim()) return 'unknown';
-  return classifyInternal(command).catch(() => 'unknown');
+  return classifyInternal(command, checkOptions).catch(() => 'unknown');
 }
 
 /**
@@ -1126,10 +1173,13 @@ export async function classifyShellCommandSafety(
  *   - Sub-shells, heredocs, etc.
  *
  * @param command - The shell command string to evaluate.
+ * @param checkOptions - Optional `cwd` so git commands can be downgraded when
+ *   the repository-local config contains program-executing keys (#8575).
  * @returns `true` if the command only performs read-only operations.
  */
 export async function isShellCommandReadOnlyAST(
   command: string,
+  checkOptions?: ShellReadOnlyCheckOptions,
 ): Promise<boolean> {
   if (typeof command !== 'string' || !command.trim()) return false;
 
@@ -1137,15 +1187,15 @@ export async function isShellCommandReadOnlyAST(
   // after a symlinked install), fall back to the regex-based checker so the
   // agent remains functional instead of hanging or crashing.
   if (parserInitFailed) {
-    return isShellCommandReadOnly(command);
+    return isShellCommandReadOnly(command, checkOptions);
   }
 
   try {
-    return (await classifyInternal(command)) === 'read-only';
+    return (await classifyInternal(command, checkOptions)) === 'read-only';
   } catch {
     // Unexpected runtime failure (e.g. WASM init error on first call) –
     // fall back to the regex-based checker rather than propagating the error.
-    return isShellCommandReadOnly(command);
+    return isShellCommandReadOnly(command, checkOptions);
   }
 }
 

@@ -252,6 +252,7 @@ async function evaluateScopedDecision(
       }
       const isReadOnly = await isShellCommandReadOnlyAST(
         stripShellWrapper(ctx.command),
+        ctx.cwd ? { cwd: ctx.cwd } : undefined,
       );
       return isReadOnly ? 'allow' : 'deny';
     }

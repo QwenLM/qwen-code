@@ -21,6 +21,10 @@ import {
   classifySedCommandSafety,
   hasShellBraceExpansion,
 } from './shell-safety-rules.js';
+import {
+  gitConfigMayExecutePrograms,
+  type ShellReadOnlyCheckOptions,
+} from './git-config-safety.js';
 
 const READ_ONLY_ROOT_COMMANDS = new Set([
   'awk',
@@ -214,7 +218,10 @@ function evaluateGitBranchArgs(args: string[]): boolean {
   return args.length === 0 || (args.length === 1 && args[0] === '--list');
 }
 
-function evaluateGitCommand(tokens: string[]): boolean {
+function evaluateGitCommand(
+  tokens: string[],
+  checkOptions?: ShellReadOnlyCheckOptions,
+): boolean {
   let index = 1;
   while (index < tokens.length && tokens[index]!.startsWith('-')) {
     const flag = tokens[index++]!.toLowerCase();
@@ -242,21 +249,31 @@ function evaluateGitCommand(tokens: string[]): boolean {
     return false;
   if (options.some((arg) => /^(?:--help|--version)$/i.test(arg))) return false;
 
+  let allowed: boolean;
   if (subcommand === 'remote') {
-    return evaluateGitRemoteArgs(args);
+    allowed = evaluateGitRemoteArgs(args);
+  } else if (subcommand === 'branch') {
+    allowed = evaluateGitBranchArgs(args);
+  } else if (['blame', 'diff', 'log', 'show'].includes(subcommand)) {
+    allowed = !options.some((arg) => /^--output(?:=|$)/.test(arg));
+  } else {
+    allowed = true;
   }
 
-  if (subcommand === 'branch') {
-    return evaluateGitBranchArgs(args);
-  }
-
-  if (['blame', 'diff', 'log', 'show'].includes(subcommand)) {
-    return !options.some((arg) => /^--output(?:=|$)/.test(arg));
-  }
-  return true;
+  // A whitelisted sub-command can still execute programs configured in the
+  // repository-local `.git/config` (diff.external, core.fsmonitor, pagers,
+  // credential/ssh helpers). Require confirmation when such keys are
+  // present. See issue #8575.
+  return (
+    allowed &&
+    !(checkOptions?.cwd && gitConfigMayExecutePrograms(checkOptions.cwd))
+  );
 }
 
-function evaluateShellSegment(segment: string): boolean {
+function evaluateShellSegment(
+  segment: string,
+  checkOptions?: ShellReadOnlyCheckOptions,
+): boolean {
   if (!segment.trim()) {
     return true;
   }
@@ -324,7 +341,7 @@ function evaluateShellSegment(segment: string): boolean {
   }
 
   if (normalizedRoot === 'git') {
-    return evaluateGitCommand([normalizedRoot, ...args]);
+    return evaluateGitCommand([normalizedRoot, ...args], checkOptions);
   }
 
   return true;
@@ -334,8 +351,15 @@ function evaluateShellSegment(segment: string): boolean {
  * @deprecated Use `isShellCommandReadOnlyAST` from `./shellAstParser.js` instead.
  * This function uses regex + shell-quote for command parsing with known edge-case
  * limitations. The AST-based replacement provides accurate parsing via tree-sitter-bash.
+ *
+ * @param command - The shell command string to evaluate.
+ * @param checkOptions - Optional `cwd` so git commands can be downgraded when
+ *   the repository-local config contains program-executing keys (#8575).
  */
-export function isShellCommandReadOnly(command: string): boolean {
+export function isShellCommandReadOnly(
+  command: string,
+  checkOptions?: ShellReadOnlyCheckOptions,
+): boolean {
   if (typeof command !== 'string' || !command.trim()) {
     return false;
   }
@@ -349,7 +373,7 @@ export function isShellCommandReadOnly(command: string): boolean {
   const segments = splitCommands(command);
 
   for (const segment of segments) {
-    if (!evaluateShellSegment(segment)) {
+    if (!evaluateShellSegment(segment, checkOptions)) {
       return false;
     }
   }

@@ -35,6 +35,10 @@ vi.mock('../utils/debugLogger.js', () => ({
 vi.mock('fs');
 vi.mock('os');
 vi.mock('crypto');
+const mockGitConfigMayExecutePrograms = vi.hoisted(() => vi.fn(() => false));
+vi.mock('../utils/git-config-safety.js', () => ({
+  gitConfigMayExecutePrograms: mockGitConfigMayExecutePrograms,
+}));
 
 import { isCommandAllowed } from '../utils/shell-utils.js';
 import {
@@ -6866,6 +6870,32 @@ describe('ShellTool', () => {
       const permission = await invocation.getDefaultPermission();
 
       expect(permission).toBe('allow');
+    });
+
+    // Regression coverage for issue #8575: whitelisted read-only git
+    // sub-commands execute programs configured in the repository-local
+    // `.git/config` (diff.external, core.fsmonitor, pagers, credential/ssh
+    // helpers). When such keys are present the command must be confirmed
+    // instead of auto-approved.
+    it('asks for read-only git commands when repo config executes programs (#8575)', async () => {
+      mockGitConfigMayExecutePrograms.mockReturnValue(true);
+      const invocation = shellTool.build({
+        command: 'git status',
+        is_background: false,
+      });
+
+      expect(await invocation.getDefaultPermission()).toBe('ask');
+      expect(mockGitConfigMayExecutePrograms).toHaveBeenCalledWith('/test/dir');
+    });
+
+    it('still allows read-only git commands when repo config is clean', async () => {
+      mockGitConfigMayExecutePrograms.mockReturnValue(false);
+      const invocation = shellTool.build({
+        command: 'git status',
+        is_background: false,
+      });
+
+      expect(await invocation.getDefaultPermission()).toBe('allow');
     });
 
     // Regression coverage for PR #4386 round 6 (cid 3298521039): the

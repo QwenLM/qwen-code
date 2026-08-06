@@ -2039,7 +2039,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
     // AST-based read-only detection
     try {
-      const isReadOnly = await isShellCommandReadOnlyAST(command);
+      const cwd = this.params.directory || this.config.getTargetDir();
+      const isReadOnly = await isShellCommandReadOnlyAST(command, { cwd });
       if (isReadOnly) {
         return 'allow';
       }
@@ -2113,7 +2114,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     for (const sub of subCommands) {
       let isReadOnly = false;
       try {
-        isReadOnly = await isShellCommandReadOnlyAST(sub);
+        isReadOnly = await isShellCommandReadOnlyAST(sub, { cwd });
       } catch {
         // conservative: treat unknown commands as requiring confirmation
       }

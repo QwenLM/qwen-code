@@ -188,7 +188,8 @@ class MonitorToolInvocation extends BaseToolInvocation<
     // Bash(...) — see comment in getConfirmationDetails); only the
     // substitution-deny half is removed.
     try {
-      const isReadOnly = await isShellCommandReadOnlyAST(command);
+      const cwd = this.params.directory || this.config.getTargetDir();
+      const isReadOnly = await isShellCommandReadOnlyAST(command, { cwd });
       if (isReadOnly) {
         return 'allow';
       }
@@ -203,6 +204,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
     _abortSignal: AbortSignal,
   ): Promise<ToolCallConfirmationDetails> {
     const normalized = normalizeMonitorShellCommand(this.params.command);
+    const cwd = this.params.directory || this.config.getTargetDir();
     const subCommands = splitCommands(normalized.safetyCommand);
     const confirmableSubCommands: string[] = [];
 
@@ -216,7 +218,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
       // permission boundary.
       let isReadOnly = false;
       try {
-        isReadOnly = await isShellCommandReadOnlyAST(sub);
+        isReadOnly = await isShellCommandReadOnlyAST(sub, { cwd });
       } catch (e) {
         // Conservative fallback: if AST analysis fails, keep the sub-command
         // in the confirmation scope instead of accidentally dropping it.
