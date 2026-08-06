@@ -15,9 +15,11 @@ import {
   createAgentViewPtyHostServer,
   connectAgentViewPtyHostProcess,
   getAgentViewPtyHostSocketPath,
+  INTERNAL_AGENT_VIEW_PTY_HOST_ARG,
   launchAgentViewPtyHostProcess,
 } from './pty-host-process.js';
 import { BoundedOutputRing, type AgentViewPtyHostHandle } from './pty-host.js';
+import { getAgentViewSessionPaths } from './supervisor-store.js';
 
 const socketDirs = new Set<string>();
 
@@ -586,6 +588,42 @@ describe('Agent View PTY host process server', () => {
 
     await expect(launched).rejects.toThrow('spawn failed');
     expect(child.killedWith).toBe('SIGKILL');
+  });
+
+  it('passes the launch file, socket path, and token to spawned PTY hosts', async () => {
+    const globalDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pty-spawn-'),
+    );
+    const launch = createLaunch('session-spawn-contract');
+    const socketPath = getAgentViewPtyHostSocketPath(launch.sessionId, {
+      globalDir,
+    });
+    socketDirs.add(path.dirname(socketPath));
+    const server = await createStatusServer(socketPath);
+    const child = fakeChildProcess(2468);
+    const spawnProcess = vi.fn(() => child);
+    try {
+      await launchAgentViewPtyHostProcess(launch, {
+        globalDir,
+        spawnProcess,
+      });
+
+      expect(spawnProcess).toHaveBeenCalledWith(
+        [
+          INTERNAL_AGENT_VIEW_PTY_HOST_ARG,
+          getAgentViewSessionPaths(launch.sessionId, { globalDir }).launchPath,
+          socketPath,
+        ],
+        expect.objectContaining({
+          QWEN_AGENT_VIEW_PTY_HOST_TOKEN: expect.stringMatching(
+            /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+          ),
+        }),
+      );
+    } finally {
+      server.close();
+      await fs.rm(globalDir, { recursive: true, force: true });
+    }
   });
 
   it('asks a spawned host to shut down when the handle is disposed', async () => {
