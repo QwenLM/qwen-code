@@ -73,3 +73,16 @@ dynamic `qwen serve` workspace runtimes disable read delegation. The WFS
 adapter keeps its read implementation so an unexpected or
 capability-violating delegated read still reaches the workspace boundary and
 fails closed for external paths.
+
+That "fails closed" is bounded, not absolute. `AcpFileSystemService` has a
+second, pre-existing bypass: when a delegated read is refused with
+`path_outside_workspace` or `symlink_escape`, it retries the read locally if
+the path's realpath sits under one of its managed read roots. Those roots
+include `/tmp` unconditionally on POSIX, plus anything named by
+`QWEN_ACP_LOCAL_READ_ROOTS`. So the boundary is fail-closed only for paths
+outside those roots. The daemon neutralizes the env-supplied half by setting
+`QWEN_ACP_LOCAL_READ_ROOTS` empty for the child.
+
+With the capability off, that retry path is unreachable in the daemon anyway —
+the capability check returns before the delegated call is attempted — so it
+now guards only generic ACP hosts that keep delegation enabled.

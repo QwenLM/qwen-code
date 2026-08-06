@@ -1394,6 +1394,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   let liveTaskToolRequestHandler: LiveTaskToolRequestHandler | undefined;
   let liveSpeakToUserHandler: LiveSpeakToUserHandler | undefined;
   const defaultSessionScope = opts.sessionScope ?? 'single';
+  // Resolved once beside the other option defaults: this default is
+  // load-bearing for every non-daemon consumer, and reading `?? true` inline
+  // would let a second `initialize` site drift away from it.
+  const delegateReadTextFileToClient =
+    opts.delegateReadTextFileToClient ?? true;
   // `undefined` → default 32 (intentionally tight to avoid resource cliffs).
   // `0` → explicitly unlimited (operator opt-out).
   // `Infinity` → unlimited (programmatic opt-out — accepted as a
@@ -2543,7 +2548,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 },
                 clientCapabilities: {
                   fs: {
-                    readTextFile: opts.delegateReadTextFileToClient ?? true,
+                    readTextFile: delegateReadTextFileToClient,
                     writeTextFile: true,
                   },
                 },

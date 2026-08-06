@@ -382,8 +382,8 @@ export interface BridgeOptions {
   delegateReadTextFileToClient?: boolean;
 
   /**
-   * Optional fs injection seam. When provided, enabled
-   * `BridgeClient.readTextFile` and `BridgeClient.writeTextFile` callbacks
+   * Optional fs injection seam. When provided, the enabled
+   * `BridgeClient.readTextFile` / `BridgeClient.writeTextFile` callbacks
    * delegate ACP fs calls to this implementation instead of using
    * BridgeClient's inline `fs.realpath` / `fs.writeFile` / `fs.readFile`
    * proxy.

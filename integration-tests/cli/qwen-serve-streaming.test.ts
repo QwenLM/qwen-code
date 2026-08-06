@@ -61,7 +61,6 @@ const CLI_BIN =
   process.env['TEST_CLI_PATH'] ??
   path.resolve(__dirname, '../../packages/cli/dist/index.js');
 const TOKEN = 'streaming-integ-secret';
-const REPO_ROOT = path.resolve(__dirname, '../..');
 
 // Windows: this suite shells out to `pgrep` / `kill -KILL` to simulate
 // child-process crashes for the SIGKILL → `session_died` test, and those
@@ -84,14 +83,19 @@ const SKIP =
   );
 const describePOSIX = SKIP ? describe.skip : describe;
 
-// Deliberately excludes the real `$HOME`: fixtures are created with
-// `mkdtempSync` and only removed in `afterAll`, so a Ctrl-C, `--bail`, or CI
-// timeout would leave a hidden directory behind in the developer's home on
-// every interrupted run. `/var/tmp` is outside both the workspace and the
-// `/tmp` local-read root, which is all this fixture base needs to be.
+// The base only has to sit outside both the workspace and the `/tmp` local-read
+// root, so the test reads a genuinely external path. The real `$HOME` is
+// excluded deliberately: cleanup lives in `afterAll`, so a Ctrl-C, `--bail`, or
+// CI timeout leaks the fixture dir. `/var/tmp` leaks the same way — the leak is
+// relocated somewhere harmless, not eliminated.
 function findExternalReadBase(): string | undefined {
   if (SKIP) return undefined;
-  for (const candidate of ['/var/tmp']) {
+  const candidates = [
+    // Escape hatch for images where /var/tmp is absent or read-only.
+    process.env['QWEN_TEST_EXTERNAL_READ_BASE'],
+    '/var/tmp',
+  ].filter((value): value is string => Boolean(value));
+  for (const candidate of candidates) {
     try {
       const resolved = realpathSync(candidate);
       accessSync(resolved, constants.W_OK);
@@ -105,6 +109,17 @@ function findExternalReadBase(): string | undefined {
       // Try the next candidate.
     }
   }
+  // Skipping is acceptable on a developer box, but on CI a silently disabled
+  // security regression test is indistinguishable from a passing one. Fail
+  // loudly instead and let the operator point QWEN_TEST_EXTERNAL_READ_BASE at
+  // a writable directory outside both the workspace and the /tmp read root.
+  if (process.env['CI']) {
+    throw new Error(
+      `No usable external-read fixture base (tried: ${candidates.join(', ')}). ` +
+        'Set QWEN_TEST_EXTERNAL_READ_BASE to a writable directory outside the ' +
+        'repo and outside /tmp.',
+    );
+  }
   return undefined;
 }
 
@@ -117,6 +132,7 @@ let client: DaemonClient;
 let fakeServer: FakeOpenAIServer;
 let homeDir = '';
 let externalReadDir = '';
+let workspaceDir = '';
 let pendingWritePath = '';
 let pendingReadPath = '';
 let pendingReadMarker = '';
@@ -209,6 +225,7 @@ beforeAll(async () => {
       ui: { enableFollowupSuggestions: false },
     }),
   );
+  workspaceDir = mkdtempSync(path.join(tmpdir(), 'qwen-serve-streaming-ws-'));
   daemon = spawn(
     process.execPath,
     [
@@ -221,16 +238,19 @@ beforeAll(async () => {
       '--hostname',
       '127.0.0.1',
       // Per #3803 §02 (1 daemon = 1 workspace), pin the bound
-      // workspace so every `createOrAttachSession({ workspaceCwd:
-      // REPO_ROOT })` below matches. Without this the daemon inherits
-      // the test runner's cwd (CI / IDE-launcher / direct vitest
-      // invocations all differ) and every session create returns
-      // 400 workspace_mismatch — the SSE / permission / Last-Event-ID
-      // tests below would all silently 404. Same fix the sibling routes test
-      // received earlier in this PR — missed in this file in the original §02
-      // pass.
+      // workspace so every `createOrAttachSession({ workspaceCwd })`
+      // below matches. Without this the daemon inherits the test
+      // runner's cwd (CI / IDE-launcher / direct vitest invocations
+      // all differ) and every session create returns 400
+      // workspace_mismatch — the SSE / permission / Last-Event-ID
+      // tests below would all silently 404. A scratch workspace (not
+      // the checkout) also keeps sessions hermetic: the daemon merges
+      // the workspace's `.qwen/settings.json` into every session, and
+      // a stray one on a shared runner (e.g. a `tools.sandbox` mode or
+      // a `tools.core` allowlist missing `todo_write`) silently breaks
+      // the Stop Guard flow below.
       '--workspace',
-      REPO_ROOT,
+      workspaceDir,
     ],
     {
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -293,6 +313,9 @@ afterAll(async () => {
   if (externalReadDir) {
     rmSync(externalReadDir, { recursive: true, force: true });
   }
+  if (workspaceDir) {
+    rmSync(workspaceDir, { recursive: true, force: true });
+  }
 }, 15_000);
 
 /** Open an authenticated SSE stream and yield parsed frames. */
@@ -323,7 +346,7 @@ async function* sseFrames(
 describePOSIX('qwen serve — child-crash recovery (real SIGKILL)', () => {
   it('publishes session_died after the qwen --acp child is SIGKILL-ed', async () => {
     const session = await client.createOrAttachSession({
-      workspaceCwd: REPO_ROOT,
+      workspaceCwd: workspaceDir,
     });
 
     // Find the daemon's direct `--acp` child PID.
@@ -377,7 +400,7 @@ describePOSIX('qwen serve — child-crash recovery (real SIGKILL)', () => {
     );
 
     // Listing must NOT show the dead session.
-    const remaining = await client.listWorkspaceSessions(REPO_ROOT);
+    const remaining = await client.listWorkspaceSessions(workspaceDir);
     // Explicit `s` type for resilience against a stale dist .d.ts
     // in the reviewer's tsc env (see same note in routes.test.ts).
     expect(
@@ -388,7 +411,7 @@ describePOSIX('qwen serve — child-crash recovery (real SIGKILL)', () => {
 
     // Retry must spawn fresh, not reuse the corpse.
     const fresh = await client.createOrAttachSession({
-      workspaceCwd: REPO_ROOT,
+      workspaceCwd: workspaceDir,
     });
     expect(fresh.sessionId).not.toBe(session.sessionId);
     expect(fresh.attached).toBe(false);
@@ -398,7 +421,7 @@ describePOSIX('qwen serve — child-crash recovery (real SIGKILL)', () => {
 describePOSIX('qwen serve — multi-client first-responder permission', () => {
   it('fans out permission_request to both subscribers; only one vote wins', async () => {
     const session = await client.createOrAttachSession({
-      workspaceCwd: REPO_ROOT,
+      workspaceCwd: workspaceDir,
     });
 
     // Pin the session to `default` approval mode. The ACP child
@@ -679,7 +702,7 @@ describePOSIX('qwen serve — same-host external text reads', () => {
 describePOSIX('qwen serve — Last-Event-ID resume', () => {
   it('reconnect with Last-Event-ID:N yields events with id > N', async () => {
     const session = await client.createOrAttachSession({
-      workspaceCwd: REPO_ROOT,
+      workspaceCwd: workspaceDir,
     });
 
     // Fire a short prompt to populate the bus.
@@ -725,7 +748,7 @@ describePOSIX('qwen serve — Last-Event-ID resume', () => {
 describePOSIX('qwen serve — daemon Todo Stop Guard replay', () => {
   it('continues after prompt admission without an SSE client and replays the bounded attempts', async () => {
     const session = await client.createOrAttachSession({
-      workspaceCwd: REPO_ROOT,
+      workspaceCwd: workspaceDir,
     });
     const requestStart = fakeServer.requests.length;
     const guardMarker = `todo-guard-e2e-${requestStart}`;

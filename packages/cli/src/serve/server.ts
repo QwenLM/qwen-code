@@ -1569,7 +1569,9 @@ export function createServeApp(
   // API calls still carry the bearer (getDaemonAuthHeaders) and every API
   // route below stays token-gated. The SPA deep-link fallback is registered
   // LATER (after all API routes, see mountWebShellSpaFallback) so authed
-  // routes win over the shell. The assets dir is resolved by the caller
+  // routes win over the shell. Exact `/session/:id` document navigations are
+  // mounted here too because a browser refresh cannot attach the bearer header
+  // before the shell loads. The assets dir is resolved by the caller
   // (runQwenServe) and injected via deps.webShellDir; `--no-web` sets
   // opts.serveWebShell=false to opt out.
   const webShellDir =
