@@ -27,8 +27,19 @@ export interface EmptyMobileComposerLayout {
   messageListTop: number;
   welcomeFooterBottom: number | null;
   welcomeFooterTop: number | null;
+  welcomeGroupClientHeight: number | null;
+  welcomeGroupOverflowY: string | null;
+  welcomeGroupScrollHeight: number | null;
+  welcomeGroupScrollTop: number | null;
+  welcomeGroupTop: number | null;
   welcomeHeaderBottom: number;
   welcomeHeaderTop: number;
+}
+
+export interface EmptyChatViewState {
+  ariaHidden: string | null;
+  className: string;
+  display: string;
 }
 
 export interface EmptyMobileComposerLayoutOptions {
@@ -78,16 +89,12 @@ export async function emptyMobileComposerLayout(
       const dotField = chatPane.querySelector<HTMLElement>(
         '[data-web-shell-new-session-dot-field]',
       );
-      if (
-        !composer ||
-        !messageList ||
-        !welcomeHeader ||
-        !dotField ||
-        (requireWelcomeFooter && !welcomeFooter)
-      ) {
-        throw new Error(
-          'Expected the empty mobile welcome layout to be rendered.',
-        );
+      if (!composer) throw new Error('Expected the composer surface.');
+      if (!messageList) throw new Error('Expected the message list.');
+      if (!welcomeHeader) throw new Error('Expected the welcome header.');
+      if (!dotField) throw new Error('Expected the new-session dot field.');
+      if (requireWelcomeFooter && !welcomeFooter) {
+        throw new Error('Expected a visible welcome footer.');
       }
 
       const chatView = Array.from(chatPane.children).find((child) =>
@@ -121,6 +128,18 @@ export async function emptyMobileComposerLayout(
       const footerStyle = getComputedStyle(footer);
       const messageListRect = messageList.getBoundingClientRect();
       const welcomeFooterRect = welcomeFooter?.getBoundingClientRect();
+      let welcomeGroup: HTMLElement | null = null;
+      for (
+        let ancestor = welcomeFooter?.parentElement;
+        ancestor && ancestor !== chatView;
+        ancestor = ancestor.parentElement
+      ) {
+        if (ancestor.contains(welcomeHeader)) {
+          welcomeGroup = ancestor;
+          break;
+        }
+      }
+      const welcomeGroupRect = welcomeGroup?.getBoundingClientRect();
 
       return {
         chatPaneBottom: chatPaneRect.bottom,
@@ -149,10 +168,65 @@ export async function emptyMobileComposerLayout(
         messageListTop: messageListRect.top,
         welcomeFooterBottom: welcomeFooterRect?.bottom ?? null,
         welcomeFooterTop: welcomeFooterRect?.top ?? null,
+        welcomeGroupClientHeight: welcomeGroup?.clientHeight ?? null,
+        welcomeGroupOverflowY: welcomeGroup
+          ? getComputedStyle(welcomeGroup).overflowY
+          : null,
+        welcomeGroupScrollHeight: welcomeGroup?.scrollHeight ?? null,
+        welcomeGroupScrollTop: welcomeGroup?.scrollTop ?? null,
+        welcomeGroupTop: welcomeGroupRect?.top ?? null,
         welcomeHeaderBottom: welcomeHeader.getBoundingClientRect().bottom,
         welcomeHeaderTop: welcomeHeader.getBoundingClientRect().top,
       };
     }, options.requireWelcomeFooter !== false);
+}
+
+export async function emptyChatViewState(
+  page: Page,
+): Promise<EmptyChatViewState> {
+  return page.getByTestId('chat-pane-container').evaluate((chatPane) => {
+    const composer = chatPane.querySelector(
+      '[data-web-shell-composer-surface]',
+    );
+    if (!composer) throw new Error('Expected the composer surface.');
+    const chatView = Array.from(chatPane.children).find((child) =>
+      child.contains(composer),
+    );
+    if (!chatView) throw new Error('Expected the composer chat view.');
+    return {
+      ariaHidden: chatView.getAttribute('aria-hidden'),
+      className: chatView.className,
+      display: getComputedStyle(chatView).display,
+    };
+  });
+}
+
+export async function scrollEmptyMobileWelcomeGroup(
+  page: Page,
+  scrollTop: number,
+): Promise<void> {
+  await page
+    .locator('[data-e2e-mobile-welcome-footer]:visible')
+    .evaluate((welcomeFooter, nextScrollTop) => {
+      const welcomeHeader = document.querySelector(
+        '[data-e2e-mobile-welcome-header]',
+      );
+      if (!welcomeHeader) throw new Error('Expected the welcome header.');
+
+      let welcomeGroup: HTMLElement | null = null;
+      for (
+        let ancestor = welcomeFooter.parentElement;
+        ancestor;
+        ancestor = ancestor.parentElement
+      ) {
+        if (ancestor.contains(welcomeHeader)) {
+          welcomeGroup = ancestor;
+          break;
+        }
+      }
+      if (!welcomeGroup) throw new Error('Expected the mobile welcome group.');
+      welcomeGroup.scrollTop = nextScrollTop;
+    }, scrollTop);
 }
 
 export function expectEmptyMobileComposerAnchored(

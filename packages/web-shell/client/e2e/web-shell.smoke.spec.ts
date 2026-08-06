@@ -18,9 +18,11 @@ import {
   type WebShellDaemonScenario,
 } from './utils/mockDaemon';
 import {
+  emptyChatViewState,
   emptyMobileComposerLayout,
   expectEmptyMobileComposerAnchored,
   gotoEmptyMobileWelcomeHarness,
+  scrollEmptyMobileWelcomeGroup,
 } from './utils/emptyMobileComposer';
 
 const COMPOSER_VIEWPORT_HEIGHTS = [1000, 800, 600] as const;
@@ -608,6 +610,64 @@ test('keeps tall footerless welcome content top-reachable in a short pane @smoke
     .toBeGreaterThanOrEqual(-1);
 });
 
+test('keeps tall welcome content top-reachable above the footer in a short pane @smoke', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 760, height: 320 });
+  const scenario = createWebShellDaemonScenario();
+  await installScenario(page, scenario, testInfo);
+
+  await gotoEmptyMobileWelcomeHarness(page, { tallWelcome: true });
+  const layout = await emptyMobileComposerLayout(page);
+  // The tall welcome footer starts below the scroll viewport, so keep the
+  // pane/composer anchoring checks without the non-overflow footer fit check.
+  expectEmptyMobileComposerAnchored(layout, {
+    expectCenteredWelcome: false,
+    requireWelcomeFooter: false,
+  });
+  if (
+    layout.welcomeGroupClientHeight === null ||
+    layout.welcomeGroupScrollHeight === null
+  ) {
+    throw new Error('Expected the mobile welcome group.');
+  }
+  expect(layout.welcomeGroupScrollHeight).toBeGreaterThan(
+    layout.welcomeGroupClientHeight,
+  );
+  expect(layout.welcomeGroupOverflowY).toBe('auto');
+
+  await scrollEmptyMobileWelcomeGroup(page, layout.welcomeGroupScrollHeight);
+  await expect
+    .poll(async () => {
+      const scrolledLayout = await emptyMobileComposerLayout(page);
+      if (scrolledLayout.welcomeGroupScrollTop === null) {
+        throw new Error('Expected the mobile welcome group.');
+      }
+      return scrolledLayout.welcomeGroupScrollTop;
+    })
+    .toBeGreaterThan(0);
+
+  await scrollEmptyMobileWelcomeGroup(page, 0);
+  await expect
+    .poll(async () => {
+      const topLayout = await emptyMobileComposerLayout(page);
+      if (topLayout.welcomeGroupScrollTop === null) {
+        throw new Error('Expected the mobile welcome group.');
+      }
+      return topLayout.welcomeGroupScrollTop;
+    })
+    .toBe(0);
+  await expect
+    .poll(async () => {
+      const topLayout = await emptyMobileComposerLayout(page);
+      if (topLayout.welcomeGroupTop === null) {
+        throw new Error('Expected the mobile welcome group.');
+      }
+      return topLayout.welcomeHeaderTop - topLayout.welcomeGroupTop;
+    })
+    .toBeGreaterThanOrEqual(-1);
+});
+
 test('keeps centered welcome content clear of the composer in short panes @smoke', async ({
   page,
 }, testInfo) => {
@@ -1066,28 +1126,6 @@ async function composerHeight(page: Page): Promise<number> {
     .boundingBox();
   if (!box) throw new Error('Expected the composer surface to be visible.');
   return box.height;
-}
-
-async function emptyChatViewState(page: Page): Promise<{
-  ariaHidden: string | null;
-  className: string;
-  display: string;
-}> {
-  return page.getByTestId('chat-pane-container').evaluate((chatPane) => {
-    const composer = chatPane.querySelector(
-      '[data-web-shell-composer-surface]',
-    );
-    if (!composer) throw new Error('Expected the composer surface.');
-    const chatView = Array.from(chatPane.children).find((child) =>
-      child.contains(composer),
-    );
-    if (!chatView) throw new Error('Expected the composer chat view.');
-    return {
-      ariaHidden: chatView.getAttribute('aria-hidden'),
-      className: chatView.className,
-      display: getComputedStyle(chatView).display,
-    };
-  });
 }
 
 async function submitLocalCommand(page: Page, text: string): Promise<void> {
