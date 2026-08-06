@@ -96,6 +96,7 @@ describe('languageCommand', () => {
         settings: {
           merged: {},
           setValue: vi.fn(),
+          setValues: vi.fn(),
         },
       },
     });
@@ -296,7 +297,7 @@ describe('languageCommand', () => {
       const result = await languageCommand.action(mockContext, 'ui en');
 
       expect(i18n.setLanguageAsync).toHaveBeenCalledWith('en');
-      expect(mockContext.services.settings.setValue).toHaveBeenCalled();
+      expect(mockContext.services.settings.setValues).toHaveBeenCalled();
       expect(mockContext.ui.reloadCommands).toHaveBeenCalled();
       expect(result).toEqual({
         type: 'message',
@@ -402,11 +403,13 @@ describe('languageCommand', () => {
 
       await languageCommand.action(mockContext, 'ui en');
 
-      expect(mockContext.services.settings.setValue).toHaveBeenCalledWith(
-        expect.anything(), // SettingScope.User
-        'general.language',
-        'en',
-      );
+      expect(mockContext.services.settings.setValues).toHaveBeenCalledWith([
+        {
+          scope: expect.anything(), // SettingScope.User
+          key: 'general.language',
+          value: 'en',
+        },
+      ]);
     });
 
     it('persists to user scope with --global', async () => {
@@ -417,11 +420,9 @@ describe('languageCommand', () => {
       await languageCommand.action(mockContext, 'ui en --global');
 
       expect(i18n.setLanguageAsync).toHaveBeenCalledWith('en');
-      expect(mockContext.services.settings.setValue).toHaveBeenCalledWith(
-        'user',
-        'general.language',
-        'en',
-      );
+      expect(mockContext.services.settings.setValues).toHaveBeenCalledWith([
+        { scope: 'user', key: 'general.language', value: 'en' },
+      ]);
     });
 
     it('persists to workspace scope with --project when trusted', async () => {
@@ -434,11 +435,9 @@ describe('languageCommand', () => {
       await languageCommand.action(mockContext, 'ui zh --project');
 
       expect(i18n.setLanguageAsync).toHaveBeenCalledWith('zh');
-      expect(mockContext.services.settings.setValue).toHaveBeenCalledWith(
-        'workspace',
-        'general.language',
-        'zh',
-      );
+      expect(mockContext.services.settings.setValues).toHaveBeenCalledWith([
+        { scope: 'workspace', key: 'general.language', value: 'zh' },
+      ]);
     });
 
     it('rejects --project in an untrusted workspace without persisting', async () => {
@@ -454,7 +453,7 @@ describe('languageCommand', () => {
       );
 
       expect(i18n.setLanguageAsync).not.toHaveBeenCalled();
-      expect(mockContext.services.settings.setValue).not.toHaveBeenCalled();
+      expect(mockContext.services.settings.setValues).not.toHaveBeenCalled();
       expect(result).toMatchObject({
         messageType: 'error',
         content: expect.stringContaining('untrusted'),
@@ -472,7 +471,7 @@ describe('languageCommand', () => {
       );
 
       expect(i18n.setLanguageAsync).not.toHaveBeenCalled();
-      expect(mockContext.services.settings.setValue).not.toHaveBeenCalled();
+      expect(mockContext.services.settings.setValues).not.toHaveBeenCalled();
       expect(result).toMatchObject({
         messageType: 'error',
         content: expect.stringContaining('Cannot use both'),
@@ -932,11 +931,9 @@ describe('languageCommand', () => {
       const result = await zhCNSubcommand.action(mockContext, '--global');
 
       expect(i18n.setLanguageAsync).toHaveBeenCalledWith('zh');
-      expect(mockContext.services.settings.setValue).toHaveBeenCalledWith(
-        'user',
-        'general.language',
-        'zh',
-      );
+      expect(mockContext.services.settings.setValues).toHaveBeenCalledWith([
+        { scope: 'user', key: 'general.language', value: 'zh' },
+      ]);
       expect(result).toEqual({
         type: 'message',
         messageType: 'info',
@@ -954,15 +951,35 @@ describe('languageCommand', () => {
       const result = await zhCNSubcommand.action(mockContext, '--project');
 
       expect(i18n.setLanguageAsync).toHaveBeenCalledWith('zh');
-      expect(mockContext.services.settings.setValue).toHaveBeenCalledWith(
-        'workspace',
-        'general.language',
-        'zh',
-      );
+      expect(mockContext.services.settings.setValues).toHaveBeenCalledWith([
+        { scope: 'workspace', key: 'general.language', value: 'zh' },
+      ]);
       expect(result).toEqual({
         type: 'message',
         messageType: 'info',
         content: expect.stringContaining('UI language changed'),
+      });
+    });
+
+    it('reports a workspace persistence failure without changing the language', async () => {
+      if (!zhCNSubcommand?.action) {
+        throw new Error('zh-CN subcommand must have an action.');
+      }
+      (mockContext.services.settings as { isTrusted?: boolean }).isTrusted =
+        true;
+      vi.mocked(mockContext.services.settings.setValues).mockImplementation(
+        () => {
+          throw new Error('EACCES');
+        },
+      );
+
+      const result = await zhCNSubcommand.action(mockContext, '--project');
+
+      expect(i18n.setLanguageAsync).not.toHaveBeenCalled();
+      expect(mockContext.ui.reloadCommands).not.toHaveBeenCalled();
+      expect(result).toMatchObject({
+        messageType: 'error',
+        content: expect.stringContaining('Failed to save'),
       });
     });
 
@@ -976,7 +993,7 @@ describe('languageCommand', () => {
       const result = await zhCNSubcommand.action(mockContext, '--project');
 
       expect(i18n.setLanguageAsync).not.toHaveBeenCalled();
-      expect(mockContext.services.settings.setValue).not.toHaveBeenCalled();
+      expect(mockContext.services.settings.setValues).not.toHaveBeenCalled();
       expect(result).toMatchObject({
         messageType: 'error',
         content: expect.stringContaining('untrusted'),
@@ -994,7 +1011,7 @@ describe('languageCommand', () => {
       );
 
       expect(i18n.setLanguageAsync).not.toHaveBeenCalled();
-      expect(mockContext.services.settings.setValue).not.toHaveBeenCalled();
+      expect(mockContext.services.settings.setValues).not.toHaveBeenCalled();
       expect(result).toMatchObject({
         messageType: 'error',
         content: expect.stringContaining('Cannot use both'),
@@ -1009,7 +1026,7 @@ describe('languageCommand', () => {
       const result = await zhCNSubcommand.action(mockContext, '--global extra');
 
       expect(i18n.setLanguageAsync).not.toHaveBeenCalled();
-      expect(mockContext.services.settings.setValue).not.toHaveBeenCalled();
+      expect(mockContext.services.settings.setValues).not.toHaveBeenCalled();
       expect(result).toEqual({
         type: 'message',
         messageType: 'error',

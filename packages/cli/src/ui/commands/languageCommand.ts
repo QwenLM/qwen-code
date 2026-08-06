@@ -149,15 +149,22 @@ async function setUiLanguage(
     };
   }
 
-  await setLanguageAsync(lang);
-
-  if (services.settings?.setValue) {
+  if (services.settings?.setValues) {
     try {
-      services.settings.setValue(scope, 'general.language', lang);
+      services.settings.setValues([
+        { scope, key: 'general.language', value: lang },
+      ]);
     } catch (error) {
       debugLogger.warn('Failed to save language setting:', error);
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t('Failed to save UI language setting.'),
+      };
     }
   }
+
+  await setLanguageAsync(lang);
 
   // Reload commands so `t()` lookups in their metadata re-resolve under the new language.
   context.ui.reloadCommands();
