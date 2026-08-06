@@ -110,6 +110,12 @@ export function createHealthDemoRoutes(
       let activeWork = false;
       let channelAlive = false;
       let lastActivity: number | null = null;
+      // Grades combine pessimistically across workspaces: one runtime that
+      // cannot vouch for its sessions makes the daemon-wide answer no better
+      // than partial, because `activeWork` is an OR over all of them.
+      let reportingFull = true;
+      let reportingAny = false;
+      let oldestReportAt: number | null = null;
 
       for (const runtime of runtimes) {
         failedWorkspaceId = runtime.workspaceId;
@@ -118,6 +124,8 @@ export function createHealthDemoRoutes(
         const runtimePendingPermissions = bridge.pendingPermissionCount;
         const runtimeActivePrompts = bridge.activePromptCount;
         const runtimeActiveWork = bridge.activeWork;
+        const runtimeReporting = bridge.activeWorkReporting;
+        const runtimeOldestReportAt = bridge.activeWorkOldestReportAt;
         const runtimeChannelAlive = bridge.isChannelLive();
         const runtimeLastActivity = bridge.lastActivityAt;
 
@@ -125,6 +133,14 @@ export function createHealthDemoRoutes(
         pendingPermissions += runtimePendingPermissions;
         activePrompts += runtimeActivePrompts;
         activeWork = activeWork || runtimeActiveWork;
+        if (runtimeReporting !== 'full') reportingFull = false;
+        if (runtimeReporting !== 'none') reportingAny = true;
+        if (
+          runtimeOldestReportAt !== null &&
+          (oldestReportAt === null || runtimeOldestReportAt < oldestReportAt)
+        ) {
+          oldestReportAt = runtimeOldestReportAt;
+        }
         channelAlive = channelAlive || runtimeChannelAlive;
         if (
           runtimeLastActivity !== null &&
@@ -144,6 +160,15 @@ export function createHealthDemoRoutes(
         pendingPermissions,
         activePrompts,
         activeWork,
+        activeWorkReporting: reportingFull
+          ? 'full'
+          : reportingAny
+            ? 'partial'
+            : 'none',
+        // 0 rather than null when nothing is covered: an idle daemon with no
+        // sessions must not read as infinitely stale to a controller applying
+        // its own freshness floor.
+        activeWorkStaleMs: oldestReportAt === null ? 0 : now - oldestReportAt,
         connectedClients: getActiveSseCount(),
         channelAlive,
         lastActivityAt:

@@ -884,9 +884,10 @@ import {
 } from '../utils/languageUtils.js';
 import { buildAuthMethods } from './authMethods.js';
 import {
-  ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
   ACTIVE_WORK_HEARTBEAT_META_KEY,
+  ACTIVE_WORK_HEARTBEAT_MIN_INTERVAL_MS,
   ACTIVE_WORK_HEARTBEAT_VERSION,
+  ACTIVE_WORK_HOLD_CATEGORIES,
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
   PROMPT_CANCEL_METHOD,
@@ -2518,7 +2519,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         },
         [ACTIVE_WORK_HEARTBEAT_META_KEY]: {
           v: ACTIVE_WORK_HEARTBEAT_VERSION,
-          intervalMs: ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
+          // Absurd cadence: the child must answer with the clamped value it
+          // will actually use, not echo this back.
+          intervalMs: 1,
         },
       },
     })) as { _meta?: Record<string, unknown> };
@@ -2529,13 +2532,14 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       },
       [ACTIVE_WORK_HEARTBEAT_META_KEY]: {
         v: ACTIVE_WORK_HEARTBEAT_VERSION,
-        intervalMs: ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
+        intervalMs: ACTIVE_WORK_HEARTBEAT_MIN_INTERVAL_MS,
+        categories: [...ACTIVE_WORK_HOLD_CATEGORIES],
       },
     });
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
-    expect(vi.mocked(Session).mock.calls.at(-1)?.[4]).toBe(
-      ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
-    );
+    // The Session gets a change callback, not a cadence: one reporter per
+    // channel owns the timing.
+    expect(typeof vi.mocked(Session).mock.calls.at(-1)?.[4]).toBe('function');
 
     mockConnectionState.resolve();
     await agentPromise;

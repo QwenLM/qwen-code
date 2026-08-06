@@ -219,7 +219,7 @@ import {
   isInactiveExtensionSkill,
 } from './extension-skills.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
-import { ActiveWorkReporter } from './activeWorkReporter.js';
+import { ActiveWorkReporter } from './active-work-reporter.js';
 import { buildSessionTasksStatus } from './session/tasksSnapshot.js';
 import {
   collectHistoryReplayUpdates,
@@ -309,10 +309,12 @@ import {
   SESSION_SOURCE_META_KEY,
 } from '@qwen-code/acp-bridge';
 import {
+  ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM,
   ACTIVE_WORK_HEARTBEAT_META_KEY,
   ACTIVE_WORK_HEARTBEAT_VERSION,
   ACTIVE_WORK_HOLD_CATEGORIES,
   clampActiveWorkIntervalMs,
+  type ActiveWorkHoldV1,
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
   CLIENT_MCP_OVER_WS_CONFIG_FLAG,
@@ -4218,12 +4220,19 @@ class QwenAgent implements Agent {
       drainTimeoutMs?: number;
       shutdownConfig?: boolean;
       waitForCloseGate?: boolean;
+      /**
+       * Close only if the Session holds no active work — the daemon's
+       * automatic-cleanup path. Explicit close, kill, and shutdown leave this
+       * unset and keep their force semantics.
+       */
+      onlyIfUnheld?: boolean;
     },
-  ): Promise<void> {
+  ): Promise<{ closed: boolean; holds: ActiveWorkHoldV1[] }> {
     const session = this.sessions.get(sessionId);
     if (!session) {
       this.mcpPool?.releaseSession(sessionId);
-      return;
+      // Already gone is the outcome the caller wanted, not a refusal.
+      return { closed: true, holds: [] };
     }
 
     const recorder = session.getConfig().getChatRecordingService();
@@ -4236,6 +4245,19 @@ class QwenAgent implements Agent {
     const cancelClose = opts?.waitForCloseGate
       ? await beginSessionCloseAfterCurrentGate(session, drainTimeoutMs)
       : session.beginClose();
+    // Checked under the close gate and before anything destructive runs. The
+    // gate is what makes this atomic: with it held the Session admits no new
+    // prompt and starts no new automatic turn, so a hold cannot appear between
+    // this read and the teardown below. Without it, a caller that asked
+    // "anything running?" and then closed would race exactly the work it was
+    // trying to protect.
+    if (opts?.onlyIfUnheld) {
+      const holds = session.collectActiveWorkHolds();
+      if (holds.length > 0) {
+        cancelClose();
+        return { closed: false, holds };
+      }
+    }
     for (const [requestId, generation] of this.generationControllers) {
       if (generation.sessionId !== sessionId) continue;
       generation.controller.abort();
@@ -4291,6 +4313,7 @@ class QwenAgent implements Agent {
     } finally {
       if (!removedFromStore) cancelClose();
     }
+    return { closed: true, holds: [] };
   }
 
   private async discardStoredSessionIfCurrent(
@@ -9374,13 +9397,18 @@ class QwenAgent implements Agent {
             'Invalid session close drain timeout',
           );
         }
-        await this.closeStoredSession(sessionId, {
+        const outcome = await this.closeStoredSession(sessionId, {
           requireFlush: params['requireFlush'] === true,
+          onlyIfUnheld: params[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] === true,
           ...(typeof rawDrainTimeoutMs === 'number'
             ? { drainTimeoutMs: rawDrainTimeoutMs }
             : {}),
         });
-        return { sessionId, closed: true };
+        // `holds` rides along only on a refusal, so the response every existing
+        // caller already parses keeps its exact shape.
+        return outcome.closed
+          ? { sessionId, closed: true }
+          : { sessionId, closed: false, holds: outcome.holds };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionCd: {
         const sessionId = params['sessionId'];

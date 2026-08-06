@@ -203,6 +203,11 @@ export const ACTIVE_WORK_STALE_INTERVALS = 3;
 export const ACTIVE_WORK_NOTIFICATION_METHOD =
   'qwen/notify/channel/active-work';
 export const ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM = 'onlyIfUnheld';
+/** Bound on the conditional-close round trip. Its own constant rather than the
+ *  handshake timeout: this runs on the automatic-cleanup path, where waiting
+ *  longer buys nothing — an unanswered request is simply left for the next
+ *  snapshot to settle. */
+export const ACTIVE_WORK_CLOSE_TIMEOUT_MS = 10_000;
 export const WORKTREE_MCP_DEFER_META_KEY = 'qwen.session.deferMcpDiscovery';
 
 /**
@@ -1770,8 +1775,31 @@ export interface AcpSessionBridge {
   /** Number of sessions with an active prompt. */
   readonly activePromptCount: number;
 
-  /** Whether a prompt, running Agent, or Agent terminal notification is unsettled. */
+  /**
+   * Whether an accepted prompt, a running background Agent, or an Agent
+   * terminal notification is unsettled. Background shells, Monitors,
+   * workflows, and cron are deliberately outside this.
+   */
   readonly activeWork: boolean;
+
+  /**
+   * How much of `activeWork` this runtime can actually vouch for. `full` means
+   * every live Session is covered by a fresh report from a child that reports
+   * all the categories; `none` means no Session is; `partial` is anything
+   * between, including a stale snapshot or a child that omits a category.
+   *
+   * Without this a controller cannot tell "nothing is running" from "nobody
+   * told me what is running", and those must not lead to the same decision.
+   */
+  readonly activeWorkReporting: 'full' | 'partial' | 'none';
+
+  /**
+   * Epoch ms of the oldest snapshot `activeWork` currently rests on, or null
+   * when no Session is covered. Diagnostic: the freshness *decision* is
+   * already folded into `activeWorkReporting`, because only the daemon knows
+   * each channel's negotiated cadence.
+   */
+  readonly activeWorkOldestReportAt: number | null;
 
   /** Queued prompts across all sessions — accepted but not yet dispatched,
    *  excluding the one running per session — i.e. the queue-depth gauge for the

@@ -457,6 +457,8 @@ function makeRuntimeBridge(): HttpAcpBridge {
     pendingPermissionCount: 0,
     activePromptCount: 0,
     activeWork: false,
+    activeWorkReporting: 'full' as const,
+    activeWorkOldestReportAt: null,
     lastActivityAt: null,
     getDaemonStatusSnapshot: vi.fn().mockReturnValue(BASE_BRIDGE_SNAPSHOT),
     isChannelLive: vi.fn().mockReturnValue(true),

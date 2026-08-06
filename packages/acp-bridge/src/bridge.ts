@@ -103,10 +103,13 @@ import {
   SESSION_SOURCE_META_KEY,
 } from './session-source.js';
 import {
+  ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM,
+  ACTIVE_WORK_CLOSE_TIMEOUT_MS,
   ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
   ACTIVE_WORK_HEARTBEAT_META_KEY,
   ACTIVE_WORK_HEARTBEAT_VERSION,
   ACTIVE_WORK_HOLD_CATEGORIES,
+  ACTIVE_WORK_STALE_INTERVALS,
   clampActiveWorkIntervalMs,
   type ActiveWorkHoldCategory,
   type ActiveWorkSnapshotV1,
@@ -1708,6 +1711,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       return;
     }
     if (entry.clientIds.size > 0) return;
+    if (!(await confirmChildUnheld(entry))) return;
     await closeSessionImpl(entry.sessionId, undefined, {
       reason: 'last_client_detached',
     }).catch((err) => {
@@ -1716,6 +1720,77 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           `${JSON.stringify(entry.sessionId)}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
       );
     });
+  }
+
+  /**
+   * Ask the owning child to close this Session only if it holds nothing, and
+   * report whether the daemon may now finish its own teardown.
+   *
+   * The cached hold set says what was true when the last snapshot was built,
+   * which is not the same as what is true now — new work can start in the gap.
+   * So the authorization to destroy comes from the child, under its close
+   * gate, not from the cache. The cache's job is only to decide *when* it is
+   * worth asking.
+   *
+   * Returns false on every uncertainty: a channel that never negotiated is
+   * handled by the pre-existing path, a refusal means work appeared, and a
+   * timeout means we cannot tell whether the child closed. None of those are
+   * retried here — the next snapshot resolves it, and a Session that is truly
+   * gone will be absent from that snapshot.
+   */
+  async function confirmChildUnheld(entry: SessionEntry): Promise<boolean> {
+    const info = channelInfoForEntry(entry);
+    if (!info?.activeWork) return true;
+    if (info.isDying) return false;
+    if (entry.activeWorkCloseInFlight) return false;
+    entry.activeWorkCloseInFlight = true;
+    try {
+      const response = await withTimeout(
+        entry.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
+          sessionId: entry.sessionId,
+          [ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM]: true,
+        }),
+        ACTIVE_WORK_CLOSE_TIMEOUT_MS,
+        SERVE_CONTROL_EXT_METHODS.sessionClose,
+      );
+      if (response['closed'] === true) {
+        // The child is done with it; only local teardown remains.
+        return true;
+      }
+      // Refused: adopt the hold set it handed back so the cache reflects the
+      // reason we are backing off rather than the stale set that sent us here.
+      const holds = response['holds'];
+      if (Array.isArray(holds)) {
+        const adopted = new Map<string, ActiveWorkHoldCategory>();
+        for (const hold of holds) {
+          if (typeof hold !== 'object' || hold === null) continue;
+          const record = hold as Record<string, unknown>;
+          const id = record['id'];
+          const category = record['category'];
+          if (
+            typeof id === 'string' &&
+            typeof category === 'string' &&
+            ACTIVE_WORK_HOLD_CATEGORIES.includes(
+              category as ActiveWorkHoldCategory,
+            )
+          ) {
+            adopted.set(id, category as ActiveWorkHoldCategory);
+          }
+        }
+        entry.childHolds = adopted;
+        entry.childHoldsAt = Date.now();
+      }
+      return false;
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: close-if-unheld for session ${JSON.stringify(entry.sessionId)} ` +
+          `did not resolve (${err instanceof Error ? err.message : String(err)}); ` +
+          `leaving it in place for the next snapshot to settle`,
+      );
+      return false;
+    } finally {
+      entry.activeWorkCloseInFlight = false;
+    }
   }
 
   /** Applies a validated channel-wide snapshot to every Session it names. */
@@ -2311,29 +2386,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       entry.attachCount - (released + (attachCountDelta - 1)),
     );
     unregisterClient(entry, clientId);
-    if (
-      entry.spawnOwnerWantedKill &&
-      entry.attachCount === 0 &&
-      entry.events.subscriberCount === 0 &&
-      !entryHasActiveWork(entry)
-    ) {
-      await bridgeApi.killSession(entry.sessionId).catch(() => {
-        /* best-effort; channel.exited will eventually reap anyway */
-      });
-    } else if (
-      entry.clientIds.size === 0 &&
-      entry.events.subscriberCount === 0 &&
-      !entryHasActiveWork(entry)
-    ) {
-      await closeSessionImpl(entry.sessionId, undefined, {
-        reason: 'last_client_detached',
-      }).catch((err) => {
-        writeStderrLine(
-          `qwen serve: close-on-attach-rollback failed for ` +
-            `${JSON.stringify(entry.sessionId)}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
-        );
-      });
-    }
+    await maybeCloseIdleSession(entry, 'attach_rollback');
   };
 
   const resolveTrustedClientId = (
@@ -5379,6 +5432,58 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         if (entryHasActiveWork(entry)) return true;
       }
       return false;
+    },
+
+    get activeWorkReporting() {
+      let covered = 0;
+      let onNegotiatedChannel = 0;
+      let total = 0;
+      for (const entry of byId.values()) {
+        total++;
+        const owner = channelInfoForEntry(entry);
+        const capability = owner?.activeWork;
+        if (!capability) continue;
+        // A child that negotiated but reports late or omits a category still
+        // tells us *something*; only a channel that never negotiated at all
+        // leaves us with nothing, which is what `none` is reserved for.
+        onNegotiatedChannel++;
+        // Missing categories and a stale snapshot are the same kind of defect
+        // from a controller's point of view: the boolean does not cover what
+        // it claims to. Both land in `partial` rather than being invisible.
+        if (
+          ACTIVE_WORK_HOLD_CATEGORIES.some(
+            (category) => !capability.categories.includes(category),
+          )
+        ) {
+          continue;
+        }
+        if (
+          entry.childHoldsAt === null ||
+          Date.now() - entry.childHoldsAt >
+            capability.intervalMs * ACTIVE_WORK_STALE_INTERVALS
+        ) {
+          continue;
+        }
+        covered++;
+      }
+      // No sessions means nothing is unreported, so the picture is complete.
+      if (total === 0) return 'full' as const;
+      if (covered === total) return 'full' as const;
+      return onNegotiatedChannel === 0
+        ? ('none' as const)
+        : ('partial' as const);
+    },
+
+    get activeWorkOldestReportAt() {
+      let oldest: number | null = null;
+      for (const entry of byId.values()) {
+        if (!channelInfoForEntry(entry)?.activeWork) continue;
+        if (entry.childHoldsAt === null) continue;
+        if (oldest === null || entry.childHoldsAt < oldest) {
+          oldest = entry.childHoldsAt;
+        }
+      }
+      return oldest;
     },
 
     get lastActivityAt() {
@@ -9086,41 +9191,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         if (entry.attachCount > 0) entry.attachCount--;
       }
       unregisterClient(entry, clientId);
-      if (
-        entry.spawnOwnerWantedKill &&
-        entry.attachCount === 0 &&
-        entry.events.subscriberCount === 0 &&
-        !entryHasActiveWork(entry)
-      ) {
-        // Defer-completed reap. Re-use killSession's logic; pass
-        // `requireZeroAttaches: false` (default) because we've
-        // already validated all the conditions ourselves.
-        await this.killSession(sessionId).catch(() => {
-          /* best-effort; channel.exited will eventually reap anyway */
-        });
-      } else if (
-        entry.clientIds.size === 0 &&
-        entry.events.subscriberCount === 0 &&
-        !entryHasActiveWork(entry)
-      ) {
-        // Last registered client left, no SSE subscribers remain, and
-        // no prompt is pending (active OR queued — `pendingPromptCount`
-        // covers the FIFO hand-off gap where `promptActive` is briefly
-        // false between two prompts). Close the session immediately so
-        // it doesn't linger in memory. The JSONL transcript on disk is
-        // preserved — session/load or session/resume can restore it
-        // later. When prompts ARE pending, skip the close: the deferred
-        // close in `sendPrompt`'s result.finally fires after the last
-        // one settles (and publishes its terminal).
-        await closeSessionImpl(sessionId, undefined, {
-          reason: 'last_client_detached',
-        }).catch((err) => {
-          writeStderrLine(
-            `qwen serve: close-on-last-detach failed for ` +
-              `${JSON.stringify(sessionId)}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
-          );
-        });
-      }
+      // Last registered client left. Whether that means close, kill, or
+      // nothing at all lives in one place now: a pending prompt (active OR
+      // queued — `pendingPromptCount` covers the FIFO hand-off gap), an
+      // unsettled Agent, or a child that has not confirmed it is unheld all
+      // hold the session open, and the deferred close fires from whichever
+      // path settles last. The JSONL transcript on disk survives either way,
+      // so session/load can restore it later.
+      await maybeCloseIdleSession(entry, 'last_client_detached');
     },
 
     killAllSync() {

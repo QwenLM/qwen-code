@@ -1807,6 +1807,12 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     get activeWork() {
       return false;
     },
+    get activeWorkReporting() {
+      return 'full' as const;
+    },
+    get activeWorkOldestReportAt() {
+      return null;
+    },
     get lastActivityAt() {
       return null;
     },
@@ -20550,6 +20556,11 @@ describe('createServeApp', () => {
         status: 'ok',
         activePrompts: 0,
         activeWork: false,
+        activeWorkReporting: 'full',
+        // No covered session, so the boolean rests on nothing stale. Null here
+        // would read as infinitely stale to a controller with a freshness floor
+        // and make an idle daemon permanently un-restartable.
+        activeWorkStaleMs: 0,
         connectedClients: 0,
         channelAlive: false,
         lastActivityAt: null,
@@ -20604,6 +20615,10 @@ describe('createServeApp', () => {
         pendingPermissionCount: { get: () => 2 },
         activePromptCount: { get: () => 2 },
         activeWork: { get: () => true },
+        // One runtime that cannot vouch for its sessions drags the daemon-wide
+        // grade down, because `activeWork` is an OR across all of them.
+        activeWorkReporting: { get: () => 'partial' as const },
+        activeWorkOldestReportAt: { get: () => now - 45_000 },
         lastActivityAt: { get: () => now - 30_000 },
         isChannelLive: { value: () => false },
       });
@@ -20637,6 +20652,8 @@ describe('createServeApp', () => {
           pendingPermissions: 3,
           activePrompts: 3,
           activeWork: true,
+          activeWorkReporting: 'partial',
+          activeWorkStaleMs: 45_000,
           channelAlive: true,
           lastActivityAt: new Date(now - 30_000).toISOString(),
           idleSinceMs: 30_000,
