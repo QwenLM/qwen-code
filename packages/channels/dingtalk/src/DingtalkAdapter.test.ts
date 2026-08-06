@@ -2718,7 +2718,8 @@ describe('DingtalkChannel sender attribution', () => {
 
     expect(channel.handleInbound).toHaveBeenCalledWith(
       expect.objectContaining({
-        text: '[Mentioned 1 other group member: member-staff]\nplease review this',
+        text: 'please review this',
+        mentionedMemberIds: ['member-staff'],
         isMentioned: true,
       }),
     );
@@ -2783,7 +2784,8 @@ describe('DingtalkChannel sender attribution', () => {
 
     expect(channel.handleInbound).toHaveBeenCalledWith(
       expect.objectContaining({
-        text: '[Mentioned 2 other group members: user-a, user-b]\nplease review this',
+        text: 'please review this',
+        mentionedMemberIds: ['user-a', 'user-b'],
         isMentioned: true,
       }),
     );
@@ -2815,7 +2817,8 @@ describe('DingtalkChannel sender attribution', () => {
 
     expect(channel.handleInbound).toHaveBeenCalledWith(
       expect.objectContaining({
-        text: '[Mentioned 1 other group member: only-staff]\nhello',
+        text: 'hello',
+        mentionedMemberIds: ['only-staff'],
         isMentioned: true,
       }),
     );
@@ -2875,7 +2878,8 @@ describe('DingtalkChannel sender attribution', () => {
 
     expect(channel.handleInbound).toHaveBeenCalledWith(
       expect.objectContaining({
-        text: '[Mentioned 1 other group member: user-a]',
+        text: '',
+        mentionedMemberIds: ['user-a'],
         isMentioned: true,
       }),
     );

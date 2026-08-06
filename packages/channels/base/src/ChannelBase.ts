@@ -5119,6 +5119,21 @@ export abstract class ChannelBase {
         envelope.senderName || envelope.senderId || 'unknown',
       );
       promptText = `[${who}] ${sanitizePromptText(promptText)}`;
+      // Render the non-bot mention marker AFTER sanitization (like the
+      // [Replying to:] wrapper below). Pre-PR the marker rode inside `text`,
+      // so sanitizePromptText stripped its brackets only when the ID list was
+      // short (<=64 chars) and folded its newline, making the delivered
+      // format length-dependent. IDs are platform-controlled, so neutralize
+      // them like quoted text before they bypass the sanitizer here.
+      if (envelope.mentionedMemberIds?.length) {
+        const ids = envelope.mentionedMemberIds
+          .map((id) => sanitizeQuotedText(id, 64).trim())
+          .filter((id) => id.length > 0);
+        if (ids.length > 0) {
+          const memberLabel = ids.length === 1 ? 'member' : 'members';
+          promptText = `[Mentioned ${ids.length} other group ${memberLabel}: ${ids.join(', ')}]\n\n${promptText}`;
+        }
+      }
     }
 
     if (envelope.referencedText) {
