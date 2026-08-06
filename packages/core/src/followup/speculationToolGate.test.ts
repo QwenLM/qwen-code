@@ -149,6 +149,73 @@ describe('speculationToolGate', () => {
       );
       expect(result.action).toBe('boundary');
     });
+
+    // Issue #8575: speculation bypasses the permission flow, so the gate
+    // itself must downgrade read-only git commands whose repo-local config
+    // executes programs.
+    describe('git config execution probe (#8575)', () => {
+      let cleanRepo: string;
+      let dirtyRepo: string;
+
+      beforeEach(async () => {
+        cleanRepo = join(testDir, 'clean-repo');
+        await mkdir(join(cleanRepo, '.git'), { recursive: true });
+        await writeFile(
+          join(cleanRepo, '.git', 'config'),
+          '[core]\n\tbare = false\n',
+        );
+
+        dirtyRepo = join(testDir, 'dirty-repo');
+        await mkdir(join(dirtyRepo, '.git'), { recursive: true });
+        await writeFile(
+          join(dirtyRepo, '.git', 'config'),
+          '[diff]\n\texternal = /tmp/evil\n',
+        );
+      });
+
+      it('hits boundary for read-only git when cwd config executes programs', async () => {
+        const result = await evaluateToolCall(
+          ToolNames.SHELL,
+          { command: 'git diff' },
+          overlayFs,
+          ApprovalMode.DEFAULT,
+          dirtyRepo,
+        );
+        expect(result.action).toBe('boundary');
+      });
+
+      it('allows read-only git when cwd config is clean', async () => {
+        const result = await evaluateToolCall(
+          ToolNames.SHELL,
+          { command: 'git diff' },
+          overlayFs,
+          ApprovalMode.DEFAULT,
+          cleanRepo,
+        );
+        expect(result.action).toBe('allow');
+      });
+
+      it('honors the directory arg over the ambient cwd', async () => {
+        const result = await evaluateToolCall(
+          ToolNames.SHELL,
+          { command: 'git status', directory: dirtyRepo },
+          overlayFs,
+          ApprovalMode.DEFAULT,
+          cleanRepo,
+        );
+        expect(result.action).toBe('boundary');
+      });
+
+      it('keeps backward compatibility without cwd', async () => {
+        const result = await evaluateToolCall(
+          ToolNames.SHELL,
+          { command: 'git diff' },
+          overlayFs,
+          ApprovalMode.DEFAULT,
+        );
+        expect(result.action).toBe('allow');
+      });
+    });
   });
 
   describe('BOUNDARY_TOOLS', () => {

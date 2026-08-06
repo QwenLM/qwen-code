@@ -125,6 +125,15 @@ describe('gitConfigMayExecutePrograms', () => {
     expect(gitConfigMayExecutePrograms(repo)).toBe(false);
   });
 
+  it('reads config.worktree of the main checkout (extensions.worktreeConfig)', () => {
+    const repo = makeRepo('wtcfg', '[core]\n\tbare = false\n');
+    fs.writeFileSync(
+      path.join(repo, '.git', 'config.worktree'),
+      '[diff]\n\texternal = /tmp/evil\n',
+    );
+    expect(gitConfigMayExecutePrograms(repo)).toBe(true);
+  });
+
   describe('linked worktrees and submodules', () => {
     it('reads config.worktree and the common config via the .git file', () => {
       const main = makeRepo('main-repo', '[core]\n\tbare = false\n');

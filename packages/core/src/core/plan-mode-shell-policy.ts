@@ -164,7 +164,11 @@ export async function evaluatePlanModeShellPolicy(input: {
   let classification: ShellCommandSafety;
   try {
     classification = await raceWithAbort(
-      () => classifyShellCommandSafety(safetyCommand),
+      () =>
+        classifyShellCommandSafety(
+          safetyCommand,
+          permissionContext.cwd ? { cwd: permissionContext.cwd } : undefined,
+        ),
       input.signal,
     );
   } catch (error) {

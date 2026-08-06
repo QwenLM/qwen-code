@@ -299,6 +299,7 @@ async function runSpeculativeLoop(
           args,
           state.overlayFs!,
           approvalMode,
+          config.getTargetDir(),
         );
 
         if (gate.action === 'boundary') {

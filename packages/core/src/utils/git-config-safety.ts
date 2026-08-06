@@ -23,10 +23,14 @@
  * file write, shared workspace) could therefore turn an auto-approved
  * "read-only" command into arbitrary code execution. See issue #8575.
  *
- * Scope: repository-local config only (`.git/config`, linked-worktree
- * `config.worktree`, and the common-dir config of linked worktrees).
+ * Scope: repository-local config only (`.git/config`, `config.worktree`
+ * where git reads it — the main checkout under `extensions.worktreeConfig`
+ * and linked worktrees — and the common-dir config of linked worktrees).
  * Global/system config is the user's own deliberate setup and is not an
  * attack surface of cloned repositories — it is intentionally not probed.
+ * Bare repositories (no `.git` entry in the layout) are not probed either;
+ * running read-only git commands inside one is exotic enough to stay out
+ * of scope.
  *
  * The probe is synchronous (bounded stat walk + small file reads) so it can
  * be shared by the AST classifier and the synchronous regex fallback
@@ -187,7 +191,12 @@ function findLocalGitConfigFiles(cwd: string): string[] {
 
     if (stat) {
       if (stat.isDirectory()) {
-        return [path.join(gitPath, 'config')];
+        // With extensions.worktreeConfig enabled, git also reads
+        // `config.worktree` for the MAIN worktree — probe both.
+        return [
+          path.join(gitPath, 'config'),
+          path.join(gitPath, 'config.worktree'),
+        ];
       }
       if (stat.isFile()) {
         let pointer: string;
