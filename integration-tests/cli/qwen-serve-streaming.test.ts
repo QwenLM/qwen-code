@@ -49,7 +49,6 @@ const CLI_BIN =
   process.env['TEST_CLI_PATH'] ??
   path.resolve(__dirname, '../../packages/cli/dist/index.js');
 const TOKEN = 'streaming-integ-secret';
-let workspaceDir = '';
 
 // Windows: this suite shells out to `pgrep` / `kill -KILL` to simulate
 // child-process crashes for the SIGKILL → `session_died` test, and those
@@ -78,6 +77,7 @@ let base = '';
 let client: DaemonClient;
 let fakeServer: FakeOpenAIServer;
 let homeDir = '';
+let workspaceDir = '';
 let pendingWritePath = '';
 
 beforeAll(async () => {
@@ -122,7 +122,6 @@ beforeAll(async () => {
     return { content: 'fake response complete' };
   });
   homeDir = mkdtempSync(path.join(tmpdir(), 'qwen-serve-streaming-home-'));
-  workspaceDir = mkdtempSync(path.join(tmpdir(), 'qwen-serve-streaming-ws-'));
   const qwenHome = path.join(homeDir, '.qwen');
   mkdirSync(qwenHome, { recursive: true });
   writeFileSync(
@@ -132,6 +131,7 @@ beforeAll(async () => {
       ui: { enableFollowupSuggestions: false },
     }),
   );
+  workspaceDir = mkdtempSync(path.join(tmpdir(), 'qwen-serve-streaming-ws-'));
   daemon = spawn(
     process.execPath,
     [
@@ -148,12 +148,13 @@ beforeAll(async () => {
       // below matches. Without this the daemon inherits the test
       // runner's cwd (CI / IDE-launcher / direct vitest invocations
       // all differ) and every session create returns 400
-      // workspace_mismatch — the tests below would all silently 404.
-      // Use a hermetic temp dir instead of the repo checkout: ambient
-      // workspace settings (a local or leaked `.qwen/settings.json`,
-      // e.g. a `tools.core` allowlist) otherwise filter tools such as
-      // todo_write out of the session registry and silently break the
-      // Todo Stop Guard test.
+      // workspace_mismatch — the SSE / permission / Last-Event-ID
+      // tests below would all silently 404. A scratch workspace (not
+      // the checkout) also keeps sessions hermetic: the daemon merges
+      // the workspace's `.qwen/settings.json` into every session, and
+      // a stray one on a shared runner (e.g. a `tools.sandbox` mode or
+      // a `tools.core` allowlist missing `todo_write`) silently breaks
+      // the Stop Guard flow below.
       '--workspace',
       workspaceDir,
     ],

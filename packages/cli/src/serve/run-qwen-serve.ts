@@ -1432,6 +1432,21 @@ const BOOTSTRAP_SERVE_PATHS = new Set([
   BOOTSTRAP_DAEMON_STATUS_PATH,
 ]);
 
+const RUNTIME_STARTUP_FAILED_ENVELOPE = {
+  error: 'Daemon runtime failed to start',
+  code: 'daemon_runtime_failed',
+} as const;
+const RUNTIME_STARTUP_STARTING_ENVELOPE = {
+  error: 'Daemon runtime is still starting',
+  code: 'daemon_runtime_starting',
+} as const;
+
+function runtimeStartupEnvelope(runtimeError: string | undefined) {
+  return runtimeError
+    ? RUNTIME_STARTUP_FAILED_ENVELOPE
+    : RUNTIME_STARTUP_STARTING_ENVELOPE;
+}
+
 function createBootstrapServeApp(input: {
   opts: ServeOptions;
   getPort: () => number;
@@ -1514,14 +1529,7 @@ function createBootstrapServeApp(input: {
       if (runtimeError === undefined) {
         res.setHeader('Retry-After', '1');
       }
-      res.status(503).json({
-        error: runtimeError
-          ? 'Daemon runtime failed to start'
-          : 'Daemon runtime is still starting',
-        code: runtimeError
-          ? 'daemon_runtime_failed'
-          : 'daemon_runtime_starting',
-      });
+      res.status(503).json(runtimeStartupEnvelope(runtimeError));
       return;
     }
     res.status(200).json(
@@ -1700,13 +1708,7 @@ function createBootstrapServeApp(input: {
   });
 
   app.use((_req: Request, res: Response): void => {
-    const runtimeError = getRuntimeError();
-    res.status(503).json({
-      error: runtimeError
-        ? 'Daemon runtime failed to start'
-        : 'Daemon runtime is still starting',
-      code: runtimeError ? 'daemon_runtime_failed' : 'daemon_runtime_starting',
-    });
+    res.status(503).json(runtimeStartupEnvelope(getRuntimeError()));
   });
 
   return app;
@@ -1721,6 +1723,7 @@ function createDelegatingServeApp(
     runtimeReady?: Promise<void>;
     authenticateDeferredRuntimeRequest?: RequestHandler;
     authenticateDeferredChannelWebhookRequest?: RequestHandler;
+    isPreAuthRequest?: (req: Request) => boolean | Promise<boolean>;
   } = {},
 ): Application {
   const app = express();
@@ -1745,7 +1748,14 @@ function createDelegatingServeApp(
           ? (options.authenticateDeferredChannelWebhookRequest ??
             options.authenticateDeferredRuntimeRequest)
           : options.authenticateDeferredRuntimeRequest;
-        if (authGate) {
+        // A rejecting predicate must not 500 every deferred request —
+        // fail closed to the bearer gate instead.
+        const preAuthExempted =
+          authGate !== undefined &&
+          (await Promise.resolve(options.isPreAuthRequest?.(req)).catch(
+            () => false,
+          )) === true;
+        if (authGate && !preAuthExempted) {
           if (!runSynchronousRequestGate(authGate, req, res, next)) {
             return;
           }
@@ -1757,6 +1767,13 @@ function createDelegatingServeApp(
         try {
           await options.runtimeReady;
         } catch {
+          if (preAuthExempted) {
+            // The bootstrap app serves the failure envelope only behind its
+            // bearer gate, which a pre-auth navigation cannot pass — answer
+            // here so the browser sees the startup failure, not a 401.
+            res.status(503).json(RUNTIME_STARTUP_FAILED_ENVELOPE);
+            return;
+          }
           // Fall through to the bootstrap app so it can report the startup error.
         } finally {
           timing.waitMs =
@@ -5811,6 +5828,17 @@ async function runQwenServeImpl(
       runtimeReady,
       authenticateDeferredRuntimeRequest: bearerAuth(opts.token),
       authenticateDeferredChannelWebhookRequest: deferredChannelWebhookAuth,
+      // The runtime app serves these before bearerAuth; a browser navigation
+      // cannot attach the bearer header, so the cold gate must let them
+      // through (and start the runtime) exactly like the warm app would.
+      // Dynamic import keeps web-shell-static out of the serve fast-path
+      // static closure (see the import-boundary guards in fast-path.test.ts).
+      isPreAuthRequest: webShellMounted
+        ? (req) =>
+            import('./web-shell-static.js').then((webShellStatic) =>
+              webShellStatic.isPreAuthWebShellRequest(req),
+            )
+        : undefined,
     });
 
   // Node's `app.listen()` wants the unbracketed IPv6 literal (`::1`) but
