@@ -11,6 +11,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -86,7 +87,10 @@ function fixture() {
 }
 
 beforeEach(() => {
-  root = mkdtempSync(join(tmpdir(), 'review-artifact-'));
+  // realpath, because the cwd-default test below chdirs into the root and
+  // compares against process.cwd(), which returns the physical path — on
+  // macOS the temp dir is reached through a /var → /private/var symlink.
+  root = realpathSync(mkdtempSync(join(tmpdir(), 'review-artifact-')));
 });
 
 afterEach(() => {
@@ -406,17 +410,22 @@ describe('saveReviewArtifact', () => {
     });
   });
 
-  it('ignores QWEN_CODE_PROJECT_DIR entirely', () => {
-    // The variable names the session-storage directory under the runtime
-    // base, never the main checkout — six of six measured CI reviews fumbled
-    // on the old preference for it (DESIGN.md — The artifact root that
-    // pointed at qwen-home). Point it at a decoy root that would accept the
-    // relative paths, and confirm resolution stays on the explicit root.
+  it('resolves against cwd and never QWEN_CODE_PROJECT_DIR', () => {
+    // The default path, with the trap armed. No `workspaceRoot` is passed —
+    // an embedder that omits it must land on cwd — while the env var points
+    // at a decoy the removed preference would have taken: the variable names
+    // the session-storage directory under the runtime base, never the main
+    // checkout, and six of six measured CI reviews fumbled on it (DESIGN.md —
+    // The artifact root that pointed at qwen-home). Re-introducing
+    // `explicit ?? env ?? cwd` fails this test: resolution lands on the
+    // decoy, not on cwd.
     const decoy = mkdtempSync(join(tmpdir(), 'review-artifact-decoy-'));
+    const savedCwd = process.cwd();
     const previous = process.env['QWEN_CODE_PROJECT_DIR'];
     process.env['QWEN_CODE_PROJECT_DIR'] = decoy;
     try {
       fixture();
+      process.chdir(root);
       const saved = saveReviewArtifact({
         findings: '.qwen/tmp/findings.json',
         composed: '.qwen/tmp/composed.json',
@@ -424,12 +433,13 @@ describe('saveReviewArtifact', () => {
         out: '.qwen/reviews/review.json',
         target: 'pr-123',
         effort: 'high',
-        workspaceRoot: root,
       });
 
       expect(saved.path).toBe(join(root, '.qwen/reviews/review.json'));
+      expect(saved.workspacePath).toBe('.qwen/reviews/review.json');
       expect(existsSync(join(decoy, '.qwen/reviews/review.json'))).toBe(false);
     } finally {
+      process.chdir(savedCwd);
       if (previous === undefined) {
         delete process.env['QWEN_CODE_PROJECT_DIR'];
       } else {
