@@ -7,7 +7,12 @@
 import { describe, it, expect } from 'vitest';
 import { APIUserAbortError as AnthropicAPIUserAbortError } from '@anthropic-ai/sdk';
 import { APIConnectionError, APIUserAbortError } from 'openai';
-import { getErrorMessage, isAbortError, isNodeError } from './errors.js';
+import {
+  getErrorMessage,
+  isAbortError,
+  isNodeError,
+  isUserCancel,
+} from './errors.js';
 
 describe('getErrorMessage cause unwrapping', () => {
   it('returns the plain message when there is no cause', () => {
@@ -270,6 +275,87 @@ describe('isAbortError', () => {
 
     expect(error.constructor.name).toBe('APIConnectionError');
     expect(isAbortError(error)).toBe(false);
+  });
+});
+
+describe('isUserCancel', () => {
+  const abortShaped = () =>
+    new APIUserAbortError({ message: 'Request was aborted.' });
+
+  /** Resolves once an already-scheduled 1ms timeout signal has fired. */
+  const settled = async (signal: AbortSignal): Promise<AbortSignal> => {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(signal.aborted).toBe(true);
+    return signal;
+  };
+
+  it('returns true when the user aborted the signal', () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    expect(isUserCancel(abortShaped(), controller.signal)).toBe(true);
+  });
+
+  it('returns false when the signal was never aborted', () => {
+    // An abort-shaped error with nobody having cancelled is a network-level
+    // abort — a genuine failure that callers must keep reporting.
+    const controller = new AbortController();
+
+    expect(isUserCancel(abortShaped(), controller.signal)).toBe(false);
+  });
+
+  it('returns false when there is no signal at all', () => {
+    expect(isUserCancel(abortShaped(), undefined)).toBe(false);
+  });
+
+  it('returns false for a non-abort error even on an aborted signal', () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    expect(isUserCancel(new Error('rate limited'), controller.signal)).toBe(
+      false,
+    );
+  });
+
+  it('returns false when an AbortSignal.timeout budget fired', async () => {
+    // The distinction this helper exists for. Internal side queries pass
+    // `AbortSignal.timeout(...)` into the same request config, so an aborted
+    // signal alone cannot mean "the user cancelled". Node sets the reason to a
+    // DOMException named 'TimeoutError'.
+    const signal = await settled(AbortSignal.timeout(1));
+
+    expect((signal.reason as Error).name).toBe('TimeoutError');
+    expect(isUserCancel(abortShaped(), signal)).toBe(false);
+  });
+
+  it('returns false when a timeout fires through AbortSignal.any', async () => {
+    // The composed shape the real call sites use: memory recall and forget
+    // build `AbortSignal.any([AbortSignal.timeout(n), callerSignal])`.
+    // AbortSignal.any adopts the firing source's reason, so the timeout is
+    // still distinguishable after composition.
+    const userController = new AbortController();
+    const signal = await settled(
+      AbortSignal.any([AbortSignal.timeout(1), userController.signal]),
+    );
+
+    expect((signal.reason as Error).name).toBe('TimeoutError');
+    expect(isUserCancel(abortShaped(), signal)).toBe(false);
+  });
+
+  it('returns true when the user cancels a signal composed with a timeout', async () => {
+    // Same composition, opposite source: the user cancels well before the
+    // budget expires, so the reason is the user's AbortError and the cancel is
+    // still suppressed.
+    const userController = new AbortController();
+    const signal = AbortSignal.any([
+      AbortSignal.timeout(60_000),
+      userController.signal,
+    ]);
+    userController.abort();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    expect((signal.reason as Error).name).toBe('AbortError');
+    expect(isUserCancel(abortShaped(), signal)).toBe(true);
   });
 });
 

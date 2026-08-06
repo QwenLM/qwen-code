@@ -49,7 +49,7 @@ import {
   getErrorMessage,
   getErrorStatus,
   getErrorType,
-  isAbortError,
+  isUserCancel,
 } from '../../utils/errors.js';
 import {
   startLLMRequestSpan,
@@ -265,14 +265,15 @@ export class LoggingContentGenerator implements ContentGenerator {
     prompt_id: string,
     abortSignal?: AbortSignal,
   ): void {
-    // A user cancel is not an API error. When the caller's signal is aborted
-    // and the error is abort-shaped, skip the api_error event entirely — the
-    // span already records the cancellation through its aborted status, so the
-    // signal isn't lost. Without this gate a user cancel is still emitted as a
+    // A user cancel is not an API error, so skip the api_error event entirely —
+    // the span already records the cancellation through its aborted status, so
+    // the signal isn't lost. Without this gate a user cancel is emitted as a
     // `qwen-code.api_error` event with error_type `APIUserAbortError`, which is
     // exactly what #8356 reported; `isAbortError` gating the debug log alone
-    // does not cover this separate telemetry path.
-    if (abortSignal?.aborted && isAbortError(error)) {
+    // does not cover this separate telemetry path. `isUserCancel` (not a bare
+    // `aborted && isAbortError`) is what keeps a timed-out internal side query
+    // — a genuine failure that also aborts this signal — reported.
+    if (isUserCancel(error, abortSignal)) {
       return;
     }
     try {

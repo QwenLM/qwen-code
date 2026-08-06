@@ -58,6 +58,39 @@ export function isAbortError(error: unknown): boolean {
 }
 
 /**
+ * Whether an error represents a cancel the *user* initiated, as opposed to any
+ * other abort. Callers that suppress reporting for user cancels should gate on
+ * this rather than on `signal.aborted && isAbortError(error)`, so the
+ * definition of "user cancel" lives in one place.
+ *
+ * An aborted signal alone is not enough. Internal side queries compose a
+ * deadline into the same `config.abortSignal` a user cancel travels on:
+ * `memory/relevanceSelector.ts` (30s), `memory/forget.ts` (8s) and
+ * `agents/arena/ArenaManager.ts` all route `AbortSignal.timeout(...)` — alone
+ * or via `AbortSignal.any([...])` — through `baseLlmClient` into the request.
+ * When such a budget runs out the provider SDK still rejects abort-shaped
+ * (`openai` throws `APIUserAbortError` for any aborted signal, `@google/genai`
+ * surfaces a DOMException `AbortError`), but nobody cancelled anything. That is
+ * a genuine failure and it must stay reported.
+ *
+ * Node sets `signal.reason` to a DOMException named 'TimeoutError' for
+ * `AbortSignal.timeout()`, and `AbortSignal.any()` adopts the firing source's
+ * reason, so the reason separates the two cases.
+ */
+export function isUserCancel(error: unknown, signal?: AbortSignal): boolean {
+  if (!signal?.aborted) {
+    return false;
+  }
+
+  const reason: unknown = signal.reason;
+  if (reason instanceof Error && reason.name === 'TimeoutError') {
+    return false;
+  }
+
+  return isAbortError(error);
+}
+
+/**
  * Best-effort one-line description of an error's `cause`, used to surface the
  * underlying syscall behind opaque wrappers like undici's `TypeError: fetch
  * failed` (whose own message carries nothing). Returns `undefined` when there

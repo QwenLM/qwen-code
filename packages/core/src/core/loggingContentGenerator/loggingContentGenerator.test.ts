@@ -883,6 +883,72 @@ describe('LoggingContentGenerator', () => {
     expect(logApiError).toHaveBeenCalledTimes(1);
   });
 
+  it('still emits an api_error event when an internal timeout budget fires', async () => {
+    // Not every aborted signal is a user cancel. Internal side queries compose
+    // `AbortSignal.timeout(...)` into the same `config.abortSignal` — memory
+    // recall (30s), forget (8s), arena summary — via baseLlmClient. When such a
+    // budget runs out the SDK still rejects abort-shaped, but this is a genuine
+    // failure: suppressing it would hide background LLM work failing behind a
+    // clean model-health chart. The signal's reason is what separates the two.
+    const timeoutSignal = AbortSignal.timeout(1);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(timeoutSignal.aborted).toBe(true);
+
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockRejectedValue(
+          new APIUserAbortError({ message: 'Request was aborted.' }),
+        ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+      config: { abortSignal: timeoutSignal },
+    } as unknown as GenerateContentParameters;
+
+    await expect(
+      generator.generateContent(request, 'prompt-timeout-abort'),
+    ).rejects.toBeInstanceOf(APIUserAbortError);
+
+    expect(logApiError).toHaveBeenCalledTimes(1);
+  });
+
+  it('still emits an api_error event for an abort-shaped error when the request has no signal', async () => {
+    // The remaining truth-table cell: no `config.abortSignal` at all. Nobody
+    // could have cancelled, so an abort-shaped rejection here is a real
+    // failure. Pins against relaxing the signal check to `?? true`.
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockRejectedValue(
+          new APIUserAbortError({ message: 'Request was aborted.' }),
+        ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    await expect(
+      generator.generateContent(request, 'prompt-no-signal-abort'),
+    ).rejects.toBeInstanceOf(APIUserAbortError);
+
+    expect(logApiError).toHaveBeenCalledTimes(1);
+  });
+
   it('does not emit an api_error event when the user cancels during stream setup', async () => {
     // Cancelling before any chunk exists — Esc while the SDK request is still
     // being established — rejects stream *setup* rather than the iterator, a
