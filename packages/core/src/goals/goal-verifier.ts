@@ -182,8 +182,14 @@ export function createGoalVerifier(
     const contents = verifierContents(input);
     const timeoutController = new AbortController();
     const timer = setTimeout(() => {
+      // TimeoutError-shaped, not a plain Error: downstream distinguishes an
+      // internal deadline from a user cancel by the abort reason's name, and
+      // a 'Error'-named reason reads as a cancel and loses the api_error.
       timeoutController.abort(
-        new Error(`Goal verifier timed out after ${timeoutMs}ms`),
+        new DOMException(
+          `Goal verifier timed out after ${timeoutMs}ms`,
+          'TimeoutError',
+        ),
       );
     }, timeoutMs);
     const abortSignal = attemptSignal

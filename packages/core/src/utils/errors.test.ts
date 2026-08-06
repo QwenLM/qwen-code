@@ -342,6 +342,19 @@ describe('isUserCancel', () => {
     expect(isUserCancel(abortShaped(), signal)).toBe(false);
   });
 
+  it('returns false for a manual-controller deadline that signals TimeoutError', () => {
+    // Not every internal budget uses AbortSignal.timeout. The goal judge and
+    // verifier, prompt hooks and the workflow stall watchdog build deadlines
+    // from a plain AbortController plus setTimeout. Those producers abort with
+    // a TimeoutError-shaped reason precisely so this predicate can tell them
+    // from a user cancel — a bare abort() is signal-level indistinguishable
+    // from Esc, which is why the fix belongs there and not here.
+    const controller = new AbortController();
+    controller.abort(new DOMException('Goal judge timed out', 'TimeoutError'));
+
+    expect(isUserCancel(abortShaped(), controller.signal)).toBe(false);
+  });
+
   it('returns true when the user cancels a signal composed with a timeout', async () => {
     // Same composition, opposite source: the user cancels well before the
     // budget expires, so the reason is the user's AbortError and the cancel is

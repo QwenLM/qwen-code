@@ -234,7 +234,14 @@ export class PromptHookRunner {
     let abortHandler: (() => void) | undefined;
     const timeoutPromise = new Promise<never>((_, reject) => {
       timeoutId = setTimeout(() => {
-        internalAbortController.abort();
+        // TimeoutError-shaped so this budget is not mistaken for a user
+        // cancel downstream, which would suppress its api_error telemetry.
+        internalAbortController.abort(
+          new DOMException(
+            `Prompt hook timed out after ${timeoutMs}ms`,
+            'TimeoutError',
+          ),
+        );
         reject(new Error(`Prompt hook timed out after ${timeoutMs}ms`));
       }, timeoutMs);
     });

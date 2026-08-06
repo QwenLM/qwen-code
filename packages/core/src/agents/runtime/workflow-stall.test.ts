@@ -13,6 +13,7 @@ import {
   DEFAULT_STALL_MS,
   MAX_STALL_ATTEMPTS,
   MAX_WORKFLOW_STALL_MS_ENV,
+  STALL_ABORT_REASON,
 } from './workflow-stall.js';
 
 describe('resolveStallMs', () => {
@@ -71,7 +72,12 @@ describe('attachStallWatchdog', () => {
     vi.advanceTimersByTime(2);
     expect(wd.stalled()).toBe(true);
     expect(controller.signal.aborted).toBe(true);
-    expect(controller.signal.reason).toBe('stalled');
+    // TimeoutError-shaped, carrying the same 'stalled' text. The attempt
+    // signal reaches model requests, and a reason that is not TimeoutError
+    // reads downstream as a user cancel and loses the api_error event.
+    expect(controller.signal.reason).toBeInstanceOf(DOMException);
+    expect(controller.signal.reason.name).toBe('TimeoutError');
+    expect(controller.signal.reason.message).toBe(STALL_ABORT_REASON);
     wd.dispose();
   });
 

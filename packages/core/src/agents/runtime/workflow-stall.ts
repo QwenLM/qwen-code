@@ -40,6 +40,13 @@ import { AgentEventEmitter, AgentEventType } from './agent-events.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { parsePositiveIntegerEnv } from '../../utils/env.js';
 
+/**
+ * Message carried by the watchdog's abort reason. The reason is a
+ * `TimeoutError`-named DOMException rather than this bare string so downstream
+ * consumers can tell a watchdog abort from a user cancel.
+ */
+export const STALL_ABORT_REASON = 'stalled';
+
 /** Default stall timeout: 60s of no progress (with no tool in flight). */
 export const DEFAULT_STALL_MS = 60_000;
 
@@ -133,7 +140,11 @@ export function attachStallWatchdog(
         `[Workflow] agent dispatch stalled — no progress for ${stallMs}ms; aborting.`,
       );
       try {
-        controller.abort('stalled');
+        // Reason keeps the 'stalled' text but is TimeoutError-shaped: the
+        // attempt signal reaches model requests, and a bare string reason
+        // reads downstream as a user cancel, suppressing the api_error for
+        // what is actually a watchdog abort.
+        controller.abort(new DOMException(STALL_ABORT_REASON, 'TimeoutError'));
       } catch (e) {
         debugLogger.warn('stall watchdog abort threw:', e);
       }

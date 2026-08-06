@@ -87,7 +87,12 @@ async function judgeGoalWithTimeout(
           debugLogger.debug(
             `Goal judge exceeded ${GOAL_JUDGE_TIMEOUT_MS}ms; pausing goal loop`,
           );
-          judgeController.abort();
+          // TimeoutError-shaped so downstream can tell this deadline apart
+          // from a user cancel; a bare abort() reasons as 'AbortError', which
+          // is indistinguishable from Esc and gets its api_error suppressed.
+          judgeController.abort(
+            new DOMException(GOAL_JUDGE_TIMEOUT_MESSAGE, 'TimeoutError'),
+          );
           resolve({
             kind: 'error',
             ok: false,
