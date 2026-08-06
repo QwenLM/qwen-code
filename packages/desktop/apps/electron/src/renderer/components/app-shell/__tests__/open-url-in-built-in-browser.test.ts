@@ -48,7 +48,7 @@ describe('openUrlInBuiltInBrowser', () => {
     const browserPaneApi = makeBrowserPaneApi()
     const openExternal = mock(() => {})
 
-    await openUrlInBuiltInBrowser('mailto:someone@example.com', {
+    await openUrlInBuiltInBrowser('  mailto:someone@example.com  ', {
       browserPaneApi,
       isChannelAvailable: () => true,
       openExternal,
@@ -76,13 +76,14 @@ describe('openUrlInBuiltInBrowser', () => {
     const browserPaneApi = makeBrowserPaneApi()
     const openExternal = mock(() => {})
 
-    await openUrlInBuiltInBrowser('https://example.com', {
+    await openUrlInBuiltInBrowser('localhost:3000/docs', {
       browserPaneApi,
       isChannelAvailable: () => false,
       openExternal,
     })
 
     expect(openExternal).toHaveBeenCalledTimes(1)
+    expect(openExternal).toHaveBeenCalledWith('https://localhost:3000/docs')
     expect(browserPaneApi.create).not.toHaveBeenCalled()
   })
 
@@ -103,7 +104,7 @@ describe('openUrlInBuiltInBrowser', () => {
     expect(browserPaneApi.hide).not.toHaveBeenCalled()
   })
 
-  it('falls back to the system browser and hides the pane when navigation fails after create', async () => {
+  it('falls back without hiding a reused pane when navigation fails after create', async () => {
     const browserPaneApi = makeBrowserPaneApi({
       navigate: mock(() => Promise.reject(new Error('Navigation timed out after 30s'))),
     } as Partial<BrowserPaneApi>)
@@ -116,8 +117,7 @@ describe('openUrlInBuiltInBrowser', () => {
     })
 
     expect(browserPaneApi.create).toHaveBeenCalledTimes(1)
-    expect(browserPaneApi.hide).toHaveBeenCalledTimes(1)
-    expect(browserPaneApi.hide).toHaveBeenCalledWith('built-in-browser')
+    expect(browserPaneApi.hide).not.toHaveBeenCalled()
     expect(openExternal).toHaveBeenCalledTimes(1)
     expect(openExternal).toHaveBeenCalledWith('https://example.com')
   })

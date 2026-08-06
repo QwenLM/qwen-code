@@ -4,6 +4,10 @@ import type { ElectronAPI } from '../../../shared/types'
 
 export type BrowserPaneApi = ElectronAPI['browserPane']
 
+const EXPLICIT_SCHEME_PATTERN = /^[a-z][a-z0-9+.-]*:/i
+const HOST_PATTERN =
+  /^(localhost|\d{1,3}(?:\.\d{1,3}){3}|[\w-]+(?:\.[\w-]+)+)(?::\d+)?(?:\/|$)/i
+
 export interface OpenUrlInBuiltInBrowserOptions {
   /** Browser pane API surface (window.electronAPI.browserPane). */
   browserPaneApi?: BrowserPaneApi
@@ -14,14 +18,17 @@ export interface OpenUrlInBuiltInBrowserOptions {
 }
 
 function shouldUseBuiltInBrowser(trimmedUrl: string): boolean {
-  const hasExplicitScheme = /^[a-z][a-z0-9+.-]*:/i.test(trimmedUrl)
-  const hasSchemeSeparator = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmedUrl)
-  const hostPattern =
-    /^(localhost|\d{1,3}(?:\.\d{1,3}){3}|[\w-]+(?:\.[\w-]+)+)(?::\d+)?(?:\/|$)/i
-  const looksLikeHost = hostPattern.test(trimmedUrl)
-  return hasSchemeSeparator
-    ? /^https?:\/\//i.test(trimmedUrl)
-    : !hasExplicitScheme || looksLikeHost
+  return (
+    HOST_PATTERN.test(trimmedUrl) ||
+    !EXPLICIT_SCHEME_PATTERN.test(trimmedUrl) ||
+    /^https?:\/\//i.test(trimmedUrl)
+  )
+}
+
+function normalizeExternalUrl(trimmedUrl: string): string {
+  if (HOST_PATTERN.test(trimmedUrl)) return `https://${trimmedUrl}`
+  if (EXPLICIT_SCHEME_PATTERN.test(trimmedUrl)) return trimmedUrl
+  return `https://duckduckgo.com/?q=${encodeURIComponent(trimmedUrl)}`
 }
 
 /**
@@ -34,9 +41,10 @@ export async function openUrlInBuiltInBrowser(
   { browserPaneApi, isChannelAvailable, openExternal }: OpenUrlInBuiltInBrowserOptions,
 ): Promise<void> {
   const trimmedUrl = url.trim()
+  const externalUrl = normalizeExternalUrl(trimmedUrl)
 
   if (!shouldUseBuiltInBrowser(trimmedUrl)) {
-    openExternal(url)
+    openExternal(externalUrl)
     return
   }
 
@@ -44,13 +52,12 @@ export async function openUrlInBuiltInBrowser(
   // map), so probe channel availability to detect servers without browser-pane
   // handlers (headless / thin-client) before attempting the built-in path.
   if (!browserPaneApi || isChannelAvailable?.(RPC_CHANNELS.browserPane.CREATE) === false) {
-    openExternal(url)
+    openExternal(externalUrl)
     return
   }
 
-  let instanceId: string | null = null
   try {
-    instanceId = await browserPaneApi.create({
+    const instanceId = await browserPaneApi.create({
       id: DEFAULT_DOCKED_BROWSER_INSTANCE_ID,
       show: true,
       presentation: 'docked',
@@ -59,14 +66,9 @@ export async function openUrlInBuiltInBrowser(
     await browserPaneApi.focus(instanceId)
   } catch (error) {
     console.warn(
-      '[App] Failed to open URL in built-in browser, falling back to default browser:',
+      '[openUrlInBuiltInBrowser] Failed to open URL in built-in browser, falling back to default browser:',
       error,
     )
-    if (instanceId) {
-      // Hide the half-opened pane so a failed navigation does not leave a
-      // stuck empty dock behind.
-      browserPaneApi.hide(instanceId).catch(() => {})
-    }
-    openExternal(url)
+    openExternal(externalUrl)
   }
 }
