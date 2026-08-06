@@ -29,11 +29,12 @@ import {
   findingsFilePath,
   writeFindingsFile,
 } from './prompt-record.js';
-import { writeStderrLine } from '../../../utils/stdioHelpers.js';
+import { writeStderrLineSafe } from '../../../utils/stdioHelpers.js';
 
 vi.mock('../../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: vi.fn(),
   writeStderrLine: vi.fn(),
+  writeStderrLineSafe: vi.fn(),
 }));
 
 const BUILT = [
@@ -163,7 +164,9 @@ describe('writeFindingsFile — a failed write must not be silent', () => {
   it('reports the failure on stderr and still returns the path', () => {
     // The build must not die on an unwritable record dir — but the miss must
     // be visible: the whole round's blocks point at the file this one write
-    // owes. A FILE where the record directory must sit makes mkdir fail.
+    // owes. A FILE where the record directory must sit makes mkdir fail. The
+    // diagnostic goes through writeStderrLineSafe: this catch exists to keep
+    // the build alive, so it must not throw out of it on EPIPE.
     const dir = mkdtempSync(join(tmpdir(), 'pr-ff-'));
     try {
       const blocker = join(dir, 'blocker');
@@ -171,9 +174,9 @@ describe('writeFindingsFile — a failed write must not be silent', () => {
       const planPath = join(blocker, 'plan.json');
       const p = writeFindingsFile(planPath, 'verify--abc', 'the list');
       expect(p).toBe(findingsFilePath(planPath, 'verify--abc'));
-      expect((writeStderrLine as unknown as Mock).mock.calls[0][0]).toContain(
-        'failed to write findings file',
-      );
+      expect(
+        (writeStderrLineSafe as unknown as Mock).mock.calls[0][0],
+      ).toContain('failed to write findings file');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -299,6 +299,15 @@ async function* withStreamInactivityTimeout(
   abortRequest: () => void,
   parentSignal: AbortSignal | undefined,
 ): AsyncGenerator<OpenAI.Chat.ChatCompletionChunk> {
+  // Both guards off: pass the source through untouched. The caller's
+  // `idleMs > 0 || maxLifetimeMs > 0` already prevents this, but the invariant
+  // must live here too — with both `<= 0`, `wait` computes to `Infinity` and
+  // Node clamps `setTimeout(Infinity)` to ~1ms, so every stream would die
+  // instantly with a bogus lifetime error.
+  if (idleMs <= 0 && maxLifetimeMs <= 0) {
+    yield* source;
+    return;
+  }
   const it = source[Symbol.asyncIterator]();
   const streamStartedAt = Date.now();
   const deadline = streamStartedAt + maxLifetimeMs;

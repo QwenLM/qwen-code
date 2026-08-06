@@ -35,7 +35,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, join, basename, resolve } from 'node:path';
-import { writeStderrLine } from '../../../utils/stdioHelpers.js';
+import { writeStderrLineSafe } from '../../../utils/stdioHelpers.js';
 
 /**
  * Where the prompts this plan's agents were built from are recorded.
@@ -116,7 +116,9 @@ export function writeFindingsFile(
     // reader can act on it. But say so now: a silent miss used to leave a
     // whole round's agents pointing at a file that does not exist, and
     // nothing downstream noticed until the floor was taught to count reads.
-    writeStderrLine(
+    // Safe writer: this catch exists to keep the build alive, so the
+    // diagnostic must not throw out of it on EPIPE (`qwen … | head`).
+    writeStderrLineSafe(
       `agent-prompt: failed to write findings file ${p}: ` +
         `${(err as Error).message}`,
     );

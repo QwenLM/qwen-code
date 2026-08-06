@@ -776,6 +776,37 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     expect(r3.converged).toBe(false);
   });
 
+  it('a pointer outside the record dir is not followed — degrades to the prompt', () => {
+    // The echo guard reads the pointer the record carries, confined to this
+    // plan's record dir. A prompt whose `.findings.md` path escapes it
+    // (here: a list sitting outside, with the quoted entry in it) must NOT
+    // be read — the guard falls back to the prompt, no entry matches, and
+    // the quotation keeps the chunk hot rather than reading an arbitrary path.
+    const outside = join(dir, 'outside.findings.md');
+    writeFileSync(
+      outside,
+      '- **File:** src/pay.ts:42 — the double charge\n' +
+        '- **Severity:** Suggestion\n',
+    );
+    const quoted =
+      'The list already carries this entry, so it is not re-reported:\n' +
+      '- **File:** src/pay.ts:42\n' +
+      '- **Severity:** Suggestion\n\n' +
+      DRY;
+    for (const r of [1, 2]) {
+      const built = record(
+        r,
+        13,
+        `chunk 13 round ${r} territory\n` + `read_file(file_path="${outside}")`,
+      );
+      transcript(built, quoted);
+    }
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.converged).toBe(false);
+  });
+
   it('a cold check nobody certified puts the chunk back on the every-round schedule', () => {
     dryTwice([13]);
     // Round 4 is the cold check — built, but the launch left no certified

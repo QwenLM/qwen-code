@@ -37,6 +37,7 @@
 // territory every round), never a skipped one.
 
 import { readFileSync, statSync } from 'node:fs';
+import { resolve, sep } from 'node:path';
 import { readTranscripts, type AgentRecord } from './transcripts.js';
 import { REVERSE_AUDIT_EXAMPLE_RECEIPT } from './agent-briefs.js';
 import {
@@ -44,6 +45,7 @@ import {
   findingsPointerOf,
   flattenPrompt,
   promptLines,
+  promptRecordDir,
   readRecordedPrompts,
 } from './prompt-record.js';
 
@@ -239,23 +241,37 @@ function substantiveClause(clause: string): boolean {
 
 /**
  * The cumulative findings list an auditor was launched against. Since #8597
- * the list rides a digest-named `.findings.md` file the launch prompt points
- * at — read it back; a prompt with no pointer predates the file shape (or its
+ * the list rides a digest-named `.findings.md` file the prompt points at —
+ * read it back; a prompt with no pointer predates the file shape (or its
  * file is gone), and the prompt itself is the fallback, which is where the
- * list lived before. An unreadable file degrades to the prompt: no entry
- * matches there, a quotation counts as a yield, and the chunk stays hot —
- * every failure in this module lands on the audit side.
+ * list lived before. The pointer is the CLI's own record's (never the
+ * orchestrator's pasted copy, which `wasDeliveredVerbatim` allows additions
+ * around), confined to this plan's record dir before reading; an unreadable
+ * or out-of-bounds file degrades to the prompt: no entry matches there, a
+ * quotation counts as a yield, and the chunk stays hot — every failure in
+ * this module lands on the audit side. `memo` keys on the pointer so the
+ * pairing walk reads each round's list once, not once per record.
  */
-function findingsListOf(launchPrompt: string): string {
-  const pointer = findingsPointerOf(launchPrompt);
-  if (pointer !== null) {
+function findingsListFor(
+  prompt: string,
+  recordDir: string,
+  memo: Map<string, string>,
+): string {
+  const pointer = findingsPointerOf(prompt);
+  if (pointer === null) return prompt;
+  const root = resolve(recordDir);
+  const target = resolve(pointer);
+  if (target !== root && !target.startsWith(root + sep)) return prompt;
+  let cached = memo.get(pointer);
+  if (cached === undefined) {
     try {
-      return readFileSync(pointer, 'utf8');
+      cached = readFileSync(target, 'utf8');
     } catch {
-      // Fall through to the prompt.
+      cached = prompt; // Fall back to the prompt.
     }
+    memo.set(pointer, cached);
   }
-  return launchPrompt;
+  return cached;
 }
 
 /**
@@ -279,6 +295,7 @@ function findingsListOf(launchPrompt: string): string {
 function classifyReturn(
   rec: AgentRecord,
   territory: Array<[number, number]>,
+  findingsList: string,
 ): AuditOutcome {
   const text = rec.finalText.trim();
   if (SEVERITY_LINE_RE.test(text)) {
@@ -291,11 +308,10 @@ function classifyReturn(
     // list cannot be a new finding against it. Skipping costs an audit at
     // most; counting a quotation re-opens the never-retire direction on
     // the loop's most common honest return.
-    const list = findingsListOf(rec.launchPrompt);
     for (const m of text.matchAll(FILE_LINE_RE)) {
       const file = (m[1] ?? '').trim();
       if (file === '' || /^N\/A\b/i.test(file)) continue;
-      if (list.includes(`**File:** ${file}`)) continue;
+      if (findingsList.includes(`**File:** ${file}`)) continue;
       return 'yielded';
     }
   }
@@ -396,11 +412,14 @@ export function scheduleReverseAuditRound(
   // The prior-round records: one per (chunk, round) prompt this CLI built.
   // Only PRIOR rounds are history — a record of the round being built is a
   // rebuild of it (a repaired delivery), not evidence about the territory.
+  const recordDir = promptRecordDir(planPath);
+  const findingsMemo = new Map<string, string>();
   const records: Array<{
     chunkId: number;
     round: number;
     lines: string[];
     territory: Array<[number, number]>;
+    findings: string;
   }> = [];
   for (const [key, prompt] of built) {
     const m = RECORD_KEY_RE.exec(key);
@@ -415,6 +434,7 @@ export function scheduleReverseAuditRound(
       // pair.
       lines: promptLines(prompt),
       territory: bakedRanges(prompt, diffPath),
+      findings: findingsListFor(prompt, recordDir, findingsMemo),
     });
   }
 
@@ -461,7 +481,7 @@ export function scheduleReverseAuditRound(
   const outcomesByRecord = matchesByRecord.map((matches, i) =>
     matches
       .filter((t) => recordsPerTranscript.get(t) === 1)
-      .map((t) => classifyReturn(t, records[i].territory)),
+      .map((t) => classifyReturn(t, records[i].territory, records[i].findings)),
   );
 
   // chunk id → prior round → every outcome that round's records produced. A

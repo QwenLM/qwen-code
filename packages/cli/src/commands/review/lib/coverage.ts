@@ -1264,7 +1264,14 @@ export function verificationGaps(
     // recorded prompt itself (a per-chunk key and its round's findings file
     // are keyed differently, so the key cannot derive the path), and a prompt
     // with no pointer (an empty early round, a pre-#8597 inlined list) owes
-    // no findings read.
+    // no findings read. Deliberate weakening versus the inlined shape this
+    // replaced: the floor proves the findings file was OPENED (one successful
+    // read of the path), not that it was paged to completion — `read_file`
+    // truncates, so a first-page-only read still leaves a matching `fNeedle`.
+    // The old `wasDeliveredVerbatim` required the whole list in the delivered
+    // prompt; the pointer proves delivery of the pointer line, not receipt of
+    // the whole list. Accepted: the brief now orders the full read, and a
+    // verifier that under-reads surfaces in the verdicts it gets wrong.
     const needle = JSON.stringify(briefPath(planPath, key));
     const opened = (r: AgentRecord) =>
       r.successfulCallArgs.some((a) => a.includes(needle));
@@ -1356,9 +1363,10 @@ export function verificationGaps(
   let unverifiedFindings = false;
   let verify: Delivery | null = null;
   if (opts.postsFindings) {
-    // The whole key family: `verify--<digest>` per shard (the record now folds
-    // the findings in, so a launch that dropped them matches nothing), plus the
-    // bare legacy key. Floor of one, as documented.
+    // The whole key family: `verify--<digest>` per shard (the record carries
+    // the findings-file pointer, and `deliveryOf` now also requires the agent
+    // to have read that file, so a launch that dropped the read matches
+    // nothing), plus the bare legacy key. Floor of one, as documented.
     const verifyKeys = [...built.keys()].filter(
       (k) => k === 'verify' || k.startsWith('verify--'),
     );
