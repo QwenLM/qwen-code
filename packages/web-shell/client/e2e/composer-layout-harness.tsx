@@ -10,6 +10,7 @@ const params = new URLSearchParams(window.location.search);
 const emptyMobileWelcome = params.get('emptyMobileWelcome') === 'true';
 const includeWelcomeFooter = params.get('welcomeFooter') !== 'false';
 const includeCustomFooter = params.get('customFooter') === 'true';
+const tallWelcome = params.get('tallWelcome') === 'true';
 const sessionId = params.get('sessionId') ?? 'composer-layout-e2e';
 const tags = Array.from({ length: 18 }, (_, index) => ({
   id: `table-${index + 1}`,
@@ -20,7 +21,15 @@ const sessionProps = emptyMobileWelcome
   ? {
       mobileWelcomeFooterMiddle: true,
       renderWelcomeHeader: () => (
-        <div data-e2e-mobile-welcome-header>Welcome header</div>
+        <div data-e2e-mobile-welcome-header>
+          {tallWelcome
+            ? Array.from({ length: 16 }, (_, index) => (
+                <div key={index} style={{ lineHeight: '24px' }}>
+                  Welcome header line {index + 1}
+                </div>
+              ))
+            : 'Welcome header'}
+        </div>
       ),
       ...(includeWelcomeFooter
         ? {

@@ -547,24 +547,65 @@ test('anchors the empty mobile composer without a welcome footer @smoke', async 
   });
 });
 
-test('anchors a custom footer and composer in a real bottom wrapper @smoke', async ({
+test('anchors a custom footer above the composer when the welcome footer is absent @smoke', async ({
   page,
 }, testInfo) => {
   await page.setViewportSize({ width: 760, height: 900 });
   const scenario = createWebShellDaemonScenario();
   await installScenario(page, scenario, testInfo);
 
-  await gotoEmptyMobileWelcomeHarness(page, { customFooter: true });
+  await gotoEmptyMobileWelcomeHarness(page, {
+    customFooter: true,
+    welcomeFooter: false,
+  });
   const customFooter = page.locator('[data-e2e-custom-footer]');
   await expect(customFooter).toBeVisible();
 
-  const layout = await emptyMobileComposerLayout(page);
-  expectEmptyMobileComposerAnchored(layout);
+  const layout = await emptyMobileComposerLayout(page, {
+    requireWelcomeFooter: false,
+  });
+  expectEmptyMobileComposerAnchored(layout, {
+    requireWelcomeFooter: false,
+  });
   expect(
     await customFooter.evaluate(
       (element) => element.getBoundingClientRect().bottom,
     ),
   ).toBeLessThanOrEqual(layout.composerTop);
+});
+
+test('keeps tall footerless welcome content top-reachable in a short pane @smoke', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 760, height: 320 });
+  const scenario = createWebShellDaemonScenario();
+  await installScenario(page, scenario, testInfo);
+
+  await gotoEmptyMobileWelcomeHarness(page, {
+    tallWelcome: true,
+    welcomeFooter: false,
+  });
+  const layout = await emptyMobileComposerLayout(page, {
+    requireWelcomeFooter: false,
+  });
+  expectEmptyMobileComposerAnchored(layout, {
+    expectCenteredWelcome: false,
+    requireWelcomeFooter: false,
+  });
+  expect(layout.messageListScrollHeight).toBeGreaterThan(
+    layout.messageListClientHeight,
+  );
+  await page
+    .locator('[data-web-shell-message-list]')
+    .evaluate((messageList) => (messageList.scrollTop = 0));
+  await expect
+    .poll(async () => {
+      const topLayout = await emptyMobileComposerLayout(page, {
+        requireWelcomeFooter: false,
+      });
+      return topLayout.welcomeHeaderTop - topLayout.messageListTop;
+    })
+    .toBeGreaterThanOrEqual(-1);
 });
 
 test('keeps centered welcome content clear of the composer in short panes @smoke', async ({

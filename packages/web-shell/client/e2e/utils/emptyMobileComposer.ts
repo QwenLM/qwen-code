@@ -22,6 +22,9 @@ export interface EmptyMobileComposerLayout {
   footerDisplay: string;
   footerPosition: string;
   footerTop: number;
+  messageListClientHeight: number;
+  messageListScrollHeight: number;
+  messageListTop: number;
   welcomeFooterBottom: number | null;
   welcomeFooterTop: number | null;
   welcomeHeaderBottom: number;
@@ -29,11 +32,13 @@ export interface EmptyMobileComposerLayout {
 }
 
 export interface EmptyMobileComposerLayoutOptions {
+  expectCenteredWelcome?: boolean;
   requireWelcomeFooter?: boolean;
 }
 
 export interface EmptyMobileWelcomeHarnessOptions {
   customFooter?: boolean;
+  tallWelcome?: boolean;
   welcomeFooter?: boolean;
 }
 
@@ -44,6 +49,7 @@ export async function gotoEmptyMobileWelcomeHarness(
   const params = new URLSearchParams({ emptyMobileWelcome: 'true' });
   if (options.welcomeFooter === false) params.set('welcomeFooter', 'false');
   if (options.customFooter === true) params.set('customFooter', 'true');
+  if (options.tallWelcome === true) params.set('tallWelcome', 'true');
   await page.goto(`/e2e/composer-layout-harness.html?${params.toString()}`);
   await expect(page.locator('[data-web-shell-root]')).toBeVisible();
 }
@@ -58,6 +64,9 @@ export async function emptyMobileComposerLayout(
       const composer = chatPane.querySelector(
         '[data-web-shell-composer-surface]',
       );
+      const messageList = chatPane.querySelector<HTMLElement>(
+        '[data-web-shell-message-list]',
+      );
       const welcomeHeader = chatPane.querySelector(
         '[data-e2e-mobile-welcome-header]',
       );
@@ -71,6 +80,7 @@ export async function emptyMobileComposerLayout(
       );
       if (
         !composer ||
+        !messageList ||
         !welcomeHeader ||
         !dotField ||
         (requireWelcomeFooter && !welcomeFooter)
@@ -109,6 +119,7 @@ export async function emptyMobileComposerLayout(
       const dotFieldStyle = getComputedStyle(dotField);
       const footerRect = footer.getBoundingClientRect();
       const footerStyle = getComputedStyle(footer);
+      const messageListRect = messageList.getBoundingClientRect();
       const welcomeFooterRect = welcomeFooter?.getBoundingClientRect();
 
       return {
@@ -133,6 +144,9 @@ export async function emptyMobileComposerLayout(
         footerDisplay: footerStyle.display,
         footerPosition: footerStyle.position,
         footerTop: footerRect.top,
+        messageListClientHeight: messageList.clientHeight,
+        messageListScrollHeight: messageList.scrollHeight,
+        messageListTop: messageListRect.top,
         welcomeFooterBottom: welcomeFooterRect?.bottom ?? null,
         welcomeFooterTop: welcomeFooterRect?.top ?? null,
         welcomeHeaderBottom: welcomeHeader.getBoundingClientRect().bottom,
@@ -172,7 +186,7 @@ export function expectEmptyMobileComposerAnchored(
       layout.welcomeFooterTop,
     );
     expect(layout.welcomeFooterBottom).toBeLessThanOrEqual(layout.footerTop);
-  } else {
+  } else if (options.expectCenteredWelcome !== false) {
     const welcomeHeaderMiddle =
       (layout.welcomeHeaderTop + layout.welcomeHeaderBottom) / 2;
     const welcomeRowMiddle = (layout.chatPaneTop + layout.footerTop) / 2;

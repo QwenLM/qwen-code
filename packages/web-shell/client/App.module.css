@@ -936,15 +936,18 @@
     [data-web-shell-message-list] {
     display: flex;
     flex-direction: column;
-    justify-content: center;
+    justify-content: safe center;
   }
 
-  .appChatEmpty .chatViewWithWelcomeMiddle .footerWithCustomFooter {
+  .appChatEmpty .chatViewWithMobileComposerBottom .footerWithCustomFooter {
     display: flex;
     flex-direction: column;
   }
 
-  .appChatEmpty .chatViewWithWelcomeMiddle .footerWithCustomFooter .composer {
+  .appChatEmpty
+    .chatViewWithMobileComposerBottom
+    .footerWithCustomFooter
+    .composer {
     order: 2;
   }
 
@@ -959,7 +962,7 @@
     padding-left: 20px;
   }
 
-  .appChatEmpty .chatViewWithWelcomeMiddle .customFooter {
+  .appChatEmpty .chatViewWithMobileComposerBottom .customFooter {
     order: 1;
     display: flex;
     flex: 0 0 auto;
