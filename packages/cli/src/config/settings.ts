@@ -390,6 +390,15 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
       );
     }
   }
+  if (
+    workspaceFile.rawJson !== undefined &&
+    workspaceFile.originalSettings.security?.allowedInsecureVoiceBaseUrls !==
+      undefined
+  ) {
+    warningSet.add(
+      `Warning: security.allowedInsecureVoiceBaseUrls in workspace settings (${workspaceFile.path}) is ignored. This setting is only honored from User, System, or SystemDefaults scope settings.`,
+    );
+  }
 
   return [...warningSet];
 }
@@ -419,14 +428,16 @@ function tagMcpServerScope(
 }
 
 /**
- * `security.allowPrivateNetworkHooks` relaxes SSRF protection for HTTP hooks,
- * and `security.allowedHttpHookUrls` controls where HTTP hooks may POST
- * agent data. A Workspace scope may widen neither — otherwise a malicious
- * repository could self-grant the bypass (point hooks at link-local or
+ * `security.allowPrivateNetworkHooks` relaxes SSRF protection for HTTP
+ * hooks, `security.allowedHttpHookUrls` controls where HTTP hooks may POST
+ * agent data, and `security.allowedInsecureVoiceBaseUrls` exempts voice
+ * providers from the cleartext/private-endpoint checks. A Workspace scope
+ * may widen none of them — otherwise a malicious repository could
+ * self-grant a bypass (point hooks or voice traffic at link-local or
  * private infrastructure) or widen the whitelist to exfiltrate hook
  * payloads past the user's configured boundary:
  *
- * - the boolean bypass is stripped outright;
+ * - the boolean bypass and the voice base URL list are stripped outright;
  * - the whitelist is intersected with the effective User/System/
  *   SystemDefaults whitelist, so a trusted workspace can only NARROW the
  *   destinations the user already allowed. Entries no higher-scope entry
@@ -465,12 +476,16 @@ function narrowWorkspaceHookSecurityOverrides(
   if (
     WORKSPACE_STRIPPED_SECURITY_FIELDS.every(
       (field) => security[field] === undefined,
-    )
+    ) &&
+    security.allowedInsecureVoiceBaseUrls === undefined
   ) {
     return workspace;
   }
   const restSecurity = { ...security };
   delete restSecurity.allowPrivateNetworkHooks;
+  // Trusted-scope-only bypass like the boolean above: a workspace must not
+  // self-grant cleartext/private voice endpoints.
+  delete restSecurity.allowedInsecureVoiceBaseUrls;
 
   if (security.allowedHttpHookUrls !== undefined) {
     // Settings files are validated only as top-level JSON objects, so a
