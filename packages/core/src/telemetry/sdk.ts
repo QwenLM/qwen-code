@@ -24,9 +24,10 @@ import type { TelemetryRuntimeConfig } from './runtime-config.js';
 import { initializeMetrics } from './metrics.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { createSessionRootContext } from './tracer.js';
-import { setSessionContext } from './session-context.js';
+import { getCurrentSessionId, setSessionContext } from './session-context.js';
 import { setShellTracePropagation } from './trace-context.js';
 import { endInteractionSpan } from './session-tracing.js';
+import { emitSessionEnd } from './session-events.js';
 
 function createTelemetryDiagLogger(): DiagLogger {
   const debugLogger = createDebugLogger('OTEL');
@@ -140,6 +141,10 @@ export function shutdownTelemetry(): Promise<void> {
       return;
     }
     endInteractionSpan('cancelled');
+    const currentSessionId = getCurrentSessionId();
+    if (currentSessionId) {
+      emitSessionEnd(currentSessionId);
+    }
     const currentSdk = sdk;
     const debugLogger = createDebugLogger('OTEL');
     let timer: ReturnType<typeof setTimeout> | undefined;

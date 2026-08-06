@@ -32,6 +32,7 @@ export {
 } from './config.js';
 export {
   logStartSession,
+  logSessionEnd,
   logUserPrompt,
   logUserRetry,
   logToolCall,

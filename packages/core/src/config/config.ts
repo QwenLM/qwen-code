@@ -129,6 +129,7 @@ import {
   shutdownTelemetry,
   refreshSessionContext,
   logStartSession,
+  logSessionEnd,
   logRipgrepFallback,
   RipgrepFallbackEvent,
   StartSessionEvent,
@@ -3794,6 +3795,7 @@ export class Config {
     });
 
     const previousSessionId = this.sessionId;
+    logSessionEnd(this);
     this.sessionId = sessionId ?? randomUUID();
     // Unconditional: startNewSession is only called on the canonical Config
     // instance (the one that already claimed via sessionEnvClaimed), so this
@@ -3840,7 +3842,11 @@ export class Config {
     // one, and the "N-shotted" PR label would span sessions.
     CommitAttributionService.resetInstance();
     if (this.initialized) {
-      logStartSession(this, new StartSessionEvent(this));
+      logStartSession(
+        this,
+        new StartSessionEvent(this),
+        sessionData ? previousSessionId : undefined,
+      );
     }
 
     // Refresh the runtime.json sidecar so external observers (terminal

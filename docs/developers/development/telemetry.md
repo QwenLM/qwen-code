@@ -858,6 +858,17 @@ The daemon process (long-running HTTP server mode) exposes its own metrics.
 
 Distributed tracing spans form a tree rooted at `qwen-code.interaction`. Each interaction is a trace root with its own `traceId`; cross-prompt correlation uses the `session.id` attribute.
 
+Session lifecycle is also exported through the OpenTelemetry General Session
+semantic conventions. When the OTel logs pipeline is enabled, Qwen Code emits
+`session.start` and `session.end` log events with the required `session.id`
+attribute. A resumed persisted conversation includes `session.previous_id` on
+its `session.start` event. `/clear` and other replacement flows intentionally
+do not claim continuation because they discard the previous conversation.
+
+The existing Qwen-specific `qwen-code.config`/`cli_config` and
+`end_session` records remain available for compatibility. GenAI request spans
+continue to use `gen_ai.conversation.id` for the same owning session ID.
+
 - `qwen-code.interaction`: Root span for each user prompt turn.
   - **Attributes**: `session.id`, optional ARMS extension `gen_ai.user.id`, `qwen-code.prompt_id`, `qwen-code.message_type`, `qwen-code.model`, `qwen-code.approval_mode`, `interaction.sequence`, `interaction.duration_ms`, `qwen-code.turn_status` ("ok"/"error"/"cancelled")
 
