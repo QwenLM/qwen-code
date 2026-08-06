@@ -693,7 +693,10 @@ export class FeishuChannel extends ChannelBase {
     const lookup = (async () => {
       try {
         const token = await this.getTenantAccessToken();
-        if (!token) return undefined;
+        if (!token) {
+          this.observedUserLookups.delete(userId);
+          return undefined;
+        }
 
         const userIdType = userId.startsWith('ou_')
           ? 'open_id'
@@ -712,7 +715,10 @@ export class FeishuChannel extends ChannelBase {
             signal: AbortSignal.timeout(15_000),
           },
         );
-        if (!response.ok) return undefined;
+        if (!response.ok) {
+          if (response.status === 401) this.tokenCache = undefined;
+          return undefined;
+        }
 
         const body = (await response.json()) as {
           code?: number;
@@ -737,7 +743,10 @@ export class FeishuChannel extends ChannelBase {
     const lookup = (async () => {
       try {
         const token = await this.getTenantAccessToken();
-        if (!token) return undefined;
+        if (!token) {
+          this.observedChatLookups.delete(chatId);
+          return undefined;
+        }
 
         const response = await fetch(
           `${BASE_URL}/im/v1/chats/${encodeURIComponent(chatId)}`,
@@ -746,7 +755,10 @@ export class FeishuChannel extends ChannelBase {
             signal: AbortSignal.timeout(15_000),
           },
         );
-        if (!response.ok) return undefined;
+        if (!response.ok) {
+          if (response.status === 401) this.tokenCache = undefined;
+          return undefined;
+        }
 
         const body = (await response.json()) as {
           code?: number;
@@ -769,11 +781,6 @@ export class FeishuChannel extends ChannelBase {
   }
 
   private async enrichObservedContact(envelope: Envelope): Promise<void> {
-    const userAttempted = this.observedUserLookups.has(envelope.senderId);
-    const chatAttempted =
-      !envelope.isGroup || this.observedChatLookups.has(envelope.chatId);
-    if (userAttempted && chatAttempted) return;
-
     const [senderName, chatName] = await Promise.all([
       this.observedUserName(envelope.senderId),
       envelope.isGroup
@@ -781,6 +788,12 @@ export class FeishuChannel extends ChannelBase {
         : Promise.resolve(undefined),
     ]);
     if (!senderName && !chatName) return;
+    if (
+      (!senderName || envelope.senderName === senderName) &&
+      (!chatName || envelope.chatName === chatName)
+    ) {
+      return;
+    }
 
     await this.recordObservedContact({
       ...envelope,

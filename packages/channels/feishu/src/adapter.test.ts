@@ -138,6 +138,23 @@ function getPrivateMethod<T>(instance: unknown, method: string): T {
   return (instance as Record<string, unknown>)[method] as T;
 }
 
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+} {
+  let resolve: (value: T) => void = () => {};
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(typeof body === 'string' ? body : JSON.stringify(body), {
+    status,
+  });
+}
+
 describe('FeishuChannel', () => {
   describe('constructor', () => {
     it('throws if clientId is missing', () => {
@@ -434,6 +451,167 @@ describe('FeishuChannel', () => {
       } finally {
         fetchSpy.mockRestore();
         stderrSpy.mockRestore();
+      }
+    });
+
+    it('repairs labels from a delayed message with a stale snapshot', async () => {
+      const observe = vi.fn();
+      const { channel } = createObservedContactChannel(observe);
+      const userLookup = deferred<Response>();
+      const chatLookup = deferred<Response>();
+      const quotedMessage = deferred<Response>();
+      const fetchSpy = vi.spyOn(global, 'fetch').mockImplementation((input) => {
+        const url = String(input);
+        if (url.includes('/contact/v3/users/basic_batch')) {
+          return userLookup.promise;
+        }
+        if (url.includes('/im/v1/chats/oc_group')) {
+          return chatLookup.promise;
+        }
+        if (url.includes('/im/v1/messages/om_parent')) {
+          return quotedMessage.promise;
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      });
+      const onMessage = getPrivateMethod<(data: unknown) => void>(
+        channel,
+        'onMessage',
+      ).bind(channel);
+
+      try {
+        onMessage(feishuGroupMessage('message_1'));
+        await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(2));
+
+        const reply = feishuGroupMessage('message_2');
+        (reply['message'] as Record<string, unknown>)['parent_id'] =
+          'om_parent';
+        onMessage(reply);
+        await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(3));
+
+        userLookup.resolve(
+          jsonResponse({
+            code: 0,
+            data: { users: [{ name: 'Alice' }] },
+          }),
+        );
+        chatLookup.resolve(
+          jsonResponse({ code: 0, data: { name: 'Project Group' } }),
+        );
+        await vi.waitFor(() => expect(observe).toHaveBeenCalledTimes(2));
+
+        quotedMessage.resolve(
+          jsonResponse({
+            data: {
+              items: [
+                {
+                  msg_type: 'text',
+                  body: { content: JSON.stringify({ text: 'quoted' }) },
+                  sender: { sender_type: 'user' },
+                },
+              ],
+            },
+          }),
+        );
+
+        await vi.waitFor(() => expect(observe).toHaveBeenCalledTimes(4));
+        expect(observe).toHaveBeenNthCalledWith(3, 'test', {
+          user: { id: 'ou_user', label: 'ou_user' },
+          group: { id: 'oc_group', label: 'oc_group' },
+        });
+        expect(observe).toHaveBeenLastCalledWith('test', {
+          user: { id: 'ou_user', label: 'Alice' },
+          group: { id: 'oc_group', label: 'Project Group' },
+        });
+        expect(
+          fetchSpy.mock.calls.filter(([input]) =>
+            String(input).includes('/contact/v3/users/basic_batch'),
+          ),
+        ).toHaveLength(1);
+        expect(
+          fetchSpy.mock.calls.filter(([input]) =>
+            String(input).includes('/im/v1/chats/oc_group'),
+          ),
+        ).toHaveLength(1);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('retries a label lookup when token acquisition fails before the request', async () => {
+      const observe = vi.fn();
+      const { channel } = createObservedContactChannel(observe);
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        tokenCache: undefined,
+      });
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockResolvedValueOnce(jsonResponse('unavailable', 503))
+        .mockResolvedValueOnce(
+          jsonResponse({
+            tenant_access_token: 'fresh_token',
+            expire: 3600,
+          }),
+        )
+        .mockResolvedValueOnce(
+          jsonResponse({
+            code: 0,
+            data: { users: [{ name: 'Alice' }] },
+          }),
+        );
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const observedUserName = getPrivateMethod<
+        (userId: string) => Promise<string | undefined>
+      >(channel, 'observedUserName').bind(channel);
+
+      try {
+        await expect(observedUserName('ou_user')).resolves.toBeUndefined();
+        await expect(observedUserName('ou_user')).resolves.toBe('Alice');
+        expect(fetchSpy).toHaveBeenCalledTimes(3);
+      } finally {
+        fetchSpy.mockRestore();
+        stderrSpy.mockRestore();
+      }
+    });
+
+    it('refreshes the token after a label lookup returns 401', async () => {
+      const observe = vi.fn();
+      const { channel } = createObservedContactChannel(observe);
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockImplementation(async (input, init) => {
+          const url = String(input);
+          if (url.includes('/tenant_access_token/internal')) {
+            return jsonResponse({
+              tenant_access_token: 'fresh_token',
+              expire: 3600,
+            });
+          }
+          if (url.includes('/contact/v3/users/basic_batch')) {
+            const authorization = new Headers(init?.headers).get(
+              'Authorization',
+            );
+            if (authorization === 'Bearer test_token') {
+              return jsonResponse('unauthorized', 401);
+            }
+            return jsonResponse({
+              code: 0,
+              data: { users: [{ name: 'Bob' }] },
+            });
+          }
+          throw new Error(`Unexpected request: ${url}`);
+        });
+      const observedUserName = getPrivateMethod<
+        (userId: string) => Promise<string | undefined>
+      >(channel, 'observedUserName').bind(channel);
+
+      try {
+        await expect(observedUserName('ou_first')).resolves.toBeUndefined();
+        await expect(observedUserName('ou_second')).resolves.toBe('Bob');
+        expect(fetchSpy).toHaveBeenCalledTimes(3);
+      } finally {
+        fetchSpy.mockRestore();
       }
     });
   });
