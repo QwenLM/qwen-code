@@ -45,6 +45,7 @@ describe('reviewCommand', () => {
       'capture-local',
       'capture-tui',
       'plan-diff',
+      'repo-context',
       'pr-context',
       'comment-status',
       'load-rules',

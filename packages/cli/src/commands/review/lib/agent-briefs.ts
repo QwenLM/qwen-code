@@ -55,6 +55,36 @@ export type RoleId =
   | 'verify'
   | 'reverse-audit';
 
+/**
+ * The roles a repository context may require. One list is the single source for
+ * BOTH the type and the runtime guard: an allow-list the type admitted while the
+ * guard rejected it (or the reverse) would make the `is` predicate a lie, so
+ * neither half is written by hand any more.
+ */
+export const REPOSITORY_CONTEXT_ROLES = [
+  '1a',
+  '1b',
+  '1c',
+  '2',
+  '3a',
+  '3b',
+  '3c',
+  '4',
+  '5',
+  '6a',
+  '6b',
+  '6c',
+  'test-matrix',
+] as const satisfies readonly RoleId[];
+
+export type RepositoryContextRoleId = (typeof REPOSITORY_CONTEXT_ROLES)[number];
+
+export function isRepositoryContextRoleId(
+  value: string,
+): value is RepositoryContextRoleId {
+  return (REPOSITORY_CONTEXT_ROLES as readonly string[]).includes(value);
+}
+
 export interface Brief {
   /** How the role is named to a human reading a coverage failure. */
   label: string;
@@ -115,8 +145,8 @@ export interface Brief {
    */
   acceptsChunk?: boolean;
   /**
-   * May this role be launched `--role <r> --findings <file>`, folding a findings
-   * list into the prompt the command prints?
+   * May this role be launched `--role <r> --findings <file>`, so the command
+   * prints a launch block pointed at the findings list?
    *
    * The verifier rules on findings; the reverse auditor avoids re-reporting them.
    * Both used to get their findings the same way: the command printed a launch
@@ -124,10 +154,13 @@ export interface Brief {
    * hand-assembly is where the prompt got paraphrased — the model added a round
    * number, inserted its own summary, and truncated the line telling it the brief
    * is authoritative — so the delivery check failed even though the agent opened
-   * its brief. With this flag the command folds the findings in and prints one
-   * block to paste, and there is no assembly step left to drift. The findings are
-   * part of the recorded prompt (see runAgentPrompt), keyed per findings digest,
-   * so a launch that drops or rewrites them matches no record.
+   * its brief. With this flag the command copies the list to a digest-named file
+   * and prints one block to paste — a pointer to that file, not the list itself,
+   * which inlined made a 12-14-agent launch one 65-82 KB message (issue #8597) —
+   * and there is no assembly step left to drift. The pointer is part of the
+   * recorded prompt (see runAgentPrompt), keyed per findings digest, so a launch
+   * that drops it matches no record, and the delivery floor counts the read it
+   * instructs exactly as it counts the brief's.
    */
   acceptsFindings?: boolean;
   /** The agent-facing text. */
@@ -545,7 +578,7 @@ Report a **Critical** for each violation, and give **both** locations that toget
     publicLabel: 'verification',
     publicLabelZh: '验证',
     readsDiff: true,
-    brief: `You are a **verification agent**. You do not look for new problems — you rule on the findings you were handed, listed in the message that launched you, each with a file, a line, an issue, and a **failure scenario**. The failure scenario is the finding's testable claim, and your verdict is the **result of tracing it through the real code**, not a plausibility vote on how the finding reads.
+    brief: `You are a **verification agent**. You do not look for new problems — you rule on the findings you were handed. They are not in the message that launched you as plain prose — when that message points at a **findings file**, \`read_file\` the \`.findings.md\` path it names, ALL of it, right after this brief (page with a larger \`offset\` if a read comes back \`isTruncated\`); on the rare write-failure fallback the list is inlined in the launch message itself, and you rule on it there instead. Each finding has a file, a line, an issue, and a **failure scenario**. The failure scenario is the finding's testable claim, and your verdict is the **result of tracing it through the real code**, not a plausibility vote on how the finding reads.
 
 For each finding you were given:
 
@@ -665,7 +698,7 @@ The asymmetry cuts both ways: confirming also requires the trace, and a finding 
     publicLabel: 'reverse audit',
     publicLabelZh: '反向审计',
     readsDiff: true,
-    brief: `You are a **reverse audit agent**. Prior agents have already reviewed this diff and their confirmed findings are listed in the message that launched you. Your job is not to re-report them — it is to find the **gaps**: the important issues no prior agent or round caught.
+    brief: `You are a **reverse audit agent**. Prior agents have already reviewed this diff; their confirmed findings are not in the message that launched you as plain prose — when that message points at a **findings file**, \`read_file\` the \`.findings.md\` path it names, ALL of it, right after this brief (page with a larger \`offset\` if a read comes back \`isTruncated\`); on the rare write-failure fallback the list is inlined in the launch message itself, and you read it there instead. An early round on a clean review names no file and tells you nothing is confirmed yet — then there is no list to avoid. Your job is not to re-report them — it is to find the **gaps**: the important issues no prior agent or round caught.
 
 - **Read your scope in full** with the diff reads the message gives you — page a truncated read rather than reasoning from its first screenful. A reverse audit that saw a fraction of its scope and returned "No issues found" is worse than none: it ends the loop on a lie.
 - **Focus exclusively on what is not already in the finding list.** Assume the obvious defects are found; look where a first pass does not: the interaction between two changes, the assumption that holds in the common case and breaks in the rare one, the removed guard whose replacement is three files away.
