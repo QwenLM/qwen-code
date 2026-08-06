@@ -22,6 +22,9 @@ export function buildCurrentQwenCliArgv(args: readonly string[]): string[] {
     if (tsxCli) {
       return [process.execPath, tsxCli, entrypoint, ...args];
     }
+    throw new Error(
+      `Cannot spawn supervisor: DEV=true with TypeScript entrypoint ${entrypoint} but tsx was not found. Run npm install.`,
+    );
   }
 
   return [process.execPath, entrypoint, ...args];

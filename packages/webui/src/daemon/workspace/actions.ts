@@ -12,6 +12,7 @@ import type {
   DaemonGoal,
   DaemonScheduledTask,
   DaemonWorkspaceActions,
+  DaemonWorkspaceDirectoryPickerResult,
   DaemonWorkspacePathSuggestions,
 } from './types.js';
 
@@ -243,6 +244,29 @@ export function createDaemonWorkspaceActions({
           'Approve channel pairing failed',
         );
         return workspace.approveWorkspaceChannelPairing(name, { code });
+      },
+
+      async approvals(name) {
+        const workspace = requireWorkspaceClient(
+          getClient,
+          getWorkspaceCwd,
+          'Load channel pairing approvals failed',
+        );
+        return withActionTimeout(
+          workspace.workspaceChannelPairingApprovals(name),
+          'Load channel pairing approvals timed out',
+        );
+      },
+
+      async revoke(name, senderId) {
+        const workspace = requireWorkspaceClient(
+          getClient,
+          getWorkspaceCwd,
+          'Revoke channel pairing approval failed',
+        );
+        return workspace.revokeWorkspaceChannelPairingApproval(name, {
+          senderId,
+        });
       },
     },
 
@@ -999,6 +1023,16 @@ export function createDaemonWorkspaceActions({
         'Suggest workspace paths timed out',
       );
       return result as DaemonWorkspacePathSuggestions;
+    },
+
+    async pickWorkspaceDirectory() {
+      const client = requireClient(getClient, 'Open directory picker failed');
+      const result = await withActionTimeout(
+        client.workspaceDirectoryPicker(),
+        'Open directory picker timed out',
+        320_000,
+      );
+      return result as DaemonWorkspaceDirectoryPickerResult;
     },
 
     async updateWorkspace(workspaceSelector, update) {

@@ -323,6 +323,7 @@ describe('DaemonClient', () => {
             cwd: '/work/secondary',
             primary: false,
             trusted: true,
+            kind: 'live',
           },
         ],
       };
@@ -453,6 +454,36 @@ describe('DaemonClient', () => {
         'http://daemon/file?path=src%2Fa.ts&line=2&limit=3',
       );
       expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('forwards a workspace text cursor', async () => {
+      const payload = {
+        kind: 'file',
+        path: 'src/a.ts',
+        content: 'next\n',
+        encoding: 'utf-8',
+        bom: false,
+        lineEnding: 'lf',
+        sizeBytes: 20,
+        returnedBytes: 5,
+        truncated: true,
+        matchedIgnore: null,
+        originalLineCount: null,
+        nextCursor: null,
+        hasMore: false,
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, payload));
+      const client = new DaemonClient({ baseUrl: 'http://daemon/', fetch });
+
+      await expect(
+        client.readWorkspaceFile('src/a.ts', {
+          limit: 3,
+          cursor: 'cursor 1',
+        }),
+      ).resolves.toEqual(payload);
+      expect(calls[0]?.url).toBe(
+        'http://daemon/file?path=src%2Fa.ts&limit=3&cursor=cursor+1',
+      );
     });
 
     it('reads raw bytes as base64 payloads', async () => {
@@ -1020,6 +1051,85 @@ describe('DaemonClient', () => {
       ).resolves.toEqual(list);
       expect(calls.map((call) => [call.method, call.url])).toEqual([
         ['GET', 'http://daemon/workspaces/%2Fwork%2Fsecondary/github/prs'],
+      ]);
+    });
+
+    it('routes the git mutation and GitHub create methods over REST', async () => {
+      const ok = { v: 1 as const, workspaceCwd: '/work/secondary' };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, ok));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const ws = client.workspaceByCwd('/work/secondary');
+
+      await ws.workspaceGitBranches();
+      await ws.workspaceGitCheckout('feat/thing');
+      await ws.workspaceGitCreateBranch('feat/new', 'main');
+      await ws.workspaceGitPush({ setUpstream: true, force: false });
+      await ws.workspaceGitPull({ rebase: true });
+      await ws.workspaceGitCommit('fix: thing', { all: true });
+      await ws.workspaceGitHubCreatePullRequest({
+        title: 'Add a thing',
+        body: 'body text',
+        base: 'main',
+      });
+      await ws.workspaceGitHubDefaultBranch();
+
+      const base = 'http://daemon/workspaces/%2Fwork%2Fsecondary';
+      expect(calls.map((c) => [c.method, c.url])).toEqual([
+        ['GET', `${base}/git/branches`],
+        ['POST', `${base}/git/checkout`],
+        ['POST', `${base}/git/branch`],
+        ['POST', `${base}/git/push`],
+        ['POST', `${base}/git/pull`],
+        ['POST', `${base}/git/commit`],
+        ['POST', `${base}/github/prs/create`],
+        ['GET', `${base}/github/default-branch`],
+      ]);
+      expect(JSON.parse(calls[1]!.body!)).toEqual({ ref: 'feat/thing' });
+      expect(JSON.parse(calls[2]!.body!)).toEqual({
+        name: 'feat/new',
+        startPoint: 'main',
+      });
+      expect(JSON.parse(calls[3]!.body!)).toEqual({
+        setUpstream: true,
+        force: false,
+      });
+      expect(JSON.parse(calls[4]!.body!)).toEqual({ rebase: true });
+      expect(JSON.parse(calls[5]!.body!)).toEqual({
+        message: 'fix: thing',
+        all: true,
+      });
+      expect(JSON.parse(calls[6]!.body!)).toEqual({
+        title: 'Add a thing',
+        body: 'body text',
+        base: 'main',
+      });
+    });
+
+    it('passes cwd as a query parameter on git mutation methods', async () => {
+      const ok = { v: 1 as const, workspaceCwd: '/work/secondary' };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, ok));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const ws = client.workspaceByCwd('/work/secondary');
+      const cwd = '/work/secondary/packages/app';
+
+      await ws.workspaceGitBranches(cwd);
+      await ws.workspaceGitCheckout('feat/thing', cwd);
+      await ws.workspaceGitCreateBranch('feat/new', 'main', cwd);
+      await ws.workspaceGitPush({ setUpstream: true }, cwd);
+      await ws.workspaceGitPull({ rebase: true }, cwd);
+      await ws.workspaceGitCommit('fix: thing', { all: true }, cwd);
+      await ws.workspaceGitHubCreatePullRequest({ title: 'Add thing' }, cwd);
+
+      const base = 'http://daemon/workspaces/%2Fwork%2Fsecondary';
+      const enc = encodeURIComponent(cwd);
+      expect(calls.map((c) => [c.method, c.url])).toEqual([
+        ['GET', `${base}/git/branches?cwd=${enc}`],
+        ['POST', `${base}/git/checkout?cwd=${enc}`],
+        ['POST', `${base}/git/branch?cwd=${enc}`],
+        ['POST', `${base}/git/push?cwd=${enc}`],
+        ['POST', `${base}/git/pull?cwd=${enc}`],
+        ['POST', `${base}/git/commit?cwd=${enc}`],
+        ['POST', `${base}/github/prs/create?cwd=${enc}`],
       ]);
     });
 
@@ -2590,6 +2700,38 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('createSideTaskSession', () => {
+    it('uses the dedicated side-task endpoint', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(201, {
+          sessionId: 'side-1',
+          workspaceCwd: '/work/a',
+          attached: false,
+          state: {},
+          displayName: 'Side task',
+          parentSessionId: 'main-1',
+          sourceType: 'side_task',
+          sourceId: 'main-1',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.createSideTaskSession(
+        'main-1',
+        {
+          name: 'Side task',
+        },
+        'side-task-client',
+      );
+
+      expect(calls[0]?.url).toBe('http://daemon/session/main-1/side-task');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('side-task-client');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        name: 'Side task',
+      });
+    });
+  });
+
   describe('cancel', () => {
     it('POSTs /cancel and tolerates 204', async () => {
       const { fetch, calls } = recordingFetch(
@@ -3673,14 +3815,14 @@ describe('DaemonClient', () => {
   describe('enqueueMidTurnMessage (web-shell mid-turn drain)', () => {
     it('POSTs the message and returns accepted:true', async () => {
       const { fetch, calls } = recordingFetch(() =>
-        jsonResponse(200, { accepted: true }),
+        jsonResponse(200, { accepted: true, messageId: 'mid-1' }),
       );
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
       const result = await client.enqueueMidTurnMessage(
         's-1',
         'also check tests',
       );
-      expect(result).toEqual({ accepted: true });
+      expect(result).toEqual({ accepted: true, messageId: 'mid-1' });
       expect(calls[0]?.url).toBe('http://daemon/session/s-1/mid-turn-message');
       expect(calls[0]?.method).toBe('POST');
       expect(JSON.parse(calls[0]?.body as string)).toEqual({
@@ -3754,6 +3896,26 @@ describe('DaemonClient', () => {
       await expect(
         client.enqueueMidTurnMessage('s-1', 'hi'),
       ).rejects.toMatchObject({ status: 404 });
+    });
+  });
+
+  describe('removeMidTurnMessage', () => {
+    it('DELETEs the encoded message id with client identity', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { removed: true }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.removeMidTurnMessage('s/1', 'mid/1', {
+          clientId: 'client-1',
+        }),
+      ).resolves.toEqual({ removed: true });
+      expect(calls[0]?.url).toBe(
+        'http://daemon/session/s%2F1/mid-turn-messages/mid%2F1',
+      );
+      expect(calls[0]?.method).toBe('DELETE');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
     });
   });
 
@@ -7186,6 +7348,10 @@ describe('DaemonClient', () => {
       await client.approveWorkspaceChannelPairing('bot/name', {
         code: 'ABCDEFGH',
       });
+      await client.workspaceChannelPairingApprovals('bot/name');
+      await client.revokeWorkspaceChannelPairingApproval('bot/name', {
+        senderId: 'sender/1',
+      });
 
       expect(calls.map(({ method, url }) => [method, url])).toEqual([
         ['GET', 'http://daemon/workspace/channel-types'],
@@ -7201,9 +7367,18 @@ describe('DaemonClient', () => {
           'POST',
           'http://daemon/workspace/channels/bot%2Fname/pairing-requests/approve',
         ],
+        [
+          'GET',
+          'http://daemon/workspace/channels/bot%2Fname/pairing-approvals',
+        ],
+        [
+          'DELETE',
+          'http://daemon/workspace/channels/bot%2Fname/pairing-approvals',
+        ],
       ]);
       expect(calls[1]?.headers['x-qwen-client-id']).toBe('reader');
       expect(calls[2]?.headers['x-qwen-client-id']).toBe('writer');
+      expect(JSON.parse(calls[11]!.body!)).toEqual({ senderId: 'sender/1' });
     });
 
     it('uses the exact qualified workspace routes', async () => {
@@ -7221,6 +7396,10 @@ describe('DaemonClient', () => {
         config: { type: 'dingtalk' },
       });
       await workspace.workspaceChannelPairingRequests('bot');
+      await workspace.workspaceChannelPairingApprovals('bot');
+      await workspace.revokeWorkspaceChannelPairingApproval('bot', {
+        senderId: 'sender-1',
+      });
 
       expect(calls.map(({ method, url }) => [method, url])).toEqual([
         ['GET', 'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channel-types'],
@@ -7234,9 +7413,20 @@ describe('DaemonClient', () => {
           'GET',
           'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channels/bot/pairing-requests',
         ],
+        [
+          'GET',
+          'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channels/bot/pairing-approvals',
+        ],
+        [
+          'DELETE',
+          'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channels/bot/pairing-approvals',
+        ],
       ]);
       expect(calls[1]?.headers['x-qwen-client-id']).toBe('reader');
       expect(calls[2]?.headers['x-qwen-client-id']).toBe('writer');
+      expect(JSON.parse(calls[6]!.body!)).toEqual({
+        senderId: 'sender-1',
+      });
     });
   });
 });

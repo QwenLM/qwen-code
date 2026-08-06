@@ -9,6 +9,7 @@ import { render } from 'ink';
 import React from 'react';
 import {
   createDebugLogger,
+  isDebugLogFileEnabled,
   type Config,
   writeRuntimeStatus,
 } from '@qwen-code/qwen-code-core';
@@ -33,11 +34,19 @@ import {
 } from './utils/kittyProtocolDetector.js';
 import { installTerminalRedrawOptimizer } from './utils/terminalRedrawOptimizer.js';
 import { installSynchronizedOutput } from './utils/synchronizedOutput.js';
-import { ErrorBoundary } from './components/shared/ErrorBoundary.js';
+import {
+  isInteractiveTerminal,
+  shouldUseVirtualViewport,
+} from './utils/terminal-buffer.js';
+import {
+  ErrorBoundary,
+  consumeLastRenderError,
+} from './components/shared/ErrorBoundary.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
 import { stopAndGetCapturedInput } from '../utils/earlyInputCapture.js';
 import { profileCheckpoint } from '../utils/startupProfiler.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
+import { sanitizeTerminalText } from './utils/textUtils.js';
 import { startPostRenderPrefetches } from '../startup/startup-prefetch.js';
 import {
   computeWindowTitle,
@@ -146,6 +155,12 @@ export async function startInteractiveUI(
   // always reads from the same stable prop rather than the (now empty) module buffer.
   const initialCapturedInput = stopAndGetCapturedInput();
 
+  const useVP = shouldUseVirtualViewport(
+    settings.merged.ui?.useTerminalBuffer,
+    config.getScreenReader(),
+    isInteractiveTerminal(),
+  );
+
   // Create wrapper component to use hooks inside render
   const AppWrapper = () => {
     const kittyProtocolStatus = useKittyKeyboardProtocol();
@@ -175,6 +190,7 @@ export async function startInteractiveUI(
                         startupWarnings={startupWarnings}
                         version={version}
                         initializationResult={initializationResult}
+                        initialUseVirtualViewport={useVP}
                         extensionRefreshState={options.extensionRefreshState}
                       />
                     </BackgroundTaskViewProvider>
@@ -188,7 +204,6 @@ export async function startInteractiveUI(
     );
   };
 
-  const useVP = settings.merged.ui?.useTerminalBuffer ?? false;
   const stdoutMaxListeners = process.stdout.getMaxListeners();
   if (useVP) {
     // Visible VP rows each subscribe to resize through Ink's useBoxMetrics.
@@ -198,6 +213,7 @@ export async function startInteractiveUI(
   }
   const appTree = (
     <ErrorBoundary
+      recordForExitEcho
       onError={(error, info) => {
         debugLogger.error(
           `[FATAL_RENDER_ERROR] ${error.message}\n${info.componentStack ?? ''}\n${error.stack ?? ''}`,
@@ -296,6 +312,18 @@ export async function startInteractiveUI(
     }
     restoreSynchronizedOutput();
     restoreTerminalRedrawOptimizer();
+    // If the ErrorBoundary caught a rendering error, echo it to stderr
+    // now that we are back on the main screen buffer. In VP mode the
+    // fallback UI was drawn on the alternate screen and is gone.
+    const renderError = consumeLastRenderError();
+    if (renderError) {
+      const loggedHint = isDebugLogFileEnabled()
+        ? ' (logged to debug file)'
+        : '';
+      writeStderrLine(
+        `\nRendering error${loggedHint}: ${sanitizeTerminalText(renderError.message)}`,
+      );
+    }
   });
 }
 

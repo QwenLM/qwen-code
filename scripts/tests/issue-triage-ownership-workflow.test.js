@@ -15,6 +15,7 @@ const issueWorkflow = readFileSync(
 );
 const legacyWorkflows = [
   'check-issue-completeness.yml',
+  'gemini-scheduled-pr-triage.yml',
   'qwen-automated-issue-triage.yml',
   'qwen-scheduled-issue-triage.yml',
 ];
@@ -52,7 +53,7 @@ describe('issue triage workflow ownership', () => {
     );
   });
 
-  it('removes disabled legacy issue triage workflows', () => {
+  it('removes disabled legacy triage workflows', () => {
     for (const file of legacyWorkflows) {
       expect(existsSync(`${workflowsDir}/${file}`)).toBe(false);
     }

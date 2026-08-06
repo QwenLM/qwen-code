@@ -20,10 +20,11 @@ import { WorkspaceDrainingError } from './acp-session-bridge.js';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import {
   mountWorkspaceMemoryRememberRoutes,
+  mountWorkspaceQualifiedMemoryRememberRoutes,
   WorkspaceRememberTaskLane,
   type WorkspaceRememberRouteDeps,
 } from './workspace-remember.js';
-import { MAX_REMEMBER_CONTENT_BYTES } from './workspace-memory-remember-constants.js';
+import { MAX_REMEMBER_CONTENT_BYTES } from '../runtime/workspace-memory-remember-constants.js';
 
 const { mockDebugLogger } = vi.hoisted(() => ({
   mockDebugLogger: {
@@ -260,6 +261,53 @@ function buildApp(
 }
 
 describe('workspace memory remember routes', () => {
+  it('routes qualified remember tasks to the selected workspace lane', async () => {
+    const primary = buildBridgeStub({});
+    const secondary = buildBridgeStub({});
+    const secondaryLane = new WorkspaceRememberTaskLane(
+      secondary,
+      '/work/secondary',
+    );
+    const app = express();
+    app.use(express.json({ limit: '1mb' }));
+    const mutate = createMutationGate({
+      tokenConfigured: true,
+      requireAuth: false,
+    });
+    const common = {
+      parseClientId: () => undefined,
+      safeBody: (req: express.Request) => req.body as Record<string, unknown>,
+    };
+    mountWorkspaceQualifiedMemoryRememberRoutes(app, {
+      mutate,
+      resolveRouteDeps: (req, res) => {
+        if (req.params['workspace'] !== 'secondary-id') {
+          res.status(400).json({ code: 'workspace_mismatch' });
+          return null;
+        }
+        return {
+          bridge: secondary,
+          lane: secondaryLane,
+          ...common,
+        };
+      },
+    });
+
+    const post = await request(app)
+      .post('/workspaces/secondary-id/memory/remember')
+      .send({ content: 'Secondary only' })
+      .expect(202);
+    await waitFor(() => secondary.rememberCalls.length === 1);
+
+    await request(app)
+      .get(`/workspaces/secondary-id/memory/remember/${post.body.taskId}`)
+      .expect(200);
+    expect(secondary.rememberCalls).toEqual([
+      { content: 'Secondary only', contextMode: 'workspace' },
+    ]);
+    expect(primary.rememberCalls).toEqual([]);
+  });
+
   it('queues and completes a hidden workspace remember task', async () => {
     const bridge = buildBridgeStub({ knownIds: ['client-1'] });
     const app = buildApp(bridge);

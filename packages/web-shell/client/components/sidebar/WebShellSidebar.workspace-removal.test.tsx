@@ -57,8 +57,9 @@ const {
   const exportSession = vi.fn();
   const active = makeSessions();
   const archived = makeSessions();
-  const useSessions = vi.fn((options?: { archiveState?: string }) =>
-    options?.archiveState === 'archived' ? archived : active,
+  const useSessions = vi.fn(
+    (options?: { archiveState?: string; sourceType?: string }) =>
+      options?.archiveState === 'archived' ? archived : active,
   );
   const exportArchivedSession = vi.fn();
   const sessionActions = { renameSession: vi.fn() };
@@ -150,6 +151,7 @@ const capabilities = {
     'workspace_runtime_removal',
     'session_archive',
     'workspace_qualified_rest_core',
+    'session_source_metadata',
   ],
   workspaces: [
     {
@@ -525,7 +527,11 @@ describe('WebShellSidebar workspace removal', () => {
       isArchived: true,
     });
     const listSecondarySessions = vi.fn(
-      async (options?: { archiveState?: string; group?: string }) => {
+      async (options?: {
+        archiveState?: string;
+        group?: string;
+        sourceType?: string;
+      }) => {
         if (options?.group === 'pinned') {
           return [
             {
@@ -585,12 +591,12 @@ describe('WebShellSidebar workspace removal', () => {
     expect(container.textContent).not.toContain('Primary archived');
     expect(
       useSessions.mock.calls.every(
-        ([options]) => !Object.hasOwn(options ?? {}, 'sourceType'),
+        ([options]) => options?.sourceType === 'default',
       ),
     ).toBe(true);
     expect(
       listSecondarySessions.mock.calls.every(
-        ([options]) => !Object.hasOwn(options ?? {}, 'sourceType'),
+        ([options]) => options?.sourceType === 'default',
       ),
     ).toBe(true);
   });
@@ -2881,6 +2887,45 @@ describe('WebShellSidebar primary workspace header', () => {
     );
     expect(primaryBadges).toHaveLength(0);
     expect(container.textContent).toContain('project');
+  });
+});
+
+describe('WebShellSidebar Live group', () => {
+  it('shows Live sessions without exposing the backing Conversations workspace', async () => {
+    const liveWorkspace: DaemonWorkspaceCapability = {
+      id: 'live',
+      cwd: '/Users/test/Documents/Qwen Code/Conversations',
+      displayName: 'Conversations',
+      primary: false,
+      trusted: true,
+      kind: 'live',
+    };
+    useWorkspaceSessionCatalog(async (cwd) =>
+      cwd === liveWorkspace.cwd
+        ? [{ sessionId: 'live-session', displayName: 'Voice check' }]
+        : [],
+    );
+    renderSidebar({
+      workspaces: [...capabilities.workspaces, liveWorkspace],
+    });
+
+    expect(container.textContent).toContain('Live');
+    expect(container.textContent).not.toContain('Conversations');
+    const liveToggle = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.includes('Live'));
+    expect(liveToggle).toBeDefined();
+    expect(
+      liveToggle?.parentElement?.querySelector('[aria-label="New task"]'),
+    ).toBeNull();
+
+    await expandWorkspace('Live');
+
+    expect(container.textContent).toContain('Voice check');
+    expect(listWorkspaceSessions).toHaveBeenCalledWith(
+      liveWorkspace.cwd,
+      expect.objectContaining({ archiveState: 'active' }),
+    );
   });
 });
 

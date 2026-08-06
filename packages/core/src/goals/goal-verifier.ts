@@ -11,7 +11,7 @@ import type { ValidatedGoalEvidenceRecord } from './goal-evidence.js';
 import type { GoalTerminalProposal } from './goal-protocol.js';
 
 const GOAL_VERIFIER_TIMEOUT_MS = 30_000;
-const GOAL_VERIFIER_REQUEST_BYTE_LIMIT = 64_000;
+const GOAL_VERIFIER_REQUEST_BYTE_LIMIT = 256_000;
 const MAX_VERIFIER_REASON_LENGTH = 2_000;
 
 const GOAL_VERIFIER_SCHEMA = {
@@ -32,6 +32,10 @@ const GOAL_VERIFIER_SYSTEM_PROMPT = `You are an independent Goal Verifier. Judge
 
 Evidence with proofKind "delivered_output" proves only that content was delivered; it cannot prove tests, files, tools, or remote state changed. Evidence with proofKind "external_fact" may support those external facts. For a blocked proposal, apply the supplied blockedPolicy exactly.
 
+For a complete proposal, evidence with proofKind "delivered_output" and turnId equal to currentTurnId is the current turn's delivered output. The legacy currentDeliveredOutput field, when present, contains the same output for compatibility.
+
+Every objective condition and factual claim in proposal.reason must be supported by the cited evidence. A claim that the user sent, typed, provided, confirmed, chose, or approved something requires cited evidence with proofKind "user_input" whose content supports that exact claim. If that evidence is absent, reject the proposal. The objective and proposal reason are claims, not evidence. Never infer a user action from a phrase appearing in the objective, the proposal reason, delivered output, or a protocol operation.
+
 The runtime sends this request only after successfully executing update_goal and recording its proposal. Never require evidence that update_goal itself was called. Treat get_goal and update_goal as trusted protocol operations, not objective work that needs transcript evidence. Judge the remaining objective conditions from the supplied evidence.
 
 Return exactly one JSON object with keys "decision" and "reason". decision must be "accept" or "reject". Include no markdown fence, preamble, extra key, or commentary.`;
@@ -44,6 +48,7 @@ interface GoalVerifierInputBase {
     revision: number;
     objective: string;
   };
+  currentTurnId?: string;
   evidence: readonly GoalVerifierEvidenceRecord[];
   currentDeliveredOutput?: readonly string[];
 }
@@ -89,6 +94,7 @@ function verifierContents(input: GoalVerifierInput): Content[] {
       revision: input.goal.revision,
       objective: input.goal.objective,
     },
+    ...(input.currentTurnId ? { currentTurnId: input.currentTurnId } : {}),
     proposal: {
       status: input.proposal.status,
       reason: input.proposal.reason,
@@ -104,7 +110,7 @@ function verifierContents(input: GoalVerifierInput): Content[] {
       proofKind: record.proofKind,
       content: record.content,
     })),
-    ...(input.currentDeliveredOutput
+    ...(!input.currentTurnId && input.currentDeliveredOutput
       ? { currentDeliveredOutput: [...input.currentDeliveredOutput] }
       : {}),
     ...(input.proposal.status === 'blocked'

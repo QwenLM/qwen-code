@@ -12,7 +12,10 @@ import { Duplex } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
 import { DEFAULT_AGENT_VIEW_ATTACH_LEASE_TTL_MS } from './attach-lease.js';
 import { AGENT_VIEW_PROTOCOL_VERSION } from './protocol.js';
-import type { AgentViewLaunchFile } from './protocol.js';
+import type {
+  AgentViewLaunchFile,
+  AgentViewSessionStateFile,
+} from './protocol.js';
 import {
   createAgentViewSupervisorHandler,
   getAgentViewSupervisorSocketPath,
@@ -53,10 +56,26 @@ describe('Agent View supervisor process helpers', () => {
       runtimeDir,
     });
 
-    expect(
-      socketPath.startsWith(path.join(runtimeDir, 'qwen-agent-view-')),
-    ).toBe(true);
-    expect(socketPath.endsWith('.sock')).toBe(true);
+    expect(path.dirname(socketPath)).toEqual(
+      expect.stringMatching(
+        new RegExp(`^${escapeRegExp(runtimeDir)}${escapeRegExp(path.sep)}`),
+      ),
+    );
+    expect(path.basename(socketPath)).toMatch(/^[a-z0-9-]+\.sock$/);
+    expect(Buffer.byteLength(socketPath)).toBeLessThan(100);
+  });
+
+  it('uses a private runtime fallback directory by default', () => {
+    const socketPath = getAgentViewSupervisorSocketPath({
+      globalDir: path.join(os.tmpdir(), 'a'.repeat(140)),
+      platform: 'linux',
+    });
+    expect(path.dirname(socketPath)).toEqual(
+      expect.stringMatching(
+        new RegExp(`^${escapeRegExp(os.tmpdir())}${escapeRegExp(path.sep)}`),
+      ),
+    );
+    expect(path.basename(socketPath)).toMatch(/^[a-z0-9-]+\.sock$/);
     expect(Buffer.byteLength(socketPath)).toBeLessThan(100);
   });
 
@@ -198,6 +217,12 @@ describe('Agent View supervisor process helpers', () => {
       sessionId,
       state: expect.objectContaining({ sessionId }),
     });
+    await expect(
+      handler.peek?.({ sessionId: sessionId.slice(0, 8).toUpperCase() }),
+    ).resolves.toMatchObject({
+      sessionId,
+      state: expect.objectContaining({ sessionId }),
+    });
     expect(launchedArgv).toEqual(
       expect.arrayContaining([
         '--session-id',
@@ -214,18 +239,22 @@ describe('Agent View supervisor process helpers', () => {
     const globalDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-agent-view-store-'),
     );
+    let launchedArgv: string[] | undefined;
+    let token = '';
     const handler = createAgentViewSupervisorHandler({
       globalDir,
       platform: 'linux',
       waitForWorkerReady: true,
       workerReadyTimeoutMs: 1000,
       launchPtyHost: async (launch) => {
+        launchedArgv = launch.argv;
+        token = launch.env['QWEN_AGENT_VIEW_TOKEN'] ?? '';
         setImmediate(() => {
           void Promise.resolve(
             handler.workerEvent?.({
               type: 'ready',
               sessionId: launch.sessionId,
-              token: launch.env['QWEN_AGENT_VIEW_TOKEN'],
+              token,
               cwd: launch.activeCwd,
               at: '2026-07-17T00:00:00.000Z',
             }),
@@ -247,6 +276,17 @@ describe('Agent View supervisor process helpers', () => {
       processState: 'alive',
       activeCwd: globalDir,
       updatedAt: '2026-07-17T00:00:00.000Z',
+    });
+    expect(launchedArgv).not.toContain('write tests');
+    await expect(
+      handler.workerControl?.({ sessionId: result.sessionId, token }),
+    ).resolves.toMatchObject({
+      events: [
+        expect.objectContaining({
+          type: 'prompt',
+          text: 'write tests',
+        }),
+      ],
     });
 
     await fs.rm(globalDir, { recursive: true, force: true });
@@ -432,7 +472,7 @@ describe('Agent View supervisor process helpers', () => {
       processState: 'starting',
       attachState: 'detached',
       activeCwd: path.join(globalDir, 'project', 'src'),
-      projectCwd: path.join(globalDir, 'project', 'src'),
+      projectCwd: path.join(globalDir, 'project'),
       worktree: { mode: 'none' },
     });
     await expect(
@@ -441,7 +481,7 @@ describe('Agent View supervisor process helpers', () => {
       sessionId,
       argv: launched,
       activeCwd: path.join(globalDir, 'project', 'src'),
-      projectCwd: path.join(globalDir, 'project', 'src'),
+      projectCwd: path.join(globalDir, 'project'),
       approvalMode: 'default',
       terminal: { columns: 100, rows: 40 },
     });
@@ -455,7 +495,7 @@ describe('Agent View supervisor process helpers', () => {
         expect.objectContaining({
           sessionId,
           activeCwd: path.join(globalDir, 'project', 'src'),
-          projectCwd: path.join(globalDir, 'project', 'src'),
+          projectCwd: path.join(globalDir, 'project'),
         }),
       ],
     });
@@ -667,6 +707,58 @@ describe('Agent View supervisor process helpers', () => {
       lastActivityAt: '2026-07-17T00:00:01.000Z',
     });
 
+    const blockedState = await readAgentViewSessionState(result.sessionId, {
+      globalDir,
+    });
+    if (!blockedState) {
+      throw new Error('expected blocked state');
+    }
+    await writeAgentViewSessionState(
+      {
+        ...blockedState,
+        lastError: {
+          code: 'stale_worker',
+          message: 'old failure',
+          at: '2026-07-17T00:00:01.000Z',
+        },
+      },
+      { globalDir },
+    );
+    await writeAgentViewActivity(
+      result.sessionId,
+      {
+        schemaVersion: 1,
+        waitingFor: 'approval',
+        inputKind: 'blocking',
+        lastResult: 'old result',
+        queuedPromptCount: 1,
+        queuedPromptPreview: 'old prompt',
+        lastQueuedPromptAt: '2026-07-17T00:00:01.000Z',
+        lastActivityAt: '2026-07-17T00:00:01.000Z',
+        capabilities: ['ready'],
+      },
+      { globalDir },
+    );
+    await handler.workerEvent?.({
+      type: 'ready',
+      sessionId: result.sessionId,
+      token,
+      cwd: globalDir,
+      capabilities: ['ready'],
+      at: '2026-07-17T00:00:02.000Z',
+    });
+    const readyState = await readAgentViewSessionState(result.sessionId, {
+      globalDir,
+    });
+    const readyActivity = await readAgentViewActivity(result.sessionId, {
+      globalDir,
+    });
+    expect(readyState).not.toHaveProperty('lastError');
+    expect(readyActivity).not.toHaveProperty('waitingFor');
+    expect(readyActivity).not.toHaveProperty('inputKind');
+    expect(readyActivity).not.toHaveProperty('lastResult');
+    expect(readyActivity).not.toHaveProperty('queuedPromptCount');
+
     await fs.rm(globalDir, { recursive: true, force: true });
   });
 
@@ -738,6 +830,7 @@ describe('Agent View supervisor process helpers', () => {
       sessionId: result.sessionId,
       token,
       cwd: globalDir,
+      capabilities: ['reply', 'hibernate'],
     });
 
     await expect(
@@ -766,6 +859,7 @@ describe('Agent View supervisor process helpers', () => {
       summary: 'write tests',
       queuedPromptCount: 1,
       queuedPromptPreview: 'next step',
+      capabilities: ['reply', 'hibernate'],
     });
 
     await handler.workerEvent?.({
@@ -817,6 +911,11 @@ describe('Agent View supervisor process helpers', () => {
     await expect(
       handler.answer?.({ sessionId: result.sessionId, text: 'no' }),
     ).resolves.toEqual({ sessionId: result.sessionId, answered: true });
+    await expect(
+      readAgentViewActivity(result.sessionId, { globalDir }),
+    ).resolves.toMatchObject({
+      capabilities: ['reply', 'hibernate'],
+    });
 
     await fs.rm(globalDir, { recursive: true, force: true });
   }, 20_000);
@@ -2213,6 +2312,93 @@ describe('Agent View supervisor process helpers', () => {
     });
   });
 
+  it('marks a stopped session process exited when its host exits', async () => {
+    const globalDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
+    );
+    const hosts: FakePtyHost[] = [];
+    const handler = createAgentViewSupervisorHandler({
+      globalDir,
+      platform: 'linux',
+      launchPtyHost: async () => {
+        const host = fakePtyHost(1234 + hosts.length);
+        hosts.push(host);
+        return host;
+      },
+    });
+    const result = (await handler.dispatch?.({
+      prompt: 'write tests',
+      cwd: globalDir,
+    })) as { sessionId: string };
+
+    await handler.stop?.({ sessionId: result.sessionId });
+    hosts[0]?.resolveExit(0);
+    await waitForSessionState(
+      result.sessionId,
+      globalDir,
+      (state) => state.processState === 'exited',
+    );
+
+    await expect(
+      readAgentViewSessionState(result.sessionId, { globalDir }),
+    ).resolves.toMatchObject({
+      sessionState: 'stopped',
+      processState: 'exited',
+    });
+
+    await fs.rm(globalDir, { recursive: true, force: true });
+  });
+
+  it('preserves a worker-reported failed state after a clean host exit', async () => {
+    const globalDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
+    );
+    const hosts: FakePtyHost[] = [];
+    const handler = createAgentViewSupervisorHandler({
+      globalDir,
+      platform: 'linux',
+      launchPtyHost: async () => {
+        const host = fakePtyHost(1234 + hosts.length);
+        hosts.push(host);
+        return host;
+      },
+    });
+    const result = (await handler.dispatch?.({
+      prompt: 'write tests',
+      cwd: globalDir,
+    })) as { sessionId: string };
+    const state = await readAgentViewSessionState(result.sessionId, {
+      globalDir,
+    });
+    if (!state) {
+      throw new Error('expected session state');
+    }
+    await writeAgentViewSessionState(
+      {
+        ...state,
+        sessionState: 'failed',
+        processState: 'alive',
+      },
+      { globalDir },
+    );
+
+    hosts[0]?.resolveExit(0);
+    await waitForSessionState(
+      result.sessionId,
+      globalDir,
+      (state) => state.processState === 'exited',
+    );
+
+    await expect(
+      readAgentViewSessionState(result.sessionId, { globalDir }),
+    ).resolves.toMatchObject({
+      sessionState: 'failed',
+      processState: 'exited',
+    });
+
+    await fs.rm(globalDir, { recursive: true, force: true });
+  });
+
   it('removes Agent View ownership without touching legacy worktree metadata', async () => {
     const globalDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-agent-view-store-'),
@@ -2377,6 +2563,14 @@ describe('Agent View supervisor process helpers', () => {
     await expect(
       readAgentViewSessionState(result.sessionId, { globalDir }),
     ).resolves.toMatchObject({ processState: 'hibernated' });
+    hosts[0]?.resolveExit(0);
+    await new Promise((resolve) => setImmediate(resolve));
+    await expect(
+      readAgentViewSessionState(result.sessionId, { globalDir }),
+    ).resolves.toMatchObject({
+      sessionState: 'idle',
+      processState: 'hibernated',
+    });
 
     await handler.respawn?.({ sessionId: result.sessionId });
     await writeSessionStateForTest(result.sessionId, globalDir, 'working');
@@ -2847,7 +3041,15 @@ async function readWorkerTokenForTest(
 }
 
 function shortHostSocketPath(): string {
-  return path.join('/tmp', `qah-${process.pid}-${Date.now()}.sock`);
+  const unique = `qah-${process.pid}-${Date.now()}`;
+  if (process.platform === 'win32') {
+    return `\\\\.\\pipe\\${unique}`;
+  }
+  return path.join(os.tmpdir(), `${unique}.sock`);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 class FakeAttachSocket extends Duplex {
@@ -2907,4 +3109,17 @@ async function waitFor(
     });
   }
   throw new Error('Timed out waiting for condition.');
+}
+
+async function waitForSessionState(
+  sessionId: string,
+  globalDir: string,
+  predicate: (state: AgentViewSessionStateFile) => boolean,
+): Promise<void> {
+  for (let attempt = 0; attempt < 50; attempt++) {
+    const state = await readAgentViewSessionState(sessionId, { globalDir });
+    if (state && predicate(state)) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('Timed out waiting for session state.');
 }

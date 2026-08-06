@@ -7,15 +7,18 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { GoalEvidenceRecord } from './goal-evidence.js';
 import type { GoalRecoveryRecord } from './goal-persistence.js';
-import type {
-  GoalSnapshotV2,
-  GoalStateCause,
-  GoalStateRecordPayloadV2,
-  GoalTurnPermit,
-  TranscriptCursor,
+import {
+  GOAL_PROPOSAL_REASON_MAX_BYTES,
+  type GoalSnapshotV2,
+  type GoalStateCause,
+  type GoalStateRecordPayloadV2,
+  type GoalTurnPermit,
+  type TranscriptCursor,
 } from './goal-protocol.js';
 import {
   createGoalRuntime,
+  GoalPersistenceUnavailableError,
+  MAX_GOAL_CONTINUATION_TURNS,
   type GoalEvidenceSource,
   type GoalJournal,
   type GoalTurnHost,
@@ -257,7 +260,13 @@ describe('goal runtime', () => {
     await runtime.finishTurn(permit);
 
     expect(evidenceSource.flush).toHaveBeenCalledOnce();
-    expect(verifier).toHaveBeenCalledOnce();
+    expect(verifier).toHaveBeenCalledWith(
+      expect.objectContaining({
+        currentTurnId: permit.turnId,
+        currentDeliveredOutput: ['Delivered result'],
+      }),
+      expect.any(AbortSignal),
+    );
     expect(journal.appended.map((payload) => payload.cause)).toEqual([
       'create',
       'turn_finished',
@@ -359,6 +368,87 @@ describe('goal runtime', () => {
       activity: 'running',
       goal: { status: 'active' },
     });
+    expect(host.started).toHaveLength(2);
+  });
+
+  it('stops continuations when completion evidence exceeds the catalog', async () => {
+    const journal = fakeGoalJournal();
+    let records: readonly RuntimeRecord[] = [];
+    const evidenceSource = fakeEvidenceSource(() => records);
+    const verifier: GoalVerifier = vi.fn();
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({ journal, evidenceSource, verifier });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+    const permit = host.started[0];
+    const cursorId = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
+    records = [
+      verifierEvidenceRecords(permit, cursorId)[0]!,
+      ...Array.from({ length: 101 }, (_, index) => ({
+        ...verifierEvidenceRecords(
+          permit,
+          cursorId,
+          `assistant-evidence-${index}`,
+        )[1]!,
+        message: {
+          role: 'model',
+          parts: [{ text: `Delivered result ${index}` }],
+        },
+      })),
+    ];
+    runtime.recordTerminalProposal(permit, {
+      status: 'complete',
+      reason: 'Delivered',
+      evidenceRefs: ['assistant-evidence-100'],
+    });
+    const causes: Array<GoalStateCause | undefined> = [];
+    runtime.subscribe((_snapshot, cause) => causes.push(cause));
+
+    await runtime.finishTurn(permit);
+
+    expect(verifier).not.toHaveBeenCalled();
+    expect(runtime.getSnapshot()).toMatchObject({
+      activity: 'idle',
+      goal: {
+        status: 'usage_limited',
+        lastReason: expect.stringContaining('bounded evidence catalog'),
+      },
+    });
+    expect(journal.appended.map((payload) => payload.cause)).toEqual([
+      'create',
+      'turn_finished',
+      'usage_limited',
+    ]);
+    expect(causes).toEqual(['turn_finished', 'usage_limited']);
+    expect(host.started).toHaveLength(1);
+
+    await expect(
+      runtime.dispatch({
+        action: 'resume',
+        expectedGoalId: permit.goalId,
+        expectedRevision: permit.revision,
+      }),
+    ).rejects.toThrow('edit or replace');
+    expect(host.started).toHaveLength(1);
+
+    const edited = await runtime.dispatch({
+      action: 'edit',
+      objective: 'deliver result',
+      expectedGoalId: permit.goalId,
+      expectedRevision: permit.revision,
+    });
+    expect(edited.snapshot.goal).toMatchObject({
+      status: 'usage_limited',
+      revision: 2,
+      lastReason: undefined,
+    });
+    expect(edited.snapshot.goal?.evidenceCursor.recordId).not.toBe(cursorId);
+    await runtime.dispatch({
+      action: 'resume',
+      expectedGoalId: permit.goalId,
+      expectedRevision: 2,
+    });
+    expect(runtime.getSnapshot().goal?.status).toBe('active');
     expect(host.started).toHaveLength(2);
   });
 
@@ -915,6 +1005,114 @@ describe('goal runtime', () => {
     expect(observed[0]?.activity).toBe('running');
   });
 
+  it('transitions to usage_limited after exceeding the continuation turn budget', async () => {
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({ journal });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'loop forever' });
+
+    // Drive turns up to the budget cap.
+    for (let i = 0; i < MAX_GOAL_CONTINUATION_TURNS; i++) {
+      const permit = host.started[host.started.length - 1];
+      expect(permit).toBeDefined();
+      await runtime.finishTurn(permit);
+    }
+
+    // Allow the async usage_limited transition to settle.
+    await vi.waitFor(() =>
+      expect(runtime.getSnapshot().goal?.status).toBe('usage_limited'),
+    );
+    expect(runtime.getSnapshot().goal?.lastReason).toContain(
+      String(MAX_GOAL_CONTINUATION_TURNS),
+    );
+    expect(journal.appended.at(-1)?.cause).toBe('usage_limited');
+  });
+
+  it('resumes a budget-exhausted goal into a fresh turn instead of re-limiting', async () => {
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({ journal });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'loop forever' });
+
+    for (let i = 0; i < MAX_GOAL_CONTINUATION_TURNS; i++) {
+      const permit = host.started[host.started.length - 1];
+      expect(permit).toBeDefined();
+      await runtime.finishTurn(permit);
+    }
+
+    await vi.waitFor(() =>
+      expect(runtime.getSnapshot().goal?.status).toBe('usage_limited'),
+    );
+    const goal = runtime.getSnapshot().goal!;
+    const startedBeforeResume = host.started.length;
+
+    const response = await runtime.dispatch({
+      action: 'resume',
+      expectedGoalId: goal.goalId,
+      expectedRevision: goal.revision,
+    });
+
+    // The reported outcome must match the settled outcome: resume grants a
+    // fresh budget and starts a continuation turn rather than reporting
+    // `active` and immediately re-transitioning to `usage_limited`.
+    expect(response.snapshot.goal?.status).toBe('active');
+    expect(response.snapshot.goal?.turnCount).toBe(0);
+    await vi.waitFor(() =>
+      expect(host.started.length).toBe(startedBeforeResume + 1),
+    );
+    expect(runtime.getSnapshot().goal?.status).toBe('active');
+  });
+
+  it('does not usage-limit a replacement goal created during budget-exhaustion persistence', async () => {
+    const appendReached = deferred<void>();
+    const appendGate = deferred<void>();
+    let blockNext = false;
+    const journal = fakeGoalJournal({
+      beforeAppend: async () => {
+        if (!blockNext) return;
+        blockNext = false;
+        appendReached.resolve();
+        await appendGate.promise;
+      },
+    });
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({ journal });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'loop forever' });
+
+    for (let i = 0; i < MAX_GOAL_CONTINUATION_TURNS - 1; i++) {
+      const permit = host.started[host.started.length - 1];
+      expect(permit).toBeDefined();
+      await runtime.finishTurn(permit);
+    }
+
+    const goalId = runtime.getSnapshot().goal!.goalId;
+    const revision = runtime.getSnapshot().goal!.revision;
+    blockNext = true;
+    const lastPermit = host.started[host.started.length - 1];
+    const finishing = runtime.finishTurn(lastPermit);
+    await appendReached.promise;
+
+    const replacing = runtime.dispatch({
+      action: 'replace',
+      objective: 'fresh start',
+      expectedGoalId: goalId,
+      expectedRevision: revision,
+    });
+    appendGate.resolve();
+    await Promise.all([finishing, replacing]);
+
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(runtime.getSnapshot().goal?.status).toBe('active');
+    expect(runtime.getSnapshot().goal?.objective).toBe('fresh start');
+    expect(
+      journal.appended.map((p) => p.cause).filter((c) => c === 'usage_limited'),
+    ).toHaveLength(0);
+  });
+
   it('returns a bounded catalog without exposing full evidence content', async () => {
     const journal = fakeGoalJournal();
     let records: readonly RuntimeRecord[] = [];
@@ -1386,7 +1584,7 @@ describe('goal runtime', () => {
     expect(newHost.preemptGoalTurn).not.toHaveBeenCalled();
   });
 
-  it('migrates a legacy active goal once before making it schedulable', async () => {
+  it('migrates a legacy active goal once into a paused state', async () => {
     const journal = fakeGoalJournal();
     const host = fakeGoalTurnHost();
     const runtime = createGoalRuntime({ journal });
@@ -1402,14 +1600,15 @@ describe('goal runtime', () => {
         goal: {
           objective: 'ship it',
           revision: 1,
-          status: 'active',
+          status: 'paused',
           evidenceCursor: { recordId: expect.any(String) },
         },
       },
     });
     expect(host.started).toEqual([]);
     runtime.bindHost(host);
-    await vi.waitFor(() => expect(host.started).toHaveLength(1));
+    await Promise.resolve();
+    expect(host.started).toEqual([]);
   });
 
   it('releases a rejected host start without an unhandled rejection', async () => {
@@ -1538,7 +1737,7 @@ describe('goal runtime', () => {
     });
   });
 
-  it('returns a defensive worker view and rejects it after permit invalidation', async () => {
+  it('returns defensive worker state and checks the complete permit atomically', async () => {
     const journal = fakeGoalJournal();
     const host = fakeGoalTurnHost();
     const runtime = createGoalRuntime({ journal });
@@ -1547,12 +1746,20 @@ describe('goal runtime', () => {
     const permit = host.started[0];
 
     const view = await runtime.getGoalForWorker(permit);
+    const permittedSnapshot = runtime.getSnapshotForPermit(permit);
     view.objective = 'mutated';
     view.evidenceCursor.recordId = 'mutated';
+    permittedSnapshot.goal!.objective = 'mutated snapshot';
     expect(runtime.getSnapshot().goal).toMatchObject({
       objective: 'ship',
       evidenceCursor: { recordId: expect.not.stringContaining('mutated') },
     });
+    expect(() =>
+      runtime.getSnapshotForPermit({
+        ...permit,
+        turnId: 'different-turn',
+      }),
+    ).toThrow('Goal turn permit is no longer valid');
 
     await runtime.dispatch({
       action: 'edit',
@@ -1563,23 +1770,49 @@ describe('goal runtime', () => {
     await expect(runtime.getGoalForWorker(permit)).rejects.toThrow(
       'Goal turn permit is no longer valid',
     );
+    expect(() => runtime.getSnapshotForPermit(permit)).toThrow(
+      'Goal turn permit is no longer valid',
+    );
   });
 
-  it('requires three repeated blocked turns and resets that audit on resume', async () => {
+  it('rejects an oversized proposal reason before consuming the turn proposal slot', async () => {
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({ journal: fakeGoalJournal() });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'ship' });
+    const permit = host.started[0];
+
+    expect(() =>
+      runtime.recordTerminalProposal(permit, {
+        status: 'complete',
+        reason: '界'.repeat(Math.floor(GOAL_PROPOSAL_REASON_MAX_BYTES / 3) + 1),
+        evidenceRefs: ['oversized'],
+      }),
+    ).toThrow(/UTF-8 bytes/i);
+    expect(
+      runtime.recordTerminalProposal(permit, {
+        status: 'complete',
+        reason: 'valid reason',
+        evidenceRefs: ['valid'],
+      }),
+    ).toEqual({ recorded: true, readyForVerification: true });
+  });
+
+  it('normalizes omitted blocker kinds in the repeated audit and resets it on resume', async () => {
     const journal = fakeGoalJournal();
     const host = fakeGoalTurnHost();
     const runtime = createGoalRuntime({ journal });
     runtime.bindHost(host);
     await runtime.dispatch({ action: 'create', objective: 'ship' });
 
-    for (let index = 0; index < 2; index += 1) {
+    for (const blockerKind of [undefined, 'repeated'] as const) {
       const permit = host.started.at(-1)!;
       expect(
         runtime.recordTerminalProposal(permit, {
           status: 'blocked',
           reason: 'waiting for access',
           evidenceRefs: [],
-          blockerKind: 'repeated',
+          ...(blockerKind ? { blockerKind } : {}),
         }),
       ).toEqual({ recorded: true, readyForVerification: false });
       await runtime.finishTurn(permit);
@@ -1591,7 +1824,6 @@ describe('goal runtime', () => {
         status: 'blocked',
         reason: 'waiting for access',
         evidenceRefs: [],
-        blockerKind: 'repeated',
       }),
     ).toEqual({ recorded: true, readyForVerification: true });
     await runtime.dispatch({
@@ -1636,10 +1868,17 @@ describe('goal runtime', () => {
 
     const restoredHost = fakeGoalTurnHost();
     const restored = createGoalRuntime({ journal: fakeGoalJournal() });
+    const recoveredPayload = journal.appended.at(-1)!;
     await restored.restore([
       {
-        ...goalStateRecord(journal.appended.at(-1)!.snapshot),
-        systemPayload: journal.appended.at(-1)!,
+        ...goalStateRecord(recoveredPayload.snapshot),
+        systemPayload: {
+          ...recoveredPayload,
+          blockedAudit: {
+            ...recoveredPayload.blockedAudit!,
+            fingerprint: '\nwaiting for access',
+          },
+        },
       },
     ]);
     restored.bindHost(restoredHost);
@@ -1954,8 +2193,8 @@ describe('goal runtime', () => {
     const runtime = createGoalRuntime({ journal: fakeGoalJournal() });
     runtime.bindHost(host);
 
-    await expect(runtime.restore([malformed])).rejects.toThrow(
-      'malformed or uses an unsupported version',
+    await expect(runtime.restore([malformed])).rejects.toBeInstanceOf(
+      GoalPersistenceUnavailableError,
     );
     await expect(
       runtime.dispatch({ action: 'create', objective: 'must not overwrite' }),
@@ -1972,8 +2211,12 @@ describe('goal runtime', () => {
     const runtime = createGoalRuntime({ journal });
     runtime.bindHost(host);
 
-    await expect(runtime.restore([legacyGoalRecord()])).rejects.toThrow(
-      'migration write failed',
+    await expect(runtime.restore([legacyGoalRecord()])).rejects.toEqual(
+      expect.objectContaining({
+        name: 'GoalPersistenceUnavailableError',
+        message: 'migration write failed',
+        cause: expect.objectContaining({ message: 'migration write failed' }),
+      }),
     );
     await expect(
       runtime.dispatch({ action: 'create', objective: 'must not overwrite' }),
@@ -1983,11 +2226,11 @@ describe('goal runtime', () => {
     await runtime.restore([legacyGoalRecord()]);
     expect(runtime.getSnapshot().goal).toMatchObject({
       objective: 'ship it',
-      status: 'active',
+      status: 'paused',
     });
   });
 
-  it('commits successful legacy recovery before reentrant subscribers run', async () => {
+  it('commits paused legacy recovery before a reentrant resume', async () => {
     const journal = fakeGoalJournal({
       appendErrors: [new Error('migration write failed'), undefined],
     });
@@ -2000,7 +2243,7 @@ describe('goal runtime', () => {
     let reentrantDispatch: Promise<unknown> | undefined;
     let reentered = false;
     runtime.subscribe((snapshot) => {
-      if (reentered || snapshot.goal?.status !== 'active') return;
+      if (reentered || snapshot.goal?.status !== 'paused') return;
       reentered = true;
       try {
         runtime.bindHost(host);
@@ -2008,7 +2251,7 @@ describe('goal runtime', () => {
         bindError = error;
       }
       reentrantDispatch = runtime.dispatch({
-        action: 'pause',
+        action: 'resume',
         expectedGoalId: snapshot.goal.goalId,
         expectedRevision: snapshot.goal.revision,
       });
@@ -2019,7 +2262,7 @@ describe('goal runtime', () => {
 
     expect(bindError).toBeUndefined();
     expect(host.started).toHaveLength(1);
-    expect(runtime.getSnapshot().goal?.status).toBe('paused');
+    expect(runtime.getSnapshot().goal?.status).toBe('active');
   });
 
   it('preempts replace and clear after commit and admits only active replacements', async () => {
