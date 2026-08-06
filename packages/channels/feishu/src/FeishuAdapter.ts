@@ -1253,6 +1253,21 @@ export class FeishuChannel extends ChannelBase {
             inboundMsgId,
             this.statusLabelFor('completed'),
           );
+          if (!updated) {
+            // Mirror onResponseComplete: retry without tables (Feishu card
+            // table-count limit) before giving up on the card.
+            const noTableText = this.stripTables(
+              displayText,
+              '(表格内容请查看原文)',
+            );
+            updated = await this.updateCard(
+              cardState.messageId,
+              noTableText,
+              true,
+              inboundMsgId,
+              this.statusLabelFor('completed'),
+            );
+          }
         } catch (error) {
           process.stderr.write(
             `[Feishu:${this.name}] input-request card finalization error: ${error instanceof Error ? error.message : error}\n`,
@@ -2002,7 +2017,9 @@ export class FeishuChannel extends ChannelBase {
     const MAX_CARD_CHARS = 20_000;
     if (text.length <= MAX_CARD_CHARS) return text;
     const marker = '\n\n_(内容过长，已截断早期内容)_';
-    let truncated = text.slice(-(MAX_CARD_CHARS - marker.length)) + marker;
+    const fenceReserve = 4; // potential '```\n' prepend for fence rebalancing
+    let truncated =
+      text.slice(-(MAX_CARD_CHARS - marker.length - fenceReserve)) + marker;
     // Re-balance code fences after truncation
     if (this.countFences(truncated) % 2 === 1) {
       truncated = '```\n' + truncated;

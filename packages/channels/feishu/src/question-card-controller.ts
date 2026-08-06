@@ -81,8 +81,13 @@ export class FeishuQuestionCardController {
     });
     record.unsubscribe = unsubscribe;
     if (record.state === 'terminal') {
+      // The request settled while the adapter awaited pre-presentation work
+      // (e.g. endOutputCardBeforeInputRequest). Skip card delivery entirely:
+      // sending and then patching terminal would leave a spurious card that
+      // looks actionable until the patch lands.
       unsubscribe();
       record.unsubscribe = undefined;
+      return { kind: 'presented' };
     }
 
     try {
@@ -102,7 +107,9 @@ export class FeishuQuestionCardController {
       }
       record.messageId = messageId;
     } catch (error) {
-      if (record.state === 'terminal') return { kind: 'presented' };
+      // Settlement can land during the delivery await; the pre-send terminal
+      // branch narrows the static type, so check the runtime state directly.
+      if (this.isTerminated(record)) return { kind: 'presented' };
       this.options.onError?.('question card delivery', error);
       await this.finalize(record, 'cancelled');
       try {
@@ -248,6 +255,10 @@ export class FeishuQuestionCardController {
       this.options.onError?.('question response', error);
       await this.completeResponse(record, 'expired');
     }
+  }
+
+  private isTerminated(record: QuestionRecord): boolean {
+    return record.state === 'terminal';
   }
 
   private async finalize(
