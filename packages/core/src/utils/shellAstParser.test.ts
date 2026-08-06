@@ -1070,6 +1070,9 @@ describe('isShellCommandReadOnlyAST fallback to regex-based checker', () => {
   it('fails closed for @ transformations when the parser is unavailable', async () => {
     _setParserFailedForTesting();
     expect(await isShellCommandReadOnlyAST('echo "${two@P}"')).toBe(false);
+    expect(
+      await isShellCommandReadOnlyAST('echo "${two@\\\nP}"'),
+    ).toBe(false);
     expect(await isShellCommandReadOnlyAST('echo "${arr[@]}"')).toBe(true);
   });
 

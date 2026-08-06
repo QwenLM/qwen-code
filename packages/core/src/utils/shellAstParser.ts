@@ -1150,7 +1150,10 @@ export async function classifyShellCommandSafety(
 function isShellCommandReadOnlyFallback(command: string): boolean {
   // The regex fallback cannot model Bash parameter transformations. Keep
   // array subscripts (`${arr[@]}`) allowed while failing closed on `@P` etc.
-  return !/\$\{[^}]*@[A-Za-z]/.test(command) && isShellCommandReadOnly(command);
+  return (
+    !/\$\{[^}]*@(?:\\\n)*[A-Za-z]/.test(command) &&
+    isShellCommandReadOnly(command)
+  );
 }
 
 /**

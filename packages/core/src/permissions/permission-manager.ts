@@ -17,10 +17,7 @@ import type { PathMatchContext } from './rule-parser.js';
 import { extractShellOperationsAcrossCommand } from './shell-semantics.js';
 import type { ShellOperation } from './shell-semantics.js';
 import { isShellCommandReadOnlyAST } from '../utils/shellAstParser.js';
-import {
-  hasShellSubstitution,
-  normalizeMonitorCommand,
-} from '../utils/shell-utils.js';
+import { normalizeMonitorCommand } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   findDangerousAllowRules,
@@ -499,14 +496,6 @@ export class PermissionManager {
   private async resolveDefaultPermission(
     command: string,
   ): Promise<'allow' | 'ask'> {
-    // Mirror the pre-AST gate in `ShellToolInvocation.getDefaultPermission`:
-    // substitution-bearing commands always ask. tree-sitter-bash cannot see
-    // substitution hidden by a line continuation (`$\<newline>(...)` — the
-    // parser emits no command_substitution node), so without this gate such
-    // commands would be auto-allowed on this path (#8582).
-    if (hasShellSubstitution(command)) {
-      return 'ask';
-    }
     try {
       const isReadOnly = await isShellCommandReadOnlyAST(command);
       if (isReadOnly) {
