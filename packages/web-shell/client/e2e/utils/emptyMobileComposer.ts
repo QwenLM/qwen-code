@@ -66,7 +66,7 @@ export async function emptyMobileComposerLayout(
           '[data-e2e-mobile-welcome-footer]',
         ),
       ).find((candidate) => candidate.getClientRects().length > 0);
-      const dotField = chatPane.querySelector(
+      const dotField = chatPane.querySelector<HTMLElement>(
         '[data-web-shell-new-session-dot-field]',
       );
       if (
