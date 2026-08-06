@@ -12,7 +12,6 @@ import {
 } from '../../constants/sessions';
 import type { TurnOutputOpenRequest } from './TurnOutputs';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
-import type { DaemonWorkspaceActions } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import { ChatPane } from '../ChatPane';
 import { Button } from '../ui/button';
@@ -41,7 +40,6 @@ interface SideTaskPanelProps {
   onArtifactsChange?: (
     sessionId: string,
     artifacts: readonly DaemonSessionArtifact[],
-    workspaceActions: DaemonWorkspaceActions,
   ) => void;
   onError?: (error: unknown, fallback: string) => void;
   sessionWorkflowEnabled?: boolean;

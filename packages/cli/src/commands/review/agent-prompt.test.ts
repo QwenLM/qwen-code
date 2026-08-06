@@ -34,8 +34,13 @@ import { dirname, join, resolve } from 'node:path';
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: vi.fn(),
   writeStderrLine: vi.fn(),
+  writeStderrLineSafe: vi.fn(),
 }));
-import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import {
+  writeStdoutLine,
+  writeStderrLine,
+  writeStderrLineSafe,
+} from '../../utils/stdioHelpers.js';
 import {
   DEADLINE_ENV,
   RESERVE_ENV,
@@ -526,13 +531,24 @@ describe('--all-chunks — every auditor of a Step 5 round, in one call', () => 
         )!;
         expect(key).toMatch(/--[0-9a-f]{12}$/);
         const rec = recorded.get(key)!;
-        // The record IS the printed block, identity line first, findings in.
+        // The record IS the printed block, identity line first, findings
+        // pointer in. The list itself rides the digest-named file — one per
+        // round, shared by every block — never the block (issue #8597).
         expect(printed).toContain(rec);
         expect(rec.startsWith('You are review agent `reverse-audit`')).toBe(
           true,
         );
-        expect(rec).toContain('- **[Critical]** x.ts:1 — y');
+        expect(rec).not.toContain('- **[Critical]** x.ts:1 — y');
+        expect(rec).toContain('.findings.md');
       }
+      // The round's findings file holds the list every block points at.
+      const anyRec = recorded.get(keys[0])!;
+      const listPath = /read_file\(file_path="([^"]*\.findings\.md)"/.exec(
+        anyRec,
+      )![1];
+      expect(readFileSync(listPath, 'utf8')).toContain(
+        '- **[Critical]** x.ts:1 — y',
+      );
       // Each block reads its OWN chunk's range — asserted on two different
       // chunks, because checking only the first cannot see a batch that built
       // every block from the same chunk.
@@ -1365,10 +1381,11 @@ describe('--roster — every prompt the plan requires, in one call', () => {
 // Dogfooded on a real 3A review: the orchestrator delivered Step 3 prompts verbatim
 // but PARAPHRASED the Step 4/5 ones — added "(round 2)", inserted its own summary,
 // truncated the "nothing replaces the brief" line — because it hand-prepended the
-// findings list. `--findings` removes that assembly step: the command folds the list
-// in and prints one block. The record stays findings-free, so the shared key still
-// matches by the add-only delivery rule.
-describe('--findings — fold the list in, print one block, record EXACTLY that block', () => {
+// findings list. `--findings` removes that assembly step: the command copies the
+// list to a digest-named file and prints one block pointing at it. The record IS
+// that block — pointer included, keyed per findings digest — so a launch that
+// drops the pointer matches no record.
+describe('--findings — point the block at the list file, record EXACTLY that block', () => {
   // Every temp dir this block makes, cleaned up after each test — the rest of the
   // file uses try/finally; a helper-based block tracks and sweeps instead.
   let dirs: string[] = [];
@@ -1416,20 +1433,31 @@ describe('--findings — fold the list in, print one block, record EXACTLY that 
     return { printed, plan };
   }
 
-  it('a verifier gets the findings folded beneath its identity line, and the record IS the printed prompt', () => {
+  it('a verifier gets the findings pointer beneath its identity line, and the record IS the printed prompt', () => {
     const { printed, plan } = run({ role: 'verify' });
-    // Printed: the findings section AND the findings themselves — and NOT the
-    // reverse auditor's framing (a branch swap in findingsSection would pass both
-    // tests if each only asserted its own heading).
+    // Printed: the findings section AND the pointer to the digest-named list
+    // file — and NOT the reverse auditor's framing (a branch swap in
+    // findingsSection would pass both tests if each only asserted its own
+    // heading). The list itself is NOT in the block: inlined per block it
+    // made a 12-14-auditor launch one 65-82 KB assistant message, and the
+    // stream generating it never completed (issue #8597).
     expect(printed).toContain('## The findings you are ruling on');
     expect(printed).not.toContain('Already confirmed');
-    expect(printed).toContain('foo.ts:10 — the collision drops arguments');
+    expect(printed).not.toContain('foo.ts:10 — the collision drops arguments');
     // and the line the orchestrator used to truncate away.
     expect(printed).toContain('does not replace the brief; read it first');
-    // Recorded: EXACTLY what was printed, findings included, under a digest key.
-    // The findings-free record was a receipt a partial delivery could satisfy:
-    // launch the agent with only the recorded tail, let it open the brief, and
-    // the delivery check passed while no verifier ever saw a finding.
+    // The list is on disk, named by the same digest that keys the record,
+    // holding exactly what --findings was given.
+    const m = /read_file\(file_path="([^"]*\.findings\.md)"\)/.exec(printed);
+    expect(m).not.toBeNull();
+    expect(readFileSync(m![1], 'utf8')).toContain(
+      'foo.ts:10 — the collision drops arguments',
+    );
+    // Recorded: EXACTLY what was printed, pointer included, under a digest
+    // key. The findings-free record was a receipt a partial delivery could
+    // satisfy; the pointer keeps that guarantee — a launch that drops it
+    // matches no record, and the delivery floor counts the read it
+    // instructs (see the verificationGaps tests).
     const recorded = recordByPrefix(plan, 'verify--');
     expect(recorded).toBe(printed);
     // The identity line leads the output — the one spot a real run edited on a
@@ -1456,7 +1484,12 @@ describe('--findings — fold the list in, print one block, record EXACTLY that 
     expect(printed).toContain('Already confirmed — do not re-report these');
     // and NOT the verifier's framing — the mirror of the assertion above.
     expect(printed).not.toContain('The findings you are ruling on');
-    expect(printed).toContain('foo.ts:10 — the collision drops arguments');
+    expect(printed).not.toContain('foo.ts:10 — the collision drops arguments');
+    const m = /read_file\(file_path="([^"]*\.findings\.md)"\)/.exec(printed);
+    expect(m).not.toBeNull();
+    expect(readFileSync(m![1], 'utf8')).toContain(
+      'foo.ts:10 — the collision drops arguments',
+    );
     const recorded = recordByPrefix(plan, 'reverse-audit--');
     expect(recorded).toBe(printed);
   });
@@ -1464,8 +1497,8 @@ describe('--findings — fold the list in, print one block, record EXACTLY that 
   it('a Step 3B per-chunk reverse auditor takes --chunk and --findings together', () => {
     // The one valid triple: reverse-audit declares both acceptsChunk and
     // acceptsFindings, and Step 5 3B launches `--role reverse-audit --chunk N
-    // --findings <cumulative>` per chunk per round. The findings fold above the
-    // chunk-scoped prompt; the record is that chunk's block, findings-free, keyed by
+    // --findings <cumulative>` per chunk per round. The findings pointer folds
+    // above the chunk-scoped prompt; the record is that chunk's block, keyed by
     // the chunk. (PLAN's chunks are 13/14/15 — chunk 14 is offset 4024, limit 176.)
     const { printed, plan } = run({
       role: 'reverse-audit',
@@ -1473,7 +1506,8 @@ describe('--findings — fold the list in, print one block, record EXACTLY that 
       round: 1,
     });
     expect(printed).toContain('Already confirmed — do not re-report these');
-    expect(printed).toContain('foo.ts:10 — the collision drops arguments');
+    expect(printed).not.toContain('foo.ts:10 — the collision drops arguments');
+    expect(printed).toContain('.findings.md');
     expect(printed).toContain('offset=4024, limit=176'); // this chunk's range only
     expect(printed).not.toContain('offset=3807'); // not chunk 13's
     const recorded = recordByPrefix(plan, 'reverse-audit--chunk-14--');
@@ -1486,8 +1520,58 @@ describe('--findings — fold the list in, print one block, record EXACTLY that 
     // must fail loudly, not inherit the reverse auditor's "do not re-report" prose.
     // Called directly with a role the function does not frame — the guards never let
     // a non-findings role reach it in a real run.
-    expect(() => findingsSection('2', 'some findings')).toThrow(
-      /--findings has no framing for role "2"/,
+    expect(() =>
+      findingsSection('2', 'some findings', '/tmp/x.findings.md'),
+    ).toThrow(/--findings has no framing for role "2"/);
+  });
+
+  it('inlines the list when the findings file could not be written', () => {
+    // A read-only tmp dir makes writeFindingsFile return null; the section
+    // must then fall back to the pre-#8597 inline shape rather than point
+    // the block at a file that does not exist — a whole round would run
+    // against the dead path before the delivery floor could fail it.
+    const list = '- **[Critical]** foo.ts:10 — the collision drops arguments';
+    const verify = findingsSection('verify', list, null);
+    expect(verify).toContain('## The findings you are ruling on');
+    expect(verify).toContain(list);
+    expect(verify).not.toContain('The list is a file');
+    expect(verify).not.toContain('.findings.md');
+    const audit = findingsSection('reverse-audit', list, null);
+    expect(audit).toContain('Already confirmed — do not re-report these');
+    expect(audit).toContain(list);
+    expect(audit).not.toContain('The list is a file');
+  });
+
+  it('a failed findings write builds with the list inlined, not a dead pointer', () => {
+    // End-to-end shape of the fallback: a FILE where the record directory
+    // must sit makes the findings write fail, and the printed block carries
+    // the list itself with no `.findings.md` pointer. The agents then read
+    // what they were launched with; the floor owes no findings read for a
+    // pointer-less prompt.
+    const dir = tmp('ap-ff-');
+    const plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(PLAN));
+    writeFileSync(
+      join(dir, 'plan-prompts'),
+      'a file where the record dir would go',
+    );
+    const findings = join(dir, 'findings.md');
+    writeFileSync(
+      findings,
+      '- **[Critical]** foo.ts:10 — the collision drops arguments',
+    );
+    (writeStderrLineSafe as unknown as Mock).mockClear();
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'verify',
+      findings,
+    });
+    const printed = (writeStdoutLine as unknown as Mock).mock
+      .calls[0][0] as string;
+    expect(printed).toContain('foo.ts:10 — the collision drops arguments');
+    expect(printed).not.toContain('.findings.md');
+    expect((writeStderrLineSafe as unknown as Mock).mock.calls[0][0]).toContain(
+      'inlining the list instead',
     );
   });
 
@@ -1542,8 +1626,8 @@ describe('--findings — fold the list in, print one block, record EXACTLY that 
     // The old shape shared one findings-free record across shards — a receipt a
     // tail-only delivery could satisfy. Now each shard's record is its exact
     // printed prompt under a findings-digest key: shard 2 does not overwrite
-    // shard 1, each launch is verified against its own list, and a launch
-    // carrying the wrong shard's list matches nothing.
+    // shard 1, each launch points at its own list file, and a launch carrying
+    // the wrong shard's pointer matches nothing.
     const dir = tmp('ap-shards-');
     const plan = join(dir, 'plan.json');
     writeFileSync(plan, JSON.stringify(PLAN));
@@ -1575,10 +1659,17 @@ describe('--findings — fold the list in, print one block, record EXACTLY that 
     const records = verifyKeys.map((k) => recorded.get(k)!);
     expect(records).toContain(printed1);
     expect(records).toContain(printed2);
-    // Cross-delivery fails: shard 1's launch does not satisfy shard 2's record.
-    const rec2 = records.find((r) => r.includes('second shard'))!;
-    expect(wasDeliveredVerbatim(printed1, rec2)).toBe(false);
-    expect(wasDeliveredVerbatim(printed2, rec2)).toBe(true);
+    // Each shard's list file holds its own findings.
+    const listOf = (p: string) =>
+      readFileSync(
+        /read_file\(file_path="([^"]*\.findings\.md)"/.exec(p)![1],
+        'utf8',
+      );
+    expect(listOf(printed1)).toContain('first shard');
+    expect(listOf(printed2)).toContain('second shard');
+    // Cross-delivery fails: shard 1's launch does not satisfy shard 2's record
+    // (printed2 IS shard 2's record — asserted above).
+    expect(wasDeliveredVerbatim(printed1, printed2)).toBe(false);
   });
 
   it('refuses a findings-taking role launched without --findings', () => {
@@ -1630,12 +1721,12 @@ describe('--findings — fold the list in, print one block, record EXACTLY that 
     [
       'a dimension role',
       { role: '2', findings: '/f' },
-      /--findings folds a findings list into the prompt, only for a role that takes one/,
+      /--findings hands a findings list to the printed block, only for a role that takes one/,
     ],
     [
       'no role',
       { findings: '/f' },
-      /--findings folds a findings list into a --role verify \/ --role reverse-audit/,
+      /--findings hands a findings list to a --role verify \/ --role reverse-audit/,
     ],
     [
       'whole-diff',
@@ -1828,6 +1919,103 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(p).toContain('say what you examined');
     expect(p).toContain('**Critical**');
     expect(p).not.toMatch(/If you find no issues, say/i);
+  });
+
+  it('injects generic repository context into reviewers and a narrow verification boundary into Agent 7', () => {
+    const contextPlan = {
+      ...PR_PLAN,
+      repositoryContext: {
+        version: 1,
+        provider: 'fake-provider',
+        label: 'Example project',
+        domains: ['compiler', 'runtime'],
+        relatedPaths: ['src/compiler.ts', 'src/runtime.ts'],
+        recommendedTests: ['test:compiler'],
+        requiredConfigurations: ['debug', 'linux-x64'],
+        requiredAgents: ['test-matrix'],
+        unverifiedDimensions: ['Alternate runtime was not exercised'],
+        verificationNotes: ['Use the repository native test runner'],
+      },
+    };
+
+    // Negative pins: roles outside the code-reviewing set and outside the
+    // manifest's required agents get nothing. A `brief.reviewsCode ||` →
+    // `true ||` regression would hand Agent 0 (issue fidelity, not code
+    // review) the full block on every context-bearing plan, and would give
+    // it to a role the manifest did not require, with the suite green.
+    expect(buildRoleBrief(contextPlan, '0')).not.toContain(
+      'Example project repository context',
+    );
+    expect(
+      buildRoleBrief(
+        {
+          ...contextPlan,
+          repositoryContext: {
+            ...contextPlan.repositoryContext,
+            requiredAgents: [],
+          },
+        },
+        'test-matrix',
+      ),
+    ).not.toContain('Example project repository context');
+
+    const reviewerBrief = buildRoleBrief(contextPlan, '1a');
+    expect(reviewerBrief).toContain('Example project repository context');
+    expect(reviewerBrief).toContain('compiler, runtime');
+    expect(reviewerBrief).toContain('src/compiler.ts');
+    expect(reviewerBrief).toContain('test:compiler');
+    expect(reviewerBrief).toContain('debug, linux-x64');
+    expect(reviewerBrief).toContain('Alternate runtime was not exercised');
+    expect(reviewerBrief).toContain('Use the repository native test runner');
+    // Section adjacency: each field is pinned under ITS OWN label, or a
+    // rendering swap between two same-shaped arrays ships green while
+    // reviewers are told the repository's proof boundaries are its
+    // verification instructions — and vice versa.
+    expect(reviewerBrief).toContain(
+      'Related paths:\n- src/compiler.ts\n- src/runtime.ts',
+    );
+    expect(reviewerBrief).toContain(
+      'Unverified dimensions:\n- Alternate runtime was not exercised',
+    );
+    expect(reviewerBrief).toContain(
+      'Verification notes:\n- Use the repository native test runner',
+    );
+
+    const territoryBrief = buildChunkAgentPrompt(contextPlan, 13);
+    expect(territoryBrief).toContain('Example project repository context');
+    expect(territoryBrief).toContain('src/compiler.ts');
+
+    const requiredAgentBrief = buildRoleBrief(contextPlan, 'test-matrix');
+    expect(requiredAgentBrief).toContain('Example project repository context');
+    expect(requiredAgentBrief).toContain('src/compiler.ts');
+    expect(requiredAgentBrief).toContain('test:compiler');
+
+    // Positive pins for code-reviewing roles OUTSIDE the manifest
+    // allow-list that reach the block solely through `brief.reviewsCode`:
+    // a narrowing mutant that keeps every pinned role strips exactly these
+    // and ships green.
+    for (const role of ['verify', 'reverse-audit'] as const) {
+      expect(buildRoleBrief(contextPlan, role)).toContain(
+        'Example project repository context',
+      );
+    }
+
+    const buildBrief = buildRoleBrief(contextPlan, '7');
+    expect(buildBrief).not.toContain('Example project repository context');
+    expect(buildBrief).not.toContain('compiler, runtime');
+    expect(buildBrief).not.toContain('src/compiler.ts');
+    expect(buildBrief).not.toContain('Alternate runtime was not exercised');
+    expect(buildBrief).toContain('Repository-specific verification boundary');
+    expect(buildBrief).toContain('test:compiler');
+    expect(buildBrief).toContain('debug, linux-x64');
+    expect(buildBrief).toContain('Use the repository native test runner');
+
+    // The --whole-diff path builds Agent 8's briefs; it carries the same
+    // block, or the one finder launched for a dominant domain is the one
+    // reviewer denied that domain's guidance.
+    const wholeDiff = buildWholeDiffBlock(contextPlan);
+    expect(wholeDiff).toContain('Example project repository context');
+    expect(wholeDiff).toContain('src/compiler.ts');
   });
 
   it('carries the mutation-testing lens into Agent 5, equivalent-mutant escape hatch included', () => {
@@ -3006,11 +3194,16 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
    * Write a transcript the way the harness writes one: the launch prompt as
    * the first record, then `calls` successful reads of the diff, then the
    * final text. `calls: 0` is the whiff shape — prose and nothing else.
+   * `readOverride` makes the auditor read THAT window instead of the one the
+   * launch bakes — the lazy-auditor shape the territory bar exists to catch.
    */
   function auditorTranscript(
     launchPrompt: string,
     finalText: string,
-    opts: { calls?: number } = {},
+    opts: {
+      calls?: number;
+      readOverride?: { offset: number; limit: number };
+    } = {},
   ): void {
     const id = `aud-${++seq}`;
     const base = { agentId: id, agentName: 'general-purpose', sessionId: 'S1' };
@@ -3019,8 +3212,10 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     // record's own baked read, so a synthetic auditor must open the same
     // window its prompt names.
     const baked = /offset=(\d+), limit=(\d+)/.exec(launchPrompt);
-    const readOffset = baked ? Number(baked[1]) : 0;
-    const readLimit = baked ? Number(baked[2]) : 100;
+    const readOffset =
+      opts.readOverride?.offset ?? (baked ? Number(baked[1]) : 0);
+    const readLimit =
+      opts.readOverride?.limit ?? (baked ? Number(baked[2]) : 100);
     const lines = [
       JSON.stringify({
         ...base,
@@ -3136,21 +3331,27 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
   });
 
   it('findings quoting a read window cannot widen a territory', () => {
-    // The record is the FOLDED prompt — the cumulative findings list rides
-    // inside it verbatim. Prose quoting a read window used to inject the
-    // range into the baked territory, and any-overlap-passes meant an
-    // auditor that read only the diff's head could retire a chunk whose
-    // territory is thousands of lines below — the hole the territory check
-    // closed, reopened by honest findings. Chunk 13's territory is
-    // 3808-4024; the injected `offset=0, limit=50` is exactly the window
-    // the auditors below read.
+    // The findings list now rides a digest-named FILE the block points at
+    // (issue #8597), so its prose can no longer inject a range into the
+    // record at all — the territory scan only ever sees the builder's own
+    // diff-aimed read. The guard still matters one level down: the auditor
+    // READS that findings file, and a lazy auditor whose only diff read is
+    // the quoted head window must not retire a chunk whose territory sits
+    // thousands of lines below. Chunk 13's territory is 3808-4024; the
+    // auditors below read only the diff's head (offset=0, limit=50).
     writeFileSync(
       findings,
       '- **File:** packages/cli/src/x.ts:12 — the earlier read used ' +
         'offset=0, limit=50 — **Severity:** Suggestion\n',
     );
-    answerRound(1, { 13: DRY, 14: YIELD, 15: YIELD });
-    answerRound(2, { 13: DRY, 14: YIELD, 15: YIELD });
+    for (const round of [1, 2]) {
+      runRound(round);
+      auditorTranscript(recordOf(round, 13), DRY, {
+        readOverride: { offset: 0, limit: 50 },
+      });
+      auditorTranscript(recordOf(round, 14), YIELD);
+      auditorTranscript(recordOf(round, 15), YIELD);
+    }
 
     const out = runRound(3);
     expect(out).toContain('3 auditors required this round');
