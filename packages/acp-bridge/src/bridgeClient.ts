@@ -45,9 +45,15 @@ import type {
   ClientMcpMessageSender,
   CreateSubSessionHandler,
   ExternalToolGuardHandler,
+  LiveScreenContextCaptureHandler,
+  LiveSpeakToUserHandler,
+  LiveTaskToolRequestHandler,
 } from './bridgeOptions.js';
 import {
   CHANNEL_DELIVERY_ERROR_CODES,
+  LIVE_TASK_TOOL_NAMES,
+  MAX_LIVE_SCREEN_CONTEXT_TEXT_CHARS,
+  MAX_LIVE_SPEAK_TO_USER_MESSAGE_CHARS,
   MAX_SUB_SESSION_NAME_CHARS,
   MAX_SUB_SESSION_PROMPT_CHARS,
 } from './bridgeOptions.js';
@@ -713,9 +719,18 @@ export class BridgeClient implements Client {
     private readonly onChannelDelivery?: ChannelDeliveryHandler,
     /** Permits pre-registration client-MCP discovery without trusting its id. */
     private readonly hasSessionSpawnInFlight: () => boolean = () => false,
+    private readonly getLiveScreenContextCaptureHandler: () =>
+      | LiveScreenContextCaptureHandler
+      | undefined = () => undefined,
+    private readonly getLiveTaskToolRequestHandler: () =>
+      | LiveTaskToolRequestHandler
+      | undefined = () => undefined,
+    private readonly getLiveSpeakToUserHandler: () =>
+      | LiveSpeakToUserHandler
+      | undefined = () => undefined,
     /**
-     * Managed tool guard hosted by the daemon. Kept last so existing direct
-     * BridgeClient constructors remain source-compatible.
+     * Managed tool guard hosted by the daemon. Kept after the Live handlers so
+     * existing direct BridgeClient constructors remain source-compatible.
      */
     private readonly externalToolGuard?: ExternalToolGuardHandler,
   ) {}
@@ -1103,6 +1118,15 @@ export class BridgeClient implements Client {
     }
     if (method === SERVE_CONTROL_EXT_METHODS.createSubSession) {
       return this.handleCreateSubSession(params);
+    }
+    if (method === SERVE_CONTROL_EXT_METHODS.liveCaptureScreenContext) {
+      return this.handleLiveScreenContextCapture(params);
+    }
+    if (method === SERVE_CONTROL_EXT_METHODS.liveTaskTool) {
+      return this.handleLiveTaskTool(params);
+    }
+    if (method === SERVE_CONTROL_EXT_METHODS.liveSpeakToUser) {
+      return this.handleLiveSpeakToUser(params);
     }
     if (method === SERVE_CONTROL_EXT_METHODS.channelDelivery) {
       return this.handleChannelDelivery(params);
@@ -1583,6 +1607,107 @@ export class BridgeClient implements Client {
     };
   }
 
+  private async handleLiveScreenContextCapture(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const handler = this.getLiveScreenContextCaptureHandler();
+    if (!handler) {
+      throw RequestError.methodNotFound(
+        SERVE_CONTROL_EXT_METHODS.liveCaptureScreenContext,
+      );
+    }
+    const callerSessionId = params['callerSessionId'];
+    if (
+      typeof callerSessionId !== 'string' ||
+      callerSessionId.length === 0 ||
+      !this.ownsSession(callerSessionId)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`callerSessionId` is required and must name a session owned by this connection',
+      );
+    }
+    const result = await handler({ callerSessionId });
+    if (
+      result.appName.length === 0 ||
+      result.appName.length > 512 ||
+      (result.windowTitle !== undefined && result.windowTitle.length > 2_048) ||
+      result.accessibilityText.length > MAX_LIVE_SCREEN_CONTEXT_TEXT_CHARS ||
+      result.screenshotPath.length === 0 ||
+      result.screenshotPath.length > 4_096
+    ) {
+      throw RequestError.internalError(undefined, 'Invalid Appshot result.');
+    }
+    return {
+      appName: result.appName,
+      ...(result.windowTitle ? { windowTitle: result.windowTitle } : {}),
+      accessibilityText: result.accessibilityText,
+      screenshotPath: result.screenshotPath,
+    };
+  }
+
+  private async handleLiveTaskTool(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const handler = this.getLiveTaskToolRequestHandler();
+    if (!handler) {
+      throw RequestError.methodNotFound(SERVE_CONTROL_EXT_METHODS.liveTaskTool);
+    }
+    const callerSessionId = params['callerSessionId'];
+    const name = params['name'];
+    const args = params['arguments'];
+    if (
+      typeof callerSessionId !== 'string' ||
+      callerSessionId.length === 0 ||
+      !this.ownsSession(callerSessionId) ||
+      typeof name !== 'string' ||
+      !LIVE_TASK_TOOL_NAMES.includes(
+        name as (typeof LIVE_TASK_TOOL_NAMES)[number],
+      ) ||
+      typeof args !== 'object' ||
+      args === null ||
+      Array.isArray(args)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Invalid Live task-tool request.',
+      );
+    }
+    return handler({
+      callerSessionId,
+      name: name as (typeof LIVE_TASK_TOOL_NAMES)[number],
+      arguments: args as Record<string, unknown>,
+    });
+  }
+
+  private async handleLiveSpeakToUser(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const handler = this.getLiveSpeakToUserHandler();
+    if (!handler) {
+      throw RequestError.methodNotFound(
+        SERVE_CONTROL_EXT_METHODS.liveSpeakToUser,
+      );
+    }
+    const callerSessionId = params['callerSessionId'];
+    const message = params['message'];
+    if (
+      typeof callerSessionId !== 'string' ||
+      callerSessionId.length === 0 ||
+      !this.ownsSession(callerSessionId) ||
+      typeof message !== 'string' ||
+      message.trim().length === 0 ||
+      message.length > MAX_LIVE_SPEAK_TO_USER_MESSAGE_CHARS
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Invalid Live speak-to-user request.',
+      );
+    }
+    await handler({ callerSessionId, message });
+    return { accepted: true };
+  }
+
   /**
    * Handle child->bridge ACP `extNotification` calls. Recognized methods are
    * `qwen/notify/session/model-update`,
@@ -1592,6 +1717,7 @@ export class BridgeClient implements Client {
    * `qwen/notify/session/prompt-suggestion` (followup assist),
    * `qwen/notify/session/artifact-event` (hook artifacts),
    * `qwen/notify/session/terminal-sequence`, and
+   * `_qwencode/end_turn` (background-notification turns), and
    * `qwen/notify/session/mcp-budget-event` — each translated into a
    * session-scoped SSE frame. Unknown methods are dropped silently for
    * forward-compat.
@@ -1600,6 +1726,27 @@ export class BridgeClient implements Client {
     method: string,
     params: Record<string, unknown>,
   ): Promise<void> {
+    if (method === '_qwencode/end_turn') {
+      const sessionId = params['sessionId'];
+      const reason = params['reason'];
+      if (
+        typeof sessionId !== 'string' ||
+        sessionId.length === 0 ||
+        typeof reason !== 'string' ||
+        reason.length === 0 ||
+        reason.length > 128 ||
+        params['source'] !== 'background_notification'
+      ) {
+        return;
+      }
+      const entry = this.resolveEntry(sessionId);
+      if (!entry || !this.ownsSession(sessionId)) return;
+      entry.events.publish({
+        type: 'background_notification_turn_complete',
+        data: { sessionId, reason },
+      });
+      return;
+    }
     if (method === 'qwen/notify/session/generation/event') {
       const sessionId = params['sessionId'];
       const requestId = params['requestId'];

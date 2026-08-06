@@ -106,6 +106,7 @@ import {
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
+  DAEMON_MODEL_PROMPT_META_KEY,
   LOAD_REPLAY_BULK_MODE,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
   LOAD_REPLAY_META_KEY,
@@ -116,6 +117,7 @@ import {
   REQUESTED_SESSION_ID_META_KEY,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   WORKTREE_MCP_DEFER_META_KEY,
+  isValidTrustedModelPrompt,
 } from './bridgeTypes.js';
 import { getChannelStartupProfileAttributes } from './channel-startup-profile.js';
 import type {
@@ -154,6 +156,9 @@ import type {
   BridgeOptions,
   BridgeSessionLifecycleEvent,
   BridgeTelemetry,
+  LiveScreenContextCaptureHandler,
+  LiveSpeakToUserHandler,
+  LiveTaskToolRequestHandler,
 } from './bridgeOptions.js';
 import { MCP_RESTART_SERVER_DEADLINE_MS } from './mcpTimeouts.js';
 import { defaultSpawnChannelFactory } from './spawnChannel.js';
@@ -1383,6 +1388,11 @@ const DEFAULT_SESSION_REAP_INTERVAL_MS = 60_000;
 const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 30 * 60_000;
 
 export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
+  let liveScreenContextCaptureHandler:
+    | LiveScreenContextCaptureHandler
+    | undefined;
+  let liveTaskToolRequestHandler: LiveTaskToolRequestHandler | undefined;
+  let liveSpeakToUserHandler: LiveSpeakToUserHandler | undefined;
   const defaultSessionScope = opts.sessionScope ?? 'single';
   // `undefined` → default 32 (intentionally tight to avoid resource cliffs).
   // `0` → explicitly unlimited (operator opt-out).
@@ -2322,6 +2332,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           () =>
             channelInfo?.sessionIds === sessionIds &&
             channelInfo.sessionSpawnsInFlight > 0,
+          () => liveScreenContextCaptureHandler,
+          () => liveTaskToolRequestHandler,
+          () => liveSpeakToUserHandler,
           opts.externalToolGuard,
         );
         connection = new ClientSideConnection(() => client, channel.stream);
@@ -4483,6 +4496,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       return {
         sessionId: existing.sessionId,
         workspaceCwd: existing.workspaceCwd,
+        ...(existing.effectiveCwd !== existing.workspaceCwd
+          ? { currentCwd: existing.effectiveCwd }
+          : {}),
         attached: true,
         clientId,
         createdAt: existing.createdAt,
@@ -4762,6 +4778,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         return {
           sessionId: racedEntry.sessionId,
           workspaceCwd: racedEntry.workspaceCwd,
+          ...(racedEntry.effectiveCwd !== racedEntry.workspaceCwd
+            ? { currentCwd: racedEntry.effectiveCwd }
+            : {}),
           attached: true,
           clientId,
           createdAt: racedEntry.createdAt,
@@ -5077,6 +5096,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   startSessionReaper();
 
   const bridgeApi: AcpSessionBridge = {
+    setLiveScreenContextCaptureHandler(handler) {
+      liveScreenContextCaptureHandler = handler;
+    },
+    setLiveTaskToolRequestHandler(handler) {
+      liveTaskToolRequestHandler = handler;
+    },
+    setLiveSpeakToUserHandler(handler) {
+      liveSpeakToUserHandler = handler;
+    },
     getDaemonStatusSnapshot(): BridgeDaemonStatusSnapshot {
       return {
         limits: {
@@ -5288,6 +5316,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           return {
             sessionId: existing.sessionId,
             workspaceCwd: existing.workspaceCwd,
+            ...(existing.effectiveCwd !== existing.workspaceCwd
+              ? { currentCwd: existing.effectiveCwd }
+              : {}),
             attached: true,
             clientId,
             createdAt: existing.createdAt,
@@ -5447,6 +5478,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         entry,
         context?.clientId,
       );
+      const modelPrompt = context?.modelPrompt;
+      if (
+        modelPrompt !== undefined &&
+        !isValidTrustedModelPrompt(modelPrompt)
+      ) {
+        throw new TypeError(
+          'Bridge modelPrompt must be a non-empty bounded string.',
+        );
+      }
       // Pre-aborted: skip the queue entirely. Without this the prompt
       // chains onto promptQueue, waits its turn, and the FIFO worker
       // checks `signal.aborted` only AFTER reaching the head — wasted
@@ -5503,6 +5543,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         state: isQueued ? 'queued' : 'running',
       };
       entry.pendingPromptList.push(pendingEntry);
+      try {
+        context?.onPromptAdmitted?.();
+      } catch (error) {
+        opts.onDiagnosticLine?.(
+          `qwen serve: prompt admission observer failed for session=${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+          'warn',
+        );
+      }
       // DAEMON-003: absolute wallclock deadline. Armed at admission (the
       // 202 point) so it covers queue wait AND execution. On expiry the
       // prompt gets its formal `turn_error{code:'prompt_deadline_exceeded'}`
@@ -5690,6 +5738,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   // below) re-arms it after this strip.
                   delete meta[DAEMON_CONTINUE_META_KEY];
                   delete meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
+                  delete meta[DAEMON_MODEL_PROMPT_META_KEY];
                   if (isRetry) {
                     meta[DAEMON_RETRY_META_KEY] = true;
                   }
@@ -5699,6 +5748,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   if (context?.channelDelivery) {
                     meta[DAEMON_CHANNEL_DELIVERY_META_KEY] =
                       context.channelDelivery;
+                  }
+                  if (modelPrompt !== undefined) {
+                    meta[DAEMON_MODEL_PROMPT_META_KEY] = modelPrompt;
                   }
                   meta[INVOCATION_CONTEXT_META_KEY] = invocationContext;
                   if (Object.keys(meta).length > 0) {
@@ -6516,6 +6568,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             sessionId,
             path: req.path,
             ...(req.allowedRoots ? { allowedRoots: req.allowedRoots } : {}),
+            ...(req.managedRelocation
+              ? { managedRelocation: req.managedRelocation }
+              : {}),
           },
         );
         const extResult = raw as {
@@ -6547,7 +6602,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             ...(originatorClientId ? { originatorClientId } : {}),
           });
         }
-
         return extResult;
       });
 
@@ -7542,6 +7596,22 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       };
     },
 
+    async setSessionLiveConversationActive(sessionId, active) {
+      await requestSessionStatus<Record<string, unknown>>(
+        sessionId,
+        SERVE_CONTROL_EXT_METHODS.sessionLiveConversation,
+        { active },
+      );
+    },
+
+    async appendSessionLiveTranscript(sessionId, entries, model) {
+      await requestSessionStatus<Record<string, unknown>>(
+        sessionId,
+        SERVE_CONTROL_EXT_METHODS.sessionLiveTranscript,
+        { entries, model },
+      );
+    },
+
     async setSessionApprovalMode(sessionId, mode, opts, context) {
       // Forwards through `qwen/control/session/approval_mode` so the
       // change lands inside the ACP child's own `Config` (per-session
@@ -7850,6 +7920,25 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
       entry.midTurnMessageQueue.splice(index, 1);
       return { removed: true };
+    },
+
+    async enqueueBackgroundNotification(sessionId, notification) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const info = channelInfoForEntry(entry);
+      if (!info || info.isDying) throw new SessionNotFoundError(sessionId);
+      const response = await Promise.race([
+        withTimeout(
+          entry.connection.extMethod(
+            SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification,
+            { sessionId, ...notification },
+          ),
+          initTimeoutMs,
+          SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification,
+        ),
+        getTransportClosedReject(entry),
+      ]);
+      return { sessionId, accepted: response['accepted'] === true };
     },
 
     async generateSessionBtw(sessionId, question, signal, _context) {

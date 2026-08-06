@@ -2169,7 +2169,7 @@ function copyContentForApiHistory(content: Content): Content {
 }
 
 function appendApiHistoryRecord(history: Content[], record: ChatRecord): void {
-  if (!record.message) return;
+  if (!record.message || record.subtype === 'realtime_message') return;
 
   const message = copyContentForApiHistory(record.message as Content);
   if (record.subtype === 'mid_turn_user_message') {
