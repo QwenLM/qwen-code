@@ -29,6 +29,7 @@ import type {
   GoalCheckpointVerificationResult,
   GoalCheckpointVerifierInput,
 } from './goal-checkpoint.js';
+import { GoalCheckpointVerifierInputTooLargeError } from './goal-checkpoint-verifier.js';
 import type { GoalVerifier } from './goal-verifier.js';
 
 function deferred<T>() {
@@ -511,6 +512,93 @@ describe('goal runtime', () => {
     expect(host.started).toHaveLength(1);
   });
 
+  it('lets a repeated blocker streak reach the verifier when the catalog truncates', async () => {
+    const journal = fakeGoalJournal();
+    let records: RuntimeRecord[] = [];
+    const evidenceSource = fakeEvidenceSource(() => records);
+    const verifier: GoalVerifier = vi.fn(async () => ({
+      decision: 'accept' as const,
+      reason: 'The repeated blocker is established',
+    }));
+    const checkpointVerifier = vi.fn();
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({
+      journal,
+      evidenceSource,
+      verifier,
+      checkpointVerifier,
+    });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+    const cursorId = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
+    records = [verifierEvidenceRecords(host.started[0]!, cursorId)[0]!];
+
+    const firstPermit = host.started[0]!;
+    records.push(
+      ...verifierEvidenceWindow(firstPermit, cursorId, 98, 'first-turn').slice(
+        1,
+      ),
+    );
+    records.push(
+      verifierUserEvidenceRecords(firstPermit, cursorId, 'blocker-1')[1]!,
+    );
+    expect(
+      runtime.recordTerminalProposal(firstPermit, {
+        status: 'blocked',
+        blockerKind: 'repeated',
+        reason: 'The same dependency is unavailable',
+        evidenceRefs: [],
+      }),
+    ).toMatchObject({ readyForVerification: false });
+    await runtime.finishTurn(firstPermit);
+
+    const secondPermit = host.started[1]!;
+    records.push(
+      verifierUserEvidenceRecords(secondPermit, cursorId, 'blocker-2')[1]!,
+    );
+    expect(
+      runtime.recordTerminalProposal(secondPermit, {
+        status: 'blocked',
+        blockerKind: 'repeated',
+        reason: 'The same dependency is unavailable',
+        evidenceRefs: [],
+      }),
+    ).toMatchObject({ readyForVerification: false });
+    await runtime.finishTurn(secondPermit);
+
+    const thirdPermit = host.started[2]!;
+    records.push(
+      ...verifierEvidenceWindow(thirdPermit, cursorId, 2, 'third-turn').slice(
+        1,
+      ),
+    );
+    records.push(
+      verifierUserEvidenceRecords(thirdPermit, cursorId, 'blocker-3')[1]!,
+    );
+    expect(
+      runtime.recordTerminalProposal(thirdPermit, {
+        status: 'blocked',
+        blockerKind: 'repeated',
+        reason: 'The same dependency is unavailable',
+        evidenceRefs: ['blocker-1', 'blocker-2', 'blocker-3'],
+      }),
+    ).toMatchObject({ readyForVerification: true });
+
+    await runtime.finishTurn(thirdPermit);
+
+    expect(checkpointVerifier).not.toHaveBeenCalled();
+    expect(verifier).toHaveBeenCalledOnce();
+    expect(journal.appended.map((payload) => payload.cause)).toEqual([
+      'create',
+      'turn_finished',
+      'turn_finished',
+      'turn_finished',
+      'verifier_accept',
+      'blocked',
+    ]);
+    expect(runtime.getSnapshot().goal).toMatchObject({ status: 'blocked' });
+  });
+
   it('checkpoints long-running evidence before starting the next turn', async () => {
     const journal = fakeGoalJournal();
     let records: readonly RuntimeRecord[] = [];
@@ -842,6 +930,47 @@ describe('goal runtime', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('records an exhausted catalog when the checkpoint request is structurally oversized', async () => {
+    const journal = fakeGoalJournal();
+    let records: readonly RuntimeRecord[] = [];
+    const evidenceSource = fakeEvidenceSource(() => records);
+    const checkpointVerifier = vi.fn(() => {
+      throw new GoalCheckpointVerifierInputTooLargeError(300_000);
+    });
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({
+      journal,
+      evidenceSource,
+      verifier: vi.fn(),
+      checkpointVerifier,
+    });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+    const permit = host.started[0]!;
+    records = verifierEvidenceWindow(
+      permit,
+      runtime.getSnapshot().goal!.evidenceCursor.recordId!,
+      80,
+    );
+
+    await runtime.finishTurn(permit);
+
+    expect(checkpointVerifier).toHaveBeenCalledOnce();
+    expect(runtime.getSnapshot().goal).toMatchObject({
+      status: 'usage_limited',
+      lastReason: GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
+    });
+    // The oversized window cannot shrink on its own, so resume must stay
+    // blocked instead of re-limiting on every resumed turn.
+    await expect(
+      runtime.dispatch({
+        action: 'resume',
+        expectedGoalId: permit.goalId,
+        expectedRevision: permit.revision,
+      }),
+    ).rejects.toThrow('edit or replace');
   });
 
   it('fails closed when a checkpoint changes source proof semantics', async () => {

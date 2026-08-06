@@ -541,7 +541,9 @@ function isGoalEvidenceCheckpoint(
     ) {
       return false;
     }
-    checkpointBytes += Buffer.byteLength(JSON.stringify(claim), 'utf8');
+    checkpointBytes += new TextEncoder().encode(
+      JSON.stringify(claim),
+    ).byteLength;
     if (checkpointBytes > GOAL_CHECKPOINT_CLAIM_MAX_BYTES) return false;
   }
   return true;

@@ -44,6 +44,16 @@ export type GoalEvidenceProofKind =
   | 'delivered_output'
   | 'external_fact';
 
+export function isGoalEvidenceProofKind(
+  value: unknown,
+): value is GoalEvidenceProofKind {
+  return (
+    value === 'user_input' ||
+    value === 'delivered_output' ||
+    value === 'external_fact'
+  );
+}
+
 export interface GoalEvidenceCheckpointClaim {
   id: string;
   proofKind: GoalEvidenceProofKind;
@@ -124,6 +134,16 @@ export interface GoalTerminalProposal {
   reason: string;
   evidenceRefs: string[];
   blockerKind?: 'authority' | 'external' | 'repeated';
+}
+
+export function isRepeatedBlockerProposal(
+  proposal: GoalTerminalProposal,
+): boolean {
+  return (
+    proposal.status === 'blocked' &&
+    proposal.blockerKind !== 'authority' &&
+    proposal.blockerKind !== 'external'
+  );
 }
 
 export function validateGoalProposalReason(reason: string): string | null {

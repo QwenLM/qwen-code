@@ -18,6 +18,7 @@ import {
   GOAL_CHECKPOINT_CLAIM_MAX_BYTES,
   GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS,
   GOAL_CHECKPOINT_SOURCE_REFERENCE_LIMIT,
+  isGoalEvidenceProofKind,
 } from './goal-protocol.js';
 
 const GOAL_CHECKPOINT_VERIFIER_TIMEOUT_MS = 30_000;
@@ -193,7 +194,7 @@ function parseClaim(
   if (
     !isRecord(value) ||
     !hasOnlyKeys(value, ['proofKind', 'claim', 'sourceRefs']) ||
-    !isProofKind(value['proofKind']) ||
+    !isGoalEvidenceProofKind(value['proofKind']) ||
     typeof value['claim'] !== 'string' ||
     !Array.isArray(value['sourceRefs']) ||
     value['sourceRefs'].length === 0 ||
@@ -216,16 +217,6 @@ function parseClaim(
     claim,
     sourceRefs: value['sourceRefs'].slice() as string[],
   };
-}
-
-function isProofKind(
-  value: unknown,
-): value is GoalCheckpointVerifierClaim['proofKind'] {
-  return (
-    value === 'user_input' ||
-    value === 'delivered_output' ||
-    value === 'external_fact'
-  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

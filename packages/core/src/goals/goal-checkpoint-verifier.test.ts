@@ -38,9 +38,9 @@ function input(): GoalCheckpointVerifierInput {
         uuid: 'tool-1',
         provenance: 'tool_result',
         turnId: 'turn-3',
-        preview: '18 tests passed',
+        preview: 'preview of 18 tests passed',
         proofKind: 'external_fact',
-        content: '18 tests passed',
+        content: '18 tests passed with the full output',
       },
     ],
   };
@@ -114,7 +114,7 @@ describe('createGoalCheckpointVerifier', () => {
         {
           uuid: 'tool-1',
           proofKind: 'external_fact',
-          content: '18 tests passed',
+          content: '18 tests passed with the full output',
         },
       ],
     });

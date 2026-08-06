@@ -7,6 +7,7 @@
 import type { Part } from '@google/genai';
 import {
   GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
+  isRepeatedBlockerProposal,
   type GoalEvidenceCheckpointClaim,
   type GoalEvidenceProofKind,
   type GoalRecord,
@@ -223,7 +224,11 @@ export function validateGoalEvidenceReferences(
   const citedRecords = references.map((reference) =>
     validateReference(reference, input, analysis),
   );
-  if (analysis.catalogTruncated) {
+  // Truncation drops the oldest post-cursor evidence, so fail closed only
+  // when the proposal's coverage depends on that full window. A repeated
+  // blocker is validated against the newest three turns, which truncation
+  // keeps.
+  if (analysis.catalogTruncated && !isRepeatedBlockerProposal(input.proposal)) {
     throw new InvalidGoalEvidenceReferenceError(
       'catalog_truncated',
       GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,

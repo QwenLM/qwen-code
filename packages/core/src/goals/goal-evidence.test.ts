@@ -172,6 +172,44 @@ describe('Goal evidence catalog', () => {
     );
   });
 
+  it('scopes the truncated catalog gate to full-window coverage proposals', () => {
+    const records = [
+      record('cursor', 'system', {
+        provenance: 'goal_control',
+        subtype: 'goal_state',
+      }),
+      ...Array.from({ length: 101 }, (_, index) =>
+        record(`evidence-${index}`, 'assistant', {
+          provenance: 'assistant_output',
+          turnId: 'turn-3',
+          text: `output ${index}`,
+        }),
+      ),
+    ];
+    const input = { records, goal: goal(), permit: permit() };
+
+    // Immediate blockers depend on the full post-cursor window, which
+    // truncation silently weakens, so they stay fail-closed.
+    expect(() =>
+      validateGoalEvidenceReferences({
+        ...input,
+        proposal: blocked('external', ['evidence-100']),
+      }),
+    ).toThrowError(expect.objectContaining({ code: 'catalog_truncated' }));
+
+    // A repeated blocker only has to cover the newest three turns, which
+    // truncation keeps, so it reaches the coverage check instead of dying
+    // at the truncation gate.
+    expect(() =>
+      validateGoalEvidenceReferences({
+        ...input,
+        proposal: blocked('repeated', ['evidence-100']),
+      }),
+    ).toThrowError(
+      expect.objectContaining({ code: 'repeated_blocker_turn_coverage' }),
+    );
+  });
+
   it('does not expand records older than the bounded catalog window', () => {
     let oldPayloadReads = 0;
     const oldPayload: Record<string, unknown> = {};

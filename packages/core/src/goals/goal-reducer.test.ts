@@ -613,6 +613,42 @@ describe('goal reducer', () => {
     );
   });
 
+  it('parses a persisted evidence checkpoint without a Buffer global', () => {
+    // Browser hosts bundling the goalWire subpath have no Buffer global, so
+    // the checkpoint byte count must rely on TextEncoder alone.
+    const buffer = globalThis.Buffer;
+    (globalThis as { Buffer?: unknown }).Buffer = undefined;
+    try {
+      const evidenceCheckpoint = {
+        checkpointId: 'checkpoint-1',
+        createdAt: 42,
+        claims: [
+          {
+            id: 'checkpoint-1:1',
+            proofKind: 'external_fact' as const,
+            claim: 'The focused suite passed \u2713 18 tests',
+            sourceRefs: ['tool-1'],
+          },
+        ],
+      };
+      const parsed = parseGoalStateRecordPayloadV2({
+        v: 2,
+        cause: 'checkpoint',
+        snapshot: snapshot(
+          goalRecord({
+            evidenceCursor: { recordId: 'checkpoint-1' },
+            evidenceCheckpoint,
+          }),
+        ),
+      });
+      expect(parsed?.snapshot.goal?.evidenceCheckpoint).toEqual(
+        evidenceCheckpoint,
+      );
+    } finally {
+      globalThis.Buffer = buffer;
+    }
+  });
+
   it('rejects persisted checkpoint claims without Core-owned sequential IDs', () => {
     expect(
       parseGoalStateRecordPayloadV2({

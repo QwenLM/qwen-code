@@ -15,6 +15,7 @@ import {
   GOAL_CHECKPOINT_CLAIM_MAX_BYTES,
   GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS,
   GOAL_CHECKPOINT_SOURCE_REFERENCE_LIMIT,
+  isGoalEvidenceProofKind,
 } from './goal-protocol.js';
 
 export interface GoalCheckpointVerifierClaim {
@@ -85,7 +86,7 @@ export function materializeGoalEvidenceCheckpoint(input: {
     if (
       !isRecord(value) ||
       !hasOnlyKeys(value, ['proofKind', 'claim', 'sourceRefs']) ||
-      !isProofKind(value['proofKind']) ||
+      !isGoalEvidenceProofKind(value['proofKind']) ||
       typeof value['claim'] !== 'string' ||
       !Array.isArray(value['sourceRefs'])
     ) {
@@ -151,14 +152,6 @@ export function materializeGoalEvidenceCheckpoint(input: {
     createdAt: input.createdAt,
     claims: materialized,
   };
-}
-
-function isProofKind(value: unknown): value is GoalEvidenceProofKind {
-  return (
-    value === 'user_input' ||
-    value === 'delivered_output' ||
-    value === 'external_fact'
-  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

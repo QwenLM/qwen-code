@@ -18,9 +18,11 @@ import {
   materializeGoalEvidenceCheckpoint,
   type GoalCheckpointVerifier,
 } from './goal-checkpoint.js';
+import { GoalCheckpointVerifierInputTooLargeError } from './goal-checkpoint-verifier.js';
 import {
   GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
   GOAL_STATE_VERSION,
+  isRepeatedBlockerProposal,
   type GoalControlRequest,
   type GoalSnapshotV2,
   type GoalStateCause,
@@ -141,14 +143,6 @@ function normalizeRecoveredBlockedAudit(
       ? `repeated${audit.fingerprint}`
       : audit.fingerprint,
   };
-}
-
-function isRepeatedBlockerProposal(proposal: GoalTerminalProposal): boolean {
-  return (
-    proposal.status === 'blocked' &&
-    proposal.blockerKind !== 'authority' &&
-    proposal.blockerKind !== 'external'
-  );
 }
 
 export function createGoalRuntime(
@@ -855,6 +849,13 @@ export function createGoalRuntime(
         await finishCheckpointCheck(attempt);
         return;
       }
+      if (error instanceof GoalCheckpointVerifierInputTooLargeError) {
+        await recordCheckpointFailure(
+          attempt,
+          GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
+        );
+        return;
+      }
       const reason = error instanceof Error ? error.message : String(error);
       await recordCheckpointFailure(attempt, reason);
     }
@@ -1211,11 +1212,7 @@ export function createGoalRuntime(
       let blockedAuditCandidate:
         | { fingerprint: string; count: number; turnIds: string[] }
         | undefined;
-      if (
-        proposal.status === 'blocked' &&
-        proposal.blockerKind !== 'authority' &&
-        proposal.blockerKind !== 'external'
-      ) {
+      if (isRepeatedBlockerProposal(proposal)) {
         const fingerprint = `${proposal.blockerKind ?? 'repeated'}\n${proposal.reason}`;
         blockedAuditCandidate = {
           fingerprint,
