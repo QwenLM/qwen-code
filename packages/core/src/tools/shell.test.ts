@@ -21,6 +21,8 @@ const mockDebugLogger = vi.hoisted(() => ({
 }));
 vi.mock('../services/shellExecutionService.js', () => ({
   ShellExecutionService: { execute: mockShellExecutionService },
+  isSignalTermination: (signal: number | NodeJS.Signals | null) =>
+    signal !== null && signal !== 0,
   getShellAbortReasonKind: (reason: unknown) =>
     typeof reason === 'object' &&
     reason !== null &&
@@ -2898,6 +2900,9 @@ describe('ShellTool', () => {
         message: expect.stringContaining('Signal: 15'),
         type: ToolErrorType.SHELL_EXECUTE_ERROR,
       });
+      expect(result.returnDisplay).toContain(
+        'Command terminated by signal: 15',
+      );
     });
 
     it('keeps a successful PTY exit code successful with signal 0 metadata', async () => {

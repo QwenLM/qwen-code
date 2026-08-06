@@ -45,6 +45,7 @@ import type {
 } from '../services/shellExecutionService.js';
 import {
   getShellAbortReasonKind,
+  isSignalTermination,
   ShellExecutionService,
 } from '../services/shellExecutionService.js';
 import {
@@ -419,12 +420,6 @@ function isShellExitError(command: string, exitCode: number | null) {
     .basename(path.win32.basename(executable))
     .replace(/\.(?:exe|cmd|bat)$/i, '');
   return !EXIT_ONE_IS_NOT_ERROR_COMMANDS.has(commandName);
-}
-
-function isSignalTermination(signal: number | NodeJS.Signals | null): boolean {
-  // node-pty reports signal 0 for a clean exit; only a non-zero signal
-  // represents an actual signal termination.
-  return signal !== null && signal !== 0;
 }
 
 const SUDO_FLAGS_WITH_VALUE = new Set([
@@ -2815,10 +2810,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
     //         cancel). Their own messaging is enough; a "should have
     //         been background" reminder when the agent already knows
     //         the command didn't complete is noise.
-    //       * Suppressed on external signal kills (`result.signal !=
-    //         null` with `aborted: false`, e.g. SIGTERM from container
-    //         shutdown, k8s eviction, OOM killer, sibling reaping the
-    //         process group). `shellExecutionService` only sets
+    //       * Suppressed on external signal kills
+    //         (`isSignalTermination(result.signal)` with `aborted: false`,
+    //         e.g. SIGTERM from container shutdown, k8s eviction, OOM
+    //         killer, or sibling reaping the process group). node-pty's
+    //         clean-exit signal 0 is normalized to null and does not
+    //         suppress this hint. The service only sets
     //         `aborted` when the AbortSignal we passed was triggered,
     //         so external signals fall through to the non-aborted
     //         branch — same rationale as timeout.
@@ -3739,7 +3736,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
             // `false` command as a success.
             const reason = result.error
               ? result.error.message
-              : result.signal !== null
+              : isSignalTermination(result.signal)
                 ? `terminated by signal ${result.signal}`
                 : `exited with code ${result.exitCode}`;
             registry.fail(shellId, reason, endTime);
