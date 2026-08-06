@@ -12,13 +12,14 @@ import { Storage } from '../config/storage.js';
 import { findProviderByCredentials } from '../providers/all-providers.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { normalizeProxyUrl } from '../utils/proxyUtils.js';
 import { loadUndici, redactProxyError } from '../utils/runtimeFetchOptions.js';
 import builtInModelModalities from './generated/models-dev-modalities.json' with { type: 'json' };
 
 const MODELS_DEV_URL = 'https://models.dev/api.json';
 const CACHE_TTL_MS = 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 10_000;
-const MAX_CATALOG_BYTES = 8 * 1024 * 1024;
+const MAX_CATALOG_BYTES = 32 * 1024 * 1024;
 const OPENROUTER_VARIANT_SUFFIX =
   /:(?:free|extended|thinking|online|nitro|floor|exacto)$/i;
 
@@ -65,10 +66,23 @@ interface CatalogState {
   loading?: Promise<ModelMetadataCatalog>;
   refresh?: Promise<void>;
   refreshTimer?: ReturnType<typeof setTimeout>;
+  options?: LoadModelMetadataCatalogOptions;
 }
 
 const builtInCatalog = builtInModelModalities as ModelMetadataCatalog;
 const catalogStates = new Map<string, CatalogState>();
+
+function hasSameLoadOptions(
+  left: LoadModelMetadataCatalogOptions | undefined,
+  right: LoadModelMetadataCatalogOptions,
+): boolean {
+  if (!left) return false;
+  return (
+    left?.cachePath === right.cachePath &&
+    left?.proxyUrl === right.proxyUrl &&
+    left?.fetch === right.fetch
+  );
+}
 
 function getCachePath(): string {
   return path.join(Storage.getGlobalQwenDir(), 'models-dev.json');
@@ -185,10 +199,11 @@ async function fetchCatalog(
   if (fetchOverride) {
     response = await fetchOverride(MODELS_DEV_URL, { signal });
   } else if (proxyUrl) {
+    const normalizedProxyUrl = normalizeProxyUrl(proxyUrl);
     const { EnvHttpProxyAgent, fetch: undiciFetch } = await loadUndici();
     const dispatcher = new EnvHttpProxyAgent({
-      httpProxy: proxyUrl,
-      httpsProxy: proxyUrl,
+      httpProxy: normalizedProxyUrl,
+      httpsProxy: normalizedProxyUrl,
     });
     closeDispatcher = () => dispatcher.close();
     try {
@@ -240,13 +255,12 @@ async function fetchAndCache(
 function scheduleRefresh(
   state: CatalogState,
   cachePath: string,
-  options: LoadModelMetadataCatalogOptions,
   delayMs: number,
 ): void {
   if (state.refreshTimer) clearTimeout(state.refreshTimer);
   state.refreshTimer = setTimeout(() => {
     state.refreshTimer = undefined;
-    refreshCatalog(state, cachePath, options, true);
+    refreshCatalog(state, cachePath, true);
   }, delayMs);
   state.refreshTimer.unref();
 }
@@ -254,12 +268,12 @@ function scheduleRefresh(
 function refreshCatalog(
   state: CatalogState,
   cachePath: string,
-  options: LoadModelMetadataCatalogOptions,
   keepFresh: boolean,
 ): void {
   if (state.refresh) return;
 
-  state.refresh = fetchAndCache(cachePath, options)
+  const refreshOptions = state.options ?? {};
+  state.refresh = fetchAndCache(cachePath, refreshOptions)
     .then((catalog) => {
       state.current = catalog;
     })
@@ -271,8 +285,12 @@ function refreshCatalog(
     })
     .finally(() => {
       state.refresh = undefined;
+      if (state.options !== refreshOptions) {
+        refreshCatalog(state, cachePath, keepFresh);
+        return;
+      }
       if (keepFresh) {
-        scheduleRefresh(state, cachePath, options, CACHE_TTL_MS);
+        scheduleRefresh(state, cachePath, CACHE_TTL_MS);
       }
     });
 }
@@ -295,9 +313,9 @@ async function loadInitialCatalog(
       state.current = catalog;
       const ageMs = Date.now() - stat.mtimeMs;
       if (ageMs >= CACHE_TTL_MS) {
-        refreshCatalog(state, cachePath, options, keepFresh);
+        refreshCatalog(state, cachePath, keepFresh);
       } else if (keepFresh) {
-        scheduleRefresh(state, cachePath, options, CACHE_TTL_MS - ageMs);
+        scheduleRefresh(state, cachePath, CACHE_TTL_MS - ageMs);
       }
       return catalog;
     }
@@ -309,7 +327,7 @@ async function loadInitialCatalog(
   }
 
   state.current = builtInCatalog;
-  refreshCatalog(state, cachePath, options, keepFresh);
+  refreshCatalog(state, cachePath, keepFresh);
   return builtInCatalog;
 }
 
@@ -323,8 +341,15 @@ export function loadModelMetadataCatalog(
     state = {};
     catalogStates.set(cachePath, state);
   }
+  const optionsChanged = !hasSameLoadOptions(state.options, options);
+  if (optionsChanged) state.options = options;
 
-  if (state.current) return Promise.resolve(state.current);
+  if (state.current) {
+    if (optionsChanged && options.cachePath === undefined) {
+      refreshCatalog(state, cachePath, true);
+    }
+    return Promise.resolve(state.current);
+  }
 
   state.loading ??= loadInitialCatalog(state, cachePath, options);
   return state.loading;
@@ -393,12 +418,9 @@ function findOriginalProviderModel(
 function resolveCatalogProviderId(
   catalog: ModelMetadataCatalog,
   lookup: ModelMetadataLookup,
+  configuredProviderId: string | undefined,
 ): string | undefined {
-  const configuredProvider = findProviderByCredentials(
-    lookup.baseUrl,
-    lookup.envKey,
-  );
-  const sourceProviderId = configuredProvider?.id ?? lookup.providerId;
+  const sourceProviderId = configuredProviderId ?? lookup.providerId;
   const normalizedBaseUrl = normalizeUrl(lookup.baseUrl);
   if (normalizedBaseUrl) {
     const endpointMatches = Object.entries(catalog).filter(
@@ -418,7 +440,7 @@ function resolveCatalogProviderId(
     }
   }
   const configuredId = mapProviderId(
-    configuredProvider?.id,
+    configuredProviderId,
     normalizedBaseUrl !== undefined,
   );
   if (configuredId && catalog[configuredId]) return configuredId;
@@ -495,12 +517,18 @@ export function getCatalogModalities(
   lookup: ModelMetadataLookup,
 ): InputModalities | undefined {
   if (!catalog || Object.keys(catalog).length === 0) return undefined;
-  const providerId = resolveCatalogProviderId(catalog, lookup);
+  const configuredProviderId = findProviderByCredentials(
+    lookup.baseUrl,
+    lookup.envKey,
+  )?.id;
+  const providerId = resolveCatalogProviderId(
+    catalog,
+    lookup,
+    configuredProviderId,
+  );
   if (!providerId) return undefined;
 
-  const sourceProviderId =
-    findProviderByCredentials(lookup.baseUrl, lookup.envKey)?.id ??
-    lookup.providerId;
+  const sourceProviderId = configuredProviderId ?? lookup.providerId;
 
   const providerModel = findCatalogModel(
     catalog[providerId]!,

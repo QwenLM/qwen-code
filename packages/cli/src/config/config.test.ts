@@ -1105,6 +1105,16 @@ describe('loadCliConfig', () => {
     }
   });
 
+  it('does not load model metadata in test mode', async () => {
+    const catalogSpy = vi.spyOn(ServerConfig, 'loadModelMetadataCatalog');
+    process.argv = ['node', 'script.js'];
+
+    const argv = await parseArguments();
+    await loadCliConfig({}, argv);
+
+    expect(catalogSpy).not.toHaveBeenCalled();
+  });
+
   it('enables debug file logging for --debug when QWEN_DEBUG_LOG_FILE is unset', async () => {
     delete process.env['QWEN_DEBUG_LOG_FILE'];
     process.argv = ['node', 'script.js', '--debug'];

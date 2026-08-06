@@ -283,6 +283,54 @@ describe('ModelRegistry', () => {
       ).toEqual({ video: true });
     });
 
+    it('preserves a known catalog text-only result over a multimodal name heuristic', () => {
+      const registry = new ModelRegistry(
+        { openai: [{ id: 'gpt-4o' }] },
+        undefined,
+        {
+          openai: {
+            api: 'https://api.openai.com/v1',
+            models: {
+              'gpt-4o': { modalities: { input: ['text'] } },
+            },
+          },
+        },
+      );
+
+      const model = registry.getModel(AuthType.USE_OPENAI, 'gpt-4o');
+      expect(model?.generationConfig.modalities).toEqual({});
+      expect(model && registry.getModalitiesSource(model)).toBe('catalog');
+    });
+
+    it('uses the resolved session endpoint for catalog lookup', () => {
+      const registry = new ModelRegistry(
+        { myproxy: [{ id: 'meta-llama/llama-4-maverick' }] },
+        { myproxy: 'openai' },
+        {
+          openrouter: {
+            api: 'https://openrouter.ai/api/v1',
+            models: {
+              'meta-llama/llama-4-maverick': {
+                modalities: { input: ['text', 'image'] },
+              },
+            },
+          },
+        },
+        {
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://openrouter.ai/api/v1',
+        },
+      );
+
+      const model = registry.getModel(
+        AuthType.USE_OPENAI,
+        'meta-llama/llama-4-maverick',
+      );
+      expect(model?.baseUrl).toBe('https://openrouter.ai/api/v1');
+      expect(model?.generationConfig.modalities).toEqual({ image: true });
+      expect(model && registry.getModalitiesSource(model)).toBe('catalog');
+    });
+
     it('passes mapped provider ids to catalog resolution', () => {
       const registry = new ModelRegistry(
         {

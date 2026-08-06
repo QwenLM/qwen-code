@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isDeepStrictEqual } from 'node:util';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
   ProviderModelConfig,
@@ -252,12 +253,19 @@ export function useProviderUpdates(
         const installedById = new Map(
           installedModels.map((model) => [model.id, model]),
         );
+        const specModalitiesById = new Map(
+          providerCfg.models?.map((model) => [model.id, model.modalities]),
+        );
         const modelPatch = installPlan.modelProviders?.[0];
         if (modelPatch) {
           modelPatch.models = modelPatch.models.map((model) => {
             const modalities = installedById.get(model.id)?.generationConfig
               ?.modalities;
-            return modalities
+            const isTemplateResidue = isDeepStrictEqual(
+              modalities,
+              specModalitiesById.get(model.id),
+            );
+            return modalities && !isTemplateResidue
               ? {
                   ...model,
                   generationConfig: {

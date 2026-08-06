@@ -204,6 +204,31 @@ describe('getCatalogModalities', () => {
     ).toBeUndefined();
   });
 
+  it.each(['coding-plan', 'token-plan'])(
+    'does not borrow the default %s catalog for an unknown endpoint',
+    (providerId) => {
+      expect(
+        getCatalogModalities(
+          {
+            [`alibaba-${providerId}-cn`]: {
+              models: {
+                'qwen-vl-model': {
+                  modalities: { input: ['text', 'image'] },
+                },
+              },
+            },
+          },
+          {
+            providerId,
+            authType: 'openai',
+            modelId: 'qwen-vl-model',
+            baseUrl: 'https://unknown.example/v1',
+          },
+        ),
+      ).toBeUndefined();
+    },
+  );
+
   it('resolves an auth-type-only lookup without provider evidence', () => {
     expect(
       getCatalogModalities(
@@ -964,7 +989,7 @@ describe('loadModelMetadataCatalog', () => {
   it.each([
     ['an HTTP error', 500, undefined],
     ['an oversized response body', 200, undefined],
-    ['an oversized declared length', 200, String(8 * 1024 * 1024 + 1)],
+    ['an oversized declared length', 200, String(32 * 1024 * 1024 + 1)],
   ])('keeps the built-in snapshot for %s', async (_name, status, length) => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'models-dev-test-'));
     tempDirs.push(dir);
@@ -977,7 +1002,7 @@ describe('loadModelMetadataCatalog', () => {
               models: {
                 model: {
                   modalities: { input: ['text'] },
-                  padding: 'x'.repeat(8 * 1024 * 1024),
+                  padding: 'x'.repeat(32 * 1024 * 1024),
                 },
               },
             },
@@ -1101,6 +1126,31 @@ describe('loadModelMetadataCatalog', () => {
     }
   });
 
+  it('re-arms the hourly refresh after refreshing a stale default cache', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'models-dev-test-'));
+    tempDirs.push(dir);
+    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(dir);
+    const cachePath = path.join(dir, 'models-dev.json');
+    await fs.writeFile(cachePath, JSON.stringify(catalog));
+    const staleTime = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    await fs.utimes(cachePath, staleTime, staleTime);
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response(JSON.stringify(catalog)));
+    const timeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+
+    await loadModelMetadataCatalog();
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    await vi.waitFor(() =>
+      expect(
+        timeoutSpy.mock.calls.some(([, delay]) => delay === 60 * 60 * 1000),
+      ).toBe(true),
+    );
+    for (const result of timeoutSpy.mock.results) {
+      clearTimeout(result.value as ReturnType<typeof setTimeout>);
+    }
+  });
+
   it('re-arms the default refresh after a fetch failure', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'models-dev-test-'));
     tempDirs.push(dir);
@@ -1159,6 +1209,57 @@ describe('loadModelMetadataCatalog', () => {
         proxyUrl: 'http://proxy.example:8080',
       }),
     ).resolves.toEqual(catalog);
+  });
+
+  it('normalizes a scheme-less proxy before creating the dispatcher', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'models-dev-test-'));
+    tempDirs.push(dir);
+    const close = vi.fn(async () => undefined);
+    const EnvHttpProxyAgent = vi.fn(() => ({ close }));
+    runtimeFetchMock.loadUndici.mockResolvedValue({
+      EnvHttpProxyAgent,
+      fetch: vi.fn(async () => new Response(JSON.stringify(catalog))),
+    });
+
+    await loadModelMetadataCatalog({
+      cachePath: path.join(dir, 'models-dev.json'),
+      proxyUrl: 'localhost:7890',
+    });
+    await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+
+    expect(EnvHttpProxyAgent).toHaveBeenCalledWith({
+      httpProxy: 'http://localhost:7890',
+      httpsProxy: 'http://localhost:7890',
+    });
+  });
+
+  it('uses the latest proxy options after an in-flight refresh', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'models-dev-test-'));
+    tempDirs.push(dir);
+    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(dir);
+    const firstResponse = deferred<Response>();
+    const EnvHttpProxyAgent = vi.fn(() => ({
+      close: vi.fn(async () => undefined),
+    }));
+    const undiciFetch = vi
+      .fn()
+      .mockImplementationOnce(() => firstResponse.promise)
+      .mockResolvedValue(new Response(JSON.stringify(catalog)));
+    runtimeFetchMock.loadUndici.mockResolvedValue({
+      EnvHttpProxyAgent,
+      fetch: undiciFetch,
+    });
+
+    await loadModelMetadataCatalog({ proxyUrl: 'first-proxy:8080' });
+    await vi.waitFor(() => expect(undiciFetch).toHaveBeenCalledOnce());
+    await loadModelMetadataCatalog({ proxyUrl: 'second-proxy:8080' });
+    firstResponse.resolve(new Response(JSON.stringify(catalog)));
+
+    await vi.waitFor(() => expect(EnvHttpProxyAgent).toHaveBeenCalledTimes(2));
+    expect(EnvHttpProxyAgent).toHaveBeenLastCalledWith({
+      httpProxy: 'http://second-proxy:8080',
+      httpsProxy: 'http://second-proxy:8080',
+    });
   });
 
   it('closes the proxy dispatcher and keeps the snapshot on rejection', async () => {

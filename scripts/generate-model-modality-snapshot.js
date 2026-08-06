@@ -30,7 +30,7 @@ export function buildSnapshot(catalog) {
     const models = Object.create(null);
     for (const modelId of Object.keys(provider.models ?? {}).sort()) {
       const model = provider.models[modelId];
-      const input = model?.modalities?.input;
+      const input = Array.isArray(model) ? model : model?.modalities?.input;
       if (Array.isArray(input)) {
         models[modelId] = input;
       } else if (model?.attachment === true) {

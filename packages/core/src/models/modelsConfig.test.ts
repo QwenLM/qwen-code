@@ -1663,6 +1663,128 @@ describe('ModelsConfig', () => {
     });
   });
 
+  it('re-derives modalities when manual credentials select a new model', async () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig: {
+        openai: [
+          {
+            id: 'vision-model',
+            baseUrl: 'https://vendor.example/v1',
+          },
+        ],
+      },
+      generationConfig: { model: 'vision-model' },
+      modelMetadataCatalog: {
+        vendor: {
+          api: 'https://vendor.example/v1',
+          models: {
+            'vision-model': {
+              modalities: { input: ['text', 'image', 'video'] },
+            },
+          },
+        },
+      },
+    });
+    await modelsConfig.switchModel(AuthType.USE_OPENAI, 'vision-model');
+    expect(modelsConfig.getGenerationConfig().modalities).toEqual({
+      image: true,
+      video: true,
+    });
+
+    modelsConfig.updateCredentials(
+      { apiKey: 'manual-key', model: 'plain-text-model' },
+      { modalities: { audio: true } },
+    );
+
+    expect(modelsConfig.getGenerationConfig().modalities).toEqual({
+      audio: true,
+    });
+    expect(modelsConfig.getGenerationConfigSources()['modalities']?.kind).toBe(
+      'settings',
+    );
+  });
+
+  it('replaces provider-sourced modalities when switching registry models', async () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig: {
+        openai: [
+          {
+            id: 'audio-model',
+            generationConfig: { modalities: { audio: true } },
+          },
+          {
+            id: 'catalog-model',
+            baseUrl: 'https://vendor.example/v1',
+          },
+        ],
+      },
+      generationConfig: { model: 'audio-model' },
+      modelMetadataCatalog: {
+        vendor: {
+          api: 'https://vendor.example/v1',
+          models: {
+            'catalog-model': {
+              modalities: { input: ['text', 'image', 'pdf'] },
+            },
+          },
+        },
+      },
+    });
+    modelsConfig.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'audio-model');
+    expect(modelsConfig.getGenerationConfig().modalities).toEqual({
+      audio: true,
+    });
+
+    await modelsConfig.switchModel(AuthType.USE_OPENAI, 'catalog-model');
+
+    expect(modelsConfig.getGenerationConfig().modalities).toEqual({
+      image: true,
+      pdf: true,
+    });
+  });
+
+  it('does not overwrite provider-sourced persisted modalities during construction', () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig: {
+        openai: [
+          {
+            id: 'catalog-model',
+            baseUrl: 'https://vendor.example/v1',
+          },
+        ],
+      },
+      generationConfig: {
+        model: 'catalog-model',
+        modalities: { video: true },
+      },
+      generationConfigSources: {
+        modalities: {
+          kind: 'modelProviders',
+          authType: AuthType.USE_OPENAI,
+          modelId: 'catalog-model',
+          detail: 'generationConfig.modalities',
+        },
+      },
+      modelMetadataCatalog: {
+        vendor: {
+          api: 'https://vendor.example/v1',
+          models: {
+            'catalog-model': {
+              modalities: { input: ['text', 'image'] },
+            },
+          },
+        },
+      },
+    });
+
+    expect(modelsConfig.getGenerationConfig().modalities).toEqual({
+      video: true,
+    });
+  });
+
   it('uses the registry catalog result for an initial mapped provider', () => {
     const modelsConfig = new ModelsConfig({
       initialAuthType: AuthType.USE_OPENAI,

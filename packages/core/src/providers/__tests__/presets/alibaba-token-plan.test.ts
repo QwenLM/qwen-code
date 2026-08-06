@@ -71,6 +71,20 @@ describe('token plan provider', () => {
       template.find((model) => model.id === 'qwen3.7-plus')?.generationConfig
         ?.modalities,
     ).toEqual({ image: true, video: true });
+    expect(
+      template
+        .filter((model) => model.generationConfig?.modalities !== undefined)
+        .map((model) => model.id),
+    ).toEqual([
+      'qwen3.7-plus',
+      'qwen3.6-plus',
+      'qwen3.8-max-preview',
+      'kimi-k2.7-code',
+      'kimi-k2.5',
+    ]);
+    expect(version).toBe(
+      'b1a5f8464e9a28951fffe458ed32b12b01599f282dc3b323dc7b40b6012a370b',
+    );
     expect(plan.providerId).toBe('token-plan');
     expect(plan.authType).toBe(AuthType.USE_OPENAI);
     expect(plan.env).toEqual({ [TOKEN_PLAN_ENV_KEY]: 'sk-token' });

@@ -91,11 +91,14 @@ export class ModelRegistry {
     ResolvedModelConfig,
     ModelModalitiesSource
   >();
+  private readonly defaultBaseUrls = new Map<AuthType, string>();
 
   /** providerId -> SDK protocol mapping; persists across reloads. */
   private providerProtocolConfig: ProviderProtocolConfig;
 
   private getDefaultBaseUrl(authType: AuthType): string {
+    const configured = this.defaultBaseUrls.get(authType);
+    if (configured !== undefined) return configured;
     switch (authType) {
       case AuthType.QWEN_OAUTH:
         return 'DYNAMIC_QWEN_OAUTH_BASE_URL';
@@ -110,10 +113,17 @@ export class ModelRegistry {
     modelProvidersConfig?: ModelProvidersConfig,
     providerProtocolConfig?: ProviderProtocolConfig,
     modelMetadataCatalog?: ModelMetadataCatalog,
+    initialDefaultBaseUrl?: { authType: AuthType; baseUrl: string },
   ) {
     this.modelsByAuthType = new Map();
     this.providerProtocolConfig = providerProtocolConfig ?? {};
     this.modelMetadataCatalog = modelMetadataCatalog;
+    if (initialDefaultBaseUrl) {
+      this.defaultBaseUrls.set(
+        initialDefaultBaseUrl.authType,
+        initialDefaultBaseUrl.baseUrl,
+      );
+    }
 
     // Always register qwen-oauth models (hard-coded, cannot be overridden)
     this.registerAuthTypeModels(AuthType.QWEN_OAUTH, QWEN_OAUTH_MODELS);
@@ -322,11 +332,12 @@ export class ModelRegistry {
     this.validateModelConfig(config, authType);
 
     const generationConfig = { ...(config.generationConfig ?? {}) };
+    const resolvedBaseUrl = config.baseUrl || this.getDefaultBaseUrl(authType);
     const lookup = {
       providerId,
       authType,
       modelId: config.id,
-      baseUrl: config.baseUrl,
+      baseUrl: resolvedBaseUrl,
       envKey: config.envKey,
     };
     const catalogModalities = getCatalogModalities(
@@ -348,7 +359,7 @@ export class ModelRegistry {
       ...config,
       authType,
       name: config.name || config.id,
-      baseUrl: config.baseUrl || this.getDefaultBaseUrl(authType),
+      baseUrl: resolvedBaseUrl,
       ...(config.baseUrl ? { registryBaseUrl: config.baseUrl } : {}),
       generationConfig,
       capabilities: config.capabilities || {},

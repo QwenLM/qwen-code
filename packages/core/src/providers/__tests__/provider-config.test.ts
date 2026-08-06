@@ -105,6 +105,35 @@ describe('buildInstallPlan', () => {
     });
   });
 
+  it('keeps advanced modalities on custom ids when preset ids use the catalog', () => {
+    const config = makeConfig({
+      modelsEditable: true,
+      models: [
+        {
+          id: 'model-a',
+          modalities: { image: true },
+        },
+      ],
+    });
+    const plan = buildInstallPlan(config, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['model-a', 'custom-model'],
+      advancedConfig: {
+        multimodal: { audio: true, video: true },
+      },
+    });
+
+    const models = plan.modelProviders?.[0]?.models;
+    expect(
+      models?.find((model) => model.id === 'model-a')?.generationConfig,
+    ).toBeUndefined();
+    expect(
+      models?.find((model) => model.id === 'custom-model')?.generationConfig
+        ?.modalities,
+    ).toEqual({ audio: true, video: true });
+  });
+
   it('builds a plan with no predefined models (custom provider path)', () => {
     const config = makeConfig({
       models: undefined,

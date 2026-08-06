@@ -164,6 +164,12 @@ export class ModelsConfig {
       options.modelProvidersConfig,
       options.providerProtocolConfig,
       options.modelMetadataCatalog,
+      options.initialAuthType && options.generationConfig?.baseUrl
+        ? {
+            authType: options.initialAuthType,
+            baseUrl: options.generationConfig.baseUrl,
+          }
+        : undefined,
     );
     this.modelMetadataCatalog = options.modelMetadataCatalog;
     this.onModelChange = options.onModelChange;
@@ -779,7 +785,7 @@ export class ModelsConfig {
     if (credentials.apiKey || credentials.baseUrl || credentials.model) {
       this.hasManualCredentials = true;
       this.currentRegistryBaseUrl = undefined;
-      this.clearProviderSourcedConfig();
+      this.clearProviderSourcedConfig(credentials.model !== undefined);
     }
 
     if (credentials.apiKey) {
@@ -815,6 +821,9 @@ export class ModelsConfig {
     // has lower priority than programmatic overrides but should still be applied.
     if (settingsGenerationConfig) {
       this.mergeSettingsGenerationConfig(settingsGenerationConfig);
+    }
+    if (credentials.model) {
+      this.applyRawModelDerivedDefaults(credentials.model);
     }
 
     // Sync with runtime model snapshot if we have a complete configuration
@@ -883,10 +892,13 @@ export class ModelsConfig {
    * This ensures provider config atomicity when user manually sets credentials.
    * Other layers (CLI, env, settings, defaults) will participate in resolve.
    */
-  private clearProviderSourcedConfig(): void {
+  private clearProviderSourcedConfig(clearModelDerived = false): void {
     for (const field of PROVIDER_SOURCED_FIELDS) {
       const source = this.generationConfigSources[field];
-      if (source?.kind === 'modelProviders') {
+      if (
+        source?.kind === 'modelProviders' ||
+        (clearModelDerived && source?.kind === 'computed')
+      ) {
         // Clear the value - let other layers resolve it
         delete (this._generationConfig as Record<string, unknown>)[field];
         delete this.generationConfigSources[field];

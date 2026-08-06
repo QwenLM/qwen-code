@@ -272,7 +272,7 @@ describe('useProviderUpdates', () => {
             ...model,
             generationConfig: {
               ...model.generationConfig,
-              modalities: { image: true, video: true },
+              modalities: { audio: true },
             },
           }
         : model,
@@ -308,7 +308,39 @@ describe('useProviderUpdates', () => {
       reloaded[AuthType.USE_OPENAI].find(
         (model: { id: string }) => model.id === 'qwen3.5-plus',
       )?.generationConfig?.modalities,
-    ).toEqual({ image: true, video: true });
+    ).toEqual({ audio: true });
+  });
+
+  it('does not re-persist installer template modalities during an update', async () => {
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: chinaTemplate,
+    };
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+    await result.current.providerUpdateRequest!.onConfirm('update');
+
+    const reloaded = mockConfig.reloadModelProvidersConfig.mock.calls[0][0];
+    expect(
+      reloaded[AuthType.USE_OPENAI].find(
+        (model: { id: string }) => model.id === 'qwen3.5-plus',
+      )?.generationConfig?.modalities,
+    ).toBeUndefined();
   });
 
   it('executes update when user confirms with "update"', async () => {
