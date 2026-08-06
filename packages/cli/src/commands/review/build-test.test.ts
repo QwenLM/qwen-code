@@ -196,25 +196,177 @@ describe('runBuildTest', () => {
     expect(calls.some((c) => c.startsWith('npm ci'))).toBe(true);
   });
 
-  it('builds and tests nothing for a docs-only diff — and says so', () => {
+  it('builds and tests nothing for a LICENSE-only diff — the license family cannot fail a suite', () => {
+    // A LICENSE edit outside every workspace cannot fail any suite, so
+    // "nothing to run" is the honest answer, not a skipped step — and no
+    // caveat: the scope misses nothing the workspaces could feel.
     writeFileSync(
       join(root, 'package.json'),
-      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+      JSON.stringify({
+        name: 'r',
+        workspaces: ['packages/*'],
+        scripts: { test: 'exit 0' },
+      }),
     );
-    pkg('packages/a', { name: '@x/a', scripts: { build: 'exit 0' } });
-    writePlan(['README.md', 'docs/x.md']);
+    pkg('packages/a', {
+      name: '@x/a',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    writePlan(['LICENSE', 'legal/LICENSE.txt']);
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 5,
+      install: false,
+      exec: (command) => {
+        calls.push(command);
+        return {
+          command,
+          exitCode: 0,
+          seconds: 1,
+          timedOut: false,
+          output: '',
+        };
+      },
+    });
+    expect(rep.affected).toEqual([]);
+    expect(calls).toEqual([]);
+    expect(rep.ok).toBe(true);
+    expect(rep.testScope).toEqual({ workspaces: [] });
+    expect(rep.testScope?.caveat).toBeUndefined();
+    expect(rep.note).toContain('no package to build');
+    expect(rep.note).toContain('complete answer');
+  });
+
+  it('runs nothing but discloses the caveat for out-of-workspace files that are not inert', () => {
+    // README/AGENTS.md-class prose is NOT inert: this repo's own root
+    // AGENTS.md is asserted on by packages/cli's load-rules.test.ts. There is
+    // still nothing to run for an outside-only diff, but the report must not
+    // certify a complete answer.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'r',
+        workspaces: ['packages/*'],
+        scripts: { test: 'exit 0' },
+      }),
+    );
+    pkg('packages/a', {
+      name: '@x/a',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    writePlan(['README.md', 'AGENTS.md']);
 
     const rep = runBuildTest({
       plan: planPath,
       worktree: root,
       timeout: 5,
       install: false,
+      exec: okExec,
     });
-    expect(rep.affected).toEqual([]);
     expect(rep.build).toEqual([]);
     expect(rep.test).toEqual([]);
     expect(rep.ok).toBe(true);
-    expect(rep.note).toContain('no package to build');
+    expect(rep.testScope?.workspaces).toEqual([]);
+    expect(rep.testScope?.caveat).toContain('README.md');
+    expect(rep.note).toContain('caveat');
+    // The note embeds the caveat's substance, not just the word "caveat".
+    expect(rep.note).toContain('README.md');
+    expect(rep.note).not.toContain('complete answer');
+  });
+
+  it('keeps a diff scoped — and caveat-free — when its only out-of-workspace files are the license family', () => {
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'r',
+        workspaces: ['packages/*'],
+        scripts: { test: 'exit 0' },
+      }),
+    );
+    pkg('packages/a', {
+      name: '@x/a',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/b', { name: '@x/b', scripts: { test: 'exit 0' } });
+    pkg('packages/c', { name: '@x/c', scripts: { test: 'exit 0' } });
+    writePlan(['packages/a/src/x.ts', 'LICENSE', 'NOTICES.txt']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec,
+    });
+    expect(rep.testScope).toEqual({ workspaces: ['packages/a'] });
+    expect(rep.test.map((t) => t.command)).toEqual([
+      'npm test --workspace="packages/a"',
+    ]);
+    expect(rep.ok).toBe(true);
+  });
+
+  it('keeps a prose file riding along scoped, but the note carries the caveat', () => {
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'r',
+        workspaces: ['packages/*'],
+        scripts: { test: 'exit 0' },
+      }),
+    );
+    pkg('packages/a', {
+      name: '@x/a',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/b', { name: '@x/b', scripts: { test: 'exit 0' } });
+    pkg('packages/c', { name: '@x/c', scripts: { test: 'exit 0' } });
+    writePlan(['packages/a/src/x.ts', 'README.md']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec,
+    });
+    expect(rep.testScope?.workspaces).toEqual(['packages/a']);
+    expect(rep.testScope?.caveat).toContain('README.md');
+    expect(rep.test.map((t) => t.command)).toEqual([
+      'npm test --workspace="packages/a"',
+    ]);
+    expect(rep.note).toContain('Caveat:');
+    // The note embeds the caveat's substance, not just the "Caveat:" label.
+    expect(rep.note).toContain('README.md');
+    expect(rep.ok).toBe(true);
+  });
+
+  it('still runs nothing for an EMPTY diff — a full suite would measure nothing', () => {
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'r',
+        workspaces: ['packages/*'],
+        scripts: { test: 'exit 0' },
+      }),
+    );
+    pkg('packages/a', { name: '@x/a', scripts: { build: 'exit 0' } });
+    writePlan([]);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 5,
+      install: false,
+      exec: okExec,
+    });
+    expect(rep.build).toEqual([]);
+    expect(rep.test).toEqual([]);
+    expect(rep.ok).toBe(true);
+    expect(rep.testScope).toEqual({ workspaces: [] });
+    expect(rep.note).toContain('no test to run');
   });
 
   it('builds and tests a single-package npm repo (no `workspaces` field)', () => {
@@ -254,6 +406,42 @@ describe('runBuildTest', () => {
     expect(calls).toContain('npm test');
     expect(calls.some((c) => c.includes('--workspace'))).toBe(false);
     expect(rep.ok).toBe(true);
+  });
+
+  it('says no tests ran for a single-package repo whose root defines only a build script', () => {
+    // The root's build runs, but with no test script nothing is executed —
+    // the note must not claim the tests of the changed package ran and passed.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'solo', scripts: { build: 'exit 0' } }),
+    );
+    writePlan(['src/index.ts']);
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: (command) => {
+        calls.push(command);
+        return {
+          command,
+          exitCode: 0,
+          seconds: 1,
+          timedOut: false,
+          output: '',
+        };
+      },
+    });
+    expect(rep.toolchain).toBe('npm');
+    expect(rep.ok).toBe(true);
+    expect(rep.test).toEqual([]);
+    expect(rep.testScope).toBeUndefined();
+    expect(rep.note).toContain('no tests ran');
+    expect(rep.note).not.toContain('Everything passed');
+    // The comment above claims the build runs — so witness it, not just the
+    // note's wording: exactly the root's build, and nothing else, executed.
+    expect(calls).toEqual(['npm run build']);
   });
 
   it('is `unsupported` for a single-package repo with no build/test script', () => {
@@ -518,7 +706,11 @@ describe('runBuildTest', () => {
     expect(withTests.test.map((t) => t.command)).toEqual([
       'npm test --workspace="packages/core"',
     ]);
+    expect(withTests.testScope).toBeDefined();
     expect(buildOnly.test).toEqual([]);
+    // The probe runs no tests, so it must not claim a scoping decision — a
+    // testScope on it would read as "the suite ran" in the agent's brief.
+    expect(buildOnly.testScope).toBeUndefined();
     // The build itself is untouched — same set, same commands, same verdict.
     expect(buildOnly.buildSet).toEqual(withTests.buildSet);
     expect(buildOnly.build.map((b) => b.command)).toEqual(
@@ -530,7 +722,7 @@ describe('runBuildTest', () => {
     expect(buildOnly.note).not.toContain('ran the tests');
   });
 
-  it('scopes the build to the changed workspace and its dependents', () => {
+  it('scopes build AND tests to the changed workspace and its dependents', () => {
     writeFileSync(
       join(root, 'package.json'),
       JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
@@ -544,7 +736,14 @@ describe('runBuildTest', () => {
       dependencies: { '@x/core': '*' },
       scripts: { build: 'exit 0', test: 'exit 0' },
     });
-    pkg('packages/island', { name: '@x/island', scripts: { build: 'exit 0' } });
+    // Enough unrelated islands that the two-package closure stays under the
+    // more-than-half cap and the scoped path is what this test exercises.
+    for (const island of ['island1', 'island2', 'island3']) {
+      pkg(`packages/${island}`, {
+        name: `@x/${island}`,
+        scripts: { build: 'exit 0', test: 'exit 0' },
+      });
+    }
     writePlan(['packages/core/src/a.ts']);
 
     const rep = runBuildTest({
@@ -557,13 +756,1007 @@ describe('runBuildTest', () => {
     expect(rep.affected).toEqual(['packages/core']);
     // core changed, so leaf's compile is where a break would surface.
     expect(rep.buildSet).toContain('packages/leaf');
-    // island depends on nothing that changed.
-    expect(rep.buildSet).not.toContain('packages/island');
-    // Only the changed workspace's tests run.
+    // The islands depend on nothing that changed.
+    expect(rep.buildSet).not.toContain('packages/island1');
+    // The changed workspace's tests run — and so do its dependent's: a
+    // behaviour change in core can fail leaf's suite while leaf still compiles.
+    expect(rep.test.map((t) => t.command)).toEqual([
+      'npm test --workspace="packages/core"',
+      'npm test --workspace="packages/leaf"',
+    ]);
+    expect(rep.testScope).toEqual({
+      workspaces: ['packages/core', 'packages/leaf'],
+    });
+    // The note names the scope, so the review body can state what ran.
+    expect(rep.note).toContain('packages/core, packages/leaf');
+    expect(rep.note).not.toContain('Caveat:');
+    expect(rep.ok).toBe(true);
+  });
+
+  it('tests the TRANSITIVE dependents of a changed workspace, not just direct ones', () => {
+    // core <- mid <- top: a behaviour change in core can surface in top's suite
+    // with mid unchanged in between. The closure must follow the chain.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/core', {
+      name: '@x/core',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/mid', {
+      name: '@x/mid',
+      dependencies: { '@x/core': '*' },
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/top', {
+      name: '@x/top',
+      // devDependencies count: a test-only consumer is still a consumer.
+      devDependencies: { '@x/mid': '*' },
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    for (const island of ['i1', 'i2', 'i3', 'i4']) {
+      pkg(`packages/${island}`, {
+        name: `@x/${island}`,
+        scripts: { test: 'exit 0' },
+      });
+    }
+    writePlan(['packages/core/src/a.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec,
+    });
+    expect(rep.testScope).toEqual({
+      workspaces: ['packages/core', 'packages/mid', 'packages/top'],
+    });
+    expect(rep.test.map((t) => t.command)).toEqual([
+      'npm test --workspace="packages/core"',
+      'npm test --workspace="packages/mid"',
+      'npm test --workspace="packages/top"',
+    ]);
+    expect(rep.ok).toBe(true);
+  });
+
+  it('builds what a MIDDLE package compiles against, but tests only the closure', () => {
+    // core <- mid <- top plus islands; changing mid means the BUILD set is
+    // {core, mid, top} (mid compiles against core) while the TEST scope is
+    // the closure {mid, top} — core's suite cannot have been broken by a
+    // change to its consumer, and the note must not claim it ran.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/core', {
+      name: '@x/core',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/mid', {
+      name: '@x/mid',
+      dependencies: { '@x/core': '*' },
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/top', {
+      name: '@x/top',
+      dependencies: { '@x/mid': '*' },
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    for (const island of ['i1', 'i2', 'i3', 'i4']) {
+      pkg(`packages/${island}`, {
+        name: `@x/${island}`,
+        scripts: { test: 'exit 0' },
+      });
+    }
+    writePlan(['packages/mid/src/a.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec,
+    });
+    expect(rep.buildSet).toContain('packages/core');
+    expect(rep.buildSet).toContain('packages/mid');
+    expect(rep.testScope).toEqual({
+      workspaces: ['packages/mid', 'packages/top'],
+    });
+    expect(rep.test.map((t) => t.command)).toEqual([
+      'npm test --workspace="packages/mid"',
+      'npm test --workspace="packages/top"',
+    ]);
+    expect(rep.note).toContain('tests scoped to packages/mid, packages/top');
+    expect(rep.ok).toBe(true);
+  });
+
+  it('excludes a build-only dependent from the test scope and the note', () => {
+    // leaf depends on core but defines no test script: nothing runs for it,
+    // so naming it would claim coverage that cannot exist.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/core', {
+      name: '@x/core',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/leaf', {
+      name: '@x/leaf',
+      dependencies: { '@x/core': '*' },
+      scripts: { build: 'exit 0' },
+    });
+    for (const island of ['i1', 'i2', 'i3']) {
+      pkg(`packages/${island}`, {
+        name: `@x/${island}`,
+        scripts: { test: 'exit 0' },
+      });
+    }
+    writePlan(['packages/core/src/a.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec,
+    });
+    // The build set still has leaf — its compile is where a break surfaces.
+    expect(rep.buildSet).toContain('packages/leaf');
+    expect(rep.testScope).toEqual({ workspaces: ['packages/core'] });
     expect(rep.test.map((t) => t.command)).toEqual([
       'npm test --workspace="packages/core"',
     ]);
+    // The note names what ran and must not claim the build-only dependent was
+    // tested — naming it would assert a coverage that cannot exist.
+    expect(rep.note).toContain('packages/core');
+    expect(rep.note).toContain('defines a test script');
+    expect(rep.note).not.toContain('packages/leaf');
+  });
+
+  it('runs the root suite as a dependent when the root package.json declares a workspace dependency', () => {
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'r',
+        workspaces: ['packages/*'],
+        scripts: { test: 'exit 0' },
+        dependencies: { '@x/core': '*' },
+      }),
+    );
+    pkg('packages/core', {
+      name: '@x/core',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    for (const island of ['i1', 'i2', 'i3', 'i4']) {
+      pkg(`packages/${island}`, {
+        name: `@x/${island}`,
+        scripts: { test: 'exit 0' },
+      });
+    }
+    writePlan(['packages/core/src/a.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec,
+    });
+    expect(rep.testScope?.workspaces).toContain('.');
+    // Affected first: the changed workspace's own suite is unstarvable.
+    expect(rep.test.map((t) => t.command)).toEqual([
+      'npm test --workspace="packages/core"',
+      'npm test',
+    ]);
     expect(rep.ok).toBe(true);
+  });
+
+  it('keeps a build-only root out of the test scope and the half-cap count', () => {
+    // The root declares a dependency on the changed member but defines NO test
+    // script: it joins the closure only as '.', the script filter drops it, and
+    // — because it is not a testable suite — it must not inflate the half-cap
+    // denominator either. The script filter and the rootRuns gate are what
+    // guarantee both; this pins the resulting scope.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'r',
+        workspaces: ['packages/*'],
+        scripts: { build: 'exit 0' },
+        dependencies: { '@x/core': '*' },
+      }),
+    );
+    pkg('packages/core', {
+      name: '@x/core',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/a', {
+      name: '@x/a',
+      dependencies: { '@x/core': '*' },
+      scripts: { test: 'exit 0' },
+    });
+    pkg('packages/island', { name: '@x/island', scripts: { test: 'exit 0' } });
+    writePlan(['packages/core/src/a.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec,
+    });
+    // 2 of the 3 testable workspaces is past half, so the caveat fires — the
+    // build-only root is NOT counted as a fourth testable suite.
+    expect(rep.testScope?.workspaces).toEqual(['packages/a', 'packages/core']);
+    expect(rep.testScope?.caveat).toContain('2 of 3 testable workspaces');
+    // Affected (core) runs first; dependents follow.
+    expect(rep.test.map((t) => t.command)).toEqual([
+      'npm test --workspace="packages/core"',
+      'npm test --workspace="packages/a"',
+    ]);
+  });
+
+  it('builds a workspace whose only edge is a dependency on the root package', () => {
+    // docs depends on the root's NAME and the root depends on core, so docs is
+    // in the test closure through the root. The build set is computed over the
+    // same root-inclusive graph, so docs is built before it is tested — a
+    // suite must never run against artifacts that were never compiled.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'r',
+        workspaces: ['packages/*'],
+        scripts: { build: 'exit 0', test: 'exit 0' },
+        dependencies: { '@x/core': '*' },
+      }),
+    );
+    pkg('packages/core', {
+      name: '@x/core',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/docs', {
+      name: '@x/docs',
+      dependencies: { r: '*' },
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    for (const island of ['i1', 'i2', 'i3']) {
+      pkg(`packages/${island}`, {
+        name: `@x/${island}`,
+        scripts: { test: 'exit 0' },
+      });
+    }
+    writePlan(['packages/core/src/a.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec,
+    });
+    expect(rep.testScope?.workspaces).toContain('packages/docs');
+    // docs is built (the drift R2-23 fixed) — and so is the root: docs names
+    // the root as a dependency, so the root joins the graph and its own
+    // `build` runs like any other package's, dependencies-first.
+    expect(rep.buildSet).toContain('packages/docs');
+    expect(rep.buildSet).toContain('packages/core');
+    expect(rep.buildSet).toContain('.');
+    expect(rep.build.map((b) => b.command)).toEqual([
+      'npm run build --workspace="packages/core"',
+      'npm run build',
+      'npm run build --workspace="packages/docs"',
+    ]);
+    expect(rep.test.map((t) => t.command)).toEqual([
+      'npm test --workspace="packages/core"',
+      'npm test',
+      'npm test --workspace="packages/docs"',
+    ]);
+    expect(rep.ok).toBe(true);
+  });
+
+  it('buildOnly measures the SAME set as the full run in the root-bridge case', () => {
+    // The merge-base probe is the baseline an A/B verdict is computed against:
+    // if its build set excluded the root bridge (and docs behind it), base
+    // would run docs's suite against artifacts the full run compiles —
+    // manufacturing a behavioural difference out of thin air.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'r',
+        workspaces: ['packages/*'],
+        scripts: { build: 'exit 0', test: 'exit 0' },
+        dependencies: { '@x/core': '*' },
+      }),
+    );
+    pkg('packages/core', {
+      name: '@x/core',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/docs', {
+      name: '@x/docs',
+      dependencies: { r: '*' },
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    writePlan(['packages/core/src/a.ts']);
+
+    const args = {
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec,
+    };
+    const withTests = runBuildTest(args);
+    const buildOnly = runBuildTest({ ...args, buildOnly: true });
+
+    expect(withTests.buildSet).toContain('.');
+    expect(buildOnly.buildSet).toEqual(withTests.buildSet);
+    expect(buildOnly.build.map((b) => b.command)).toEqual(
+      withTests.build.map((b) => b.command),
+    );
+    expect(buildOnly.test).toEqual([]);
+    expect(buildOnly.ok).toBe(true);
+  });
+
+  it('skips a fan-out root suite — the scoped member suites are the coverage', () => {
+    // The root's `test` fans out over every workspace: running it as bare
+    // `npm test` would repeat the ENTIRE suite inside one command deadline,
+    // the fallback this command refuses. It must not appear among the test
+    // commands, and the caveat must say why.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'r',
+        workspaces: ['packages/*'],
+        scripts: {
+          build: 'exit 0',
+          test: 'npm run test --workspaces --if-present',
+        },
+        dependencies: { '@x/core': '*' },
+      }),
+    );
+    pkg('packages/core', {
+      name: '@x/core',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/docs', {
+      name: '@x/docs',
+      dependencies: { r: '*' },
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    for (const island of ['i1', 'i2', 'i3', 'i4']) {
+      pkg(`packages/${island}`, {
+        name: `@x/${island}`,
+        scripts: { test: 'exit 0' },
+      });
+    }
+    writePlan(['packages/core/src/a.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec,
+    });
+    expect(rep.test.map((t) => t.command)).toEqual([
+      'npm test --workspace="packages/core"',
+      'npm test --workspace="packages/docs"',
+    ]);
+    expect(rep.testScope?.workspaces).not.toContain('.');
+    expect(rep.testScope?.caveat).toContain('fans out');
+    expect(rep.note).toContain('fans out');
+    expect(rep.ok).toBe(true);
+  });
+
+  it('attempts every suite with the REMAINING budget and names only the never-attempted', () => {
+    // Suites of ~2s of real wall clock against a 16s budget: core runs — with
+    // a deadline shrunk to what remains, never the full 60s — and the suites
+    // the floor cuts off are named notRun. Reserving a full per-command
+    // deadline per suite (the old guard) would have run NONE of them.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/core', {
+      name: '@x/core',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/a', {
+      name: '@x/a',
+      dependencies: { '@x/core': '*' },
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/b', {
+      name: '@x/b',
+      dependencies: { '@x/a': '*' },
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    for (const island of ['i1', 'i2', 'i3']) {
+      pkg(`packages/${island}`, {
+        name: `@x/${island}`,
+        scripts: { test: 'exit 0' },
+      });
+    }
+    writePlan(['packages/core/src/a.ts']);
+
+    const testCalls: Array<{ command: string; timeoutMs: number }> = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      budget: 16,
+      install: false,
+      exec: (command, _cwd, timeoutMs) => {
+        if (command.startsWith('npm test')) {
+          testCalls.push({ command, timeoutMs });
+          // Real wall clock, so the budget actually drains.
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000);
+        }
+        return {
+          command,
+          exitCode: 0,
+          seconds: 1,
+          timedOut: false,
+          output: '',
+        };
+      },
+    });
+    // core (affected) ran with a deadline shrunk to the remaining budget; a
+    // and b fell below the 15s attempt floor and are named, not faked.
+    expect(rep.test.map((t) => t.command)).toEqual([
+      'npm test --workspace="packages/core"',
+    ]);
+    expect(testCalls.every((c) => c.timeoutMs < 60_000)).toBe(true);
+    // Structural: workspaces names what ran (scope order), notRun what was
+    // never attempted.
+    expect(rep.testScope?.workspaces).toEqual(['packages/core']);
+    expect(rep.testScope?.notRun).toEqual(['packages/a', 'packages/b']);
+    expect(rep.note).toContain('not run: packages/a, packages/b');
+    expect(rep.ok).toBe(true);
+  });
+
+  it('routes builds and suites to notBuilt/notRun below the attempt floor — never a fake timeout', () => {
+    // Budget below the 15s floor from the start: no build is attempted (an
+    // attempt would manufacture a fake timeout), no suite runs against
+    // artifacts never compiled, and the report says both plainly.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/core', {
+      name: '@x/core',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/leaf', {
+      name: '@x/leaf',
+      dependencies: { '@x/core': '*' },
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    writePlan(['packages/core/src/a.ts']);
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      budget: 1,
+      install: false,
+      exec: (command) => {
+        calls.push(command);
+        return {
+          command,
+          exitCode: 0,
+          seconds: 1,
+          timedOut: false,
+          output: '',
+        };
+      },
+    });
+    expect(calls.filter((c) => c.startsWith('npm run build'))).toEqual([]);
+    expect(rep.test).toEqual([]);
+    // Nothing reports as built or run that was not.
+    expect(rep.buildSet).toEqual([]);
+    expect(rep.testScope?.workspaces).toEqual([]);
+    expect(rep.testScope?.notRun).toEqual(['packages/core', 'packages/leaf']);
+    expect(rep.note).toContain('not built: packages/core, packages/leaf');
+    expect(rep.note).toContain('before any suite could run');
+    expect(rep.ok).toBe(true);
+  });
+
+  it('runs the AFFECTED workspace first, so the budget trims dependents, never the changed suite', () => {
+    // The closure is alphabetical — `alpha` before `zebra` — but the diff
+    // changed zebra, and its own suite is the one most likely to catch the
+    // regression. The run order must put it first.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/zebra', {
+      name: '@x/zebra',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/alpha', {
+      name: '@x/alpha',
+      dependencies: { '@x/zebra': '*' },
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    for (const island of ['i1', 'i2', 'i3']) {
+      pkg(`packages/${island}`, {
+        name: `@x/${island}`,
+        scripts: { test: 'exit 0' },
+      });
+    }
+    writePlan(['packages/zebra/src/a.ts']);
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: (command) => {
+        calls.push(command);
+        return {
+          command,
+          exitCode: 0,
+          seconds: 1,
+          timedOut: false,
+          output: '',
+        };
+      },
+    });
+    expect(rep.test.map((t) => t.command)).toEqual([
+      'npm test --workspace="packages/zebra"',
+      'npm test --workspace="packages/alpha"',
+    ]);
+    expect(rep.ok).toBe(true);
+  });
+
+  it('skips a fan-out root BUILD — the scoped loop already builds the members it drives', () => {
+    // The root devDepends on the changed member and its build is
+    // `npm run build --workspaces`: running it as one bare command is the
+    // whole-monorepo build this command exists to refuse.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'r',
+        workspaces: ['packages/*'],
+        scripts: {
+          build: 'npm run build --workspaces --if-present',
+          test: 'exit 0',
+        },
+        devDependencies: { '@x/core': '*' },
+      }),
+    );
+    pkg('packages/core', {
+      name: '@x/core',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    for (const island of ['i1', 'i2', 'i3']) {
+      pkg(`packages/${island}`, {
+        name: `@x/${island}`,
+        scripts: { test: 'exit 0' },
+      });
+    }
+    writePlan(['packages/core/src/a.ts']);
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: (command) => {
+        calls.push(command);
+        return {
+          command,
+          exitCode: 0,
+          seconds: 1,
+          timedOut: false,
+          output: '',
+        };
+      },
+    });
+    // The root is in the graph (its edges matter) but its aggregator build
+    // must not execute — and must not linger in the reported build set, or
+    // the report names a build that never ran.
+    expect(rep.buildSet).not.toContain('.');
+    expect(calls).not.toContain('npm run build');
+    expect(rep.note).not.toContain('plus the root package');
+    // The root's NON-fan-out test still runs as a dependent.
+    expect(calls).toContain('npm test');
+    expect(rep.ok).toBe(true);
+  });
+
+  it('carries the caveat on a FAILURE note too — the note is what the brief renders first', () => {
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/a', {
+      name: '@x/a',
+      scripts: { build: 'exit 0', test: 'exit 1' },
+    });
+    for (const island of ['i1', 'i2', 'i3']) {
+      pkg(`packages/${island}`, {
+        name: `@x/${island}`,
+        scripts: { test: 'exit 0' },
+      });
+    }
+    writePlan(['packages/a/src/x.ts', 'scripts/build.js']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: (command) => ({
+        command,
+        exitCode: command.startsWith('npm test') ? 1 : 0,
+        seconds: 1,
+        timedOut: false,
+        output: '1 failing',
+      }),
+    });
+    expect(rep.ok).toBe(false);
+    expect(rep.note).toContain('failed');
+    expect(rep.note).toContain('Caveat:');
+    expect(rep.note).toContain('scripts/build.js');
+  });
+
+  it('shell-escapes a workspace dir name — the tree is PR-authored input', () => {
+    // A dir named `$(touch pwned)` would execute inside double quotes on a
+    // POSIX shell: `$()` and backticks stay live there. The command line must
+    // escape it.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/$(touch pwned)', {
+      name: '@x/evil',
+      scripts: { test: 'exit 0' },
+    });
+    pkg('packages/island', { name: '@x/island', scripts: { test: 'exit 0' } });
+    writePlan(['packages/$(touch pwned)/src/a.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec,
+    });
+    expect(rep.test.map((t) => t.command)).toEqual([
+      'npm test --workspace="packages/\\$(touch pwned)"',
+    ]);
+  });
+
+  it('certifies nothing to run for an outside-only diff, and names the caveat — never a complete answer', () => {
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'r',
+        workspaces: ['packages/*'],
+        scripts: { test: 'exit 0' },
+      }),
+    );
+    pkg('packages/a', { name: '@x/a', scripts: { test: 'exit 0' } });
+    writePlan(['scripts/build.js']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec,
+    });
+    expect(rep.build).toEqual([]);
+    expect(rep.test).toEqual([]);
+    expect(rep.ok).toBe(true);
+    expect(rep.testScope?.caveat).toContain('scripts/build.js');
+    expect(rep.note).toContain('caveat');
+    expect(rep.note).not.toContain('complete answer');
+
+    // The merge-base probe (build-only) over the same diff reports no
+    // testScope and no inert-prose label — it is a probe, not a verdict.
+    const probe = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      buildOnly: true,
+      exec: okExec,
+    });
+    expect(probe.testScope).toBeUndefined();
+    expect(probe.note).toContain('build-only probe');
+    expect(probe.note).not.toContain('inert prose');
+  });
+
+  it('says no tests ran when no workspace in scope defines a test script', () => {
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/core', {
+      name: '@x/core',
+      scripts: { build: 'exit 0' },
+    });
+    pkg('packages/b', { name: '@x/b', scripts: { test: 'exit 0' } });
+    pkg('packages/c', { name: '@x/c', scripts: { test: 'exit 0' } });
+    writePlan(['packages/core/src/a.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec,
+    });
+    expect(rep.build.map((b) => b.command)).toEqual([
+      'npm run build --workspace="packages/core"',
+    ]);
+    expect(rep.test).toEqual([]);
+    expect(rep.ok).toBe(true);
+    expect(rep.note).toContain('no workspace in scope defines a test script');
+  });
+
+  it('records a caveat — and still runs the closure — when it covers more than half the workspaces', () => {
+    // With core feeding both dependents, the closure is 3 of the 5 testable
+    // suites (the root defines a test too, and it counts in the total) — past
+    // half, so the report says the scoped set is not a meaningful narrowing.
+    // The closure still runs: the root's full suite cannot finish inside a
+    // command deadline on a large monorepo, so a full-suite fallback would
+    // only ever report a timeout.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'r',
+        workspaces: ['packages/*'],
+        scripts: { test: 'exit 0' },
+      }),
+    );
+    pkg('packages/core', {
+      name: '@x/core',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/a', {
+      name: '@x/a',
+      dependencies: { '@x/core': '*' },
+      scripts: { test: 'exit 0' },
+    });
+    pkg('packages/b', {
+      name: '@x/b',
+      dependencies: { '@x/core': '*' },
+      scripts: { test: 'exit 0' },
+    });
+    pkg('packages/island', { name: '@x/island', scripts: { test: 'exit 0' } });
+    writePlan(['packages/core/src/a.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec,
+    });
+    expect(rep.testScope?.caveat).toContain(
+      '3 of 5 testable suites (including the root)',
+    );
+    expect(rep.testScope?.caveat).toContain('more than half');
+    // The closure runs, suite by suite — never the root's full-suite command.
+    // Affected (core) first, dependents after.
+    expect(rep.test.map((t) => t.command)).toEqual([
+      'npm test --workspace="packages/core"',
+      'npm test --workspace="packages/a"',
+      'npm test --workspace="packages/b"',
+    ]);
+    // The BUILD stays scoped too: packages outside the closure cannot have
+    // been broken at compile time.
+    expect(rep.buildSet).not.toContain('packages/island');
+    expect(rep.note).toContain('Caveat:');
+    expect(rep.ok).toBe(true);
+  });
+
+  it('runs the scoped suites and records a caveat when the diff also touches non-workspace files', () => {
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'r',
+        workspaces: ['packages/*'],
+        scripts: { test: 'exit 0' },
+      }),
+    );
+    pkg('packages/a', {
+      name: '@x/a',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/b', { name: '@x/b', scripts: { test: 'exit 0' } });
+    pkg('packages/c', { name: '@x/c', scripts: { test: 'exit 0' } });
+    writePlan(['packages/a/src/x.ts', 'scripts/build.js']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec,
+    });
+    expect(rep.testScope?.caveat).toContain('scripts/build.js');
+    expect(rep.test.map((t) => t.command)).toEqual([
+      'npm test --workspace="packages/a"',
+    ]);
+    // The workspace part of the diff still gets its scoped compile signal.
+    expect(rep.affected).toEqual(['packages/a']);
+    expect(rep.build.map((b) => b.command)).toEqual([
+      'npm run build --workspace="packages/a"',
+    ]);
+  });
+
+  it('does not widen an outside-file caveat to every workspace — the closure still runs', () => {
+    // eslint.config.js is influential, but the run stays the diff's closure:
+    // b does not depend on a, so its suite cannot fail from this diff.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/a', {
+      name: '@x/a',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/b', { name: '@x/b', scripts: { test: 'exit 0' } });
+    writePlan(['packages/a/src/x.ts', 'eslint.config.js']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec,
+    });
+    expect(rep.testScope?.caveat).toContain('eslint.config.js');
+    expect(rep.test.map((t) => t.command)).toEqual([
+      'npm test --workspace="packages/a"',
+    ]);
+  });
+
+  it('records a caveat when a workspace package.json does not parse, and runs the visible closure', () => {
+    // An unparseable manifest means the dependency graph is missing that
+    // package's reverse edges — a dependent of the diff could be invisible.
+    // The visible closure still runs; the caveat discloses the gap.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'r',
+        workspaces: ['packages/*'],
+        scripts: { test: 'exit 0' },
+      }),
+    );
+    pkg('packages/a', {
+      name: '@x/a',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/b', { name: '@x/b', scripts: { test: 'exit 0' } });
+    pkg('packages/c', { name: '@x/c', scripts: { test: 'exit 0' } });
+    mkdirSync(join(root, 'packages', 'broken'), { recursive: true });
+    writeFileSync(
+      join(root, 'packages', 'broken', 'package.json'),
+      '{ not json',
+    );
+    writePlan(['packages/a/src/x.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec,
+    });
+    expect(rep.testScope?.caveat).toContain('packages/broken');
+    expect(rep.test.map((t) => t.command)).toEqual([
+      'npm test --workspace="packages/a"',
+    ]);
+  });
+
+  it('records a caveat when a workspace manifest parses but has no usable name', () => {
+    // npm links a nameless member and its dependencies all the same, so its
+    // missing reverse edges are the same gap as an unparseable manifest.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'r',
+        workspaces: ['packages/*'],
+        scripts: { test: 'exit 0' },
+      }),
+    );
+    pkg('packages/core', {
+      name: '@x/core',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/nameless', {
+      dependencies: { '@x/core': '*' },
+      scripts: { test: 'exit 0' },
+    });
+    pkg('packages/b', { name: '@x/b', scripts: { test: 'exit 0' } });
+    pkg('packages/c', { name: '@x/c', scripts: { test: 'exit 0' } });
+    writePlan(['packages/core/src/x.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec,
+    });
+    expect(rep.testScope?.caveat).toContain('packages/nameless');
+    expect(rep.test.map((t) => t.command)).toEqual([
+      'npm test --workspace="packages/core"',
+    ]);
+  });
+
+  it('discloses a diff inside a negated member — softly, never as an incomplete scope', () => {
+    // packages/desktop is a separate toolchain (its own lockfile); a diff
+    // inside it cannot fail any npm workspace's suite, so "nothing to run"
+    // stays the answer — disclosed softly (its own suite did not run), never
+    // as an incomplete scope.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'r',
+        workspaces: ['packages/*', '!packages/desktop'],
+        scripts: { test: 'exit 0' },
+      }),
+    );
+    pkg('packages/core', {
+      name: '@x/core',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/desktop', {
+      name: '@x/desktop',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    writePlan(['packages/desktop/src/main.rs']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec,
+    });
+    expect(rep.build).toEqual([]);
+    expect(rep.test).toEqual([]);
+    expect(rep.testScope?.workspaces).toEqual([]);
+    expect(rep.testScope?.caveat).toContain('packages/desktop/src/main.rs');
+    expect(rep.testScope?.caveat).toContain('were not run');
+    expect(rep.note).toContain('were not run');
+  });
+
+  it('keeps a plain single-package repo report free of the testScope field', () => {
+    // A single-package repo's one suite IS its full suite — the field would
+    // claim a scoping decision that never happened, and this repo shape's
+    // report must stay byte-identical to what it was before scoping existed.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'solo',
+        scripts: { build: 'exit 0', test: 'exit 0' },
+      }),
+    );
+    writePlan(['src/index.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec,
+    });
+    expect(rep.ok).toBe(true);
+    expect(JSON.stringify(rep)).not.toContain('testScope');
   });
 
   it('reports a build failure with its output, and does not call it ok', () => {
@@ -591,6 +1784,9 @@ describe('runBuildTest', () => {
     expect(rep.build.at(-1)?.exitCode).toBe(1);
     expect(rep.build.at(-1)?.output).toContain('TS2345');
     expect(rep.note).toContain('Correlate');
+    // The run never reached its test phase, so it must not carry a scope that
+    // would read as "the suites ran" in the agent's brief.
+    expect(rep.testScope).toBeUndefined();
   });
 
   it('widens on a compiler-named workspace package, and leaves no false failure behind', () => {
