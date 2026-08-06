@@ -147,6 +147,10 @@ const installAndBuildSteps =
   workflow.match(
     /- name: 'Install dependencies and build'[\s\S]*?(?=\n[ ]{6}- name: ')/g,
   ) ?? [];
+const nodeSetupSteps =
+  workflow.match(
+    /- name: 'Set up Node.js \(hosted\)'[\s\S]*?(?=\n[ ]{6}- name: ')/g,
+  ) ?? [];
 
 function readAutofixSkill() {
   return readFileSync('.qwen/skills/autofix/SKILL.md', 'utf8');
@@ -1754,7 +1758,11 @@ describe('qwen-autofix workflow', () => {
 
   it('falls back to existing issue backlog only when review has no target', () => {
     expect(issueAutofixJob).toContain("needs: ['route', 'review-scan']");
-    expect(issueAutofixJob).toContain('always()');
+    // Anchor the job `if` opening: a bare toContain('always()') is also
+    // satisfied by step-level always()s elsewhere in the job.
+    expect(issueAutofixJob).toContain(
+      "if: |-\n      ${{\n        always() &&\n        needs.route.outputs.do_issue == 'true' &&",
+    );
     expect(issueAutofixJob).toContain("needs.review-scan.result == 'success'");
     expect(issueAutofixJob).toContain(
       "github.event_name != 'schedule' || (needs.review-scan.result == 'success' && needs.review-scan.outputs.has_targets != 'true')",
@@ -1890,9 +1898,68 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain(
       'if [[ "${ISSUE_STATE}" == \'open\' && "${_late_ready}" == \'true\' && "${_late_approved}" == \'true\' && "${sender_is_trusted}" == \'true\' ]]; then',
     );
+    // Issue-phase mutual exclusion: forced dispatches key per issue, label
+    // events key on the payload issue, and every scan-and-pick run (cron or
+    // unforced dispatch) shares ONE group. A run-unique fallback here let two
+    // overlapping scans double-claim the same issue — the claim recheck runs
+    // after assess and only narrows the race to the short gap between the
+    // recheck and the claim's label write; it does not close it. GitHub
+    // evaluates concurrency before the job `if`, but after `needs`, so the
+    // group is gated on the job `if`'s runnability predicate plus a dry-run
+    // exclusion: keyed-group occupants must CLAIM, and dry runs are
+    // if-runnable yet skip Claim/Publish, so they get a run-unique group
+    // just like never-runnable runs and cannot supersede a pending
+    // target-keyed run. The right edge is anchored to
+    // cancel-in-progress because the value is a folded block scalar — a
+    // run-unique suffix appended as a continuation line would also become
+    // part of the group value while a trailing-newline anchor stayed green.
     expect(issueAutofixJob).toContain(
-      "group: 'qwen-autofix-issue-${{ needs.route.outputs.issue_number || github.run_id }}'",
+      "group: >-\n        ${{ needs.route.outputs.do_issue == 'true' && needs.route.outputs.dry_run != 'true' && (github.event_name != 'schedule' || (needs.review-scan.result == 'success' && needs.review-scan.outputs.has_targets != 'true')) && format('qwen-autofix-issue-{0}', needs.route.outputs.issue_number || github.event.issue.number || 'scheduled') || format('qwen-autofix-issue-run-{0}', github.run_id) }}\n      cancel-in-progress: false",
     );
+    expect(issueAutofixJob).not.toContain('|| github.run_id }}');
+    // The group identity and the scan step's FORCED_ISSUE env are
+    // load-bearingly coupled: both must resolve to the same issue on every
+    // trigger path, or runs aimed at one issue land in different groups and
+    // the double-claim race reopens while every literal pin above stays
+    // green. Assert the two expressions equal so neither side can drift
+    // alone.
+    const groupKeyedOn = issueAutofixJob.match(
+      /format\('qwen-autofix-issue-\{0\}', (.+?) \|\| 'scheduled'\)/,
+    )?.[1];
+    const forcedIssueSource = issueAutofixJob.match(
+      /id: 'scan'[\s\S]*?FORCED_ISSUE: '\$\{\{ (.+?) \}\}'/,
+    )?.[1];
+    expect(groupKeyedOn).toBeTruthy();
+    expect(groupKeyedOn).toBe(forcedIssueSource);
+    // The gate duplicated into the group expression must stay equal to the
+    // job `if` predicate minus `always() &&` (anchored where the job `if`
+    // opens), plus the dry-run exclusion the `if` does not need — dry runs
+    // execute but never claim, so they must not enter a keyed group: the
+    // gate clause now occurs on both sides, so the literal pins of it are
+    // satisfied by the group copy even if the `if:`-side occurrence drifts.
+    const normalize = (text) => text.replace(/\s+/g, ' ').trim();
+    const ifPredicate = normalize(
+      issueAutofixJob.match(/if: \|-\n\s*\$\{\{\n([\s\S]*?)\n\s*\}\}/)?.[1] ??
+        '',
+    ).replace(/^always\(\) && /, '');
+    const gatePredicate = normalize(
+      issueAutofixJob.match(
+        /group: >-\n\s*\$\{\{\s*(.+?)\s*&& format\('qwen-autofix-issue-\{0\}'/,
+      )?.[1] ?? '',
+    );
+    expect(ifPredicate).toBeTruthy();
+    expect(gatePredicate).toBe(
+      ifPredicate.replace(
+        "needs.route.outputs.do_issue == 'true' && ",
+        "needs.route.outputs.do_issue == 'true' && needs.route.outputs.dry_run != 'true' && ",
+      ),
+    );
+    // Dry runs get run-unique groups above because they never claim — that
+    // invariant rests on these step `if:` gates, which nothing else asserts:
+    // dropping the clause from either gate lets a dry run and a scheduled
+    // real run claim the same issue while every group pin stays green.
+    expect(claimIssueStep).toContain("needs.route.outputs.dry_run != 'true'");
+    expect(publishPrStep).toContain("needs.route.outputs.dry_run != 'true'");
     expect(workflow).toContain(
       '(.labels // []) | map(.name) as $labels | ($labels | index($ready))',
     );
@@ -5205,6 +5272,7 @@ describe('qwen-autofix workflow', () => {
 
     expect(workflow).toMatch(/issue-autofix:[\s\S]*?runs-on: 'ubuntu-latest'/);
     expect(workflow).toMatch(/review-address:[\s\S]*?runs-on: 'ubuntu-latest'/);
+    expect(workflow).toMatch(/build-cli:[\s\S]*?runs-on: 'ubuntu-latest'/);
     expect(workflow).not.toContain(
       '["self-hosted", "linux", "x64", "autofix"]',
     );
@@ -5214,7 +5282,9 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain(
       "RUNNER_ENVIRONMENT: '${{ runner.environment }}'",
     );
-    expect(prepareQwenCliSteps).toHaveLength(2);
+    // issue-autofix, build-cli, and review-address each stage the qwen shim
+    // against the workspace bundle.
+    expect(prepareQwenCliSteps).toHaveLength(3);
     for (const step of prepareQwenCliSteps) {
       expect(step).toContain(
         'qwen_version="$(node -p "require(\'./package.json\').version")"',
@@ -5223,6 +5293,9 @@ describe('qwen-autofix workflow', () => {
         'exec node "${GITHUB_WORKSPACE}/dist/cli.js" "$@"',
       );
       expect(step).toContain('qwen-bin');
+      expect(step).toContain('chmod +x "${qwen_bin}/qwen"');
+      expect(step).toContain('echo "${qwen_bin}" >> "${GITHUB_PATH}"');
+      expect(step).toContain('qwen --version');
       expect(step).not.toContain('current_version="$(qwen --version');
       expect(step).not.toContain('Using pre-installed Qwen Code');
       expect(step).not.toContain('npm install -g');
@@ -5279,6 +5352,8 @@ describe('qwen-autofix workflow', () => {
   });
 
   it('retries dependency installation before building', () => {
+    // issue-autofix and build-cli build from sources; review-address restores
+    // the shared bundle instead (see 'builds the review CLI bundle once...').
     expect(installAndBuildSteps).toHaveLength(2);
     for (const step of installAndBuildSteps) {
       expect(step).toContain('for attempt in 1 2 3; do');
@@ -5289,6 +5364,124 @@ describe('qwen-autofix workflow', () => {
       expect(step).toContain('npm run build');
       expect(step).toContain('npm run bundle');
     }
+  });
+
+  it('keeps the Node setup recipe identical across the autofix jobs', () => {
+    // The three setup steps are lockstep copies; a partial recipe edit (a
+    // Node bump applied to two of the three jobs) must not ship green.
+    expect(nodeSetupSteps).toHaveLength(3);
+    for (const step of nodeSetupSteps) {
+      expect(step).toContain(
+        'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e',
+      );
+      expect(step).toContain("node-version: '22.x'");
+      expect(step).toContain("cache: 'npm'");
+      expect(step).toContain("cache-dependency-path: 'package-lock.json'");
+    }
+  });
+
+  it('builds the review CLI bundle once and fans it out to the address legs', () => {
+    // Measured driver: 6 review-address legs each spent 3.5-5 minutes on
+    // npm ci + build + bundle of the SAME trusted base (~25 runner-minutes
+    // per scan) before the agent could start. The legs download the shared
+    // artifact instead; only their npm ci remains (the agent and the verify
+    // gate still need node_modules against the PR branch).
+    const buildCliJob =
+      workflow.match(
+        /\n {2}build-cli:[\s\S]*?(?=\n {2}review-address:)/,
+      )?.[0] ?? '';
+    const addressJob =
+      workflow.match(/\n {2}review-address:[\s\S]*$/)?.[0] ?? '';
+    const stepOf = (job, name) =>
+      job.match(
+        new RegExp(`- name: '${name}'[\\s\\S]*?(?=\\n[ ]{6}- name: |$)`),
+      )?.[0] ?? '';
+    expect(buildCliJob).toBeTruthy();
+    expect(addressJob).toBeTruthy();
+
+    expect(buildCliJob).toContain("needs: ['route', 'review-scan']");
+    expect(addressJob).toContain(
+      "needs: ['route', 'review-scan', 'build-cli']",
+    );
+    // An idle tick (no review targets) must not spend a build; the issue
+    // phase only runs when there are none, so gating on do_issue too would
+    // rebuild on every quiet scheduled tick.
+    expect(buildCliJob).toContain(
+      "needs.review-scan.outputs.has_targets == 'true'",
+    );
+    expect(buildCliJob).not.toContain('do_issue');
+
+    // The leg checks out the SHA the bundle was compiled from — a mid-run
+    // base push can never leave a leg running a bundle built from different
+    // sources than its checkout.
+    expect(buildCliJob).toContain(
+      "base_sha: '${{ steps.meta.outputs.base_sha }}'",
+    );
+    expect(buildCliJob).toContain(
+      'echo "base_sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"',
+    );
+    // The step id is the LINK between those two pins: without id: 'meta',
+    // steps.meta.outputs.base_sha resolves to '' at runtime and every leg
+    // silently checks out the event-default ref.
+    expect(stepOf(buildCliJob, 'Upload CLI bundle')).toContain("id: 'meta'");
+    expect(stepOf(addressJob, 'Checkout trusted base')).toContain(
+      "ref: '${{ needs.build-cli.outputs.base_sha }}'",
+    );
+    // The guard must fail the leg LOUD before the checkout: an empty ref
+    // makes actions/checkout fall back to the event default — on
+    // pull_request_review triggers the PR merge ref.
+    const validateShaStep = stepOf(addressJob, 'Validate bundle SHA');
+    expect(validateShaStep).toContain(
+      "BASE_SHA: '${{ needs.build-cli.outputs.base_sha }}'",
+    );
+    expect(validateShaStep).toContain(
+      'if [[ ! "${BASE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then',
+    );
+    expect(validateShaStep).toContain('exit 1');
+    expect(addressJob.indexOf("- name: 'Validate bundle SHA'")).toBeLessThan(
+      addressJob.indexOf("- name: 'Checkout trusted base'"),
+    );
+
+    // The artifact is the repo-root dist/ plus packages/core/dist —
+    // copy_bundle_assets.js already gathers every runtime asset under the
+    // root dist/, and the remaining packages/*/dist would triple the size
+    // and are rebuilt from branch sources by the verify gate. core's dist
+    // is the exception: the settings-schema check runs BEFORE any build
+    // (on every path, including no-action) and its generator — tsx run
+    // from the repo root, whose tsconfig has NO `paths` — imports cli
+    // sources that resolve '@qwen-code/qwen-code-core' through the
+    // workspace symlink to core's dist entry point (the i18n check
+    // instead resolves core to sources via the packages/cli `paths` map).
+    // The regex anchors the line end, so appending another path to the
+    // tarball fails here — a substring pin would let additive drift pass.
+    expect(buildCliJob).toMatch(
+      /tar -czf "\$\{RUNNER_TEMP\}\/qwen-cli-dist\.tar\.gz" dist packages\/core\/dist\n/,
+    );
+    expect(buildCliJob).toContain("name: 'qwen-autofix-cli-dist'");
+    expect(buildCliJob).toContain('retention-days: 1');
+    expect(buildCliJob).toContain("if-no-files-found: 'error'");
+
+    const restoreStep = stepOf(addressJob, 'Restore CLI bundle');
+    expect(restoreStep).toContain(
+      'tar -xzf "${RUNNER_TEMP}/cli-dist/qwen-cli-dist.tar.gz"',
+    );
+    expect(restoreStep).toContain('test -f dist/cli.js');
+    // A bundle without core's dist entry point makes the pre-build
+    // settings-schema generator crash with ERR_MODULE_NOT_FOUND — pin the
+    // restore-side assertion.
+    expect(restoreStep).toContain('test -f packages/core/dist/index.js');
+    const downloadStep = stepOf(addressJob, 'Download CLI bundle');
+    expect(downloadStep).toContain("name: 'qwen-autofix-cli-dist'");
+    // Download directory and restore extract path are one contract — pin
+    // both sides so a rename of either fails this suite.
+    expect(downloadStep).toContain("path: '${{ runner.temp }}/cli-dist'");
+
+    // The leg itself never rebuilds the base bundle — that is the entire
+    // point of the fan-out.
+    const legInstall = stepOf(addressJob, 'Install dependencies');
+    expect(legInstall).toContain('npm ci --prefer-offline');
+    expect(legInstall).not.toContain('npm run build');
+    expect(legInstall).not.toContain('npm run bundle');
   });
 
   it('uses the standard checkout action for autonomous runner jobs', () => {
@@ -6628,6 +6821,9 @@ describe('qwen-autofix workflow', () => {
     const contractCheck = reviewVerificationRunner.indexOf(
       "run_check 'cross-package contract verification failed'",
     );
+    const coreRebuild = reviewVerificationRunner.indexOf(
+      "run_check 'core rebuild failed on the agent-committed fix'",
+    );
     const noOpCheck = reviewVerificationRunner.indexOf(
       'if git diff --quiet "origin/${BRANCH}...${BRANCH}"; then',
     );
@@ -6646,6 +6842,19 @@ describe('qwen-autofix workflow', () => {
     expect(verificationHeadCapture).toBeGreaterThan(-1);
     expect(schemaCheck).toBeGreaterThan(verificationHeadCapture);
     expect(contractCheck).toBeGreaterThan(schemaCheck);
+    // The conditional core rebuild sits between the HEAD capture and the
+    // schema check: the generator must read a branch-built core dist when
+    // the branch itself changed core sources (base-restored dist would
+    // disagree with the branch's committed schema or crash the generator),
+    // and it only fires when the branch diff touches core's sources.
+    expect(coreRebuild).toBeGreaterThan(verificationHeadCapture);
+    expect(schemaCheck).toBeGreaterThan(coreRebuild);
+    expect(reviewVerificationRunner).toContain(
+      'npm run build --workspace packages/core',
+    );
+    expect(reviewVerificationRunner).toContain(
+      "grep -Eq '^packages/core/(src/|index\\.ts$)'",
+    );
     expect(assertions).toHaveLength(2);
     expect(assertions[0]).toBeGreaterThan(contractCheck);
     expect(noOpCheck).toBeGreaterThan(assertions[0]);
@@ -7713,6 +7922,7 @@ describe('qwen-autofix workflow', () => {
     // calls reject_fix on failure - so the verdict is declared AND the reason
     // is captured for the retry.
     for (const check of [
+      "run_check 'core rebuild failed on the agent-committed fix'",
       "run_check 'settings schema is stale on the agent-committed fix'",
       "run_check 'cross-package contract verification failed'",
       "run_check 'build failed on the agent-committed fix' npm run build",
