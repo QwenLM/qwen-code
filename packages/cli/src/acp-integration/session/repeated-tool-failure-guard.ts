@@ -84,7 +84,6 @@ const INELIGIBLE_RESET_REASON_PRECEDENCE = [
   'unknown',
   'not_started',
   'post_execution_failure',
-  'success',
 ] as const satisfies readonly RepeatedToolFailureResetReason[];
 
 export type RepeatedToolFailureGuardDecision =
@@ -208,6 +207,7 @@ export function reduceRepeatedToolFailureGuard(
   }
 
   const eligible: FailureKey[] = [];
+  const successfulPolicyToolNames = new Set<string>();
   const resetReasons = new Set<RepeatedToolFailureResetReason>();
   let enforcementDisabled = state.enforcementDisabled;
   for (const observation of observations) {
@@ -229,7 +229,12 @@ export function reduceRepeatedToolFailureGuard(
         executionStatus === 'success' ||
         executionStatus === 'not_started'
       ) {
-        resetReasons.add('success');
+        if (observation.policyToolName) {
+          successfulPolicyToolNames.add(observation.policyToolName);
+        } else {
+          resetReasons.add('unknown');
+          enforcementDisabled = true;
+        }
       } else {
         resetReasons.add('unknown');
         enforcementDisabled = true;
@@ -275,11 +280,20 @@ export function reduceRepeatedToolFailureGuard(
     return reset(state, resetReason, enforcementDisabled);
   }
 
-  const key = eligible[0];
+  const matchingFailures = eligible.filter(
+    (failure) => !successfulPolicyToolNames.has(failure.policyToolName),
+  );
+  const key = matchingFailures[0];
   if (!key) {
+    if (state.key && successfulPolicyToolNames.has(state.key.policyToolName)) {
+      return reset(state, 'success');
+    }
+    if (successfulPolicyToolNames.size > 0) {
+      return { kind: 'none', state };
+    }
     return reset(state, 'unknown', true);
   }
-  if (eligible.some((entry) => !keysEqual(entry, key))) {
+  if (matchingFailures.some((entry) => !keysEqual(entry, key))) {
     return reset(state, 'mixed');
   }
 
@@ -287,7 +301,7 @@ export function reduceRepeatedToolFailureGuard(
     const nextState: RepeatedToolFailureGuardState = {
       phase: 'tracking',
       key,
-      failureCount: eligible.length,
+      failureCount: matchingFailures.length,
       batchCount: 1,
       candidateOrdinal: state.nextCandidateOrdinal,
       nextCandidateOrdinal: state.nextCandidateOrdinal + 1,
@@ -296,7 +310,7 @@ export function reduceRepeatedToolFailureGuard(
     return { kind: 'tracked', state: nextState };
   }
 
-  const failureCount = state.failureCount + eligible.length;
+  const failureCount = state.failureCount + matchingFailures.length;
   const batchCount = state.batchCount + 1;
   if (state.phase === 'warned') {
     const nextState: RepeatedToolFailureGuardState = {

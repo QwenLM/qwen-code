@@ -7126,7 +7126,7 @@ describe('Session', () => {
           expect(mockClient.extMethod).toHaveBeenCalledTimes(1);
           expect(
             logRepeatedToolFailureGuardSpy.mock.calls.some(
-              ([, event]) => event.reset_reason === 'unreliable_input',
+              ([event]) => event.reset_reason === 'unreliable_input',
             ),
           ).toBe(true);
           expect(logLoopDetectedSpy).not.toHaveBeenCalledWith(
@@ -7162,7 +7162,7 @@ describe('Session', () => {
           expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(4);
           expect(
             logRepeatedToolFailureGuardSpy.mock.calls.some(
-              ([, event]) => event.reset_reason === 'queued_prompt',
+              ([event]) => event.reset_reason === 'queued_prompt',
             ),
           ).toBe(true);
           expect(sentText()).not.toContainEqual(
@@ -7236,7 +7236,7 @@ describe('Session', () => {
           );
           const telemetryPromptIds =
             logRepeatedToolFailureGuardSpy.mock.calls.map(
-              ([, event]) => event.prompt_id,
+              ([event]) => event.prompt_id,
             );
           expect(new Set(telemetryPromptIds).size).toBe(1);
           expect(telemetryPromptIds[0]).toBe('test-session-id########1');
@@ -7277,6 +7277,12 @@ describe('Session', () => {
         try {
           const execute = installFailingTool();
           let drainCount = 0;
+          const reminder =
+            '<system-reminder>unfinished todo: inspect the failure</system-reminder>';
+          vi.mocked(mockConfig.takeActiveTodoReminder).mockImplementation(
+            (_promptId, force = false) =>
+              !force && drainCount === 3 ? reminder : undefined,
+          );
           mockClient.extMethod = vi.fn().mockImplementation(async () => {
             drainCount++;
             if (drainCount === 3) {
@@ -7301,6 +7307,10 @@ describe('Session', () => {
               loop_type: core.LoopType.REPEATED_TOOL_EXECUTION_FAILURE,
             }),
           );
+          expect(mockChat.addHistory).toHaveBeenCalledWith({
+            role: 'user',
+            parts: expect.arrayContaining([{ text: reminder }]),
+          });
         } finally {
           restoreGuardMode();
         }

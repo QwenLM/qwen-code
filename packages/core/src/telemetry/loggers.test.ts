@@ -355,7 +355,6 @@ describe('loggers', () => {
 
   describe('logRepeatedToolFailureGuard', () => {
     it('emits a data-minimized transition log and low-cardinality metric', () => {
-      const config = makeFakeConfig({ sessionId: 'test-session-id' });
       vi.spyOn(
         metrics,
         'recordRepeatedToolFailureGuardMetrics',
@@ -376,7 +375,7 @@ describe('loggers', () => {
         tool_type: 'mcp',
       });
 
-      logRepeatedToolFailureGuard(config, event);
+      logRepeatedToolFailureGuard(event);
 
       expect(mockLogger.emit).toHaveBeenCalledWith({
         body: 'Repeated tool failure guard decision: would_warn.',
@@ -406,7 +405,6 @@ describe('loggers', () => {
     });
 
     it('isolates transition log and metric sink failures', () => {
-      const config = makeFakeConfig({ sessionId: 'test-session-id' });
       const event = new RepeatedToolFailureGuardEvent({
         prompt_id: 'prompt-id',
         route: 'acp_foreground',
@@ -428,7 +426,7 @@ describe('loggers', () => {
         throw new Error('log unavailable');
       });
 
-      expect(() => logRepeatedToolFailureGuard(config, event)).not.toThrow();
+      expect(() => logRepeatedToolFailureGuard(event)).not.toThrow();
       expect(event).not.toHaveProperty('reset_reason');
       expect(event).not.toHaveProperty('terminal_status');
       expect(event).not.toHaveProperty('execution_status');

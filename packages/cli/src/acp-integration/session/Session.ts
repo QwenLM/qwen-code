@@ -522,7 +522,6 @@ function repeatedToolFailureBatchBucket(count: number): '0' | '1' | '2' | '3+' {
 }
 
 function recordRepeatedToolFailureDecision(
-  config: Config,
   promptId: string,
   mode: RepeatedToolFailureGuardMode,
   previousState: RepeatedToolFailureGuardState,
@@ -557,39 +556,29 @@ function recordRepeatedToolFailureDecision(
   const toolType =
     matchingToolTypes.size === 1 ? [...matchingToolTypes][0] : undefined;
 
-  try {
-    logRepeatedToolFailureGuard(
-      config,
-      new RepeatedToolFailureGuardEvent({
-        prompt_id: promptId,
-        route: 'acp_foreground',
-        mode,
-        phase_before: previousState.phase,
-        phase_after: decision.state.phase,
-        decision: telemetryDecision,
-        failure_count_bucket: repeatedToolFailureCountBucket(
-          countState.failureCount,
-        ),
-        batch_count_bucket: repeatedToolFailureBatchBucket(
-          countState.batchCount,
-        ),
-        candidate_ordinal: countState.candidateOrdinal,
-        ...(decision.kind === 'reset'
-          ? { reset_reason: decision.reason }
-          : {
-              terminal_status: 'error',
-              execution_status: 'error',
-              execution_error_type: key?.executionErrorType,
-              tool_type: toolType,
-            }),
-      }),
-    );
-  } catch (error) {
-    debugLogger.debug(
-      '[repeated-tool-failure-guard] Failed to record telemetry',
-      error,
-    );
-  }
+  logRepeatedToolFailureGuard(
+    new RepeatedToolFailureGuardEvent({
+      prompt_id: promptId,
+      route: 'acp_foreground',
+      mode,
+      phase_before: previousState.phase,
+      phase_after: decision.state.phase,
+      decision: telemetryDecision,
+      failure_count_bucket: repeatedToolFailureCountBucket(
+        countState.failureCount,
+      ),
+      batch_count_bucket: repeatedToolFailureBatchBucket(countState.batchCount),
+      candidate_ordinal: countState.candidateOrdinal,
+      ...(decision.kind === 'reset'
+        ? { reset_reason: decision.reason }
+        : {
+            terminal_status: 'error',
+            execution_status: 'error',
+            execution_error_type: key?.executionErrorType,
+            tool_type: toolType,
+          }),
+    }),
+  );
 }
 
 function recordDaemonLoopDetected(
@@ -5205,11 +5194,16 @@ export class Session implements SessionContext {
     if (hadMidTurnUserInput) {
       this.todoStopGuard.acceptMidTurnUserInput();
     }
+    const activeTodoReminder = this.config.takeActiveTodoReminder(promptId);
     if (abortSignal.aborted) {
       return {
         message: {
           role: 'user',
-          parts: [...toolRun.parts, ...drained.parts],
+          parts: [
+            ...toolRun.parts,
+            ...(activeTodoReminder ? [{ text: activeTodoReminder }] : []),
+            ...drained.parts,
+          ],
         },
         hadMidTurnUserInput,
       };
@@ -5231,7 +5225,6 @@ export class Session implements SessionContext {
       },
     );
     recordRepeatedToolFailureDecision(
-      this.config,
       promptId,
       toolLoopState.repeatedToolFailureMode,
       previousRepeatedToolFailureState,
@@ -5245,7 +5238,6 @@ export class Session implements SessionContext {
         `[repeated-tool-failure-guard] mode=${toolLoopState.repeatedToolFailureMode} decision=${repeatedToolFailureDecision.kind} phase=${state.phase} candidate=${state.candidateOrdinal} failures=${state.failureCount} batches=${state.batchCount}`,
       );
     }
-    const activeTodoReminder = this.config.takeActiveTodoReminder(promptId);
     const parts = [
       ...toolRun.parts,
       ...(activeTodoReminder ? [{ text: activeTodoReminder }] : []),

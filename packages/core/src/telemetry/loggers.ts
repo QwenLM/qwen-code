@@ -659,9 +659,10 @@ export function logLoopDetected(
 }
 
 export function logRepeatedToolFailureGuard(
-  _config: Config,
   event: RepeatedToolFailureGuardEvent,
 ): void {
+  // Deployment cohort and service version come from the OpenTelemetry
+  // Resource, which is attached to both the logger and meter providers.
   runToolTelemetrySink(() => {
     if (isTelemetrySdkInitialized()) {
       const logger = logs.getLogger(SERVICE_NAME);

@@ -9,8 +9,9 @@ Area: Interactive ACP foreground prompt loop
 ACP should stop an automatic model loop when the same resolved tool repeatedly
 reaches the same trusted execution failure. The protection is conservative:
 it observes only finalized, fully settled tool batches; gives the model one
-fixed corrective reminder per candidate streak; and stops only if the next
-batch repeats the same failure.
+fixed corrective reminder per candidate streak; and stops only if a later
+matching batch repeats the same failure without that tool succeeding in
+between.
 
 The first version is an in-memory, per-prompt semantic guard. It does not
 replace the existing protections for duplicate provider call IDs, invalid
@@ -87,8 +88,8 @@ frames, or spans.
 
 | Terminal `status` | `executionStatus`    | Meaning for this guard                                                 |
 | ----------------- | -------------------- | ---------------------------------------------------------------------- |
-| `success`         | `success`            | Reset                                                                  |
-| `success`         | `not_started`        | Reset; protocol-level synthetic result                                 |
+| `success`         | `success`            | Reset a candidate for the same resolved tool                           |
+| `success`         | `not_started`        | Reset the same-tool candidate; protocol-level synthetic result         |
 | `error`           | `not_started`        | Reset; validation, permission rejection, hook block, or lookup failure |
 | `error`           | `error`              | Eligible only with a trusted frozen `executionErrorType`               |
 | `error`           | `success`            | Reset; execution succeeded and later processing failed                 |
@@ -179,18 +180,24 @@ After every `runToolCalls` batch has fully settled:
    leave the existing input and FIFO behavior authoritative. If the drain is
    unreliable, reset and disable enforcement for the rest of the prompt.
 3. Reset to `idle` if the batch is incomplete, violates the outcome contract,
-   or contains any reset-class outcome.
-4. Collect eligible failure keys from the batch. If there is not exactly one
-   unique key, reset to `idle`.
+   or contains cancellation, unknown, not-started, or post-execution failure.
+4. Collect eligible failure keys from the batch. If there is more than one
+   unique key, reset to `idle`. A successful observation resets only a
+   candidate for the same resolved tool; successful observations from other
+   tools neither advance nor reset the candidate. A success has no execution
+   error type, so it clears every failure classification for that tool before
+   the remaining unique failure key is selected.
 5. If the key differs from the tracked key, begin a new streak from this batch.
    Otherwise add the batch's eligible failure count and increment the batch
-   count.
+   count. A complete batch containing only unrelated successful tools leaves
+   the current streak unchanged.
 6. When `failureCount >= 8` and `batchCount >= 2`, transition to `warned` and
    request the mode-specific reminder action shown below.
-7. If the immediately following complete batch contains the same eligible key
-   and no reset condition, execute and record the whole batch, then transition
-   to `latched`. The configured mode determines whether another model request
-   is sent.
+7. If a later complete batch contains the same eligible key and no reset
+   condition, execute and record the whole batch, then transition to `latched`.
+   Intervening successes from other tools do not hide the repeated failure; a
+   success from the candidate tool resets it. The configured mode determines
+   whether another model request is sent.
 
 The state transition and control action are separate:
 
@@ -205,6 +212,13 @@ repeated reminders and telemetry amplification in shadow and warn modes.
 Resetting a candidate and later tracking a different failure key may produce a
 new reminder; the one-reminder guarantee is per candidate streak, not per
 top-level prompt.
+
+The first release intentionally retains one active candidate instead of a map
+of independent streaks. After same-tool successes are removed, multiple
+remaining failure keys reset because choosing which concurrent failure should
+own a reminder or stop is ambiguous. This keeps enforcement conservative while
+still detecting the dominant interleaved shape in which one tool keeps failing
+as read, edit, or inspection tools succeed between attempts.
 
 The reminder is:
 
@@ -286,8 +300,8 @@ their prompts explicitly, and Session forces those marked prompts to `off`
 even when the process is configured for enforcement. It is not process-global
 and must not fall back to a legacy or primary runtime when workspace ownership
 is unknown. The marker is client-asserted ACP metadata, so another client can
-also opt its prompt out of this conservative protection; it is a routing trust
-signal, not an authorization boundary.
+also opt its prompt out of this conservative protection; it is a routing hint,
+not a trust signal or authorization boundary.
 
 Modes:
 
@@ -400,6 +414,13 @@ Shadow mode advances a virtual warned state without injecting the reminder, so
 `would_warn` and `would_stop` estimate volume only. They cannot establish how a
 model behaves after seeing the reminder.
 
+Before the baseline starts, each deployment must configure a stable
+OpenTelemetry Resource attribute such as `deployment.environment` that
+distinguishes internal from public cloud. The SDK always supplies
+`service.version`; it deliberately does not invent a deployment environment.
+Without that Resource dimension, Phase 1 cannot produce a per-environment
+conclusion and rollout must not advance.
+
 The default shadow mode does not change model continuation or injected
 messages. It does add `todoStopGuardWatchQueuedPrompt: true` to the existing
 mid-turn drain request so the reducer can prove that no full prompt is queued.
@@ -500,9 +521,11 @@ Automated unit tests for the pure reducer cover:
 - eight failures in one batch do not warn;
 - eight failures across two batches warn;
 - the next matching batch stops only after it settles;
-- success, cancellation, `not_started`, `unknown`, post-processing failure,
-  mixed keys, incomplete batch, unreliable drain, queued prompt, and new input
-  reset;
+- same-tool success, cancellation, `not_started`, `unknown`, post-processing
+  failure, mixed failure keys, incomplete batch, unreliable drain, queued
+  prompt, and new input reset;
+- successes from other tools are ignored both within a matching failure batch
+  and in intervening successful batches;
 - duplicate provider events are ignored rather than counted or reset;
 - a new key starts a new streak;
 - warning and stop text are fixed and contain no tool data; and

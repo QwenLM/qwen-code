@@ -3,6 +3,7 @@ import type {
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
 
+// Client-supplied routing hint only; never use it as an authorization boundary.
 export const CHANNEL_PROMPT_META_KEY = 'qwen.channel.prompt';
 
 export interface AvailableCommand {

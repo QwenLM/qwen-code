@@ -180,6 +180,154 @@ describe('repeated tool failure guard', () => {
     },
   );
 
+  it('keeps counting a failure key when other tools succeed in the same batch', () => {
+    const failingShell = (callId: string) =>
+      observation({
+        callId,
+        policyToolName: 'run_shell_command',
+        executionErrorType: ToolErrorType.EXECUTION_FAILED,
+      });
+    const first = reduce(
+      createRepeatedToolFailureGuardState(),
+      Array.from({ length: 4 }, (_, index) => failingShell(`first-${index}`)),
+    );
+    const second = reduce(first.state, [
+      ...Array.from({ length: 4 }, (_, index) =>
+        failingShell(`second-${index}`),
+      ),
+      observation({
+        callId: 'read-success',
+        policyToolName: 'read_file',
+        terminalStatus: 'success',
+        executionStatus: 'success',
+        executionErrorType: undefined,
+      }),
+    ]);
+
+    expect(second).toMatchObject({
+      kind: 'warn',
+      state: { failureCount: 8, batchCount: 2 },
+    });
+  });
+
+  it('preserves a failure streak across successful batches from other tools', () => {
+    const failingShell = (callId: string) =>
+      observation({
+        callId,
+        policyToolName: 'run_shell_command',
+        executionErrorType: ToolErrorType.EXECUTION_FAILED,
+      });
+    const first = reduce(
+      createRepeatedToolFailureGuardState(),
+      Array.from({ length: 4 }, (_, index) => failingShell(`first-${index}`)),
+    );
+    const unrelatedSuccess = reduce(first.state, [
+      observation({
+        callId: 'edit-success',
+        policyToolName: 'replace',
+        terminalStatus: 'success',
+        executionStatus: 'success',
+        executionErrorType: undefined,
+      }),
+    ]);
+    const second = reduce(
+      unrelatedSuccess.state,
+      Array.from({ length: 4 }, (_, index) => failingShell(`second-${index}`)),
+    );
+
+    expect(unrelatedSuccess).toEqual({ kind: 'none', state: first.state });
+    expect(second).toMatchObject({
+      kind: 'warn',
+      state: { failureCount: 8, batchCount: 2 },
+    });
+  });
+
+  it('resets when the failing tool also succeeds in the same batch', () => {
+    const tracked = reduce(createRepeatedToolFailureGuardState(), [
+      observation(),
+    ]);
+    const result = reduce(tracked.state, [
+      observation({ callId: 'failure' }),
+      observation({
+        callId: 'success',
+        terminalStatus: 'success',
+        executionStatus: 'success',
+        executionErrorType: undefined,
+      }),
+    ]);
+
+    expect(result).toMatchObject({ kind: 'reset', reason: 'success' });
+  });
+
+  it('does not let another tool self-recovery reset the tracked candidate', () => {
+    const tracked = reduce(createRepeatedToolFailureGuardState(), [
+      observation(),
+    ]);
+    const result = reduce(tracked.state, [
+      observation({
+        callId: 'other-failure',
+        policyToolName: 'run_shell_command',
+        executionErrorType: ToolErrorType.EXECUTION_FAILED,
+      }),
+      observation({
+        callId: 'other-success',
+        policyToolName: 'run_shell_command',
+        terminalStatus: 'success',
+        executionStatus: 'success',
+        executionErrorType: undefined,
+      }),
+    ]);
+
+    expect(result).toEqual({ kind: 'none', state: tracked.state });
+  });
+
+  it('counts one failure key when another failing tool succeeds in the batch', () => {
+    const result = reduce(createRepeatedToolFailureGuardState(), [
+      observation({ callId: 'tracked-failure' }),
+      observation({
+        callId: 'other-failure',
+        policyToolName: 'run_shell_command',
+        executionErrorType: ToolErrorType.EXECUTION_FAILED,
+      }),
+      observation({
+        callId: 'other-success',
+        policyToolName: 'run_shell_command',
+        terminalStatus: 'success',
+        executionStatus: 'success',
+        executionErrorType: undefined,
+      }),
+    ]);
+
+    expect(result).toMatchObject({
+      kind: 'tracked',
+      state: {
+        key: {
+          policyToolName: 'read_file',
+          executionErrorType: ToolErrorType.FILE_NOT_FOUND,
+        },
+        failureCount: 1,
+        batchCount: 1,
+      },
+    });
+  });
+
+  it('downgrades enforcement for a successful observation without tool identity', () => {
+    const result = reduce(createRepeatedToolFailureGuardState(), [
+      observation({
+        policyToolName: undefined,
+        terminalStatus: 'success',
+        executionStatus: 'success',
+        executionErrorType: undefined,
+      }),
+    ]);
+
+    expect(result).toMatchObject({
+      kind: 'reset',
+      reason: 'unknown',
+      state: { enforcementDisabled: true },
+    });
+  });
+
   it('ignores provider duplicates without advancing or resetting', () => {
     const tracked = reduce(createRepeatedToolFailureGuardState(), [
       observation(),
