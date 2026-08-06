@@ -7922,9 +7922,22 @@ describe('GeminiChat', async () => {
             { message: 'test' },
             'prompt-transport-continuation-record-fc-cut',
           );
-          await expect(
-            collectStreamWithFakeTimers(stream, 10_000),
-          ).rejects.toThrow();
+          // This send rejects, so it cannot use `collectStreamWithFakeTimers`:
+          // that helper returns the collecting promise only after advancing
+          // timers, and the cut lands during the advance — leaving the
+          // rejection momentarily unhandled. Attach the assertion first, like
+          // `expectStreamExhaustion` above.
+          const collecting = (async () => {
+            for await (const _ of stream) {
+              /* consume */
+            }
+          })();
+          const settled = (async () => {
+            await expect(collecting).rejects.toThrow('terminated');
+          })();
+          await vi.advanceTimersByTimeAsync(0);
+          await vi.advanceTimersByTimeAsync(10_000);
+          await settled;
 
           expect(
             mockContentGenerator.generateContentStream,
