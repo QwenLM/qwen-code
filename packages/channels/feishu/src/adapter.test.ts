@@ -3425,6 +3425,81 @@ describe('FeishuChannel', () => {
       }
     });
 
+    it('anchors the creating-timeout at post-answer card creation start', async () => {
+      vi.useFakeTimers();
+      try {
+        const channel = createChannel();
+        const createStreamingCard = vi.fn();
+        Object.assign(channel as unknown as Record<string, unknown>, {
+          createStreamingCard,
+          sendMessage: vi.fn().mockResolvedValue(undefined),
+          addReaction: vi.fn().mockResolvedValue(undefined),
+          removeReaction: vi.fn().mockResolvedValue(undefined),
+        });
+        getPrivateMethod<Map<string, string>>(channel, 'msgToQuestion').set(
+          'inbound_1',
+          'question?',
+        );
+
+        const startedAt = Date.now();
+        getPrivateMethod<
+          (chatId: string, sessionId: string, messageId?: string) => void
+        >(channel, 'onPromptStart').call(
+          channel,
+          'oc_chat_id',
+          'session_1',
+          'inbound_1',
+        );
+        getPrivateMethod<
+          (chatId: string, chunk: string, sessionId: string) => void
+        >(channel, 'onResponseChunk').call(
+          channel,
+          'oc_chat_id',
+          'pre-question text',
+          'session_1',
+        );
+        await getPrivateMethod<
+          (
+            chatId: string,
+            sessionId: string,
+            segment: ChannelOutputSegmentContext,
+            reason: ChannelOutputSegmentEndReason,
+          ) => void | Promise<void>
+        >(channel, 'onOutputSegmentEnd').call(
+          channel,
+          'oc_chat_id',
+          'session_1',
+          {} as ChannelOutputSegmentContext,
+          'input_requested',
+        );
+
+        const cardSessions = getPrivateMethod<
+          Map<string, { creating: boolean; lastUpdateAt: number }>
+        >(channel, 'cardSessions');
+        // The released pre-question entry carries the release-time timestamp.
+        expect(cardSessions.get('inbound_1')?.lastUpdateAt).toBe(startedAt);
+        expect(createStreamingCard).not.toHaveBeenCalled();
+
+        // The user takes longer than the sweep's 60s creating-timeout to
+        // answer; the first post-answer chunk restarts card creation.
+        vi.advanceTimersByTime(90_000);
+        getPrivateMethod<
+          (chatId: string, chunk: string, sessionId: string) => void
+        >(channel, 'onResponseChunk').call(
+          channel,
+          'oc_chat_id',
+          'post-answer text',
+          'session_1',
+        );
+
+        const state = cardSessions.get('inbound_1');
+        expect(state?.creating).toBe(true);
+        expect(state?.lastUpdateAt).toBe(startedAt + 90_000);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('truncates oversized input-request card finalization', async () => {
       const channel = createChannel();
       const updateCard = vi.fn().mockResolvedValue(true);

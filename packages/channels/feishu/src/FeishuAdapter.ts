@@ -1073,6 +1073,10 @@ export class FeishuChannel extends ChannelBase {
     // If card not yet created (fallback path), create now
     if (!cardState.created && !cardState.cardCreationFailed) {
       cardState.creating = true;
+      // The orphan sweep times out creations by lastUpdateAt; anchor it at
+      // creation start so a stale released pre-question entry cannot trip
+      // the 60s bound mid-creation.
+      cardState.lastUpdateAt = Date.now();
       const cs = cardState;
       cardState.creationTimer = setTimeout(async () => {
         try {
