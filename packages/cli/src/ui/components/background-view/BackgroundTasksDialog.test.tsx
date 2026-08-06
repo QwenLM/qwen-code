@@ -851,6 +851,10 @@ describe('BackgroundTasksDialog', () => {
     const h = setup([workflowEntry({ status: 'pausing' })]);
 
     h.call(() => h.probe.current!.actions.openDialog());
+    // The pausing footer hint is the only visible signal that a pause
+    // request is in flight — assert it directly so removing/merging the
+    // 'pausing' hint branch cannot pass silently.
+    expect(h.lastFrame()).toContain('cooperative pause pending');
     h.pressKey({ sequence: 'p' });
 
     expect(h.workflowPause).not.toHaveBeenCalled();
@@ -1282,6 +1286,33 @@ describe('BackgroundTasksDialog', () => {
       expect(h.probe.current!.state.dialogMode).toBe('detail');
       expect(h.lastFrame()).not.toContain('s save');
       expect(h.lastFrame()).toContain('cooperative');
+      if (status === 'pausing') {
+        // Pin the pausing explainer itself: bare 'cooperative' is also
+        // satisfied by the footer hint. A single-line fragment is used
+        // because the full string wraps inside the bordered box.
+        expect(h.lastFrame()).toContain('in-flight work may finish before');
+      }
+    },
+  );
+
+  it.each(['pausing', 'paused'] as const)(
+    'marks the current phase of a %s workflow in detail view',
+    (status) => {
+      const h = setup([
+        workflowEntry({
+          status,
+          phases: ['Plan', 'Build'],
+          currentPhase: 'Build',
+          endTime: undefined,
+        }),
+      ]);
+
+      h.call(() => h.probe.current!.actions.openDialog());
+      h.call(() => h.probe.current!.actions.enterDetail());
+
+      const f = h.lastFrame() ?? '';
+      expect(f).toContain('▸ Build');
+      expect(f).not.toContain('▸ Plan');
     },
   );
 

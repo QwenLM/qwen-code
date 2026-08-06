@@ -729,9 +729,12 @@ export class WorkflowRunRegistry {
     const entry = this.entries.get(runId);
     // Symmetric with `onAgentCompleted` / `setRecentLogs`: dispatches in
     // flight at cancel time still settle afterwards (the production
-    // dispatch reports tokens in a `finally`), and their burn must keep
-    // mirroring into `tokensSpent` — otherwise a cancelled run's
-    // completed-agent count and token total diverge.
+    // dispatch reports tokens in a `finally`), and their burn keeps
+    // mirroring into `tokensSpent` so the live entry's completed-agent
+    // count and token total stay consistent. The persisted snapshot and
+    // telemetry event are a best-effort projection frozen at settlement
+    // — the runner writes both before in-flight dispatches drain — so
+    // for cancelled runs they may read lower than this entry.
     if (
       !entry ||
       (!isActiveWorkflowStatus(entry.status) && entry.status !== 'cancelled')

@@ -475,6 +475,38 @@ describe('WorkflowRunner', () => {
     expect(observed.terminalStatuses).toEqual(['cancelled', 'cancelled']);
   });
 
+  it('settles a cancelled running run as cancelled when its script absorbs the abort', async () => {
+    // The cancelled-settlement guard must cover cancel-from-running too,
+    // not only cancel-from-paused: a never-paused run whose script
+    // absorbs the abort and still returns normally must not settle ok
+    // while the registry entry, telemetry, and snapshot say cancelled.
+    const { config, registry } = configWithRegistry();
+    let rejectDispatch: ((error: Error) => void) | undefined;
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script:
+        'try { return await agent("work"); } catch { return "fallback"; }',
+      args: undefined,
+      runInBackground: true,
+      dispatch: () =>
+        new Promise<string>((_resolve, reject) => {
+          rejectDispatch = reject;
+        }),
+    });
+    await vi.waitFor(() => expect(rejectDispatch).toBeDefined());
+    expect(registry.get(handle.runId)?.status).toBe('running');
+
+    registry.cancel(handle.runId, Date.now());
+    rejectDispatch?.(new Error('aborted'));
+
+    await expect(handle.completion).resolves.toMatchObject({
+      ok: false,
+      message: 'Workflow run cancelled.',
+    });
+    expect(registry.get(handle.runId)?.status).toBe('cancelled');
+  });
+
   it('rejects a concurrent resume while the original run is active', async () => {
     const { config, registry } = configWithRegistry();
     const runId = 'wf_1234abcd';

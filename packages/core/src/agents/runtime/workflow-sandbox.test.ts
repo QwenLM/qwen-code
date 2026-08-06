@@ -1755,7 +1755,10 @@ describe('createWorkflowSandbox primitives', () => {
     // reaches no other surface — the rejection must be mirrored into the
     // run log rather than silently observed. Covers the bare call AND a
     // script-derived `.then()` chain; neither shape may surface the
-    // rejection as a process-level unhandledRejection.
+    // rejection as a process-level unhandledRejection. The wordings
+    // differ by attribution: the bare call never attached to its root,
+    // while the chain attached a fulfillment-only handler, so its root
+    // WAS attached and only the rejection went unhandled.
     const sandbox = createWorkflowSandbox({
       args: undefined,
       dispatch: () => Promise.reject(new Error('dispatch-boom')),
@@ -1775,9 +1778,79 @@ describe('createWorkflowSandbox primitives', () => {
     }
     expect(sandbox.getLogs()).toEqual([
       'dispatch failed (result not consumed): dispatch-boom',
-      'dispatch failed (result not consumed): dispatch-boom',
+      'dispatch failed (rejection not handled): dispatch-boom',
     ]);
     expect(unhandled).toEqual([]);
+  });
+
+  it('mirrors unconsumed rejections whose message merely contains "aborted"', async () => {
+    // Teardown discrimination matches the host error NAME at the vm
+    // boundary (the scheduler's DOMException 'AbortError'), never the
+    // message text: a genuine failure like a network-layer
+    // 'connection aborted by peer' must still reach the run log.
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: () => Promise.reject(new Error('connection aborted by peer')),
+    });
+    await sandbox.run(`agent('a'); return 'done';`);
+    expect(sandbox.getLogs()).toEqual([
+      'dispatch failed (result not consumed): connection aborted by peer',
+    ]);
+  });
+
+  it('does not report a rejection the script consumes after a later await', async () => {
+    // The unconsumed verdict defers to run settlement: flaky rejects while
+    // the script is still suspended in the second await, but the script
+    // consumes the rejection afterwards — the run log must not claim it
+    // went unconsumed (a self-contradicting entry next to 'handled:').
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: (prompt: string) =>
+        prompt === 'flaky'
+          ? Promise.reject(new Error('flaky-boom'))
+          : Promise.resolve('slow-done'),
+    });
+    await sandbox.run(`
+      const p = agent('flaky');
+      await agent('slow');
+      try { await p; } catch (e) { log('handled: ' + e.message); }
+      return 'done';
+    `);
+    expect(sandbox.getLogs()).toEqual(['handled: flaky-boom']);
+  });
+
+  it('attributes a fire-and-forget handler failure to the script, not the dispatch', async () => {
+    // The dispatch SUCCEEDS but the script's own then-handler throws: the
+    // mirror must not claim a dispatch failure and send operators
+    // investigating dispatch / budget gates instead of the script.
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'not-json',
+    });
+    await sandbox.run(
+      `agent('fetch').then((r) => JSON.parse(r)); return 'done';`,
+    );
+    const logs = sandbox.getLogs();
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toMatch(/^script handler failed \(result not consumed\): /);
+  });
+
+  it('does not mirror a side branch once the script handles the root rejection', async () => {
+    // The root rejection IS handled by the script's await-catch; only an
+    // unassigned side branch's derived promise went unconsumed. Mirroring
+    // '(result not consumed)' there is contradicted by the script's own
+    // 'handled:' line.
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: () => Promise.reject(new Error('x-boom')),
+    });
+    await sandbox.run(`
+      const p = agent('x');
+      p.then(() => log('side'));
+      try { await p; } catch (e) { log('handled: ' + e.message); }
+      return 'done';
+    `);
+    expect(sandbox.getLogs()).toEqual(['handled: x-boom']);
   });
 
   it('does not log teardown abort rejections of un-awaited dispatches', async () => {

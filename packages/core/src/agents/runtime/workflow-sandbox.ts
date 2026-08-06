@@ -766,6 +766,38 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
   if (opts.args !== undefined) validateArgs(opts.args);
   const argsJson = opts.args === undefined ? null : JSON.stringify(opts.args);
 
+  // Unconsumed-rejection mirror bookkeeping (see `observeDispatch` in the
+  // init script below). The verdict is deferred to run settlement: an entry
+  // recorded at rejection-settlement time is cleared if the script still
+  // consumes the promise afterwards (a delayed `await` / `.catch`), and
+  // only still-uncleared entries are flushed into the run log in `run()`'s
+  // `finally`. A rejection whose root the script attached a rejection
+  // handler to anywhere in the chain is never mirrored — the script had a
+  // chance to surface it itself. Keys are opaque ids; the bridge contract
+  // only allows primitives across, so the vm side passes ids and strings.
+  const unconsumedRoots = new Map<number, { rejectionHandled: boolean }>();
+  interface UnconsumedRejectionEntry {
+    rootId: number;
+    isRoot: boolean;
+    dispatchFailed: boolean;
+    msg: string;
+  }
+  const unconsumedRejections = new Map<number, UnconsumedRejectionEntry>();
+  let nextUnconsumedId = 1;
+  let unconsumedSettled = false;
+
+  // Precise attribution: 'dispatch failed' only when the root dispatch
+  // itself rejected (marked at the vm boundary), '(result not consumed)'
+  // only when the root was never attached to.
+  const unconsumedRejectionLine = (rec: UnconsumedRejectionEntry): string => {
+    if (rec.dispatchFailed) {
+      return rec.isRoot
+        ? 'dispatch failed (result not consumed): ' + rec.msg
+        : 'dispatch failed (rejection not handled): ' + rec.msg;
+    }
+    return 'script handler failed (result not consumed): ' + rec.msg;
+  };
+
   // FIX-Round1-T1/T8/T14: build EVERY sandbox global inside the vm-realm
   // via the init script below. Host-realm objects (Promises returned by host
   // async functions, Error objects thrown by host code) leak the host Function
@@ -794,6 +826,45 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         `Workflow result revival failed at index ${idx}: ${reason}; ` +
           `slot set to null (non-JSON-serializable thunk return).`,
       );
+    },
+    // --- Unconsumed-rejection mirror bookkeeping ---
+    wfRegisterRoot: (): number => {
+      const id = nextUnconsumedId++;
+      unconsumedRoots.set(id, { rejectionHandled: false });
+      return id;
+    },
+    wfMarkRejectionHandled: (rootId: number): void => {
+      const root = unconsumedRoots.get(rootId);
+      if (root) root.rejectionHandled = true;
+    },
+    wfReportUnconsumed: (
+      rootId: number,
+      isRoot: boolean,
+      dispatchFailed: boolean,
+      msg: string,
+    ): number => {
+      if (unconsumedSettled) {
+        // Post-settlement rejection: the script can no longer consume it
+        // (the run's finally already flushed), so mirror it immediately.
+        const rec: UnconsumedRejectionEntry = {
+          rootId,
+          isRoot,
+          dispatchFailed,
+          msg,
+        };
+        if (
+          !(dispatchFailed && unconsumedRoots.get(rootId)?.rejectionHandled)
+        ) {
+          safeLog(unconsumedRejectionLine(rec));
+        }
+        return 0;
+      }
+      const id = nextUnconsumedId++;
+      unconsumedRejections.set(id, { rootId, isRoot, dispatchFailed, msg });
+      return id;
+    },
+    wfClearUnconsumed: (id: number): void => {
+      unconsumedRejections.delete(id);
     },
     // The truthy flags distinguish "injected" from "default stub" inside the
     // init script without leaking the host function itself when not used.
@@ -885,62 +956,82 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       // Without this, a correctly-cancelled run holding a pending derived
       // chain fired a process-level unhandledRejection even though the
       // bare dispatch promise was observed.
+      //
+      // Unconsumed rejections of an observed node are recorded through
+      // the bridge and mirrored into the run log at run settlement (a
+      // later consumption clears the record first) — a dispatch refused
+      // at the entry gate (budget / agent cap) or failing mid-run reaches
+      // no other surface, so without the mirror the failure leaves no
+      // log, alarm, or telemetry.
+      function mapDispatchError(hostErr) {
+        const msg = (hostErr && hostErr.message != null)
+          ? String(hostErr.message)
+          : String(hostErr);
+        const vmErr = new Error(msg);
+        // Precise teardown discrimination: the scheduler's abortError() is
+        // a DOMException named 'AbortError'. Matching the name here at the
+        // host boundary — before the error is flattened into a vm-realm
+        // Error — suppresses teardown noise without swallowing genuine
+        // failures whose message merely contains 'aborted' (e.g. a
+        // network-layer 'connection aborted by peer').
+        if (hostErr && hostErr.name === 'AbortError') vmErr.__wfAbort = true;
+        vmErr.__wfDispatchFailed = true;
+        return vmErr;
+      }
       function observeDispatch(promise) {
         // Direct native-then call: routing through ObservedPromise.then
         // would mark the promise consumed and recurse the observer.
         Promise.prototype.then.call(promise, undefined, function (err) {
-          // Un-awaited calls never attach a handler. When a run is
-          // cancelled or settles, abortPending rejects still-queued
-          // dispatches with AbortError; the observer marks that teardown
-          // rejection handled so it cannot surface as a process-level
-          // unhandledRejection alarm on a correctly-cancelled run.
-          // Awaiting callers still receive the rejection through their
-          // own handlers. Non-abort rejections of a result nobody ever
-          // consumed are mirrored into the run log: a dispatch refused
-          // at the entry gate (budget / agent cap) or failing mid-run
-          // reaches no other surface, so the silent drop left no log,
-          // alarm, or telemetry.
           if (promise.__wfConsumed) return;
+          if (err && err.__wfAbort) return;
           const msg = String(
             err && err.message != null ? err.message : err,
           );
-          if (
-            msg.indexOf('aborted') === -1 &&
-            msg.indexOf('AbortError') === -1
-          ) {
-            __b.pushLog('dispatch failed (result not consumed): ' + msg);
-          }
+          promise.__wfUnconsumedId = __b.wfReportUnconsumed(
+            promise.__wfRootId,
+            promise.__wfIsRoot === true,
+            !!(err && err.__wfDispatchFailed),
+            msg,
+          );
         });
       }
       class ObservedPromise extends Promise {
         then(onFulfilled, onRejected) {
           this.__wfConsumed = true;
+          // An attached rejection handler means the script can surface the
+          // root rejection itself; the mirror stays silent for it.
+          if (typeof onRejected === 'function') {
+            __b.wfMarkRejectionHandled(this.__wfRootId);
+          }
+          // A delayed consumption clears a verdict recorded at
+          // rejection-settlement time, so a late-but-real await is not
+          // misreported as unconsumed.
+          if (this.__wfUnconsumedId !== undefined) {
+            __b.wfClearUnconsumed(this.__wfUnconsumedId);
+            this.__wfUnconsumedId = undefined;
+          }
           const derived = super.then(onFulfilled, onRejected);
+          derived.__wfRootId = this.__wfRootId;
           observeDispatch(derived);
           return derived;
         }
       }
       function vmAsync(hostFn) {
         return function (...vmArgs) {
+          const rootId = __b.wfRegisterRoot();
           const p = new ObservedPromise(function (resolve, reject) {
             try {
               const hostPromise = hostFn.apply(null, vmArgs);
               hostPromise.then(
                 function (value) { resolve(value); },
-                function (hostErr) {
-                  const msg = (hostErr && hostErr.message != null)
-                    ? String(hostErr.message)
-                    : String(hostErr);
-                  reject(new Error(msg));
-                }
+                function (hostErr) { reject(mapDispatchError(hostErr)); }
               );
             } catch (hostErr) {
-              const msg = (hostErr && hostErr.message != null)
-                ? String(hostErr.message)
-                : String(hostErr);
-              reject(new Error(msg));
+              reject(mapDispatchError(hostErr));
             }
           });
+          p.__wfRootId = rootId;
+          p.__wfIsRoot = true;
           observeDispatch(p);
           return p;
         };
@@ -1242,6 +1333,30 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
 
   const maxWallClockMs = resolveMaxWallClockMs(opts);
 
+  // Flush still-unconsumed rejection entries into the run log. Called from
+  // `run()`'s finally: the one-macrotask yield lets rejection observers
+  // queued behind the script's settlement microtasks land before the
+  // verdict. When no dispatch root was ever registered the yield is skipped
+  // — dispatch-free runs keep their settlement free of timer dependencies
+  // (load-bearing for fake-timer tests of the wall-clock backstop).
+  const flushUnconsumedRejections = async (): Promise<void> => {
+    unconsumedSettled = true;
+    if (nextUnconsumedId === 1) return;
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
+    for (const rec of unconsumedRejections.values()) {
+      if (
+        rec.dispatchFailed &&
+        unconsumedRoots.get(rec.rootId)?.rejectionHandled
+      ) {
+        continue;
+      }
+      safeLog(unconsumedRejectionLine(rec));
+    }
+    unconsumedRejections.clear();
+  };
+
   let extractedMeta: WorkflowMeta | null = null;
   return {
     async run(scriptSource: string): Promise<unknown> {
@@ -1333,6 +1448,7 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         );
         stopWatchingState?.();
         watchdog?.stop();
+        await flushUnconsumedRejections();
       }
     },
     getPhases: () => [...phases],
