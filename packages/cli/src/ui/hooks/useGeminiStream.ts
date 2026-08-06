@@ -2462,11 +2462,24 @@ export const useGeminiStream = (
         if (isAtCommand(message)) {
           const timeout = new AbortController();
           const atCommandSignal = AbortSignal.any([signal, timeout.signal]);
-          const timeoutId = setTimeout(() => {
-            timeout.abort(
-              new Error(MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE),
-            );
-          }, MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS);
+          // URL media refs are exempt from the fixed mid-turn budget: the
+          // omni URL path downloads and uploads media end-to-end inside
+          // resolveAtCommandQuery under its own watchdogs (30s header, 60s
+          // idle), so a 10s cap would structurally kill every mid-turn
+          // @https reference — and inside the resolver the timeout abort is
+          // indistinguishable from a user cancel, so the message would be
+          // dropped quietly rather than failing with a named error.
+          // Filesystem resolution keeps the cap unchanged.
+          const hasUrlMediaRef =
+            /@https?:\/\//i.test(message) &&
+            (config.isOmniEnabled?.() ?? false);
+          const timeoutId = hasUrlMediaRef
+            ? undefined
+            : setTimeout(() => {
+                timeout.abort(
+                  new Error(MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE),
+                );
+              }, MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS);
           try {
             const atCommandResult = await resolveWithAbort(
               atCommandSignal,

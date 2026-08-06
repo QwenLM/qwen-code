@@ -13,6 +13,10 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./omni": {
+      "types": "./dist/src/omni/index.d.ts",
+      "import": "./dist/src/omni/index.js"
+    },
     "./transcriptRecords": {
       "types": "./dist/src/utils/transcript-records.d.ts",
       "import": "./dist/src/utils/transcript-records.js"

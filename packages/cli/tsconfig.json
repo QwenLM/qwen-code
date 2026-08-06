@@ -11,6 +11,7 @@
       "@qwen-code/qwen-code-core/transcriptRecords": [
         "../core/src/utils/transcript-records.ts"
       ],
+      "@qwen-code/qwen-code-core/omni": ["../core/src/omni/index.ts"],
       "@qwen-code/qwen-code-core/*": ["../core/src/*"],
       "@qwen-code/acp-bridge": ["../acp-bridge/src/index.ts"],
       "@qwen-code/acp-bridge/transcriptReplay": [

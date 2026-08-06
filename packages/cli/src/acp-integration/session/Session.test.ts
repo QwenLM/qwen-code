@@ -461,6 +461,9 @@ describe('Session', () => {
   }
 
   beforeEach(() => {
+    // Self-hosted CI runners export QWEN_RUNTIME_DIR; it outranks
+    // Storage.setRuntimeBaseDir, breaking the runtime-pinning assertions.
+    vi.stubEnv('QWEN_RUNTIME_DIR', '');
     startToolSpanSpy.mockClear();
     addToolArgumentsAttributesSpy.mockClear();
     addToolCallResultAttributesSpy.mockClear();
@@ -662,6 +665,7 @@ describe('Session', () => {
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     // Reset global runtime base dir state to prevent state leakage between tests
     core.Storage.setRuntimeBaseDir(null);
     // Clear session reference to allow garbage collection

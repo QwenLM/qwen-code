@@ -19,6 +19,10 @@ export default defineConfig({
         __dirname,
         '../core/src/utils/transcript-records.ts',
       ),
+      '@qwen-code/qwen-code-core/omni': path.resolve(
+        __dirname,
+        '../core/src/omni/index.ts',
+      ),
       '@qwen-code/qwen-code-core': path.resolve(__dirname, '../core/index.ts'),
       // cli's daemon-status-provider.test.ts imports `FakeAgent` /
       // `makeChannel` from acp-bridge's package-private

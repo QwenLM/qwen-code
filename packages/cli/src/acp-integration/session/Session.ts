@@ -8263,6 +8263,22 @@ export class Session implements SessionContext {
             });
           }
 
+          // Omni second normalization trigger point (parity with
+          // CoreToolScheduler.processToolResultImages, design §8.2):
+          // inline tool-result media becomes oss:// fileData before the
+          // vision bridge runs, which then skips the converted parts.
+          {
+            // Dynamic import: keeps omni out of the ACP static closure
+            // (serve fast-path bundle-closure CI check).
+            const { processToolResultOmniMedia } = await import(
+              '@qwen-code/qwen-code-core/omni'
+            );
+            responseParts = await processToolResultOmniMedia(
+              responseParts,
+              this.config,
+              activeToolAbortSignal,
+            );
+          }
           const visionBridgeNotices: string[] = [];
           responseParts = await bridgeToolResultImages({
             config: this.config,

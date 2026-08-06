@@ -34,7 +34,7 @@ export interface DashScopeUploaderOptions {
    * Chat-completions base URL (e.g. https://dashscope.aliyuncs.com/compatible-mode/v1).
    * The uploads endpoint lives at `<origin>/api/v1/uploads`; only the origin
    * is used. Defaults to the official public endpoint when omitted — but the
-   * production gate (isOmniVideoDeliveryActive) requires a concrete DashScope
+   * production gate (isOmniDeliveryActive) requires a concrete DashScope
    * baseUrl, so the credential is never sent to an origin the user did not
    * configure for this provider.
    */

@@ -46,6 +46,10 @@ export default defineConfig({
         __dirname,
         '../core/src/utils/transcript-records.ts',
       ),
+      '@qwen-code/qwen-code-core/omni': path.resolve(
+        __dirname,
+        '../core/src/omni/index.ts',
+      ),
       '@qwen-code/acp-bridge/transcriptReplay': path.resolve(
         __dirname,
         '../acp-bridge/src/transcript-replay.ts',

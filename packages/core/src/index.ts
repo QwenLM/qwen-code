@@ -662,3 +662,26 @@ export {
   type StartupEventSink,
   type StartupEventAttrs,
 } from './utils/startupEventSink.js';
+
+// ============================================================================
+// Omni multimodal experiment — upload-based media delivery
+// ============================================================================
+
+export {
+  isOmniDeliveryActive,
+  processMediaForOmniDelivery,
+  readMediaViaOmniDelivery,
+  parseHttpUrlRef,
+  downloadMediaUrl,
+  effectiveMaxDownloadFileBytes,
+  recognizeMediaFile,
+  OmniObjectStore,
+  OmniDeliveryError,
+  OmniDownloadError,
+  OmniTransportGuardError,
+  type OmniModality,
+  type OmniMediaDelivery,
+  type OmniTokenEstimate,
+  type DownloadedMedia,
+} from './omni/index.js';
+export { processToolResultOmniMedia } from './omni/tool-result-media.js';

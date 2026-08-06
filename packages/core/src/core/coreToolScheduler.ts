@@ -1387,9 +1387,26 @@ export class CoreToolScheduler {
   }> {
     let modelOverride: string | undefined;
     const notices: string[] = [];
+    // Omni second normalization trigger point: convert inline tool-result
+    // media into oss:// fileData BEFORE the vision bridge runs — converted
+    // parts are invisible to isImagePart, so the bridge skips them. Sibling
+    // step by design (§8.2): never mixed into bridge logic. Preserves the
+    // identity-equality contract: unchanged input returns the same array.
+    // Dynamic import keeps the omni module graph out of the ACP/serve
+    // fast-path static bundle closure (mirrors fileUtils' pattern; the
+    // serve bundle-closure CI check forbids iconv-scale chunks on the
+    // acpAgent static path).
+    const { processToolResultOmniMedia } = await import(
+      '../omni/tool-result-media.js'
+    );
+    const omniProcessed = await processToolResultOmniMedia(
+      responseParts,
+      this.config,
+      signal,
+    );
     const processedParts = await bridgeToolResultImages({
       config: this.config,
-      responseParts,
+      responseParts: omniProcessed,
       signal,
       onFullTurnModel: (model) => {
         if (!this.onToolResultFullTurnModel?.(model)) return false;

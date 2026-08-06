@@ -67,17 +67,37 @@ const loaderPath = join(tmpDir, 'loader.mjs');
 
 const coreSourcePath = join(root, 'packages', 'core', 'index.ts');
 const coreSourceUrl = pathToFileURL(coreSourcePath).href;
+// The `/omni` subpath export maps to dist/ in package.json; without an alias
+// here, dev mode would silently load a stale build of the omni pipeline while
+// the rest of core runs from source.
+const coreOmniSourcePath = join(
+  root,
+  'packages',
+  'core',
+  'src',
+  'omni',
+  'index.ts',
+);
+const coreOmniSourceUrl = pathToFileURL(coreOmniSourcePath).href;
 
 const loaderCode = `
 import { pathToFileURL } from 'node:url';
 
 const coreSourceUrl = '${coreSourceUrl}';
+const coreOmniSourceUrl = '${coreOmniSourceUrl}';
 
 export function resolve(specifier, context, nextResolve) {
   if (specifier === '@qwen-code/qwen-code-core') {
     return {
       shortCircuit: true,
       url: coreSourceUrl,
+      format: 'module',
+    };
+  }
+  if (specifier === '@qwen-code/qwen-code-core/omni') {
+    return {
+      shortCircuit: true,
+      url: coreOmniSourceUrl,
       format: 'module',
     };
   }

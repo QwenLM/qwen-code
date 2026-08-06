@@ -3641,12 +3641,13 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: false,
         description:
-          'Enable the omni media pipeline. Local video files referenced ' +
-          'with @ are recognized (ffprobe), stored content-addressed under ' +
-          '.qwen/omni/objects/, uploaded through the DashScope temporary ' +
-          'upload channel, and delivered as oss:// URLs instead of inline ' +
-          'base64. Only active for DashScope-compatible endpoints. Can ' +
-          'also be enabled via QWEN_CODE_ENABLE_OMNI=1.',
+          'Enable the omni media pipeline. Media files (video, image, ' +
+          'audio) referenced with @ — and media served from @https:// ' +
+          'URLs — are recognized (ffprobe), stored content-addressed ' +
+          'under .qwen/omni/objects/, uploaded through the DashScope ' +
+          'temporary upload channel, and delivered as oss:// URLs instead ' +
+          'of inline base64. Only active for DashScope-compatible ' +
+          'endpoints. Can also be enabled via QWEN_CODE_ENABLE_OMNI=1.',
         showInDialog: true,
       },
       upload: {
@@ -3673,6 +3674,66 @@ const SETTINGS_SCHEMA = {
               type: 'number',
               minimum: 1,
               default: 1073741824,
+            },
+          },
+        },
+      },
+      transport: {
+        type: 'object',
+        label: 'Omni Transport Guard',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: {},
+        description:
+          'Transport guard dimensions beyond the byte ceiling for omni ' +
+          'media delivery.',
+        showInDialog: false,
+        properties: {
+          maxEstimatedTokens: {
+            type: 'number',
+            label: 'Max Estimated Tokens',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: 0,
+            description:
+              'Estimated-token ceiling for a single omni media input, ' +
+              'checked before upload using the versioned raw-resource ' +
+              'estimator. 0 disables the token guard — the estimation ' +
+              'formula is pending confirmation with the model provider; ' +
+              'set a positive threshold to enforce fail-closed rejection.',
+            showInDialog: false,
+            jsonSchemaOverride: {
+              type: 'number',
+              minimum: 0,
+              default: 0,
+            },
+          },
+        },
+      },
+      download: {
+        type: 'object',
+        label: 'Omni Download',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: {},
+        description: 'URL media localization limits for omni delivery.',
+        showInDialog: false,
+        properties: {
+          maxFileBytes: {
+            type: 'number',
+            label: 'Max Download File Bytes',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: 0,
+            description:
+              'Byte ceiling for downloading URL media inputs. 0 or unset ' +
+              'follows omni.upload.maxFileBytes (downloading more than the ' +
+              'upload channel can deliver is pointless).',
+            showInDialog: false,
+            jsonSchemaOverride: {
+              type: 'number',
+              minimum: 0,
+              default: 0,
             },
           },
         },

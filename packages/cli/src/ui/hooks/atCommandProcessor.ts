@@ -121,14 +121,31 @@ function parseAllAtCommands(query: string): AtCommandPart[] {
     }
 
     // Parse @path
+    //
+    // A URL ref (`@https://…`) is delimited differently from a filesystem
+    // path. The punctuation terminators below exist to stop a path at a
+    // sentence boundary ("see file.txt, then…"), but `?`, `&`, `,` and `;`
+    // are structural in a URL — a presigned OSS/S3 link carries its signature
+    // in the query string, so terminating at `?` would silently drop it and
+    // the request would fail with HTTP 403.
+    //
+    // Instead a URL runs to the first character RFC 3986 does not permit
+    // unencoded. That covers whitespace and also CJK prose written with no
+    // space ("@https://host/a.mp4。分析一下"), which a whitespace-only rule
+    // would swallow into the URL.
+    const isUrlRef = /^https?:\/\//i.test(query.slice(atIndex + 1));
+    // unreserved / gen-delims / sub-delims / pct-encoding, per RFC 3986.
+    const NON_URL_CHAR = /[^A-Za-z0-9\-._~:/?#[\]@!$&'()*+,;=%]/;
     let pathEndIndex = atIndex + 1;
     let inEscape = false;
     while (pathEndIndex < query.length) {
-      const char = query[pathEndIndex];
+      const char = query[pathEndIndex]!;
       if (inEscape) {
         inEscape = false;
       } else if (char === '\\') {
         inEscape = true;
+      } else if (isUrlRef) {
+        if (NON_URL_CHAR.test(char)) break;
       } else if (/[,\s;!?()[\]{}]/.test(char)) {
         // Path ends at first whitespace or punctuation not escaped
         break;
@@ -143,7 +160,18 @@ function parseAllAtCommands(query: string): AtCommandPart[] {
       }
       pathEndIndex++;
     }
-    const rawAtPath = query.substring(atIndex, pathEndIndex);
+    let rawAtPath = query.substring(atIndex, pathEndIndex);
+    if (isUrlRef) {
+      // `.`/`,`/`;`/`!`/`?` are legal URL characters but are usually prose
+      // when they land at the very end ("@https://host/a.mp4. Explain it").
+      // Trimmed after the scan rather than treated as terminators, so they
+      // can never cut a URL short mid-query. Brackets and parens are left
+      // alone: they appear balanced inside real URLs, and a wrapped URL still
+      // yields a named error rather than a silently mangled request.
+      const trimmed = rawAtPath.replace(/[.,;:!?]+$/, '');
+      pathEndIndex = atIndex + trimmed.length;
+      rawAtPath = trimmed;
+    }
     // unescapePath expects the @ symbol to be present, and will handle it.
     const atPath = unescapePath(rawAtPath);
     parts.push({ type: 'atPath', content: atPath });
@@ -251,6 +279,12 @@ export async function resolveAtCommandQuery({
     ref: { id?: string; title?: string };
   }> = [];
 
+  // URL media references (`@https://…`) collected during the loop and
+  // localized (downloaded → recognized → promoted into the omni object
+  // store) after it. Only active when omni delivery is on; otherwise URL
+  // tokens keep today's fall-through behavior (left as text).
+  const urlMediaRefs: Array<{ originalAtPath: string; url: string }> = [];
+
   for (const atPathPart of atPathCommandParts) {
     const originalAtPath = atPathPart.content; // e.g., "@file.txt" or "@"
 
@@ -262,6 +296,23 @@ export async function resolveAtCommandQuery({
     }
 
     const pathName = originalAtPath.substring(1);
+
+    // URL media reference (`@https://…`): detected BEFORE every other
+    // parser — a URL can't be an extension/session/MCP ref, and without
+    // this branch it would fall through to filesystem resolution where the
+    // ENOENT skip silently drops it. Only intercepted when omni delivery
+    // is active; otherwise preserve the legacy text fall-through.
+    if (/^https?:\/\//i.test(pathName) && config.isOmniEnabled?.()) {
+      const omni = await import('@qwen-code/qwen-code-core/omni');
+      if (omni.isOmniDeliveryActive(config) && omni.parseHttpUrlRef(pathName)) {
+        if (!urlMediaRefs.some((r) => r.url === pathName)) {
+          urlMediaRefs.push({ originalAtPath, url: pathName });
+        }
+        // Keep the URL verbatim in the text sent to the model.
+        atPathToResolvedSpecMap.set(originalAtPath, pathName);
+        continue;
+      }
+    }
 
     // Extension reference (`@ext:<name>`): detected BEFORE MCP/filesystem
     // resolution. Only matches when the path starts with `ext:` and the name
@@ -505,6 +556,124 @@ export async function resolveAtCommandQuery({
     ),
   );
 
+  // URL media localization: download → recognize → promote into the omni
+  // object store → upload → fileData part. Sequential (media downloads can
+  // be large; parallel GiB transfers would contend), failure-isolated per
+  // URL (an error card is shown and the turn continues — mirroring the MCP
+  // resource block's Promise.allSettled semantics).
+  const urlMediaParts: Part[] = [];
+  const urlMediaDisplays: IndividualToolCallDisplay[] = [];
+  const urlMediaLabels: string[] = [];
+  if (urlMediaRefs.length > 0) {
+    const core = await import('@qwen-code/qwen-code-core/omni');
+    for (let i = 0; i < urlMediaRefs.length; i++) {
+      const ref = urlMediaRefs[i];
+      const callId = `client-url-media-${userMessageTimestamp}-${i}`;
+      const hostLabel = (() => {
+        try {
+          return new URL(ref.url).hostname;
+        } catch {
+          return 'invalid-url';
+        }
+      })();
+      let tempPartPath: string | undefined;
+      try {
+        const store = new core.OmniObjectStore(config.storage.getQwenDir());
+        const downloadsDir = path.join(store.getOmniRootDir(), 'downloads');
+        const downloaded = await core.downloadMediaUrl({
+          url: ref.url,
+          downloadsDir,
+          maxBytes: core.effectiveMaxDownloadFileBytes(config),
+          signal,
+        });
+        tempPartPath = downloaded.partPath;
+        // Full local-file pipeline on the downloaded bytes: sniff/probe/
+        // hash again (the design requires re-recognition from the local
+        // file — never trust transfer-time observations), guard, store,
+        // upload. Displays and error messages need a stable name; use the
+        // URL basename.
+        const urlBase = path.basename(new URL(ref.url).pathname) || hostLabel;
+        // Per-modality gate, mirroring the local-file path in fileUtils:
+        // media the active model cannot consume must not be stored and
+        // uploaded — the fileData part would only be replaced by an
+        // unsupported-modality placeholder in the converter, after paying
+        // for the upload. (The download itself is unavoidable: modality
+        // is only knowable from the bytes.) A null sniff falls through to
+        // the pipeline, whose recognition failure names the problem.
+        const modalities =
+          config.getContentGeneratorConfig?.()?.modalities ?? {};
+        const sniffedModality = await core.sniffFileModality(
+          downloaded.partPath,
+        );
+        if (sniffedModality && !modalities[sniffedModality]) {
+          urlMediaDisplays.push({
+            callId,
+            name: 'Fetch Media URL',
+            description: `Download ${ref.url}`,
+            status: ToolCallStatus.Error,
+            resultDisplay: `Skipped ${urlBase}: the active model does not accept ${sniffedModality} input.`,
+            confirmationDetails: undefined,
+          });
+          continue;
+        }
+        const delivery = await core.processMediaForOmniDelivery(
+          downloaded.partPath,
+          config,
+          // displayName: guard/error messages must name the URL's file, not
+          // the opaque staging path the download landed under.
+          { signal, displayName: urlBase },
+        );
+        urlMediaParts.push({
+          fileData: {
+            fileUri: delivery.fileUri,
+            mimeType: delivery.mimeType,
+            displayName: urlBase,
+          },
+        });
+        urlMediaLabels.push(ref.url);
+        urlMediaDisplays.push({
+          callId,
+          name: 'Fetch Media URL',
+          description: `Downloaded ${ref.url}`,
+          status: ToolCallStatus.Success,
+          resultDisplay: `Localized ${urlBase} (${delivery.recognized.modality}, ${(delivery.recognized.sizeBytes / 1024 / 1024).toFixed(1)}MB) and delivered via omni upload.`,
+          confirmationDetails: undefined,
+        });
+      } catch (error) {
+        if (signal.aborted) {
+          // User cancelled mid-download: end the turn quietly instead of
+          // throwing — resolveAtCommandQuery has no throw contract, and a
+          // rejection here would surface as an unhandled-rejection banner
+          // (cancelOngoingRequest already handles the UI reset).
+          if (tempPartPath) {
+            await fs.rm(tempPartPath, { force: true }).catch(() => {});
+          }
+          return {
+            processedQuery: null,
+            shouldProceed: false,
+            toolDisplays: [...urlMediaDisplays],
+            filesRead: urlMediaLabels,
+            // No chat-recording entry for a user-cancelled resolution.
+          };
+        }
+        const reason = getErrorMessage(error);
+        onDebugMessage(`Failed to localize media URL ${ref.url}: ${reason}`);
+        urlMediaDisplays.push({
+          callId,
+          name: 'Fetch Media URL',
+          description: `Download ${ref.url}`,
+          status: ToolCallStatus.Error,
+          resultDisplay: `Failed to fetch media from ${hostLabel}: ${reason}`,
+          confirmationDetails: undefined,
+        });
+      } finally {
+        if (tempPartPath) {
+          await fs.rm(tempPartPath, { force: true }).catch(() => {});
+        }
+      }
+    }
+  }
+
   const resourceParts: Part[] = [];
   const resourceDisplays: IndividualToolCallDisplay[] = [];
   const resourceLabels: string[] = [];
@@ -565,7 +734,11 @@ export async function resolveAtCommandQuery({
     mcpResourceRefs.length === 0 &&
     mcpServerMentions.length === 0 &&
     extensionMentions.length === 0 &&
-    sessionMentions.length === 0
+    sessionMentions.length === 0 &&
+    // URL media refs count as content too: without this, a URL-only prompt
+    // would run the whole download→upload pipeline and then discard the
+    // delivered parts (and their display cards) via this early return.
+    urlMediaRefs.length === 0
   ) {
     onDebugMessage('No valid file paths found in @ commands to read.');
     if (initialQueryText === '@' && query.trim() === '@') {
@@ -852,6 +1025,7 @@ export async function resolveAtCommandQuery({
         ...scopedMentionLabels,
         ...contentLabelsForDisplay,
         ...resourceLabels,
+        ...urlMediaLabels,
       ];
       return {
         processedQuery: null,
@@ -859,6 +1033,7 @@ export async function resolveAtCommandQuery({
         toolDisplays: [
           ...scopedMentionDisplays,
           ...resourceDisplays,
+          ...urlMediaDisplays,
           errorToolCallDisplay,
         ],
         filesRead: labelsOnError,
@@ -881,11 +1056,13 @@ export async function resolveAtCommandQuery({
     ...scopedMentionParts,
     ...fileParts,
     ...resourceParts,
+    ...urlMediaParts,
   ];
   const allLabels = [
     ...scopedMentionLabels,
     ...contentLabelsForDisplay,
     ...resourceLabels,
+    ...urlMediaLabels,
   ];
 
   return {
@@ -895,6 +1072,7 @@ export async function resolveAtCommandQuery({
       ...scopedMentionDisplays,
       ...fileDisplays,
       ...resourceDisplays,
+      ...urlMediaDisplays,
     ],
     filesRead: allLabels,
     recording: {

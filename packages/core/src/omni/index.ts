@@ -13,10 +13,18 @@ import { ToolErrorType } from '../tools/tool-error.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { isAbortError } from '../utils/errors.js';
 import { isFfmpegAvailable, isFfprobeAvailable } from './ffmpeg.js';
+import type { OmniTokenEstimate } from './estimation.js';
 import {
-  extensionForVideoMime,
-  recognizeVideoFile,
-  type RecognizedVideo,
+  assertWithinByteLimit,
+  assertWithinTokenLimit,
+  effectiveMaxUploadFileBytes,
+} from './guard.js';
+import {
+  extensionForMime,
+  hashFileSha256,
+  recognizeMediaFile,
+  type OmniModality,
+  type RecognizedMedia,
 } from './recognition.js';
 import { OmniObjectStore } from './storage.js';
 import { DashScopeUploader } from './upload.js';
@@ -30,15 +38,66 @@ export {
 export { OmniObjectStore } from './storage.js';
 export { DashScopeUploader, OSS_URL_PREFIX } from './upload.js';
 export {
-  recognizeVideoFile,
+  recognizeMediaFile,
+  sniffMediaType,
+  sniffFileModality,
   sniffVideoMimeType,
   hashFileSha256,
+  type OmniModality,
+  type RecognizedMedia,
 } from './recognition.js';
+export {
+  estimateRawResourceTokens,
+  type OmniTokenEstimate,
+} from './estimation.js';
+export {
+  OmniTransportGuardError,
+  DEFAULT_OMNI_MAX_UPLOAD_FILE_BYTES,
+} from './guard.js';
+export {
+  downloadMediaUrl,
+  parseHttpUrlRef,
+  OmniDownloadError,
+  type DownloadedMedia,
+} from './download.js';
+// Circular-safe (both modules only bind functions): lets the ./omni
+// subpath entry serve the tool-result funnel without the big barrel.
+export { processToolResultOmniMedia } from './tool-result-media.js';
 
 const debugLogger = createDebugLogger('omni');
 
-/** Default per-file upload ceiling: 1 GiB (DashScope instant-upload cap). */
-export const DEFAULT_OMNI_MAX_UPLOAD_FILE_BYTES = 1024 * 1024 * 1024;
+/**
+ * Scrub absolute path segments out of an error message, keeping the
+ * basename — fs errors embed full paths (`ENOENT: … stat '/Users/x/…'`)
+ * and several wraps below flow into model-visible llmContent, which must
+ * never carry real paths.
+ *
+ * `knownPaths` are replaced EXACTLY (split/join) before the pattern pass:
+ * a regex can never enumerate every path shape (CJK segments, `~`-prefixed
+ * or special-character basenames, Windows drives), but the pipeline always
+ * knows which file it was working on, and exact replacement of that path is
+ * immune to all of them. The pattern pass then catches other embedded paths
+ * (e.g. the object-store destination) with separator-based — not
+ * ASCII-word-based — segment classes, so non-ASCII segments still match.
+ */
+// Exported for direct unit testing of the path shapes (visible only via the
+// module namespace; not re-exported from any barrel).
+export function sanitizeErrorMessage(
+  err: unknown,
+  knownPaths: string[] = [],
+): string {
+  let msg = err instanceof Error ? err.message : String(err);
+  for (const known of knownPaths) {
+    if (known) msg = msg.split(known).join(path.basename(known));
+  }
+  return (
+    msg
+      // POSIX: two or more segments then a basename → keep the basename.
+      .replace(/(?:\/[^/\s'"]+)+\/([^/\s'"]+)/g, '$1')
+      // Windows: optional drive letter, backslash segments.
+      .replace(/(?:[A-Za-z]:)?(?:\\[^\\\s'"]+)+\\([^\\\s'"]+)/g, '$1')
+  );
+}
 
 /**
  * Placeholder the model-config resolver assigns under Qwen OAuth; the real
@@ -48,8 +107,8 @@ export const DEFAULT_OMNI_MAX_UPLOAD_FILE_BYTES = 1024 * 1024 * 1024;
  */
 const QWEN_OAUTH_PLACEHOLDER_API_KEY = 'QWEN_OAUTH_DYNAMIC_TOKEN';
 
-/** Result of the S1 video delivery pipeline. */
-export interface OmniVideoDelivery {
+/** Result of the omni media delivery pipeline. */
+export interface OmniMediaDelivery {
   /** `oss://…` URL to place in fileData.fileUri. */
   fileUri: string;
   /** Authoritative (sniffed) MIME type for the Part. */
@@ -57,7 +116,9 @@ export interface OmniVideoDelivery {
   /** Content hash — identity of the stored object. */
   sha256: string;
   /** Recognition output, for logs/display. */
-  recognized: RecognizedVideo;
+  recognized: RecognizedMedia;
+  /** Raw-resource token estimate (attached even when the guard is off). */
+  tokenEstimate: OmniTokenEstimate;
   /** Whether the object store already held this content. */
   deduped: boolean;
 }
@@ -74,7 +135,7 @@ export class OmniDeliveryError extends Error {
 }
 
 /**
- * Gate for the S1 video delivery path. All conditions must hold:
+ * Gate for the omni delivery path. All conditions must hold:
  *
  * 1. omni enabled (settings or QWEN_CODE_ENABLE_OMNI=1);
  * 2. trusted workspace (the pipeline writes .qwen/omni/ and uploads
@@ -87,10 +148,10 @@ export class OmniDeliveryError extends Error {
  * 5. a DashScope-compatible provider.
  *
  * Any failed condition falls back to the pre-omni inline behavior.
- * Video modality is checked by the caller (fileUtils) alongside the
+ * Modality support is checked by the caller (fileUtils) alongside the
  * existing modality gate.
  */
-export function isOmniVideoDeliveryActive(config: Config): boolean {
+export function isOmniDeliveryActive(config: Config): boolean {
   // Optional calls so stub Configs in tests (and embedders constructing
   // partial configs) don't need the omni accessors to process files.
   if (!config.isOmniEnabled?.()) return false;
@@ -106,7 +167,7 @@ export function isOmniVideoDeliveryActive(config: Config): boolean {
     cgc.apiKey === QWEN_OAUTH_PLACEHOLDER_API_KEY
   ) {
     debugLogger.debug(
-      'omni delivery inactive: no static API key usable for the uploads endpoint (Qwen OAuth is not supported in S1)',
+      'omni delivery inactive: no static API key usable for the uploads endpoint (Qwen OAuth is not supported)',
     );
     return false;
   }
@@ -120,19 +181,33 @@ export function isOmniVideoDeliveryActive(config: Config): boolean {
 }
 
 /**
- * S1 pipeline: recognize → promote into the content-addressed store →
- * upload via the DashScope temporary channel → return the oss:// URL.
+ * Omni pipeline: recognize → transport guard → hash → promote into the
+ * content-addressed store → upload via the DashScope temporary channel →
+ * return the oss:// URL plus the token estimate.
  *
- * No caching in S1: every invocation re-uploads (S3 adds the
- * (sha256, model) upload cache). Throws OmniDeliveryError on any failure;
- * user aborts propagate as the original abort error.
+ * All modalities are uploaded AS-IS — no resizing, no transcoding.
+ * Degradation is the job of S4 policies (which must disclose); the default
+ * path never silently alters content. No caching yet (S3 adds the
+ * (sha256, model) upload cache). Throws OmniDeliveryError /
+ * OmniTransportGuardError on failure; user aborts propagate untouched.
  */
-export async function processVideoForOmniDelivery(
+export async function processMediaForOmniDelivery(
   filePath: string,
   config: Config,
-  signal?: AbortSignal,
-): Promise<OmniVideoDelivery> {
-  const displayName = path.basename(filePath);
+  options?: {
+    expectedModality?: OmniModality;
+    signal?: AbortSignal;
+    /**
+     * Name used for the file in guard/error messages. Defaults to the
+     * file's basename — callers whose input is not a user-visible path
+     * (the URL funnel stages downloads under opaque temp names) pass the
+     * user-recognizable name instead.
+     */
+    displayName?: string;
+  },
+): Promise<OmniMediaDelivery> {
+  const { expectedModality, signal } = options ?? {};
+  const displayName = options?.displayName ?? path.basename(filePath);
 
   // Defense in depth: startup validation already asserted this, but the
   // pipeline can also be reached in embedders that skip Config.initialize.
@@ -142,65 +217,64 @@ export async function processVideoForOmniDelivery(
   ]);
   if (!ffmpeg || !ffprobe) {
     throw new OmniDeliveryError(
-      'ffmpeg/ffprobe not available; omni video delivery requires both on PATH.',
+      'ffmpeg/ffprobe not available; omni media delivery requires both on PATH.',
     );
   }
 
-  // Enforce the byte ceiling from a cheap stat BEFORE hashing/probing —
-  // a 60GB capture must not stream through SHA-256 only to be rejected.
-  const configuredMax = config.getOmniUploadMaxFileBytes?.();
-  const maxBytes =
-    configuredMax !== undefined && configuredMax > 0
-      ? configuredMax
-      : DEFAULT_OMNI_MAX_UPLOAD_FILE_BYTES;
+  // Byte guard from a cheap stat BEFORE hashing/probing — a 60GB capture
+  // must not stream through SHA-256 only to be rejected.
   const stat = await fs.stat(filePath).catch((err) => {
     throw new OmniDeliveryError(
-      `Cannot stat video file ${displayName}: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
+      `Cannot stat media file ${displayName}: ${sanitizeErrorMessage(err, [filePath])}`,
       { cause: err },
     );
   });
-  if (stat.size > maxBytes) {
-    throw new OmniDeliveryError(
-      `Video exceeds the omni upload limit: ${stat.size} bytes > ` +
-        `${maxBytes} bytes (omni.upload.maxFileBytes). ` +
-        `Reduce the file size before retrying.`,
-    );
-  }
+  assertWithinByteLimit(config, stat.size, displayName);
 
-  let recognized: RecognizedVideo;
+  let recognized: RecognizedMedia;
   try {
-    recognized = await recognizeVideoFile(filePath, signal);
+    recognized = await recognizeMediaFile(filePath, {
+      expectedModality,
+      signal,
+    });
   } catch (err) {
     if (signal?.aborted) throw err;
     throw new OmniDeliveryError(
-      `Video recognition failed for ${displayName}: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
+      `Media recognition failed for ${displayName}: ${sanitizeErrorMessage(err, [filePath])}`,
+      { cause: err },
+    );
+  }
+
+  // Token guard AFTER probe (needs metadata), BEFORE hash/copy/upload — a
+  // token-oversized input must not pay a full-file SHA-256 to be rejected.
+  const tokenEstimate = assertWithinTokenLimit(config, recognized, displayName);
+
+  // Content hash: identity of the stored object. Computed only once all
+  // guards have passed, immediately before promotion into the store.
+  let sha256: string;
+  try {
+    sha256 = await hashFileSha256(filePath, signal);
+  } catch (err) {
+    if (signal?.aborted) throw err;
+    throw new OmniDeliveryError(
+      `Failed to hash media file ${displayName}: ${sanitizeErrorMessage(err, [filePath])}`,
       { cause: err },
     );
   }
 
   const store = new OmniObjectStore(config.storage.getQwenDir());
-  const extension = extensionForVideoMime(recognized.detectedMimeType);
+  const extension = extensionForMime(recognized.detectedMimeType);
   let objectPath: string;
   let deduped: boolean;
   try {
-    const put = await store.putFile(
-      filePath,
-      recognized.sha256,
-      extension,
-      signal,
-    );
+    const put = await store.putFile(filePath, sha256, extension, signal);
     objectPath = put.objectPath;
     deduped = put.deduped;
   } catch (err) {
     if (signal?.aborted) throw err;
     throw new OmniDeliveryError(
-      `Failed to store video in the omni object store: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
+      `Failed to store media in the omni object store: ` +
+        `${sanitizeErrorMessage(err, [filePath, store.getOmniRootDir()])}`,
       { cause: err },
     );
   }
@@ -220,21 +294,27 @@ export async function processVideoForOmniDelivery(
     });
   } catch (err) {
     if (signal?.aborted) throw err;
+    // Upload errors can embed the object-store path (spawn/fs failures) —
+    // sanitize with the concrete path AND the store root, since a path with
+    // a space in a segment defeats the pattern pass (segment classes break
+    // at whitespace) and only exact replacement is immune.
     throw new OmniDeliveryError(
-      err instanceof Error ? err.message : String(err),
+      sanitizeErrorMessage(err, [objectPath, store.getOmniRootDir()]),
       { cause: err },
     );
   }
 
   debugLogger.debug(
-    `omni video delivered: sha256=${recognized.sha256.slice(0, 12)}… ` +
-      `size=${recognized.sizeBytes} deduped=${deduped} uri=${fileUri}`,
+    `omni ${recognized.modality} delivered: sha256=${sha256.slice(0, 12)}… ` +
+      `size=${recognized.sizeBytes} est=${tokenEstimate.estimatedTokenCount}(${tokenEstimate.status}) ` +
+      `deduped=${deduped} uri=${fileUri}`,
   );
   return {
     fileUri,
     mimeType: recognized.detectedMimeType,
-    sha256: recognized.sha256,
+    sha256,
     recognized,
+    tokenEstimate,
     deduped,
   };
 }
@@ -242,57 +322,110 @@ export async function processVideoForOmniDelivery(
 /** Read-result shape consumed by fileUtils.processSingleFileContent for
  * media Parts (structurally mirrors ProcessedFileReadResult's media case
  * without importing fileUtils, which would create a cycle). */
-export interface OmniVideoReadResult {
+export interface OmniMediaReadResult {
   llmContent:
     | string
+    | Array<
+        | { text: string }
+        | {
+            fileData: {
+              fileUri: string;
+              mimeType: string;
+              displayName: string;
+            };
+          }
+      >
     | { fileData: { fileUri: string; mimeType: string; displayName: string } };
   returnDisplay: string;
   error?: string;
   errorType?: ToolErrorType;
+  tokenEstimate?: OmniTokenEstimate;
 }
 
 /**
- * fileUtils-facing wrapper: run the S1 delivery pipeline and shape the
+ * fileUtils-facing wrapper: run the delivery pipeline and shape the
  * outcome as a file-read result. Fails closed on delivery errors (no
  * inline fallback); rethrows user aborts so the caller's abort handling
- * applies.
+ * applies. For images, a text part with dimensions and a zoom hint is
+ * emitted alongside the fileData part (zoom_image reads the original from
+ * disk and stays functional under upload delivery).
  */
-export async function readVideoViaOmniDelivery(params: {
+export async function readMediaViaOmniDelivery(params: {
   filePath: string;
   config: Config;
   displayName: string;
   relativePathForDisplay: string;
+  expectedModality: OmniModality;
   signal?: AbortSignal;
-}): Promise<OmniVideoReadResult> {
-  const { filePath, config, displayName, relativePathForDisplay, signal } =
-    params;
+}): Promise<OmniMediaReadResult> {
+  const {
+    filePath,
+    config,
+    displayName,
+    relativePathForDisplay,
+    expectedModality,
+    signal,
+  } = params;
   try {
-    const delivery = await processVideoForOmniDelivery(
-      filePath,
-      config,
+    const delivery = await processMediaForOmniDelivery(filePath, config, {
+      expectedModality,
       signal,
-    );
-    return {
-      llmContent: {
-        fileData: {
-          fileUri: delivery.fileUri,
-          mimeType: delivery.mimeType,
-          displayName,
-        },
+    });
+    const fileDataPart = {
+      fileData: {
+        fileUri: delivery.fileUri,
+        mimeType: delivery.mimeType,
+        displayName,
       },
-      returnDisplay: `Read video file (omni upload): ${relativePathForDisplay}`,
+    };
+    const { width, height } = delivery.recognized.metadata;
+    const llmContent =
+      delivery.recognized.modality === 'image' &&
+      width !== undefined &&
+      height !== undefined
+        ? [
+            {
+              text:
+                `Image ${displayName}: full resolution ${width}x${height} px. ` +
+                `Use zoom_image for a closer look at details.`,
+            },
+            fileDataPart,
+          ]
+        : fileDataPart;
+    return {
+      llmContent,
+      returnDisplay: `Read ${delivery.recognized.modality} file (omni upload): ${relativePathForDisplay}`,
+      tokenEstimate: delivery.tokenEstimate,
     };
   } catch (err) {
     if (isAbortError(err) || signal?.aborted) throw err;
     // Fail closed: no silent fallback to inline base64 — a fallback would
     // resurrect the 10MB cap surprise and mislead the user into thinking
-    // the model saw the original video.
-    const message = err instanceof Error ? err.message : String(err);
+    // the model saw the original media.
+    //
+    // Both llmContent AND error are model-visible: on READ_CONTENT_FAILURE
+    // the scheduler puts `error` (not the sanitized llmContent) into the
+    // functionResponse, so an unsanitized message here would leak the
+    // absolute path on every failed read_file. Sanitize once, use twice,
+    // and name the file by displayName rather than its real path.
+    const message = sanitizeErrorMessage(err, [filePath]);
     return {
-      llmContent: `[Omni video delivery failed for ${displayName}: ${message}]`,
-      returnDisplay: `Failed to deliver video via omni upload: ${relativePathForDisplay}`,
-      error: `Omni video delivery failed: ${filePath}: ${message}`,
+      llmContent: `[Omni media delivery failed for ${displayName}: ${message}]`,
+      returnDisplay: `Failed to deliver media via omni upload: ${relativePathForDisplay}`,
+      error: `Omni media delivery failed: ${displayName}: ${message}`,
       errorType: ToolErrorType.READ_CONTENT_FAILURE,
     };
   }
+}
+
+/** Effective download byte ceiling — never above the upload channel cap
+ * (downloading more than can be delivered is pointless), including when
+ * `omni.download.maxFileBytes` is explicitly configured higher. */
+export function effectiveMaxDownloadFileBytes(config: Config): number {
+  const uploadCap = effectiveMaxUploadFileBytes(config);
+  const configured = config.getOmniDownloadMaxFileBytes?.();
+  if (configured !== undefined && configured > 0) {
+    return Math.min(configured, uploadCap);
+  }
+  return uploadCap;
 }
