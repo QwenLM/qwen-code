@@ -18,7 +18,9 @@ export interface EmptyMobileComposerLayout {
   dotFieldZIndex: string;
   footerAnchoredToChatPane: boolean;
   footerBottom: number;
+  footerDisplay: string;
   footerPosition: string;
+  footerTop: number;
   welcomeFooterBottom: number | null;
   welcomeFooterTop: number | null;
   welcomeHeaderBottom: number;
@@ -29,6 +31,7 @@ export interface EmptyMobileComposerLayoutOptions {
 }
 
 export interface EmptyMobileWelcomeHarnessOptions {
+  customFooter?: boolean;
   welcomeFooter?: boolean;
 }
 
@@ -38,6 +41,7 @@ export async function gotoEmptyMobileWelcomeHarness(
 ): Promise<void> {
   const params = new URLSearchParams({ emptyMobileWelcome: 'true' });
   if (options.welcomeFooter === false) params.set('welcomeFooter', 'false');
+  if (options.customFooter === true) params.set('customFooter', 'true');
   await page.goto(`/e2e/composer-layout-harness.html?${params.toString()}`);
   await expect(page.locator('[data-web-shell-root]')).toBeVisible();
 }
@@ -102,6 +106,7 @@ export async function emptyMobileComposerLayout(
       const dotFieldRect = dotField.getBoundingClientRect();
       const dotFieldStyle = getComputedStyle(dotField);
       const footerRect = footer.getBoundingClientRect();
+      const footerStyle = getComputedStyle(footer);
       const welcomeFooterRect = welcomeFooter?.getBoundingClientRect();
 
       return {
@@ -122,7 +127,9 @@ export async function emptyMobileComposerLayout(
         dotFieldZIndex: dotFieldStyle.zIndex,
         footerAnchoredToChatPane: footer.offsetParent === chatPane,
         footerBottom: footerRect.bottom,
-        footerPosition: getComputedStyle(footer).position,
+        footerDisplay: footerStyle.display,
+        footerPosition: footerStyle.position,
+        footerTop: footerRect.top,
         welcomeFooterBottom: welcomeFooterRect?.bottom ?? null,
         welcomeFooterTop: welcomeFooterRect?.top ?? null,
         welcomeHeaderBottom: welcomeHeader.getBoundingClientRect().bottom,
@@ -134,7 +141,8 @@ export function expectEmptyMobileComposerAnchored(
   layout: EmptyMobileComposerLayout,
   options: EmptyMobileComposerLayoutOptions = {},
 ): void {
-  expect(layout.footerPosition).toBe('absolute');
+  expect(layout.footerPosition).toBe('relative');
+  expect(layout.footerDisplay).not.toBe('contents');
   expect(
     Math.abs(layout.footerBottom - layout.chatPaneBottom),
   ).toBeLessThanOrEqual(1);
@@ -159,6 +167,6 @@ export function expectEmptyMobileComposerAnchored(
     expect(layout.welcomeHeaderBottom).toBeLessThanOrEqual(
       layout.welcomeFooterTop,
     );
-    expect(layout.welcomeFooterBottom).toBeLessThanOrEqual(layout.composerTop);
+    expect(layout.welcomeFooterBottom).toBeLessThanOrEqual(layout.footerTop);
   }
 }

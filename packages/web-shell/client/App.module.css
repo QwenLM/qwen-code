@@ -906,37 +906,38 @@
     overflow: hidden;
   }
 
-  /* Override chatViewWrap's relative positioning so the absolute footer
-     anchors to chatPane. The wrap remains a flex item, so its inherited
-     z-index: 1 still applies under static positioning and keeps the welcome
-     content and composer above the dot field. */
-  .appChatEmpty .chatViewWithMobileComposerBottom {
+  /* Fill the pane with a welcome row and a bottom composer row. The wrap
+     remains a flex item, so its inherited z-index: 1 still applies under
+     static positioning and keeps both rows above the dot field. */
+  .appChatEmpty .chatViewWithMobileComposerBottom:not(.chatViewHidden) {
     position: static;
+    display: grid;
+    grid-template-rows: minmax(0, 1fr) auto;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
   }
 
   .appChatEmpty .chatViewWithMobileComposerBottom .footer {
-    position: absolute;
-    right: 0;
-    bottom: 0;
-    left: 0;
+    position: relative;
     margin-top: 0;
   }
 
   .appChatEmpty .mobileWelcomeGroup {
     display: flex;
     flex-direction: column;
+    min-height: 0;
+    overflow-y: auto;
+    justify-content: safe center;
   }
 
   .appChatEmpty .chatViewWithWelcomeMiddle .footerWithCustomFooter {
-    display: contents;
+    display: flex;
+    flex-direction: column;
   }
 
   .appChatEmpty .chatViewWithWelcomeMiddle .footerWithCustomFooter .composer {
     order: 2;
-    width: min(100%, var(--chat-shell-width));
-    margin: 0 auto;
-    padding-right: 20px;
-    padding-left: 20px;
   }
 
   .appChatEmpty .chatViewWithWelcomeMiddle .mobileWelcomeFooterMiddle {
@@ -956,10 +957,7 @@
     flex: 0 0 auto;
     align-items: flex-start;
     justify-content: center;
-    width: min(100%, var(--chat-shell-width));
-    margin: 0 auto;
-    padding-right: 20px;
-    padding-left: 20px;
+    width: 100%;
   }
   .desktopWelcomeFooter {
     display: none;
