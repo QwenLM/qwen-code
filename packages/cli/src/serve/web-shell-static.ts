@@ -90,7 +90,11 @@ const SESSION_DEEP_LINK_PATH = /^\/session\/[^/]+\/?$/u;
  * BEFORE `bearerAuth`. The deferred-runtime gate in `createDelegatingServeApp`
  * exempts exactly these so a cold daemon answers the shell's entry points the
  * same way the warm runtime app does, instead of 401ing browser navigations
- * that cannot attach the bearer header. Keep in sync with the routes
+ * that cannot attach the bearer header. Percent-encoded single-segment deep
+ * links (e.g. `/session/<id>%2fstatus`) also match — Express does not decode
+ * `%2F` during route matching — but they cannot reach an API route or session
+ * data: pre-auth answers serve only the public shell HTML, identical to
+ * `GET /` (or the startup-failure envelope). Keep in sync with the routes
  * registered in `mountWebShellAssets`.
  */
 export function isPreAuthWebShellRequest(req: Request): boolean {
