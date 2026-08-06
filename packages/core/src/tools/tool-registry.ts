@@ -13,6 +13,7 @@ import type {
 } from './tools.js';
 import { Kind, BaseDeclarativeTool, BaseToolInvocation } from './tools.js';
 import { type Config, matchesAnyServerPattern } from '../config/config.js';
+import { isMediaPolicyToolHiddenFromModel } from '../omni/policy/model-access.js';
 import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import type { SendSdkMcpMessage } from './mcp-client.js';
@@ -734,16 +735,22 @@ export class ToolRegistry {
     includeDeferred?: boolean;
   }): FunctionDeclaration[] {
     const includeDeferred = options?.includeDeferred === true;
-    return Array.from(this.tools.values())
-      .filter(
-        (tool) =>
-          includeDeferred ||
-          !tool.shouldDefer ||
-          tool.alwaysLoad ||
-          !this.isDeferredAndHidden(tool.name),
-      )
-      .sort(ToolRegistry.compareToolsByDeclarationName)
-      .map((tool) => tool.schema);
+    return (
+      Array.from(this.tools.values())
+        .filter(
+          (tool) =>
+            includeDeferred ||
+            !tool.shouldDefer ||
+            tool.alwaysLoad ||
+            !this.isDeferredAndHidden(tool.name),
+        )
+        // Omni media-policy tools without modelAccess.enabled are registered
+        // (the fixed-policy orchestrator needs them) but never declared to
+        // the model — including for subagents, which force includeDeferred.
+        .filter((tool) => !isMediaPolicyToolHiddenFromModel(this.config, tool))
+        .sort(ToolRegistry.compareToolsByDeclarationName)
+        .map((tool) => tool.schema)
+    );
   }
 
   /**
@@ -903,7 +910,10 @@ export class ToolRegistry {
     const declarations: FunctionDeclaration[] = [];
     for (const name of toolNames) {
       const tool = this.tools.get(name);
-      if (tool) {
+      // Same modelAccess gate as getFunctionDeclarations: an explicit
+      // subagent tool list must not become a leak path for media-policy
+      // tools the model can't call.
+      if (tool && !isMediaPolicyToolHiddenFromModel(this.config, tool)) {
         declarations.push(tool.schema);
       }
     }

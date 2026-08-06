@@ -38,6 +38,7 @@ import {
   SchemaValidator,
   type ConfigParameters,
   type MCPServerConfig,
+  type OmniPolicyToolsSettings,
   type WebSearchSettings,
   MAX_SUBAGENT_DEPTH_LIMIT,
 } from '@qwen-code/qwen-code-core';
@@ -2199,6 +2200,9 @@ export async function loadCliConfig(
     omniUrlDownloadMaxFileBytes:
       settings.omni?.ingestion?.localization?.url?.maxFileBytes,
     omniUploadUrlTtlHours: settings.omni?.delivery?.upload?.urlTtlHours,
+    omniPolicyTools: settings.omni?.processing?.policyTools as
+      | OmniPolicyToolsSettings
+      | undefined,
     // CDP tunnel (Plan C, #5626): with the tunnel on, browser automation goes
     // through the CDP tunnel (far lighter than the OS-level computer-use
     // driver), so disable computer-use to keep the agent off that heavy path.

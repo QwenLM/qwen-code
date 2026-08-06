@@ -28,6 +28,7 @@ import {
   selectVisionBridgeModel,
 } from '../services/visionBridge/vision-bridge-service.js';
 import type { AnyToolInvocation } from '../tools/tools.js';
+import type { OmniPolicyToolsSettings } from '../omni/policy/types.js';
 import type { ArenaManager } from '../agents/arena/ArenaManager.js';
 import { ArenaAgentClient } from '../agents/arena/ArenaAgentClient.js';
 import type { TeamManager } from '../agents/team/TeamManager.js';
@@ -1110,6 +1111,9 @@ export interface ConfigParameters {
   omniUrlDownloadMaxFileBytes?: number;
   /** Upload URL TTL in hours (0 disables the cache; default 47). */
   omniUploadUrlTtlHours?: number;
+  /** Raw `omni.processing.policyTools` map (per-tool settings/runtime/
+   * modelAccess). Normalized lazily by the omni policy modules. */
+  omniPolicyTools?: OmniPolicyToolsSettings;
   /** Image generation model selected through `/model --image`. */
   imageModel?: string;
   /**
@@ -1940,6 +1944,7 @@ export class Config {
   private readonly omniMaxEstimatedTokens?: number;
   private readonly omniUrlDownloadMaxFileBytes?: number;
   private readonly omniUploadUrlTtlHours?: number;
+  private readonly omniPolicyTools?: OmniPolicyToolsSettings;
   private workflowsEnabled = false;
   private readonly skipWorkflowUsageWarning: boolean = false;
   private readonly computerUseEnabled: boolean = true;
@@ -2220,6 +2225,7 @@ export class Config {
     this.omniMaxEstimatedTokens = params.omniMaxEstimatedTokens;
     this.omniUrlDownloadMaxFileBytes = params.omniUrlDownloadMaxFileBytes;
     this.omniUploadUrlTtlHours = params.omniUploadUrlTtlHours;
+    this.omniPolicyTools = params.omniPolicyTools;
     this.workflowsEnabled = params.workflowsEnabled ?? false;
     this.skipWorkflowUsageWarning = params.skipWorkflowUsageWarning ?? false;
     this.computerUseEnabled = params.computerUseEnabled ?? true;
@@ -6394,6 +6400,10 @@ export class Config {
 
   getOmniUploadUrlTtlHours(): number | undefined {
     return this.omniUploadUrlTtlHours;
+  }
+
+  getOmniPolicyToolsSettings(): OmniPolicyToolsSettings | undefined {
+    return this.omniPolicyTools;
   }
 
   resolveImageGenerationModel(

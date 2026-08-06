@@ -152,6 +152,40 @@ export abstract class BaseToolInvocation<
  */
 export type AnyToolInvocation = ToolInvocation<object, ToolResult>;
 
+/** One declared output of a media-policy tool (see
+ * {@link MediaPolicyToolDescriptor}). */
+export interface MediaPolicyToolOutputSpec {
+  /** What the output is: a derived media artifact or a disclosure text. */
+  kind: 'media' | 'text';
+  /** Role label for text outputs (e.g. 'disclosure'). */
+  role?: string;
+  /** MIME types the output may carry (media outputs). */
+  mimeTypes?: string[];
+  /** Whether a successful run MUST produce this output. */
+  required: boolean;
+  /** Whether the output is a lossy transformation of its input. A lossy
+   * media output obligates a disclosure text alongside it. */
+  lossy?: boolean;
+}
+
+/**
+ * Code-registration fact marking a tool as an omni media-policy tool —
+ * declared by the tool class itself, immutable at runtime, and never
+ * configurable. Its presence is what the scheduler's modelAccess gate,
+ * the declaration surfaces, and the fixed-policy orchestrator key off:
+ * config can never turn an ordinary tool into a policy tool (or the
+ * reverse).
+ */
+export interface MediaPolicyToolDescriptor {
+  kind: 'media_policy';
+  /** Media modalities the tool accepts as input. */
+  inputMediaTypes: Array<'image' | 'audio' | 'video'>;
+  /** Outputs a successful run may/must produce. */
+  outputs: MediaPolicyToolOutputSpec[];
+  /** JSON schema for `omni.processing.policyTools.<name>.settings`. */
+  settingsSchema?: object;
+}
+
 /**
  * Interface for a tool builder that validates parameters and creates invocations.
  */
@@ -246,6 +280,16 @@ export abstract class DeclarativeTool<
       description: this.description,
       parametersJsonSchema: this.parameterSchema,
     };
+  }
+
+  /**
+   * Present iff this tool is an omni media-policy tool. A code-level fact
+   * of the tool class (not configuration): the scheduler's modelAccess
+   * gate, the declaration surfaces, and the fixed-policy orchestrator all
+   * key off it. Default: not a media-policy tool.
+   */
+  get mediaPolicyDescriptor(): MediaPolicyToolDescriptor | undefined {
+    return undefined;
   }
 
   /**

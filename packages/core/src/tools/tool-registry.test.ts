@@ -17,6 +17,7 @@ import { mcpToTool } from '@google/genai';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import { MockTool } from '../test-utils/mock-tool.js';
+import type { MediaPolicyToolDescriptor } from './tools.js';
 import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
 
 import { McpClientManager } from './mcp-client-manager.js';
@@ -381,6 +382,78 @@ describe('ToolRegistry', () => {
 
       expect(names).toContain('loaded-tool');
       expect(names).toContain('lazy-tool');
+    });
+  });
+
+  describe('media-policy tool visibility', () => {
+    class MockMediaPolicyTool extends MockTool {
+      override get mediaPolicyDescriptor(): MediaPolicyToolDescriptor {
+        return {
+          kind: 'media_policy',
+          inputMediaTypes: ['image'],
+          outputs: [{ kind: 'media', required: true }],
+        };
+      }
+    }
+
+    const enabledConfig = () =>
+      new Config({
+        ...baseConfigParams,
+        omniPolicyTools: {
+          omni_compress_image: { modelAccess: { enabled: true } },
+        },
+      });
+
+    it('excludes media-policy tools from getFunctionDeclarations by default', () => {
+      toolRegistry.registerTool(new MockTool({ name: 'visible' }));
+      toolRegistry.registerTool(
+        new MockMediaPolicyTool({ name: 'omni_compress_image' }),
+      );
+
+      const names = toolRegistry.getFunctionDeclarations().map((d) => d.name);
+      expect(names).toEqual(['visible']);
+    });
+
+    it('keeps media-policy tools hidden even with includeDeferred: true', () => {
+      // agent-core's wildcard/default branches call
+      // getFunctionDeclarations({ includeDeferred: true }); the media-policy
+      // filter must hold there too.
+      toolRegistry.registerTool(
+        new MockMediaPolicyTool({ name: 'omni_compress_image' }),
+      );
+
+      const names = toolRegistry
+        .getFunctionDeclarations({ includeDeferred: true })
+        .map((d) => d.name);
+      expect(names).toEqual([]);
+    });
+
+    it('excludes media-policy tools from getFunctionDeclarationsFiltered even when named explicitly', () => {
+      toolRegistry.registerTool(new MockTool({ name: 'visible' }));
+      toolRegistry.registerTool(
+        new MockMediaPolicyTool({ name: 'omni_compress_image' }),
+      );
+
+      const names = toolRegistry
+        .getFunctionDeclarationsFiltered(['visible', 'omni_compress_image'])
+        .map((d) => d.name);
+      expect(names).toEqual(['visible']);
+    });
+
+    it('declares media-policy tools when modelAccess.enabled is true', () => {
+      const registry = new ToolRegistry(enabledConfig());
+      registry.registerTool(
+        new MockMediaPolicyTool({ name: 'omni_compress_image' }),
+      );
+
+      expect(registry.getFunctionDeclarations().map((d) => d.name)).toEqual([
+        'omni_compress_image',
+      ]);
+      expect(
+        registry
+          .getFunctionDeclarationsFiltered(['omni_compress_image'])
+          .map((d) => d.name),
+      ).toEqual(['omni_compress_image']);
     });
   });
 

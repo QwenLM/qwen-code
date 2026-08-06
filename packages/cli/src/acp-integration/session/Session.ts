@@ -162,6 +162,7 @@ import {
   runWithRuntimeContentGenerator,
   getInvocationContext,
   runWithInvocationContext,
+  evaluateMediaPolicyToolCall,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
@@ -7221,6 +7222,28 @@ export class Session implements SessionContext {
             toolName,
           );
         }
+
+        // ---- Media-policy modelAccess gate (mirrors CoreToolScheduler) ----
+        // Every ACP-originated call is a model call: there is no in-process
+        // fixed_policy caller on this path, so the origin is pinned rather
+        // than read from the (untrusted) protocol payload.
+        const mediaPolicyGate = evaluateMediaPolicyToolCall({
+          config: this.config,
+          tool,
+          args,
+          executionOrigin: { kind: 'model' },
+        });
+        if (mediaPolicyGate.outcome === 'reject') {
+          return earlyErrorResponse(
+            new Error(mediaPolicyGate.message),
+            toolName,
+            {
+              recordInvalidToolParams:
+                mediaPolicyGate.reason === 'invalid_params',
+            },
+          );
+        }
+        args = mediaPolicyGate.args;
 
         // Detect TodoWriteTool early - route to plan updates instead of tool_call events
         const isTodoWriteTool = tool.name === ToolNames.TODO_WRITE;

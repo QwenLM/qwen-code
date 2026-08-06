@@ -18,8 +18,10 @@ import type {
   AnyToolInvocation,
   ChatRecordingService,
   ToolArtifact,
+  PolicyArtifactBatch,
 } from '../index.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { evaluateMediaPolicyToolCall } from '../omni/policy/model-access.js';
 import { sanitizeToolNameForProvider } from '../utils/tool-name-utils.js';
 import { compactToolResultDisplayForHistory } from '../utils/toolResultDisplayCompaction.js';
 import {
@@ -2309,10 +2311,44 @@ export class CoreToolScheduler {
           continue;
         }
 
+        // Omni media-policy protocol gate (before buildInvocation, so the
+        // merged arguments still go through the tool's native schema and
+        // business validation):
+        // - model/client-origin calls of a media-policy tool require
+        //   modelAccess.enabled, are rejected when they explicitly name a
+        //   lockedArguments key, and get defaultArguments/lockedArguments
+        //   merged in;
+        // - a fixed_policy origin on a NON-media-policy tool is rejected
+        //   (defense in depth: a forged origin must not become a
+        //   permission bypass for Shell/Edit/MCP tools);
+        // - a missing origin fails closed as model.
+        const policyGate = evaluateMediaPolicyToolCall({
+          config: this.config,
+          tool: toolInstance,
+          args: reqInfo.args,
+          executionOrigin: reqInfo.executionOrigin,
+        });
+        if (policyGate.outcome === 'reject') {
+          newToolCalls.push({
+            status: 'error',
+            request: reqInfo,
+            tool: toolInstance,
+            response: createErrorResponse(
+              reqInfo,
+              new Error(policyGate.message),
+              policyGate.reason === 'invalid_params'
+                ? ToolErrorType.INVALID_TOOL_PARAMS
+                : ToolErrorType.EXECUTION_DENIED,
+            ),
+            durationMs: 0,
+          });
+          continue;
+        }
+
         const invocationOrError = runInRequestGoalContext(reqInfo, () =>
           this.buildInvocation(
             toolInstance,
-            reqInfo.args,
+            policyGate.args,
             reqInfo.callId,
             reqInfo.prompt_id,
           ),
@@ -2435,6 +2471,22 @@ export class CoreToolScheduler {
           // =================================================================
           // L3→L4→L5 Permission Flow
           // =================================================================
+
+          // Fixed-policy orchestrator calls skip the interactive permission
+          // flow entirely: no PermissionManager ask/deny evaluation, no
+          // confirmation dialog, no plan/auto classification. The remaining
+          // guards still hold — PM tool-enablement ran at schedule time,
+          // origin/descriptor pairing was enforced before buildInvocation,
+          // and PreToolUse hooks fire (a hook deny fails the call closed)
+          // at execution time.
+          if (reqInfo.executionOrigin?.kind === 'fixed_policy') {
+            this.setToolCallOutcome(
+              reqInfo.callId,
+              ToolConfirmationOutcome.ProceedAlways,
+            );
+            this.setStatusInternal(reqInfo.callId, 'scheduled');
+            continue;
+          }
 
           // ---- L3→L4: Shared permission flow ----
           let toolParams = invocation.params as Record<string, unknown>;
@@ -4763,6 +4815,22 @@ export class CoreToolScheduler {
           ...(toolResult.artifacts ?? []),
           ...(postToolUseArtifacts ?? []),
         ];
+        // Raw media-policy artifacts, captured from the tool's OWN result —
+        // deliberately excluding the PostToolUse hook artifacts merged into
+        // `artifacts` above, which must never impersonate policy outputs.
+        const policyArtifacts: PolicyArtifactBatch | undefined =
+          scheduledCall.tool.mediaPolicyDescriptor &&
+          toolResult.artifacts &&
+          toolResult.artifacts.length > 0
+            ? {
+                toolName: canonicalName,
+                invocationId: callId,
+                executionOrigin: scheduledCall.request.executionOrigin ?? {
+                  kind: 'model',
+                },
+                artifacts: toolResult.artifacts,
+              }
+            : undefined;
         const successResponse: ToolCallResponseInfo = {
           callId,
           responseParts: response,
@@ -4786,6 +4854,7 @@ export class CoreToolScheduler {
             ? { visionBridgeNotice: processedImages.visionBridgeNotice }
             : {}),
           ...(artifacts.length > 0 ? { artifacts } : {}),
+          ...(policyArtifacts ? { policyArtifacts } : {}),
         };
         // After an APPROVED exit_plan_mode, swap the large `plan` argument
         // still sitting in the model turn's functionCall for a pointer to the
