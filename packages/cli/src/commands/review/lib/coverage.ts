@@ -71,6 +71,7 @@ import {
 } from './roster.js';
 import { BRIEFS } from './agent-briefs.js';
 import { chunkIdsProblem } from './diff-plan.js';
+import { readBudgetStop } from './deadline.js';
 import { shellQuotePath } from './shell-quote.js';
 
 export interface CoverageFromTranscripts {
@@ -234,7 +235,7 @@ function readPlan(path: string): { plan: Plan; mtimeMs: number } {
 }
 
 /** `chunk 13 of 25` — written into the prompt by `agent-prompt`, in code. */
-const CHUNK_RE = /\bchunk\s+(\d+)\s+of\s+\d+\b/i;
+export const CHUNK_RE = /\bchunk\s+(\d+)\s+of\s+\d+\b/i;
 
 /** The chunk this agent owns, when it was launched to own one. */
 function assignedChunk(rec: AgentRecord): number | null {
@@ -938,7 +939,13 @@ type GapText = Record<Exclude<Delivery, 'ok'>, GapEntry>;
 const rebuildFix = (role: 'verify' | 'reverse-audit', noun: string): string =>
   `build the prompt with \`"\${QWEN_CODE_CLI:-qwen}" review agent-prompt ` +
   `--plan <plan> --role ${role} --findings <file> [--rules <rules file>] ` +
-  `[--round <k>]\` ` +
+  // --round is MANDATORY for a reverse-audit build (`agent-prompt` refuses a
+  // round-less call — the label keys the record and the budget gate's
+  // accounting), so the paste-and-run repair must not bracket it as optional:
+  // an orchestrator honouring the bracket convention would have its first
+  // repair attempt rejected. Verify genuinely takes it or not (only a repeat
+  // verification round passes one), so its brackets stay.
+  (role === 'reverse-audit' ? `--round <k>\` ` : `[--round <k>]\` `) +
   (role === 'reverse-audit'
     ? `(an early round with nothing confirmed passes an empty file; `
     : `(pass the shard's findings, never an empty file — a verifier that sees ` +
@@ -1249,8 +1256,23 @@ export function verificationGaps(
     (k) => k === 'reverse-audit' || k.startsWith('reverse-audit--'),
   );
   const reverse = bestDelivery(reverseKeys);
+  // A budget-stop marker means the round builder itself refused the reverse
+  // audit on the run's time budget. Exactly ONE gap shape is then by design:
+  // `not-built` — the refusal writes no record, so an audit with no records
+  // is the audit the gate stopped, and the gap's FIX (rebuild the round)
+  // would be refused by the very gate that stopped it — exit 4,
+  // deterministically, time only moves forward. compose-review synthesizes
+  // the marker's own disclosure instead: it names the stop honestly and caps
+  // the verdict. Every OTHER shape describes a round that predates the
+  // refusal — a built round nobody launched, a launch the orchestrator
+  // rewrote, a brief never opened — and those disclosures are still owed: a
+  // hand-written round-1 launch is exactly as undelivered when round 3 later
+  // hits the budget, and suppressing it would let "stopped before round 3"
+  // imply the rounds that did run were faithful.
+  const budgetStopped = readBudgetStop(planPath) !== null;
+  const reverseByDesign = budgetStopped && reverse === 'not-built';
   // A repairable reverse-audit gap only at high: medium is complete without it.
-  const reverseGap = !balancedMedium && reverse !== 'ok';
+  const reverseGap = !balancedMedium && !reverseByDesign && reverse !== 'ok';
   if (reverseGap) {
     // The fix template carries `--plan <plan>`; a literal `<plan>` pasted into a
     // POSIX shell parses as input redirection, so the one repair round Step 6

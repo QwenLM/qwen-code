@@ -41,6 +41,7 @@ try {
   testBootstrapBridgeConfiguration();
   testLegacyApplicationIdentity();
   testElectronBridgeWorkflow();
+  testDesktopReleaseSigningWorkflow();
   testResolveLogRoot();
   testSliceNewLog();
   testUpdateManifest(path.join(root, 'manifest'));
@@ -77,6 +78,63 @@ function testElectronBridgeWorkflow() {
   ]) {
     assert.match(workflow, new RegExp(artifact.replaceAll('.', '\\.')));
   }
+}
+
+function testDesktopReleaseSigningWorkflow() {
+  const workflow = fs.readFileSync(
+    path.join(repoRoot, '.github', 'workflows', 'desktop-release.yml'),
+    'utf8',
+  );
+  const primaryIncomplete =
+    '$primaryIncomplete = ([bool]$env:WINDOWS_CERTIFICATE) -ne ' +
+    '([bool]$env:WINDOWS_CERTIFICATE_PASSWORD)';
+  const legacyIncomplete =
+    '$legacyIncomplete = ([bool]$env:LEGACY_WIN_CSC_LINK) -ne ' +
+    '([bool]$env:LEGACY_WIN_CSC_KEY_PASSWORD)';
+  assert.ok(
+    workflow.includes(primaryIncomplete),
+    'Windows signing must fail closed when the primary certificate pair is incomplete',
+  );
+  assert.ok(
+    workflow.includes(legacyIncomplete),
+    'Windows signing must fail closed when the legacy certificate pair is incomplete',
+  );
+  assert.ok(
+    workflow.includes(
+      'elif [ "$RUNNER_OS" = \'Windows\' ] && [ -n "$WINDOWS_CONFIG" ]; then',
+    ),
+    'Windows builds must only pass a Tauri config when signing config exists',
+  );
+  assert.ok(
+    workflow.includes(
+      "$signature.Status -eq 'NotSigned' -and -not $env:WINDOWS_CONFIG",
+    ),
+    'Unsigned Windows installers are only allowed when no signing config exists',
+  );
+  assert.ok(
+    workflow.includes('--entitlements src-tauri/Entitlements.plist {} +'),
+    'ripgrep codesign failures must fail the signing step',
+  );
+  assert.match(
+    workflow,
+    /Ripgrep vendor directory not found at \$rg_dir/,
+    'missing ripgrep binaries must be visible in release logs',
+  );
+  assert.match(
+    workflow,
+    /Node\.js runtime binary not found at \$node_bin/,
+    'missing Node.js runtime binary must be visible in release logs',
+  );
+  assert.ok(
+    workflow.indexOf("name: 'Prepare bundled runtime'") <
+      workflow.indexOf("name: 'Sign bundled vendor binaries (macOS)'"),
+    'vendor binaries must be signed after the runtime is prepared',
+  );
+  assert.ok(
+    workflow.indexOf("name: 'Sign bundled vendor binaries (macOS)'") <
+      workflow.indexOf("name: 'Build desktop installers'"),
+    'vendor binaries must be signed before Tauri builds installers',
+  );
 }
 
 function testBootstrapBridgeConfiguration() {
