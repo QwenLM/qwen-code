@@ -109,46 +109,49 @@ describe('auto-skill curator', () => {
     }
   });
 
-  it('ignores auto-skill directories whose names carry control/ANSI bytes', async () => {
-    const now = new Date('2026-07-27T00:00:00.000Z');
-    const old = new Date(now.getTime() - 100 * DAY_MS);
+  it.skipIf(process.platform === 'win32')(
+    'ignores auto-skill directories whose names carry control/ANSI bytes',
+    async () => {
+      const now = new Date('2026-07-27T00:00:00.000Z');
+      const old = new Date(now.getTime() - 100 * DAY_MS);
 
-    // A crafted directory that satisfies the `auto-skill-` prefix and basename
-    // checks and carries a VALID frontmatter name, so only the directory-name
-    // charset guard can exclude it. Its name embeds an ESC control sequence
-    // that the non-interactive `/curator` output would otherwise print verbatim
-    // (terminal control-sequence injection). Keep a clean managed skill so the
-    // enumeration itself is exercised.
-    const maliciousDir = 'auto-skill-[2J[31mevil';
-    const directory = path.join(projectRoot, '.qwen', 'skills', maliciousDir);
-    await fs.mkdir(directory, { recursive: true });
-    const maliciousManifest = path.join(directory, 'SKILL.md');
-    await fs.writeFile(
-      maliciousManifest,
-      [
-        '---',
-        'name: evil',
-        'description: crafted',
-        'source: auto-skill',
-        '---',
-        '',
-        '# Skill',
-      ].join('\n'),
-    );
-    await fs.utimes(maliciousManifest, old, old);
+      // A crafted directory that satisfies the `auto-skill-` prefix and basename
+      // checks and carries a VALID frontmatter name, so only the directory-name
+      // charset guard can exclude it. Its name embeds an ESC control sequence
+      // that the non-interactive `/curator` output would otherwise print verbatim
+      // (terminal control-sequence injection). Keep a clean managed skill so the
+      // enumeration itself is exercised.
+      const maliciousDir = 'auto-skill-[2J[31mevil';
+      const directory = path.join(projectRoot, '.qwen', 'skills', maliciousDir);
+      await fs.mkdir(directory, { recursive: true });
+      const maliciousManifest = path.join(directory, 'SKILL.md');
+      await fs.writeFile(
+        maliciousManifest,
+        [
+          '---',
+          'name: evil',
+          'description: crafted',
+          'source: auto-skill',
+          '---',
+          '',
+          '# Skill',
+        ].join('\n'),
+      );
+      await fs.utimes(maliciousManifest, old, old);
 
-    await writeSkill('auto-skill-clean', 'auto-skill', old);
+      await writeSkill('auto-skill-clean', 'auto-skill', old);
 
-    const status = await getAutoSkillCuratorStatus(projectRoot, now);
+      const status = await getAutoSkillCuratorStatus(projectRoot, now);
 
-    const surfaced = [
-      ...status.active,
-      ...status.stale,
-      ...status.archived,
-    ].map((entry) => entry.directoryName);
-    expect(surfaced).toContain('auto-skill-clean');
-    expect(surfaced).not.toContain(maliciousDir);
-  });
+      const surfaced = [
+        ...status.active,
+        ...status.stale,
+        ...status.archived,
+      ].map((entry) => entry.directoryName);
+      expect(surfaced).toContain('auto-skill-clean');
+      expect(surfaced).not.toContain(maliciousDir);
+    },
+  );
 
   it.skipIf(process.platform === 'win32')(
     'refuses an auto-skill whose manifest is a symlink',
@@ -929,39 +932,42 @@ describe('auto-skill curator', () => {
     expect(status.lastRunAt).toBeDefined();
   });
 
-  it('reports skippedErrors when rename fails transiently', async () => {
-    const now = new Date('2026-07-27T00:00:00.000Z');
-    const old = new Date(now.getTime() - 100 * DAY_MS);
-    const manifest = await writeSkill('auto-skill-err', 'auto-skill', old);
-    await recordAutoSkillUsage(
-      projectRoot,
-      { name: 'err', level: 'project', filePath: manifest },
-      old,
-    );
+  it.skipIf(process.platform === 'win32')(
+    'reports skippedErrors when rename fails transiently',
+    async () => {
+      const now = new Date('2026-07-27T00:00:00.000Z');
+      const old = new Date(now.getTime() - 100 * DAY_MS);
+      const manifest = await writeSkill('auto-skill-err', 'auto-skill', old);
+      await recordAutoSkillUsage(
+        projectRoot,
+        { name: 'err', level: 'project', filePath: manifest },
+        old,
+      );
 
-    // Seed state so the curator proceeds past the seeding branch.
-    await runAutoSkillCurator(projectRoot, {
-      now: new Date(now.getTime() - 95 * DAY_MS),
-    });
+      // Seed state so the curator proceeds past the seeding branch.
+      await runAutoSkillCurator(projectRoot, {
+        now: new Date(now.getTime() - 95 * DAY_MS),
+      });
 
-    // Ensure the archive root exists, then remove write permission from the
-    // skills root so rename (which needs write on the source parent) fails
-    // with EACCES while lstat on the destination still succeeds.
-    const skillsRoot = path.join(projectRoot, '.qwen', 'skills');
-    const archiveRoot = path.join(projectRoot, '.qwen', 'archived-skills');
-    await fs.mkdir(archiveRoot, { recursive: true });
-    await fs.chmod(skillsRoot, 0o555);
+      // Ensure the archive root exists, then remove write permission from the
+      // skills root so rename (which needs write on the source parent) fails
+      // with EACCES while lstat on the destination still succeeds.
+      const skillsRoot = path.join(projectRoot, '.qwen', 'skills');
+      const archiveRoot = path.join(projectRoot, '.qwen', 'archived-skills');
+      await fs.mkdir(archiveRoot, { recursive: true });
+      await fs.chmod(skillsRoot, 0o555);
 
-    try {
-      const result = await runAutoSkillCurator(projectRoot, { now });
-      expect(result.skippedErrors).toContain('auto-skill-err');
-      expect(result.archived).not.toContain('auto-skill-err');
-      const status = await getAutoSkillCuratorStatus(projectRoot, now);
-      expect(status.lastRunAt).toBeDefined();
-    } finally {
-      await fs.chmod(skillsRoot, 0o755);
-    }
-  });
+      try {
+        const result = await runAutoSkillCurator(projectRoot, { now });
+        expect(result.skippedErrors).toContain('auto-skill-err');
+        expect(result.archived).not.toContain('auto-skill-err');
+        const status = await getAutoSkillCuratorStatus(projectRoot, now);
+        expect(status.lastRunAt).toBeDefined();
+      } finally {
+        await fs.chmod(skillsRoot, 0o755);
+      }
+    },
+  );
 
   it('prunes records whose directory exists in neither root', async () => {
     const now = new Date('2026-07-27T00:00:00.000Z');
