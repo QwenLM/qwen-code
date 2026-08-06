@@ -95,12 +95,17 @@ describe('FeishuQuestionCardController presentation', () => {
     expect(JSON.stringify(patchCard.mock.calls[0]?.[1])).not.toContain(
       '已取消',
     );
-    expect(controller.claim(validCancel())).toMatchObject({ kind: 'handled' });
+    expect(controller.claim(validCancel())).toEqual({
+      kind: 'handled',
+      response: {
+        toast: { type: 'warning', content: '该问题已过期或已处理。' },
+      },
+    });
   });
 
   it('unsubscribes when settlement fires during listener registration', async () => {
     const unsubscribe = vi.fn();
-    const { controller } = createHarness();
+    const { controller, patchCard, sendCard } = createHarness();
     const { context } = createContext('request-synchronously-settled', {
       onSettled(listener) {
         listener('cancelled');
@@ -113,6 +118,8 @@ describe('FeishuQuestionCardController presentation', () => {
     });
 
     expect(unsubscribe).toHaveBeenCalledOnce();
+    expect(sendCard).not.toHaveBeenCalled();
+    expect(patchCard).not.toHaveBeenCalled();
   });
 
   it('returns presented only after native delivery provides a message id', async () => {
@@ -456,10 +463,40 @@ describe('FeishuQuestionCardController callbacks', () => {
       'oc_1',
       expect.stringContaining('Region: Which region?'),
     );
-    expect(controller.claim(validCancel('request-patch'))).toMatchObject({
+    expect(controller.claim(validCancel('request-patch'))).toEqual({
       kind: 'handled',
-      response: { toast: expect.any(Object) },
+      response: {
+        toast: { type: 'warning', content: '该问题已过期或已处理。' },
+      },
     });
+  });
+
+  it('includes submitted answers in the patch-failure fallback', async () => {
+    const { controller, patchCard, sendFallback } = createHarness();
+    patchCard.mockResolvedValue(false);
+    const { context, respond } = createContext('request-answer-fallback');
+    await controller.present(context);
+    const claimed = controller.claim(
+      submit('request-answer-fallback', { '0': 'Beijing' }),
+    );
+    if (claimed.kind !== 'handled' || !claimed.execute) {
+      throw new Error('Expected claimed callback execution');
+    }
+
+    await claimed.execute();
+
+    expect(respond).toHaveBeenCalledWith({
+      outcome: { outcome: 'selected', optionId: 'allow-once' },
+      answers: { '0': 'Beijing' },
+    });
+    expect(sendFallback).toHaveBeenCalledWith(
+      'oc_1',
+      expect.stringContaining('已提交'),
+    );
+    expect(sendFallback).toHaveBeenCalledWith(
+      'oc_1',
+      expect.stringContaining('Region: Beijing'),
+    );
   });
 
   it('reports a rejected responder without reopening the request', async () => {
@@ -478,9 +515,11 @@ describe('FeishuQuestionCardController callbacks', () => {
       'question response',
       expect.any(Error),
     );
-    expect(controller.claim(validCancel('request-rejected'))).toMatchObject({
+    expect(controller.claim(validCancel('request-rejected'))).toEqual({
       kind: 'handled',
-      response: { toast: expect.any(Object) },
+      response: {
+        toast: { type: 'warning', content: '该问题已过期或已处理。' },
+      },
     });
   });
 
@@ -617,6 +656,8 @@ describe('FeishuQuestionCardController terminal cleanup', () => {
       'om_two',
       expect.objectContaining({ schema: '2.0' }),
     );
+    expect(JSON.stringify(patchCard.mock.calls[0]?.[1])).toContain('已取消');
+    expect(JSON.stringify(patchCard.mock.calls[1]?.[1])).toContain('已取消');
     expect(
       controller.claim(
         validCancel('request-run-other', {

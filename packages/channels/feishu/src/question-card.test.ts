@@ -114,6 +114,7 @@ describe('Feishu question cards', () => {
 
     expect(submit).toMatchObject({
       tag: 'button',
+      text: { tag: 'plain_text', content: '提交' },
       name: 'qwen_ask_submit_request-1',
       value: {
         action: 'qwen_ask_submit',
@@ -123,6 +124,7 @@ describe('Feishu question cards', () => {
     });
     expect(cancel).toMatchObject({
       tag: 'button',
+      text: { tag: 'plain_text', content: '取消' },
       name: 'qwen_ask_cancel_request-1',
       value: {
         action: 'qwen_ask_cancel',
@@ -268,6 +270,15 @@ describe('Feishu question cards', () => {
         value: { action: 'stop', operation_id: 'request-1' },
       },
     },
+    {
+      action: {
+        name: 'qwen_ask_cancel_wrong-request',
+        value: {
+          action: 'qwen_ask_cancel',
+          operation_id: 'request-1',
+        },
+      },
+    },
   ])('does not claim unrelated or malformed actions', (data) => {
     expect(parseQuestionAction(data)).toEqual({ kind: 'unhandled' });
   });
@@ -295,6 +306,12 @@ describe('Feishu question cards', () => {
     { region: ['Beijing', 'Beijing'], sources: ['Logs'] },
     { region: 'Beijing', sources: ['Logs', 'Logs'] },
     { region: 'Beijing', sources: ['Logs'], extra: 'value' },
+    { region: 'Beijing', sources: [] },
+    { region: 'Beijing', sources: '[]' },
+    { region: 'Beijing', sources: '"Logs"' },
+    { region: 'Beijing', sources: 'not-json' },
+    { region: 'Beijing', sources: '{"a":1}' },
+    { region: 'Beijing', sources: 42 },
   ])('rejects incomplete or invalid form values', (formValue) => {
     expect(parseQuestionAnswers(questions, formValue)).toBeUndefined();
   });

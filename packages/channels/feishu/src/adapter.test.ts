@@ -195,6 +195,37 @@ describe('FeishuChannel', () => {
       await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce());
     });
 
+    it('routes toast-only handled question actions without executing anything', async () => {
+      const channel = createChannel();
+      const response = {
+        toast: { type: 'warning', content: '请完整选择有效答案。' },
+      };
+      const claim = vi.fn().mockReturnValue({ kind: 'handled', response });
+      const onCardAction = vi.fn().mockReturnValue(true);
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        questionCardController: { claim },
+        onCardAction,
+      });
+      const handler = getPrivateMethod<
+        () => Record<string, (data: unknown) => unknown>
+      >(channel, 'buildHandlerMap').call(channel)['card.action.trigger'];
+      const payload = {
+        action: {
+          value: {
+            action: 'qwen_ask_submit',
+            operation_id: 'request-1',
+          },
+        },
+      };
+
+      expect(handler?.(payload)).toBe(response);
+      expect(onCardAction).not.toHaveBeenCalled();
+      // Flush immediates: without the `if (execute)` guard the handler would
+      // call `execute()` on undefined inside setImmediate and surface as an
+      // uncaught exception instead of the warning toast.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
     it('falls through unhandled question actions to Stop handling', () => {
       const channel = createChannel();
       const claim = vi.fn().mockReturnValue({ kind: 'unhandled' });
@@ -966,12 +997,13 @@ describe('FeishuChannel', () => {
           'inbound_1',
           '已完成',
         );
-        expect(cardSessions.get('inbound_1')).toMatchObject({
+        expect(cardSessions.get('inbound_1')).toEqual({
           messageId: '',
           created: false,
           creating: false,
           stopped: false,
           accumulatedText: '',
+          lastUpdateAt: expect.any(Number),
         });
         expect(sessionToInboundMsg.get('session_1')).toBe('inbound_1');
         expect(msgToQuestion.get('inbound_1')).toBe('question?');
@@ -1075,6 +1107,57 @@ describe('FeishuChannel', () => {
         ).toBe('inbound_1');
       },
     );
+
+    it('recovers input-request card finalization with a table-stripped retry', async () => {
+      const channel = createChannel();
+      const updateCard = vi
+        .fn()
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(true);
+      const deleteCard = vi.fn().mockResolvedValue(true);
+      const sendMessage = vi.fn().mockResolvedValue(undefined);
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        updateCard,
+        deleteCard,
+        sendMessage,
+      });
+      getPrivateMethod<Map<string, Record<string, unknown>>>(
+        channel,
+        'cardSessions',
+      ).set('inbound_1', {
+        messageId: 'om_first_output',
+        created: true,
+        creating: false,
+        stopped: false,
+        accumulatedText:
+          'before question\n\n| a | b |\n| --- | --- |\n| 1 | 2 |',
+        lastUpdateAt: Date.now(),
+      });
+      getPrivateMethod<Map<string, string>>(channel, 'sessionToInboundMsg').set(
+        'session_1',
+        'inbound_1',
+      );
+
+      await getPrivateMethod<
+        (
+          chatId: string,
+          sessionId: string,
+          segment: ChannelOutputSegmentContext,
+          reason: ChannelOutputSegmentEndReason,
+        ) => void | Promise<void>
+      >(channel, 'onOutputSegmentEnd').call(
+        channel,
+        'oc_chat_id',
+        'session_1',
+        {} as ChannelOutputSegmentContext,
+        'input_requested',
+      );
+
+      expect(updateCard).toHaveBeenCalledTimes(2);
+      expect(updateCard.mock.calls[1]?.[1]).toContain('(表格内容请查看原文)');
+      expect(deleteCard).not.toHaveBeenCalled();
+      expect(sendMessage).not.toHaveBeenCalled();
+    });
 
     it.each([
       ['while card creation is in flight', { creating: true }],
@@ -2436,8 +2519,9 @@ describe('FeishuChannel', () => {
         'response_boundary',
       );
 
-      expect(cardSessions.get('inbound_1')).toMatchObject({
+      expect(cardSessions.get('inbound_1')).toEqual({
         accumulatedText: '',
+        stopped: false,
         boundaryText: 'segment one',
       });
     });
@@ -3185,6 +3269,8 @@ describe('FeishuChannel', () => {
           updateCard,
           createStreamingCard,
           questionCardController: { present },
+          addReaction: vi.fn().mockResolvedValue(undefined),
+          removeReaction: vi.fn().mockResolvedValue(undefined),
         });
         getPrivateMethod<Map<string, string>>(channel, 'msgToQuestion').set(
           'inbound_1',
@@ -3295,14 +3381,16 @@ describe('FeishuChannel', () => {
     it('surfaces a post-answer failure after the output card was released', async () => {
       const channel = createChannel();
       const sendMessage = vi.fn().mockResolvedValue(undefined);
+      const addReaction = vi.fn().mockResolvedValue(undefined);
+      const removeReaction = vi.fn().mockResolvedValue(undefined);
       Object.assign(channel as unknown as Record<string, unknown>, {
         questionCardController: {
           present: vi.fn().mockResolvedValue({ kind: 'presented' }),
           cancelRun: vi.fn(),
         },
         sendMessage,
-        addReaction: vi.fn().mockResolvedValue(undefined),
-        removeReaction: vi.fn().mockResolvedValue(undefined),
+        addReaction,
+        removeReaction,
       });
       getPrivateMethod<Map<string, string>>(channel, 'msgToQuestion').set(
         'inbound_1',
@@ -3350,6 +3438,8 @@ describe('FeishuChannel', () => {
         'oc_chat_id',
         expect.stringContaining('已失败'),
       );
+      expect(addReaction).toHaveBeenCalledWith('inbound_1', 'OnIt');
+      expect(removeReaction).toHaveBeenCalledWith('inbound_1', 'OnIt');
     });
 
     it('keeps auxiliary maps when an abandoned creation never starts', async () => {
@@ -3360,6 +3450,8 @@ describe('FeishuChannel', () => {
         Object.assign(channel as unknown as Record<string, unknown>, {
           createStreamingCard,
           sendMessage: vi.fn().mockResolvedValue(undefined),
+          addReaction: vi.fn().mockResolvedValue(undefined),
+          removeReaction: vi.fn().mockResolvedValue(undefined),
         });
         const msgToQuestion = getPrivateMethod<Map<string, string>>(
           channel,
@@ -3500,6 +3592,259 @@ describe('FeishuChannel', () => {
       }
     });
 
+    it('blocks the throttled update before the input-request final patch', async () => {
+      vi.useFakeTimers();
+      try {
+        const channel = createChannel();
+        const updateCard = vi.fn().mockResolvedValue(true);
+        Object.assign(channel as unknown as Record<string, unknown>, {
+          updateCard,
+        });
+        const cardSessions = getPrivateMethod<
+          Map<string, Record<string, unknown>>
+        >(channel, 'cardSessions');
+        cardSessions.set('inbound_1', {
+          messageId: 'om_first_output',
+          created: true,
+          creating: false,
+          stopped: false,
+          accumulatedText: 'streamed',
+          lastUpdateAt: Date.now(),
+        });
+        getPrivateMethod<Map<string, string>>(
+          channel,
+          'sessionToInboundMsg',
+        ).set('session_1', 'inbound_1');
+
+        // onResponseChunk arms the throttled streaming update timer.
+        getPrivateMethod<
+          (chatId: string, chunk: string, sessionId: string) => void
+        >(channel, 'onResponseChunk').call(
+          channel,
+          'oc_chat_id',
+          ' more',
+          'session_1',
+        );
+        const state = cardSessions.get('inbound_1');
+        expect(state?.pendingUpdateTimer).not.toBeUndefined();
+
+        await getPrivateMethod<
+          (
+            chatId: string,
+            sessionId: string,
+            segment: ChannelOutputSegmentContext,
+            reason: ChannelOutputSegmentEndReason,
+          ) => void | Promise<void>
+        >(channel, 'onOutputSegmentEnd').call(
+          channel,
+          'oc_chat_id',
+          'session_1',
+          {} as ChannelOutputSegmentContext,
+          'input_requested',
+        );
+
+        expect(state?.finalizing).toBe(true);
+        expect(state?.pendingUpdateTimer).toBeUndefined();
+        expect(updateCard).toHaveBeenCalledTimes(1);
+        await vi.runAllTimersAsync();
+        // The cleared throttled callback must never race the final patch.
+        expect(updateCard).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('deletes a late card when the input request lands mid-creation', async () => {
+      vi.useFakeTimers();
+      try {
+        const channel = createChannel();
+        let resolveCreate!: (value: {
+          messageId: string;
+          success: boolean;
+        }) => void;
+        const createStreamingCard = vi.fn().mockImplementation(
+          () =>
+            new Promise((resolve) => {
+              resolveCreate = resolve;
+            }),
+        );
+        const deleteCard = vi.fn().mockResolvedValue(true);
+        const updateCard = vi.fn().mockResolvedValue(true);
+        Object.assign(channel as unknown as Record<string, unknown>, {
+          createStreamingCard,
+          deleteCard,
+          updateCard,
+          sendMessage: vi.fn().mockResolvedValue(undefined),
+          addReaction: vi.fn().mockResolvedValue(undefined),
+          removeReaction: vi.fn().mockResolvedValue(undefined),
+        });
+        getPrivateMethod<Map<string, string>>(channel, 'msgToQuestion').set(
+          'inbound_1',
+          'question?',
+        );
+        getPrivateMethod<Map<string, string>>(channel, 'msgToSenderName').set(
+          'inbound_1',
+          '@sender',
+        );
+        getPrivateMethod<Map<string, string>>(channel, 'msgToSenderId').set(
+          'inbound_1',
+          'owner-1',
+        );
+
+        getPrivateMethod<
+          (chatId: string, sessionId: string, messageId?: string) => void
+        >(channel, 'onPromptStart').call(
+          channel,
+          'oc_chat_id',
+          'session_1',
+          'inbound_1',
+        );
+        getPrivateMethod<
+          (chatId: string, chunk: string, sessionId: string) => void
+        >(channel, 'onResponseChunk').call(
+          channel,
+          'oc_chat_id',
+          'pre-question text',
+          'session_1',
+        );
+        // Fire the creation timer; the HTTP create stays pending.
+        await vi.advanceTimersByTimeAsync(0);
+        expect(createStreamingCard).toHaveBeenCalledOnce();
+
+        await getPrivateMethod<
+          (
+            chatId: string,
+            sessionId: string,
+            segment: ChannelOutputSegmentContext,
+            reason: ChannelOutputSegmentEndReason,
+          ) => void | Promise<void>
+        >(channel, 'onOutputSegmentEnd').call(
+          channel,
+          'oc_chat_id',
+          'session_1',
+          {} as ChannelOutputSegmentContext,
+          'input_requested',
+        );
+
+        // The late creation resolves after the release.
+        resolveCreate({ messageId: 'om_late', success: true });
+        await vi.advanceTimersByTimeAsync(0);
+
+        expect(deleteCard).toHaveBeenCalledWith('om_late');
+        expect(updateCard).not.toHaveBeenCalled();
+        expect(
+          getPrivateMethod<Map<string, string>>(channel, 'msgToQuestion').get(
+            'inbound_1',
+          ),
+        ).toBe('question?');
+        expect(
+          getPrivateMethod<Map<string, string>>(channel, 'msgToSenderName').get(
+            'inbound_1',
+          ),
+        ).toBe('@sender');
+        expect(
+          getPrivateMethod<Map<string, string>>(channel, 'msgToSenderId').get(
+            'inbound_1',
+          ),
+        ).toBe('owner-1');
+        expect(
+          getPrivateMethod<Map<string, string>>(
+            channel,
+            'sessionToInboundMsg',
+          ).get('session_1'),
+        ).toBe('inbound_1');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('skips cleanup when an abandoned creation timer fires late', async () => {
+      vi.useFakeTimers();
+      try {
+        const channel = createChannel();
+        const createStreamingCard = vi.fn();
+        Object.assign(channel as unknown as Record<string, unknown>, {
+          createStreamingCard,
+          sendMessage: vi.fn().mockResolvedValue(undefined),
+          addReaction: vi.fn().mockResolvedValue(undefined),
+          removeReaction: vi.fn().mockResolvedValue(undefined),
+        });
+        getPrivateMethod<Map<string, string>>(channel, 'msgToQuestion').set(
+          'inbound_1',
+          'question?',
+        );
+        getPrivateMethod<Map<string, string>>(channel, 'msgToSenderName').set(
+          'inbound_1',
+          '@sender',
+        );
+        getPrivateMethod<Map<string, string>>(channel, 'msgToSenderId').set(
+          'inbound_1',
+          'owner-1',
+        );
+
+        getPrivateMethod<
+          (chatId: string, sessionId: string, messageId?: string) => void
+        >(channel, 'onPromptStart').call(
+          channel,
+          'oc_chat_id',
+          'session_1',
+          'inbound_1',
+        );
+        getPrivateMethod<
+          (chatId: string, chunk: string, sessionId: string) => void
+        >(channel, 'onResponseChunk').call(
+          channel,
+          'oc_chat_id',
+          'pre-question text',
+          'session_1',
+        );
+
+        await getPrivateMethod<
+          (
+            chatId: string,
+            sessionId: string,
+            segment: ChannelOutputSegmentContext,
+            reason: ChannelOutputSegmentEndReason,
+          ) => void | Promise<void>
+        >(channel, 'onOutputSegmentEnd').call(
+          channel,
+          'oc_chat_id',
+          'session_1',
+          {} as ChannelOutputSegmentContext,
+          'input_requested',
+        );
+
+        // The pending creation timer fires after the abandoned mark; the
+        // guard must skip cleanupCard so the auxiliary maps survive.
+        await vi.advanceTimersByTimeAsync(0);
+
+        expect(createStreamingCard).not.toHaveBeenCalled();
+        expect(
+          getPrivateMethod<Map<string, string>>(channel, 'msgToQuestion').get(
+            'inbound_1',
+          ),
+        ).toBe('question?');
+        expect(
+          getPrivateMethod<Map<string, string>>(channel, 'msgToSenderName').get(
+            'inbound_1',
+          ),
+        ).toBe('@sender');
+        expect(
+          getPrivateMethod<Map<string, string>>(channel, 'msgToSenderId').get(
+            'inbound_1',
+          ),
+        ).toBe('owner-1');
+        expect(
+          getPrivateMethod<Map<string, string>>(
+            channel,
+            'sessionToInboundMsg',
+          ).get('session_1'),
+        ).toBe('inbound_1');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('truncates oversized input-request card finalization', async () => {
       const channel = createChannel();
       const updateCard = vi.fn().mockResolvedValue(true);
@@ -3514,7 +3859,56 @@ describe('FeishuChannel', () => {
         created: true,
         creating: false,
         stopped: false,
-        accumulatedText: 'x'.repeat(21_000),
+        accumulatedText: `HEAD${'x'.repeat(21_000)}TAIL`,
+        lastUpdateAt: Date.now(),
+      });
+      getPrivateMethod<Map<string, string>>(channel, 'sessionToInboundMsg').set(
+        'session_1',
+        'inbound_1',
+      );
+
+      await getPrivateMethod<
+        (
+          chatId: string,
+          sessionId: string,
+          segment: ChannelOutputSegmentContext,
+          reason: ChannelOutputSegmentEndReason,
+        ) => void | Promise<void>
+      >(channel, 'onOutputSegmentEnd').call(
+        channel,
+        'oc_chat_id',
+        'session_1',
+        {} as ChannelOutputSegmentContext,
+        'input_requested',
+      );
+
+      const finalText = updateCard.mock.calls[0]?.[1] as string;
+      const marker = '\n\n_(内容过长，已截断早期内容)_';
+      expect(finalText.length).toBeLessThanOrEqual(20_000);
+      expect(finalText.endsWith(marker)).toBe(true);
+      // Truncation keeps the tail: the head marker is dropped, the tail
+      // marker survives immediately before the truncation note.
+      expect(finalText).not.toContain('HEAD');
+      expect(finalText.slice(0, -marker.length).endsWith('TAIL')).toBe(true);
+    });
+
+    it('keeps the card cap when fence rebalancing prepends a fence', async () => {
+      const channel = createChannel();
+      const updateCard = vi.fn().mockResolvedValue(true);
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        updateCard,
+      });
+      getPrivateMethod<Map<string, Record<string, unknown>>>(
+        channel,
+        'cardSessions',
+      ).set('inbound_1', {
+        messageId: 'om_first_output',
+        created: true,
+        creating: false,
+        stopped: false,
+        // Oversized body whose kept tail carries a single (odd) code fence,
+        // forcing the '```\n' rebalance prepend.
+        accumulatedText: 'x'.repeat(20_500) + '\n```\n' + 'y'.repeat(500),
         lastUpdateAt: Date.now(),
       });
       getPrivateMethod<Map<string, string>>(channel, 'sessionToInboundMsg').set(
@@ -3539,6 +3933,7 @@ describe('FeishuChannel', () => {
 
       const finalText = updateCard.mock.calls[0]?.[1] as string;
       expect(finalText.length).toBeLessThanOrEqual(20_000);
+      expect(finalText.startsWith('```\n')).toBe(true);
       expect(finalText).toContain('内容过长，已截断早期内容');
     });
   });
