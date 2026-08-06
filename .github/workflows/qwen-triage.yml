@@ -576,6 +576,7 @@ jobs:
                      elif $running != null then $running.id
                      else (last | .id) // empty end'
             )" || EXISTING_ID=''
+            echo "Claim marker selection: '${EXISTING_ID:-new post}'" >&2
             if [ -n "$EXISTING_ID" ]; then
               gh api --method PATCH \
                 "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING_ID" \

@@ -69,6 +69,76 @@ function job(name) {
     : workflow.slice(start, start + 1 + nextJob);
 }
 
+// Executed-harness factory shared by the claim and finalize lifecycle tests:
+// a stubbed `gh` on PATH with failure-injection arms, the real step script
+// run under GitHub's exact shell flags, and capture of the body/call the
+// stub saw. GitHub runs `shell: bash` as `bash --noprofile --norc -eo
+// pipefail {0}`, and a step's own `set -uo pipefail` does not turn `-e`
+// back off — match that, or an unguarded failing command kills the real
+// step in production while the harness stays green. One shared copy keeps
+// that fidelity contract in one place: the two pasted copies already
+// diverged once (only the finalize stub had the failure arms), and a later
+// fix made on only one copy would silently degrade exactly one test. The
+// arms stay inert unless a scenario sets GH_STUB_FAIL_LIST / GH_STUB_FAIL_WRITE.
+function makeGhHarness(label) {
+  const dir = mkdtempSync(join(tmpdir(), `triage-${label}-`));
+  const commentsFile = join(dir, 'comments.json');
+  const bodyOut = join(dir, 'body.md');
+  const callOut = join(dir, 'call.txt');
+  writeFileSync(
+    join(dir, 'gh'),
+    [
+      '#!/usr/bin/env bash',
+      'body=""',
+      'for a in "$@"; do case "$a" in body=*) body="${a#body=}";; esac; done',
+      'if [ -n "$body" ]; then',
+      '  printf "%s" "$body" > "$GH_STUB_OUT"',
+      '  printf "%s\\n" "$*" > "$GH_STUB_CALL"',
+      'fi',
+      'case "$*" in',
+      "  'api user --jq .login') echo qwen-code-ci-bot ;;",
+      '  *--paginate*) [ -n "${GH_STUB_FAIL_LIST:-}" ] && exit 1; cat "$GH_STUB_COMMENTS" ;;',
+      '  *) [ -n "${GH_STUB_FAIL_WRITE:-}" ] && exit 1 ;;',
+      'esac',
+      'exit 0',
+    ].join('\n'),
+    { mode: 0o755 },
+  );
+  const RUN_URL = 'https://github.com/QwenLM/qwen-code/actions/runs/77';
+  const bashArgs = ['--noprofile', '--norc', '-eo', 'pipefail', '-c'];
+  const run = (script, env) => {
+    rmSync(bodyOut, { force: true });
+    rmSync(callOut, { force: true });
+    const proc = spawnSync('bash', [...bashArgs, script], {
+      env: {
+        ...process.env,
+        PATH: `${dir}:${process.env.PATH}`,
+        GH_TOKEN: 'x',
+        GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+        NUMBER: '7999',
+        RUN_URL,
+        GH_STUB_OUT: bodyOut,
+        GH_STUB_CALL: callOut,
+        GH_STUB_COMMENTS: commentsFile,
+        ...env,
+      },
+      encoding: 'utf8',
+    });
+    expect(proc.status, proc.stderr).toBe(0);
+    return {
+      body: existsSync(bodyOut) ? readFileSync(bodyOut, 'utf8') : null,
+      call: existsSync(callOut) ? readFileSync(callOut, 'utf8') : null,
+      out: `${proc.stdout}${proc.stderr}`,
+    };
+  };
+  return {
+    commentsFile,
+    run,
+    cleanup: () => rmSync(dir, { recursive: true, force: true }),
+    RUN_URL,
+  };
+}
+
 // Spawns the real proxy against a streaming upstream (20 chunks, 200 ms
 // apart = 4 s total) and a stalling upstream (headers + one chunk, then
 // silence), with the proxy's 120 s watchdog shortened to 1.5 s. The healthy
@@ -528,6 +598,10 @@ describe('qwen-triage tmux workflow', () => {
     // contains($runurl + ")") keys on exactly this embedding.
     expect(statusStep).toContain('[watch live progress]($RUN_URL)');
     expect(statusStep).toContain('[查看实时进度]($RUN_URL)');
+    // The finalize side of the same coupling: its terminal wordings must
+    // keep $RUN_URL adjacent to the link's closing ')', or a re-run's
+    // attempt-1 tombstone classifies as foreign and re-runs stack comments.
+    expect(finalizeStep).toContain('[view run]($RUN_URL)');
     expect(finalizeStep).toContain('--method PATCH');
     expect(finalizeStep).toContain('Qwen Triage finished');
     expect(finalizeStep).toContain('ended early');
@@ -546,65 +620,8 @@ describe('qwen-triage tmux workflow', () => {
         .replace(/^ {10}/gm, '');
       expect(script).toBeTruthy();
 
-      const dir = mkdtempSync(join(tmpdir(), 'triage-finalize-'));
-      const commentsFile = join(dir, 'comments.json');
-      const bodyOut = join(dir, 'body.md');
-      const callOut = join(dir, 'call.txt');
+      const { commentsFile, run, cleanup, RUN_URL } = makeGhHarness('finalize');
       try {
-        writeFileSync(
-          join(dir, 'gh'),
-          [
-            '#!/usr/bin/env bash',
-            'body=""',
-            'for a in "$@"; do case "$a" in body=*) body="${a#body=}";; esac; done',
-            'if [ -n "$body" ]; then',
-            '  printf "%s" "$body" > "$GH_STUB_OUT"',
-            '  printf "%s\n" "$*" > "$GH_STUB_CALL"',
-            'fi',
-            'case "$*" in',
-            "  'api user --jq .login') echo qwen-code-ci-bot ;;",
-            '  *--paginate*) [ -n "${GH_STUB_FAIL_LIST:-}" ] && exit 1; cat "$GH_STUB_COMMENTS" ;;',
-            '  *) [ -n "${GH_STUB_FAIL_WRITE:-}" ] && exit 1 ;;',
-            'esac',
-            'exit 0',
-          ].join('\n'),
-          { mode: 0o755 },
-        );
-
-        const RUN_URL = 'https://github.com/QwenLM/qwen-code/actions/runs/77';
-        // GitHub runs `shell: bash` as `bash --noprofile --norc -eo pipefail
-        // {0}`, and the step's own `set -uo pipefail` does not turn `-e` back
-        // off. Match that, or an unguarded failing command kills the real
-        // step in production while this harness stays green.
-        const bashArgs = ['--noprofile', '--norc', '-eo', 'pipefail', '-c'];
-        const run = (env) => {
-          rmSync(bodyOut, { force: true });
-          rmSync(callOut, { force: true });
-          const proc = spawnSync('bash', [...bashArgs, script], {
-            env: {
-              ...process.env,
-              PATH: `${dir}:${process.env.PATH}`,
-              GH_TOKEN: 'x',
-              GITHUB_REPOSITORY: 'QwenLM/qwen-code',
-              NUMBER: '7999',
-              RUN_URL,
-              TRIAGE_OUTCOME: 'success',
-              JOB_STATUS: 'success',
-              GH_STUB_OUT: bodyOut,
-              GH_STUB_CALL: callOut,
-              GH_STUB_COMMENTS: commentsFile,
-              ...env,
-            },
-            encoding: 'utf8',
-          });
-          expect(proc.status, proc.stderr).toBe(0);
-          return {
-            body: existsSync(bodyOut) ? readFileSync(bodyOut, 'utf8') : null,
-            call: existsSync(callOut) ? readFileSync(callOut, 'utf8') : null,
-            out: `${proc.stdout}${proc.stderr}`,
-          };
-        };
-
         // Which branch posts which body. No lifecycle comment exists yet, so
         // each run POSTs its own and the composer is what is under test.
         writeFileSync(commentsFile, '[]');
@@ -631,7 +648,7 @@ describe('qwen-triage tmux workflow', () => {
           [{ TRIAGE_OUTCOME: 'skipped', JOB_STATUS: 'failure' }, 'early'],
         ];
         for (const [env, expected] of combos) {
-          const { body, call, out } = run(env);
+          const { body, call, out } = run(script, env);
           expect(call, 'POSTed, not PATCHed').not.toContain('--method PATCH');
           expect(call).toContain('issues/7999/comments');
           // The empty thread is its OWN state, not foreign: nothing may log
@@ -668,7 +685,7 @@ describe('qwen-triage tmux workflow', () => {
             },
           ]),
         );
-        const foreign = run({
+        const foreign = run(script, {
           TRIAGE_OUTCOME: 'skipped',
           JOB_STATUS: 'cancelled',
         });
@@ -690,7 +707,7 @@ describe('qwen-triage tmux workflow', () => {
             },
           ]),
         );
-        const prefixed = run({
+        const prefixed = run(script, {
           TRIAGE_OUTCOME: 'skipped',
           JOB_STATUS: 'cancelled',
         });
@@ -713,7 +730,7 @@ describe('qwen-triage tmux workflow', () => {
             },
           ]),
         );
-        const legacy = run({
+        const legacy = run(script, {
           TRIAGE_OUTCOME: 'skipped',
           JOB_STATUS: 'cancelled',
         });
@@ -739,7 +756,7 @@ describe('qwen-triage tmux workflow', () => {
             },
           ]),
         );
-        const both = run({
+        const both = run(script, {
           TRIAGE_OUTCOME: 'failure',
           JOB_STATUS: 'cancelled',
         });
@@ -764,7 +781,7 @@ describe('qwen-triage tmux workflow', () => {
             },
           ]),
         );
-        const masked = run({
+        const masked = run(script, {
           TRIAGE_OUTCOME: 'failure',
           JOB_STATUS: 'cancelled',
         });
@@ -790,7 +807,7 @@ describe('qwen-triage tmux workflow', () => {
             },
           ]),
         );
-        const rerun = run({
+        const rerun = run(script, {
           TRIAGE_OUTCOME: 'failure',
           JOB_STATUS: 'cancelled',
         });
@@ -801,7 +818,7 @@ describe('qwen-triage tmux workflow', () => {
         // An unreadable comment list is neither "no comment" nor "foreign":
         // POSTing would add a duplicate lifecycle comment while the real
         // claim stays at "running". Warn and skip instead.
-        const unreadable = run({
+        const unreadable = run(script, {
           TRIAGE_OUTCOME: 'failure',
           JOB_STATUS: 'cancelled',
           GH_STUB_FAIL_LIST: '1',
@@ -822,7 +839,7 @@ describe('qwen-triage tmux workflow', () => {
             },
           ]),
         );
-        const own = run({
+        const own = run(script, {
           TRIAGE_OUTCOME: 'failure',
           JOB_STATUS: 'cancelled',
         });
@@ -837,7 +854,7 @@ describe('qwen-triage tmux workflow', () => {
         // if: always(). These scenarios are all that notice a deleted
         // `|| echo` guard — one per write arm. `run` asserts exit 0.
         writeFileSync(commentsFile, '[]');
-        const postFailed = run({
+        const postFailed = run(script, {
           TRIAGE_OUTCOME: 'success',
           JOB_STATUS: 'success',
           GH_STUB_FAIL_WRITE: '1',
@@ -856,7 +873,7 @@ describe('qwen-triage tmux workflow', () => {
             },
           ]),
         );
-        const foreignPostFailed = run({
+        const foreignPostFailed = run(script, {
           TRIAGE_OUTCOME: 'skipped',
           JOB_STATUS: 'cancelled',
           GH_STUB_FAIL_WRITE: '1',
@@ -878,7 +895,7 @@ describe('qwen-triage tmux workflow', () => {
             },
           ]),
         );
-        const patchFailed = run({
+        const patchFailed = run(script, {
           TRIAGE_OUTCOME: 'failure',
           JOB_STATUS: 'cancelled',
           GH_STUB_FAIL_WRITE: '1',
@@ -887,7 +904,7 @@ describe('qwen-triage tmux workflow', () => {
           'Failed to finalize triage status comment; continuing.',
         );
       } finally {
-        rmSync(dir, { recursive: true, force: true });
+        cleanup();
       }
     },
   );
@@ -909,57 +926,8 @@ describe('qwen-triage tmux workflow', () => {
         .replace(/^ {10}/gm, '');
       expect(script).toBeTruthy();
 
-      const dir = mkdtempSync(join(tmpdir(), 'triage-claim-'));
-      const commentsFile = join(dir, 'comments.json');
-      const bodyOut = join(dir, 'body.md');
-      const callOut = join(dir, 'call.txt');
+      const { commentsFile, run, cleanup, RUN_URL } = makeGhHarness('claim');
       try {
-        writeFileSync(
-          join(dir, 'gh'),
-          [
-            '#!/usr/bin/env bash',
-            'body=""',
-            'for a in "$@"; do case "$a" in body=*) body="${a#body=}";; esac; done',
-            'if [ -n "$body" ]; then',
-            '  printf "%s" "$body" > "$GH_STUB_OUT"',
-            '  printf "%s\n" "$*" > "$GH_STUB_CALL"',
-            'fi',
-            'case "$*" in',
-            "  'api user --jq .login') echo qwen-code-ci-bot ;;",
-            '  *--paginate*) cat "$GH_STUB_COMMENTS" ;;',
-            'esac',
-            'exit 0',
-          ].join('\n'),
-          { mode: 0o755 },
-        );
-
-        const RUN_URL = 'https://github.com/QwenLM/qwen-code/actions/runs/77';
-        // Same shell flags as the real step — see the finalize harness.
-        const bashArgs = ['--noprofile', '--norc', '-eo', 'pipefail', '-c'];
-        const run = (env) => {
-          rmSync(bodyOut, { force: true });
-          rmSync(callOut, { force: true });
-          const proc = spawnSync('bash', [...bashArgs, script], {
-            env: {
-              ...process.env,
-              PATH: `${dir}:${process.env.PATH}`,
-              GH_TOKEN: 'x',
-              GITHUB_REPOSITORY: 'QwenLM/qwen-code',
-              NUMBER: '7999',
-              RUN_URL,
-              GH_STUB_OUT: bodyOut,
-              GH_STUB_CALL: callOut,
-              GH_STUB_COMMENTS: commentsFile,
-              ...env,
-            },
-            encoding: 'utf8',
-          });
-          expect(proc.status, proc.stderr).toBe(0);
-          return {
-            body: existsSync(bodyOut) ? readFileSync(bodyOut, 'utf8') : null,
-            call: existsSync(callOut) ? readFileSync(callOut, 'utf8') : null,
-          };
-        };
         const marker = '<!-- qwen-triage lifecycle -->';
         const comment = (id, body) => ({
           id,
@@ -977,12 +945,17 @@ describe('qwen-triage tmux workflow', () => {
         const RUNS_123 = 'https://github.com/QwenLM/qwen-code/actions/runs/123';
         const RUNS_456 = 'https://github.com/QwenLM/qwen-code/actions/runs/456';
 
-        // No marker yet: POST the running claim.
+        // No marker yet: POST the running claim. The body must START with
+        // the lifecycle marker — every selector in both steps is gated on
+        // startswith($m), so a composer that drops the marker posts a claim
+        // nothing ever recognizes or flips.
         writeFileSync(commentsFile, '[]');
-        const fresh = run({});
+        const fresh = run(script, {});
         expect(fresh.call).toContain('issues/7999/comments');
         expect(fresh.call).not.toContain('--method PATCH');
         expect(fresh.body).toContain('Qwen Triage is running');
+        expect(fresh.body.startsWith(marker), fresh.body).toBe(true);
+        expect(fresh.out).toContain("Claim marker selection: 'new post'");
 
         // A re-run keeps github.run_id, so its attempt-1 marker is OWN:
         // rewrite it instead of the newest (foreign) slot.
@@ -993,10 +966,26 @@ describe('qwen-triage tmux workflow', () => {
             comment(45, tombstone(RUN_URL)),
           ]),
         );
-        const own = run({});
+        const own = run(script, {});
         expect(own.call).toContain('--method PATCH');
         expect(own.call).toContain('issues/comments/45');
         expect(own.call).not.toContain('issues/comments/42');
+
+        // Two own markers for one run — the attempt-1 tombstone and the
+        // attempt-2 claim both embed this run's URL: the LAST own marker
+        // must win, or a `first` mutant PATCHes the dead tombstone back to
+        // running while finalize keeps picking the last own.
+        writeFileSync(
+          commentsFile,
+          JSON.stringify([
+            comment(45, tombstone(RUN_URL)),
+            comment(46, running(RUN_URL)),
+          ]),
+        );
+        const rerun = run(script, {});
+        expect(rerun.call).toContain('--method PATCH');
+        expect(rerun.call).toContain('issues/comments/46');
+        expect(rerun.call).not.toContain('issues/comments/45');
 
         // An own marker beats a stranded running claim from another run.
         writeFileSync(
@@ -1006,7 +995,7 @@ describe('qwen-triage tmux workflow', () => {
             comment(45, tombstone(RUN_URL)),
           ]),
         );
-        const ownBeatsStranded = run({});
+        const ownBeatsStranded = run(script, {});
         expect(ownBeatsStranded.call).toContain('issues/comments/45');
         expect(ownBeatsStranded.call).not.toContain('issues/comments/43');
 
@@ -1019,9 +1008,10 @@ describe('qwen-triage tmux workflow', () => {
             comment(44, tombstone(RUNS_55)),
           ]),
         );
-        const reclaim = run({});
+        const reclaim = run(script, {});
         expect(reclaim.call).toContain('issues/comments/43');
         expect(reclaim.call).not.toContain('issues/comments/44');
+        expect(reclaim.out).toContain("Claim marker selection: '43'");
 
         // Two stranded running claims: the OLDEST first, so successive runs
         // sweep them one per claim instead of ping-ponging on the newest.
@@ -1032,7 +1022,7 @@ describe('qwen-triage tmux workflow', () => {
             comment(44, running(RUNS_456)),
           ]),
         );
-        const oldest = run({});
+        const oldest = run(script, {});
         expect(oldest.call).toContain('issues/comments/43');
         expect(oldest.call).not.toContain('issues/comments/44');
 
@@ -1045,11 +1035,54 @@ describe('qwen-triage tmux workflow', () => {
             comment(44, tombstone(RUNS_456)),
           ]),
         );
-        const newest = run({});
+        const newest = run(script, {});
         expect(newest.call).toContain('issues/comments/44');
         expect(newest.call).not.toContain('issues/comments/42');
+
+        // A legacy marker body is still a reusable slot: dropping
+        // startswith($legacy) from the claim jq loses single-slot healing
+        // for pre-migration threads and survives the suite.
+        writeFileSync(
+          commentsFile,
+          JSON.stringify([
+            comment(
+              41,
+              '<!-- qwen-triage stage=status -->\n\nlegacy status wording',
+            ),
+          ]),
+        );
+        const legacy = run(script, {});
+        expect(legacy.call).toContain('--method PATCH');
+        expect(legacy.call).toContain('issues/comments/41');
+
+        // A failing write must not fail the step: under GitHub's `-eo
+        // pipefail` an unguarded POST/PATCH turns a transient comments-API
+        // blip into a red job BEFORE 'Run Qwen Triage' starts. These
+        // scenarios are all that notice a deleted `|| echo` guard — one per
+        // write arm; `run` asserts exit 0.
+        writeFileSync(commentsFile, '[]');
+        const postFailed = run(script, { GH_STUB_FAIL_WRITE: '1' });
+        expect(postFailed.out).toContain(
+          'Failed to post triage status comment; continuing.',
+        );
+
+        writeFileSync(
+          commentsFile,
+          JSON.stringify([comment(45, tombstone(RUN_URL))]),
+        );
+        const patchFailed = run(script, { GH_STUB_FAIL_WRITE: '1' });
+        expect(patchFailed.out).toContain(
+          'Failed to update triage status comment; continuing.',
+        );
+
+        // An unreadable comment list is best-effort too: `|| EXISTING_ID=''`
+        // falls back to a fresh claim post; deleting the guard kills the
+        // step on a transient blip.
+        const listFailed = run(script, { GH_STUB_FAIL_LIST: '1' });
+        expect(listFailed.call).toContain('issues/7999/comments');
+        expect(listFailed.call).not.toContain('--method PATCH');
       } finally {
-        rmSync(dir, { recursive: true, force: true });
+        cleanup();
       }
     },
   );

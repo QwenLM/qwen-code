@@ -205,6 +205,100 @@ describe('qwen-triage-finalize workflow', () => {
     );
     expect(script).toContain('sort -un');
   });
+
+  // update_status is the third writer of the lifecycle marker. It must
+  // never PATCH a live running claim while a calm marker exists:
+  // overwriting the claim erases the run URL that run's finalize keys on,
+  // so that run posts a second comment while the overwritten one — never
+  // the newest again, and no longer "running" for the claim step's reclaim
+  // — strands forever. Execute the real selector.
+  it.skipIf(spawnSync('jq', ['--version']).status !== 0)(
+    'flips the newest calm status marker, never a live running claim',
+    () => {
+      const program = script.match(
+        /jq -r --arg bot "\$BOT_LOGIN" --arg m "\$STATUS_MARKER" --arg legacy "\$LEGACY_STATUS_MARKER" \\\n\s*'([\s\S]*?)' \\\n/,
+      )?.[1];
+      expect(program).toBeTruthy();
+
+      const dir = mkdtempSync(join(tmpdir(), 'finalize-status-select-'));
+      const progFile = join(dir, 'select.jq');
+      writeFileSync(progFile, program);
+      const marker = '<!-- qwen-triage lifecycle -->';
+      const running = (url) =>
+        `${marker}\n\n🔄 **Qwen Triage is running** — [watch live progress](${url}).`;
+      const calm = (runId) =>
+        `${marker}\n\n✅ earlier verdict [view run](https://github.com/QwenLM/qwen-code/actions/runs/${runId})`;
+      const comment = (id, body, login = 'qwen-code-ci-bot') => ({
+        id,
+        user: { login },
+        body,
+      });
+      const selectId = (comments) => {
+        const r = spawnSync(
+          'jq',
+          [
+            '-r',
+            '--arg',
+            'bot',
+            'qwen-code-ci-bot',
+            '--arg',
+            'm',
+            marker,
+            '--arg',
+            'legacy',
+            '<!-- qwen-triage stage=status -->',
+            '-f',
+            progFile,
+          ],
+          { input: JSON.stringify(comments), encoding: 'utf8' },
+        );
+        expect(r.status, r.stderr).toBe(0);
+        return r.stdout.trim();
+      };
+      const RUNS_77 = 'https://github.com/QwenLM/qwen-code/actions/runs/77';
+      const RUNS_88 = 'https://github.com/QwenLM/qwen-code/actions/runs/88';
+
+      try {
+        // A live running claim is skipped while any calm marker exists.
+        expect(
+          selectId([comment(41, calm(55)), comment(42, running(RUNS_77))]),
+        ).toBe('41');
+        // The newest calm marker wins; a newer running claim still skipped.
+        expect(
+          selectId([
+            comment(41, calm(55)),
+            comment(44, calm(66)),
+            comment(45, running(RUNS_77)),
+          ]),
+        ).toBe('44');
+        // Only running markers: fall back to the base newest-wins slot.
+        expect(
+          selectId([
+            comment(43, running(RUNS_77)),
+            comment(44, running(RUNS_88)),
+          ]),
+        ).toBe('44');
+        // A legacy marker body is calm — the only slot that thread has.
+        expect(
+          selectId([
+            comment(
+              40,
+              '<!-- qwen-triage stage=status -->\n\nlegacy status wording',
+            ),
+            comment(46, running(RUNS_77)),
+          ]),
+        ).toBe('40');
+        // No marker at all: nothing to flip.
+        expect(selectId([])).toBe('');
+        // Author filter and startswith still hold: a human's comment or a
+        // body merely quoting the marker never qualifies.
+        expect(selectId([comment(47, running(RUNS_77), 'a-human')])).toBe('');
+        expect(selectId([comment(48, `quoted ${calm(55)}`)])).toBe('');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 describe('qwen-triage-finalize helpers', () => {
