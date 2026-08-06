@@ -241,6 +241,167 @@ describe('runStartupRecoveryOnce', () => {
     await expect(runStartupRecoveryOnce(store)).resolves.toBeUndefined();
   });
 
+  describe('staging sweep (storage design §6.1: uncommitted work is deleted)', () => {
+    it('deletes every staging entry, including nested artifact trees and stray files', async () => {
+      const stagingDir = store.getStagingDir();
+      const invocationDir = path.join(stagingDir, '0123456789abcdef');
+      await fs.mkdir(path.join(invocationDir, 'nested'), { recursive: true });
+      await fs.writeFile(
+        path.join(invocationDir, 'nested', 'artifact.webp'),
+        'half-written',
+      );
+      await fs.writeFile(path.join(stagingDir, 'stray.tmp'), 'stray');
+
+      await runStartupRecoveryOnce(store);
+
+      await expect(fs.readdir(stagingDir)).resolves.toEqual([]);
+    });
+
+    it('a symlinked staging ROOT is never swept', async () => {
+      const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'omni-stage-'));
+      const victim = path.join(outside, 'victim.bin');
+      await fs.writeFile(victim, 'external');
+      try {
+        const stagingDir = store.getStagingDir();
+        await fs.rm(stagingDir, { recursive: true, force: true });
+        await fs.symlink(outside, stagingDir);
+
+        await runStartupRecoveryOnce(store);
+
+        await expect(fs.readFile(victim, 'utf8')).resolves.toBe('external');
+        expect((await fs.lstat(stagingDir)).isSymbolicLink()).toBe(true);
+      } finally {
+        await fs.rm(outside, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('quarantine sweep (retention window + size budget)', () => {
+    async function makeQuarantineEntry(
+      name: string,
+      content: string,
+      ageMs: number,
+    ): Promise<string> {
+      const dir = path.join(store.getQuarantineDir(), name);
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(path.join(dir, 'artifact.bin'), content);
+      await fs.writeFile(path.join(dir, 'reason.json'), '{}');
+      const when = new Date(Date.now() - ageMs);
+      await fs.utimes(dir, when, when);
+      return dir;
+    }
+
+    it('removes entries past the retention window, keeps younger ones', async () => {
+      const expired = await makeQuarantineEntry(
+        'aaaaaaaaaaaaaaaa',
+        'old',
+        8 * 86_400_000,
+      );
+      const fresh = await makeQuarantineEntry(
+        'bbbbbbbbbbbbbbbb',
+        'new',
+        1 * 86_400_000,
+      );
+
+      await runStartupRecoveryOnce(store, undefined, {
+        quarantineRetentionDays: 7,
+      });
+
+      await expect(fs.lstat(expired)).rejects.toThrow();
+      await expect(fs.lstat(fresh)).resolves.toBeDefined();
+    });
+
+    it('removes oldest entries first when over the size budget', async () => {
+      const oldest = await makeQuarantineEntry(
+        'aaaaaaaaaaaaaaaa',
+        'x'.repeat(100),
+        3 * 3600_000,
+      );
+      const middle = await makeQuarantineEntry(
+        'bbbbbbbbbbbbbbbb',
+        'y'.repeat(100),
+        2 * 3600_000,
+      );
+      const newest = await makeQuarantineEntry(
+        'cccccccccccccccc',
+        'z'.repeat(100),
+        1 * 3600_000,
+      );
+
+      // ~300 bytes of artifacts (+ reason.json) against a 250-byte budget:
+      // dropping the single oldest entry brings the area back under.
+      await runStartupRecoveryOnce(store, undefined, {
+        quarantineMaxBytes: 250,
+      });
+
+      await expect(fs.lstat(oldest)).rejects.toThrow();
+      await expect(fs.lstat(middle)).resolves.toBeDefined();
+      await expect(fs.lstat(newest)).resolves.toBeDefined();
+    });
+
+    it('keeps everything when under both retention and budget', async () => {
+      const a = await makeQuarantineEntry('aaaaaaaaaaaaaaaa', 'a', 3600_000);
+      const b = await makeQuarantineEntry('bbbbbbbbbbbbbbbb', 'b', 7200_000);
+
+      await runStartupRecoveryOnce(store);
+
+      await expect(fs.lstat(a)).resolves.toBeDefined();
+      await expect(fs.lstat(b)).resolves.toBeDefined();
+    });
+
+    it('a symlinked quarantine ENTRY is never traversed, sized, or deleted', async () => {
+      const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'omni-quar-'));
+      const victim = path.join(outside, 'victim.bin');
+      await fs.writeFile(victim, 'x'.repeat(10_000));
+      const old = new Date(Date.now() - 30 * 86_400_000);
+      await fs.utimes(outside, old, old);
+      await fs.utimes(victim, old, old);
+      try {
+        const link = path.join(store.getQuarantineDir(), 'dddddddddddddddd');
+        await fs.symlink(outside, link);
+
+        // Aggressive limits: if the sweep treated the link as an entry it
+        // would be expired AND over budget — external bytes must survive.
+        await runStartupRecoveryOnce(store, undefined, {
+          quarantineRetentionDays: 1,
+          quarantineMaxBytes: 1,
+        });
+
+        await expect(fs.readFile(victim, 'utf8')).resolves.toBe(
+          'x'.repeat(10_000),
+        );
+        expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
+      } finally {
+        await fs.rm(outside, { recursive: true, force: true });
+      }
+    });
+
+    it('a symlinked quarantine ROOT is never swept', async () => {
+      const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'omni-quar-'));
+      const victimDir = path.join(outside, 'eeeeeeeeeeeeeeee');
+      await fs.mkdir(victimDir);
+      await fs.writeFile(path.join(victimDir, 'victim.bin'), 'external');
+      const old = new Date(Date.now() - 30 * 86_400_000);
+      await fs.utimes(victimDir, old, old);
+      try {
+        const quarantineDir = store.getQuarantineDir();
+        await fs.rm(quarantineDir, { recursive: true, force: true });
+        await fs.symlink(outside, quarantineDir);
+
+        await runStartupRecoveryOnce(store, undefined, {
+          quarantineRetentionDays: 1,
+        });
+
+        await expect(
+          fs.readFile(path.join(victimDir, 'victim.bin'), 'utf8'),
+        ).resolves.toBe('external');
+        expect((await fs.lstat(quarantineDir)).isSymbolicLink()).toBe(true);
+      } finally {
+        await fs.rm(outside, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe('symlink containment (recovery must never leave the omni root)', () => {
     /** External dir with a victim file whose NAME makes recovery want to
      * delete it through every code path: hash-mismatched "object", expired

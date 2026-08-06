@@ -31,12 +31,21 @@ const SAMPLE_VERIFY_MAX_BYTES = 64 * 1024 * 1024;
  * belong to a promotion in flight in ANOTHER process — deleting it would
  * fail that process's rename. Older survivors are crash leftovers. */
 const TMP_GRACE_MS = 3600_000;
+/** Default retention for quarantined invocations (storage design §7). */
+const QUARANTINE_RETENTION_DAYS = 7;
+/** Default size budget for the quarantine area (storage design §7). */
+const QUARANTINE_MAX_BYTES = 5 * 1024 * 1024 * 1024;
 
 /** Tunables for {@link runStartupRecoveryOnce}; production callers use
  * the defaults, tests inject small values. */
 export interface StartupRecoveryOptions {
   sampleVerifyLimit?: number;
   sampleVerifyMaxBytes?: number;
+  /** Quarantined invocations older than this are removed. */
+  quarantineRetentionDays?: number;
+  /** Above this total size, quarantined invocations are removed
+   * oldest-first until the area fits. */
+  quarantineMaxBytes?: number;
 }
 
 /** One latch per omni root: distinct stores in one process (multi-project
@@ -85,6 +94,124 @@ async function sweepDownloads(downloadsDir: string): Promise<void> {
         await fs.rm(p, { force: true });
         debugLogger.debug(`recovery: removed expired download ${name}`);
       }
+    } catch {
+      // Best-effort sweep.
+    }
+  }
+}
+
+/**
+ * Delete EVERYTHING under `staging/`. Staging entries belong to policy
+ * invocations that never committed (a successful commit deletes its own
+ * staging directory first), so at startup there is nothing to keep
+ * (storage design §6.1). The staging root itself must be a real directory
+ * — a symlinked root would redirect the recursive deletes outside the
+ * omni root.
+ */
+async function sweepStaging(stagingDir: string): Promise<void> {
+  if (!(await isRealDirectory(stagingDir))) return;
+  let names: string[];
+  try {
+    names = await fs.readdir(stagingDir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    try {
+      // rm on a symlink entry removes the link itself without following
+      // it, so no containment check is needed per entry.
+      await fs.rm(path.join(stagingDir, name), {
+        recursive: true,
+        force: true,
+      });
+      debugLogger.debug(`recovery: removed uncommitted staging ${name}`);
+    } catch {
+      // Best-effort sweep.
+    }
+  }
+}
+
+/** Recursively sum the sizes of regular files under a REAL directory,
+ * never following symlinks (neither directory nor file entries). */
+async function directorySizeBytes(dir: string): Promise<number> {
+  let total = 0;
+  let names: string[];
+  try {
+    names = await fs.readdir(dir);
+  } catch {
+    return total;
+  }
+  for (const name of names) {
+    const p = path.join(dir, name);
+    try {
+      const st = await fs.lstat(p);
+      if (st.isFile()) {
+        total += st.size;
+      } else if (st.isDirectory()) {
+        total += await directorySizeBytes(p);
+      }
+    } catch {
+      // Unreadable entry contributes nothing.
+    }
+  }
+  return total;
+}
+
+/**
+ * Enforce the quarantine retention window and size budget (storage design
+ * §4.4/§6.1): entries older than `retentionMs` are removed; if the
+ * remainder still exceeds `maxBytes`, the oldest entries are removed
+ * first until the area fits. Only REAL directories are treated as
+ * quarantine entries — symlinks are never traversed, sized, or deleted.
+ */
+async function sweepQuarantine(
+  quarantineDir: string,
+  retentionMs: number,
+  maxBytes: number,
+): Promise<void> {
+  if (!(await isRealDirectory(quarantineDir))) return;
+  let names: string[];
+  try {
+    names = await fs.readdir(quarantineDir);
+  } catch {
+    return;
+  }
+  const entries: Array<{ name: string; mtimeMs: number; sizeBytes: number }> =
+    [];
+  const cutoff = Date.now() - retentionMs;
+  for (const name of names) {
+    const p = path.join(quarantineDir, name);
+    if (!(await isRealDirectory(p))) continue;
+    try {
+      const st = await fs.lstat(p);
+      if (st.mtimeMs < cutoff) {
+        await fs.rm(p, { recursive: true, force: true });
+        debugLogger.debug(`recovery: removed expired quarantine ${name}`);
+        continue;
+      }
+      entries.push({
+        name,
+        mtimeMs: st.mtimeMs,
+        sizeBytes: await directorySizeBytes(p),
+      });
+    } catch {
+      // Best-effort sweep.
+    }
+  }
+  let total = entries.reduce((sum, e) => sum + e.sizeBytes, 0);
+  if (total <= maxBytes) return;
+  entries.sort((a, b) => a.mtimeMs - b.mtimeMs);
+  for (const entry of entries) {
+    if (total <= maxBytes) break;
+    try {
+      await fs.rm(path.join(quarantineDir, entry.name), {
+        recursive: true,
+        force: true,
+      });
+      total -= entry.sizeBytes;
+      debugLogger.debug(
+        `recovery: removed quarantine ${entry.name} (over size budget)`,
+      );
     } catch {
       // Best-effort sweep.
     }
@@ -201,10 +328,14 @@ async function sampleVerifyObjects(
  * lazily the first time the omni pipeline is touched — zero cost when
  * omni is unused.
  *
- * 1. crash-orphaned `downloads/*.part` older than the 48h debugging
+ * 1. everything under `staging/` is deleted — staging entries belong to
+ *    policy invocations that never committed (storage design §6.1);
+ * 2. crash-orphaned `downloads/*.part` older than the 48h debugging
  *    retention window are removed;
- * 2. `objects/…/.tmp-*` promotion orphans are removed (crash leftovers);
- * 3. a small sample of objects is hash-verified; corrupt objects are
+ * 3. `quarantine/` is trimmed to its retention window and size budget
+ *    (oldest-first once over budget);
+ * 4. `objects/…/.tmp-*` promotion orphans are removed (crash leftovers);
+ * 5. a small sample of objects is hash-verified; corrupt objects are
  *    deleted with their upload-cache entries cascaded.
  *
  * Never throws: recovery is hygiene, not a gate. That covers the latch
@@ -236,7 +367,14 @@ export function runStartupRecoveryOnce(
       // managed tree. (An absent directory fails the check too, which is
       // fine — there is nothing to sweep beneath it.)
       if (!(await isRealDirectory(root))) return;
+      await sweepStaging(path.join(root, 'staging'));
       await sweepDownloads(path.join(root, 'downloads'));
+      await sweepQuarantine(
+        path.join(root, 'quarantine'),
+        (options?.quarantineRetentionDays ?? QUARANTINE_RETENTION_DAYS) *
+          86_400_000,
+        options?.quarantineMaxBytes ?? QUARANTINE_MAX_BYTES,
+      );
       if (!(await isRealDirectory(path.join(root, 'objects')))) return;
       await sweepTmpFiles(store.getObjectsDir());
       await sampleVerifyObjects(
