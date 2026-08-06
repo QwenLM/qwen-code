@@ -207,6 +207,7 @@ describe('<VirtualizedList />', () => {
       { id: 1, kind: 'body' },
     ];
 
+    // Ref-style capture: Wrapper assigns the real setter during render.
     let setExpanded: (v: boolean) => void = () => {};
 
     function Wrapper() {
@@ -241,21 +242,29 @@ describe('<VirtualizedList />', () => {
       );
     }
 
-    const { lastFrame, rerender } = render(<Wrapper />);
+    const { lastFrame } = render(<Wrapper />);
     await act(async () => {});
 
     const expandedFrame = lastFrame() ?? '';
     expect(expandedFrame).toContain('thinking line 29');
 
     act(() => setExpanded(false));
-    rerender(<Wrapper />);
     await act(async () => {});
 
     const lines = (lastFrame() ?? '').split('\n');
     const headIdx = lines.findIndex((l) => l.includes('thought head'));
     const footerIdx = lines.findIndex((l) => l.includes('FOOTER'));
     expect(headIdx).toBeGreaterThan(-1);
-    expect(footerIdx - headIdx).toBeLessThanOrEqual(2);
+    // Exact adjacency, no slack: a mutant clamping reported heights to
+    // >= 1 would still leave one blank row per zero-height item yet pass
+    // any looser bound. A missing FOOTER (findIndex -1) fails it too.
+    expect(footerIdx - headIdx).toBe(1);
+
+    // Round trip: re-expand must overwrite the cached 0 with the real
+    // height so an item can never get stuck at zero height.
+    act(() => setExpanded(true));
+    await act(async () => {});
+    expect(lastFrame() ?? '').toContain('thinking line 29');
   });
 
   it('targetScrollIndex anchors to that index on first usable render', () => {

@@ -120,6 +120,9 @@ const VirtualizedListItem = memo(
       // Report zero heights too: a collapsed thought continuation renders
       // nothing (height 0), and skipping the report would leave the cached
       // expanded height in `heights`, inflating totalHeight with a blank gap.
+      // Only mounted (in-window) items report, so collapse-all leaves
+      // off-screen items' cached heights stale until they scroll back into
+      // the window (same as the grow direction).
       if (hasMeasured) {
         onHeightChangeRef.current(itemKey, height);
       }
