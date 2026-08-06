@@ -52,6 +52,8 @@ vi.mock('../utils/nextSpeakerChecker.js', () => ({
 import { GeminiClient, SendMessageType } from './client.js';
 import { GeminiEventType, type ServerGeminiStreamEvent } from './turn.js';
 
+const FORMER_GOAL_CONTINUATION_LIMIT = 50;
+
 const permit: GoalTurnPermit = {
   goalId: 'goal-1',
   revision: 1,
@@ -1016,7 +1018,7 @@ describe('GeminiClient Goal admission', () => {
     vi.mocked(config.getGoalRuntime).mockReturnValue(runtime);
     await runtime.dispatch({ action: 'create', objective: 'ship' });
 
-    const turns = 75;
+    const turns = FORMER_GOAL_CONTINUATION_LIMIT + 25;
     for (let turn = 0; turn < turns; turn += 1) {
       const current = started[turn]!;
       await drain(

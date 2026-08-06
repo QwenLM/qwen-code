@@ -25,6 +25,8 @@ import {
 import { GoalConflictError } from './goal-reducer.js';
 import type { GoalVerifier } from './goal-verifier.js';
 
+const FORMER_GOAL_CONTINUATION_LIMIT = 50;
+
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
   let reject!: (reason?: unknown) => void;
@@ -1014,7 +1016,7 @@ describe('goal runtime', () => {
     runtime.bindHost(host);
     await runtime.dispatch({ action: 'create', objective: 'loop forever' });
 
-    const turns = 75;
+    const turns = FORMER_GOAL_CONTINUATION_LIMIT + 25;
     for (let i = 0; i < turns; i++) {
       const permit = host.started[host.started.length - 1];
       expect(permit).toBeDefined();
@@ -1047,7 +1049,7 @@ describe('goal runtime', () => {
             objective: 'keep going',
             status: 'usage_limited',
             evidenceCursor: { recordId: 'limit-record' },
-            turnCount: 50,
+            turnCount: FORMER_GOAL_CONTINUATION_LIMIT,
             activeTimeMs: 1_000,
             createdAt: 1,
             updatedAt: 2,
@@ -1065,13 +1067,13 @@ describe('goal runtime', () => {
 
     expect(resumed.snapshot).toMatchObject({
       activity: 'running',
-      goal: { status: 'active', turnCount: 50 },
+      goal: { status: 'active', turnCount: FORMER_GOAL_CONTINUATION_LIMIT },
     });
     expect(host.started).toHaveLength(1);
     await runtime.finishTurn(host.started[0]);
     expect(runtime.getSnapshot()).toMatchObject({
       activity: 'running',
-      goal: { status: 'active', turnCount: 51 },
+      goal: { status: 'active', turnCount: FORMER_GOAL_CONTINUATION_LIMIT + 1 },
     });
   });
 
