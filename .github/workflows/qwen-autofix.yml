@@ -784,6 +784,13 @@ jobs:
           # sandbox container runs as this same user, so the tighter mode
           # costs the job nothing.
           chmod 700 "${WORKDIR}"
+          # Age-sweep abandoned run-scoped dirs on this shared /tmp: a hard
+          # runner kill skips the always() teardown and run_id never repeats,
+          # so nothing else ever reclaims them.
+          find /tmp -maxdepth 1 -name 'autofix-*' -mmin +1440 -exec rm -rf {} + 2>/dev/null || true
+          # The reused workspace's .git accumulates unreferenced objects
+          # across fetch runs on this persistent pool; prune them.
+          git gc --prune=now --quiet 2>/dev/null || true
 
       # Self-hosted runners keep the workspace's .git across runs, so a
       # failed earlier attempt's local branch survives here: the agent's
@@ -834,6 +841,7 @@ jobs:
       - name: 'Check runner environment'
         env:
           RUNNER_ENVIRONMENT: '${{ runner.environment }}'
+          RUNNER_NAME: '${{ runner.name }}'
         run: |-
           case "${RUNNER_ENVIRONMENT}" in
             github-hosted|self-hosted) ;;
@@ -842,6 +850,18 @@ jobs:
               exit 1
               ;;
           esac
+          # The label routing pins ecs-qwen, but a mis-labelled registration
+          # must not silently claim a PAT-bearing 300-minute job — assert the
+          # pool by name on the self-hosted branch too.
+          if [[ "${RUNNER_ENVIRONMENT}" == 'self-hosted' ]]; then
+            case "${RUNNER_NAME}" in
+              ecs-qwen-*) ;;
+              *)
+                echo "::error::self-hosted runner '${RUNNER_NAME}' is not an ecs-qwen pool member; refusing to run here."
+                exit 1
+                ;;
+            esac
+          fi
           # Capability preflight for the persistent pool: this job's agent
           # runs inside the docker sandbox, and a missing daemon otherwise
           # surfaces only at 'Resolve sandbox image' — after npm ci/build
@@ -1428,11 +1448,15 @@ jobs:
           BRANCH="autofix/issue-${ISSUE}"
           git config --local --unset-all http.https://github.com/.extraheader || true
           git config core.hooksPath /dev/null
-          # Authenticate the push transiently, never writing the PAT into
-          # the origin remote: the pool keeps this workspace between runs,
-          # so a token persisted to .git/config would stay readable on the
-          # shared host until a later job wiped it.
-          git push --no-verify "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git" "${BRANCH}"
+          # Authenticate the push via a transient credential helper: the
+          # PAT enters neither the remote URL (persisted to .git/config on
+          # this reused workspace) nor the process argv (/proc/<pid>/cmdline
+          # is world-readable on this shared host). The config holds only a
+          # ${GITHUB_TOKEN} reference, and credential.* is off the sanitize
+          # allowlist, so a leftover helper is swept next run.
+          git config --local credential.helper '!f(){ echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; };f'
+          git push --no-verify "https://github.com/${REPO}.git" "${BRANCH}"
+          git config --local --unset-all credential.helper || true
 
           PR_URL="$(gh pr create --repo "${REPO}" \
             --base main --head "${BRANCH}" \
@@ -3117,6 +3141,13 @@ jobs:
           # sandbox container runs as this same user, so the tighter mode
           # costs the job nothing.
           chmod 700 "${WORKDIR}"
+          # Age-sweep abandoned run-scoped dirs on this shared /tmp: a hard
+          # runner kill skips the always() teardown and run_id never repeats,
+          # so nothing else ever reclaims them.
+          find /tmp -maxdepth 1 -name 'autofix-*' -mmin +1440 -exec rm -rf {} + 2>/dev/null || true
+          # The reused workspace's .git accumulates unreferenced objects
+          # across fetch runs on this persistent pool; prune them.
+          git gc --prune=now --quiet 2>/dev/null || true
 
       # Stage the schema gate script from the TRUSTED BASE checkout before
       # "Prepare branch and feedback" switches the working tree to the PR
@@ -3148,6 +3179,7 @@ jobs:
       - name: 'Check runner environment'
         env:
           RUNNER_ENVIRONMENT: '${{ runner.environment }}'
+          RUNNER_NAME: '${{ runner.name }}'
         run: |-
           case "${RUNNER_ENVIRONMENT}" in
             github-hosted|self-hosted) ;;
@@ -3156,6 +3188,18 @@ jobs:
               exit 1
               ;;
           esac
+          # The label routing pins ecs-qwen, but a mis-labelled registration
+          # must not silently claim a PAT-bearing 300-minute job — assert the
+          # pool by name on the self-hosted branch too.
+          if [[ "${RUNNER_ENVIRONMENT}" == 'self-hosted' ]]; then
+            case "${RUNNER_NAME}" in
+              ecs-qwen-*) ;;
+              *)
+                echo "::error::self-hosted runner '${RUNNER_NAME}' is not an ecs-qwen pool member; refusing to run here."
+                exit 1
+                ;;
+            esac
+          fi
           # Capability preflight for the persistent pool: this job's agent
           # runs inside the docker sandbox, and a missing daemon otherwise
           # surfaces only at 'Resolve sandbox image' — after npm ci/build
@@ -3354,7 +3398,8 @@ jobs:
             # and fine-grained PATs are documented as NOT receiving it.
             # Prove push access NOW, before an agent round is spent, instead
             # of 403ing at the report step after the work is done.
-            if ! git push --no-verify --dry-run "https://x-access-token:${GITHUB_TOKEN}@github.com/${HEAD_REPO}.git" HEAD:"${BRANCH}" > /dev/null 2>&1; then
+            git config --local credential.helper '!f(){ echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; };f'
+            if ! git push --no-verify --dry-run "https://github.com/${HEAD_REPO}.git" HEAD:"${BRANCH}" > /dev/null 2>&1; then
               echo "🫥 fork push preflight failed for ${HEAD_REPO} (allow-edits grant or PAT type) — discarding without action or marker"
               {
                 echo "stale=true"
@@ -3364,6 +3409,7 @@ jobs:
               } >> "${GITHUB_OUTPUT}"
               exit 0
             fi
+            git config --local --unset-all credential.helper || true
           else
             git checkout -B "${BRANCH}" "origin/${BRANCH}"
           fi
@@ -4253,13 +4299,17 @@ jobs:
             # commits get checked). A pre-push hook would execute that code
             # with the PAT in env — sever hooks entirely before pushing.
             git config core.hooksPath /dev/null
+            # Authenticate via a transient credential helper instead of a
+            # token-bearing URL: the PAT enters neither .git/config nor the
+            # process argv on this shared host (see Publish PR).
+            git config --local credential.helper '!f(){ echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; };f'
             if [[ "${HEAD_REPO:-${REPO}}" != "${REPO}" ]]; then
               # Push back to the FORK branch via allow-edits (PAT has push
               # rights on the upstream, which GitHub extends to the fork's
               # PR branch when the author ticked the box).
-              PUSH_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${HEAD_REPO}.git"
+              PUSH_URL="https://github.com/${HEAD_REPO}.git"
             else
-              PUSH_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
+              PUSH_URL="https://github.com/${REPO}.git"
             fi
             # Salvage a race-lost push instead of discarding the run. The
             # per-PR head-write concurrency group serialises THIS repo's
@@ -4307,6 +4357,7 @@ jobs:
                 PUSH_RACE_MERGED='true'
               fi
             done
+            git config --local --unset-all credential.helper || true
             CAN_RESOLVE_THREADS='false'
             if [[ -s "${WORKDIR}/resolved-comments.txt" ]]; then
               LOCAL_PUSHED_HEAD="$(git rev-parse HEAD)"

@@ -2224,7 +2224,7 @@ describe('qwen-autofix workflow', () => {
       'git fetch "https://github.com/${HEAD_REPO}.git" "refs/heads/${BRANCH}"',
     );
     expect(workflow).toContain(
-      'PUSH_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${HEAD_REPO}.git"',
+      'PUSH_URL="https://github.com/${HEAD_REPO}.git"',
     );
     expect(workflow).toContain(
       'git push --no-verify "${PUSH_URL}" HEAD:"${BRANCH}"',
@@ -2233,7 +2233,7 @@ describe('qwen-autofix workflow', () => {
     // prove push access BEFORE an agent round is spent, discarding
     // gracefully instead of 403ing at the report step.
     expect(workflow).toContain(
-      'git push --no-verify --dry-run "https://x-access-token:${GITHUB_TOKEN}@github.com/${HEAD_REPO}.git" HEAD:"${BRANCH}"',
+      'git push --no-verify --dry-run "https://github.com/${HEAD_REPO}.git" HEAD:"${BRANCH}"',
     );
     expect(workflow).toContain('fork push preflight failed');
     // First-pickup engage ack anchors the window when the label path could
@@ -6472,7 +6472,7 @@ describe('qwen-autofix workflow', () => {
     // for ${HEAD_REPO} (empty in the same-repo case → a malformed
     // `github.com/.git` remote) must not survive.
     expect(pushAndReportStep).toContain(
-      'PUSH_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"',
+      'PUSH_URL="https://github.com/${REPO}.git"',
     );
     expect(pushAndReportStep).toContain(
       'git fetch "${PUSH_URL}" "refs/heads/${BRANCH}"',
@@ -6549,13 +6549,19 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).not.toMatch(/\bgit push\b[^\n]* -[a-zA-Z]*f\b/);
     expect(workflow).not.toMatch(/\bgit push\b[^\n]* \+\S/);
     expect(publishPrStep).toContain(
-      'git push --no-verify "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git" "${BRANCH}"',
+      'git push --no-verify "https://github.com/${REPO}.git" "${BRANCH}"',
     );
-    // Neither PAT push may persist the token into the reused workspace's
-    // .git/config — a `git remote set-url` carrying the PAT survives the job
-    // on the shared pool. Both authenticate transiently (URL on the command).
+    // Neither PAT push may expose the token — not persisted to .git/config
+    // (a `git remote set-url`) and not in the process argv (a token-bearing
+    // URL on the command line, world-readable via /proc on this shared
+    // host). Both authenticate via a transient credential helper instead, so
+    // the push/fetch URLs are tokenless.
     expect(publishPrStep).not.toContain('git remote set-url');
     expect(pushAndReportStep).not.toContain('git remote set-url');
+    expect(publishPrStep).not.toContain('x-access-token:${GITHUB_TOKEN}@');
+    expect(pushAndReportStep).not.toContain('x-access-token:${GITHUB_TOKEN}@');
+    expect(publishPrStep).toContain('credential.helper');
+    expect(pushAndReportStep).toContain('credential.helper');
     expect(pushAndReportStep).toContain(
       'git push --no-verify "${PUSH_URL}" HEAD:"${BRANCH}"',
     );
