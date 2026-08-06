@@ -994,6 +994,31 @@ for (const theme of THEMES) {
         ),
       ).toBeVisible();
       await captureScreenshot(page, `code-review-artifact-${theme}`);
+
+      // Fullscreen is only reachable once the panel is open; without
+      // expanding it here, the toggle and the fullscreen surface stay
+      // invisible to the before/after preview.
+      await page
+        .getByRole('button', { name: 'Fullscreen', exact: true })
+        .click();
+      await expect(
+        page.locator('[class*="artifactPanelFullscreen"]'),
+      ).toBeVisible();
+      await expect(
+        page.getByRole('button', { name: 'Exit fullscreen', exact: true }),
+      ).toBeVisible();
+      await captureScreenshot(page, `code-review-artifact-fullscreen-${theme}`);
+
+      // Escape shrinks the panel back to its dock. Assert the restore
+      // path without a second capture: the docked layout is the same
+      // view as the code-review-artifact shot above.
+      await page.keyboard.press('Escape');
+      await expect(
+        page.locator('[class*="artifactPanelFullscreen"]'),
+      ).toHaveCount(0);
+      await expect(
+        page.getByRole('button', { name: 'Fullscreen', exact: true }),
+      ).toBeVisible();
     });
   });
 }
