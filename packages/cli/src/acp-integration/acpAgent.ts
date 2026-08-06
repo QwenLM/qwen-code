@@ -26,6 +26,7 @@ import {
   getScopedEnvContents,
   QwenOAuth2Event,
   qwenOAuth2Events,
+  reconcileInstallModelIds,
   resolveBaseUrl,
   MCP_BUDGET_WARN_FRACTION,
   MCPServerConfig,
@@ -2089,7 +2090,14 @@ function readProviderSetupInputs(
 
   const defaultModelIds = getDefaultModelIds(config);
   const modelIds = readStringArray(params['modelIds'], 'modelIds');
-  const resolvedModelIds = modelIds.length > 0 ? modelIds : defaultModelIds;
+  // Reconnect clients (including the desktop connect form) echo back the model
+  // IDs saved in settings. Reconcile them against the current built-in template
+  // so a reconnect after a template change installs the new built-ins rather
+  // than stamping the new version over a stale list.
+  const resolvedModelIds =
+    modelIds.length > 0
+      ? reconcileInstallModelIds(config, modelIds)
+      : defaultModelIds;
   if (resolvedModelIds.length === 0) {
     throw RequestError.invalidParams(
       undefined,

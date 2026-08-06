@@ -10,6 +10,7 @@ import {
   AuthType,
   CODING_PLAN_CHINA_BASE_URL,
   CODING_PLAN_ENV_KEY,
+  CODING_PLAN_GLOBAL_BASE_URL,
   codingPlanProvider,
   TOKEN_PLAN_BASE_URL,
   TOKEN_PLAN_ENV_KEY,
@@ -38,6 +39,15 @@ const chinaTemplate = buildProviderTemplate(
 const chinaVersion = computeProviderTemplateVersion(
   codingPlanProvider,
   CODING_PLAN_CHINA_BASE_URL,
+);
+
+const globalTemplate = buildProviderTemplate(
+  codingPlanProvider,
+  CODING_PLAN_GLOBAL_BASE_URL,
+);
+const globalVersion = computeProviderTemplateVersion(
+  codingPlanProvider,
+  CODING_PLAN_GLOBAL_BASE_URL,
 );
 
 const tokenTemplate = buildProviderTemplate(
@@ -118,6 +128,41 @@ describe('useProviderUpdates', () => {
     };
     mockSettings.merged['modelProviders'] = {
       [AuthType.USE_OPENAI]: chinaTemplate,
+    };
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    expect(result.current.providerUpdateRequest).toBeUndefined();
+  });
+
+  // Read-side counterpart to the write-side "stored version excludes custom
+  // models" test. Detection must hash the built-in template for the *stored*
+  // region — not the installed model list (which carries custom models) and not
+  // the provider's default region. Either substitution re-opens the #8504 loop
+  // where the prompt reappears on every restart.
+  it('does not show update prompt for a non-default region install carrying a custom model', () => {
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
+      baseUrl: CODING_PLAN_GLOBAL_BASE_URL,
+      version: globalVersion,
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: [
+        ...globalTemplate,
+        {
+          id: 'my-custom-model',
+          baseUrl: CODING_PLAN_GLOBAL_BASE_URL,
+          envKey: CODING_PLAN_ENV_KEY,
+          name: '[Coding Plan] my-custom-model',
+        },
+      ],
     };
 
     const { result } = renderHook(() =>

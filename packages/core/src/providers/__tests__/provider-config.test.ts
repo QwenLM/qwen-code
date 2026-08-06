@@ -14,6 +14,7 @@ import {
   findExistingProviderModels,
   findProviderByCredentials,
   getDefaultModelIds,
+  reconcileInstallModelIds,
   resolveBaseUrl,
   shouldShowStep,
   providerMatchesCredentials,
@@ -399,6 +400,65 @@ describe('getDefaultModelIds', () => {
   it('returns empty array when no models', () => {
     const config = makeConfig({ models: undefined });
     expect(getDefaultModelIds(config)).toEqual([]);
+  });
+});
+
+describe('reconcileInstallModelIds', () => {
+  it('refreshes built-ins the caller echoed back a stale copy of', () => {
+    const config = makeConfig({ models: [{ id: 'a' }, { id: 'b' }] });
+    // A reconnect echoing the model list saved before 'b' was added.
+    expect(reconcileInstallModelIds(config, ['a'])).toEqual(['a', 'b']);
+  });
+
+  it('carries through an ID the template no longer ships', () => {
+    // A dropped built-in is indistinguishable from a user-added ID, so it is
+    // retained — the same tradeoff executeUpdate makes. Harmless for detection,
+    // which compares only IDs in the current built-in set.
+    const config = makeConfig({ models: [{ id: 'a' }] });
+    expect(reconcileInstallModelIds(config, ['a', 'b'])).toEqual(['a', 'b']);
+  });
+
+  it('preserves user-added custom IDs after the built-ins', () => {
+    const config = makeConfig({ models: [{ id: 'a' }, { id: 'b' }] });
+    expect(reconcileInstallModelIds(config, ['a', 'mine'])).toEqual([
+      'a',
+      'b',
+      'mine',
+    ]);
+  });
+
+  it('is the identity for providers without a built-in list', () => {
+    const config = makeConfig({ models: undefined });
+    expect(reconcileInstallModelIds(config, ['mine', 'other'])).toEqual([
+      'mine',
+      'other',
+    ]);
+  });
+
+  it('keeps the install plan version in step with the template', () => {
+    const config = makeConfig({ models: [{ id: 'a' }, { id: 'b' }] });
+    const plan = buildInstallPlan(config, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'k',
+      // Stale echoed list: without reconciliation the plan would install only
+      // 'a' while still stamping the current two-model template version,
+      // permanently suppressing update detection.
+      modelIds: reconcileInstallModelIds(config, ['a']),
+    });
+    expect(plan.modelProviders?.[0]?.models.map((m) => m.id)).toEqual([
+      'a',
+      'b',
+    ]);
+    expect(
+      plan.providerState?.['providerMetadata.test'] as {
+        version: string;
+      },
+    ).toMatchObject({
+      version: computeProviderTemplateVersion(
+        config,
+        'https://api.test.com/v1',
+      ),
+    });
   });
 });
 

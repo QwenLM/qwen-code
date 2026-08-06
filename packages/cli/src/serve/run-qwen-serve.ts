@@ -919,13 +919,17 @@ function normalizeInstallModelIds(
   req: ServeAuthProviderInstallRequest,
   provider: ProviderConfig,
   getDefaultModelIds: CoreRuntime['getDefaultModelIds'],
+  reconcileInstallModelIds: CoreRuntime['reconcileInstallModelIds'],
 ): string[] {
   const fromRequest = req.modelIds
     ?.map((id) => id.trim())
     .filter((id) => id.length > 0);
+  // A reconnect echoes back the saved model IDs; reconcile them against the
+  // current built-in template so the install cannot stamp the new template
+  // version over a stale model set (which would suppress update detection).
   const modelIds =
     fromRequest && fromRequest.length > 0
-      ? fromRequest
+      ? reconcileInstallModelIds(provider, fromRequest)
       : getDefaultModelIds(provider);
   return [...new Set(modelIds)];
 }
@@ -935,6 +939,7 @@ function buildProviderSetupInputs(
   provider: ProviderConfig,
   helpers: {
     getDefaultModelIds: CoreRuntime['getDefaultModelIds'];
+    reconcileInstallModelIds: CoreRuntime['reconcileInstallModelIds'];
     resolveBaseUrl: CoreRuntime['resolveBaseUrl'];
   },
 ): ProviderSetupInputs {
@@ -948,6 +953,7 @@ function buildProviderSetupInputs(
       req,
       provider,
       helpers.getDefaultModelIds,
+      helpers.reconcileInstallModelIds,
     ),
     ...(req.advancedConfig ? { advancedConfig: req.advancedConfig } : {}),
   };
@@ -5505,6 +5511,7 @@ async function runQwenServeImpl(
             }
             const inputs = buildProviderSetupInputs(req, provider, {
               getDefaultModelIds: core.getDefaultModelIds,
+              reconcileInstallModelIds: core.reconcileInstallModelIds,
               resolveBaseUrl: core.resolveBaseUrl,
             });
             const plan = core.buildInstallPlan(provider, inputs);

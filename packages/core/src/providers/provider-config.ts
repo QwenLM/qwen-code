@@ -522,12 +522,41 @@ export function buildProviderTemplate(
 
 /**
  * Version oracle for the provider's built-in template. Install persists this
- * value and update detection compares against it, so both sides must call
- * this helper instead of re-spelling the hash.
+ * value and update detection compares against it; the core/CLI install and
+ * detection paths must call this helper instead of re-spelling the hash.
+ * (Exception: the VS Code companion's settingsWriter persists its own hash.)
  */
 export function computeProviderTemplateVersion(
   config: ProviderConfig,
   baseUrl?: string,
 ): string {
   return computeModelListVersion(buildProviderTemplate(config, baseUrl));
+}
+
+/**
+ * Reconciles a caller-supplied model list against the provider's current
+ * built-in template.
+ *
+ * Reconnect paths echo back the model IDs they read from settings — ACP
+ * `qwen/providers/connect`, `qwen serve`'s install request, and the desktop
+ * connect form (which pre-fills from `existingConfig.modelIds` and posts them
+ * through ACP). Installing that echoed list verbatim is unsafe because
+ * `resolveProviderState` stamps the *current* template version regardless: after
+ * a release that adds or removes a built-in, a key rotation or reconnect would
+ * persist the stale model set under the new version, and `findAllPendingUpdates`
+ * would then never offer the update again.
+ *
+ * Built-ins are refreshed to the current template while user-added custom IDs
+ * survive — the same reconciliation the TUI wizard and `executeUpdate` already
+ * perform. For providers with no built-in list (custom providers, which carry no
+ * version metadata) this is the identity.
+ */
+export function reconcileInstallModelIds(
+  config: ProviderConfig,
+  requestedIds: readonly string[],
+): string[] {
+  const defaultIds = getDefaultModelIds(config);
+  if (defaultIds.length === 0) return [...requestedIds];
+  const builtinIds = new Set(defaultIds);
+  return [...defaultIds, ...requestedIds.filter((id) => !builtinIds.has(id))];
 }

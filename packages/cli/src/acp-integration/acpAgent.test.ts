@@ -334,6 +334,14 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     (provider: { models?: Array<{ id: string }> }) =>
       provider.models?.map((model) => model.id) ?? [],
   ),
+  reconcileInstallModelIds: vi.fn(
+    (provider: { models?: Array<{ id: string }> }, requested: string[]) => {
+      const defaultIds = provider.models?.map((model) => model.id) ?? [];
+      if (defaultIds.length === 0) return [...requested];
+      const builtinIds = new Set(defaultIds);
+      return [...defaultIds, ...requested.filter((id) => !builtinIds.has(id))];
+    },
+  ),
   resolveBaseUrl: vi.fn(
     (
       provider: { baseUrl?: string | Array<{ url: string }> },
@@ -11470,6 +11478,89 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(buildInstallPlan).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'deepseek' }),
       expect.objectContaining({ apiKey: 'sk-existing' }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/providers/connect refreshes built-in models a reconnect echoed back stale', async () => {
+    // The desktop connect form pre-fills from existingConfig.modelIds and posts
+    // them back unchanged. Installing that list verbatim would persist a stale
+    // model set under the *current* template version, and update detection
+    // would then never offer the missing built-in again.
+    const settings = {
+      ...makeSessionSettings(),
+      merged: {
+        mcpServers: {},
+        env: { DEEPSEEK_API_KEY: 'sk-existing' },
+        modelProviders: {
+          openai: [
+            {
+              id: 'my-custom-model',
+              baseUrl: 'https://api.deepseek.com',
+              envKey: 'DEEPSEEK_API_KEY',
+            },
+          ],
+        },
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'deepseek',
+        // Echoed list predating the built-in 'deepseek-chat'.
+        modelIds: ['my-custom-model'],
+      }),
+    ).resolves.toMatchObject({ success: true, providerId: 'deepseek' });
+
+    expect(buildInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'deepseek' }),
+      expect.objectContaining({
+        modelIds: ['deepseek-chat', 'my-custom-model'],
+      }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/providers/connect leaves model IDs untouched for a provider with no built-ins', async () => {
+    const settings = {
+      ...makeSessionSettings(),
+      merged: { mcpServers: {}, env: {}, modelProviders: {} },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'custom-openai-compatible',
+        baseUrl: 'https://api.custom.example/v1',
+        apiKey: 'sk-custom',
+        modelIds: ['only-mine'],
+      }),
+    ).resolves.toMatchObject({ success: true });
+
+    expect(buildInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'custom-openai-compatible' }),
+      expect.objectContaining({ modelIds: ['only-mine'] }),
     );
 
     mockConnectionState.resolve();

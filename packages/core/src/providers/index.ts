@@ -29,6 +29,7 @@ export {
   getDefaultModelIds,
   providerMatchesCredentials,
   PROVIDER_METADATA_NS,
+  reconcileInstallModelIds,
   resolveBaseUrl,
   resolveMetadataKey,
   resolveOwnsModel,

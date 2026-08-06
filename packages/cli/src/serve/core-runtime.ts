@@ -27,6 +27,7 @@ export {
   recordDaemonSessionLifecycle,
   registerDaemonEventLoopLagGauge,
   registerDaemonGaugeCallbacks,
+  reconcileInstallModelIds,
   resolveBaseUrl,
   resolveTelemetrySettings,
   shutdownTelemetry,
