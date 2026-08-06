@@ -1802,10 +1802,10 @@ describe('Gateway message handling', () => {
     ch.disconnect();
   });
 
-  it('READY cold start: purgeSingleScopeOrphans clears orphaned router mappings', async () => {
+  it('READY cold start: purgeSingleScopeOrphans clears single-scope orphans, keeps 3-part keys', async () => {
     // The purge must run as part of the READY restore chain and drop
-    // single-era + user-scope orphan keys from the router (thread 62 gate:
-    // previously the purge had no wiring-level test).
+    // single-era orphan keys from the router (thread 62 gate: previously the
+    // purge had no wiring-level test).
     const ch = makeChannel({ sessionScope: 'thread' });
     const pvt = ch as unknown as QQChannelRaw;
     const chp = ch as unknown as Record<string, unknown>;
@@ -1816,10 +1816,7 @@ describe('Gateway message handling', () => {
 
     expect(chp['coldStart']).toBe(true);
 
-    const removeSessionId = vi.fn(
-      (sid: string) =>
-        sid.startsWith('single-era-') || sid.startsWith('user-era-'),
-    );
+    const removeSessionId = vi.fn((sid: string) => sid === 'single-era-1');
     chp['router'] = {
       restoreSessions: vi.fn().mockResolvedValue(undefined),
       getAll: () => [
@@ -1829,7 +1826,7 @@ describe('Gateway message handling', () => {
           sessionId: 'single-era-1',
           target: { channelName: 'test-bot' },
         },
-        // User-scope 3-part key under thread scope: orphan.
+        // User-scope 3-part key under thread scope: kept (ages out).
         {
           key: 'test-bot:user-1:chat-1',
           sessionId: 'user-era-1',
@@ -1860,9 +1857,9 @@ describe('Gateway message handling', () => {
     )({ op: 0, t: 'READY', s: 1, d: { session_id: 'sess-cold' } }, () => {});
 
     // purgeSingleScopeOrphans ran inside the restore chain and removed the
-    // two orphan keys, keeping the live two-part key.
+    // single-scope orphan, keeping the 3-part and live two-part keys.
     expect(removeSessionId).toHaveBeenCalledWith('single-era-1');
-    expect(removeSessionId).toHaveBeenCalledWith('user-era-1');
+    expect(removeSessionId).not.toHaveBeenCalledWith('user-era-1');
     expect(removeSessionId).not.toHaveBeenCalledWith('live-1');
     expect(chp['_ready']).toBe(true);
 

@@ -602,7 +602,7 @@ describe('idle-flush timer', () => {
     expect(sessionAnchors.has('sess-B')).toBe(true);
   });
 
-  it('onPromptStart releases the previous turn anchor before overwriting, cascading its orphaned seq (thread 48)', () => {
+  it('onPromptStart releases the previous turn anchor before overwriting, cascading its orphaned seq', () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
     const sessionAnchors = chp['sessionReplyMsgId'] as Map<
@@ -1635,7 +1635,7 @@ describe('error recovery paths', () => {
     stderrSpy.mockRestore();
   });
 
-  it('a permanent failure of a deferred (pending) session cleans the pending flag, flush record and turn counter (thread 53)', async () => {
+  it('a permanent failure of a deferred (pending) session cleans the pending flag, flush record and turn counter', async () => {
     const ch = makeChannel();
     mockSendQQMessage.mockRejectedValue(
       new DeliveryError('RETRY_EXHAUSTED', 'permanent failure'),
@@ -1693,7 +1693,7 @@ describe('error recovery paths', () => {
     expect(turnCounter.has('sess-1')).toBe(false);
   });
 
-  it('a permanent failure of a proactive turn never releases the successor anchor (thread 54)', async () => {
+  it('a permanent failure of a proactive turn never releases the successor anchor', async () => {
     const ch = makeChannel();
     mockSendQQMessage.mockRejectedValue(
       new DeliveryError('RETRY_EXHAUSTED', 'permanent failure'),
@@ -2247,7 +2247,7 @@ describe('identity guard (#3, #6)', () => {
   });
 });
 
-describe('wenshao round-9: cancel/flush coordination (threads 29-36)', () => {
+describe('cancel/flush coordination', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useFakeTimers();
@@ -2257,7 +2257,7 @@ describe('wenshao round-9: cancel/flush coordination (threads 29-36)', () => {
     vi.useRealTimers();
   });
 
-  it('cancel with a buffered residual while a send is in flight eventually delivers the tail (thread 31)', async () => {
+  it('cancel with a buffered residual while a send is in flight eventually delivers the tail', async () => {
     const ch = makeChannel();
     let resolveSend: (v: MockResponse) => void;
     const sendPromise = new Promise<MockResponse>((r) => {
@@ -2337,7 +2337,7 @@ describe('wenshao round-9: cancel/flush coordination (threads 29-36)', () => {
     expect(seqMap.has('msg-A')).toBe(true);
   });
 
-  it('onPromptEnd defers a cancelled turn whose send is in flight so the tail keeps its anchor (thread 30)', async () => {
+  it('onPromptEnd defers a cancelled turn whose send is in flight so the tail keeps its anchor', async () => {
     const ch = makeChannel();
     let resolveSend: (v: MockResponse) => void;
     const sendPromise = new Promise<MockResponse>((r) => {
@@ -2401,7 +2401,7 @@ describe('wenshao round-9: cancel/flush coordination (threads 29-36)', () => {
     expect(seqMap.has('msg-A')).toBe(true);
   });
 
-  it("keeps a cancelled turn's deferred residual when a new turn's chunk arrives (thread 33)", async () => {
+  it("keeps a cancelled turn's deferred residual when a new turn's chunk arrives", async () => {
     const ch = makeChannel();
     let resolveSend: (v: MockResponse) => void;
     const sendPromise = new Promise<MockResponse>((r) => {
@@ -2485,7 +2485,7 @@ describe('wenshao round-9: cancel/flush coordination (threads 29-36)', () => {
     expect(mockSendQQMessage).toHaveBeenCalledTimes(3);
   });
 
-  it("a deferred proactive turn's flush does not erase the successor's anchor (thread 32)", async () => {
+  it("a deferred proactive turn's flush does not erase the successor's anchor", async () => {
     const ch = makeChannel();
     let resolveSend: (v: MockResponse) => void;
     const sendPromise = new Promise<MockResponse>((r) => {
@@ -2539,7 +2539,7 @@ describe('wenshao round-9: cancel/flush coordination (threads 29-36)', () => {
     expect(sessionAnchors.get('sess-1')!.msgId).toBe('msg-B');
   });
 
-  it('a transient failure during a cancelled turn preserves the residual accumulated during the in-flight send (thread 34)', async () => {
+  it('a transient failure during a cancelled turn preserves the residual accumulated during the in-flight send', async () => {
     const ch = makeChannel();
     let rejectSend: (err: Error) => void;
     const sendPromise = new Promise<MockResponse>((_r, rej) => {
@@ -2595,7 +2595,7 @@ describe('wenshao round-9: cancel/flush coordination (threads 29-36)', () => {
     expect(seqMap.has('msg-A')).toBe(true);
   });
 
-  it('onPromptEnd fallthrough releases the anchor and clears every structure when no stream is active (thread 36b)', () => {
+  it('onPromptEnd fallthrough releases the anchor and clears every structure when no stream is active', () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
     const flushingSessions = chp['flushingSessions'] as Set<string>;
@@ -2646,7 +2646,7 @@ describe('wenshao round-9: cancel/flush coordination (threads 29-36)', () => {
     expect(seqMap.has('msg-A')).toBe(false);
   });
 
-  it('release with a mismatched expectedMsgId keeps the successor anchor but cascades the old seq (thread 36d)', () => {
+  it('release with a mismatched expectedMsgId keeps the successor anchor but cascades the old seq', () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
     const sessionAnchors = chp['sessionReplyMsgId'] as Map<
@@ -2679,7 +2679,7 @@ describe('wenshao round-9: cancel/flush coordination (threads 29-36)', () => {
     expect(seqMap.get('msg-B')).toBe(1);
   });
 
-  it('onPromptEnd hands the buffered state to the flush chain, so a residual arriving during the send is still delivered (thread 70)', async () => {
+  it('onPromptEnd hands the buffered state to the flush chain, so a residual arriving during the send is still delivered', async () => {
     const ch = makeChannel();
     let resolveSend: (v: MockResponse) => void;
     const sendPromise = new Promise<MockResponse>((r) => {
@@ -2738,5 +2738,74 @@ describe('wenshao round-9: cancel/flush coordination (threads 29-36)', () => {
     );
     expect(tailBody['msg_id']).toBe('msg-A');
     expect(pendingStreamDelete.has('sess-1')).toBe(false);
+  });
+
+  it('release while a tail flush is in flight keeps msg-A seq instead of resetting it to 1', async () => {
+    const ch = makeChannel();
+    let resolveTailSend: (v: MockResponse) => void;
+    const tailSendPromise = new Promise<MockResponse>((r) => {
+      resolveTailSend = r;
+    });
+    mockSendQQMessage.mockResolvedValue(mockResponse(true));
+
+    const chp = ch as unknown as Record<string, unknown>;
+    const seqMap = chp['msgSeqMap'] as Map<string, number>;
+    const flushingSessions = chp['flushingSessions'] as Set<string>;
+    const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+
+    // Turn 1 streams; its first flush delivers (msg-A, seq 1) and settles.
+    setReplyMsgId(ch, 'test-chat', 'msg-A');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-A');
+    onResponseChunk(ch, 'test-chat', 'hello ', 's1');
+    vi.advanceTimersByTime(2000);
+    await drain();
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    expect(seqMap.get('msg-A')).toBe(1);
+
+    // A tail arrives and the turn is cancelled: onPromptEnd hands the
+    // residual to an immediate flush and keeps its send in flight. The
+    // streamState entry is now drained (buffer '', timer null) — the only
+    // marker that the tail flush is still alive is the flushingSessions flag.
+    mockSendQQMessage.mockReturnValueOnce(tailSendPromise);
+    onResponseChunk(ch, 'test-chat', 'world', 's1');
+    (
+      ch as unknown as { onPromptEnd: (c: string, s: string) => void }
+    ).onPromptEnd('test-chat', 's1');
+    await drain();
+
+    // The tail flush captured the residual and is suspended in flight.
+    expect(seqMap.get('msg-A')).toBe(2); // seq already assigned to the tail send
+    expect(flushingSessions.has('s1')).toBe(true);
+    expect(pendingStreamDelete.has('s1')).toBe(true);
+    const st = streamState(ch).get('s1')!;
+    expect(st.buffer).toBe('');
+    expect(st.timer).toBeNull();
+    expect(st.msgId).toBe('msg-A');
+
+    // The next turn starts with a newer message: onPromptStart releases the
+    // superseded anchor. The release must NOT cascade msg-A's counter away —
+    // the in-flight flush still owns the tail. The old (buffer || timer)
+    // guard missed this drained-entry window and reset the tail's msg_seq to
+    // 1 on its re-flush, which QQ dedupes on msg_id + msg_seq and silently
+    // drops.
+    setReplyMsgId(ch, 'test-chat', 'msg-B');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-B');
+
+    expect(sessionAnchors.get('s1')!.msgId).toBe('msg-B');
+    expect(seqMap.get('msg-A')).toBe(2);
+
+    // The tail send settles; the chain's settle-time release runs under the
+    // same in-flight marker, so the counter survives to the end.
+    resolveTailSend!(mockResponse(true));
+    await drain();
+
+    expect(seqMap.get('msg-A')).toBe(2);
+    expect(streamState(ch).has('s1')).toBe(false);
+    expect(flushingSessions.has('s1')).toBe(false);
+    expect(pendingStreamDelete.has('s1')).toBe(false);
   });
 });

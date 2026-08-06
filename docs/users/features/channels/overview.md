@@ -61,7 +61,7 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 | `model`                  | No               | Model to use for this channel (e.g., `qwen3.5-plus`). Overrides the default model. Useful for multimodal models that support image input                               |
 | `senderPolicy`           | No               | Who can talk to the bot: `allowlist` (default), `open`, or `pairing`                                                                                                   |
 | `allowedUsers`           | No               | List of user IDs allowed to use the bot (used by `allowlist` and `pairing` policies)                                                                                   |
-| `sessionScope`           | No               | How sessions are scoped: `user` (default), `thread`, or `single`                                                                                                       |
+| `sessionScope`           | No               | How sessions are scoped: `user` (default), `thread`, `chat_thread`, or `single`. Channel plugins may declare a different default (e.g., QQ defaults to `thread`)       |
 | `cwd`                    | No               | Working directory for the agent. Defaults to the current directory                                                                                                     |
 | `approvalMode`           | No               | Tool approval mode for channel sessions. Unattended webhook tasks require `yolo`; the setting applies to every session on the channel                                  |
 | `instructions`           | No               | Custom instructions prepended to the first message of each session                                                                                                     |
@@ -87,8 +87,9 @@ Controls who can interact with the bot:
 
 Controls how conversation sessions are managed:
 
-- **`user`** (default) — One session per user. All messages from the same user share a conversation.
+- **`user`** (default) — One session per user. All messages from the same user share a conversation. `user` is the global default, but a channel plugin can declare a different default for its type (for example, the QQ channel defaults to `thread`).
 - **`thread`** — One session per thread/topic. Useful for group chats with threads.
+- **`chat_thread`** — One session per chat and thread, shared across participants even outside a group (for example, an issue or PR discussion).
 - **`single`** — One shared session for all users. Everyone shares the same conversation.
 
 ### Channel Memory

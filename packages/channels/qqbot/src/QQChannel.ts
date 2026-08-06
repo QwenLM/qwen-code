@@ -2060,17 +2060,19 @@ export class QQChannel extends ChannelBase {
   }
 
   /**
-   * Purge orphaned session mappings left over from earlier session scopes:
-   * `<channel>:__single__` keys from the era when this channel forced
-   * sessionScope to 'single' (see PR #6457), and `<channel>:<sender>:<chat>`
-   * three-part user-scope keys once the scope moves off 'user' (see PR
-   * #8241). Under thread/user scope the single keys can never be routed to
-   * again; under thread/chat_thread scope the three-part keys can never be
-   * routed to again (the thread-scope router re-keys those sessions as
-   * two-part `<channel>:<chat>`), so both are dead weight in the router maps
+   * Purge orphaned session mappings left over from the single-scope era,
+   * when this channel forced sessionScope to 'single' (see PR #6457):
+   * `<channel>:__single__` keys. Under thread/user scope these single keys
+   * can never be routed to again, so they are dead weight in the router maps
    * and in the persisted sessions file — and worse, restore re-attaches them
    * via bridge.loadSession on every restart, silently resetting DM/group
    * continuity.
+   *
+   * Three-part user-scope keys (`<channel>:<sender>:<chat>`) are deliberately
+   * NOT purged here: since the default scope flipped, purging them under any
+   * non-user scope would be a silent breaking change for every zero-config
+   * deployment that used to run user scope — those keys are left to age out
+   * naturally.
    *
    * Runs AFTER restoreSessions(): SessionRouter exposes no public API to drop
    * persisted entries before restore (readPersistedEntries/deleteByKey are
@@ -2082,8 +2084,7 @@ export class QQChannel extends ChannelBase {
   private purgeSingleScopeOrphans(): void {
     // Under an explicit 'single' sessionScope these keys are live routing
     // state, not orphans — purging them would silently reset every explicit
-    // single-scope user session on each channel (re)start. Under 'user'
-    // sessionScope the three-part keys are live routing state too.
+    // single-scope user session on each channel (re)start.
     if (this.config.sessionScope === 'single') return;
     try {
       const all = this.router.getAll();
@@ -2096,18 +2097,7 @@ export class QQChannel extends ChannelBase {
         // era are `<thisChannel>:__single__`, so the exact match still cleans
         // up this channel's orphans without touching sibling routes.
         const isSingleOrphan = entry.key === `${this.name}:__single__`;
-        // 3-part user-scope keys are orphans only when this channel is NOT
-        // running a per-sender scope AND the entry genuinely belongs to this
-        // channel. Owned-by-name: routing keys are `channel:...` prefixed, so
-        // match the entry's channelName (the router records it in target)
-        // instead of string-prefixing — a channel named `my:bot` or a sibling
-        // whose name is a prefix of ours must not have its live keys purged.
-        const isUserScopeOrphan =
-          (this.config.sessionScope === 'thread' ||
-            this.config.sessionScope === 'chat_thread') &&
-          entry.target?.channelName === this.name &&
-          entry.key.split(':').length === 3;
-        if (isSingleOrphan || isUserScopeOrphan) {
+        if (isSingleOrphan) {
           // Release the daemon-side session too: restoreSessions() already
           // re-attached it via bridge.loadSession, so without this the orphan
           // stays alive in the daemon until the process ends. removeSessionId
@@ -2127,7 +2117,7 @@ export class QQChannel extends ChannelBase {
       }
       if (purged > 0) {
         process.stderr.write(
-          `[QQ:${this.name}] Purged ${purged} orphaned session mapping(s) (single-scope era, or user-scope keys under non-user scope)\n`,
+          `[QQ:${this.name}] Purged ${purged} orphaned single-scope session mapping(s)\n`,
         );
       }
     } catch (e) {
@@ -2183,8 +2173,17 @@ export class QQChannel extends ChannelBase {
     // Releasing now would drop the counter, and the tail's sendMessage would
     // resolve nextSeq = 1 after the first flush's (msg-A,1); QQ dedupes on
     // msg_id + msg_seq and silently drops the tail.
-    for (const s of this.streamState.values()) {
-      if (s.msgId === target && (s.buffer || s.timer)) return;
+    // A flush already in flight keeps the seq for the same reason: idleFlush()
+    // clears buffer/timer before sendMessage awaits resolveRoute, so without
+    // the flushingSessions check a release would drop the counter and the
+    // in-flight send would resolve nextSeq = 1 after the first segment's
+    // (msg-A,1) — the tail is silently lost to QQ's msg_id + msg_seq dedup.
+    for (const [sid, s] of this.streamState) {
+      if (
+        s.msgId === target &&
+        (s.buffer || s.timer || this.flushingSessions.has(sid))
+      )
+        return;
     }
     // The chat-level entry still points at this msgId — seq is still in use.
     for (const [, entry] of this.replyMsgId) {
@@ -3274,7 +3273,7 @@ export class QQChannel extends ChannelBase {
     // Non-@-bot messages pass isMentioned:false, which causes GroupGate.requireMention
     // to silently drop them before they reach the LLM. This is by core design:
     // non-@-bot group messages should flow through cron/log only, not trigger AI.
-    // Thread #17's fix (setting isMentioned=true for non-@-bot keyword/all matches)
+    // A prior fix (setting isMentioned=true for non-@-bot keyword/all matches)
     // was intentionally reverted — it violated principle #1.
     // Users must set requireMention: false in group config
     // (e.g., `groups: { '*': { requireMention: false } }`) to allow

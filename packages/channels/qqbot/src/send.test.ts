@@ -406,11 +406,8 @@ describe('purgeSingleScopeOrphans', () => {
     (ch as unknown as Record<string, unknown>)['purgeSingleScopeOrphans']();
   }
 
-  it('removes only orphan mappings (single-scope + user-scope), keeping live ones', () => {
-    const removeSessionId = vi.fn(
-      (sid: string) =>
-        sid.startsWith('single-era-') || sid.startsWith('user-era-'),
-    );
+  it('removes only single-scope orphans, keeping user-scope 3-part keys', () => {
+    const removeSessionId = vi.fn((sid: string) => sid === 'single-era-1');
     const stderrSpy = vi
       .spyOn(process.stderr, 'write')
       .mockImplementation(() => true);
@@ -435,7 +432,8 @@ describe('purgeSingleScopeOrphans', () => {
           sessionId: 'normal-1',
           target: { channelName: 'test-bot' },
         },
-        // User-scope three-part key under thread scope: orphan (PR #8241).
+        // User-scope three-part key under thread scope: kept — 3-part keys
+        // age out naturally instead of being purged (PR #8241).
         {
           key: 'test-bot:user-1:chat-1',
           sessionId: 'user-era-1',
@@ -455,15 +453,17 @@ describe('purgeSingleScopeOrphans', () => {
     };
     const ch = makeChannelWithRouter(router);
     callPurge(ch);
-    expect(removeSessionId).toHaveBeenCalledTimes(2);
+    expect(removeSessionId).toHaveBeenCalledTimes(1);
     expect(removeSessionId).toHaveBeenCalledWith('single-era-1');
-    expect(removeSessionId).toHaveBeenCalledWith('user-era-1');
+    expect(removeSessionId).not.toHaveBeenCalledWith('user-era-1');
     expect(removeSessionId).not.toHaveBeenCalledWith('sibling-live');
     expect(removeSessionId).not.toHaveBeenCalledWith('normal-1');
     expect(removeSessionId).not.toHaveBeenCalledWith('sibling-3part');
     // The purge reports what it dropped on stderr (thread 57 gate).
     const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
-    expect(logged).toContain('Purged 2 orphaned session mapping(s)');
+    expect(logged).toContain(
+      'Purged 1 orphaned single-scope session mapping(s)',
+    );
   });
 
   it('releases the daemon-side session for each purged orphan (bridge.discardSession)', () => {
@@ -505,13 +505,13 @@ describe('purgeSingleScopeOrphans', () => {
     expect(removeSessionId).toHaveBeenCalledWith('single-era-1');
   });
 
-  it('purges user-scope 3-part keys under thread scope but keeps live two-part keys', () => {
+  it('keeps user-scope 3-part keys under thread scope (age out) but purges single-scope orphans', () => {
     const removeSessionId = vi.fn(() => true);
     const discardSession = vi.fn().mockResolvedValue(undefined);
     const router = {
       getAll: () => [
-        // User-scope three-part key: unreachable under thread scope (the
-        // router re-keys those sessions as two-part) → orphan.
+        // User-scope three-part key under thread scope: kept — 3-part keys
+        // age out naturally instead of being purged.
         {
           key: 'test-bot:u1:c1',
           sessionId: 'user-scope-1',
@@ -559,13 +559,15 @@ describe('purgeSingleScopeOrphans', () => {
       { router } as unknown as QQChannelOptions,
     );
     callPurge(ch);
-    expect(removeSessionId).toHaveBeenCalledTimes(2);
-    expect(removeSessionId).toHaveBeenCalledWith('user-scope-1');
+    expect(removeSessionId).toHaveBeenCalledTimes(1);
+    expect(removeSessionId).not.toHaveBeenCalledWith('user-scope-1');
     expect(removeSessionId).toHaveBeenCalledWith('single-era-1');
     expect(removeSessionId).not.toHaveBeenCalledWith('thread-scope-1');
     expect(removeSessionId).not.toHaveBeenCalledWith('sibling-3part');
-    // The daemon-side user-scope session is discarded like the others.
-    expect(discardSession).toHaveBeenCalledWith('user-scope-1');
+    // Only the purged single-scope orphan's daemon-side session is discarded.
+    expect(discardSession).toHaveBeenCalledTimes(1);
+    expect(discardSession).toHaveBeenCalledWith('single-era-1');
+    expect(discardSession).not.toHaveBeenCalledWith('user-scope-1');
     expect(discardSession).not.toHaveBeenCalledWith('sibling-3part');
   });
 
