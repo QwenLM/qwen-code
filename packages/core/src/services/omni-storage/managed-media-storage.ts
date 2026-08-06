@@ -111,6 +111,20 @@ export class ManagedMediaStorage {
       await this.assertNoSymlink(dir);
     }
 
+    // mkdir's mode only applies when creating; tighten adopted dirs too.
+    // Runs after the symlink checks so chmod never follows a planted link.
+    for (const dir of [
+      this.rootDir,
+      this.paths.objectsDir,
+      this.paths.downloadsDir,
+      this.paths.stagingDir,
+      this.paths.quarantineDir,
+    ]) {
+      await fs.promises.chmod(dir, 0o700).catch((err) => {
+        debugLogger.warn(`Could not tighten ${dir} to 0700:`, err);
+      });
+    }
+
     const gitignorePath = path.join(this.rootDir, '.gitignore');
     try {
       await fs.promises.writeFile(gitignorePath, '*\n', {
@@ -148,21 +162,43 @@ export class ManagedMediaStorage {
       mode: 0o700,
     });
 
-    const sourceStat = await fs.promises.stat(sourcePath);
-    const readStream = fs.createReadStream(sourcePath);
-    const writeStream = fs.createWriteStream(tmpPath, { mode: 0o600 });
-
-    readStream.on('data', (chunk) => {
-      hash.update(chunk);
-    });
-    await pipeline(readStream, writeStream);
-
-    return this.finalizeCommit(
-      tmpPath,
-      hash.digest('hex'),
-      extension,
-      sourceStat.size,
+    // Open once and trust the fd from then on: reopening by path after the
+    // check would let a racing writer swap in a symlink or special file.
+    const noFollow = 'O_NOFOLLOW' in fs.constants ? fs.constants.O_NOFOLLOW : 0;
+    const handle = await fs.promises.open(
+      sourcePath,
+      fs.constants.O_RDONLY | noFollow,
     );
+    try {
+      const sourceStat = await handle.stat();
+      if (!sourceStat.isFile()) {
+        throw new Error(
+          `Refusing non-regular file in commitObject: ${sourcePath}. ` +
+            'Symlinks and special files are not allowed.',
+        );
+      }
+      const readStream = handle.createReadStream();
+      const writeStream = fs.createWriteStream(tmpPath, { mode: 0o600 });
+
+      readStream.on('data', (chunk) => {
+        hash.update(chunk);
+      });
+      try {
+        await pipeline(readStream, writeStream);
+      } catch (err) {
+        await fs.promises.unlink(tmpPath).catch(() => {});
+        throw err;
+      }
+
+      return this.finalizeCommit(
+        tmpPath,
+        hash.digest('hex'),
+        extension,
+        sourceStat.size,
+      );
+    } finally {
+      await handle.close();
+    }
   }
 
   /**
@@ -191,7 +227,12 @@ export class ManagedMediaStorage {
       prefixDir,
       `.commit-${randomBytes(8).toString('hex')}.tmp`,
     );
-    await fs.promises.writeFile(tmpPath, data, { mode: 0o600 });
+    try {
+      await fs.promises.writeFile(tmpPath, data, { mode: 0o600 });
+    } catch (err) {
+      await fs.promises.unlink(tmpPath).catch(() => {});
+      throw err;
+    }
     await fs.promises.rename(tmpPath, objectPath);
 
     return {
@@ -370,15 +411,17 @@ export class ManagedMediaStorage {
         }
         for (const file of files) {
           if (file.endsWith('.tmp')) continue;
+          let fileStat: fs.Stats;
           try {
-            const fileStat = await fs.promises.stat(
-              path.join(prefixPath, file),
-            );
-            totalBytes += fileStat.size;
-            objectCount++;
+            // lstat + isFile mirrors GC's listObjects; stat would follow a
+            // planted symlink into the budget with no cleanup path for it.
+            fileStat = await fs.promises.lstat(path.join(prefixPath, file));
           } catch {
-            // skip
+            continue;
           }
+          if (!fileStat.isFile()) continue;
+          totalBytes += fileStat.size;
+          objectCount++;
         }
       }
     } catch {
@@ -470,17 +513,24 @@ export class ManagedMediaStorage {
       const match = files.find(
         (f) => f.startsWith(sha256) && !f.endsWith('.tmp'),
       );
-      return match ? path.join(prefixDir, match) : undefined;
+      if (!match) return undefined;
+      const candidatePath = path.join(prefixDir, match);
+      // Refuse a planted symlink at lookup time instead of serving the
+      // link target's bytes (§9: do not follow).
+      const st = await fs.promises.lstat(candidatePath);
+      if (!st.isFile()) return undefined;
+      return candidatePath;
     } catch {
       return undefined;
     }
   }
 
-  private async assertNoSymlink(targetPath: string): Promise<void> {
-    const resolved = path.resolve(targetPath);
-    // Find the deepest existing ancestor (the target itself may not exist
-    // yet); walk up through ENOENTs.
-    let existing = resolved;
+  /**
+   * Resolve symlinks in the existing prefix of `p`; nonexistent suffix
+   * components cannot be symlinks and are kept as-is.
+   */
+  private async physicalPath(p: string): Promise<string> {
+    let existing = p;
     for (;;) {
       try {
         await fs.promises.lstat(existing);
@@ -488,18 +538,58 @@ export class ManagedMediaStorage {
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
         const parent = path.dirname(existing);
-        if (parent === existing) return;
+        if (parent === existing) return p;
         existing = parent;
       }
     }
-    // realpath resolves elsewhere when any component of the existing
-    // prefix is a symlink — including the final component itself.
     const real = await fs.promises.realpath(existing);
-    if (real !== existing) {
+    return existing === p ? real : path.join(real, p.slice(existing.length));
+  }
+
+  /**
+   * §3 scopes symlink refusal to the managed tree itself. Symlinks
+   * strictly above the storage root are system-managed (macOS
+   * /var -> /private/var, relocated home dirs) and are normalized, not
+   * refused; anything at or below the root must stay symlink-free. For a
+   * path outside the tree (e.g. an external commit source) only the
+   * target's own component is checked.
+   */
+  private async assertNoSymlink(targetPath: string): Promise<void> {
+    const resolved = path.resolve(targetPath);
+    const root = path.resolve(this.rootDir);
+    const rel = path.relative(root, resolved);
+    const inside =
+      rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+    const floor = inside ? root : resolved;
+
+    const floorParent = path.dirname(floor);
+    const expectedFloor =
+      floorParent === floor
+        ? floor
+        : path.join(await this.physicalPath(floorParent), path.basename(floor));
+
+    let floorExists = true;
+    try {
+      await fs.promises.lstat(floor);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      floorExists = false;
+    }
+    if (floorExists && (await fs.promises.realpath(floor)) !== expectedFloor) {
       throw new Error(
-        `Symlink detected in path ${targetPath} (at "${existing}"). ` +
-          'Omni storage refuses symlinks.',
+        `Symlink detected at "${floor}". Omni storage refuses symlinks ` +
+          'at or below the storage root.',
       );
+    }
+
+    if (resolved !== floor) {
+      const expectedTarget = path.join(expectedFloor, rel);
+      if ((await this.physicalPath(resolved)) !== expectedTarget) {
+        throw new Error(
+          `Symlink detected in path ${targetPath}. Omni storage refuses ` +
+            'symlinks at or below the storage root.',
+        );
+      }
     }
   }
 }

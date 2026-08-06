@@ -85,16 +85,51 @@ describe('ManagedMediaStorage', () => {
       expect(gitignore).toBe('*\n');
     });
 
-    it('enforces 0700 dirs and 0600 files', async () => {
-      const root = path.join(tmpDir, 'omni');
-      for (const sub of ['objects', 'downloads', 'staging', 'quarantine']) {
-        const stat = await fs.promises.stat(path.join(root, sub));
-        expect(stat.mode & 0o777).toBe(0o700);
-      }
-      const result = await storage.commitBuffer(Buffer.from('perms'), '.bin');
-      const fileStat = await fs.promises.stat(result.objectPath);
-      expect(fileStat.mode & 0o777).toBe(0o600);
-    });
+    // Windows applies only the read-only bit from mode and libuv reports
+    // fabricated permissions, so mode assertions can never hold there.
+    it.skipIf(process.platform === 'win32')(
+      'enforces 0700 dirs and 0600 files',
+      async () => {
+        const root = path.join(tmpDir, 'omni');
+        for (const sub of ['objects', 'downloads', 'staging', 'quarantine']) {
+          const stat = await fs.promises.stat(path.join(root, sub));
+          expect(stat.mode & 0o777).toBe(0o700);
+        }
+        const result = await storage.commitBuffer(Buffer.from('perms'), '.bin');
+        const fileStat = await fs.promises.stat(result.objectPath);
+        expect(fileStat.mode & 0o777).toBe(0o600);
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'tightens pre-existing permissive region dirs on adoption',
+      async () => {
+        const root = path.join(tmpDir, 'omni-adopted');
+        for (const sub of [
+          '',
+          'objects',
+          'downloads',
+          'staging',
+          'quarantine',
+        ]) {
+          const dir = path.join(root, sub);
+          await fs.promises.mkdir(dir, { recursive: true });
+          await fs.promises.chmod(dir, 0o755);
+        }
+        const adopted = new ManagedMediaStorage(root, testConfig());
+        await adopted.initialize();
+        for (const sub of [
+          '',
+          'objects',
+          'downloads',
+          'staging',
+          'quarantine',
+        ]) {
+          const stat = await fs.promises.stat(path.join(root, sub));
+          expect(stat.mode & 0o777).toBe(0o700);
+        }
+      },
+    );
 
     it('does not clobber a pre-existing .gitignore', async () => {
       const root = path.join(tmpDir, 'omni2');
@@ -118,7 +153,10 @@ describe('ManagedMediaStorage', () => {
       await expect(linkStorage.initialize()).rejects.toThrow('symlink');
     });
 
-    it('rejects a symlinked ancestor of the storage root', async () => {
+    it('tolerates a symlinked ancestor above the storage root', async () => {
+      // System-managed symlinks above the root (macOS /var -> /private/var,
+      // relocated homes) are not the threat §3 targets; refusing them would
+      // break every store under os.tmpdir() on macOS.
       const realParent = path.join(tmpDir, 'real-parent');
       const linkParent = path.join(tmpDir, 'link-parent');
       await fs.promises.mkdir(realParent);
@@ -127,7 +165,18 @@ describe('ManagedMediaStorage', () => {
         path.join(linkParent, 'omni'),
         testConfig(),
       );
-      await expect(nested.initialize()).rejects.toThrow('symlink');
+      await expect(nested.initialize()).resolves.toBeUndefined();
+      const data = Buffer.from('under a symlinked ancestor');
+      const result = await nested.commitBuffer(data, '.bin');
+      expect((await fs.promises.readFile(result.objectPath)).equals(data)).toBe(
+        true,
+      );
+      const realRoot = await fs.promises.realpath(
+        path.join(linkParent, 'omni'),
+      );
+      expect(
+        (await fs.promises.lstat(path.join(realRoot, 'objects'))).isDirectory(),
+      ).toBe(true);
     });
 
     it('rejects a pre-symlinked region directory', async () => {
@@ -210,6 +259,15 @@ describe('ManagedMediaStorage', () => {
       await expect(storage.commitObject(linkFile, '.bin')).rejects.toThrow(
         'symlink',
       );
+    });
+
+    it('rejects a non-regular commit source', async () => {
+      // The fd-based check must catch special files even when the path
+      // check passes (directories on POSIX; the open itself fails on
+      // Windows) — either way the commit must not proceed.
+      const dirSource = path.join(tmpDir, 'dir-source');
+      await fs.promises.mkdir(dirSource);
+      await expect(storage.commitObject(dirSource, '.bin')).rejects.toThrow();
     });
 
     it('deduplicates when content already exists', async () => {
@@ -426,6 +484,26 @@ describe('ManagedMediaStorage', () => {
 
       const status = await smallStorage.getBudgetStatus();
       expect(status.overBudget).toBe(true);
+    });
+
+    it('budget and lookup refuse a planted symlink inside objects/', async () => {
+      const data = Buffer.from('replace me');
+      const result = await storage.commitBuffer(data, '.bin');
+
+      // Swap the committed object for a symlink to a larger outside file.
+      const outside = path.join(tmpDir, 'outside-target.txt');
+      await fs.promises.writeFile(outside, 'x'.repeat(5000));
+      await fs.promises.unlink(result.objectPath);
+      await fs.promises.symlink(outside, result.objectPath);
+
+      // Lookup must not serve the link target's bytes (§9: do not follow),
+      // and the budget must not count a link GC can never reclaim.
+      expect(await storage.objectExists(result.managedId)).toBe(false);
+      expect(await storage.findObjectPath(result.managedId)).toBeUndefined();
+      const status = await storage.getBudgetStatus();
+      expect(status.objectCount).toBe(0);
+      expect(status.totalBytes).toBe(0);
+      expect(status.overBudget).toBe(false);
     });
   });
 });

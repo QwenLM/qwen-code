@@ -105,8 +105,12 @@ export async function runGc(
   uploadCache: OmniUploadCache,
   rootProvider: GcRootProvider,
 ): Promise<GcResult> {
-  const rootSet = await rootProvider.getReferencedManagedIds();
+  // Enumerate objects BEFORE snapshotting roots: the commit protocol puts
+  // bytes on disk before the Memory transaction registers its reference,
+  // so an object committed during the walk must not classify as
+  // unreferenced in this pass (it would simply miss this enumeration).
   const objects = await listObjects(paths.objectsDir);
+  const rootSet = await rootProvider.getReferencedManagedIds();
   const retentionCutoff = Date.now() - config.retentionDays * 86_400_000;
 
   const referenced: ObjectEntry[] = [];
@@ -166,13 +170,27 @@ export async function runGc(
         sweptCount++;
         sweptHashes.push(obj.sha256);
         debugLogger.debug(`Budget-swept object ${obj.sha256}`);
-      } catch {
-        // already gone
+      } catch (err) {
+        // ENOENT: deleted concurrently — the bytes are already free, so
+        // drop them from the accounting (and invalidate the cache entry,
+        // since the remover may not have been deleteObject). Genuine
+        // failures keep the bytes counted, as in phase 1.
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+          currentBytes -= obj.sizeBytes;
+          sweptHashes.push(obj.sha256);
+        }
       }
     }
   }
 
-  uploadCache.invalidateMany(sweptHashes);
+  try {
+    uploadCache.invalidateMany(sweptHashes);
+  } catch (err) {
+    // Cache invalidation must not discard the GcResult after the sweep
+    // already ran; stale entries degrade to a delivery miss (§9) and age
+    // out via pruneExpired.
+    debugLogger.warn('Failed to invalidate upload cache after GC:', err);
+  }
 
   const overBudget = currentBytes > config.maxTotalBytes;
   const result: GcResult = {
@@ -383,8 +401,14 @@ export async function runStartupRecovery(
     }
   }
 
-  // 6. Prune expired upload cache entries
-  uploadCache.pruneExpired();
+  // 6. Prune expired upload cache entries (best-effort, like every other
+  // recovery step: an unreadable cache file must not abort startup after
+  // cleanup already ran).
+  try {
+    uploadCache.pruneExpired();
+  } catch (err) {
+    debugLogger.warn('Failed to prune expired upload cache entries:', err);
+  }
 
   debugLogger.info(
     `Startup recovery: ${result.stagingDirsRemoved} staging, ` +
