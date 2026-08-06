@@ -2120,7 +2120,10 @@ export default {
   Paused: '已暫停',
   'Pause is cooperative; in-flight work may finish before the workflow is paused.':
     '暫停是協作式的；在工作流暫停之前，進行中的工作可能會先完成。',
-  'Paused cooperatively; press p to resume.': '已協作式暫停；按 p 恢復。',
+  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume.':
+    '已暫停：不會啟動新的 agent；agent 呼叫之間的指令碼會繼續執行。按 p 恢復。',
+  'Pause/resume was rejected; the workflow state changed. Try again.':
+    '暫停/恢復被拒絕；工作流狀態已變更。請重試。',
   'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.':
     '提示：使用 `/workflows p <runId>`，或在背景任務中按 p 協作暫停/恢復；使用 `/workflows <runId>` 檢視詳情。',
   Completed: '已完成',

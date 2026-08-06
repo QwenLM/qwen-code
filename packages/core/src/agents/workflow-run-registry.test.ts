@@ -18,8 +18,11 @@ import {
   MAX_PENDING_WORKFLOW_APPROVALS,
   MAX_WORKFLOW_APPROVAL_DISPLAY_CHARS,
   MAX_RETAINED_TERMINAL_WORKFLOWS,
+  isActiveWorkflowStatus,
+  isTerminalWorkflowStatus,
   type WorkflowApprovalRequestCallback,
   type WorkflowTaskRegistration,
+  type WorkflowStatus,
 } from './workflow-run-registry.js';
 
 function reg(
@@ -1358,4 +1361,25 @@ describe('WorkflowRunRegistry', () => {
     r.reset();
     expect(r.shouldShowUsageWarning()).toBe(false);
   });
+});
+
+describe('workflow status guards', () => {
+  // The terminal guard is an explicit positive match, not the negation of
+  // the active whitelist — a status later added to WorkflowStatus must not
+  // silently classify as terminal and flow into WorkflowSnapshot.status.
+  it.each<WorkflowStatus>(['completed', 'failed', 'cancelled'])(
+    'classifies %s as terminal',
+    (status) => {
+      expect(isTerminalWorkflowStatus(status)).toBe(true);
+      expect(isActiveWorkflowStatus(status)).toBe(false);
+    },
+  );
+
+  it.each<WorkflowStatus>(['running', 'pausing', 'paused'])(
+    'classifies %s as active',
+    (status) => {
+      expect(isActiveWorkflowStatus(status)).toBe(true);
+      expect(isTerminalWorkflowStatus(status)).toBe(false);
+    },
+  );
 });

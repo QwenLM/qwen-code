@@ -447,9 +447,9 @@ describe('BackgroundTasksDialog', () => {
       h.call(() => h.probe.current!.actions.openDialog());
       h.call(() => h.probe.current!.actions.enterDetail());
       expect(h.probe.current!.state.dialogMode).toBe('detail');
-      expect(h.lastFrame()).toContain(
-        'Paused cooperatively; press p to resume.',
-      );
+      // Copy states the real guarantee: no new dispatches start, but script
+      // code between agent calls keeps running (a paused run can still settle).
+      expect(h.lastFrame()).toContain('no new agents will start');
 
       const before = h.lastFrame();
       act(() => {
@@ -851,14 +851,39 @@ describe('BackgroundTasksDialog', () => {
     const h = setup([workflowEntry({ status: 'pausing' })]);
 
     h.call(() => h.probe.current!.actions.openDialog());
-    // The pausing footer hint is the only visible signal that a pause
-    // request is in flight — assert it directly so removing/merging the
-    // 'pausing' hint branch cannot pass silently.
-    expect(h.lastFrame()).toContain('cooperative pause pending');
+    // 'pausing' is a status, not a keybinding, so it gets no footer hint;
+    // the detail body's Pausing explainer carries the signal instead.
+    expect(h.lastFrame()).not.toContain('p pause');
+    expect(h.lastFrame()).not.toContain('p resume');
     h.pressKey({ sequence: 'p' });
 
     expect(h.workflowPause).not.toHaveBeenCalled();
     expect(h.workflowResume).not.toHaveBeenCalled();
+  });
+
+  it('flashes a footer note when the registry rejects a pause/resume', () => {
+    vi.useFakeTimers();
+    try {
+      const h = setup([workflowEntry({ status: 'running' })]);
+      h.call(() => h.probe.current!.actions.openDialog());
+      // Registry loses the race and refuses the transition.
+      h.workflowPause.mockReturnValue(false);
+
+      h.pressKey({ sequence: 'p' });
+
+      expect(h.workflowPause).toHaveBeenCalledWith('wf_test1234');
+      // The verdict is surfaced instead of being swallowed (parity with
+      // the explicit error /workflows p reports).
+      expect(h.lastFrame()).toContain('Pause/resume was rejected');
+
+      // The note clears itself after a few seconds.
+      act(() => {
+        vi.advanceTimersByTime(3100);
+      });
+      expect(h.lastFrame()).not.toContain('Pause/resume was rejected');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('does not offer or trigger pause for a foreground workflow', () => {

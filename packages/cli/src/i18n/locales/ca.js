@@ -1593,7 +1593,16 @@ export default {
   'Background agent needs approval': "L'agent en segon pla necessita aprovació",
   'Approve or deny the request above': 'Aprova o denega la sol·licitud de dalt',
   Running: 'En execució',
+  Pausing: 'Pausant',
   Paused: 'En pausa',
+  'Pause is cooperative; in-flight work may finish before the workflow is paused.':
+    'La pausa és cooperativa; el treball en curs pot acabar abans que el flux de treball es posi en pausa.',
+  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume.':
+    "En pausa: no s'iniciaran agents nous; el codi de l'script entre crides d'agent continua executant-se. Prem p per reprendre.",
+  'Pause/resume was rejected; the workflow state changed. Try again.':
+    "La pausa o la represa ha estat rebutjada; l'estat del flux de treball ha canviat. Torna-ho a provar.",
+  'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.':
+    'Consell: usa `/workflows p <runId>` o Tasques en segon pla + p per posar en pausa/reprendre cooperativament; usa `/workflows <runId>` per veure els detalls.',
   Completed: 'Completada',
   Failed: 'Fallida',
   Stopped: 'Aturada',

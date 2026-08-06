@@ -11,7 +11,14 @@
  */
 
 import type React from 'react';
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { Box, Text } from 'ink';
 import stringWidth from 'string-width';
 import {
@@ -190,11 +197,11 @@ function isStoppableEntry(entry: DialogEntry): boolean {
 
 function workflowPauseHint(entry: DialogEntry | null): string | undefined {
   if (entry?.kind !== 'workflow' || !entry.isBackgrounded) return undefined;
+  // 'pausing' deliberately gets no footer hint: it is a status, not a
+  // keybinding; the detail body's Pausing explainer already carries it.
   switch (entry.status) {
     case 'running':
       return 'p pause (cooperative)';
-    case 'pausing':
-      return 'cooperative pause pending';
     case 'paused':
       return 'p resume (cooperative)';
     default:
@@ -1247,7 +1254,9 @@ const WorkflowDetailBody: React.FC<{
                 ? t(
                     'Pause is cooperative; in-flight work may finish before the workflow is paused.',
                   )
-                : t('Paused cooperatively; press p to resume.')}
+                : t(
+                    'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume.',
+                  )}
             </Text>
           </Box>
         </Fragment>
@@ -1420,6 +1429,20 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   useEffect(() => {
     if (!isDetailMode) setSaveActive(false);
   }, [isDetailMode]);
+
+  // A rejected cooperative pause/resume (the registry returns false when the
+  // run's state raced away mid-request) flashes a short footer note instead
+  // of being swallowed, matching the explicit error /workflows p reports.
+  const [pauseRejected, setPauseRejected] = useState(false);
+  useEffect(() => {
+    if (!pauseRejected) return;
+    const timer = setTimeout(() => setPauseRejected(false), 3000);
+    return () => clearTimeout(timer);
+  }, [pauseRejected]);
+
+  const toggleWorkflowPauseWithFeedback = useCallback(() => {
+    if (toggleSelectedWorkflowPause() === false) setPauseRejected(true);
+  }, [toggleSelectedWorkflowPause]);
 
   const selectedEntry = useMemo(() => {
     const fromSnapshot = entries[selectedIndex] ?? null;
@@ -1735,7 +1758,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
           return;
         }
         if (key.sequence === 'p' && !key.ctrl && !key.meta) {
-          toggleSelectedWorkflowPause();
+          toggleWorkflowPauseWithFeedback();
           return;
         }
         if (key.sequence === 'x' && !key.ctrl && !key.meta) {
@@ -1791,7 +1814,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
         return;
       }
       if (key.sequence === 'p' && !key.ctrl && !key.meta) {
-        toggleSelectedWorkflowPause();
+        toggleWorkflowPauseWithFeedback();
         return;
       }
       if (key.sequence === 'x' && !key.ctrl && !key.meta) {
@@ -1937,7 +1960,15 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
         />
       ) : (
         <Box marginTop={1} paddingX={1}>
-          <Text color={theme.text.secondary}>{hints.join(' \u00B7 ')}</Text>
+          {pauseRejected ? (
+            <Text color={theme.status.warning}>
+              {t(
+                'Pause/resume was rejected; the workflow state changed. Try again.',
+              )}
+            </Text>
+          ) : (
+            <Text color={theme.text.secondary}>{hints.join(' \u00B7 ')}</Text>
+          )}
         </Box>
       )}
     </Box>

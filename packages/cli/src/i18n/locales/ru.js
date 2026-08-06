@@ -1480,7 +1480,16 @@ export default {
   'Background agent needs approval': 'Фоновый агент требует подтверждения',
   'Approve or deny the request above': 'Подтвердите или отклоните запрос выше',
   Running: 'Выполняется',
+  Pausing: 'Приостанавливается',
   Paused: 'Приостановлено',
+  'Pause is cooperative; in-flight work may finish before the workflow is paused.':
+    'Приостановка кооперативная; выполняемая работа может завершиться до того, как рабочий процесс будет приостановлен.',
+  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume.':
+    'Приостановлено: новые агенты не будут запускаться; код скрипта между вызовами агентов продолжает выполняться. Нажмите p, чтобы возобновить.',
+  'Pause/resume was rejected; the workflow state changed. Try again.':
+    'Приостановка/возобновление отклонены; состояние рабочего процесса изменилось. Повторите попытку.',
+  'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.':
+    'Подсказка: используйте `/workflows p <runId>` или «Фоновые задачи» + p для кооперативной приостановки/возобновления; используйте `/workflows <runId>` для подробностей.',
   Completed: 'Завершено',
   Failed: 'Ошибка',
   Stopped: 'Остановлено',

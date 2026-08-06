@@ -71,8 +71,13 @@ export interface BackgroundTaskViewActions {
   cancelSelected(): void;
   /** Resume the currently selected paused entry. */
   resumeSelected(): Promise<void>;
-  /** Cooperatively pause or resume the selected workflow. */
-  toggleSelectedWorkflowPause(): void;
+  /**
+   * Cooperatively pause or resume the selected workflow. Returns whether
+   * the registry accepted the transition, or `null` when the keypress does
+   * not apply to the selection (not a backgrounded workflow in a pausable
+   * state). A `false` verdict means the run's state changed mid-race.
+   */
+  toggleSelectedWorkflowPause(): boolean | null;
   enterDetailFromPanel(): void;
   setPillFocused(focused: boolean): void;
   setLivePanelFocused(focused: boolean): void;
@@ -113,7 +118,7 @@ const DEFAULT_ACTIONS: BackgroundTaskViewActions = {
   enterDetailFromPanel: noop,
   cancelSelected: noop,
   resumeSelected: async () => {},
-  toggleSelectedWorkflowPause: noop,
+  toggleSelectedWorkflowPause: () => null,
   setPillFocused: noop,
   setLivePanelFocused: noop,
   setLivePanelSelectedIndex: noop,
@@ -295,16 +300,16 @@ export function BackgroundTaskViewProvider({
     await config.resumeBackgroundAgent(target.agentId);
   }, [config, entries, selectedIndex]);
 
-  const toggleSelectedWorkflowPause = useCallback(() => {
-    if (!config) return;
+  const toggleSelectedWorkflowPause = useCallback((): boolean | null => {
+    if (!config) return null;
     const target = entries[selectedIndex];
-    if (!target || target.kind !== 'workflow' || !target.isBackgrounded) return;
-    const registry = config.getWorkflowRunRegistry();
-    if (target.status === 'running') {
-      registry.pause(target.runId);
-    } else if (target.status === 'paused') {
-      registry.resume(target.runId);
+    if (!target || target.kind !== 'workflow' || !target.isBackgrounded) {
+      return null;
     }
+    const registry = config.getWorkflowRunRegistry();
+    if (target.status === 'running') return registry.pause(target.runId);
+    if (target.status === 'paused') return registry.resume(target.runId);
+    return null;
   }, [config, entries, selectedIndex]);
 
   const state: BackgroundTaskViewState = useMemo(

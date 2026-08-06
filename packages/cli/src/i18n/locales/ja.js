@@ -973,7 +973,16 @@ export default {
   'Approve or deny the request above':
     '上のリクエストを承認または拒否してください',
   Running: '実行中',
+  Pausing: '一時停止に移行中',
   Paused: '一時停止中',
+  'Pause is cooperative; in-flight work may finish before the workflow is paused.':
+    '一時停止は協調的です。ワークフローが一時停止される前に、実行中の作業が完了する場合があります。',
+  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume.':
+    '一時停止中：新しいエージェントは開始されません。エージェント呼び出し間のスクリプトコードは実行を続けます。再開するには p を押してください。',
+  'Pause/resume was rejected; the workflow state changed. Try again.':
+    '一時停止／再開は拒否されました。ワークフローの状態が変化しました。もう一度お試しください。',
+  'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.':
+    'ヒント：`/workflows p <runId>` またはバックグラウンドタスク + p で実行を協調的に一時停止／再開できます。詳細は `/workflows <runId>` で確認できます。',
   Completed: '完了',
   Failed: '失敗',
   Stopped: '停止済み',

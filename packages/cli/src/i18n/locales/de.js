@@ -1532,7 +1532,16 @@ export default {
   'Approve or deny the request above':
     'Genehmigen oder lehnen Sie die obige Anfrage ab',
   Running: 'Läuft',
+  Pausing: 'Wird pausiert',
   Paused: 'Pausiert',
+  'Pause is cooperative; in-flight work may finish before the workflow is paused.':
+    'Das Pausieren ist kooperativ; laufende Arbeiten werden möglicherweise abgeschlossen, bevor der Workflow pausiert ist.',
+  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume.':
+    'Pausiert: Es werden keine neuen Agenten gestartet; Skriptcode zwischen Agentenaufrufen läuft weiter. Drücke p, um fortzufahren.',
+  'Pause/resume was rejected; the workflow state changed. Try again.':
+    'Pausieren/Fortsetzen wurde abgelehnt; der Workflow-Status hat sich geändert. Versuche es erneut.',
+  'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.':
+    'Tipp: Verwende `/workflows p <runId>` oder Hintergrundaufgaben + p, um einen Lauf kooperativ zu pausieren/fortzusetzen; mit `/workflows <runId>` siehst du Details.',
   Completed: 'Abgeschlossen',
   Failed: 'Fehlgeschlagen',
   Stopped: 'Gestoppt',

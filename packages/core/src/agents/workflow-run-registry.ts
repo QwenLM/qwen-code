@@ -71,7 +71,12 @@ export function isActiveWorkflowStatus(
 export function isTerminalWorkflowStatus(
   status: WorkflowStatus,
 ): status is WorkflowTerminalStatus {
-  return !isActiveWorkflowStatus(status);
+  // Explicit positive match rather than `!isActiveWorkflowStatus(status)`:
+  // a status later added to WorkflowStatus must not silently classify as
+  // terminal and flow into WorkflowSnapshot.status (typed to this union).
+  return (
+    status === 'completed' || status === 'failed' || status === 'cancelled'
+  );
 }
 
 export const MAX_PENDING_WORKFLOW_APPROVALS = 32;

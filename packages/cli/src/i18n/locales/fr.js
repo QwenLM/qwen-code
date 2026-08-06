@@ -1603,7 +1603,16 @@ export default {
   'Approve or deny the request above':
     'Approuvez ou refusez la demande ci-dessus',
   Running: 'En cours',
+  Pausing: 'Mise en pause',
   Paused: 'En pause',
+  'Pause is cooperative; in-flight work may finish before the workflow is paused.':
+    'La pause est coopérative ; le travail en cours peut se terminer avant que le workflow ne soit mis en pause.',
+  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume.':
+    "En pause : aucun nouvel agent ne démarrera ; le code du script entre les appels d'agents continue de s'exécuter. Appuyez sur p pour reprendre.",
+  'Pause/resume was rejected; the workflow state changed. Try again.':
+    "La mise en pause ou la reprise a été refusée ; l'état du workflow a changé. Réessayez.",
+  'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.':
+    'Astuce : utilisez `/workflows p <runId>` ou Tâches en arrière-plan + p pour mettre en pause/reprendre de façon coopérative ; utilisez `/workflows <runId>` pour les détails.',
   Completed: 'Terminé',
   Failed: 'Échec',
   Stopped: 'Arrêté',
