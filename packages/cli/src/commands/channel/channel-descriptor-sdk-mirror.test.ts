@@ -54,10 +54,14 @@ const FIELD_KINDS: readonly ChannelConfigFieldKind[] = [
 
 function assertDescriptorWireShape(
   descriptor: ChannelConfigFieldDescriptor,
+  nested = false,
 ): void {
   expect(typeof descriptor.key).toBe('string');
   expect(typeof descriptor.label).toBe('string');
   expect(FIELD_KINDS).toContain(descriptor.kind);
+  if (nested) {
+    expect(descriptor.kind).not.toBe('secret');
+  }
   const allowedKeys = new Set([
     'key',
     'label',
@@ -71,10 +75,12 @@ function assertDescriptorWireShape(
     allowedKeys.add('properties');
     expect(descriptor.required ?? false).toBe(false);
     for (const property of descriptor.properties ?? []) {
-      assertDescriptorWireShape(property);
+      assertDescriptorWireShape(property, true);
     }
   } else {
-    allowedKeys.add('envResolvable');
+    if (!nested) {
+      allowedKeys.add('envResolvable');
+    }
     if (descriptor.kind === 'number') {
       allowedKeys.add('exclusiveMinimum');
     }

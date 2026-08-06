@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   DINGTALK_INTERACTIVE_CARD_TIMEOUT_EXCLUSIVE_MINIMUM,
+  DINGTALK_INTERACTIVE_CARD_TIMEOUT_MAXIMUM_MS,
   parseDingtalkCardCallback,
   parseDingtalkInteractiveCardConfig,
 } from './interactive-card-types.js';
@@ -84,6 +85,16 @@ describe('interactive card config', () => {
     expect(() =>
       parseDingtalkInteractiveCardConfig({ statusCard: { enabled: 'yes' } }),
     ).toThrow('statusCard.enabled');
+  });
+
+  it('clamps question timeouts at the setTimeout maximum delay', () => {
+    expect(
+      parseDingtalkInteractiveCardConfig({
+        questionCard: {
+          timeoutMs: DINGTALK_INTERACTIVE_CARD_TIMEOUT_MAXIMUM_MS + 1,
+        },
+      }).questionCard.timeoutMs,
+    ).toBe(DINGTALK_INTERACTIVE_CARD_TIMEOUT_MAXIMUM_MS);
   });
 });
 

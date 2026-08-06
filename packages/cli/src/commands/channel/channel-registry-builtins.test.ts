@@ -1,10 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
+import type { ChannelPlugin } from '@qwen-code/channel-base';
 
-vi.mock('@qwen-code/channel-dingtalk', () => ({
-  plugin: {
-    channelType: 'dingtalk',
-    displayName: 'DingTalk',
-    management: {
+const { dingtalkPlugin } = vi.hoisted(() => {
+  // A prototype-based (class-instance) plugin, a shape the extension loader
+  // accepts: createChannel lives on the prototype, not as an own property.
+  class InvalidDingtalkPlugin {
+    channelType = 'dingtalk';
+    displayName = 'DingTalk';
+    management = {
       fields: [
         {
           key: 'settings',
@@ -13,14 +16,23 @@ vi.mock('@qwen-code/channel-dingtalk', () => ({
           required: true,
         },
       ],
-    },
-    createChannel() {
+    };
+    createChannel(): never {
       throw new Error('not used');
-    },
-  },
+    }
+  }
+  return { dingtalkPlugin: new InvalidDingtalkPlugin() };
+});
+
+vi.mock('@qwen-code/channel-dingtalk', () => ({
+  plugin: dingtalkPlugin,
 }));
 
-import { getPlugin, supportedChannelCatalog } from './channel-registry.js';
+import {
+  getPlugin,
+  registerPlugin,
+  supportedChannelCatalog,
+} from './channel-registry.js';
 
 describe('built-in channel registry', () => {
   it('keeps an invalid built-in channel running without management metadata', async () => {
@@ -44,7 +56,57 @@ describe('built-in channel registry', () => {
     const plugin = await getPlugin('dingtalk');
     expect(plugin?.management).toBeUndefined();
     expect(plugin?.createChannel).toBeTypeOf('function');
+    expect(plugin?.createChannel).toBe(dingtalkPlugin.createChannel);
+    expect(plugin?.channelType).toBe('dingtalk');
 
     stderr.mockRestore();
+  });
+
+  it('registers a nested property keyed "type" with management intact', async () => {
+    const plugin: ChannelPlugin = {
+      channelType: 'valid-nested-type-key',
+      displayName: 'valid-nested-type-key',
+      management: {
+        fields: [
+          {
+            key: 'settings',
+            label: 'Settings',
+            kind: 'object',
+            properties: [{ key: 'type', label: 'Type', kind: 'string' }],
+          },
+        ],
+      },
+      createChannel() {
+        throw new Error('not used');
+      },
+    };
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+    registerPlugin(plugin);
+
+    expect(stderr).not.toHaveBeenCalledWith(
+      expect.stringContaining('Invalid management metadata'),
+    );
+    stderr.mockRestore();
+
+    const registered = await getPlugin('valid-nested-type-key');
+    expect(registered?.management).toBe(plugin.management);
+
+    const entry = (await supportedChannelCatalog()).find(
+      (candidate) => candidate.type === 'valid-nested-type-key',
+    );
+    expect(entry).toEqual({
+      type: 'valid-nested-type-key',
+      displayName: 'valid-nested-type-key',
+      manageable: true,
+      fields: [
+        {
+          key: 'settings',
+          label: 'Settings',
+          kind: 'object',
+          properties: [{ key: 'type', label: 'Type', kind: 'string' }],
+        },
+      ],
+    });
   });
 });

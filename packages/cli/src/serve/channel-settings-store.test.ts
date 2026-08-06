@@ -9,6 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import stripJsonComments from 'strip-json-comments';
+import type { ChannelPlugin } from '@qwen-code/channel-base';
 import { registerPlugin } from '../commands/channel/channel-registry.js';
 import { resetHomeEnvBootstrapForTesting } from '../config/settings.js';
 import { WorkspaceChannelSettingsStore } from './channel-settings-store.js';
@@ -595,6 +596,156 @@ describe('WorkspaceChannelSettingsStore', () => {
         'Channel field "interactiveCards.questionCard.timeoutMs" has an invalid value.',
     });
     expect(fs.readFileSync(settingsPath, 'utf8')).toBe(beforeRejectedWrite);
+  });
+
+  it('preserves an unchanged invalid nested object while a sibling property changes', async () => {
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "bot": {
+    "type": "dingtalk",
+    "clientId": "client-id",
+    "clientSecret": "existing-secret",
+    "interactiveCards": {
+      "enabled": false,
+      "questionCard": { "enabled": true, "timeoutMs": 0 }
+    }
+  } }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    const next = await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'dingtalk',
+        clientId: 'client-id',
+        interactiveCards: {
+          enabled: true,
+          questionCard: { enabled: true, timeoutMs: 0 },
+        },
+      },
+      secrets: { clientSecret: { operation: 'preserve' } },
+    });
+
+    expect(next.channels['bot']).toMatchObject({
+      interactiveCards: {
+        enabled: true,
+        questionCard: { enabled: true, timeoutMs: 0 },
+      },
+    });
+  });
+
+  it('preserves an unchanged stored non-record object value', async () => {
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "bot": {
+    "type": "dingtalk",
+    "clientId": "client-id",
+    "clientSecret": "existing-secret",
+    "interactiveCards": null
+  } }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    const next = await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'dingtalk',
+        clientId: 'updated-id',
+        interactiveCards: null,
+      },
+      secrets: { clientSecret: { operation: 'preserve' } },
+    });
+
+    expect(next.channels['bot']).toMatchObject({
+      clientId: 'updated-id',
+      interactiveCards: null,
+    });
+
+    const beforeRejectedWrite = fs.readFileSync(settingsPath, 'utf8');
+    await expect(
+      store.upsert('bot', {
+        expectedRevision: next.revision,
+        config: {
+          type: 'dingtalk',
+          clientId: 'updated-id',
+          interactiveCards: [],
+        },
+        secrets: { clientSecret: { operation: 'preserve' } },
+      }),
+    ).rejects.toMatchObject({
+      code: 'channel_settings_invalid_config',
+      message: 'Channel field "interactiveCards" has an invalid value.',
+    });
+    expect(fs.readFileSync(settingsPath, 'utf8')).toBe(beforeRejectedWrite);
+  });
+
+  it('preserves an unchanged stored object that omits a now-required nested property', async () => {
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "bot": {
+    "type": "management-validation-test",
+    "clientId": "client-id",
+    "clientSecret": "existing-secret",
+    "nested": {}
+  } }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    const next = await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'management-validation-test',
+        clientId: 'updated-id',
+        nested: {},
+      },
+      secrets: { clientSecret: { operation: 'preserve' } },
+    });
+
+    expect(next.channels['bot']).toMatchObject({
+      clientId: 'updated-id',
+      nested: {},
+    });
+  });
+
+  it('accepts environment references on fields with truthy non-boolean envResolvable', async () => {
+    registerPlugin({
+      channelType: 'untyped-env-resolvable',
+      displayName: 'Untyped env resolvable',
+      management: {
+        fields: [
+          {
+            key: 'clientId',
+            label: 'Client ID',
+            kind: 'string',
+            required: true,
+          },
+          {
+            key: 'endpoint',
+            label: 'Endpoint',
+            kind: 'string',
+            envResolvable: 'yes',
+          },
+        ],
+      },
+      createChannel() {
+        throw new Error('not used');
+      },
+    } as unknown as ChannelPlugin);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    const next = await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'untyped-env-resolvable',
+        clientId: 'client-id',
+        endpoint: '$ENDPOINT',
+      },
+    });
+
+    expect(next.channels['bot']).toMatchObject({
+      clientId: 'client-id',
+      endpoint: '$ENDPOINT',
+    });
   });
 
   it('rejects an omitted required nested descriptor property without writing', async () => {

@@ -137,6 +137,48 @@ describe('channel registry', () => {
       message: 'Channel field "settings.prototype" cannot use a reserved key.',
     },
     {
+      type: 'invalid-depth2-nested-secret',
+      fields: [
+        {
+          key: 'settings',
+          label: 'Settings',
+          kind: 'object',
+          properties: [
+            {
+              key: 'inner',
+              label: 'Inner',
+              kind: 'object',
+              properties: [{ key: 'token', label: 'Token', kind: 'secret' }],
+            },
+          ],
+        },
+      ],
+      message:
+        'Channel field "settings.inner.token" cannot declare a nested secret.',
+    },
+    {
+      type: 'invalid-depth2-reserved-key',
+      fields: [
+        {
+          key: 'settings',
+          label: 'Settings',
+          kind: 'object',
+          properties: [
+            {
+              key: 'inner',
+              label: 'Inner',
+              kind: 'object',
+              properties: [
+                { key: '__proto__', label: 'Proto', kind: 'string' },
+              ],
+            },
+          ],
+        },
+      ],
+      message:
+        'Channel field "settings.inner.__proto__" cannot use a reserved key.',
+    },
+    {
       type: 'invalid-reserved-type-key',
       fields: [
         {
@@ -177,6 +219,19 @@ describe('channel registry', () => {
       message: 'Channel field "mode" must declare at least one option.',
     },
     {
+      type: 'invalid-non-finite-exclusive-minimum',
+      fields: [
+        {
+          key: 'retries',
+          label: 'Retries',
+          kind: 'number',
+          exclusiveMinimum: Number.NaN,
+        },
+      ],
+      message:
+        'Channel field "retries" must declare a finite exclusiveMinimum.',
+    },
+    {
       type: 'invalid-object-properties-not-array',
       fields: [
         {
@@ -198,6 +253,18 @@ describe('channel registry', () => {
         },
       ],
       message: 'Channel field "settings" must declare a properties array.',
+    },
+    {
+      type: 'invalid-object-with-empty-properties',
+      fields: [
+        {
+          key: 'settings',
+          label: 'Settings',
+          kind: 'object',
+          properties: [],
+        },
+      ],
+      message: 'Channel field "settings" must declare at least one property.',
     },
     {
       type: 'invalid-duplicate-top-level-field',
@@ -306,7 +373,7 @@ describe('channel registry', () => {
 
     expect(stderr).toHaveBeenCalledWith(
       expect.stringContaining(
-        'Invalid management metadata in "invalid-validate-config" channel: Channel management metadata must declare validateConfig as a function.',
+        'Invalid management metadata in "invalid-validate-config" channel: Channel management metadata must declare validateConfig as a synchronous function.',
       ),
     );
     stderr.mockRestore();
@@ -321,6 +388,44 @@ describe('channel registry', () => {
     expect(entry).toEqual({
       type: 'invalid-validate-config',
       displayName: 'invalid-validate-config',
+      manageable: false,
+      fields: [],
+    });
+  });
+
+  it('registers a plugin whose validateConfig is async without management metadata', async () => {
+    const plugin = {
+      channelType: 'invalid-async-validate-config',
+      displayName: 'invalid-async-validate-config',
+      management: {
+        fields: [{ key: 'token', label: 'Token', kind: 'string' }],
+        validateConfig: async () => undefined,
+      },
+      createChannel() {
+        throw new Error('not used');
+      },
+    } as unknown as ChannelPlugin;
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+    registerPlugin(plugin);
+
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Invalid management metadata in "invalid-async-validate-config" channel: Channel management metadata must declare validateConfig as a synchronous function.',
+      ),
+    );
+    stderr.mockRestore();
+
+    const registered = await getPlugin('invalid-async-validate-config');
+    expect(registered?.management).toBeUndefined();
+    expect(registered?.createChannel).toBe(plugin.createChannel);
+
+    const entry = (await supportedChannelCatalog()).find(
+      (candidate) => candidate.type === 'invalid-async-validate-config',
+    );
+    expect(entry).toEqual({
+      type: 'invalid-async-validate-config',
+      displayName: 'invalid-async-validate-config',
       manageable: false,
       fields: [],
     });

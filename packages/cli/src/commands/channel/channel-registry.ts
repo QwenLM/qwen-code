@@ -63,6 +63,15 @@ function assertManagementField(
     );
   }
   if (
+    field.kind === 'number' &&
+    field.exclusiveMinimum !== undefined &&
+    !Number.isFinite(field.exclusiveMinimum)
+  ) {
+    throw new Error(
+      `Channel field "${path}" must declare a finite exclusiveMinimum.`,
+    );
+  }
+  if (
     field.kind === 'enum' &&
     (!Array.isArray(field.options) ||
       field.options.length === 0 ||
@@ -84,6 +93,11 @@ function assertManagementField(
   if (!Array.isArray(field.properties)) {
     throw new Error(`Channel field "${path}" must declare a properties array.`);
   }
+  if (field.properties.length === 0) {
+    throw new Error(
+      `Channel field "${path}" must declare at least one property.`,
+    );
+  }
   assertManagementFields(field.properties, path, true);
 }
 
@@ -92,10 +106,11 @@ function assertManagementDescriptor(plugin: ChannelPlugin): void {
   if (management === undefined) return;
   if (
     management.validateConfig !== undefined &&
-    typeof management.validateConfig !== 'function'
+    (typeof management.validateConfig !== 'function' ||
+      management.validateConfig.constructor.name === 'AsyncFunction')
   ) {
     throw new Error(
-      'Channel management metadata must declare validateConfig as a function.',
+      'Channel management metadata must declare validateConfig as a synchronous function.',
     );
   }
   if (!Array.isArray(management.fields)) {
@@ -155,11 +170,21 @@ function registerWithManagementValidation(
     assertManagementDescriptor(plugin);
   } catch (error) {
     // Fail closed on the management surface only; the channel runtime keeps
-    // working with management stripped.
+    // working with management stripped. Object.assign over a prototype copy
+    // keeps prototype methods (e.g. class-instance plugins) alive.
     process.stderr.write(
       `[channel-registry] Invalid management metadata in "${label}" channel: ${error instanceof Error ? error.message : String(error)}\n`,
     );
-    registry.set(plugin.channelType, { ...plugin, management: undefined });
+    registry.set(
+      plugin.channelType,
+      Object.assign(
+        Object.create(
+          Object.getPrototypeOf(plugin) ?? Object.prototype,
+        ) as ChannelPlugin,
+        plugin,
+        { management: undefined },
+      ),
+    );
     return;
   }
   registry.set(plugin.channelType, plugin);

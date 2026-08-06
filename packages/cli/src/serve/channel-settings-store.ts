@@ -223,14 +223,17 @@ function assertDescriptorValue(
   previous?: unknown,
 ): void {
   if (field.kind === 'object') {
-    if (!isRecord(value)) {
-      throw invalidConfig(`Channel field "${path}" has an invalid value.`);
-    }
     // The web editor cannot edit object fields and re-sends the stored value
     // verbatim on every save; an unchanged stored object keeps its values even
     // if a newer rule would reject them. Reserved keys stay rejected.
-    if (isDeepStrictEqual(previous, value) && !containsUnsafeObjectKey(value)) {
+    if (
+      isDeepStrictEqual(previous, value) &&
+      (!isRecord(value) || !containsUnsafeObjectKey(value))
+    ) {
       return;
+    }
+    if (!isRecord(value)) {
+      throw invalidConfig(`Channel field "${path}" has an invalid value.`);
     }
     const previousRecord = isRecord(previous) ? previous : {};
     const properties = new Map(
@@ -255,7 +258,7 @@ function assertDescriptorValue(
   const invalidEnvironment =
     typeof value === 'string' &&
     isEnvironmentReference(value) &&
-    field.envResolvable !== true;
+    !field.envResolvable;
   if (invalidEnvironment) {
     throw invalidConfig(
       `Channel field "${path}" does not support environment references.`,
