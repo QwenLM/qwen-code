@@ -150,16 +150,32 @@
   min-width: 0;
 }
 
+/* Status drives one accent, and the accent drives every edge treatment on the
+   node: the border, and the selection ring. Before this, status set
+   `border-color` while selection stacked an always-blue ring on top, so a
+   completed (green) or blocked (amber) node picked up a second border in a
+   clashing hue the moment it was selected. */
 .node {
+  --node-accent: var(--border);
+  --node-ring: var(--agent-blue-500);
   position: relative;
   display: flex;
   flex-direction: column;
   gap: 6px;
   min-width: 0;
   padding: 9px 10px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--node-accent);
   border-radius: 8px;
   background: var(--background);
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .node {
+    transition: none;
+  }
 }
 
 .dagCanvas .node::before,
@@ -185,21 +201,26 @@
 
 .node[data-status='running'],
 .node[data-status='completed'] {
-  border-color: color-mix(in srgb, var(--success-color) 55%, var(--border));
+  --node-accent: color-mix(in srgb, var(--success-color) 55%, var(--border));
+  --node-ring: var(--success-color);
 }
 
 .node[data-status='blocked'],
 .node[data-status='paused'] {
-  border-color: color-mix(in srgb, var(--warning-color) 55%, var(--border));
+  --node-accent: color-mix(in srgb, var(--warning-color) 55%, var(--border));
+  --node-ring: var(--warning-color);
 }
 
 .node[data-status='in_progress'] {
-  border-color: color-mix(in srgb, var(--agent-blue-500) 55%, var(--border));
+  --node-accent: color-mix(in srgb, var(--agent-blue-500) 55%, var(--border));
+  --node-ring: var(--agent-blue-500);
 }
 
+/* Selection reads as "the same edge, turned up": the border goes to full
+   strength and the ring echoes it, rather than introducing a second colour. */
 .node[data-selected='true'] {
-  box-shadow: 0 0 0 2px
-    color-mix(in srgb, var(--agent-blue-500) 35%, transparent);
+  border-color: var(--node-ring);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--node-ring) 32%, transparent);
 }
 
 .nodeSummary {
