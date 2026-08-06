@@ -485,7 +485,15 @@ function VirtualizedList<T>(
     props.targetScrollIndex,
   ]);
 
-  const startIndex = Math.max(0, findLastLE(offsets, actualScrollTop) - 1);
+  // Cached zero heights create runs of coincident offsets; findLastLE
+  // lands on the run's LAST item, leaving the run's earlier items
+  // unmounted and unable to re-measure their re-expanded content. Walk
+  // back to the run's first item so a re-expand heals the whole run in
+  // one pass instead of one item per scroll.
+  let startIndex = Math.max(0, findLastLE(offsets, actualScrollTop) - 1);
+  while (startIndex > 0 && offsets[startIndex - 1] === offsets[startIndex]) {
+    startIndex--;
+  }
   const viewHeightForEndIndex =
     scrollableContainerHeight > 0 ? scrollableContainerHeight : 50;
   const endIndexOffsetRaw = upperBound(
