@@ -82,6 +82,13 @@ describe('runBaseTree', () => {
     git(repo, 'config', 'user.email', 't@t.t');
     git(repo, 'config', 'user.name', 't');
     writeFileSync(join(repo, 'a.txt'), 'before\n');
+    writeFileSync(
+      join(repo, 'package.json'),
+      JSON.stringify({
+        name: 'fixture',
+        scripts: { build: 'true', test: 'true' },
+      }),
+    );
     git(repo, 'add', '-A');
     git(repo, 'commit', '-qm', 'base');
     baseSha = git(repo, 'rev-parse', 'HEAD');
@@ -212,7 +219,7 @@ describe('runBaseTree', () => {
     expect(run({}, build).available).toBe(false);
     const second = run({}, build);
     expect(second.available).toBe(false);
-    expect(second.note).toContain('already failed');
+    expect(second.note).toContain('already settled');
     expect(builds).toHaveLength(1);
   });
 
@@ -235,7 +242,7 @@ describe('runBaseTree', () => {
     expect(r.note).toMatch(/never a finding against the PR/);
   });
 
-  it('is NOT available when the build handed off without building anything', () => {
+  it('is NOT available when the build handed off without building anything — and settles', () => {
     // A PR that adds a workspace package maps to no package at the merge base,
     // so runBuildTest hands off `unsupported` (ok: true, build: []). Stamping that
     // tree available would let an A/B read the missing build as a behavioural diff.
@@ -245,11 +252,26 @@ describe('runBaseTree', () => {
       build: [],
       note: 'handoff',
     } as unknown as BuildTestReport;
-    const r = run({}, () => handoff);
+    const builds: string[] = [];
+    const build = (w: string): BuildTestReport => {
+      builds.push(w);
+      return handoff;
+    };
+    const r = run({}, build);
     expect(r.available).toBe(false);
     expect(
       existsSync(join(baseWorktreePath(worktree), '.qwen-review-base-ok')),
     ).toBe(false);
+    // Zero commands ran, so the note must read as "did not build" — never as
+    // a tree that built with an attribution problem.
+    expect(r.note).toMatch(/did not build/);
+    expect(r.note).not.toMatch(/built, but/);
+    // Settled: a later shard reuses the marker instead of re-paying the
+    // worktree add plus build to re-learn the same "unavailable".
+    const second = run({}, build);
+    expect(second.available).toBe(false);
+    expect(second.note).toContain('already settled');
+    expect(builds).toHaveLength(1);
   });
 
   it('is NOT available when npm scoped nothing to compile', () => {
@@ -262,6 +284,24 @@ describe('runBaseTree', () => {
       note: 'nothing to build',
     } as unknown as BuildTestReport;
     expect(run({}, () => empty).available).toBe(false);
+  });
+
+  it('is NOT available for a maven base that BUILT — and does not say it failed', () => {
+    // `test-delta` attributes failures by parsing runner output; surefire's
+    // shape is not a parse it can do, so the A/B is unavailable for maven.
+    // The tree built fine — the note must not claim otherwise.
+    const mavenBuild = {
+      ok: true,
+      toolchain: 'maven',
+      build: [{ command: 'mvn -B -pl common -am compile', exitCode: 0 }],
+      note: 'built',
+    } as unknown as BuildTestReport;
+    const r = run({}, () => mavenBuild);
+    expect(r.available).toBe(false);
+    expect(r.note).toMatch(/built, but an A\/B is not available/);
+    expect(r.note).toMatch(/maven/);
+    expect(r.note).not.toMatch(/did not build/);
+    expect(r.note).toMatch(/never a finding against the PR/);
   });
 
   it('refuses when the plan carries no mergeBaseSha', () => {
@@ -278,6 +318,66 @@ describe('runBaseTree', () => {
     const r = run({ plan: { baseFetchFailed: true } });
     expect(r.available).toBe(false);
     expect(r.note).toMatch(/stale/);
+    expect(existsSync(baseWorktreePath(worktree))).toBe(false);
+  });
+
+  it('passes the pre-check for modeled workspaces and reaches the build seam', () => {
+    // The workspace-glob arm of the pre-check: `packages/*` is modeled, so
+    // the review proceeds to the build instead of refusing up front.
+    writeFileSync(
+      join(worktree, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    mkdirSync(join(worktree, 'packages', 'a'), { recursive: true });
+    writeFileSync(
+      join(worktree, 'packages', 'a', 'package.json'),
+      JSON.stringify({ name: '@x/a', scripts: { build: 'true' } }),
+    );
+
+    const builds: string[] = [];
+    const r = run({}, (w) => {
+      builds.push(w);
+      return okBuild;
+    });
+
+    expect(r.available).toBe(true);
+    expect(builds).toHaveLength(1);
+  });
+
+  it('refuses up front when the workspace glob is unmodeled', () => {
+    writeFileSync(
+      join(worktree, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/**'] }),
+    );
+
+    const builds: string[] = [];
+    const r = run({}, (w) => {
+      builds.push(w);
+      return okBuild;
+    });
+
+    expect(r.available).toBe(false);
+    expect(r.note).toMatch(/no npm layout/);
+    expect(builds).toEqual([]);
+    expect(existsSync(baseWorktreePath(worktree))).toBe(false);
+  });
+
+  it('refuses BEFORE any worktree add when the repo is not npm-scopable', () => {
+    // The A/B gate accepts only npm builds; a Maven review used to pay a
+    // checkout plus up to a full per-command deadline to learn that. The
+    // source worktree's layout tells it for free.
+    rmSync(join(worktree, 'package.json'));
+    writeFileSync(join(worktree, 'pom.xml'), '<project/>');
+
+    const builds: string[] = [];
+    const r = run({}, (w) => {
+      builds.push(w);
+      return okBuild;
+    });
+
+    expect(r.available).toBe(false);
+    expect(r.note).toMatch(/no npm layout/);
+    expect(builds).toEqual([]); // no checkout, no build
     expect(existsSync(baseWorktreePath(worktree))).toBe(false);
   });
 
