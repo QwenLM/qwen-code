@@ -660,8 +660,31 @@ jobs:
       }}
     runs-on: 'ubuntu-latest'
     timeout-minutes: 180
+    # route.issue_number is only set for forced dispatches; label events carry
+    # the issue in the payload, and scan-and-pick runs (cron, unforced
+    # dispatch) share one 'scheduled' group. The old github.run_id fallback
+    # made every scan-and-pick run its own group, so two overlapping scans
+    # (cron fires every 40-70min, this job runs up to 180) could double-claim
+    # the same issue — the claim recheck runs after assess and only narrows
+    # the race to the short gap between the recheck and the claim's label
+    # write; it does not close it. Queued (never cancelled) so the newest
+    # pending tick still runs after a long scan if targets remain;
+    # intermediate ticks are superseded, which is fine because each run
+    # rescans from scratch.
+    #
+    # GitHub evaluates concurrency before the job `if`, but after `needs`, so
+    # the group is gated on the same runnability predicate as the `if` above,
+    # plus a dry-run exclusion: runs whose issue phase will not execute
+    # (do_issue=false takeover, review, and command events; label events
+    # failing the decide gates; scheduled ticks whose review-scan still has
+    # targets) and dry runs (if-runnable, but their Claim/Publish steps are
+    # gated off) get a run-unique group instead — a run that never claims
+    # entering a target-keyed group would replace the single pending run
+    # there and silently cancel it. Same precedent as qwen-triage.yml's
+    # triage/tmux jobs.
     concurrency:
-      group: 'qwen-autofix-issue-${{ needs.route.outputs.issue_number || github.run_id }}'
+      group: >-
+        ${{ needs.route.outputs.do_issue == 'true' && needs.route.outputs.dry_run != 'true' && (github.event_name != 'schedule' || (needs.review-scan.result == 'success' && needs.review-scan.outputs.has_targets != 'true')) && format('qwen-autofix-issue-{0}', needs.route.outputs.issue_number || github.event.issue.number || 'scheduled') || format('qwen-autofix-issue-run-{0}', github.run_id) }}
       cancel-in-progress: false
     permissions:
       contents: 'read'
@@ -786,6 +809,8 @@ jobs:
         id: 'scan'
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+          # Must resolve to the same issue as this job's concurrency group
+          # expression; a test pins the two equal.
           FORCED_ISSUE: '${{ needs.route.outputs.issue_number || github.event.issue.number }}'
         run: |-
           mkdir -p "${WORKDIR}"
