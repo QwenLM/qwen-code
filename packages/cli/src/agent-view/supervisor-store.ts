@@ -42,6 +42,8 @@ interface StoreOptions {
   globalDir?: string;
 }
 
+const rosterMutationQueues = new Map<string, Promise<void>>();
+
 export function getAgentViewStorePaths(
   options: StoreOptions = {},
 ): AgentViewStorePaths {
@@ -100,45 +102,49 @@ export async function upsertAgentViewRosterEntry(
   entry: AgentViewRosterEntry,
   options: StoreOptions = {},
 ): Promise<AgentViewRosterFile> {
-  const roster = await readAgentViewRosterForWrite(options);
-  const key = sanitizeSessionId(entry.sessionId);
-  const sessions = roster.sessions.filter(
-    (item) => sanitizeSessionId(item.sessionId) !== key,
-  );
-  const existing = roster.sessions.find(
-    (item) => sanitizeSessionId(item.sessionId) === key,
-  );
-  const updated: AgentViewRosterEntry = {
-    ...existing,
-    ...entry,
-  };
-  const next: AgentViewRosterFile = {
-    ...roster,
-    schemaVersion: 1,
-    updatedAt: entry.updatedAt,
-    sessions: [...sessions, updated].sort(compareRosterEntries),
-  };
-  await writeAgentViewRoster(next, options);
-  return next;
+  return mutateAgentViewRoster(options, async () => {
+    const roster = await readAgentViewRosterForWrite(options);
+    const entryKey = sanitizeSessionId(entry.sessionId);
+    const sessions = roster.sessions.filter(
+      (item) => sanitizeSessionId(item.sessionId) !== entryKey,
+    );
+    const existing = roster.sessions.find(
+      (item) => sanitizeSessionId(item.sessionId) === entryKey,
+    );
+    const updated: AgentViewRosterEntry = {
+      ...existing,
+      ...entry,
+    };
+    const next: AgentViewRosterFile = {
+      ...roster,
+      schemaVersion: 1,
+      updatedAt: entry.updatedAt,
+      sessions: [...sessions, updated].sort(compareRosterEntries),
+    };
+    await writeAgentViewRoster(next, options);
+    return next;
+  });
 }
 
 export async function removeAgentViewRosterEntry(
   sessionId: string,
   options: StoreOptions = {},
 ): Promise<AgentViewRosterFile> {
-  const roster = await readAgentViewRosterForWrite(options);
-  const key = sanitizeSessionId(sessionId);
-  const now = new Date().toISOString();
-  const next: AgentViewRosterFile = {
-    ...roster,
-    schemaVersion: 1,
-    updatedAt: now,
-    sessions: roster.sessions.filter(
-      (item) => sanitizeSessionId(item.sessionId) !== key,
-    ),
-  };
-  await writeAgentViewRoster(next, options);
-  return next;
+  return mutateAgentViewRoster(options, async () => {
+    const roster = await readAgentViewRosterForWrite(options);
+    const sessionKey = sanitizeSessionId(sessionId);
+    const now = new Date().toISOString();
+    const next: AgentViewRosterFile = {
+      ...roster,
+      schemaVersion: 1,
+      updatedAt: now,
+      sessions: roster.sessions.filter(
+        (item) => sanitizeSessionId(item.sessionId) !== sessionKey,
+      ),
+    };
+    await writeAgentViewRoster(next, options);
+    return next;
+  });
 }
 
 export async function updateAgentViewRosterEntry(
@@ -146,24 +152,27 @@ export async function updateAgentViewRosterEntry(
   update: (entry: AgentViewRosterEntry) => AgentViewRosterEntry,
   options: StoreOptions = {},
 ): Promise<AgentViewRosterEntry | undefined> {
-  const roster = await readAgentViewRosterForWrite(options);
-  const key = sanitizeSessionId(sessionId);
-  let updated: AgentViewRosterEntry | undefined;
-  const sessions = roster.sessions.map((entry) => {
-    if (sanitizeSessionId(entry.sessionId) !== key) return entry;
-    updated = update(entry);
+  return mutateAgentViewRoster(options, async () => {
+    const roster = await readAgentViewRosterForWrite(options);
+    const sessionKey = sanitizeSessionId(sessionId);
+    const existing = roster.sessions.find(
+      (entry) => sanitizeSessionId(entry.sessionId) === sessionKey,
+    );
+    if (!existing) return undefined;
+    const updated = update(existing);
+    const sessions = roster.sessions.filter(
+      (entry) => sanitizeSessionId(entry.sessionId) !== sessionKey,
+    );
+
+    const next: AgentViewRosterFile = {
+      ...roster,
+      schemaVersion: 1,
+      updatedAt: updated.updatedAt,
+      sessions: [...sessions, updated].sort(compareRosterEntries),
+    };
+    await writeAgentViewRoster(next, options);
     return updated;
   });
-  if (!updated) return undefined;
-
-  const next: AgentViewRosterFile = {
-    ...roster,
-    schemaVersion: 1,
-    updatedAt: updated.updatedAt,
-    sessions: sessions.sort(compareRosterEntries),
-  };
-  await writeAgentViewRoster(next, options);
-  return updated;
 }
 
 export async function readAgentViewSessionState(
@@ -223,9 +232,12 @@ export async function listAgentViewSessionSnapshots(
     states.map(async (state) => ({
       sessionId: state.sessionId,
       state,
+      launch: redactAgentViewLaunch(
+        await readAgentViewLaunch(state.sessionId, options),
+      ),
       activity: await readAgentViewActivity(state.sessionId, options),
       worker: await readAgentViewWorker(state.sessionId, options),
-      rosterEntry: rosterEntries.get(state.sessionId),
+      rosterEntry: rosterEntries.get(sanitizeSessionId(state.sessionId)),
     })),
   );
   return snapshots.sort((left, right) =>
@@ -384,6 +396,29 @@ async function readJsonRecordForWrite(
   }
 }
 
+async function mutateAgentViewRoster<T>(
+  options: StoreOptions,
+  action: () => Promise<T>,
+): Promise<T> {
+  const rosterPath = getAgentViewStorePaths(options).rosterPath;
+  const previous = rosterMutationQueues.get(rosterPath) ?? Promise.resolve();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const current = previous.catch(() => {}).then(() => gate);
+  rosterMutationQueues.set(rosterPath, current);
+  await previous.catch(() => {});
+  try {
+    return await action();
+  } finally {
+    release();
+    if (rosterMutationQueues.get(rosterPath) === current) {
+      rosterMutationQueues.delete(rosterPath);
+    }
+  }
+}
+
 async function writeJsonFile(
   filePath: string,
   value: JsonRecord,
@@ -510,6 +545,16 @@ function normalizeLaunch(
   };
 }
 
+function redactAgentViewLaunch(
+  launch: AgentViewLaunchFile | undefined,
+): AgentViewLaunchFile | undefined {
+  if (!launch) return undefined;
+  return {
+    ...launch,
+    env: {},
+  };
+}
+
 function normalizeActivity(
   raw: JsonRecord | undefined,
 ): AgentViewActivityFile | undefined {
@@ -519,9 +564,27 @@ function normalizeActivity(
   return {
     ...raw,
     schemaVersion: 1,
-    summary: stringValue(raw['summary']),
-    waitingFor: stringValue(raw['waitingFor']),
-    lastResult: stringValue(raw['lastResult']),
+    ...(stringValue(raw['summary'])
+      ? { summary: stringValue(raw['summary']) }
+      : {}),
+    ...(stringValue(raw['waitingFor'])
+      ? { waitingFor: stringValue(raw['waitingFor']) }
+      : {}),
+    ...(inputKindValue(raw['inputKind'])
+      ? { inputKind: inputKindValue(raw['inputKind']) }
+      : {}),
+    ...(stringValue(raw['lastResult'])
+      ? { lastResult: stringValue(raw['lastResult']) }
+      : {}),
+    ...(numberValue(raw['queuedPromptCount'])
+      ? { queuedPromptCount: numberValue(raw['queuedPromptCount']) }
+      : {}),
+    ...(stringValue(raw['queuedPromptPreview'])
+      ? { queuedPromptPreview: stringValue(raw['queuedPromptPreview']) }
+      : {}),
+    ...(stringValue(raw['lastQueuedPromptAt'])
+      ? { lastQueuedPromptAt: stringValue(raw['lastQueuedPromptAt']) }
+      : {}),
     lastActivityAt,
     capabilities: stringArrayValue(raw['capabilities']),
   };
@@ -617,6 +680,10 @@ function worktreeModeValue(
   value: unknown,
 ): AgentViewSessionStateFile['worktree']['mode'] {
   return value === 'worktree' || value === 'shared-unisolated' ? value : 'none';
+}
+
+function inputKindValue(value: unknown): AgentViewActivityFile['inputKind'] {
+  return value === 'blocking' || value === 'soft' ? value : undefined;
 }
 
 function terminalValue(value: unknown): AgentViewLaunchFile['terminal'] {

@@ -159,6 +159,32 @@ describe('launchAgentViewPtyHost', () => {
     expect(pty.spawnCalls[0]?.args).toEqual(['--agent-view-worker']);
   });
 
+  it('does not inherit color-disabling supervisor environment into workers', async () => {
+    const pty = createFakePty();
+    const originalTerm = process.env['TERM'];
+    const originalNoColor = process.env['NO_COLOR'];
+    process.env['TERM'] = 'dumb';
+    process.env['NO_COLOR'] = '1';
+    try {
+      await launchAgentViewPtyHost(createLaunch(), { pty });
+    } finally {
+      if (originalTerm === undefined) {
+        delete process.env['TERM'];
+      } else {
+        process.env['TERM'] = originalTerm;
+      }
+      if (originalNoColor === undefined) {
+        delete process.env['NO_COLOR'];
+      } else {
+        process.env['NO_COLOR'] = originalNoColor;
+      }
+    }
+
+    expect(pty.spawnCalls[0]?.options.name).toBe('xterm-256color');
+    expect(pty.spawnCalls[0]?.options.env['TERM']).toBe('xterm-256color');
+    expect(pty.spawnCalls[0]?.options.env['NO_COLOR']).toBeUndefined();
+  });
+
   it('exposes PTY write, data subscription, and resize controls', async () => {
     const pty = createFakePty();
     const handle = await launchAgentViewPtyHost(createLaunch(), { pty });

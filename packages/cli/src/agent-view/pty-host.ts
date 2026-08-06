@@ -283,20 +283,14 @@ export async function launchAgentViewPtyHost(
   const output = new BoundedOutputRing(
     options.maxOutputBytes ?? DEFAULT_AGENT_VIEW_PTY_OUTPUT_BYTES,
   );
-  const inheritedEnv = stringProcessEnv(process.env);
-  for (const key of INTERNAL_ONLY_WORKER_ENV_KEYS) {
-    delete inheritedEnv[key];
-  }
+  const env = buildWorkerPtyEnv(stringProcessEnv(process.env), launch.env);
+  const term = env['TERM'];
   const ptyProcess = pty.module.spawn(command[0], command.slice(1), {
     cwd: launch.activeCwd,
-    name: 'xterm-256color',
+    name: term,
     cols: launch.terminal.columns,
     rows: launch.terminal.rows,
-    env: {
-      ...inheritedEnv,
-      ...launch.env,
-      TERM: 'xterm-256color',
-    },
+    env,
     handleFlowControl: true,
   });
   const inputDecoder = new StringDecoder('utf8');
@@ -347,6 +341,35 @@ export async function launchAgentViewPtyHost(
     },
   };
 }
+
+function buildWorkerPtyEnv(
+  inherited: Record<string, string>,
+  launchEnv: Record<string, string>,
+): Record<string, string> {
+  const env = { ...inherited };
+  for (const key of INTERNAL_ONLY_WORKER_ENV_KEYS) {
+    delete env[key];
+  }
+  for (const key of COLOR_ENV_KEYS) {
+    delete env[key];
+  }
+  return {
+    ...env,
+    ...launchEnv,
+    TERM: launchEnv['TERM'] ?? 'xterm-256color',
+  };
+}
+
+const COLOR_ENV_KEYS = [
+  'NO_COLOR',
+  'NODE_DISABLE_COLORS',
+  'FORCE_COLOR',
+  'CLICOLOR',
+  'CLICOLOR_FORCE',
+  'TERM',
+  'CODEX_CI',
+  'CI',
+];
 
 async function importPty(
   specifier: '@lydell/node-pty' | 'node-pty',
