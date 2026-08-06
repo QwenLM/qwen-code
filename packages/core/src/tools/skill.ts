@@ -22,6 +22,7 @@ import {
 import path from 'path';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { registerSkillHooks } from '../hooks/registerSkillHooks.js';
+import { recordAutoSkillUsage } from '../skills/skill-curator.js';
 
 const debugLogger = createDebugLogger('SKILL');
 
@@ -340,6 +341,18 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
     return 'ask';
   }
 
+  private async recordAutoSkillUsageBestEffort(
+    skill: SkillConfig,
+  ): Promise<void> {
+    try {
+      await recordAutoSkillUsage(this.config.getProjectRoot(), skill);
+    } catch (error) {
+      debugLogger.warn(
+        `Failed to record auto-skill usage: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
   async execute(
     _signal?: AbortSignal,
     _updateOutput?: (output: ToolResultDisplay) => void,
@@ -495,6 +508,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       // onSkillLoaded, which adds the name to the loaded set.
       if (this.isSkillLoaded(this.params.skill)) {
         this.onSkillLoaded(this.params.skill);
+        void this.recordAutoSkillUsageBestEffort(skill);
         const msg = `Skill "${this.params.skill}" is already loaded in context.`;
         return {
           llmContent: msg,
@@ -548,6 +562,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
 
       const baseDir = path.dirname(skill.filePath);
       const llmContent = buildSkillLlmContent(baseDir, skill.body);
+      void this.recordAutoSkillUsageBestEffort(skill);
       recordSkillInvocation(this.config, {
         skillName: this.params.skill,
         success: true,

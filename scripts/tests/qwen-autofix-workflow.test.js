@@ -100,10 +100,26 @@ const triageAndAddressStep =
   workflow.match(
     /- name: 'Triage and address'[\s\S]*?(?=\n[ ]{6}- name: 'Verification gate')/,
   )?.[0] ?? '';
+const repairDeterministicRejectionStep =
+  workflow.match(
+    /- name: 'Repair deterministic rejection'[\s\S]*?(?=\n[ ]{6}- name: 'Repair verification gate')/,
+  )?.[0] ?? '';
+const repairVerificationGateStep =
+  workflow.match(
+    /- name: 'Repair verification gate'[\s\S]*?(?=\n[ ]{6}- name: 'Finalize verification')/,
+  )?.[0] ?? '';
+const finalizeVerificationStep =
+  workflow.match(
+    /- name: 'Finalize verification'[\s\S]*?(?=\n[ ]{6}- name: 'Show run artifacts')/,
+  )?.[0] ?? '';
 const prepareBranchAndFeedbackStep =
   workflow.match(
     /- name: 'Prepare branch and feedback'[\s\S]*?(?=\n[ ]{6}- name: 'Post autofix status comment')/,
   )?.[0] ?? '';
+// Whitespace-tolerant shape of a normalized ic.json fetch: re-indenting or
+// re-wrapping the block must not break the presence/order pins using it.
+const normalizedIcFetch =
+  /issues\/\$\{PR\}\/comments" --paginate\s*\\?\s*\|\s*jq -s 'add \/\/ \[\]' > "\$\{WORKDIR\}\/ic\.json"/;
 const postStatusCommentStep =
   workflow.match(
     /- name: 'Post autofix status comment'[\s\S]*?(?=\n[ ]{6}- name: 'Triage and address')/,
@@ -130,6 +146,10 @@ const resolveSandboxImageSteps =
 const installAndBuildSteps =
   workflow.match(
     /- name: 'Install dependencies and build'[\s\S]*?(?=\n[ ]{6}- name: ')/g,
+  ) ?? [];
+const nodeSetupSteps =
+  workflow.match(
+    /- name: 'Set up Node.js \(hosted\)'[\s\S]*?(?=\n[ ]{6}- name: ')/g,
   ) ?? [];
 
 function readAutofixSkill() {
@@ -228,6 +248,28 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).not.toMatch(/^\s*(fi|done|esac)"\s*$/m);
   });
 
+  it('keeps the prepare-branch-and-feedback run block bash-parseable', () => {
+    // The deferred-feedback echo sits inside a double-quoted string, where the
+    // '"'"' idiom is a literal apostrophe followed by a string CLOSER rather
+    // than an embedded quote — a parse-time syntax error that aborts the step
+    // for every run while the jq-filter tests (which never run the echo lines)
+    // stay green. bash -n the whole run block so a future quoting regression in
+    // this step fails CI instead of breaking every autofix run.
+    const runBlock =
+      prepareBranchAndFeedbackStep.match(/run: \|-\n([\s\S]*)$/)?.[1];
+    expect(runBlock).toBeTruthy();
+    const res = spawnSync('bash', ['-n'], {
+      encoding: 'utf8',
+      input: runBlock.replace(/^ {10}/gm, ''),
+    });
+    // Surface bash's syntax error on failure, not just `expected 2 to be 0`:
+    // this test exists precisely to diagnose quoting breakage.
+    expect({ status: res.status, stderr: res.stderr }).toEqual({
+      status: 0,
+      stderr: '',
+    });
+  });
+
   it('runs scheduled autofix as a 10-minute multi-target fan-out worker', () => {
     expect(workflow).toContain("cron: '*/10 * * * *'");
     expect(workflow).not.toContain("cron: '0 0,12 * * *'");
@@ -301,12 +343,12 @@ describe('qwen-autofix workflow', () => {
     // discards itself — no agent run, no marker, no comment.
     expect(prepareBranchAndFeedbackStep).toContain('LIVE_EVAL_WM');
     expect(prepareBranchAndFeedbackStep).toContain('stale duplicate target');
-    // Four gates, and both status-comment steps are among them: a discarded
-    // duplicate must neither announce a round it will never run nor rewrite
-    // the status the real round already finalised.
+    // Addressing, the first verification, the final verdict, and both status
+    // comment steps discard stale targets. The repair is gated by the first
+    // verdict, so it cannot start for a stale target.
     expect(
       workflow.split("steps.prepare.outputs.stale != 'true'").length - 1,
-    ).toBe(4);
+    ).toBe(5);
     expect(reviewScanJob).toContain(
       'capture("^review-address \\\\((?<pr>[0-9]+),")',
     );
@@ -350,9 +392,10 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).toContain('EFF_WM="${CREATED_WM}"');
     expect(reviewScanJob).toContain('echo "targets=[]" >> "${GITHUB_OUTPUT}"');
     expect(reviewScanJob).toContain('active checks in flight; skipping until');
-    // Staleness bound must sit above legitimate check runtimes (review-address is
-    // capped at 120m) so an active run is never aged out mid-flight.
-    expect(reviewScanJob).toContain('PENDING_STALE_MIN=240');
+    // Staleness bound must sit above legitimate check runtimes (a review-address
+    // job runs up to its 300-minute cap) so an active run is never aged out
+    // mid-flight.
+    expect(reviewScanJob).toContain('PENDING_STALE_MIN=330');
     // The staleness filter itself, including the comparison operator: a check only
     // blocks if its start is newer than the cutoff. Asserting `> $cut` too means a
     // flipped comparison (which would age out live checks → double-processing) is
@@ -1715,7 +1758,11 @@ describe('qwen-autofix workflow', () => {
 
   it('falls back to existing issue backlog only when review has no target', () => {
     expect(issueAutofixJob).toContain("needs: ['route', 'review-scan']");
-    expect(issueAutofixJob).toContain('always()');
+    // Anchor the job `if` opening: a bare toContain('always()') is also
+    // satisfied by step-level always()s elsewhere in the job.
+    expect(issueAutofixJob).toContain(
+      "if: |-\n      ${{\n        always() &&\n        needs.route.outputs.do_issue == 'true' &&",
+    );
     expect(issueAutofixJob).toContain("needs.review-scan.result == 'success'");
     expect(issueAutofixJob).toContain(
       "github.event_name != 'schedule' || (needs.review-scan.result == 'success' && needs.review-scan.outputs.has_targets != 'true')",
@@ -1851,9 +1898,68 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain(
       'if [[ "${ISSUE_STATE}" == \'open\' && "${_late_ready}" == \'true\' && "${_late_approved}" == \'true\' && "${sender_is_trusted}" == \'true\' ]]; then',
     );
+    // Issue-phase mutual exclusion: forced dispatches key per issue, label
+    // events key on the payload issue, and every scan-and-pick run (cron or
+    // unforced dispatch) shares ONE group. A run-unique fallback here let two
+    // overlapping scans double-claim the same issue — the claim recheck runs
+    // after assess and only narrows the race to the short gap between the
+    // recheck and the claim's label write; it does not close it. GitHub
+    // evaluates concurrency before the job `if`, but after `needs`, so the
+    // group is gated on the job `if`'s runnability predicate plus a dry-run
+    // exclusion: keyed-group occupants must CLAIM, and dry runs are
+    // if-runnable yet skip Claim/Publish, so they get a run-unique group
+    // just like never-runnable runs and cannot supersede a pending
+    // target-keyed run. The right edge is anchored to
+    // cancel-in-progress because the value is a folded block scalar — a
+    // run-unique suffix appended as a continuation line would also become
+    // part of the group value while a trailing-newline anchor stayed green.
     expect(issueAutofixJob).toContain(
-      "group: 'qwen-autofix-issue-${{ needs.route.outputs.issue_number || github.run_id }}'",
+      "group: >-\n        ${{ needs.route.outputs.do_issue == 'true' && needs.route.outputs.dry_run != 'true' && (github.event_name != 'schedule' || (needs.review-scan.result == 'success' && needs.review-scan.outputs.has_targets != 'true')) && format('qwen-autofix-issue-{0}', needs.route.outputs.issue_number || github.event.issue.number || 'scheduled') || format('qwen-autofix-issue-run-{0}', github.run_id) }}\n      cancel-in-progress: false",
     );
+    expect(issueAutofixJob).not.toContain('|| github.run_id }}');
+    // The group identity and the scan step's FORCED_ISSUE env are
+    // load-bearingly coupled: both must resolve to the same issue on every
+    // trigger path, or runs aimed at one issue land in different groups and
+    // the double-claim race reopens while every literal pin above stays
+    // green. Assert the two expressions equal so neither side can drift
+    // alone.
+    const groupKeyedOn = issueAutofixJob.match(
+      /format\('qwen-autofix-issue-\{0\}', (.+?) \|\| 'scheduled'\)/,
+    )?.[1];
+    const forcedIssueSource = issueAutofixJob.match(
+      /id: 'scan'[\s\S]*?FORCED_ISSUE: '\$\{\{ (.+?) \}\}'/,
+    )?.[1];
+    expect(groupKeyedOn).toBeTruthy();
+    expect(groupKeyedOn).toBe(forcedIssueSource);
+    // The gate duplicated into the group expression must stay equal to the
+    // job `if` predicate minus `always() &&` (anchored where the job `if`
+    // opens), plus the dry-run exclusion the `if` does not need — dry runs
+    // execute but never claim, so they must not enter a keyed group: the
+    // gate clause now occurs on both sides, so the literal pins of it are
+    // satisfied by the group copy even if the `if:`-side occurrence drifts.
+    const normalize = (text) => text.replace(/\s+/g, ' ').trim();
+    const ifPredicate = normalize(
+      issueAutofixJob.match(/if: \|-\n\s*\$\{\{\n([\s\S]*?)\n\s*\}\}/)?.[1] ??
+        '',
+    ).replace(/^always\(\) && /, '');
+    const gatePredicate = normalize(
+      issueAutofixJob.match(
+        /group: >-\n\s*\$\{\{\s*(.+?)\s*&& format\('qwen-autofix-issue-\{0\}'/,
+      )?.[1] ?? '',
+    );
+    expect(ifPredicate).toBeTruthy();
+    expect(gatePredicate).toBe(
+      ifPredicate.replace(
+        "needs.route.outputs.do_issue == 'true' && ",
+        "needs.route.outputs.do_issue == 'true' && needs.route.outputs.dry_run != 'true' && ",
+      ),
+    );
+    // Dry runs get run-unique groups above because they never claim — that
+    // invariant rests on these step `if:` gates, which nothing else asserts:
+    // dropping the clause from either gate lets a dry run and a scheduled
+    // real run claim the same issue while every group pin stays green.
+    expect(claimIssueStep).toContain("needs.route.outputs.dry_run != 'true'");
+    expect(publishPrStep).toContain("needs.route.outputs.dry_run != 'true'");
     expect(workflow).toContain(
       '(.labels // []) | map(.name) as $labels | ($labels | index($ready))',
     );
@@ -1948,13 +2054,19 @@ describe('qwen-autofix workflow', () => {
     // one lost Chinese section against a duplicate elsewhere): engage,
     // honest bot-PR release, skip-labeled bot-PR release, human-PR
     // release, re-arm, fork allow-edits refusal, two skip-blocked refusals,
-    // the non-main base refusal, the cap pause, and the scan-side
-    // first-pickup engage ack (fork label events carry no secrets, so the
-    // scan anchors the window itself).
+    // the label-path non-main base refusal, the command-path non-main base
+    // refusal, the takeover cap pause, the standard-mode cap pause, the
+    // forced-dispatch cap refusal, the command-path direct engage ack (the
+    // labeled event has been observed to not fire — #7999, #8002 — so the
+    // command acks itself), the command-path direct release acks (all three
+    // variants, mirroring the ack job — a loud add next to a mute stop
+    // would re-create the lost-event ambiguity on the release side), and
+    // the scan-side first-pickup engage ack (fork label events carry no
+    // secrets, so the scan anchors the window itself).
     const ackBodies = workflow.match(
       /printf '[^']*takeover-(?:ack|cap)[^']*'/g,
     );
-    expect(ackBodies).toHaveLength(12);
+    expect(ackBodies).toHaveLength(19);
     for (const body of ackBodies) {
       expect(body).toContain('<summary>中文说明</summary>');
     }
@@ -1967,6 +2079,26 @@ describe('qwen-autofix workflow', () => {
     // continues; only takeover mode (the raised cap) ends.
     expect(workflow).toContain('Takeover mode ended');
     expect(workflow).toContain('STANDARD bot management continues');
+    // The three release acks are duplicated VERBATIM between the command
+    // path (REL_BODY) and the ack job (BODY) — indentation and the variable
+    // name are the only differences. A wording change must land in BOTH, or
+    // users see divergent release messages depending on whether they used
+    // `/takeover stop` or removed the label. No other test guards this
+    // cross-site identity: pin that each of the three variants appears
+    // exactly twice and that the two copies are byte-identical.
+    const releaseBodies =
+      workflow.match(
+        /printf '👋[^']*takeover-ack released[^']*'(?: "\$\{[A-Z_]+\}")+/g,
+      ) ?? [];
+    expect(releaseBodies).toHaveLength(6);
+    const releaseCounts = new Map();
+    for (const body of releaseBodies) {
+      releaseCounts.set(body, (releaseCounts.get(body) ?? 0) + 1);
+    }
+    expect(releaseCounts.size).toBe(3);
+    for (const count of releaseCounts.values()) {
+      expect(count).toBe(2);
+    }
     // Commands are serialized per PR — an older /takeover can never land
     // after a newer /takeover stop read the unlabeled state.
     expect(workflow).toContain(
@@ -2142,7 +2274,10 @@ describe('qwen-autofix workflow', () => {
       'git fetch "https://github.com/${HEAD_REPO}.git" "refs/heads/${BRANCH}"',
     );
     expect(workflow).toContain(
-      'git push --no-verify "https://x-access-token:${GITHUB_TOKEN}@github.com/${HEAD_REPO}.git" HEAD:"${BRANCH}"',
+      'PUSH_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${HEAD_REPO}.git"',
+    );
+    expect(workflow).toContain(
+      'git push --no-verify "${PUSH_URL}" HEAD:"${BRANCH}"',
     );
     // The allow-edits grant rides the classic-PAT path only — prepare must
     // prove push access BEFORE an agent round is spent, discarding
@@ -2157,6 +2292,56 @@ describe('qwen-autofix workflow', () => {
     // under the fresh key.
     expect(reviewScanJob).toContain('takeover-ack engaged');
     expect(reviewScanJob).toContain('ic re-fetch after engage ack failed');
+    // The re-fetch must stay ATOMIC — write ic.next.json, then mv it onto
+    // ic.json only when the whole pipeline succeeded: ic.json already holds
+    // a successful full fetch, and a direct redirect truncates it BEFORE the
+    // pipeline runs, so a mid-stream jq failure would leave 0 bytes —
+    // MARKERS on empty input exits 0 with '' and the round cap silently
+    // resets. The other pins (--paginate count, normalizer count,
+    // not.toContain('--paginate > ')) all survive a 'simplification' to
+    // '> ic.json' under the if-guard, so pin the temp-file + swap shape.
+    expect(reviewScanJob).toMatch(
+      /issues\/\$\{PR\}\/comments" --paginate\s*\\?\s*\|\s*jq -s 'add \/\/ \[\]' > "\$\{WORKDIR\}\/ic\.next\.json"; then\s+mv "\$\{WORKDIR\}\/ic\.next\.json" "\$\{WORKDIR\}\/ic\.json"/,
+    );
+    // Behavioral, against real bash + jq: the truncation race the atomic
+    // pattern defends against. A direct redirect destroys the prior good
+    // fetch when the stream is truncated mid-page; the temp-file pattern
+    // keeps it on failure and still swaps in a fresh copy on success.
+    const priorFetch = JSON.stringify([
+      { user: { login: 'bot' }, body: 'prior fetch', id: 1 },
+    ]);
+    const truncatedStream = '[{"id":2'; // network cut mid-page
+    const atomicRefetch =
+      "if jq -s 'add // []' > ic.next.json; then mv ic.next.json ic.json; fi";
+    const atomicDir = mkdtempSync(join(tmpdir(), 'autofix-ic-atomic-'));
+    try {
+      writeFileSync(join(atomicDir, 'ic.json'), priorFetch);
+      // jq fails on the truncated stream…
+      expect(() =>
+        execFileSync('bash', ['-c', "jq -s 'add // []' > ic.json"], {
+          cwd: atomicDir,
+          input: truncatedStream,
+        }),
+      ).toThrow();
+      // …but only after the redirect already zeroed the good fetch.
+      expect(readFileSync(join(atomicDir, 'ic.json'), 'utf8')).toBe('');
+      writeFileSync(join(atomicDir, 'ic.json'), priorFetch);
+      execFileSync('bash', ['-c', atomicRefetch], {
+        cwd: atomicDir,
+        input: truncatedStream,
+      });
+      expect(readFileSync(join(atomicDir, 'ic.json'), 'utf8')).toBe(priorFetch);
+      const freshFetch = JSON.stringify([{ id: 3 }]);
+      execFileSync('bash', ['-c', atomicRefetch], {
+        cwd: atomicDir,
+        input: freshFetch,
+      });
+      expect(
+        JSON.parse(readFileSync(join(atomicDir, 'ic.json'), 'utf8')),
+      ).toEqual([{ id: 3 }]);
+    } finally {
+      rmSync(atomicDir, { recursive: true, force: true });
+    }
     // Ack dedup is author-filtered (a forged human marker must not suppress
     // the real ack) and re-armable: a takeover-label application newer than
     // the latest bot ack posts a fresh ack, resetting the round window.
@@ -2247,9 +2432,7 @@ describe('qwen-autofix workflow', () => {
     // ic.json fetch BEFORE the first ack-timestamp read (reading a previous
     // candidate's file mis-dedups; a missing file kills the scan step under
     // -eo pipefail). Same textual-order technique as the hooks-severed pins.
-    const icFetchAt = reviewScanJob.indexOf(
-      'gh api "repos/${REPO}/issues/${PR}/comments" --paginate > "${WORKDIR}/ic.json"',
-    );
+    const icFetchAt = reviewScanJob.search(normalizedIcFetch);
     const ackReadAt = reviewScanJob.indexOf('LAST_ENGAGE_ACK_TS=');
     expect(icFetchAt).toBeGreaterThan(-1);
     expect(ackReadAt).toBeGreaterThan(icFetchAt);
@@ -2257,9 +2440,65 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).toContain(
       'DRY-RUN: would post engage ack on #${PR} (window key untouched)',
     );
-    // In-repo first-pickup defers to the label event's DEDICATED ack job
-    // within a short grace, so a concurrent ack job is never double-posted.
+    // First-pickup grace is keyed by WHO owns the missing ack (the label
+    // event's actor): a human in-repo label defers to the DEDICATED ack
+    // job (3m of job spin-up), a bot-applied label defers only to the
+    // COMMAND's own in-flight write (45s — fork or in-repo alike); past
+    // the grace the next scheduled scan heals a failed command ack
+    // (≤10 min), and an ic.json snapshot taken between
+    // the label write and the command's ack cannot double-post.
     expect(reviewScanJob).toContain('engage ack deferred for #${PR}');
+    // Behaviorally pin the LAST_LABELED_BY jq extraction — the load-bearing
+    // input to the actor-keyed grace — mirroring the labeledTs treatment
+    // above: regex-extract the program, exec it against a multi-event
+    // fixture, and assert the returned actor. A presence check alone
+    // survives any mutation to the jq body (.actor.login → .user.login,
+    // wrong source file, sort_by on the wrong field).
+    const labeledByProgram = reviewScanJob
+      .match(
+        /LAST_LABELED_BY="\$\(jq -rs --arg lb "\$\{TAKEOVER_LABEL\}" '([\s\S]*?)' "\$\{WORKDIR\}\/pr-events\.json"\)"/,
+      )?.[1]
+      ?.replace(/\n {18}/g, '\n');
+    expect(labeledByProgram).toBeTruthy();
+    const labeledBy = execFileSync(
+      'jq',
+      ['-rs', '--arg', 'lb', 'autofix/takeover', labeledByProgram],
+      {
+        encoding: 'utf8',
+        input:
+          JSON.stringify([
+            {
+              event: 'labeled',
+              label: { name: 'autofix/takeover' },
+              actor: { login: 'wenshao' },
+              created_at: '2026-07-02T00:00:00Z',
+            },
+            {
+              event: 'labeled',
+              label: { name: 'other' },
+              actor: { login: 'mallory' },
+              created_at: '2026-07-09T00:00:00Z',
+            },
+          ]) +
+          JSON.stringify([
+            {
+              event: 'unlabeled',
+              label: { name: 'autofix/takeover' },
+              actor: { login: 'qwen-code-dev-bot' },
+              created_at: '2026-07-08T00:00:00Z',
+            },
+            {
+              event: 'labeled',
+              label: { name: 'autofix/takeover' },
+              actor: { login: 'qwen-code-dev-bot' },
+              created_at: '2026-07-06T00:00:00Z',
+            },
+          ]),
+      },
+    ).trim();
+    expect(labeledBy).toBe('qwen-code-dev-bot');
+    expect(reviewScanJob).toContain('command-applied label <45s ago');
+    expect(reviewScanJob).toContain(`date -u -d '45 seconds ago'`);
     // A fork fetch failure (force-push/rename race) discards gracefully
     // instead of a red run, and a fork moved since the scan is discarded at
     // the live re-check rather than fetched/pushed at the stale path.
@@ -2277,14 +2516,206 @@ describe('qwen-autofix workflow', () => {
       '--json headRefName,headRefOid,statusCheckRollup,createdAt,labels',
     );
     // Command-style comments are instructions, not feedback — excluded at
-    // ALL FOUR feedback sites (scan count via $cf; NEWEST, LIVE_NEW, and
-    // the renderer inline) so /triage-, /review-, and /takeover-style
+    // ALL FIVE feedback sites (scan count via $cf; NEWEST, LIVE_NEW,
+    // Critical-only deferral rendering, and the renderer inline) so /triage-,
+    // /review-, and /takeover-style
     // invocations never burn an agent cycle on a no-action report.
     expect(reviewScanJob).toContain("COMMAND_FILTER='^\\s*@qwen-code /'");
     expect(reviewScanJob).toContain('test($cf) | not');
+    // Five sites now: the four feedback/deferral exclusions plus the
+    // over-budget census, which must not count command comments as
+    // feedback batches either.
     expect(workflow.split('test("^\\\\s*@qwen-code /") | not').length - 1).toBe(
-      3,
+      5,
     );
+  });
+
+  it('normalizes every paginated WORKDIR fetch to one flat array (>100-item PRs)', () => {
+    // gh >= v2.31.0 merges all pages of a REST array endpoint into ONE flat
+    // JSON array (cli/cli#7190), so on every hosted runner the WORKDIR files
+    // are already single arrays; the jq -s 'add // []' pipes are retained as
+    // cheap defense-in-depth. Every fetch that lands in a WORKDIR json file
+    // must still pipe through the normalizer: plain-jq consumers
+    // (MARKERS/REARM_KEY/ROUND, CAP_NOTICED, BASE_UPDATE_RECENT,
+    // LAST_REJECTION, PRIOR_TIMEOUTS, the milestone census) would
+    // mis-aggregate on a multi-doc file — ROUND becomes a multi-line string
+    // and the cap arithmetic dies silently — while NEWEST/LIVE_NEW
+    // additionally bind rv/rc/ic/checks POSITIONALLY, so one multi-page file
+    // shifts every later slot. Slurp-style readers (jq -rs add, --slurpfile
+    // + add) are unaffected: add is idempotent over a single flat array.
+    // The two-page fixtures below are synthetic (the per-page shape gh <
+    // v2.31.0 emitted): they exercise the jq mechanics of the normalizer and
+    // its consumers, not the wire format current gh produces.
+    expect(workflow).not.toContain('--paginate > "');
+    // Pin the total --paginate code-site count so ANY new paginated site
+    // forces a deliberate test update, however it is spaced or line-wrapped:
+    // bump this count AND pipe the new site through the normalizer (bumping
+    // the count below too) — bumping this pin alone leaves toBe(9) green.
+    expect(workflow.split('--paginate').length - 1).toBe(13);
+    // scan ic + pr-events + ic re-fetch + scan rv/rc + prepare rv/rc/ic +
+    // report COMMENTS_JSON fallback = nine normalized fetch sites.
+    expect(workflow.split("jq -s 'add // []'").length - 1).toBe(9);
+    // Empty-input semantics: a total gh failure feeds the fallback an EMPTY
+    // stream, where the normalizer filter must yield '[]' and not 'null' —
+    // the PRIOR_HEADS consumer below iterates the result with .[], which
+    // dies on null ("Cannot iterate over null"). Every existing behavioral
+    // fixture is non-empty, where 'add // []' and bare 'add' are
+    // indistinguishable, so run the fallback's ACTUAL filter against empty
+    // stdin and pin the empty case explicitly.
+    const fallbackFilter = reviewAddressReportStep.match(
+      /COMMENTS_JSON="\$\(gh api "repos\/\$\{REPO\}\/issues\/\$\{PR\}\/comments" --paginate 2> \/dev\/null \| jq -s '([\s\S]*?)' \|\| true\)"/,
+    )?.[1];
+    expect(fallbackFilter).toBeTruthy();
+    expect(
+      execFileSync('jq', ['-s', fallbackFilter], {
+        encoding: 'utf8',
+        input: '',
+      }).trim(),
+    ).toBe('[]');
+    expect(
+      execFileSync('jq', ['-s', 'add'], {
+        encoding: 'utf8',
+        input: '',
+      }).trim(),
+    ).toBe('null'); // what dropping '// []' would silently produce
+    const priorHeadsProgram = reviewAddressReportStep
+      .match(
+        /PRIOR_HEADS="\$\(jq -r --arg ab "\$\{AUTOFIX_BOT\}" --arg win "\$\{WINDOW:-none\}" '([\s\S]*?)' <<< "\$\{COMMENTS_JSON\}"/,
+      )?.[1]
+      ?.replace(/\n {16}/g, '\n');
+    expect(priorHeadsProgram).toBeTruthy();
+    expect(() =>
+      execFileSync(
+        'jq',
+        ['-r', '--arg', 'ab', 'bot', '--arg', 'win', 'none', priorHeadsProgram],
+        { encoding: 'utf8', input: 'null' },
+      ),
+    ).toThrow(); // Cannot iterate over null
+    expect(
+      execFileSync(
+        'jq',
+        ['-r', '--arg', 'ab', 'bot', '--arg', 'win', 'none', priorHeadsProgram],
+        { encoding: 'utf8', input: '[]' },
+      ),
+    ).toBe(''); // cleanly empty — duplicate-report suppression stays intact
+
+    // Behavioral, against real jq: markers split across two pages. The raw
+    // page stream BREAKS the plain consumer (two outputs — the negative
+    // control), the normalized stream aggregates across the page boundary.
+    const markersProgram = reviewScanJob.match(
+      /MARKERS="\$\(jq -c --arg ab "\$\{AUTOFIX_BOT\}" '([\s\S]*?)' "\$\{WORKDIR\}\/ic\.json"\)"/,
+    )?.[1];
+    expect(markersProgram).toBeTruthy();
+    const roundProgram = reviewScanJob.match(
+      /ROUND="\$\(jq -r --arg key "\$\{REARM_KEY\}" '([\s\S]*?)' <<< "\$\{MARKERS\}"\)"/,
+    )?.[1];
+    expect(roundProgram).toBeTruthy();
+    const pageOne = JSON.stringify([
+      {
+        user: { login: 'bot' },
+        body: 'r3 <!-- autofix-eval ts=2026-07-01T00:00:00Z acted=true round=3 -->',
+        created_at: '2026-07-01T00:00:00Z',
+      },
+    ]);
+    const pageTwo = JSON.stringify([
+      {
+        user: { login: 'bot' },
+        body: 'r7 <!-- autofix-eval ts=2026-07-06T00:00:00Z acted=true round=7 -->',
+        created_at: '2026-07-06T00:00:00Z',
+      },
+    ]);
+    const rawMarkers = execFileSync(
+      'jq',
+      ['-c', '--arg', 'ab', 'bot', markersProgram],
+      { encoding: 'utf8', input: pageOne + pageTwo },
+    ).trim();
+    expect(rawMarkers.split('\n')).toHaveLength(2); // the pre-fix corruption
+    const flat = execFileSync('jq', ['-cs', 'add // []'], {
+      encoding: 'utf8',
+      input: pageOne + pageTwo,
+    });
+    const markers = execFileSync(
+      'jq',
+      ['-c', '--arg', 'ab', 'bot', markersProgram],
+      { encoding: 'utf8', input: flat },
+    ).trim();
+    expect(markers.split('\n')).toHaveLength(1);
+    const round = execFileSync(
+      'jq',
+      ['-r', '--arg', 'key', 'none', roundProgram],
+      { encoding: 'utf8', input: markers },
+    ).trim();
+    expect(round).toBe('7'); // max round crosses the page boundary
+
+    // Positional binding: NEWEST reads rv/rc/ic/checks as .[0]..[3]. With a
+    // normalized rv.json the page-2 review is found; feeding the RAW
+    // two-page rv.json instead shifts rc/ic into the wrong slots and the
+    // page-2 review timestamp is silently lost (negative control).
+    const newestProgram = workflow.match(
+      /NEWEST="\$\(jq -rs \\\n[\s\S]*?--argjson trust "\$\{TRUSTED_ASSOC\}" '([\s\S]*?)' "\$\{WORKDIR\}\/rv\.json"/,
+    )?.[1];
+    expect(newestProgram).toBeTruthy();
+    const rvPages =
+      JSON.stringify([
+        {
+          submitted_at: '2026-07-01T00:00:00Z',
+          user: { login: 'maint' },
+          author_association: 'MEMBER',
+          state: 'COMMENTED',
+        },
+      ]) +
+      JSON.stringify([
+        {
+          submitted_at: '2026-07-09T00:00:00Z',
+          user: { login: 'maint' },
+          author_association: 'MEMBER',
+          state: 'CHANGES_REQUESTED',
+        },
+      ]);
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-paginate-'));
+    try {
+      const newestArgs = (rv) => [
+        '-rs',
+        '--arg',
+        'wm',
+        '',
+        '--arg',
+        'rb',
+        'qwen-code-ci-bot',
+        '--arg',
+        'ab',
+        'bot',
+        '--argjson',
+        'trust',
+        '["OWNER", "MEMBER", "COLLABORATOR"]',
+        newestProgram,
+        rv,
+        join(dir, 'rc.json'),
+        join(dir, 'ic.json'),
+        join(dir, 'checks.json'),
+      ];
+      writeFileSync(
+        join(dir, 'rv.json'),
+        execFileSync('jq', ['-cs', 'add // []'], {
+          encoding: 'utf8',
+          input: rvPages,
+        }),
+      );
+      writeFileSync(join(dir, 'rv-raw.json'), rvPages);
+      writeFileSync(join(dir, 'rc.json'), '[]');
+      writeFileSync(join(dir, 'ic.json'), '[]');
+      writeFileSync(join(dir, 'checks.json'), '[]');
+      const newest = execFileSync('jq', newestArgs(join(dir, 'rv.json')), {
+        encoding: 'utf8',
+      }).trim();
+      expect(newest).toBe('2026-07-09T00:00:00Z');
+      const shifted = execFileSync('jq', newestArgs(join(dir, 'rv-raw.json')), {
+        encoding: 'utf8',
+      }).trim();
+      expect(shifted).toBe('2026-07-01T00:00:00Z'); // page 2 lost pre-fix
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('raises the round cap to TAKEOVER_MAX_ROUNDS while the label is present', () => {
@@ -2298,6 +2729,65 @@ describe('qwen-autofix workflow', () => {
     // guidance in the body.
     expect(reviewScanJob).toContain('<!-- takeover-cap-reached -->');
     expect(reviewScanJob).toContain('Takeover paused');
+    // The cap notice covers ALL managed PRs, not just takeover: standard
+    // bot PRs used to cap in silence (#7836 hit 10/10 with zero PR-visible
+    // notice), which let the shepherd's conflict dispatch die silently on
+    // a cap the PR page never mentioned. Same marker → same
+    // once-per-window dedup for both variants.
+    expect(reviewScanJob).toContain('AutoFix paused');
+    // Three sites: the dedup census read + BOTH notice bodies — the shared
+    // marker is what gives the two variants one once-per-window dedup.
+    expect(
+      reviewScanJob.split('<!-- takeover-cap-reached -->').length - 1,
+    ).toBe(3);
+    // A FORCED dispatch (shepherd conflict lever or a human) refused at the
+    // cap gate answers on the PR — observed on #7836: '🐑 dispatched the
+    // autofix loop' followed by a green run that did nothing, with the
+    // refusal visible only in the Actions log. Gated on workflow_dispatch:
+    // FORCED_PR is ALSO set for trusted pull_request_review submissions
+    // (route emits pr_number for those), and answering each one loudly
+    // spammed 7 refusals on #7836 — those stay covered by the
+    // once-per-window pause notice. No dedup on the dispatch itself: the
+    // shepherd sends at most one per head, and a human asking twice
+    // deserves two answers.
+    expect(reviewScanJob).toContain(
+      'if [[ -n "${FORCED_PR}" && "${FORCED_PR}" == "${PR}" && "${EVENT_NAME}" == \'workflow_dispatch\' ]]; then',
+    );
+    expect(reviewScanJob).toContain('<!-- takeover-cap-refused -->');
+    expect(reviewScanJob).toContain('Dispatch refused');
+    expect(reviewScanJob).toContain('DRY-RUN: would post cap-refused notice');
+    expect(reviewScanJob).toContain(
+      'cap-refused notice skipped: PAT authenticates as',
+    );
+    // The loud refusal is gated on workflow_dispatch (FORCED_PR is also set
+    // for trusted review submissions). Replay the guard VERBATIM so a
+    // dropped EVENT_NAME condition fails the test, not just a substring: a
+    // dispatch is answered, a review submission is left to the pause notice.
+    const refusedGuard = reviewScanJob.match(
+      /(if \[\[ -n "\$\{FORCED_PR\}" && "\$\{FORCED_PR\}" == "\$\{PR\}" && "\$\{EVENT_NAME\}" == 'workflow_dispatch' \]\]; then)/,
+    )?.[1];
+    expect(refusedGuard).toBeTruthy();
+    const refuses = (eventName) =>
+      execFileSync('bash', ['-c', `${refusedGuard}\necho REFUSED\nfi`], {
+        env: {
+          ...process.env,
+          FORCED_PR: '7836',
+          PR: '7836',
+          EVENT_NAME: eventName,
+        },
+        encoding: 'utf8',
+      }).trim();
+    expect(refuses('workflow_dispatch')).toContain('REFUSED');
+    expect(refuses('pull_request_review')).not.toContain('REFUSED');
+    // The standard-mode pause and the refusal both point at the actual
+    // recovery command as a printf ARG (the takeover variant keeps its
+    // takeover-command-only wording).
+    const capBodies =
+      reviewScanJob.match(/printf '[^']*takeover-cap-re[^']*'[^\n]*/g) ?? [];
+    expect(capBodies).toHaveLength(3);
+    expect(
+      capBodies.filter((b) => b.includes('"${RETRY_COMMAND}"')),
+    ).toHaveLength(2);
     expect(reviewScanJob).toMatch(
       /CAP_NOTICED=[\s\S]*?contains\("<!-- takeover-cap-reached -->"\)[\s\S]*?> \$rt/,
     );
@@ -2309,8 +2799,12 @@ describe('qwen-autofix workflow', () => {
       'cap notice skipped: consent changed since the snapshot',
     );
     // The queued toggle re-verifies state and base, and author privilege is
-    // LIVE (triage+ today), never durable authorship alone.
-    expect(workflow).toContain('no longer an open main-targeting PR');
+    // LIVE (triage+ today), never durable authorship alone. A closed PR
+    // drops silently; a non-main base refuses out loud (engage side only).
+    expect(workflow).toContain('no longer an open PR');
+    expect(workflow).toContain(
+      `takeover command refused: PR #\${PR} targets '\${CMD_BASE_REF}' not 'main'`,
+    );
     expect(routeStep).toContain('admin|maintain|write|triage)');
     expect(reviewScanJob).toContain('"${ROUND}" -ge "${EFF_MAX_ROUNDS}"');
     // The effective cap travels in the matrix target and SHADOWS the
@@ -2378,6 +2872,45 @@ describe('qwen-autofix workflow', () => {
     expect(noticed('2026-07-18T11:00:00Z', '2026-07-18T10:00:00Z')).toBe('1');
     // No key yet (lifetime dedup, rt='') → any prior notice suppresses.
     expect(noticed('2026-07-18T09:00:00Z', '')).toBe('1');
+    // The consent gate is the core behavioral change: standard bot PRs now
+    // receive cap notices (they used to be takeover-only). Replay the gate
+    // VERBATIM under all four label/takeover permutations so a dropped
+    // HAS_TAKEOVER guard or a reverted skip-wins condition fails the test,
+    // not just a substring assertion.
+    const consentGate = reviewScanJob.match(
+      /(if \[\[ " \$\{LIVE_LABELS\} " == \*" \$\{SKIP_LABEL\} "\* \]\] \\\n[\s\S]*?continue\n {16}fi)/,
+    )?.[1];
+    expect(consentGate).toBeTruthy();
+    const gate = (liveLabels, hasTakeover) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `for _ in 1; do\n${consentGate.replace(/\n {16}/g, '\n')}\necho PROCEED\ndone`,
+        ],
+        {
+          env: {
+            ...process.env,
+            LIVE_LABELS: liveLabels,
+            HAS_TAKEOVER: hasTakeover,
+            SKIP_LABEL: 'autofix/skip',
+            TAKEOVER_LABEL: 'autofix/takeover',
+          },
+          encoding: 'utf8',
+        },
+      ).trim();
+    // Standard bot PR, no skip label → NOT skipped (the #7836 case).
+    expect(gate('autofix/managed', 'false')).toContain('PROCEED');
+    // Standard bot PR + skip label → skipped everywhere.
+    expect(gate('autofix/managed autofix/skip', 'false')).toContain(
+      'cap notice skipped',
+    );
+    // Takeover PR with its label removed → skipped (stale consent).
+    expect(gate('autofix/managed', 'true')).toContain('cap notice skipped');
+    // Takeover PR with the label still present → NOT skipped.
+    expect(gate('autofix/managed autofix/takeover', 'true')).toContain(
+      'PROCEED',
+    );
     // Candidates drain newest-first, and the free busy skip never consumes
     // inspection budget.
     expect(reviewScanJob).toContain('sort_by(-.number)');
@@ -2385,9 +2918,155 @@ describe('qwen-autofix workflow', () => {
     // starve the oldest tail forever once the pool exceeds the budget.
     expect(reviewScanJob).toContain('ROT_OFF=');
     expect(reviewScanJob).toContain('.[$o:] + .[:$o]');
-    expect(reviewScanJob).toMatch(
-      /BUSY_PRS[\s\S]{0,240}INSPECTED=\$\(\( INSPECTED \+ 1 \)\)/,
+    // The free skips (busy, idle-backoff) both live in the loop head,
+    // BEFORE the budget increment — assert on the slice, not a byte
+    // distance (comment growth must not red-light CI, and arbitrary code
+    // between the skips and the increment must).
+    const loopHead = reviewScanJob.slice(
+      reviewScanJob.indexOf('for PR in ${CANDIDATES}'),
+      reviewScanJob.indexOf('INSPECTED=$(( INSPECTED + 1 ))'),
     );
+    expect(loopHead).toContain("'busy'");
+    expect(loopHead).toContain("'idle-backoff'");
+    expect(loopHead).not.toContain('INSPECTED=');
+  });
+
+  it('backs off idle candidates without spending inspection budget', () => {
+    // Measured 2026-07-29: 28 open takeover PRs, 8 idle in "nothing new"
+    // state for 10+ hours. Every idle inspection costs a unit of the
+    // shared MAX_CANDIDATE_INSPECTIONS budget and a slice of the serial
+    // API walk (a few fewer gh round-trips per scan; the #8002 delay was
+    // queue/startup, which the candidate loop cannot recover). Candidates
+    // idle >24h are inspected on about one scan in four. The staleness
+    // signal is the list's own updatedAt — no API call, and no
+    // per-candidate process fork either: one jq builds the idle SET, and
+    // the loop tests membership like the busy skip does.
+    expect(
+      (reviewScanJob.match(/--json [^\n]*\bupdatedAt\b/g) ?? []).length,
+    ).toBe(2);
+    expect(reviewScanJob).toContain(`IDLE_CUTOFF="$(date -u -d '24 hours ago'`);
+    // The slot is a time quantum mod 4 keyed against PR % 4 (same quantum
+    // family as ROT_OFF). The exact quantum is deliberately NOT pinned:
+    // against the real irregular scan cadence (~40-70 min gaps, not */10)
+    // no constant quantum bounds the gap — the wait is geometric (measured
+    // median ~2h, p90 ~6h) — and 3600 s actually measures better on p90/max
+    // than 600 s, so CI must not forbid a future quantum change. The
+    // behavioral replay below (which passes slotNow explicitly) protects
+    // the slot logic; this pin only asserts the mod-4 time-quantum shape.
+    expect(reviewScanJob).toMatch(
+      /IDLE_SLOT_NOW="\$\(\(.*\$\(date -u \+%s\) \/ \d+\) % 4 \)\)"/,
+    );
+    expect(reviewScanJob).toContain(
+      'inspected ~1 scan in 4 (median ~2h, p90 ~6h)',
+    );
+    // Fail-open on the forced-dispatch path: it never builds the list
+    // files, so the set stays empty and a forced PR is always inspected.
+    expect(reviewScanJob).toContain("IDLE_PRS=' '");
+    expect(reviewScanJob).toMatch(
+      /if \[\[ -f "\$\{WORKDIR\}\/bot-prs\.json" && -f "\$\{WORKDIR\}\/takeover-prs\.json" \]\]; then\n\s+IDLE_CUTOFF=/,
+    );
+
+    // Behavioral replay of the set builder + skip predicate (the string
+    // pins alone cannot catch a flipped comparison or slot equality):
+    // run the real jq and the real predicate over four candidate shapes.
+    const setSrc = reviewScanJob.match(
+      /IDLE_PRS=" \$\(jq -rs[\s\S]*?\) "/,
+    )?.[0];
+    expect(setSrc).toBeTruthy();
+    expect(setSrc).toContain('takeover-prs.json');
+    const predSrc = reviewScanJob.match(
+      /if \[\[ "\$\{IDLE_PRS\}" == \*" \$\{PR\} "\* &&[^\n]*\]\]; then/,
+    )?.[0];
+    expect(predSrc).toBeTruthy();
+    const runBackoff = ({
+      pr,
+      updatedAt,
+      slotNow,
+      listed = true,
+      inTakeover = false,
+    }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'idle-backoff-'));
+      try {
+        const row = listed
+          ? [{ number: Number(pr), updatedAt }]
+          : [{ number: 99999, updatedAt: '2026-01-01T00:00:00Z' }];
+        writeFileSync(
+          join(dir, 'bot-prs.json'),
+          inTakeover ? '[]' : JSON.stringify(row),
+        );
+        writeFileSync(
+          join(dir, 'takeover-prs.json'),
+          inTakeover ? JSON.stringify(row) : '[]',
+        );
+        return execFileSync(
+          'bash',
+          [
+            '-c',
+            [
+              'set -uo pipefail',
+              `WORKDIR='${dir}'`,
+              `IDLE_CUTOFF='2026-07-28T12:00:00Z'`,
+              setSrc,
+              `IDLE_SLOT_NOW='${slotNow}'`,
+              `PR='${pr}'`,
+              `${predSrc} printf skip; else printf inspect; fi`,
+            ].join('\n'),
+          ],
+          { encoding: 'utf8' },
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    // Idle and out of slot → deferred (8001 % 4 = 1).
+    expect(
+      runBackoff({ pr: '8001', updatedAt: '2026-07-27T00:00:00Z', slotNow: 0 }),
+    ).toBe('skip');
+    // Idle but IN its slot → inspected (its slot matched this scan).
+    expect(
+      runBackoff({ pr: '8001', updatedAt: '2026-07-27T00:00:00Z', slotNow: 1 }),
+    ).toBe('inspect');
+    // Fresh activity → inspected regardless of slot.
+    expect(
+      runBackoff({ pr: '8001', updatedAt: '2026-07-28T13:00:00Z', slotNow: 0 }),
+    ).toBe('inspect');
+    // Missing from the lookup (forced-dispatch shape) → inspected.
+    expect(
+      runBackoff({
+        pr: '8001',
+        updatedAt: '2026-07-27T00:00:00Z',
+        slotNow: 0,
+        listed: false,
+      }),
+    ).toBe('inspect');
+
+    // Null/empty updatedAt (defensive guard) → inspected, not idle.
+    expect(runBackoff({ pr: '8001', updatedAt: null, slotNow: 0 })).toBe(
+      'inspect',
+    );
+    // Idle candidate in takeover-prs.json (the cohort this targets) → deferred.
+    expect(
+      runBackoff({
+        pr: '8001',
+        updatedAt: '2026-07-27T00:00:00Z',
+        slotNow: 0,
+        inTakeover: true,
+      }),
+    ).toBe('skip');
+
+    // Visible in the fleet dashboard, like the busy skip.
+    expect(reviewScanJob).toContain("'idle-backoff'");
+    // The workflow comment must not claim the 10-target cap is relieved —
+    // idle candidates hit `continue` before the TARGETS append, so they
+    // never contend for it; the real win is inspection budget + walk
+    // latency, and the comment says so.
+    expect(reviewScanJob).toContain(
+      'Idle PRs never reach the\n          # 10-target budget',
+    );
+    // The two scan-only signals updatedAt cannot see are named, not
+    // papered over by an absolute invariant.
+    expect(reviewScanJob).toContain('base conflict');
+    expect(reviewScanJob).toContain('still-red checks');
   });
 
   it('behaviorally replays the takeover-command toggle across all four paths', () => {
@@ -2409,13 +3088,14 @@ describe('qwen-autofix workflow', () => {
       authorPerm = 'write',
       state = 'OPEN',
       base = 'main',
+      author = 'fork-owner',
     }) => {
       const dir = mkdtempSync(join(tmpdir(), 'autofix-toggle-'));
       try {
         const prJson = JSON.stringify({
           isCrossRepository: fork,
           maintainerCanModify: canModify,
-          author: { login: 'fork-owner' },
+          author: { login: author },
           state,
           baseRefName: base,
           labels: labels.map((name) => ({ name })),
@@ -2427,7 +3107,7 @@ describe('qwen-autofix workflow', () => {
             `if [[ "$1" == "api" && "$2" == */collaborators/*/permission ]]; then printf '%s' '${authorPerm}';`,
             `elif [[ "$1" == "pr" && "$2" == "view" ]]; then printf '%s' '${prJson}';`,
             `elif [[ "$1" == "pr" && "$2" == "edit" ]]; then echo "EDIT $*" >> '${join(dir, 'writes.log')}';`,
-            `elif [[ "$1" == "pr" && "$2" == "comment" ]]; then echo "COMMENT $4" >> '${join(dir, 'writes.log')}'; cat > /dev/null <<< "$6";`,
+            `elif [[ "$1" == "pr" && "$2" == "comment" ]]; then echo "COMMENT $*" >> '${join(dir, 'writes.log')}';`,
             'fi',
           ].join('\n'),
         );
@@ -2446,6 +3126,7 @@ describe('qwen-autofix workflow', () => {
               TAKEOVER_LABEL: 'autofix/takeover',
               SKIP_LABEL: 'autofix/skip',
               TAKEOVER_COMMAND: '@qwen-code /takeover',
+              AUTOFIX_BOT: 'qwen-code-dev-bot',
               GITHUB_TOKEN: 'x',
             },
             encoding: 'utf8',
@@ -2460,11 +3141,16 @@ describe('qwen-autofix workflow', () => {
         rmSync(dir, { recursive: true, force: true });
       }
     };
-    // add + absent → label applied, no ack from this job.
+    // add + absent → label applied AND the engage ack posted directly from
+    // this job: the labeled event has been observed to not fire at all
+    // (#7999, #8002), so the user-visible ack cannot depend on that
+    // round-trip. In-repo PRs get no fork note.
     const addAbsent = runToggle({ cmd: 'add' });
     expect(addAbsent.writes).toContain('EDIT pr edit 7165');
     expect(addAbsent.writes).toContain('--add-label');
-    expect(addAbsent.writes).not.toContain('COMMENT');
+    expect(addAbsent.writes).toContain('<!-- takeover-ack engaged -->');
+    expect(addAbsent.writes).not.toContain('next scheduled scan');
+    expect(addAbsent.writes).not.toContain('定时扫描');
     // add + present → re-arm ack, label untouched.
     const rearm = runToggle({ cmd: 'add', labels: ['autofix/takeover'] });
     expect(rearm.writes).toContain('COMMENT');
@@ -2476,6 +3162,28 @@ describe('qwen-autofix workflow', () => {
       labels: ['autofix/takeover'],
     });
     expect(removePresent.writes).toContain('--remove-label');
+    // Release acks directly too — the exact mirror of the engage side: a
+    // loud add next to a mute stop re-creates the lost-event ambiguity on
+    // the release side (and fork/non-main releases have no other ack path
+    // at all). Human-authored PR → the plain released variant.
+    expect(removePresent.writes).toContain('<!-- takeover-ack released -->');
+    expect(removePresent.writes).toContain('Takeover released');
+    // Variant selection mirrors the ack job: bot-authored → standard
+    // management continues; bot-authored + skip → fully opted out.
+    const botRelease = runToggle({
+      cmd: 'remove',
+      labels: ['autofix/takeover'],
+      author: 'qwen-code-dev-bot',
+    });
+    expect(botRelease.writes).toContain('STANDARD bot management continues');
+    const botSkipRelease = runToggle({
+      cmd: 'remove',
+      labels: ['autofix/takeover', 'autofix/skip'],
+      author: 'qwen-code-dev-bot',
+    });
+    expect(botSkipRelease.writes).toContain(
+      'opts it out of standard bot management entirely',
+    );
     // remove + absent → explicit no-op, no writes at all.
     const removeAbsent = runToggle({ cmd: 'remove' });
     expect(removeAbsent.writes.trim()).toBe('');
@@ -2491,7 +3199,21 @@ describe('qwen-autofix workflow', () => {
     expect(forkRefused.writes).not.toContain('EDIT');
     const forkManaged = runToggle({ cmd: 'add', fork: true });
     expect(forkManaged.writes).toContain('--add-label');
-    expect(forkManaged.writes).not.toContain('COMMENT');
+    // Fork label events carry no secrets, so no other job could ever ack a
+    // fork engage — the command's own ack is the ONLY one, and it sets the
+    // expectation that the first round comes from the next scheduled scan.
+    // Assert each language's note in ITS OWN half of the body: a mutation
+    // swapping the EN/ZH printf args ships the Chinese sentence inside the
+    // English paragraph (and vice versa) while a whole-body toContain
+    // still passes.
+    expect(forkManaged.writes).toContain('<!-- takeover-ack engaged -->');
+    const [forkEn, forkZh] = forkManaged.writes.split(
+      '<summary>中文说明</summary>',
+    );
+    expect(forkEn).toContain('next scheduled scan (usually within minutes)');
+    expect(forkEn).not.toContain('定时扫描');
+    expect(forkZh).toContain('通常几分钟内');
+    expect(forkZh).not.toContain('next scheduled scan');
     // A below-write fork author would be a ghost engagement (label sticks,
     // nothing ever manages it) — the command refuses with the adoption ask.
     const forkGhost = runToggle({ cmd: 'add', fork: true, authorPerm: 'read' });
@@ -2507,6 +3229,40 @@ describe('qwen-autofix workflow', () => {
       labels: ['autofix/takeover'],
     });
     expect(forkStop.writes).toContain('--remove-label');
+    // Fork unlabeled events carry no secrets, so this is the ONLY possible
+    // release ack for a fork — it must post here.
+    expect(forkStop.writes).toContain('<!-- takeover-ack released -->');
+    // A /takeover on a stacked PR refuses OUT LOUD (the silent drop made it
+    // indistinguishable from a lost event) and never applies the label.
+    const stacked = runToggle({ cmd: 'add', base: 'feat/base-pr' });
+    expect(stacked.writes).toContain('<!-- takeover-ack base-refused -->');
+    expect(stacked.writes).toContain('`feat/base-pr`');
+    expect(stacked.writes).not.toContain('EDIT');
+    // …but a stop on a non-main PR PROCEEDS: removing a stuck label is
+    // harmless and matches the latest intent (previously dropped, leaving a
+    // manually-applied label with no command able to remove it).
+    const stackedStop = runToggle({
+      cmd: 'remove',
+      base: 'feat/base-pr',
+      labels: ['autofix/takeover'],
+    });
+    expect(stackedStop.writes).toContain('--remove-label');
+    // A non-main release never reaches the ack job (route ignores it), so
+    // the command's own ack is the only voice here too.
+    expect(stackedStop.writes).toContain('<!-- takeover-ack released -->');
+    // A closed PR still drops silently for both directions.
+    const closed = runToggle({ cmd: 'add', state: 'CLOSED' });
+    expect(closed.writes.trim()).toBe('');
+    expect(closed.log).toContain('no longer an open PR');
+    // Both ack posts keep their non-fatal fallback: under bash -e a failed
+    // gh pr comment would otherwise abort the step RED after the label was
+    // already toggled — a worse signal than the silence being fixed. A
+    // mutation to `|| true` must not survive either: the warning is what
+    // makes the failure diagnosable.
+    expect(workflow).toContain(
+      `engage ack comment failed on #\${PR}; the scan's first-pickup ack heals it`,
+    );
+    expect(workflow).toContain('release ack comment failed on #${PR}');
   });
 
   it('behaviorally resets round counting at the latest takeover engage ack', () => {
@@ -3045,6 +3801,7 @@ describe('qwen-autofix workflow', () => {
       action = 'labeled',
       headRepo = 'QwenLM/qwen-code',
       label = 'autofix/takeover',
+      sender = 'wenshao',
     }) =>
       // The block also logs its reasoning; only the trailing summary is asserted.
       execFileSync(
@@ -3072,7 +3829,8 @@ describe('qwen-autofix workflow', () => {
             PR_STATE: state,
             PR_BASE_REF: base,
             PR_NUMBER_EVENT: '7368',
-            SENDER_LOGIN: 'wenshao',
+            SENDER_LOGIN: sender,
+            AUTOFIX_BOT: 'qwen-code-dev-bot',
           },
           encoding: 'utf8',
         },
@@ -3089,6 +3847,11 @@ describe('qwen-autofix workflow', () => {
     // Unchanged: a main-targeting in-repo PR still engages, and engagement
     // carries no base (the field exists only to name a refusal).
     expect(run({})).toBe('ack=engaged base= review=true');
+    // A label applied BY THE BOT came from takeover-command, which posts the
+    // engage ack itself (the labeled event has been observed to not fire —
+    // #7999, #8002 — so the ack cannot depend on this round-trip). Only the
+    // ack is suppressed; the immediate scan still routes.
+    expect(run({ sender: 'qwen-code-dev-bot' })).toBe('ack= base= review=true');
     // Still deliberately silent — these were never engaged and a comment on
     // them would be noise, not information: a closed PR, a fork (whose label
     // event carries no secrets to comment with), a non-takeover label, and
@@ -3098,6 +3861,15 @@ describe('qwen-autofix workflow', () => {
       'ack= base= review=false',
     );
     expect(run({ label: 'kind/bug' })).toBe('ack= base= review=false');
+    // A label REMOVED by the bot came from a /takeover stop — the command
+    // posts the release ack itself, mirroring the engage-side suppression.
+    expect(run({ action: 'unlabeled', sender: 'qwen-code-dev-bot' })).toBe(
+      'ack= base= review=false',
+    );
+    // …while a human removing the label still gets the ack-job release ack.
+    expect(run({ action: 'unlabeled' })).toBe(
+      'ack=released base= review=false',
+    );
     expect(
       run({ action: 'unlabeled', base: 'ci/autofix-gate-crash-retry' }),
     ).toBe('ack= base= review=false');
@@ -3192,25 +3964,906 @@ describe('qwen-autofix workflow', () => {
     expect(broken.body).toBe('');
   });
 
-  it('treats Suggestion-level review findings as actionable feedback', () => {
-    // AGENTS.md: Suggestions ARE addressed during a PR's first ~5 review
-    // rounds; only past that are they deferred with a recorded reason. The
-    // loop's MAX_ROUNDS cap is that same boundary, so every round the loop
-    // runs is within the address-Suggestions window — the scan and the
-    // feedback rendering must NOT filter `**[Suggestion]**` /review comments.
-    expect(workflow).not.toContain('QWEN_SUGGESTION_FILTER');
-    // The filter REGEX (escaped form only ever appears in filter code, not in
-    // prose comments) must be gone from both the scan and the feedback render.
-    expect(workflow).not.toContain('\\*\\*\\[Suggestion\\]\\*\\*');
-    // The agent-facing policy lives in the SKILL: implement valuable
-    // suggestions, decline only with a recorded per-finding reason.
+  it('narrows the agent prompt after a timeout since the last successful round', () => {
+    // Re-running the identical address-everything prompt after a timeout
+    // walks straight into the same wall (#7929 burned three 50-minute
+    // timeouts that way, #7846 two). From the second attempt on, the
+    // feedback carries the measured timeout fact; the project skill owns the
+    // narrowing policy so Actions and local entry points do not grow separate
+    // model instructions.
+    expect(prepareBranchAndFeedbackStep).toContain('PRIOR_TIMEOUTS=');
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'Budget warning: previous round(s) ran out of time',
+    );
     const skill = readAutofixSkill();
-    expect(skill).toContain('never');
-    expect(skill).toContain('drop one silently');
-    // A third disposition beyond fix/decline: escalate a judgment that is the
-    // maintainer's to make, instead of silently deciding it.
-    expect(skill).toContain("Needs a maintainer's decision");
-    expect(skill).toContain('escalate when the');
+    expect(skill).toContain('smallest blocking subset');
+    expect(skill).toContain('comment-replies.json');
+    expect(skill).toContain('decline nonessential refactors');
+    expect(skill).toContain('fix that exact rejection before other feedback');
+    expect(prepareBranchAndFeedbackStep).not.toContain(
+      'commit as soon as that subset is done',
+    );
+    expect(prepareBranchAndFeedbackStep).not.toContain('Fix this first');
+    // The trigger threshold itself is pinned — a `-ge 99` mutation would
+    // otherwise leave the feature inert with every string pin green.
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'if [[ "${PRIOR_TIMEOUTS}" -ge 1 ]]',
+    );
+
+    // Behavioral replay of the census (the string pins alone cannot catch
+    // a broken filter): extract the real jq and run it against fixture
+    // ic.json shapes.
+    const censusSrc = prepareBranchAndFeedbackStep.match(
+      /PRIOR_TIMEOUTS="\$\(jq -r[\s\S]*?ic\.json" 2> \/dev\/null \|\| true\)"/,
+    )?.[0];
+    expect(censusSrc).toBeTruthy();
+    const TIMEOUT_HEADLINE =
+      '🤖 AutoFix ran out of time before finishing (timeout (3000000ms)) (attempt 2/100) — it will retry on the next scan.';
+    const PUSH_HEADLINE =
+      '🤖 Addressed the latest review feedback (round 2/100). What changed…';
+    const NOOP_HEADLINE =
+      '🤖 Reviewed the latest feedback — no changes needed. Why, point by point:…';
+    const mk = (headline, win, at, login = 'qwen-code-dev-bot') => ({
+      user: { login },
+      created_at: at,
+      body: `${headline}\n<!-- autofix-eval ts=x acted=false round=1${win ? ` win=${win}` : ''} -->`,
+    });
+    const runCensus = (comments, key) => {
+      const dir = mkdtempSync(join(tmpdir(), 'timeout-census-'));
+      try {
+        writeFileSync(join(dir, 'ic.json'), JSON.stringify(comments));
+        return execFileSync(
+          'bash',
+          [
+            '-c',
+            [
+              'set -uo pipefail',
+              `WORKDIR='${dir}'`,
+              "AUTOFIX_BOT='qwen-code-dev-bot'",
+              `LIVE_REARM_KEY='${key}'`,
+              censusSrc,
+              'printf %s "${PRIOR_TIMEOUTS}"',
+            ].join('\n'),
+          ],
+          { encoding: 'utf8' },
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    const K = '2026-07-29T03:00:00Z';
+    // A push RESETS the narrowing (the breaker stays cumulative — this
+    // census feeds only the prompt): timeout, push, timeout → 1.
+    expect(
+      runCensus(
+        [
+          mk(TIMEOUT_HEADLINE, K, '2026-07-29T04:00:00Z'),
+          mk(PUSH_HEADLINE, K, '2026-07-29T05:00:00Z'),
+          mk(TIMEOUT_HEADLINE, K, '2026-07-29T06:00:00Z'),
+        ],
+        K,
+      ),
+    ).toBe('1');
+    // A no-op round RESETS the narrowing too: the reset alternation has a
+    // `no changes needed` branch the push case above never touches, so a
+    // no-op between two timeouts must also collapse the count to the single
+    // trailing timeout.
+    expect(
+      runCensus(
+        [
+          mk(TIMEOUT_HEADLINE, K, '2026-07-29T04:00:00Z'),
+          mk(NOOP_HEADLINE, K, '2026-07-29T05:00:00Z'),
+          mk(TIMEOUT_HEADLINE, K, '2026-07-29T06:00:00Z'),
+        ],
+        K,
+      ),
+    ).toBe('1');
+    // Two trailing timeouts count as two.
+    expect(
+      runCensus(
+        [
+          mk(PUSH_HEADLINE, K, '2026-07-29T04:00:00Z'),
+          mk(TIMEOUT_HEADLINE, K, '2026-07-29T05:00:00Z'),
+          mk(TIMEOUT_HEADLINE, K, '2026-07-29T06:00:00Z'),
+        ],
+        K,
+      ),
+    ).toBe('2');
+    // Legacy pre-takeover markers (no win= field) count under key 'none' —
+    // the common real case: a PR that timed out before any re-arm.
+    expect(
+      runCensus(
+        [
+          mk(TIMEOUT_HEADLINE, null, '2026-07-29T04:00:00Z'),
+          mk(TIMEOUT_HEADLINE, null, '2026-07-29T05:00:00Z'),
+        ],
+        'none',
+      ),
+    ).toBe('2');
+    // Old-window timeouts do not leak into a fresh window (re-arm clears).
+    expect(
+      runCensus(
+        [
+          mk(TIMEOUT_HEADLINE, 'old-window', '2026-07-29T04:00:00Z'),
+          mk(TIMEOUT_HEADLINE, 'old-window', '2026-07-29T05:00:00Z'),
+        ],
+        K,
+      ),
+    ).toBe('0');
+    // Non-timeout rounds and a HUMAN quoting the timeout headline verbatim
+    // both count zero (author-filtered like every census).
+    expect(runCensus([mk(PUSH_HEADLINE, K, '2026-07-29T04:00:00Z')], K)).toBe(
+      '0',
+    );
+    expect(
+      runCensus(
+        [mk(TIMEOUT_HEADLINE, K, '2026-07-29T04:00:00Z', 'some-human')],
+        K,
+      ),
+    ).toBe('0');
+
+    // The census needle matches the emitted headline VERBATIM — first
+    // lines can embed provider error text (API_ERROR_DETAIL), so a loose
+    // phrase could count a model error message as a timeout.
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'contains("AutoFix ran out of time before finishing")',
+    );
+    expect(reviewAddressReportStep).toContain(
+      'CAUSE="ran out of time before finishing (${AGENT_TIMEOUT})"',
+    );
+    // Pin the template that JOINS them: a mutation to the prefix (e.g.
+    // adding a colon) breaks the census while both pins above stay green.
+    expect(reviewAddressReportStep).toContain(
+      'HEADLINE="🤖 AutoFix ${CAUSE} (attempt',
+    );
+  });
+
+  it('switches to Critical-only feedback after ten change rounds', () => {
+    // ROUND counts change-producing rounds, so 9 still starts the tenth
+    // suggestion-capable change while 10 starts the first Critical-only round.
+    expect(workflow).toContain("CRITICAL_ONLY_AFTER_ROUND: '10'");
+    expect(workflow).not.toContain('TAKEOVER_CRITICAL_ONLY_AFTER_ROUND');
+    expect(prepareBranchAndFeedbackStep).toContain(
+      '[[ "${ROUND}" -ge "${CRITICAL_ONLY_AFTER_ROUND}" ]]',
+    );
+    const modeBlock = prepareBranchAndFeedbackStep.match(
+      /(CRITICAL_ONLY='false'\n\s+if \[\[ "\$\{ROUND\}" -ge "\$\{CRITICAL_ONLY_AFTER_ROUND\}" \]\]; then\n\s+CRITICAL_ONLY='true'\n\s+fi)/,
+    )?.[1];
+    expect(modeBlock).toBeTruthy();
+    const modeAt = (round) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `ROUND=${round}\nCRITICAL_ONLY_AFTER_ROUND=10\n${modeBlock}\nprintf '%s' "$CRITICAL_ONLY"`,
+        ],
+        { encoding: 'utf8' },
+      );
+    expect(modeAt(9)).toBe('false');
+    expect(modeAt(10)).toBe('true');
+
+    // Once the boundary is crossed, only an explicit Critical inline finding
+    // or a formal changes-requested review is actionable. Suggestion and
+    // unclassified comments stay open instead of driving more code changes.
+    expect(prepareBranchAndFeedbackStep).toContain('CRITICAL_ONLY');
+    expect(prepareBranchAndFeedbackStep).toContain('**[Critical]**');
+    const inlineFilter = prepareBranchAndFeedbackStep.match(
+      /echo "## Inline comments"[\s\S]*?jq -rs --arg wm "\$\{WATERMARK\}"[\s\S]*?--slurpfile reviews "\$\{WORKDIR\}\/rv\.json" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/rc\.json"/,
+    )?.[1];
+    expect(inlineFilter).toBeTruthy();
+    const inlineFeedback = [
+      {
+        id: 10,
+        created_at: '2025-12-31T00:00:00Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: '**[Critical]** stale owner routes writes to the wrong runtime',
+      },
+      {
+        id: 11,
+        created_at: '2026-01-02T00:00:00Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: '**[Critical]** wrong workspace is mutated',
+      },
+      {
+        id: 12,
+        created_at: '2026-01-02T00:00:01Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: '**[Suggestion]** add an aria-label',
+      },
+      {
+        id: 13,
+        created_at: '2026-01-02T00:00:02Z',
+        user: { login: 'maintainer' },
+        author_association: 'MEMBER',
+        body: 'Could this helper be renamed?',
+      },
+      {
+        id: 14,
+        in_reply_to_id: 10,
+        created_at: '2026-01-02T00:00:03Z',
+        user: { login: 'maintainer' },
+        author_association: 'MEMBER',
+        body: 'This still routes through the legacy primary.',
+      },
+      {
+        id: 15,
+        pull_request_review_id: 20,
+        created_at: '2026-01-02T00:00:04Z',
+        user: { login: 'maintainer' },
+        author_association: 'MEMBER',
+        body: 'The null branch still crashes.',
+      },
+    ];
+    const reviews = [
+      {
+        id: 20,
+        state: 'CHANGES_REQUESTED',
+      },
+    ];
+    const countInline = (criticalOnly, over = []) =>
+      Number(
+        execFileSync(
+          'jq',
+          [
+            '-s',
+            '--arg',
+            'wm',
+            '2026-01-01T00:00:00Z',
+            '--arg',
+            'rb',
+            'qwen-code-ci-bot',
+            '--arg',
+            'ab',
+            'qwen-code-dev-bot',
+            '--argjson',
+            'critical_only',
+            String(criticalOnly),
+            '--argjson',
+            'trust',
+            '["OWNER","MEMBER","COLLABORATOR"]',
+            '--argjson',
+            'over',
+            JSON.stringify(over),
+            '--argjson',
+            'reviews',
+            JSON.stringify([reviews]),
+            `[\n${inlineFilter}\n] | length`,
+          ],
+          {
+            encoding: 'utf8',
+            input: JSON.stringify(inlineFeedback),
+          },
+        ),
+      );
+    expect(countInline(false)).toBe(5);
+    // In Critical-only mode the REVIEW BOT's suggestion (12) is filtered,
+    // but MAINTAINER comments (13) stay actionable regardless of wording —
+    // the lexical **[Critical]** test applies only to the bot's own
+    // findings. Observed on #8037/#7944/#7885/#7799: a maintainer's
+    // "fix 1 and 3 before merge" was deferred wholesale as one
+    // 'non-Critical item' and the agent never read it.
+    expect(countInline(true)).toBe(4);
+    // …until that maintainer exhausts the per-window budget: an account can
+    // host an automated reviewer loop, so past K consumed batches their
+    // untagged feedback defers like the bot's. The tagged/CR escapes stay:
+    // the reply-to-Critical (14) and CR-review (15) items survive.
+    expect(countInline(true, ['maintainer'])).toBe(3);
+
+    // Actionable reviews and issue-level comments filters: extract and
+    // execute against fixture data with critical_only both ways, mirroring
+    // the inline filter test above.
+    const actionableReviewsFilter = prepareBranchAndFeedbackStep.match(
+      /echo "## Reviews"[\s\S]*?jq -r --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--argjson critical_only "\$\{CRITICAL_ONLY\}" --argjson trust "\$\{TRUSTED_ASSOC\}" \\\n\s+--argjson over "\$\{OVER_BUDGET_AUTHORS\}" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/rv\.json"/,
+    )?.[1];
+    expect(actionableReviewsFilter).toBeTruthy();
+    const actionableReviews = [
+      {
+        id: 20,
+        state: 'CHANGES_REQUESTED',
+        submitted_at: '2026-01-02T00:00:00Z',
+        user: { login: 'maintainer' },
+        author_association: 'MEMBER',
+        body: 'The null branch still crashes.',
+      },
+      {
+        id: 21,
+        state: 'COMMENTED',
+        submitted_at: '2026-01-02T00:00:01Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: 'Looks good overall',
+      },
+      {
+        id: 22,
+        state: 'COMMENTED',
+        submitted_at: '2026-01-02T00:00:02Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: '**[Critical]** memory leak in the owner route',
+      },
+      {
+        id: 23,
+        state: 'COMMENTED',
+        submitted_at: '2026-01-02T00:00:03Z',
+        user: { login: 'maintainer' },
+        author_association: 'MEMBER',
+        body: 'I verified locally; please fix findings 1 and 3 before merge.',
+      },
+    ];
+    const countActionableReviews = (criticalOnly, over = []) =>
+      Number(
+        execFileSync(
+          'jq',
+          [
+            '--arg',
+            'wm',
+            '2026-01-01T00:00:00Z',
+            '--arg',
+            'rb',
+            'qwen-code-ci-bot',
+            '--arg',
+            'ab',
+            'qwen-code-dev-bot',
+            '--argjson',
+            'critical_only',
+            String(criticalOnly),
+            '--argjson',
+            'trust',
+            '["OWNER","MEMBER","COLLABORATOR"]',
+            '--argjson',
+            'over',
+            JSON.stringify(over),
+            `[${actionableReviewsFilter}] | length`,
+          ],
+          { encoding: 'utf8', input: JSON.stringify(actionableReviews) },
+        ),
+      );
+    // All four are actionable while suggestions are in scope; in
+    // Critical-only mode only the BOT's non-Critical COMMENTED review is
+    // excluded — the maintainer's COMMENTED review stays actionable.
+    expect(countActionableReviews(false)).toBe(4);
+    expect(countActionableReviews(true)).toBe(3);
+    // Over-budget: the maintainer's COMMENTED review defers; their formal
+    // CHANGES_REQUESTED (20) still cuts through.
+    expect(countActionableReviews(true, ['maintainer'])).toBe(2);
+
+    const actionableIssueFilter = prepareBranchAndFeedbackStep.match(
+      /echo "## Issue-level comments"[\s\S]*?jq -r --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--argjson critical_only "\$\{CRITICAL_ONLY\}" --argjson trust "\$\{TRUSTED_ASSOC\}" \\\n\s+--argjson over "\$\{OVER_BUDGET_AUTHORS\}" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/ic\.json"/,
+    )?.[1];
+    expect(actionableIssueFilter).toBeTruthy();
+    const actionableIssueComments = [
+      {
+        id: 30,
+        created_at: '2026-01-02T00:00:00Z',
+        user: { login: 'maintainer' },
+        author_association: 'MEMBER',
+        body: 'Please also update the docs.',
+      },
+      {
+        id: 31,
+        created_at: '2026-01-02T00:00:01Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: '**[Critical]** data loss on concurrent writes',
+      },
+      {
+        id: 32,
+        created_at: '2026-01-02T00:00:02Z',
+        user: { login: 'maintainer' },
+        author_association: 'MEMBER',
+        body: '@qwen-code /review',
+      },
+    ];
+    const countActionableIssue = (criticalOnly, over = []) =>
+      Number(
+        execFileSync(
+          'jq',
+          [
+            '--arg',
+            'wm',
+            '2026-01-01T00:00:00Z',
+            '--arg',
+            'rb',
+            'qwen-code-ci-bot',
+            '--arg',
+            'ab',
+            'qwen-code-dev-bot',
+            '--argjson',
+            'critical_only',
+            String(criticalOnly),
+            '--argjson',
+            'trust',
+            '["OWNER","MEMBER","COLLABORATOR"]',
+            '--argjson',
+            'over',
+            JSON.stringify(over),
+            `[${actionableIssueFilter}] | length`,
+          ],
+          { encoding: 'utf8', input: JSON.stringify(actionableIssueComments) },
+        ),
+      );
+    // Normal and Critical comments are actionable while suggestions are in
+    // scope; the command-style comment is always excluded. In Critical-only
+    // mode the maintainer's comment STAYS actionable alongside the bot's
+    // Critical one — only bot non-Critical output is filtered.
+    expect(countActionableIssue(false)).toBe(2);
+    expect(countActionableIssue(true)).toBe(2);
+    // Over-budget: the plain comment defers; the bot's **[Critical]** (31)
+    // still counts.
+    expect(countActionableIssue(true, ['maintainer'])).toBe(1);
+
+    // Deferred queries: extract and execute against fixture data,
+    // mirroring the actionable inline filter test above.
+    const deferredReviewsFilter = prepareBranchAndFeedbackStep.match(
+      /## Deferred non-Critical feedback[\s\S]*?jq -r --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--arg pr_url "\$\{PR_URL\}" --argjson over "\$\{OVER_BUDGET_AUTHORS\}" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/rv\.json"/,
+    )?.[1];
+    expect(deferredReviewsFilter).toBeTruthy();
+    const deferredReviews = [
+      ...reviews,
+      {
+        id: 21,
+        state: 'COMMENTED',
+        submitted_at: '2026-01-02T00:00:00Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: 'Looks good overall',
+        html_url: 'https://github.com/test/pull/1#review-21',
+      },
+      {
+        id: 22,
+        state: 'COMMENTED',
+        submitted_at: '2026-01-02T00:00:01Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: '**[Critical]** memory leak in the owner route',
+        html_url: 'https://github.com/test/pull/1#review-22',
+      },
+      {
+        id: 23,
+        state: 'COMMENTED',
+        submitted_at: '2026-01-02T00:00:02Z',
+        user: { login: 'maintainer' },
+        author_association: 'MEMBER',
+        body: 'I verified locally; please fix findings 1 and 3 before merge.',
+        html_url: 'https://github.com/test/pull/1#review-23',
+      },
+    ];
+    const countDeferredReviews = (over = []) =>
+      Number(
+        execFileSync(
+          'jq',
+          [
+            '--arg',
+            'wm',
+            '2026-01-01T00:00:00Z',
+            '--arg',
+            'rb',
+            'qwen-code-ci-bot',
+            '--arg',
+            'ab',
+            'qwen-code-dev-bot',
+            '--arg',
+            'pr_url',
+            'https://github.com/test/pull/1',
+            '--argjson',
+            'over',
+            JSON.stringify(over),
+            `[${deferredReviewsFilter}] | length`,
+          ],
+          { encoding: 'utf8', input: JSON.stringify(deferredReviews) },
+        ),
+      );
+    // Only the BOT's COMMENTED non-Critical review is deferred;
+    // CHANGES_REQUESTED, COMMENTED-Critical, and the MAINTAINER's
+    // COMMENTED review are not.
+    expect(countDeferredReviews()).toBe(1);
+    expect(countDeferredReviews(['maintainer'])).toBe(2);
+
+    const deferredInlineFilter = prepareBranchAndFeedbackStep.match(
+      /jq -rs --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--arg pr_url "\$\{PR_URL\}" --argjson over "\$\{OVER_BUDGET_AUTHORS\}" \\\n\s+--slurpfile reviews "\$\{WORKDIR\}\/rv\.json" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/rc\.json"/,
+    )?.[1];
+    expect(deferredInlineFilter).toBeTruthy();
+    const countDeferredInline = (over = []) =>
+      Number(
+        execFileSync(
+          'jq',
+          [
+            '-s',
+            '--arg',
+            'wm',
+            '2026-01-01T00:00:00Z',
+            '--arg',
+            'rb',
+            'qwen-code-ci-bot',
+            '--arg',
+            'ab',
+            'qwen-code-dev-bot',
+            '--arg',
+            'pr_url',
+            'https://github.com/test/pull/1',
+            '--argjson',
+            'over',
+            JSON.stringify(over),
+            '--argjson',
+            'reviews',
+            JSON.stringify([reviews]),
+            `[\n${deferredInlineFilter}\n] | length`,
+          ],
+          { encoding: 'utf8', input: JSON.stringify(inlineFeedback) },
+        ),
+      );
+    // Only the BOT's suggestion (id 12) is deferred; the maintainer's
+    // unclassified comment (13) stays actionable, and Critical (11),
+    // reply-to-Critical (14), and CHANGES_REQUESTED-associated (15) were
+    // never deferred.
+    expect(countDeferredInline()).toBe(1);
+    // Over-budget maintainer: their unclassified comment (13) joins the
+    // deferred list; reply-to-Critical (14) and CR-associated (15) never do.
+    expect(countDeferredInline(['maintainer'])).toBe(2);
+
+    const deferredIssueFilter = prepareBranchAndFeedbackStep.match(
+      /"\$\{WORKDIR\}\/rc\.json"\n\s+jq -r --arg wm "\$\{WATERMARK\}" --arg rb "\$\{REVIEW_BOT\}" --arg ab "\$\{AUTOFIX_BOT\}" \\\n\s+--arg pr_url "\$\{PR_URL\}" --argjson over "\$\{OVER_BUDGET_AUTHORS\}" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/ic\.json"/,
+    )?.[1];
+    expect(deferredIssueFilter).toBeTruthy();
+    const issueComments = [
+      {
+        id: 30,
+        created_at: '2026-01-02T00:00:00Z',
+        user: { login: 'maintainer' },
+        author_association: 'MEMBER',
+        body: 'Please also update the docs.',
+        html_url: 'https://github.com/test/pull/1#issuecomment-30',
+      },
+      {
+        id: 31,
+        created_at: '2026-01-02T00:00:01Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: '**[Critical]** data loss on concurrent writes',
+        html_url: 'https://github.com/test/pull/1#issuecomment-31',
+      },
+      {
+        id: 32,
+        created_at: '2026-01-02T00:00:02Z',
+        user: { login: 'maintainer' },
+        author_association: 'MEMBER',
+        body: '@qwen-code /review',
+        html_url: 'https://github.com/test/pull/1#issuecomment-32',
+      },
+      {
+        id: 33,
+        created_at: '2026-01-02T00:00:03Z',
+        user: { login: 'qwen-code-ci-bot' },
+        author_association: 'NONE',
+        body: '**[Suggestion]** consider caching this lookup',
+        html_url: 'https://github.com/test/pull/1#issuecomment-33',
+      },
+    ];
+    const countDeferredIssue = (over = []) =>
+      Number(
+        execFileSync(
+          'jq',
+          [
+            '--arg',
+            'wm',
+            '2026-01-01T00:00:00Z',
+            '--arg',
+            'rb',
+            'qwen-code-ci-bot',
+            '--arg',
+            'ab',
+            'qwen-code-dev-bot',
+            '--arg',
+            'pr_url',
+            'https://github.com/test/pull/1',
+            '--argjson',
+            'over',
+            JSON.stringify(over),
+            `[${deferredIssueFilter}] | length`,
+          ],
+          { encoding: 'utf8', input: JSON.stringify(issueComments) },
+        ),
+      );
+    // Only the BOT's suggestion (33) is deferred; the maintainer's normal
+    // comment (30), the Critical (31), and the command (32) are not.
+    expect(countDeferredIssue()).toBe(1);
+    expect(countDeferredIssue(['maintainer'])).toBe(2);
+
+    // CHANGES_REQUESTED is a formal merge blocker, so its review summary and
+    // associated inline details remain actionable even without the marker.
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'or (.state // "") == "CHANGES_REQUESTED"',
+    );
+    // The human bypass is present in ALL THREE actionable filters and the
+    // bot-only select in ALL THREE deferred builders — the lexical
+    // **[Critical]** test applies exclusively to the review bot's output.
+    expect(
+      prepareBranchAndFeedbackStep.split(
+        'or (((.user.login // "") != $rb) and (((.user.login // "") | IN($over[])) | not))',
+      ).length - 1,
+    ).toBe(3);
+    expect(
+      prepareBranchAndFeedbackStep
+        .match(
+          /## Deferred non-Critical feedback[\s\S]*?deferred-feedback\.md/,
+        )?.[0]
+        ?.split(
+          '| select(((.user.login // "") == $rb) or ((.user.login // "") | IN($over[])))',
+        ).length - 1,
+    ).toBe(3);
+    // The budget census itself: replay the real jq over fixture files. A
+    // looped reviewer with two CONSUMED batches in the Critical-only tail
+    // is listed; one batch, pre-Critical batches, unconsumed (fresh)
+    // feedback, untrusted authors, and command comments never count.
+    // Never-deferrable feedback must not burn budget either, mirroring the
+    // deferred renderer: Critical-tagged comments, Request changes / APPROVED
+    // reviews, inline replies rooted at a Critical comment, and inline comments
+    // under a Request changes review all stay absent (crit/cr/appr/replyguy/
+    // crinline). The review bot stays absent even as a trusted MEMBER, and a
+    // sentinel-ts marker opens no span (sentinelvictim stays at one batch).
+    expect(workflow).toContain("CRITICAL_ONLY_HUMAN_BATCHES: '2'");
+    const censusBlock = prepareBranchAndFeedbackStep.match(
+      /OVER_BUDGET_AUTHORS="\$\(jq -n[\s\S]*?' \|\| echo '\[\]'\)"/,
+    )?.[0];
+    expect(censusBlock).toBeTruthy();
+    const WKEY = '2026-07-01T00:00:00Z';
+    const markerC = (ts, acted, round, at, win = WKEY) => ({
+      user: { login: 'qwen-code-dev-bot' },
+      created_at: at,
+      body: `head\n<!-- autofix-eval ts=${ts} acted=${acted} round=${round} win=${win} -->`,
+    });
+    const humanC = (login, at, assoc = 'MEMBER', body = 'feedback') => ({
+      user: { login },
+      created_at: at,
+      author_association: assoc,
+      body,
+    });
+    const budgetDir = mkdtempSync(join(tmpdir(), 'over-budget-'));
+    try {
+      writeFileSync(
+        join(budgetDir, 'ic.json'),
+        JSON.stringify([
+          markerC('2026-07-02T00:00:00Z', 'true', 5, '2026-07-02T01:00:00Z'),
+          markerC('2026-07-03T00:00:00Z', 'true', 6, '2026-07-03T01:00:00Z'),
+          markerC('2026-07-04T00:00:00Z', 'false', 6, '2026-07-04T01:00:00Z'),
+          // Stale-window marker: qualifies for a span but win != WKEY.
+          markerC(
+            '2026-06-15T00:00:00Z',
+            'true',
+            6,
+            '2026-06-15T01:00:00Z',
+            '2026-06-01T00:00:00Z',
+          ),
+          // Sentinel-ts marker: filtered out, so it opens no span. Dropping
+          // the guard would open a (2026-07-04, 9999] span that absorbs
+          // sentinelvictim's second batch below and surface them.
+          markerC('9999-12-31T23:59:59Z', 'true', 6, '2026-07-04T02:00:00Z'),
+          humanC('looper', '2026-07-02T12:00:00Z'),
+          humanC('looper', '2026-07-03T12:00:00Z'),
+          humanC('onetime', '2026-07-03T13:00:00Z'),
+          // Stale-window human inside the stale span; must not count.
+          humanC('onetime', '2026-06-14T12:00:00Z'),
+          humanC('looper', '2026-07-01T12:00:00Z'),
+          humanC('looper', '2026-07-05T00:00:00Z'),
+          humanC('rando', '2026-07-02T13:00:00Z', 'NONE'),
+          humanC(
+            'looper',
+            '2026-07-02T13:00:00Z',
+            'MEMBER',
+            '@qwen-code /review',
+          ),
+          // Command-only author: both items are /commands, so with the
+          // command-exclusion filter they count 0 consumed spans and stay
+          // absent; dropping the filter would surface them and fail the
+          // assertion, which is what makes the guard observable.
+          humanC(
+            'commander',
+            '2026-07-02T14:00:00Z',
+            'MEMBER',
+            '@qwen-code /review',
+          ),
+          humanC(
+            'commander',
+            '2026-07-03T14:00:00Z',
+            'MEMBER',
+            '@qwen-code /retry',
+          ),
+          // Critical-only author: both batches are **[Critical]**-tagged, so
+          // they are never deferrable and must not count (absent). Dropping the
+          // Critical exclusion would surface them.
+          humanC(
+            'crit',
+            '2026-07-02T15:00:00Z',
+            'MEMBER',
+            '**[Critical]** fix X',
+          ),
+          humanC(
+            'crit',
+            '2026-07-03T15:00:00Z',
+            'MEMBER',
+            '**[Critical]** still broken',
+          ),
+          // Review bot, even carrying a trusted association, is excluded by
+          // login (its budget is zero). Dropping `.login != $rb` surfaces it.
+          humanC(
+            'qwen-code-ci-bot',
+            '2026-07-02T18:00:00Z',
+            'MEMBER',
+            'bot suggestion',
+          ),
+          humanC(
+            'qwen-code-ci-bot',
+            '2026-07-03T18:00:00Z',
+            'MEMBER',
+            'bot suggestion 2',
+          ),
+          // Sentinel-span probe: the first batch lands in span B; the second
+          // falls after span B and only counts if the sentinel marker above
+          // wrongly opens a span. With the guard, stays at one batch (absent).
+          humanC('sentinelvictim', '2026-07-03T12:30:00Z'),
+          humanC('sentinelvictim', '2026-07-04T12:00:00Z'),
+        ]),
+      );
+      // A second author whose two consumed batches arrive through the review
+      // (.submitted_at) and inline-comment (.created_at) branches, not ic.json:
+      // both are untagged, so they count under either census semantic.
+      writeFileSync(
+        join(budgetDir, 'rv.json'),
+        JSON.stringify([
+          {
+            user: { login: 'reviewer2' },
+            author_association: 'MEMBER',
+            state: 'COMMENTED',
+            submitted_at: '2026-07-02T12:30:00Z',
+            body: 'feedback delivered through a review',
+          },
+          // Request changes / APPROVED reviews are never deferrable, so two
+          // consumed-span batches of each must not count (both authors absent):
+          // the census mirrors the deferred renderer's `state == "COMMENTED"`.
+          {
+            user: { login: 'cr' },
+            author_association: 'MEMBER',
+            state: 'CHANGES_REQUESTED',
+            submitted_at: '2026-07-02T16:00:00Z',
+            body: 'changes requested',
+          },
+          {
+            user: { login: 'cr' },
+            author_association: 'MEMBER',
+            state: 'CHANGES_REQUESTED',
+            submitted_at: '2026-07-03T16:00:00Z',
+            body: 'changes requested again',
+          },
+          {
+            user: { login: 'appr' },
+            author_association: 'MEMBER',
+            state: 'APPROVED',
+            submitted_at: '2026-07-02T17:00:00Z',
+            body: 'lgtm',
+          },
+          {
+            user: { login: 'appr' },
+            author_association: 'MEMBER',
+            state: 'APPROVED',
+            submitted_at: '2026-07-03T17:00:00Z',
+            body: 'lgtm again',
+          },
+          // Request changes review container (id 801) that the crinline
+          // comments below attach to; itself never deferrable.
+          {
+            id: 801,
+            user: { login: 'crreviewer' },
+            author_association: 'MEMBER',
+            state: 'CHANGES_REQUESTED',
+            submitted_at: '2026-07-02T10:00:00Z',
+            body: 'requesting changes',
+          },
+        ]),
+      );
+      writeFileSync(
+        join(budgetDir, 'rc.json'),
+        JSON.stringify([
+          {
+            user: { login: 'reviewer2' },
+            author_association: 'MEMBER',
+            created_at: '2026-07-03T13:30:00Z',
+            body: 'feedback delivered through an inline comment',
+          },
+          // Critical root comment (id 901) that replyguy's replies attach to.
+          {
+            id: 901,
+            user: { login: 'somecrit' },
+            author_association: 'MEMBER',
+            created_at: '2026-07-02T11:00:00Z',
+            body: '**[Critical]** root finding',
+          },
+          // Inline replies rooted at a Critical comment are never deferrable,
+          // so two consumed-span replies must not count (replyguy absent).
+          {
+            user: { login: 'replyguy' },
+            author_association: 'MEMBER',
+            in_reply_to_id: 901,
+            created_at: '2026-07-02T12:45:00Z',
+            body: 'me too',
+          },
+          {
+            user: { login: 'replyguy' },
+            author_association: 'MEMBER',
+            in_reply_to_id: 901,
+            created_at: '2026-07-03T12:45:00Z',
+            body: 'me too again',
+          },
+          // Inline comments under a Request changes review are never
+          // deferrable, so two consumed-span comments must not count
+          // (crinline absent).
+          {
+            user: { login: 'crinline' },
+            author_association: 'MEMBER',
+            pull_request_review_id: 801,
+            created_at: '2026-07-02T13:45:00Z',
+            body: 'inline under CR review',
+          },
+          {
+            user: { login: 'crinline' },
+            author_association: 'MEMBER',
+            pull_request_review_id: 801,
+            created_at: '2026-07-03T13:45:00Z',
+            body: 'inline under CR review 2',
+          },
+        ]),
+      );
+      const overOut = execFileSync(
+        'bash',
+        [
+          '-c',
+          [
+            'set -uo pipefail',
+            `WORKDIR='${budgetDir}'`,
+            `LIVE_REARM_KEY='${WKEY}'`,
+            "AUTOFIX_BOT='qwen-code-dev-bot'",
+            "REVIEW_BOT='qwen-code-ci-bot'",
+            `TRUSTED_ASSOC='["OWNER","MEMBER","COLLABORATOR"]'`,
+            'CRITICAL_ONLY_AFTER_ROUND=5',
+            'CRITICAL_ONLY_HUMAN_BATCHES=2',
+            censusBlock.replace(/\n {10}/g, '\n'),
+            'printf %s "${OVER_BUDGET_AUTHORS}"',
+          ].join('\n'),
+        ],
+        { encoding: 'utf8' },
+      );
+      // Only the two looped authors land here; every protected author above
+      // (crit/cr/appr/replyguy/crinline/qwen-code-ci-bot/sentinelvictim) has
+      // two consumed-span batches yet stays absent — dropping any one of the
+      // census's deferral-mirroring exclusions surfaces one of them and fails.
+      expect(JSON.parse(overOut)).toEqual(['looper', 'reviewer2']);
+    } finally {
+      rmSync(budgetDir, { recursive: true, force: true });
+    }
+    // The deferral note names over-budget authors with the escapes.
+    expect(prepareBranchAndFeedbackStep).toContain('is at this window');
+    expect(prepareBranchAndFeedbackStep).toContain('regular-feedback budget');
+    expect(inlineFilter).toContain('pull_request_review_id');
+
+    // Scan still selects fresh suggestions so a no-op report can advance the
+    // watermark; prepare hides their bodies from the agent and the
+    // deterministic report records links to the items left open.
+    expect(reviewScanJob).not.toContain('CRITICAL_ONLY');
+    expect(prepareBranchAndFeedbackStep).toContain(
+      '## Deferred non-Critical feedback',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain('deferred-feedback.md');
+    expect(pushAndReportStep).toContain('deferred-feedback.md');
+
+    // The agent-facing policy is an independent second guard: even if someone
+    // later changes the rendering, a declared Critical-only round must never
+    // modify code for the deferred section.
+    const skill = readAutofixSkill();
+    expect(skill).toContain('Critical-only mode');
+    expect(skill).toContain('do not modify code');
+    expect(skill).toContain('Deferred non-Critical feedback');
   });
 
   it('requires the address path to run verification and record it as evidence', () => {
@@ -3242,7 +4895,7 @@ describe('qwen-autofix workflow', () => {
     // The develop-issue mode must also require a Verification section in its
     // e2e-report, not just address-review — same regression, different mode.
     expect(flat).toContain(
-      'section that lists each command you ran and its result (see Shared Rules)',
+      'section that lists each command you ran and its result (see GitHub Actions Rules)',
     );
     // The Verification section ends the English body, before the collapsed
     // Chinese translation — not after it.
@@ -3280,9 +4933,7 @@ describe('qwen-autofix workflow', () => {
     // The "nothing new" gate must check all three feedback sources.
     expect(reviewScanStep).toContain('"${N_ISSUE_COMMENTS}" -eq 0');
     // review-address must also fetch ic.json and render issue-level comments.
-    expect(workflow).toContain(
-      'repos/${REPO}/issues/${PR}/comments" --paginate > "${WORKDIR}/ic.json"',
-    );
+    expect(prepareBranchAndFeedbackStep).toMatch(normalizedIcFetch);
     expect(prepareBranchAndFeedbackStep).toContain(
       '2> /dev/null || echo \'[]\' > "${WORKDIR}/checks.json"',
     );
@@ -3621,6 +5272,7 @@ describe('qwen-autofix workflow', () => {
 
     expect(workflow).toMatch(/issue-autofix:[\s\S]*?runs-on: 'ubuntu-latest'/);
     expect(workflow).toMatch(/review-address:[\s\S]*?runs-on: 'ubuntu-latest'/);
+    expect(workflow).toMatch(/build-cli:[\s\S]*?runs-on: 'ubuntu-latest'/);
     expect(workflow).not.toContain(
       '["self-hosted", "linux", "x64", "autofix"]',
     );
@@ -3630,7 +5282,9 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain(
       "RUNNER_ENVIRONMENT: '${{ runner.environment }}'",
     );
-    expect(prepareQwenCliSteps).toHaveLength(2);
+    // issue-autofix, build-cli, and review-address each stage the qwen shim
+    // against the workspace bundle.
+    expect(prepareQwenCliSteps).toHaveLength(3);
     for (const step of prepareQwenCliSteps) {
       expect(step).toContain(
         'qwen_version="$(node -p "require(\'./package.json\').version")"',
@@ -3639,6 +5293,9 @@ describe('qwen-autofix workflow', () => {
         'exec node "${GITHUB_WORKSPACE}/dist/cli.js" "$@"',
       );
       expect(step).toContain('qwen-bin');
+      expect(step).toContain('chmod +x "${qwen_bin}/qwen"');
+      expect(step).toContain('echo "${qwen_bin}" >> "${GITHUB_PATH}"');
+      expect(step).toContain('qwen --version');
       expect(step).not.toContain('current_version="$(qwen --version');
       expect(step).not.toContain('Using pre-installed Qwen Code');
       expect(step).not.toContain('npm install -g');
@@ -3695,6 +5352,8 @@ describe('qwen-autofix workflow', () => {
   });
 
   it('retries dependency installation before building', () => {
+    // issue-autofix and build-cli build from sources; review-address restores
+    // the shared bundle instead (see 'builds the review CLI bundle once...').
     expect(installAndBuildSteps).toHaveLength(2);
     for (const step of installAndBuildSteps) {
       expect(step).toContain('for attempt in 1 2 3; do');
@@ -3705,6 +5364,124 @@ describe('qwen-autofix workflow', () => {
       expect(step).toContain('npm run build');
       expect(step).toContain('npm run bundle');
     }
+  });
+
+  it('keeps the Node setup recipe identical across the autofix jobs', () => {
+    // The three setup steps are lockstep copies; a partial recipe edit (a
+    // Node bump applied to two of the three jobs) must not ship green.
+    expect(nodeSetupSteps).toHaveLength(3);
+    for (const step of nodeSetupSteps) {
+      expect(step).toContain(
+        'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e',
+      );
+      expect(step).toContain("node-version: '22.x'");
+      expect(step).toContain("cache: 'npm'");
+      expect(step).toContain("cache-dependency-path: 'package-lock.json'");
+    }
+  });
+
+  it('builds the review CLI bundle once and fans it out to the address legs', () => {
+    // Measured driver: 6 review-address legs each spent 3.5-5 minutes on
+    // npm ci + build + bundle of the SAME trusted base (~25 runner-minutes
+    // per scan) before the agent could start. The legs download the shared
+    // artifact instead; only their npm ci remains (the agent and the verify
+    // gate still need node_modules against the PR branch).
+    const buildCliJob =
+      workflow.match(
+        /\n {2}build-cli:[\s\S]*?(?=\n {2}review-address:)/,
+      )?.[0] ?? '';
+    const addressJob =
+      workflow.match(/\n {2}review-address:[\s\S]*$/)?.[0] ?? '';
+    const stepOf = (job, name) =>
+      job.match(
+        new RegExp(`- name: '${name}'[\\s\\S]*?(?=\\n[ ]{6}- name: |$)`),
+      )?.[0] ?? '';
+    expect(buildCliJob).toBeTruthy();
+    expect(addressJob).toBeTruthy();
+
+    expect(buildCliJob).toContain("needs: ['route', 'review-scan']");
+    expect(addressJob).toContain(
+      "needs: ['route', 'review-scan', 'build-cli']",
+    );
+    // An idle tick (no review targets) must not spend a build; the issue
+    // phase only runs when there are none, so gating on do_issue too would
+    // rebuild on every quiet scheduled tick.
+    expect(buildCliJob).toContain(
+      "needs.review-scan.outputs.has_targets == 'true'",
+    );
+    expect(buildCliJob).not.toContain('do_issue');
+
+    // The leg checks out the SHA the bundle was compiled from — a mid-run
+    // base push can never leave a leg running a bundle built from different
+    // sources than its checkout.
+    expect(buildCliJob).toContain(
+      "base_sha: '${{ steps.meta.outputs.base_sha }}'",
+    );
+    expect(buildCliJob).toContain(
+      'echo "base_sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"',
+    );
+    // The step id is the LINK between those two pins: without id: 'meta',
+    // steps.meta.outputs.base_sha resolves to '' at runtime and every leg
+    // silently checks out the event-default ref.
+    expect(stepOf(buildCliJob, 'Upload CLI bundle')).toContain("id: 'meta'");
+    expect(stepOf(addressJob, 'Checkout trusted base')).toContain(
+      "ref: '${{ needs.build-cli.outputs.base_sha }}'",
+    );
+    // The guard must fail the leg LOUD before the checkout: an empty ref
+    // makes actions/checkout fall back to the event default — on
+    // pull_request_review triggers the PR merge ref.
+    const validateShaStep = stepOf(addressJob, 'Validate bundle SHA');
+    expect(validateShaStep).toContain(
+      "BASE_SHA: '${{ needs.build-cli.outputs.base_sha }}'",
+    );
+    expect(validateShaStep).toContain(
+      'if [[ ! "${BASE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then',
+    );
+    expect(validateShaStep).toContain('exit 1');
+    expect(addressJob.indexOf("- name: 'Validate bundle SHA'")).toBeLessThan(
+      addressJob.indexOf("- name: 'Checkout trusted base'"),
+    );
+
+    // The artifact is the repo-root dist/ plus packages/core/dist —
+    // copy_bundle_assets.js already gathers every runtime asset under the
+    // root dist/, and the remaining packages/*/dist would triple the size
+    // and are rebuilt from branch sources by the verify gate. core's dist
+    // is the exception: the settings-schema check runs BEFORE any build
+    // (on every path, including no-action) and its generator — tsx run
+    // from the repo root, whose tsconfig has NO `paths` — imports cli
+    // sources that resolve '@qwen-code/qwen-code-core' through the
+    // workspace symlink to core's dist entry point (the i18n check
+    // instead resolves core to sources via the packages/cli `paths` map).
+    // The regex anchors the line end, so appending another path to the
+    // tarball fails here — a substring pin would let additive drift pass.
+    expect(buildCliJob).toMatch(
+      /tar -czf "\$\{RUNNER_TEMP\}\/qwen-cli-dist\.tar\.gz" dist packages\/core\/dist\n/,
+    );
+    expect(buildCliJob).toContain("name: 'qwen-autofix-cli-dist'");
+    expect(buildCliJob).toContain('retention-days: 1');
+    expect(buildCliJob).toContain("if-no-files-found: 'error'");
+
+    const restoreStep = stepOf(addressJob, 'Restore CLI bundle');
+    expect(restoreStep).toContain(
+      'tar -xzf "${RUNNER_TEMP}/cli-dist/qwen-cli-dist.tar.gz"',
+    );
+    expect(restoreStep).toContain('test -f dist/cli.js');
+    // A bundle without core's dist entry point makes the pre-build
+    // settings-schema generator crash with ERR_MODULE_NOT_FOUND — pin the
+    // restore-side assertion.
+    expect(restoreStep).toContain('test -f packages/core/dist/index.js');
+    const downloadStep = stepOf(addressJob, 'Download CLI bundle');
+    expect(downloadStep).toContain("name: 'qwen-autofix-cli-dist'");
+    // Download directory and restore extract path are one contract — pin
+    // both sides so a rename of either fails this suite.
+    expect(downloadStep).toContain("path: '${{ runner.temp }}/cli-dist'");
+
+    // The leg itself never rebuilds the base bundle — that is the entire
+    // point of the fan-out.
+    const legInstall = stepOf(addressJob, 'Install dependencies');
+    expect(legInstall).toContain('npm ci --prefer-offline');
+    expect(legInstall).not.toContain('npm run build');
+    expect(legInstall).not.toContain('npm run bundle');
   });
 
   it('uses the standard checkout action for autonomous runner jobs', () => {
@@ -3769,6 +5546,7 @@ describe('qwen-autofix workflow', () => {
       assessCandidatesStep,
       developFixStep,
       triageAndAddressStep,
+      repairDeterministicRejectionStep,
     ];
     for (const step of qwenSteps) {
       expect(step.length).toBeGreaterThan(0);
@@ -3790,6 +5568,9 @@ describe('qwen-autofix workflow', () => {
     );
     expect(developFixStep).toContain('rm -f "${WORKDIR}/failure.md"');
     expect(triageAndAddressStep).toContain('rm -f "${WORKDIR}/failure.md"');
+    expect(repairDeterministicRejectionStep).toContain(
+      '"${WORKDIR}/failure.md"',
+    );
   });
 
   it('keeps agent decision logic in the project autofix skill', () => {
@@ -3827,6 +5608,9 @@ describe('qwen-autofix workflow', () => {
     expect(triageAndAddressStep).toContain(
       'node "${RUNNER_TEMP}/autofix-skill/scripts/run-agent.mjs" \\\n            --mode address-review',
     );
+    expect(repairDeterministicRejectionStep).toContain(
+      'node "${RUNNER_TEMP}/autofix-skill/scripts/run-agent.mjs" \\\n            --mode address-review',
+    );
     // Staging must MIRROR the skill layout: run-agent.mjs resolves its
     // SKILL as `<own dir>/../SKILL.md`, so the staged runner and a staged
     // SKILL.md must sit in autofix-skill/{scripts/run-agent.mjs,SKILL.md}.
@@ -3856,6 +5640,7 @@ describe('qwen-autofix workflow', () => {
       assessCandidatesStep,
       developFixStep,
       triageAndAddressStep,
+      repairDeterministicRejectionStep,
     ]) {
       expect(step).not.toContain('## Role');
       expect(step).not.toContain('## Workflow');
@@ -3863,7 +5648,74 @@ describe('qwen-autofix workflow', () => {
     }
   });
 
-  it('keeps the current autofix skill limited to workflow-invoked modes', () => {
+  it('uses the project skill for manual local convergence', () => {
+    const skill = readAutofixSkill();
+    const flatSkill = skill.replace(/\s+/g, ' ');
+    const launchIndex = skill.indexOf('Launch exactly this command');
+    const flatLaunchIndex = flatSkill.indexOf('Launch exactly this command');
+
+    expect(skill).toContain('disable-model-invocation: true');
+    expect(skill).toContain('Mode: local working tree');
+    expect(flatSkill).toContain('explicit confirmation');
+    expect(skill).toContain('repository-defined build or test commands');
+    expect(skill).toContain('retains model credentials and network access');
+    expect(flatSkill).toContain('bare `/autofix` invocation is not consent');
+    expect(skill).toContain('Git Bash/MSYS');
+    expect(launchIndex).toBeGreaterThan(0);
+    expect(flatLaunchIndex).toBeGreaterThan(0);
+    expect(flatSkill.indexOf('explicit confirmation')).toBeLessThan(
+      flatLaunchIndex,
+    );
+    expect(skill.indexOf('Git Bash/MSYS')).toBeLessThan(launchIndex);
+    expect(skill.slice(0, launchIndex)).toContain('`BLOCKED`');
+    expect(skill).toContain(
+      'env -u SANDBOX QWEN_SANDBOX=true "${QWEN_CODE_CLI:-qwen}" review run --approval-mode auto --effort high --json --quiet',
+    );
+    expect(skill).toContain('is_background: true');
+    expect(flatSkill).toContain('terminal task notification');
+    expect(flatSkill).toContain(
+      'yield the current assistant pass without an outcome',
+    );
+    expect(flatSkill).toContain(
+      'including ACP, stream-json, and headless runs',
+    );
+    expect(flatSkill).toContain('at least 30 seconds between checks');
+    expect(flatSkill).toContain("shell tool's shorter foreground limit");
+    expect(flatSkill).toContain(
+      'Clearing inherited `SANDBOX` prevents a stale marker from bypassing sandbox startup',
+    );
+    expect(flatSkill).toContain('content fingerprint');
+    expect(flatSkill).toContain('review-time or concurrent changes');
+    expect(flatSkill).toContain(
+      'match the post-review fingerprint from this round',
+    );
+    expect(skill).toContain('staged, unstaged, and untracked');
+    for (const resultField of [
+      'completed',
+      'timedOut',
+      'childSignal',
+      'childExitCode',
+      'reportPath',
+      'event',
+      'baseEvent',
+      'cappedBy',
+      'downgraded',
+    ]) {
+      expect(skill).toContain(`\`${resultField}\``);
+    }
+    expect(skill).toContain('There is no fixed round limit');
+    expect(skill).toContain('changes oscillate');
+    expect(skill).toContain('staged-diff hash must match');
+    expect(skill).toContain('NO_CHANGES');
+    expect(skill).toContain('CONVERGED');
+    expect(skill).toContain('BLOCKED');
+    expect(skill).toContain('STALLED');
+    expect(skill).not.toContain('/autofix on');
+    expect(skill).not.toContain('/autofix off');
+    expect(skill).not.toContain('/autofix status');
+  });
+
+  it('keeps the runner limited to workflow-invoked modes', () => {
     const { stderr } = runAutofixRunner(['--mode', 'bogus', '--print-prompt']);
 
     expect(stderr).toContain(
@@ -4162,6 +6014,7 @@ describe('qwen-autofix workflow', () => {
       assessCandidatesStep,
       developFixStep,
       triageAndAddressStep,
+      repairDeterministicRejectionStep,
     ];
     for (const step of qwenSteps) {
       expect(step.length).toBeGreaterThan(0);
@@ -4192,6 +6045,376 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).not.toContain('cat > "${proxy_script}"');
   });
 
+  it('posts a takeover milestone digest as rounds accumulate, with a residual bucket', () => {
+    // The takeover cap (100) bounds runaway but says nothing about when a
+    // human should step in: #7469 ground to round 12 over 7 days with the
+    // only budget signal buried in Actions logs. Once 10+ rounds accumulate
+    // since the last digest, a window-scoped census lands on the PR itself.
+    // Digest fires only on takeover PRs and only for PUSHED rounds…
+    expect(pushAndReportStep).toContain('"${OUTCOME}" == "fixed"');
+    expect(pushAndReportStep).toContain(
+      '"${MAX_ROUNDS}" == "${TAKEOVER_MAX_ROUNDS}"',
+    );
+    // …on a CROSSING trigger, not an equality test: failure rounds also
+    // advance the counter, so `push@9, crash@10, push@11` would skip an
+    // exact %10 forever — on exactly the failure-heavy PR the digest
+    // exists for.
+    expect(pushAndReportStep).toContain('"${NEXT_ROUND}" -ge 10');
+    expect(pushAndReportStep).toContain('$(( NEXT_ROUND - MS_LAST ))');
+    // Its own marker, NOT autofix-eval: every census (round, consec,
+    // watermark) selects on autofix-eval, so the digest must stay
+    // invisible to all of them; the feedback filters drop bot comments,
+    // so the agent never reads it as feedback either.
+    expect(pushAndReportStep).toContain('<!-- autofix-milestone round=');
+    const milestone = pushAndReportStep.match(
+      /printf '[^']*autofix-milestone[^']*'/,
+    )?.[0];
+    expect(milestone).toBeTruthy();
+    expect(milestone).not.toContain('autofix-eval');
+    expect(milestone).toContain('<summary>中文说明</summary>');
+    // …and the marker inventory stays complete.
+    expect(workflow).toContain(
+      'autofix-base-updated|autofix-milestone|qwen-triage',
+    );
+
+    // Behavioral replay: extract the digest block and run it under bash
+    // with a stubbed gh against fixture ic.json histories. String pins
+    // alone cannot catch a census that silently zeroes.
+    const digestBlock = pushAndReportStep.match(
+      /if \[\[ "\$\{OUTCOME\}" == "fixed" && "\$\{MAX_ROUNDS\}" == "\$\{TAKEOVER_MAX_ROUNDS\}" \]\][\s\S]*?\n {10}fi\n/,
+    )?.[0];
+    expect(digestBlock).toBeTruthy();
+    // Cross-pin: each census grep needle must match the actual headline
+    // emission site, so a reword that updates one but not the other fails
+    // here — not silently in production.
+    const emitPush = pushAndReportStep.match(
+      /echo "(🤖 Addressed the latest review feedback[^"]*)"/,
+    )?.[1];
+    const emitNoop = pushAndReportStep.match(
+      /echo "(🤖 Reviewed the latest feedback — no changes needed[^"]*)"/,
+    )?.[1];
+    const emitTimeout = reviewAddressReportStep.match(
+      /CAUSE="(ran out of time before finishing[^"]*)"/,
+    )?.[1];
+    const emitRejected = reviewAddressReportStep.match(
+      /HEADLINE="(🤖 Could not (?:address the latest feedback|produce a passing fix)[^"]*)"/,
+    )?.[1];
+    expect(emitPush).toBeTruthy();
+    expect(emitNoop).toBeTruthy();
+    expect(emitTimeout).toBeTruthy();
+    expect(emitRejected).toBeTruthy();
+    const needlePushed = digestBlock.match(/N_PUSHED=.*grep -c '([^']*)'/)?.[1];
+    const needleNoop = digestBlock.match(/N_NOOP=.*grep -c '([^']*)'/)?.[1];
+    const needleTimeout = digestBlock.match(
+      /N_TIMEOUT=.*grep -c '([^']*)'/,
+    )?.[1];
+    const needleRejected = digestBlock.match(
+      /N_REJECTED=.*grep -cE '([^']*)'/,
+    )?.[1];
+    expect(needlePushed).toBeTruthy();
+    expect(needleNoop).toBeTruthy();
+    expect(needleTimeout).toBeTruthy();
+    expect(needleRejected).toBeTruthy();
+    expect(emitPush).toContain(needlePushed);
+    expect(emitNoop).toContain(needleNoop);
+    expect(`🤖 AutoFix ${emitTimeout}`).toContain(needleTimeout);
+    expect(emitRejected).toMatch(new RegExp(needleRejected));
+    const HEADS = {
+      push: '🤖 Addressed the latest review feedback (round 2/100). What changed…',
+      noop: '🤖 Reviewed the latest feedback — no changes needed. Why…',
+      timeout:
+        '🤖 AutoFix ran out of time before finishing (timeout (3000000ms)) (attempt 2/100) — it will retry on the next scan.',
+      rejectedOld:
+        '🤖 Could not address the latest feedback automatically (round 3/100). A human should take over this PR.',
+      rejectedNew:
+        '🤖 Could not produce a passing fix for this feedback (round 4/100) — the verification gate rejected the attempt.',
+      crash:
+        '🤖 AutoFix crashed before it could evaluate the feedback (attempt 2/100) — it will retry on the next scan.',
+      gate: '🤖 AutoFix hit a verification-gate error before reaching a verdict (attempt 3/100) — it will retry on the next scan.',
+    };
+    const K = '2026-07-01T00:00:00Z';
+    const evalC = (head, win, at, login = 'qwen-code-dev-bot') => ({
+      user: { login },
+      created_at: at,
+      body: `${head}\n<!-- autofix-eval ts=x acted=false round=1${win ? ` win=${win}` : ''} -->`,
+    });
+    const baseC = (at) => ({
+      user: { login: 'qwen-code-dev-bot' },
+      created_at: at,
+      body: '🔀 Base updated: …\n<!-- autofix-base-updated -->',
+    });
+    const msC = (round, win, at) => ({
+      user: { login: 'qwen-code-dev-bot' },
+      created_at: at,
+      body: `📊 …\n<!-- autofix-milestone round=${round} win=${win} -->`,
+    });
+    const runDigest = (
+      comments,
+      {
+        nextRound = 10,
+        window = K,
+        outcome = 'fixed',
+        maxRounds = '100',
+        commentExit = 0,
+      } = {},
+    ) => {
+      const dir = mkdtempSync(join(tmpdir(), 'milestone-'));
+      try {
+        writeFileSync(join(dir, 'ic.json'), JSON.stringify(comments));
+        const bin = join(dir, 'bin');
+        mkdirSync(bin);
+        const commentBody =
+          commentExit === 0
+            ? `printf '%s' "$7" > ${JSON.stringify(join(dir, 'digest.md'))}; exit 0`
+            : `exit ${commentExit}`;
+        writeFileSync(
+          join(bin, 'gh'),
+          `#!/usr/bin/env bash\nif [[ "$1" == 'pr' && "$2" == 'comment' ]]; then ${commentBody}; fi\nexit 1\n`,
+        );
+        chmodSync(join(bin, 'gh'), 0o755);
+        const log = execFileSync(
+          'bash',
+          ['-c', `set -euo pipefail\n${digestBlock.replace(/\n {10}/g, '\n')}`],
+          {
+            env: {
+              ...process.env,
+              PATH: `${bin}:${process.env.PATH}`,
+              WORKDIR: dir,
+              OUTCOME: outcome,
+              NEXT_ROUND: String(nextRound),
+              MAX_ROUNDS: maxRounds,
+              TAKEOVER_MAX_ROUNDS: '100',
+              WINDOW: window,
+              AUTOFIX_BOT: 'qwen-code-dev-bot',
+              REPO: 'o/r',
+              PR: '1',
+              TAKEOVER_LABEL: 'autofix/takeover',
+              TAKEOVER_COMMAND: '@qwen-code /takeover',
+            },
+            encoding: 'utf8',
+          },
+        );
+        const digestPath = join(dir, 'digest.md');
+        return {
+          log,
+          body: existsSync(digestPath) ? readFileSync(digestPath, 'utf8') : '',
+        };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+
+    // Mixed healthy history: counts land in the right buckets, an
+    // old-window push and a HUMAN quoting a marker verbatim are excluded,
+    // both rejection wordings count, base updates window by timestamp.
+    const mixed = runDigest([
+      evalC(HEADS.push, K, '2026-07-02T00:00:00Z'),
+      evalC(HEADS.push, K, '2026-07-03T00:00:00Z'),
+      evalC(HEADS.push, K, '2026-07-04T00:00:00Z'),
+      evalC(HEADS.push, K, '2026-07-05T00:00:00Z'),
+      evalC(HEADS.push, K, '2026-07-06T00:00:00Z'),
+      evalC(HEADS.noop, K, '2026-07-07T00:00:00Z'),
+      evalC(HEADS.timeout, K, '2026-07-08T00:00:00Z'),
+      evalC(HEADS.rejectedOld, K, '2026-07-09T00:00:00Z'),
+      evalC(HEADS.rejectedNew, K, '2026-07-10T00:00:00Z'),
+      evalC(HEADS.push, '2026-05-01T00:00:00Z', '2026-06-01T00:00:00Z'),
+      evalC(HEADS.push, K, '2026-07-11T00:00:00Z', 'some-human'),
+      baseC('2026-07-12T00:00:00Z'),
+      baseC('2026-05-02T00:00:00Z'),
+    ]);
+    expect(mixed.body).toContain(
+      '6 pushed fix(es), 1 no-change review(s), 1 timeout(s), 2 rejected attempt(s), 0 other round(s)',
+    );
+    expect(mixed.body).toContain('1 base update(s)');
+    expect(mixed.body).toContain('round 10/100, in the current window');
+    expect(mixed.body).toContain(
+      '<!-- autofix-milestone round=10 win=2026-07-01T00:00:00Z -->',
+    );
+    expect(mixed.log).toContain('milestone digest posted');
+
+    // Failure-heavy window: crashes and gate errors land in the residual
+    // bucket and make it the LOUDEST line, not four zeros quieter than a
+    // healthy window.
+    const grim = runDigest([
+      evalC(HEADS.push, K, '2026-07-02T00:00:00Z'),
+      evalC(HEADS.crash, K, '2026-07-03T00:00:00Z'),
+      evalC(HEADS.crash, K, '2026-07-04T00:00:00Z'),
+      evalC(HEADS.crash, K, '2026-07-05T00:00:00Z'),
+      evalC(HEADS.crash, K, '2026-07-06T00:00:00Z'),
+      evalC(HEADS.gate, K, '2026-07-07T00:00:00Z'),
+      evalC(HEADS.gate, K, '2026-07-08T00:00:00Z'),
+      evalC(HEADS.gate, K, '2026-07-09T00:00:00Z'),
+      evalC(HEADS.gate, K, '2026-07-10T00:00:00Z'),
+    ]);
+    expect(grim.body).toContain(
+      '2 pushed fix(es), 0 no-change review(s), 0 timeout(s), 0 rejected attempt(s), 8 other round(s)',
+    );
+
+    // Crossing trigger: a digest at round 10 suppresses round 12 but not
+    // round 20; a failure at the exact multiple no longer loses the digest.
+    const suppressed = runDigest(
+      [
+        evalC(HEADS.push, K, '2026-07-02T00:00:00Z'),
+        msC(10, K, '2026-07-03T00:00:00Z'),
+      ],
+      { nextRound: 12 },
+    );
+    expect(suppressed.body).toBe('');
+    const dueAgain = runDigest(
+      [
+        evalC(HEADS.push, K, '2026-07-02T00:00:00Z'),
+        msC(10, K, '2026-07-03T00:00:00Z'),
+      ],
+      { nextRound: 20 },
+    );
+    expect(dueAgain.body).toContain('round 20/100');
+    // An old-window milestone marker does not suppress a fresh window.
+    const freshWindow = runDigest(
+      [
+        evalC(HEADS.push, K, '2026-07-02T00:00:00Z'),
+        msC(11, '2026-05-01T00:00:00Z', '2026-07-03T00:00:00Z'),
+      ],
+      { nextRound: 11 },
+    );
+    expect(freshWindow.body).toContain('round 11/100');
+
+    // WINDOW=none says what it counts instead of claiming a window.
+    const noWindow = runDigest(
+      [evalC(HEADS.push, null, '2026-07-02T00:00:00Z')],
+      { window: 'none' },
+    );
+    expect(noWindow.body).toContain('since the PR opened');
+
+    // Non-pushing outcomes and non-takeover caps never digest.
+    expect(
+      runDigest([evalC(HEADS.push, K, '2026-07-02T00:00:00Z')], {
+        outcome: 'noop',
+      }).body,
+    ).toBe('');
+    expect(
+      runDigest([evalC(HEADS.push, K, '2026-07-02T00:00:00Z')], {
+        maxRounds: '10',
+      }).body,
+    ).toBe('');
+    // A census that parses zero window markers at round 10+ posts NOTHING
+    // rather than a fabricated all-zero digest.
+    const empty = runDigest([]);
+    expect(empty.body).toBe('');
+    expect(empty.log).toContain('skipping the digest');
+
+    // Best-effort is behavioral, not just string-pinned: when `gh pr
+    // comment` fails, the block must still return normally (no throw under
+    // the step's `set -e` lineage) and only warn — a good push must never
+    // go red over a failed digest.
+    const commentFailed = runDigest(
+      [evalC(HEADS.push, K, '2026-07-02T00:00:00Z')],
+      { commentExit: 1 },
+    );
+    expect(commentFailed.body).toBe('');
+    expect(commentFailed.log).toContain(
+      '::warning::milestone digest failed to post on PR #1',
+    );
+
+    // Best-effort stays pinned: the success log is chained to the post
+    // (no unconditional "posted" after a failed comment), the failure
+    // path only warns.
+    expect(pushAndReportStep).toMatch(
+      /then\n\s+echo "📊 milestone digest posted/,
+    );
+    expect(pushAndReportStep).toContain('milestone digest failed to post');
+  });
+
+  it('salvages a race-lost push by merging the moved head instead of discarding the run', () => {
+    // A one-shot push dies `fetch first` whenever anything pushes to the PR
+    // head during the agent's ~120-minute window (observed twice in one day,
+    // #7983/#7985 — a full verified agent run thrown away each time). The
+    // per-PR head-write concurrency group cannot prevent this: it only
+    // serialises THIS repo's workflows, not the PR author or the fork side.
+    // On rejection the report step fetches the moved head, MERGES it into
+    // the local line, and retries a bounded number of times; the merge
+    // result descends from the remote head so the retry is a fast-forward.
+    expect(pushAndReportStep).toContain('for push_attempt in 1 2 3; do');
+    // A successful push breaks out of the loop immediately — without this
+    // pin, deleting the break survives: the loop range and give-up message
+    // are still asserted as strings, but a successful push then re-runs
+    // git push twice more and the salvage legs execute against a branch
+    // that was already pushed.
+    expect(pushAndReportStep).toMatch(
+      /if git push --no-verify "\$\{PUSH_URL\}" HEAD:"\$\{BRANCH\}"; then\n\s+break/,
+    );
+    // BOTH push-URL constructions stay pinned — the fork one is pinned by
+    // the fork-plumbing test, and the same-repo one lost its old
+    // `origin "${BRANCH}"` pin in this rework: a mutation swapping ${REPO}
+    // for ${HEAD_REPO} (empty in the same-repo case → a malformed
+    // `github.com/.git` remote) must not survive.
+    expect(pushAndReportStep).toContain(
+      'PUSH_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"',
+    );
+    expect(pushAndReportStep).toContain(
+      'git fetch "${PUSH_URL}" "refs/heads/${BRANCH}"',
+    );
+    // Every failure path in the salvage loop is ::error::-annotated — a
+    // deleted fork branch (or transient network error) must not kill the
+    // step with an unannotated exit 128 under bash -e. The structural pin
+    // connects the message to its exit 1: deleting that exit 1 proceeds to
+    // `git merge FETCH_HEAD` against a stale FETCH_HEAD.
+    expect(pushAndReportStep).toMatch(
+      /echo "::error::could not fetch the moved head \(attempt \$\{push_attempt\}\)[^\n]*"\n\s+exit 1/,
+    );
+    // The disclosure flag keys on HEAD actually advancing: a transient
+    // push failure on an unmoved branch no-ops the merge ("Already up to
+    // date") and must NOT tell the reviewer to re-check commits that
+    // never existed.
+    expect(pushAndReportStep).toMatch(
+      /PRE_MERGE_HEAD="\$\(git rev-parse HEAD\)"\n\s+if ! git -c user\.name=/,
+    );
+    expect(pushAndReportStep).toMatch(
+      /if \[\[ "\$\(git rev-parse HEAD\)" != "\$\{PRE_MERGE_HEAD\}" \]\]; then\n\s+PUSH_RACE_MERGED='true'/,
+    );
+    // Merge, never rebase: the agent's own conflict-resolution rounds create
+    // merge commits, and a rebase would flatten them and can silently
+    // re-introduce the conflicts they resolved.
+    expect(pushAndReportStep).toContain('merge --no-edit FETCH_HEAD');
+    expect(pushAndReportStep).not.toContain('git rebase');
+    // The merge commit needs an explicit identity on a bare runner.
+    expect(pushAndReportStep).toContain('-c user.name="${AUTOFIX_BOT}"');
+    expect(pushAndReportStep).toContain(
+      '-c user.email="${AUTOFIX_BOT}@users.noreply.github.com"',
+    );
+    // A genuine content conflict aborts cleanly and falls through to the
+    // existing failure path — the salvage must never overwrite either side.
+    expect(pushAndReportStep).toContain('git merge --abort || true');
+    // Structural pin: deleting this exit 1 falls through to the report
+    // section and posts a round-complete comment as if the push succeeded.
+    expect(pushAndReportStep).toMatch(
+      /echo "::error::the commits pushed during the run conflict with this fix[^\n]*"\n\s+exit 1/,
+    );
+    // The salvage is disclosed in the round report: the round's verification
+    // ran before the merge, so mid-run commits deserve a re-check. The
+    // structure pin keeps the warning conditional — making it unconditional
+    // (printed every round) passes presence-only checks but is the exact
+    // false-disclosure this head's own fix commit closes from the other side.
+    expect(pushAndReportStep).toMatch(
+      /if \[\[ "\$\{PUSH_RACE_MERGED\}" == .true. \]\]; then\n\s+echo\n\s+echo "⚠️ The branch received new commits/,
+    );
+    expect(pushAndReportStep).toMatch(
+      /PUSH_RACE_MERGED='false'\n\s+for push_attempt in 1 2 3; do/,
+    );
+    expect(pushAndReportStep).toContain('verification predates that merge');
+    // Bounded: the loop gives up after the last attempt instead of spinning.
+    // The structural pin connects the guard value to the error exit — a
+    // mutation of == 3 to == 4 survives presence-only checks: the loop
+    // range string is unchanged and the error message still exists as dead
+    // code, but execution falls through to the report section after 3
+    // failed attempts and posts a round-complete comment as if the push
+    // succeeded. Deleting exit 1 alone also survives without this pin:
+    // the guard fires and prints the error but execution continues past
+    // fi, the for-loop exhausts, and the report section runs.
+    expect(pushAndReportStep).toMatch(
+      /if \[\[ "\$\{push_attempt\}" == 3 \]\]; then\n\s+echo "::error::push rejected \$\{push_attempt\} times; giving up"\n\s+exit 1/,
+    );
+  });
+
   it('pushes autofix branches without rewriting remote history', () => {
     expect(workflow).not.toMatch(/\bgit push\b[^\n]*--force(?:-with-lease)?/);
     // No bare -f / +refspec force forms either. (--no-verify is NOT a force
@@ -4203,7 +6426,7 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).not.toMatch(/\bgit push\b[^\n]* \+\S/);
     expect(publishPrStep).toContain('git push --no-verify origin "${BRANCH}"');
     expect(pushAndReportStep).toContain(
-      'git push --no-verify origin "${BRANCH}"',
+      'git push --no-verify "${PUSH_URL}" HEAD:"${BRANCH}"',
     );
     // Five sites now: both PAT pushes, the PAT-bearing prepare checkout,
     // AND both no-secret verification checkouts (convention: every host
@@ -4507,6 +6730,226 @@ describe('qwen-autofix workflow', () => {
     );
   });
 
+  it('repairs one deterministic rejection and finalizes only the last verdict', () => {
+    const reviewVerificationGateStep = verificationGateSteps[1];
+    expect(reviewVerificationGateStep).toContain('continue-on-error: true');
+    expect(repairDeterministicRejectionStep).toContain(
+      "steps.verify.outputs.retryable == 'true'",
+    );
+    expect(repairDeterministicRejectionStep).toContain('timeout-minutes: 20');
+    expect(repairDeterministicRejectionStep).toContain(
+      "QWEN_TIMEOUT_MS: '1080000'",
+    );
+    const settingsJson = (step) =>
+      step.match(/SETTINGS_JSON: \|-\n([\s\S]*?)\n {8}run: \|-/)?.[1] ?? '';
+    expect(settingsJson(repairDeterministicRejectionStep)).toBe(
+      settingsJson(triageAndAddressStep),
+    );
+    expect(settingsJson(repairDeterministicRejectionStep)).toContain(
+      '"sandbox": "docker"',
+    );
+    expect(repairDeterministicRejectionStep).toContain(
+      'mkdir -p .qwen "${QWEN_HOME}"',
+    );
+    expect(repairDeterministicRejectionStep).toContain(
+      'printf \'%s\\n\' "${SETTINGS_JSON}" > .qwen/settings.json',
+    );
+    expect(repairDeterministicRejectionStep).toContain(
+      'echo "attempted=true" >> "${GITHUB_OUTPUT}"',
+    );
+    expect(repairDeterministicRejectionStep).toContain(
+      'cat "${WORKDIR}/gate-rejection.md"',
+    );
+    expect(repairDeterministicRejectionStep).not.toContain(
+      'Keep that commit and add one follow-up commit',
+    );
+    expect(readAutofixSkill().replace(/\s+/g, ' ')).toContain(
+      'preserve the existing rejected commit and add one verified follow-up commit',
+    );
+    const repairCleanup =
+      repairDeterministicRejectionStep.match(
+        /rm -f \\\n([\s\S]*?)\n {10}rm -rf "\$\{QWEN_HOME\}"/,
+      )?.[1] ?? '';
+    expect(repairCleanup).toContain('gate-rejection.md');
+    expect(repairCleanup).toContain('"${WORKDIR}/resolved-comments.txt"');
+    expect(repairCleanup).toContain('"${WORKDIR}/comment-replies.json"');
+    expect(
+      repairDeterministicRejectionStep.match(
+        /node "\$\{RUNNER_TEMP\}\/autofix-skill\/scripts\/run-agent\.mjs"/g,
+      ) ?? [],
+    ).toHaveLength(1);
+    expect(
+      workflow.match(/- name: 'Repair deterministic rejection'/g) ?? [],
+    ).toHaveLength(1);
+    expect(repairVerificationGateStep).toContain('continue-on-error: true');
+    expect(repairVerificationGateStep).toContain(
+      "steps.repair.outputs.attempted == 'true'",
+    );
+    expect(repairVerificationGateStep).toContain(
+      'bash "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
+    );
+    expect(
+      reviewVerificationRunner.match(/retryable=true/g) ?? [],
+    ).toHaveLength(1);
+    expect(reviewVerificationRunner).toContain(
+      "run_check 'settings schema is stale on the agent-committed fix'",
+    );
+    expect(reviewVerificationRunner).toContain(
+      "run_check 'cross-package contract verification failed'",
+    );
+    expect(pushAndReportStep).toContain(
+      "steps.final_verify.outputs.outcome == 'fixed'",
+    );
+    expect(pushAndReportStep).toContain(
+      "OUTCOME: '${{ steps.final_verify.outputs.outcome }}'",
+    );
+    expect(reviewAddressReportStep).toContain(
+      "OUTCOME: '${{ steps.final_verify.outputs.outcome }}'",
+    );
+    expect(reviewAddressReportStep).toContain(
+      "COMMITTED: '${{ steps.final_verify.outputs.committed }}'",
+    );
+    expect(finalizeStatusCommentStep).toContain(
+      "OUTCOME: '${{ steps.final_verify.outputs.outcome }}'",
+    );
+    const verificationHeadCapture = reviewVerificationRunner.indexOf(
+      'VERIFICATION_HEAD="$(git rev-parse HEAD)"',
+    );
+    const schemaCheck = reviewVerificationRunner.indexOf(
+      "run_check 'settings schema is stale on the agent-committed fix'",
+    );
+    const contractCheck = reviewVerificationRunner.indexOf(
+      "run_check 'cross-package contract verification failed'",
+    );
+    const coreRebuild = reviewVerificationRunner.indexOf(
+      "run_check 'core rebuild failed on the agent-committed fix'",
+    );
+    const noOpCheck = reviewVerificationRunner.indexOf(
+      'if git diff --quiet "origin/${BRANCH}...${BRANCH}"; then',
+    );
+    const buildCheck = reviewVerificationRunner.indexOf(
+      "run_check 'build failed on the agent-committed fix' npm run build",
+    );
+    const assertions = [
+      ...reviewVerificationRunner.matchAll(/^assert_verification_tree$/gm),
+    ].map((match) => match.index);
+    const verifiedHeadOutput = reviewVerificationRunner.indexOf(
+      'echo "verified_head=${VERIFICATION_HEAD}" >> "${GITHUB_OUTPUT}"',
+    );
+    expect(reviewVerificationRunner).toContain(
+      "reject_fix 'workspace is dirty before deterministic verification'",
+    );
+    expect(verificationHeadCapture).toBeGreaterThan(-1);
+    expect(schemaCheck).toBeGreaterThan(verificationHeadCapture);
+    expect(contractCheck).toBeGreaterThan(schemaCheck);
+    // The conditional core rebuild sits between the HEAD capture and the
+    // schema check: the generator must read a branch-built core dist when
+    // the branch itself changed core sources (base-restored dist would
+    // disagree with the branch's committed schema or crash the generator),
+    // and it only fires when the branch diff touches core's sources.
+    expect(coreRebuild).toBeGreaterThan(verificationHeadCapture);
+    expect(schemaCheck).toBeGreaterThan(coreRebuild);
+    expect(reviewVerificationRunner).toContain(
+      'npm run build --workspace packages/core',
+    );
+    expect(reviewVerificationRunner).toContain(
+      "grep -Eq '^packages/core/(src/|index\\.ts$)'",
+    );
+    expect(assertions).toHaveLength(2);
+    expect(assertions[0]).toBeGreaterThan(contractCheck);
+    expect(noOpCheck).toBeGreaterThan(assertions[0]);
+    expect(buildCheck).toBeGreaterThan(noOpCheck);
+    expect(assertions[1]).toBeGreaterThan(buildCheck);
+    expect(verifiedHeadOutput).toBeGreaterThan(assertions[1]);
+    expect(pushAndReportStep).toContain(
+      "VERIFIED_HEAD: '${{ steps.final_verify.outputs.verified_head }}'",
+    );
+
+    const body = finalizeVerificationStep
+      .match(/ {8}run: \|-\n([\s\S]*)$/)?.[1]
+      .split('\n')
+      .map((line) => (line.startsWith('          ') ? line.slice(10) : line))
+      .join('\n');
+    expect(body).toBeTruthy();
+    const run = (env) => {
+      const dir = mkdtempSync(join(tmpdir(), 'final-verify-'));
+      const output = join(dir, 'output');
+      const result = spawnSync('bash', ['-c', `set -eo pipefail\n${body}`], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          GITHUB_OUTPUT: output,
+          FIRST_OUTCOME: '',
+          FIRST_COMMITTED: '',
+          FIRST_VERIFIED_HEAD: '',
+          REPAIR_ATTEMPTED: '',
+          REPAIR_OUTCOME: '',
+          REPAIR_COMMITTED: '',
+          REPAIR_VERIFIED_HEAD: '',
+          ...env,
+        },
+      });
+      const written = existsSync(output) ? readFileSync(output, 'utf8') : '';
+      rmSync(dir, { recursive: true, force: true });
+      return { status: result.status, written };
+    };
+
+    expect(
+      run({ FIRST_OUTCOME: 'fixed', FIRST_VERIFIED_HEAD: 'first-sha' }),
+    ).toMatchObject({
+      status: 0,
+      written: expect.stringContaining('verified_head=first-sha'),
+    });
+    expect(run({ FIRST_OUTCOME: 'noop' })).toMatchObject({
+      status: 0,
+      written: expect.stringContaining('outcome=noop'),
+    });
+    expect(
+      run({
+        FIRST_OUTCOME: 'failed',
+        FIRST_COMMITTED: 'true',
+        FIRST_VERIFIED_HEAD: 'stale-first-sha',
+        REPAIR_ATTEMPTED: 'true',
+        REPAIR_OUTCOME: 'fixed',
+        REPAIR_COMMITTED: 'true',
+        REPAIR_VERIFIED_HEAD: 'repair-sha',
+      }),
+    ).toMatchObject({
+      status: 0,
+      written: expect.stringContaining('verified_head=repair-sha'),
+    });
+    const repairedWithoutVerifiedHead = run({
+      FIRST_OUTCOME: 'failed',
+      FIRST_COMMITTED: 'true',
+      FIRST_VERIFIED_HEAD: 'stale-first-sha',
+      REPAIR_ATTEMPTED: 'true',
+      REPAIR_OUTCOME: 'fixed',
+    });
+    expect(repairedWithoutVerifiedHead).toMatchObject({
+      status: 0,
+      written: expect.stringContaining('committed=true'),
+    });
+    expect(repairedWithoutVerifiedHead.written).not.toContain('verified_head=');
+    expect(
+      run({
+        FIRST_OUTCOME: 'failed',
+        REPAIR_ATTEMPTED: 'true',
+        REPAIR_OUTCOME: 'failed',
+      }),
+    ).toMatchObject({
+      status: 1,
+      written: expect.stringContaining('outcome=failed'),
+    });
+    expect(run({ FIRST_OUTCOME: '' })).toMatchObject({ status: 1 });
+    expect(
+      run({
+        FIRST_OUTCOME: 'failed',
+        REPAIR_ATTEMPTED: 'true',
+        REPAIR_OUTCOME: '',
+      }),
+    ).toMatchObject({ status: 1 });
+  });
+
   it('posts a human-handoff marker when review addressing reaches a terminal handoff', () => {
     expect(reviewAddressReportStep).toContain(
       "GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'",
@@ -4571,7 +7014,16 @@ describe('qwen-autofix workflow', () => {
       'for f in failure.md handoff.md address-summary.md no-action.md',
     );
     expect(reviewAddressReportStep).toContain(
-      'Could not address the latest feedback automatically',
+      'Could not produce a passing fix for this feedback',
+    );
+    // The handoff must not read as a full release: the loop stays engaged
+    // for NEW feedback (#7929 posted "a human should take over" and then
+    // kept pushing rounds — a contradiction to anyone reading the thread).
+    expect(reviewAddressReportStep).toContain(
+      'the loop stays engaged and still picks up new feedback',
+    );
+    expect(reviewAddressReportStep).toContain(
+      'will not retry this item on its own',
     );
     expect(reviewAddressReportStep).toContain('gh pr comment "${PR}"');
     expect(reviewAddressReportStep).toContain(
@@ -4584,10 +7036,12 @@ describe('qwen-autofix workflow', () => {
       '::warning::Failed to post handoff comment on PR #${PR}',
     );
     expect(reviewAddressReportStep).toContain('human should take over');
-    // Token-breaking neutralization at ALL SIX agent-derived publish sites
+    // Token-breaking neutralization at ALL EIGHT agent-derived publish sites
     // (address-summary, no-action, DETAIL_FILE, API_ERROR_DETAIL, the
-    // gate-rejection body, and the comment-reply body, whose content is
-    // agent stdout that can echo external comment text), and it
+    // gate-rejection body, the comment-reply body whose content is agent
+    // stdout that can echo external comment text, and the two
+    // deferred-feedback report sections, which render untrusted
+    // review-comment paths into a bot-authored comment), and it
     // must be LINE-INDEPENDENT: a whole-comment strip misses a marker whose
     // --> sits on another line, while jq scan() matches across newlines.
     // Proven end-to-end on a split forged marker.
@@ -4596,7 +7050,7 @@ describe('qwen-autofix workflow', () => {
     // backslashes — a NO-OP on both GNU and BSD sed, verified) left the count
     // at four and this test green, shipping an unescaped publish site.
     const escapeSites = workflow.match(/sed 's\/<!--\/[^']*\/g'/g) ?? [];
-    expect(escapeSites).toHaveLength(6);
+    expect(escapeSites).toHaveLength(8);
     for (const site of escapeSites) {
       expect(site).toBe("sed 's/<!--/<!\\\\-\\\\-/g'");
     }
@@ -4626,7 +7080,7 @@ describe('qwen-autofix workflow', () => {
 
   it('announces a working round up front and closes the same status comment', () => {
     // The whole point: the live run link reaches the thread BEFORE the
-    // 80-minute agent step, not after it. Without this the PR is silent from
+    // 130-minute agent step, not after it. Without this the PR is silent from
     // takeover until "Push and report", so a working round and a stuck one
     // look identical.
     expect(postStatusCommentStep.length).toBeGreaterThan(0);
@@ -4836,13 +7290,18 @@ describe('qwen-autofix workflow', () => {
     expect(decision).toBeTruthy();
     const SENTINEL = '9999-12-31T23:59:59Z';
     const NEWEST = '2026-07-20T10:00:00Z';
-    const run = (env) => {
+    const run = (env, { gateRejection = false } = {}) => {
       // The gate-rejection branch (OUTCOME=failed, no crash/timeout) now probes
       // whether the PR is behind main and, if so, updates the base — so stub gh:
       // commits/<main> → a SHA, compare → CMP_STATUS_STUB (default 'ahead', i.e.
       // NOT behind, so the existing rejection cases still hand off), and
       // update-branch → UPDATE_OK_STUB (default success).
       const dir = mkdtempSync(join(tmpdir(), 'decision-'));
+      // reject_fix is the ONLY writer of gate-rejection.md, so its presence is
+      // the exact "the gate actually ran" discriminator the headline keys on.
+      if (gateRejection) {
+        writeFileSync(join(dir, 'gate-rejection.md'), '**build failed**');
+      }
       const bin = join(dir, 'bin');
       mkdirSync(bin);
       writeFileSync(
@@ -4868,6 +7327,7 @@ describe('qwen-autofix workflow', () => {
           env: {
             ...process.env,
             PATH: `${bin}:${process.env.PATH}`,
+            WORKDIR: dir,
             REPO: 'o/r',
             PR: '1',
             REPORT_HEAD: 'prhead123',
@@ -4890,9 +7350,24 @@ describe('qwen-autofix workflow', () => {
 
     // Declared rejection, PR up to date ('ahead') -> a genuine fix failure ->
     // advance the watermark and hand off to a human.
-    const rejected = run({ OUTCOME: 'failed' });
+    // A genuine gate rejection: reject_fix wrote gate-rejection.md, so the
+    // headline names the gate.
+    const rejected = run({ OUTCOME: 'failed' }, { gateRejection: true });
     expect(rejected.split('|')[0]).toBe(NEWEST);
-    expect(rejected).toContain('Could not address the latest feedback');
+    expect(rejected).toContain('Could not produce a passing fix');
+    expect(rejected).toContain('the verification gate rejected the attempt');
+    expect(rejected).toContain('stays engaged');
+    // outcome=failed WITHOUT a gate decision (failure.md abort, dirty tree,
+    // unchanged branch, or missing summary) must NOT claim the gate rejected:
+    // gate-rejection.md is written only by reject_fix, so its absence is the
+    // exact discriminator. A blanket clause would repeat the
+    // wording-doesn't-match-behaviour bug this PR fixes.
+    const failedNoGate = run({ OUTCOME: 'failed' });
+    expect(failedNoGate.split('|')[0]).toBe(NEWEST);
+    expect(failedNoGate).toContain('Could not produce a passing fix');
+    expect(failedNoGate).not.toContain(
+      'the verification gate rejected the attempt',
+    );
 
     // #7471: the gate rejected the fix, but the PR was BEHIND main — the build
     // failed on a stale base (a dependency main already removed), not the fix.
@@ -4917,7 +7392,7 @@ describe('qwen-autofix workflow', () => {
       UPDATE_OK_STUB: '0',
     });
     expect(staleConflict.split('|')[0]).toBe(NEWEST);
-    expect(staleConflict).toContain('Could not address the latest feedback');
+    expect(staleConflict).toContain('Could not produce a passing fix');
 
     // Gate crash (no verdict): keep the feedback live and retry.
     const crashed = run({ OUTCOME: '' });
@@ -5117,6 +7592,12 @@ describe('qwen-autofix workflow', () => {
       workflow.match(/TAKEOVER_MAX_ROUNDS: '(\d+)'/)?.[1],
     );
     expect(cap).toBeLessThan(takeoverCap);
+    // Cumulative timeout sub-cap: same constraints as the consecutive one.
+    const timeoutCap = Number(
+      workflow.match(/TIMEOUT_WINDOW_CAP: '(\d+)'/)?.[1],
+    );
+    expect(timeoutCap).toBeGreaterThan(0);
+    expect(timeoutCap).toBeLessThan(takeoverCap);
 
     const block = reviewAddressReportStep.match(
       /if \[\[ "\$\{MARK_ROUND\}" != "\$\{MAX_ROUNDS\}" \]\] && \[\[ "\$\{PREPARE_OUTCOME\}" == 'success' \|\| "\$\{PREPARE_OUTCOME\}" == 'failure' \]\] && \[\[ "\$\{STALE_BASE_RETRY:-false\}" != 'true' \]\] && \{ \[\[ -z "\$\{API_ERROR_DETAIL\}" \]\] \|\| \[\[ "\$\{API_ERROR_KIND\}" == 'auth' \]\]; \}; then\n {14}CONSEC_FAIL=1\n[\s\S]*?\n {14}fi\n {12}fi\n/,
@@ -5125,7 +7606,7 @@ describe('qwen-autofix workflow', () => {
     const script = block.replace(/^ {12}/gm, '');
 
     const FAIL =
-      '🤖 Could not address the latest feedback automatically (round 3/100).';
+      '🤖 Could not produce a passing fix for this feedback (round 3/100) — the verification gate rejected the attempt.';
     const FAIL_TIMEOUT = '🤖 AutoFix could not reach the model (attempt 2/3)';
     const PUSH = '🤖 Addressed the latest review feedback (round 2/100).';
     const NOOP = '🤖 Reviewed the latest feedback — no changes needed.';
@@ -5147,6 +7628,7 @@ describe('qwen-autofix workflow', () => {
         apiErrorKind = '',
         prepareOutcome = 'success',
         staleBaseRetry = false,
+        agentTimeout = '',
       } = {},
     ) => {
       const dir = mkdtempSync(join(tmpdir(), 'consec-'));
@@ -5175,7 +7657,7 @@ describe('qwen-autofix workflow', () => {
         'bash',
         [
           '-c',
-          `set -uo pipefail\nWORKDIR='${dir}'\nMARK_ROUND=${markRound}\nMAX_ROUNDS=100\nCONSECUTIVE_FAILURE_CAP=${cap}\nCONSEC_FAIL=0\nREPO=o/r\nPR=1\nAUTOFIX_BOT=qwen-code-dev-bot\nRETRY_COMMAND='@qwen-code /retry'\nAPI_ERROR_DETAIL='${apiErrorDetail}'\nAPI_ERROR_KIND='${apiErrorKind}'\nPREPARE_OUTCOME='${prepareOutcome}'\nSTALE_BASE_RETRY='${staleBaseRetry}'\n${window !== undefined ? `WINDOW='${window}'\n` : ''}HEADLINE=orig\n${script}\nprintf '%s|%s|%s' "$MARK_ROUND" "${'${CONSEC_FAIL}'}" "$HEADLINE"`,
+          `set -uo pipefail\nWORKDIR='${dir}'\nMARK_ROUND=${markRound}\nMAX_ROUNDS=100\nCONSECUTIVE_FAILURE_CAP=${cap}\nTIMEOUT_WINDOW_CAP=${timeoutCap}\nAGENT_TIMEOUT='${agentTimeout}'\nCONSEC_FAIL=0\nREPO=o/r\nPR=1\nAUTOFIX_BOT=qwen-code-dev-bot\nRETRY_COMMAND='@qwen-code /retry'\nAPI_ERROR_DETAIL='${apiErrorDetail}'\nAPI_ERROR_KIND='${apiErrorKind}'\nPREPARE_OUTCOME='${prepareOutcome}'\nSTALE_BASE_RETRY='${staleBaseRetry}'\n${window !== undefined ? `WINDOW='${window}'\n` : ''}HEADLINE=orig\n${script}\nprintf '%s|%s|%s' "$MARK_ROUND" "${'${CONSEC_FAIL}'}" "$HEADLINE"`,
         ],
         {
           env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
@@ -5285,6 +7767,81 @@ describe('qwen-autofix workflow', () => {
       terminal: true,
       headline: 'orig',
     });
+
+    // CUMULATIVE timeout breaker: pushes in between reset CONSEC_FAIL but
+    // must NOT reset this one — #7929's exact shape (timeout, push, timeout,
+    // push, timeout) never tripped the consecutive cap while burning a full
+    // agent budget each time.
+    const TIMEOUT_HEAD =
+      '🤖 AutoFix ran out of time before finishing (timeout (3000000ms)) (attempt 2/100) — it will retry on the next scan.';
+    const interleaved = run([TIMEOUT_HEAD, PUSH, TIMEOUT_HEAD, PUSH], {
+      agentTimeout: 'timeout (3000000ms)',
+    });
+    expect(interleaved.terminal).toBe(true);
+    expect(interleaved.headline).toContain('time-budget exhaustions');
+    expect(interleaved.headline).toContain('/retry');
+    // One short of the cap keeps retrying (current round not a timeout).
+    expect(run([TIMEOUT_HEAD, PUSH, TIMEOUT_HEAD])).toMatchObject({
+      terminal: false,
+    });
+    // Window-scoped like every other census: pre-re-arm timeouts don't count.
+    expect(
+      run(
+        [
+          { headline: TIMEOUT_HEAD, win: 'old-window' },
+          { headline: TIMEOUT_HEAD, win: 'old-window' },
+        ],
+        { window: 'new-window', agentTimeout: 'timeout (3000000ms)' },
+      ),
+    ).toMatchObject({ terminal: false });
+    // A NON-timeout failure landing on an already-capped window still
+    // trips it — the #7929/#7846 rollout state the headline's
+    // parenthetical describes. A plausible "only count when this round
+    // timed out" cleanup (wrapping the block in an AGENT_TIMEOUT check)
+    // would silently delete this documented case.
+    expect(
+      run([TIMEOUT_HEAD, PUSH, TIMEOUT_HEAD, PUSH, TIMEOUT_HEAD]),
+    ).toMatchObject({ terminal: true });
+    // Inherited from the outer guard, pinned so a refactor that hoists the
+    // timeout block out of it cannot mass-terminate every in-flight PR
+    // during a provider outage.
+    expect(
+      run(Array(5).fill(TIMEOUT_HEAD), {
+        apiErrorDetail: '429 rate limited',
+        apiErrorKind: 'transient',
+      }),
+    ).toMatchObject({ terminal: false });
+    // The timeout breaker ALSO inherits the stale-base exemption from the
+    // outer guard: a stale-base retry on a window already carrying the
+    // timeout cap must not terminate (the base was just updated, the next
+    // round builds fresh). Pinned so the same hoist that would delete the
+    // API-error exemption above cannot silently delete this one either.
+    expect(
+      run(Array(5).fill(TIMEOUT_HEAD), { staleBaseRetry: true }),
+    ).toMatchObject({ terminal: false });
+    // When BOTH breakers would fire, the consecutive one (evaluated first)
+    // keeps its headline — a terminal round is never overridden.
+    const bothCapped = run(Array(cap - 1).fill(TIMEOUT_HEAD), {
+      agentTimeout: 'timeout (3000000ms)',
+    });
+    expect(bothCapped.terminal).toBe(true);
+    // 'consecutive' alone is satisfied by EITHER branch; assert the
+    // consecutive breaker's own phrase AND the absence of the timeout one
+    // — an `if true` mutation on the timeout guard flips the headline and
+    // must fail here.
+    expect(bothCapped.headline).toContain(
+      'consecutive rounds that failed to push',
+    );
+    expect(bothCapped.headline).not.toContain('time-budget exhaustions');
+    // Pin the census greps to the actual emit line: the timeout CAUSE text
+    // and the breaker's grep needle must stay in lockstep, or the census
+    // silently counts zero.
+    expect(reviewAddressReportStep).toContain(
+      'CAUSE="ran out of time before finishing (${AGENT_TIMEOUT})"',
+    );
+    expect(reviewAddressReportStep).toContain(
+      'TIMEOUT_N="$(grep -c \'AutoFix ran out of time before finishing\' <<< "${PRIOR_HEADS}" || true)"',
+    );
     // The reset detector keys on literal substrings; pin them to the actual
     // "Push and report" emit lines so a reword breaks this test, not silently
     // the streak reset in production.
@@ -5365,6 +7922,9 @@ describe('qwen-autofix workflow', () => {
     // calls reject_fix on failure - so the verdict is declared AND the reason
     // is captured for the retry.
     for (const check of [
+      "run_check 'core rebuild failed on the agent-committed fix'",
+      "run_check 'settings schema is stale on the agent-committed fix'",
+      "run_check 'cross-package contract verification failed'",
       "run_check 'build failed on the agent-committed fix' npm run build",
       "run_check 'typecheck failed on the agent-committed fix' npm run typecheck",
       "run_check 'lint failed on the agent-committed fix' npm run lint",
@@ -5389,6 +7949,7 @@ describe('qwen-autofix workflow', () => {
     }
     expect(status).not.toBe(0);
     expect(readFileSync(out, 'utf8')).toContain('outcome=failed');
+    expect(readFileSync(out, 'utf8')).toContain('retryable=true');
     // The verdict must be declared BEFORE the detail file is written, and the
     // write must be non-fatal. An empty outcome on a failed job reads as "the
     // gate never reached a verdict" — a CRASH, which is retried — so a
@@ -5610,13 +8171,13 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain("RETRY_COMMAND: '@qwen-code /retry'");
     expect(workflow).toContain('<!-- autofix-rearm -->');
     expect(workflow).toContain(
-      '<!-- (autofix-eval|autofix-rearm|autofix-base-updated|qwen-triage|',
+      '<!-- (autofix-eval|autofix-rearm|autofix-base-updated|autofix-milestone|qwen-triage|',
     );
     // Verify all four filter sites (scan + 3 address) include autofix-rearm;
-    // the scan site also carries autofix-base-updated.
+    // the scan site also carries autofix-base-updated + autofix-milestone.
     const filterMatches = [
       ...workflow.matchAll(
-        /autofix-eval\|autofix-rearm\|(autofix-base-updated\|)?qwen-triage/g,
+        /autofix-eval\|autofix-rearm\|(autofix-base-updated\|autofix-milestone\|)?qwen-triage/g,
       ),
     ];
     expect(filterMatches.length).toBeGreaterThanOrEqual(4);
@@ -5848,13 +8409,12 @@ describe('qwen-autofix workflow', () => {
     // itself (its sandbox carries no token), so it records the inline-comment
     // ids it implemented and the push step maps each to its thread.
     const lines = workflow.split('\n');
-    const i = lines.findIndex((l) =>
-      l.includes('resolved-comments.txt" ]]; then'),
-    );
+    const i = lines.findIndex((l) => l.includes("CAN_RESOLVE_THREADS='false'"));
     const j = lines.findIndex(
-      (l, k) => k > i && l.trim().startsWith('echo "🧵 resolved'),
+      (l, k) => k > i && l.trim().startsWith('echo "🧵 confirmed'),
     );
     expect(i).toBeGreaterThan(-1);
+    expect(j).toBeGreaterThan(i);
     const block = lines.slice(i, j + 2).join('\n');
     // feedback.md must carry the handle the agent echoes back.
     expect(workflow).toContain('- [rc:\\(.id)]');
@@ -5868,58 +8428,293 @@ describe('qwen-autofix workflow', () => {
       join(bin, 'gh'),
       [
         '#!/usr/bin/env bash',
-        'for a in "$@"; do [[ "$a" == threadId=* ]] && printf "%s\\n" "${a#threadId=}" >> "$RESOLVED_LOG"; done',
-        'exit 0',
+        'if [[ "$1 $2" == "pr view" ]]; then',
+        '  saw_json=false; saw_head_field=false; saw_jq=false; saw_head_filter=false',
+        '  for a in "$@"; do',
+        '    [[ "$a" == --json ]] && saw_json=true',
+        '    [[ "$a" == headRefOid ]] && saw_head_field=true',
+        '    [[ "$a" == --jq ]] && saw_jq=true',
+        '    [[ "$a" == \'.headRefOid // ""\' ]] && saw_head_filter=true',
+        '  done',
+        '  [[ "$saw_json $saw_head_field $saw_jq $saw_head_filter" == "true true true true" ]] || exit 2',
+        '  [[ "${LIVE_HEAD_EXIT:-0}" == 0 ]] || exit "${LIVE_HEAD_EXIT}"',
+        '  count="$(cat "$HEAD_READ_COUNT")"',
+        '  count=$((count + 1))',
+        '  printf "%s" "$count" > "$HEAD_READ_COUNT"',
+        '  if [[ -n "${LIVE_HEAD_SEQUENCE:-}" ]]; then',
+        '    value="$(cut -d, -f"$count" <<< "$LIVE_HEAD_SEQUENCE")"',
+        '    printf "%s" "${value:-${LIVE_HEAD:-}}"',
+        '  else',
+        '    printf "%s" "${LIVE_HEAD:-}"',
+        '  fi',
+        '  exit 0',
+        'fi',
+        'query=""; thread_id=""',
+        'for a in "$@"; do',
+        '  [[ "$a" == query=* ]] && query="${a#query=}"',
+        '  [[ "$a" == threadId=* ]] && thread_id="${a#threadId=}"',
+        'done',
+        'if [[ "$query" == *"reviewThreads(first:100)"* ]]; then',
+        '  printf \'%s\' "$THREADS_RAW_STUB"',
+        '  exit 0',
+        'fi',
+        'if [[ "$query" == *PullRequestReviewThread* ]]; then',
+        '  saw_jq=false; saw_guard_filter=false',
+        '  for a in "$@"; do',
+        '    [[ "$a" == --jq ]] && saw_jq=true',
+        '    [[ "$a" == \'[.data.repository.pullRequest.headRefOid // "", .data.node.isResolved] | @tsv\' ]] && saw_guard_filter=true',
+        '  done',
+        '  [[ "$saw_jq $saw_guard_filter" == "true true" ]] || exit 2',
+        '  count="$(cat "$HEAD_READ_COUNT")"',
+        '  count=$((count + 1))',
+        '  printf "%s" "$count" > "$HEAD_READ_COUNT"',
+        '  value="$(cut -d, -f"$count" <<< "${LIVE_HEAD_SEQUENCE:-}")"',
+        '  head="${value:-${LIVE_HEAD:-}}"',
+        '  resolved=false',
+        '  if [[ "${UNKNOWN_THREAD_STATE:-}" == "$thread_id" ]]; then resolved=null; elif grep -qxF "$thread_id" "$THREAD_STATE_FILE" || [[ "${OTHER_ACTOR_RESOLVED:-}" == "$thread_id" ]]; then resolved=true; fi',
+        '  printf "%s\\t%s\\n" "$head" "$resolved"',
+        '  exit 0',
+        'fi',
+        'if [[ "$query" == *resolveReviewThread* ]]; then',
+        '  printf "resolve:%s\\n" "$thread_id" >> "$RESOLVED_LOG"',
+        '  if [[ "${RESOLVE_APPLIES:-true}" == true ]]; then',
+        '    grep -qxF "$thread_id" "$THREAD_STATE_FILE" || printf "%s\\n" "$thread_id" >> "$THREAD_STATE_FILE"',
+        '  fi',
+        '  [[ "${RESOLVE_EXIT:-0}" == 0 ]] || exit "${RESOLVE_EXIT}"',
+        '  exit 0',
+        'fi',
+        'exit 1',
       ].join('\n'),
     );
     chmodSync(join(bin, 'gh'), 0o755);
     // 111 was implemented; 333's thread is already resolved; 999 matches
     // nothing. 222 was DECLINED, so it is deliberately absent and must stay open.
     writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
-    const out = execFileSync('bash', ['-c', `set -euo pipefail\n${block}`], {
-      env: {
-        ...process.env,
-        PATH: `${bin}:${process.env.PATH}`,
-        WORKDIR: dir,
-        REPO: 'QwenLM/qwen-code',
-        PR: '7308',
-        RESOLVED_LOG: resolvedLog,
-        // The threads fetch is hoisted above the resolve block (shared with the
-        // reply block), so the test supplies the mapped threads directly.
-        THREADS_JSON: JSON.stringify([
-          {
-            id: 'T_open_1',
-            isResolved: false,
-            comments: { nodes: [{ databaseId: 111 }] },
-          },
-          {
-            id: 'T_open_2',
-            isResolved: false,
-            comments: { nodes: [{ databaseId: 222 }] },
-          },
-          {
-            id: 'T_done',
-            isResolved: true,
-            comments: { nodes: [{ databaseId: 333 }] },
-          },
-        ]),
-      },
+    const localHead = execFileSync('git', ['rev-parse', 'HEAD'], {
       encoding: 'utf8',
+    }).trim();
+    const threadsRaw = JSON.stringify({
+      nodes: [
+        {
+          id: 'T_open_1',
+          isResolved: false,
+          comments: { nodes: [{ databaseId: 111 }] },
+        },
+        {
+          id: 'T_open_2',
+          isResolved: false,
+          comments: { nodes: [{ databaseId: 222 }] },
+        },
+        {
+          id: 'T_open_3',
+          isResolved: false,
+          comments: { nodes: [{ databaseId: 444 }] },
+        },
+        {
+          id: 'T_done',
+          isResolved: true,
+          comments: { nodes: [{ databaseId: 333 }] },
+        },
+      ],
+      pageInfo: { hasNextPage: false },
     });
-    const resolved = readFileSync(resolvedLog, 'utf8')
-      .trim()
-      .split('\n')
-      .filter(Boolean);
-    expect(resolved).toEqual(['T_open_1']);
-    expect(resolved).not.toContain('T_open_2'); // declined stays open
-    expect(resolved).not.toContain('T_done'); // already resolved
-    expect(out).toContain('resolved 1 review thread');
+    const headReadCount = join(dir, 'head-read-count');
+    const threadStateFile = join(dir, 'thread-state');
+    const runResolve = (env = {}) => {
+      writeFileSync(resolvedLog, '');
+      writeFileSync(headReadCount, '0');
+      writeFileSync(threadStateFile, '');
+      const result = spawnSync('bash', ['-c', `set -euo pipefail\n${block}`], {
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          WORKDIR: dir,
+          REPO: 'QwenLM/qwen-code',
+          PR: '7308',
+          RESOLVED_LOG: resolvedLog,
+          HEAD_READ_COUNT: headReadCount,
+          THREAD_STATE_FILE: threadStateFile,
+          THREADS_RAW_STUB: threadsRaw,
+          VERIFIED_HEAD: localHead,
+          LIVE_HEAD: localHead,
+          PUSH_RACE_MERGED: 'false',
+          ...env,
+        },
+        encoding: 'utf8',
+      });
+      return {
+        status: result.status,
+        out: `${result.stdout}${result.stderr}`,
+        resolved: readFileSync(resolvedLog, 'utf8')
+          .trim()
+          .split('\n')
+          .filter(Boolean),
+      };
+    };
+
+    expect(block).toContain(
+      'gh api graphql -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F pr="${PR}" -f threadId="${1}"',
+    );
+    expect(block).toContain('pullRequest(number:$pr){headRefOid}');
+    expect(block).toContain(
+      'node(id:$threadId){... on PullRequestReviewThread{isResolved}}',
+    );
+
+    const matching = runResolve();
+    expect(matching.status).toBe(0);
+    expect(matching.resolved).toEqual(['resolve:T_open_1']);
+    expect(matching.resolved).not.toContain('resolve:T_open_2'); // declined stays open
+    expect(matching.resolved).not.toContain('resolve:T_done'); // already resolved
+    expect(matching.out).toContain(
+      'confirmed 1 selected review thread(s) resolved while the verified head remained live',
+    );
+
+    const movedBeforeMutation = runResolve({
+      LIVE_HEAD_SEQUENCE: `${localHead},new-contributor-head`,
+    });
+    expect(movedBeforeMutation.status).toBe(0);
+    expect(movedBeforeMutation.resolved).toEqual([]);
+    expect(movedBeforeMutation.out).toContain(
+      'live PR head moved before resolving comment 111',
+    );
+
+    const movedDuringMutation = runResolve({
+      LIVE_HEAD_SEQUENCE: `${localHead},${localHead},new-contributor-head`,
+    });
+    expect(movedDuringMutation.status).toBe(0);
+    expect(movedDuringMutation.resolved).toEqual(['resolve:T_open_1']);
+    expect(movedDuringMutation.out).toContain(
+      'live PR head or thread state could not be proven after resolving comment 111',
+    );
+    expect(movedDuringMutation.out).toContain(
+      'confirmed 0 selected review thread(s) resolved',
+    );
+
+    const lostMutationResponse = runResolve({ RESOLVE_EXIT: '1' });
+    expect(lostMutationResponse.status).toBe(0);
+    expect(lostMutationResponse.resolved).toEqual(['resolve:T_open_1']);
+    expect(lostMutationResponse.out).toContain(
+      'another actor or a lost response may be responsible',
+    );
+    expect(lostMutationResponse.out).toContain(
+      'confirmed 1 selected review thread(s) resolved',
+    );
+
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\nrc:444\n');
+    const lostResponseThenDrift = runResolve({
+      RESOLVE_EXIT: '1',
+      LIVE_HEAD_SEQUENCE: `${localHead},${localHead},${localHead},new-contributor-head`,
+    });
+    expect(lostResponseThenDrift.status).toBe(0);
+    expect(lostResponseThenDrift.resolved).toEqual(['resolve:T_open_1']);
+    expect(lostResponseThenDrift.out).toContain(
+      'another actor or a lost response may be responsible',
+    );
+    expect(lostResponseThenDrift.out).toContain(
+      'live PR head moved before resolving comment 444',
+    );
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
+
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\nrc:444\n');
+    const failedMutation = runResolve({
+      RESOLVE_APPLIES: 'false',
+      RESOLVE_EXIT: '1',
+    });
+    expect(failedMutation.status).toBe(0);
+    expect(failedMutation.resolved).toEqual([
+      'resolve:T_open_1',
+      'resolve:T_open_3',
+    ]);
+    expect(failedMutation.out).toContain(
+      'could not resolve the review thread for comment 111',
+    );
+    expect(failedMutation.out).toContain(
+      'could not resolve the review thread for comment 444',
+    );
+    expect(failedMutation.out).toContain(
+      'confirmed 0 selected review thread(s) resolved',
+    );
+
+    const falseSuccess = runResolve({
+      RESOLVE_APPLIES: 'false',
+      RESOLVE_EXIT: '0',
+    });
+    expect(falseSuccess.status).toBe(0);
+    expect(falseSuccess.resolved).toEqual(['resolve:T_open_1']);
+    expect(falseSuccess.out).toContain(
+      'live PR head or thread state could not be proven after resolving comment 111',
+    );
+    expect(falseSuccess.out).not.toContain('resolve:T_open_3');
+    expect(falseSuccess.out).toContain(
+      'confirmed 0 selected review thread(s) resolved',
+    );
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
+
+    const ambiguousMutation = runResolve({
+      RESOLVE_EXIT: '1',
+      LIVE_HEAD_SEQUENCE: `${localHead},${localHead},new-contributor-head`,
+    });
+    expect(ambiguousMutation.status).toBe(0);
+    expect(ambiguousMutation.resolved).toEqual(['resolve:T_open_1']);
+    expect(ambiguousMutation.out).toContain(
+      'live PR head or thread state could not be proven after resolving comment 111',
+    );
+    expect(ambiguousMutation.out).toContain(
+      'confirmed 0 selected review thread(s) resolved',
+    );
+
+    const resolvedByOtherActor = runResolve({
+      OTHER_ACTOR_RESOLVED: 'T_open_1',
+    });
+    expect(resolvedByOtherActor.status).toBe(0);
+    expect(resolvedByOtherActor.resolved).toEqual([]);
+    expect(resolvedByOtherActor.out).toContain('was resolved by another actor');
+
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\nrc:444\n');
+    const unknownThreadState = runResolve({
+      UNKNOWN_THREAD_STATE: 'T_open_1',
+    });
+    expect(unknownThreadState.status).toBe(0);
+    expect(unknownThreadState.resolved).toEqual([]);
+    expect(unknownThreadState.out).toContain(
+      'state of comment 111 could not be proven',
+    );
+    expect(unknownThreadState.out).not.toContain('resolve:T_open_3');
+
+    const movedBeforeSecondMutation = runResolve({
+      LIVE_HEAD_SEQUENCE: `${localHead},${localHead},${localHead},new-contributor-head`,
+    });
+    expect(movedBeforeSecondMutation.status).toBe(0);
+    expect(movedBeforeSecondMutation.resolved).toEqual(['resolve:T_open_1']);
+    expect(movedBeforeSecondMutation.out).toContain(
+      'live PR head moved before resolving comment 444',
+    );
+    expect(movedBeforeSecondMutation.out).toContain(
+      'confirmed 1 selected review thread(s) resolved',
+    );
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
+
+    for (const env of [
+      { LIVE_HEAD: 'new-contributor-head' },
+      { LIVE_HEAD_EXIT: '1' },
+      { VERIFIED_HEAD: 'different-verified-head' },
+      { PUSH_RACE_MERGED: 'true' },
+    ]) {
+      const uncertain = runResolve(env);
+      expect(uncertain.status).toBe(0);
+      expect(uncertain.resolved).toEqual([]);
+      expect(uncertain.out).toContain('skipping review-thread resolution');
+      expect(uncertain.out).not.toContain(
+        'confirmed 1 selected review thread(s) resolved',
+      );
+    }
     // The SKILL keys resolution on the FINDING being fixed, not on "did I edit
     // a file this round" — an earlier commit's fix that still holds resolves
     // too, or a fixed Critical sits open and reads as unaddressed (#7731).
     const skill = readAutofixSkill();
     expect(skill).toContain('RESOLVED IN THE CODE');
     expect(skill).toMatch(/already fixed that you re-verified still holds/);
+    expect(skill).toContain('live PR head is still the exact commit');
     expect(skill).toContain('comment-replies.json');
     rmSync(dir, { recursive: true, force: true });
   });
@@ -6039,18 +8834,179 @@ describe('qwen-autofix workflow', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it('replays the handoff decision and terminal-round transitions under bash', () => {
-    // The agent step is bounded below the 120-minute job timeout so a runaway
-    // agent fails the STEP, not the job, leaving the always() report step time to
-    // run (a job-level timeout would cancel that step too and go silent).
-    // 120 is the review-address job timeout (unique; other jobs use 5/15/180).
-    expect(workflow).toContain('timeout-minutes: 120');
+  it('bounds every long step so the round fits under the job timeout', () => {
+    // Every long step is bounded BELOW the job timeout so a runaway fails its
+    // own STEP, leaving the always() report step time to run — a job-level
+    // timeout cancels that step too and the round goes silent.
+    //
+    // The invariant is the SUM, not any single number: identify the long
+    // steps by what they EXECUTE, not by whether they already carry a bound,
+    // so a new step running one of these two scripts shows up here even if
+    // added without a bound. Cheap setup/report steps run other scripts and
+    // are covered by the SETUP_AND_REPORT_MIN reserve instead.
     const addressStep =
       workflow.match(
         /- name: 'Triage and address'[\s\S]*?(?=\n {6}- name: )/,
       )?.[0] ?? '';
-    expect(addressStep).toContain('timeout-minutes: 80');
+    // review-address is the LAST job in the file, so the terminator has to
+    // accept end-of-input as well as the next job header.
+    const jobBlock =
+      workflow.match(
+        /\n {2}review-address:\n[\s\S]*?(?=\n {2}\w[\w-]*:\n|$)/,
+      )?.[0] ?? '';
+    expect(jobBlock).toBeTruthy();
+    const jobCapMin = Number(
+      jobBlock.match(/\n {4}timeout-minutes: (\d+)/)?.[1],
+    );
+    expect(Number.isFinite(jobCapMin)).toBe(true);
 
+    const stepBlocks = jobBlock.split(/\n {6}- name: /).slice(1);
+    const longSteps = stepBlocks.filter((b) =>
+      /node [^\n]*run-agent\.mjs|bash [^\n]*run-autofix-review-verification\.sh/.test(
+        b,
+      ),
+    );
+    // Primary + repair agent steps and their two verification gates.
+    expect(longSteps).toHaveLength(4);
+    const stepCaps = longSteps.map((b) =>
+      Number(b.match(/\n {8}timeout-minutes: (\d+)/)?.[1]),
+    );
+    for (const cap of stepCaps) {
+      expect(Number.isFinite(cap)).toBe(true);
+    }
+    // The setup/report steps (Prepare, Push, Finalize) are NOT bounded at
+    // runtime — this reserve is an ASSUMPTION that they stay under 25m
+    // (measured 5-7m + 3-4s), not a proven headroom. A hung gh call in any
+    // of them can still eat the job timeout.
+    const SETUP_AND_REPORT_MIN = 25;
+    const worstCaseMin =
+      stepCaps.reduce((a, b) => a + b, 0) + SETUP_AND_REPORT_MIN;
+    expect(worstCaseMin).toBeLessThanOrEqual(jobCapMin);
+    expect(jobCapMin).toBeLessThanOrEqual(360);
+
+    // The pending-check staleness bound (review-scan) must sit ABOVE this job
+    // cap, or a live review-address run ages out of HAS_PENDING_CHECKS
+    // mid-flight and the PR is enqueued against its own still-running check.
+    const pendingStaleMin = Number(
+      reviewScanJob.match(/PENDING_STALE_MIN=(\d+)/)?.[1],
+    );
+    expect(Number.isFinite(pendingStaleMin)).toBe(true);
+    expect(pendingStaleMin).toBeGreaterThan(jobCapMin);
+
+    // continue-on-error makes bounding the verification gates a graceful
+    // degrade: a timed-out gate falls through to the report step.
+    for (const name of ['Verification gate', 'Repair verification gate']) {
+      const gate =
+        jobBlock.match(
+          new RegExp(`- name: '${name}'[\\s\\S]*?(?=\\n {6}- name: )`),
+        )?.[0] ?? '';
+      expect(gate, `${name} is missing from review-address`).toBeTruthy();
+      expect(gate).toContain('continue-on-error: true');
+    }
+
+    // QWEN_TIMEOUT_MS is the budget that actually ends a round; the step
+    // timeout is only a backstop. Derive both from the workflow and assert
+    // the margin so the pair cannot drift silently.
+    const stepCapMin = Number(addressStep.match(/timeout-minutes: (\d+)/)?.[1]);
+    const budgetMs = Number(
+      addressStep.match(
+        /QWEN_TIMEOUT_MS: '\$\{\{[^}]*\|\|\s*(\d+)\s*\}\}'/,
+      )?.[1],
+    );
+    expect(Number.isFinite(stepCapMin)).toBe(true);
+    expect(Number.isFinite(budgetMs)).toBe(true);
+    const marginMin = stepCapMin - budgetMs / 60000;
+    // Under the cap, or the cap fires first and the internal kill path never
+    // writes `agent-timeout` — the file the report step reads to tell a
+    // timeout apart from a crash.
+    expect(marginMin).toBeGreaterThanOrEqual(1);
+    // The repair attempt stays inside its own smaller step the same way.
+    const repairCapMin = Number(
+      repairDeterministicRejectionStep.match(/timeout-minutes: (\d+)/)?.[1],
+    );
+    const repairMs = Number(
+      repairDeterministicRejectionStep.match(/QWEN_TIMEOUT_MS: '(\d+)'/)?.[1],
+    );
+    expect(repairCapMin - repairMs / 60000).toBeGreaterThanOrEqual(1);
+
+    // The run block clamps QWEN_TIMEOUT_MS to a RANGE so a misconfigured repo
+    // variable degrades to a warning, not a misreport. Both bounds, because
+    // the floor guards the likelier mistake: this variable is the one place
+    // that wants milliseconds while everything around it says minutes.
+    expect(addressStep).toContain('BUDGET_CAP_MS=7200000');
+    expect(addressStep).toContain('BUDGET_FLOOR_MS=60000');
+    expect(addressStep).toMatch(
+      /QWEN_TIMEOUT_MS.*MILLISECONDS in \[.*\].*clamping to/,
+    );
+    // The clamp ceiling must stay under the step backstop with the SAME margin
+    // rule as the fallback above, or the cap fires first and the internal kill
+    // path never writes `agent-timeout`.
+    const clampMs = Number(addressStep.match(/BUDGET_CAP_MS=(\d+)/)?.[1]);
+    expect(Number.isFinite(clampMs)).toBe(true);
+    expect(clampMs / 60000).toBeLessThanOrEqual(stepCapMin - 1);
+    // The clamp ceiling IS the fallback budget: raising the default below the
+    // || without raising BUDGET_CAP_MS would be silently pulled back down (with
+    // a ::warning::) on every run.
+    expect(budgetMs).toBeLessThanOrEqual(clampMs);
+
+    // Replay the ACTUAL clamp block so the guard condition is executed, not
+    // merely string-matched: a flipped operator, a dropped width bound, or a
+    // missing 10# must fail here rather than survive green.
+    const clampBlock = addressStep.match(
+      /BUDGET_CAP_MS=\d+\n[\s\S]*?export QWEN_TIMEOUT_MS/,
+    )?.[0];
+    expect(clampBlock).toBeTruthy();
+    const runClamp = (value) =>
+      execFileSync(
+        'bash',
+        ['-c', `${clampBlock}\nprintf '%s' "$QWEN_TIMEOUT_MS"`],
+        { env: { ...process.env, QWEN_TIMEOUT_MS: value }, encoding: 'utf8' },
+      )
+        .trim()
+        .split('\n')
+        .pop();
+    // In-range values pass through untouched; both bounds are inclusive.
+    expect(runClamp('60000')).toBe('60000');
+    expect(runClamp('7200000')).toBe('7200000');
+    // Over-cap, malformed, zero-padded (octal), and int64-overflowing values
+    // all clamp to the ceiling instead of reaching run-agent.mjs unclamped.
+    expect(runClamp('9999999')).toBe('7200000');
+    expect(runClamp('abc')).toBe('7200000');
+    expect(runClamp('09999999')).toBe('7200000');
+    expect(runClamp('9223372036854775808')).toBe('7200000');
+
+    // The FLOOR, and the reason it exists: every comment, the PR body and the
+    // operator message speak in minutes while this variable wants
+    // milliseconds. `120` is not a contrived input — it is what a maintainer
+    // told to "raise the agent time budget" types. Unclamped it arms a 120 ms
+    // timer, so every round SIGTERMs instantly and reports a timeout until
+    // TIMEOUT_WINDOW_CAP stops AutoFix on the PR, advising the human to raise
+    // the budget they just raised, with no warning anywhere in that loop.
+    for (const minutesShaped of ['1', '30', '60', '120', '999']) {
+      expect(runClamp(minutesShaped)).toBe('7200000');
+    }
+    // `0` and `000` passed the bare regex while the message claimed the value
+    // had to be positive.
+    expect(runClamp('0')).toBe('7200000');
+    expect(runClamp('000')).toBe('7200000');
+    // Just under and just over the floor, so the boundary is pinned in both
+    // directions rather than only from inside.
+    expect(runClamp('59999')).toBe('7200000');
+    expect(runClamp('60001')).toBe('60001');
+
+    // The message has to name the units, since a units confusion is the whole
+    // failure mode this branch exists for.
+    const warned = execFileSync('bash', ['-c', `${clampBlock}\n:`], {
+      env: { ...process.env, QWEN_TIMEOUT_MS: '120' },
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    expect(warned).toContain('::warning::');
+    expect(warned).toContain('MILLISECONDS');
+    expect(warned).toContain('120 means 120ms, not 120 minutes');
+  });
+
+  it('replays the handoff decision and terminal-round transitions under bash', () => {
     // Replay the ACTUAL POST_HANDOFF decision extracted from the workflow so the
     // state transitions are exercised, not merely string-matched.
     const decision = reviewAddressReportStep.match(

@@ -1,0 +1,120 @@
+name: 'Windows Self-Hosted Runner Validation'
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: 'read'
+
+jobs:
+  validate:
+    name: 'Validate runner'
+    runs-on: ['self-hosted', 'Windows', 'X64', 'ecs-win']
+    timeout-minutes: 60
+    steps:
+      # Mirrors the Windows merge-queue gate in ci.yml, so this smoke validates
+      # exactly the configuration that gate runs: autocrlf off before the
+      # checkout, then the shared configure action after it (repository-local
+      # `./` actions resolve from the job workspace, so the checkout must
+      # precede them).
+      - name: 'Disable Git CRLF conversion'
+        shell: 'powershell'
+        run: 'git config --global core.autocrlf false'
+
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+
+      - name: 'Configure Windows test environment'
+        uses: './.github/actions/configure-windows-runner'
+
+      # Same stale-checkout guard as the gate: the smoke runs behind the same
+      # caching egress proxy, so fail loud if the checkout lacks the
+      # dispatched head instead of silently validating the wrong tree.
+      - name: 'Verify checkout includes expected head commit'
+        uses: './.github/actions/verify-checkout-head'
+        with:
+          expected_sha: '${{ github.sha }}'
+
+      - name: 'Verify tools'
+        shell: 'powershell'
+        run: |-
+          $ErrorActionPreference = 'Stop'
+          whoami
+          "TEMP=$env:TEMP"
+          if ($env:TEMP -ne $env:RUNNER_TEMP) {
+            throw "TEMP not redirected to RUNNER_TEMP: $env:TEMP"
+          }
+          git --version
+          $nodeVersion = node --version
+          $nodeVersion
+          if ([int]($nodeVersion -replace '^v(\d+)\..*$', '$1') -lt 22) {
+            throw "Node.js 22 or newer is required, found $nodeVersion."
+          }
+          npm --version
+          qwen --version
+          gh --version
+
+      - name: 'Verify symbolic links'
+        shell: 'powershell'
+        run: |-
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'windows-runner-symlink-smoke'
+          $target = Join-Path $root 'target.txt'
+          $link = Join-Path $root 'link.txt'
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+          Set-Content -Path $target -Value 'ok'
+          try {
+            New-Item -ItemType SymbolicLink -Path $link -Target $target | Out-Null
+            if ((Get-Content $link) -ne 'ok') {
+              throw 'Symbolic link target is unreadable.'
+            }
+          } finally {
+            Remove-Item $root -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+      # Same Node path as the gate's self-hosted side: avoid setup-node
+      # downloads on ECS, where nodejs.org may be unreachable through the
+      # egress proxy.
+      - name: 'Use pre-installed Node.js'
+        uses: './.github/actions/self-hosted-node'
+
+      - name: 'Configure persistent npm cache (self-hosted)'
+        shell: 'bash'
+        run: |-
+          cache_dir="${HOME}/.cache/qwen-code/npm"
+          # Coreutils like mkdir are not guaranteed on a Git-Bash-only PATH,
+          # so create the directory through the Node the preflight verified.
+          node -e "require('node:fs').mkdirSync(process.argv[1], { recursive: true })" "${cache_dir}"
+          echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
+          echo "Using persistent npm cache at ${cache_dir}"
+          du -sh "${cache_dir}" 2>/dev/null || true
+
+      # ci.yml's workflow-level defaults run the gate's steps under bash, so
+      # pin the same shell here: smoke evidence only transfers to the gate
+      # when both execute these commands the same way.
+      - name: 'Configure npm for rate limiting'
+        shell: 'bash'
+        run: |-
+          npm config set fetch-retry-mintimeout 20000
+          npm config set fetch-retry-maxtimeout 120000
+          npm config set fetch-retries 5
+          npm config set fetch-timeout 300000
+
+      - name: 'Install dependencies'
+        shell: 'bash'
+        run: 'npm ci --prefer-offline --no-audit --progress=false'
+
+      - name: 'Run tests and generate reports'
+        shell: 'bash'
+        env:
+          NO_COLOR: true
+          HOME: '${{ runner.temp }}/qwen-ci-home'
+          USERPROFILE: '${{ runner.temp }}/qwen-ci-home'
+          OPENAI_API_KEY: ''
+          DASHSCOPE_API_KEY: ''
+          QWEN_API_KEY: ''
+          GEMINI_API_KEY: ''
+          QWEN_DEFAULT_AUTH_TYPE: ''
+        run: |-
+          node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
+          npm run test:ci

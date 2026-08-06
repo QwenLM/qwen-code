@@ -248,6 +248,29 @@ describe('useAutoAcceptIndicator', () => {
     expect(result.current).toBe(ApprovalMode.DEFAULT);
   });
 
+  it('should not cycle approval modes when Ctrl+Shift+Tab is pressed', () => {
+    mockConfigInstance.getApprovalMode.mockReturnValue(ApprovalMode.DEFAULT);
+    const { result } = renderHook(() =>
+      useAutoAcceptIndicator({
+        config: mockConfigInstance as unknown as ActualConfigType,
+        addItem: vi.fn(),
+      }),
+    );
+
+    // Ctrl+Shift+Tab is a completion-category navigation binding (#8069); it
+    // must not also cycle the approval mode in Kitty-protocol terminals that
+    // report the ctrl modifier on Shift+Tab.
+    act(() => {
+      capturedUseKeypressHandler({
+        name: 'tab',
+        shift: true,
+        ctrl: true,
+      } as Key);
+    });
+    expect(mockConfigInstance.setApprovalMode).not.toHaveBeenCalled();
+    expect(result.current).toBe(ApprovalMode.DEFAULT);
+  });
+
   it('should not toggle if only one key or other keys combinations are pressed', () => {
     mockConfigInstance.getApprovalMode.mockReturnValue(ApprovalMode.DEFAULT);
     renderHook(() =>

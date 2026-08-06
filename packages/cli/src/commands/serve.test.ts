@@ -45,6 +45,11 @@ describe('serve command args', () => {
     expect(parsed['enable-session-shell']).toBe(false);
   });
 
+  it('defaults max sessions to 32', () => {
+    const parsed = buildParser().parseSync('');
+    expect(parsed['max-sessions']).toBe(32);
+  });
+
   it('accepts --experimental-lsp in strict parser mode', () => {
     const parsed = buildParser().strict().parseSync('--experimental-lsp');
     expect(parsed['experimentalLsp']).toBe(true);
@@ -82,6 +87,24 @@ describe('serve command args', () => {
   it('leaves --initialize-timeout-ms unset by default', () => {
     const parsed = buildParser().parseSync('');
     expect(parsed['initialize-timeout-ms']).toBeUndefined();
+  });
+
+  it('defaults external tool guarding to off', () => {
+    const parsed = buildParser().parseSync('');
+    expect(parsed['external-tool-guard-mode']).toBe('off');
+  });
+
+  it('parses required external tool guard options', () => {
+    const parsed = buildParser().parseSync(
+      '--external-tool-guard-mode required ' +
+        '--external-tool-guard-endpoint http://127.0.0.1:8787 ' +
+        '--external-tool-guard-timeout-ms 2500',
+    );
+    expect(parsed['external-tool-guard-mode']).toBe('required');
+    expect(parsed['external-tool-guard-endpoint']).toBe(
+      'http://127.0.0.1:8787',
+    );
+    expect(parsed['external-tool-guard-timeout-ms']).toBe(2500);
   });
 
   it('parses --experimental-lsp for daemon child opt-in', () => {
@@ -128,6 +151,22 @@ describe('serve command args', () => {
     );
 
     expect(parsed['workspace']).toEqual(['/tmp/primary', '/tmp/secondary']);
+  });
+
+  it('parses --memory-project-scope and rejects unsupported values', () => {
+    expect(
+      buildParser().parseSync('--memory-project-scope workspace')[
+        'memory-project-scope'
+      ],
+    ).toBe('workspace');
+    expect(
+      buildParser().parseSync('--memory-project-scope git-root')[
+        'memory-project-scope'
+      ],
+    ).toBe('git-root');
+    expect(() =>
+      buildParser().parseSync('--memory-project-scope unsupported'),
+    ).toThrow(/Invalid values/);
   });
 
   it('rejects valueless --workspace forms', () => {
@@ -285,6 +324,64 @@ describe('serve rate limit env parsing', () => {
     expect(mockRunQwenServe).toHaveBeenCalledWith(
       expect.objectContaining({ maxTotalSessions: 42 }),
     );
+  });
+
+  it('passes --memory-project-scope to runQwenServe', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs(
+      '--no-web --memory-project-scope workspace',
+    );
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ memoryProjectScope: 'workspace' }),
+    );
+  });
+
+  it('passes required guard config and keeps its token daemon-local', async () => {
+    process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'] = 'guard-secret';
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs(
+      '--no-web --external-tool-guard-mode required ' +
+        '--external-tool-guard-endpoint http://127.0.0.1:8787 ' +
+        '--external-tool-guard-timeout-ms 2500',
+    );
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({
+        externalToolGuard: {
+          mode: 'required',
+          endpoint: 'http://127.0.0.1:8787',
+          token: 'guard-secret',
+          timeoutMs: 2500,
+        },
+      }),
+    );
+    expect(process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN']).toBeUndefined();
+  });
+
+  it('does not pass a provider when mode is off even if config exists', async () => {
+    process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'] = 'guard-secret';
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs(
+      '--no-web --external-tool-guard-endpoint http://127.0.0.1:8787',
+    );
+
+    expect(mockRunQwenServe.mock.calls[0]?.[0]).not.toHaveProperty(
+      'externalToolGuard',
+    );
+    expect(process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN']).toBeUndefined();
   });
 
   it('passes --channel all as an all-channel selection', async () => {

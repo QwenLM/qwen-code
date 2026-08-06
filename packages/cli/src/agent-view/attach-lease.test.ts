@@ -29,6 +29,21 @@ describe('AgentViewAttachLeaseManager', () => {
     });
   });
 
+  it('uses a random lease id when no id factory is provided', () => {
+    const manager = new AgentViewAttachLeaseManager();
+    const result = manager.acquire('session-1');
+
+    expect(result).toMatchObject({
+      ok: true,
+      lease: {
+        sessionId: 'session-1',
+      },
+    });
+    expect(result.lease.leaseId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    );
+  });
+
   it('rejects a second acquire while a lease is active', () => {
     const clock = fakeClock('2026-07-17T00:00:00.000Z');
     const manager = new AgentViewAttachLeaseManager({

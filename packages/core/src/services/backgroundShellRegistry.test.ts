@@ -26,6 +26,7 @@ import {
   statusFilePathFor,
   type ShellTaskRegistration,
 } from './backgroundShellRegistry.js';
+import { todoWorkChainContext } from '../utils/promptIdContext.js';
 
 let tmpDirs: string[] = [];
 
@@ -67,6 +68,15 @@ function makeEntry(
 
 describe('BackgroundShellRegistry', () => {
   describe('register / get / getAll', () => {
+    it('captures the Todo work-chain owner at registration', () => {
+      const reg = new BackgroundShellRegistry();
+      const entry = todoWorkChainContext.run('work-chain-1', () =>
+        reg.register(makeEntry()),
+      );
+
+      expect(entry.todoWorkChainId).toBe('work-chain-1');
+    });
+
     it('round-trips a registered entry by id', () => {
       const reg = new BackgroundShellRegistry();
       const e = makeEntry({ shellId: 'a' });

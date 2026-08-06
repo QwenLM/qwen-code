@@ -11,6 +11,7 @@ import type { CompletedToolCall } from '../core/coreToolScheduler.js';
 import { DiscoveredMCPTool } from '../tools/mcp-tool.js';
 import type { FileDiff } from '../tools/tools.js';
 import type { AuthType } from '../core/contentGenerator.js';
+import type { ToolExecutionStatus } from '../core/turn.js';
 import {
   getDecisionFromOutcome,
   ToolCallDecision,
@@ -18,6 +19,7 @@ import {
 import type { FileOperation } from './metrics.js';
 export { ToolCallDecision };
 import type { OutputFormat } from '../output/types.js';
+import type { RipgrepFailureKind } from '../utils/ripgrepUtils.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { STRUCTURED_OUTPUT_REDACTED_ARGS } from '../tools/syntheticOutput.js';
 import type { SkillTool } from '../tools/skill.js';
@@ -174,10 +176,12 @@ export class UserRetryEvent implements BaseTelemetryEvent {
 export class ToolCallEvent implements BaseTelemetryEvent {
   'event.name': 'tool_call';
   'event.timestamp': string;
+  call_id?: string;
   function_name: string;
   function_args: Record<string, unknown>;
   duration_ms: number;
   status: 'success' | 'error' | 'cancelled';
+  execution_status?: ToolExecutionStatus | 'unknown';
   success: boolean; // Keep for backward compatibility
   decision?: ToolCallDecision;
   error?: string;
@@ -193,6 +197,7 @@ export class ToolCallEvent implements BaseTelemetryEvent {
   constructor(call: CompletedToolCall) {
     this['event.name'] = 'tool_call';
     this['event.timestamp'] = new Date().toISOString();
+    this.call_id = call.request.callId;
     this.function_name = call.request.name;
     // structured_output args ARE the user's final structured payload (the
     // command's actual answer, already emitted in stdout `result` /
@@ -211,6 +216,7 @@ export class ToolCallEvent implements BaseTelemetryEvent {
         : call.request.args;
     this.duration_ms = call.durationMs ?? 0;
     this.status = call.status;
+    this.execution_status = call.response.executionStatus;
     this.success = call.status === 'success'; // Keep for backward compatibility
     this.decision = call.outcome
       ? getDecisionFromOutcome(call.outcome)
@@ -437,6 +443,33 @@ export class RipgrepFallbackEvent implements BaseTelemetryEvent {
   }
 }
 
+export type RipgrepRuntimeRecoveryFailureKind = RipgrepFailureKind;
+
+export class RipgrepRuntimeRecoveryEvent implements BaseTelemetryEvent {
+  'event.name': 'ripgrep_runtime_recovery';
+  'event.timestamp': string;
+  selection_mode: 'builtin' | 'system';
+  retry_triggered: boolean;
+  retry_succeeded?: boolean;
+  failure_kind: RipgrepRuntimeRecoveryFailureKind;
+
+  constructor(params: {
+    selection_mode: 'builtin' | 'system';
+    retry_triggered: boolean;
+    retry_succeeded?: boolean;
+    failure_kind: RipgrepRuntimeRecoveryFailureKind;
+  }) {
+    this['event.name'] = 'ripgrep_runtime_recovery';
+    this['event.timestamp'] = new Date().toISOString();
+    this.selection_mode = params.selection_mode;
+    this.retry_triggered = params.retry_triggered;
+    if (params.retry_succeeded !== undefined) {
+      this.retry_succeeded = params.retry_succeeded;
+    }
+    this.failure_kind = params.failure_kind;
+  }
+}
+
 export enum LoopType {
   CONSECUTIVE_IDENTICAL_TOOL_CALLS = 'consecutive_identical_tool_calls',
   CHANTING_IDENTICAL_SENTENCES = 'chanting_identical_sentences',
@@ -531,6 +564,8 @@ export interface ChatCompressionEvent extends BaseTelemetryEvent {
   tokens_after: number;
   compression_input_token_count?: number;
   compression_output_token_count?: number;
+  cache_sharing_attempted?: boolean;
+  cache_sharing_used?: boolean;
 }
 
 export function makeChatCompressionEvent({
@@ -538,6 +573,8 @@ export function makeChatCompressionEvent({
   tokens_after,
   compression_input_token_count,
   compression_output_token_count,
+  cache_sharing_attempted,
+  cache_sharing_used,
 }: Omit<ChatCompressionEvent, CommonFields>): ChatCompressionEvent {
   return {
     'event.name': 'chat_compression',
@@ -550,6 +587,10 @@ export function makeChatCompressionEvent({
     ...(compression_output_token_count !== undefined
       ? { compression_output_token_count }
       : {}),
+    ...(cache_sharing_attempted !== undefined
+      ? { cache_sharing_attempted }
+      : {}),
+    ...(cache_sharing_used !== undefined ? { cache_sharing_used } : {}),
   };
 }
 
@@ -1094,6 +1135,7 @@ export type TelemetryEvent =
   | ApiCancelEvent
   | ApiResponseEvent
   | FlashFallbackEvent
+  | RipgrepRuntimeRecoveryEvent
   | LoopDetectedEvent
   | LoopDetectionDisabledEvent
   | NextSpeakerCheckEvent

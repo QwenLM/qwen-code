@@ -1004,6 +1004,57 @@ describe('resolveGitDir', () => {
   });
 });
 
+describe('getGitWorkingTreeStatus stash count in a linked worktree', () => {
+  let main: string;
+
+  beforeEach(async () => {
+    main = await makeRepo();
+    await fs.writeFile(path.join(main, 'a.txt'), 'hi\n');
+    await git(main, 'add', '.');
+    await git(main, 'commit', '-q', '-m', 'init');
+    // Two entries so the assertion cannot pass on an off-by-one.
+    await fs.writeFile(path.join(main, 'a.txt'), 'one\n');
+    await git(main, 'stash', '-q');
+    await fs.writeFile(path.join(main, 'a.txt'), 'two\n');
+    await git(main, 'stash', '-q');
+  });
+
+  afterEach(async () => {
+    await fs.rm(main, { recursive: true, force: true });
+  });
+
+  it('counts the shared stash from inside a linked worktree', async () => {
+    const wtPath = path.join(main, 'wt');
+    await git(main, 'worktree', 'add', '-q', wtPath, '-b', 'side');
+
+    // `git stash list` reports both entries from either working tree, because
+    // the stash is one ref for the whole repository. Reading the reflog from
+    // the per-worktree gitdir found nothing and reported 0.
+    expect((await getGitWorkingTreeStatus(wtPath))?.stashCount).toBe(2);
+    // Same number from the main worktree: the two must not diverge.
+    expect((await getGitWorkingTreeStatus(main))?.stashCount).toBe(2);
+  });
+
+  it('still reports the per-worktree operation, not the shared one', async () => {
+    // The guard against over-correcting. Only refs are shared; MERGE_HEAD and
+    // friends are per-worktree, so redirecting everything to the common dir
+    // would make a merge in one worktree appear in all of them.
+    const wtPath = path.join(main, 'wt');
+    await git(main, 'worktree', 'add', '-q', wtPath, '-b', 'side');
+    await fs.writeFile(
+      path.join(main, '.git', 'MERGE_HEAD'),
+      '0000000000000000000000000000000000000000\n',
+    );
+
+    expect((await getGitWorkingTreeStatus(main))?.operation).toBe('merge');
+    expect((await getGitWorkingTreeStatus(wtPath))?.operation).toBeUndefined();
+  });
+
+  it('still counts the stash in a plain repository', async () => {
+    expect((await getGitWorkingTreeStatus(main))?.stashCount).toBe(2);
+  });
+});
+
 describe('fetchGitDiff transient-state detection', () => {
   let repo: string;
   beforeEach(async () => {
@@ -2188,5 +2239,54 @@ describe('fetchGitCommitDetail', () => {
     // surface what the merge introduced (feature.txt) — else filesCount is 0.
     expect(detail!.filesCount).toBeGreaterThan(0);
     expect(detail!.files.some((f) => f.path === 'feature.txt')).toBe(true);
+  });
+});
+
+describe('fetchGitLog range argument injection guard', () => {
+  let repo: string;
+
+  beforeEach(async () => {
+    repo = await makeRepo();
+    await fs.writeFile(path.join(repo, 'a.txt'), 'one\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'first');
+    await fs.writeFile(path.join(repo, 'a.txt'), 'two\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'second');
+  });
+
+  afterEach(async () => {
+    await fs.rm(repo, { recursive: true, force: true });
+  });
+
+  it('honours a legitimate revision range', async () => {
+    const log = await fetchGitLog(repo, { range: 'HEAD~1..HEAD' });
+    expect(log).not.toBeNull();
+    expect(log!.entries).toHaveLength(1);
+    expect(log!.entries[0].subject).toBe('second');
+  });
+
+  it('ignores a range that is really a git option and writes no file', async () => {
+    const target = path.join(repo, 'PWNED.txt');
+    const log = await fetchGitLog(repo, {
+      range: `--output=${target}`,
+    });
+    // The malicious range is dropped, so the full log is returned and git
+    // never interprets `--output` (which would truncate/create the file).
+    expect(log).not.toBeNull();
+    expect(log!.entries.length).toBe(2);
+    await expect(fs.access(target)).rejects.toThrow();
+  });
+
+  it('drops a range starting with .. and returns the full log', async () => {
+    const log = await fetchGitLog(repo, { range: '..HEAD' });
+    expect(log).not.toBeNull();
+    expect(log!.entries).toHaveLength(2);
+  });
+
+  it('drops a range with characters outside the allowlist', async () => {
+    const log = await fetchGitLog(repo, { range: 'HEAD;rm -rf /' });
+    expect(log).not.toBeNull();
+    expect(log!.entries).toHaveLength(2);
   });
 });

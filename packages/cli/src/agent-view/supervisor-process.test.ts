@@ -56,8 +56,25 @@ describe('Agent View supervisor process helpers', () => {
       runtimeDir,
     });
 
-    expect(path.dirname(socketPath)).toBe(runtimeDir);
-    expect(path.basename(socketPath)).toMatch(/^[a-f0-9]{16}\.sock$/);
+    const uid = process.getuid?.();
+    const fallbackDir =
+      uid === undefined
+        ? /^qwen-agent-view-[a-f0-9]{12}$/
+        : `qwen-agent-view-${uid}`;
+    expect(path.dirname(socketPath)).toEqual(
+      expect.stringMatching(
+        new RegExp(
+          `^${escapeRegExp(runtimeDir)}${escapeRegExp(path.sep)}${
+            typeof fallbackDir === 'string'
+              ? escapeRegExp(fallbackDir)
+              : fallbackDir.source
+          }$`,
+        ),
+      ),
+    );
+    expect(path.basename(socketPath)).toMatch(
+      /^supervisor-[a-f0-9]{12}\.sock$/,
+    );
     expect(Buffer.byteLength(socketPath)).toBeLessThan(100);
   });
 
@@ -66,11 +83,20 @@ describe('Agent View supervisor process helpers', () => {
       globalDir: path.join(os.tmpdir(), 'a'.repeat(140)),
       platform: 'linux',
     });
-    const uid =
-      typeof process.getuid === 'function' ? process.getuid() : 'user';
+    const uid = process.getuid?.();
 
-    expect(path.dirname(socketPath)).toBe(path.join(os.tmpdir(), `qav-${uid}`));
-    expect(path.basename(socketPath)).toMatch(/^[a-f0-9]{16}\.sock$/);
+    const expectedDir =
+      uid === undefined
+        ? expect.stringMatching(
+            new RegExp(
+              `^${escapeRegExp(os.tmpdir())}${escapeRegExp(path.sep)}qwen-agent-view-[a-f0-9]{12}$`,
+            ),
+          )
+        : path.join(os.tmpdir(), `qwen-agent-view-${uid}`);
+    expect(path.dirname(socketPath)).toEqual(expectedDir);
+    expect(path.basename(socketPath)).toMatch(
+      /^supervisor-[a-f0-9]{12}\.sock$/,
+    );
     expect(Buffer.byteLength(socketPath)).toBeLessThan(100);
   });
 
@@ -80,7 +106,7 @@ describe('Agent View supervisor process helpers', () => {
         globalDir: 'C:\\Users\\test\\.qwen',
         platform: 'win32',
       }),
-    ).toMatch(/^\\\\\.\\pipe\\qwen-agent-view-[a-f0-9]{16}$/);
+    ).toMatch(/^\\\\\.\\pipe\\qwen-agent-view-[a-f0-9]{12}$/);
   });
 
   it('computes stale socket paths without exceeding the Unix path limit', () => {
@@ -94,7 +120,7 @@ describe('Agent View supervisor process helpers', () => {
     const longPath = path.join('/tmp', `${'a'.repeat(120)}.sock`);
     const stalePath = getAgentViewSupervisorStaleSocketPath(longPath, 'pid:42');
     expect(stalePath).toMatch(
-      /^\/tmp\/qwen-agent-view-stale-[a-f0-9]{16}\.sock$/,
+      /^\/tmp\/qwen-agent-view-stale-[a-f0-9]{12}\.sock$/,
     );
     expect(Buffer.byteLength(stalePath)).toBeLessThan(100);
   });
@@ -2955,7 +2981,15 @@ async function readWorkerTokenForTest(
 }
 
 function shortHostSocketPath(): string {
-  return path.join('/tmp', `qah-${process.pid}-${Date.now()}.sock`);
+  const unique = `qah-${process.pid}-${Date.now()}`;
+  if (process.platform === 'win32') {
+    return `\\\\.\\pipe\\${unique}`;
+  }
+  return path.join(os.tmpdir(), `${unique}.sock`);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 class FakeAttachSocket extends Duplex {

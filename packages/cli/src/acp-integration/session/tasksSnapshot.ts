@@ -118,6 +118,7 @@ function serializeMonitorTask(
     ...optionalField('exitCode', entry.exitCode),
     ...optionalField('error', entry.error),
     ...optionalField('ownerAgentId', entry.ownerAgentId),
+    ...optionalField('toolUseId', entry.toolUseId),
   };
 }
 

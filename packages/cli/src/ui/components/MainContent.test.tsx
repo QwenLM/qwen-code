@@ -16,6 +16,7 @@ import {
 } from '../contexts/UIActionsContext.js';
 import { AppContext } from '../contexts/AppContext.js';
 import { OverflowProvider } from '../contexts/OverflowContext.js';
+import { ThoughtExpandedProvider } from '../contexts/ThoughtExpandedContext.js';
 import { ToolCallStatus, StreamingState } from '../types.js';
 
 // Global compact mode was removed (#5666); type-based tool rendering no longer
@@ -660,6 +661,74 @@ describe('<MainContent />', () => {
 
     // No reset means the LAST staticItemsSpy call still received TOTAL.
     expect(staticItemsSpy.mock.calls.at(-1)?.[0]).toHaveLength(TOTAL);
+  });
+
+  describe('fullDetail wiring (Ctrl+O / Alt+T full-detail toggle)', () => {
+    const toolGroupHistory = [
+      {
+        id: 1,
+        type: 'tool_group' as const,
+        tools: [
+          {
+            callId: 'a1',
+            name: 'bash',
+            description: 'run ls',
+            status: ToolCallStatus.Success,
+            resultDisplay: undefined,
+            confirmationDetails: undefined,
+          },
+        ],
+      },
+    ];
+
+    const renderWithThoughtExpanded = (
+      history: UIState['history'],
+      allExpanded: boolean,
+    ) =>
+      render(
+        <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
+          <UIActionsContext.Provider value={createUIActions()}>
+            <UIStateContext.Provider value={createUIState({ history })}>
+              <OverflowProvider>
+                <ThoughtExpandedProvider
+                  value={{
+                    allExpanded,
+                    expandedHeadIds: new Set<number>(),
+                    toggle: () => {},
+                  }}
+                >
+                  <MainContent />
+                </ThoughtExpandedProvider>
+              </OverflowProvider>
+            </UIStateContext.Provider>
+          </UIActionsContext.Provider>
+        </AppContext.Provider>,
+      );
+
+    it('forwards allExpanded=true from ThoughtExpandedContext as fullDetail', () => {
+      historyItemDisplayPropsSpy.mockClear();
+
+      renderWithThoughtExpanded(toolGroupHistory, true);
+
+      const calls = historyItemDisplayPropsSpy.mock.calls.map((c) => c[0]);
+      const toolGroup = calls.find((c) => c?.item?.id === 1);
+      expect(toolGroup).toBeDefined();
+      // MainContent reads allExpanded from context and must forward it to
+      // every HistoryItemDisplay as fullDetail — the wiring the deleted
+      // TranscriptView used to be the sole producer of.
+      expect(toolGroup.fullDetail).toBe(true);
+    });
+
+    it('forwards fullDetail=false when the full-detail toggle is off', () => {
+      historyItemDisplayPropsSpy.mockClear();
+
+      renderWithThoughtExpanded(toolGroupHistory, false);
+
+      const calls = historyItemDisplayPropsSpy.mock.calls.map((c) => c[0]);
+      const toolGroup = calls.find((c) => c?.item?.id === 1);
+      expect(toolGroup).toBeDefined();
+      expect(toolGroup.fullDetail).toBe(false);
+    });
   });
 
   describe('compact mode + Static path (useTerminalBuffer=false)', () => {

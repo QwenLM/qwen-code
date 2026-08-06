@@ -4,9 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { StringDecoder } from 'node:string_decoder';
 import type { AgentViewLaunchFile } from './protocol.js';
 
 export const DEFAULT_AGENT_VIEW_PTY_OUTPUT_BYTES = 1024 * 1024;
+const INTERNAL_ONLY_WORKER_ENV_KEYS = new Set([
+  'QWEN_AGENT_VIEW_PTY_HOST_TOKEN',
+]);
 
 export interface AgentViewPtySpawnOptions {
   cwd: string;
@@ -158,9 +162,31 @@ export class BoundedOutputRing {
         this.retainedBytesValue -= first.byteLength;
       } else {
         const retained = trimUtf8Start(first.subarray(excess));
-        this.chunks[0] = retained;
+        if (retained.byteLength === 0) {
+          this.chunks.shift();
+        } else {
+          this.chunks[0] = retained;
+        }
         this.retainedBytesValue -= first.byteLength - retained.byteLength;
       }
+    }
+    this.trimLeadingUtf8ContinuationBytes();
+  }
+
+  private trimLeadingUtf8ContinuationBytes(): void {
+    while (this.chunks.length > 0) {
+      const first = this.chunks[0]!;
+      const retained = trimUtf8Start(first);
+      if (retained.byteLength === first.byteLength) {
+        return;
+      }
+      if (retained.byteLength === 0) {
+        this.chunks.shift();
+      } else {
+        this.chunks[0] = retained;
+      }
+      this.retainedBytesValue -= first.byteLength - retained.byteLength;
+      if (retained.byteLength > 0) return;
     }
   }
 }
@@ -267,6 +293,7 @@ export async function launchAgentViewPtyHost(
     env,
     handleFlowControl: true,
   });
+  const inputDecoder = new StringDecoder('utf8');
 
   const disposables: AgentViewPtyDisposable[] = [];
   const dataDisposable = ptyProcess.onData((data) => {
@@ -292,7 +319,7 @@ export async function launchAgentViewPtyHost(
     output,
     exited,
     write(data: Buffer): void {
-      ptyProcess.write(data.toString('utf8'));
+      ptyProcess.write(inputDecoder.write(data));
     },
     onData(callback: (data: string) => void): AgentViewPtyDisposable | void {
       return ptyProcess.onData(callback);
@@ -307,6 +334,7 @@ export async function launchAgentViewPtyHost(
       ptyProcess.kill('SIGTERM');
     },
     dispose(): void {
+      ptyProcess.kill();
       for (const disposable of disposables.splice(0)) {
         disposable.dispose();
       }
@@ -319,6 +347,9 @@ function buildWorkerPtyEnv(
   launchEnv: Record<string, string>,
 ): Record<string, string> {
   const env = { ...inherited };
+  for (const key of INTERNAL_ONLY_WORKER_ENV_KEYS) {
+    delete env[key];
+  }
   for (const key of COLOR_ENV_KEYS) {
     delete env[key];
   }

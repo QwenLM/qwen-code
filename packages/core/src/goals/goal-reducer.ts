@@ -5,6 +5,7 @@
  */
 
 import {
+  GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
   GOAL_STATE_VERSION,
   type GoalControlRequest,
   type GoalRecord,
@@ -96,6 +97,7 @@ export function reduceGoalControl(
       revision: current.revision + 1,
       objective: normalizeObjective(request.objective, snapshotOf(current)),
       evidenceCursor: copyCursor(transition.cursor),
+      lastReason: undefined,
     });
   }
 
@@ -121,10 +123,25 @@ export function reduceGoalControl(
       snapshotOf(current),
     );
   }
+  if (
+    current.status === 'usage_limited' &&
+    current.lastReason === GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON
+  ) {
+    throw new GoalInvalidTransitionError(
+      'An evidence-limited Goal cannot be resumed; edit or replace the Goal first',
+      snapshotOf(current),
+    );
+  }
   if (request.action !== 'resume') {
     return assertNever(request, snapshotOf(current));
   }
-  return transitionGoal(current, transition.now, { status: 'active' });
+  // An explicit resume re-authorizes autonomous continuation, so it grants a
+  // fresh turn budget; keeping the exhausted count would report `active` and
+  // immediately re-transition to `usage_limited` without running a turn.
+  return transitionGoal(current, transition.now, {
+    status: 'active',
+    turnCount: 0,
+  });
 }
 
 export function reduceGoalTurnFinished(

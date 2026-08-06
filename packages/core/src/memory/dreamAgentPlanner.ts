@@ -11,7 +11,11 @@ import {
 } from '../utils/forkedAgent.js';
 import * as path from 'node:path';
 import { Storage } from '../config/storage.js';
-import { AUTO_MEMORY_INDEX_FILENAME, getAutoMemoryRoot } from './paths.js';
+import {
+  AUTO_MEMORY_INDEX_FILENAME,
+  AUTO_MEMORY_PINNED_DIRNAME,
+  getAutoMemoryRoot,
+} from './paths.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { escapeShellArg, getShellConfiguration } from '../utils/shell-utils.js';
 import { createMemoryScopedAgentConfig } from './memory-scoped-agent-config.js';
@@ -24,7 +28,9 @@ const DREAM_AGENT_SYSTEM_PROMPT = `You are performing a managed memory dream —
 Synthesize what you've learned recently into durable, well-organized memories so that future sessions can orient quickly.
 
 Rules:
-- Merge semantically duplicate entries — if the same fact appears in multiple files, consolidate into one file and delete the rest.
+- Treat files under the top-level \`${AUTO_MEMORY_PINNED_DIRNAME}/\` directory as protected read-only records. Never modify, overwrite, rename, merge into, or delete them.
+- Leave \`${AUTO_MEMORY_PINNED_DIRNAME}/\` out of consolidation analysis; do not list, read, or compare its files during Dream.
+- Merge semantically duplicate entries among writable topic files — if the same fact appears in multiple writable files, consolidate into one file and delete the rest.
 - Preserve all durable information; do not delete content that is still accurate.
 - Fix contradicted or stale facts only when the evidence is clear from the existing memory content or recent transcript signal.
 - Update the MEMORY.md index to accurately reflect surviving files.
@@ -56,6 +62,7 @@ export function buildConsolidationTaskPrompt(
     '- List the memory directory to see what files exist',
     `- Read \`${memoryRoot}/${AUTO_MEMORY_INDEX_FILENAME}\` to understand the current index`,
     '- Skim topic subdirectories (`user/`, `project/`, `feedback/`, `reference/`)',
+    `- Skip \`${AUTO_MEMORY_PINNED_DIRNAME}/\` during Dream; do not list or read files there`,
     '- If `logs/` or `sessions/` subdirectories exist, review recent entries there',
     '',
     '## Phase 2 — Gather recent signal',
@@ -73,6 +80,7 @@ export function buildConsolidationTaskPrompt(
     'For each topic directory:',
     '- Identify duplicate or near-duplicate `.md` files (same fact expressed differently)',
     '- Merge duplicates: write the canonical version into one file, delete the redundant files',
+    `- Exclude \`${AUTO_MEMORY_PINNED_DIRNAME}/\` from duplicate, stale, and contradiction analysis; never use a pinned file as a merge target or deletion candidate`,
     '- Fix stale or contradicted facts when clear from the existing content',
     '- Convert relative dates (for example: "yesterday", "last week") to absolute dates when preserving them',
     '',
@@ -81,6 +89,7 @@ export function buildConsolidationTaskPrompt(
     `Update \`${memoryRoot}/${AUTO_MEMORY_INDEX_FILENAME}\` to reflect surviving files.`,
     'Each entry: `- [Title](relative/path.md) — one-line hook`',
     'Keep the index under roughly 200 lines and ~25KB.',
+    `Do not intentionally remove existing index entries for valid \`${AUTO_MEMORY_PINNED_DIRNAME}/\` files during consolidation; normal index limits still apply.`,
     'Remove pointers to deleted, stale, wrong, or superseded files. Add pointers to any newly created files.',
     'If an index line is too verbose, shorten it and move the detail back into the memory file itself.',
     '',
@@ -101,13 +110,14 @@ export async function planManagedAutoMemoryDreamByAgent(
   const scopedConfig = createMemoryScopedAgentConfig(config, projectRoot, {
     allowShell: true,
     includeUserMemory: false,
+    protectPinnedMemory: true,
   });
   const result = await runForkedAgent({
     name: 'managed-auto-memory-dreamer',
     config: scopedConfig,
     taskPrompt: buildConsolidationTaskPrompt(memoryRoot, transcriptDir),
     systemPrompt: DREAM_AGENT_SYSTEM_PROMPT,
-    maxTurns: MAX_TURNS,
+    maxTurns: config.getMemoryAgentMaxTurns() ?? MAX_TURNS,
     maxTimeMinutes: config.getMemoryAgentTimeoutMinutes() ?? MAX_TIME_MINUTES,
     tools: [
       ToolNames.READ_FILE,

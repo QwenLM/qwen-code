@@ -10,6 +10,7 @@ import {
   BTW_MAX_INPUT_LENGTH,
   createDebugLogger,
   GROUP_COLOR_OPTIONS,
+  Storage,
   SessionService,
   SessionOrganizationError,
   SESSION_WRITER_RPC_CODES,
@@ -43,11 +44,16 @@ import {
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import { parseSessionSource } from '@qwen-code/acp-bridge';
 import {
+  isReservedLiveSessionSource,
+  readLoadableLiveConversationMetadata,
+} from '../live/session-source.js';
+import {
   translateAndCheckAbsoluteWorkspacePath,
   canonicalizeWorkspace,
 } from '@qwen-code/acp-bridge/workspacePaths';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import {
+  SessionNotFoundError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
   WorkspaceMismatchError,
@@ -60,6 +66,7 @@ import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { MAX_WORKSPACE_PATH_LENGTH } from '../fs/paths.js';
 import {
   MAX_READ_BYTES,
+  MAX_TEXT_CURSOR_CHARS,
   type WorkspaceFileSystemFactory,
 } from '../fs/index.js';
 import {
@@ -85,8 +92,8 @@ import {
   publicErrorStatus,
   type WorkspaceRememberTaskLane,
 } from '../workspace-remember.js';
-import { extractRememberErrorCode } from '../workspace-remember-errors.js';
-import { MAX_REMEMBER_CONTENT_BYTES } from '../workspace-memory-remember-constants.js';
+import { extractRememberErrorCode } from '../../runtime/workspace-remember-errors.js';
+import { MAX_REMEMBER_CONTENT_BYTES } from '../../runtime/workspace-memory-remember-constants.js';
 import type { DeviceFlowRegistry } from '../auth/device-flow.js';
 import { collectWorkspaceMemoryStatus } from '../workspace-memory.js';
 import {
@@ -102,7 +109,9 @@ import { createSessionOrganizationService } from '../session-organization-helper
 import {
   archiveDaemonSessions,
   assertSessionLoadable,
+  deleteDaemonSessionIfOrphan,
   deleteDaemonSessions,
+  DaemonDrainingError,
   logSessionArchiveWarning,
   SessionArchiveCoordinator,
   unarchiveDaemonSessions,
@@ -560,11 +569,18 @@ function pickSessionArtifactInput(
  * the operator-facing message is not a cross-tenant leak), and anything
  * unrecognized collapses to a generic INTERNAL_ERROR string.
  */
-function toRpcError(err: unknown): {
+export function toRpcError(err: unknown): {
   code: number;
   message: string;
   data?: Record<string, unknown>;
 } {
+  if (err instanceof DaemonDrainingError) {
+    return {
+      code: RPC.INTERNAL_ERROR,
+      message: err.message,
+      data: { errorKind: 'daemon_draining' },
+    };
+  }
   const writerError = sessionWriterRpcError(err);
   if (writerError) return writerError;
   if (err instanceof AcpParamError || err instanceof InvalidCursorError) {
@@ -783,6 +799,11 @@ function rpcErrorFrame(id: JsonRpcId, err: unknown) {
  */
 export const ACP_PROTOCOL_VERSION = 1;
 
+export interface LiveSessionIsolation {
+  materializeConversationDirectory(sessionId: string): Promise<string>;
+  isSessionActive?(sessionId: string): boolean;
+}
+
 /**
  * Routes JSON-RPC messages between the HTTP transport and the
  * `HttpAcpBridge`. Inbound client messages map to bridge calls; the
@@ -807,6 +828,8 @@ export class AcpDispatcher {
     private readonly captureGenerationAssertion: () =>
       | (() => void)
       | undefined = () => undefined,
+    private readonly liveSessionIsolation?: LiveSessionIsolation,
+    private readonly sessionRuntimeBaseDir: string = Storage.getRuntimeBaseDir(),
   ) {
     this.agentManager = createDaemonSubagentManager(boundWorkspace);
   }
@@ -815,20 +838,21 @@ export class AcpDispatcher {
     sessionId: string,
     removePersistedSession = false,
   ): void {
-    void this.bridge
-      .killSession(sessionId, { requireZeroAttaches: true })
-      .then(async (killed) => {
-        if (killed && removePersistedSession) {
-          await new SessionService(this.boundWorkspace).removeSession(
-            sessionId,
-          );
-        }
-      })
-      .catch((err) =>
-        writeStderrLine(
-          `qwen serve: /acp orphan killSession(${logSafe(sessionId)}) failed: ${logSafe(errMsg(err))}`,
-        ),
-      );
+    const cleanup = removePersistedSession
+      ? deleteDaemonSessionIfOrphan({
+          sessionId,
+          service: new SessionService(this.boundWorkspace, {
+            runtimeBaseDir: this.sessionRuntimeBaseDir,
+          }),
+          bridge: this.bridge,
+          coordinator: this.archiveCoordinator,
+        })
+      : this.bridge.killSession(sessionId, { requireZeroAttaches: true });
+    void cleanup.catch((err) =>
+      writeStderrLine(
+        `qwen serve: /acp orphan killSession(${logSafe(sessionId)}) failed: ${logSafe(errMsg(err))}`,
+      ),
+    );
   }
 
   /**
@@ -861,6 +885,24 @@ export class AcpDispatcher {
     return requestedWorkspace;
   }
 
+  private parseSessionWorkspaceCwd(params: Record<string, unknown>): string {
+    const requestedWorkspace = parseOptionalWorkspaceCwd(
+      params,
+      this.boundWorkspace,
+    );
+    if (
+      !this.liveSessionIsolation ||
+      requestedWorkspace === this.boundWorkspace
+    ) {
+      return requestedWorkspace;
+    }
+    const canonicalWorkspace = canonicalizeWorkspace(requestedWorkspace);
+    if (canonicalWorkspace !== this.boundWorkspace) {
+      throw new WorkspaceMismatchError(this.boundWorkspace, canonicalWorkspace);
+    }
+    return this.boundWorkspace;
+  }
+
   private parseSessionIds(params: Record<string, unknown>): string[] {
     const sessionIds = params['sessionIds'];
     if (
@@ -874,6 +916,32 @@ export class AcpDispatcher {
       );
     }
     return [...new Set(sessionIds as string[])];
+  }
+
+  private rejectActiveLiveSessionMutation(
+    conn: AcpConnection,
+    id: JsonRpcId | undefined,
+    sessionIds: readonly string[],
+  ): boolean {
+    const activeSessionId = sessionIds.find((sessionId) =>
+      this.liveSessionIsolation?.isSessionActive?.(sessionId),
+    );
+    if (!activeSessionId) return false;
+    if (id !== undefined) {
+      conn.sendConn(
+        error(
+          id,
+          RPC.INVALID_REQUEST,
+          'An active Live Voice session cannot be closed, deleted, or archived. Stop or replace the Live call first.',
+          {
+            errorKind: 'live_session_active',
+            httpStatus: 409,
+            sessionId: activeSessionId,
+          },
+        ),
+      );
+    }
+    return true;
   }
 
   private serializeSessionErrors(
@@ -1163,6 +1231,18 @@ export class AcpDispatcher {
     sessionHeader?: string,
     reqLoopback?: boolean,
   ): Promise<void> {
+    return Storage.runWithResolvedRuntimeBaseDir(
+      this.sessionRuntimeBaseDir,
+      () => this.handleInRuntime(conn, msg, sessionHeader, reqLoopback),
+    );
+  }
+
+  private async handleInRuntime(
+    conn: AcpConnection,
+    msg: JsonRpcInbound,
+    sessionHeader?: string,
+    reqLoopback?: boolean,
+  ): Promise<void> {
     // Loopback is evaluated PER REQUEST (the permission-vote POST may arrive
     // from a different peer than `initialize`), falling back to the
     // connection's initialize-time value when the caller didn't supply it.
@@ -1245,7 +1325,20 @@ export class AcpDispatcher {
           return;
 
         case 'session/new': {
-          const cwd = parseOptionalWorkspaceCwd(params, this.boundWorkspace);
+          const cwd = this.parseSessionWorkspaceCwd(params);
+          if (this.liveSessionIsolation) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  'Sessions in the Conversations workspace can only be created by Live Voice.',
+                  { errorKind: 'live_session_creation_reserved' },
+                ),
+              );
+            }
+            return;
+          }
           const source = parseSessionSource(
             params['sourceType'],
             params['sourceId'],
@@ -1253,6 +1346,18 @@ export class AcpDispatcher {
           if ('error' in source) {
             if (id !== undefined) {
               conn.sendConn(error(id, RPC.INVALID_PARAMS, source.error));
+            }
+            return;
+          }
+          if (isReservedLiveSessionSource(source)) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  'The requested session source is reserved for daemon-owned Live Voice sessions.',
+                ),
+              );
             }
             return;
           }
@@ -1332,7 +1437,7 @@ export class AcpDispatcher {
             }
             return;
           }
-          const cwd = parseOptionalWorkspaceCwd(params, this.boundWorkspace);
+          const cwd = this.parseSessionWorkspaceCwd(params);
           const restored = await this.archiveCoordinator.runSharedMany(
             [sessionId],
             async () => {
@@ -1340,23 +1445,89 @@ export class AcpDispatcher {
               // Re-seed the persisted parent lineage so a restored sub-session
               // still reports its parent over the ACP transport (parity with the
               // REST restore handler); the bridge creates the entry without it.
-              const metadata = await new SessionService(
-                cwd,
-              ).readCreationMetadata(sessionId);
-              return method === 'session/load'
-                ? await this.bridge.loadSession({
+              const sessionService = new SessionService(cwd);
+              const metadata = this.liveSessionIsolation
+                ? await readLoadableLiveConversationMetadata(
                     sessionId,
-                    workspaceCwd: cwd,
-                    clientId: conn.clientId,
-                    historyReplay: 'response',
-                    ...metadata,
-                  })
-                : await this.bridge.resumeSession({
+                    (candidateId) =>
+                      sessionService.readCreationMetadata(candidateId),
+                  )
+                : await sessionService.readCreationMetadata(sessionId);
+              if (metadata === undefined) {
+                throw new SessionNotFoundError(sessionId);
+              }
+              const liveConversationCwd = this.liveSessionIsolation
+                ? await this.liveSessionIsolation.materializeConversationDirectory(
                     sessionId,
-                    workspaceCwd: cwd,
-                    clientId: conn.clientId,
-                    ...metadata,
-                  });
+                  )
+                : undefined;
+              const session =
+                method === 'session/load'
+                  ? await this.bridge.loadSession({
+                      sessionId,
+                      workspaceCwd: cwd,
+                      clientId: conn.clientId,
+                      historyReplay: 'response',
+                      ...metadata,
+                    })
+                  : await this.bridge.resumeSession({
+                      sessionId,
+                      workspaceCwd: cwd,
+                      clientId: conn.clientId,
+                      ...metadata,
+                    });
+              // Live creation and cold restore reserve this relocation before
+              // returning an id that can be prompted. An active entry has
+              // therefore already crossed the same isolation boundary.
+              if (liveConversationCwd === undefined) {
+                return session;
+              }
+              if (session.hasActivePrompt) {
+                if (session.currentCwd === liveConversationCwd) return session;
+                try {
+                  if (session.clientId) {
+                    await this.bridge.detachClient(
+                      session.sessionId,
+                      session.clientId,
+                    );
+                  }
+                } catch {
+                  // Preserve the isolation error. Never kill an active owner.
+                }
+                throw new Error(
+                  'Active Live session is outside its isolated conversation directory.',
+                );
+              }
+              try {
+                const changed = await this.bridge.changeSessionCwd(sessionId, {
+                  path: liveConversationCwd,
+                  allowedRoots: [cwd],
+                  managedRelocation: 'live-conversation',
+                });
+                if (changed.newCwd !== liveConversationCwd) {
+                  throw new Error(
+                    'Live conversation directory relocation was rejected.',
+                  );
+                }
+                session.currentCwd = changed.newCwd;
+              } catch (error) {
+                try {
+                  if (session.attached && session.clientId) {
+                    await this.bridge.detachClient(
+                      session.sessionId,
+                      session.clientId,
+                    );
+                  } else if (!session.attached) {
+                    await this.bridge.killSession(session.sessionId, {
+                      requireZeroAttaches: true,
+                    });
+                  }
+                } catch {
+                  // Preserve the relocation error.
+                }
+                throw error;
+              }
+              return session;
             },
           );
           // Teardown raced the restore — EITHER the whole connection was
@@ -1555,6 +1726,9 @@ export class AcpDispatcher {
         case 'session/close': {
           const sessionId = String(params['sessionId'] ?? '');
           if (!this.requireOwned(conn, sessionId, id)) return;
+          if (this.rejectActiveLiveSessionMutation(conn, id, [sessionId])) {
+            return;
+          }
           // Close the ownership gate before the coordinator await so
           // concurrent closes from this connection cannot both reach the bridge.
           conn.ownedSessions.delete(sessionId);
@@ -1620,6 +1794,19 @@ export class AcpDispatcher {
         // ACP standard: session/fork — create a branched copy of an existing
         // session. Maps to bridge.branchSession().
         case 'session/fork': {
+          if (this.liveSessionIsolation) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  'Sessions in the Conversations workspace can only be created by Live Voice.',
+                  { errorKind: 'live_session_creation_reserved' },
+                ),
+              );
+            }
+            return;
+          }
           const sessionId = String(params['sessionId'] ?? '');
           if (!sessionId) {
             if (id !== undefined) {
@@ -3334,8 +3521,31 @@ export class AcpDispatcher {
               );
             return;
           }
+          const rawCursor = params['cursor'];
+          if (
+            rawCursor !== undefined &&
+            (typeof rawCursor !== 'string' ||
+              rawCursor.length === 0 ||
+              rawCursor.length > MAX_TEXT_CURSOR_CHARS)
+          ) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  `\`cursor\` must be a non-empty string of at most ${MAX_TEXT_CURSOR_CHARS} characters`,
+                ),
+              );
+            return;
+          }
+          const cursor = rawCursor as string | undefined;
           const resolved = await fs.resolve(p, 'read');
-          const out = await fs.readText(resolved, { maxBytes, line, limit });
+          const out = await fs.readText(resolved, {
+            maxBytes,
+            line,
+            limit,
+            cursor,
+          });
           this.replyConn(conn, id, {
             path: p,
             content: out.content,
@@ -3826,6 +4036,7 @@ export class AcpDispatcher {
 
         case `${QWEN_METHOD_NS}sessions/delete`: {
           const ids = this.parseSessionIds(params);
+          if (this.rejectActiveLiveSessionMutation(conn, id, ids)) return;
           const svc = new SessionService(this.boundWorkspace);
           const result = await deleteDaemonSessions({
             sessionIds: ids,
@@ -3846,6 +4057,7 @@ export class AcpDispatcher {
 
         case `${QWEN_METHOD_NS}sessions/archive`: {
           const ids = this.parseSessionIds(params);
+          if (this.rejectActiveLiveSessionMutation(conn, id, ids)) return;
           const svc = new SessionService(this.boundWorkspace, {
             onWarning: logSessionArchiveWarning,
           });

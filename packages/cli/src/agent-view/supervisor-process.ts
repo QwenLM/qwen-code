@@ -65,8 +65,6 @@ const DEFAULT_ATTACH_LEASE_HEARTBEAT_MS =
   DEFAULT_AGENT_VIEW_ATTACH_LEASE_TTL_MS / 3;
 
 export interface AgentViewSupervisorHibernationPolicy {
-  enabled?: boolean;
-  idleMs?: number;
   autoExit?: boolean;
   autoExitGraceMs?: number;
 }
@@ -133,13 +131,19 @@ export function getAgentViewSupervisorSocketPath(
     return primaryPath;
   }
 
+  // Fall back to a per-uid directory under the runtime dir. prepareSocketPath
+  // creates it 0700 when missing and the socket file is 0600, but the directory
+  // name is predictable: on a shared multi-user tmpdir a pre-existing directory
+  // is reused with its current owner and mode. Callers that need a hardened
+  // path should pass a private 0700 runtimeDir (e.g. XDG_RUNTIME_DIR).
+  const uid = process.getuid?.();
   const fallbackDir =
-    options.runtimeDir ??
-    path.join(
-      os.tmpdir(),
-      `qav-${typeof process.getuid === 'function' ? process.getuid() : 'user'}`,
-    );
-  return path.join(fallbackDir, `${digest}.sock`);
+    uid === undefined ? `qwen-agent-view-${digest}` : `qwen-agent-view-${uid}`;
+  return path.join(
+    options.runtimeDir ?? os.tmpdir(),
+    fallbackDir,
+    `supervisor-${digest}.sock`,
+  );
 }
 
 export function getAgentViewSupervisorStaleSocketPath(

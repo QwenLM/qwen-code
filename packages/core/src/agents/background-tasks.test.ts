@@ -26,6 +26,7 @@ import {
 import * as transcript from './agent-transcript.js';
 import { AgentEventEmitter, AgentEventType } from './runtime/agent-events.js';
 import { ToolConfirmationOutcome } from '../tools/tools.js';
+import { todoWorkChainContext } from '../utils/promptIdContext.js';
 
 function makeApproval(
   callId: string,
@@ -60,6 +61,15 @@ function makeRegistration(
 }
 
 describe('notification emission and agent context (#7156)', () => {
+  it('captures the Todo work-chain owner at registration', () => {
+    const registry = new BackgroundTaskRegistry();
+    const entry = todoWorkChainContext.run('work-chain-1', () =>
+      registry.register(makeRegistration('bg-owner')),
+    );
+
+    expect(entry.todoWorkChainId).toBe('work-chain-1');
+  });
+
   // A background agent's terminal transition fires inside its own
   // AsyncLocalStorage frame, and ALS context follows every async
   // continuation the notification callback starts (React state updates,

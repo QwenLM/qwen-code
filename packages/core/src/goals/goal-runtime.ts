@@ -23,6 +23,7 @@ import {
   type GoalTerminalProposal,
   type GoalTurnPermit,
   type TranscriptCursor,
+  validateGoalProposalReason,
 } from './goal-protocol.js';
 import {
   elapsedActiveTime,
@@ -39,6 +40,10 @@ import {
   recoverGoalFromRecords,
   type GoalRecoveryRecord,
 } from './goal-persistence.js';
+
+export const GOAL_RUNTIME_DISPOSED_MESSAGE = 'Goal runtime has been disposed';
+export const STALE_GOAL_TURN_MESSAGE = 'Goal turn permit is no longer valid';
+export const MAX_GOAL_CONTINUATION_TURNS = 50;
 
 export interface GoalJournal {
   getTranscriptCursor(): TranscriptCursor;
@@ -57,6 +62,16 @@ export interface CreateGoalRuntimeOptions {
 export interface GoalEvidenceSource {
   flush(): Promise<void>;
   readActiveTranscriptChain(): Promise<readonly GoalEvidenceRecord[]>;
+}
+
+export class GoalPersistenceUnavailableError extends Error {
+  constructor(
+    message = 'Goal persistence is unavailable for this session',
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = 'GoalPersistenceUnavailableError';
+  }
 }
 
 export interface GoalTurnHost {
@@ -89,6 +104,7 @@ export interface GoalPendingProposal {
 
 export interface GoalRuntime {
   getSnapshot(): GoalSnapshotV2;
+  getSnapshotForPermit?(permit: GoalTurnPermit): GoalSnapshotV2;
   subscribe(
     listener: (snapshot: GoalSnapshotV2, cause?: GoalStateCause) => void,
   ): () => void;
@@ -109,9 +125,22 @@ export interface GoalRuntime {
   dispose(): void;
 }
 
+function normalizeRecoveredBlockedAudit(
+  audit: NonNullable<GoalStateRecordPayloadV2['blockedAudit']>,
+): NonNullable<GoalStateRecordPayloadV2['blockedAudit']> {
+  return {
+    ...structuredClone(audit),
+    fingerprint: audit.fingerprint.startsWith('\n')
+      ? `repeated${audit.fingerprint}`
+      : audit.fingerprint,
+  };
+}
+
 export function createGoalRuntime(
   options: CreateGoalRuntimeOptions,
-): GoalRuntime {
+): GoalRuntime & {
+  getSnapshotForPermit(permit: GoalTurnPermit): GoalSnapshotV2;
+} {
   if (Boolean(options.evidenceSource) !== Boolean(options.verifier)) {
     throw new Error(
       'Goal evidence source and verifier must be configured together',
@@ -162,7 +191,7 @@ export function createGoalRuntime(
   type VerificationAttempt = NonNullable<typeof verificationAttempt>;
 
   const assertAvailable = () => {
-    if (disposed) throw new Error('Goal runtime has been disposed');
+    if (disposed) throw new Error(GOAL_RUNTIME_DISPOSED_MESSAGE);
   };
 
   const assertOperational = () => {
@@ -275,6 +304,39 @@ export function createGoalRuntime(
     ) {
       return;
     }
+    if (snapshot.goal.turnCount >= MAX_GOAL_CONTINUATION_TURNS) {
+      const budgetGoalId = snapshot.goal.goalId;
+      const budgetRevision = snapshot.goal.revision;
+      void enqueue(async () => {
+        if (
+          snapshot.goal?.status !== 'active' ||
+          snapshot.goal.goalId !== budgetGoalId ||
+          snapshot.goal.revision !== budgetRevision
+        )
+          return;
+        const now = Date.now();
+        const reason = `Goal exceeded the ${MAX_GOAL_CONTINUATION_TURNS}-turn continuation budget`;
+        const limitedSnapshot: GoalSnapshotV2 = {
+          v: GOAL_STATE_VERSION,
+          goal: {
+            ...snapshot.goal,
+            status: 'usage_limited',
+            activeTimeMs: elapsedActiveTime(snapshot.goal, now),
+            updatedAt: now,
+            lastReason: reason,
+          },
+          activity: 'idle',
+        };
+        await options.journal.recordGoalState(randomUUID(), {
+          v: GOAL_STATE_VERSION,
+          cause: 'usage_limited',
+          snapshot: limitedSnapshot,
+        });
+        snapshot = structuredClone(limitedSnapshot);
+        broadcast('usage_limited');
+      });
+      return;
+    }
     continuationQueued = true;
     flushContinuation(cause);
   };
@@ -294,6 +356,14 @@ export function createGoalRuntime(
     currentPermit?.goalId === permit.goalId &&
     currentPermit.revision === permit.revision &&
     currentPermit.turnId === permit.turnId;
+
+  const getSnapshotForPermit = (permit: GoalTurnPermit): GoalSnapshotV2 => {
+    assertOperational();
+    if (!isCurrentPermit(permit) || !snapshot.goal) {
+      throw new Error(STALE_GOAL_TURN_MESSAGE);
+    }
+    return getSnapshot();
+  };
 
   const isCurrentVerificationAttempt = (attempt: VerificationAttempt) =>
     verificationAttempt === attempt &&
@@ -328,6 +398,7 @@ export function createGoalRuntime(
         revision: attempt.goal.revision,
         objective: attempt.goal.objective,
       },
+      currentTurnId: attempt.permit.turnId,
       evidence: evidence.citedRecords,
       ...(currentDeliveredOutput.length > 0 ? { currentDeliveredOutput } : {}),
     };
@@ -512,10 +583,13 @@ export function createGoalRuntime(
     } catch (error) {
       if (attempt.controller.signal.aborted) return;
       if (error instanceof InvalidGoalEvidenceReferenceError) {
-        outcome = {
-          kind: 'decision',
-          result: { decision: 'reject', reason: error.message },
-        };
+        outcome =
+          error.code === 'catalog_truncated'
+            ? { kind: 'usage_limited', reason: error.message }
+            : {
+                kind: 'decision',
+                result: { decision: 'reject', reason: error.message },
+              };
       } else {
         const reason =
           error instanceof EvidenceSourceUnavailableError
@@ -531,6 +605,7 @@ export function createGoalRuntime(
 
   return {
     getSnapshot,
+    getSnapshotForPermit,
     subscribe(
       listener: (value: GoalSnapshotV2, cause?: GoalStateCause) => void,
     ): () => void {
@@ -543,7 +618,7 @@ export function createGoalRuntime(
         if (restored) return;
         const recovery = recoverGoalFromRecords(records);
         if (recovery.kind === 'unsupported') {
-          recoveryError = new Error(recovery.reason);
+          recoveryError = new GoalPersistenceUnavailableError(recovery.reason);
           throw recoveryError;
         }
         try {
@@ -555,7 +630,7 @@ export function createGoalRuntime(
               activity: 'idle',
             };
             blockedAudit = recovery.payload.blockedAudit
-              ? structuredClone(recovery.payload.blockedAudit)
+              ? normalizeRecoveredBlockedAudit(recovery.payload.blockedAudit)
               : undefined;
             recoveredCause = recovery.payload.cause;
           } else if (recovery.kind === 'legacy') {
@@ -566,7 +641,14 @@ export function createGoalRuntime(
               recordUuid,
               now: Date.now(),
             });
-            await options.journal.recordGoalState(recordUuid, payload);
+            try {
+              await options.journal.recordGoalState(recordUuid, payload);
+            } catch (error) {
+              throw new GoalPersistenceUnavailableError(
+                error instanceof Error ? error.message : String(error),
+                { cause: error },
+              );
+            }
             assertAvailable();
             recoveredSnapshot = structuredClone(payload.snapshot);
             recoveredCause = payload.cause;
@@ -659,7 +741,7 @@ export function createGoalRuntime(
     getVerifierFeedback(permit: GoalTurnPermit): string | undefined {
       assertOperational();
       if (!isCurrentPermit(permit)) {
-        throw new Error('Goal turn permit is no longer valid');
+        throw new Error(STALE_GOAL_TURN_MESSAGE);
       }
       return currentTurnFeedback;
     },
@@ -668,7 +750,7 @@ export function createGoalRuntime(
         async (): Promise<VerificationAttempt | undefined> => {
           assertOperational();
           if (!isCurrentPermit(permit) || !snapshot.goal) {
-            throw new Error('Goal turn permit is no longer valid');
+            throw new Error(STALE_GOAL_TURN_MESSAGE);
           }
           const recordUuid = randomUUID();
           const nextGoal = reduceGoalTurnFinished(snapshot.goal, {
@@ -754,7 +836,7 @@ export function createGoalRuntime(
     async getGoalForWorker(permit: GoalTurnPermit): Promise<GoalWorkerView> {
       assertOperational();
       if (!isCurrentPermit(permit) || !snapshot.goal) {
-        throw new Error('Goal turn permit is no longer valid');
+        throw new Error(STALE_GOAL_TURN_MESSAGE);
       }
       const goal = structuredClone(snapshot.goal);
       const verifierFeedback = currentTurnFeedback;
@@ -776,7 +858,7 @@ export function createGoalRuntime(
         permit,
       });
       if (!isCurrentPermit(permit) || !snapshot.goal) {
-        throw new Error('Goal turn permit is no longer valid');
+        throw new Error(STALE_GOAL_TURN_MESSAGE);
       }
       return {
         goalId: goal.goalId,
@@ -793,8 +875,10 @@ export function createGoalRuntime(
     ): GoalProposalReceipt {
       assertOperational();
       if (!isCurrentPermit(permit)) {
-        throw new Error('Goal turn permit is no longer valid');
+        throw new Error(STALE_GOAL_TURN_MESSAGE);
       }
+      const reasonError = validateGoalProposalReason(proposal.reason);
+      if (reasonError) throw new Error(reasonError);
       if (currentProposal) {
         return {
           recorded: false,
@@ -810,7 +894,7 @@ export function createGoalRuntime(
         proposal.blockerKind !== 'authority' &&
         proposal.blockerKind !== 'external'
       ) {
-        const fingerprint = `${proposal.blockerKind ?? ''}\n${proposal.reason}`;
+        const fingerprint = `${proposal.blockerKind ?? 'repeated'}\n${proposal.reason}`;
         blockedAuditCandidate = {
           fingerprint,
           count:
