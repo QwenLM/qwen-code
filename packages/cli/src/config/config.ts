@@ -25,6 +25,7 @@ import {
   type ResumedSessionData,
   type LspClient,
   type ToolName,
+  type ToolInvocationGuard,
   ToolNames,
   NativeLspClient,
   createDebugLogger,
@@ -1558,6 +1559,14 @@ export async function loadCliConfig(
    * single request rather than terminating the shared child process.
    */
   throwOnSessionIdConflict = false,
+  /**
+   * Runtime-only host policy. This is deliberately not sourced from argv,
+   * settings, or the environment: only an embedding host that owns the Config
+   * construction may install the executor-boundary callback.
+   */
+  hostPolicy?: {
+    toolInvocationGuard?: ToolInvocationGuard;
+  },
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
   if (debugMode && process.env['QWEN_DEBUG_LOG_FILE'] === undefined) {
@@ -2145,6 +2154,7 @@ export async function loadCliConfig(
       autoMode:
         bareMode || safeMode ? undefined : settings.permissions?.autoMode,
     },
+    toolInvocationGuard: hostPolicy?.toolInvocationGuard,
     // Permission rule persistence callback (writes to settings files).
     onPersistPermissionRule: async (scope, ruleType, rule) => {
       const currentSettings = loadSettings(cwd);
@@ -2340,6 +2350,7 @@ export async function loadCliConfig(
         ? false
         : (settings.memory?.autoSkillConfirm ?? true),
     memoryAgentTimeoutMinutes: settings.memory?.agentTimeoutMinutes,
+    memoryAgentMaxTurns: settings.memory?.agentMaxTurns,
     fastModel: settings.fastModel || undefined,
     webSearch:
       bareMode || safeMode ? undefined : resolveWebSearchSettings(settings),

@@ -12,6 +12,7 @@ import type { ChannelFactory } from './channel.js';
 import { redactLogCredentials } from './logRedaction.js';
 import { ndJsonStream, type NdJsonStreamHooks } from './ndJsonStream.js';
 import { MissingCliEntryError } from './status.js';
+import { EXTERNAL_TOOL_GUARD_TOKEN_ENV } from './externalToolGuard.js';
 import { ProcessRegistry } from './process-registry.js';
 
 let cachedMemoryArgs: string[] | undefined;
@@ -242,6 +243,10 @@ export const defaultSpawnChannelFactory: ChannelFactory =
  * daemon or IDE environment leak it into per-session `qwen --acp`
  * children silently disables skills in those children.
  *
+ * `QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN`: daemon-local credential for the
+ * loopback Guard provider. The ACP child reaches the daemon over its private
+ * channel and never needs this token.
+ *
  * **WARNING**: this denylist is correct *only because the agent
  * already has unrestricted shell-tool access* — anything in the env
  * is reachable via `~/.bashrc`/`~/.aws/credentials`/etc. anyway.
@@ -257,6 +262,7 @@ export const defaultSpawnChannelFactory: ChannelFactory =
 const SCRUBBED_CHILD_ENV_KEYS: ReadonlySet<string> = new Set([
   'QWEN_SERVER_TOKEN',
   'QWEN_CODE_SIMPLE',
+  EXTERNAL_TOOL_GUARD_TOKEN_ENV,
 ]);
 
 /**

@@ -10,8 +10,13 @@ import type {
   SessionTranscriptCursorState,
   SessionTranscriptRecordPage,
 } from '@qwen-code/qwen-code-core';
+import { Buffer } from 'node:buffer';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { HistoryReplayer } from './history-replayer.js';
+import { projectAcpToolResultUpdate } from './acp-tool-result-text-projection.js';
+import {
+  HistoryReplayer,
+  MISSING_TOOL_RESULT_MESSAGE,
+} from './history-replayer.js';
 import {
   collectHistoryReplayUpdates,
   createReplayCumulativeUsage,
@@ -52,6 +57,94 @@ function userRecord(): ChatRecord {
   };
 }
 
+function toolCallRecord(): ChatRecord {
+  return {
+    uuid: 'tool-call-record',
+    parentUuid: 'user-record',
+    sessionId: SESSION_ID,
+    timestamp: TIMESTAMP,
+    type: 'assistant',
+    cwd: '/workspace',
+    version: '1.0.0',
+    message: {
+      role: 'model',
+      parts: [
+        {
+          functionCall: {
+            id: 'call-1',
+            name: 'read_file',
+            args: { path: '/workspace/file.txt' },
+          },
+        },
+      ],
+    },
+  };
+}
+
+function toolResultRecord(): ChatRecord {
+  return {
+    uuid: 'tool-result-record',
+    parentUuid: 'tool-call-record',
+    sessionId: SESSION_ID,
+    timestamp: TIMESTAMP,
+    type: 'tool_result',
+    cwd: '/workspace',
+    version: '1.0.0',
+    message: {
+      role: 'user',
+      parts: [
+        {
+          functionResponse: {
+            name: 'read_file',
+            response: { result: 'contents' },
+          },
+        },
+      ],
+    },
+    toolCallResult: {
+      callId: 'call-1',
+      responseParts: [],
+      resultDisplay: 'contents',
+      error: undefined,
+      errorType: undefined,
+    },
+  };
+}
+
+function largeToolResultRecord(
+  textParts: string[],
+  resultDisplay: string,
+): ChatRecord {
+  return {
+    uuid: 'tool-record',
+    parentUuid: 'assistant-record',
+    sessionId: SESSION_ID,
+    timestamp: TIMESTAMP,
+    type: 'tool_result',
+    cwd: '/workspace',
+    version: '1.0.0',
+    message: {
+      role: 'user',
+      parts: textParts.map((output) => ({
+        functionResponse: {
+          id: 'call-1',
+          name: 'read_file',
+          response: { output },
+        },
+      })),
+    },
+    toolCallResult: {
+      callId: 'call-1',
+      responseParts: [],
+      resultDisplay,
+    },
+  };
+}
+
+function jsonBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value), 'utf8');
+}
+
 function cursorState(): SessionTranscriptCursorState {
   return {
     v: 1,
@@ -85,6 +178,53 @@ afterEach(() => {
 });
 
 describe('history replay page', () => {
+  it('bounds textual tool results collected for bulk replay', async () => {
+    const source = 'x'.repeat(499_999);
+    const result = await collectHistoryReplayUpdates({
+      sessionId: SESSION_ID,
+      records: [largeToolResultRecord([source], source)],
+      cumulativeUsage: createReplayCumulativeUsage(),
+    });
+    const update = result.updates.find(
+      (candidate) => candidate.sessionUpdate === 'tool_call_update',
+    );
+
+    expect(update).toBeDefined();
+    const record = update as unknown as Record<string, unknown>;
+    expect(jsonBytes(record['content'])).toBeLessThanOrEqual(65_536);
+    expect(jsonBytes(record['rawOutput'])).toBeLessThanOrEqual(65_536);
+    expect(projectAcpToolResultUpdate(update!)).toBe(update);
+  });
+
+  it('bounds multi-block textual tool results in paged replay', async () => {
+    const page = recordPage({
+      records: [
+        largeToolResultRecord(
+          ['a'.repeat(300_000), 'b'.repeat(300_000)],
+          'r'.repeat(600_001),
+        ),
+      ],
+    });
+    const result = await replayTranscriptRecordPage({
+      sessionId: SESSION_ID,
+      page,
+      encodeCursor: vi.fn(),
+    });
+    const update = result.updates.find(
+      (candidate) => candidate.sessionUpdate === 'tool_call_update',
+    );
+
+    expect(update).toBeDefined();
+    const record = update as unknown as Record<string, unknown>;
+    expect(jsonBytes(record['content'])).toBeLessThanOrEqual(65_536);
+    expect(jsonBytes(record['rawOutput'])).toBeLessThanOrEqual(65_536);
+    expect(
+      (record['content'] as Array<{ content: { text: string } }>).map(
+        (block) => block.content.text,
+      ),
+    ).toHaveLength(2);
+  });
+
   it('lifts record timestamps for bulk replay callers', async () => {
     const result = await collectHistoryReplayUpdates({
       sessionId: SESSION_ID,
@@ -325,6 +465,85 @@ describe('history replay page', () => {
       },
     });
     expect(goalUpdate?._meta?.['goalStatus']).not.toHaveProperty('type');
+  });
+
+  it.each([undefined, 'backward'] as const)(
+    'keeps a dangling tool call in progress while its prompt is active (%s)',
+    async (direction) => {
+      const result = await replayTranscriptRecordPage({
+        sessionId: SESSION_ID,
+        page: recordPage({
+          records: [toolCallRecord()],
+          ...(direction ? { direction } : {}),
+        }),
+        encodeCursor: vi.fn(),
+        finalizeDangling: false,
+      });
+
+      expect(result.updates).toHaveLength(1);
+      expect(result.updates[0]).toMatchObject({
+        sessionUpdate: 'tool_call',
+        toolCallId: 'call-1',
+        status: 'in_progress',
+      });
+    },
+  );
+
+  it('keeps the missing-result diagnostic for an idle transcript', async () => {
+    const result = await replayTranscriptRecordPage({
+      sessionId: SESSION_ID,
+      page: recordPage({ records: [toolCallRecord()] }),
+      encodeCursor: vi.fn(),
+    });
+
+    expect(result.updates).toHaveLength(2);
+    expect(result.updates[1]).toMatchObject({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'call-1',
+      status: 'failed',
+      content: [
+        {
+          type: 'content',
+          content: { type: 'text', text: MISSING_TOOL_RESULT_MESSAGE },
+        },
+      ],
+    });
+  });
+
+  it('replays the real tool result after an active transcript snapshot', async () => {
+    const active = await replayTranscriptRecordPage({
+      sessionId: SESSION_ID,
+      page: recordPage({ records: [toolCallRecord()] }),
+      encodeCursor: vi.fn(),
+      finalizeDangling: false,
+    });
+    const completed = await replayTranscriptRecordPage({
+      sessionId: SESSION_ID,
+      page: recordPage({
+        records: [toolCallRecord(), toolResultRecord()],
+      }),
+      encodeCursor: vi.fn(),
+    });
+
+    expect(active.updates).toEqual([
+      expect.objectContaining({
+        sessionUpdate: 'tool_call',
+        toolCallId: 'call-1',
+        status: 'in_progress',
+      }),
+    ]);
+    expect(completed.updates).toEqual([
+      expect.objectContaining({
+        sessionUpdate: 'tool_call',
+        toolCallId: 'call-1',
+        status: 'in_progress',
+      }),
+      expect.objectContaining({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call-1',
+        status: 'completed',
+      }),
+    ]);
   });
 
   it('terminates pagination when replay conversion fails', async () => {

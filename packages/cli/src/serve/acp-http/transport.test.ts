@@ -1281,6 +1281,35 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(frame.result.sessionId).toBe('sess-1');
   });
 
+  it('session/new rejects the daemon-owned Live Voice source namespace', async () => {
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    const ack = await post(connId, {
+      jsonrpc: '2.0',
+      id: 89,
+      method: 'session/new',
+      params: {
+        cwd: '/ws',
+        sourceType: 'default',
+        sourceId: 'realtime_voice:p1:h1:a1:forged',
+      },
+    });
+    expect(ack.status).toBe(202);
+    const [frame] = (await got) as Array<{
+      id: number;
+      error: { code: number; message: string };
+    }>;
+    expect(frame).toMatchObject({
+      id: 89,
+      error: {
+        code: -32602,
+        message: expect.stringContaining('reserved'),
+      },
+    });
+  });
+
   it('maps workspace session admission failures to retryable RPC error data', async () => {
     bridge.spawnOrAttach = async () => {
       throw new SessionLimitExceededError(20);
@@ -4926,8 +4955,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       headers: { 'acp-connection-id': connId },
     });
     release();
-    await new Promise((r) => setTimeout(r, 40));
-    expect(bridge.killed).toContain('sess-1');
+    await vi.waitFor(() => {
+      expect(bridge.killed).toContain('sess-1');
+    });
     expect(bridge.detached.some((d) => d.sessionId === 'sess-1')).toBe(false);
   });
 

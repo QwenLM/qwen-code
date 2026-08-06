@@ -1163,7 +1163,7 @@ Review content`;
         disabledSkillLevels: ['bundled'],
       });
       vi.spyOn(disabledConfig, 'getProjectRoot').mockReturnValue(
-        '/test/project',
+        TEST_PROJECT_ROOT,
       );
       const disabledManager = new SkillManager(disabledConfig);
       mockReaddirForLevels(new Set(['project', 'bundled']));
