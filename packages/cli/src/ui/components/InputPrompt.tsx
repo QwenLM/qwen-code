@@ -1212,10 +1212,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         // Relies on two invariants: (1) InputPrompt/BaseTextInput subscribe
         // before AppContainer, and (2) buffer.text reads through to
         // stateRef.current synchronously. Break either and the single-ESC
-        // cancel regresses with a fully green suite - see the integration test.
-        // Only Responding is gated (matching AppContainer's cancel branch);
-        // WaitingForConfirmation is deliberately not covered - do NOT broaden
-        // this to !== Idle or ESC becomes a no-op during a tool confirmation.
+        // cancel regresses with a fully green suite (no integration test
+        // covers this hop yet - the two harnesses mock each other's side).
+        // Only Responding is gated (matching AppContainer's cancel branch).
+        // WaitingForConfirmation needs no handling here: Composer unmounts
+        // InputPrompt whenever isInputActive is false (isInputActiveForState
+        // admits only Idle/Responding), so this branch never runs during a
+        // tool confirmation.
         if (
           !isAttachmentMode &&
           uiState.messageQueue.length > 0 &&

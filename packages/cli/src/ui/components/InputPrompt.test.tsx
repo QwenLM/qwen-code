@@ -5747,11 +5747,10 @@ describe('InputPrompt', () => {
 
     it('does not pop the queue or clear the buffer on ESC when responding with an empty buffer', async () => {
       // Pins the no-side-effect contract for ESC while the agent is Responding
-      // and both the buffer and the queue are empty: no queue pop and no
-      // buffer mutation. The cancel itself is AppContainer's job (its broadcast
-      // ESC handler runs after this one and sees the empty buffer), so this
-      // only asserts InputPrompt's side leaves the shared buffer untouched.
-      // #8201.
+      // and both the buffer and the queue are empty. This branch consumes the
+      // key (returns true) but mutates nothing; AppContainer's broadcast ESC
+      // handler runs after this one regardless of return values and cancels
+      // because the buffer stayed empty. #8201.
       mockedUseUIState.mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: [],
