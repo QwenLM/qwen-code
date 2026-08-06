@@ -9737,17 +9737,21 @@ export class Session implements SessionContext {
               data: part.data,
             },
           });
-        case 'audio':
-          // Audio skips the clamp here so runAudioBridge can own it:
+        case 'audio': {
+          // Recognized audio skips the clamp here so runAudioBridge can own it:
           // transcription (with its own size gate) for text-only targets, or
           // clamped native passthrough in #applyAudioBridgeIfNeeded when the
           // bridge skips an audio-capable target.
-          return {
+          const audioPart = {
             inlineData: {
               mimeType: part.mimeType,
               data: part.data,
             },
           };
+          return hasAudioParts([audioPart])
+            ? audioPart
+            : clampInlineMediaPart(audioPart);
+        }
         case 'resource_link': {
           if (part.uri.startsWith(FILE_URI_SCHEME)) {
             return {

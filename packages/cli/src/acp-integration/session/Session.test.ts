@@ -5126,6 +5126,41 @@ describe('Session', () => {
       }
     });
 
+    it('clamps non-audio MIME payloads supplied as ACP audio blocks', async () => {
+      const ENV_KEY = 'QWEN_CODE_MAX_INLINE_MEDIA_BYTES';
+      const original = process.env[ENV_KEY];
+      process.env[ENV_KEY] = '8';
+      mockConfig.getEffectiveInputModalities = vi
+        .fn()
+        .mockReturnValue({ image: true, video: true });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'inspect this payload' },
+            {
+              type: 'audio',
+              mimeType: 'video/mp4',
+              data: 'QUJDREVGR0hJSktMTU5PUFFSU1Q=',
+            },
+          ],
+        });
+      } finally {
+        if (original === undefined) delete process.env[ENV_KEY];
+        else process.env[ENV_KEY] = original;
+      }
+
+      expect(transcribeVoiceAudioSpy).not.toHaveBeenCalled();
+      const sent = firstSentMessage();
+      expect(sent.some((part) => 'inlineData' in part)).toBe(false);
+      expect(textParts(sent).join('\n')).toContain('video/mp4');
+      expect(textParts(sent).join('\n')).toContain('Media omitted');
+    });
+
     it('routes ACP audio prompts through the audio bridge for text-only primary models', async () => {
       mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
       mockChat.sendMessageStream = vi
