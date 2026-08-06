@@ -67,6 +67,38 @@ describe('channel registry', () => {
       message: 'Channel field "settings" cannot be a required object.',
     },
     {
+      type: 'invalid-truthy-required-object',
+      fields: [
+        {
+          key: 'settings',
+          label: 'Settings',
+          kind: 'object',
+          required: 'true',
+        },
+      ],
+      message: 'Channel field "settings" cannot be a required object.',
+    },
+    {
+      type: 'invalid-truthy-nested-environment',
+      fields: [
+        {
+          key: 'settings',
+          label: 'Settings',
+          kind: 'object',
+          properties: [
+            {
+              key: 'endpoint',
+              label: 'Endpoint',
+              kind: 'string',
+              envResolvable: 'yes',
+            },
+          ],
+        },
+      ],
+      message:
+        'Channel field "settings.endpoint" cannot resolve environment references.',
+    },
+    {
       type: 'invalid-env-resolvable-object',
       fields: [
         {
@@ -116,6 +148,11 @@ describe('channel registry', () => {
       message: 'Channel field "type" cannot use the reserved key "type".',
     },
     {
+      type: 'invalid-field-without-key',
+      fields: [{ label: 'Token', kind: 'string', required: true }],
+      message: 'Channel field "undefined" must declare a non-empty string key.',
+    },
+    {
       type: 'invalid-enum-without-options',
       fields: [
         {
@@ -126,6 +163,41 @@ describe('channel registry', () => {
         },
       ],
       message: 'Channel field "mode" must declare at least one option.',
+    },
+    {
+      type: 'invalid-enum-string-options',
+      fields: [
+        {
+          key: 'mode',
+          label: 'Mode',
+          kind: 'enum',
+          options: ['allowlist', 'open'],
+        },
+      ],
+      message: 'Channel field "mode" must declare at least one option.',
+    },
+    {
+      type: 'invalid-object-properties-not-array',
+      fields: [
+        {
+          key: 'settings',
+          label: 'Settings',
+          kind: 'object',
+          properties: '',
+        },
+      ],
+      message: 'Channel field "settings" must declare a properties array.',
+    },
+    {
+      type: 'invalid-object-without-properties',
+      fields: [
+        {
+          key: 'settings',
+          label: 'Settings',
+          kind: 'object',
+        },
+      ],
+      message: 'Channel field "settings" must declare a properties array.',
     },
     {
       type: 'invalid-duplicate-top-level-field',
@@ -216,25 +288,60 @@ describe('channel registry', () => {
     });
   });
 
+  it('registers a plugin whose validateConfig is not a function without management metadata', async () => {
+    const plugin = {
+      channelType: 'invalid-validate-config',
+      displayName: 'invalid-validate-config',
+      management: {
+        fields: [{ key: 'token', label: 'Token', kind: 'string' }],
+        validateConfig: { report: true },
+      },
+      createChannel() {
+        throw new Error('not used');
+      },
+    } as unknown as ChannelPlugin;
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+    registerPlugin(plugin);
+
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Invalid management metadata in "invalid-validate-config" channel: Channel management metadata must declare validateConfig as a function.',
+      ),
+    );
+    stderr.mockRestore();
+
+    const registered = await getPlugin('invalid-validate-config');
+    expect(registered?.management).toBeUndefined();
+    expect(registered?.createChannel).toBe(plugin.createChannel);
+
+    const entry = (await supportedChannelCatalog()).find(
+      (candidate) => candidate.type === 'invalid-validate-config',
+    );
+    expect(entry).toEqual({
+      type: 'invalid-validate-config',
+      displayName: 'invalid-validate-config',
+      manageable: false,
+      fields: [],
+    });
+  });
+
   it('only marks the manually configurable built-in types as manageable', async () => {
     const catalog = await supportedChannelCatalog();
     expect(
       catalog
         .map((entry) => entry.type)
-        .filter((type) => !type.startsWith('invalid-'))
-        .sort(),
-    ).toEqual(
-      [
-        'telegram',
-        'weixin',
-        'dingtalk',
-        'wecom',
-        'feishu',
-        'qq',
-        'github',
-        'gitlab',
-      ].sort(),
-    );
+        .filter((type) => !type.startsWith('invalid-')),
+    ).toEqual([
+      'telegram',
+      'weixin',
+      'dingtalk',
+      'wecom',
+      'feishu',
+      'qq',
+      'github',
+      'gitlab',
+    ]);
     expect(
       catalog.filter((entry) => entry.manageable).map((entry) => entry.type),
     ).toEqual(['dingtalk', 'wecom', 'feishu', 'github', 'gitlab']);

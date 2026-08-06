@@ -208,6 +208,14 @@ function assertSharedField(key: string, value: unknown): boolean {
   return false;
 }
 
+function containsUnsafeObjectKey(value: Record<string, unknown>): boolean {
+  for (const [key, nested] of Object.entries(value)) {
+    if (UNSAFE_OBJECT_KEYS.has(key)) return true;
+    if (isRecord(nested) && containsUnsafeObjectKey(nested)) return true;
+  }
+  return false;
+}
+
 function assertDescriptorValue(
   field: ChannelConfigFieldDescriptor,
   value: unknown,
@@ -217,6 +225,12 @@ function assertDescriptorValue(
   if (field.kind === 'object') {
     if (!isRecord(value)) {
       throw invalidConfig(`Channel field "${path}" has an invalid value.`);
+    }
+    // The web editor cannot edit object fields and re-sends the stored value
+    // verbatim on every save; an unchanged stored object keeps its values even
+    // if a newer rule would reject them. Reserved keys stay rejected.
+    if (isDeepStrictEqual(previous, value) && !containsUnsafeObjectKey(value)) {
+      return;
     }
     const previousRecord = isRecord(previous) ? previous : {};
     const properties = new Map(

@@ -33,6 +33,7 @@ export type ChannelEditorValidationCode =
   | 'invalid'
   | 'invalidOption'
   | 'number'
+  | 'outOfRange'
   | 'policy';
 
 export type ChannelEditorValidationErrors = Record<
@@ -162,12 +163,13 @@ export function validateChannelEditorDraft(
       draftValue.trim() !== ''
     ) {
       const parsed = Number(draftValue);
-      if (
-        !Number.isFinite(parsed) ||
-        (field.exclusiveMinimum !== undefined &&
-          parsed <= field.exclusiveMinimum)
-      ) {
+      if (!Number.isFinite(parsed)) {
         errors[field.key] = 'number';
+      } else if (
+        field.exclusiveMinimum !== undefined &&
+        parsed <= field.exclusiveMinimum
+      ) {
+        errors[field.key] = 'outOfRange';
       }
     } else if (field.kind === 'string-list' && field.options) {
       if (typeof draftValue === 'string') {

@@ -549,6 +549,54 @@ describe('WorkspaceChannelSettingsStore', () => {
     });
   });
 
+  it('preserves an unchanged stored object value that fails current validation', async () => {
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "bot": {
+    "type": "dingtalk",
+    "clientId": "client-id",
+    "clientSecret": "existing-secret",
+    "interactiveCards": {
+      "questionCard": { "enabled": true, "timeoutMs": 0 }
+    }
+  } }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    const next = await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'dingtalk',
+        clientId: 'updated-id',
+        interactiveCards: { questionCard: { enabled: true, timeoutMs: 0 } },
+      },
+      secrets: { clientSecret: { operation: 'preserve' } },
+    });
+
+    expect(next.channels['bot']).toMatchObject({
+      clientId: 'updated-id',
+      interactiveCards: { questionCard: { enabled: true, timeoutMs: 0 } },
+    });
+
+    const beforeRejectedWrite = fs.readFileSync(settingsPath, 'utf8');
+    await expect(
+      store.upsert('bot', {
+        expectedRevision: next.revision,
+        config: {
+          type: 'dingtalk',
+          clientId: 'updated-id',
+          interactiveCards: { questionCard: { enabled: true, timeoutMs: -1 } },
+        },
+        secrets: { clientSecret: { operation: 'preserve' } },
+      }),
+    ).rejects.toMatchObject({
+      code: 'channel_settings_invalid_config',
+      message:
+        'Channel field "interactiveCards.questionCard.timeoutMs" has an invalid value.',
+    });
+    expect(fs.readFileSync(settingsPath, 'utf8')).toBe(beforeRejectedWrite);
+  });
+
   it('rejects an omitted required nested descriptor property without writing', async () => {
     const store = new WorkspaceChannelSettingsStore(workspace);
     const before = fs.readFileSync(settingsPath, 'utf8');

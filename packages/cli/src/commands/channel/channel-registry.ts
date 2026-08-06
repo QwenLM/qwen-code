@@ -26,6 +26,11 @@ function assertManagementFields(
   const seen = new Set<string>();
   for (const field of fields) {
     const path = parentPath ? `${parentPath}.${field.key}` : field.key;
+    if (typeof field.key !== 'string' || field.key.length === 0) {
+      throw new Error(
+        `Channel field "${path}" must declare a non-empty string key.`,
+      );
+    }
     if (seen.has(field.key)) {
       throw new Error(`Channel field "${path}" is declared more than once.`);
     }
@@ -47,8 +52,8 @@ function assertManagementField(
       `Channel field "${path}" cannot use the reserved key "type".`,
     );
   }
-  const envResolvable = field.envResolvable === true;
-  const required = field.required === true;
+  const envResolvable = Boolean(field.envResolvable);
+  const required = Boolean(field.required);
   if (field.kind === 'secret' && nested) {
     throw new Error(`Channel field "${path}" cannot declare a nested secret.`);
   }
@@ -57,7 +62,12 @@ function assertManagementField(
       `Channel field "${path}" cannot resolve environment references.`,
     );
   }
-  if (field.kind === 'enum' && (field.options?.length ?? 0) === 0) {
+  if (
+    field.kind === 'enum' &&
+    (!Array.isArray(field.options) ||
+      field.options.length === 0 ||
+      field.options.some((option) => typeof option?.value !== 'string'))
+  ) {
     throw new Error(
       `Channel field "${path}" must declare at least one option.`,
     );
@@ -71,12 +81,23 @@ function assertManagementField(
       `Channel field "${path}" cannot resolve environment references.`,
     );
   }
-  assertManagementFields(field.properties ?? [], path, true);
+  if (!Array.isArray(field.properties)) {
+    throw new Error(`Channel field "${path}" must declare a properties array.`);
+  }
+  assertManagementFields(field.properties, path, true);
 }
 
 function assertManagementDescriptor(plugin: ChannelPlugin): void {
   const management = plugin.management;
   if (management === undefined) return;
+  if (
+    management.validateConfig !== undefined &&
+    typeof management.validateConfig !== 'function'
+  ) {
+    throw new Error(
+      'Channel management metadata must declare validateConfig as a function.',
+    );
+  }
   if (!Array.isArray(management.fields)) {
     throw new Error('Channel management metadata must declare a fields array.');
   }

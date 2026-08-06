@@ -14,14 +14,15 @@ import type {
   DaemonChannelConfigFieldDescriptor,
   DaemonChannelConfigFieldKind,
   DaemonChannelConfigNestedFieldDescriptor,
+  DaemonChannelTypeDescriptor,
 } from '@qwen-code/sdk/daemon';
 import { supportedChannelCatalog } from './channel-registry.js';
+import type { ChannelTypeDescriptor } from './channel-registry.js';
 
-type MirrorMatches<Source, Target> = [Source] extends [Target]
-  ? [Target] extends [Source]
+type MirrorMatches<Source, Target> =
+  (<T>() => T extends Source ? 1 : 2) extends <T>() => T extends Target ? 1 : 2
     ? true
-    : false
-  : false;
+    : false;
 
 type FieldKindsMatch = MirrorMatches<
   ChannelConfigFieldKind,
@@ -34,6 +35,10 @@ type FieldDescriptorsMatch = MirrorMatches<
 type NestedFieldDescriptorsMatch = MirrorMatches<
   ChannelConfigNestedFieldDescriptor,
   DaemonChannelConfigNestedFieldDescriptor
+>;
+type CatalogEnvelopesMatch = MirrorMatches<
+  ChannelTypeDescriptor,
+  DaemonChannelTypeDescriptor
 >;
 
 const FIELD_KINDS: readonly ChannelConfigFieldKind[] = [
@@ -90,9 +95,13 @@ describe('channel descriptor SDK mirror', () => {
     const fieldKindsMatch: FieldKindsMatch = true;
     const fieldDescriptorsMatch: FieldDescriptorsMatch = true;
     const nestedFieldDescriptorsMatch: NestedFieldDescriptorsMatch = true;
+    const catalogEnvelopesMatch: CatalogEnvelopesMatch = true;
 
     expect(
-      fieldKindsMatch && fieldDescriptorsMatch && nestedFieldDescriptorsMatch,
+      fieldKindsMatch &&
+        fieldDescriptorsMatch &&
+        nestedFieldDescriptorsMatch &&
+        catalogEnvelopesMatch,
     ).toBe(true);
   });
 
@@ -100,6 +109,15 @@ describe('channel descriptor SDK mirror', () => {
     const catalog = await supportedChannelCatalog();
     const manageable = catalog.filter((entry) => entry.manageable);
     expect(manageable).not.toHaveLength(0);
+    const dingtalk = catalog.find((entry) => entry.type === 'dingtalk');
+    expect(
+      dingtalk?.fields.some(
+        (field) =>
+          field.kind === 'object' &&
+          field.properties !== undefined &&
+          field.properties.length > 0,
+      ),
+    ).toBe(true);
     for (const entry of manageable) {
       for (const field of entry.fields) {
         assertDescriptorWireShape(field);

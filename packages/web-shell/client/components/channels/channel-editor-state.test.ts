@@ -219,7 +219,7 @@ describe('Channel editor state', () => {
     invalid.name = 'example';
     invalid.values.timeoutMs = '0';
     expect(validateChannelEditorDraft(descriptor, invalid, [])).toEqual({
-      timeoutMs: 'number',
+      timeoutMs: 'outOfRange',
     });
 
     const valid = createChannelEditorDraft(descriptor);
