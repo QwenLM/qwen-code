@@ -294,7 +294,7 @@ export async function processMediaForOmniDelivery(
     .update(`${cgc.baseUrl ?? ''}|${cgc.apiKey ?? ''}`)
     .digest('hex')
     .slice(0, 16);
-  const configuredTtl = config.getOmniUploadCacheTtlHours?.();
+  const configuredTtl = config.getOmniUploadUrlTtlHours?.();
   const uploadCache = new OmniUploadCache(
     store.getOmniRootDir(),
     configuredTtl === undefined
@@ -487,10 +487,11 @@ export async function readMediaViaOmniDelivery(params: {
 
 /** Effective download byte ceiling — never above the upload channel cap
  * (downloading more than can be delivered is pointless), including when
- * `omni.download.maxFileBytes` is explicitly configured higher. */
+ * `omni.ingestion.localization.url.maxFileBytes` is explicitly configured
+ * higher. */
 export function effectiveMaxDownloadFileBytes(config: Config): number {
   const uploadCap = effectiveMaxUploadFileBytes(config);
-  const configured = config.getOmniDownloadMaxFileBytes?.();
+  const configured = config.getOmniUrlDownloadMaxFileBytes?.();
   if (configured !== undefined && configured > 0) {
     return Math.min(configured, uploadCap);
   }

@@ -26,7 +26,7 @@ export class OmniTransportGuardError extends Error {
 
 /** Resolve the effective byte ceiling (undefined/<=0 config → default). */
 export function effectiveMaxUploadFileBytes(config: Config): number {
-  const configured = config.getOmniUploadMaxFileBytes?.();
+  const configured = config.getOmniMaxUploadFileBytes?.();
   return configured !== undefined && configured > 0
     ? configured
     : DEFAULT_OMNI_MAX_UPLOAD_FILE_BYTES;
@@ -44,7 +44,7 @@ export function assertWithinByteLimit(
   if (sizeBytes > maxBytes) {
     throw new OmniTransportGuardError(
       `${displayName} exceeds the omni upload limit: ${sizeBytes} bytes > ` +
-        `${maxBytes} bytes (omni.upload.maxFileBytes). ` +
+        `${maxBytes} bytes (omni.processing.transportGuard.maxUploadFileBytes). ` +
         `Reduce the file size before retrying.`,
     );
   }
@@ -55,7 +55,7 @@ export function assertWithinByteLimit(
  * BEFORE store/upload, so an oversized input costs one probe — not a copy
  * and a multi-minute upload.
  *
- * Threshold semantics (`omni.transport.maxEstimatedTokens`):
+ * Threshold semantics (`omni.processing.transportGuard.maxEstimatedTokens`):
  * - unset / 0 / negative → guard disabled (the estimation formula is still
  *   pending confirmation with the model provider; estimates are attached
  *   for observability but must not reject until a threshold is set);
@@ -77,7 +77,7 @@ export function assertWithinTokenLimit(
     throw new OmniTransportGuardError(
       `${displayName} exceeds the omni estimated-token limit: ` +
         `~${estimate.estimatedTokenCount} tokens (${estimate.method}) > ` +
-        `${maxTokens} (omni.transport.maxEstimatedTokens). ` +
+        `${maxTokens} (omni.processing.transportGuard.maxEstimatedTokens). ` +
         `Reduce duration/resolution or raise the limit.`,
     );
   }

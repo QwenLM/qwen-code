@@ -1103,13 +1103,13 @@ export interface ConfigParameters {
    * pipeline (omni-experiment branch). */
   omniEnabled?: boolean;
   /** Per-file byte ceiling for omni media uploads (default 1 GiB). */
-  omniUploadMaxFileBytes?: number;
+  omniMaxUploadFileBytes?: number;
   /** Estimated-token ceiling for omni media (0/unset = guard disabled). */
   omniMaxEstimatedTokens?: number;
   /** Byte ceiling for omni URL downloads (unset = follow upload cap). */
-  omniDownloadMaxFileBytes?: number;
-  /** Upload cache TTL in hours (0 disables the cache; default 47). */
-  omniUploadCacheTtlHours?: number;
+  omniUrlDownloadMaxFileBytes?: number;
+  /** Upload URL TTL in hours (0 disables the cache; default 47). */
+  omniUploadUrlTtlHours?: number;
   /** Image generation model selected through `/model --image`. */
   imageModel?: string;
   /**
@@ -1936,10 +1936,10 @@ export class Config {
   private readonly artifactHost?: ArtifactHostConfig;
   private readonly artifactOss?: ArtifactOssConfig;
   private readonly omniEnabled: boolean = false;
-  private readonly omniUploadMaxFileBytes?: number;
+  private readonly omniMaxUploadFileBytes?: number;
   private readonly omniMaxEstimatedTokens?: number;
-  private readonly omniDownloadMaxFileBytes?: number;
-  private readonly omniUploadCacheTtlHours?: number;
+  private readonly omniUrlDownloadMaxFileBytes?: number;
+  private readonly omniUploadUrlTtlHours?: number;
   private workflowsEnabled = false;
   private readonly skipWorkflowUsageWarning: boolean = false;
   private readonly computerUseEnabled: boolean = true;
@@ -2216,10 +2216,10 @@ export class Config {
     this.artifactHost = params.artifactHost;
     this.artifactOss = params.artifactOss;
     this.omniEnabled = params.omniEnabled ?? false;
-    this.omniUploadMaxFileBytes = params.omniUploadMaxFileBytes;
+    this.omniMaxUploadFileBytes = params.omniMaxUploadFileBytes;
     this.omniMaxEstimatedTokens = params.omniMaxEstimatedTokens;
-    this.omniDownloadMaxFileBytes = params.omniDownloadMaxFileBytes;
-    this.omniUploadCacheTtlHours = params.omniUploadCacheTtlHours;
+    this.omniUrlDownloadMaxFileBytes = params.omniUrlDownloadMaxFileBytes;
+    this.omniUploadUrlTtlHours = params.omniUploadUrlTtlHours;
     this.workflowsEnabled = params.workflowsEnabled ?? false;
     this.skipWorkflowUsageWarning = params.skipWorkflowUsageWarning ?? false;
     this.computerUseEnabled = params.computerUseEnabled ?? true;
@@ -6380,20 +6380,20 @@ export class Config {
     return this.omniEnabled;
   }
 
-  getOmniUploadMaxFileBytes(): number | undefined {
-    return this.omniUploadMaxFileBytes;
+  getOmniMaxUploadFileBytes(): number | undefined {
+    return this.omniMaxUploadFileBytes;
   }
 
   getOmniMaxEstimatedTokens(): number | undefined {
     return this.omniMaxEstimatedTokens;
   }
 
-  getOmniDownloadMaxFileBytes(): number | undefined {
-    return this.omniDownloadMaxFileBytes;
+  getOmniUrlDownloadMaxFileBytes(): number | undefined {
+    return this.omniUrlDownloadMaxFileBytes;
   }
 
-  getOmniUploadCacheTtlHours(): number | undefined {
-    return this.omniUploadCacheTtlHours;
+  getOmniUploadUrlTtlHours(): number | undefined {
+    return this.omniUploadUrlTtlHours;
   }
 
   resolveImageGenerationModel(

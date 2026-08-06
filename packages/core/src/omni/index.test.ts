@@ -72,8 +72,8 @@ describe('sanitizeErrorMessage', () => {
 describe('effectiveMaxDownloadFileBytes', () => {
   const capsConfig = (download?: number, upload?: number): Config =>
     ({
-      getOmniDownloadMaxFileBytes: () => download,
-      getOmniUploadMaxFileBytes: () => upload,
+      getOmniUrlDownloadMaxFileBytes: () => download,
+      getOmniMaxUploadFileBytes: () => upload,
     }) as unknown as Config;
 
   it('never exceeds the upload cap, even when configured higher', () => {
@@ -186,7 +186,7 @@ describe('readMediaViaOmniDelivery result shape', () => {
       isTrustedFolder: vi.fn().mockReturnValue(true),
       getContentGeneratorConfig: vi.fn().mockReturnValue(DASHSCOPE_CGC),
       getModel: vi.fn().mockReturnValue('qwen3.5-omni-plus'),
-      getOmniUploadMaxFileBytes: vi.fn().mockReturnValue(0),
+      getOmniMaxUploadFileBytes: vi.fn().mockReturnValue(0),
       getOmniMaxEstimatedTokens: vi.fn().mockReturnValue(0),
       storage: { getQwenDir: () => '/tmp/omni-test-qwen' },
     } as unknown as Config;
@@ -540,9 +540,9 @@ describe('processMediaForOmniDelivery upload cache integration', () => {
         .fn()
         .mockReturnValue(overrides?.cgc ?? DASHSCOPE_CGC),
       getModel: vi.fn().mockReturnValue('qwen3.5-omni-plus'),
-      getOmniUploadMaxFileBytes: vi.fn().mockReturnValue(0),
+      getOmniMaxUploadFileBytes: vi.fn().mockReturnValue(0),
       getOmniMaxEstimatedTokens: vi.fn().mockReturnValue(0),
-      getOmniUploadCacheTtlHours: vi.fn().mockReturnValue(overrides?.ttlHours),
+      getOmniUploadUrlTtlHours: vi.fn().mockReturnValue(overrides?.ttlHours),
       storage: { getQwenDir: () => tmpDir },
     } as unknown as Config;
   }

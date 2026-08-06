@@ -2192,10 +2192,13 @@ export async function loadCliConfig(
         }
       : undefined,
     omniEnabled: settings.omni?.enabled ?? false,
-    omniUploadMaxFileBytes: settings.omni?.upload?.maxFileBytes,
-    omniMaxEstimatedTokens: settings.omni?.transport?.maxEstimatedTokens,
-    omniDownloadMaxFileBytes: settings.omni?.download?.maxFileBytes,
-    omniUploadCacheTtlHours: settings.omni?.upload?.cacheTtlHours,
+    omniMaxUploadFileBytes:
+      settings.omni?.processing?.transportGuard?.maxUploadFileBytes,
+    omniMaxEstimatedTokens:
+      settings.omni?.processing?.transportGuard?.maxEstimatedTokens,
+    omniUrlDownloadMaxFileBytes:
+      settings.omni?.ingestion?.localization?.url?.maxFileBytes,
+    omniUploadUrlTtlHours: settings.omni?.delivery?.upload?.urlTtlHours,
     // CDP tunnel (Plan C, #5626): with the tunnel on, browser automation goes
     // through the CDP tunnel (far lighter than the OS-level computer-use
     // driver), so disable computer-use to keep the agent off that heavy path.
