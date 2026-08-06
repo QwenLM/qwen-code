@@ -1,5 +1,20 @@
 # Web Shell tmux Terminal (Interactive CLI Sub-Agent)
 
+## Real scenario
+
+The agent (in the Web Shell) is asked to start an interactive CLI; it uses the
+`tmux` tool, which registers a terminal task. The user can then attach and
+watch the live session.
+
+Web Shell session after the agent created the terminal (`bg_25154e98`):
+
+![Web Shell session showing the tmux tool call](./assets/web-shell-tmux-terminal/webshell-session.png)
+
+The same terminal attached (`tmux -L qwen-serve attach -t qsh-bg_25154e98`),
+running Claude Code live:
+
+![Attached tmux terminal running Claude Code](./assets/web-shell-tmux-terminal/terminal-claude.png)
+
 ## Problem
 
 A Web Shell session's agent already runs as a full qwen-code process on the
