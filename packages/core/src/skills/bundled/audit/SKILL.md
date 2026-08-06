@@ -162,8 +162,9 @@ After verification, run reverse-audit rounds over the plan's `fileGroups`, carry
 **Resolve anchors at write time.** Assemble the report draft, then:
 
 ```bash
-"${QWEN_CODE_CLI}" audit check-anchors --plan .qwen/tmp/audit-plan-<ts>.json \
-  --report <draft-path> --callers .qwen/tmp/audit-callers-<ts>.json
+"${QWEN_CODE_CLI:-qwen}" audit check-anchors --plan .qwen/tmp/audit-plan-<ts>.json \
+  --report <draft-path>
+# add: --callers .qwen/tmp/audit-callers-<ts>.json — only when 1c registered callers (medium/high with a 1c return; never at low)
 ```
 
 Every finding's anchor snippet must resolve uniquely against the audited files or the registered callers. `unresolved`/`ambiguous` → downgrade the finding (or refuse it) and record the refusal in the header; `out-of-scope` → refuse. An exit code of 4 means at least one finding needs this handling — never ship an anchor that binds arbitrarily.
