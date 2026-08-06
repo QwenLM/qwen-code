@@ -7,6 +7,9 @@ const { dingtalkPlugin } = vi.hoisted(() => {
   class InvalidDingtalkPlugin {
     channelType = 'dingtalk';
     displayName = 'DingTalk';
+    requiredConfigFields = ['clientId', 'clientSecret'];
+    envResolvableConfigFields = ['clientId', 'clientSecret'];
+    defaultSessionScope = 'thread';
     management = {
       fields: [
         {
@@ -47,6 +50,9 @@ describe('built-in channel registry', () => {
       fields: [],
     });
     expect(catalog.map((entry) => entry.type)).toContain('gitlab');
+    expect(
+      catalog.filter((entry) => entry.manageable).map((entry) => entry.type),
+    ).toEqual(['wecom', 'feishu', 'github', 'gitlab']);
     expect(stderr).toHaveBeenCalledWith(
       expect.stringContaining(
         'Invalid management metadata in "dingtalk" channel: Channel field "settings" cannot be a required object.',
@@ -55,9 +61,16 @@ describe('built-in channel registry', () => {
 
     const plugin = await getPlugin('dingtalk');
     expect(plugin?.management).toBeUndefined();
+    expect(plugin).not.toBe(dingtalkPlugin);
     expect(plugin?.createChannel).toBeTypeOf('function');
     expect(plugin?.createChannel).toBe(dingtalkPlugin.createChannel);
     expect(plugin?.channelType).toBe('dingtalk');
+    expect(plugin?.requiredConfigFields).toEqual(['clientId', 'clientSecret']);
+    expect(plugin?.envResolvableConfigFields).toEqual([
+      'clientId',
+      'clientSecret',
+    ]);
+    expect(plugin?.defaultSessionScope).toBe('thread');
 
     stderr.mockRestore();
   });

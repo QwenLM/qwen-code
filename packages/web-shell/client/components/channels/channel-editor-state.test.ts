@@ -196,6 +196,7 @@ describe('Channel editor state', () => {
 
     const draft = createChannelEditorDraft(descriptor);
     draft.name = 'example';
+    draft.values.interactiveCards = '';
 
     expect(validateChannelEditorDraft(descriptor, draft, [])).toEqual({});
   });

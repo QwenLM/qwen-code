@@ -574,9 +574,9 @@ describe('WorkspaceChannelSettingsStore', () => {
       secrets: { clientSecret: { operation: 'preserve' } },
     });
 
-    expect(next.channels['bot']).toMatchObject({
-      clientId: 'updated-id',
-      interactiveCards: { questionCard: { enabled: true, timeoutMs: 0 } },
+    expect(next.channels['bot']).toMatchObject({ clientId: 'updated-id' });
+    expect(next.channels['bot']?.['interactiveCards']).toEqual({
+      questionCard: { enabled: true, timeoutMs: 0 },
     });
 
     const beforeRejectedWrite = fs.readFileSync(settingsPath, 'utf8');
@@ -626,11 +626,9 @@ describe('WorkspaceChannelSettingsStore', () => {
       secrets: { clientSecret: { operation: 'preserve' } },
     });
 
-    expect(next.channels['bot']).toMatchObject({
-      interactiveCards: {
-        enabled: true,
-        questionCard: { enabled: true, timeoutMs: 0 },
-      },
+    expect(next.channels['bot']?.['interactiveCards']).toEqual({
+      enabled: true,
+      questionCard: { enabled: true, timeoutMs: 0 },
     });
   });
 
@@ -701,10 +699,8 @@ describe('WorkspaceChannelSettingsStore', () => {
       secrets: { clientSecret: { operation: 'preserve' } },
     });
 
-    expect(next.channels['bot']).toMatchObject({
-      clientId: 'updated-id',
-      nested: {},
-    });
+    expect(next.channels['bot']).toMatchObject({ clientId: 'updated-id' });
+    expect(next.channels['bot']?.['nested']).toEqual({});
   });
 
   it('accepts environment references on fields with truthy non-boolean envResolvable', async () => {
@@ -823,18 +819,16 @@ describe('WorkspaceChannelSettingsStore', () => {
         clientId: 'updated-id',
         interactiveCards: {
           enabled: true,
-          questionCard: { enabled: true, legacyFlag: 1 },
+          questionCard: { enabled: false, legacyFlag: 1 },
         },
       },
       secrets: { clientSecret: { operation: 'preserve' } },
     });
 
-    expect(next.channels['bot']).toMatchObject({
-      clientId: 'updated-id',
-      interactiveCards: {
-        enabled: true,
-        questionCard: { enabled: true, legacyFlag: 1 },
-      },
+    expect(next.channels['bot']).toMatchObject({ clientId: 'updated-id' });
+    expect(next.channels['bot']?.['interactiveCards']).toEqual({
+      enabled: true,
+      questionCard: { enabled: false, legacyFlag: 1 },
     });
 
     const beforeRejectedWrite = fs.readFileSync(settingsPath, 'utf8');
@@ -846,7 +840,7 @@ describe('WorkspaceChannelSettingsStore', () => {
           clientId: 'updated-id',
           interactiveCards: {
             enabled: true,
-            questionCard: { enabled: true, legacyFlag: 2 },
+            questionCard: { enabled: false, legacyFlag: 2 },
           },
         },
         secrets: { clientSecret: { operation: 'preserve' } },
@@ -924,6 +918,107 @@ describe('WorkspaceChannelSettingsStore', () => {
     ).rejects.toMatchObject({
       code: 'channel_settings_invalid_config',
       message: 'Channel field "prototype" is not manageable.',
+    });
+
+    expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
+  });
+
+  it.each([
+    {
+      label: 'reserved key nested under a legacy key',
+      legacy: { constructor: { legacy: true } },
+    },
+    {
+      label: 'reserved key inside a legacy array',
+      legacy: [{ ['__proto__']: { legacy: true } }],
+    },
+  ])(
+    'rejects a stored interactiveCards value with a $label',
+    async ({ legacy }) => {
+      writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "bot": {
+    "type": "dingtalk",
+    "clientId": "client-id",
+    "clientSecret": "existing-secret",
+    "interactiveCards": { "legacy": ${JSON.stringify(legacy)} }
+  } }
+}\n`);
+      const store = new WorkspaceChannelSettingsStore(workspace);
+      const before = fs.readFileSync(settingsPath, 'utf8');
+
+      await expect(
+        store.upsert('bot', {
+          expectedRevision: store.snapshot().revision,
+          config: {
+            type: 'dingtalk',
+            clientId: 'client-id',
+            interactiveCards: { legacy },
+          },
+          secrets: { clientSecret: { operation: 'preserve' } },
+        }),
+      ).rejects.toMatchObject({
+        code: 'channel_settings_invalid_config',
+        message:
+          'Channel field "interactiveCards.legacy" cannot use a reserved key.',
+      });
+
+      expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
+    },
+  );
+
+  it('rejects reserved keys inside record field values without writing', async () => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    const before = fs.readFileSync(settingsPath, 'utf8');
+
+    await expect(
+      store.upsert('bot', {
+        expectedRevision: store.snapshot().revision,
+        config: {
+          type: 'management-validation-test',
+          clientId: 'client-id',
+          templates: { ['__proto__']: 'polluted' },
+        },
+        secrets: { clientSecret: { operation: 'preserve' } },
+      }),
+    ).rejects.toMatchObject({
+      code: 'channel_settings_invalid_config',
+      message: 'Channel field "templates" has an invalid value.',
+    });
+
+    expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
+  });
+
+  it('rejects a validateConfig that returns a Promise instead of an error message', async () => {
+    registerPlugin({
+      channelType: 'promise-validate-config',
+      displayName: 'Promise validate config',
+      management: {
+        fields: [
+          {
+            key: 'clientId',
+            label: 'Client ID',
+            kind: 'string',
+            required: true,
+          },
+        ],
+        validateConfig: () => Promise.resolve(undefined),
+      },
+      createChannel() {
+        throw new Error('not used');
+      },
+    } as unknown as ChannelPlugin);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    const before = fs.readFileSync(settingsPath, 'utf8');
+
+    await expect(
+      store.upsert('bot', {
+        expectedRevision: store.snapshot().revision,
+        config: { type: 'promise-validate-config', clientId: 'client-id' },
+      }),
+    ).rejects.toMatchObject({
+      code: 'channel_settings_invalid_config',
+      message: 'Channel validateConfig must return a string error message.',
     });
 
     expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);

@@ -208,12 +208,15 @@ function assertSharedField(key: string, value: unknown): boolean {
   return false;
 }
 
-function containsUnsafeObjectKey(value: Record<string, unknown>): boolean {
-  for (const [key, nested] of Object.entries(value)) {
-    if (UNSAFE_OBJECT_KEYS.has(key)) return true;
-    if (isRecord(nested) && containsUnsafeObjectKey(nested)) return true;
+function containsUnsafeObjectKey(value: unknown): boolean {
+  if (Array.isArray(value)) {
+    return value.some((item) => containsUnsafeObjectKey(item));
   }
-  return false;
+  if (!isRecord(value)) return false;
+  return Object.entries(value).some(
+    ([key, nested]) =>
+      UNSAFE_OBJECT_KEYS.has(key) || containsUnsafeObjectKey(nested),
+  );
 }
 
 function assertDescriptorValue(
@@ -226,10 +229,7 @@ function assertDescriptorValue(
     // The web editor cannot edit object fields and re-sends the stored value
     // verbatim on every save; an unchanged stored object keeps its values even
     // if a newer rule would reject them. Reserved keys stay rejected.
-    if (
-      isDeepStrictEqual(previous, value) &&
-      (!isRecord(value) || !containsUnsafeObjectKey(value))
-    ) {
+    if (isDeepStrictEqual(previous, value) && !containsUnsafeObjectKey(value)) {
       return;
     }
     if (!isRecord(value)) {
@@ -282,7 +282,8 @@ function assertDescriptorValue(
       value.every((item) => typeof item === 'string')) ||
     (field.kind === 'record' &&
       isRecord(value) &&
-      Object.values(value).every((v) => typeof v === 'string'));
+      Object.values(value).every((v) => typeof v === 'string') &&
+      !containsUnsafeObjectKey(value));
   if (!valid) {
     throw invalidConfig(`Channel field "${path}" has an invalid value.`);
   }
@@ -314,6 +315,11 @@ function assertPreservedUnknownField(
   const fieldPath = path ? `${path}.${key}` : key;
   if (UNSAFE_OBJECT_KEYS.has(key)) {
     throw invalidConfig(`Channel field "${fieldPath}" is not manageable.`);
+  }
+  if (containsUnsafeObjectKey(value)) {
+    throw invalidConfig(
+      `Channel field "${fieldPath}" cannot use a reserved key.`,
+    );
   }
   if (Object.hasOwn(previous, key) && isDeepStrictEqual(previous[key], value)) {
     return;
@@ -459,9 +465,14 @@ export class WorkspaceChannelSettingsStore {
       if (value !== undefined) nextConfig[key] = value;
     }
     assertManagedConfig(nextConfig, previous, plugin.management.fields);
-    const crossFieldError = plugin.management.validateConfig?.(nextConfig);
+    const crossFieldError: unknown =
+      plugin.management.validateConfig?.(nextConfig);
     if (crossFieldError !== undefined) {
-      throw invalidConfig(crossFieldError);
+      throw invalidConfig(
+        typeof crossFieldError === 'string'
+          ? crossFieldError
+          : 'Channel validateConfig must return a string error message.',
+      );
     }
 
     const channels = { ...current.channels, [name]: nextConfig };

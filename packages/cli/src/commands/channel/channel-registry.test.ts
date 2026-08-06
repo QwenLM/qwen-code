@@ -195,6 +195,11 @@ describe('channel registry', () => {
       message: 'Channel field "undefined" must declare a non-empty string key.',
     },
     {
+      type: 'invalid-unknown-kind',
+      fields: [{ key: 'retries', label: 'Retries', kind: 'sting' }],
+      message: 'Channel field "retries" declares an unknown kind "sting".',
+    },
+    {
       type: 'invalid-enum-without-options',
       fields: [
         {
@@ -207,6 +212,11 @@ describe('channel registry', () => {
       message: 'Channel field "mode" must declare at least one option.',
     },
     {
+      type: 'invalid-enum-empty-options',
+      fields: [{ key: 'mode', label: 'Mode', kind: 'enum', options: [] }],
+      message: 'Channel field "mode" must declare at least one option.',
+    },
+    {
       type: 'invalid-enum-string-options',
       fields: [
         {
@@ -216,7 +226,36 @@ describe('channel registry', () => {
           options: ['allowlist', 'open'],
         },
       ],
-      message: 'Channel field "mode" must declare at least one option.',
+      message:
+        'Channel field "mode" must declare non-empty string option values.',
+    },
+    {
+      type: 'invalid-enum-empty-option-value',
+      fields: [
+        {
+          key: 'mode',
+          label: 'Mode',
+          kind: 'enum',
+          options: [{ value: '', label: 'Empty' }],
+        },
+      ],
+      message:
+        'Channel field "mode" must declare non-empty string option values.',
+    },
+    {
+      type: 'invalid-enum-duplicate-option-values',
+      fields: [
+        {
+          key: 'mode',
+          label: 'Mode',
+          kind: 'enum',
+          options: [
+            { value: 'fast', label: 'Fast' },
+            { value: 'fast', label: 'Fastest' },
+          ],
+        },
+      ],
+      message: 'Channel field "mode" declares duplicate option values.',
     },
     {
       type: 'invalid-non-finite-exclusive-minimum',
@@ -306,6 +345,7 @@ describe('channel registry', () => {
 
       const registered = await getPlugin(type);
       expect(registered?.management).toBeUndefined();
+      expect(registered).not.toBe(plugin);
       expect(registered?.createChannel).toBe(plugin.createChannel);
 
       const entry = (await supportedChannelCatalog()).find(
@@ -342,6 +382,7 @@ describe('channel registry', () => {
 
     const registered = await getPlugin('invalid-missing-fields-array');
     expect(registered?.management).toBeUndefined();
+    expect(registered).not.toBe(plugin);
     expect(registered?.createChannel).toBe(plugin.createChannel);
 
     const entry = (await supportedChannelCatalog()).find(
@@ -380,6 +421,7 @@ describe('channel registry', () => {
 
     const registered = await getPlugin('invalid-validate-config');
     expect(registered?.management).toBeUndefined();
+    expect(registered).not.toBe(plugin);
     expect(registered?.createChannel).toBe(plugin.createChannel);
 
     const entry = (await supportedChannelCatalog()).find(
@@ -418,6 +460,7 @@ describe('channel registry', () => {
 
     const registered = await getPlugin('invalid-async-validate-config');
     expect(registered?.management).toBeUndefined();
+    expect(registered).not.toBe(plugin);
     expect(registered?.createChannel).toBe(plugin.createChannel);
 
     const entry = (await supportedChannelCatalog()).find(
@@ -431,13 +474,124 @@ describe('channel registry', () => {
     });
   });
 
+  it('registers a null-prototype plugin without management metadata and keeps Object.prototype behavior', async () => {
+    const plugin = Object.assign(Object.create(null), {
+      channelType: 'invalid-null-prototype-plugin',
+      displayName: 'invalid-null-prototype-plugin',
+      management: {
+        fields: [
+          {
+            key: 'settings',
+            label: 'Settings',
+            kind: 'object',
+            required: true,
+          },
+        ],
+      },
+      createChannel() {
+        throw new Error('not used');
+      },
+    }) as ChannelPlugin;
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+    registerPlugin(plugin);
+
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Invalid management metadata in "invalid-null-prototype-plugin" channel: Channel field "settings" cannot be a required object.',
+      ),
+    );
+    stderr.mockRestore();
+
+    const registered = await getPlugin('invalid-null-prototype-plugin');
+    expect(registered?.management).toBeUndefined();
+    expect(registered).not.toBe(plugin);
+    expect(Object.getPrototypeOf(registered)).toBe(Object.prototype);
+    expect(registered?.createChannel).toBe(plugin.createChannel);
+  });
+
+  it('registers a plugin whose management is a getter-only accessor without management metadata', async () => {
+    class GetterManagementPlugin {
+      channelType = 'invalid-getter-management';
+      displayName = 'invalid-getter-management';
+      get management() {
+        return {
+          fields: [
+            {
+              key: 'settings',
+              label: 'Settings',
+              kind: 'object',
+              required: true,
+            },
+          ],
+        };
+      }
+      createChannel(): never {
+        throw new Error('not used');
+      }
+    }
+    const plugin = new GetterManagementPlugin() as unknown as ChannelPlugin;
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+    registerPlugin(plugin);
+
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Invalid management metadata in "invalid-getter-management" channel: Channel field "settings" cannot be a required object.',
+      ),
+    );
+    stderr.mockRestore();
+
+    const registered = await getPlugin('invalid-getter-management');
+    expect(registered?.management).toBeUndefined();
+    expect(registered).not.toBe(plugin);
+    expect(registered?.createChannel).toBe(plugin.createChannel);
+  });
+
+  it('registers an object field declaring required: false with management intact', async () => {
+    const plugin: ChannelPlugin = {
+      channelType: 'valid-optional-required-object',
+      displayName: 'valid-optional-required-object',
+      management: {
+        fields: [
+          {
+            key: 'settings',
+            label: 'Settings',
+            kind: 'object',
+            required: false,
+            properties: [{ key: 'enabled', label: 'Enabled', kind: 'boolean' }],
+          },
+        ],
+      },
+      createChannel() {
+        throw new Error('not used');
+      },
+    };
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+    registerPlugin(plugin);
+
+    expect(stderr).not.toHaveBeenCalledWith(
+      expect.stringContaining('Invalid management metadata'),
+    );
+    stderr.mockRestore();
+
+    const registered = await getPlugin('valid-optional-required-object');
+    expect(registered?.management).toBe(plugin.management);
+
+    const entry = (await supportedChannelCatalog()).find(
+      (candidate) => candidate.type === 'valid-optional-required-object',
+    );
+    expect(entry?.manageable).toBe(true);
+  });
+
   it('only marks the manually configurable built-in types as manageable', async () => {
     const catalog = await supportedChannelCatalog();
-    expect(
-      catalog
-        .map((entry) => entry.type)
-        .filter((type) => !type.startsWith('invalid-')),
-    ).toEqual([
+    const builtinCatalog = catalog.filter(
+      (entry) =>
+        !entry.type.startsWith('invalid-') && !entry.type.startsWith('valid-'),
+    );
+    expect(builtinCatalog.map((entry) => entry.type)).toEqual([
       'telegram',
       'weixin',
       'dingtalk',
@@ -448,7 +602,9 @@ describe('channel registry', () => {
       'gitlab',
     ]);
     expect(
-      catalog.filter((entry) => entry.manageable).map((entry) => entry.type),
+      builtinCatalog
+        .filter((entry) => entry.manageable)
+        .map((entry) => entry.type),
     ).toEqual(['dingtalk', 'wecom', 'feishu', 'github', 'gitlab']);
     expect(
       catalog.find((entry) => entry.type === 'dingtalk')?.fields,

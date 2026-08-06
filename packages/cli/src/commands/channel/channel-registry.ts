@@ -1,5 +1,6 @@
 import type {
   ChannelConfigFieldDescriptor,
+  ChannelConfigFieldKind,
   ChannelPlugin,
 } from '@qwen-code/channel-base';
 
@@ -16,6 +17,17 @@ export const UNSAFE_OBJECT_KEYS = new Set([
   '__proto__',
   'constructor',
   'prototype',
+]);
+
+const FIELD_KINDS: ReadonlySet<ChannelConfigFieldKind> = new Set([
+  'string',
+  'secret',
+  'boolean',
+  'number',
+  'enum',
+  'string-list',
+  'record',
+  'object',
 ]);
 
 function assertManagementFields(
@@ -44,6 +56,11 @@ function assertManagementField(
   path: string,
   nested: boolean,
 ): void {
+  if (!FIELD_KINDS.has(field.kind)) {
+    throw new Error(
+      `Channel field "${path}" declares an unknown kind "${field.kind}".`,
+    );
+  }
   if (UNSAFE_OBJECT_KEYS.has(field.key)) {
     throw new Error(`Channel field "${path}" cannot use a reserved key.`);
   }
@@ -71,15 +88,30 @@ function assertManagementField(
       `Channel field "${path}" must declare a finite exclusiveMinimum.`,
     );
   }
-  if (
-    field.kind === 'enum' &&
-    (!Array.isArray(field.options) ||
-      field.options.length === 0 ||
-      field.options.some((option) => typeof option?.value !== 'string'))
-  ) {
-    throw new Error(
-      `Channel field "${path}" must declare at least one option.`,
-    );
+  if (field.kind === 'enum') {
+    if (!Array.isArray(field.options) || field.options.length === 0) {
+      throw new Error(
+        `Channel field "${path}" must declare at least one option.`,
+      );
+    }
+    if (
+      field.options.some(
+        (option) =>
+          typeof option?.value !== 'string' || option.value.length === 0,
+      )
+    ) {
+      throw new Error(
+        `Channel field "${path}" must declare non-empty string option values.`,
+      );
+    }
+    if (
+      new Set(field.options.map((option) => option.value)).size !==
+      field.options.length
+    ) {
+      throw new Error(
+        `Channel field "${path}" declares duplicate option values.`,
+      );
+    }
   }
   if (field.kind !== 'object') return;
   if (required) {
@@ -170,21 +202,26 @@ function registerWithManagementValidation(
     assertManagementDescriptor(plugin);
   } catch (error) {
     // Fail closed on the management surface only; the channel runtime keeps
-    // working with management stripped. Object.assign over a prototype copy
-    // keeps prototype methods (e.g. class-instance plugins) alive.
+    // working with management stripped. The copy over the original prototype
+    // keeps prototype methods (e.g. class-instance plugins) alive, and
+    // defineProperty shadows getter-only accessors that would reject an
+    // assignment.
     process.stderr.write(
       `[channel-registry] Invalid management metadata in "${label}" channel: ${error instanceof Error ? error.message : String(error)}\n`,
     );
-    registry.set(
-      plugin.channelType,
-      Object.assign(
-        Object.create(
-          Object.getPrototypeOf(plugin) ?? Object.prototype,
-        ) as ChannelPlugin,
-        plugin,
-        { management: undefined },
-      ),
+    const stripped = Object.assign(
+      Object.create(
+        Object.getPrototypeOf(plugin) ?? Object.prototype,
+      ) as ChannelPlugin,
+      plugin,
     );
+    Object.defineProperty(stripped, 'management', {
+      value: undefined,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+    registry.set(plugin.channelType, stripped);
     return;
   }
   registry.set(plugin.channelType, plugin);
