@@ -13,10 +13,24 @@ export interface ListSessionsArgs {
 
 export async function handleListSessions(
   ctx: SessionToolContext,
-  args: ListSessionsArgs
+  args: ListSessionsArgs,
 ): Promise<ToolResult> {
   if (!ctx.listSessions) {
     return errorResponse('list_sessions is not available in this context.');
+  }
+
+  if (
+    args.limit !== undefined &&
+    (!Number.isInteger(args.limit) || args.limit < 1)
+  ) {
+    return errorResponse('limit must be a positive integer.');
+  }
+
+  if (
+    args.offset !== undefined &&
+    (!Number.isInteger(args.offset) || args.offset < 0)
+  ) {
+    return errorResponse('offset must be a non-negative integer.');
   }
 
   try {
