@@ -74,16 +74,28 @@ export function findingsFilePath(planPath: string, key: string): string {
 
 /**
  * The findings file a recorded launch prompt points at, if any — the pointer
- * `findingsSection` bakes into the block. One pointer per block, and a brief
- * path (`.brief.md`) can never match the `.findings.md` suffix, so the first
- * match is the match. Shared by every reader of the pointer: the delivery
- * floor (coverage) and the retirement echo-guard both extract it from the
- * harness's copy of the launch prompt rather than deriving a path from the
- * record key — a per-chunk record key and its round's findings file are
- * keyed differently, so the prompt is the only source that is always right.
+ * `findingsSection` bakes into the block. Anchored to the exact shape that
+ * builder emits: the pointer sits alone on its own line inside its fence.
+ * The anchor matters because of the write-failure fallback: when the findings
+ * file could not be written, `findingsSection` inlines the LIST in that same
+ * position, and a finding entry there can itself quote a
+ * `read_file(file_path="….findings.md")` line. A loose first-match would then
+ * extract the QUOTATION as the pointer — and the readers diverge: coverage
+ * demands a read of a path no agent was told to read (spurious
+ * `findings-unread` on an already-degraded run), and retirement, worse,
+ * confines-and-reads an earlier round's file, flipping `yielded` to dry and
+ * retiring a chunk that just reported — the one direction this module's
+ * header says it never fails. A quoted pointer inside a findings entry is
+ * indented or embedded in prose, so requiring it standalone removes it. A
+ * brief path (`.brief.md`) can never match the `.findings.md` suffix.
+ * Shared by every reader of the pointer: the delivery floor (coverage) and
+ * the retirement echo-guard both extract it from the recorded prompt rather
+ * than deriving a path from the record key — a per-chunk record key and its
+ * round's findings file are keyed differently, so the prompt is the only
+ * source that is always right.
  */
 export function findingsPointerOf(prompt: string): string | null {
-  const m = /read_file\(file_path="([^"]*\.findings\.md)"\)/.exec(prompt);
+  const m = /^read_file\(file_path="([^"]*\.findings\.md)"\)$/m.exec(prompt);
   return m && m[1] !== undefined ? m[1] : null;
 }
 

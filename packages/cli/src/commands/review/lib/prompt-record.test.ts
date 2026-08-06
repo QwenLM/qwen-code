@@ -158,6 +158,28 @@ describe('findingsPointerOf — the list file a recorded launch points at', () =
     // never match the `.findings.md` suffix the pointer carries.
     expect(findingsPointerOf(BUILT)).toBeNull();
   });
+
+  it('ignores a pointer-shaped line quoted inside an inlined findings list', () => {
+    // The write-failure fallback inlines the list where the pointer would sit.
+    // A finding entry there can quote a read_file pointer of ITS own (a finding
+    // about this pipeline); the anchor must not mistake that quotation for the
+    // pointer, or retirement would confine-and-read an earlier round's file and
+    // flip a just-filed finding to an echo. A quoted pointer is indented or
+    // embedded in prose, so a standalone-line anchor skips it.
+    const prompt = [
+      'You are review agent `reverse-audit` (round 2).',
+      '',
+      '## Already confirmed — do not re-report these',
+      '',
+      '- **File:** src/review/prompt-record.ts:85 — a finding quoting the',
+      '  pointer shape: `read_file(file_path="/t/old.findings.md")`',
+      '- **Severity:** Suggestion',
+      '',
+      '**Your brief is a file. Read it first.**',
+      'read_file(file_path="/t/reverse-audit--abc123.brief.md")',
+    ].join('\n');
+    expect(findingsPointerOf(prompt)).toBeNull();
+  });
 });
 
 describe('writeFindingsFile — a failed write must not be silent', () => {
