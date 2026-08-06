@@ -44,6 +44,23 @@ describe('openUrlInBuiltInBrowser', () => {
     expect(openExternal).not.toHaveBeenCalled()
   })
 
+  it('opens host-like URLs in the built-in browser', async () => {
+    const browserPaneApi = makeBrowserPaneApi()
+    const openExternal = mock(() => {})
+
+    await openUrlInBuiltInBrowser('localhost:3000/docs', {
+      browserPaneApi,
+      isChannelAvailable: () => true,
+      openExternal,
+    })
+
+    expect(browserPaneApi.navigate).toHaveBeenCalledWith(
+      'built-in-browser',
+      'localhost:3000/docs',
+    )
+    expect(openExternal).not.toHaveBeenCalled()
+  })
+
   it('routes scheme-prefixed non-http URLs to the system browser', async () => {
     const browserPaneApi = makeBrowserPaneApi()
     const openExternal = mock(() => {})
@@ -62,14 +79,16 @@ describe('openUrlInBuiltInBrowser', () => {
   it('falls back to the system browser when the browser pane API is missing', async () => {
     const openExternal = mock(() => {})
 
-    await openUrlInBuiltInBrowser('https://example.com', {
+    await openUrlInBuiltInBrowser('search \ud800 term', {
       browserPaneApi: undefined,
       isChannelAvailable: () => true,
       openExternal,
     })
 
     expect(openExternal).toHaveBeenCalledTimes(1)
-    expect(openExternal).toHaveBeenCalledWith('https://example.com')
+    expect(openExternal).toHaveBeenCalledWith(
+      'https://duckduckgo.com/?q=search%20%EF%BF%BD%20term',
+    )
   })
 
   it('falls back to the system browser when browser-pane channels are unavailable', async () => {
@@ -93,14 +112,14 @@ describe('openUrlInBuiltInBrowser', () => {
     } as Partial<BrowserPaneApi>)
     const openExternal = mock(() => {})
 
-    await openUrlInBuiltInBrowser('https://example.com', {
+    await openUrlInBuiltInBrowser('localhost:3000/docs', {
       browserPaneApi,
       isChannelAvailable: () => true,
       openExternal,
     })
 
     expect(openExternal).toHaveBeenCalledTimes(1)
-    expect(openExternal).toHaveBeenCalledWith('https://example.com')
+    expect(openExternal).toHaveBeenCalledWith('https://localhost:3000/docs')
     expect(browserPaneApi.hide).not.toHaveBeenCalled()
   })
 

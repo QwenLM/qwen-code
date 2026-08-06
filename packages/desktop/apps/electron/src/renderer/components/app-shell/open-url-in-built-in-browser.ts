@@ -28,7 +28,7 @@ function shouldUseBuiltInBrowser(trimmedUrl: string): boolean {
 function normalizeExternalUrl(trimmedUrl: string): string {
   if (HOST_PATTERN.test(trimmedUrl)) return `https://${trimmedUrl}`
   if (EXPLICIT_SCHEME_PATTERN.test(trimmedUrl)) return trimmedUrl
-  return `https://duckduckgo.com/?q=${encodeURIComponent(trimmedUrl)}`
+  return `https://duckduckgo.com/?q=${encodeURIComponent(trimmedUrl.toWellFormed())}`
 }
 
 /**
