@@ -3422,7 +3422,16 @@ describe('qwen-autofix workflow', () => {
           'bash',
           [
             '-c',
-            `sleep() { :; }\n${reader.replace(/\n {10}/g, '\n')}\n${command}`,
+            // Production shell options (defaults.run.shell: bash → `bash
+            // --noprofile --norc -eo pipefail`), with the call made through
+            // `|| exit $?` so errexit is suspended inside the helper exactly
+            // as the `if !` call sites suspend it.
+            [
+              'set -eo pipefail',
+              'sleep() { :; }',
+              reader.replace(/\n {10}/g, '\n'),
+              `${command} || exit $?`,
+            ].join('\n'),
           ],
           {
             env: {
@@ -3469,7 +3478,12 @@ describe('qwen-autofix workflow', () => {
         'bash',
         [
           '-c',
-          `sleep() { :; }\n${readPermission.replace(/\n {10}/g, '\n')}\nread_live_permission qqqys`,
+          [
+            'set -eo pipefail',
+            'sleep() { :; }',
+            readPermission.replace(/\n {10}/g, '\n'),
+            'read_live_permission qqqys || exit $?',
+          ].join('\n'),
         ],
         {
           env: {
@@ -3487,7 +3501,12 @@ describe('qwen-autofix workflow', () => {
         'bash',
         [
           '-c',
-          `sleep() { :; }\n${readMeta.replace(/\n {10}/g, '\n')}\nread_forced_pr_meta`,
+          [
+            'set -eo pipefail',
+            'sleep() { :; }',
+            readMeta.replace(/\n {10}/g, '\n'),
+            'read_forced_pr_meta || exit $?',
+          ].join('\n'),
         ],
         {
           env: {
@@ -3518,13 +3537,18 @@ if [[ "$1 $2" == 'api user' ]]; then
     printf '1' > '${reporterDir}/actor-failed'
     exit 1
   fi
-  printf '%s' 'qwen-code-dev-bot'
+  printf '%s' "\${STUB_ACTOR:-qwen-code-dev-bot}"
   exit 0
 fi
 if [[ "$1 $2" == 'api repos/QwenLM/qwen-code/issues/8320/comments' ]]; then
-  [[ "\${FAIL_STATUS_LOOKUP:-false}" == 'true' ]] && exit 1
-  [[ "\${NO_STATUS_MARKER:-false}" == 'true' ]] && exit 0
-  printf '%s' '123'
+  if [[ "\${FAIL_STATUS_LOOKUP:-false}" == 'true' ]]; then
+    printf 'gh: Server Error (HTTP 502)\\n' >&2
+    exit 1
+  fi
+  [[ "\${NO_STATUS_MARKER:-false}" == 'true' ]] && { printf '%s' '[]'; exit 0; }
+  # A realistic page: gh emits the comment objects, not bare ids, and a
+  # deleted-body comment really does arrive as "body": null.
+  printf '%s' "\${STATUS_PAGE}"
   exit 0
 fi
 if [[ "$1 $2 $3" == 'api --method PATCH' ]]; then
@@ -3545,6 +3569,17 @@ exit 1
 `,
       );
       chmodSync(join(reporterDir, 'gh'), 0o755);
+      // One page carrying a null-bodied comment alongside the real status
+      // comment: the shape the production filter must survive.
+      const statusPage = JSON.stringify([
+        { id: 1, user: { login: 'qwen-code-dev-bot' }, body: null },
+        { id: 2, user: { login: 'wenshao' }, body: 'looks good' },
+        {
+          id: 123,
+          user: { login: 'qwen-code-dev-bot' },
+          body: '<!-- autofix-status -->\n\n🔄 working',
+        },
+      ]);
       const runReporter = (
         extraEnv = {},
         reason = 'permission_lookup_failed',
@@ -3553,7 +3588,18 @@ exit 1
           'bash',
           [
             '-c',
-            `sleep() { :; }\n${reportBlocked.replace(/\n {10}/g, '\n')}\nreport_forced_takeover_blocked ${reason}`,
+            // Production runs this block under `bash --noprofile --norc -eo
+            // pipefail` (defaults.run.shell: bash), and every call site is an
+            // `if !` / `||` context, which suspends errexit inside the call.
+            // Reproduce BOTH halves: the harness sets -eo pipefail (so the new
+            // gh|jq pipeline reports gh's failure, not jq's success) and calls
+            // the function through `|| exit $?`, exactly as the gate does.
+            [
+              'set -eo pipefail',
+              'sleep() { :; }',
+              reportBlocked.replace(/\n {10}/g, '\n'),
+              `report_forced_takeover_blocked ${reason} || exit $?`,
+            ].join('\n'),
           ],
           {
             env: {
@@ -3565,6 +3611,8 @@ exit 1
               AUTOFIX_BOT: 'qwen-code-dev-bot',
               TAKEOVER_LABEL: 'autofix/takeover',
               GITHUB_RUN_ID: '30778039590',
+              GITHUB_SERVER_URL: 'https://ghes.example.com',
+              STATUS_PAGE: statusPage,
               META: meta,
               ...extraEnv,
             },
@@ -3577,11 +3625,21 @@ exit 1
         stderr: '',
       });
       const calls = readFileSync(callsFile, 'utf8');
+      // Picking 123 out of a page whose FIRST bot comment has `body: null` is
+      // the whole point: without the `// ""` guard jq aborts the program
+      // (rc=5), gh exits non-zero, all three attempts fail, and the run reds
+      // out without ever posting the blocked status it exists to post.
       expect(calls).toContain('repos/QwenLM/qwen-code/issues/comments/123');
       expect(calls).toContain('autofix-status');
       expect(calls).toContain('AutoFix blocked');
       expect(calls).toContain('permission_lookup_failed');
       expect(calls).toContain('A later scheduled scan will retry');
+      // The run link resolves from GITHUB_SERVER_URL like every other status
+      // writer; a hardcoded github.com is the one broken link on GHES.
+      expect(calls).toContain(
+        'https://ghes.example.com/QwenLM/qwen-code/actions/runs/30778039590',
+      );
+      expect(calls).not.toContain('https://github.com/QwenLM');
 
       writeFileSync(callsFile, '');
       const transientActorReporter = runReporter({ FAIL_ACTOR_ONCE: 'true' });
@@ -3651,12 +3709,30 @@ exit 1
       expect(botManagedReporter.status).toBe(0);
       expect(readFileSync(callsFile, 'utf8')).toContain('AutoFix blocked');
 
+      writeFileSync(callsFile, '');
       const failedReporter = runReporter({ FAIL_STATUS_LOOKUP: 'true' });
       expect(failedReporter.status).toBe(1);
-      expect(failedReporter.stdout).toContain('(attempt 3/3)');
-      expect(failedReporter.stdout).toContain(
+      // Warnings go to stderr like the two reader helpers, so the reporter is
+      // safe to wrap in $( ) and its warnings never pollute a captured value.
+      expect(failedReporter.stdout).toBe('');
+      expect(failedReporter.stderr).toContain('(attempt 3/3)');
+      expect(failedReporter.stderr).toContain(
         'Failed to read takeover status comments',
       );
+      // gh's own diagnosis rides along instead of going to /dev/null — the
+      // rule this same block states for read_live_permission.
+      expect(failedReporter.stderr).toContain('HTTP 502');
+
+      // 'The PAT is not the bot' is the riskiest new branch and had no
+      // coverage in either direction. It is still a hard stop (return 1), so
+      // the mismatch cannot be mistaken for a delivered status comment.
+      writeFileSync(callsFile, '');
+      const wrongActorReporter = runReporter({ STUB_ACTOR: 'some-human' });
+      expect(wrongActorReporter.status).toBe(1);
+      expect(wrongActorReporter.stderr).toContain(
+        "PAT authenticates as 'some-human'",
+      );
+      expect(readFileSync(callsFile, 'utf8')).not.toContain('AutoFix blocked');
     } finally {
       rmSync(reporterDir, { recursive: true, force: true });
     }
@@ -3713,7 +3789,12 @@ exit 1
           'bash',
           [
             '-c',
-            `sleep() { :; }\n${readPermission.replace(/\n {10}/g, '\n')}\nread_live_permission '${login}'`,
+            [
+              'set -eo pipefail',
+              'sleep() { :; }',
+              readPermission.replace(/\n {10}/g, '\n'),
+              `read_live_permission '${login}' || exit $?`,
+            ].join('\n'),
           ],
           {
             env: {
@@ -3812,7 +3893,22 @@ exit 1
       maintainerCanModify: true,
     });
 
-    const runGate = (permission) => {
+    const inRepoMeta = JSON.stringify({
+      ...JSON.parse(forkMeta),
+      author: { login: 'qqqys' },
+      isCrossRepository: false,
+    });
+    const statusPage = JSON.stringify([
+      {
+        id: 123,
+        user: { login: 'qwen-code-dev-bot' },
+        body: '<!-- autofix-status -->\n\n🔄 working',
+      },
+    ]);
+
+    // permission 'transient' makes every collaborator lookup answer HTTP 502,
+    // the only input that reaches permission_lookup_failed.
+    const runGate = (permission, metaJson = forkMeta) => {
       const dir = mkdtempSync(join(tmpdir(), 'autofix-wiring-'));
       try {
         const callsFile = join(dir, 'calls');
@@ -3824,12 +3920,17 @@ exit 1
 printf '%q ' "$@" >> '${callsFile}'
 printf '\\n' >> '${callsFile}'
 case "$1 $2" in
-  'pr view') printf '%s' '${forkMeta}'; exit 0 ;;
+  'pr view') printf '%s' '${metaJson}'; exit 0 ;;
   'api user') printf '%s' 'qwen-code-dev-bot'; exit 0 ;;
 esac
 case "$2" in
-  *collaborators/*/permission) printf '%s' '${permission}'; exit 0 ;;
-  */issues/8320/comments) printf '%s' '123'; exit 0 ;;
+  *collaborators/*/permission)
+    if [[ '${permission}' == 'transient' ]]; then
+      printf 'gh: Server Error (HTTP 502)\\n' >&2
+      exit 1
+    fi
+    printf '%s' '${permission}'; exit 0 ;;
+  */issues/8320/comments) printf '%s' '${statusPage}'; exit 0 ;;
 esac
 [[ "$1 $2 $3" == 'api --method PATCH' ]] && exit 0
 exit 1
@@ -3841,6 +3942,10 @@ exit 1
           [
             '-c',
             [
+              // Production shell options: `bash --noprofile --norc -eo
+              // pipefail` (defaults.run.shell: bash). The gate runs at top
+              // level there, so errexit is live for it here too.
+              'set -eo pipefail',
               'sleep() { :; }',
               readMeta.replace(/\n {10}/g, '\n'),
               readPermission.replace(/\n {10}/g, '\n'),
@@ -3861,6 +3966,7 @@ exit 1
               TAKEOVER_LABEL: 'autofix/takeover',
               SKIP_LABEL: 'autofix/skip',
               GITHUB_RUN_ID: '30778039590',
+              GITHUB_SERVER_URL: 'https://ghes.example.com',
               GITHUB_OUTPUT: outputFile,
             },
             encoding: 'utf8',
@@ -3869,6 +3975,7 @@ exit 1
         return {
           status: result.status,
           stdout: result.stdout,
+          stderr: result.stderr,
           calls: readFileSync(callsFile, 'utf8'),
           output: readFileSync(outputFile, 'utf8'),
         };
@@ -3896,6 +4003,29 @@ exit 1
     expect(admitted.stdout).toContain('admitted (author renovate[bot]=write)');
     expect(admitted.stdout).toContain('ADMITTED:eligible');
     expect(admitted.calls).not.toContain('--method');
+
+    // In-repo PRs are gated by author/label ALONE — the live-permission call
+    // is fork-only. Without this case, deleting the `isCrossRepository == true`
+    // conjunct keeps the whole suite green while an in-repo takeover PR whose
+    // author was demoted gets rejected as author_permission_read.
+    const inRepo = runGate('read', inRepoMeta);
+    expect(inRepo.status).toBe(0);
+    expect(inRepo.stdout).toContain('ADMITTED:eligible');
+    expect(inRepo.calls).not.toContain('collaborators');
+    expect(inRepo.calls).not.toContain('AutoFix blocked');
+
+    // A genuinely transient permission answer is the ONE path that still reds
+    // the run, and it must post the blocked status before it does. Without
+    // this case, flipping that `exit 1` to `exit 0` ships green and restores
+    // the silent-success failure mode this PR exists to remove.
+    const lookupFailed = runGate('transient');
+    expect(lookupFailed.status).toBe(1);
+    expect(lookupFailed.stdout).not.toContain('ADMITTED:');
+    expect(lookupFailed.calls).toContain('permission_lookup_failed');
+    expect(lookupFailed.calls).toContain('A later scheduled scan will retry');
+    expect(lookupFailed.calls).toContain(
+      'repos/QwenLM/qwen-code/issues/comments/123',
+    );
   });
 
   it('serializes forced status writes with the matching address job', () => {
