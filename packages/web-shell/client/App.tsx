@@ -26,7 +26,6 @@ import {
   useWorkspaceActions,
   useWorkspaceEventSignals,
   type DaemonSessionActions,
-  type DaemonWorkspaceActions,
   type DaemonSessionNotice,
   type DaemonStreamingState,
 } from '@qwen-code/webui/daemon-react-sdk';
@@ -125,6 +124,7 @@ import {
   getFileChangePreviewContent,
   TURN_OUTPUT_KINDS,
 } from './components/artifacts/TurnOutputs';
+import { useArtifactWorkspaceTarget } from './components/artifacts/useArtifactWorkspaceTarget';
 import {
   getArtifactsByTurn,
   getFileChangesByTurn,
@@ -388,7 +388,6 @@ interface ArtifactPanelSessionState {
 }
 interface PaneArtifactSnapshot {
   artifacts: readonly DaemonSessionArtifact[];
-  workspaceActions: DaemonWorkspaceActions;
 }
 // Cap on how long a manual "run now" waits for its bound session to become
 // active before giving up, so the scheduled-tasks UI can't stay stuck disabled
@@ -1886,6 +1885,9 @@ export function App({
     ) === true;
   const { notices, dismissNotice } = useSessionNotices();
   const workspaceActions = useWorkspaceActions();
+  const artifactWorkspaceTarget = useArtifactWorkspaceTarget(
+    connection.workspaceCwd,
+  );
   const dynamicWorkspaceRegistrationSupported =
     workspace.capabilities?.features?.includes(
       'dynamic_workspace_registration',
@@ -2243,15 +2245,18 @@ export function App({
       return;
     }
     const artifactIds = new Set(artifacts.map((artifact) => artifact.id));
-    const paneArtifactIds = new Set(
+    // Extras referenced by open artifact tabs must survive the reconcile:
+    // they keep those tabs renderable through transient gaps in the live
+    // list, and stay inert while the live list (merged first) covers them.
+    const openArtifactIds = new Set(
       artifactPanelTabs
-        .filter((tab) => tab.kind === 'artifact' && tab.workspaceActions)
+        .filter((tab) => tab.kind === 'artifact')
         .map((tab) => (tab.kind === 'artifact' ? tab.artifactId : '')),
     );
     setArtifactPanelExtraArtifacts((previous) => {
       const next = previous.filter(
         (artifact) =>
-          !artifactIds.has(artifact.id) || paneArtifactIds.has(artifact.id),
+          !artifactIds.has(artifact.id) || openArtifactIds.has(artifact.id),
       );
       return next.length === previous.length ? previous : next;
     });
@@ -2271,9 +2276,11 @@ export function App({
       return artifacts;
     }
     const merged = [...artifacts];
+    // Pane snapshots outrank open-time extras so a retained extra never
+    // shadows a fresher pane report for the same artifact id.
     for (const artifact of [
-      ...artifactPanelExtraArtifacts,
       ...paneArtifactExtras,
+      ...artifactPanelExtraArtifacts,
     ]) {
       const index = merged.findIndex((item) => item.id === artifact.id);
       if (index < 0) {
@@ -2286,13 +2293,31 @@ export function App({
     (
       paneSessionId: string,
       paneArtifacts: readonly DaemonSessionArtifact[],
-      paneWorkspaceActions: DaemonWorkspaceActions,
     ) => {
+      if (paneArtifacts.length > 0) {
+        const paneArtifactIds = new Set(
+          paneArtifacts.map((artifact) => artifact.id),
+        );
+        // Keep extras whose artifact tab is still open: once the pane closes
+        // and its snapshot is dropped, the extra is the tab's only copy.
+        const openArtifactIds = new Set(
+          artifactPanelTabsRef.current
+            .filter((tab) => tab.kind === 'artifact')
+            .map((tab) => (tab.kind === 'artifact' ? tab.artifactId : '')),
+        );
+        setArtifactPanelExtraArtifacts((current) => {
+          const next = current.filter(
+            (artifact) =>
+              !paneArtifactIds.has(artifact.id) ||
+              openArtifactIds.has(artifact.id),
+          );
+          return next.length === current.length ? current : next;
+        });
+      }
       setPaneArtifactSnapshots((current) => {
         const previous = current.get(paneSessionId);
         const unchanged =
-          previous?.workspaceActions === paneWorkspaceActions &&
-          previous.artifacts.length === paneArtifacts.length &&
+          previous?.artifacts.length === paneArtifacts.length &&
           previous.artifacts.every((artifact, index) => {
             const nextArtifact = paneArtifacts[index];
             // `metadata` is deliberately not compared: artifact events carry
@@ -2314,31 +2339,9 @@ export function App({
         } else {
           next.set(paneSessionId, {
             artifacts: [...paneArtifacts],
-            workspaceActions: paneWorkspaceActions,
           });
         }
         return next;
-      });
-      const artifactIds = new Set(paneArtifacts.map((artifact) => artifact.id));
-      setArtifactPanelTabs((tabs) => {
-        let changed = false;
-        const next = tabs.map((tab) => {
-          if (tab.kind !== 'artifact' || !artifactIds.has(tab.artifactId)) {
-            return tab;
-          }
-          const updated = {
-            id: tab.id,
-            kind: 'artifact' as const,
-            title: tab.title,
-            artifactId: tab.artifactId,
-            workspaceActions: tab.workspaceActions ?? paneWorkspaceActions,
-          };
-          if (tab.previewContent !== undefined) changed = true;
-          if (tab.workspaceActions) return updated;
-          changed = true;
-          return updated;
-        });
-        return changed ? next : tabs;
       });
     },
     [],
@@ -2763,6 +2766,12 @@ export function App({
         kind: 'artifact',
         artifactId,
         title: artifact?.title ?? 'Artifact',
+        ...(connection.workspaceCwd
+          ? { workspaceCwd: connection.workspaceCwd }
+          : {}),
+        ...(artifactWorkspaceTarget?.workspaceId
+          ? { workspaceId: artifactWorkspaceTarget.workspaceId }
+          : {}),
         ...(previewContent !== undefined ? { previewContent } : {}),
       };
       setArtifactPanelTabs((tabs) =>
@@ -2778,14 +2787,19 @@ export function App({
       );
       setArtifactPanelOpen(true);
     },
-    [artifactPanelArtifacts, getDefaultReviewPanelWidth],
+    [
+      artifactPanelArtifacts,
+      artifactWorkspaceTarget?.workspaceId,
+      connection.workspaceCwd,
+      getDefaultReviewPanelWidth,
+    ],
   );
   const openReviewPanel = useCallback(
     (
       changes: readonly TurnOutputFileChange[],
       selectedPath?: string,
-      workspaceActions?: DaemonWorkspaceActions,
       reviewWorkspaceCwd?: string,
+      reviewWorkspaceId?: string,
       tabId = 'review',
     ) => {
       const reviewTab: ArtifactPanelTab = {
@@ -2794,8 +2808,8 @@ export function App({
         title: t('turnOutputs.review'),
         changes,
         ...(selectedPath ? { selectedPath } : {}),
-        ...(workspaceActions ? { workspaceActions } : {}),
         ...(reviewWorkspaceCwd ? { workspaceCwd: reviewWorkspaceCwd } : {}),
+        ...(reviewWorkspaceId ? { workspaceId: reviewWorkspaceId } : {}),
       };
       setArtifactPanelTabs((tabs) =>
         tabs.some((item) => item.id === reviewTab.id)
@@ -2814,12 +2828,23 @@ export function App({
   );
   const openLatestReviewPanel = useCallback(() => {
     if (latestReviewChanges.length === 0) return;
-    openReviewPanel(latestReviewChanges);
-  }, [latestReviewChanges, openReviewPanel]);
+    openReviewPanel(
+      latestReviewChanges,
+      undefined,
+      connection.workspaceCwd,
+      artifactWorkspaceTarget?.workspaceId,
+    );
+  }, [
+    artifactWorkspaceTarget?.workspaceId,
+    connection.workspaceCwd,
+    latestReviewChanges,
+    openReviewPanel,
+  ]);
   const openScheduledTaskPanel = useCallback(
     (
       task: TurnOutputScheduledTask,
-      tabWorkspaceActions?: ReturnType<typeof useWorkspaceActions>,
+      tabWorkspaceCwd?: string,
+      tabWorkspaceId?: string,
       sourceSessionId?: string,
     ) => {
       const tab: ArtifactPanelTab = {
@@ -2828,10 +2853,9 @@ export function App({
           : `scheduled-task:${task.toolCallId}`,
         kind: 'scheduled_task',
         title: t('scheduledTasks.title'),
-        task,
-        ...(tabWorkspaceActions
-          ? { workspaceActions: tabWorkspaceActions }
-          : {}),
+        task: tabWorkspaceId ? { ...task, workspaceId: tabWorkspaceId } : task,
+        ...(tabWorkspaceCwd ? { workspaceCwd: tabWorkspaceCwd } : {}),
+        ...(tabWorkspaceId ? { workspaceId: tabWorkspaceId } : {}),
       };
       setArtifactPanelTabs((tabs) =>
         tabs.some((item) => item.id === tab.id)
@@ -3006,8 +3030,8 @@ export function App({
         openReviewPanel(
           request.changes,
           request.selectedPath,
-          request.workspaceActions,
           request.workspaceCwd,
+          request.workspaceId,
           request.sourceSessionId
             ? `review:${request.sourceSessionId}:${request.turnId}`
             : undefined,
@@ -3017,7 +3041,8 @@ export function App({
       if (request.kind === 'scheduled_task') {
         openScheduledTaskPanel(
           request.task,
-          request.workspaceActions,
+          request.workspaceCwd,
+          request.workspaceId,
           request.sourceSessionId,
         );
         return;
@@ -3030,17 +3055,19 @@ export function App({
         );
         return;
       }
-      if (!request.workspaceActions || request.sourceSessionId) {
-        setArtifactPanelExtraArtifacts((current) => {
-          const index = current.findIndex(
-            (artifact) => artifact.id === request.artifact.id,
-          );
-          if (index < 0) return [...current, request.artifact];
-          const next = [...current];
-          next[index] = request.artifact;
-          return next;
-        });
-      }
+      // Cache the opened row so the tab keeps rendering through transient
+      // gaps in the live artifact lists (an SSE reconnect, or the source
+      // pane closing); the snapshot/live-list reconciles drop the copy once
+      // a fresher source covers the artifact again.
+      setArtifactPanelExtraArtifacts((current) => {
+        const index = current.findIndex(
+          (artifact) => artifact.id === request.artifact.id,
+        );
+        if (index < 0) return [...current, request.artifact];
+        const next = [...current];
+        next[index] = request.artifact;
+        return next;
+      });
       const tab: ArtifactPanelTab = {
         id: request.sourceSessionId
           ? `${request.sourceSessionId}:${request.id}`
@@ -3048,8 +3075,10 @@ export function App({
         kind: 'artifact',
         title: request.title,
         artifactId: request.artifactId,
-        ...(request.workspaceActions
-          ? { workspaceActions: request.workspaceActions }
+        ...(request.workspaceCwd ? { workspaceCwd: request.workspaceCwd } : {}),
+        ...(request.workspaceId ? { workspaceId: request.workspaceId } : {}),
+        ...(request.sourceSessionId
+          ? { sourceSessionId: request.sourceSessionId }
           : {}),
         ...(request.previewContent !== undefined
           ? { previewContent: request.previewContent }
@@ -3079,8 +3108,8 @@ export function App({
   const openFilePreview = useCallback(
     (
       change: TurnOutputFileChange,
-      workspaceActions: DaemonWorkspaceActions,
       previewWorkspaceCwd?: string,
+      previewWorkspaceId?: string,
     ) => {
       const previewContent = getFileChangePreviewContent(change);
       const tab: ArtifactPanelTab = {
@@ -3088,7 +3117,8 @@ export function App({
         kind: 'file',
         title: displayPath(change.path, previewWorkspaceCwd),
         workspacePath: change.path,
-        workspaceActions,
+        ...(previewWorkspaceCwd ? { workspaceCwd: previewWorkspaceCwd } : {}),
+        ...(previewWorkspaceId ? { workspaceId: previewWorkspaceId } : {}),
         ...(previewContent !== undefined ? { previewContent } : {}),
       };
       setArtifactPanelTabs((tabs) =>

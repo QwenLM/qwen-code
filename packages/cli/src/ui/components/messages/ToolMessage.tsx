@@ -58,6 +58,7 @@ import {
 } from '../shared/ToolStatusIndicator.js';
 import { ToolElapsedTime } from '../shared/ToolElapsedTime.js';
 import { TerminalImage } from '../TerminalImage.js';
+import { formatInlineImageOverflow } from '../../utils/inline-image-parts.js';
 
 // Names that resolve to the agent tool: the canonical name plus whatever
 // legacy request aliases core's migration map declares (e.g. 'task').
@@ -694,6 +695,8 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   name,
   description,
   resultDisplay,
+  images,
+  omittedImageCount,
   visionBridgeNotice,
   detailedDisplay,
   status,
@@ -775,6 +778,10 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
         MIN_LINES_SHOWN + 1, // enforce minimum lines shown
       )
     : undefined;
+  const inlineImageHeight =
+    availableHeight !== undefined && images?.length
+      ? Math.max(1, Math.floor(availableHeight / (images.length + 1)))
+      : availableHeight;
   // Cap inline shell output. Applies to both the streaming ANSI display and
   // the completed string display (shell.ts emits the final result as a plain
   // string via `returnDisplayMessage = result.output`). ShellStatsBar surfaces
@@ -971,6 +978,26 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
               />
             )}
           </Box>
+        </Box>
+      )}
+      {((images?.length ?? 0) > 0 ||
+        (omittedImageCount !== undefined && omittedImageCount > 0)) && (
+        <Box
+          paddingLeft={STATUS_INDICATOR_WIDTH}
+          width="100%"
+          flexDirection="column"
+        >
+          {images?.map((image, index) => (
+            <TerminalImage
+              key={index}
+              image={image}
+              contentWidth={innerWidth}
+              availableTerminalHeight={inlineImageHeight}
+            />
+          ))}
+          {omittedImageCount !== undefined && omittedImageCount > 0 && (
+            <Text dimColor>{formatInlineImageOverflow(omittedImageCount)}</Text>
+          )}
         </Box>
       )}
       {isThisShellFocused && config && (
