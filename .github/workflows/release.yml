@@ -427,6 +427,23 @@ jobs:
           npm run bundle
           npm run prepare:package
 
+      # Regression guard for #8622: a mis-built/tree-shaken bundle can silently
+      # drop hook dispatch (only some events fire). Fail the release if the built
+      # bundle lacks the hook execution path, so a hook-stripped artifact can never
+      # be published again.
+      - name: 'Verify bundle retains hook dispatch'
+        run: |-
+          set -euo pipefail
+          if ! grep -rq 'PreToolUse' dist/ 2>/dev/null; then
+            echo '::error::Built bundle is missing PreToolUse hook dispatch (#8622 regression); aborting release.'
+            exit 1
+          fi
+          if ! grep -rqE 'hook_execution_request|HOOK_EXECUTION' dist/ 2>/dev/null; then
+            echo '::error::Built bundle is missing hook execution bus wiring (#8622 regression); aborting release.'
+            exit 1
+          fi
+          echo 'bundle retains hook dispatch markers'
+
       - name: 'Build Standalone Archives'
         env:
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
