@@ -21,6 +21,7 @@ import {
 } from './utils/mockDaemon';
 import {
   emptyMobileComposerLayout,
+  expectEmptyMobileComposerAnchored,
   gotoEmptyMobileWelcomeHarness,
 } from './utils/emptyMobileComposer';
 
@@ -64,18 +65,7 @@ test('anchors the empty mobile composer with the textarea backend', async ({
   await expect(dotField.locator('canvas')).toBeVisible();
 
   const layout = await emptyMobileComposerLayout(page);
-  expect(layout.footerPosition).toBe('absolute');
-  expect(
-    Math.abs(layout.footerBottom - layout.chatPaneBottom),
-  ).toBeLessThanOrEqual(1);
-  expect(layout.welcomeHeaderBottom).toBeLessThanOrEqual(
-    layout.welcomeFooterTop,
-  );
-  expect(layout.welcomeFooterBottom).toBeLessThanOrEqual(layout.composerTop);
-  expect(layout.chatViewPosition).toBe('static');
-  expect(layout.chatViewZIndex).toBe('1');
-  expect(layout.dotFieldCoversChatPane).toBe(true);
-  expect(layout.dotFieldPointerEvents).toBe('none');
+  expectEmptyMobileComposerAnchored(layout);
 
   await textarea.tap();
   await textarea.fill('Composer remains interactive on touch devices');

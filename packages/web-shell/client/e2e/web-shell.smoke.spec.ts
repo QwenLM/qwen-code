@@ -19,6 +19,7 @@ import {
 } from './utils/mockDaemon';
 import {
   emptyMobileComposerLayout,
+  expectEmptyMobileComposerAnchored,
   gotoEmptyMobileWelcomeHarness,
 } from './utils/emptyMobileComposer';
 
@@ -485,20 +486,7 @@ test('anchors the empty mobile composer to the chat pane across the breakpoint @
   await expect(dotField.locator('canvas')).toBeVisible();
 
   const narrowLayout = await emptyMobileComposerLayout(page);
-  expect(narrowLayout.footerPosition).toBe('absolute');
-  expect(
-    Math.abs(narrowLayout.footerBottom - narrowLayout.chatPaneBottom),
-  ).toBeLessThanOrEqual(1);
-  expect(narrowLayout.welcomeHeaderBottom).toBeLessThanOrEqual(
-    narrowLayout.welcomeFooterTop,
-  );
-  expect(narrowLayout.welcomeFooterBottom).toBeLessThanOrEqual(
-    narrowLayout.composerTop,
-  );
-  expect(narrowLayout.chatViewPosition).toBe('static');
-  expect(narrowLayout.chatViewZIndex).toBe('1');
-  expect(narrowLayout.dotFieldCoversChatPane).toBe(true);
-  expect(narrowLayout.dotFieldPointerEvents).toBe('none');
+  expectEmptyMobileComposerAnchored(narrowLayout);
 
   await editor.click();
   await page.keyboard.type('Composer remains interactive');
@@ -512,6 +500,12 @@ test('anchors the empty mobile composer to the chat pane across the breakpoint @
       footerPosition: 'relative',
     });
   const wideLayout = await emptyMobileComposerLayout(page);
+  if (
+    wideLayout.welcomeFooterTop === null ||
+    wideLayout.welcomeFooterBottom === null
+  ) {
+    throw new Error('Expected a visible welcome footer above the breakpoint.');
+  }
   expect(wideLayout.welcomeFooterBottom).toBeGreaterThan(
     wideLayout.welcomeFooterTop,
   );
@@ -524,12 +518,33 @@ test('anchors the empty mobile composer to the chat pane across the breakpoint @
       footerPosition: 'absolute',
     });
   const narrowLayoutAfterResize = await emptyMobileComposerLayout(page);
-  expect(
-    Math.abs(
-      narrowLayoutAfterResize.footerBottom -
-        narrowLayoutAfterResize.chatPaneBottom,
-    ),
-  ).toBeLessThanOrEqual(1);
+  expectEmptyMobileComposerAnchored(narrowLayoutAfterResize);
+});
+
+test('anchors the empty mobile composer without a welcome footer @smoke', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 760, height: 900 });
+  const scenario = createWebShellDaemonScenario();
+  await installScenario(page, scenario, testInfo);
+
+  await gotoEmptyMobileWelcomeHarness(page, { welcomeFooter: false });
+  const composer = page.locator('[data-web-shell-composer-surface]');
+  const welcomeHeader = page.locator('[data-e2e-mobile-welcome-header]');
+  const welcomeFooter = page.locator('[data-e2e-mobile-welcome-footer]');
+  const dotField = page.locator('[data-web-shell-new-session-dot-field]');
+
+  await expect(composer).toBeVisible();
+  await expect(welcomeHeader).toBeVisible();
+  await expect(welcomeFooter).toHaveCount(0);
+  await expect(dotField.locator('canvas')).toBeVisible();
+
+  const layout = await emptyMobileComposerLayout(page, {
+    requireWelcomeFooter: false,
+  });
+  expectEmptyMobileComposerAnchored(layout, {
+    requireWelcomeFooter: false,
+  });
 });
 
 for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {
