@@ -3964,6 +3964,138 @@ describe('useGeminiStream', () => {
     );
   });
 
+  it('keeps raw audio on its active route when a mixed turn also needs the vision bridge', async () => {
+    const queuedPrompt =
+      'inspect @/tmp/screenshot.png and listen @/tmp/recording.wav';
+    const resolvedTextPart: Part = { text: queuedPrompt };
+    const resolvedAudioPart: Part = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    const resolvedImagePart: Part = {
+      inlineData: { mimeType: 'image/png', data: 'iVBORw0KGgo=' },
+    };
+    const visionTextPart: Part = { text: '[mid-turn image transcript]' };
+    const resolveForModel = vi.fn().mockResolvedValue({
+      contentGeneratorConfig: { modalities: { audio: true } },
+    });
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: () => ({}),
+      getDefaultVisionBridgeModel: () => ({
+        id: 'vision-agent',
+        agentCapable: true,
+      }),
+      getBaseLlmClient: () => ({ resolveForModel }),
+    });
+    mockRunVisionBridge.mockResolvedValue({
+      applied: true,
+      status: 'ok',
+      parts: [resolvedTextPart, resolvedAudioPart, visionTextPart],
+      convertedCount: 1,
+      omittedCount: 0,
+      modelId: 'vision-agent',
+      egressOccurred: true,
+    });
+    vi.spyOn(atCommandProcessor, 'resolveAtCommandQuery').mockResolvedValue({
+      processedQuery: [resolvedTextPart, resolvedAudioPart, resolvedImagePart],
+      shouldProceed: true,
+    });
+    const toolCallResponseParts: Part[] = [
+      {
+        functionResponse: {
+          id: 'call1',
+          name: 'testTool',
+          response: { result: 'ok' },
+        },
+      },
+    ];
+    const completedToolCalls: TrackedToolCall[] = [
+      {
+        request: {
+          callId: 'call1',
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-mixed-skill-override',
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId: 'call1',
+          responseParts: toolCallResponseParts,
+          errorType: undefined,
+          modelOverride: 'audio-skill-model',
+        },
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => 'Mock description',
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+    const midTurnDrainRef = {
+      current: vi
+        .fn<() => string[]>()
+        .mockReturnValueOnce([queuedPrompt])
+        .mockReturnValue([]),
+    };
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        midTurnDrainRef,
+      ),
+    );
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete(completedToolCalls);
+      }
+    });
+
+    await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalledTimes(1));
+    expect(mockRunAudioBridge).not.toHaveBeenCalled();
+    expect(mockRunVisionBridge).toHaveBeenCalledWith({
+      config: mockConfig,
+      parts: [resolvedTextPart, resolvedAudioPart, resolvedImagePart],
+      signal: expect.any(AbortSignal),
+    });
+    expect(mockSendMessageStream).toHaveBeenCalledWith(
+      [
+        ...toolCallResponseParts,
+        resolvedTextPart,
+        resolvedAudioPart,
+        visionTextPart,
+      ],
+      expect.any(AbortSignal),
+      'prompt-id-mixed-skill-override',
+      expect.objectContaining({ modelOverride: 'audio-skill-model\0' }),
+    );
+  });
+
   it('forwards mid-turn text when a bridge failure returns no replacement parts', async () => {
     const queuedPrompt = 'inspect @/tmp/screenshot.png and summarize';
     const resolvedImagePart: Part = {

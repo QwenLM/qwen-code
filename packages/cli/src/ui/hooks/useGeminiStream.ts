@@ -1119,7 +1119,7 @@ export const useGeminiStream = (
 
       debugLogger.debug('vision bridge: gate matched, running conversion');
       const fullTurnModel = config.getDefaultVisionBridgeModel();
-      if (fullTurnModel?.agentCapable) {
+      if (fullTurnModel?.agentCapable && !hasAudioParts(parts)) {
         const fullTurnParts = (Array.isArray(parts) ? parts : [parts]).map(
           (part) =>
             typeof part === 'string'
