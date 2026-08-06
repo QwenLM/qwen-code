@@ -334,6 +334,17 @@ describe('WorkspaceChannelSettingsStore', () => {
       },
     },
     {
+      label: 'invalid sessionScope value',
+      config: {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+        sessionScope: 'bogus',
+      },
+      secrets: {
+        clientSecret: { operation: 'replace', value: 'secret' } as const,
+      },
+    },
+    {
       label: 'environment reference on a non-resolvable field',
       config: {
         type: 'management-validation-test',
@@ -450,6 +461,24 @@ describe('WorkspaceChannelSettingsStore', () => {
       groupHistoryLimit: 25,
       blockStreaming: 'on',
       identity: { id: 'ops', displayName: 'Ops' },
+    });
+  });
+
+  it('accepts chat_thread as a session scope', async () => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    const next = await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+        sessionScope: 'chat_thread',
+      },
+      secrets: { clientSecret: { operation: 'replace', value: 'secret' } },
+    });
+
+    expect(next.channels['bot']).toMatchObject({
+      sessionScope: 'chat_thread',
     });
   });
 

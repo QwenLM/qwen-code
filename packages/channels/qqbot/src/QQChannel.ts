@@ -3404,7 +3404,7 @@ export class QQChannel extends ChannelBase {
         if (state.timer) clearTimeout(state.timer);
         // Release before the deletes so the release guard still sees this
         // entry's live flush state and keeps the msg_seq counter while a
-        // send owns it (wenshao blocking-1 ordering).
+        // send owns it (release-before-delete ordering).
         this.releaseSessionReplyAnchor(sid);
         this.flushingSessions.delete(sid);
         this.pendingStreamDelete.delete(sid);
