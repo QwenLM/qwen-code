@@ -22,6 +22,15 @@ export type {
   MediaPolicyToolDescriptor,
   MediaPolicyToolOutputSpec,
 } from '../../tools/tools.js';
+export type {
+  ComparisonCondition,
+  ComparisonOperator,
+  ConditionEvaluation,
+  ConditionOperand,
+  FixedPolicyCondition,
+  FixedPolicyConditionContext,
+  FixedPolicyField,
+} from './conditions.js';
 
 /**
  * Raw (pre-normalization) shape of one
