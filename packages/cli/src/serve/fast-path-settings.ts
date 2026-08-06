@@ -21,10 +21,9 @@ import {
   getSystemSettingsPath,
   SETTINGS_DIRECTORY_NAME,
 } from '../config/storage-paths-lite.js';
-import {
-  getPathComparisonVariants,
-  isWithinRoot,
-} from '../config/path-comparison.js';
+import { getPathComparisonVariants } from '../config/path-comparison.js';
+import type { TrustPrecedenceRule } from '../config/trust-precedence.js';
+import { resolveTrustDecision } from '../config/trust-precedence.js';
 import { publishPendingCompileCache } from '../config/compile-cache.js';
 import type { Settings } from '../config/settingsSchema.js';
 import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
@@ -47,10 +46,7 @@ const V2_SETTINGS_VERSION = 2;
 const TRUST_FOLDER = 'TRUST_FOLDER';
 const TRUST_PARENT = 'TRUST_PARENT';
 const DO_NOT_TRUST = 'DO_NOT_TRUST';
-type CachedTrustRule = {
-  level: 'trusted' | 'untrusted';
-  variants: Set<string>;
-};
+type CachedTrustRule = TrustPrecedenceRule;
 let homeEnvBootstrapped = false;
 let cachedTrustedFoldersPath: string | undefined;
 let cachedTrustedFolderRules: CachedTrustRule[] | undefined;
@@ -362,31 +358,12 @@ function buildTrustedFolderRules(
 }
 
 function isPathTrustedFastPath(location: string): boolean | undefined {
-  const rules = readTrustedFolderRulesFastPath();
-  const locationVariants = getPathComparisonVariants(location);
-  for (const rule of rules) {
-    if (rule.level !== 'trusted') continue;
-    for (const locationVariant of locationVariants) {
-      for (const trustedVariant of rule.variants) {
-        if (isWithinRoot(locationVariant, trustedVariant)) {
-          return true;
-        }
-      }
-    }
-  }
-
-  for (const rule of rules) {
-    if (rule.level !== 'untrusted') continue;
-    for (const locationVariant of locationVariants) {
-      for (const untrustedVariant of rule.variants) {
-        if (locationVariant === untrustedVariant) {
-          return false;
-        }
-      }
-    }
-  }
-
-  return undefined;
+  // Shares the resolver with trustedFolders.ts so the two paths cannot drift
+  // apart again; the cached rules already carry pre-computed path variants.
+  return resolveTrustDecision(
+    readTrustedFolderRulesFastPath(),
+    getPathComparisonVariants(location),
+  );
 }
 
 function isWorkspaceTrustedFastPath(

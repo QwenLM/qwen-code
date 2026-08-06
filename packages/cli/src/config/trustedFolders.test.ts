@@ -149,13 +149,13 @@ describe('Trusted Folders Loading', () => {
       );
       expect(folders.isPathTrusted('/trustedparent/trustme')).toBe(true);
 
-      // No explicit rule covers this file
-      expect(folders.isPathTrusted('/secret/bankaccounts.json')).toBe(
-        undefined,
-      );
-      expect(folders.isPathTrusted('/secret/mine/privatekey.pem')).toBe(
-        undefined,
-      );
+      // Covered by the DO_NOT_TRUST rule on /secret. These used to resolve to
+      // undefined, which callers read as "not untrusted" and went on to load
+      // workspace .env — the #8627 bypass. Distrust now covers descendants.
+      expect(folders.isPathTrusted('/secret/bankaccounts.json')).toBe(false);
+      expect(folders.isPathTrusted('/secret/mine/privatekey.pem')).toBe(false);
+
+      // Genuinely uncovered by any rule.
       expect(folders.isPathTrusted('/user/someotherfolder')).toBe(undefined);
     });
   });
@@ -558,10 +558,10 @@ describe('isWorkspaceTrusted', () => {
     });
   });
 
-  it('should return undefined for a child of an untrusted folder', () => {
+  it('should treat a child of an untrusted folder as untrusted', () => {
     mockCwd = '/home/user/untrusted/src';
     mockRules['/home/user/untrusted'] = TrustLevel.DO_NOT_TRUST;
-    expect(isWorkspaceTrusted(mockSettings).isTrusted).toBeUndefined();
+    expect(isWorkspaceTrusted(mockSettings).isTrusted).toBe(false);
   });
 
   it('should return undefined when no rules match', () => {
@@ -571,12 +571,58 @@ describe('isWorkspaceTrusted', () => {
     expect(isWorkspaceTrusted(mockSettings).isTrusted).toBeUndefined();
   });
 
-  it('should prioritize trust over distrust', () => {
+  it('should prioritize explicit distrust over inherited trust', () => {
     mockCwd = '/home/user/projectA/untrusted';
     mockRules['/home/user/projectA'] = TrustLevel.TRUST_FOLDER;
     mockRules['/home/user/projectA/untrusted'] = TrustLevel.DO_NOT_TRUST;
     expect(isWorkspaceTrusted(mockSettings)).toEqual({
+      isTrusted: false,
+      source: 'file',
+    });
+  });
+
+  it('should extend explicit distrust to descendants of the distrusted folder', () => {
+    // The distrust rule is on the repo root, not on the launch directory —
+    // the case that a plain check-order swap leaves exploitable.
+    mockCwd = '/home/user/projectA/untrusted/packages/foo';
+    mockRules['/home/user/projectA'] = TrustLevel.TRUST_FOLDER;
+    mockRules['/home/user/projectA/untrusted'] = TrustLevel.DO_NOT_TRUST;
+    expect(isWorkspaceTrusted(mockSettings)).toEqual({
+      isTrusted: false,
+      source: 'file',
+    });
+  });
+
+  it('should let a nested trust rule override a distrusted ancestor', () => {
+    // The other direction: blanket distrust with an explicit opt-in exception
+    // must keep working.
+    mockCwd = '/home/user/projectA/good';
+    mockRules['/home/user/projectA'] = TrustLevel.DO_NOT_TRUST;
+    mockRules['/home/user/projectA/good'] = TrustLevel.TRUST_FOLDER;
+    expect(isWorkspaceTrusted(mockSettings)).toEqual({
       isTrusted: true,
+      source: 'file',
+    });
+  });
+
+  it('should resolve trust by the most specific rule regardless of key order', () => {
+    mockCwd = '/home/user/projectA/untrusted/nested';
+    // Deliberately insert the deeper trust rule before the shallower ones.
+    mockRules['/home/user/projectA/untrusted/nested'] = TrustLevel.TRUST_FOLDER;
+    mockRules['/home/user/projectA/untrusted'] = TrustLevel.DO_NOT_TRUST;
+    mockRules['/home/user/projectA'] = TrustLevel.TRUST_FOLDER;
+    expect(isWorkspaceTrusted(mockSettings)).toEqual({
+      isTrusted: true,
+      source: 'file',
+    });
+  });
+
+  it('should let distrust win a tie against TRUST_PARENT on the same folder', () => {
+    mockCwd = '/home/user/projectA';
+    mockRules['/home/user/projectA/child'] = TrustLevel.TRUST_PARENT;
+    mockRules['/home/user/projectA'] = TrustLevel.DO_NOT_TRUST;
+    expect(isWorkspaceTrusted(mockSettings)).toEqual({
+      isTrusted: false,
       source: 'file',
     });
   });

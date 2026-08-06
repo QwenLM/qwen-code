@@ -1662,7 +1662,7 @@ describe('serve fast path environment bootstrap', () => {
     expect(process.env['QWEN_SERVER_TOKEN']).toBe('trusted');
   });
 
-  it('prioritizes trusted parent folders over nested distrust rules', async () => {
+  it('does not load env from a nested workspace marked DO_NOT_TRUST', async () => {
     delete process.env['QWEN_SERVER_TOKEN'];
     const qwenHome = useTempQwenHome();
     tempWorkspace = realpathSync(
@@ -1685,9 +1685,73 @@ describe('serve fast path environment bootstrap', () => {
         [childWorkspace]: TrustLevel.DO_NOT_TRUST,
       }),
     );
-    writeFileSync(join(childWorkspace, '.env'), 'QWEN_SERVER_TOKEN=trusted\n');
+    writeFileSync(join(childWorkspace, '.env'), 'QWEN_SERVER_TOKEN=attacker\n');
 
     await bootstrapServeFastPathEnvironment(childWorkspace);
+
+    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+  });
+
+  it('does not load env from a subdirectory of a DO_NOT_TRUST workspace', async () => {
+    // Regression for #8627: the launch directory is *below* the distrusted
+    // repo root, so exact-match distrust alone leaves the token injectable.
+    delete process.env['QWEN_SERVER_TOKEN'];
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-trust-descendant-')),
+    );
+    const evilRepo = join(tempWorkspace, 'evil-repo');
+    const subDir = join(evilRepo, 'packages', 'foo');
+    mkdirSync(subDir, { recursive: true });
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+    );
+    process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = join(
+      qwenHome,
+      'trustedFolders.json',
+    );
+    writeFileSync(
+      process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'],
+      JSON.stringify({
+        [tempWorkspace]: TrustLevel.TRUST_FOLDER,
+        [evilRepo]: TrustLevel.DO_NOT_TRUST,
+      }),
+    );
+    writeFileSync(join(evilRepo, '.env'), 'QWEN_SERVER_TOKEN=attacker\n');
+
+    await bootstrapServeFastPathEnvironment(subDir);
+
+    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+  });
+
+  it('still loads env for a trusted workspace nested in a distrusted parent', async () => {
+    // The opposite direction: blanket distrust with an explicit opt-in.
+    delete process.env['QWEN_SERVER_TOKEN'];
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-trust-optin-')),
+    );
+    const goodChild = join(tempWorkspace, 'good');
+    mkdirSync(goodChild);
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+    );
+    process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = join(
+      qwenHome,
+      'trustedFolders.json',
+    );
+    writeFileSync(
+      process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'],
+      JSON.stringify({
+        [tempWorkspace]: TrustLevel.DO_NOT_TRUST,
+        [goodChild]: TrustLevel.TRUST_FOLDER,
+      }),
+    );
+    writeFileSync(join(goodChild, '.env'), 'QWEN_SERVER_TOKEN=trusted\n');
+
+    await bootstrapServeFastPathEnvironment(goodChild);
 
     expect(process.env['QWEN_SERVER_TOKEN']).toBe('trusted');
   });

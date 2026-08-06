@@ -338,18 +338,9 @@ function explicitTrustLevel(
     },
     [],
   );
-  const effective = folders.isPathTrusted(workspaceCwd);
-  if (effective === undefined) return null;
-  for (const [rulePath, trustLevel] of Object.entries(
-    snapshot.trustedFolders,
-  )) {
-    const preview = new LoadedTrustedFolders(
-      { path: getTrustedFoldersPath(), config: { [rulePath]: trustLevel } },
-      [],
-    ).isPathTrusted(workspaceCwd);
-    if (preview === effective) return trustLevel;
-  }
-  return null;
+  // Ask the shared resolver which rule actually won, rather than probing each
+  // rule in isolation and returning the first whose verdict happens to match.
+  return folders.getDecidingTrustLevel(workspaceCwd);
 }
 
 export function evaluateDaemonWorkspaceTrust(
