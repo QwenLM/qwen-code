@@ -56,4 +56,5 @@ export interface AcpChannelExitInfo {
 export type ChannelFactory = (
   workspaceCwd: string,
   childEnvOverrides?: Readonly<Record<string, string | undefined>>,
+  signal?: AbortSignal,
 ) => Promise<AcpChannel>;

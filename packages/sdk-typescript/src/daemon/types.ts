@@ -50,6 +50,7 @@ export interface DaemonWorkspaceRemovalActivity {
   memoryTasks: number;
   channelWorkers: number;
   voiceSessions?: number;
+  workspaceRuntime?: number;
 }
 
 export interface DaemonWorkspaceRemovalResult {
@@ -1588,6 +1589,14 @@ export interface DaemonWorkspaceAcpPreheatResult {
   durationMs: number;
   reason?: 'timeout' | 'error';
   error?: string;
+}
+
+export interface DaemonWorkspaceRuntimeStatus {
+  v: 1;
+  workspaceCwd: string;
+  state: 'cold' | 'starting' | 'active' | 'idle' | 'stopping';
+  runtimeLive: boolean;
+  runtimeEpoch: number;
 }
 
 export interface DaemonWorkspaceProviderCurrent {

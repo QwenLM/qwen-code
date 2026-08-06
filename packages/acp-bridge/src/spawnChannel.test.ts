@@ -32,7 +32,7 @@
  * Each branch listed below is now regression-guarded by an assertion.
  */
 
-import { EventEmitter } from 'node:events';
+import { EventEmitter, getEventListeners } from 'node:events';
 import type { ChildProcess } from 'node:child_process';
 import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -242,6 +242,39 @@ describe('createSpawnChannelFactory env policy', () => {
       exitCode: 1,
       signalCode: null,
     });
+  });
+
+  it('force-kills the child when the startup signal aborts after spawn', async () => {
+    const child = createFakeChildProcess();
+    mockSpawn.mockReturnValue(child);
+    const controller = new AbortController();
+
+    const channel = await createSpawnChannelFactory()(
+      '/tmp/project',
+      undefined,
+      controller.signal,
+    );
+
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(1);
+    controller.abort();
+    expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+
+    child.emit('exit', 0, null);
+    await expect(channel.exited).resolves.toEqual({
+      exitCode: 0,
+      signalCode: null,
+    });
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
+  });
+
+  it('rejects without spawning when the signal is already aborted', async () => {
+    const controller = new AbortController();
+    controller.abort(new Error('startup cancelled'));
+
+    await expect(
+      createSpawnChannelFactory()('/tmp/project', undefined, controller.signal),
+    ).rejects.toThrow('startup cancelled');
+    expect(mockSpawn).not.toHaveBeenCalled();
   });
 });
 

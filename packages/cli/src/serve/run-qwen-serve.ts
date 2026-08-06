@@ -1135,6 +1135,7 @@ async function loadServeRuntimeModules() {
     workspaceSkillsStatusModule,
     totalSessionAdmissionModule,
     workspaceRegistryModule,
+    workspaceRuntimeCoordinatorModule,
   ] = await Promise.all([
     import('./server.js'),
     import('@qwen-code/acp-bridge/bridge'),
@@ -1147,6 +1148,7 @@ async function loadServeRuntimeModules() {
     import('./workspace-skills-status.js'),
     import('./total-session-admission.js'),
     import('./workspace-registry.js'),
+    import('./workspace-runtime-coordinator.js'),
   ]);
   return {
     createServeApp: serverModule.createServeApp,
@@ -1175,6 +1177,8 @@ async function loadServeRuntimeModules() {
       workspaceRegistryModule.createWorkspaceSessionOwnerIndex,
     createWorkspaceGenerationGuard:
       workspaceRegistryModule.createWorkspaceGenerationGuard,
+    getWorkspaceRuntimeCoordinatorIfSupported:
+      workspaceRuntimeCoordinatorModule.getWorkspaceRuntimeCoordinatorIfSupported,
   };
 }
 
@@ -1208,6 +1212,7 @@ function currentServeFeaturesForRunQwenServe(
   opts: ServeOptions,
   sessionShellCommandEnabled: boolean,
   sessionArtifactsPersistenceAvailable: boolean,
+  workspaceRuntimeAvailable: boolean,
   env: Readonly<Record<string, string | undefined>>,
 ): string[] {
   return getAdvertisedServeFeatures(undefined, {
@@ -1234,6 +1239,7 @@ function currentServeFeaturesForRunQwenServe(
     channelManagementAvailable: true,
     persistentWorkspaceRegistrationAvailable: true,
     workspaceRuntimeRemovalAvailable: true,
+    workspaceRuntimeAvailable,
     // Advertise the same WS feature flags as the runtime path (serve-features.ts)
     // so the bootstrap `/capabilities` window doesn't briefly under-report them.
     clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
@@ -1248,6 +1254,7 @@ function createBootstrapCapabilities(input: {
   qwenCodeVersion?: string;
   sessionShellCommandEnabled: boolean;
   sessionArtifactsPersistenceAvailable: boolean;
+  workspaceRuntimeAvailable: boolean;
   permissionPolicy: PermissionPolicy | undefined;
   env: Readonly<Record<string, string | undefined>>;
 }): CapabilitiesEnvelope {
@@ -1262,6 +1269,7 @@ function createBootstrapCapabilities(input: {
       input.opts,
       input.sessionShellCommandEnabled,
       input.sessionArtifactsPersistenceAvailable,
+      input.workspaceRuntimeAvailable,
       input.env,
     ),
     modelServices: [],
@@ -1439,6 +1447,7 @@ function createBootstrapServeApp(input: {
   qwenCodeVersion?: string;
   sessionShellCommandEnabled: boolean;
   sessionArtifactsPersistenceAvailable: boolean;
+  workspaceRuntimeAvailable: boolean;
   permissionPolicy: PermissionPolicy | undefined;
   multiWorkspaceCapabilitiesRequireRuntime: boolean;
   getRuntimeError: () => string | undefined;
@@ -1457,6 +1466,7 @@ function createBootstrapServeApp(input: {
     qwenCodeVersion,
     sessionShellCommandEnabled,
     sessionArtifactsPersistenceAvailable,
+    workspaceRuntimeAvailable,
     permissionPolicy,
     multiWorkspaceCapabilitiesRequireRuntime,
     getRuntimeError,
@@ -1529,6 +1539,7 @@ function createBootstrapServeApp(input: {
         qwenCodeVersion,
         sessionShellCommandEnabled,
         sessionArtifactsPersistenceAvailable,
+        workspaceRuntimeAvailable,
         permissionPolicy,
         env: process.env,
       }),
@@ -1636,6 +1647,7 @@ function createBootstrapServeApp(input: {
           opts,
           sessionShellCommandEnabled,
           sessionArtifactsPersistenceAvailable,
+          workspaceRuntimeAvailable,
           process.env,
         ),
       },
@@ -2026,7 +2038,7 @@ async function runQwenServeImpl(
   // copy before freezing runtime environments or starting auxiliary workers.
   delete process.env[EXTERNAL_TOOL_GUARD_TOKEN_ENV];
   const channelDeliveryAuthorizations = new ChannelDeliveryAuthorizationStore();
-  const shouldPreheat = !deps.bridge && shouldPreheatBridge(deps);
+  let shouldPreheat = !deps.bridge && shouldPreheatBridge(deps);
   const startup: DaemonStartupSnapshot = {
     processStartedAt: new Date(
       Date.now() - Math.round(process.uptime() * 1000),
@@ -2836,6 +2848,9 @@ async function runQwenServeImpl(
   const webShellMounted = !!webShellDir;
   let runtimeApp: Application | undefined;
   let runtimeAppForCleanup: Application | undefined;
+  let getWorkspaceRuntimeCoordinatorIfSupported:
+    | (typeof import('./workspace-runtime-coordinator.js'))['getWorkspaceRuntimeCoordinatorIfSupported']
+    | undefined;
   let bridgeRef: AcpSessionBridge | undefined = deps.bridge;
   let managedProcessRegistry:
     | {
@@ -3193,6 +3208,8 @@ async function runQwenServeImpl(
         cliVersionPromise,
         import('../config/daemon-trust-policy.js'),
       ]);
+    getWorkspaceRuntimeCoordinatorIfSupported =
+      runtime.getWorkspaceRuntimeCoordinatorIfSupported;
     cliVersion = resolvedCliVersion;
     settingsRuntime.environment.preResolveHomeEnvOverrides();
     const bootTrustSnapshot = await trustPolicy.readDaemonTrustPolicySnapshot();
@@ -3203,6 +3220,10 @@ async function runQwenServeImpl(
     );
     const trustedWorkspace =
       deps.trustedWorkspace ?? bootPrimaryTrustDecision.targetTrusted;
+    if (shouldPreheat && !trustedWorkspace) {
+      shouldPreheat = false;
+      startup.preheat.status = 'not_scheduled';
+    }
     const workspaceTrustHotReloadAvailable =
       deps.trustedWorkspace === undefined &&
       deps.bridge === undefined &&
@@ -3613,6 +3634,26 @@ async function runQwenServeImpl(
     // `mcp_register`). Inert unless `opts.clientMcpOverWs` is on.
     const clientMcpSenderRegistry = new ClientMcpSenderRegistry();
     const runtimeBridges: AcpSessionBridge[] = [];
+    // Epoch sources are deliberately never evicted: a removed workspace
+    // that is re-registered under the same cwd must continue from its
+    // last epoch, otherwise clients holding the old epoch would observe
+    // a regression.
+    const runtimeEpochSources = new Map<
+      string,
+      { current(): number; allocate(): number }
+    >();
+    const runtimeEpochSourceFor = (workspaceCwd: string) => {
+      let source = runtimeEpochSources.get(workspaceCwd);
+      if (!source) {
+        let epoch = 0;
+        source = {
+          current: () => epoch,
+          allocate: () => ++epoch,
+        };
+        runtimeEpochSources.set(workspaceCwd, source);
+      }
+      return source;
+    };
     const totalSessionAdmission = runtime.createTotalSessionAdmissionController(
       {
         maxTotalSessions: opts.maxTotalSessions,
@@ -3877,6 +3918,7 @@ async function runQwenServeImpl(
           ? { permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs }
           : {}),
         boundWorkspace,
+        runtimeEpochSource: runtimeEpochSourceFor(boundWorkspace),
         sessionShellCommandEnabled,
         childEnvOverrides,
         channelFactory,
@@ -4274,6 +4316,7 @@ async function runQwenServeImpl(
           ? { permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs }
           : {}),
         boundWorkspace: workspaceInput.cwd,
+        runtimeEpochSource: runtimeEpochSourceFor(workspaceInput.cwd),
         sessionShellCommandEnabled,
         childEnvOverrides,
         channelFactory: secondaryChannelFactory,
@@ -4796,6 +4839,7 @@ async function runQwenServeImpl(
             ? { permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs }
             : {}),
           boundWorkspace: cwd,
+          runtimeEpochSource: runtimeEpochSourceFor(cwd),
           sessionShellCommandEnabled,
           childEnvOverrides,
           channelFactory: wsChannelFactory,
@@ -5161,6 +5205,9 @@ async function runQwenServeImpl(
         const existing = runtimeCleanupPromises.get(runtimeToDrain);
         if (existing) return existing;
         const cleanup = (async () => {
+          runtime
+            .getWorkspaceRuntimeCoordinatorIfSupported(runtimeToDrain)
+            ?.dispose();
           const containmentErrors: Error[] = [];
           try {
             await workspaceVoiceCoordinator.disposeRuntime(
@@ -5785,6 +5832,9 @@ async function runQwenServeImpl(
     qwenCodeVersion: cliVersion,
     sessionShellCommandEnabled,
     sessionArtifactsPersistenceAvailable,
+    workspaceRuntimeAvailable:
+      deps.bridge === undefined ||
+      typeof deps.bridge.getWorkspaceRuntimeLifecycleSnapshot === 'function',
     permissionPolicy,
     multiWorkspaceCapabilitiesRequireRuntime: workspaceInputs.length > 1,
     getRuntimeError: () => runtimeStartupError,
@@ -6830,6 +6880,19 @@ async function runQwenServeImpl(
             cancelLiveDiscoveryRetry();
             channelControlDraining = true;
             const initiallyMountedApp = runtimeApp ?? runtimeAppForCleanup;
+            const beginRuntimeCoordinatorDrains = (
+              app: typeof initiallyMountedApp,
+            ): void => {
+              const registry = app?.locals?.['workspaceRegistry'] as
+                | WorkspaceRegistry
+                | undefined;
+              for (const workspaceRuntime of registry?.list() ?? []) {
+                getWorkspaceRuntimeCoordinatorIfSupported?.(
+                  workspaceRuntime,
+                )?.beginDrain();
+              }
+            };
+            beginRuntimeCoordinatorDrains(initiallyMountedApp);
             const initiallyMountedManagement = initiallyMountedApp?.locals?.[
               'workspaceManagementHandle'
             ] as { sealAndWait?: () => Promise<void> } | undefined;
@@ -7022,6 +7085,7 @@ async function runQwenServeImpl(
                     err instanceof Error ? err : null,
                   );
                 });
+                beginRuntimeCoordinatorDrains(appForCleanup);
                 startProcessRegistryShutdown();
                 disposeRuntimeAppResources(appForCleanup);
                 disposeDaemonEventLoopMonitor();
