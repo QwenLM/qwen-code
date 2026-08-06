@@ -61,6 +61,10 @@ export default defineConfig({
         __dirname,
         '../acp-bridge/src/process-registry.ts',
       ),
+      '@qwen-code/acp-bridge/daemonMemoryBudget': path.resolve(
+        __dirname,
+        '../acp-bridge/src/daemon-memory-budget.ts',
+      ),
       '@qwen-code/acp-bridge/ndJsonStream': path.resolve(
         __dirname,
         '../acp-bridge/src/ndJsonStream.ts',
@@ -104,6 +108,10 @@ export default defineConfig({
       '@qwen-code/acp-bridge/workspacePaths': path.resolve(
         __dirname,
         '../acp-bridge/src/workspacePaths.ts',
+      ),
+      '@qwen-code/acp-bridge/externalToolGuard': path.resolve(
+        __dirname,
+        '../acp-bridge/src/externalToolGuard.ts',
       ),
       '@qwen-code/audio-capture': path.resolve(
         __dirname,

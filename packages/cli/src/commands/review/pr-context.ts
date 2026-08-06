@@ -15,10 +15,17 @@
 
 import type { CommandModule } from 'yargs';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD } from '@qwen-code/qwen-code-core';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
-import { ensureAuthenticated, gh, ghApiAll, setGhHost } from './lib/gh.js';
+import {
+  currentUser,
+  ensureAuthenticated,
+  gh,
+  ghApiAll,
+  setGhHost,
+} from './lib/gh.js';
+import { parseLedger, stripLedgerMarker, type Ledger } from './lib/ledger.js';
 
 /**
  * Marker embedded in the "suggestion summary" issue comment that /review used
@@ -418,8 +425,8 @@ export function findRootId<
  * below it, and a prefix match dropped exactly that body from the context
  * file, letting the re-check approve past the blocker.
  */
-const CANONICAL_LGTM_RE =
-  /^No issues found\.?\s*LGTM!?\s*(?:✅\s*)?(?:_— [^\n]{0,200} via Qwen Code \/review_\s*)?$/i;
+export const CANONICAL_LGTM_RE =
+  /^No issues found\.?\s*LGTM!?\s*(?:✅\s*)?(?:_— [^\n]{0,200} via Qwen Code \/review(?: \(v[^\n]{1,100}\))?_\s*)?$/i;
 
 /**
  * Should this review-level summary be shown to agents?
@@ -633,6 +640,79 @@ function blockerSection(
   return out;
 }
 
+/**
+ * The latest machine ledger the REVIEWING account itself posted, if any.
+ *
+ * Own-account only: the ledger claims "these are the findings the previous
+ * /review round stood behind", and only this account's reviews can make that
+ * claim. Another user's marker — pasted, forged, or their own tooling's — is
+ * data about THEIR review, not ours, and is ignored rather than trusted.
+ * Latest by submitted_at wins: each posted round embeds a fresh full copy.
+ * Ties — same second, or both timestamps missing — break on the review id,
+ * which is monotonic: keeping the earlier review on a tie would hand the next
+ * round the older work list, the one failure this whole recovery exists to
+ * prevent.
+ */
+export function latestOwnLedger(
+  reviews: RawReview[],
+  login: string | null,
+): Ledger | null {
+  if (!login) return null;
+  let best: { at: string; id: number; ledger: Ledger } | null = null;
+  for (const r of reviews) {
+    if (r.user?.login !== login) continue;
+    const ledger = parseLedger(r.body);
+    if (!ledger) continue;
+    const at = r.submitted_at ?? '';
+    const id = typeof r.id === 'number' ? r.id : 0;
+    if (!best || at > best.at || (at === best.at && id > best.id)) {
+      best = { at, id, ledger };
+    }
+  }
+  return best?.ledger ?? null;
+}
+
+/** Render the previous round's ledger for the context file. */
+export function renderLedgerSection(ledger: Ledger): string {
+  // Cell contents come from a marker in a PR body — untrusted text. A `|` or a
+  // newline would break the table structure (and could forge rows), so both are
+  // neutralised before interpolation. The location cell is rendered inside a
+  // code span, so it also has its backticks replaced: one would close the span
+  // and let the rest of the path render as markdown.
+  // Backslash FIRST: escaping `|` with `\\|` is only an escape if the backslash
+  // is itself literal. A title already holding `\\|` became `\\\\|`, which markdown
+  // reads as an escaped backslash followed by a LIVE separator — the forged
+  // row this escaping exists to prevent, produced by the escaping.
+  const cell = (v: string) =>
+    v
+      .replace(/\\/g, '\\\\')
+      .replace(/\|/g, '\\|')
+      .replace(/[\r\n]+/g, ' ');
+  const code = (v: string) => cell(v).replace(/`/g, "'");
+  const rows = ledger.findings.map(
+    (f) =>
+      `| ${cell(f.id)} | ${f.sev === 'C' ? 'Critical' : 'Suggestion'} | \`${code(f.file)}${f.line ? `:${f.line}` : ''}\` | ${cell(f.title)} |`,
+  );
+  return [
+    '## Previous /review round (machine ledger)',
+    '',
+    `Round ${ledger.round}, recovered from the marker this account's last posted review carried. **Every entry below is owed a this-round ruling** (fixed / still stands / cannot tell) under Step 6's previous-round rules — the ledger is a work list, not a verdict; re-assert each claim against the code before repeating or retiring it.`,
+    // A truncated ledger must not read like a complete one. `dropped` exists
+    // to draw that line, and this is the only place a reader sees the list.
+    ...(ledger.dropped
+      ? [
+          '',
+          `**This list is PARTIAL**: ${ledger.dropped} further finding(s) from round ${ledger.round} did not fit the marker's size cap and are not here. Absence below is not evidence a finding was fixed — say so rather than reporting the missing ones as retired.`,
+        ]
+      : []),
+    '',
+    '| id | severity | location | title |',
+    '| --- | --- | --- | --- |',
+    ...rows,
+    '',
+  ].join('\n');
+}
+
 export function buildMarkdown(
   prNumber: string,
   ownerRepo: string,
@@ -640,6 +720,7 @@ export function buildMarkdown(
   inline: RawComment[],
   issue: RawComment[],
   reviews: RawReview[],
+  prevLedger: Ledger | null = null,
 ): string {
   const {
     openRoots,
@@ -713,8 +794,16 @@ export function buildMarkdown(
   // future agents to remember (e.g. "the previously-flagged X is no longer
   // applicable to the current diff"). Empty bodies and "LGTM" templates are
   // filtered to keep the section signal-rich.
+  if (prevLedger) {
+    parts.push(renderLedgerSection(prevLedger));
+  }
+
   const meaningfulReviews = reviews
-    .filter((r) => isReviewWorthShowing(r.body))
+    // Strip before FILTERING, not only before rendering: CANONICAL_LGTM_RE is
+    // ^…$-anchored, so a trailing marker made every canonical LGTM "worth
+    // showing" and every prior no-op round started rendering in full — the
+    // exact noise the filter exists to remove.
+    .filter((r) => isReviewWorthShowing(stripLedgerMarker(r.body ?? '')))
     .sort((a, b) => (a.submitted_at ?? '').localeCompare(b.submitted_at ?? ''));
   if (meaningfulReviews.length > 0) {
     parts.push('## Review summaries (reviewer-level overall comments)');
@@ -730,7 +819,9 @@ export function buildMarkdown(
         `### @${r.user?.login ?? '?'} [${r.state ?? 'COMMENTED'}]${date ? ` ${date}` : ''}${idNote}`,
       );
       parts.push('');
-      parts.push(quoteBlock(fullBody(r.body, r.id, ctx)));
+      parts.push(
+        quoteBlock(fullBody(stripLedgerMarker(r.body ?? ''), r.id, ctx)),
+      );
       parts.push('');
     }
   }
@@ -866,12 +957,54 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
     `repos/${owner}/${repo}/pulls/${prNumber}/reviews`,
   ) as RawReview[];
 
-  const md = buildMarkdown(prNumber, ownerRepo, meta, inline, issue, reviews);
+  // Recover the previous round's machine ledger from this account's own last
+  // posted review, and persist it beside the context file: compose-review reads
+  // the side file for the round number, and Step 6 owes each entry a ruling.
+  // Best-effort — offline/unauthenticated just means no ledger, never a failure.
+  let prevLedger: Ledger | null = null;
+  try {
+    // `currentUser()` is a network round-trip; with no reviews on the PR there
+    // is nothing for its answer to match against, so it is not made.
+    prevLedger = reviews.length
+      ? latestOwnLedger(reviews, currentUser())
+      : null;
+  } catch {
+    prevLedger = null;
+  }
+  if (prevLedger) {
+    // mkdir FIRST and guard: this write precedes the one below that creates the
+    // directory, and an unguarded ENOENT would fail the whole command over a
+    // best-effort carry-forward.
+    try {
+      mkdirSync(dirname(out), { recursive: true });
+      writeFileSync(
+        join(dirname(out), `qwen-review-pr-${prNumber}-prev-ledger.json`),
+        JSON.stringify(prevLedger, null, 2),
+      );
+    } catch {
+      // No side file: compose-review starts the round count over, nothing else.
+    }
+  }
+  // No `else` clearing a stale side file, deliberately. A recovery that failed
+  // transiently — auth, network, a review page not fetched — would otherwise
+  // reset the round counter to 1 and re-issue ids the PR already carries.
+  // Keeping the stale copy only ever advances the count, which is the safe
+  // direction for an id space.
+
+  const md = buildMarkdown(
+    prNumber,
+    ownerRepo,
+    meta,
+    inline,
+    issue,
+    reviews,
+    prevLedger,
+  );
 
   mkdirSync(dirname(out), { recursive: true });
   writeFileSync(out, md, 'utf8');
   const meaningfulReviewCount = reviews.filter((r) =>
-    isReviewWorthShowing(r.body),
+    isReviewWorthShowing(stripLedgerMarker(r.body ?? '')),
   ).length;
   // Same walk buildMarkdown just rendered from — never a re-implementation,
   // so this count cannot silently diverge from the file's contents.

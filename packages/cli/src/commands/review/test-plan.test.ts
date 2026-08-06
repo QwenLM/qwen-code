@@ -13,6 +13,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import yargs, { type Argv } from 'yargs';
@@ -109,7 +110,7 @@ describe('extractTestPlanSection', () => {
   it('does not end the section on a spaceless # line (ATX rule)', () => {
     // `#8176`, `#tag`, an unfenced `#!/bin/bash` are prose, not headings.
     const s = extractTestPlanSection(
-      '## Test Plan\n\nsee #8176\n#!/usr/bin/env bash\nmore\n\n## Risk\n\nx',
+      '## Test Plan\n\nsee #8176\n#!/usr/bin/env bash\nmore\n### done here\n\n## Risk\n\nx',
     );
     expect(s?.content).toContain('#!/usr/bin/env bash');
     expect(s?.content).toContain('more');
@@ -163,6 +164,34 @@ describe('extractClaims', () => {
     expect(claims[0].text).toContain('157');
   });
 
+  it('does not extract the MIXED file-count shape either', () => {
+    // The shape a runner prints the moment any file fails — which is when a
+    // summary actually gets pasted into a Test Plan. The label is no longer
+    // adjacent to the number it qualifies, so an adjacency rule lets `44`
+    // through as a test count and the note reads `claimed 44, observed 1323`.
+    const claims = extractClaims(
+      'Test Files  1 failed | 44 passed (45)\n     Tests  2 failed | 1323 passed (1325)',
+    ).filter((c) => c.kind === 'count');
+    expect(claims.map((c) => c.text)).toEqual(['1323 passed']);
+  });
+
+  it('does not extract jest Test Suites counts as test counts', () => {
+    // Same rule, jest's spelling: every number after the label counts suites.
+    const claims = extractClaims(
+      'Test Suites: 1 failed, 44 passed, 45 total\nTests:       2 failed, 1323 passed, 1325 total',
+    ).filter((c) => c.kind === 'count');
+    expect(claims.map((c) => c.text)).toEqual(['1323 passed']);
+  });
+
+  it('keeps a bare count on a line that never named files', () => {
+    // The mask is per-line: blanking to end of line must not swallow a
+    // legitimate count that follows on the NEXT one.
+    const claims = extractClaims('Test Files  3 passed\n471 passed').filter(
+      (c) => c.kind === 'count',
+    );
+    expect(claims.map((c) => c.text)).toEqual(['471 passed']);
+  });
+
   it('emits one claim per distinct count', () => {
     const claims = extractClaims(
       'core: 1135 passed, desktop: 41 passed',
@@ -193,6 +222,8 @@ describe('extractClaims', () => {
     const claims = extractClaims(
       '`cd packages/core && npx vitest run src/telemetry/loggers.test.ts`',
     );
+    // The cd TARGET is claimed (running `cd` proves the dir must exist) —
+    // filtered only through the static exclusion list, not the evidence bar.
     expect(claims).toContainEqual({ kind: 'path', text: 'packages/core' });
     expect(claims).toContainEqual({
       kind: 'path',
@@ -229,6 +260,17 @@ describe('extractClaims', () => {
         '`for d in a b; do cd $d && npx vitest run src/x.test.ts; done`',
       ),
     ).toEqual([]);
+  });
+
+  it('does not read a Test FILES summary as a test-count claim', () => {
+    expect(
+      extractClaims('Test Files  45 passed (45)').filter(
+        (c) => c.kind === 'count',
+      ),
+    ).toEqual([]);
+    expect(
+      extractClaims('Tests  100 passed').filter((c) => c.kind === 'count'),
+    ).toHaveLength(1);
   });
 
   it('does not read prose inside a quoted argument as a path', () => {
@@ -610,6 +652,69 @@ describe('runTestPlan', () => {
       expect(verdictOf(r.claims, '../other/x.ts')).toBe('unchecked');
     });
 
+    it('sheds no claims from a pasted unified diff in an Evidence block', () => {
+      // The PR template invites pasting logs/diffs INSIDE the Test Plan;
+      // `+++ b/<path>` once became a contradicted claim on a correct body.
+      const r = run(
+        '## Test Plan\n\n```diff\ndiff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n```',
+      );
+      expect(r.claims).toEqual([]);
+    });
+
+    it('sheds no claim from a pasted diff BODY line with a path shape', () => {
+      // `-packages/old/gone.ts` matched PATH_RE (its class admits -/+) and
+      // ruled a false contradicted on a realistic pasted diff.
+      const r = run(
+        '## Test Plan\n\n```diff\ndiff --git a/s.ts b/s.ts\n--- a/s.ts\n+++ b/s.ts\n@@ -1,2 +1,2 @@\n-packages/old/gone.ts\n+packages/new/added.ts\n```',
+      );
+      expect(r.claims).toEqual([]);
+    });
+
+    it('a gitignored file that EXISTS still rules reproduces, and says which kind', () => {
+      // build-test may have produced it earlier in this worktree; the ignore
+      // guard only ever downgrades a would-be contradiction. The NOTE is the
+      // part a reader acts on: an ignored file that is present is something
+      // this run produced, not state at the reviewed commit, and collapsing
+      // both cases onto one sentence retires that distinction silently.
+      execFileSync('git', ['init', '-q'], { cwd: dir });
+      writeFileSync(join(dir, '.gitignore'), 'artifacts/\n');
+      mkdirSync(join(dir, 'artifacts'), { recursive: true });
+      writeFileSync(join(dir, 'artifacts/report.json'), '{}');
+      const r = run('## Test Plan\n\nWrote `artifacts/report.json`');
+      const claim = r.claims.find((c) => c.text === 'artifacts/report.json');
+      expect(claim?.verdict).toBe('reproduces');
+      expect(claim?.note).toContain('gitignored');
+      expect(claim?.note).toContain('this run produced');
+    });
+
+    it('a TRACKED file that exists says it is state at the reviewed commit', () => {
+      execFileSync('git', ['init', '-q'], { cwd: dir });
+      mkdirSync(join(dir, 'src'), { recursive: true });
+      writeFileSync(join(dir, 'src/kept.ts'), 'export {};\n');
+      const r = run('## Test Plan\n\nSee `src/kept.ts`');
+      const claim = r.claims.find((c) => c.text === 'src/kept.ts');
+      expect(claim?.verdict).toBe('reproduces');
+      expect(claim?.note).toBe(
+        'exists at the reviewed commit (the diff does not change it)',
+      );
+    });
+
+    it('sheds no claim at all for a well-known build directory', () => {
+      // `dist/` is on the static exclusion list, so the claim never forms.
+      const r = run('## Test Plan\n\nRun `node dist/index.js`');
+      expect(r.claims.find((c) => c.text === 'dist/index.js')).toBeUndefined();
+    });
+
+    it('rules a gitignored path OUTSIDE the static list unchecked', () => {
+      // The check-ignore backstop covers ignored dirs the list cannot name.
+      execFileSync('git', ['init', '-q'], { cwd: dir });
+      writeFileSync(join(dir, '.gitignore'), 'artifacts/\n');
+      const r = run('## Test Plan\n\nWrote `artifacts/report.json`');
+      const claim = r.claims.find((c) => c.text === 'artifacts/report.json');
+      expect(claim?.verdict).toBe('unchecked');
+      expect(claim?.note).toContain('gitignored');
+    });
+
     it('never extracts an absolute path as a repo claim', () => {
       // `/tmp/out/log.json` is a real thing to write in a Test Plan and is not
       // a statement about the repository — it must produce no claim at all.
@@ -638,6 +743,85 @@ describe('runTestPlan', () => {
       const claim = r.claims.find((c) => c.text === 'npm run test:ghost');
       expect(claim?.verdict).toBe('contradicted');
       expect(claim?.observed).toBe('no package defines this script');
+    });
+
+    it('reproduces a script defined only by a nameless-but-parseable member', () => {
+      // A nameless member lands in `skipped`, but its manifest PARSES — the
+      // scripts table is fully readable (scripts need no `name` to enumerate),
+      // so the ruling uses the evidence it holds rather than declaring the
+      // whole table unreadable.
+      mkdirSync(join(dir, 'packages/nameless'), { recursive: true });
+      writeFileSync(
+        join(dir, 'packages/nameless/package.json'),
+        JSON.stringify({ scripts: { 'test:ghost': 'vitest' } }),
+      );
+      const r = run('## Test Plan\n\nRan `npm run test:ghost`');
+      const claim = r.claims.find((c) => c.text === 'npm run test:ghost');
+      expect(claim?.verdict).toBe('reproduces');
+    });
+
+    it('contradicts a fabricated script even when a nameless member exists', () => {
+      // Every manifest parses — the script table is complete — so a positive
+      // absence is sound; `unchecked` is reserved for genuinely unreadable
+      // manifests.
+      mkdirSync(join(dir, 'packages/nameless'), { recursive: true });
+      writeFileSync(
+        join(dir, 'packages/nameless/package.json'),
+        JSON.stringify({ scripts: { 'test:ghost': 'vitest' } }),
+      );
+      const r = run('## Test Plan\n\nRan `npm run test:nonexistent`');
+      const claim = r.claims.find((c) => c.text === 'npm run test:nonexistent');
+      expect(claim?.verdict).toBe('contradicted');
+    });
+
+    it('rules unchecked — not contradicted — when only an unreadable manifest could define the script', () => {
+      // A manifest that does not PARSE proves nothing about its scripts, so
+      // the ruling must not assert a positive absence from a table it was
+      // told may be incomplete.
+      mkdirSync(join(dir, 'packages/broken'), { recursive: true });
+      writeFileSync(join(dir, 'packages/broken/package.json'), '{ not json');
+      const r = run('## Test Plan\n\nRan `npm run test:ghost`');
+      const claim = r.claims.find((c) => c.text === 'npm run test:ghost');
+      expect(claim?.verdict).toBe('unchecked');
+      expect(claim?.note).toContain('packages/broken');
+    });
+
+    it('rules unchecked when the workspace globs use a shape the walker does not model', () => {
+      // `packages/**` lands in NEITHER `packages` nor `skipped` — the table
+      // may be silently incomplete, so a positive absence would be unsound.
+      writeFileSync(
+        join(dir, 'package.json'),
+        JSON.stringify({
+          name: 'r',
+          workspaces: ['packages/**'],
+          scripts: { build: 'exit 0' },
+        }),
+      );
+      mkdirSync(join(dir, 'packages/cli'), { recursive: true });
+      writeFileSync(
+        join(dir, 'packages/cli/package.json'),
+        JSON.stringify({ name: '@x/cli', scripts: { 'test:unit': 'vitest' } }),
+      );
+      const r = run('## Test Plan\n\nRan `npm run test:unit`');
+      expect(verdictOf(r.claims, 'npm run test:unit')).toBe('unchecked');
+    });
+
+    it('models ./-prefixed workspace globs like their bare form', () => {
+      writeFileSync(
+        join(dir, 'package.json'),
+        JSON.stringify({
+          name: 'r',
+          workspaces: ['./packages/*'],
+          scripts: { build: 'exit 0' },
+        }),
+      );
+      mkdirSync(join(dir, 'packages/cli'), { recursive: true });
+      writeFileSync(
+        join(dir, 'packages/cli/package.json'),
+        JSON.stringify({ name: '@x/cli', scripts: { 'test:unit': 'vitest' } }),
+      );
+      const r = run('## Test Plan\n\nRan `npm run test:unit`');
+      expect(verdictOf(r.claims, 'npm run test:unit')).toBe('reproduces');
     });
 
     it("prefers this review's own exit code over the manifest lookup", () => {

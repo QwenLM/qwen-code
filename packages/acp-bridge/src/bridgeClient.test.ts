@@ -50,9 +50,12 @@ import {
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import { BridgeClient } from './bridgeClient.js';
 import {
+  type LiveSpeakToUserHandler,
   MAX_SUB_SESSION_NAME_CHARS,
   MAX_SUB_SESSION_PROMPT_CHARS,
+  type ExternalToolGuardHandler,
 } from './bridgeOptions.js';
+import { SERVE_CONTROL_EXT_METHODS } from './status.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
 import type {
   BridgePendingInteraction,
@@ -76,7 +79,14 @@ import { SessionArtifactStore } from './sessionArtifacts.js';
  * a thrower-Mediator that fails any unexpected `request()` /
  * `vote()` / `forgetSession()` call.
  */
-function makeClient(fileSystem?: BridgeFileSystem): BridgeClient {
+function makeClient(
+  fileSystem?: BridgeFileSystem,
+  managedGuard?: {
+    resolveEntry: (sessionId?: string) => unknown;
+    ownsSession?: (sessionId: string) => boolean;
+    handler: ExternalToolGuardHandler;
+  },
+): BridgeClient {
   const noPermissionFlow = () => {
     throw new Error('test: permission flow should not run in fs-path tests');
   };
@@ -87,14 +97,338 @@ function makeClient(fileSystem?: BridgeFileSystem): BridgeClient {
   // required (policy/vote/forgetSession/peekSessionFor/pendingCount).
   const throwerMediator = { request: noPermissionFlow } as never;
   return new BridgeClient(
-    noPermissionFlow as never, // resolveEntry
+    (managedGuard?.resolveEntry ?? noPermissionFlow) as never, // resolveEntry
     noPermissionFlow as never, // resolvePendingRestoreEvents
     throwerMediator, // mediator (F3 Commit 3)
     0, // permissionTimeoutMs (disabled)
     Infinity, // maxPendingPerSession (disabled)
     fileSystem,
+    undefined,
+    undefined,
+    undefined,
+    managedGuard?.ownsSession ?? (() => true),
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    () => false,
+    undefined,
+    undefined,
+    undefined,
+    managedGuard?.handler,
   );
 }
+
+function makeLiveSpeakClient(
+  handler: LiveSpeakToUserHandler,
+  ownsSession: (sessionId: string) => boolean = () => true,
+): BridgeClient {
+  const noPermissionFlow = () => {
+    throw new Error('test: permission flow should not run');
+  };
+  return new BridgeClient(
+    (() => undefined) as never,
+    (() => undefined) as never,
+    { request: noPermissionFlow } as never,
+    0,
+    Infinity,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    ownsSession,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    () => handler,
+  );
+}
+
+describe('BridgeClient — Live speak-to-user channel', () => {
+  it('routes exact speech only for a session owned by the connection', async () => {
+    const handler = vi.fn(async () => undefined);
+    const client = makeLiveSpeakClient(
+      handler,
+      (sessionId) => sessionId === 'live-session',
+    );
+
+    await expect(
+      client.extMethod(SERVE_CONTROL_EXT_METHODS.liveSpeakToUser, {
+        callerSessionId: 'live-session',
+        message: '原样说出这句话。',
+      }),
+    ).resolves.toEqual({ accepted: true });
+    expect(handler).toHaveBeenCalledWith({
+      callerSessionId: 'live-session',
+      message: '原样说出这句话。',
+    });
+
+    await expect(
+      client.extMethod(SERVE_CONTROL_EXT_METHODS.liveSpeakToUser, {
+        callerSessionId: 'other-session',
+        message: '不应发送',
+      }),
+    ).rejects.toMatchObject({ code: -32602 });
+  });
+});
+
+describe('BridgeClient — background notification turn boundary', () => {
+  it('publishes the child end-turn signal for the owned live session', async () => {
+    const sessionId = 'session-background';
+    const publish = vi.fn().mockReturnValue(true);
+    const entry = { sessionId, events: { publish } };
+    const noFlow = () => {
+      throw new Error('test: permission flow should not run');
+    };
+    const client = new BridgeClient(
+      ((id: string) => (id === sessionId ? entry : undefined)) as never,
+      noFlow as never,
+      { request: noFlow } as never,
+      0,
+      Infinity,
+    );
+
+    await client.extNotification('_qwencode/end_turn', {
+      sessionId,
+      reason: 'end_turn',
+      source: 'background_notification',
+    });
+
+    expect(publish).toHaveBeenCalledWith({
+      type: 'background_notification_turn_complete',
+      data: { sessionId, reason: 'end_turn' },
+    });
+  });
+
+  it('drops malformed or foreign end-turn signals', async () => {
+    const publish = vi.fn();
+    const entry = { sessionId: 'owned', events: { publish } };
+    const noFlow = () => {
+      throw new Error('test: permission flow should not run');
+    };
+    const client = new BridgeClient(
+      ((id: string) => (id === 'owned' ? entry : undefined)) as never,
+      noFlow as never,
+      { request: noFlow } as never,
+      0,
+      Infinity,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      (id) => id === 'owned',
+    );
+
+    await client.extNotification('_qwencode/end_turn', {
+      sessionId: 'owned',
+      reason: 'end_turn',
+      source: 'forged',
+    });
+    await client.extNotification('_qwencode/end_turn', {
+      sessionId: 'foreign',
+      reason: 'end_turn',
+      source: 'background_notification',
+    });
+
+    expect(publish).not.toHaveBeenCalled();
+  });
+});
+
+describe('BridgeClient — managed external tool guard', () => {
+  it('uses runtime-owned session/prompt identity before calling the host', async () => {
+    const handler = vi.fn<ExternalToolGuardHandler>().mockResolvedValue({
+      allowed: true,
+    });
+    const entry: {
+      sessionId: string;
+      promptActive: boolean;
+      activePromptId?: string;
+    } = {
+      sessionId: 'session-1',
+      promptActive: true,
+      activePromptId: 'prompt-1',
+    };
+    const client = makeClient(undefined, {
+      resolveEntry: (sessionId) =>
+        sessionId === entry.sessionId ? entry : undefined,
+      handler,
+    });
+
+    await expect(
+      client.extMethod(SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare, {
+        sessionId: 'session-1',
+        promptId: 'prompt-1',
+        toolCallId: 'call-1',
+        toolName: 'write_file',
+        arguments: { path: 'README.md' },
+      }),
+    ).resolves.toEqual({ allowed: true });
+    expect(handler).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      promptId: 'prompt-1',
+      toolCallId: 'call-1',
+      toolName: 'write_file',
+      arguments: { path: 'README.md' },
+    });
+  });
+
+  it('rejects a stale prompt without contacting the host', async () => {
+    const handler = vi.fn<ExternalToolGuardHandler>().mockResolvedValue({
+      allowed: true,
+    });
+    const client = makeClient(undefined, {
+      resolveEntry: () => ({
+        sessionId: 'session-1',
+        promptActive: true,
+        activePromptId: 'prompt-current',
+      }),
+      handler,
+    });
+
+    await expect(
+      client.extMethod(SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare, {
+        sessionId: 'session-1',
+        promptId: 'prompt-stale',
+        toolCallId: 'call-1',
+        toolName: 'write_file',
+        arguments: {},
+      }),
+    ).rejects.toThrow('not the active prompt');
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('discards an allow when the prompt stops while the provider is pending', async () => {
+    let release!: () => void;
+    const providerPending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const handler = vi.fn<ExternalToolGuardHandler>(async () => {
+      await providerPending;
+      return { allowed: true };
+    });
+    const entry: {
+      sessionId: string;
+      promptActive: boolean;
+      activePromptId?: string;
+    } = {
+      sessionId: 'session-1',
+      promptActive: true,
+      activePromptId: 'prompt-1',
+    };
+    const client = makeClient(undefined, {
+      resolveEntry: (sessionId) =>
+        sessionId === entry.sessionId ? entry : undefined,
+      handler,
+    });
+
+    const pending = client.extMethod(
+      SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare,
+      {
+        sessionId: 'session-1',
+        promptId: 'prompt-1',
+        toolCallId: 'call-1',
+        toolName: 'write_file',
+        arguments: {},
+      },
+    );
+    await vi.waitFor(() => expect(handler).toHaveBeenCalledOnce());
+    entry.promptActive = false;
+    delete entry.activePromptId;
+    release();
+
+    await expect(pending).rejects.toThrow('no longer active');
+  });
+
+  it('does not route unrelated extension methods through the tool guard handler', async () => {
+    const handler = vi.fn<ExternalToolGuardHandler>().mockResolvedValue({
+      allowed: true,
+    });
+    const client = makeClient(undefined, {
+      resolveEntry: () => ({
+        sessionId: 'session-1',
+        promptActive: true,
+        activePromptId: 'prompt-1',
+      }),
+      handler,
+    });
+
+    const err = await client
+      .extMethod('qwen/control/unrelated-method', {
+        sessionId: 'session-1',
+        promptId: 'prompt-1',
+        toolCallId: 'call-1',
+        toolName: 'write_file',
+        arguments: {},
+      })
+      .catch((caught: unknown) => caught);
+    expect(err).toBeInstanceOf(RequestError);
+    expect((err as RequestError).code).toBe(-32601);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('rejects a session not owned by this channel', async () => {
+    const handler = vi.fn<ExternalToolGuardHandler>().mockResolvedValue({
+      allowed: true,
+    });
+    const client = makeClient(undefined, {
+      resolveEntry: () => ({
+        sessionId: 'session-foreign',
+        promptActive: true,
+        activePromptId: 'prompt-1',
+      }),
+      ownsSession: () => false,
+      handler,
+    });
+
+    await expect(
+      client.extMethod(SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare, {
+        sessionId: 'session-foreign',
+        promptId: 'prompt-1',
+        toolCallId: 'call-1',
+        toolName: 'write_file',
+        arguments: {},
+      }),
+    ).rejects.toThrow('not owned');
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { allowed: 'yes' },
+    { allowed: true, reason: 'not valid for allow' },
+    { allowed: false, reason: 'line one\nline two' },
+    { allowed: false, reason: 'line one\u2028line two' },
+    { allowed: false, extra: true },
+  ])('fails closed for malformed host result %#', async (result) => {
+    const handler = vi
+      .fn<ExternalToolGuardHandler>()
+      .mockResolvedValue(result as never);
+    const entry = {
+      sessionId: 'session-1',
+      promptActive: true,
+      activePromptId: 'prompt-1',
+    };
+    const client = makeClient(undefined, {
+      resolveEntry: () => entry,
+      handler,
+    });
+
+    await expect(
+      client.extMethod(SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare, {
+        sessionId: 'session-1',
+        promptId: 'prompt-1',
+        toolCallId: 'call-1',
+        toolName: 'write_file',
+        arguments: {},
+      }),
+    ).rejects.toThrow('invalid result');
+  });
+});
 
 describe('BridgeClient — recording degradation ownership', () => {
   it('keeps session-level recording degradation prompt-neutral', async () => {
@@ -1103,6 +1437,88 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
       callerSessionId: 'caller-1',
     });
     expect(onCreate).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('BridgeClient — Live screen-context extMethod dispatch', () => {
+  function makeLiveClient(
+    handler:
+      | (() => Promise<{
+          appName: string;
+          accessibilityText: string;
+          screenshotPath: string;
+        }>)
+      | undefined,
+  ): BridgeClient {
+    const noFlow = () => {
+      throw new Error('test: unexpected flow');
+    };
+    return new BridgeClient(
+      (() => undefined) as never,
+      noFlow as never,
+      { request: noFlow } as never,
+      0,
+      Infinity,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      (sessionId) => sessionId === 'live-coordinator',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => false,
+      () =>
+        handler
+          ? async ({ callerSessionId }) => {
+              expect(callerSessionId).toBe('live-coordinator');
+              return handler();
+            }
+          : undefined,
+    );
+  }
+
+  it('authenticates and forwards the argument-free Live capture', async () => {
+    const handler = vi.fn(async () => ({
+      appName: 'Safari',
+      accessibilityText: 'AXWindow',
+      screenshotPath: '/private/tmp/shot.png',
+    }));
+    const client = makeLiveClient(handler);
+
+    await expect(
+      client.extMethod('qwen/control/live/capture-screen-context', {
+        callerSessionId: 'live-coordinator',
+      }),
+    ).resolves.toEqual({
+      appName: 'Safari',
+      accessibilityText: 'AXWindow',
+      screenshotPath: '/private/tmp/shot.png',
+    });
+    expect(handler).toHaveBeenCalledOnce();
+  });
+
+  it('rejects unowned sessions and a missing daemon handler', async () => {
+    const handler = vi.fn(async () => ({
+      appName: 'Safari',
+      accessibilityText: '',
+      screenshotPath: '/private/tmp/shot.png',
+    }));
+    await expect(
+      makeLiveClient(handler).extMethod(
+        'qwen/control/live/capture-screen-context',
+        { callerSessionId: 'worker-or-forged' },
+      ),
+    ).rejects.toThrow(/callerSessionId/u);
+    expect(handler).not.toHaveBeenCalled();
+    await expect(
+      makeLiveClient(undefined).extMethod(
+        'qwen/control/live/capture-screen-context',
+        { callerSessionId: 'live-coordinator' },
+      ),
+    ).rejects.toThrow();
   });
 });
 
@@ -2534,7 +2950,10 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     const entry = {
       sessionId: 'sess:drain',
       activePromptId: 'prompt-drain',
-      midTurnMessageQueue: [{ text: 'first' }, { text: 'second' }],
+      midTurnMessageQueue: [
+        { messageId: 'mid-1', text: 'first' },
+        { messageId: 'mid-2', text: 'second' },
+      ],
       events: { publish },
     };
     const client = makeClientWithEntry('sess:drain', entry);
@@ -2554,7 +2973,11 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     expect(publish.mock.calls[0][0]).toMatchObject({
       type: 'mid_turn_message_injected',
       promptId: 'prompt-drain',
-      data: { sessionId: 'sess:drain', messages: ['first', 'second'] },
+      data: {
+        sessionId: 'sess:drain',
+        messages: ['first', 'second'],
+        messageIds: ['mid-1', 'mid-2'],
+      },
     });
     // Anonymous queue entries (no originator) ⇒ no `originatorClientId` on the
     // frame, so every consumer reconciles it.
@@ -2570,9 +2993,9 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       sessionId: 'sess:multi',
       activePromptId: 'prompt-multi',
       midTurnMessageQueue: [
-        { text: 'a', originatorClientId: 'client-1' },
-        { text: 'b', originatorClientId: 'client-2' },
-        { text: 'c', originatorClientId: 'client-1' },
+        { messageId: 'mid-a', text: 'a', originatorClientId: 'client-1' },
+        { messageId: 'mid-b', text: 'b', originatorClientId: 'client-2' },
+        { messageId: 'mid-c', text: 'c', originatorClientId: 'client-1' },
       ],
       events: { publish },
     };
@@ -2596,13 +3019,21 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     expect(c1).toMatchObject({
       type: 'mid_turn_message_injected',
       promptId: 'prompt-multi',
-      data: { sessionId: 'sess:multi', messages: ['a', 'c'] },
+      data: {
+        sessionId: 'sess:multi',
+        messages: ['a', 'c'],
+        messageIds: ['mid-a', 'mid-c'],
+      },
       originatorClientId: 'client-1',
     });
     expect(c2).toMatchObject({
       type: 'mid_turn_message_injected',
       promptId: 'prompt-multi',
-      data: { sessionId: 'sess:multi', messages: ['b'] },
+      data: {
+        sessionId: 'sess:multi',
+        messages: ['b'],
+        messageIds: ['mid-b'],
+      },
       originatorClientId: 'client-2',
     });
   });
@@ -2619,7 +3050,9 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     try {
       const entry = {
         sessionId: 'sess:closed',
-        midTurnMessageQueue: [{ text: 'still-delivered' }],
+        midTurnMessageQueue: [
+          { messageId: 'mid-delivered', text: 'still-delivered' },
+        ],
         events: { publish },
       };
       const client = makeClientWithEntry('sess:closed', entry);

@@ -22,6 +22,10 @@ import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 import { createChildAbortController } from '../../utils/abortController.js';
 import { reconcileMaxTokens } from '../tokenLimits.js';
 import {
+  isQwenFamilyWireModel,
+  isTieredEffortWireModel,
+} from '../modalityDefaults.js';
+import {
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   MAX_STREAM_IDLE_TIMEOUT_MS,
   QWEN_STREAM_IDLE_TIMEOUT_MS_ENV,
@@ -877,17 +881,20 @@ export class ContentGenerationPipeline {
       // what actually ships: a qwen config with a non-qwen request model
       // would leak the field, and a non-qwen config with a qwen request
       // model would miss the disable signal (the regression).
-      //
-      // `coder-model` is the QWEN_OAUTH default (DEFAULT_QWEN_MODEL in
-      // config/models.ts, aliased to Qwen 3.6 Plus hybrid) — it doesn't
-      // start with `qwen` but is the most common hybrid-thinking model
-      // for first-time users, so it must be covered.
-      if (
-        !thinkingMandatory &&
-        (model.startsWith('qwen') || model === 'coder-model')
-      ) {
+      if (!thinkingMandatory && isQwenFamilyWireModel(model)) {
         if (isDashScope) {
-          typed['enable_thinking'] = false;
+          if (isTieredEffortWireModel(model)) {
+            // The tier-native family reads reasoning_effort, not the
+            // boolean: emit the canonical disable in the knob it reads
+            // (the strip below preserves 'none'). Drop a user-supplied
+            // thinking_budget too — DashScope rejects it alongside
+            // reasoning_effort.
+            delete typed['enable_thinking'];
+            delete typed['thinking_budget'];
+            typed['reasoning_effort'] = 'none';
+          } else {
+            typed['enable_thinking'] = false;
+          }
         } else {
           // Non-DashScope OpenAI-compatible servers (vLLM, SGLang, ...) render
           // the model's chat template server-side and read the thinking switch
@@ -958,12 +965,30 @@ export class ContentGenerationPipeline {
     }
 
     const typed = providerRequest as unknown as Record<string, unknown>;
-    // DashScope rejects forced tool selection while thinking is enabled.
+    const reasoningEffort = typed['reasoning_effort'];
+    // DashScope rejects forced tool selection while thinking is enabled
+    // ("The tool_choice parameter does not support being set to required or
+    // object in thinking mode"). Both field clauses are family-gated like
+    // the disable path above: `enable_thinking` and `reasoning_effort` are
+    // qwen thinking switches, but on non-qwen models sharing the endpoint
+    // they are opaque parameters that do not put the request in thinking
+    // mode (GLM reads `thinking.enabled`, DeepSeek `thinking.type`), and
+    // dropping `required` there only degrades their forced-tool side
+    // queries. `thinkingMandatory` stays ungated: it is explicit
+    // "thinking is on" knowledge, model-agnostic by design.
     if (
       isDashScope &&
       typed['tool_choice'] === 'required' &&
-      (thinkingMandatory || typed['enable_thinking'] === true)
+      (thinkingMandatory ||
+        (isQwenFamilyWireModel(model) &&
+          (typed['enable_thinking'] === true ||
+            (typeof reasoningEffort === 'string' &&
+              reasoningEffort !== 'none'))))
     ) {
+      debugLogger.debug(
+        'DashScope: dropping tool_choice=required while thinking is enabled',
+        { model, reasoningEffort, thinkingMandatory },
+      );
       delete typed['tool_choice'];
     }
 
@@ -1151,7 +1176,11 @@ export class ContentGenerationPipeline {
         | undefined;
       if (
         (wireRequest?.['enable_thinking'] === false ||
-          chatTemplateKwargs?.['enable_thinking'] === false) &&
+          chatTemplateKwargs?.['enable_thinking'] === false ||
+          // The tier-native family's disable shape (reasoning_effort:
+          // 'none') replaces enable_thinking: false on the wire; recognise
+          // it so runtime learning still fires there.
+          wireRequest?.['reasoning_effort'] === 'none') &&
         request.config?.abortSignal?.aborted !== true &&
         isRequiredThinkingError(error)
       ) {

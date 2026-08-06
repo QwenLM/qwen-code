@@ -16,6 +16,7 @@ import type {
   DaemonSessionBtwResult,
   DaemonSessionGenerationEvent,
   DaemonMidTurnMessageResult,
+  DaemonRemoveMidTurnMessageResult,
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
   DaemonSessionContextStatus,
@@ -298,6 +299,7 @@ export interface DaemonTodoItem {
   content: string;
   status: DaemonTodoStatus;
   priority?: DaemonTodoPriority;
+  blockedBy?: string[];
 }
 
 export interface DaemonTodoList {
@@ -305,6 +307,8 @@ export interface DaemonTodoList {
   toolCallId: string;
   title: string;
   status: string;
+  planId?: string;
+  sourceCallId?: string;
   items: DaemonTodoItem[];
   raw: Extract<DaemonTranscriptBlock, { kind: 'tool' }>;
 }
@@ -352,7 +356,11 @@ export interface DaemonSessionActions {
     sessionId: string,
     options?: { workspaceCwd?: string },
   ): Promise<void>;
-  reloadSession(signal: AbortSignal): Promise<void>;
+  /** `memory` replay is reserved for the provider's live-journal repair. */
+  reloadSession(
+    signal: AbortSignal,
+    options?: { replaySource?: 'configured' | 'memory' },
+  ): Promise<void>;
   resumeSession(
     sessionId: string,
     options?: { workspaceCwd?: string },
@@ -413,6 +421,10 @@ export interface DaemonSessionActions {
     message: string,
     opts?: { signal?: AbortSignal },
   ): Promise<DaemonMidTurnMessageResult>;
+  removeMidTurnMessage(
+    messageId: string,
+    opts?: PendingPromptActionOptions,
+  ): Promise<DaemonRemoveMidTurnMessageResult>;
   getPendingPrompts(
     opts?: PendingPromptActionOptions,
   ): Promise<DaemonPendingPromptsResult>;
@@ -488,4 +500,5 @@ export interface PendingSessionLoad {
   resolve: () => void;
   reject: (error: unknown) => void;
   signal?: AbortSignal;
+  replaySource?: 'configured' | 'memory';
 }

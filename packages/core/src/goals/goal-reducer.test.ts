@@ -88,6 +88,28 @@ describe('goal reducer', () => {
     });
   });
 
+  it('clears lastReason when editing the objective', () => {
+    const previous = goalRecord({
+      goalId: 'g-1',
+      revision: 2,
+      lastReason: 'stale verifier rejection',
+    });
+    const next = reduceGoalControl(previous, {
+      request: {
+        action: 'edit',
+        objective: 'updated objective',
+        expectedGoalId: 'g-1',
+        expectedRevision: 2,
+      },
+      now: 300,
+      nextGoalId: 'unused',
+      cursor: { recordId: 'r-300' },
+    });
+
+    expect(next?.lastReason).toBeUndefined();
+    expect(next?.objective).toBe('updated objective');
+  });
+
   it('creates a trimmed active goal only when no goal exists', () => {
     const next = reduceGoalControl(null, {
       request: { action: 'create', objective: '  ship  ' },
@@ -220,6 +242,29 @@ describe('goal reducer', () => {
       });
     },
   );
+
+  it('resets the continuation turn budget when resuming an exhausted goal', () => {
+    const resumed = reduceGoalControl(
+      goalRecord({ status: 'usage_limited', revision: 4, turnCount: 50 }),
+      {
+        request: {
+          action: 'resume',
+          expectedGoalId: 'g-1',
+          expectedRevision: 4,
+        },
+        now: 200,
+        nextGoalId: 'unused',
+        cursor: { recordId: 'r-200' },
+      },
+    );
+
+    expect(resumed).toMatchObject({
+      status: 'active',
+      revision: 4,
+      turnCount: 0,
+      evidenceCursor: { recordId: 'r-100' },
+    });
+  });
 
   it('rejects an unsupported control action instead of resuming', () => {
     expect(() =>

@@ -124,6 +124,39 @@ describe('<HistoryItemDisplay />', () => {
     expect(output).toContain('Converted 1 image(s) to text via vm.');
   });
 
+  it('renders v2 goal_state history items through the lifecycle card', () => {
+    const item: HistoryItem = {
+      id: 1,
+      type: MessageType.GOAL_STATE,
+      snapshot: {
+        v: 2,
+        activity: 'idle',
+        goal: {
+          goalId: 'goal-1',
+          revision: 1,
+          objective: 'ship the release',
+          status: 'blocked',
+          evidenceCursor: { recordId: 'record-1' },
+          turnCount: 2,
+          activeTimeMs: 4_000,
+          createdAt: 1_000,
+          updatedAt: 5_000,
+          lastReason: 'waiting for approval',
+        },
+      },
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <HistoryItemDisplay item={item} terminalWidth={80} isPending={false} />,
+    );
+
+    const output = lastFrame();
+    expect(output).toContain('Goal blocked');
+    expect(output).toContain('Goal: ship the release');
+    expect(output).toContain('2 turns');
+    expect(output).toContain('Reason: waiting for approval');
+  });
+
   it('renders StatsDisplay for "stats" type', () => {
     const item: HistoryItem = {
       ...baseItem,
@@ -702,6 +735,31 @@ describe('<HistoryItemDisplay />', () => {
       handler?.(mouseEvent('left-release', 20));
 
       expect(toggle).not.toHaveBeenCalled();
+    });
+
+    it('hides the click hint when ui.mouseTracking is false despite VP being on', () => {
+      const settingsNoMouse = new LoadedSettings(
+        { path: '', settings: {}, originalSettings: {} },
+        { path: '', settings: {}, originalSettings: {} },
+        {
+          path: '',
+          settings: { ui: { useTerminalBuffer: true, mouseTracking: false } },
+          originalSettings: {},
+        },
+        { path: '', settings: {}, originalSettings: {} },
+        true,
+        new Set(),
+      );
+      const { lastFrame } = renderWithProviders(
+        <HistoryItemDisplay
+          item={thoughtItem}
+          terminalWidth={100}
+          isPending={false}
+        />,
+        { settings: settingsNoMouse },
+      );
+
+      expect(lastFrame()).not.toContain(`click or ${toggleKeyHint} to expand`);
     });
   });
 });

@@ -13,6 +13,7 @@ import {
 // instead of inlining the string literals, so upstream changes
 // are compiler-flagged here.
 import type { PermissionPolicy } from '@qwen-code/acp-bridge';
+import type { DaemonMemoryBudget } from '@qwen-code/acp-bridge/daemonMemoryBudget';
 import type {
   AuthType,
   InputModalities,
@@ -68,6 +69,11 @@ export interface ServeOptions {
    * above single-user usage, well below the design's N≈50 cliff where
    * per-session RSS (~30–50 MB) and FD pressure start to bite. Set to
    * `0` or `Infinity` to disable.
+   *
+   * This is a fairness and FD lever rather than a memory lever. Sessions
+   * multiplex onto their workspace's single ACP child, so per-session RSS is
+   * spent inside that child's heap, which nothing currently bounds beyond
+   * V8's own ceiling.
    */
   maxSessions?: number;
   /**
@@ -219,6 +225,31 @@ export interface ServeOptions {
    */
   mcpPoolActive?: boolean;
   /**
+   * Total memory budget in MB for the whole daemon process tree — the root
+   * plus every `qwen --acp` child it spawns. When unset, derived as half of
+   * the cgroup-constrained or host memory. Currently observed and reported
+   * only; it does not yet size any child.
+   */
+  memoryBudgetMb?: number;
+  /**
+   * Resolved at boot by `runQwenServe`. Not an operator input, and not
+   * consumed by any spawn path — it is reported under `limits.memory` on
+   * `GET /daemon/status` so the daemon's memory denominator is observable
+   * before a child-capacity policy is designed against it.
+   */
+  daemonMemoryBudget?: DaemonMemoryBudget;
+  /**
+   * Required external pre-execution policy for managed ACP tools. Omitted
+   * means fully off. The token remains daemon-local and is never forwarded to
+   * the ACP child or any executor environment.
+   */
+  externalToolGuard?: {
+    mode: 'required';
+    endpoint: string;
+    token: string;
+    timeoutMs?: number;
+  };
+  /**
    * Cross-origin allowlist for browser webui
    * deployments.
    */
@@ -350,6 +381,7 @@ export interface CapabilitiesEnvelope {
     primary: boolean;
     trusted: boolean;
     removable?: boolean;
+    kind?: 'live';
   }>;
   /**
    * Transport families this daemon supports. Always includes `'rest'`;

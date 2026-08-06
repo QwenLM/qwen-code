@@ -22,6 +22,7 @@ import {
   resolveRuntimeStartupTimeoutMs,
   runQwenServe,
   type RunHandle,
+  subSessionConcurrencyCapsFromSettings,
   validatePolicyConfig,
   waitForRuntimeStartingForShutdown,
 } from './run-qwen-serve.js';
@@ -467,6 +468,17 @@ const mockCreateSpawnChannelFactoryOptions = vi.hoisted(
 const mockChannelWorkerEnabledState = vi.hoisted(() => ({
   value: undefined as boolean | undefined,
 }));
+const mockTotalMemBytes = vi.hoisted(() => ({
+  value: undefined as number | undefined,
+}));
+
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  return {
+    ...actual,
+    totalmem: () => mockTotalMemBytes.value ?? actual.totalmem(),
+  };
+});
 
 async function getFreeLoopbackPort(): Promise<number> {
   const server = createServer();
@@ -776,6 +788,80 @@ describe('extractContextFilename (#4297 fold-in 7 P2-1 helper)', () => {
     expect(extractContextFilename(42)).toBeUndefined();
     expect(extractContextFilename(true)).toBeUndefined();
     expect(extractContextFilename({ fileName: 'AGENTS.md' })).toBeUndefined();
+  });
+});
+
+describe('subSessionConcurrencyCapsFromSettings', () => {
+  it('passes through positive integer caps', () => {
+    expect(
+      subSessionConcurrencyCapsFromSettings({
+        maxConcurrentSubSessionsPerCaller: 8,
+        maxConcurrentSubSessionsTotal: 12,
+      }),
+    ).toEqual({ maxConcurrentPerCaller: 8, maxConcurrentTotal: 12 });
+  });
+
+  it('omits absent keys so launcher defaults apply', () => {
+    expect(subSessionConcurrencyCapsFromSettings({})).toEqual({});
+  });
+
+  it('rejects values outside positive integers', () => {
+    // Hand-edited settings.json could land any of these; coercing (e.g.
+    // accepting 0 or "10") would silently disable or misread a resource cap.
+    const onWarning = vi.fn();
+    expect(
+      subSessionConcurrencyCapsFromSettings(
+        {
+          maxConcurrentSubSessionsPerCaller: 0,
+          maxConcurrentSubSessionsTotal: -1,
+        },
+        onWarning,
+      ),
+    ).toEqual({});
+    expect(
+      subSessionConcurrencyCapsFromSettings(
+        {
+          maxConcurrentSubSessionsPerCaller: 2.5,
+          maxConcurrentSubSessionsTotal: '10',
+        },
+        onWarning,
+      ),
+    ).toEqual({});
+    expect(onWarning).toHaveBeenCalledTimes(4);
+  });
+
+  it('keeps a valid cap when the sibling key is invalid', () => {
+    expect(
+      subSessionConcurrencyCapsFromSettings(
+        {
+          maxConcurrentSubSessionsPerCaller: 8,
+          maxConcurrentSubSessionsTotal: Number.NaN,
+        },
+        () => {},
+      ),
+    ).toEqual({ maxConcurrentPerCaller: 8 });
+  });
+
+  it('warns naming a present-but-invalid cap', () => {
+    const onWarning = vi.fn();
+    expect(
+      subSessionConcurrencyCapsFromSettings(
+        { maxConcurrentSubSessionsTotal: '50' },
+        onWarning,
+      ),
+    ).toEqual({});
+    expect(onWarning).toHaveBeenCalledTimes(1);
+    expect(onWarning.mock.calls[0][0]).toContain(
+      'maxConcurrentSubSessionsTotal',
+    );
+    // JSON.stringify keeps the quotes, revealing the value is a string.
+    expect(onWarning.mock.calls[0][0]).toContain('"50"');
+  });
+
+  it('does not warn when the keys are absent', () => {
+    const onWarning = vi.fn();
+    subSessionConcurrencyCapsFromSettings({}, onWarning);
+    expect(onWarning).not.toHaveBeenCalled();
   });
 });
 
@@ -1862,6 +1948,214 @@ describe('runQwenServe permissionResponseTimeoutMs validation', () => {
   });
 });
 
+/**
+ * The budget is resolved at boot and reported; it does not size any child yet.
+ * The only boot-time behavior is rejecting an out-of-range flag value.
+ */
+describe('runQwenServe memory budget', () => {
+  let tmpDirs: string[] = [];
+
+  afterEach(() => {
+    for (const dir of tmpDirs) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+    tmpDirs = [];
+  });
+
+  function makeTmpDir(): string {
+    const dir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-mem-')),
+    );
+    tmpDirs.push(dir);
+    return dir;
+  }
+
+  it('reports the resolved budget over HTTP without sizing any child', async () => {
+    const dir = makeTmpDir();
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: dir,
+        maxSessions: 1,
+        serveWebShell: false,
+        memoryBudgetMb: 4096,
+      },
+      { resolveOnListen: true },
+    );
+
+    try {
+      await handle.runtimeReady;
+      const res = await fetch(`${handle.url}/daemon/status`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        limits: {
+          memory: {
+            enforced: false;
+            configuredBudgetMb: number;
+            effectiveBudgetMb: number;
+            budgetSource: string;
+            availableMemoryMb: number;
+            insufficientMemory: boolean;
+            modeled: {
+              rootReserveMb: number;
+              childPoolMb: number;
+              minChildHeapMb: number;
+              maxChildHeapMb: number;
+              legacyChildCeilingMb: number;
+            };
+          } | null;
+        };
+        runtime: {
+          memory?: {
+            registeredWorkspaces: number;
+            activeAcpChildren: number;
+            childRssCoverage: string;
+            modeled: {
+              recommendedShareAtRegisteredMb: number;
+              recommendedShareAtActiveMb: number | null;
+            };
+          };
+        };
+      };
+
+      const memory = body.limits.memory;
+      expect(memory).not.toBeNull();
+      // Nothing in this section is applied, and the wire says so.
+      expect(memory?.enforced).toBe(false);
+      expect(memory?.configuredBudgetMb).toBe(4096);
+      expect(memory?.budgetSource).toBe('flag');
+      // The invariant that motivates separating configured from effective:
+      // whatever is reported must be something the machine can back.
+      expect(memory?.effectiveBudgetMb).toBeLessThanOrEqual(
+        memory?.availableMemoryMb ?? 0,
+      );
+      // Modeled pools stay non-negative and inside the budget they come from.
+      expect(memory?.modeled.rootReserveMb).toBeLessThanOrEqual(
+        memory?.effectiveBudgetMb ?? 0,
+      );
+      expect(memory?.modeled.childPoolMb).toBeGreaterThanOrEqual(0);
+      expect(memory?.modeled.childPoolMb).toBeLessThan(
+        memory?.effectiveBudgetMb ?? 0,
+      );
+      expect(memory?.modeled.legacyChildCeilingMb).toBeGreaterThan(0);
+
+      const runtimeMemory = body.runtime.memory;
+      expect(runtimeMemory?.registeredWorkspaces).toBe(1);
+      // Sampling still covers only the primary child; say so rather than let
+      // the section imply process-tree observation.
+      expect(runtimeMemory?.childRssCoverage).toBe('primary_only');
+      expect(
+        runtimeMemory?.modeled.recommendedShareAtRegisteredMb,
+      ).toBeGreaterThan(0);
+    } finally {
+      await handle.close();
+    }
+  }, 30_000);
+
+  it('rejects a budget below the documented minimum', async () => {
+    const dir = makeTmpDir();
+    const origEnv = process.env['QWEN_RUNTIME_DIR'];
+    process.env['QWEN_RUNTIME_DIR'] = dir;
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace: dir,
+            maxSessions: 1,
+            memoryBudgetMb: 512,
+          },
+          {
+            bridge: {
+              spawnOrAttach: vi.fn(),
+              shutdown: vi.fn().mockResolvedValue(undefined),
+              killAllSync: vi.fn(),
+            } as unknown as HttpAcpBridge,
+          },
+        ),
+      ).rejects.toThrow(/memoryBudgetMb/);
+    } finally {
+      delete process.env['QWEN_RUNTIME_DIR'];
+      if (origEnv !== undefined) process.env['QWEN_RUNTIME_DIR'] = origEnv;
+    }
+  });
+
+  it('writes a stderr line when the budget comes from the flag', async () => {
+    const dir = makeTmpDir();
+    const stderrWrites: string[] = [];
+    const spy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: dir,
+        maxSessions: 1,
+        serveWebShell: false,
+        memoryBudgetMb: 4096,
+      },
+      { resolveOnListen: true },
+    );
+    try {
+      await handle.runtimeReady;
+      expect(stderrWrites.join('')).toContain('memory budget');
+    } finally {
+      spy.mockRestore();
+      await handle.close();
+    }
+  });
+
+  it('writes no stderr line for a derived budget on a sufficient host', async () => {
+    // The gate must stay conditional: a derived budget on a host above the
+    // minimum prints nothing. If the gate were unconditional this test fails.
+    // Pin host memory so the test is independent of the runner's cgroup.
+    mockTotalMemBytes.value = 32_768 * 1024 * 1024;
+    const constrainedSpy = vi
+      .spyOn(
+        process as { constrainedMemory: () => number },
+        'constrainedMemory',
+      )
+      .mockReturnValue(0);
+    const dir = makeTmpDir();
+    const stderrWrites: string[] = [];
+    const spy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: dir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      { resolveOnListen: true },
+    );
+    try {
+      await handle.runtimeReady;
+      expect(stderrWrites.join('')).not.toContain('memory budget');
+    } finally {
+      spy.mockRestore();
+      constrainedSpy.mockRestore();
+      mockTotalMemBytes.value = undefined;
+      await handle.close();
+    }
+  });
+});
+
 describe('runQwenServe initializeTimeoutMs validation', () => {
   let tmpDir: string;
 
@@ -2522,6 +2816,58 @@ describe('runQwenServe pre-listen bridge option validation', () => {
         { bridge: makeRuntimeBridge() },
       ),
     ).rejects.toThrow(/Injected bridge dependencies/);
+    expect(stdoutWrites.join('')).not.toContain('qwen serve listening on');
+  });
+
+  it('rejects an unknown embedded external Tool Guard mode before listening', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-guard-opt-')),
+    );
+    const stdoutWrites: string[] = [];
+    vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
+      stdoutWrites.push(String(chunk));
+      return true;
+    });
+    process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'] = 'ambient-secret';
+
+    await expect(
+      runQwenServe({
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        externalToolGuard: {
+          mode: 'optional',
+        },
+      } as unknown as Parameters<typeof runQwenServe>[0]),
+    ).rejects.toThrow(/externalToolGuard/);
+    expect(stdoutWrites.join('')).not.toContain('qwen serve listening on');
+    expect(process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN']).toBeUndefined();
+  });
+
+  it('rejects unsafe required provider configuration before listening', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-guard-config-')),
+    );
+    const stdoutWrites: string[] = [];
+    vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
+      stdoutWrites.push(String(chunk));
+      return true;
+    });
+
+    await expect(
+      runQwenServe({
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        externalToolGuard: {
+          mode: 'required',
+          endpoint: 'https://policy.example.com',
+          token: 'secret',
+        },
+      }),
+    ).rejects.toThrow(/loopback/);
     expect(stdoutWrites.join('')).not.toContain('qwen serve listening on');
   });
 });
@@ -6102,6 +6448,7 @@ describe('runQwenServe runtime startup failures', () => {
           channelIdleTimeoutMs: 0,
           sessionIdleTimeoutMs: 1_800_000,
           acpConnectionCap: null,
+          memory: expect.objectContaining({ enforced: false }),
         },
         capabilities: {
           protocolVersions: { current: 'v1', supported: ['v1'] },
@@ -6365,6 +6712,7 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
       resume: vi.fn(),
       preheat: vi.fn().mockResolvedValue(undefined),
       getDaemonStatusSnapshot: vi.fn().mockReturnValue(BASE_BRIDGE_SNAPSHOT),
+      isChannelLive: vi.fn().mockReturnValue(true),
     } as unknown as HttpAcpBridge;
   }
 
@@ -9371,6 +9719,7 @@ describe('runQwenServe startup observability', () => {
       resume: vi.fn(),
       preheat: vi.fn().mockResolvedValue(undefined),
       getDaemonStatusSnapshot: vi.fn().mockReturnValue(BASE_BRIDGE_SNAPSHOT),
+      isChannelLive: vi.fn().mockReturnValue(true),
     } as unknown as HttpAcpBridge;
   }
 

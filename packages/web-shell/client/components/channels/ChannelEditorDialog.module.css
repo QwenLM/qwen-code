@@ -82,6 +82,31 @@
   font-size: 11px;
 }
 
+.fieldDescription {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.recordFields {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.recordRow {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.recordLabel {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted-foreground);
+}
+
 .secretState {
   display: flex;
   flex-wrap: wrap;

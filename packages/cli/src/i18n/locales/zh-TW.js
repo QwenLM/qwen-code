@@ -183,6 +183,7 @@ export default {
   'toolDisplayName.Agent': 'Agent',
   'toolDisplayName.Artifact': '製品',
   'toolDisplayName.RecordArtifact': '記錄製品',
+  'toolDisplayName.DisplayImage': '顯示圖片',
   'toolDisplayName.Skill': '技能',
   'toolDisplayName.EnterPlanMode': '進入計畫模式',
   'toolDisplayName.ExitPlanMode': '退出計畫模式',
@@ -1299,6 +1300,13 @@ export default {
   'Already generating summary, wait for previous request to complete':
     '正在生成摘要，請等待上一個請求完成',
   'No conversation found to summarize.': '未找到要總結的對話',
+  'Summary path already exists and is not a generated summary: {{path}}':
+    '摘要路徑已存在且非產生的摘要：{{path}}',
+  'Summary path must be within the project root.': '摘要路徑必須在專案根目錄內',
+  'Summary path resolves to an existing directory: {{path}}':
+    '摘要路徑解析為一個已存在的目錄：{{path}}',
+  'Summary path ends with a separator but is an existing file: {{path}}':
+    '摘要路徑以分隔符結尾，但是一個已存在的檔案：{{path}}',
   'Failed to generate project context summary: {{error}}':
     '生成項目上下文摘要失敗：{{error}}',
   'Saved project summary to {{filePathForDisplay}}.':
@@ -1317,8 +1325,8 @@ export default {
     '切換此會話的模型（--fast 可設置建議模型，--voice 可設置語音轉寫模型，[model-id] 可立即切換）',
   'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
     '切換此會話的模型（--fast 建議模型，--voice 語音轉寫模型，--vision 視覺橋接模型，--project 持久化到專案設定，--global 持久化到使用者設定，[model-id] 立即切換，或用 [model-id] [prompt] 在另一個模型上執行一次性提示；內聯提示按原文發送，不展開 @file）',
-  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --image for the image generation model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
-    '切換此會話的模型（--fast 建議模型，--voice 語音轉寫模型，--vision 視覺橋接模型，--image 圖像生成模型，--project 持久化到專案設定，--global 持久化到使用者設定，[model-id] 立即切換，或用 [model-id] [prompt] 在另一個模型上執行一次性提示；內聯提示按原文發送，不展開 @file）',
+  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --compaction for chat compression model, --image for the image generation model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
+    '切換此會話的模型（--fast 建議模型，--voice 語音轉寫模型，--vision 視覺橋接模型，--compaction 聊天壓縮模型，--image 圖像生成模型，--project 持久化到專案設定，--global 持久化到使用者設定，[model-id] 立即切換，或用 [model-id] [prompt] 在另一個模型上執行一次性提示；內聯提示按原文發送，不展開 @file）',
   "Inline one-shot override isn't supported in this mode — run '/model {{model}}' first, then send your prompt.":
     "此模式不支援內聯一次性覆寫——請先執行 '/model {{model}}'，再發送你的提示。",
   "Inline one-shot override can't switch providers. '{{model}}' belongs to a different provider — run '/model {{model}}' first, then send your prompt.":
@@ -1332,6 +1340,8 @@ export default {
   'Set the image-capable model used to transcribe images for a text-only main model':
     '設定用於為純文字主模型轉寫圖像的圖像能力模型',
   'Set the model used to generate images': '設置用於生成圖像的模型',
+  'Set the model used for chat compression (auto-compaction)':
+    '設置用於聊天壓縮（自動壓縮）的模型',
   'Persist the model selection to the project settings (workspace scope)':
     '將模型選擇持久化到專案設定（工作區）',
   'Persist the model selection to the user settings (global scope)':
@@ -1339,10 +1349,15 @@ export default {
   'Select Fast Model': '選擇快速模型',
   'Select Vision Model': '選擇視覺模型',
   'Select Image Model': '選擇圖像模型',
+  'Select Compaction Model': '選擇壓縮模型',
   'Select Voice Model': '選擇語音模型',
   'Vision Model': '視覺模型',
   'Image Model': '圖像模型',
+  'Compaction Model': '壓縮模型',
   'Voice Model': '語音模型',
+  'Selected compaction model is unavailable.': '所選壓縮模型不可用。',
+  'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /auth to configure or switch providers, or run /model --compaction without a model to choose from configured models.':
+    '在 settings.modelProviders 中配置模型並確保設置了所需的環境變量。在交互模式下，運行 /auth 配置或切換 provider，或運行 /model --compaction（不帶模型參數）從已配置的模型中選擇。',
   'Selected voice model is unavailable.': '所選語音模型不可用。',
   'Selected image model is unavailable.': '所選圖像模型不可用。',
   "Voice model '{{model}}' is configured more than once. Remove duplicate model ids before selecting it for voice transcription.":
@@ -1546,12 +1561,16 @@ export default {
   audio: '音頻',
   video: '視頻',
   'not set': '未設置',
+  'not set (falls back to the main model)': '未設置（回退到主模型）',
   'Current voice model: {{voiceModel}}\nUse "/model --voice <model-id>" to set voice model.':
     '當前語音模型：{{voiceModel}}\n使用 "/model --voice <model-id>" 設置語音模型。',
   'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.':
     '當前視覺模型：{{visionModel}}\n使用 "/model --vision <model-id>" 設置視覺橋接模型。',
   'Current image model: {{imageModel}}\nUse "/model --image <model-id>" to set the image generation model.':
     '當前圖像模型：{{imageModel}}\n使用 "/model --image <model-id>" 設置圖像生成模型。',
+  'Compaction model override cleared': '壓縮模型覆蓋已清除',
+  'Current compaction model: {{compactionModel}}\nUse "/model --compaction <model-id>" to set compaction model, or "/model --compaction clear" to clear the override.':
+    '當前壓縮模型：{{compactionModel}}\n使用 "/model --compaction <model-id>" 設置壓縮模型，或使用 "/model --compaction clear" 清除覆蓋設置。',
   "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.":
     "語音模型 '{{modelName}}' 不唯一。請先配置唯一的模型 ID，再使用 /model --voice。",
   "Image model '{{modelName}}' matches multiple configured endpoints. Run /model --image without an argument and choose the exact endpoint.":
@@ -1999,6 +2018,7 @@ export default {
     '設定具備推理能力的模型思考的強度（{{tiers}}）；依各供應商進行映射與鉗制。',
   'Set a goal — keep working until the condition is met':
     '設定目標 — 持續工作直到條件滿足',
+  'Set or control a session goal': '設定或控制工作階段目標',
   'Exited plan mode. Previous approval mode restored.':
     '已退出計劃模式，已恢復之前的審批模式。',
   'Enabled plan mode. The agent will analyze and plan without executing tools.':
