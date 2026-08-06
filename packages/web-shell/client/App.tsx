@@ -4995,7 +4995,10 @@ export function App({
   // Echo a local command into the transcript, or suppress it while a turn is
   // streaming so the injected user row can't split the active turn (see
   // appendOrDeferLocalUserMessage). Returns true when suppressed — callers must
-  // then stop and not run the command's inline side effects.
+  // then stop and not run the command's inline side effects. Exception:
+  // read-only display commands wrap this in echoLocalCommandIfIdle and
+  // intentionally ignore the suppression signal — their status-block output
+  // does not split the active turn.
   const echoOrDeferLocalCommand = useCallback(
     (text: string, images?: PromptImage[]): boolean =>
       appendOrDeferLocalUserMessage(
@@ -5007,6 +5010,29 @@ export function App({
         },
       ),
     [store],
+  );
+
+  // Echo a local command when idle, but never block it. Read-only display
+  // commands (/stats, /about, /context) render their result as a status
+  // block, which does not split the active turn, so they run immediately
+  // mid-turn with only the echo skipped.
+  const echoLocalCommandIfIdle = useCallback(
+    (text: string): void => {
+      void echoOrDeferLocalCommand(text);
+    },
+    [echoOrDeferLocalCommand],
+  );
+
+  // Shared result dispatch for those read-only commands: `clearActiveText:
+  // false` keeps the status block from finalizing the in-flight assistant
+  // block mid-stream, which would split the streaming answer and orphan its
+  // usage frames.
+  const dispatchReadOnlyStatus = useCallback(
+    (text: string) => {
+      store.dispatch([{ type: 'status', text, clearActiveText: false }]);
+      resumeChatBottomFollow('smooth');
+    },
+    [store, resumeChatBottomFollow],
   );
 
   const blockLocalCommandDuringTurn = useCallback((): false => {
@@ -5872,37 +5898,32 @@ export function App({
   }, [currentMode, handleSetMode]);
 
   // Shared by the /context slash command and the status-bar context
-  // indicator. Echoes the command as a local user message first — that also
-  // makes the transcript follow the tail (MessageList Rule 4), so the panel
-  // is revealed even when the click comes while scrolled up.
+  // indicator. Echoes the command when idle — that also makes the transcript
+  // follow the tail (MessageList Rule 4). Mid-turn the echo is skipped and
+  // dispatchReadOnlyStatus's resumeChatBottomFollow resumes bottom-follow,
+  // so the panel is revealed even when the click comes while scrolled up.
   const showContextUsage = useCallback(
     (commandText: string, detail: boolean) => {
-      // Self-guard so every entry point (keyboard, status-bar button, in-chat
-      // "context detail" click) defers mid-turn instead of splitting the turn.
+      // Read-only: every entry point (keyboard, status-bar button, in-chat
+      // "context detail" click) runs immediately, even mid-turn — only the
+      // echo is skipped while streaming so the active turn is not split.
       if (!requireActiveSessionForLocalCommand()) return;
-      if (echoOrDeferLocalCommand(commandText)) return;
+      echoLocalCommandIfIdle(commandText);
       sessionActions
         .getContextUsage({ detail })
         .then((result) => {
-          store.dispatch([
-            {
-              type: 'status',
-              text: serializeContextUsageMessage(result),
-            },
-          ]);
-          resumeChatBottomFollow('smooth');
+          dispatchReadOnlyStatus(serializeContextUsageMessage(result));
         })
         .catch((error: unknown) => {
           reportError(error, 'Failed to load context usage');
         });
     },
     [
-      echoOrDeferLocalCommand,
-      store,
+      echoLocalCommandIfIdle,
+      dispatchReadOnlyStatus,
       requireActiveSessionForLocalCommand,
       sessionActions,
       reportError,
-      resumeChatBottomFollow,
     ],
   );
 
@@ -7586,84 +7607,84 @@ export function App({
             if (statsArg === 'model') statsView = 'model';
             else if (statsArg === 'tools') statsView = 'tools';
             if (!requireActiveSessionForLocalCommand()) return false;
-            if (echoOrDeferLocalCommand(text, images)) return true;
+            echoLocalCommandIfIdle(text);
             sessionActions
               .getStats()
               .then((result) => {
-                store.dispatch([
-                  {
-                    type: 'status',
-                    text: serializeStatsMessage(result, statsView),
-                  },
-                ]);
-                resumeChatBottomFollow('smooth');
+                dispatchReadOnlyStatus(
+                  serializeStatsMessage(result, statsView),
+                );
               })
-              .catch(() => {});
+              .catch((error: unknown) => {
+                reportError(error, 'Failed to load stats');
+              });
             return true;
           }
           if (cmd === 'status' || cmd === 'about') {
-            if (echoOrDeferLocalCommand(text, images)) return true;
+            echoLocalCommandIfIdle(text);
             Promise.all([
               workspaceActions.loadPreflight().catch(() => null),
               workspaceActions.loadProviders().catch(() => null),
               workspaceActions.loadEnv().catch(() => null),
-            ]).then(([preflight, providers, env]) => {
-              const sys = collectSystemInfo(preflight, env);
+            ])
+              .then(([preflight, providers, env]) => {
+                const sys = collectSystemInfo(preflight, env);
 
-              let authSource = sys.authSource;
-              if (!authSource && providers?.current?.authType) {
-                authSource = providers.current.authType;
-              }
-
-              const runtimeParts: string[] = [];
-              if (sys.nodeVersion)
-                runtimeParts.push(`Node.js v${sys.nodeVersion}`);
-              if (sys.npmVersion) runtimeParts.push(`npm ${sys.npmVersion}`);
-
-              let formattedAuth = '';
-              if (authSource) {
-                if (
-                  authSource.startsWith('oauth') ||
-                  authSource === 'qwen-oauth'
-                ) {
-                  formattedAuth = 'Qwen OAuth';
-                } else {
-                  formattedAuth = `API Key - ${authSource}`;
+                let authSource = sys.authSource;
+                if (!authSource && providers?.current?.authType) {
+                  authSource = providers.current.authType;
                 }
-              }
 
-              const platformStr = `${sys.platform} ${sys.arch}`.trim();
-              const curModel = currentModelRef.current;
-              const conn = connectionRef.current;
-              const qwenCodeVersion = conn.capabilities?.qwenCodeVersion || '';
-              const info: StatusInfo = {
-                cliVersion: qwenCodeVersion,
-                runtime: runtimeParts.join(' / '),
-                platform: platformStr,
-                auth: formattedAuth,
-                baseUrl: providers?.current?.baseUrl || '',
-                model:
-                  curModel ||
-                  conn.currentModel ||
-                  providers?.current?.modelId ||
-                  '',
-                fastModel:
-                  providers?.current?.fastModelId ||
-                  curModel ||
-                  conn.currentModel ||
-                  providers?.current?.modelId ||
-                  '',
-                sessionId: conn.sessionId || '',
-                sandbox: sys.sandbox,
-                proxy: sys.proxy,
-                memoryUsage: sys.memoryUsage,
-              };
+                const runtimeParts: string[] = [];
+                if (sys.nodeVersion)
+                  runtimeParts.push(`Node.js v${sys.nodeVersion}`);
+                if (sys.npmVersion) runtimeParts.push(`npm ${sys.npmVersion}`);
 
-              store.dispatch([
-                { type: 'status', text: serializeStatusMessage(info) },
-              ]);
-              resumeChatBottomFollow('smooth');
-            });
+                let formattedAuth = '';
+                if (authSource) {
+                  if (
+                    authSource.startsWith('oauth') ||
+                    authSource === 'qwen-oauth'
+                  ) {
+                    formattedAuth = 'Qwen OAuth';
+                  } else {
+                    formattedAuth = `API Key - ${authSource}`;
+                  }
+                }
+
+                const platformStr = `${sys.platform} ${sys.arch}`.trim();
+                const curModel = currentModelRef.current;
+                const conn = connectionRef.current;
+                const qwenCodeVersion =
+                  conn.capabilities?.qwenCodeVersion || '';
+                const info: StatusInfo = {
+                  cliVersion: qwenCodeVersion,
+                  runtime: runtimeParts.join(' / '),
+                  platform: platformStr,
+                  auth: formattedAuth,
+                  baseUrl: providers?.current?.baseUrl || '',
+                  model:
+                    curModel ||
+                    conn.currentModel ||
+                    providers?.current?.modelId ||
+                    '',
+                  fastModel:
+                    providers?.current?.fastModelId ||
+                    curModel ||
+                    conn.currentModel ||
+                    providers?.current?.modelId ||
+                    '',
+                  sessionId: conn.sessionId || '',
+                  sandbox: sys.sandbox,
+                  proxy: sys.proxy,
+                  memoryUsage: sys.memoryUsage,
+                };
+
+                dispatchReadOnlyStatus(serializeStatusMessage(info));
+              })
+              .catch((error: unknown) => {
+                reportError(error, 'Failed to load status info');
+              });
             return true;
           }
           if (cmd === 'bug') {
@@ -7805,6 +7826,8 @@ export function App({
       store,
       enqueuePrompt,
       echoOrDeferLocalCommand,
+      echoLocalCommandIfIdle,
+      dispatchReadOnlyStatus,
       branchCurrentSession,
       closeMobileDrawer,
       closePanel,
