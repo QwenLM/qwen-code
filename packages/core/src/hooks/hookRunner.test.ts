@@ -6,6 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { HookRunner } from './hookRunner.js';
+import * as shellUtils from '../utils/shell-utils.js';
 import {
   HookEventName,
   HookType,
@@ -1093,6 +1094,29 @@ describe('HookRunner', () => {
       expect(spawnArgs[0]).toBe('powershell');
       expect(spawnArgs[1]).toContain('-Command');
       expect(spawnArgs[2].shell).toBe(false);
+    });
+
+    it('uses powershell when the global shell is cmd', async () => {
+      const spy = vi
+        .spyOn(shellUtils, 'getShellConfiguration')
+        .mockReturnValue({
+          executable: 'cmd.exe',
+          argsPrefix: ['/d', '/s', '/c'],
+          shell: 'cmd',
+        });
+      try {
+        mockSpawn.mockImplementation(() => createMockProcess(0));
+        await hookRunner.executeHook(
+          { type: HookType.Command, command: 'echo test', source: HooksConfigSource.Project },
+          HookEventName.PreToolUse,
+          createMockInput(),
+        );
+        const spawnArgs = mockSpawn.mock.calls[0];
+        expect(spawnArgs[0]).toBe('powershell');
+        expect(spawnArgs[1]).toEqual(['-NoProfile', '-Command', expect.any(String)]);
+      } finally {
+        spy.mockRestore();
+      }
     });
   });
 });

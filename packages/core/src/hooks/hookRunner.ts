@@ -22,7 +22,6 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   escapeShellArg,
   getShellConfiguration,
-  isWindows,
   type ShellType,
   type ShellConfiguration,
 } from '../utils/shell-utils.js';
@@ -242,7 +241,7 @@ export class HookRunner {
         return {
           shell: 'powershell',
           executable: 'powershell',
-          argsPrefix: ['-Command'],
+          argsPrefix: ['-NoProfile', '-Command'],
         };
       }
 
@@ -257,7 +256,7 @@ export class HookRunner {
 
     // On Windows cmd.exe /d /s /c keeps quotes in shell-prefix commands, so a
     // quoted path fails; powershell strips them natively.
-    if (isWindows()) {
+    if (globalConfig.shell === 'cmd') {
       return {
         shell: 'powershell',
         executable: 'powershell',

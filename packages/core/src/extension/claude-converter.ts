@@ -967,14 +967,6 @@ export function isClaudePluginConfig(
 
   const marketplaceConfigObj = marketplaceConfig as Record<string, unknown>;
 
-  // Must have name and owner
-  if (
-    typeof marketplaceConfigObj['name'] !== 'string' ||
-    typeof marketplaceConfigObj['owner'] !== 'object'
-  ) {
-    return false;
-  }
-
   if (!Array.isArray(marketplaceConfigObj['plugins'])) {
     return false;
   }

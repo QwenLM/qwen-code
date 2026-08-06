@@ -197,18 +197,72 @@ describe('mergeClaudeConfigs', () => {
 });
 
 describe('isClaudePluginConfig', () => {
-  it('should identify Claude plugin directory', () => {
-    const extensionDir = '/tmp/test-extension';
-    const marketplace = {
-      extensionSource: 'https://test.com',
-      pluginName: 'test-plugin',
-    };
+  let testDir: string;
 
-    // This will check if marketplace.json exists and contains the plugin
-    // Note: In real usage, this requires actual file system setup
-    expect(typeof isClaudePluginConfig(extensionDir, marketplace)).toBe(
-      'boolean',
+  beforeEach(() => {
+    testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-market-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(testDir, { recursive: true, force: true });
+  });
+
+  const writeMarketplace = (content: unknown) => {
+    fs.mkdirSync(path.join(testDir, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(testDir, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify(content),
+      'utf-8',
     );
+  };
+
+  it('identifies a spec-compliant marketplace', () => {
+    writeMarketplace({
+      name: 'test',
+      owner: { name: 'Test' },
+      plugins: [{ name: 'test-plugin', source: './' }],
+    });
+    expect(
+      isClaudePluginConfig(testDir, {
+        extensionSource: '',
+        pluginName: 'test-plugin',
+      }),
+    ).toBe(true);
+  });
+
+  it('identifies a marketplace without top-level name/owner', () => {
+    writeMarketplace({
+      plugins: [{ name: 'test-plugin', source: './' }],
+    });
+    expect(
+      isClaudePluginConfig(testDir, {
+        extensionSource: '',
+        pluginName: 'test-plugin',
+      }),
+    ).toBe(true);
+  });
+
+  it('returns false when the plugin is not listed', () => {
+    writeMarketplace({
+      name: 'test',
+      owner: { name: 'Test' },
+      plugins: [{ name: 'other', source: './' }],
+    });
+    expect(
+      isClaudePluginConfig(testDir, {
+        extensionSource: '',
+        pluginName: 'missing',
+      }),
+    ).toBe(false);
+  });
+
+  it('returns false when there is no marketplace.json', () => {
+    expect(
+      isClaudePluginConfig(testDir, {
+        extensionSource: '',
+        pluginName: 'test-plugin',
+      }),
+    ).toBe(false);
   });
 });
 
